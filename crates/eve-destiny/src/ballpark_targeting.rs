@@ -55,30 +55,67 @@ impl Ballpark {
     }
 
     pub fn remove_target_lock(&mut self, source_id: BallId, target_id: BallId) -> bool {
+        self.remove_target_lock_with_events(source_id, target_id, true)
+    }
+
+    pub fn remove_target_lock_quiet(&mut self, source_id: BallId, target_id: BallId) -> bool {
+        self.remove_target_lock_with_events(source_id, target_id, false)
+    }
+
+    fn remove_target_lock_with_events(
+        &mut self,
+        source_id: BallId,
+        target_id: BallId,
+        emit_lost_event: bool,
+    ) -> bool {
         if let Some(locks) = self.target_locks.get_mut(&source_id) {
-            let before = locks.len();
-            locks.retain(|l| l.target_id != target_id);
-            if locks.len() < before {
+            let mut removed = false;
+            let mut had_locked = false;
+            locks.retain(|l| {
+                if l.target_id == target_id {
+                    removed = true;
+                    if l.locked {
+                        had_locked = true;
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            if locks.is_empty() {
+                self.target_locks.remove(&source_id);
+            }
+            if emit_lost_event && had_locked {
                 self.pending_events.push(DestinyEvent::OnTarget {
                     mode: "lost".to_string(),
                     source_id,
                     target_id,
                 });
-                return true;
             }
+            return removed;
         }
         false
     }
 
     pub fn clear_target_locks(&mut self, source_id: BallId) -> usize {
+        self.clear_target_locks_with_events(source_id, true)
+    }
+
+    pub fn clear_target_locks_quiet(&mut self, source_id: BallId) -> usize {
+        self.clear_target_locks_with_events(source_id, false)
+    }
+
+    fn clear_target_locks_with_events(&mut self, source_id: BallId, emit_lost_event: bool) -> usize {
         if let Some(locks) = self.target_locks.remove(&source_id) {
             let count = locks.len();
-            for l in &locks {
-                self.pending_events.push(DestinyEvent::OnTarget {
-                    mode: "lost".to_string(),
-                    source_id,
-                    target_id: l.target_id,
-                });
+            if emit_lost_event {
+                for l in &locks {
+                    self.pending_events.push(DestinyEvent::OnTarget {
+                        mode: "lost".to_string(),
+                        source_id,
+                        target_id: l.target_id,
+                    });
+                }
             }
             count
         } else {
@@ -89,14 +126,59 @@ impl Ballpark {
     /// Applies an ECM jam to `target_id`, clearing all existing locked targets and preventing
     /// target locking for `duration_s` seconds (`feat:modules.ecm`, `DG-5`).
     pub fn apply_ecm_jam(&mut self, target_id: BallId, duration_s: f64) {
-        if let Some(cs) = self.combat_states.get_mut(&target_id) {
+        self.apply_ecm_jam_from(None, target_id, duration_s);
+    }
+
+    /// Applies an ECM jam to `target_id` optionally attributed to `source_id` (`#1082`).
+    /// Active locks on jammers in `ecm_jammed_by` are retained; all other locks are cleared.
+    pub fn apply_ecm_jam_from(&mut self, source_id: Option<BallId>, target_id: BallId, duration_s: f64) {
+        let retain_targets = if let Some(cs) = self.combat_states.get_mut(&target_id) {
             cs.sync_action_breaks();
             if cs.is_cloaked || cs.is_invulnerable() {
                 return;
             }
-            cs.ecm_jammed_remaining_s = duration_s;
+            if cs.ecm_jammed_remaining_s <= 0.0 {
+                cs.ecm_jammed_by.clear();
+            }
+            cs.ecm_jammed_remaining_s = if duration_s > 0.0 {
+                cs.ecm_jammed_remaining_s.max(duration_s)
+            } else {
+                duration_s
+            };
+            if let Some(src) = source_id {
+                if !cs.ecm_jammed_by.contains(&src) {
+                    cs.ecm_jammed_by.push(src);
+                }
+            }
+            cs.ecm_jammed_by.clone()
+        } else {
+            Vec::new()
+        };
+        self.clear_target_locks_except(target_id, &retain_targets);
+    }
+
+    pub fn clear_target_locks_except(&mut self, source_id: BallId, retain_targets: &[BallId]) {
+        if retain_targets.is_empty() {
+            self.clear_target_locks(source_id);
+            return;
         }
-        self.clear_target_locks(target_id);
+        if let Some(mut locks) = self.target_locks.remove(&source_id) {
+            let mut kept = Vec::new();
+            for lock in locks.drain(..) {
+                if retain_targets.contains(&lock.target_id) {
+                    kept.push(lock);
+                } else {
+                    self.pending_events.push(DestinyEvent::OnTarget {
+                        mode: "lost".to_string(),
+                        source_id,
+                        target_id: lock.target_id,
+                    });
+                }
+            }
+            if !kept.is_empty() {
+                self.target_locks.insert(source_id, kept);
+            }
+        }
     }
 
     /// Applies an ECM burst AoE around `source_id`, jamming all valid target balls within `burst_radius_m`

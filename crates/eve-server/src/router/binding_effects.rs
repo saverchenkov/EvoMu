@@ -91,7 +91,11 @@ pub fn special_fx_guid_for_module_sde(
     {
         return Some(("effects.HybridFired".to_string(), true));
     }
-    if group_id == 55 || eff_name == "projectileFired" {
+    if group_id == 55
+        || eff_name == "projectileFired"
+        || (group_id == 53
+            && (name_lower.contains("autocannon") || name_lower.contains("artillery")))
+    {
         return Some(("effects.ProjectileFired".to_string(), true));
     }
     if group_id == 53 || eff_name == "targetAttack" {

@@ -417,7 +417,9 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::GetTargetLocks { .. } => "GetTargetLocks",
             SystemCommand::AddTargetLock { .. } => "AddTargetLock",
             SystemCommand::RemoveTargetLock { .. } => "RemoveTargetLock",
+            SystemCommand::RemoveTargetLockQuiet { .. } => "RemoveTargetLockQuiet",
             SystemCommand::ClearTargetLocks { .. } => "ClearTargetLocks",
+            SystemCommand::ClearTargetLocksQuiet { .. } => "ClearTargetLocksQuiet",
             SystemCommand::SetCapacitor { .. } => "SetCapacitor",
             SystemCommand::HealCombatState { .. } => "HealCombatState",
             SystemCommand::SetCombatState { .. } => "SetCombatState",
@@ -435,6 +437,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::AddInterdictionSphere { .. } => "AddInterdictionSphere",
             SystemCommand::AddMobileWarpDisruptor { .. } => "AddMobileWarpDisruptor",
             SystemCommand::ApplyEcmJam { .. } => "ApplyEcmJam",
+            SystemCommand::ApplyEcmJamFrom { .. } => "ApplyEcmJamFrom",
             SystemCommand::ApplyEcmBurst { .. } => "ApplyEcmBurst",
             SystemCommand::ScheduleMobileWarpDisruptor { .. } => "ScheduleMobileWarpDisruptor",
             SystemCommand::UpdateModuleOverload { .. } => "UpdateModuleOverload",
@@ -516,7 +519,9 @@ fn system_command_all_variants_construct_and_match() {
         SystemCommand::GetTargetLocks { ball_id: 1, reply: oneshot::channel().0 },
         SystemCommand::AddTargetLock { source_id: 1, lock: TargetLock { target_id: 2, lock_time_ms: 100.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }, reply: oneshot::channel().0 },
         SystemCommand::RemoveTargetLock { source_id: 1, target_id: 2, reply: oneshot::channel().0 },
+        SystemCommand::RemoveTargetLockQuiet { source_id: 1, target_id: 2, reply: oneshot::channel().0 },
         SystemCommand::ClearTargetLocks { source_id: 1, reply: oneshot::channel().0 },
+        SystemCommand::ClearTargetLocksQuiet { source_id: 1, reply: oneshot::channel().0 },
         SystemCommand::SetCapacitor { ball_id: 1, capacitor: 50.0, reply: oneshot::channel().0 },
         SystemCommand::HealCombatState { ball_id: 1, reply: oneshot::channel().0 },
         SystemCommand::SetCombatState { ball_id: 1, combat_state: CombatState::default(), reply: oneshot::channel().0 },
@@ -545,8 +550,8 @@ fn system_command_all_variants_construct_and_match() {
         SystemCommand::FlushConditionCheckpoint { reply: oneshot::channel().0 },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 68);
+    assert_eq!(tags.len(), 70);
     assert_eq!(tags[0], "SpawnBall");
-    assert_eq!(tags[66], "FlushPeerObserverUpdates");
-    assert_eq!(tags[67], "FlushConditionCheckpoint");
+    assert_eq!(tags[68], "FlushPeerObserverUpdates");
+    assert_eq!(tags[69], "FlushConditionCheckpoint");
 }

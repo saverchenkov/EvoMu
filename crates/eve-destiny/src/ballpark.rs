@@ -608,9 +608,36 @@ impl Ballpark {
         self.ball_interactive_overrides.remove(&ball_id);
         self.active_wubble_multipliers.remove(&ball_id);
         self.target_locks.remove(&ball_id);
-        for locks in self.target_locks.values_mut() {
-            locks.retain(|l| l.target_id != ball_id);
+        for (&source_id, locks) in self.target_locks.iter_mut() {
+            let mut had_locked = false;
+            let mut had_pending = false;
+            locks.retain(|l| {
+                if l.target_id == ball_id {
+                    if l.locked {
+                        had_locked = true;
+                    } else {
+                        had_pending = true;
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            if had_locked {
+                self.pending_events.push(DestinyEvent::OnTarget {
+                    mode: "lost".to_string(),
+                    source_id,
+                    target_id: ball_id,
+                });
+            }
+            if had_pending {
+                self.pending_events.push(DestinyEvent::TargetLockFailed {
+                    source_id,
+                    target_id: ball_id,
+                });
+            }
         }
+        self.target_locks.retain(|_, locks| !locks.is_empty());
         self.observer_events.remove(&ball_id);
         self.pending_handoff_observers.remove(&ball_id);
         self.scheduled_observer_events
@@ -733,17 +760,31 @@ impl Ballpark {
             q.push(fleet_ev);
         }
         if destroyed {
-            let term_ev = DestinyEvent::TerminalExplosion {
-                ball_id,
-                destruction_effect_id: None,
-            };
-            if let Some(gid) = grid_id {
-                self.queue_event_for_grid_observers(gid, None, &term_ev);
-            } else {
-                self.observer_events.entry(ball_id).or_default().push(term_ev);
-            }
-            let _ = self.remove_ball_preserving_observer_events(ball_id);
+            let _ = self.destroy_ball_with_terminal_explosion(ball_id, None);
         }
+    }
+
+    /// Emits `DestinyEvent::TerminalExplosion` for an active `ball_id` and removes it
+    /// while preserving grid observer events.
+    pub fn destroy_ball_with_terminal_explosion(
+        &mut self,
+        ball_id: BallId,
+        destruction_effect_id: Option<i64>,
+    ) -> Option<Ball> {
+        if !self.balls.contains_key(&ball_id) {
+            return None;
+        }
+        let grid_id = self.ball_grid_ids.get(&ball_id).copied();
+        let term_ev = DestinyEvent::TerminalExplosion {
+            ball_id,
+            destruction_effect_id,
+        };
+        if let Some(gid) = grid_id {
+            self.queue_event_for_grid_observers(gid, None, &term_ev);
+        } else {
+            self.observer_events.entry(ball_id).or_default().push(term_ev);
+        }
+        self.remove_ball_preserving_observer_events(ball_id)
     }
 
     /// Applies incoming damage to `ball_id`, updates its [`CombatState`], emits

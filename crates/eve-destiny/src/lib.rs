@@ -245,6 +245,8 @@ pub struct CombatState {
     /// Remaining seconds of active ECM jam suppression (`feat:modules.ecm`, `DG-5`).
     #[serde(default)]
     pub ecm_jammed_remaining_s: f64,
+    #[serde(default)]
+    pub ecm_jammed_by: Vec<BallId>,
     /// True when an active Warp Scrambler or Scripted HIC WDFG disables MWD and MJD (`feat:modules.warp-disruptor`, `feat:modules.warp-disruption-field`).
     #[serde(default)]
     pub is_mwd_mjd_disabled: bool,
@@ -428,6 +430,7 @@ impl Default for CombatState {
             is_interdiction_nullified: false,
             is_web_immune: false,
             ecm_jammed_remaining_s: 0.0,
+            ecm_jammed_by: Vec::new(),
             is_mwd_mjd_disabled: false,
             disallow_assistance: false,
             is_covert_cloak: false,
@@ -944,6 +947,10 @@ pub enum DestinyEvent {
     },
     OnTarget {
         mode: String,
+        source_id: BallId,
+        target_id: BallId,
+    },
+    TargetLockFailed {
         source_id: BallId,
         target_id: BallId,
     },

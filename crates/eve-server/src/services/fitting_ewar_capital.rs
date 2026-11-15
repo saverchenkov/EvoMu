@@ -129,7 +129,8 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         .default_attributes
                         .keys()
                         .any(|&aid| matches!(aid, 604 | 605 | 606 | 609 | 610));
-                    let requires_ammo = uses_charge_groups || !has_builtin_damage;
+                    let requires_ammo =
+                        mod_type.capacity > 0.0 && (uses_charge_groups || !has_builtin_damage);
                     if requires_ammo {
                         let has_slot_item = ctx.db.with_snapshot(|snap| {
                             let bank = snap
@@ -1040,12 +1041,8 @@ pub(crate) async fn validate_passive_targeter_activation(
         });
     }
     if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-        if cs.ecm_jammed_remaining_s > 0.0 {
-            return Err(BridgeRpcError {
-                code: "ShipJammed".into(),
-                message: "Targeting systems are jammed by ECM".into(),
-                client_error: None,
-            });
+        if cs.ecm_jammed_remaining_s > 0.0 && !cs.ecm_jammed_by.contains(&target_id) {
+            return Err(super::fitting_dogma_im::ship_jammed_rpc_error(ctx, target_id));
         }
         if (cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0)
             || cs.decloak_targeting_delay_remaining_s > 0.0
@@ -1286,7 +1283,7 @@ pub(crate) async fn commit_post_cycle_activation_effects(
         match m.type_id {
             27678 => {
                 for &vid in &victims {
-                    let _ = sys.apply_ecm_jam(vid, 20.0).await;
+                    let _ = sys.apply_ecm_jam_from(ship_id, vid, 20.0).await;
                 }
             }
             40636 => {

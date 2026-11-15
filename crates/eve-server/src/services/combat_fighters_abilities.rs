@@ -781,8 +781,7 @@ async fn activate_single_fighter_ability(
                 };
                 if jam_strength >= jam_threshold {
                     let dur_s = (attr(2220).unwrap_or(10_000.0) / 1_000.0).max(5.0);
-                    let _ = sys_handle.apply_ecm_jam(tid, dur_s).await;
-                    let _ = sys_handle.clear_target_locks(tid).await;
+                    let _ = sys_handle.apply_ecm_jam_from(fighter_ball_id, tid, dur_s).await;
                 }
                 DamageVector::default()
             }

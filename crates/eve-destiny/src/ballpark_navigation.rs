@@ -189,11 +189,18 @@ impl Ballpark {
 
             if let Some(locks) = self.target_locks.remove(&ball_id) {
                 for l in locks {
-                    self.pending_events.push(DestinyEvent::OnTarget {
-                        mode: "lost".to_string(),
-                        source_id: ball_id,
-                        target_id: l.target_id,
-                    });
+                    if l.locked {
+                        self.pending_events.push(DestinyEvent::OnTarget {
+                            mode: "lost".to_string(),
+                            source_id: ball_id,
+                            target_id: l.target_id,
+                        });
+                    } else {
+                        self.pending_events.push(DestinyEvent::TargetLockFailed {
+                            source_id: ball_id,
+                            target_id: l.target_id,
+                        });
+                    }
                 }
             }
         }

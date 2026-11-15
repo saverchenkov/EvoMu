@@ -11,6 +11,35 @@ pub(crate) use guards::*;
 pub(crate) mod helpers;
 pub(crate) use helpers::*;
 
+/// Builds a `ModuleAlreadyActive` error carrying V24 `EffectAlreadyActive2` (`3252`).
+pub(crate) fn module_already_active_rpc_error(
+    ctx: &ServerContext,
+    module_type_id: Option<u32>,
+    message: impl Into<String>,
+) -> BridgeRpcError {
+    let mod_name = module_type_id
+        .and_then(|tid| ctx.sde.types.get(&tid))
+        .map(|t| t.name.clone())
+        .unwrap_or_else(|| "Module".to_string());
+    BridgeRpcError::with_client_error(
+        "ModuleAlreadyActive",
+        message,
+        eve_proto::ClientError::user_with_args(
+            eve_proto::UserErrorKey::EffectAlreadyActive2,
+            [("modulename", PyRep::String(mod_name))],
+        ),
+    )
+}
+
+/// Builds a `TargetNotLocked` error carrying V24 `UserError::TargetNotLocked` (`1627`).
+pub(crate) fn target_not_locked_rpc_error(message: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError::with_client_error(
+        "TargetNotLocked",
+        message,
+        eve_proto::ClientError::user(eve_proto::UserErrorKey::TargetNotLocked),
+    )
+}
+
 pub(crate) async fn handle_module_cycles(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -243,11 +272,11 @@ pub(crate) async fn handle_module_cycles(
                 return crate::router::box_fut(|| crate::services::combat_crimewatch::combat_weapons::handle_weapons(ctx, session, service, method, args, kwargs)).await;
             }
             if method == "Activate" && is_weapon && ctx.is_module_in_reactivation_delay(ship_id, module_id) {
-                return Some(Err(BridgeRpcError {
-                    code: "ModuleAlreadyActive".into(),
-                    message: format!("Module {module_id} is already active in a cycle"),
-                    client_error: None,
-                }));
+                return Some(Err(module_already_active_rpc_error(
+                    ctx,
+                    Some(m.type_id),
+                    format!("Module {module_id} is already active in a cycle"),
+                )));
             }
 
             if (matches!(
@@ -273,7 +302,7 @@ pub(crate) async fn handle_module_cycles(
             // Mining lasers, strip miners, ice and gas harvesters run on the repeating MN-04 cycle engine.
             if crate::services::mining_cycle::mining_kind_of(&ctx.sde, mod_type).is_some() {
                 let Some(target_id) = target_id_opt.filter(|&t| t > 0) else {
-                    return Some(Err(BridgeRpcError { code: "TargetNotLocked".into(), message: "Mining modules require a locked target asteroid".into(), client_error: None }));
+                    return Some(Err(target_not_locked_rpc_error("Mining modules require a locked target asteroid")));
                 };
                 return Some(
                     crate::router::box_fut(|| crate::services::mining_cycle::activate(ctx, char_id, ship_id, sys_id, module_id, target_id)).await,
@@ -792,8 +821,14 @@ pub(crate) async fn handle_module_cycles(
                     }
                 }
                 if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
-                    let code = if matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807) { "ModuleAlreadyActive" } else { "ModuleReactivationDelay" };
-                    return Some(Err(BridgeRpcError { code: code.into(), message: format!("Module {module_id} cannot reactivate before delay expires"), client_error: None }));
+                    if matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807) {
+                        return Some(Err(module_already_active_rpc_error(
+                            ctx,
+                            Some(m.type_id),
+                            format!("Module {module_id} cannot reactivate before delay expires"),
+                        )));
+                    }
+                    return Some(Err(BridgeRpcError { code: "ModuleReactivationDelay".into(), message: format!("Module {module_id} cannot reactivate before delay expires"), client_error: None }));
                 }
                 let allow_mutadaptive_retarget = mod_type.group_id == 2018
                     && target_id_opt.is_some()
@@ -811,11 +846,11 @@ pub(crate) async fn handle_module_cycles(
                             }
                         }
                     }
-                    return Some(Err(BridgeRpcError {
-                        code: "ModuleAlreadyActive".into(),
-                        message: format!("Module {module_id} is already active in a cycle"),
-                        client_error: None,
-                    }));
+                    return Some(Err(module_already_active_rpc_error(
+                        ctx,
+                        Some(m.type_id),
+                        format!("Module {module_id} is already active in a cycle"),
+                    )));
                 }
                 if allow_smartbomb_retrigger && in_actor_cycle {
                     let _ = sys.remove_module_cycle(ship_id, module_id).await;
@@ -867,7 +902,7 @@ pub(crate) async fn handle_module_cycles(
                             crate::services::combat_weapons_spool::reset_entropic_spool(
                                 ctx, ship_id, module_id,
                             );
-                            return Some(Err(BridgeRpcError { code: "TargetNotLocked".into(), message: format!("Target {target_id} is not locked"), client_error: None }));
+                            return Some(Err(target_not_locked_rpc_error(format!("Target {target_id} is not locked"))));
                         }
                     }
                     if (matches!(mod_type.group_id, 52 | 65 | 68 | 71 | 201 | 208 | 291 | 379 | 1672)
@@ -1655,10 +1690,11 @@ pub(crate) async fn handle_module_cycles(
 
             if let Err(e) = sys.add_module_cycle(cycle).await {
                 ctx.remove_projected_ewar_by_module(ship_id, module_id);
+                if e.contains("ModuleAlreadyActive") {
+                    return Some(Err(module_already_active_rpc_error(ctx, Some(m.type_id), e)));
+                }
                 let code = if e.contains("WarpScrambled") {
                     "WarpScrambled"
-                } else if e.contains("ModuleAlreadyActive") {
-                    "ModuleAlreadyActive"
                 } else {
                     "NotEnoughCapacitor"
                 };
@@ -1740,17 +1776,6 @@ pub(crate) async fn handle_module_cycles(
                 }
             });
             let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
-            let mut volley_destroyed_target = false;
-            if (is_turret_group || is_missile_group || is_vorton_group) && target_id_opt.is_some() {
-                if let Ok((destroyed, weapon_actions)) = sys.fire_weapon_cycle_volley(ship_id, module_id).await {
-                    if !destroyed.is_empty() {
-                        volley_destroyed_target = true;
-                    }
-                    if !weapon_actions.is_empty() {
-                        execute_pending_cycle_actions_list(ctx, sys_id, weapon_actions).await;
-                    }
-                }
-            }
             if mod_type.group_id == 330 || m.type_id == 83485 {
                 crate::services::space_destiny::space_nav_travel::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
             }
@@ -1809,7 +1834,7 @@ pub(crate) async fn handle_module_cycles(
             } else {
                 (duration_s * 1_000.0).max(0.0)
             };
-            let _ = ctx.notify_module_effect_started_with_cycle(
+            let _ = ctx.notify_module_effect_started_with_cycle_and_charge(
                 char_id,
                 ship_id,
                 module_id,
@@ -1818,7 +1843,30 @@ pub(crate) async fn handle_module_cycles(
                 target_id_opt,
                 Some(godma_repeat),
                 Some(godma_duration_ms),
+                active_burst_charge_tid,
             );
+            for &slave_mod_id in &linked_turrets {
+                if slave_mod_id == module_id {
+                    continue;
+                }
+                let slave_type_id = fit
+                    .modules
+                    .get(&slave_mod_id)
+                    .map(|fm| fm.type_id)
+                    .or_else(|| ctx.db.with_snapshot(|snap| snap.items.get(&slave_mod_id).map(|i| i.type_id)))
+                    .unwrap_or(m.type_id);
+                ctx.notify_module_special_fx_started(
+                    char_id,
+                    ship_id,
+                    slave_mod_id,
+                    slave_type_id,
+                    Some(effect_name.as_str()),
+                    target_id_opt,
+                    godma_repeat,
+                    godma_duration_ms,
+                    active_burst_charge_tid,
+                );
+            }
             if cap_need > 0.0 || cap_booster_inject_amount > 0.0 || effective_max_capacitor.is_some() {
                 if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
                     let old_cap = if cap_need > 0.0 && cap_booster_inject_amount == 0.0 {
@@ -1841,6 +1889,18 @@ pub(crate) async fn handle_module_cycles(
                 ctx, sys_id, char_id, ship_id, module_id, m.type_id, mod_type, m.charge_type_id,
                 disables_target_mwd_mjd, hic_bubble_radius_m, target_id_opt,
             );
+
+            let mut volley_destroyed_target = false;
+            if (is_turret_group || is_missile_group || is_vorton_group) && target_id_opt.is_some() {
+                if let Ok((destroyed, weapon_actions)) = sys.fire_weapon_cycle_volley(ship_id, module_id).await {
+                    if !destroyed.is_empty() {
+                        volley_destroyed_target = true;
+                    }
+                    if !weapon_actions.is_empty() {
+                        execute_pending_cycle_actions_list(ctx, sys_id, weapon_actions).await;
+                    }
+                }
+            }
 
             if let Some(rep) = instant_rep_opt {
                 return Some(Ok(rep));

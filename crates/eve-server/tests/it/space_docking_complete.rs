@@ -626,3 +626,140 @@ async fn test_session_change_timer_triggers_and_coverage() {
     let post_pod_ok = rpc(&ctx, &mut victim_sess, "corpRegistry", "SetAccountKey", &[PyRep::Integer(1000)]).await;
     assert!(post_pod_ok.is_ok(), "SetAccountKey must succeed after podding timer expiry");
 }
+
+#[tokio::test]
+async fn dock_undock_restores_only_shield_and_cap() {
+    // parity: feat:navigation.dock-station, feat:navigation.undock
+    eve_testkit::attest(&["feat:navigation.dock-station", "feat:navigation.undock"]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let char_id = 90_000_001i64;
+    let ship_id = 100_000_250i64;
+    let mod_id = 100_000_251i64;
+    let sys_id = 30_000_142u32;
+    let station_id = 60_003_760i64;
+    let st_pos = ctx.sde.stations.get(&station_id).map(|s| s.position).unwrap_or(DVec3::ZERO);
+
+    let mut dyn_mod = HashMap::new();
+    dyn_mod.insert(eve_sde::attr_ids::DAMAGE, 12.5);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            eve_db::InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 486,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: dyn_mod,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let mut sess = SessionState {
+        user_id: Some(1),
+        session_id: 9915,
+        character_id: Some(char_id),
+        corporation_id: Some(1_000_001),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let mut cs = ctx.build_ship_combat_state(char_id, ship_id, 587);
+    let max_shield = cs.max_shield_hp;
+    let max_armor = cs.max_armor_hp;
+    let max_hull = cs.max_structure_hp;
+    let damaged_shield = (max_shield * 0.25).max(1.0);
+    let damaged_armor = (max_armor * 0.40).max(1.0);
+    let damaged_hull = (max_hull * 0.55).max(1.0);
+    let drained_cap = (cs.max_capacitor * 0.20).max(1.0);
+    cs.shield_hp = damaged_shield;
+    cs.armor_hp = damaged_armor;
+    cs.structure_hp = damaged_hull;
+    cs.capacitor = drained_cap;
+
+    let _ = sys
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 587,
+                position: st_pos + DVec3::new(100.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 2.5,
+                mass: 1_200_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            cs,
+        )
+        .await
+        .expect("spawn damaged ship near station");
+
+    // 1. Dock: shield and capacitor restore to full, while armor/hull/module damage persist
+    rpc(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(station_id)])
+        .await
+        .expect("Dock must succeed");
+
+    let docked_cond = ctx.db.with_snapshot(|s| {
+        (
+            eve_server::sp6_lifecycle::read_ship_condition_in_snap(s, ship_id).expect("persisted condition"),
+            s.items[&mod_id].dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied().unwrap_or(0.0),
+        )
+    });
+    assert!((docked_cond.0.shield_hp - max_shield).abs() < 1e-6, "dock must restore shield to max");
+    assert!(docked_cond.0.shield_hp > damaged_shield, "shield must not retain pre-dock damage");
+    assert!(docked_cond.0.capacitor.is_none(), "dock must reset capacitor deficit (None = full)");
+    assert!((docked_cond.0.armor_hp - damaged_armor).abs() < 1e-6, "dock must preserve armor damage");
+    assert!((docked_cond.0.hull_hp - damaged_hull).abs() < 1e-6, "dock must preserve hull damage");
+    assert!((docked_cond.1 - 12.5).abs() < 1e-6, "dock must preserve module overheat damage");
+
+    // 2. Undock after session change timer -> live ship has full shield + cap, persisted armor/hull/module damage
+    ctx.advance_secs(12);
+    rpc(&ctx, &mut sess, "stationSvc", "Undock", &[])
+        .await
+        .expect("Undock must succeed");
+
+    let undock_cs = sys.get_combat_state(ship_id).await.unwrap().expect("undocked CombatState");
+    assert!((undock_cs.shield_hp - undock_cs.max_shield_hp).abs() < 1e-6, "undock shield must be full");
+    assert!((undock_cs.capacitor - undock_cs.max_capacitor).abs() < 1e-6, "undock capacitor must be full");
+    assert!((undock_cs.armor_hp - damaged_armor).abs() < 1e-6, "armor damage must persist across undock");
+    assert!(undock_cs.armor_hp < undock_cs.max_armor_hp);
+    assert!((undock_cs.structure_hp - damaged_hull).abs() < 1e-6, "hull damage must persist across undock");
+    assert!(undock_cs.structure_hp < undock_cs.max_structure_hp);
+
+    let fit = ctx.fit(char_id, ship_id).expect("fit after undock");
+    assert!(
+        (fit.modules[&mod_id].damage_hp - 12.5).abs() < 1e-6,
+        "module damage must persist across dock and undock"
+    );
+}

@@ -508,6 +508,15 @@ impl SystemHandle {
     }
 
     pub fn try_remove_ball(&self, ball_id: BallId) {
+        self.try_remove_ball_impl(ball_id, false);
+    }
+
+    /// Removes `ball_id` and emits a preceding `TerminalExplosion` (`#1082`) if it is still in space.
+    pub fn try_remove_destroyed_ball(&self, ball_id: BallId) {
+        self.try_remove_ball_impl(ball_id, true);
+    }
+
+    fn try_remove_ball_impl(&self, ball_id: BallId, emit_destruction_fx: bool) {
         self.cancel_ship_nanite_repairs_sync(ball_id, true);
         let remove_from_bp_and_st =
             |bp: &mut Ballpark, st: &mut super::SystemActorState| {
@@ -548,7 +557,11 @@ impl SystemHandle {
                         .and_then(|m| (m.owner_id > 0).then_some(m.owner_id));
                     base_scramble_strengths.remove(&ball_id);
                     base_core_strengths.remove(&ball_id);
-                    let _ = bp.remove_ball(ball_id);
+                    if emit_destruction_fx {
+                        let _ = bp.destroy_ball_with_terminal_explosion(ball_id, None);
+                    } else {
+                        let _ = bp.remove_ball(ball_id);
+                    }
                     (removed_cycles, fallback_slim_owner, db_opt.clone())
                 };
                 celestials_helpers::remove_ball_checkpoint_tracking(st, ball_id);
@@ -1585,9 +1598,21 @@ impl SystemHandle {
         rx.await.map_err(|_| "Solar system reply dropped".to_string())
     }
 
+    pub async fn remove_target_lock_quiet(&self, source_id: BallId, target_id: BallId) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_sender().send(SystemCommand::RemoveTargetLockQuiet { source_id, target_id, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
     pub async fn clear_target_locks(&self, source_id: BallId) -> Result<usize, String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_sender().send(SystemCommand::ClearTargetLocks { source_id, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn clear_target_locks_quiet(&self, source_id: BallId) -> Result<usize, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_sender().send(SystemCommand::ClearTargetLocksQuiet { source_id, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await.map_err(|_| "Solar system reply dropped".to_string())
     }
 
@@ -1835,6 +1860,25 @@ impl SystemHandle {
         let (tx, rx) = oneshot::channel();
         self.cmd_sender()
             .send(SystemCommand::ApplyEcmJam {
+                target_id,
+                duration_s,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn apply_ecm_jam_from(
+        &self,
+        source_id: BallId,
+        target_id: BallId,
+        duration_s: f64,
+    ) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_sender()
+            .send(SystemCommand::ApplyEcmJamFrom {
+                source_id,
                 target_id,
                 duration_s,
                 reply: tx,

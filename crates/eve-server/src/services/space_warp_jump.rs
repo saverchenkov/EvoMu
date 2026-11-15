@@ -1477,13 +1477,17 @@ async fn handle_dock(
         });
     };
     handle.clear_warp_stopped_at(ship_id);
+    let docked_combat_state =
+        crate::services::station_structure::docked_combat_state_recharging_shield_and_cap(
+            taken.combat_state.as_ref(),
+        );
     match ctx.db.dock_character_if_in_space(char_id, sys_id, dock_id, is_structure) {
         Ok(_) => {
             ctx.db.with_mut_snapshot(|snap| {
                 crate::sp6_lifecycle::leave_space_in_snap(
                     snap,
                     ship_id,
-                    taken.combat_state.as_ref(),
+                    docked_combat_state.as_ref(),
                     None,
                     None,
                 );

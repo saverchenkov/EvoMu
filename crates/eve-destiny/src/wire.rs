@@ -888,7 +888,18 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
         } => PyRep::Tuple(vec![
             PyRep::String("OnTarget".into()),
             PyRep::Tuple(vec![
-                PyRep::String(mode.clone()),
+                PyRep::String(mode.as_str().into()),
+                PyRep::Integer(*source_id),
+                PyRep::Integer(*target_id),
+            ]),
+        ]),
+        DestinyEvent::TargetLockFailed {
+            source_id,
+            target_id,
+        } => PyRep::Tuple(vec![
+            PyRep::String("OnTarget".into()),
+            PyRep::Tuple(vec![
+                PyRep::String("lost".into()),
                 PyRep::Integer(*source_id),
                 PyRep::Integer(*target_id),
             ]),

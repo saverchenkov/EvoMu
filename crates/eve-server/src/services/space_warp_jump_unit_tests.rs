@@ -801,14 +801,14 @@ async fn e2_handoffs_b4_b8_c27_take_restore_absent_ball_and_capacitor_persistenc
         .db
         .with_snapshot(|snap| crate::sp6_lifecycle::read_ship_condition_in_snap(snap, ship_id))
         .expect("persisted condition should exist");
-    assert!((cond.shield_hp - 110.0).abs() < 1e-6);
+    assert!((cond.shield_hp - updated_cs.max_shield_hp).abs() < 1e-6);
     assert!((cond.armor_hp - 120.0).abs() < 1e-6);
     assert!((cond.hull_hp - 130.0).abs() < 1e-6);
-    assert_eq!(cond.capacitor, Some(92.5));
+    assert_eq!(cond.capacitor, None);
     assert_eq!(cond.in_space_system, None);
     assert!(cond.space_entry_epoch >= 1);
 
-    // 4. #889 (C27): Undock restores partial capacitor (92.5 GJ, not 250.0 GJ max) and bumps space_entry_epoch
+    // 4. #1082 / #889 (C27): Undock restores shield & capacitor to full while preserving armor/hull damage and bumping space_entry_epoch
     let char_uid = ctx
         .db
         .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.user_id))
@@ -840,8 +840,9 @@ async fn e2_handoffs_b4_b8_c27_take_restore_absent_ball_and_capacitor_persistenc
         .unwrap()
         .expect("undocked ship must have live combat state");
     assert!(
-        (undocked_cs.capacitor - 92.5).abs() < 1e-4,
-        "expected partial capacitor 92.5 GJ after undock, got {}",
+        (undocked_cs.capacitor - undocked_cs.max_capacitor).abs() < 1e-4,
+        "expected full capacitor {} GJ after undock, got {}",
+        undocked_cs.max_capacitor,
         undocked_cs.capacitor
     );
     let undock_notifs = ctx.drain_notifications_for_char(char_id);
@@ -853,12 +854,12 @@ async fn e2_handoffs_b4_b8_c27_take_restore_absent_ball_and_capacitor_persistenc
                         if t.len() >= 7
                         && t[2].as_i64() == Some(ship_id)
                         && t[3].as_i64() == Some(18)
-                        && t[5].as_f64().is_some_and(|v| (v - 92.5).abs() < 1e-4))
+                        && t[5].as_f64().is_some_and(|v| (v - undocked_cs.max_capacitor).abs() < 1e-4))
                 }))
         }),
         "Undock must emit OnModuleAttributeChanges (attr 18 CHARGE) for HUD capacitor (#1002)"
     );
-    assert!((undocked_cs.shield_hp - 110.0).abs() < 1e-4);
+    assert!((undocked_cs.shield_hp - undocked_cs.max_shield_hp).abs() < 1e-4);
     assert!((undocked_cs.armor_hp - 120.0).abs() < 1e-4);
     assert!((undocked_cs.structure_hp - 130.0).abs() < 1e-4);
 
@@ -881,6 +882,7 @@ async fn e2_handoffs_b4_b8_c27_take_restore_absent_ball_and_capacitor_persistenc
     jita_handle.try_set_ball_position(ship_id, jita_to_perim_gate.position + DVec3::new(500.0, 0.0, 0.0));
     let _ = jita_handle
         .modify_combat_state(ship_id, |cs| {
+            cs.capacitor = 92.5;
             cs.undock_invulnerable_remaining_ticks = 0;
             cs.gate_cloak_remaining_ticks = 0;
             cs.is_cloaked = false;

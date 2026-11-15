@@ -1070,6 +1070,9 @@ impl Ballpark {
             cs.sync_action_breaks();
             if cs.ecm_jammed_remaining_s > 0.0 {
                 cs.ecm_jammed_remaining_s = (cs.ecm_jammed_remaining_s - dt).max(0.0);
+                if cs.ecm_jammed_remaining_s <= 0.0 {
+                    cs.ecm_jammed_by.clear();
+                }
             }
             if cs.lance_disrupted_remaining_s > 0.0 {
                 cs.lance_disrupted_remaining_s = (cs.lance_disrupted_remaining_s - dt).max(0.0);
@@ -1078,6 +1081,7 @@ impl Ballpark {
 
         // Advance target locks and validate lock breaks (`DG-4`, `DG-5`).
         let mut lost_events = Vec::new();
+        let mut failed_events = Vec::new();
         let mut completed_events = Vec::new();
         let mut locks_to_retain = BTreeMap::new();
 
@@ -1086,20 +1090,32 @@ impl Ballpark {
             let source_cs = self.combat_states.get(&source_id);
             let source_cloaked = source_cs
                 .is_some_and(|c| c.is_cloaked || c.decloak_targeting_delay_remaining_s > 0.0);
+            let jammed_by: &[BallId] = source_cs
+                .filter(|c| c.ecm_jammed_remaining_s > 0.0)
+                .map(|c| c.ecm_jammed_by.as_slice())
+                .unwrap_or(&[]);
             let source_jammed = source_cs.is_some_and(|c| c.ecm_jammed_remaining_s > 0.0);
             let source_warping = source_ball
                 .map(|b| matches!(b.mode, MovementMode::Warp { .. }))
                 .unwrap_or(true);
 
-            if source_ball.is_none() || source_cloaked || source_warping || source_jammed {
+            if source_ball.is_none() || source_cloaked || source_warping {
                 for lock in locks {
-                    lost_events.push((source_id, lock.target_id));
+                    if source_warping && !lock.locked {
+                        failed_events.push((source_id, lock.target_id));
+                    } else {
+                        lost_events.push((source_id, lock.target_id));
+                    }
                 }
                 continue;
             }
 
             let mut retained = Vec::new();
             for mut lock in locks.clone() {
+                if source_jammed && !jammed_by.contains(&lock.target_id) {
+                    lost_events.push((source_id, lock.target_id));
+                    continue;
+                }
                 let target_ball = self.balls.get(&lock.target_id);
                 let target_untarg = self
                     .combat_states
@@ -1139,6 +1155,12 @@ impl Ballpark {
         for (source_id, target_id) in lost_events {
             self.pending_events.push(DestinyEvent::OnTarget {
                 mode: "lost".to_string(),
+                source_id,
+                target_id,
+            });
+        }
+        for (source_id, target_id) in failed_events {
+            self.pending_events.push(DestinyEvent::TargetLockFailed {
                 source_id,
                 target_id,
             });

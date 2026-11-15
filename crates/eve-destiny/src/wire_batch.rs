@@ -17,7 +17,12 @@ pub fn encode_destiny_updates(
     let encoded: Vec<PyRep> = events
         .iter()
         .filter(|ev| matches!(ev, DestinyEvent::SetState { .. }))
-        .chain(events.iter().filter(|ev| !matches!(ev, DestinyEvent::SetState { .. })))
+        .chain(events.iter().filter(|ev| {
+            !matches!(
+                ev,
+                DestinyEvent::SetState { .. } | DestinyEvent::TargetLockFailed { .. }
+            )
+        }))
         .map(|ev| encode_destiny_event(stamp, ev, park))
         .collect();
     PyRep::List(encoded)

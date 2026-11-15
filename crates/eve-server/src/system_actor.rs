@@ -1047,8 +1047,62 @@ impl SystemRegistry {
                             SystemCommand::SetMovementMode { ball_id, mode, reply } => {
                                 if ballpark.balls.contains_key(&ball_id) {
                                     let is_stop = matches!(mode, eve_destiny::MovementMode::Stop);
+                                    let pre_ev_len = ballpark.pending_events.len();
                                     match ballpark.set_mode(ball_id, mode) {
                                         Ok(()) => {
+                                            if ballpark.pending_events.len() > pre_ev_len {
+                                                let new_evs: Vec<DestinyEvent> =
+                                                    ballpark.pending_events[pre_ev_len..].to_vec();
+                                                let deact_guard = module_deactivation_hook_actor
+                                                    .read()
+                                                    .unwrap_or_else(|e| e.into_inner())
+                                                    .clone();
+                                                for ev in &new_evs {
+                                                    if let DestinyEvent::OnTarget {
+                                                        mode: m,
+                                                        source_id,
+                                                        target_id,
+                                                    } = ev
+                                                    {
+                                                        if m == "lost" {
+                                                            on_target_unlocked_in_actor(
+                                                                &mut ballpark,
+                                                                active_module_cycles,
+                                                                &base_scramble_strengths,
+                                                                &base_core_strengths,
+                                                                &db_opt,
+                                                                *source_id,
+                                                                Some(*target_id),
+                                                                deact_guard.as_ref(),
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                cycles::flush_target_lost_notifications(
+                                                    &ballpark,
+                                                    &new_evs,
+                                                    db_opt.as_ref(),
+                                                    pending_notifications_opt
+                                                        .as_deref()
+                                                        .map(|r| r as &dyn AnyRwLock<_>),
+                                                    notify_tx_opt.as_ref(),
+                                                );
+                                                let mut idx = pre_ev_len;
+                                                while idx < ballpark.pending_events.len() {
+                                                    let drop_ev = matches!(
+                                                        &ballpark.pending_events[idx],
+                                                        DestinyEvent::TargetLockFailed { .. }
+                                                    ) || matches!(
+                                                        &ballpark.pending_events[idx],
+                                                        DestinyEvent::OnTarget { mode, .. } if mode == "lost"
+                                                    );
+                                                    if drop_ev {
+                                                        ballpark.pending_events.remove(idx);
+                                                    } else {
+                                                        idx += 1;
+                                                    }
+                                                }
+                                            }
                                             if is_stop && active_module_cycles.iter().any(|c| c.ship_id == ball_id) {
                                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                                 reconcile_tackle_and_bubbles(&mut ballpark, active_module_cycles, &base_scramble_strengths, &base_core_strengths, &db_opt, deact_guard.as_ref());
@@ -1380,8 +1434,18 @@ impl SystemRegistry {
                                 };
                                 let _ = reply.send(res);
                             }
-                            SystemCommand::RemoveTargetLock { source_id, target_id, reply } => {
-                                let removed = ballpark.remove_target_lock(source_id, target_id);
+                            cmd @ (SystemCommand::RemoveTargetLock { .. }
+                            | SystemCommand::RemoveTargetLockQuiet { .. }) => {
+                                let (source_id, target_id, reply, emit_lost) = match cmd {
+                                    SystemCommand::RemoveTargetLock { source_id, target_id, reply } => (source_id, target_id, reply, true),
+                                    SystemCommand::RemoveTargetLockQuiet { source_id, target_id, reply } => (source_id, target_id, reply, false),
+                                    _ => unreachable!(),
+                                };
+                                let removed = if emit_lost {
+                                    ballpark.remove_target_lock(source_id, target_id)
+                                } else {
+                                    ballpark.remove_target_lock_quiet(source_id, target_id)
+                                };
                                 if removed {
                                     let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                     on_target_unlocked_in_actor(
@@ -1397,8 +1461,18 @@ impl SystemRegistry {
                                 }
                                 let _ = reply.send(removed);
                             }
-                            SystemCommand::ClearTargetLocks { source_id, reply } => {
-                                let count = ballpark.clear_target_locks(source_id);
+                            cmd @ (SystemCommand::ClearTargetLocks { .. }
+                            | SystemCommand::ClearTargetLocksQuiet { .. }) => {
+                                let (source_id, reply, emit_lost) = match cmd {
+                                    SystemCommand::ClearTargetLocks { source_id, reply } => (source_id, reply, true),
+                                    SystemCommand::ClearTargetLocksQuiet { source_id, reply } => (source_id, reply, false),
+                                    _ => unreachable!(),
+                                };
+                                let count = if emit_lost {
+                                    ballpark.clear_target_locks(source_id)
+                                } else {
+                                    ballpark.clear_target_locks_quiet(source_id)
+                                };
                                 if count > 0 {
                                     let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                     on_target_unlocked_in_actor(
@@ -1612,12 +1686,46 @@ impl SystemRegistry {
                                         &mut volley_actions,
                                         &mut volley_destroyed,
                                     );
-                                    cycles::flush_pending_cycle_damage_notifications(
+                                    cycles::flush_pending_cycle_damage_notifications_with_ballpark(
+                                        &ballpark,
+                                        sde_opt.as_deref(),
                                         db_opt.as_ref(),
                                         pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
                                         notify_tx_opt.as_ref(),
                                         &mut volley_actions,
                                     );
+                                    if !volley_destroyed.is_empty() {
+                                        let dead_ids: Vec<BallId> =
+                                            volley_destroyed.iter().map(|&(bid, _)| bid).collect();
+                                        let deact_guard = module_deactivation_hook_actor
+                                            .read()
+                                            .unwrap_or_else(|e| e.into_inner())
+                                            .clone();
+                                        cycles::teardown_attacker_locks_and_cycles_for_destroyed_balls(
+                                            &mut ballpark,
+                                            active_module_cycles,
+                                            &base_scramble_strengths,
+                                            &base_core_strengths,
+                                            &db_opt,
+                                            pending_notifications_opt
+                                                .as_deref()
+                                                .map(|r| r as &dyn AnyRwLock<_>),
+                                            notify_tx_opt.as_ref(),
+                                            deact_guard.as_ref(),
+                                            &dead_ids,
+                                        );
+                                        ballpark.pending_events.retain(|ev| match ev {
+                                            DestinyEvent::TargetLockFailed { target_id, .. } => {
+                                                !dead_ids.contains(target_id)
+                                            }
+                                            DestinyEvent::OnTarget { mode, target_id, .. }
+                                                if mode == "lost" =>
+                                            {
+                                                !dead_ids.contains(target_id)
+                                            }
+                                            _ => true,
+                                        });
+                                    }
                                     if let Some(db) = db_opt.as_ref() {
                                         for &(target_ball_id, _) in &volley_destroyed {
                                             crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
@@ -1807,6 +1915,26 @@ impl SystemRegistry {
                                 let exists = ballpark.combat_states.contains_key(&target_id) && !target_ewar_immune;
                                 if exists {
                                     ballpark.apply_ecm_jam(target_id, duration_s);
+                                    let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
+                                    on_target_unlocked_in_actor(
+                                        &mut ballpark,
+                                        active_module_cycles,
+                                        &base_scramble_strengths,
+                                        &base_core_strengths,
+                                        &db_opt,
+                                        target_id,
+                                        None,
+                                        deact_guard.as_ref(),
+                                    );
+                                    sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
+                                }
+                                let _ = reply.send(exists);
+                            }
+                            SystemCommand::ApplyEcmJamFrom { source_id, target_id, duration_s, reply } => {
+                                let target_ewar_immune = active_module_cycles.iter().any(|c| c.ship_id == target_id && c.self_ewar_immune);
+                                let exists = ballpark.combat_states.contains_key(&target_id) && !target_ewar_immune;
+                                if exists {
+                                    ballpark.apply_ecm_jam_from(Some(source_id), target_id, duration_s);
                                     let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                     on_target_unlocked_in_actor(
                                         &mut ballpark,
@@ -2019,7 +2147,9 @@ impl SystemRegistry {
                                 mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, dt_sim, deact_guard.as_ref(),
                             );
                             cycles::record_player_ship_capacitor_deltas(&ballpark, &pre_tick_caps, pending_cycle_actions);
-                            cycles::flush_pending_cycle_damage_notifications(
+                            cycles::flush_pending_cycle_damage_notifications_with_ballpark(
+                                &ballpark,
+                                sde_opt.as_deref(),
                                 db_opt.as_ref(),
                                 pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
                                 notify_tx_opt.as_ref(),
@@ -2089,6 +2219,23 @@ impl SystemRegistry {
                                     step_now_unix,
                                     &mut destroyed_balls,
                                 );
+                                if !destroyed_balls.is_empty() {
+                                    let dead_ids: Vec<BallId> =
+                                        destroyed_balls.iter().map(|&(bid, _)| bid).collect();
+                                    cycles::teardown_attacker_locks_and_cycles_for_destroyed_balls(
+                                        &mut ballpark,
+                                        active_module_cycles,
+                                        &base_scramble_strengths,
+                                        &base_core_strengths,
+                                        &db_opt,
+                                        pending_notifications_opt
+                                            .as_deref()
+                                            .map(|r| r as &dyn AnyRwLock<_>),
+                                        notify_tx_opt.as_ref(),
+                                        deact_guard.as_ref(),
+                                        &dead_ids,
+                                    );
+                                }
                                 cycles_tackle::snapshot_active_tackle_totals(&ballpark, active_module_cycles, &mut last_active_totals);
                                 reconcile_tackle_and_bubbles(
                                     &mut ballpark,

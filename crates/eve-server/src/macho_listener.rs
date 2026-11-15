@@ -269,6 +269,19 @@ pub fn out_frame_to_wire_pyrep(
             args.clone(),
         )
         .to_pyrep(),
+        OutFrame::ServiceCall {
+            service,
+            method,
+            args,
+        } => crate::router::ServerContext::build_macho_service_call_packet(
+            proxy_node_id,
+            client_id,
+            user_id,
+            service,
+            method,
+            args.clone(),
+        )
+        .to_pyrep(),
     }
 }
 
@@ -306,6 +319,7 @@ fn out_frame_kind_and_stamp(frame: &crate::outbound_sequencer::OutFrame) -> (&'s
         OutFrame::SessionChange { .. } => ("SessionChangeNotification", None),
         OutFrame::DoDestinyUpdate { stamp, .. } => ("DoDestinyUpdate", Some(*stamp)),
         OutFrame::Notification { .. } => ("Notification", None),
+        OutFrame::ServiceCall { .. } => ("ServiceCall", None),
     }
 }
 
@@ -565,6 +579,7 @@ fn build_destiny_batch(
 fn build_typed_notification(
     ctx: &ServerContext,
     event: String,
+    id_type: Option<&str>,
     args: Vec<PyRep>,
 ) -> Option<crate::outbound_sequencer::TypedNotification> {
     if crate::router::client_compat::should_suppress_macho_notification(&event, &args) {
@@ -578,6 +593,9 @@ fn build_typed_notification(
     Some(crate::outbound_sequencer::TypedNotification {
         event,
         args: norm_args,
+        service: id_type
+            .and_then(|s| s.strip_prefix("service:"))
+            .map(ToOwned::to_owned),
     })
 }
 
@@ -1017,7 +1035,7 @@ pub async fn execute_call_req_wire(
         if sess_change_sent && notif.event == "OnSessionChanged" {
             continue;
         }
-        if let Some(tn) = build_typed_notification(ctx, notif.event, notif.args) {
+        if let Some(tn) = build_typed_notification(ctx, notif.event, Some(&notif.id_type), notif.args) {
             typed_notifications.push(tn);
         }
     }
@@ -1025,7 +1043,7 @@ pub async fn execute_call_req_wire(
         if sess_change_sent && event == "OnSessionChanged" {
             continue;
         }
-        if let Some(tn) = build_typed_notification(ctx, event, args) {
+        if let Some(tn) = build_typed_notification(ctx, event, None, args) {
             typed_notifications.push(tn);
         }
     }
@@ -1433,9 +1451,12 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 ctx.sync_session(&mut session);
                                 continue;
                             }
-                            if let Some(typed_notif) =
-                                build_typed_notification(&ctx, notif.event, notif.args)
-                            {
+                            if let Some(typed_notif) = build_typed_notification(
+                                &ctx,
+                                notif.event,
+                                Some(&notif.id_type),
+                                notif.args,
+                            ) {
                                 pending_notifs.push(typed_notif);
                             }
                         }
@@ -1597,13 +1618,24 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         }
                         let mut write_failed = false;
                         for typed_notif in pending_notifs {
-                            let notif_pkt = MachoPacket::new_broadcast_notification(
-                                MACHO_PROXY_NODE_ID,
-                                client_id,
-                                session.user_id,
-                                &typed_notif.event,
-                                typed_notif.args,
-                            );
+                            let notif_pkt = if let Some(ref service) = typed_notif.service {
+                                crate::router::ServerContext::build_macho_service_call_packet(
+                                    MACHO_PROXY_NODE_ID,
+                                    client_id,
+                                    session.user_id,
+                                    service,
+                                    &typed_notif.event,
+                                    typed_notif.args,
+                                )
+                            } else {
+                                MachoPacket::new_broadcast_notification(
+                                    MACHO_PROXY_NODE_ID,
+                                    client_id,
+                                    session.user_id,
+                                    &typed_notif.event,
+                                    typed_notif.args,
+                                )
+                            };
                             if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep()).await.is_err() {
                                 write_failed = true;
                                 break;
@@ -2251,23 +2283,31 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
     let mut notifs = Vec::new();
     if let Some(cid) = session.character_id {
         for n in ctx.drain_notifications_for_char(cid) {
-            notifs.push((n.event, n.args));
+            notifs.push((n.event, Some(n.id_type), n.args));
         }
     }
     for (ev, args) in session.drain_notifications() {
-        if !notifs.iter().any(|(e, a)| e == &ev && a == &args) {
-            notifs.push((ev, args));
+        if !notifs.iter().any(|(e, _, a)| e == &ev && a == &args) {
+            notifs.push((ev, None, args));
         }
     }
-    for (event, args) in notifs {
+    for (event, id_type, args) in notifs {
         if sess_change_sent && event == "OnSessionChanged" {
             continue;
         }
-        if let Some(tn) = build_typed_notification(ctx, event, args) {
-            out_frames.push(crate::outbound_sequencer::OutFrame::Notification {
-                event: tn.event,
-                args: tn.args,
-            });
+        if let Some(tn) = build_typed_notification(ctx, event, id_type.as_deref(), args) {
+            if let Some(service) = tn.service {
+                out_frames.push(crate::outbound_sequencer::OutFrame::ServiceCall {
+                    service,
+                    method: tn.event,
+                    args: tn.args,
+                });
+            } else {
+                out_frames.push(crate::outbound_sequencer::OutFrame::Notification {
+                    event: tn.event,
+                    args: tn.args,
+                });
+            }
         }
     }
     let wire_packets = out_frames

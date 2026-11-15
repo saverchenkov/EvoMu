@@ -1511,7 +1511,7 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
         let roll = super::csprng_unit_f64(ctx);
         let jam_duration_s = if duration_s > 0.0 { duration_s } else { 20.0 };
         if roll < jam_chance && jam_chance > 0.0 {
-            let _ = sys.apply_ecm_jam(target_id, jam_duration_s).await;
+            let _ = sys.apply_ecm_jam_from(ship_id, target_id, jam_duration_s).await;
             crate::services::notify_emitters_space_dungeons::emit_ecm_jam_landed(
                 ctx,
                 sys_id,
@@ -2174,6 +2174,31 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                 }
                 if !notified && applied_dmg > 0.0 {
                     let owner_cid = attacker_char_id.unwrap_or(0);
+                    let (sr, ar, hr) = if let Ok(Some(t_cs)) =
+                        ctx.systems.get_or_spawn(sys_id).get_combat_state(target_id).await
+                    {
+                        (
+                            (t_cs.shield_hp / t_cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0),
+                            (t_cs.armor_hp / t_cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0),
+                            (t_cs.structure_hp / t_cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0),
+                        )
+                    } else {
+                        (0.0, 0.0, 0.0)
+                    };
+                    if let Some(acid) = attacker_char_id.filter(|&c| c > 0) {
+                        let _ = ctx.notify_damage_state_change(
+                            crate::router::NotificationTarget::Character(acid),
+                            target_id,
+                            sr,
+                            ar,
+                            hr,
+                        );
+                    }
+                    if let Some(vcid) = target_char_id.filter(|&c| c > 0 && c != owner_cid) {
+                        crate::services::notify_emitters_combat_ess_progression::emit_damage_state_change(
+                            ctx, vcid, target_id, sr, ar, hr,
+                        );
+                    }
                     if let Some(acid) = attacker_char_id.filter(|&c| c > 0) {
                         let dmg_dict = PyRep::Dict(vec![
                             (PyRep::String("damage".into()), PyRep::Real(applied_dmg)),
@@ -2430,7 +2455,9 @@ pub(crate) async fn try_handle_mercden_remote_shield_repair(
 ) -> Result<Option<PyRep>, BridgeRpcError> {
     let locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
     if !locks.iter().any(|l| l.target_id == target_id && l.locked) {
-        return Err(BridgeRpcError { code: "TargetNotLocked".into(), message: format!("Target {target_id} is not locked"), client_error: None });
+        return Err(crate::services::inventory_fitting::fitting_module_cycles::target_not_locked_rpc_error(format!(
+            "Target {target_id} is not locked"
+        )));
     }
     if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
         if cs.is_cloaked {

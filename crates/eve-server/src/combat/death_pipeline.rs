@@ -1082,7 +1082,7 @@ pub fn execute_death_pipeline_sync_inner(
         .filter(|c| c.ship_id == victim_ship_id)
         .map(|c| c.module_id)
         .collect();
-    sys_handle.try_remove_ball(victim_ship_id);
+    sys_handle.try_remove_destroyed_ball(victim_ship_id);
     let (wreck_grp, wreck_cat) = if is_pod {
         ctx.sde
             .types

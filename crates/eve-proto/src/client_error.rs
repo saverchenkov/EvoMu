@@ -102,9 +102,13 @@ pub enum UserErrorKey {
 
     // --- Combat, Modules, Drones & Fighters ---
     ModuleAlreadyActive,
+    EffectAlreadyActive2,
     ModuleNotOnline,
     MaxBandwidthExceeded,
     TargetNotLocked,
+    TargetingAptitudeAlreadyFullyUtilized,
+    TargetingSystemsAlreadyFullyUtilized,
+    TargetingSystemsBeingJammed,
     InvalidTargetGroup,
     ShipHasNoFighterBay,
     CannotLaunchFighterNotEnoughTubesAvailableForClass,
@@ -135,7 +139,7 @@ pub enum UserErrorKey {
 }
 
 impl UserErrorKey {
-    /// Exhaustive slice of all 88 typed [`UserErrorKey`] variants.
+    /// Exhaustive slice of all 92 typed [`UserErrorKey`] variants.
     pub const ALL: &[Self] = &[
         Self::InsureShipFailedSingleContract,
         Self::InsureShipFailedMultipleContracts,
@@ -199,9 +203,13 @@ impl UserErrorKey {
         Self::CantEnterWormholeGlobalCriminalFlag,
         Self::CantWarpAwayGlobalCriminalFlag,
         Self::ModuleAlreadyActive,
+        Self::EffectAlreadyActive2,
         Self::ModuleNotOnline,
         Self::MaxBandwidthExceeded,
         Self::TargetNotLocked,
+        Self::TargetingAptitudeAlreadyFullyUtilized,
+        Self::TargetingSystemsAlreadyFullyUtilized,
+        Self::TargetingSystemsBeingJammed,
         Self::InvalidTargetGroup,
         Self::ShipHasNoFighterBay,
         Self::CannotLaunchFighterNotEnoughTubesAvailableForClass,
@@ -294,9 +302,13 @@ impl UserErrorKey {
             Self::CantEnterWormholeGlobalCriminalFlag => "CantEnterWormholeGlobalCriminalFlag",
             Self::CantWarpAwayGlobalCriminalFlag => "CantWarpAwayGlobalCriminalFlag",
             Self::ModuleAlreadyActive => "ModuleAlreadyActive",
+            Self::EffectAlreadyActive2 => "EffectAlreadyActive2",
             Self::ModuleNotOnline => "ModuleNotOnline",
             Self::MaxBandwidthExceeded => "MaxBandwidthExceeded",
             Self::TargetNotLocked => "TargetNotLocked",
+            Self::TargetingAptitudeAlreadyFullyUtilized => "TargetingAptitudeAlreadyFullyUtilized",
+            Self::TargetingSystemsAlreadyFullyUtilized => "TargetingSystemsAlreadyFullyUtilized",
+            Self::TargetingSystemsBeingJammed => "TargetingSystemsBeingJammed",
             Self::InvalidTargetGroup => "InvalidTargetGroup",
             Self::ShipHasNoFighterBay => "ShipHasNoFighterBay",
             Self::CannotLaunchFighterNotEnoughTubesAvailableForClass => {
@@ -398,9 +410,13 @@ impl UserErrorKey {
             Self::CantEnterWormholeGlobalCriminalFlag => Some(2844),
             Self::CantWarpAwayGlobalCriminalFlag => Some(3827),
             Self::ModuleAlreadyActive => Some(1224),
+            Self::EffectAlreadyActive2 => Some(3252),
             Self::ModuleNotOnline => Some(1231),
             Self::MaxBandwidthExceeded => Some(2396),
             Self::TargetNotLocked => Some(1627),
+            Self::TargetingAptitudeAlreadyFullyUtilized => Some(1634),
+            Self::TargetingSystemsAlreadyFullyUtilized => Some(1636),
+            Self::TargetingSystemsBeingJammed => Some(1637),
             Self::InvalidTargetGroup => Some(987),
             Self::ShipHasNoFighterBay => Some(4890),
             Self::CannotLaunchFighterNotEnoughTubesAvailableForClass => Some(5112),
@@ -459,7 +475,18 @@ impl UserErrorKey {
                 ("maxCnt".into(), PyRep::Integer(0)),
             ],
             Self::SlashError => vec![("reason".into(), PyRep::ascii_bytes(""))],
-            Self::UnMachoDestination | Self::CustomInfo => {
+            Self::TargetingAptitudeAlreadyFullyUtilized
+            | Self::TargetingSystemsAlreadyFullyUtilized => {
+                vec![("limit".into(), PyRep::Integer(0))]
+            }
+            Self::TargetingSystemsBeingJammed => {
+                vec![("targetname".into(), PyRep::ascii_bytes(""))]
+            }
+            Self::EffectAlreadyActive2 => {
+                vec![("modulename".into(), PyRep::ascii_bytes(""))]
+            }
+            Self::CustomInfo => vec![("info".into(), PyRep::ascii_bytes(self.as_str()))],
+            Self::UnMachoDestination => {
                 vec![("info".into(), PyRep::ascii_bytes(self.as_str()))]
             }
             Self::CustomNotify => vec![("notify".into(), PyRep::ascii_bytes(self.as_str()))],
@@ -968,5 +995,41 @@ mod tests {
                 .is_empty(),
             "InsureShipFailedSingleContract default_args must not emit a hardcoded character ID"
         );
+    }
+
+    #[test]
+    fn gh1082_targeting_and_module_activation_user_error_keys_have_v24_dialog_ids() {
+        let expected = [
+            (UserErrorKey::TargetNotLocked, "TargetNotLocked", 1627),
+            (
+                UserErrorKey::TargetingAptitudeAlreadyFullyUtilized,
+                "TargetingAptitudeAlreadyFullyUtilized",
+                1634,
+            ),
+            (
+                UserErrorKey::TargetingSystemsAlreadyFullyUtilized,
+                "TargetingSystemsAlreadyFullyUtilized",
+                1636,
+            ),
+            (
+                UserErrorKey::TargetingSystemsBeingJammed,
+                "TargetingSystemsBeingJammed",
+                1637,
+            ),
+            (UserErrorKey::EffectAlreadyActive2, "EffectAlreadyActive2", 3252),
+        ];
+        for (key, key_str, dialog_id) in expected {
+            assert_eq!(key.as_str(), key_str);
+            assert_eq!(UserErrorKey::from_code(key_str), Some(key));
+            assert_eq!(key.v24_dialog_id(), Some(dialog_id));
+            let err = BridgeRpcError::from_user_key(key);
+            assert_eq!(
+                err.to_client_error("dogmaIM", "Activate"),
+                ClientError::User {
+                    key,
+                    args: Vec::new(),
+                }
+            );
+        }
     }
 }

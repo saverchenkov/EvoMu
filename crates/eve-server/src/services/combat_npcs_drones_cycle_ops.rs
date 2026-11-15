@@ -177,7 +177,7 @@ pub(crate) async fn try_apply_drone_ecm_jam(
         .filter(|l| l.target_id == d.ball_id)
         .collect();
     let jam_dur_s = d.cycle_duration_secs(ctx).max(20) as f64;
-    let _ = sys_handle.apply_ecm_jam(target_id, jam_dur_s).await;
+    let _ = sys_handle.apply_ecm_jam_from(d.ball_id, target_id, jam_dur_s).await;
     for tl in taunt_locks {
         let _ = sys_handle.add_target_lock(target_id, tl).await;
     }

@@ -24,6 +24,17 @@ pub mod structure_ansiblex_navigation;
 #[path = "structure_lifecycle_rpc.rs"]
 pub mod structure_lifecycle_rpc;
 
+/// Restores shield and capacitor to maximum on dock while preserving armor, hull, and module damage (`#1082`).
+pub(crate) fn docked_combat_state_recharging_shield_and_cap(
+    combat_state: Option<&eve_destiny::CombatState>,
+) -> Option<eve_destiny::CombatState> {
+    combat_state.cloned().map(|mut cs| {
+        cs.shield_hp = cs.max_shield_hp;
+        cs.capacitor = cs.max_capacitor;
+        cs
+    })
+}
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -468,6 +479,8 @@ pub async fn handle(
             };
 
             let mut combat_state = ctx.build_ship_combat_state(char_id, ship.item_id, ship.type_id);
+            combat_state.shield_hp = combat_state.max_shield_hp;
+            combat_state.capacitor = combat_state.max_capacitor;
             combat_state.undock_invulnerable_remaining_ticks = 30;
             let max_vel = combat_state
                 .base_max_velocity
@@ -842,16 +855,23 @@ pub async fn handle(
                 }));
             };
             handle.clear_warp_stopped_at(ship_id);
+            let docked_combat_state =
+                docked_combat_state_recharging_shield_and_cap(taken.combat_state.as_ref());
             match ctx.db.dock_character_if_in_space(char_id, sys_id, dock_id, is_structure) {
                 Ok(_) => {
                     let active_mods: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
                         crate::sp6_lifecycle::leave_space_in_snap(
                             snap,
                             ship_id,
-                            taken.combat_state.as_ref(),
+                            docked_combat_state.as_ref(),
                             None,
                             None,
                         );
+                        if docked_combat_state.is_none() {
+                            if let Some(meta) = snap.sp6_lifecycle.ship_combat_hp.get_mut(&(-ship_id)) {
+                                meta.shield_hp = 0.0;
+                            }
+                        }
                         snap.item_positions.remove(&ship_id);
                         let mods: Vec<i64> = snap
                             .items

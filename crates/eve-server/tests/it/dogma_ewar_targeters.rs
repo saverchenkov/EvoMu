@@ -315,7 +315,7 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
     .await
     .expect("spawn far ball");
 
-    // Lock victim_id from attacker ship_id, and give victim_id a lock on ship_id
+    // Lock victim_id from attacker ship_id, and give victim_id locks on both jammer ship_id and non-jammer far_id
     sys.add_target_lock(
         ship_id,
         TargetLock {
@@ -328,19 +328,21 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
     )
     .await
     .unwrap();
-    sys.add_target_lock(
-        victim_id,
-        TargetLock {
-            target_id: ship_id,
-            lock_time_ms: 1000.0,
-            remaining_lock_ms: 0.0,
-            locked: true,
-            max_range_m: Some(50_000.0),
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(sys.get_target_locks(victim_id).await.unwrap().len(), 1);
+    for tid in [ship_id, far_id] {
+        sys.add_target_lock(
+            victim_id,
+            TargetLock {
+                target_id: tid,
+                lock_time_ms: 1000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(50_000.0),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(sys.get_target_locks(victim_id).await.unwrap().len(), 2);
 
     // Activate Multispectral ECM I (1957) on victim_id via dogmaIM.Activate until probabilistic CSPRNG jam roll lands
     let mut ecm_jammed = false;
@@ -390,10 +392,11 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
         ecm_jammed,
         "Victim must be ECM-jammed after Multispectral ECM I activation"
     );
+    let locks_after_jam = sys.get_target_locks(victim_id).await.unwrap();
     assert_eq!(
-        sys.get_target_locks(victim_id).await.unwrap().len(),
-        0,
-        "Targeted Multispectral ECM I activation must break all target locks on victim"
+        locks_after_jam.iter().map(|l| l.target_id).collect::<Vec<_>>(),
+        vec![ship_id],
+        "Targeted Multispectral ECM I activation must break non-jammer locks while retaining jammer lock"
     );
 
     // Verify 20-second ECM jam duration and targeting lockout across system steps (feat:modules.ecm)
@@ -424,14 +427,14 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
             "dogmaIM",
             None,
             "AddTarget",
-            &[PyRep::Integer(ship_id)],
+            &[PyRep::Integer(far_id)],
             &kw,
             None,
         )
         .await;
     assert!(
         lock_while_jammed.is_err(),
-        "Victim must not be able to lock targets during the 20s ECM jam window"
+        "Victim must not be able to lock non-jammer targets during the 20s ECM jam window"
     );
     sys.step_manual(10.0).await.unwrap();
     let mid_jam_rem = sys
@@ -450,13 +453,13 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
             "dogmaIM",
             None,
             "AddTarget",
-            &[PyRep::Integer(ship_id)],
+            &[PyRep::Integer(far_id)],
             &kw,
             None,
         )
         .await
         .is_err(),
-        "Victim must still be blocked from locking at 10s into the 20s ECM jam window"
+        "Victim must still be blocked from locking non-jammers at 10s into the 20s ECM jam window"
     );
     sys.step_manual(10.0).await.unwrap();
     let expired_jam_rem = sys
@@ -474,7 +477,7 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
         "dogmaIM",
         None,
         "AddTarget",
-        &[PyRep::Integer(ship_id)],
+        &[PyRep::Integer(far_id)],
         &kw,
         None,
     )

@@ -397,7 +397,7 @@ fn issue_804_notify_module_effect_started_emits_on_special_fx_for_turrets_ewar_p
         assert_eq!(sfx.args.get(7), Some(&PyRep::Integer(1)));
         assert_eq!(sfx.args.get(8), Some(&PyRep::Integer(1)));
         assert!(sfx.args.get(9).and_then(|v| v.as_f64()).is_some());
-        assert_eq!(sfx.args.get(10), Some(&PyRep::Integer(0)));
+        assert_eq!(sfx.args.get(10), Some(&PyRep::Integer(1000)));
         assert!(sfx.args.get(11).and_then(|v| v.as_i64()).unwrap_or(0) > 0);
         assert_eq!(sfx.args.get(12), Some(&PyRep::Real(0.0)));
         assert_eq!(sfx.args.get(13), Some(&PyRep::None));
