@@ -2404,3 +2404,330 @@ async fn test_gh963_shield_booster_cycle_end_and_offline_never_flush_location_pr
     .await
     .expect("re-activating module after cycle end and offline/online roundtrip must succeed");
 }
+
+#[tokio::test]
+async fn issue_1073_set_module_online_in_space_does_not_orphan_def_effect() {
+    use eve_testkit::client_harness::ClientWireFrameKind;
+    use eve_testkit::shadow_client::ShadowClient;
+
+    let ctx = ServerContext::new();
+    let mut sess = SessionState::new(1073);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let kw = HashMap::new();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let char_id = sess.character_id.expect("char_id");
+    let ship_id = sess.ship_id.expect("ship_id");
+    let sys_id = sess.solar_system_id.unwrap_or(30_000_142);
+    let miner_id = 1_073_000_001_i64;
+    let rock_id = 1_073_000_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.type_id = 603; // Merlin
+        }
+        snap.items.retain(|_, item| item.location_id != ship_id);
+        snap.module_online_states.clear();
+        snap.module_active_states.clear();
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.insert(
+            3386,
+            eve_db::TrainedSkillRecord {
+                type_id: 3386,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        sk.insert(
+            3429,
+            eve_db::TrainedSkillRecord {
+                type_id: 3429,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+    });
+    seed_item(
+        &ctx,
+        miner_id,
+        483, // Miner I
+        char_id,
+        ship_id,
+        InventoryFlag::HiSlot0,
+        1,
+        true,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(miner_id, false);
+    });
+    grant_all_required_skills_for_type(&ctx, char_id, 603);
+    grant_all_required_skills_for_type(&ctx, char_id, 483);
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = sess.drain_notifications();
+
+    let def_eff_id = i64::from(
+        ctx.sde
+            .types
+            .get(&483)
+            .and_then(|t| t.default_effect_id)
+            .expect("Miner I default_effect_id"),
+    );
+
+    let mut shadow = ShadowClient::from_world(char_id, &ctx.db, Some(&ctx.sde));
+    shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+
+    async fn wire_call_and_apply(
+        ctx: &ServerContext,
+        sess: &mut SessionState,
+        service: &str,
+        method: &str,
+        args: &[PyRep],
+        kw: &HashMap<String, PyRep>,
+        shadow: &mut ShadowClient,
+    ) -> (PyRep, Vec<(String, Vec<PyRep>)>) {
+        let mut harness = common::borrow_wire_harness(ctx, sess);
+        let out = harness.call_exchange(service, None, method, args, kw).await;
+        let mut notifs = Vec::new();
+        for frame in &out.frames {
+            match &frame.kind {
+                ClientWireFrameKind::Notification { event, args } => {
+                    shadow.apply_notification(event, args);
+                    notifs.push((event.clone(), args.clone()));
+                }
+                ClientWireFrameKind::DoDestinyUpdate { updates, .. } => {
+                    shadow.apply_notification("DoDestinyUpdate", std::slice::from_ref(updates));
+                }
+                ClientWireFrameKind::SessionChange { packet } => {
+                    shadow.apply_notification(
+                        "SessionChangeNotification",
+                        std::slice::from_ref(packet),
+                    );
+                }
+                ClientWireFrameKind::CallRsp { .. }
+                | ClientWireFrameKind::ErrorResponse { .. } => {}
+            }
+        }
+        let rep = out
+            .result
+            .unwrap_or_else(|e| panic!("{service}.{method} failed: {e:?}"));
+        (rep, notifs)
+    }
+
+    // 1. Undock into space with offline Miner I and prime via GetAllInfo.
+    ctx.advance_secs(12);
+    let _ = wire_call_and_apply(
+        &ctx,
+        &mut sess,
+        "stationSvc",
+        "Undock",
+        &[],
+        &kw,
+        &mut shadow,
+    )
+    .await;
+    assert!(sess.station_id.is_none(), "pilot must be in space after Undock");
+
+    let (all_info, _) = wire_call_and_apply(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "GetAllInfo",
+        &[PyRep::Bool(true), PyRep::Bool(true)],
+        &kw,
+        &mut shadow,
+    )
+    .await;
+    shadow.sync_from_get_all_info(&all_info);
+    shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+    assert_eq!(shadow.module_states.online_states.get(&miner_id), Some(&false));
+    assert!(
+        shadow
+            .module_states
+            .primed_effects_by_item
+            .get(&miner_id)
+            .is_some_and(|e| e.contains(&16) && e.contains(&def_eff_id)),
+        "GetAllInfo must prime online (16) and default effect ({def_eff_id}) on Miner I"
+    );
+
+    // 2. SetModuleOnline in space MUST NOT emit OnGodmaEffectInfo or OnGodmaPrimeItem,
+    // which in the V24.01 client replace effectsByItemEffect DBRows and orphan ModuleButton.def_effect.
+    let (_, online_notifs) = wire_call_and_apply(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "SetModuleOnline",
+        &[PyRep::Integer(ship_id), PyRep::Integer(miner_id)],
+        &kw,
+        &mut shadow,
+    )
+    .await;
+    assert!(
+        !online_notifs
+            .iter()
+            .any(|(ev, _)| ev == "OnGodmaEffectInfo" || ev == "OnGodmaPrimeItem"),
+        "GH #1073: SetModuleOnline in space must not emit OnGodmaEffectInfo or OnGodmaPrimeItem: {online_notifs:?}"
+    );
+    assert!(
+        online_notifs.iter().any(|(ev, args)| {
+            ev == "OnGodmaShipEffect"
+                && args.first() == Some(&PyRep::Integer(miner_id))
+                && args.get(1) == Some(&PyRep::Integer(16))
+                && args.get(3) == Some(&PyRep::Integer(1))
+        }),
+        "SetModuleOnline must emit OnGodmaShipEffect(16, active=1): {online_notifs:?}"
+    );
+    assert!(
+        online_notifs.iter().any(|(ev, _)| ev == "OnModuleAttributeChanges"),
+        "SetModuleOnline must emit OnModuleAttributeChanges: {online_notifs:?}"
+    );
+    assert_eq!(shadow.module_states.online_states.get(&miner_id), Some(&true));
+    assert!(
+        shadow
+            .module_states
+            .primed_effects_by_item
+            .get(&miner_id)
+            .is_some_and(|e| e.contains(&16) && e.contains(&def_eff_id)),
+        "primed effects on Miner I must remain intact after SetModuleOnline"
+    );
+    shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+
+    // 3. Spawn and lock Scordite asteroid, then Activate & Deactivate Miner I in space.
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let (_, ship_ball) = sys
+        .get_ball_snapshot(ship_id)
+        .await
+        .expect("get_ball_snapshot")
+        .expect("ship ball in space");
+    let rock_pos = ship_ball.position + DVec3::new(1_000.0, 0.0, 0.0);
+    ctx.db.spawn_asteroid(eve_db::AsteroidRecord {
+        asteroid_id: rock_id,
+        solar_system_id: sys_id,
+        belt_id: 40_000_001,
+        type_id: 1228,
+        quantity: 5_000,
+        initial_quantity: 5_000,
+        position: (rock_pos.x, rock_pos.y, rock_pos.z),
+        radius: 50.0,
+    });
+    sys.spawn_asteroid(
+        eve_server::system_actor::AsteroidState {
+            asteroid_id: rock_id,
+            belt_id: 40_000_001,
+            type_id: 1228,
+            initial_units: 5_000,
+            remaining_units: 5_000,
+            unit_volume: 0.15,
+            depleted: false,
+            respawn_at_tick: None,
+        },
+        Ball {
+            id: rock_id,
+            type_id: 1228,
+            position: rock_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 0.0,
+            mass: 1.0e10,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+    )
+    .await
+    .expect("spawn asteroid");
+
+    let _ = wire_call_and_apply(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "AddTarget",
+        &[PyRep::Integer(rock_id)],
+        &kw,
+        &mut shadow,
+    )
+    .await;
+    for _ in 0..10 {
+        if sys
+            .get_target_locks(ship_id)
+            .await
+            .expect("get_target_locks")
+            .iter()
+            .any(|l| l.target_id == rock_id && l.locked)
+        {
+            break;
+        }
+        sys.step_manual(5.0).await.expect("step_manual");
+    }
+    for n in ctx.drain_notifications_for_char(char_id) {
+        shadow.apply_notification(&n.event, &n.args);
+    }
+    for (ev, args) in sess.drain_notifications() {
+        shadow.apply_notification(&ev, &args);
+    }
+
+    let (_, act_notifs) = wire_call_and_apply(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(miner_id),
+            PyRep::String("miningLaser".into()),
+            PyRep::Integer(rock_id),
+        ],
+        &kw,
+        &mut shadow,
+    )
+    .await;
+    assert!(
+        !act_notifs
+            .iter()
+            .any(|(ev, _)| ev == "OnGodmaEffectInfo" || ev == "OnGodmaPrimeItem"),
+        "Activate(miningLaser) must not emit OnGodmaEffectInfo or OnGodmaPrimeItem: {act_notifs:?}"
+    );
+    assert!(
+        act_notifs.iter().any(|(ev, args)| {
+            ev == "OnGodmaShipEffect"
+                && args.first() == Some(&PyRep::Integer(miner_id))
+                && args.get(1) == Some(&PyRep::Integer(def_eff_id))
+                && args.get(3) == Some(&PyRep::Integer(1))
+        }),
+        "Activate(miningLaser) must emit OnGodmaShipEffect(active=1): {act_notifs:?}"
+    );
+    assert!(shadow.module_states.active_modules.contains(&miner_id));
+    shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+
+    let (_, deact_notifs) = wire_call_and_apply(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Deactivate",
+        &[PyRep::Integer(miner_id), PyRep::String("miningLaser".into())],
+        &kw,
+        &mut shadow,
+    )
+    .await;
+    assert!(
+        deact_notifs.iter().any(|(ev, args)| {
+            ev == "OnGodmaShipEffect"
+                && args.first() == Some(&PyRep::Integer(miner_id))
+                && args.get(1) == Some(&PyRep::Integer(def_eff_id))
+                && args.get(3) == Some(&PyRep::Integer(0))
+        }),
+        "Deactivate(miningLaser) must emit OnGodmaShipEffect(active=0): {deact_notifs:?}"
+    );
+    assert!(!shadow.module_states.active_modules.contains(&miner_id));
+    shadow.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+}

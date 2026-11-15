@@ -709,10 +709,22 @@ pub(crate) fn evaluate_ship_dogma_attributes(
         let val = eval_ctx.ship.get_attribute(attr_id, &ctx.sde);
         ship_attrs_map.insert(attr_id, val);
     }
-    let dyn_attrs = ctx
+    let (dyn_attrs, mod_dyn_attrs) = ctx
         .db
-        .with_snapshot(|s| s.items.get(&ship_id).map(|it| it.dynamic_attributes.clone()))
-        .unwrap_or_default();
+        .with_snapshot(|s| {
+            let ship_dyn = s
+                .items
+                .get(&ship_id)
+                .map(|it| it.dynamic_attributes.clone())
+                .unwrap_or_default();
+            let mut per_mod = HashMap::new();
+            for it in s.items.values() {
+                if it.location_id == ship_id && !it.dynamic_attributes.is_empty() {
+                    per_mod.insert(it.item_id, it.dynamic_attributes.clone());
+                }
+            }
+            (ship_dyn, per_mod)
+        });
     for (attr_id, val) in dyn_attrs {
         if matches!(attr_id, 3 | 18 | 264 | 265 | 266)
             || !eval_ctx
@@ -750,6 +762,15 @@ pub(crate) fn evaluate_ship_dogma_attributes(
             .into_iter()
             .map(|aid| (aid, m_state.get_attribute(aid, &ctx.sde)))
             .collect();
+        if let Some(m_dyn) = mod_dyn_attrs.get(&m_state.item_id) {
+            for (&aid, &val) in m_dyn {
+                if matches!(aid, 3 | 18 | 264 | 265 | 266)
+                    || !m_state.modifiers.iter().any(|m| m.target_attribute_id == aid)
+                {
+                    m_map.insert(aid, val);
+                }
+            }
+        }
         let is_mod_online = fit
             .modules
             .get(&m_state.item_id)
@@ -779,6 +800,11 @@ pub(crate) fn evaluate_ship_dogma_attributes(
             .get(&m.type_id)
             .map(|t| t.default_attributes.clone())
             .unwrap_or_default();
+        if let Some(m_dyn) = mod_dyn_attrs.get(&m.item_id) {
+            for (&aid, &val) in m_dyn {
+                m_map.insert(aid, val);
+            }
+        }
         m_map.insert(2, 0.0);
         let mut m_attrs: Vec<(PyRep, PyRep)> = m_map
             .into_iter()

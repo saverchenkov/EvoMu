@@ -1609,10 +1609,15 @@ async fn notify_batch9_godma_and_location_cache_invalidation() {
     let mut sess_b = login_in_space(&ctx, 9_412, "other", "other-secret", PILOT_B, ship_b, 587, SYS_JITA, DVec3::new(1_000.0, 0.0, 0.0)).await;
 
     let mod_id = 940_000_110_i64;
+    let ammo_id = 940_000_112_i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             mod_id,
             make_item(mod_id, 2873, PILOT_A, ship_a, InventoryFlag::HiSlot0, 1, true),
+        );
+        snap.items.insert(
+            ammo_id,
+            make_item(ammo_id, 185, PILOT_A, ship_a, InventoryFlag::Cargo, 20, false),
         );
     });
     ctx.invalidate_ship_fitting(ship_a);
@@ -1633,7 +1638,8 @@ async fn notify_batch9_godma_and_location_cache_invalidation() {
         .iter()
         .any(|(e, _)| e == "OnGodmaPrimeItem"));
 
-    // Positive: SetModuleOnline emits OnGodmaPrimeItem and OnGodmaEffectInfo
+    // Positive: SetModuleOnline on an already-primed fitted module in space updates
+    // online state/attributes/effect without re-priming (which would orphan def_effect, #1073).
     let _ = rpc(
         &ctx,
         &mut sess_a,
@@ -1644,14 +1650,62 @@ async fn notify_batch9_godma_and_location_cache_invalidation() {
     .await
     .expect("SetModuleOnline");
     let online_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    let prime_args = find_notif(&online_notifs, "OnGodmaPrimeItem");
+    assert!(
+        !online_notifs
+            .iter()
+            .any(|(e, _)| e == "OnGodmaPrimeItem" || e == "OnGodmaEffectInfo"),
+        "SetModuleOnline on fitted item must not emit OnGodmaPrimeItem or OnGodmaEffectInfo: {online_notifs:?}"
+    );
+    let _ = find_notif(&online_notifs, "OnModuleAttributeChanges");
+    let ship_eff_args = find_notif(&online_notifs, "OnGodmaShipEffect");
+    assert_eq!(ship_eff_args[0], PyRep::Integer(mod_id));
+    assert_eq!(ship_eff_args[1], PyRep::Integer(16));
+    assert_eq!(ship_eff_args[3], PyRep::Integer(1));
+
+    // OnGodmaPrimeItem is legitimately emitted for newly created charge sublocations (LoadAmmo).
+    let _ = rpc(
+        &ctx,
+        &mut sess_a,
+        "dogmaIM",
+        "LoadAmmo",
+        &[
+            PyRep::Integer(ship_a),
+            PyRep::List(vec![PyRep::Integer(mod_id)]),
+            PyRep::List(vec![PyRep::Integer(ammo_id)]),
+        ],
+    )
+    .await
+    .expect("LoadAmmo");
+    let load_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let prime_args = find_notif(&load_notifs, "OnGodmaPrimeItem");
     assert_eq!(prime_args.len(), 2);
     assert_eq!(prime_args[0], PyRep::Integer(ship_a));
-    assert_eq!(prime_args[1].dict_get("itemID"), Some(&PyRep::Integer(mod_id)));
-    assert!(matches!(prime_args[1].dict_get("attributes"), Some(PyRep::Dict(d)) if d.len() > 2));
-    let eff_args = find_notif(&online_notifs, "OnGodmaEffectInfo");
+    assert_eq!(
+        prime_args[1].dict_get("itemID"),
+        Some(&PyRep::Tuple(vec![
+            PyRep::Integer(ship_a),
+            PyRep::Integer(i64::from(InventoryFlag::HiSlot0 as u16)),
+            PyRep::Integer(185),
+        ]))
+    );
+    assert!(matches!(prime_args[1].dict_get("attributes"), Some(PyRep::Dict(d)) if !d.is_empty()));
+
+    // OnGodmaEffectInfo is legitimately emitted for synthetic (non-inventory) items not in ctx.db.items.
+    let synthetic_mod_id = 940_000_199_i64;
+    eve_server::services::notify_emitters_skills_trade_godma::emit_godma_effect_info_for_module(
+        &ctx,
+        PILOT_A,
+        ship_a,
+        synthetic_mod_id,
+        2873,
+        "online",
+        1.0,
+        None,
+    );
+    let synth_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let eff_args = find_notif(&synth_notifs, "OnGodmaEffectInfo");
     assert_eq!(eff_args.len(), 4);
-    assert_eq!(eff_args[0], PyRep::Integer(mod_id));
+    assert_eq!(eff_args[0], PyRep::Integer(synthetic_mod_id));
     assert_eq!(eff_args[1], PyRep::Integer(2873));
 
     // Negative 7a: TakeModuleOffline on unowned ship fails
