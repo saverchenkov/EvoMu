@@ -1544,11 +1544,13 @@ async fn w4_mutant_killers_cycles_cloak_turret_missile_rah_reload_cleanup_and_fl
     let mut sde_mut = (*make_extra_sde()).clone();
     let mut reload_ty = sde_mut.types.values().next().unwrap().clone();
     reload_ty.type_id = 941_999;
+    reload_ty.group_id = 55;
     reload_ty.capacity = 20.0;
     reload_ty.default_attributes = HashMap::from([(1795u16, 5_100.0)]);
     sde_mut.types.insert(941_999, reload_ty);
     let mut ammo_ty = sde_mut.types.values().next().unwrap().clone();
     ammo_ty.type_id = 941_998;
+    ammo_ty.group_id = 83;
     ammo_ty.volume = 1.0;
     sde_mut.types.insert(941_998, ammo_ty);
     let sde_arc = Arc::new(sde_mut);
