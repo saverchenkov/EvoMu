@@ -1056,7 +1056,7 @@ async fn test_live_playtest_upwell_1055_1056_1057_1059_wire_ratcheted() {
 
     // #1057: structureCargoDelivery.DropOffItems accepts V24 3-arg ([itemIDs], sourceLoc, structureID)
     // on uncored (quantum_core_installed=false) structures, returns movedItemIDs list, and emits OnItemChange
-    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = harness.drain_notifications();
     let drop_rep = harness
         .call_ok(
             "structureCargoDelivery",
@@ -1077,9 +1077,10 @@ async fn test_live_playtest_upwell_1055_1056_1057_1059_wire_ratcheted() {
         assert_eq!(core.flag, InventoryFlag::Deliveries);
     });
     assert!(
-        ctx.drain_notifications_for_char(char_id)
+        harness
+            .drain_notifications()
             .iter()
-            .any(|n| n.event == "OnItemChange"),
+            .any(|(ev, _)| ev == "OnItemChange"),
         "expected OnItemChange notification after DropOffItems"
     );
 
