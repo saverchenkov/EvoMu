@@ -96,7 +96,7 @@ fn blueprint_data_corp_permissions_contract_visibility_and_nested_container_reso
     .unwrap_err();
     assert_eq!(err_corp.code, "OwnerAccessDenied");
 
-    // 2. Grant ROLE_FACTORY_MANAGER -> 1-arg call returns List with BPC resolved to st_id facility!
+    // 2. Grant ROLE_FACTORY_MANAGER -> 1-arg call returns canonical (bps, bpCounts) 2-tuple with BPC resolved to st_id facility
     sess.corp_role = corp_roles::ROLE_FACTORY_MANAGER;
     let corp_bps = call_ind_bps(
         &ctx,
@@ -107,12 +107,18 @@ fn blueprint_data_corp_permissions_contract_visibility_and_nested_container_reso
         &kw,
     )
     .unwrap();
-    let PyRep::List(list) = corp_bps else {
-        panic!("expected 1-arg GetBlueprintDataByOwner to return List");
+    let PyRep::Tuple(parts) = corp_bps else {
+        panic!("expected GetBlueprintDataByOwner to return (bps, bpCounts) Tuple");
     };
+    assert_eq!(parts.len(), 2);
+    let PyRep::List(ref list) = parts[0] else {
+        panic!("expected tuple[0] to be blueprint List");
+    };
+    assert!(matches!(parts[1], PyRep::Dict(_)));
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].dict_get("facilityID"), Some(&PyRep::Integer(st_id)));
     assert_eq!(list[0].dict_get("original"), Some(&PyRep::Bool(false)));
+    assert_eq!(list[0].dict_get("copy"), Some(&PyRep::Bool(true)));
     assert_eq!(list[0].dict_get("runs"), Some(&PyRep::Integer(7)));
     assert_eq!(list[0].dict_get("quantity"), Some(&PyRep::Integer(-2)));
     assert_eq!(list[0].dict_get("isImpounded"), Some(&PyRep::Bool(false)));
@@ -390,13 +396,7 @@ fn facility_manager_get_facilities_populates_service_access_docked_and_undocked(
         let mut sess = char_session(char_id, station_id);
         let raw = call_ind_bps(&ctx, &mut sess, "facilityManager", "GetFacilities", &[], &kw)
             .expect("GetFacilities raw succeeds");
-        let normalized = crate::router::client_compat::normalize_macho_rpc_reply(
-            "facilityManager",
-            "GetFacilities",
-            Ok(raw),
-        )
-        .expect("GetFacilities normalized succeeds");
-        let PyRep::List(facilities) = normalized else {
+        let PyRep::List(facilities) = raw else {
             panic!("{label}: expected facility list");
         };
         assert!(!facilities.is_empty(), "{label}: expected at least one facility");
@@ -408,10 +408,14 @@ fn facility_manager_get_facilities_populates_service_access_docked_and_undocked(
                 matches!(service_access, PyRep::Dict(_)),
                 "{label}: expected serviceAccess Dict, got {service_access:?}"
             );
-            assert!(
-                matches!(fac.dict_get("activities"), Some(PyRep::Dict(_))),
-                "{label}: facility missing activities Dict"
-            );
+            let Some(PyRep::Dict(acts)) = fac.dict_get("activities") else {
+                panic!("{label}: facility missing activities Dict");
+            };
+            assert!(!acts.is_empty(), "{label}: expected non-empty activities Dict");
+            for (k, v) in acts {
+                assert!(k.as_i64().is_some());
+                assert!(matches!(v, PyRep::Tuple(t) if t.len() == 6));
+            }
             assert!(fac.dict_get("sccTaxModifier").is_some());
             assert!(fac.dict_get("rigModifiers").is_some());
             assert!(fac.dict_get("globalModifiers").is_some());

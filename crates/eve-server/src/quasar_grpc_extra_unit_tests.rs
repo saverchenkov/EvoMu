@@ -46,23 +46,6 @@ fn normalize_macho_rpc_reply_exhaustive_fallback_and_non_empty_branches() {
     .unwrap();
     assert_eq!(xmpp_no_ch.dict_get("other"), Some(&PyRep::Integer(1)));
 
-    // blueprintManager.GetBlueprintDataByOwner non-empty list preserves custom entry
-    let custom_bp = PyRep::keyval([("itemID", PyRep::Integer(999)), ("typeID", PyRep::Integer(689))]);
-    let bp_non_empty = normalize_macho_rpc_reply(
-        "blueprintManager",
-        "GetBlueprintDataByOwner",
-        Ok(PyRep::List(vec![custom_bp])),
-    )
-    .unwrap();
-    let PyRep::Tuple(bp_tuple) = bp_non_empty else {
-        panic!("expected tuple");
-    };
-    let PyRep::List(bp_items) = &bp_tuple[0] else {
-        panic!("expected list");
-    };
-    assert_eq!(bp_items.len(), 1);
-    assert_eq!(bp_items[0].dict_get("typeID"), Some(&PyRep::Integer(689)));
-
     // charMgr.GetOwnerNoteLabels with non-String item and 2-char string
     let notes = normalize_macho_rpc_reply(
         "charMgr",

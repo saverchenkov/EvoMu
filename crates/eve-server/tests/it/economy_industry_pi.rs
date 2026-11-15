@@ -489,7 +489,10 @@ async fn test_industry_blueprint_data_facilities_jobs() {
     let owner_bps = rpc(&ctx, &mut s1, "blueprintManager", "GetBlueprintDataByOwner", &[PyRep::Integer(90_000_001)])
         .await
         .expect("GetBlueprintDataByOwner");
-    let PyRep::List(owner_bp_list) = owner_bps else { panic!("Expected List") };
+    let PyRep::Tuple(owner_pair) = owner_bps else { panic!("Expected (bps, bpCounts) Tuple") };
+    assert_eq!(owner_pair.len(), 2);
+    let PyRep::List(ref owner_bp_list) = owner_pair[0] else { panic!("Expected blueprint List at tuple[0]") };
+    assert!(matches!(owner_pair[1], PyRep::Dict(_)));
     let bpo_entry = owner_bp_list.iter().find(|b| b.dict_get("itemID").and_then(|v| v.as_i64()) == Some(rifter_bpo_id)).expect("BPO in GetBlueprintDataByOwner");
     assert_eq!(bpo_entry.dict_get("original").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(bpo_entry.dict_get("materialEfficiency").and_then(|v| v.as_i64()), Some(8));
@@ -514,8 +517,9 @@ async fn test_industry_blueprint_data_facilities_jobs() {
     assert_eq!(npc_fac.dict_get("timeModifier").and_then(|v| v.as_f64()), Some(1.0));
     assert_eq!(npc_fac.dict_get("costModifier").and_then(|v| v.as_f64()), Some(1.0));
     assert_eq!(npc_fac.dict_get("tax").and_then(|v| v.as_f64()), Some(0.0025));
-    let PyRep::List(npc_acts) = npc_fac.dict_get("activities").expect("NPC activities") else { panic!("Expected List") };
-    assert!(npc_acts.contains(&PyRep::Integer(1)) && npc_acts.contains(&PyRep::Integer(8)));
+    let PyRep::Dict(npc_acts) = npc_fac.dict_get("activities").expect("NPC activities") else { panic!("Expected Dict") };
+    assert!(npc_acts.iter().any(|(k, v)| k == &PyRep::Integer(1) && matches!(v, PyRep::Tuple(t) if t.len() == 6)));
+    assert!(npc_acts.iter().any(|(k, v)| k == &PyRep::Integer(8) && matches!(v, PyRep::Tuple(t) if t.len() == 6)));
     let struct_fac_in_list = fac_list.iter().find(|f| f.dict_get("facilityID").and_then(|v| v.as_i64()) == Some(raitaru_id)).expect("Structure in GetFacilities");
     assert_eq!(struct_fac_in_list.dict_get("typeID").and_then(|v| v.as_i64()), Some(35825));
 
@@ -525,8 +529,8 @@ async fn test_industry_blueprint_data_facilities_jobs() {
     assert_eq!(raitaru_fac.dict_get("costModifier").and_then(|v| v.as_f64()), Some(0.97));
     assert_eq!(raitaru_fac.dict_get("materialModifier").and_then(|v| v.as_f64()), Some(0.99));
     assert_eq!(raitaru_fac.dict_get("timeModifier").and_then(|v| v.as_f64()), Some(0.85));
-    let PyRep::List(r_acts) = raitaru_fac.dict_get("activities").expect("Raitaru activities") else { panic!("Expected List") };
-    assert!(r_acts.contains(&PyRep::Integer(1)));
+    let PyRep::Dict(r_acts) = raitaru_fac.dict_get("activities").expect("Raitaru activities") else { panic!("Expected Dict") };
+    assert!(r_acts.iter().any(|(k, v)| k == &PyRep::Integer(1) && matches!(v, PyRep::Tuple(t) if t.len() == 6)));
 
     let max_mods = rpc(&ctx, &mut s1, "facilityManager", "GetMaxActivityModifiers", &[]).await.expect("GetMaxActivityModifiers");
     assert_eq!(max_mods.dict_get("materialMultiplier").and_then(|v| v.as_f64()), Some(0.99));

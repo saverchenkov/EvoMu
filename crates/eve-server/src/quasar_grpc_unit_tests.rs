@@ -65,21 +65,6 @@ fn normalize_macho_rpc_reply_covers_structure_jump_chat_siphon_and_blueprints() 
     .unwrap();
     assert_eq!(siphon.dict_get("capacity"), Some(&PyRep::Real(1_000.0)));
     assert_eq!(siphon.dict_get("used"), Some(&PyRep::Real(350.0)));
-
-    // blueprintManager.GetBlueprintDataByOwner empty list stays empty
-    let bp_empty = normalize_macho_rpc_reply(
-        "blueprintManager",
-        "GetBlueprintDataByOwner",
-        Ok(PyRep::List(Vec::new())),
-    )
-    .unwrap();
-    let PyRep::Tuple(bp_parts) = bp_empty else {
-        panic!("expected tuple");
-    };
-    let PyRep::List(bp_list) = &bp_parts[0] else {
-        panic!("expected list");
-    };
-    assert!(bp_list.is_empty());
 }
 
 #[test]

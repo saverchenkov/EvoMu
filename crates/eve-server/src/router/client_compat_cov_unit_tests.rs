@@ -121,22 +121,7 @@ fn normalize_structure_jump_xmpp_beyonce_blueprint_and_char_branches() {
     assert_eq!(siphon.dict_get("capacity"), Some(&PyRep::Real(1_000.0)));
     assert_eq!(siphon.dict_get("used"), Some(&PyRep::Real(250.0)));
 
-    // 4. blueprintManager.GetBlueprintDataByOwner
-    let bps = normalize_macho_rpc_reply(
-        "blueprintManager",
-        "GetBlueprintDataByOwner",
-        Ok(PyRep::List(vec![
-            PyRep::keyval([("locationID", PyRep::Integer(60_003_760))]),
-            PyRep::keyval([("locationID", PyRep::Integer(60_003_760))]),
-        ])),
-    )
-    .expect("bps");
-    let PyRep::Tuple(bp_parts) = bps else {
-        panic!("expected tuple");
-    };
-    assert_eq!(bp_parts.len(), 2);
-
-    // 5. charMgr.GetOwnerNoteLabels & GetRecentShipKillsAndLosses
+    // 4. charMgr.GetOwnerNoteLabels & GetRecentShipKillsAndLosses
     let notes = normalize_macho_rpc_reply(
         "charMgr",
         "GetOwnerNoteLabels",
@@ -816,31 +801,6 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
     assert_eq!(t[0], PyRep::List(vec![PyRep::Integer(1001), PyRep::Integer(1002)]));
     assert_eq!(t[1], PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(200))]));
 
-    // #934: facilityManager.GetFacilityLocations wraps KeyVal locations into industry.job.Location ObjectEx
-    let fac_locs = normalize_macho_rpc_reply(
-        "facilityManager",
-        "GetFacilityLocations",
-        Ok(PyRep::List(vec![PyRep::keyval([
-            ("itemID", PyRep::Integer(60_003_760)),
-            ("ownerID", PyRep::Integer(90_000_001)),
-            ("flagID", PyRep::Integer(4)),
-            ("typeID", PyRep::Integer(1529)),
-        ])])),
-    )
-    .expect("normalize GetFacilityLocations");
-    let PyRep::List(fac_items) = fac_locs else {
-        panic!("expected List from GetFacilityLocations");
-    };
-    assert_eq!(fac_items.len(), 1);
-    let PyRep::ObjectEx { is_type_2: true, header, .. } = &fac_items[0] else {
-        panic!("expected ObjectEx type 2 industry.job.Location");
-    };
-    let PyRep::Tuple(hdr) = header.as_ref() else { panic!("expected Tuple header") };
-    assert_eq!(hdr[0], PyRep::Tuple(vec![PyRep::Token("industry.job.Location".into())]));
-    assert_eq!(hdr[1].dict_get("itemID"), Some(&PyRep::Integer(60_003_760)));
-    assert_eq!(hdr[1].dict_get("canView"), Some(&PyRep::Bool(true)));
-    assert_eq!(hdr[1].dict_get("canTake"), Some(&PyRep::Bool(true)));
-
     // #955: dungeonInstanceCacheMgr.GetFactionWarfareBattlefieldInstances converts List -> Dict by solarSystemID
     let fw_bf = normalize_macho_rpc_reply(
         "dungeonInstanceCacheMgr",
@@ -862,55 +822,6 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
     };
     assert_eq!(sys_bfs[0].dict_get("dungeonID"), Some(&PyRep::Integer(10_485)));
     assert_eq!(sys_bfs[0].dict_get("dungeonNameID"), Some(&PyRep::Integer(0)));
-
-    // #956: blueprintManager.GetBlueprintData & GetBlueprintDataByOwner populate solarSystemID, copy, typeID, and BlueprintInstance fields
-    let bp_data = normalize_macho_rpc_reply(
-        "blueprintManager",
-        "GetBlueprintData",
-        Ok(PyRep::keyval([
-            ("blueprintID", PyRep::Integer(9_001)),
-            ("blueprintTypeID", PyRep::Integer(683)),
-            ("facilityID", PyRep::Integer(60_003_760)),
-            ("original", PyRep::Bool(true)),
-            ("runsRemaining", PyRep::Integer(-1)),
-        ])),
-    )
-    .expect("normalize GetBlueprintData");
-    assert_eq!(bp_data.dict_get("typeID"), Some(&PyRep::Integer(683)));
-    assert_eq!(bp_data.dict_get("itemID"), Some(&PyRep::Integer(9_001)));
-    assert_eq!(bp_data.dict_get("solarSystemID"), Some(&PyRep::Integer(30_000_142)));
-    assert_eq!(bp_data.dict_get("copy"), Some(&PyRep::Bool(false)));
-    assert_eq!(bp_data.dict_get("locationTypeID"), Some(&PyRep::Integer(1529)));
-    assert_eq!(bp_data.dict_get("flagID"), Some(&PyRep::Integer(4)));
-    assert_eq!(bp_data.dict_get("runs"), Some(&PyRep::Integer(-1)));
-    assert_eq!(bp_data.dict_get("quantity"), Some(&PyRep::Integer(-1)));
-    assert_eq!(bp_data.dict_get("jobID"), Some(&PyRep::None));
-
-    let bp_owner = normalize_macho_rpc_reply(
-        "blueprintManager",
-        "GetBlueprintDataByOwner",
-        Ok(PyRep::List(vec![PyRep::keyval([
-            ("blueprintID", PyRep::Integer(9_002)),
-            ("blueprintTypeID", PyRep::Integer(684)),
-            ("facilityID", PyRep::Integer(60_003_760)),
-            ("solarSystemID", PyRep::None),
-            ("original", PyRep::Bool(false)),
-            ("runsRemaining", PyRep::Integer(10)),
-        ])])),
-    )
-    .expect("normalize GetBlueprintDataByOwner");
-    let PyRep::Tuple(bp_owner_pair) = &bp_owner else {
-        panic!("expected (bps, locs) tuple in GetBlueprintDataByOwner");
-    };
-    let Some(PyRep::List(owner_bps)) = bp_owner_pair.first() else {
-        panic!("expected bps list in GetBlueprintDataByOwner");
-    };
-    assert_eq!(owner_bps.len(), 1);
-    assert_eq!(owner_bps[0].dict_get("solarSystemID"), Some(&PyRep::Integer(30_000_142)));
-    assert_eq!(owner_bps[0].dict_get("copy"), Some(&PyRep::Bool(true)));
-    assert_eq!(owner_bps[0].dict_get("typeID"), Some(&PyRep::Integer(684)));
-    assert_eq!(owner_bps[0].dict_get("itemID"), Some(&PyRep::Integer(9_002)));
-    assert_eq!(owner_bps[0].dict_get("jobID"), Some(&PyRep::None));
 
     // #957 + #1023: agentMgr.GetMissionObjectiveInfo omits None coords and referringAgentID from location dicts,
     // uses corp/faction ownerIDs (never character/agent IDs) on transport pickup/dropoff, and populates dungeon optional/location keys.
