@@ -661,7 +661,7 @@ async fn peace_treaties_expiry_alliance_and_client_compat_boundaries() {
     // 2. session.alliance_id == Some(my_ally) matches war 2 (outgoing) and war 3 (incoming)
     let mut sess_ally = SessionState {
         alliance_id: Some(my_ally),
-        ..sess_zero_ally
+        ..sess_zero_ally.clone()
     };
     let res_ally = crate::services::social_corp_fleet::handle(
         &ctx,

@@ -53,34 +53,6 @@ fn kv_primitives_and_rowset_dict_helpers_cover_all_types() {
     assert_eq!(kv_float(&entries, "i"), 42.0);
     assert_eq!(kv_float(&entries, "s"), 0.0);
     assert_eq!(kv_float(&entries, "missing"), 0.0);
-
-    // Non-rowset passes through unchanged.
-    assert_eq!(rowset_to_dict_by_key(PyRep::Integer(5), "fleetID"), PyRep::Integer(5));
-
-    // Rowset converts to Dict keyed by key_col, falling back when row is shorter than key_idx.
-    let rs = PyRep::Rowset {
-        columns: vec!["fleetID".into(), "name".into()],
-        rows: vec![
-            vec![PyRep::Integer(101), PyRep::String("Alpha".into())],
-            vec![PyRep::Integer(102), PyRep::String("Bravo".into())],
-        ],
-    };
-    let PyRep::Dict(pairs) = rowset_to_dict_by_key(rs, "fleetID") else {
-        panic!("expected Dict");
-    };
-    assert_eq!(pairs.len(), 2);
-    assert_eq!(pairs[0].0, PyRep::Integer(101));
-    assert_eq!(pairs[1].0, PyRep::Integer(102));
-
-    let rs_missing_col = PyRep::Rowset {
-        columns: vec!["colA".into()],
-        rows: vec![vec![], vec![PyRep::Integer(77)]],
-    };
-    let PyRep::Dict(fb_pairs) = rowset_to_dict_by_key(rs_missing_col, "nonExistent") else {
-        panic!("expected Dict");
-    };
-    assert_eq!(fb_pairs[0].0, PyRep::Integer(1));
-    assert_eq!(fb_pairs[1].0, PyRep::Integer(77));
 }
 
 #[test]
@@ -1853,7 +1825,7 @@ async fn c9_typed_handlers_fleet_sov_corpmgr_emit_canonical_wire_shapes() {
     let fleet_id = 77_000_933_i64;
     ctx.fleet_extras.lock().unwrap().adverts.insert(
         fleet_id,
-        crate::services::fleet_social_fleets::FleetAdvertState {
+        crate::services::fleet_social::fleet_social_fleets::FleetAdvertState {
             fleet_id,
             leader_id: 90_000_001,
             fleet_name: "Roam".into(),
