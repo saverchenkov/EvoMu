@@ -973,7 +973,7 @@ async fn cargo_dropoff_covers_space_range_acl_flex_state_locks_and_specialized_h
         }
     });
     let uid = ctx.db.get_character(char_id).map(|c| c.user_id).unwrap_or(1);
-    let _ = ctx.db.acquire_online_lock(uid, Some(char_id), 10);
+    let _ = ctx.db.acquire_online_lock(uid, 10, Some(char_id), true, 0);
     let _ = ctx.drain_notifications_for_char(char_id);
     assert_eq!(
         handle_cargo_dropoff(
