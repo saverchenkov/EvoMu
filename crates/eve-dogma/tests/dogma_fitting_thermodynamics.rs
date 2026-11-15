@@ -422,9 +422,7 @@ fn test_t3c_subsystems_t3d_stances_drones_and_dynamic_attrs() {
 fn test_t3c_subsystems_stance_errors_hypothetical_modules_and_overflow_rollbacks() {
     let p = std::env::var("EVOMU_SDE_PATH")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::path::Path::new("/Users/sergeya/ai/EvoMu/data/evomu_sde.sqlite").to_path_buf()
-        });
+        .unwrap_or_else(|_| eve_sde::SdeRegistry::default_db_path());
     let sde = SdeRegistry::open(p).expect("SDE sqlite");
 
     // 1. Real V24.01 Strategic Cruiser (Tengu = 29984) + 4 real Tengu subsystems in flags 125..=128

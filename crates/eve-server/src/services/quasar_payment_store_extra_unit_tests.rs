@@ -24,14 +24,7 @@ fn shared_sde() -> Arc<SdeRegistry> {
 
 fn shared_descriptors() -> Arc<QuasarDescriptorRegistry> {
     static DESC: OnceLock<Arc<QuasarDescriptorRegistry>> = OnceLock::new();
-    Arc::clone(DESC.get_or_init(|| {
-        QuasarDescriptorRegistry::open(
-            std::path::Path::new("/Users/sergeya/ai/EvoMu/data/quasar_descriptors.sqlite"),
-            std::path::Path::new("/Users/sergeya/ai/EvoMu/data/quasar_descriptor_manifest.json"),
-        )
-        .map(Arc::new)
-        .unwrap_or_else(|_| QuasarDescriptorRegistry::open_default_or_empty())
-    }))
+    Arc::clone(DESC.get_or_init(QuasarDescriptorRegistry::open_default_or_empty))
 }
 
 fn new_router() -> (PublicGatewayRouter, Arc<WorldRepository>) {

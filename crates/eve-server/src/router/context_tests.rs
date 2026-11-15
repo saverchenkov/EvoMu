@@ -1443,3 +1443,59 @@ fn clear_persisted_module_overload_preserves_stance_and_prunes_empty_records() {
         assert!(!snap.ship_fit_inputs.contains_key(&ship_id));
     });
 }
+
+#[tokio::test]
+async fn test_c_deadline_getters_and_advance_sim_ms_expiry() {
+    let ctx = test_ctx();
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let char_id = 90_000_001;
+    let ship_id = 100_000_001;
+    let mod_id = 900_880_001;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            mod_id,
+            make_item(mod_id, 2048, char_id, ship_id, InventoryFlag::LoSlot0, 1),
+        );
+        snap.cluster_and_runtime
+            .module_reload_until_unix
+            .insert(mod_id, 1_800_000_005);
+    });
+    ctx.record_module_reactivation_delay(ship_id, mod_id, 4.0);
+    ctx.session_change_timers.lock().unwrap().insert(
+        char_id,
+        crate::services::space_destiny::SessionChangeTimerState {
+            expires_unix: 1_800_000_006,
+            system_id: 30_000_142,
+            started_tick: 1,
+            reason: "test".into(),
+            location_change_invul_until: 1_800_000_007,
+        },
+    );
+    crate::services::space_destiny::grant_location_change_invulnerability(
+        &ctx,
+        char_id,
+        1_800_000_007,
+    );
+
+    assert_eq!(ctx.pending_reload_complete_at(mod_id), Some(1_800_000_005));
+    assert!(ctx
+        .module_reactivation_cooldown_until_unix(ship_id, mod_id)
+        .is_some());
+    assert_eq!(ctx.session_change_timer_until(char_id), Some(1_800_000_006));
+    assert_eq!(ctx.location_change_invuln_until(char_id), Some(1_800_000_007));
+
+    ctx.advance_sim_ms(4_500).await;
+    assert_eq!(ctx.module_reactivation_cooldown_until_unix(ship_id, mod_id), None);
+    assert_eq!(ctx.pending_reload_complete_at(mod_id), Some(1_800_000_005));
+    assert_eq!(ctx.session_change_timer_until(char_id), Some(1_800_000_006));
+    assert_eq!(ctx.location_change_invuln_until(char_id), Some(1_800_000_007));
+
+    let waited_ms = ctx
+        .advance_until(|| ctx.location_change_invuln_until(char_id).is_none(), 5_000)
+        .await
+        .expect("location_change_invuln_until must expire via advance_until");
+    assert!(waited_ms >= 2_500);
+    assert_eq!(ctx.pending_reload_complete_at(mod_id), None);
+    assert_eq!(ctx.session_change_timer_until(char_id), None);
+    assert_eq!(ctx.location_change_invuln_until(char_id), None);
+}

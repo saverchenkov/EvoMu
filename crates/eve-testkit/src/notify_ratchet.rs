@@ -8,9 +8,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use eve_proto::PyRep;
 use serde::{Deserialize, Serialize};
 
-use crate::client_harness::strip_rust_comments_and_literals;
+use crate::client_harness::{strip_rust_comments_and_literals, ClientWireFrame, ClientWireFrameKind};
 
 /// Scan summary produced by [`scan_raw_notify_calls_in_dir`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -386,5 +387,61 @@ mod tests {
             per_file_raw_notify: BTreeMap::new(),
         };
         assert!(ratchet.assert_ratchet(&regressed_files).is_err());
+    }
+
+    #[test]
+    fn assert_no_notification_detects_matching_event_and_predicate() {
+        let frames = vec![ClientWireFrame {
+            kind: ClientWireFrameKind::Notification {
+                event: "OnOrderChanged".into(),
+                args: vec![PyRep::Integer(42), PyRep::String("buy".into())],
+            },
+            wire_packet: PyRep::None,
+        }];
+        assert_no_notification(&frames, "OnDamageMessage", |_| true);
+        assert_no_notification(&frames, "OnOrderChanged", |args| {
+            args.first().and_then(PyRep::as_i64) == Some(99)
+        });
+        let hit = std::panic::catch_unwind(|| {
+            assert_no_notification(&frames, "OnOrderChanged", |args| {
+                args.first().and_then(PyRep::as_i64) == Some(42)
+            });
+        });
+        assert!(hit.is_err());
+    }
+}
+
+/// Asserts that `frames` contains no `Notification` named `name` whose argument slice satisfies
+/// `pred` (`GH #1077 §C`).
+pub fn assert_no_notification<F>(frames: &[ClientWireFrame], name: &str, mut pred: F)
+where
+    F: FnMut(&[PyRep]) -> bool,
+{
+    for (idx, frame) in frames.iter().enumerate() {
+        if let ClientWireFrameKind::Notification { event, args } = &frame.kind {
+            if event == name && pred(args.as_slice()) {
+                panic!(
+                    "unexpected notification '{name}' matching predicate at frame[{idx}] with args: {args:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Asserts that `(event, args)` notification tuples contain no `name` entry whose argument slice
+/// satisfies `pred` (`GH #1077 §C`).
+pub fn assert_no_notification_tuples<F>(
+    notifications: &[(String, Vec<PyRep>)],
+    name: &str,
+    mut pred: F,
+) where
+    F: FnMut(&[PyRep]) -> bool,
+{
+    for (idx, (event, args)) in notifications.iter().enumerate() {
+        if event == name && pred(args.as_slice()) {
+            panic!(
+                "unexpected notification '{name}' matching predicate at notification[{idx}] with args: {args:?}"
+            );
+        }
     }
 }

@@ -6,7 +6,7 @@ Inspired by Anthropic's Project EVE (Claude Plays MMORPGs), adapted for EvoMu's
 macOS V24.01 EVE.app (exefile) client + Rust eve-server:
 
 1. Isolated Playtester Worktree & Staged Client:
-   - Runs in `/Users/sergeya/ai/EvoMu-playtester` (or repo root containing this script)
+   - Runs in `../EvoMu-playtester` (or repo root containing this script)
    - Stages EVE.app into `~/.cache/evomu/client_build_3624425_playtester` so it never
      collides with `run_journeys` hourly regressions.
    - Injects `evomu_site.py` (with `_DRIVER_SCHEDULED = True` and `_install_logmodule_hook()`)
@@ -72,7 +72,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 HARNESS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = HARNESS_DIR.parent.parent
-DEFAULT_PLAYTESTER_WORKTREE = Path("/Users/sergeya/ai/EvoMu-playtester")
+DEFAULT_PLAYTESTER_WORKTREE = (
+    Path(os.environ["EVOMU_PLAYTESTER_WORKTREE"])
+    if os.environ.get("EVOMU_PLAYTESTER_WORKTREE")
+    else (REPO_ROOT.parent / "EvoMu-playtester")
+)
 
 ACTION_SCHEMA_PATH = HARNESS_DIR / "playtester_action_schema.json"
 PERSONAS_PATH = HARNESS_DIR / "playtester_personas.json"
@@ -2177,17 +2181,21 @@ class PlaytesterRunner:
         return False, last_origin_check
 
     def _resolve_sde_and_quasar_paths(self) -> Tuple[Path, Path]:
+        main_checkout_data = REPO_ROOT.parent / "EvoMu" / "data"
+        wt_parent_data = self.worktree_dir.parent.parent / "data"
         sde_candidates = [
             Path(os.environ.get("EVOMU_SDE_PATH", "")) if os.environ.get("EVOMU_SDE_PATH") else None,
             self.worktree_dir / "data" / "evomu_sde.sqlite",
-            Path("/Users/sergeya/ai/EvoMu/data/evomu_sde.sqlite"),
+            wt_parent_data / "evomu_sde.sqlite",
+            main_checkout_data / "evomu_sde.sqlite",
         ]
         sde_path = next((p for p in sde_candidates if p and p.exists()), self.worktree_dir / "data" / "evomu_sde.sqlite")
 
         qd_candidates = [
             Path(os.environ.get("EVOMU_QUASAR_DESCRIPTORS_PATH", "")) if os.environ.get("EVOMU_QUASAR_DESCRIPTORS_PATH") else None,
             self.worktree_dir / "data" / "quasar_descriptors.sqlite",
-            Path("/Users/sergeya/ai/EvoMu/data/quasar_descriptors.sqlite"),
+            wt_parent_data / "quasar_descriptors.sqlite",
+            main_checkout_data / "quasar_descriptors.sqlite",
         ]
         qd_path = next((p for p in qd_candidates if p and p.exists()), self.worktree_dir / "data" / "quasar_descriptors.sqlite")
         return sde_path, qd_path
@@ -2290,7 +2298,7 @@ role_mask = 9223372036854775807
         binary = self.worktree_dir / "target" / "debug" / "eve-server"
         if not binary.exists():
             # Reuse supervisor binary if at the exact same git commit to avoid redundant rebuild
-            sup_root = Path("/Users/sergeya/ai/EvoMu-supervisor")
+            sup_root = REPO_ROOT.parent / "EvoMu-supervisor"
             sup_bin = sup_root / "target" / "debug" / "eve-server"
             if sup_bin.exists() and get_git_head(sup_root) == get_git_head(self.worktree_dir):
                 log_info(f"Reusing matching eve-server binary from {sup_bin} (HEAD={get_git_head(self.worktree_dir)})")

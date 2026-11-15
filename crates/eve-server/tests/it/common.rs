@@ -17,6 +17,48 @@ use std::future::Future;
 use std::pin::Pin;
 
 #[allow(dead_code)]
+fn out_frame_to_wire_frame(
+    f: OutFrame,
+    wire_packet: PyRep,
+    rpc_result: Option<&Result<PyRep, ClientErrorResponse>>,
+) -> ClientWireFrame {
+    let kind = match f {
+        OutFrame::CallRsp { call_id, .. } => match rpc_result {
+            Some(Ok(reply)) => ClientWireFrameKind::CallRsp {
+                call_id,
+                reply: reply.clone(),
+            },
+            Some(Err(err)) => ClientWireFrameKind::ErrorResponse {
+                call_id,
+                body: err.wire_body.clone(),
+            },
+            None => ClientWireFrameKind::CallRsp {
+                call_id,
+                reply: PyRep::None,
+            },
+        },
+        OutFrame::SessionChange { frame } => ClientWireFrameKind::SessionChange { packet: frame },
+        OutFrame::DoDestinyUpdate {
+            epoch,
+            stamp,
+            has_set_state,
+            updates,
+            wait_for_bubble,
+        } => ClientWireFrameKind::DoDestinyUpdate {
+            epoch,
+            stamp,
+            has_set_state,
+            updates,
+            wait_for_bubble,
+        },
+        OutFrame::Notification { event, args } => {
+            ClientWireFrameKind::Notification { event, args }
+        }
+    };
+    ClientWireFrame { kind, wire_packet }
+}
+
+#[allow(dead_code)]
 fn to_wire_exchange(out: ClientWireCallOutcome) -> ClientWireExchange {
     let rpc_result = match out.rpc_result {
         Ok(rep) => Ok(rep),
@@ -30,40 +72,7 @@ fn to_wire_exchange(out: ClientWireCallOutcome) -> ClientWireExchange {
         .out_frames
         .into_iter()
         .zip(out.wire_packets)
-        .map(|(f, wire_packet)| {
-            let kind = match f {
-                OutFrame::CallRsp { call_id, .. } => match &rpc_result {
-                    Ok(reply) => ClientWireFrameKind::CallRsp {
-                        call_id,
-                        reply: reply.clone(),
-                    },
-                    Err(err) => ClientWireFrameKind::ErrorResponse {
-                        call_id,
-                        body: err.wire_body.clone(),
-                    },
-                },
-                OutFrame::SessionChange { frame } => {
-                    ClientWireFrameKind::SessionChange { packet: frame }
-                }
-                OutFrame::DoDestinyUpdate {
-                    epoch,
-                    stamp,
-                    has_set_state,
-                    updates,
-                    wait_for_bubble,
-                } => ClientWireFrameKind::DoDestinyUpdate {
-                    epoch,
-                    stamp,
-                    has_set_state,
-                    updates,
-                    wait_for_bubble,
-                },
-                OutFrame::Notification { event, args } => {
-                    ClientWireFrameKind::Notification { event, args }
-                }
-            };
-            ClientWireFrame { kind, wire_packet }
-        })
+        .map(|(f, wire_packet)| out_frame_to_wire_frame(f, wire_packet, Some(&rpc_result)))
         .collect();
     ClientWireExchange {
         rpc_result,
@@ -101,6 +110,15 @@ impl<'c> ClientWireTransport for ServerWireTransport<'c> {
             sde: &self.inner.ctx.sde,
             db: &self.inner.ctx.db,
         })
+    }
+
+    fn drain_pending_frames(&mut self) -> Vec<ClientWireFrame> {
+        let (out_frames, wire_packets) = self.inner.drain_pending_frames();
+        out_frames
+            .into_iter()
+            .zip(wire_packets)
+            .map(|(f, wire_packet)| out_frame_to_wire_frame(f, wire_packet, None))
+            .collect()
     }
 }
 
@@ -199,6 +217,24 @@ pub fn borrow_wire_harness<'s, 'c>(
         session,
         preserve_char_notifications: false,
     })
+}
+
+/// Builds a two-session owner/observer fixture over `wrap_wire_harness`, recording
+/// `(session_id, stamp, action, entity_id)` for every `DoDestinyUpdate` (`GH #1077 §C`).
+#[allow(dead_code)]
+pub fn owner_observer_fixture<'c>(
+    ctx: &'c ServerContext,
+    owner_session: SessionState,
+    observer_session: SessionState,
+) -> eve_testkit::destiny_invariants::OwnerObserverFixture<ServerWireTransport<'c>> {
+    let owner_sid = owner_session.session_id;
+    let observer_sid = observer_session.session_id;
+    eve_testkit::destiny_invariants::OwnerObserverFixture::new(
+        owner_sid,
+        wrap_wire_harness(ctx, owner_session),
+        observer_sid,
+        wrap_wire_harness(ctx, observer_session),
+    )
 }
 
 /// Fixed virtual-clock base (Unix seconds) shared by time-dependent integration tests.

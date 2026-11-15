@@ -38,6 +38,28 @@ pub trait ServerClock: Send + Sync {
     /// Advances virtual time by `secs` seconds immediately.
     fn advance_secs(&self, secs: u64);
 
+    /// Advances virtual time by `millis` milliseconds immediately.
+    fn advance_millis(&self, millis: u64) {
+        if millis >= 1_000 {
+            self.advance_secs(millis / 1_000);
+        }
+    }
+
+    /// Current virtual timestamp in Unix milliseconds.
+    fn now_unix_millis(&self) -> u64 {
+        self.now_unix_secs()
+            .saturating_mul(1_000)
+            .saturating_add((self.now_subsec_nanos() / 1_000_000) as u64)
+    }
+
+    /// Deterministic test override pinning virtual wall time to `unix_secs`.
+    #[cfg(any(test, feature = "testkit"))]
+    fn set_wall_now_for_tests(&self, _unix_secs: u64) {}
+
+    /// Deterministic test override pinning virtual wall time to `unix_millis`.
+    #[cfg(any(test, feature = "testkit"))]
+    fn set_wall_now_ms_for_tests(&self, _unix_millis: u64) {}
+
     /// Returns the cumulative virtual time offset in seconds (`0` for un-offset wall clocks).
     fn offset_secs(&self) -> u64 {
         0
@@ -86,8 +108,8 @@ pub struct VirtualServerClock {
     paused_at_wall_secs: AtomicU64,
     /// Cumulative wall-clock seconds spent paused so unpausing resumes monotonically without jumping.
     paused_accum_wall_secs: AtomicU64,
-    /// Cumulative virtual clock offset in seconds.
-    offset_secs: AtomicU64,
+    /// Cumulative virtual clock offset in milliseconds.
+    offset_millis: AtomicU64,
     /// Time-acceleration factor applied by [`Self::step_tick`] (`>= 1`).
     acceleration_multiplier: AtomicU64,
     /// Whether the clock is currently paused.
@@ -108,7 +130,7 @@ impl VirtualServerClock {
             fixed_base_secs: AtomicU64::new(fixed_base_secs),
             paused_at_wall_secs: AtomicU64::new(0),
             paused_accum_wall_secs: AtomicU64::new(0),
-            offset_secs: AtomicU64::new(offset_secs),
+            offset_millis: AtomicU64::new(offset_secs.saturating_mul(1_000)),
             acceleration_multiplier: AtomicU64::new(1),
             paused: AtomicBool::new(false),
             pause_on_tick: AtomicBool::new(false),
@@ -135,55 +157,108 @@ impl VirtualServerClock {
         Self::from_parts(initial_unix_secs.max(1), offset_secs)
     }
 
-    /// Returns the cumulative virtual time offset in seconds.
+    /// Returns the cumulative virtual time offset in whole seconds.
     pub fn offset_secs(&self) -> u64 {
-        self.offset_secs.load(Ordering::SeqCst)
+        self.offset_millis.load(Ordering::SeqCst) / 1_000
     }
 
     /// Restores the persisted virtual clock offset in seconds.
     pub fn restore_offset_secs(&self, offset_secs: u64) {
-        self.offset_secs.store(offset_secs, Ordering::SeqCst);
+        self.offset_millis
+            .store(offset_secs.saturating_mul(1_000), Ordering::SeqCst);
     }
 
     /// Atomically advances virtual time by `secs` seconds and returns the updated cumulative offset.
     pub fn advance_secs_and_read_offset(&self, secs: u64) -> u64 {
-        let prev = self.offset_secs.fetch_add(secs, Ordering::SeqCst);
-        prev.saturating_add(secs)
+        let delta_ms = secs.saturating_mul(1_000);
+        let prev = self.offset_millis.fetch_add(delta_ms, Ordering::SeqCst);
+        prev.saturating_add(delta_ms) / 1_000
+    }
+
+    fn base_secs_and_nanos(&self) -> (u64, u32) {
+        let fixed = self.fixed_base_secs.load(Ordering::SeqCst);
+        if fixed > 0 {
+            return (fixed, 0);
+        }
+        let accum = self.paused_accum_wall_secs.load(Ordering::SeqCst);
+        if self.paused.load(Ordering::SeqCst) {
+            let paused_at = self.paused_at_wall_secs.load(Ordering::SeqCst);
+            let anchor = if paused_at > 0 {
+                paused_at
+            } else {
+                host_wall_unix_secs_and_nanos().0
+            };
+            (anchor.saturating_sub(accum), 0)
+        } else {
+            let (wall_secs, wall_nanos) = host_wall_unix_secs_and_nanos();
+            (wall_secs.saturating_sub(accum), wall_nanos)
+        }
+    }
+
+    fn current_secs_and_nanos(&self) -> (u64, u32) {
+        let (base_secs, base_nanos) = self.base_secs_and_nanos();
+        let offset_ms = self.offset_millis.load(Ordering::SeqCst);
+        let extra_nanos = ((offset_ms % 1_000) as u32) * 1_000_000;
+        let total_nanos = base_nanos + extra_nanos;
+        let carry_secs = (total_nanos / 1_000_000_000) as u64;
+        let secs = base_secs
+            .saturating_add(offset_ms / 1_000)
+            .saturating_add(carry_secs);
+        (secs, total_nanos % 1_000_000_000)
+    }
+
+    /// Deterministically pins virtual wall time to `unix_secs` (resetting virtual offset to `0`).
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn set_wall_now_for_tests(&self, unix_secs: u64) {
+        self.fixed_base_secs
+            .store(unix_secs.max(1), Ordering::SeqCst);
+        self.offset_millis.store(0, Ordering::SeqCst);
+        self.paused_at_wall_secs.store(0, Ordering::SeqCst);
+        self.paused_accum_wall_secs.store(0, Ordering::SeqCst);
+    }
+
+    /// Deterministically pins virtual wall time to `unix_millis`.
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn set_wall_now_ms_for_tests(&self, unix_millis: u64) {
+        let secs = (unix_millis / 1_000).max(1);
+        let rem_ms = if unix_millis >= 1_000 {
+            unix_millis % 1_000
+        } else {
+            0
+        };
+        self.fixed_base_secs.store(secs, Ordering::SeqCst);
+        self.offset_millis.store(rem_ms, Ordering::SeqCst);
+        self.paused_at_wall_secs.store(0, Ordering::SeqCst);
+        self.paused_accum_wall_secs.store(0, Ordering::SeqCst);
     }
 }
 
 impl ServerClock for VirtualServerClock {
     fn now_unix_secs(&self) -> u64 {
-        let fixed = self.fixed_base_secs.load(Ordering::SeqCst);
-        let base = if fixed > 0 {
-            fixed
-        } else {
-            let accum = self.paused_accum_wall_secs.load(Ordering::SeqCst);
-            if self.paused.load(Ordering::SeqCst) {
-                let paused_at = self.paused_at_wall_secs.load(Ordering::SeqCst);
-                let anchor = if paused_at > 0 {
-                    paused_at
-                } else {
-                    host_wall_unix_secs_and_nanos().0
-                };
-                anchor.saturating_sub(accum)
-            } else {
-                host_wall_unix_secs_and_nanos().0.saturating_sub(accum)
-            }
-        };
-        base.saturating_add(self.offset_secs.load(Ordering::SeqCst))
+        self.current_secs_and_nanos().0
     }
 
     fn now_subsec_nanos(&self) -> u32 {
-        if self.fixed_base_secs.load(Ordering::SeqCst) > 0 || self.paused.load(Ordering::SeqCst) {
-            0
-        } else {
-            host_wall_unix_secs_and_nanos().1
-        }
+        self.current_secs_and_nanos().1
     }
 
     fn advance_secs(&self, secs: u64) {
-        self.offset_secs.fetch_add(secs, Ordering::SeqCst);
+        self.offset_millis
+            .fetch_add(secs.saturating_mul(1_000), Ordering::SeqCst);
+    }
+
+    fn advance_millis(&self, millis: u64) {
+        self.offset_millis.fetch_add(millis, Ordering::SeqCst);
+    }
+
+    #[cfg(any(test, feature = "testkit"))]
+    fn set_wall_now_for_tests(&self, unix_secs: u64) {
+        VirtualServerClock::set_wall_now_for_tests(self, unix_secs);
+    }
+
+    #[cfg(any(test, feature = "testkit"))]
+    fn set_wall_now_ms_for_tests(&self, unix_millis: u64) {
+        VirtualServerClock::set_wall_now_ms_for_tests(self, unix_millis);
     }
 
     fn offset_secs(&self) -> u64 {
@@ -237,7 +312,8 @@ impl ServerClock for VirtualServerClock {
         }
         let mult = self.acceleration_multiplier();
         let advanced = base_secs.saturating_mul(mult);
-        self.offset_secs.fetch_add(advanced, Ordering::SeqCst);
+        self.offset_millis
+            .fetch_add(advanced.saturating_mul(1_000), Ordering::SeqCst);
         if self.pause_on_tick() {
             self.set_paused(true);
         }
@@ -253,7 +329,8 @@ impl ServerClock for VirtualServerClock {
         }
         let mult = self.acceleration_multiplier();
         if mult > 1 {
-            self.offset_secs.fetch_add(mult - 1, Ordering::SeqCst);
+            self.offset_millis
+                .fetch_add((mult - 1).saturating_mul(1_000), Ordering::SeqCst);
         }
         if self.pause_on_tick() {
             self.set_paused(true);
