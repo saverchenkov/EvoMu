@@ -818,19 +818,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         );
                     }
                     for old_rec in &removed_capsule_items {
-                        let old_loc = old_rec.location_id;
-                        let old_flag = old_rec.flag;
-                        let mut junk_rec = old_rec.clone();
-                        junk_rec.location_id = 6;
-                        junk_rec.flag = InventoryFlag::Hangar;
-                        let mut item_changes = vec![(3, PyRep::Integer(old_loc))];
-                        if old_flag != InventoryFlag::Hangar {
-                            item_changes.push((4, PyRep::Integer(old_flag as i64)));
-                        }
-                        let row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
-                            crate::services::inventory_bound::item_to_packed_cells(ctx, &junk_rec),
-                        );
-                        ctx.notify_item_change(char_id, row, item_changes);
+                        ctx.emit_item_deleted_routed(char_id, old_rec);
                     }
                     crate::sp6_lifecycle::clear_safe_logoff(&ctx.db, char_id);
                     let ship_state = prime_ship_on_board(ctx, session, char_id, sid);
