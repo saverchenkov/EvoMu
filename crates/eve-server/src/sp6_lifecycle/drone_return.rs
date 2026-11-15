@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+use crate::router::notify_registry::{OnDroneControlLost, OnDroneStateChange, OnItemChange};
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, DroneSpaceState};
 use eve_machonet::SessionState;
@@ -101,16 +102,18 @@ pub async fn handle_cmd_return_bay(
                     activity: Some("returning".into()),
                 },
             ).await;
-            let notif_args = vec![
-                PyRep::Integer(d.drone_item_id),
-                PyRep::Integer(char_id),
-                PyRep::Integer(ship_id),
-                PyRep::Integer(4),
-                PyRep::Integer(d.type_id as i64),
-                PyRep::Integer(char_id),
-                PyRep::Integer(ship_id),
-            ];
-            ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args);
+            ctx.emit_typed(
+                NotificationTarget::Character(char_id),
+                OnDroneStateChange {
+                    drone_id: d.drone_item_id,
+                    owner_id: char_id,
+                    controller_id: ship_id,
+                    activity_state: 4,
+                    drone_type_id: i64::from(d.type_id),
+                    controller_owner_id: char_id,
+                    target_id: Some(ship_id),
+                },
+            );
             crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, d.drone_item_id, 4, Some("returning"));
             continue;
         }
@@ -229,20 +232,17 @@ async fn try_atomic_scoop_drone(
             },
         )
         .await;
-    let notif_args = vec![
-        PyRep::Integer(claimed_drone.drone_item_id),
-        PyRep::Integer(claimed_drone.owner_char_id),
-        PyRep::Integer(target_ship_id),
-        PyRep::Integer(0),
-        PyRep::Integer(claimed_drone.type_id as i64),
-        PyRep::Integer(claimed_drone.owner_char_id),
-        PyRep::None,
-    ];
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(claimed_drone.owner_char_id),
-        "OnDroneStateChange",
-        "charid",
-        notif_args,
+        OnDroneStateChange {
+            drone_id: claimed_drone.drone_item_id,
+            owner_id: claimed_drone.owner_char_id,
+            controller_id: target_ship_id,
+            activity_state: 0,
+            drone_type_id: i64::from(claimed_drone.type_id),
+            controller_owner_id: claimed_drone.owner_char_id,
+            target_id: None,
+        },
     );
     crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(
         ctx,
@@ -262,12 +262,10 @@ async fn try_atomic_scoop_drone(
         .get_item(claimed_drone.drone_item_id)
         .map(|i| (i.owner_id, i.singleton, if i.singleton { -1 } else { i.quantity as i64 }))
         .unwrap_or((claimed_drone.owner_char_id, true, -1));
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(claimed_drone.owner_char_id),
-        "OnItemChange",
-        "charid",
-        vec![
-            PyRep::keyval([
+        OnItemChange {
+            item: PyRep::keyval([
                 ("itemID", PyRep::Integer(claimed_drone.drone_item_id)),
                 ("typeID", PyRep::Integer(claimed_drone.type_id as i64)),
                 ("ownerID", PyRep::Integer(owner_id)),
@@ -278,14 +276,15 @@ async fn try_atomic_scoop_drone(
                 ("categoryID", PyRep::Integer(i64::from(category_id))),
                 ("singleton", PyRep::Bool(singleton)),
             ]),
-            PyRep::Dict(vec![
+            change: PyRep::Dict(vec![
                 (
                     PyRep::Integer(3),
                     PyRep::Integer(claimed_drone.solar_system_id as i64),
                 ),
                 (PyRep::Integer(4), PyRep::Integer(0)),
             ]),
-        ],
+            location: PyRep::None,
+        },
     );
     true
 }
@@ -334,7 +333,10 @@ pub fn disconnect_drones_for_ship_on_warp_sync(
         }
     });
     for &bid in &lost_balls {
-        ctx.notify(NotificationTarget::Character(char_id), "OnDroneControlLost", "charid", vec![PyRep::Integer(bid)]);
+        ctx.emit_typed(
+            NotificationTarget::Character(char_id),
+            OnDroneControlLost { drone_id: bid },
+        );
     }
 }
 
@@ -369,11 +371,9 @@ pub fn abandon_drones_on_warp_sync(
             if let Some(ref sys_handle) = sys_handle_opt {
                 sys_handle.try_stop_ball(bid);
             }
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnDroneControlLost",
-                "charid",
-                vec![PyRep::Integer(bid)],
+                OnDroneControlLost { drone_id: bid },
             );
         }
     }

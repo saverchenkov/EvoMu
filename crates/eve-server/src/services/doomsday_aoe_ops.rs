@@ -32,6 +32,30 @@ const MAX_REAPER_ARC_LENGTH_M: f64 = 100_000.0;
 const SUPERWEAPON_NEUT_PULSE_RADIUS_M: f64 = 10_000.0;
 const SUPERWEAPON_NEUT_PULSE_GJ: f64 = 35_000.0;
 
+fn emit_doomsday_godma_effect(
+    ctx: &ServerContext,
+    char_id: i64,
+    module_id: i64,
+    effect_id: i64,
+) {
+    ctx.emit_typed(
+        NotificationTarget::Character(char_id),
+        crate::router::notify_registry::OnGodmaShipEffect {
+            item_id: module_id,
+            effect: PyRep::Integer(effect_id),
+            start_or_time: PyRep::Bool(true),
+            start: None,
+            active: None,
+            environment: None,
+            start_time: None,
+            duration: None,
+            repeat: None,
+            error: None,
+            actual_stop_time: None,
+        },
+    );
+}
+
 /// Cancels any scheduled or firing AoE Titan superweapon cycles (`Cone`, `SpatialGtfo`, `ReaperSweep`)
 /// belonging to `ship_id` when the caster dies or leaves space (`#499`).
 pub fn cancel_aoe_superweapon_cycles_for_ship(ctx: &ServerContext, ship_id: i64) {
@@ -662,16 +686,7 @@ pub async fn activate_cone_doomsday(
         Some("doomsdayConeDOT"),
     )
     .unwrap_or(6473);
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnGodmaShipEffect",
-        "charid",
-        vec![
-            PyRep::Integer(module_id),
-            PyRep::Integer(cone_eff_id),
-            PyRep::Bool(true),
-        ],
-    );
+    emit_doomsday_godma_effect(ctx, char_id, module_id, cone_eff_id);
 
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),
@@ -779,16 +794,7 @@ pub async fn activate_spatial_gtfo_doomsday(
         Some("doomsdayHOG"),
     )
     .unwrap_or(6474);
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnGodmaShipEffect",
-        "charid",
-        vec![
-            PyRep::Integer(module_id),
-            PyRep::Integer(spatial_eff_id),
-            PyRep::Bool(true),
-        ],
-    );
+    emit_doomsday_godma_effect(ctx, char_id, module_id, spatial_eff_id);
 
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),
@@ -954,16 +960,7 @@ pub async fn activate_multipoint_reaper_doomsday(
         Some("doomsdaySlash"),
     )
     .unwrap_or(6201);
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnGodmaShipEffect",
-        "charid",
-        vec![
-            PyRep::Integer(module_id),
-            PyRep::Integer(mp_eff_id),
-            PyRep::Bool(true),
-        ],
-    );
+    emit_doomsday_godma_effect(ctx, char_id, module_id, mp_eff_id);
 
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),
