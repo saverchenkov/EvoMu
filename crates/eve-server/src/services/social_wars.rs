@@ -978,7 +978,7 @@ pub(super) fn handle_wars(
             struct PeaceTreatyReply {
                 war_id: i64,
                 other_owner_id: i64,
-                expiry_unix: i64,
+                expiry_unix: u64,
             }
             impl PeaceTreatyReply {
                 fn into_pyrep(self) -> PyRep {

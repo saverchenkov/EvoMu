@@ -1123,8 +1123,8 @@ pub async fn handle(
                             owner_corp_id: i64,
                             alliance_id: Option<i64>,
                             sys_id: u32,
-                            vuln_start: u32,
-                            vuln_end: u32,
+                            vuln_start: u64,
+                            vuln_end: u64,
                         }
                         impl LocalSovStructureReply {
                             fn into_pyrep(self) -> PyRep {
