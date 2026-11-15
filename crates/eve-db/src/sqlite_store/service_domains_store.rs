@@ -408,7 +408,10 @@ fn load_entity_kv_for_rollback(
     }
     for (k, &expected_row_fp) in &fp.service_domains.entity_kv_rows {
         match out.get(k) {
-            Some(row) if fp_entity_kv_row(row) == expected_row_fp => {}
+            Some(row) if {
+                let h = canonical_fp(row);
+                (if h == 0 { 1 } else { h }) == expected_row_fp
+            } => {}
             Some(_) => {
                 return Err(format!(
                     "rollback entity_kv mismatched baseline row ({}:{}:{})",
