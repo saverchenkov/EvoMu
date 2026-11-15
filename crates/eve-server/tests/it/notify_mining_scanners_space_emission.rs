@@ -526,3 +526,216 @@ async fn notify_mining_probes_scanners_and_space_emission() {
     assert_eq!(remote_args[0], PyRep::String("CustomNotify".into()));
     assert!(remote_args[1].dict_get("notify").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()));
 }
+
+// parity: notify:OnMoonScanComplete, notify:OnNewMoonProbe, notify:OnRemoveMoonProbe
+// parity: notify:OnScanNoMaterials
+#[tokio::test]
+async fn test_moon_scan_complete_wire_notification_and_pochven_no_materials() {
+    eve_testkit::attest(&[
+        "notify:OnMoonScanComplete",
+        "notify:OnNewMoonProbe",
+        "notify:OnRemoveMoonProbe",
+        "notify:OnScanNoMaterials",
+    ]);
+
+    async fn wire_call(
+        ctx: &ServerContext,
+        sess: &mut SessionState,
+        svc: &str,
+        method: &str,
+        args: &[PyRep],
+    ) -> PyRep {
+        let kw = HashMap::new();
+        let mut h = eve_testkit::client_harness::ClientHarness::new(
+            crate::common::SessionBorrowWireTransport {
+                ctx,
+                session: sess,
+                preserve_char_notifications: true,
+            },
+        );
+        h.call_ok(svc, None, method, args, &kw).await
+    }
+
+    let ctx = new_ctx();
+    ctx.db
+        .set_account_role("demo", eve_machonet::service_roles::ROLE_GM_DEFAULT)
+        .expect("set GM role");
+    let mut sess = SessionState::new(7_190);
+    crate::common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    wire_call(
+        &ctx,
+        &mut sess,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(PILOT_A)],
+    )
+    .await;
+
+    for cmd in [
+        "/giveskill 3412 5",
+        "/giveskill 3551 5",
+        "/giveskill 3426 5",
+        "/giveskill 3413 5",
+        "/giveskill 32918 5",
+    ] {
+        wire_call(&ctx, &mut sess, "slash", "SlashCmd", &[PyRep::String(cmd.into())]).await;
+    }
+
+    let ship_kv = wire_call(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/giveitem 32880 1".into())],
+    )
+    .await;
+    let ship_id = ship_kv
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("Venture itemID");
+    ctx.advance_secs(12);
+    wire_call(&ctx, &mut sess, "ship", "Board", &[PyRep::Integer(ship_id)]).await;
+    ctx.advance_secs(12);
+
+    let fit_kv = wire_call(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/fit me 33272".into())],
+    )
+    .await;
+    let moon_launcher_id = fit_kv
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("Survey Probe Launcher II itemID");
+
+    wire_call(&ctx, &mut sess, "stationSvc", "Undock", &[]).await;
+    ctx.advance_secs(12);
+    wire_call(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/giveitem 18637 4".into())],
+    )
+    .await;
+
+    let jita = ctx.systems.get_or_spawn(SYS_JITA);
+    let moon_jita_pos = jita.get_ball_snapshot(MOON_JITA).await.unwrap().unwrap().1.position;
+    let ship_near_jita_moon = moon_jita_pos - DVec3::new(10_000_000.0, 0.0, 0.0);
+    if let Ok(Some((_, mut sb))) = jita.get_ball_snapshot(ship_id).await {
+        sb.position = ship_near_jita_moon;
+        sb.velocity = (moon_jita_pos - ship_near_jita_moon).normalize() * 100.0;
+        let _ = jita.spawn_ball(sb).await;
+    }
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
+
+    let moon_launch = wire_call(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(moon_launcher_id),
+            PyRep::String("useMissiles".into()),
+            PyRep::Integer(MOON_JITA),
+        ],
+    )
+    .await;
+    let probe_id = moon_launch
+        .dict_get("probeID")
+        .and_then(|v| v.as_i64())
+        .expect("probeID");
+
+    let new_probe_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    let new_probe_args = find_notif(&new_probe_notifs, "OnNewMoonProbe");
+    assert_eq!(new_probe_args.len(), 1);
+    assert_eq!(
+        new_probe_args[0].dict_get("probeID").and_then(|v| v.as_i64()),
+        Some(probe_id)
+    );
+    assert_eq!(
+        new_probe_args[0].dict_get("typeID").and_then(|v| v.as_i64()),
+        Some(18637)
+    );
+    assert_eq!(
+        new_probe_args[0].dict_get("moonID").and_then(|v| v.as_i64()),
+        Some(MOON_JITA)
+    );
+    assert!(
+        new_probe_args[0]
+            .dict_get("expiry")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            > 0
+    );
+
+    ctx.advance_secs(140);
+    let scan_done_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    let moon_scan_args = find_notif(&scan_done_notifs, "OnMoonScanComplete");
+    assert_eq!(moon_scan_args.len(), 2);
+    assert_eq!(moon_scan_args[0], PyRep::Integer(MOON_JITA));
+    let PyRep::Dict(moon_ores) = &moon_scan_args[1] else {
+        panic!("expected Dict for OnMoonScanComplete resources");
+    };
+    assert!(!moon_ores.is_empty());
+    let mut total_frac = 0.0;
+    for (k, v) in moon_ores {
+        let tid = k.as_i64().expect("ore typeID") as u32;
+        let frac = v.as_f64().expect("ore fraction");
+        assert!(ctx.sde.types.contains_key(&tid) && (0.0..=1.0).contains(&frac));
+        total_frac += frac;
+    }
+    assert!(
+        (total_frac - 1.0).abs() < 1e-4,
+        "moon ore fractions must sum to 1.0, got {total_frac}"
+    );
+    assert_eq!(
+        find_notif(&scan_done_notifs, "OnRemoveMoonProbe"),
+        &[PyRep::Integer(probe_id)]
+    );
+
+    wire_call(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/tr {SYS_POCHVEN_KUHARAH}"))],
+    )
+    .await;
+    let pochven = ctx.systems.get_or_spawn(SYS_POCHVEN_KUHARAH);
+    let moon_poch_pos = pochven
+        .get_ball_snapshot(MOON_POCHVEN)
+        .await
+        .unwrap()
+        .unwrap()
+        .1
+        .position;
+    let ship_near_poch_moon = moon_poch_pos - DVec3::new(10_000_000.0, 0.0, 0.0);
+    if let Ok(Some((_, mut sb))) = pochven.get_ball_snapshot(ship_id).await {
+        sb.position = ship_near_poch_moon;
+        sb.velocity = (moon_poch_pos - ship_near_poch_moon).normalize() * 100.0;
+        let _ = pochven.spawn_ball(sb).await;
+    }
+    ctx.advance_secs(15);
+    wire_call(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(moon_launcher_id),
+            PyRep::String("useMissiles".into()),
+            PyRep::Integer(MOON_POCHVEN),
+        ],
+    )
+    .await;
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
+    ctx.advance_secs(140);
+    let poch_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    assert_eq!(
+        find_notif(&poch_notifs, "OnScanNoMaterials"),
+        &[PyRep::Integer(MOON_POCHVEN)]
+    );
+}

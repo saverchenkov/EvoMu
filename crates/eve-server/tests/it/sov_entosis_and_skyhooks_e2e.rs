@@ -437,12 +437,10 @@ async fn test_e2e_sov_adm_dev_indices_entosis_counter_and_command_nodes() {
     let _ = call_bound_rpc;
 }
 
-// parity: feat:sovereignty.skyhook-reagent-maturity
 // parity: feat:navigation.warp-vector
 #[tokio::test]
 async fn test_e2e_skyhook_reagent_maturity_and_warp_vector() {
     eve_testkit::attest(&[
-        "feat:sovereignty.skyhook-reagent-maturity",
         "feat:navigation.warp-vector",
     ]);
 
