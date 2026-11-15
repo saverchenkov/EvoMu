@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EvoMu Harness Trace Schema (v1)",
+  "type": "object",
+  "required": ["schema_version", "scenario", "events"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "scenario": { "type": "string", "minLength": 1 },
+    "base_stamp": { "type": ["integer", "null"] },
+    "virtual_clock": {
+      "type": "object",
+      "properties": {
+        "initial_tick": { "type": "integer" },
+        "tick_ms": { "type": "integer", "minimum": 1 },
+        "tidi_factor": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "entity_aliases": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "sessions": {
+      "type": "object",
+      "additionalProperties": { "type": "object" }
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind"],
+        "properties": {
+          "seq": { "type": "integer" },
+          "kind": { "enum": ["rpc_in", "clock_advance", "out_frame"] },
+          "sim_ms": { "type": "integer", "minimum": 0 },
+          "session": { "type": "string" },
+          "frame_type": {
+            "enum": ["DoDestinyUpdate", "CallRsp", "ErrorResponse", "SessionChange", "Notification"]
+          },
+          "epoch": { "type": "integer" },
+          "stamp": { "type": "integer" },
+          "has_set_state": { "type": "boolean" },
+          "wait_for_bubble": { "type": "boolean" },
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["action"],
+              "properties": {
+                "action": { "type": "string" },
+                "stamp": { "type": "integer" },
+                "entities": { "type": "array" },
+                "metadata": { "type": "object" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
