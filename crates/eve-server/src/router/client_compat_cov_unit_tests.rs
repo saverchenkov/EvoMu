@@ -1172,7 +1172,10 @@ async fn c9_typed_handlers_corp_dev_fw_peace_emit_canonical_wire_shapes() {
             .or_insert_with(|| eve_db::CorporationRecord::new(cid, "Alpha", "ALPH", 90_000_001))
             .members
             .extend([90_000_001, 90_000_002]);
-        snap.corp_governance.entry(cid).or_default().role_audit_log.push((
+        let gov = snap.corp_governance.entry(cid).or_default();
+        gov.reinforce_hour = 18;
+        gov.reinforce_weekday = 5;
+        gov.role_audit_log.push((
             90_000_002,
             90_000_001,
             0,

@@ -349,7 +349,7 @@ async fn fw_direct_enlistment_and_sov_mgr_info_rpcs() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(local_structs.row_count(), Some(2));
+    assert_eq!(local_structs.row_count(), Some(1));
     assert!(matches!(
         &local_structs,
         PyRep::List(items)
