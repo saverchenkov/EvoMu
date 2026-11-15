@@ -459,8 +459,31 @@ impl<'a> serde::Serializer for FnvSerializer<'a> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static THREAD_FINGERPRINT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+#[inline]
+pub(crate) fn record_thread_fingerprint_call() {
+    THREAD_FINGERPRINT_CALLS.with(|c| c.set(c.get().saturating_add(1)));
+}
+
+#[cfg(test)]
+pub(crate) fn reset_thread_fingerprint_calls_for_test() {
+    THREAD_FINGERPRINT_CALLS.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn thread_fingerprint_calls_for_test() -> usize {
+    THREAD_FINGERPRINT_CALLS.with(|c| c.get())
+}
+
 #[inline]
 pub(crate) fn canonical_fp<T: Serialize + ?Sized>(val: &T) -> u64 {
+    #[cfg(test)]
+    record_thread_fingerprint_call();
     let mut h = FnvHasher::new();
     if let Err(err) = val.serialize(FnvSerializer(&mut h)) {
         debug_assert!(false, "FnvSerializer failed in canonical_fp: {err}");
@@ -737,6 +760,8 @@ pub(crate) fn fp_item(i: &InventoryItemRecord) -> u64 {
 
 #[inline]
 pub(crate) fn fp_market_order(o: &MarketOrderRecord) -> u64 {
+    #[cfg(test)]
+    record_thread_fingerprint_call();
     let mut h = FnvHasher::new();
     h.mix_word(o.order_id as u64);
     h.mix_word(o.owner_id as u64);

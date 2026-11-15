@@ -1386,7 +1386,9 @@ pub fn load_snapshot_from_sqlite_with_options(
     super::service_domains_store::load_service_domains_checked(conn, &mut snap, &mut ctx)?;
     ctx.flush_quarantined_rows(conn)?;
 
-    let mut pre_migration_fp = compute_fingerprints(&snap);
+    let can_sync_migrations =
+        conn.is_autocommit() && !conn.is_readonly(rusqlite::DatabaseName::Main).unwrap_or(false);
+    let mut pre_migration_fp = can_sync_migrations.then(|| compute_fingerprints(&snap));
     // Run startup snapshot migrations BEFORE computing baseline fingerprints and flush any
     // migrated rows immediately into SQLite so neither clean reads nor first-transaction rollbacks
     // revert `next_entity_id`, `account_plex_vault`, `service_domains`, or `fw_system_occupations`.
@@ -1397,12 +1399,12 @@ pub fn load_snapshot_from_sqlite_with_options(
     for (&sid, st) in &mut snap.system_states {
         st.solar_system_id = sid;
     }
-    if conn.is_autocommit() && !conn.is_readonly(rusqlite::DatabaseName::Main).unwrap_or(false) {
+    let fp = if let Some(mut fp) = pre_migration_fp.take() {
         if had_legacy_ledger || had_legacy_notes_lp {
             super::domain_rows::apply_domain_rows_migration(conn)?;
         }
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-        let delta = super::sync::sync_dirty_to_sqlite(&tx, &snap, &mut pre_migration_fp, false)?;
+        let delta = super::sync::sync_dirty_to_sqlite(&tx, &snap, &mut fp, false)?;
         if had_legacy_ledger {
             super::domain_rows::drop_legacy_ledger_tables(&tx)?;
         }
@@ -1412,8 +1414,10 @@ pub fn load_snapshot_from_sqlite_with_options(
         if delta.dirty || had_legacy_ledger || had_legacy_notes_lp {
             tx.commit().map_err(|e| e.to_string())?;
         }
-    }
-    let fp = compute_fingerprints(&snap);
+        fp
+    } else {
+        compute_fingerprints(&snap)
+    };
     Ok((snap, fp))
 }
 #[cfg(test)] #[path = "load_unit_tests.rs"] mod load_unit_tests;

@@ -406,6 +406,30 @@ fn load_entity_kv_for_rollback(
     if out.is_empty() && !fp.service_domains.entity_kv_rows.is_empty() {
         return Err("rollback entity_kv returned empty table for non-empty baseline".into());
     }
+    for (k, &expected_row_fp) in &fp.service_domains.entity_kv_rows {
+        match out.get(k) {
+            Some(row) if {
+                let h = canonical_fp(row);
+                (if h == 0 { 1 } else { h }) == expected_row_fp
+            } => {}
+            Some(_) => {
+                return Err(format!(
+                    "rollback entity_kv mismatched baseline row ({}:{}:{})",
+                    k.ns.as_str(),
+                    k.entity_id,
+                    k.sub_key
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "rollback entity_kv missing baseline row ({}:{}:{})",
+                    k.ns.as_str(),
+                    k.entity_id,
+                    k.sub_key
+                ));
+            }
+        }
+    }
     Ok(out)
 }
 
@@ -414,11 +438,12 @@ pub fn load_service_domains_checked(
     snap: &mut WorldStateSnapshot,
     ctx: &mut super::quarantine::LoadContext,
 ) -> Result<(), String> {
+    let mut staged = WorldStateSnapshot::default();
     let mut known_keys = std::collections::HashSet::with_capacity(20);
     macro_rules! load_one {
         ($field:ident, $key:expr) => {
             known_keys.insert($key);
-            load_domain_row_checked(conn, $key, &mut snap.$field, ctx)?;
+            load_domain_row_checked(conn, $key, &mut staged.$field, ctx)?;
         };
     }
     for_each_service_domain!(load_one);
@@ -483,7 +508,15 @@ pub fn load_service_domains_checked(
         }
     }
 
-    load_entity_kv_checked(conn, snap, ctx)?;
+    load_entity_kv_checked(conn, &mut staged, ctx)?;
+
+    macro_rules! commit_one {
+        ($field:ident, $key:expr) => {
+            snap.$field = staged.$field;
+        };
+    }
+    for_each_service_domain!(commit_one);
+    snap.entity_kv = staged.entity_kv;
 
     Ok(())
 }

@@ -68,6 +68,12 @@ pub fn load_d6_checked(
     snap: &mut WorldStateSnapshot,
     ctx: &mut super::quarantine::LoadContext,
 ) -> Result<(), String> {
+    let mut next_alliance_id = snap.next_alliance_id;
+    let mut next_corporation_id = snap.next_corporation_id;
+    let mut next_notification_id = snap.next_notification_id;
+    let mut next_report_id = snap.next_report_id;
+    let mut staged_sp6 = None;
+
     if let Ok(mut stmt) = conn.prepare("SELECT rowid, meta_key, meta_value FROM world_meta") {
         if let Ok(mut rows) = stmt.query([]) {
             while let Some(r) = rows.next().map_err(|e| e.to_string())? {
@@ -81,10 +87,10 @@ pub fn load_d6_checked(
                     ))
                 })() {
                     Ok((k, v)) => match k.as_str() {
-                        "next_alliance_id" => snap.next_alliance_id = v,
-                        "next_corporation_id" => snap.next_corporation_id = v,
-                        "next_notification_id" => snap.next_notification_id = v,
-                        "next_report_id" => snap.next_report_id = v,
+                        "next_alliance_id" => next_alliance_id = v,
+                        "next_corporation_id" => next_corporation_id = v,
+                        "next_notification_id" => next_notification_id = v,
+                        "next_report_id" => next_report_id = v,
                         _ => {}
                     },
                     Err(err) => {
@@ -104,7 +110,7 @@ pub fn load_d6_checked(
                 let payload = super::quarantine::row_col_string(r, 2);
                 match parse_sp6_lifecycle_row(r) {
                     Ok(st) => {
-                        snap.sp6_lifecycle = st;
+                        staged_sp6 = Some(st);
                     }
                     Err(err) => {
                         ctx.record_bad_row(
@@ -119,6 +125,13 @@ pub fn load_d6_checked(
                 }
             }
         }
+    }
+    snap.next_alliance_id = next_alliance_id;
+    snap.next_corporation_id = next_corporation_id;
+    snap.next_notification_id = next_notification_id;
+    snap.next_report_id = next_report_id;
+    if let Some(st) = staged_sp6 {
+        snap.sp6_lifecycle = st;
     }
     snap.reconcile_id_counters();
     Ok(())

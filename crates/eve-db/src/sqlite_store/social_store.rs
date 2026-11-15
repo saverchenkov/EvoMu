@@ -398,10 +398,12 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
         Ok(())
     }
 
+    let mut staged = WorldStateSnapshot::default();
+
     // 1. read_mails, deleted_mails, trashed_mails
-    load_pair_set(conn, ctx, "read_mails", &mut snap.read_mails)?;
-    load_pair_set(conn, ctx, "deleted_mails", &mut snap.deleted_mails)?;
-    load_pair_set(conn, ctx, "trashed_mails", &mut snap.trashed_mails)?;
+    load_pair_set(conn, ctx, "read_mails", &mut staged.read_mails)?;
+    load_pair_set(conn, ctx, "deleted_mails", &mut staged.deleted_mails)?;
+    load_pair_set(conn, ctx, "trashed_mails", &mut staged.trashed_mails)?;
 
     // 2. mail_labels & mail_assigned_labels
     load_i64_json_map::<Vec<MailLabelRecord>>(
@@ -410,9 +412,8 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
         "mail_labels",
         "character_id",
         "labels_json",
-        &mut snap.mail_labels,
+        &mut staged.mail_labels,
     )?;
-    snap.mail_assigned_labels.clear();
     {
         let mut stmt = conn
             .prepare("SELECT rowid, character_id, mail_id, labels_json FROM mail_assigned_labels")
@@ -429,7 +430,7 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
             })();
             match res {
                 Ok((k, labels)) => {
-                    snap.mail_assigned_labels.insert(k, labels);
+                    staged.mail_assigned_labels.insert(k, labels);
                 }
                 Err(err) => {
                     let key = row_composite_key_string(r, 1, 2);
@@ -454,7 +455,7 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
         "mailing_lists",
         "list_id",
         "record_json",
-        &mut snap.mailing_lists,
+        &mut staged.mailing_lists,
     )?;
     load_i64_json_map::<CalendarEventRecord>(
         conn,
@@ -462,12 +463,10 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
         "calendar_events",
         "event_id",
         "record_json",
-        &mut snap.calendar_events,
+        &mut staged.calendar_events,
     )?;
 
     // 4. bookmark_meta & bookmark_folders
-    snap.bookmark_subfolders.clear();
-    snap.bookmark_expiries.clear();
     {
         let mut meta_map = HashMap::<i64, PersistedBookmarkMeta>::new();
         load_i64_json_map(
@@ -481,20 +480,16 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
         for (bid, meta) in meta_map {
             if snap.bookmarks.contains_key(&bid) {
                 if let Some(sf) = meta.subfolder_id {
-                    snap.bookmark_subfolders.insert(bid, sf);
+                    staged.bookmark_subfolders.insert(bid, sf);
                 }
             }
             if let Some(exp) = meta.expiry_unix {
                 if exp > 0 {
-                    snap.bookmark_expiries.insert(bid, exp);
+                    staged.bookmark_expiries.insert(bid, exp);
                 }
             }
         }
     }
-    snap.bookmark_folders.clear();
-    snap.bookmark_folder_acls.clear();
-    snap.bookmark_folder_known_by.clear();
-    snap.bookmark_subfolder_parents.clear();
     {
         let mut folder_map = HashMap::<i64, PersistedBookmarkFolder>::new();
         load_i64_json_map(
@@ -506,16 +501,17 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
             &mut folder_map,
         )?;
         for (fid, persisted) in folder_map {
-            snap.bookmark_folders.insert(fid, persisted.record);
+            staged.bookmark_folders.insert(fid, persisted.record);
             if !persisted.access_group_ids.is_empty() {
-                snap.bookmark_folder_acls
+                staged
+                    .bookmark_folder_acls
                     .insert(fid, persisted.access_group_ids);
             }
             for (cid, active) in persisted.known_by {
-                snap.bookmark_folder_known_by.insert((fid, cid), active);
+                staged.bookmark_folder_known_by.insert((fid, cid), active);
             }
             if let Some(pfid) = persisted.parent_folder_id {
-                snap.bookmark_subfolder_parents.insert(fid, pfid);
+                staged.bookmark_subfolder_parents.insert(fid, pfid);
             }
         }
     }
@@ -526,12 +522,10 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
         "access_groups",
         "group_id",
         "members_json",
-        &mut snap.access_groups,
+        &mut staged.access_groups,
     )?;
 
     // 5. chat_channels & chat_channel_acl
-    snap.chat_channels.clear();
-    snap.chat_channel_acl.clear();
     {
         let mut stmt = conn
             .prepare("SELECT rowid, channel_id, record_json FROM chat_channels")
@@ -549,10 +543,10 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
             match res {
                 Ok((cid, persisted)) => {
                     if !persisted.standalone_acl_only {
-                        snap.chat_channels.insert(cid.clone(), persisted.record);
+                        staged.chat_channels.insert(cid.clone(), persisted.record);
                     }
                     if is_chat_acl_non_empty(&persisted.acl) {
-                        snap.chat_channel_acl.insert(cid, persisted.acl);
+                        staged.chat_channel_acl.insert(cid, persisted.acl);
                     }
                 }
                 Err(err) => {
@@ -571,7 +565,7 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
         "char_contacts",
         "character_id",
         "contacts_json",
-        &mut snap.char_contacts,
+        &mut staged.char_contacts,
     )?;
     load_i64_json_map::<Vec<SocialContactNotificationRecord>>(
         conn,
@@ -579,7 +573,7 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
         "char_contact_notifications",
         "character_id",
         "notifications_json",
-        &mut snap.char_contact_notifications,
+        &mut staged.char_contact_notifications,
     )?;
     load_i64_json_map::<Vec<(i64, String)>>(
         conn,
@@ -587,7 +581,7 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
         "char_contact_labels",
         "character_id",
         "labels_json",
-        &mut snap.char_contact_labels,
+        &mut staged.char_contact_labels,
     )?;
     load_i64_json_map::<Vec<SocialContactRecord>>(
         conn,
@@ -595,7 +589,7 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
         "corp_contacts",
         "corporation_id",
         "contacts_json",
-        &mut snap.corp_contacts,
+        &mut staged.corp_contacts,
     )?;
     load_i64_json_map::<Vec<(i64, String, u32)>>(
         conn,
@@ -603,7 +597,7 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
         "corp_contact_labels",
         "corporation_id",
         "labels_json",
-        &mut snap.corp_contact_labels,
+        &mut staged.corp_contact_labels,
     )?;
     load_i64_json_map::<Vec<SocialContactRecord>>(
         conn,
@@ -611,7 +605,7 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
         "alliance_contacts",
         "alliance_id",
         "contacts_json",
-        &mut snap.alliance_contacts,
+        &mut staged.alliance_contacts,
     )?;
     load_i64_json_map::<Vec<(i64, String)>>(
         conn,
@@ -619,11 +613,10 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
         "alliance_contact_labels",
         "alliance_id",
         "labels_json",
-        &mut snap.alliance_contact_labels,
+        &mut staged.alliance_contact_labels,
     )?;
 
     // 7. char_notes
-    snap.char_notes.clear();
     {
         let mut stmt = conn
             .prepare("SELECT rowid, character_id, item_id, note FROM char_notes")
@@ -639,7 +632,7 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
             })();
             match res {
                 Ok((k, note)) => {
-                    snap.char_notes.insert(k, note);
+                    staged.char_notes.insert(k, note);
                 }
                 Err(err) => {
                     let key = row_composite_key_string(r, 1, 2);
@@ -649,6 +642,31 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
             }
         }
     }
+
+    snap.read_mails = staged.read_mails;
+    snap.deleted_mails = staged.deleted_mails;
+    snap.trashed_mails = staged.trashed_mails;
+    snap.mail_labels = staged.mail_labels;
+    snap.mail_assigned_labels = staged.mail_assigned_labels;
+    snap.mailing_lists = staged.mailing_lists;
+    snap.calendar_events = staged.calendar_events;
+    snap.bookmark_subfolders = staged.bookmark_subfolders;
+    snap.bookmark_expiries = staged.bookmark_expiries;
+    snap.bookmark_folders = staged.bookmark_folders;
+    snap.bookmark_folder_acls = staged.bookmark_folder_acls;
+    snap.bookmark_folder_known_by = staged.bookmark_folder_known_by;
+    snap.bookmark_subfolder_parents = staged.bookmark_subfolder_parents;
+    snap.access_groups = staged.access_groups;
+    snap.chat_channels = staged.chat_channels;
+    snap.chat_channel_acl = staged.chat_channel_acl;
+    snap.char_contacts = staged.char_contacts;
+    snap.char_contact_notifications = staged.char_contact_notifications;
+    snap.char_contact_labels = staged.char_contact_labels;
+    snap.corp_contacts = staged.corp_contacts;
+    snap.corp_contact_labels = staged.corp_contact_labels;
+    snap.alliance_contacts = staged.alliance_contacts;
+    snap.alliance_contact_labels = staged.alliance_contact_labels;
+    snap.char_notes = staged.char_notes;
 
     Ok(())
 }

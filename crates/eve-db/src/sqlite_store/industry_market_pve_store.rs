@@ -283,6 +283,8 @@ pub fn load_d6_batch4_checked(
     snap: &mut WorldStateSnapshot,
     ctx: &mut super::quarantine::LoadContext,
 ) -> Result<(), String> {
+    let mut staged = WorldStateSnapshot::default();
+    let mut seen_keys = HashSet::new();
     if let Ok(mut stmt) =
         conn.prepare("SELECT rowid, blob_key, blob_json FROM world_kv_blobs")
     {
@@ -294,9 +296,11 @@ pub fn load_d6_batch4_checked(
                 match r
                     .get::<_, String>(2)
                     .map_err(|e| e.to_string())
-                    .and_then(|js| apply_blob_json_checked(snap, &key, &js))
+                    .and_then(|js| apply_blob_json_checked(&mut staged, &key, &js))
                 {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        seen_keys.insert(key);
+                    }
                     Err(err) => {
                         ctx.record_bad_row(
                             "world_kv_blobs",
@@ -311,6 +315,53 @@ pub fn load_d6_batch4_checked(
             }
         }
     }
+    macro_rules! commit_staged_blobs {
+        ($($key:literal => $field:ident),* $(,)?) => {
+            $(
+                if seen_keys.contains($key) {
+                    snap.$field = staged.$field;
+                }
+            )*
+        };
+    }
+    commit_staged_blobs!(
+        "moon_extractions" => moon_extractions,
+        "auto_moon_miners" => auto_moon_miners,
+        "observer_mining_ledger" => observer_mining_ledger,
+        "char_research_agents" => char_research_agents,
+        "planetary_colony_layouts" => planetary_colony_layouts,
+        "corp_customs_offices" => corp_customs_offices,
+        "orbital_provision_types" => orbital_provision_types,
+        "wallet_journal_timestamps" => wallet_journal_timestamps,
+        "char_wallet_transactions" => char_wallet_transactions,
+        "corp_wallet_journals" => corp_wallet_journals,
+        "corp_wallet_transactions" => corp_wallet_transactions,
+        "market_order_meta" => market_order_meta,
+        "market_history" => market_history,
+        "cosmic_signatures" => cosmic_signatures,
+        "cosmic_anomalies" => cosmic_anomalies,
+        "incursions" => incursions,
+        "last_mission_decline_times" => last_mission_decline_times,
+        "wh_polarizations" => wh_polarizations,
+        "module_online_states" => module_online_states,
+        "module_active_states" => module_active_states,
+        "module_active_charges" => module_active_charges,
+        "ship_fit_inputs" => ship_fit_inputs,
+        "weapon_banks" => weapon_banks,
+        "paused_skill_queues" => paused_skill_queues,
+        "starbase_settings" => starbase_settings,
+        "corp_container_logs" => corp_container_logs,
+        "killmail_details" => killmail_details,
+        "station_office_rental_costs" => station_office_rental_costs,
+        "structure_esi_timer_meta" => structure_esi_timer_meta,
+        "corp_project_contributors" => corp_project_contributors,
+        "loyalty_store_offers" => loyalty_store_offers,
+        "system_jump_events" => system_jump_events,
+        "system_kill_events" => system_kill_events,
+        "quasar_state_blobs" => quasar_state_blobs,
+        "service_state_blobs" => service_state_blobs,
+        "insurance_contracts" => insurance_contracts,
+    );
     Ok(())
 }
 
@@ -463,6 +514,11 @@ fn reload_mining_ledger_strict(
     if out.is_empty() && expected_fp != 0 && expected_fp != empty_fp {
         return Err(
             "rollback char_mining_ledger returned empty table for non-empty baseline".into(),
+        );
+    }
+    if expected_fp != 0 && fp_json(&out) != expected_fp {
+        return Err(
+            "rollback char_mining_ledger fingerprint mismatch against committed baseline".into(),
         );
     }
     Ok(out)
