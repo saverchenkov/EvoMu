@@ -368,8 +368,10 @@ async fn test_contract_proxy_and_insurance_rpcs() {
         )
         .await
         .expect("CreateContract ItemExchange");
-    let c_kv = kv_map(&contract_res);
-    let contract_id = c_kv.get("contractID").and_then(|v| v.as_i64()).expect("contractID");
+    let contract_id = match &contract_res {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => kv_map(&contract_res).get("contractID").and_then(|v| v.as_i64()).expect("contractID"),
+    };
 
     let owner_list = ctx
         .dispatch_rpc(
@@ -383,7 +385,7 @@ async fn test_contract_proxy_and_insurance_rpcs() {
         )
         .await
         .expect("GetContractListForOwner");
-    let PyRep::List(c_list) = owner_list else {
+    let PyRep::List(c_list) = owner_list.dict_get("contracts").unwrap_or(&owner_list) else {
         panic!("Expected list from GetContractListForOwner");
     };
     assert!(c_list
@@ -414,19 +416,27 @@ async fn test_contract_proxy_and_insurance_rpcs() {
         PyRep::List(vec![PyRep::Integer(iid)]), PyRep::List(vec![]),
     ];
     let auc_res = ctx.dispatch_rpc(&mut s1, "contractProxy", None, "CreateContract", &make_auc(auc_item_id, "Auction Won"), &empty_kw, None).await.expect("CreateContract Auction 1");
-    let auc_id = kv_map(&auc_res).get("contractID").and_then(|v| v.as_i64()).expect("auc_id");
+    let auc_id = match &auc_res {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => kv_map(&auc_res).get("contractID").and_then(|v| v.as_i64()).expect("auc_id"),
+    };
     let auc2_res = ctx.dispatch_rpc(&mut s1, "contractProxy", None, "CreateContract", &make_auc(auc2_item_id, "Auction Outbid"), &empty_kw, None).await.expect("CreateContract Auction 2");
-    let auc2_id = kv_map(&auc2_res).get("contractID").and_then(|v| v.as_i64()).expect("auc2_id");
+    let auc2_id = match &auc2_res {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => kv_map(&auc2_res).get("contractID").and_then(|v| v.as_i64()).expect("auc2_id"),
+    };
 
     // Pilot 2 bids on both auctions
     ctx.dispatch_rpc(&mut s2, "contractProxy", None, "PlaceBid", &[PyRep::Integer(auc_id), PyRep::Real(60_000.0)], &empty_kw, None).await.expect("PlaceBid 1");
     ctx.dispatch_rpc(&mut s2, "contractProxy", None, "PlaceBid", &[PyRep::Integer(auc2_id), PyRep::Real(60_000.0)], &empty_kw, None).await.expect("PlaceBid 2");
 
     // Active bids query (isAccepted = false) includes both active auctions; won/finished query (isAccepted = true) is empty
-    let PyRep::List(active_bids) = ctx.dispatch_rpc(&mut s2, "contractProxy", None, "GetMyBids", &[PyRep::Bool(false)], &empty_kw, None).await.expect("GetMyBids active") else { panic!("Expected list"); };
+    let active_bids_rep = ctx.dispatch_rpc(&mut s2, "contractProxy", None, "GetMyBids", &[PyRep::Bool(false)], &empty_kw, None).await.expect("GetMyBids active");
+    let PyRep::List(active_bids) = active_bids_rep.dict_get("contracts").unwrap_or(&active_bids_rep) else { panic!("Expected list"); };
     assert!(active_bids.iter().any(|c| kv_map(c).get("contractID") == Some(&PyRep::Integer(auc_id))));
     assert!(active_bids.iter().any(|c| kv_map(c).get("contractID") == Some(&PyRep::Integer(auc2_id))));
-    let PyRep::List(won_before) = ctx.dispatch_rpc(&mut s2, "contractProxy", None, "GetMyBids", &[PyRep::Bool(true)], &empty_kw, None).await.expect("GetMyBids won before") else { panic!("Expected list"); };
+    let won_before_rep = ctx.dispatch_rpc(&mut s2, "contractProxy", None, "GetMyBids", &[PyRep::Bool(true)], &empty_kw, None).await.expect("GetMyBids won before");
+    let PyRep::List(won_before) = won_before_rep.dict_get("contracts").unwrap_or(&won_before_rep) else { panic!("Expected list"); };
     assert!(won_before.is_empty(), "GetMyBids(isAccepted=true) must exclude still-active auctions");
 
     // Corporation bid query requires ROLE_CONTRACT_MANAGER or Director
@@ -465,7 +475,8 @@ async fn test_contract_proxy_and_insurance_rpcs() {
             c2.status = "Finished".into();
         }
     });
-    let PyRep::List(won_after) = ctx.dispatch_rpc(&mut s2, "contractProxy", None, "GetMyBids", &[PyRep::Bool(true)], &empty_kw, None).await.expect("GetMyBids won after") else { panic!("Expected list"); };
+    let won_after_rep = ctx.dispatch_rpc(&mut s2, "contractProxy", None, "GetMyBids", &[PyRep::Bool(true)], &empty_kw, None).await.expect("GetMyBids won after");
+    let PyRep::List(won_after) = won_after_rep.dict_get("contracts").unwrap_or(&won_after_rep) else { panic!("Expected list"); };
     assert_eq!(won_after.len(), 1);
     assert_eq!(kv_map(&won_after[0]).get("contractID"), Some(&PyRep::Integer(auc_id)));
 
@@ -510,7 +521,7 @@ async fn test_contract_proxy_and_insurance_rpcs() {
         )
         .await
         .expect("GetMyExpiredContractList");
-    let PyRep::List(exp_list) = expired_list else {
+    let PyRep::List(exp_list) = expired_list.dict_get("contracts").unwrap_or(&expired_list) else {
         panic!("Expected list from GetMyExpiredContractList");
     };
     assert!(exp_list

@@ -265,65 +265,531 @@ fn contract_location_ids(
     (i64::from(sys_id), region_id)
 }
 
-fn contract_to_pyrep(
-    c: &ContractRecord,
-    snap: &eve_db::WorldStateSnapshot,
-    sde: &eve_sde::SdeRegistry,
-) -> PyRep {
-    let items_rep = PyRep::List(c.item_ids.iter().map(|&id| PyRep::Integer(id)).collect());
-    let detailed_items_rep = PyRep::List(c.item_ids.iter().filter_map(|&id| {
-        let it = snap.items.get(&id)?;
+fn contract_type_code(contract_type: &str) -> i64 {
+    match contract_type {
+        "ItemExchange" | "item_exchange" => 1,
+        "Auction" | "auction" => 2,
+        "Courier" | "courier" => 3,
+        "Loan" | "loan" => 4,
+        _ => 1,
+    }
+}
+
+fn contract_status_code(status: &str) -> i64 {
+    match status {
+        "Outstanding" | "outstanding" => 0,
+        "InProgress" | "in_progress" => 1,
+        "FinishedIssuer" | "finished_issuer" => 2,
+        "FinishedContractor" | "finished_contractor" => 3,
+        "Finished" | "finished" | "Completed" | "completed" => 4,
+        "Cancelled" | "cancelled" => 5,
+        "Rejected" | "rejected" => 6,
+        "Failed" | "failed" => 7,
+        "Deleted" | "deleted" => 8,
+        "Reversed" | "reversed" => 9,
+        _ => 0,
+    }
+}
+
+fn contract_availability_code(availability: &str) -> i64 {
+    match availability {
+        "Public" | "public" => 0,
+        "Private" | "private" | "Personal" | "personal" | "Myself" | "myself" => 1,
+        "Corporation" | "corporation" | "MyCorp" | "my_corp" => 2,
+        "Alliance" | "alliance" | "MyAlliance" | "my_alliance" => 3,
+        _ => 0,
+    }
+}
+
+fn unix_to_contract_filetime(unix_secs: i64) -> i64 {
+    if unix_secs > 100_000_000_000_000 {
+        unix_secs
+    } else if unix_secs > 0 {
+        (unix_secs + 11_644_473_600) * 10_000_000
+    } else {
+        133_500_000_000_000_000
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CreatedContractsReply {
+    pub contract_ids: Vec<i64>,
+}
+
+impl CreatedContractsReply {
+    pub(crate) fn single(contract_id: i64) -> Self {
+        Self {
+            contract_ids: vec![contract_id],
+        }
+    }
+
+    pub(crate) fn to_pyrep(&self) -> PyRep {
+        PyRep::List(self.contract_ids.iter().copied().map(PyRep::Integer).collect())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ContractItemReply {
+    pub item_id: i64,
+    pub type_id: i64,
+    pub quantity: i64,
+    pub in_crate: bool,
+    pub parent_id: i64,
+    pub flag_id: i64,
+    pub singleton: bool,
+    pub copy: bool,
+    pub material_efficiency: i64,
+    pub time_efficiency: i64,
+    pub runs_remaining: Option<u32>,
+    pub damage: f64,
+    pub source_mutaplasmid_id: Option<u32>,
+    pub dynamic_attributes: Vec<(i64, f64)>,
+}
+
+impl ContractItemReply {
+    pub(crate) fn offered(it: &eve_db::InventoryItemRecord) -> Self {
         let me = it.dynamic_attributes.get(&1112).copied().unwrap_or(0.0) as i64;
         let te = it.dynamic_attributes.get(&1113).copied().unwrap_or(0.0) as i64;
         let dmg = it.dynamic_attributes.get(&3).copied().unwrap_or(0.0);
-        let runs_rep = it.blueprint_runs_remaining.map(|r| PyRep::Integer(r as i64)).unwrap_or(PyRep::Integer(-1));
-        let mut dyn_entries: Vec<(PyRep, PyRep)> = it.dynamic_attributes.iter().map(|(&attr_id, &val)| (PyRep::Integer(attr_id as i64), PyRep::Real(val))).collect();
-        dyn_entries.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
-        Some(PyRep::keyval([
-            ("itemID", PyRep::Integer(it.item_id)), ("typeID", PyRep::Integer(it.type_id as i64)),
-            ("quantity", PyRep::Integer(it.quantity as i64)), ("singleton", PyRep::Bool(it.singleton)),
-            ("copy", PyRep::Bool(it.is_blueprint_copy)), ("isBlueprintCopy", PyRep::Bool(it.is_blueprint_copy)),
-            ("materialEfficiency", PyRep::Integer(me)), ("timeEfficiency", PyRep::Integer(te)),
-            ("runs", runs_rep.clone()), ("runsRemaining", runs_rep), ("damage", PyRep::Real(dmg)),
-            ("sourceMutaplasmidID", it.source_mutaplasmid_id.map(|m| PyRep::Integer(m as i64)).unwrap_or(PyRep::None)),
-            ("dynamicAttributes", PyRep::Dict(dyn_entries)),
-        ]))
-    }).collect());
-    let req_rep = PyRep::List(c.requested_items.iter().map(|&(tid, qty)| PyRep::keyval([("typeID", PyRep::Integer(tid as i64)), ("quantity", PyRep::Integer(qty as i64))])).collect());
-    let bids_rep = PyRep::List(c.bid_history.iter().map(|&(bidder_id, amount, ts)| PyRep::keyval([("bidderID", PyRep::Integer(bidder_id)), ("amountISK", PyRep::Real(amount.to_wire_f64())), ("timestampUnix", PyRep::Integer(ts as i64))])).collect());
-    let availability = if c.availability.is_empty() { "Public".to_string() } else { c.availability.clone() };
-    let primary = c.item_ids.first().and_then(|id| snap.items.get(id));
-    let primary_me = primary.map(|it| it.dynamic_attributes.get(&1112).copied().unwrap_or(0.0) as i64).unwrap_or(0);
-    let primary_te = primary.map(|it| it.dynamic_attributes.get(&1113).copied().unwrap_or(0.0) as i64).unwrap_or(0);
-    let primary_copy = primary.map(|it| it.is_blueprint_copy).unwrap_or(false);
-    let primary_runs = primary.and_then(|it| it.blueprint_runs_remaining).map(|r| PyRep::Integer(r as i64)).unwrap_or(PyRep::Integer(-1));
-    let primary_dmg = primary.map(|it| it.dynamic_attributes.get(&3).copied().unwrap_or(0.0)).unwrap_or(0.0);
-    let primary_muta = primary.and_then(|it| it.source_mutaplasmid_id).map(|m| PyRep::Integer(m as i64)).unwrap_or(PyRep::None);
-    let (start_sys_id, start_reg_id) = contract_location_ids(sde, snap, c.start_station_id);
-    let (end_sys_id, end_reg_id) = contract_location_ids(sde, snap, c.end_station_id);
-    let base_fields = [
-        ("contractID", PyRep::Integer(c.contract_id)), ("issuerID", PyRep::Integer(c.issuer_id)),
-        ("issuerCorpID", PyRep::Integer(c.issuer_corp_id)), ("acceptorID", c.acceptor_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-        ("assigneeID", PyRep::Integer(c.assignee_id)), ("availability", PyRep::String(availability)),
-        ("type", PyRep::String(c.contract_type.clone())), ("status", PyRep::String(c.status.clone())),
-        ("startStationID", PyRep::Integer(c.start_station_id)), ("endStationID", PyRep::Integer(c.end_station_id)),
-        ("startSolarSystemID", PyRep::Integer(start_sys_id)), ("endSolarSystemID", PyRep::Integer(end_sys_id)),
-        ("startRegionID", PyRep::Integer(start_reg_id)), ("endRegionID", PyRep::Integer(end_reg_id)),
-        ("price", PyRep::Real(c.price.to_wire_f64())), ("reward", PyRep::Real(c.reward.to_wire_f64())),
-        ("collateral", PyRep::Real(c.collateral.to_wire_f64())), ("buyout", PyRep::Real(c.buyout.to_wire_f64())),
-        ("currentBid", PyRep::Real(c.current_bid.to_wire_f64())), ("currentBidderID", c.current_bidder_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-        ("itemIDs", items_rep), ("items", detailed_items_rep), ("requestedItems", req_rep), ("bids", bids_rep),
-        ("expirationUnix", PyRep::Integer(c.expiration_unix as i64)), ("dateIssuedUnix", PyRep::Integer(c.date_issued_unix as i64)),
-        ("numDays", PyRep::Integer(c.num_days.max(1) as i64)), ("title", PyRep::String(c.title.clone())), ("forCorp", PyRep::Bool(c.for_corp)),
-        ("copy", PyRep::Bool(primary_copy)), ("isBlueprintCopy", PyRep::Bool(primary_copy)),
-        ("materialEfficiency", PyRep::Integer(primary_me)), ("timeEfficiency", PyRep::Integer(primary_te)),
-        ("runs", primary_runs.clone()), ("runsRemaining", primary_runs), ("damage", PyRep::Real(primary_dmg)),
-        ("sourceMutaplasmidID", primary_muta),
-    ];
-    let contract_kv = PyRep::keyval(base_fields.clone());
-    let mut outer: Vec<(&str, PyRep)> = base_fields.into();
-    outer.push(("contract", contract_kv));
-    PyRep::keyval(outer)
+        let mut dyn_entries: Vec<(i64, f64)> = it
+            .dynamic_attributes
+            .iter()
+            .map(|(&attr_id, &val)| (i64::from(attr_id), val))
+            .collect();
+        dyn_entries.sort_by_key(|(k, _)| *k);
+        Self {
+            item_id: it.item_id,
+            type_id: i64::from(it.type_id),
+            quantity: i64::from(it.quantity).max(1),
+            in_crate: true,
+            parent_id: 0,
+            flag_id: 0,
+            singleton: it.singleton,
+            copy: it.is_blueprint_copy,
+            material_efficiency: me,
+            time_efficiency: te,
+            runs_remaining: it.blueprint_runs_remaining,
+            damage: dmg,
+            source_mutaplasmid_id: it.source_mutaplasmid_id,
+            dynamic_attributes: dyn_entries,
+        }
+    }
+
+    pub(crate) fn requested(type_id: u32, quantity: u32) -> Self {
+        Self {
+            item_id: 0,
+            type_id: i64::from(type_id),
+            quantity: i64::from(quantity).max(1),
+            in_crate: false,
+            parent_id: 0,
+            flag_id: 0,
+            singleton: false,
+            copy: false,
+            material_efficiency: 0,
+            time_efficiency: 0,
+            runs_remaining: None,
+            damage: 0.0,
+            source_mutaplasmid_id: None,
+            dynamic_attributes: Vec::new(),
+        }
+    }
+
+    pub(crate) fn to_pyrep(&self) -> PyRep {
+        let runs_rep = self
+            .runs_remaining
+            .map(|r| PyRep::Integer(i64::from(r)))
+            .unwrap_or(PyRep::Integer(-1));
+        if self.in_crate {
+            let dyn_entries = self
+                .dynamic_attributes
+                .iter()
+                .map(|&(attr_id, val)| (PyRep::Integer(attr_id), PyRep::Real(val)))
+                .collect();
+            PyRep::keyval([
+                ("itemID", PyRep::Integer(self.item_id)),
+                ("typeID", PyRep::Integer(self.type_id)),
+                ("itemTypeID", PyRep::Integer(self.type_id)),
+                ("quantity", PyRep::Integer(self.quantity)),
+                ("inCrate", PyRep::Bool(true)),
+                ("parentID", PyRep::Integer(self.parent_id)),
+                ("flagID", PyRep::Integer(self.flag_id)),
+                ("singleton", PyRep::Bool(self.singleton)),
+                ("copy", PyRep::Bool(self.copy)),
+                ("isBlueprintCopy", PyRep::Bool(self.copy)),
+                ("materialEfficiency", PyRep::Integer(self.material_efficiency)),
+                ("timeEfficiency", PyRep::Integer(self.time_efficiency)),
+                ("runs", runs_rep.clone()),
+                ("runsRemaining", runs_rep),
+                ("damage", PyRep::Real(self.damage)),
+                (
+                    "sourceMutaplasmidID",
+                    self.source_mutaplasmid_id
+                        .map(|m| PyRep::Integer(i64::from(m)))
+                        .unwrap_or(PyRep::None),
+                ),
+                ("dynamicAttributes", PyRep::Dict(dyn_entries)),
+            ])
+        } else {
+            PyRep::keyval([
+                ("typeID", PyRep::Integer(self.type_id)),
+                ("itemTypeID", PyRep::Integer(self.type_id)),
+                ("quantity", PyRep::Integer(self.quantity)),
+                ("inCrate", PyRep::Bool(false)),
+                ("itemID", PyRep::Integer(self.item_id)),
+                ("parentID", PyRep::Integer(self.parent_id)),
+                ("flagID", PyRep::Integer(self.flag_id)),
+                ("copy", PyRep::Bool(self.copy)),
+            ])
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ContractBidReply {
+    pub bidder_id: i64,
+    pub amount_isk: f64,
+    pub timestamp_unix: i64,
+}
+
+impl ContractBidReply {
+    pub(crate) fn to_pyrep(&self) -> PyRep {
+        PyRep::keyval([
+            ("bidderID", PyRep::Integer(self.bidder_id)),
+            ("amount", PyRep::Real(self.amount_isk)),
+            ("amountISK", PyRep::Real(self.amount_isk)),
+            ("timestampUnix", PyRep::Integer(self.timestamp_unix)),
+        ])
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ContractReply {
+    pub contract_id: i64,
+    pub issuer_id: i64,
+    pub issuer_corp_id: i64,
+    pub acceptor_id: i64,
+    pub assignee_id: i64,
+    pub availability_code: i64,
+    pub type_code: i64,
+    pub status_code: i64,
+    pub start_station_id: i64,
+    pub end_station_id: i64,
+    pub start_solar_system_id: i64,
+    pub end_solar_system_id: i64,
+    pub start_region_id: i64,
+    pub end_region_id: i64,
+    pub price: f64,
+    pub reward: f64,
+    pub collateral: f64,
+    pub buyout: f64,
+    pub current_bid: f64,
+    pub current_bidder_id: Option<i64>,
+    pub volume: f64,
+    pub crate_id: i64,
+    pub item_ids: Vec<i64>,
+    pub items: Vec<ContractItemReply>,
+    pub requested_items: Vec<(u32, u32)>,
+    pub bids: Vec<ContractBidReply>,
+    pub date_issued_ft: i64,
+    pub date_expired_ft: i64,
+    pub date_accepted_ft: i64,
+    pub date_completed_ft: i64,
+    pub expiration_unix: i64,
+    pub date_issued_unix: i64,
+    pub num_days: i64,
+    pub title: String,
+    pub for_corp: bool,
+    pub primary_copy: bool,
+    pub primary_me: i64,
+    pub primary_te: i64,
+    pub primary_runs: Option<u32>,
+    pub primary_dmg: f64,
+    pub primary_mutaplasmid_id: Option<u32>,
+}
+
+impl ContractReply {
+    pub(crate) fn from_record(
+        c: &ContractRecord,
+        snap: &eve_db::WorldStateSnapshot,
+        sde: &eve_sde::SdeRegistry,
+    ) -> Self {
+        let mut items: Vec<ContractItemReply> = c
+            .item_ids
+            .iter()
+            .filter_map(|&id| snap.items.get(&id).map(ContractItemReply::offered))
+            .collect();
+        for &(tid, qty) in &c.requested_items {
+            if tid > 0 {
+                items.push(ContractItemReply::requested(tid, qty));
+            }
+        }
+        let bids = c
+            .bid_history
+            .iter()
+            .map(|&(bidder_id, amount, ts)| ContractBidReply {
+                bidder_id,
+                amount_isk: amount.to_wire_f64(),
+                timestamp_unix: ts as i64,
+            })
+            .collect();
+        let availability_str = if c.availability.is_empty() {
+            "Public"
+        } else {
+            c.availability.as_str()
+        };
+        let primary = c.item_ids.first().and_then(|id| snap.items.get(id));
+        let (start_sys_id, start_reg_id) = contract_location_ids(sde, snap, c.start_station_id);
+        let (raw_end_sys_id, end_reg_id) = contract_location_ids(sde, snap, c.end_station_id);
+        let end_sys_id = if raw_end_sys_id > 0 {
+            raw_end_sys_id
+        } else {
+            start_sys_id
+        };
+        let date_issued_unix = if c.date_issued_unix > 0 {
+            c.date_issued_unix as i64
+        } else {
+            1_700_000_000
+        };
+        let expiration_unix = if c.expiration_unix > 0 {
+            c.expiration_unix as i64
+        } else {
+            1_700_086_400
+        };
+        let date_issued_ft = unix_to_contract_filetime(date_issued_unix);
+        let date_expired_ft = unix_to_contract_filetime(expiration_unix);
+        let date_accepted_ft = unix_to_contract_filetime(1_700_000_000);
+        Self {
+            contract_id: c.contract_id,
+            issuer_id: c.issuer_id,
+            issuer_corp_id: c.issuer_corp_id,
+            acceptor_id: c.acceptor_id.unwrap_or(0),
+            assignee_id: c.assignee_id,
+            availability_code: contract_availability_code(availability_str),
+            type_code: contract_type_code(&c.contract_type),
+            status_code: contract_status_code(&c.status),
+            start_station_id: c.start_station_id,
+            end_station_id: c.end_station_id,
+            start_solar_system_id: start_sys_id,
+            end_solar_system_id: end_sys_id,
+            start_region_id: start_reg_id,
+            end_region_id: end_reg_id,
+            price: c.price.to_wire_f64(),
+            reward: c.reward.to_wire_f64(),
+            collateral: c.collateral.to_wire_f64(),
+            buyout: c.buyout.to_wire_f64(),
+            current_bid: c.current_bid.to_wire_f64(),
+            current_bidder_id: c.current_bidder_id,
+            volume: 1.0,
+            crate_id: 0,
+            item_ids: c.item_ids.clone(),
+            items,
+            requested_items: c.requested_items.clone(),
+            bids,
+            date_issued_ft,
+            date_expired_ft,
+            date_accepted_ft,
+            date_completed_ft: date_accepted_ft,
+            expiration_unix: c.expiration_unix as i64,
+            date_issued_unix: c.date_issued_unix as i64,
+            num_days: i64::from(c.num_days.max(1)),
+            title: c.title.clone(),
+            for_corp: c.for_corp,
+            primary_copy: primary.map(|it| it.is_blueprint_copy).unwrap_or(false),
+            primary_me: primary
+                .map(|it| it.dynamic_attributes.get(&1112).copied().unwrap_or(0.0) as i64)
+                .unwrap_or(0),
+            primary_te: primary
+                .map(|it| it.dynamic_attributes.get(&1113).copied().unwrap_or(0.0) as i64)
+                .unwrap_or(0),
+            primary_runs: primary.and_then(|it| it.blueprint_runs_remaining),
+            primary_dmg: primary
+                .map(|it| it.dynamic_attributes.get(&3).copied().unwrap_or(0.0))
+                .unwrap_or(0.0),
+            primary_mutaplasmid_id: primary.and_then(|it| it.source_mutaplasmid_id),
+        }
+    }
+
+    pub(crate) fn items_pyrep(&self) -> PyRep {
+        PyRep::List(self.items.iter().map(ContractItemReply::to_pyrep).collect())
+    }
+
+    pub(crate) fn bids_pyrep(&self) -> PyRep {
+        PyRep::List(self.bids.iter().map(ContractBidReply::to_pyrep).collect())
+    }
+
+    fn base_fields(&self) -> Vec<(&'static str, PyRep)> {
+        let item_ids_rep = PyRep::List(self.item_ids.iter().copied().map(PyRep::Integer).collect());
+        let req_rep = PyRep::List(
+            self.requested_items
+                .iter()
+                .map(|&(tid, qty)| {
+                    PyRep::keyval([
+                        ("typeID", PyRep::Integer(i64::from(tid))),
+                        ("quantity", PyRep::Integer(i64::from(qty))),
+                    ])
+                })
+                .collect(),
+        );
+        let primary_runs = self
+            .primary_runs
+            .map(|r| PyRep::Integer(i64::from(r)))
+            .unwrap_or(PyRep::Integer(-1));
+        let primary_muta = self
+            .primary_mutaplasmid_id
+            .map(|m| PyRep::Integer(i64::from(m)))
+            .unwrap_or(PyRep::None);
+        vec![
+            ("contractID", PyRep::Integer(self.contract_id)),
+            ("issuerID", PyRep::Integer(self.issuer_id)),
+            ("issuerCorpID", PyRep::Integer(self.issuer_corp_id)),
+            ("acceptorID", PyRep::Integer(self.acceptor_id)),
+            ("assigneeID", PyRep::Integer(self.assignee_id)),
+            ("availability", PyRep::Integer(self.availability_code)),
+            ("type", PyRep::Integer(self.type_code)),
+            ("status", PyRep::Integer(self.status_code)),
+            ("startStationID", PyRep::Integer(self.start_station_id)),
+            ("endStationID", PyRep::Integer(self.end_station_id)),
+            ("startSolarSystemID", PyRep::Integer(self.start_solar_system_id)),
+            ("endSolarSystemID", PyRep::Integer(self.end_solar_system_id)),
+            ("startRegionID", PyRep::Integer(self.start_region_id)),
+            ("endRegionID", PyRep::Integer(self.end_region_id)),
+            ("price", PyRep::Real(self.price)),
+            ("reward", PyRep::Real(self.reward)),
+            ("collateral", PyRep::Real(self.collateral)),
+            ("buyout", PyRep::Real(self.buyout)),
+            ("currentBid", PyRep::Real(self.current_bid)),
+            (
+                "currentBidderID",
+                self.current_bidder_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+            ),
+            ("volume", PyRep::Real(self.volume)),
+            ("crateID", PyRep::Integer(self.crate_id)),
+            ("itemIDs", item_ids_rep),
+            ("items", self.items_pyrep()),
+            ("requestedItems", req_rep),
+            ("bids", self.bids_pyrep()),
+            ("numBids", PyRep::Integer(self.bids.len() as i64)),
+            ("dateIssued", PyRep::Integer(self.date_issued_ft)),
+            ("dateExpired", PyRep::Integer(self.date_expired_ft)),
+            ("dateAccepted", PyRep::Integer(self.date_accepted_ft)),
+            ("dateCompleted", PyRep::Integer(self.date_completed_ft)),
+            ("expirationUnix", PyRep::Integer(self.expiration_unix)),
+            ("dateIssuedUnix", PyRep::Integer(self.date_issued_unix)),
+            ("numDays", PyRep::Integer(self.num_days)),
+            ("title", PyRep::String(self.title.clone())),
+            ("forCorp", PyRep::Bool(self.for_corp)),
+            ("copy", PyRep::Bool(self.primary_copy)),
+            ("isBlueprintCopy", PyRep::Bool(self.primary_copy)),
+            ("materialEfficiency", PyRep::Integer(self.primary_me)),
+            ("timeEfficiency", PyRep::Integer(self.primary_te)),
+            ("runs", primary_runs.clone()),
+            ("runsRemaining", primary_runs),
+            ("damage", PyRep::Real(self.primary_dmg)),
+            ("sourceMutaplasmidID", primary_muta),
+        ]
+    }
+
+    pub(crate) fn inner_contract_pyrep(&self) -> PyRep {
+        PyRep::keyval(self.base_fields())
+    }
+
+    pub(crate) fn to_pyrep(&self) -> PyRep {
+        let base = self.base_fields();
+        let contract_kv = PyRep::keyval(base.clone());
+        let mut outer = base;
+        outer.push(("contract", contract_kv));
+        PyRep::keyval(outer)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ContractListReply {
+    pub contracts: Vec<ContractReply>,
+}
+
+impl ContractListReply {
+    pub(crate) fn from_records(
+        list: &[ContractRecord],
+        snap: &eve_db::WorldStateSnapshot,
+        sde: &eve_sde::SdeRegistry,
+    ) -> Self {
+        Self {
+            contracts: list
+                .iter()
+                .map(|c| ContractReply::from_record(c, snap, sde))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn to_pyrep(&self) -> PyRep {
+        let mut contracts_rep = Vec::with_capacity(self.contracts.len());
+        let mut items_by_cid = Vec::with_capacity(self.contracts.len());
+        for c in &self.contracts {
+            items_by_cid.push((PyRep::Integer(c.contract_id), c.items_pyrep()));
+            contracts_rep.push(c.to_pyrep());
+        }
+        PyRep::keyval([
+            ("contracts", PyRep::List(contracts_rep)),
+            ("items", PyRep::Dict(items_by_cid)),
+        ])
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ContractSearchEntry {
+    pub contract: ContractReply,
+}
+
+impl ContractSearchEntry {
+    pub(crate) fn to_pyrep(&self) -> PyRep {
+        PyRep::keyval([
+            ("contract", self.contract.inner_contract_pyrep()),
+            ("items", self.contract.items_pyrep()),
+            ("bids", self.contract.bids_pyrep()),
+            ("numBids", PyRep::Integer(self.contract.bids.len() as i64)),
+        ])
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ContractSearchReply {
+    pub contracts: Vec<ContractSearchEntry>,
+    pub max_results: i64,
+    pub search_time: i64,
+}
+
+impl ContractSearchReply {
+    pub(crate) fn from_records(
+        list: &[ContractRecord],
+        snap: &eve_db::WorldStateSnapshot,
+        sde: &eve_sde::SdeRegistry,
+    ) -> Self {
+        Self {
+            contracts: list
+                .iter()
+                .map(|c| ContractSearchEntry {
+                    contract: ContractReply::from_record(c, snap, sde),
+                })
+                .collect(),
+            max_results: 100,
+            search_time: 1,
+        }
+    }
+
+    pub(crate) fn to_pyrep(&self) -> PyRep {
+        let entries = self
+            .contracts
+            .iter()
+            .map(ContractSearchEntry::to_pyrep)
+            .collect::<Vec<_>>();
+        let n = entries.len() as i64;
+        PyRep::keyval([
+            ("contracts", PyRep::List(entries)),
+            ("numFound", PyRep::Integer(n)),
+            ("maxResults", PyRep::Integer(self.max_results)),
+            ("searchTime", PyRep::Integer(self.search_time)),
+        ])
+    }
 }
 
 fn check_contract_visibility(
@@ -938,11 +1404,11 @@ pub fn handle(
                     date_issued_unix: now_unix, title, for_corp, num_days,
                 });
                 let notify_delta = delta.finish(snap);
-                Ok((id, exp_unix, broker_fee_isk, deposit_isk, max_slots, notify_delta))
+                Ok((id, notify_delta))
             });
 
             match res {
-                Ok((cid, exp_unix, broker_fee_isk, deposit_isk, max_slots, notify_delta)) => {
+                Ok((cid, notify_delta)) => {
                     notify_delta.emit(ctx);
                     let escrowed_ids = ctx.db.with_snapshot(|s| s.contracts.get(&cid).map(|c| c.item_ids.clone()).unwrap_or_default());
                     for iid in escrowed_ids {
@@ -950,12 +1416,7 @@ pub fn handle(
                     }
                     notify_contract(ctx, char_id, "OnContractCreated", cid);
                     if assignee_id > 0 { notify_contract(ctx, assignee_id, "OnContractAssigned", cid); }
-                    Some(Ok(PyRep::keyval([
-                        ("contractID", PyRep::Integer(cid)), ("status", PyRep::String("Outstanding".into())),
-                        ("expirationUnix", PyRep::Integer(exp_unix as i64)), ("numDays", PyRep::Integer(num_days as i64)),
-                        ("brokerFeeISK", PyRep::Real(broker_fee_isk)), ("depositISK", PyRep::Real(deposit_isk)),
-                        ("maxContractsLimit", PyRep::Integer(max_slots as i64)),
-                    ])))
+                    Some(Ok(CreatedContractsReply::single(cid).to_pyrep()))
                 }
                 Err(e) => Some(Err(e)),
             }
@@ -1931,7 +2392,7 @@ pub fn handle(
                 if !check_contract_visibility(c, char_id, caller_corp, caller_alliance) && c.acceptor_id != Some(char_id) {
                     return Err(rpc_err("ContractAccessDenied", format!("Character {char_id} cannot view private contract {cid}")));
                 }
-                Ok(contract_to_pyrep(c, snap, &ctx.sde))
+                Ok(ContractReply::from_record(c, snap, &ctx.sde).to_pyrep())
             });
             if res.is_ok() && method == "GetContractInfo" { notify_contract(ctx, char_id, "OnShowContract", cid); }
             Some(res)
@@ -1949,7 +2410,7 @@ pub fn handle(
             let caller_alliance = session.alliance_id;
             let now_unix = ctx.now_unix();
 
-            let rows = ctx.db.try_with_mut_snapshot(|snap| {
+            let reply = ctx.db.try_with_mut_snapshot(|snap| {
                     let cids: Vec<i64> = snap.contracts.keys().copied().collect();
                     for cid in cids { let _ = snap.resolve_expired_contract(cid, now_unix); }
                     let mut list: Vec<ContractRecord> = snap.contracts.values().filter(|c| {
@@ -1981,9 +2442,9 @@ pub fn handle(
                                 && item_type_ok
                         }).cloned().collect();
                     list.sort_by_key(|c| c.contract_id);
-                    Ok::<_, std::convert::Infallible>(list.iter().map(|c| contract_to_pyrep(c, snap, &ctx.sde)).collect::<Vec<_>>())
+                    Ok::<_, std::convert::Infallible>(ContractSearchReply::from_records(&list, snap, &ctx.sde))
                 }).unwrap();
-            Some(Ok(PyRep::List(rows)))
+            Some(Ok(reply.to_pyrep()))
         }
 
         "GetMyCurrentContractList" | "GetContractList" | "GetContractListForOwner" => {
@@ -2018,7 +2479,7 @@ pub fn handle(
                 }))
                 .flatten();
             let now_unix = ctx.now_unix();
-            let rows = ctx.db.try_with_mut_snapshot(|snap| {
+            let reply = ctx.db.try_with_mut_snapshot(|snap| {
                 let cids: Vec<i64> = snap.contracts.keys().copied().collect();
                 for cid in cids { let _ = snap.resolve_expired_contract(cid, now_unix); }
                 let owner_is_corp = (owner_id == caller_corp && caller_corp != 0) || snap.corporations.contains_key(&owner_id);
@@ -2066,9 +2527,9 @@ pub fn handle(
                     status_ok && type_ok && owner_ok
                 }).cloned().collect();
                 list.sort_by_key(|c| c.contract_id);
-                Ok::<_, std::convert::Infallible>(list.iter().map(|c| contract_to_pyrep(c, snap, &ctx.sde)).collect::<Vec<_>>())
+                Ok::<_, std::convert::Infallible>(ContractListReply::from_records(&list, snap, &ctx.sde))
             }).unwrap();
-            Some(Ok(PyRep::List(rows)))
+            Some(Ok(reply.to_pyrep()))
         }
 
         "GetMyExpiredContractList" => {
@@ -2078,7 +2539,7 @@ pub fn handle(
                 .or_else(|| kwargs.get("forCorp").and_then(|v| match v { PyRep::Bool(b) => Some(*b), _ => None }))
                 .unwrap_or(false);
             let now_unix = ctx.now_unix();
-            let rows = ctx.db.try_with_mut_snapshot(|snap| {
+            let reply = ctx.db.try_with_mut_snapshot(|snap| {
                 let cids: Vec<i64> = snap.contracts.keys().copied().collect();
                 for cid in cids { let _ = snap.resolve_expired_contract(cid, now_unix); }
                 let mut list: Vec<ContractRecord> = snap.contracts.values().filter(|c| {
@@ -2094,9 +2555,9 @@ pub fn handle(
                         }
                 }).cloned().collect();
                 list.sort_by_key(|c| c.contract_id);
-                Ok::<_, std::convert::Infallible>(list.iter().map(|c| contract_to_pyrep(c, snap, &ctx.sde)).collect::<Vec<_>>())
+                Ok::<_, std::convert::Infallible>(ContractListReply::from_records(&list, snap, &ctx.sde))
             }).unwrap();
-            Some(Ok(PyRep::List(rows)))
+            Some(Ok(reply.to_pyrep()))
         }
 
         "GetMyBids" => {
@@ -2109,7 +2570,7 @@ pub fn handle(
                 .or_else(|| kwargs.get("forCorp").and_then(parse_flag).filter(|&b| b).and(session.corporation_id))
                 .unwrap_or(char_id);
             let now_unix = ctx.now_unix();
-            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<Vec<PyRep>, BridgeRpcError> {
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<ContractListReply, BridgeRpcError> {
                 if owner_id != char_id {
                     let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
                     let allowed = owner_id == caller_corp
@@ -2137,9 +2598,9 @@ pub fn handle(
                     }
                 }).cloned().collect();
                 list.sort_by_key(|c| c.contract_id);
-                Ok(list.iter().map(|c| contract_to_pyrep(c, snap, &ctx.sde)).collect())
+                Ok(ContractListReply::from_records(&list, snap, &ctx.sde))
             });
-            Some(res.map(PyRep::List))
+            Some(res.map(|reply| reply.to_pyrep()))
         }
 
         "GetLoginInfo" => {

@@ -248,7 +248,10 @@ async fn test_esi_live_contracts_character_corporation_and_public() {
     )
     .await
     .expect("Create Auction contract");
-    let auc_id = auc_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let auc_id = match &auc_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => auc_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap(),
+    };
 
     // Pilot 2 places bid on Auction
     rpc(
@@ -288,7 +291,10 @@ async fn test_esi_live_contracts_character_corporation_and_public() {
     )
     .await
     .expect("Create ItemExchange contract");
-    let ie_id = ie_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let ie_id = match &ie_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => ie_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap(),
+    };
 
     // 3. Create Corporation contract
     ctx.db.with_mut_snapshot(|snap| {
@@ -323,7 +329,10 @@ async fn test_esi_live_contracts_character_corporation_and_public() {
     )
     .await
     .expect("Create Corp contract");
-    let corp_c_id = corp_c_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let corp_c_id = match &corp_c_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => corp_c_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap(),
+    };
 
     let p1_char_tok = issue_sso_token(&ctx, "demo", "demo-secret", PILOT_1, &["esi-contracts.read_character_contracts.v1"]);
     let p1_corp_tok = issue_sso_token(&ctx, "demo", "demo-secret", PILOT_1, &["esi-contracts.read_corporation_contracts.v1"]);

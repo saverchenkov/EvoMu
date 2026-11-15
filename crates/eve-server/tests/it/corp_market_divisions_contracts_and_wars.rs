@@ -206,9 +206,18 @@ async fn test_break_plastic_wrap_requires_colocation_and_fails_courier_collatera
             PyRep::List(vec![PyRep::Integer(cargo_id)]),
         ],
     ).await.expect("Create Courier contract");
-    let contract_id = c_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let contract_id = match &c_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => c_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap(),
+    };
 
-    let deposit_isk = c_rep.dict_get("depositISK").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let deposit_isk = ctx.db.with_snapshot(|s| {
+        s.fleet_and_social_ops
+            .contract_deposits
+            .get(&contract_id)
+            .map(|c| c.to_wire_f64())
+            .unwrap_or(0.0)
+    });
     let p1_bal_after_create = ctx.db.get_character(P1).unwrap().balance.0;
     rpc(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(contract_id)]).await.expect("AcceptContract");
     let wrap_id = ctx.db.with_snapshot(|s| {

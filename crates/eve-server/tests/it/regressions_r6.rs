@@ -258,10 +258,11 @@ async fn test_review_r6_np0_np1_regressions() {
         )
         .await
         .unwrap();
-    let PyRep::KeyVal(c_kv) = c_res else {
-        panic!("Expected contract KeyVal");
+    let cid = match c_res {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        PyRep::KeyVal(c_kv) => c_kv.get("contractID").unwrap().as_i64().unwrap(),
+        _ => panic!("Expected contract List or KeyVal"),
     };
-    let cid = c_kv.get("contractID").unwrap().as_i64().unwrap();
 
     // Self-accept by issuer (s2) is rejected
     let self_acc = ctx
@@ -316,10 +317,11 @@ async fn test_review_r6_np0_np1_regressions() {
         )
         .await
         .unwrap();
-    let PyRep::KeyVal(ca_kv) = c_amarr else {
-        panic!("Expected ca KeyVal");
+    let cid_amarr = match c_amarr {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        PyRep::KeyVal(ca_kv) => ca_kv.get("contractID").unwrap().as_i64().unwrap(),
+        _ => panic!("Expected ca List or KeyVal"),
     };
-    let cid_amarr = ca_kv.get("contractID").unwrap().as_i64().unwrap();
 
     let wrong_start = ctx
         .dispatch_rpc(
@@ -373,10 +375,11 @@ async fn test_review_r6_np0_np1_regressions() {
         )
         .await
         .unwrap();
-    let PyRep::KeyVal(c2_kv) = c2_res else {
-        panic!("Expected c2 KeyVal");
+    let cid2 = match c2_res {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        PyRep::KeyVal(c2_kv) => c2_kv.get("contractID").unwrap().as_i64().unwrap(),
+        _ => panic!("Expected c2 List or KeyVal"),
     };
-    let cid2 = c2_kv.get("contractID").unwrap().as_i64().unwrap();
 
     let acc_c2 = ctx
         .dispatch_rpc(

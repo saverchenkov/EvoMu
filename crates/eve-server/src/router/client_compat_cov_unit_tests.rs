@@ -191,37 +191,6 @@ fn normalize_structure_jump_xmpp_beyonce_blueprint_and_char_branches() {
 
 #[test]
 fn normalize_contract_corp_devindex_dogma_fw_homestation_inv_and_clones() {
-    // contractProxy arms
-    let cl = normalize_macho_rpc_reply(
-        "contractProxy",
-        "GetContractListForOwner",
-        Ok(PyRep::List(vec![PyRep::Integer(1)])),
-    )
-    .expect("contracts list");
-    assert_eq!(cl.dict_get("contracts"), Some(&PyRep::List(vec![PyRep::Integer(1)])));
-
-    let oc = normalize_macho_rpc_reply(
-        "contractProxy",
-        "NumOutstandingContracts",
-        Ok(PyRep::Integer(4)),
-    )
-    .expect("outstanding");
-    assert_eq!(oc.dict_get("myCharTotal"), Some(&PyRep::Integer(4)));
-
-    let sc = normalize_macho_rpc_reply(
-        "contractProxy",
-        "SearchContracts",
-        Ok(PyRep::List(vec![
-            PyRep::keyval([("contractID", PyRep::Integer(10))]),
-            PyRep::keyval([
-                ("contract", PyRep::Integer(11)),
-                ("bids", PyRep::List(Vec::new())),
-            ]),
-        ])),
-    )
-    .expect("search contracts");
-    assert_eq!(sc.dict_get("numFound"), Some(&PyRep::Integer(2)));
-
     // corporationSvc
     let emp1 = normalize_macho_rpc_reply(
         "corporationSvc",

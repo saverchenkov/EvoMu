@@ -156,7 +156,10 @@ async fn test_b22_contracts_blueprints_and_plastic_wrap_break() {
     let create_ie = rpc_kw(&ctx, &mut sess1, "contractProxy", "CreateContract", &[ie_params], &confirm_kw)
         .await
         .expect("CreateContract ItemExchange");
-    let ie_cid = field(&create_ie, "contractID").as_i64().unwrap_or_else(|| create_ie.as_i64().unwrap());
+    let ie_cid = match &create_ie {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => field(&create_ie, "contractID").as_i64().unwrap_or_else(|| create_ie.as_i64().unwrap()),
+    };
 
     // Inspect via contractProxy.GetContract & contractProxy.SearchContracts
     let info = rpc(&ctx, &mut sess2, "contractProxy", "GetContract", &[PyRep::Integer(ie_cid)])
@@ -180,15 +183,16 @@ async fn test_b22_contracts_blueprints_and_plastic_wrap_break() {
     let search = rpc_kw(&ctx, &mut sess2, "contractProxy", "SearchContracts", &[], &search_kw)
         .await
         .expect("contractProxy.SearchContracts");
-    let PyRep::List(found_contracts) = search else {
+    let PyRep::List(found_contracts) = field(&search, "contracts") else {
         panic!("expected list from SearchContracts");
     };
-    let found_ie = found_contracts
+    let found_ie_entry = found_contracts
         .iter()
-        .find(|c| field(c, "contractID") == PyRep::Integer(ie_cid))
+        .find(|c| field(&field(c, "contract"), "contractID") == PyRep::Integer(ie_cid))
         .expect("ItemExchange contract in SearchContracts");
-    assert_eq!(field(found_ie, "title"), PyRep::String("BPO + BPC + Abyssal".into()));
-    assert_eq!(field(found_ie, "type"), PyRep::String("ItemExchange".into()));
+    let found_ie = field(found_ie_entry, "contract");
+    assert_eq!(field(&found_ie, "title"), PyRep::String("BPO + BPC + Abyssal".into()));
+    assert_eq!(field(&found_ie, "type"), PyRep::Integer(1));
 
     // Accept contract (V24 2-arg: contractID, forCorp) and verify singleton metadata preserved
     rpc(&ctx, &mut sess2, "contractProxy", "AcceptContract", &[PyRep::Integer(ie_cid), PyRep::Bool(false)])
@@ -231,7 +235,10 @@ async fn test_b22_contracts_blueprints_and_plastic_wrap_break() {
     let create_courier = rpc_kw(&ctx, &mut sess1, "contractProxy", "CreateContract", &[courier_params], &confirm_kw)
         .await
         .expect("CreateContract Courier");
-    let courier_cid = field(&create_courier, "contractID").as_i64().unwrap_or_else(|| create_courier.as_i64().unwrap());
+    let courier_cid = match &create_courier {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => field(&create_courier, "contractID").as_i64().unwrap_or_else(|| create_courier.as_i64().unwrap()),
+    };
     rpc(&ctx, &mut sess2, "contractProxy", "AcceptContract", &[PyRep::Integer(courier_cid), PyRep::Bool(false)])
         .await
         .expect("AcceptContract Courier");

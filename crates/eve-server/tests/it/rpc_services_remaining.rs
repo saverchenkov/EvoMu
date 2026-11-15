@@ -216,12 +216,12 @@ async fn contract_proxy_notifications_bulk_delete_and_dockable_items() {
 
     // 2. DeleteContractNotification removes outbid auction 7001 from GetMyBids
     let bids_before = call_rpc(&ctx, &mut sess, "contractProxy", "GetMyBids", &[PyRep::Bool(false)]).await.expect("GetMyBids before");
-    assert!(matches!(&bids_before, PyRep::List(l) if l.len() == 1));
+    assert!(matches!(bids_before.dict_get("contracts").unwrap_or(&bids_before), PyRep::List(l) if l.len() == 1));
     let del_c_notif = call_rpc(&ctx, &mut sess, "contractProxy", "DeleteContractNotification", &[PyRep::Integer(7001), PyRep::Integer(0)])
         .await.expect("DeleteContractNotification");
     assert_eq!(del_c_notif, PyRep::Bool(true));
     let bids_after = call_rpc(&ctx, &mut sess, "contractProxy", "GetMyBids", &[PyRep::Bool(false)]).await.expect("GetMyBids after");
-    assert!(matches!(&bids_after, PyRep::List(l) if l.is_empty()));
+    assert!(matches!(bids_after.dict_get("contracts").unwrap_or(&bids_after), PyRep::List(l) if l.is_empty()));
     assert_eq!(ctx.db.with_snapshot(|s| s.contracts[&7001].bid_history.len()), 1, "bid_history must not be mutated");
 
     // 3. DeleteNotification dismisses assigned contract 7002 from GetLoginInfo().assignedToMe
@@ -2517,7 +2517,8 @@ async fn test_rpc_sweep_group3_contract_proxy_methods() {
 
     let page = call(&ctx, &mut s1, "contractProxy", "CollectMyPageInfo", &[]).await;
     assert_eq!(page.dict_get("numOutstandingContractsNonCorp"), Some(&PyRep::Integer(3)));
-    assert_eq!(call(&ctx, &mut s1, "contractProxy", "NumOutstandingContracts", &[]).await, PyRep::Integer(3));
+    let num_out = call(&ctx, &mut s1, "contractProxy", "NumOutstandingContracts", &[]).await;
+    assert_eq!(num_out.dict_get("myCharTotal"), Some(&PyRep::Integer(3)));
     let escrow = call(&ctx, &mut s1, "contractProxy", "GetMyContractEscrow", &[]).await;
     assert_eq!(escrow.dict_get("iskEscrow"), Some(&PyRep::Real(50_000.0)));
     assert_eq!(escrow.dict_get("itemsEscrow"), Some(&PyRep::Integer(2)));
@@ -2800,7 +2801,10 @@ async fn test_collect_my_page_info_dynamic_contracts_and_no_jita_dummy() {
     )
     .await
     .expect("CreateContract");
-    assert!(created.as_i64().or_else(|| created.dict_get("contractID").and_then(|v| v.as_i64())).is_some());
+    assert!(match &created {
+        PyRep::List(ids) => ids.first().and_then(|v| v.as_i64()).is_some(),
+        _ => created.as_i64().or_else(|| created.dict_get("contractID").and_then(|v| v.as_i64())).is_some(),
+    });
 
     // 3. P1 sees numOutstandingContractsNonCorp == 1; P2 sees exact assigned 4-tuple and requires-attention == 1
     let p1_info = rpc(&ctx, &mut s1, "contractProxy", "CollectMyPageInfo", &[])

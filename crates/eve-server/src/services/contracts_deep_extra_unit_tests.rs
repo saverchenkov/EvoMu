@@ -81,6 +81,20 @@ pub(super) fn seed_item(ctx: &ServerContext, item_id: i64, type_id: u32, owner_i
     });
 }
 
+pub(super) fn created_cid(r: &PyRep) -> Option<i64> {
+    match r {
+        PyRep::List(items) => items.first().and_then(|v| v.as_i64()),
+        _ => r.dict_get("contractID").and_then(|v| v.as_i64()),
+    }
+}
+
+pub(super) fn contract_list_rows(r: &PyRep) -> &[PyRep] {
+    match r.dict_get("contracts").unwrap_or(r) {
+        PyRep::List(items) => items.as_slice(),
+        _ => &[],
+    }
+}
+
 #[test]
 fn create_contract_validation_and_for_corp_role_and_slot_branches() {
     let ctx = make_test_context();
@@ -323,7 +337,7 @@ fn create_contract_validation_and_for_corp_role_and_slot_branches() {
     )
     .unwrap()
     .unwrap();
-    let cid = created.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let cid = created_cid(&created).unwrap();
     ctx.db.with_snapshot(|snap| {
         let rec = snap.contracts.get(&cid).unwrap();
         assert!(rec.for_corp);

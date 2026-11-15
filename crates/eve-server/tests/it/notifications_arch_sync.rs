@@ -545,7 +545,10 @@ async fn arch_737_751_item_wallet_and_market_notification_parity() {
         )
         .await
         .expect("CreateContract");
-    let cid = c_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let cid = match &c_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => c_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap(),
+    };
     let cr_a = ctx.drain_notifications_for_char(PILOT_A);
     assert!(
         cr_a.iter().any(|n| n.event == "OnItemChange"),

@@ -42,7 +42,7 @@ fn accept_two_way_item_exchange_filters_disallowed_items_and_consumes_valid_stac
     )
     .unwrap()
     .unwrap();
-    let cid = created.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let cid = created_cid(&created).unwrap();
 
     // Seed ineligible stacks of type 35: damaged item, BPC, and non-empty container
     ctx.db.with_mut_snapshot(|snap| {
@@ -156,7 +156,7 @@ fn courier_contract_accept_complete_and_break_plastic_wrap_lifecycle() {
     )
     .unwrap()
     .unwrap();
-    let cid = created.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let cid = created_cid(&created).unwrap();
 
     let acc = handle(&ctx, &mut courier_sess, "contractProxy", "AcceptContract", &[PyRep::Integer(cid)], &kw)
         .unwrap()
@@ -228,7 +228,7 @@ fn courier_contract_accept_complete_and_break_plastic_wrap_lifecycle() {
     )
     .unwrap()
     .unwrap();
-    let cid2 = created2.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let cid2 = created_cid(&created2).unwrap();
     let acc2 = handle(&ctx, &mut courier_sess, "contractProxy", "AcceptContract", &[PyRep::Integer(cid2)], &kw)
         .unwrap()
         .unwrap();
@@ -289,7 +289,7 @@ fn auction_bidding_outbid_refund_buyout_and_get_my_bids_login_info() {
     )
     .unwrap()
     .unwrap();
-    let cid = created.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let cid = created_cid(&created).unwrap();
 
     let self_bid = handle(&ctx, &mut issuer_sess, "contractProxy", "PlaceBid", &[PyRep::Integer(cid), PyRep::Real(150_000.0)], &kw)
         .unwrap()
@@ -311,7 +311,7 @@ fn auction_bidding_outbid_refund_buyout_and_get_my_bids_login_info() {
     let my_bids = handle(&ctx, &mut b1_sess, "contractProxy", "GetMyBids", &[PyRep::Bool(false)], &kw)
         .unwrap()
         .unwrap();
-    assert!(matches!(my_bids, PyRep::List(ref l) if !l.is_empty()));
+    assert!(!contract_list_rows(&my_bids).is_empty());
 
     let buyout_res = handle(&ctx, &mut b2_sess, "contractProxy", "PlaceBid", &[PyRep::Integer(cid), PyRep::Real(500_000.0)], &kw)
         .unwrap()
@@ -433,7 +433,7 @@ fn courier_corp_acceptor_structure_destination_location_metadata_and_expiry() {
     )
     .unwrap()
     .unwrap();
-    let cid = created.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let cid = created_cid(&created).unwrap();
 
     // GetContract does NOT emit OnShowContract, whereas GetContractInfo DOES, and includes W2 location & detailed item metadata
     let _ = ctx.drain_notifications_for_char(hauler_id);
@@ -543,28 +543,28 @@ fn courier_corp_acceptor_structure_destination_location_metadata_and_expiry() {
     seed_item(&ctx, 914_101, 34, issuer_corp, JITA_STATION_ID, InventoryFlag::CorpDeliveries, 20, false);
     hauler_sess.station_id = Some(JITA_STATION_ID);
     hauler_sess.structure_id = None;
-    let c2 = handle(
-        &ctx,
-        &mut issuer_sess,
-        "contractProxy",
-        "CreateContract",
-        &[PyRep::keyval([
-            ("type", PyRep::String("Courier".into())),
-            ("availability", PyRep::String("Public".into())),
-            ("startStationID", PyRep::Integer(JITA_STATION_ID)),
-            ("endStationID", PyRep::Integer(DEST_STRUCT_ID)),
-            ("reward", PyRep::Real(100_000.0)),
-            ("collateral", PyRep::Real(800_000.0)),
-            ("numDays", PyRep::Integer(1)),
-            ("forCorp", PyRep::Bool(true)),
-            ("itemList", PyRep::Integer(914_101)),
-        ])],
-        &kw,
+    let c2 = created_cid(
+        &handle(
+            &ctx,
+            &mut issuer_sess,
+            "contractProxy",
+            "CreateContract",
+            &[PyRep::keyval([
+                ("type", PyRep::String("Courier".into())),
+                ("availability", PyRep::String("Public".into())),
+                ("startStationID", PyRep::Integer(JITA_STATION_ID)),
+                ("endStationID", PyRep::Integer(DEST_STRUCT_ID)),
+                ("reward", PyRep::Real(100_000.0)),
+                ("collateral", PyRep::Real(800_000.0)),
+                ("numDays", PyRep::Integer(1)),
+                ("forCorp", PyRep::Bool(true)),
+                ("itemList", PyRep::Integer(914_101)),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
     )
-    .unwrap()
-    .unwrap()
-    .dict_get("contractID")
-    .and_then(|v| v.as_i64())
     .unwrap();
     handle(&ctx, &mut hauler_sess, "contractProxy", "AcceptContract", &[PyRep::Integer(c2), PyRep::Bool(true)], &kw)
         .unwrap()
@@ -614,26 +614,26 @@ fn break_plastic_wrap_cargo_extraction_corp_manager_and_auth_boundaries() {
     let mut outsider_sess = make_authed_session(3, outsider_id, 1_000_009, None, Some(JITA_STATION_ID), Some(915_503));
     let kw = HashMap::new();
 
-    let cid = handle(
-        &ctx,
-        &mut issuer_sess,
-        "contractProxy",
-        "CreateContract",
-        &[PyRep::keyval([
-            ("type", PyRep::String("Courier".into())),
-            ("availability", PyRep::String("Public".into())),
-            ("startStationID", PyRep::Integer(JITA_STATION_ID)),
-            ("endStationID", PyRep::Integer(DEST_STRUCT_ID)),
-            ("reward", PyRep::Real(50_000.0)),
-            ("collateral", PyRep::Real(600_000.0)),
-            ("itemList", PyRep::Integer(wrapped_ship)),
-        ])],
-        &kw,
+    let cid = created_cid(
+        &handle(
+            &ctx,
+            &mut issuer_sess,
+            "contractProxy",
+            "CreateContract",
+            &[PyRep::keyval([
+                ("type", PyRep::String("Courier".into())),
+                ("availability", PyRep::String("Public".into())),
+                ("startStationID", PyRep::Integer(JITA_STATION_ID)),
+                ("endStationID", PyRep::Integer(DEST_STRUCT_ID)),
+                ("reward", PyRep::Real(50_000.0)),
+                ("collateral", PyRep::Real(600_000.0)),
+                ("itemList", PyRep::Integer(wrapped_ship)),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
     )
-    .unwrap()
-    .unwrap()
-    .dict_get("contractID")
-    .and_then(|v| v.as_i64())
     .unwrap();
 
     let accepted = handle(&ctx, &mut hauler_sess, "contractProxy", "AcceptContract", &[PyRep::Integer(cid), PyRep::Bool(true)], &kw)
@@ -744,27 +744,27 @@ fn auction_corp_bidding_division_refund_self_outbid_buyout_and_get_my_bids_filte
     let kw = HashMap::new();
 
     // Private auction to bidder_corp checks ContractAccessDenied vs corp visibility + Bid increments
-    let priv_cid = handle(
-        &ctx,
-        &mut issuer_sess,
-        "contractProxy",
-        "CreateContract",
-        &[PyRep::keyval([
-            ("type", PyRep::String("Auction".into())),
-            ("availability", PyRep::String("Private".into())),
-            ("assigneeID", PyRep::Integer(bidder_corp)),
-            ("startStationID", PyRep::Integer(JITA_STATION_ID)),
-            ("price", PyRep::Real(100_000.0)),
-            ("collateral", PyRep::Real(500_000.0)),
-            ("forCorp", PyRep::Bool(true)),
-            ("itemList", PyRep::Integer(916_100)),
-        ])],
-        &kw,
+    let priv_cid = created_cid(
+        &handle(
+            &ctx,
+            &mut issuer_sess,
+            "contractProxy",
+            "CreateContract",
+            &[PyRep::keyval([
+                ("type", PyRep::String("Auction".into())),
+                ("availability", PyRep::String("Private".into())),
+                ("assigneeID", PyRep::Integer(bidder_corp)),
+                ("startStationID", PyRep::Integer(JITA_STATION_ID)),
+                ("price", PyRep::Real(100_000.0)),
+                ("collateral", PyRep::Real(500_000.0)),
+                ("forCorp", PyRep::Bool(true)),
+                ("itemList", PyRep::Integer(916_100)),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
     )
-    .unwrap()
-    .unwrap()
-    .dict_get("contractID")
-    .and_then(|v| v.as_i64())
     .unwrap();
 
     // Outsider cannot bid or view private auction
@@ -811,25 +811,25 @@ fn auction_corp_bidding_division_refund_self_outbid_buyout_and_get_my_bids_filte
     });
 
     // Public auction for cross-bidder outbid & increment min boundary
-    let pub_cid = handle(
-        &ctx,
-        &mut issuer_sess,
-        "contractProxy",
-        "CreateContract",
-        &[PyRep::keyval([
-            ("type", PyRep::String("Auction".into())),
-            ("availability", PyRep::String("Public".into())),
-            ("startStationID", PyRep::Integer(JITA_STATION_ID)),
-            ("price", PyRep::Real(100.0)), // tests min increment floor = max(5%, 100 ISK = 10_000 cents)
-            ("collateral", PyRep::Real(500_000.0)),
-            ("itemList", PyRep::Integer(916_101)),
-        ])],
-        &kw,
+    let pub_cid = created_cid(
+        &handle(
+            &ctx,
+            &mut issuer_sess,
+            "contractProxy",
+            "CreateContract",
+            &[PyRep::keyval([
+                ("type", PyRep::String("Auction".into())),
+                ("availability", PyRep::String("Public".into())),
+                ("startStationID", PyRep::Integer(JITA_STATION_ID)),
+                ("price", PyRep::Real(100.0)), // tests min increment floor = max(5%, 100 ISK = 10_000 cents)
+                ("collateral", PyRep::Real(500_000.0)),
+                ("itemList", PyRep::Integer(916_101)),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
     )
-    .unwrap()
-    .unwrap()
-    .dict_get("contractID")
-    .and_then(|v| v.as_i64())
     .unwrap();
 
     // Issuer bidding for issuer_corp on own forCorp auction rejected; self-outbid delta & min increment floor checked
@@ -913,9 +913,9 @@ fn auction_corp_bidding_division_refund_self_outbid_buyout_and_get_my_bids_filte
     let all_corp_bids = handle(&ctx, &mut corp_bid_sess, "contractProxy", "GetMyBids", &[], &for_corp_kw)
         .unwrap()
         .unwrap();
-    assert!(matches!(outstanding, PyRep::List(ref l) if l.len() == 1));
-    assert!(matches!(accepted_only, PyRep::List(ref l) if l.is_empty()));
-    assert!(matches!(all_corp_bids, PyRep::List(ref l) if l.len() == 2));
+    assert_eq!(contract_list_rows(&outstanding).len(), 1);
+    assert!(contract_list_rows(&accepted_only).is_empty());
+    assert_eq!(contract_list_rows(&all_corp_bids).len(), 2);
 
     // contract_dismissed_notifs removes entry from GetMyBids and GetLoginInfo
     ctx.db.with_mut_snapshot(|snap| {
@@ -927,5 +927,5 @@ fn auction_corp_bidding_division_refund_self_outbid_buyout_and_get_my_bids_filte
     let after_dismiss = handle(&ctx, &mut corp_bid_sess, "contractProxy", "GetMyBids", &[PyRep::Bool(false)], &for_corp_kw)
         .unwrap()
         .unwrap();
-    assert!(matches!(after_dismiss, PyRep::List(ref l) if l.is_empty()));
+    assert!(contract_list_rows(&after_dismiss).is_empty());
 }

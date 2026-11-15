@@ -54,10 +54,11 @@ async fn test_review_r8_regressions() {
         )
         .await
         .unwrap();
-    let PyRep::KeyVal(cab_kv) = c_ab else {
-        panic!("Expected cab_kv");
+    let cid_ab = match c_ab {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        PyRep::KeyVal(cab_kv) => cab_kv.get("contractID").unwrap().as_i64().unwrap(),
+        _ => panic!("Expected cab_kv"),
     };
-    let cid_ab = cab_kv.get("contractID").unwrap().as_i64().unwrap();
 
     let muta_locked =
         ctx.dispatch_rpc(&mut s1, "dynamicItemService", None, "CreateDynamicItem", &[PyRep::Integer(47746), PyRep::Integer(100_000_003)], &kw, None).await;
@@ -195,10 +196,11 @@ async fn test_review_r8_regressions() {
         )
         .await
         .unwrap();
-    let PyRep::KeyVal(cexp_kv) = c_exp else {
-        panic!("Expected cexp_kv");
+    let cid_exp = match c_exp {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        PyRep::KeyVal(cexp_kv) => cexp_kv.get("contractID").unwrap().as_i64().unwrap(),
+        _ => panic!("Expected cexp_kv"),
     };
-    let cid_exp = cexp_kv.get("contractID").unwrap().as_i64().unwrap();
     assert_eq!(ctx.db.get_character(90_000_001).unwrap().balance.0, s1_bal_pre - 11_500_000);
     ctx.advance_virtual_clock(86_405);
     let acc_exp = ctx.dispatch_rpc(&mut s2, "contractProxy", None, "AcceptContract", &[PyRep::Integer(cid_exp)], &kw, None).await;
@@ -233,11 +235,12 @@ async fn test_review_r8_regressions() {
         )
         .await
         .unwrap();
-    let PyRep::KeyVal(cin_kv) = c_inprog else {
-        panic!("Expected cin_kv");
+    let cid_in = match c_inprog {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        PyRep::KeyVal(cin_kv) => cin_kv.get("contractID").unwrap().as_i64().unwrap(),
+        _ => panic!("Expected cin_kv"),
     };
-    let cid_in = cin_kv.get("contractID").unwrap().as_i64().unwrap();
-    let create_exp = cin_kv.get("expirationUnix").unwrap().as_i64().unwrap();
+    let create_exp = ctx.db.with_snapshot(|s| s.contracts[&cid_in].expiration_unix as i64);
     // Advance 80,000s (late in 24h offer window) and accept with s2
     ctx.advance_virtual_clock(80_000);
     let acc_in = ctx.dispatch_rpc(&mut s2, "contractProxy", None, "AcceptContract", &[PyRep::Integer(cid_in)], &kw, None).await.unwrap();

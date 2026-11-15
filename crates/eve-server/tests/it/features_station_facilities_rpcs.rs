@@ -602,7 +602,10 @@ async fn test_b29_fleet_grace_invite_and_death_courier_lifecycle() {
         PyRep::Real(1_000_000.0), PyRep::String("Courier 1".into()), PyRep::None,
         PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(cargo_1), PyRep::Integer(100)])]),
     ]).await;
-    let c1_id = c1_rep.as_i64().or_else(|| c1_rep.dict_get("contractID").and_then(|v| v.as_i64())).expect("c1_id");
+    let c1_id = match &c1_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => c1_rep.as_i64().or_else(|| c1_rep.dict_get("contractID").and_then(|v| v.as_i64())).expect("c1_id"),
+    };
     rpc(&ctx, &mut s1, "contractProxy", "AcceptContract", &[PyRep::Integer(c1_id)]).await;
     ctx.db.with_mut_snapshot(|snap| {
         let ship_id = snap.characters[&PILOT_1].active_ship_id;
@@ -663,7 +666,10 @@ async fn test_b29_fleet_grace_invite_and_death_courier_lifecycle() {
         PyRep::Real(500_000.0), PyRep::String("Courier 2".into()), PyRep::None,
         PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(cargo_2), PyRep::Integer(50)])]),
     ]).await;
-    let c2_id = c2_rep.as_i64().or_else(|| c2_rep.dict_get("contractID").and_then(|v| v.as_i64())).expect("c2_id");
+    let c2_id = match &c2_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => c2_rep.as_i64().or_else(|| c2_rep.dict_get("contractID").and_then(|v| v.as_i64())).expect("c2_id"),
+    };
     let mut s1_c2 = login_select(&ctx, 9506, "demo", "demo-secret", PILOT_1).await;
     rpc(&ctx, &mut s1_c2, "contractProxy", "AcceptContract", &[PyRep::Integer(c2_id)]).await;
     let ship2_id = ctx.db.with_snapshot(|s| s.characters[&PILOT_1].active_ship_id);

@@ -385,10 +385,10 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
         )
         .await
         .unwrap();
-    let PyRep::KeyVal(c_kv) = c_res else {
-        panic!("Expected contract KeyVal");
+    let PyRep::List(c_ids) = c_res else {
+        panic!("Expected contract IDs List");
     };
-    let cid = c_kv.get("contractID").unwrap().as_i64().unwrap();
+    let cid = c_ids[0].as_i64().unwrap();
     let self_acc = ctx
         .dispatch_rpc(
             &mut sess2,

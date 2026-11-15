@@ -26,6 +26,20 @@ fn call_contract(
         .unwrap_or_else(|| panic!("unhandled contractProxy.{method}"))
 }
 
+fn created_cid(r: &PyRep) -> Option<i64> {
+    match r {
+        PyRep::List(items) => items.first().and_then(|v| v.as_i64()),
+        _ => r.dict_get("contractID").and_then(|v| v.as_i64()),
+    }
+}
+
+fn contract_list_rows(r: &PyRep) -> &[PyRep] {
+    match r.dict_get("contracts").unwrap_or(r) {
+        PyRep::List(items) => items.as_slice(),
+        _ => &[],
+    }
+}
+
 fn setup_sandbox() -> (
     ServerContext,
     SessionState,
@@ -179,24 +193,24 @@ fn reject_fail_delete_and_gm_expire_contract_edge_cases() {
     let issuer_bal_before = ctx
         .db
         .with_snapshot(|s| s.characters.get(&issuer_id).unwrap().balance.0);
-    let cid_personal = call_contract(
-        &ctx,
-        &mut issuer_sess,
-        "CreateContract",
-        vec![PyRep::keyval([
-            ("contractType", PyRep::Integer(1)),
-            ("availability", PyRep::Integer(1)),
-            ("assigneeID", PyRep::Integer(acceptor_id)),
-            ("price", PyRep::Real(0.0)),
-            ("reward", PyRep::Real(250_000.0)),
-            ("itemList", PyRep::List(vec![PyRep::Integer(item_personal)])),
-            ("title", PyRep::String("Private Offer".into())),
-        ])],
-        &kw,
+    let cid_personal = created_cid(
+        &call_contract(
+            &ctx,
+            &mut issuer_sess,
+            "CreateContract",
+            vec![PyRep::keyval([
+                ("contractType", PyRep::Integer(1)),
+                ("availability", PyRep::Integer(1)),
+                ("assigneeID", PyRep::Integer(acceptor_id)),
+                ("price", PyRep::Real(0.0)),
+                ("reward", PyRep::Real(250_000.0)),
+                ("itemList", PyRep::List(vec![PyRep::Integer(item_personal)])),
+                ("title", PyRep::String("Private Offer".into())),
+            ])],
+            &kw,
+        )
+        .unwrap(),
     )
-    .unwrap()
-    .dict_get("contractID")
-    .and_then(|v| v.as_i64())
     .unwrap();
 
     assert_eq!(
@@ -258,22 +272,22 @@ fn reject_fail_delete_and_gm_expire_contract_edge_cases() {
     );
 
     // 2. Contract assigned to acceptor_corp: non-director corp member lacks role -> CrpAccessDenied
-    let cid_corp = call_contract(
-        &ctx,
-        &mut issuer_sess,
-        "CreateContract",
-        vec![PyRep::keyval([
-            ("contractType", PyRep::Integer(1)),
-            ("availability", PyRep::Integer(1)),
-            ("assigneeID", PyRep::Integer(acceptor_corp)),
-            ("price", PyRep::Real(100_000.0)),
-            ("itemList", PyRep::List(vec![PyRep::Integer(item_corp)])),
-        ])],
-        &kw,
+    let cid_corp = created_cid(
+        &call_contract(
+            &ctx,
+            &mut issuer_sess,
+            "CreateContract",
+            vec![PyRep::keyval([
+                ("contractType", PyRep::Integer(1)),
+                ("availability", PyRep::Integer(1)),
+                ("assigneeID", PyRep::Integer(acceptor_corp)),
+                ("price", PyRep::Real(100_000.0)),
+                ("itemList", PyRep::List(vec![PyRep::Integer(item_corp)])),
+            ])],
+            &kw,
+        )
+        .unwrap(),
     )
-    .unwrap()
-    .dict_get("contractID")
-    .and_then(|v| v.as_i64())
     .unwrap();
     assert_eq!(
         call_contract(
@@ -289,23 +303,23 @@ fn reject_fail_delete_and_gm_expire_contract_edge_cases() {
     );
 
     // 3. FailContract on InProgress Courier vs non-Courier; DeleteContract ownership violation
-    let cid_courier = call_contract(
-        &ctx,
-        &mut issuer_sess,
-        "CreateContract",
-        vec![PyRep::keyval([
-            ("contractType", PyRep::Integer(3)),
-            ("startStationID", PyRep::Integer(station_id)),
-            ("endStationID", PyRep::Integer(dest_station_id)),
-            ("reward", PyRep::Real(500_000.0)),
-            ("collateral", PyRep::Real(1_000_000.0)),
-            ("itemList", PyRep::List(vec![PyRep::Integer(item_courier)])),
-        ])],
-        &kw,
+    let cid_courier = created_cid(
+        &call_contract(
+            &ctx,
+            &mut issuer_sess,
+            "CreateContract",
+            vec![PyRep::keyval([
+                ("contractType", PyRep::Integer(3)),
+                ("startStationID", PyRep::Integer(station_id)),
+                ("endStationID", PyRep::Integer(dest_station_id)),
+                ("reward", PyRep::Real(500_000.0)),
+                ("collateral", PyRep::Real(1_000_000.0)),
+                ("itemList", PyRep::List(vec![PyRep::Integer(item_courier)])),
+            ])],
+            &kw,
+        )
+        .unwrap(),
     )
-    .unwrap()
-    .dict_get("contractID")
-    .and_then(|v| v.as_i64())
     .unwrap();
 
     // Stranger cannot delete someone else's contract
@@ -355,20 +369,20 @@ fn reject_fail_delete_and_gm_expire_contract_edge_cases() {
     assert_eq!(failed.dict_get("status").and_then(|v| v.as_str()), Some("Failed"));
 
     // 4. GM_ExpireContract: non-GM denied, missing contract -> ContractNotFound, GM expires -> Expired, then issuer deletes
-    let cid_exp = call_contract(
-        &ctx,
-        &mut issuer_sess,
-        "CreateContract",
-        vec![PyRep::keyval([
-            ("contractType", PyRep::Integer(1)),
-            ("price", PyRep::Real(200_000.0)),
-            ("itemList", PyRep::List(vec![PyRep::Integer(item_exp)])),
-        ])],
-        &kw,
+    let cid_exp = created_cid(
+        &call_contract(
+            &ctx,
+            &mut issuer_sess,
+            "CreateContract",
+            vec![PyRep::keyval([
+                ("contractType", PyRep::Integer(1)),
+                ("price", PyRep::Real(200_000.0)),
+                ("itemList", PyRep::List(vec![PyRep::Integer(item_exp)])),
+            ])],
+            &kw,
+        )
+        .unwrap(),
     )
-    .unwrap()
-    .dict_get("contractID")
-    .and_then(|v| v.as_i64())
     .unwrap();
 
     assert_eq!(
@@ -435,11 +449,9 @@ fn reject_fail_delete_and_gm_expire_contract_edge_cases() {
         .code,
         "ContractAccessDenied"
     );
-    let PyRep::List(expired_rows) =
-        call_contract(&ctx, &mut issuer_sess, "GetMyExpiredContractList", vec![], &kw).unwrap()
-    else {
-        panic!("expected list");
-    };
+    let expired_rep =
+        call_contract(&ctx, &mut issuer_sess, "GetMyExpiredContractList", vec![], &kw).unwrap();
+    let expired_rows = contract_list_rows(&expired_rep);
     assert!(expired_rows.iter().any(|r| {
         r.dict_get("contractID").and_then(|v| v.as_i64()) == Some(cid_personal)
     }));
@@ -472,23 +484,23 @@ fn complete_contract_validation_and_auction_bid_buyout_edges() {
     });
 
     // 1. Courier CompleteContract error guards
-    let cid_c = call_contract(
-        &ctx,
-        &mut issuer_sess,
-        "CreateContract",
-        vec![PyRep::keyval([
-            ("contractType", PyRep::Integer(3)),
-            ("startStationID", PyRep::Integer(station_id)),
-            ("endStationID", PyRep::Integer(dest_station_id)),
-            ("reward", PyRep::Real(100_000.0)),
-            ("collateral", PyRep::Real(200_000.0)),
-            ("itemList", PyRep::List(vec![PyRep::Integer(item_courier)])),
-        ])],
-        &kw,
+    let cid_c = created_cid(
+        &call_contract(
+            &ctx,
+            &mut issuer_sess,
+            "CreateContract",
+            vec![PyRep::keyval([
+                ("contractType", PyRep::Integer(3)),
+                ("startStationID", PyRep::Integer(station_id)),
+                ("endStationID", PyRep::Integer(dest_station_id)),
+                ("reward", PyRep::Real(100_000.0)),
+                ("collateral", PyRep::Real(200_000.0)),
+                ("itemList", PyRep::List(vec![PyRep::Integer(item_courier)])),
+            ])],
+            &kw,
+        )
+        .unwrap(),
     )
-    .unwrap()
-    .dict_get("contractID")
-    .and_then(|v| v.as_i64())
     .unwrap();
 
     call_contract(
@@ -588,22 +600,22 @@ fn complete_contract_validation_and_auction_bid_buyout_edges() {
     );
 
     // 2. Auction PlaceBid: BidTooLow, InsufficientFunds, self-outbid refund, CannotDeleteAuctionWithBids, buyout
-    let cid_a = call_contract(
-        &ctx,
-        &mut issuer_sess,
-        "CreateContract",
-        vec![PyRep::keyval([
-            ("contractType", PyRep::Integer(2)),
-            ("price", PyRep::Real(1_000_000.0)),
-            ("collateral", PyRep::Real(3_000_000.0)), // buyout = 3M
-            ("itemList", PyRep::List(vec![PyRep::Integer(item_auction)])),
-            ("title", PyRep::String("Rare Mineral".into())),
-        ])],
-        &kw,
+    let cid_a = created_cid(
+        &call_contract(
+            &ctx,
+            &mut issuer_sess,
+            "CreateContract",
+            vec![PyRep::keyval([
+                ("contractType", PyRep::Integer(2)),
+                ("price", PyRep::Real(1_000_000.0)),
+                ("collateral", PyRep::Real(3_000_000.0)), // buyout = 3M
+                ("itemList", PyRep::List(vec![PyRep::Integer(item_auction)])),
+                ("title", PyRep::String("Rare Mineral".into())),
+            ])],
+            &kw,
+        )
+        .unwrap(),
     )
-    .unwrap()
-    .dict_get("contractID")
-    .and_then(|v| v.as_i64())
     .unwrap();
 
     // Opening bid below starting price -> BidTooLow
@@ -701,14 +713,15 @@ fn complete_contract_validation_and_auction_bid_buyout_edges() {
     skw.insert("itemTypeID".into(), PyRep::Integer(35));
     skw.insert("minPrice".into(), PyRep::Real(500_000.0));
     skw.insert("maxPrice".into(), PyRep::Real(2_000_000.0));
-    let PyRep::List(found) =
-        call_contract(&ctx, &mut stranger_sess, "SearchContracts", vec![], &skw).unwrap()
-    else {
-        panic!("expected list");
-    };
+    let search_rep =
+        call_contract(&ctx, &mut stranger_sess, "SearchContracts", vec![], &skw).unwrap();
+    let found = contract_list_rows(&search_rep);
     assert_eq!(found.len(), 1);
     assert_eq!(
-        found[0].dict_get("contractID").and_then(|v| v.as_i64()),
+        found[0]
+            .dict_get("contract")
+            .and_then(|c| c.dict_get("contractID"))
+            .and_then(|v| v.as_i64()),
         Some(cid_a)
     );
 

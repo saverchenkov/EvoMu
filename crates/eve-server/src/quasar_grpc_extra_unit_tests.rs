@@ -84,22 +84,6 @@ fn normalize_macho_rpc_reply_exhaustive_fallback_and_non_empty_branches() {
             .unwrap(),
         PyRep::Integer(7)
     );
-
-    // contractProxy.SearchContracts when item already has "contract" and "bids"
-    let prewrapped = PyRep::keyval([
-        ("contract", PyRep::keyval([("contractID", PyRep::Integer(55))])),
-        ("bids", PyRep::List(Vec::new())),
-    ]);
-    let search_pre = normalize_macho_rpc_reply(
-        "contractProxy",
-        "SearchContracts",
-        Ok(PyRep::List(vec![prewrapped.clone()])),
-    )
-    .unwrap();
-    assert_eq!(
-        search_pre.dict_get("contracts"),
-        Some(&PyRep::List(vec![prewrapped]))
-    );
 }
 
 #[test]

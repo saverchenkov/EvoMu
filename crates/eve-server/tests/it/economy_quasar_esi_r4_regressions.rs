@@ -607,7 +607,7 @@ async fn test_r4_192_personal_contracts_excluded_from_corp_contract_queries() {
         )
         .await
         .expect("GetContractListForOwner corp");
-    let PyRep::List(rows) = res else {
+    let PyRep::List(rows) = res.dict_get("contracts").unwrap_or(&res) else {
         panic!("expected List")
     };
     let ids: Vec<i64> = rows

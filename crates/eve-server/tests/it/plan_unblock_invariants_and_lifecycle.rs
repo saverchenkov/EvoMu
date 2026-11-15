@@ -383,7 +383,10 @@ async fn test_e3_corp_contract_wallet_roles_and_issuer_departure() {
         .dispatch_rpc(&mut s1, "contractProxy", None, "CreateContract", &c_args, &kw, None)
         .await
         .expect("CreateContract for_corp with ROLE_CONTRACT_MANAGER");
-    let cid = created.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let cid = match &created {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => created.dict_get("contractID").and_then(|v| v.as_i64()).unwrap(),
+    };
 
     let char_bal_mid = ctx.db.get_character(90_000_001).unwrap().balance;
     let corp_bal_mid = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet_balance());
@@ -425,14 +428,20 @@ async fn test_e3_corp_contract_wallet_roles_and_issuer_departure() {
         PyRep::String("Cancel & Collateral Test".into()), PyRep::String(String::new()), PyRep::List(vec![PyRep::Integer(iid)]),
     ];
     let created2 = ctx.dispatch_rpc(&mut s1, "contractProxy", None, "CreateContract", &courier_args(880_002_002), &kw, None).await.expect("CreateContract 2");
-    let cid2 = created2.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let cid2 = match &created2 {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => created2.dict_get("contractID").and_then(|v| v.as_i64()).unwrap(),
+    };
     let corp_bal_pre_cancel = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet_balance());
     let _ = rpc(&ctx, &mut s1, "contractProxy", "DeleteContract", &[PyRep::Integer(cid2)]).await.expect("DeleteContract");
     let corp_bal_post_cancel = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet_balance());
     assert_eq!(corp_bal_post_cancel.0 - corp_bal_pre_cancel.0, IskCents::from_f64_isk(150_000.0).0, "Cancel must credit reward + deposit refund to corp wallet");
 
     let created3 = ctx.dispatch_rpc(&mut s1, "contractProxy", None, "CreateContract", &courier_args(880_002_003), &kw, None).await.expect("CreateContract 3");
-    let cid3 = created3.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+    let cid3 = match &created3 {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => created3.dict_get("contractID").and_then(|v| v.as_i64()).unwrap(),
+    };
     let _ = rpc(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(cid3)]).await.expect("AcceptContract 3");
     let corp_bal_pre_fail = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet_balance());
     let _ = rpc(&ctx, &mut s2, "contractProxy", "FailContract", &[PyRep::Integer(cid3)]).await.expect("FailContract 3");

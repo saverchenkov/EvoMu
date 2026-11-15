@@ -227,7 +227,10 @@ async fn provision_contract_player_in_space(
         ("title", PyRep::String("Fit".into())),
         ("itemList", PyRep::List(transfer_ids.iter().map(|&id| PyRep::Integer(id)).collect())),
     ])]).await;
-    let cid_contract = create_rep.as_i64().or_else(|| create_rep.dict_get("contractID").and_then(|v| v.as_i64())).unwrap();
+    let cid_contract = match &create_rep {
+        PyRep::List(ids) => ids[0].as_i64().unwrap(),
+        _ => create_rep.as_i64().or_else(|| create_rep.dict_get("contractID").and_then(|v| v.as_i64())).unwrap(),
+    };
     ok(ctx, &mut p, "contractProxy", "AcceptContract", &[PyRep::Integer(cid_contract), PyRep::Bool(false)]).await;
 
     for _ in 0..inj_cnt { ok(ctx, &mut p, "skillMgr2", "InjectSkillpoints", &[PyRep::Integer(inj_id)]).await; }

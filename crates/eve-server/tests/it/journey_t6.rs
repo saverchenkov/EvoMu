@@ -578,7 +578,10 @@ async fn test_journey_10_contracts() {
         )
         .await
         .expect("CreateContract");
-        let cid = c.as_i64().or_else(|| c.dict_get("contractID").and_then(|v| v.as_i64())).unwrap_or(0);
+        let cid = match &c {
+            PyRep::List(ids) => ids.first().and_then(|v| v.as_i64()).unwrap_or(0),
+            _ => c.as_i64().or_else(|| c.dict_get("contractID").and_then(|v| v.as_i64())).unwrap_or(0),
+        };
         assert!(cid > 0);
         if ctype == 2 {
             rpc(&ctx, &mut s2, "contractProxy", "PlaceBid", &[PyRep::Integer(cid), PyRep::Real(1_200.0)])

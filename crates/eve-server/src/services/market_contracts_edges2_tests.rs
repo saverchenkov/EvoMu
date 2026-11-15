@@ -953,7 +953,13 @@ fn contract_proxy_page_info_finish_auction_no_winner_and_container_queries() {
     )
     .unwrap()
     .unwrap();
-    assert!(num_personal.as_i64().unwrap() >= 1);
+    assert!(num_personal.dict_get("myCharTotal").and_then(|v| v.as_i64()).unwrap() >= 1);
+    assert_eq!(num_personal.dict_get("myCorpTotal"), Some(&PyRep::Integer(0)));
+    assert_eq!(
+        num_personal.dict_get("nonCorpForMyChar"),
+        num_personal.dict_get("myCharTotal")
+    );
+    assert_eq!(num_personal.dict_get("nonCorpForMyCorp"), Some(&PyRep::Integer(0)));
 
     // FinishAuction with no bids returns corp item to CorpSAG1
     let fin = handle(
