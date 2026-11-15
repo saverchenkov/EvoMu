@@ -137,6 +137,20 @@ pub struct ActiveModuleCycle {
     pub started_at_unix: u64,
 }
 
+impl ActiveModuleCycle {
+    /// Returns `true` when this cycle paid upfront at activation for an end-of-cycle
+    /// repair or capacitor-vampire transfer (`#890`) that must finish its current cycle
+    /// on `Deactivate` rather than being dropped mid-cycle.
+    pub fn has_paid_end_of_cycle_effect(&self) -> bool {
+        self.armor_repair_amount > 0.0
+            || self.hull_repair_amount > 0.0
+            || (self.remote_armor_amount > 0.0 && self.mutadaptive_spool_step <= 0.0)
+            || self.remote_hull_amount > 0.0
+            || (self.is_aar && self.aar_base_armor_repair > 0.0)
+            || (self.cap_transfer_target > 0.0 && self.remote_cap_amount <= 0.0)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ActiveNaniteRepair {
     pub char_id: CharacterId,

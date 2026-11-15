@@ -434,4 +434,63 @@ async fn deactivate_active_armor_repairer_defers_removal_and_finishes_paid_cycle
     let after_cs = sys.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!((after_cs.armor_hp - 280.0).abs() < 1e-3, "got armor_hp={}", after_cs.armor_hp);
     assert!((after_cs.capacitor - 460.0).abs() < 1e-6, "must not charge cap for cycle 2 (got {})", after_cs.capacitor);
+
+    // Also verify synthetic / custom-group paid end-of-cycle Hull Repairer (hull_repair_amount > 0)
+    // defers removal on Deactivate via has_paid_end_of_cycle_effect() (#890).
+    let hull_rep_id = 1_000_994_063;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            hull_rep_id,
+            InventoryItemRecord {
+                item_id: hull_rep_id,
+                type_id: 3_528,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::LoSlot1,
+                quantity: 1,
+                singleton: true,
+                custom_name: None,
+                dynamic_attributes: HashMap::new(),
+            },
+        );
+        snap.module_online_states.insert(hull_rep_id, true);
+        snap.module_active_states.insert(hull_rep_id);
+    });
+    if let Ok(Some(mut cs)) = sys.get_combat_state(ship_id).await {
+        cs.structure_hp = 100.0;
+        cs.max_structure_hp = 500.0;
+        let _ = sys.set_combat_state(ship_id, cs).await;
+    }
+    sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
+        ship_id,
+        module_id: hull_rep_id,
+        module_type_id: 0, // synthetic type_id outside SDE group table -> exercises has_paid_end_of_cycle_effect()
+        effect_name: "structureRepair".into(),
+        target_id: None,
+        repeat: 1,
+        duration_s: 4.0,
+        elapsed_s: 1.0,
+        cap_need_per_cycle: 20.0,
+        hull_repair_amount: 60.0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    handle_mining_and_deactivate(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Deactivate",
+        &[PyRep::Integer(hull_rep_id), PyRep::String("structureRepair".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Deactivate Hull Repairer mid-cycle");
+    assert!(sys.has_module_cycle(ship_id, hull_rep_id).await);
+    let _ = sys.step_manual(3.2).await.unwrap();
+    assert!(!sys.has_module_cycle(ship_id, hull_rep_id).await);
+    let hull_after = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((hull_after.structure_hp - 160.0).abs() < 1e-3, "got structure_hp={}", hull_after.structure_hp);
 }

@@ -2365,3 +2365,184 @@ fn w4_mutant_killers_baselines_scaled_recompute_dirty_filters_immobilize_and_ove
         "cloaked ball spawn via spawn_ball_with_combat_in_actor must not emit AddBalls2 (#871)"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gh890_rejects_reactivating_active_cycle_and_defers_paid_end_of_cycle_deactivation() {
+    let mut bp = Ballpark::new(30_000_142);
+    let ship_id = 9890_001_i64;
+    let target_a = 9890_002_i64;
+    let target_b = 9890_003_i64;
+    bp.add_ball(make_tackle_ball(ship_id, 587, DVec3::ZERO));
+    bp.combat_states.insert(
+        ship_id,
+        CombatState {
+            capacitor: 500.0,
+            max_capacitor: 500.0,
+            armor_hp: 200.0,
+            max_armor_hp: 1_000.0,
+            undock_invulnerable_remaining_ticks: 10,
+            ..CombatState::default()
+        },
+    );
+    bp.add_ball(make_tackle_ball(target_a, 587, DVec3::new(2_000.0, 0.0, 0.0)));
+    bp.combat_states.insert(target_a, CombatState::default());
+    bp.add_ball(make_tackle_ball(target_b, 587, DVec3::new(3_000.0, 0.0, 0.0)));
+    bp.combat_states.insert(target_b, CombatState::default());
+
+    let mut cycles = Vec::new();
+    let base_scram = HashMap::new();
+    let base_core = HashMap::new();
+
+    // 1. Activate Stasis Webifier on target_a
+    handle_add_module_cycle(
+        &mut bp,
+        &mut cycles,
+        &base_scram,
+        &base_core,
+        &None,
+        &None,
+        None,
+        ActiveModuleCycle {
+            ship_id,
+            module_id: 890_101,
+            target_id: Some(target_a),
+            duration_s: 5.0,
+            elapsed_s: 2.0,
+            cap_need_per_cycle: 25.0,
+            target_velocity_multiplier: Some(0.4),
+            ..ActiveModuleCycle::default()
+        },
+    )
+    .expect("first web activation succeeds");
+    assert!((bp.combat_states[&ship_id].capacitor - 475.0).abs() < 1e-6);
+    assert!((bp.balls[&target_a].max_velocity - 160.0).abs() < 1e-6);
+    assert!((bp.balls[&target_b].max_velocity - 400.0).abs() < 1e-6);
+
+    // Re-adding the same active module on target_b mid-cycle MUST be rejected with ModuleAlreadyActive
+    // without deducting capacitor or swapping the web to target_b (#890).
+    let dup_web_err = handle_add_module_cycle(
+        &mut bp,
+        &mut cycles,
+        &base_scram,
+        &base_core,
+        &None,
+        &None,
+        None,
+        ActiveModuleCycle {
+            ship_id,
+            module_id: 890_101,
+            target_id: Some(target_b),
+            duration_s: 5.0,
+            cap_need_per_cycle: 25.0,
+            target_velocity_multiplier: Some(0.4),
+            ..ActiveModuleCycle::default()
+        },
+    )
+    .expect_err("re-activating already-active module must fail");
+    assert!(dup_web_err.contains("ModuleAlreadyActive"), "got {dup_web_err}");
+    assert_eq!(cycles.len(), 1);
+    assert_eq!(cycles[0].target_id, Some(target_a));
+    assert!((cycles[0].elapsed_s - 2.0).abs() < 1e-6);
+    assert!((bp.combat_states[&ship_id].capacitor - 475.0).abs() < 1e-6);
+    assert!((bp.balls[&target_a].max_velocity - 160.0).abs() < 1e-6);
+    assert!((bp.balls[&target_b].max_velocity - 400.0).abs() < 1e-6);
+
+    // 2. has_paid_end_of_cycle_effect & request_cycle_deactivation (#890)
+    assert!(ActiveModuleCycle {
+        armor_repair_amount: 80.0,
+        ..ActiveModuleCycle::default()
+    }
+    .has_paid_end_of_cycle_effect());
+    assert!(ActiveModuleCycle {
+        hull_repair_amount: 40.0,
+        ..ActiveModuleCycle::default()
+    }
+    .has_paid_end_of_cycle_effect());
+    assert!(ActiveModuleCycle {
+        remote_armor_amount: 120.0,
+        ..ActiveModuleCycle::default()
+    }
+    .has_paid_end_of_cycle_effect());
+    assert!(!ActiveModuleCycle {
+        remote_armor_amount: 120.0,
+        mutadaptive_spool_step: 0.1,
+        ..ActiveModuleCycle::default()
+    }
+    .has_paid_end_of_cycle_effect());
+    assert!(ActiveModuleCycle {
+        remote_hull_amount: 60.0,
+        ..ActiveModuleCycle::default()
+    }
+    .has_paid_end_of_cycle_effect());
+    assert!(ActiveModuleCycle {
+        is_aar: true,
+        aar_base_armor_repair: 50.0,
+        ..ActiveModuleCycle::default()
+    }
+    .has_paid_end_of_cycle_effect());
+    assert!(ActiveModuleCycle {
+        cap_transfer_target: 40.0,
+        remote_cap_amount: 0.0,
+        ..ActiveModuleCycle::default()
+    }
+    .has_paid_end_of_cycle_effect());
+    assert!(!ActiveModuleCycle {
+        cap_transfer_target: 40.0,
+        remote_cap_amount: 40.0,
+        ..ActiveModuleCycle::default()
+    }
+    .has_paid_end_of_cycle_effect());
+
+    let ctx = crate::router::ServerContext::new();
+    let sys = ctx.systems.get_or_spawn(30_000_142);
+    sys.spawn_ball_with_combat(
+        make_tackle_ball(ship_id, 587, DVec3::ZERO),
+        CombatState {
+            armor_hp: 200.0,
+            max_armor_hp: 1_000.0,
+            structure_hp: 150.0,
+            max_structure_hp: 500.0,
+            capacitor: 500.0,
+            max_capacitor: 500.0,
+            capacitor_recharge_time_ms: 0.0,
+            shield_recharge_time_ms: 0.0,
+            ..CombatState::default()
+        },
+    )
+    .await
+    .unwrap();
+    sys.add_module_cycle(ActiveModuleCycle {
+        ship_id,
+        module_id: 890_201,
+        duration_s: 4.0,
+        elapsed_s: 1.5,
+        repeat: 1,
+        cap_need_per_cycle: 50.0,
+        hull_repair_amount: 90.0,
+        ..ActiveModuleCycle::default()
+    })
+    .await
+    .unwrap();
+    // Re-adding active hull repairer via SystemHandle::add_module_cycle is rejected
+    let actor_dup = sys
+        .add_module_cycle(ActiveModuleCycle {
+            ship_id,
+            module_id: 890_201,
+            duration_s: 4.0,
+            repeat: 1,
+            cap_need_per_cycle: 50.0,
+            hull_repair_amount: 90.0,
+            ..ActiveModuleCycle::default()
+        })
+        .await
+        .expect_err("actor must reject duplicate active module cycle");
+    assert!(actor_dup.contains("ModuleAlreadyActive"));
+    // Deactivating mid-cycle marks repeat=0 and still delivers the paid 90 HP hull repair at cycle end
+    assert_eq!(sys.request_cycle_deactivation(ship_id, 890_201).await, Ok(true));
+    assert!(sys.has_module_cycle(ship_id, 890_201).await);
+    let _ = sys.step_manual(2.6).await.unwrap();
+    assert!(!sys.has_module_cycle(ship_id, 890_201).await);
+    let cs_after = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((cs_after.structure_hp - 240.0).abs() < 1e-3);
+    assert!((cs_after.capacitor - 450.0).abs() < 1e-6);
+}

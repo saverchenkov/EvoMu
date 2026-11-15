@@ -1524,6 +1524,7 @@ impl SystemRegistry {
                                 let _ = reply.send(updated);
                             }
                             SystemCommand::AddModuleCycle { cycle, reply } => {
+                                let cyc_key = (cycle.ship_id, cycle.module_id);
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                 let res = handle_add_module_cycle(
                                     &mut ballpark,
@@ -1535,6 +1536,9 @@ impl SystemRegistry {
                                     deact_guard.as_ref(),
                                     cycle,
                                 );
+                                if res.is_ok() {
+                                    weapon_cycle_start_modules.remove(&cyc_key);
+                                }
                                 cycles_tackle::snapshot_active_tackle_totals(&ballpark, active_module_cycles, &mut last_active_totals);
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(res);
@@ -1573,8 +1577,18 @@ impl SystemRegistry {
                                     .iter_mut()
                                     .find(|c| c.ship_id == ship_id && c.module_id == module_id)
                                 {
-                                    cycle.repeat = 0;
-                                    true
+                                    let is_sde_paid_group = sde_opt
+                                        .as_ref()
+                                        .and_then(|s| s.types.get(&cycle.module_type_id))
+                                        .is_some_and(|t| {
+                                            matches!(t.group_id, 62 | 63 | 68 | 325 | 585 | 1199 | 1698)
+                                        });
+                                    if cycle.has_paid_end_of_cycle_effect() || is_sde_paid_group {
+                                        cycle.repeat = 0;
+                                        true
+                                    } else {
+                                        false
+                                    }
                                 } else {
                                     false
                                 };
@@ -1704,6 +1718,11 @@ impl SystemRegistry {
                                     ship_id,
                                     deact_guard.as_ref(),
                                 );
+                                weapon_cycle_start_modules.retain(|&(s_id, m_id)| {
+                                    active_module_cycles
+                                        .iter()
+                                        .any(|c| c.ship_id == s_id && c.module_id == m_id)
+                                });
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 {
                                     let mut mod_guard = active_module_ships_actor.write().unwrap_or_else(|e| e.into_inner());
