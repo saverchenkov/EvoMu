@@ -863,11 +863,10 @@ fn emit_expired_quasar_notices(
         } else {
             ("eve_public.corporationgoal.api.ExpiredNotice", "goal.uuid")
         };
-        let _ = gateway.publish_notice(
+        let _ = gateway.publish_pb_notice(
             NoticeScope::Corporation(corp_id as u32),
-            pb::message(type_name)
-                .set(field_path, uuid.as_slice())
-                .must_to_any(),
+            "social_corp_projects.expired_notice",
+            pb::message(type_name).set(field_path, uuid.as_slice()),
             now_unix,
         );
     }
@@ -1117,6 +1116,26 @@ pub fn record_server_project_activity_in_db(
     qty: u64,
     filter_opt: Option<i64>,
 ) {
+    crate::quasar_gateway::isolate_side_effect("social_corp_projects.record_server_project_activity", || {
+        record_server_project_activity_in_db_inner(
+            db,
+            quasar_gateway,
+            char_id,
+            matcher_types,
+            qty,
+            filter_opt,
+        );
+    });
+}
+
+fn record_server_project_activity_in_db_inner(
+    db: &eve_db::WorldRepository,
+    quasar_gateway: Option<&crate::quasar_gateway::PublicGatewayRouter>,
+    char_id: i64,
+    matcher_types: &[&str],
+    qty: u64,
+    filter_opt: Option<i64>,
+) {
     let now_unix = db.clock().now_unix_secs();
     let (expired, updates) = db.with_mut_snapshot(|snap| {
         record_server_project_activity_detailed(snap, char_id, matcher_types, qty, filter_opt, now_unix)
@@ -1154,34 +1173,34 @@ pub fn record_server_project_activity_in_db(
                             .and_then(|d| d.char_contributions.get(&char_id).copied())
                             .unwrap_or(u.new_cur)
                     });
-                    let _ = gateway.publish_notice(
+                    let _ = gateway.publish_pb_notice(
                         NoticeScope::Corporation(u.corp_id as u32),
+                        "social_corp_projects.freelance_contributed",
                         pb::message("eve_public.freelance.project.api.ParticipantContributedNotice")
                             .set("project.uuid", u.uuid.as_slice())
                             .set("participant.sequential", contributor_u32)
-                            .set("total_participant_progress", char_tot)
-                            .must_to_any(),
+                            .set("total_participant_progress", char_tot),
                         now_unix,
                     );
                 }
-                let _ = gateway.publish_notice(
+                let _ = gateway.publish_pb_notice(
                     NoticeScope::Corporation(u.corp_id as u32),
+                    "social_corp_projects.freelance_progressed",
                     pb::message("eve_public.freelance.project.api.ProgressedNotice")
                         .set("project.uuid", u.uuid.as_slice())
                         .set("total_project_progress", u.new_cur)
                         .set(
                             "total_contributors",
                             u.total_contributors.max(1).min(u32::MAX as usize) as u32,
-                        )
-                        .must_to_any(),
+                        ),
                     now_unix,
                 );
                 if u.completed && u.prev_cur < u.new_cur {
-                    let _ = gateway.publish_notice(
+                    let _ = gateway.publish_pb_notice(
                         NoticeScope::Corporation(u.corp_id as u32),
+                        "social_corp_projects.freelance_completed",
                         pb::message("eve_public.freelance.project.api.CompletedNotice")
-                            .set("project.uuid", u.uuid.as_slice())
-                            .must_to_any(),
+                            .set("project.uuid", u.uuid.as_slice()),
                         now_unix,
                     );
                 }
@@ -1191,21 +1210,27 @@ pub fn record_server_project_activity_in_db(
                 (u.corp_id > 0).then_some(u.corp_id as u32),
                 u.creator_id.max(0) as u32,
             );
-            let _ = gateway.publish_notice(
+            let _ = gateway.publish_notice_isolated(
                 scope.clone(),
+                "social_corp_projects.goal_contributed",
                 notices::goal_contributed(&u.uuid, contributor_u32, u.prev_cur, u.new_cur, now_unix),
                 now_unix,
             );
             if u.completed && u.prev_cur < u.new_cur {
-                let _ = gateway.publish_notice(scope, notices::goal_completed(&u.uuid), now_unix);
+                let _ = gateway.publish_notice_isolated(
+                    scope,
+                    "social_corp_projects.goal_completed",
+                    notices::goal_completed(&u.uuid),
+                    now_unix,
+                );
             }
             if u.auto_paid_isk > 0 && contributor_u32 > 0 {
-                let _ = gateway.publish_notice(
+                let _ = gateway.publish_pb_notice(
                     NoticeScope::Character(contributor_u32),
+                    "social_corp_projects.goal_redeemed",
                     pb::message("eve_public.corporationgoal.api.RedeemedNotice")
                         .set("goal.uuid", u.uuid.as_slice())
-                        .set("quantity", u.auto_paid_isk)
-                        .must_to_any(),
+                        .set("quantity", u.auto_paid_isk),
                     now_unix,
                 );
             }

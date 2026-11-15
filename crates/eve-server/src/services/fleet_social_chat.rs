@@ -1658,63 +1658,80 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 }
 
 pub fn mint_or_rotate_xmpp_auth_token(ctx: &ServerContext, char_id: i64) -> String {
-    let token = generate_xmpp_auth_token();
-    let now_unix = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs
-            .remove(&format!("xmpp:token:{char_id}"));
-        let _ = snap
-            .kv_mut(eve_db::Ns::XmppAuthToken)
-            .set_with_unix(char_id, "", &token, now_unix);
-    });
-    token
+    crate::quasar_gateway::isolate_side_effect(
+        "fleet_social_chat.mint_or_rotate_xmpp_auth_token",
+        || {
+            let token = generate_xmpp_auth_token();
+            let now_unix = ctx.now_unix();
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.service_state_blobs
+                    .remove(&format!("xmpp:token:{char_id}"));
+                let _ = snap
+                    .kv_mut(eve_db::Ns::XmppAuthToken)
+                    .set_with_unix(char_id, "", &token, now_unix);
+            });
+            token
+        },
+    )
+    .unwrap_or_default()
 }
 
 pub fn ensure_xmpp_auth_token(ctx: &ServerContext, char_id: i64) -> String {
-    let key = format!("xmpp:token:{char_id}");
-    if let Some(existing) = ctx.db.with_snapshot(|snap| {
-        snap.kv(eve_db::Ns::XmppAuthToken)
-            .get::<String>(char_id, "")
-            .filter(|t| !t.is_empty())
-            .or_else(|| {
-                snap.service_state_blobs
-                    .get(&key)
+    crate::quasar_gateway::isolate_side_effect(
+        "fleet_social_chat.ensure_xmpp_auth_token",
+        || {
+            let key = format!("xmpp:token:{char_id}");
+            if let Some(existing) = ctx.db.with_snapshot(|snap| {
+                snap.kv(eve_db::Ns::XmppAuthToken)
+                    .get::<String>(char_id, "")
                     .filter(|t| !t.is_empty())
-                    .cloned()
-            })
-    }) {
-        return existing;
-    }
-    let fresh = generate_xmpp_auth_token();
-    let now_unix = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(existing) = snap
-            .kv(eve_db::Ns::XmppAuthToken)
-            .get::<String>(char_id, "")
-            .filter(|t| !t.is_empty())
-            .or_else(|| {
-                snap.service_state_blobs
-                    .get(&key)
+                    .or_else(|| {
+                        snap.service_state_blobs
+                            .get(&key)
+                            .filter(|t| !t.is_empty())
+                            .cloned()
+                    })
+            }) {
+                return existing;
+            }
+            let fresh = generate_xmpp_auth_token();
+            let now_unix = ctx.now_unix();
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(existing) = snap
+                    .kv(eve_db::Ns::XmppAuthToken)
+                    .get::<String>(char_id, "")
                     .filter(|t| !t.is_empty())
-                    .cloned()
+                    .or_else(|| {
+                        snap.service_state_blobs
+                            .get(&key)
+                            .filter(|t| !t.is_empty())
+                            .cloned()
+                    })
+                {
+                    return existing;
+                }
+                let _ = snap
+                    .kv_mut(eve_db::Ns::XmppAuthToken)
+                    .set_with_unix(char_id, "", &fresh, now_unix);
+                fresh.clone()
             })
-        {
-            return existing;
-        }
-        let _ = snap
-            .kv_mut(eve_db::Ns::XmppAuthToken)
-            .set_with_unix(char_id, "", &fresh, now_unix);
-        fresh.clone()
-    })
+        },
+    )
+    .unwrap_or_default()
 }
 
 pub fn revoke_xmpp_auth_token(ctx: &ServerContext, char_id: i64) {
-    let key = format!("xmpp:token:{char_id}");
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.remove(&key);
-        snap.kv_mut(eve_db::Ns::XmppAuthToken)
-            .remove(char_id, "");
-    });
+    crate::quasar_gateway::isolate_side_effect(
+        "fleet_social_chat.revoke_xmpp_auth_token",
+        || {
+            let key = format!("xmpp:token:{char_id}");
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.service_state_blobs.remove(&key);
+                snap.kv_mut(eve_db::Ns::XmppAuthToken)
+                    .remove(char_id, "");
+            });
+        },
+    );
 }
 
 fn handle_get_chat_authentication_token(

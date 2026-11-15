@@ -181,10 +181,10 @@ fn register_orchestrator_handlers(
                 let mut st = load_orch_state(&db1);
                 st.default_tenant_version = ver;
                 save_orch_state(&db1, &st);
-                Ok(pb::message(
+                pb::message(
                     "eve.content.orchestrator.admin.api.SetDefaultTenantVersionResponse",
                 )
-                .must_to_any())
+                .to_any_or_internal_err()
             }),
         );
 
@@ -205,10 +205,10 @@ fn register_orchestrator_handlers(
                     ));
                 }
                 save_orch_state(&db2, &st);
-                Ok(pb::message(
+                pb::message(
                     "eve.content.orchestrator.admin.api.SetTenantVersionResponse",
                 )
-                .must_to_any())
+                .to_any_or_internal_err()
             }),
         );
     }
@@ -220,11 +220,11 @@ fn register_orchestrator_handlers(
             "eve.content.orchestrator.api.GetDefaultTenantVersionRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
                 let st = load_orch_state(&db1);
-                Ok(pb::message(
+                pb::message(
                     "eve.content.orchestrator.api.GetDefaultTenantVersionResponse",
                 )
                 .set("version", semver_builder(&st.default_tenant_version))
-                .must_to_any())
+                .to_any_or_internal_err()
             }),
         );
 
@@ -237,11 +237,11 @@ fn register_orchestrator_handlers(
                     .tenant_version
                     .as_ref()
                     .unwrap_or(&st.default_tenant_version);
-                Ok(pb::message(
+                pb::message(
                     "eve.content.orchestrator.api.GetTenantVersionResponse",
                 )
                 .set("version", semver_builder(ver))
-                .must_to_any())
+                .to_any_or_internal_err()
             }),
         );
 
@@ -341,7 +341,7 @@ fn register_orchestrator_handlers(
                         m
                     });
                 }
-                Ok(resp.must_to_any())
+                resp.to_any_or_internal_err()
             }),
         );
     }
@@ -362,7 +362,7 @@ fn register_orchestrator_handlers(
                             .set("short_description", dep.short_description.as_str())
                     });
                 }
-                Ok(resp.must_to_any())
+                resp.to_any_or_internal_err()
             }),
         );
 
@@ -376,7 +376,7 @@ fn register_orchestrator_handlers(
                     .deployments
                     .get(&dep_id)
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Deployment not found".into()))?;
-                Ok(pb::message("eve.content.orchestrator.deployment.api.GetResponse")
+                pb::message("eve.content.orchestrator.deployment.api.GetResponse")
                     .set("attributes.name", dep.name.as_str())
                     .set("attributes.content_group.sequential", dep.content_group_id)
                     .set(
@@ -384,7 +384,7 @@ fn register_orchestrator_handlers(
                         dep.current_content_count,
                     )
                     .set("attributes.no_region_limit", dep.no_region_limit)
-                    .must_to_any())
+                    .to_any_or_internal_err()
             }),
         );
 
@@ -400,10 +400,8 @@ fn register_orchestrator_handlers(
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Deployment not found".into()))?;
                 dep.enabled = true;
                 save_orch_state(&db3, &st);
-                Ok(
-                    pb::message("eve.content.orchestrator.deployment.api.EnableResponse")
-                        .must_to_any(),
-                )
+                pb::message("eve.content.orchestrator.deployment.api.EnableResponse")
+                    .to_any_or_internal_err()
             }),
         );
 
@@ -419,10 +417,8 @@ fn register_orchestrator_handlers(
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Deployment not found".into()))?;
                 dep.enabled = false;
                 save_orch_state(&db4, &st);
-                Ok(
-                    pb::message("eve.content.orchestrator.deployment.api.DisableResponse")
-                        .must_to_any(),
-                )
+                pb::message("eve.content.orchestrator.deployment.api.DisableResponse")
+                    .to_any_or_internal_err()
             }),
         );
     }
@@ -439,7 +435,7 @@ fn register_orchestrator_handlers(
                     .content_groups
                     .get(&cg_id)
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Content group not found".into()))?;
-                Ok(pb::message(
+                pb::message(
                     "eve.content.orchestrator.deployment.contentgroup.api.GetResponse",
                 )
                 .set("attributes.name", cg.name.as_str())
@@ -447,7 +443,7 @@ fn register_orchestrator_handlers(
                     m.set("content_type.sequential", cg.content_type_id)
                         .set("weight", cg.weight)
                 })
-                .must_to_any())
+                .to_any_or_internal_err()
             }),
         );
     }
@@ -464,7 +460,7 @@ fn register_orchestrator_handlers(
                     .content_types
                     .get(&ct_id)
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Content type not found".into()))?;
-                Ok(pb::message(
+                pb::message(
                     "eve.content.orchestrator.deployment.contenttype.api.GetResponse",
                 )
                 .set("attributes.name", ct.name.as_str())
@@ -473,7 +469,7 @@ fn register_orchestrator_handlers(
                     ct.short_description.as_str(),
                 )
                 .set("attributes.dungeon.sequential", ct.dungeon_id)
-                .must_to_any())
+                .to_any_or_internal_err()
             }),
         );
     }
@@ -495,10 +491,10 @@ fn register_orchestrator_handlers(
                     return Err((STATUS_NOT_FOUND, "Deployment instance not found".into()));
                 }
                 save_orch_state(&db1, &st);
-                Ok(pb::message(
+                pb::message(
                     "eve.content.orchestrator.deployment.instance.admin.api.RemoveResponse",
                 )
-                .must_to_any())
+                .to_any_or_internal_err()
             }),
         );
     }
@@ -521,7 +517,7 @@ fn register_orchestrator_handlers(
                 {
                     resp = resp.add_with("instances", |m| m.set("uuid", inst.uuid.clone()));
                 }
-                Ok(resp.must_to_any())
+                resp.to_any_or_internal_err()
             }),
         );
 
@@ -539,7 +535,7 @@ fn register_orchestrator_handlers(
                     .iter()
                     .find(|i| i.uuid == uuid)
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Instance not found".into()))?;
-                Ok(pb::message(
+                pb::message(
                     "eve.content.orchestrator.deployment.instance.api.GetResponse",
                 )
                 .set(
@@ -550,7 +546,7 @@ fn register_orchestrator_handlers(
                 .set_with("attributes.location", |loc| {
                     set_solar_system_location(loc, inst.solar_system_id, inst.constellation_id)
                 })
-                .must_to_any())
+                .to_any_or_internal_err()
             }),
         );
     }
@@ -593,7 +589,7 @@ fn register_commerce_admin_handlers(
                             .set("attributes.discount_percent", l.discount_percent)
                     });
                 }
-                Ok(resp.must_to_any())
+                resp.to_any_or_internal_err()
             }),
         );
     }
@@ -632,7 +628,7 @@ fn register_commerce_admin_handlers(
                             .set("attributes.quantity", l.quantity)
                     });
                 }
-                Ok(resp.must_to_any())
+                resp.to_any_or_internal_err()
             }),
         );
     }
@@ -684,10 +680,8 @@ fn register_commerce_admin_handlers(
                 if !found {
                     return Err((STATUS_NOT_FOUND, "Failed fulfillment not found".into()));
                 }
-                Ok(
-                    pb::message("eve.store.sale.admin.RetryFailedFulfillmentResponse")
-                        .must_to_any(),
-                )
+                pb::message("eve.store.sale.admin.RetryFailedFulfillmentResponse")
+                    .to_any_or_internal_err()
             }),
         );
 
@@ -721,10 +715,8 @@ fn register_commerce_admin_handlers(
                         }
                     }
                 });
-                Ok(
-                    pb::message("eve.store.sale.admin.RetryAllFailedFulfillmentsResponse")
-                        .must_to_any(),
-                )
+                pb::message("eve.store.sale.admin.RetryAllFailedFulfillmentsResponse")
+                    .to_any_or_internal_err()
             }),
         );
 
@@ -743,10 +735,8 @@ fn register_commerce_admin_handlers(
                 if !removed {
                     return Err((STATUS_NOT_FOUND, "Failed fulfillment not found".into()));
                 }
-                Ok(
-                    pb::message("eve.store.sale.admin.DropFailedFulfillmentResponse")
-                        .must_to_any(),
-                )
+                pb::message("eve.store.sale.admin.DropFailedFulfillmentResponse")
+                    .to_any_or_internal_err()
             }),
         );
     }
@@ -784,10 +774,8 @@ fn register_commerce_admin_handlers(
                     rec.promoted = true;
                     rec.retracted = false;
                 });
-                Ok(
-                    pb::message("eve.store.targetaudience.offer.api.admin.PromoteResponse")
-                        .must_to_any(),
-                )
+                pb::message("eve.store.targetaudience.offer.api.admin.PromoteResponse")
+                    .to_any_or_internal_err()
             }),
         );
 
@@ -810,10 +798,8 @@ fn register_commerce_admin_handlers(
                 if !found {
                     return Err((STATUS_NOT_FOUND, "Targeted offer not found".into()));
                 }
-                Ok(
-                    pb::message("eve.store.targetaudience.offer.api.admin.RetractResponse")
-                        .must_to_any(),
-                )
+                pb::message("eve.store.targetaudience.offer.api.admin.RetractResponse")
+                    .to_any_or_internal_err()
             }),
         );
 
@@ -849,10 +835,10 @@ fn register_commerce_admin_handlers(
                         });
                     rec.partner_code = partner_code;
                 });
-                Ok(pb::message(
+                pb::message(
                     "eve.store.targetaudience.offer.api.admin.BackfillPartnerCodeResponse",
                 )
-                .must_to_any())
+                .to_any_or_internal_err()
             }),
         );
     }

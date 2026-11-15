@@ -73,22 +73,25 @@ pub fn register_handlers(
                     Ok::<_, (u32, String)>((sys, pid))
                 })?;
 
-                let notice = pb::message("eve_public.sovereignty.skyhook.api.ActivationNotice")
-                    .set("solar_system.sequential", sys_id)
-                    .with(|b| match planet_id {
-                        Some(pid) => b.set("planet.sequential", pid as u64),
-                        None => b,
-                    })
-                    .set("skyhook.sequential", structure_id as u64)
-                    .set("active", true)
-                    .must_to_any();
-                pending.write().unwrap_or_else(|e| e.into_inner()).push((
-                    NoticeScope::SolarSystem(sys_id),
-                    notice,
-                ));
+                if let Some(notice) = crate::quasar_gateway::pb_to_any_or_log(
+                    "quasar_sov_services.skyhook_activate",
+                    pb::message("eve_public.sovereignty.skyhook.api.ActivationNotice")
+                        .set("solar_system.sequential", sys_id)
+                        .with(|b| match planet_id {
+                            Some(pid) => b.set("planet.sequential", pid as u64),
+                            None => b,
+                        })
+                        .set("skyhook.sequential", structure_id as u64)
+                        .set("active", true),
+                ) {
+                    pending.write().unwrap_or_else(|e| e.into_inner()).push((
+                        NoticeScope::SolarSystem(sys_id),
+                        notice,
+                    ));
+                }
 
-                Ok(pb::message("eve_public.sovereignty.skyhook.api.ActivateResponse")
-                    .must_to_any())
+                pb::message("eve_public.sovereignty.skyhook.api.ActivateResponse")
+                    .to_any_or_internal_err()
             }),
         );
     }
@@ -109,22 +112,25 @@ pub fn register_handlers(
                     Ok::<_, (u32, String)>((sys, pid))
                 })?;
 
-                let notice = pb::message("eve_public.sovereignty.skyhook.api.ActivationNotice")
-                    .set("solar_system.sequential", sys_id)
-                    .with(|b| match planet_id {
-                        Some(pid) => b.set("planet.sequential", pid as u64),
-                        None => b,
-                    })
-                    .set("skyhook.sequential", structure_id as u64)
-                    .set("active", false)
-                    .must_to_any();
-                pending.write().unwrap_or_else(|e| e.into_inner()).push((
-                    NoticeScope::SolarSystem(sys_id),
-                    notice,
-                ));
+                if let Some(notice) = crate::quasar_gateway::pb_to_any_or_log(
+                    "quasar_sov_services.skyhook_deactivate",
+                    pb::message("eve_public.sovereignty.skyhook.api.ActivationNotice")
+                        .set("solar_system.sequential", sys_id)
+                        .with(|b| match planet_id {
+                            Some(pid) => b.set("planet.sequential", pid as u64),
+                            None => b,
+                        })
+                        .set("skyhook.sequential", structure_id as u64)
+                        .set("active", false),
+                ) {
+                    pending.write().unwrap_or_else(|e| e.into_inner()).push((
+                        NoticeScope::SolarSystem(sys_id),
+                        notice,
+                    ));
+                }
 
-                Ok(pb::message("eve_public.sovereignty.skyhook.api.DeactivateResponse")
-                    .must_to_any())
+                pb::message("eve_public.sovereignty.skyhook.api.DeactivateResponse")
+                    .to_any_or_internal_err()
             }),
         );
     }
@@ -154,7 +160,7 @@ pub fn register_handlers(
                     "res:/ui/texture/corps/{}_128.png",
                     fac.corporation_id.unwrap_or(faction_id as i64)
                 );
-                Ok(pb::message("eve.faction.api.GetResponse")
+                pb::message("eve.faction.api.GetResponse")
                     .set_with("faction", |attr| {
                         let attr = attr
                             .set("name", fac.name.as_str())
@@ -166,7 +172,7 @@ pub fn register_handlers(
                             attr
                         }
                     })
-                    .must_to_any())
+                    .to_any_or_internal_err()
             }),
         );
     }
@@ -214,7 +220,7 @@ pub fn register_handlers(
                 for fid in matched_ids {
                     resp = resp.add_with("factions", |f| f.set("sequential", fid));
                 }
-                Ok(resp.must_to_any())
+                resp.to_any_or_internal_err()
             }),
         );
     }
@@ -273,13 +279,12 @@ pub fn register_handlers(
                     if include_sys_field {
                         resp = resp.set("solar_system.sequential", sys_id);
                     }
-                    Ok(resp
-                        .add_with("scores", |s| {
-                            s.set("faction.sequential", occ_fac)
-                                .set("contribution", vp.min(u64::from(u32::MAX)))
-                                .set("floor", adv_floor.min(u64::from(u32::MAX)))
-                        })
-                        .must_to_any())
+                    resp.add_with("scores", |s| {
+                        s.set("faction.sequential", occ_fac)
+                            .set("contribution", vp.min(u64::from(u32::MAX)))
+                            .set("floor", adv_floor.min(u64::from(u32::MAX)))
+                    })
+                    .to_any_or_internal_err()
                 }),
             );
         }
@@ -325,9 +330,8 @@ pub fn register_handlers(
                             })
                         });
                     }
-                    Ok(resp
-                        .set("ceiling", ceiling.min(u64::from(u32::MAX)))
-                        .must_to_any())
+                    resp.set("ceiling", ceiling.min(u64::from(u32::MAX)))
+                        .to_any_or_internal_err()
                 }),
             );
         }
@@ -416,32 +420,36 @@ pub fn register_handlers(
                     let fac_id = resolved_fac_id;
                     if is_increment {
                         let contrib = delta_or_val.max(0).min(i64::from(i32::MAX)) as i32;
-                        let contrib_notice =
+                        if let Some(contrib_notice) = crate::quasar_gateway::pb_to_any_or_log(
+                            "quasar_sov_services.admin_contribution_score",
                             pb::message("eve_public.faction.activity.ScoreContributionNotice")
                                 .set("solar_system.sequential", sys_id)
                                 .set("contributor.sequential", caller_cid)
                                 .set("faction.sequential", fac_id)
-                                .set("contribution", contrib)
-                                .must_to_any();
-                        pending_fw.write().unwrap_or_else(|e| e.into_inner()).push((
-                            NoticeScope::SolarSystem(sys_id),
-                            contrib_notice,
-                        ));
+                                .set("contribution", contrib),
+                        ) {
+                            pending_fw.write().unwrap_or_else(|e| e.into_inner()).push((
+                                NoticeScope::SolarSystem(sys_id),
+                                contrib_notice,
+                            ));
+                        }
                     }
-                    let scores_notice =
+                    if let Some(scores_notice) = crate::quasar_gateway::pb_to_any_or_log(
+                        "quasar_sov_services.admin_solar_system_scores",
                         pb::message("eve_public.faction.activity.SolarSystemScoresNotice")
                             .set("solar_system.sequential", sys_id)
                             .add_with("scores", |s| {
                                 s.set("faction.sequential", fac_id)
                                     .set("contribution", new_vp.min(u64::from(u32::MAX)))
                                     .set("floor", adv_floor.min(u64::from(u32::MAX)))
-                            })
-                            .must_to_any();
-                    pending_fw.write().unwrap_or_else(|e| e.into_inner()).push((
-                        NoticeScope::SolarSystem(sys_id),
-                        scores_notice,
-                    ));
-                    Ok(pb::message(rsp_name).must_to_any())
+                            }),
+                    ) {
+                        pending_fw.write().unwrap_or_else(|e| e.into_inner()).push((
+                            NoticeScope::SolarSystem(sys_id),
+                            scores_notice,
+                        ));
+                    }
+                    pb::message(rsp_name).to_any_or_internal_err()
                 }),
             );
         }
@@ -586,7 +594,7 @@ pub fn register_handlers(
                 for wz_id in warzones {
                     resp = resp.add_with("warzones", |w| w.set("sequential", wz_id));
                 }
-                Ok(resp.must_to_any())
+                resp.to_any_or_internal_err()
             }),
         );
 
@@ -616,19 +624,17 @@ pub fn register_handlers(
                         .unwrap_or(u64::from(default_pirate));
                     Ok((factions, pirate))
                 })?;
-                Ok(
-                    pb::message("eve.factionwarfare.warzone.api.GetParticipantsResponse")
-                        .set_with("participants", |mut p| {
-                            for fid in factions {
-                                p = p.add_with("factions", |f| f.set("sequential", fid));
-                            }
-                            if sde_entry.factions.contains_key(&(pirate_faction as u32)) {
-                                p = p.set("pirate_faction.sequential", pirate_faction);
-                            }
-                            p
-                        })
-                        .must_to_any(),
-                )
+                pb::message("eve.factionwarfare.warzone.api.GetParticipantsResponse")
+                    .set_with("participants", |mut p| {
+                        for fid in factions {
+                            p = p.add_with("factions", |f| f.set("sequential", fid));
+                        }
+                        if sde_entry.factions.contains_key(&(pirate_faction as u32)) {
+                            p = p.set("pirate_faction.sequential", pirate_faction);
+                        }
+                        p
+                    })
+                    .to_any_or_internal_err()
             }),
         );
     }
@@ -678,7 +684,7 @@ pub fn register_handlers(
                                 .set("journey", journey.to_vec())
                         });
                 }
-                Ok(resp.must_to_any())
+                resp.to_any_or_internal_err()
             }),
         );
     }
@@ -705,7 +711,12 @@ pub(crate) fn publish_stargate_lock_activated_notice(
         .set("solarsystem.sequential", solar_system_id)
         .set("gate.sequential", gate_id)
         .set("expiry", GoogleTimestamp::from_unix(expiry_unix as i64, 0))
-        .must_to_any();
+        .to_any_or_internal_err()
+        .map_err(|(code, message)| eve_proto::BridgeRpcError {
+            code: format!("QuasarError{code}"),
+            message,
+            client_error: None,
+        })?;
     gateway
         .publish_notice(NoticeScope::Character(char_id as u32), any, now_unix)
         .map(|(_, n)| n)
@@ -720,11 +731,14 @@ pub(crate) fn publish_stargate_lock_deactivated_notice(
     gate_id: i64,
     now_unix: u64,
 ) {
-    let any = pb::message("eve_public.stargate.lock.api.DeactivatedNotice")
-        .set("solarsystem.sequential", solar_system_id)
-        .set("gate.sequential", gate_id as u64)
-        .must_to_any();
-    let _ = gateway.publish_notice(NoticeScope::Character(char_id as u32), any, now_unix);
+    let _ = gateway.publish_pb_notice(
+        NoticeScope::Character(char_id as u32),
+        "quasar_sov_services.publish_stargate_lock_deactivated_notice",
+        pb::message("eve_public.stargate.lock.api.DeactivatedNotice")
+            .set("solarsystem.sequential", solar_system_id)
+            .set("gate.sequential", gate_id as u64),
+        now_unix,
+    );
 }
 
 #[cfg(test)]

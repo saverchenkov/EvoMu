@@ -1,6 +1,6 @@
 //! `quasar_freelance_defs` — V24 Freelance Item Delivery, SDE Contribution Method Serialization & Cursor Pagination.
 
-use super::quasar_social_chat::{ctx_now_unix, ctx_queue_notice};
+use super::quasar_social_chat::ctx_now_unix;
 use super::quasar_social_freelance::QuasarFreelanceState;
 use super::social_corp_fleet::social_corp_projects as corp_projects;
 use crate::quasar_gateway::{
@@ -182,11 +182,11 @@ pub fn register_item_delivery_and_definitions(
             });
             if !is_item_delivery {
                 // V24 `DeliverResponse.project_does_not_allow_item_delivery = 12`.
-                return Ok(pb::message(
+                return pb::message(
                     "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverResponse",
                 )
                 .set_with("project_does_not_allow_item_delivery", |v| v)
-                .must_to_any());
+                .to_any_or_internal_err();
             }
             let req_qty = dyn_msg
                 .get(4)
@@ -356,20 +356,20 @@ pub fn register_item_delivery_and_definitions(
                     12 => "project_does_not_allow_item_delivery",
                     _ => "project_does_not_exist",
                 };
-                return Ok(pb::message(
+                return pb::message(
                     "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverResponse",
                 )
                 .set_with(variant_field, |v| v)
-                .must_to_any());
+                .to_any_or_internal_err();
             }
             if !found {
-                ctx_queue_notice(
+                crate::quasar_gateway::queue_pb_notice(
                     NoticeScope::Character(cid),
+                    "quasar_freelance_defs.deliver.contribution_failed",
                     pb::message(
                         "eve_public.freelance.contributionmethod.itemdelivery.api.ContributionFailedNotice",
                     )
-                    .set("identifier.uuid", uuid.clone())
-                    .must_to_any(),
+                    .set("identifier.uuid", uuid.clone()),
                     now_u,
                 );
                 return Err((
@@ -438,53 +438,53 @@ pub fn register_item_delivery_and_definitions(
             state_deliver.refresh_from_db(now_u);
 
             let remainder = (target_prog_total - total_prog).max(0) as u64;
-            ctx_queue_notice(
+            crate::quasar_gateway::queue_pb_notice(
                 NoticeScope::Character(cid),
+                "quasar_freelance_defs.deliver.contribution_succeeded",
                 pb::message(
                     "eve_public.freelance.contributionmethod.itemdelivery.api.ContributionSucceededNotice",
                 )
                 .set("delivery.uuid", uuid.clone())
                 .set("contributed", delivered_units as u64)
-                .set("remainder", remainder)
-                .must_to_any(),
+                .set("remainder", remainder),
                 now_u,
             );
 
-            ctx_queue_notice(
+            crate::quasar_gateway::queue_pb_notice(
                 NoticeScope::Corporation(corpid),
+                "quasar_freelance_defs.deliver.participant_contributed",
                 pb::message("eve_public.freelance.project.api.ParticipantContributedNotice")
                     .set("project.uuid", uuid.clone())
                     .set("participant.sequential", cid)
-                    .set("total_participant_progress", char_total_prog)
-                    .must_to_any(),
+                    .set("total_participant_progress", char_total_prog),
                 now_u,
             );
 
-            ctx_queue_notice(
+            crate::quasar_gateway::queue_pb_notice(
                 NoticeScope::Corporation(corpid),
+                "quasar_freelance_defs.deliver.progressed",
                 pb::message("eve_public.freelance.project.api.ProgressedNotice")
                     .set("project.uuid", uuid.clone())
                     .set("total_project_progress", total_prog as u64)
-                    .set("total_contributors", total_contributors as u32)
-                    .must_to_any(),
+                    .set("total_contributors", total_contributors as u32),
                 now_u,
             );
 
             if completed {
-                ctx_queue_notice(
+                crate::quasar_gateway::queue_pb_notice(
                     NoticeScope::Corporation(corpid),
+                    "quasar_freelance_defs.deliver.completed",
                     pb::message("eve_public.freelance.project.api.CompletedNotice")
-                        .set("project.uuid", uuid.clone())
-                        .must_to_any(),
+                        .set("project.uuid", uuid.clone()),
                     now_u,
                 );
             }
 
-            Ok(pb::message(
+            pb::message(
                 "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverResponse",
             )
             .set("escrowed.delivery.uuid", uuid)
-            .must_to_any())
+            .to_any_or_internal_err()
         }),
     );
 
@@ -513,7 +513,7 @@ pub fn register_item_delivery_and_definitions(
             } else {
                 rsp.set_with("failed", |v| v)
             };
-            Ok(rsp.must_to_any())
+            rsp.to_any_or_internal_err()
         }),
     );
 
@@ -582,7 +582,11 @@ pub fn encode_freelance_contribution_methods(
         }
     }
 
-    builder.must_to_any()
+    crate::quasar_gateway::pb_to_any_or_log(
+        "quasar_freelance_defs.encode_freelance_contribution_methods",
+        builder,
+    )
+    .unwrap_or_default()
 }
 
 fn set_loc_id(b: ProtoBuilder, field: &str, val: &serde_json::Value, key: &str) -> ProtoBuilder {

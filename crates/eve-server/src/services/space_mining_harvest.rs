@@ -19,41 +19,43 @@ pub fn mining_contribution_method(group_id: u32) -> &'static str {
 
 pub fn dispatch_mining_gameplay_events(ctx: &ServerContext, char_id: i64, units: u64, sys_id: u32, ore_type_id: u32) {
     if units > 0 {
-        ctx.quasar_gateway
-            .progression
-            .daily_goals
-            .on_gameplay_event(char_id as u32, 2, units, &ctx.quasar_gateway);
-        ctx.quasar_gateway
-            .progression
-            .career_goals
-            .on_gameplay_event(char_id as u32, "mining", units, &ctx.quasar_gateway);
-        ctx.quasar_gateway
-            .progression
-            .extra
-            .on_campaign_gameplay_event(
-                char_id as u32,
-                CampaignEvent {
-                    method: mining_contribution_method(ctx.sde.types.get(&ore_type_id).map(|t| t.group_id).unwrap_or(0)),
-                    type_id: Some(ore_type_id),
-                    solar_system_id: Some(sys_id),
-                    faction_id: None,
-                },
+        crate::quasar_gateway::isolate_side_effect("space_mining_harvest.progression", || {
+            ctx.quasar_gateway
+                .progression
+                .daily_goals
+                .on_gameplay_event(char_id as u32, 2, units, &ctx.quasar_gateway);
+            ctx.quasar_gateway
+                .progression
+                .career_goals
+                .on_gameplay_event(char_id as u32, "mining", units, &ctx.quasar_gateway);
+            ctx.quasar_gateway
+                .progression
+                .extra
+                .on_campaign_gameplay_event(
+                    char_id as u32,
+                    CampaignEvent {
+                        method: mining_contribution_method(ctx.sde.types.get(&ore_type_id).map(|t| t.group_id).unwrap_or(0)),
+                        type_id: Some(ore_type_id),
+                        solar_system_id: Some(sys_id),
+                        faction_id: None,
+                    },
+                    units,
+                    ctx.now_unix(),
+                    &ctx.quasar_gateway,
+                );
+            let ore_vol = ctx.sde.types.get(&ore_type_id).map(|t| t.volume).unwrap_or(0.1) * (units as f64);
+            let now_unix = ctx.now_unix();
+            ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["timesMined"], 1, now_unix, &ctx.quasar_gateway);
+            ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["totalMined"], units, now_unix, &ctx.quasar_gateway);
+            ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["volumeMined"], ore_vol.round().max(1.0) as u64, now_unix, &ctx.quasar_gateway);
+            crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
+                ctx,
+                char_id,
+                &["MineMaterials", "MineOre"],
                 units,
-                ctx.now_unix(),
-                &ctx.quasar_gateway,
+                Some(ore_type_id as i64),
             );
-        let ore_vol = ctx.sde.types.get(&ore_type_id).map(|t| t.volume).unwrap_or(0.1) * (units as f64);
-        let now_unix = ctx.now_unix();
-        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["timesMined"], 1, now_unix, &ctx.quasar_gateway);
-        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["totalMined"], units, now_unix, &ctx.quasar_gateway);
-        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["volumeMined"], ore_vol.round().max(1.0) as u64, now_unix, &ctx.quasar_gateway);
-        crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
-            ctx,
-            char_id,
-            &["MineMaterials", "MineOre"],
-            units,
-            Some(ore_type_id as i64),
-        );
+        });
         let ore_vol = ctx
             .sde
             .types

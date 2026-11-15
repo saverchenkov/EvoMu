@@ -1530,41 +1530,43 @@ fn finalize_destroyed_npc_side_effects(
             npc_ball_id,
             Some(killer_char_id),
         );
-        ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(
-            killer_char_id as u32,
-            1,
-            1,
-            &ctx.quasar_gateway,
-        );
-        ctx.quasar_gateway.progression.career_goals.on_gameplay_event(
-            killer_char_id as u32,
-            "combat",
-            1,
-            &ctx.quasar_gateway,
-        );
-        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
-            killer_char_id as u32,
-            &["destroyHostileNPC", "entityGroupDestroyed"],
-            1,
-            ctx.now_unix(),
-            &ctx.quasar_gateway,
-        );
-        let npc_gid = ctx
-            .sde
-            .types
-            .get(&entity.type_id)
-            .map(|t| t.group_id)
-            .unwrap_or(0);
-        crate::services::operations_manager::record_server_operation_event(
-            ctx,
-            killer_char_id,
-            "somethingExplode",
-            &[
-                ("typeID", entity.type_id.to_string()),
-                ("groupID", npc_gid.to_string()),
-            ],
-            1,
-        );
+        crate::quasar_gateway::isolate_side_effect("combat.npc_ai.npc_destroyed_progression", || {
+            ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(
+                killer_char_id as u32,
+                1,
+                1,
+                &ctx.quasar_gateway,
+            );
+            ctx.quasar_gateway.progression.career_goals.on_gameplay_event(
+                killer_char_id as u32,
+                "combat",
+                1,
+                &ctx.quasar_gateway,
+            );
+            ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
+                killer_char_id as u32,
+                &["destroyHostileNPC", "entityGroupDestroyed"],
+                1,
+                ctx.now_unix(),
+                &ctx.quasar_gateway,
+            );
+            let npc_gid = ctx
+                .sde
+                .types
+                .get(&entity.type_id)
+                .map(|t| t.group_id)
+                .unwrap_or(0);
+            crate::services::operations_manager::record_server_operation_event(
+                ctx,
+                killer_char_id,
+                "somethingExplode",
+                &[
+                    ("typeID", entity.type_id.to_string()),
+                    ("groupID", npc_gid.to_string()),
+                ],
+                1,
+            );
+        });
     }
     res
 }

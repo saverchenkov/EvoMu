@@ -209,26 +209,36 @@ fn tagged_uuid(tag: &[u8; 8], id: u64) -> [u8; 16] {
 
 /// Encodes `{ <field 1>: Identifier { uuid = 1 } }` — the shared shape of every campaign notice id.
 pub fn encode_identifier(uuid: &[u8; 16]) -> Vec<u8> {
-    pb::message("eve_public.campaign.Identifier")
-        .set("uuid", *uuid)
-        .must_encode()
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_campaign_state.encode_identifier",
+        pb::message("eve_public.campaign.Identifier").set("uuid", *uuid),
+    )
+    .unwrap_or_default()
 }
 
-fn campaign_notice(type_name: &str, campaign_id: u64) -> GoogleAny {
-    pb::message(type_name)
-        .set("campaign.uuid", campaign_id_to_uuid_bytes(campaign_id))
-        .must_to_any()
+fn campaign_notice(type_name: &str, campaign_id: u64) -> Option<GoogleAny> {
+    crate::quasar_gateway::pb_to_any_or_log(
+        "quasar_campaign_state.campaign_notice",
+        pb::message(type_name).set("campaign.uuid", campaign_id_to_uuid_bytes(campaign_id)),
+    )
 }
 
-fn contributed_notice(type_name: &str, id_field: &str, uuid: [u8; 16], total_participant_progress: u64) -> GoogleAny {
-    pb::message(type_name)
-        .set(&format!("{id_field}.uuid"), uuid)
-        .set("total_participant_progress", total_participant_progress)
-        .must_to_any()
+fn contributed_notice(
+    type_name: &str,
+    id_field: &str,
+    uuid: [u8; 16],
+    total_participant_progress: u64,
+) -> Option<GoogleAny> {
+    crate::quasar_gateway::pb_to_any_or_log(
+        "quasar_campaign_state.contributed_notice",
+        pb::message(type_name)
+            .set(&format!("{id_field}.uuid"), uuid)
+            .set("total_participant_progress", total_participant_progress),
+    )
 }
 
 /// `CurrentVersionNotice { versions: [CampaignVersion { campaign = 1, version = 2 { etag = 2 } }] }`.
-fn current_version_notice(versions: &[(u64, u64)]) -> GoogleAny {
+fn current_version_notice(versions: &[(u64, u64)]) -> Option<GoogleAny> {
     let mut notice = pb::message("eve_public.campaign.api.CurrentVersionNotice");
     for (cid, etag) in versions {
         notice = notice.add_with("versions", |entry| {
@@ -237,7 +247,7 @@ fn current_version_notice(versions: &[(u64, u64)]) -> GoogleAny {
                 .set("version.etag", *etag)
         });
     }
-    notice.must_to_any()
+    crate::quasar_gateway::pb_to_any_or_log("quasar_campaign_state.current_version_notice", notice)
 }
 
 /// Parameter list `(key, parameter type, icon)` of an authentic contribution method, if the name is known.
@@ -393,7 +403,9 @@ impl ProgressionExtraManager {
                         tc.last_tick_unix = camp.scheduled_start_unix;
                     }
                 }
-                out.push((NoticeScope::Broadcast, campaign_notice("eve_public.campaign.api.StartedNotice", cid)));
+                if let Some(n) = campaign_notice("eve_public.campaign.api.StartedNotice", cid) {
+                    out.push((NoticeScope::Broadcast, n));
+                }
                 changed = true;
             }
             if camp.state != CAMPAIGN_STATE_ACTIVE {
@@ -426,7 +438,9 @@ impl ProgressionExtraManager {
                     t.state = TRACK_STATE_STOPPED;
                     t.transition_unix = now;
                 }
-                out.push((NoticeScope::Broadcast, campaign_notice("eve_public.campaign.api.CompletedNotice", cid)));
+                if let Some(n) = campaign_notice("eve_public.campaign.api.CompletedNotice", cid) {
+                    out.push((NoticeScope::Broadcast, n));
+                }
                 changed = true;
             } else if camp.scheduled_expiry_unix > 0 && now >= camp.scheduled_expiry_unix {
                 camp.state = CAMPAIGN_STATE_EXPIRED;
@@ -439,13 +453,17 @@ impl ProgressionExtraManager {
                     t.state = TRACK_STATE_STOPPED;
                     t.transition_unix = camp.scheduled_expiry_unix;
                 }
-                out.push((NoticeScope::Broadcast, campaign_notice("eve_public.campaign.api.ExpiredNotice", cid)));
+                if let Some(n) = campaign_notice("eve_public.campaign.api.ExpiredNotice", cid) {
+                    out.push((NoticeScope::Broadcast, n));
+                }
                 changed = true;
             }
         }
         if !versions.is_empty() {
             versions.sort_unstable();
-            out.push((NoticeScope::Broadcast, current_version_notice(&versions)));
+            if let Some(n) = current_version_notice(&versions) {
+                out.push((NoticeScope::Broadcast, n));
+            }
         }
         if changed {
             self.save_to_db();
@@ -505,15 +523,14 @@ impl ProgressionExtraManager {
                     obj.state = OBJECTIVE_STATE_COMPLETED;
                     obj.transition_unix = now;
                 }
-                out.push((
-                    NoticeScope::Character(char_id),
-                    contributed_notice(
-                        "eve_public.campaign.objective.api.ContributedNotice",
-                        "objective",
-                        objective_id_to_uuid_bytes(oid),
-                        participant_total,
-                    ),
-                ));
+                if let Some(n) = contributed_notice(
+                    "eve_public.campaign.objective.api.ContributedNotice",
+                    "objective",
+                    objective_id_to_uuid_bytes(oid),
+                    participant_total,
+                ) {
+                    out.push((NoticeScope::Character(char_id), n));
+                }
                 per_campaign.push((obj.campaign_id, credit as u64));
                 credited_any = true;
             }
@@ -544,15 +561,14 @@ impl ProgressionExtraManager {
                         t.state = TRACK_STATE_TARGET_REACHED;
                         t.transition_unix = now;
                     }
-                    out.push((
-                        NoticeScope::Character(char_id),
-                        contributed_notice(
-                            "eve_public.campaign.track.api.ContributedNotice",
-                            "track",
-                            track_id_to_uuid_bytes(*tid),
-                            participant_total,
-                        ),
-                    ));
+                    if let Some(n) = contributed_notice(
+                        "eve_public.campaign.track.api.ContributedNotice",
+                        "track",
+                        track_id_to_uuid_bytes(*tid),
+                        participant_total,
+                    ) {
+                        out.push((NoticeScope::Character(char_id), n));
+                    }
                 }
             }
         }
@@ -565,9 +581,16 @@ impl ProgressionExtraManager {
 
     /// Gameplay hook used by mining / industry / exploration / FW code paths.
     pub fn on_campaign_gameplay_event(&self, char_id: u32, event: CampaignEvent<'_>, units: u64, now: u64, gateway: &PublicGatewayRouter) {
-        for (scope, payload) in self.record_gameplay_contribution(char_id, &event, units, now) {
-            let _ = gateway.publish_notice(scope, payload, now);
-        }
+        crate::quasar_gateway::isolate_side_effect("quasar_campaign_state.on_campaign_gameplay_event", || {
+            for (scope, payload) in self.record_gameplay_contribution(char_id, &event, units, now) {
+                let _ = gateway.publish_notice_isolated(
+                    scope,
+                    "quasar_campaign_state.on_campaign_gameplay_event.notice",
+                    payload,
+                    now,
+                );
+            }
+        });
     }
 
     /// Settles every elapsed tick at the participant count active so far (pushing any lifecycle

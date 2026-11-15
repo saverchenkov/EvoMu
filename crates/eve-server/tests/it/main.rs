@@ -550,3 +550,4 @@ mod remediate_flagged_fake_pve_econ;
 mod remediate_flagged_fake_quasar_cosmetics;
 mod shadow_client_convergence;
 mod observability_sequencer_ops;
+mod quasar_blast_radius_isolation;

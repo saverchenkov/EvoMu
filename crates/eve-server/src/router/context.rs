@@ -772,11 +772,13 @@ impl ServerContext {
                 if let Some(kid) = killer_opt {
                     let now_s = db.clock().now_unix_secs();
                     let (clr, esc, step) = crate::services::pve_exploration::handle_pve_site_npc_destruction_core(sys, db, sde, &ctx.mechanic_rng, &*ctx.combat_ephemeral, sys_id, npc_id, kid, true).await;
-                    ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(kid as u32, &["destroyHostileNPC"], 1, now_s, &ctx.quasar_gateway);
-                    if let Some(ref sid) = clr {
-                        let (cat, did) = crate::services::pve_exploration::pve_site_category_and_dungeon_id(db, now_s, sys_id, sid);
-                        ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(sys_id, &cat, did, 1, now_s, &ctx.quasar_gateway);
-                    }
+                    crate::quasar_gateway::isolate_side_effect("router.context.npc_destroyed_progression", || {
+                        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(kid as u32, &["destroyHostileNPC"], 1, now_s, &ctx.quasar_gateway);
+                        if let Some(ref sid) = clr {
+                            let (cat, did) = crate::services::pve_exploration::pve_site_category_and_dungeon_id(db, now_s, sys_id, sid);
+                            ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(sys_id, &cat, did, 1, now_s, &ctx.quasar_gateway);
+                        }
+                    });
                     crate::services::pve_exploration::notify_pve_destruction_events(db, &*ctx.pending_notifications, tx, kid, clr, esc, step);
                 }
                 crate::services::pve_dungeon_runtime::on_dungeon_npc_killed_core(
@@ -1140,10 +1142,12 @@ impl ServerContext {
             .unwrap_or_else(|e| e.into_inner())
             .insert((char_id, solar_system_id, sig_ball_id));
         if inserted {
-            self.quasar_gateway.progression.daily_goals.on_gameplay_event(char_id as u32, 3, 1, &self.quasar_gateway);
-            self.quasar_gateway.progression.career_goals.on_gameplay_event(char_id as u32, "exploration", 1, &self.quasar_gateway);
-            self.quasar_gateway.progression.extra.on_campaign_gameplay_event(char_id as u32, crate::services::quasar_campaign_state::CampaignEvent { method: "ScanSignature", type_id: None, solar_system_id: Some(solar_system_id), faction_id: None }, 1, self.now_unix(), &self.quasar_gateway);
-            crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(self, char_id, &["ScanSignatures"], 1, Some(solar_system_id as i64));
+            crate::quasar_gateway::isolate_side_effect("router.context.mark_signature_scanned", || {
+                self.quasar_gateway.progression.daily_goals.on_gameplay_event(char_id as u32, 3, 1, &self.quasar_gateway);
+                self.quasar_gateway.progression.career_goals.on_gameplay_event(char_id as u32, "exploration", 1, &self.quasar_gateway);
+                self.quasar_gateway.progression.extra.on_campaign_gameplay_event(char_id as u32, crate::services::quasar_campaign_state::CampaignEvent { method: "ScanSignature", type_id: None, solar_system_id: Some(solar_system_id), faction_id: None }, 1, self.now_unix(), &self.quasar_gateway);
+                crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(self, char_id, &["ScanSignatures"], 1, Some(solar_system_id as i64));
+            });
         }
     }
 

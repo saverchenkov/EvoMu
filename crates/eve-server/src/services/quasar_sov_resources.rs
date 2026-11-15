@@ -116,11 +116,10 @@ pub fn register_handlers(
                 if !known_matches {
                     resp = add_planet_definitions(resp);
                 }
-                Ok(resp
-                    .set("version.major", 1u32)
+                resp.set("version.major", 1u32)
                     .set("version.minor", 0u32)
                     .set("version.patch", 0u32)
-                    .must_to_any())
+                    .to_any_or_internal_err()
             }),
         );
     }
@@ -147,10 +146,10 @@ pub fn register_handlers(
                         ));
                     }
                 }
-                Ok(add_planet_definitions(pb::message(
+                add_planet_definitions(pb::message(
                     "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionResponse",
                 ))
-                .must_to_any())
+                .to_any_or_internal_err()
             }),
         );
     }
@@ -219,7 +218,7 @@ pub fn register_handlers(
                     }
                 }
 
-                Ok(resp.must_to_any())
+                resp.to_any_or_internal_err()
             }),
         );
     }
@@ -235,20 +234,22 @@ pub fn register_handlers(
                 let _cid = ctx
                     .effective_character_id()
                     .ok_or((STATUS_UNAUTHORIZED, "Authenticated character required".to_string()))?;
-                let out = star_configs
-                    .get_or_init(|| {
-                        let mut resp = pb::message(
-                            "eve_public.sovereignty.resource.star.api.GetAllConfigurationsResponse",
-                        );
-                        for (star_id, type_id) in sde_star.all_stars() {
-                            let power = star_power(&sde_star, type_id);
-                            resp = resp.add_with("configurations", |cfg| {
-                                cfg.set("star.sequential", star_id as u64).set("power", power)
-                            });
-                        }
-                        resp.must_encode()
-                    })
-                    .clone();
+                let out = if let Some(cached) = star_configs.get() {
+                    cached.clone()
+                } else {
+                    let mut resp = pb::message(
+                        "eve_public.sovereignty.resource.star.api.GetAllConfigurationsResponse",
+                    );
+                    for (star_id, type_id) in sde_star.all_stars() {
+                        let power = star_power(&sde_star, type_id);
+                        resp = resp.add_with("configurations", |cfg| {
+                            cfg.set("star.sequential", star_id as u64).set("power", power)
+                        });
+                    }
+                    let encoded = resp.encode_or_internal_err()?;
+                    let _ = star_configs.set(encoded.clone());
+                    encoded
+                };
 
                 Ok(GoogleAny {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.resource.star.api.GetAllConfigurationsResponse"),
@@ -302,29 +303,31 @@ pub fn register_handlers(
                 })?;
 
                 // Emit ReagentSimulationsNotice
-                let notice = pb::message(
-                    "eve_public.sovereignty.skyhook.api.ReagentSimulationsNotice",
-                )
-                .set("skyhook.sequential", skyhook_id as u64)
-                .add_with("simulations", |s| {
-                    s.set("reagent.sequential", reag_type)
-                        .set("simulation.secured_stock", reag_qty as u32)
-                })
-                .must_to_any();
+                if let Some(notice) = crate::quasar_gateway::pb_to_any_or_log(
+                    "quasar_sov_resources.modify_reagents",
+                    pb::message(
+                        "eve_public.sovereignty.skyhook.api.ReagentSimulationsNotice",
+                    )
+                    .set("skyhook.sequential", skyhook_id as u64)
+                    .add_with("simulations", |s| {
+                        s.set("reagent.sequential", reag_type)
+                            .set("simulation.secured_stock", reag_qty as u32)
+                    }),
+                ) {
+                    pending.write().unwrap_or_else(|e| e.into_inner()).push((
+                        NoticeScope::SolarSystem(sys_id),
+                        notice,
+                    ));
+                }
 
-                pending.write().unwrap_or_else(|e| e.into_inner()).push((
-                    NoticeScope::SolarSystem(sys_id),
-                    notice,
-                ));
-
-                Ok(pb::message(
+                pb::message(
                     "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsResponse",
                 )
                 .add_with("reagent_simulations", |s| {
                     s.set("reagent.sequential", reag_type)
                         .set("simulation.secured_stock", reag_qty as u32)
                 })
-                .must_to_any())
+                .to_any_or_internal_err()
             }),
         );
     }
@@ -357,23 +360,25 @@ pub fn register_handlers(
                 })?;
 
                 // Emit TheftVulnerabilityWindowScheduledNotice
-                let notice = pb::message(
-                    "eve_public.sovereignty.skyhook.api.TheftVulnerabilityWindowScheduledNotice",
-                )
-                .set("skyhook.sequential", skyhook_id as u64)
-                .set("start_time", GoogleTimestamp::from_unix(start as i64, 0))
-                .set("end_time", GoogleTimestamp::from_unix(end as i64, 0))
-                .must_to_any();
+                if let Some(notice) = crate::quasar_gateway::pb_to_any_or_log(
+                    "quasar_sov_resources.schedule_theft_vulnerability_window",
+                    pb::message(
+                        "eve_public.sovereignty.skyhook.api.TheftVulnerabilityWindowScheduledNotice",
+                    )
+                    .set("skyhook.sequential", skyhook_id as u64)
+                    .set("start_time", GoogleTimestamp::from_unix(start as i64, 0))
+                    .set("end_time", GoogleTimestamp::from_unix(end as i64, 0)),
+                ) {
+                    pending.write().unwrap_or_else(|e| e.into_inner()).push((
+                        NoticeScope::SolarSystem(sys_id),
+                        notice,
+                    ));
+                }
 
-                pending.write().unwrap_or_else(|e| e.into_inner()).push((
-                    NoticeScope::SolarSystem(sys_id),
-                    notice,
-                ));
-
-                Ok(pb::message(
+                pb::message(
                     "eve_public.sovereignty.skyhook.api.admin.ScheduleTheftVulnerabilityWindowResponse",
                 )
-                .must_to_any())
+                .to_any_or_internal_err()
             }),
         );
     }

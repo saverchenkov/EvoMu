@@ -99,7 +99,12 @@ fn wrap_wire_bytes(field: u32, bytes: Vec<u8>, out: &mut Vec<u8>) {
 
 /// `LifecycleState { state = 1; transition_time = 2 }` (same shape for campaign/objective/track).
 pub fn encode_lifecycle(field: u32, state: u32, transition_unix: u64, out: &mut Vec<u8>) {
-    wrap_wire_bytes(field, lifecycle_builder("eve_public.campaign.LifecycleState", state, transition_unix).must_encode(), out);
+    if let Some(bytes) = crate::quasar_gateway::pb_encode_or_log(
+        "quasar_campaign_handlers.encode_lifecycle",
+        lifecycle_builder("eve_public.campaign.LifecycleState", state, transition_unix),
+    ) {
+        wrap_wire_bytes(field, bytes, out);
+    }
 }
 
 fn campaign_stats_builder(objs: &[&CampaignObjectiveRecord]) -> ProtoBuilder {
@@ -114,7 +119,11 @@ fn campaign_stats_builder(objs: &[&CampaignObjectiveRecord]) -> ProtoBuilder {
 
 /// `campaign.Stats { current_campaign_progress = 1; total_contributors = 2 }`.
 pub fn encode_campaign_stats(objs: &[&CampaignObjectiveRecord]) -> Vec<u8> {
-    campaign_stats_builder(objs).must_encode()
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_campaign_handlers.encode_campaign_stats",
+        campaign_stats_builder(objs),
+    )
+    .unwrap_or_default()
 }
 
 fn campaign_attributes_builder(c: &CampaignRecord, objs: &[&CampaignObjectiveRecord]) -> ProtoBuilder {
@@ -134,7 +143,11 @@ fn campaign_attributes_builder(c: &CampaignRecord, objs: &[&CampaignObjectiveRec
 
 /// `campaign.Attributes` (fields 14, 16-21, 23, 24, 29).
 pub fn encode_campaign_attributes(c: &CampaignRecord, objs: &[&CampaignObjectiveRecord]) -> Vec<u8> {
-    campaign_attributes_builder(c, objs).must_encode()
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_campaign_handlers.encode_campaign_attributes",
+        campaign_attributes_builder(c, objs),
+    )
+    .unwrap_or_default()
 }
 
 pub(crate) fn objective_stats_builder(o: &CampaignObjectiveRecord) -> ProtoBuilder {
@@ -148,7 +161,11 @@ pub(crate) fn objective_stats_builder(o: &CampaignObjectiveRecord) -> ProtoBuild
 /// `objective.Stats { current_objective_progress = 1; committed_participants = 2;
 /// total_participants = 3; total_contributors = 4 }`.
 pub fn encode_objective_stats(o: &CampaignObjectiveRecord) -> Vec<u8> {
-    objective_stats_builder(o).must_encode()
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_campaign_handlers.encode_objective_stats",
+        objective_stats_builder(o),
+    )
+    .unwrap_or_default()
 }
 
 pub(crate) fn objective_attributes_builder(o: &CampaignObjectiveRecord) -> ProtoBuilder {
@@ -187,7 +204,11 @@ pub(crate) fn objective_attributes_builder(o: &CampaignObjectiveRecord) -> Proto
 
 /// `objective.Attributes` (fields 6, 8/9, 11-14, 16, 22).
 pub fn encode_objective_attributes(o: &CampaignObjectiveRecord) -> Vec<u8> {
-    objective_attributes_builder(o).must_encode()
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_campaign_handlers.encode_objective_attributes",
+        objective_attributes_builder(o),
+    )
+    .unwrap_or_default()
 }
 
 pub(crate) fn track_attributes_builder(t: &CampaignTrackRecord) -> ProtoBuilder {
@@ -236,7 +257,11 @@ pub(crate) fn track_attributes_builder(t: &CampaignTrackRecord) -> ProtoBuilder 
 
 /// `track.Attributes` (fields 1, 3/4, 5/6, 8, 11).
 pub fn encode_track_attributes(t: &CampaignTrackRecord) -> Vec<u8> {
-    track_attributes_builder(t).must_encode()
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_campaign_handlers.encode_track_attributes",
+        track_attributes_builder(t),
+    )
+    .unwrap_or_default()
 }
 
 pub(crate) fn track_stats_builder(t: &CampaignTrackRecord) -> ProtoBuilder {
@@ -256,7 +281,11 @@ pub(crate) fn track_stats_builder(t: &CampaignTrackRecord) -> ProtoBuilder {
 
 /// `track.Stats { current_progress = 1; ticking_contributions = 2 [{ key, stopped | next_tick }] }`.
 pub fn encode_track_stats(t: &CampaignTrackRecord) -> Vec<u8> {
-    track_stats_builder(t).must_encode()
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_campaign_handlers.encode_track_stats",
+        track_stats_builder(t),
+    )
+    .unwrap_or_default()
 }
 
 pub(crate) fn track_participant_stats_builder(t: &CampaignTrackRecord, char_id: u32) -> ProtoBuilder {
@@ -274,7 +303,11 @@ pub(crate) fn track_participant_stats_builder(t: &CampaignTrackRecord, char_id: 
 
 /// `track.ParticipantStats { participant_track = 1 { current = 1; max_reached = 2 } | no_participant_track = 2 }`.
 pub fn encode_track_participant_stats(t: &CampaignTrackRecord, char_id: u32) -> Vec<u8> {
-    track_participant_stats_builder(t, char_id).must_encode()
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_campaign_handlers.encode_track_participant_stats",
+        track_participant_stats_builder(t, char_id),
+    )
+    .unwrap_or_default()
 }
 
 fn status_track_builder(t: &CampaignTrackRecord) -> ProtoBuilder {
@@ -286,7 +319,11 @@ fn status_track_builder(t: &CampaignTrackRecord) -> ProtoBuilder {
 
 /// `GetStatusResponse.Track { id = 1; state = 2; stats = 3 }` (campaign and objective APIs).
 pub fn encode_status_track(t: &CampaignTrackRecord) -> Vec<u8> {
-    status_track_builder(t).must_encode()
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_campaign_handlers.encode_status_track",
+        status_track_builder(t),
+    )
+    .unwrap_or_default()
 }
 
 pub fn campaign_tracks(mgr: &ProgressionExtraManager, cid: u64) -> Vec<CampaignTrackRecord> {
@@ -367,7 +404,7 @@ pub fn register_campaign_handlers(router: &PublicGatewayRouter, manager: Arc<Pro
             for cid in listed_campaigns(&mgr, None).0 {
                 b = b.add("campaigns", id_builder("eve_public.campaign.Identifier", campaign_id_to_uuid_bytes(cid)));
             }
-            Ok(b.must_to_any())
+            b.to_any_or_internal_err()
         }),
     );
 
@@ -387,7 +424,7 @@ pub fn register_campaign_handlers(router: &PublicGatewayRouter, manager: Arc<Pro
                     up.set("definition_name", &c.name).set("scheduled_start_time", ts_unix(c.scheduled_start_unix))
                 });
             }
-            Ok(b.must_to_any())
+            b.to_any_or_internal_err()
         }),
     );
 
@@ -420,7 +457,7 @@ pub fn register_campaign_handlers(router: &PublicGatewayRouter, manager: Arc<Pro
             for o in &objs {
                 b = b.add("objectives", id_builder("eve_public.campaign.objective.Identifier", objective_id_to_uuid_bytes(o.id)));
             }
-            Ok(b.must_to_any())
+            b.to_any_or_internal_err()
         }),
     );
 
@@ -439,7 +476,7 @@ pub fn register_campaign_handlers(router: &PublicGatewayRouter, manager: Arc<Pro
             for t in campaign_tracks(&mgr, cid) {
                 b = b.add("tracks", status_track_builder(&t));
             }
-            Ok(b.must_to_any())
+            b.to_any_or_internal_err()
         }),
     );
 
@@ -459,7 +496,7 @@ pub fn register_campaign_handlers(router: &PublicGatewayRouter, manager: Arc<Pro
                         .set("stats", objective_stats_builder(o))
                 });
             }
-            Ok(b.must_to_any())
+            b.to_any_or_internal_err()
         }),
     );
 
@@ -481,16 +518,16 @@ pub fn register_campaign_handlers(router: &PublicGatewayRouter, manager: Arc<Pro
                         })
                 });
             }
-            Ok(b.must_to_any())
+            b.to_any_or_internal_err()
         }),
     );
 
     router.register_handler(
         "eve_public.campaign.api.GetLimitsRequest",
         Arc::new(move |_ctx, _any, _dyn| {
-            Ok(pb::message("eve_public.campaign.api.GetLimitsResponse")
+            pb::message("eve_public.campaign.api.GetLimitsResponse")
                 .set("max_active_objectives_per_participant", MAX_ACTIVE_OBJECTIVES_PER_PARTICIPANT)
-                .must_to_any())
+                .to_any_or_internal_err()
         }),
     );
 
@@ -513,7 +550,7 @@ pub fn register_campaign_handlers(router: &PublicGatewayRouter, manager: Arc<Pro
                         .set("no_lp_unredeemed", true)
                 });
             }
-            Ok(b.must_to_any())
+            b.to_any_or_internal_err()
         }),
     );
 
@@ -546,7 +583,7 @@ pub fn register_campaign_handlers(router: &PublicGatewayRouter, manager: Arc<Pro
                         .set("no_lp_unredeemed", true)
                 });
             }
-            Ok(b.must_to_any())
+            b.to_any_or_internal_err()
         }),
     );
 
@@ -576,7 +613,11 @@ pub(crate) fn ticking_prediction_builder(t: &CampaignTrackRecord, units: u64) ->
 
 /// Predicted value of the next tick of each ticking contribution on `t`.
 pub fn encode_ticking_prediction(t: &CampaignTrackRecord, units: u64) -> Vec<u8> {
-    ticking_prediction_builder(t, units).must_encode()
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_campaign_handlers.encode_ticking_prediction",
+        ticking_prediction_builder(t, units),
+    )
+    .unwrap_or_default()
 }
 
 #[cfg(test)] #[path = "quasar_campaign_handlers_tests.rs"]

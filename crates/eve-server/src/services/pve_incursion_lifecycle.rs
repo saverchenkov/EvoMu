@@ -1229,13 +1229,23 @@ pub fn publish_incursion_tale_notice(
     now_unix: u64,
 ) {
     use crate::services::quasar_goal_tale_notices as notices;
-    let payload = notices::tale_lifecycle(
-        started,
-        tale_id.max(0) as u64,
-        INCURSION_TALE_TEMPLATE_ID,
-        staging_solar_system_id as u64,
+    crate::quasar_gateway::isolate_side_effect(
+        "pve_incursion_lifecycle.publish_incursion_tale_notice",
+        || {
+            let payload = notices::tale_lifecycle(
+                started,
+                tale_id.max(0) as u64,
+                INCURSION_TALE_TEMPLATE_ID,
+                staging_solar_system_id as u64,
+            );
+            let _ = gateway.publish_notice_isolated(
+                notices::tale_scope(),
+                "pve_incursion_lifecycle.tale_lifecycle",
+                payload,
+                now_unix,
+            );
+        },
     );
-    let _ = gateway.publish_notice(notices::tale_scope(), payload, now_unix);
 }
 
 /// When a site completion ended its incursion (mothership defeated), announces the tale stop.

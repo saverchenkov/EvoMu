@@ -372,7 +372,36 @@ pub struct ProtoBuilder {
 
 static PB_FALLBACK_REGISTRY: OnceLock<Arc<QuasarDescriptorRegistry>> = OnceLock::new();
 
+thread_local! {
+    static PB_THREAD_REGISTRY_OVERRIDE: std::cell::RefCell<Option<Arc<QuasarDescriptorRegistry>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with a thread-local [`QuasarDescriptorRegistry`] override for [`message`] calls on
+/// the current thread (used by regression tests simulating an empty or partial descriptor DB
+/// without affecting concurrent tests).
+pub fn with_registry_override<R>(
+    registry: Arc<QuasarDescriptorRegistry>,
+    f: impl FnOnce() -> R,
+) -> R {
+    struct ResetGuard(Option<Arc<QuasarDescriptorRegistry>>);
+    impl Drop for ResetGuard {
+        fn drop(&mut self) {
+            let prev = self.0.take();
+            PB_THREAD_REGISTRY_OVERRIDE.with(|cell| {
+                *cell.borrow_mut() = prev;
+            });
+        }
+    }
+    let prev = PB_THREAD_REGISTRY_OVERRIDE.with(|cell| cell.borrow_mut().replace(registry));
+    let _guard = ResetGuard(prev);
+    f()
+}
+
 fn default_registry() -> Result<Arc<QuasarDescriptorRegistry>, PbError> {
+    if let Some(reg) = PB_THREAD_REGISTRY_OVERRIDE.with(|cell| cell.borrow().clone()) {
+        return Ok(reg);
+    }
     if let Ok(reg) = QuasarDescriptorRegistry::open_default() {
         return Ok(reg);
     }
@@ -624,6 +653,30 @@ impl ProtoBuilder {
     pub fn to_dynamic(self) -> Result<DynamicQuasarMessage, PbError> {
         let state = self.state?;
         node_to_dynamic(&state.registry, &state.root)
+    }
+
+    /// Encodes the validated message into a [`GoogleAny`], mapping any [`PbError`] to a
+    /// `(500, String)` Quasar gateway internal error tuple.
+    pub fn to_any_or_internal_err(self) -> Result<GoogleAny, (u32, String)> {
+        self.to_any().map_err(|e| (500, e.to_string()))
+    }
+
+    /// Encodes the validated message into canonical protobuf wire bytes, mapping any [`PbError`]
+    /// to a `(500, String)` Quasar gateway internal error tuple.
+    pub fn encode_or_internal_err(self) -> Result<Vec<u8>, (u32, String)> {
+        self.encode().map_err(|e| (500, e.to_string()))
+    }
+
+    /// Encodes the validated message into `out`, mapping any [`PbError`] to a `(500, String)`
+    /// Quasar gateway internal error tuple.
+    pub fn encode_into_or_internal_err(self, out: &mut Vec<u8>) -> Result<(), (u32, String)> {
+        self.encode_into(out).map_err(|e| (500, e.to_string()))
+    }
+
+    /// Converts the validated builder into a [`DynamicQuasarMessage`], mapping any [`PbError`] to
+    /// a `(500, String)` Quasar gateway internal error tuple.
+    pub fn to_dynamic_or_internal_err(self) -> Result<DynamicQuasarMessage, (u32, String)> {
+        self.to_dynamic().map_err(|e| (500, e.to_string()))
     }
 
     /// Encodes the message, panicking with the descriptive [`PbError`] on any schema violation.

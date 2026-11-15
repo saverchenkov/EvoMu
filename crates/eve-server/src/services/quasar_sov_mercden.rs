@@ -258,11 +258,14 @@ fn fill_evolution_simulation(b: ProtoBuilder, den: &PersistedMercenaryDen) -> Pr
 
 /// Encodes `eve_public.sovereignty.mercenaryden.EvolutionSimulation`.
 pub fn encode_evolution_simulation(den: &PersistedMercenaryDen) -> Vec<u8> {
-    fill_evolution_simulation(
-        pb::message("eve_public.sovereignty.mercenaryden.EvolutionSimulation"),
-        den,
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_sov_mercden.encode_evolution_simulation",
+        fill_evolution_simulation(
+            pb::message("eve_public.sovereignty.mercenaryden.EvolutionSimulation"),
+            den,
+        ),
     )
-    .must_encode()
+    .unwrap_or_default()
 }
 
 fn fill_evolution_definition(b: ProtoBuilder) -> ProtoBuilder {
@@ -338,28 +341,34 @@ fn encode_infomorphs_gen_definition_for_planet(
 }
 
 fn push_evolution_notice(pending: &PendingNotices, den: &PersistedMercenaryDen) {
-    let n = pb::message(EVOLUTION_NOTICE)
-        .set("mercenary_den.sequential", den.den_id as u64)
-        .set_with("state", |s| fill_evolution_simulation(s, den))
-        .must_encode();
-    push_notice(pending, den.solar_system_id, EVOLUTION_NOTICE, n);
+    if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
+        "quasar_sov_mercden.push_evolution_notice",
+        pb::message(EVOLUTION_NOTICE)
+            .set("mercenary_den.sequential", den.den_id as u64)
+            .set_with("state", |s| fill_evolution_simulation(s, den)),
+    ) {
+        push_notice(pending, den.solar_system_id, EVOLUTION_NOTICE, n);
+    }
 }
 
 pub fn push_definitions_updated_notice(pending: &PendingNotices, den: &PersistedMercenaryDen) {
-    let n = pb::message("eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice")
-        .set("mercenary_den.sequential", den.den_id as u64)
-        .set_with("evolution", fill_evolution_definition)
-        .set_with("infomorphs", |i| {
-            fill_infomorphs_gen_definition(
-                i,
-                INFOMORPH_CARGO_CAPACITY,
-                None,
-                den.solar_system_id,
-                den.planet_id,
-            )
-        })
-        .must_encode();
-    push_notice(pending, den.solar_system_id, "eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice", n);
+    if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
+        "quasar_sov_mercden.push_definitions_updated_notice",
+        pb::message("eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice")
+            .set("mercenary_den.sequential", den.den_id as u64)
+            .set_with("evolution", fill_evolution_definition)
+            .set_with("infomorphs", |i| {
+                fill_infomorphs_gen_definition(
+                    i,
+                    INFOMORPH_CARGO_CAPACITY,
+                    None,
+                    den.solar_system_id,
+                    den.planet_id,
+                )
+            }),
+    ) {
+        push_notice(pending, den.solar_system_id, "eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice", n);
+    }
 }
 
 pub fn push_activity_completed_notice(
@@ -371,14 +380,17 @@ pub fn push_activity_completed_notice(
     anarchy_impact: i32,
     infomorph_bonus: u32,
 ) {
-    let n = pb::message("eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice")
-        .set("mercenary_den.sequential", den_id as u64)
-        .set("id.uuid", uuid.to_vec())
-        .set("development_impact", dev_impact)
-        .set("anarchy_impact", anarchy_impact)
-        .set("infomorph_bonus", infomorph_bonus)
-        .must_encode();
-    push_notice(pending, solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice", n);
+    if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
+        "quasar_sov_mercden.push_activity_completed_notice",
+        pb::message("eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice")
+            .set("mercenary_den.sequential", den_id as u64)
+            .set("id.uuid", uuid.to_vec())
+            .set("development_impact", dev_impact)
+            .set("anarchy_impact", anarchy_impact)
+            .set("infomorph_bonus", infomorph_bonus),
+    ) {
+        push_notice(pending, solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice", n);
+    }
 }
 
 pub fn push_activity_expiry_changed_notice(
@@ -387,12 +399,15 @@ pub fn push_activity_expiry_changed_notice(
     activity: &PersistedMercenaryActivity,
     previous_expiry: u64,
 ) {
-    let n = pb::message("eve_public.sovereignty.mercenaryden.activity.api.ExpiryChangedNotice")
-        .set("id.uuid", activity.uuid.clone())
-        .set_with("activity", |attr| fill_activity_attributes(attr, activity))
-        .set("previous_expiry", GoogleTimestamp::from_unix(previous_expiry as i64, 0))
-        .must_encode();
-    push_notice(pending, solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.ExpiryChangedNotice", n);
+    if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
+        "quasar_sov_mercden.push_activity_expiry_changed_notice",
+        pb::message("eve_public.sovereignty.mercenaryden.activity.api.ExpiryChangedNotice")
+            .set("id.uuid", activity.uuid.clone())
+            .set_with("activity", |attr| fill_activity_attributes(attr, activity))
+            .set("previous_expiry", GoogleTimestamp::from_unix(previous_expiry as i64, 0)),
+    ) {
+        push_notice(pending, solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.ExpiryChangedNotice", n);
+    }
 }
 
 /// Simulates a den in place using planet SDE data and emits `EvolutionStateChangedNotice` on a stage change.
@@ -433,11 +448,14 @@ fn fill_activity_attributes(b: ProtoBuilder, a: &PersistedMercenaryActivity) -> 
 
 /// Encodes `eve_public.sovereignty.mercenaryden.activity.Attributes`.
 pub fn encode_activity_attributes(a: &PersistedMercenaryActivity) -> Vec<u8> {
-    fill_activity_attributes(
-        pb::message("eve_public.sovereignty.mercenaryden.activity.Attributes"),
-        a,
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_sov_mercden.encode_activity_attributes",
+        fill_activity_attributes(
+            pb::message("eve_public.sovereignty.mercenaryden.activity.Attributes"),
+            a,
+        ),
     )
-    .must_encode()
+    .unwrap_or_default()
 }
 
 pub(crate) fn complete_mercenary_activity_in_snap(
@@ -541,11 +559,14 @@ pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &Pendin
                     }
                 });
             }
-            let n = pb::message("eve_public.sovereignty.mercenaryden.activity.api.RemovedNotice")
-                .set("mercenary_den.sequential", den_id as u64)
-                .set("id.uuid", a.uuid)
-                .must_encode();
-            push_notice(pending, den.solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.RemovedNotice", n);
+            if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
+                "quasar_sov_mercden.refresh_activities.removed",
+                pb::message("eve_public.sovereignty.mercenaryden.activity.api.RemovedNotice")
+                    .set("mercenary_den.sequential", den_id as u64)
+                    .set("id.uuid", a.uuid),
+            ) {
+                push_notice(pending, den.solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.RemovedNotice", n);
+            }
         }
     }
     if !den.enabled || now < den.next_activity_generation_unix {
@@ -571,12 +592,15 @@ pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &Pendin
             anarchy_impact: -10,
             infomorph_bonus: 350,
         };
-        let n = pb::message("eve_public.sovereignty.mercenaryden.activity.api.AddedNotice")
-            .set("id.uuid", uuid.clone())
-            .set_with("activity", |attr| fill_activity_attributes(attr, &a))
-            .set("solar_system.sequential", den.solar_system_id)
-            .must_encode();
-        push_notice(pending, den.solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.AddedNotice", n);
+        if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
+            "quasar_sov_mercden.refresh_activities.added",
+            pb::message("eve_public.sovereignty.mercenaryden.activity.api.AddedNotice")
+                .set("id.uuid", uuid.clone())
+                .set_with("activity", |attr| fill_activity_attributes(attr, &a))
+                .set("solar_system.sequential", den.solar_system_id),
+        ) {
+            push_notice(pending, den.solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.AddedNotice", n);
+        }
         snap.sov_runtime.mercenary_activities.insert(hex(&uuid), a);
     }
     if let Some(d) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
@@ -629,7 +653,7 @@ fn modify_level_handler(
                 push_definitions_updated_notice(&pending, den);
                 Ok::<_, RpcError>(encode_evolution_simulation(den))
             })?;
-            Ok(pb::message(rsp).set_raw_message("simulation", sim).must_to_any())
+            pb::message(rsp).set_raw_message("simulation", sim).to_any_or_internal_err()
         }),
     );
 }
@@ -648,7 +672,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 for id in db.with_snapshot(|snap| owned_den_ids(snap, cid)) {
                     resp = resp.add_with("id", |i| i.set("sequential", id as u64));
                 }
-                Ok(resp.must_to_any())
+                resp.to_any_or_internal_err()
             }),
         );
     }
@@ -664,12 +688,12 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                         .and_then(|s| s.get(&TYPE_MERCENARY_DEN_MANAGEMENT))
                         .map_or(0, |s| u64::from(s.level))
                 });
-                Ok(pb::message(
+                pb::message(
                     "eve_public.sovereignty.mercenaryden.api.GetMaximumForCharacterResponse",
                 )
                 .set("current_maximum", level.min(MERCENARY_DEN_ABSOLUTE_MAX) as u32)
                 .set("absolute_maximum", MERCENARY_DEN_ABSOLUTE_MAX as u32)
-                .must_to_any())
+                .to_any_or_internal_err()
             }),
         );
     }
@@ -688,7 +712,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                     Ok::<_, RpcError>((den, owner))
                 })?;
                 let cap = infomorph_cargo_capacity(stage_for_level(den.development_level));
-                Ok(pb::message("eve_public.sovereignty.mercenaryden.api.GetAsOwnerResponse")
+                pb::message("eve_public.sovereignty.mercenaryden.api.GetAsOwnerResponse")
                     .set_with("attributes", |attrs| {
                         attrs
                             .set("owner.sequential", den.owner_char_id as u64)
@@ -724,7 +748,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                         Some(corp) => b.set("skyhook_owner.sequential", corp as u64),
                         None => b,
                     })
-                    .must_to_any())
+                    .to_any_or_internal_err()
             }),
         );
     }
@@ -765,9 +789,8 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                             .set_with("attributes", |attr| fill_activity_attributes(attr, a))
                     });
                 }
-                Ok(resp
-                    .set("next_generation_at", GoogleTimestamp::from_unix(next_gen as i64, 0))
-                    .must_to_any())
+                resp.set("next_generation_at", GoogleTimestamp::from_unix(next_gen as i64, 0))
+                    .to_any_or_internal_err()
             }),
         );
     }
@@ -795,7 +818,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                             .set_with("attributes", |attr| fill_activity_attributes(attr, a))
                     });
                 }
-                Ok(resp.must_to_any())
+                resp.to_any_or_internal_err()
             }),
         );
     }
@@ -880,16 +903,19 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                     entry.expiry_unix = now + 1_800;
                     push_activity_expiry_changed_notice(&pending, entry.solar_system_id, entry, previous_expiry);
                     let attrs = encode_activity_attributes(entry);
-                    let n = pb::message("eve_public.sovereignty.mercenaryden.activity.api.StartedNotice")
-                        .set("id.uuid", uuid.clone())
-                        .set_raw_message("activity", &attrs)
-                        .must_encode();
-                    push_notice(&pending, entry.solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.StartedNotice", n);
+                    if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
+                        "quasar_sov_mercden.activity_start",
+                        pb::message("eve_public.sovereignty.mercenaryden.activity.api.StartedNotice")
+                            .set("id.uuid", uuid.clone())
+                            .set_raw_message("activity", &attrs),
+                    ) {
+                        push_notice(&pending, entry.solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.StartedNotice", n);
+                    }
                     Ok::<_, RpcError>(attrs)
                 })?;
-                Ok(pb::message("eve_public.sovereignty.mercenaryden.activity.api.StartResponse")
+                pb::message("eve_public.sovereignty.mercenaryden.activity.api.StartResponse")
                     .set_raw_message("attributes", attrs)
-                    .must_to_any())
+                    .to_any_or_internal_err()
             }),
         );
     }
@@ -908,11 +934,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                         .max()
                         .unwrap_or(0)
                 });
-                Ok(pb::message(
+                pb::message(
                     "eve_public.sovereignty.mercenaryden.activity.api.GetCapacityResponse",
                 )
                 .set("capacity", capacity)
-                .must_to_any())
+                .to_any_or_internal_err()
             }),
         );
     }

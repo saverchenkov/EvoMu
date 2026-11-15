@@ -393,7 +393,21 @@ impl ProgressionExtraManager {
         now_unix: u64,
         gateway: &PublicGatewayRouter,
     ) -> Vec<CommunityTrackState> {
-        notices::complete_system_tale_encounter(self, solar_system_id, site_category, dungeon_id, delta, now_unix, gateway)
+        crate::quasar_gateway::isolate_side_effect(
+            "quasar_progression_extra.on_system_tale_encounter_completed",
+            || {
+                notices::complete_system_tale_encounter(
+                    self,
+                    solar_system_id,
+                    site_category,
+                    dungeon_id,
+                    delta,
+                    now_unix,
+                    gateway,
+                )
+            },
+        )
+        .unwrap_or_default()
     }
 }
 
@@ -742,9 +756,9 @@ pub fn register_progression_extra_handlers(
                 .values()
                 .filter(|t| filter.is_none_or(|f| t.0 == f))
                 .count() as u32;
-            Ok(pb::message("eve.tale.api.GetActiveTalesCountResponse")
+            pb::message("eve.tale.api.GetActiveTalesCountResponse")
                 .set("count", count)
-                .must_to_any())
+                .to_any_or_internal_err()
         }),
     );
 
@@ -1025,9 +1039,9 @@ pub fn register_progression_extra_handlers(
             mgr.save_to_db();
             ctx_queue_notice(notices::goal_scope(goal_corp, cid), created, now_u);
 
-            Ok(pb::message("eve_public.goal.api.CreateResponse")
+            pb::message("eve_public.goal.api.CreateResponse")
                 .set("goal.uuid", uuid.to_vec())
-                .must_to_any())
+                .to_any_or_internal_err()
         }),
     );
 
@@ -1065,9 +1079,9 @@ pub fn register_progression_extra_handlers(
                 contribution_config_pb: &contrib_pb,
             });
 
-            Ok(pb::message("eve_public.goal.api.GetResponse")
+            pb::message("eve_public.goal.api.GetResponse")
                 .set_raw_message("goal", &attr_bytes)
-                .must_to_any())
+                .to_any_or_internal_err()
         }),
     );
 
@@ -1116,7 +1130,7 @@ pub fn register_progression_extra_handlers(
                         .set_raw_message("goal", &attr_bytes)
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any_or_internal_err()
         }),
     );
 
@@ -1176,7 +1190,7 @@ pub fn register_progression_extra_handlers(
                     now_u,
                 );
             }
-            Ok(pb::message("eve_public.goal.api.CloseResponse").must_to_any())
+            pb::message("eve_public.goal.api.CloseResponse").to_any_or_internal_err()
         }),
     );
 
@@ -1246,7 +1260,7 @@ pub fn register_progression_extra_handlers(
             if capped >= desired && prev < desired {
                 ctx_queue_notice(scope, notices::goal_completed(&target_uuid), now_u);
             }
-            Ok(pb::message("eve_public.goal.api.SetCurrentProgressResponse").must_to_any())
+            pb::message("eve_public.goal.api.SetCurrentProgressResponse").to_any_or_internal_err()
         }),
     );
 
@@ -1283,7 +1297,7 @@ pub fn register_progression_extra_handlers(
                 notices::goal_deleted(&target_uuid),
                 now_u,
             );
-            Ok(pb::message("eve_public.goal.api.DeleteResponse").must_to_any())
+            pb::message("eve_public.goal.api.DeleteResponse").to_any_or_internal_err()
         }),
     );
 
@@ -1333,7 +1347,7 @@ pub fn register_progression_extra_handlers(
                     notices::goal_description_changed(&target_uuid, &text)
                 };
                 ctx_queue_notice(notices::goal_scope(mgr.goal_corp_id(&target_uuid), live_g.creator_id), notice, now_u);
-                Ok(pb::message(rsp_name).must_to_any())
+                pb::message(rsp_name).to_any_or_internal_err()
             }),
         );
     }
@@ -1349,10 +1363,10 @@ pub fn register_progression_extra_handlers(
                 .into_iter()
                 .filter(|g| g.creator_id == cid && !g.closed)
                 .count() as u32;
-            Ok(pb::message("eve_public.goal.api.GetCapacityResponse")
+            pb::message("eve_public.goal.api.GetCapacityResponse")
                 .set("count", count)
                 .set("capacity", 50u32)
-                .must_to_any())
+                .to_any_or_internal_err()
         }),
     );
 
@@ -1423,7 +1437,7 @@ pub fn register_progression_extra_handlers(
                     ),
                 );
             }
-            Ok(resp.must_to_any())
+            resp.to_any_or_internal_err()
         }),
     );
 
@@ -1444,7 +1458,7 @@ pub fn register_progression_extra_handlers(
                 .find(|&(c, _)| c == cid)
                 .map(|(_, p)| p)
                 .unwrap_or(0);
-            Ok(pb::message("eve_public.goal.contribution.api.GetMyContributorSummaryForGoalResponse")
+            pb::message("eve_public.goal.contribution.api.GetMyContributorSummaryForGoalResponse")
                 .set(
                     "summary",
                     build_goal_contrib_summary(
@@ -1454,7 +1468,7 @@ pub fn register_progression_extra_handlers(
                         &g.uuid,
                     ),
                 )
-                .must_to_any())
+                .to_any_or_internal_err()
         }),
     );
 
@@ -1479,7 +1493,7 @@ pub fn register_progression_extra_handlers(
                     );
                 }
             }
-            Ok(resp.must_to_any())
+            resp.to_any_or_internal_err()
         }),
     );
 

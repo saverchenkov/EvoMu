@@ -578,21 +578,28 @@ pub(crate) fn emit_hub_diffs(pending: &PendingNotices, before: &BTreeMap<i64, Hu
                         r.workforce_allocated,
                         r.workforce_local,
                     )
-                })
-                .must_encode();
-            push_notice(pending, now.sys, "eve_public.sovereignty.hub.api.ResourcesSimulatedNotice", n);
+                });
+            if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
+                "quasar_sov_hub.emit_hub_diffs.resources",
+                n,
+            ) {
+                push_notice(pending, now.sys, "eve_public.sovereignty.hub.api.ResourcesSimulatedNotice", n);
+            }
         }
         if let Some(p) = prev {
             if p.state != now.state {
-                let n = pb::message(
-                    "eve_public.sovereignty.resource.transfer.workforce.api.StateChangedNotice",
-                )
-                .set("solar_system.sequential", now.sys)
-                .set_raw_message("old_state", &p.state)
-                .set_raw_message("new_state", &now.state)
-                .set("hub.sequential", *hub_id as u64)
-                .must_encode();
-                push_notice(pending, now.sys, "eve_public.sovereignty.resource.transfer.workforce.api.StateChangedNotice", n);
+                if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
+                    "quasar_sov_hub.emit_hub_diffs.workforce_state",
+                    pb::message(
+                        "eve_public.sovereignty.resource.transfer.workforce.api.StateChangedNotice",
+                    )
+                    .set("solar_system.sequential", now.sys)
+                    .set_raw_message("old_state", &p.state)
+                    .set_raw_message("new_state", &now.state)
+                    .set("hub.sequential", *hub_id as u64),
+                ) {
+                    push_notice(pending, now.sys, "eve_public.sovereignty.resource.transfer.workforce.api.StateChangedNotice", n);
+                }
             }
         }
     }
@@ -646,12 +653,15 @@ pub(crate) fn run_simulation(snap: &mut WorldStateSnapshot, sde: &SdeRegistry, p
         return;
     }
     enforce_hub_power_overload(snap, sde, hub_id);
-    let n = pb::message("eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice")
-        .set_with("hub_upgrades", |b| {
-            fill_hub_upgrades(b, sde, hub_id, snap.sov_runtime.sov_hubs.get(&hub_id))
-        })
-        .must_encode();
-    push_notice(pending, sys, "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice", n);
+    if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
+        "quasar_sov_hub.run_simulation",
+        pb::message("eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice")
+            .set_with("hub_upgrades", |b| {
+                fill_hub_upgrades(b, sde, hub_id, snap.sov_runtime.sov_hubs.get(&hub_id))
+            }),
+    ) {
+        push_notice(pending, sys, "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice", n);
+    }
     let after = hub_views(snap, sde, &[hub_id]);
     emit_hub_diffs(pending, &before, &after);
 }
@@ -723,8 +733,11 @@ fn fill_hub_upgrades(
 
 /// Encodes `eve_public.sovereignty.hub.upgrade.HubUpgrades` from persisted hub state.
 pub(crate) fn encode_hub_upgrades(sde: &SdeRegistry, hub_id: i64, hub: Option<&PersistedSovHubData>) -> Vec<u8> {
-    fill_hub_upgrades(pb::message("eve_public.sovereignty.hub.upgrade.HubUpgrades"), sde, hub_id, hub)
-        .must_encode()
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_sov_hub.encode_hub_upgrades",
+        fill_hub_upgrades(pb::message("eve_public.sovereignty.hub.upgrade.HubUpgrades"), sde, hub_id, hub),
+    )
+    .unwrap_or_default()
 }
 
 /// Reads `(hub_id, type_id)` from an `eve_public.sovereignty.hub.upgrade.Identifier` at `field`.
@@ -944,7 +957,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                     run_simulation(snap, &sde, &pending, hub_id, ctx.now_unix());
                     compute_hub_resources(snap, &sde, hub_id).ok_or((STATUS_NOT_FOUND, "hub".to_string()))
                 })?;
-                Ok(pb::message("eve_public.sovereignty.hub.api.GetResourcesResponse")
+                pb::message("eve_public.sovereignty.hub.api.GetResourcesResponse")
                     .set_with("power", |p| {
                         fill_resource_pair(p, r.power_available, r.power_allocated, r.power_local)
                     })
@@ -956,7 +969,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                             r.workforce_local,
                         )
                     })
-                    .must_to_any())
+                    .to_any_or_internal_err()
             }),
         );
     }
@@ -989,9 +1002,8 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                             .set("burned_per_hour", per_hour)
                     });
                 }
-                Ok(resp
-                    .set("last_updated", GoogleTimestamp::from_unix(hub.last_updated_unix as i64, 0))
-                    .must_to_any())
+                resp.set("last_updated", GoogleTimestamp::from_unix(hub.last_updated_unix as i64, 0))
+                    .to_any_or_internal_err()
             }),
         );
     }
@@ -1087,19 +1099,22 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                         .get(&hub_id)
                         .is_some_and(|h| h.upgrades != prev_upgrades);
                     if restored {
-                        let n = pb::message(
-                            "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
-                        )
-                        .set_with("hub_upgrades", |b| {
-                            fill_hub_upgrades(b, &sde, hub_id, snap.sov_runtime.sov_hubs.get(&hub_id))
-                        })
-                        .must_encode();
-                        push_notice(&pending, sys, "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice", n);
+                        if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
+                            "quasar_sov_hub.fuel_add.upgrades_simulated",
+                            pb::message(
+                                "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
+                            )
+                            .set_with("hub_upgrades", |b| {
+                                fill_hub_upgrades(b, &sde, hub_id, snap.sov_runtime.sov_hubs.get(&hub_id))
+                            }),
+                        ) {
+                            push_notice(&pending, sys, "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice", n);
+                        }
                     }
                     emit_hub_diffs(&pending, &before, &hub_views(snap, &sde, &[hub_id]));
                     Ok(())
                 })?;
-                Ok(pb::message("eve_public.sovereignty.hub.fuel.api.AddResponse").must_to_any())
+                pb::message("eve_public.sovereignty.hub.fuel.api.AddResponse").to_any_or_internal_err()
             }),
         );
     }
@@ -1115,7 +1130,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                 for d in all_upgrade_definitions(&sde) {
                     resp = resp.add_with("definitions", |def| fill_definition(def, &d));
                 }
-                Ok(resp.must_to_any())
+                resp.to_any_or_internal_err()
             }),
         );
     }
@@ -1133,9 +1148,9 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                     run_simulation(snap, &sde, &pending, hub_id, ctx.now_unix());
                     Ok::<_, RpcError>(snap.clone_sov_hub(hub_id))
                 })?;
-                Ok(pb::message("eve_public.sovereignty.hub.upgrade.api.GetHubUpgradesResponse")
+                pb::message("eve_public.sovereignty.hub.upgrade.api.GetHubUpgradesResponse")
                     .set_with("hub_upgrades", |b| fill_hub_upgrades(b, &sde, hub_id, Some(&hub)))
-                    .must_to_any())
+                    .to_any_or_internal_err()
             }),
         );
     }
@@ -1156,9 +1171,9 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                         .and_then(|h| h.upgrades.iter().find(|u| u.type_id == type_id).cloned())
                         .ok_or((STATUS_NOT_FOUND, format!("Upgrade {type_id} is not installed in hub {hub_id}")))
                 })?;
-                Ok(pb::message("eve_public.sovereignty.hub.upgrade.api.GetResponse")
+                pb::message("eve_public.sovereignty.hub.upgrade.api.GetResponse")
                     .set_with("attributes", |att| fill_upgrade_attributes(att, &sde, &up))
-                    .must_to_any())
+                    .to_any_or_internal_err()
             }),
         );
     }
@@ -1184,18 +1199,21 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                     let before = hub_views(snap, &sde, &[hub_id]);
                     let sys = process_configuration(snap, &sde, &c, hub_id, &new_items, &config, ctx.now_unix())?;
                     let encoded = encode_hub_upgrades(&sde, hub_id, snap.sov_runtime.sov_hubs.get(&hub_id));
-                    let n = pb::message(
-                        "eve_public.sovereignty.hub.upgrade.api.HubUpgradesConfiguredNotice",
-                    )
-                    .set_raw_message("hub_upgrades", &encoded)
-                    .must_encode();
-                    push_notice(&pending, sys, "eve_public.sovereignty.hub.upgrade.api.HubUpgradesConfiguredNotice", n);
+                    if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
+                        "quasar_sov_hub.process_configuration.configured",
+                        pb::message(
+                            "eve_public.sovereignty.hub.upgrade.api.HubUpgradesConfiguredNotice",
+                        )
+                        .set_raw_message("hub_upgrades", &encoded),
+                    ) {
+                        push_notice(&pending, sys, "eve_public.sovereignty.hub.upgrade.api.HubUpgradesConfiguredNotice", n);
+                    }
                     emit_hub_diffs(&pending, &before, &hub_views(snap, &sde, &[hub_id]));
                     Ok::<_, RpcError>(encoded)
                 })?;
-                Ok(pb::message("eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationResponse")
+                pb::message("eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationResponse")
                     .set_raw_message("hub_upgrades", hub_upgrades)
-                    .must_to_any())
+                    .to_any_or_internal_err()
             }),
         );
     }
@@ -1262,37 +1280,43 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                         .get(&hub_id)
                         .map(|h| h.upgrades.iter().map(|u| (u.type_id, power_state(u))).collect())
                         .unwrap_or_default();
-                    let n = pb::message("eve_public.sovereignty.hub.upgrade.api.UninstalledNotice")
-                        .set_with("upgrade", |id| fill_upgrade_identifier(id, hub_id, type_id))
-                        .set("upgrade_type.sequential", type_id)
-                        .set("hub.sequential", hub_id as u64)
-                        .must_encode();
-                    push_notice(&pending, sys, "eve_public.sovereignty.hub.upgrade.api.UninstalledNotice", n);
+                    if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
+                        "quasar_sov_hub.uninstall.uninstalled",
+                        pb::message("eve_public.sovereignty.hub.upgrade.api.UninstalledNotice")
+                            .set_with("upgrade", |id| fill_upgrade_identifier(id, hub_id, type_id))
+                            .set("upgrade_type.sequential", type_id)
+                            .set("hub.sequential", hub_id as u64),
+                    ) {
+                        push_notice(&pending, sys, "eve_public.sovereignty.hub.upgrade.api.UninstalledNotice", n);
+                    }
                     if prev_states != next_states {
-                        let sim_n = pb::message(
-                            "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
-                        )
-                        .set_with("hub_upgrades", |b| {
-                            fill_hub_upgrades(
-                                b,
-                                &sde,
-                                hub_id,
-                                snap.sov_runtime.sov_hubs.get(&hub_id),
+                        if let Some(sim_n) = crate::quasar_gateway::pb_encode_or_log(
+                            "quasar_sov_hub.uninstall.upgrades_simulated",
+                            pb::message(
+                                "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
                             )
-                        })
-                        .must_encode();
-                        push_notice(
-                            &pending,
-                            sys,
-                            "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
-                            sim_n,
-                        );
+                            .set_with("hub_upgrades", |b| {
+                                fill_hub_upgrades(
+                                    b,
+                                    &sde,
+                                    hub_id,
+                                    snap.sov_runtime.sov_hubs.get(&hub_id),
+                                )
+                            }),
+                        ) {
+                            push_notice(
+                                &pending,
+                                sys,
+                                "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
+                                sim_n,
+                            );
+                        }
                     }
                     emit_hub_diffs(&pending, &before, &hub_views(snap, &sde, &[hub_id]));
                     Ok(())
                 })?;
-                Ok(pb::message("eve_public.sovereignty.hub.upgrade.api.UninstallResponse")
-                    .must_to_any())
+                pb::message("eve_public.sovereignty.hub.upgrade.api.UninstallResponse")
+                    .to_any_or_internal_err()
             }),
         );
     }

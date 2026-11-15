@@ -369,15 +369,20 @@ pub async fn handle(
         }
         let (removed_from_space, saved_sys) = save_location_and_leave_space(ctx, session).await;
         if let Some(cid) = session.character_id {
-            crate::services::campaigns_and_milestones::playtime::pause_milestone_playtime(
-                &ctx.db,
-                cid,
-                ctx.now_unix(),
+            crate::quasar_gateway::isolate_side_effect(
+                "account_services.Logout.secondary_hooks",
+                || {
+                    crate::services::campaigns_and_milestones::playtime::pause_milestone_playtime(
+                        &ctx.db,
+                        cid,
+                        ctx.now_unix(),
+                    );
+                    // Watchers of this character get OnClientContactChange(charID, False).
+                    crate::services::character_skills::notify_watchlist_presence(ctx, cid, false);
+                    crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, cid);
+                    ctx.clear_notifications_for_char(cid);
+                },
             );
-            // Watchers of this character get OnClientContactChange(charID, False).
-            crate::services::character_skills::notify_watchlist_presence(ctx, cid, false);
-            crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, cid);
-            ctx.clear_notifications_for_char(cid);
         }
         if let Some(uid) = session.user_id {
             on_logout(ctx, uid);
@@ -409,14 +414,19 @@ pub async fn handle(
             cid,
         );
         let _ = save_location_and_leave_space(ctx, session).await;
-        crate::services::campaigns_and_milestones::playtime::pause_milestone_playtime(
-            &ctx.db,
-            cid,
-            ctx.now_unix(),
+        crate::quasar_gateway::isolate_side_effect(
+            "account_services.UserLogOffCharacter.secondary_hooks",
+            || {
+                crate::services::campaigns_and_milestones::playtime::pause_milestone_playtime(
+                    &ctx.db,
+                    cid,
+                    ctx.now_unix(),
+                );
+                crate::services::character_skills::notify_watchlist_presence(ctx, cid, false);
+                crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, cid);
+                ctx.clear_notifications_for_char(cid);
+            },
         );
-        crate::services::character_skills::notify_watchlist_presence(ctx, cid, false);
-        crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, cid);
-        ctx.clear_notifications_for_char(cid);
         if let Some(uid) = session.user_id {
             let _ = ctx
                 .db

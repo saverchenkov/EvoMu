@@ -396,9 +396,14 @@ pub fn handle_char_unbound(
             };
 
             if let Some(prev_cid) = session.character_id.filter(|&id| id != c.character_id) {
-                crate::services::fleet_social::revoke_xmpp_auth_token(ctx, prev_cid);
-                crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, prev_cid);
-                ctx.clear_notifications_for_char(prev_cid);
+                crate::quasar_gateway::isolate_side_effect(
+                    "character_gm_tools.SelectCharacterID.prev_logout",
+                    || {
+                        crate::services::fleet_social::revoke_xmpp_auth_token(ctx, prev_cid);
+                        crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, prev_cid);
+                        ctx.clear_notifications_for_char(prev_cid);
+                    },
+                );
             }
             let was_online = session.character_id == Some(c.character_id)
                 || crate::services::character_contacts::is_character_online(ctx, c.character_id);
@@ -451,13 +456,18 @@ pub fn handle_char_unbound(
                 let _ = crate::sp6_lifecycle::reconnect_character_in_space_sync(ctx, c.character_id);
             }
 
-            ctx.sync_character_local_chat(c.character_id, None, eff_sys);
-            crate::services::fleet_social::fleet_social_notify::on_character_select(ctx, session, c.character_id, was_online);
-            let _ = crate::services::fleet_social::mint_or_rotate_xmpp_auth_token(ctx, c.character_id);
-            catch_up_skill_queue(ctx, c.character_id);
-            notify_watchlist_logon(ctx, c.character_id);
-            crate::services::space_destiny::record_session_change_timer(
-                ctx, c.character_id, now_unix, eff_sys, 0, "login",
+            crate::quasar_gateway::isolate_side_effect(
+                "character_gm_tools.SelectCharacterID.post_select_hooks",
+                || {
+                    ctx.sync_character_local_chat(c.character_id, None, eff_sys);
+                    crate::services::fleet_social::fleet_social_notify::on_character_select(ctx, session, c.character_id, was_online);
+                    let _ = crate::services::fleet_social::mint_or_rotate_xmpp_auth_token(ctx, c.character_id);
+                    catch_up_skill_queue(ctx, c.character_id);
+                    notify_watchlist_logon(ctx, c.character_id);
+                    crate::services::space_destiny::record_session_change_timer(
+                        ctx, c.character_id, now_unix, eff_sys, 0, "login",
+                    );
+                },
             );
 
             Some(Ok(PyRep::keyval([

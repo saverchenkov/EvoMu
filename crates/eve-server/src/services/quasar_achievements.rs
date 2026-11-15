@@ -633,22 +633,43 @@ impl AchievementManager {
         if delta == 0 || event_names.is_empty() {
             return;
         }
-        if let Some(ref db) = self.db {
-            crate::services::quasar_goal_tale_notices::record_server_opportunity_event(db, &self.definitions, character_id, event_names, delta, now_unix);
-            if let Some(ref sde) = self.sde {
-                crate::services::operations_manager_helpers::advance_and_notify_server_operation_tasks(db, sde, gateway, i64::from(character_id), event_names, &[], delta, now_unix);
-            }
-        }
-        let mut event_ids: Vec<u32> = self
-            .definitions
-            .iter()
-            .flat_map(|d| d.conditions.iter())
-            .filter(|c| event_names.contains(&c.event_name.as_str()))
-            .map(|c| c.statistic_event_id)
-            .collect();
-        event_ids.sort_unstable();
-        event_ids.dedup();
-        self.apply_statistic_event_ids(character_id, &event_ids, delta, now_unix, false, gateway);
+        crate::quasar_gateway::isolate_side_effect(
+            "quasar_achievements.on_gameplay_event_by_name",
+            || {
+                if let Some(ref db) = self.db {
+                    crate::services::quasar_goal_tale_notices::record_server_opportunity_event(
+                        db,
+                        &self.definitions,
+                        character_id,
+                        event_names,
+                        delta,
+                        now_unix,
+                    );
+                    if let Some(ref sde) = self.sde {
+                        crate::services::operations_manager_helpers::advance_and_notify_server_operation_tasks(
+                            db,
+                            sde,
+                            gateway,
+                            i64::from(character_id),
+                            event_names,
+                            &[],
+                            delta,
+                            now_unix,
+                        );
+                    }
+                }
+                let mut event_ids: Vec<u32> = self
+                    .definitions
+                    .iter()
+                    .flat_map(|d| d.conditions.iter())
+                    .filter(|c| event_names.contains(&c.event_name.as_str()))
+                    .map(|c| c.statistic_event_id)
+                    .collect();
+                event_ids.sort_unstable();
+                event_ids.dedup();
+                self.apply_statistic_event_ids(character_id, &event_ids, delta, now_unix, false, gateway);
+            },
+        );
     }
 
     pub fn on_client_counter_event(
@@ -662,18 +683,26 @@ impl AchievementManager {
         if delta == 0 {
             return;
         }
-        let parsed_id = key.parse::<u32>().ok();
-        let mut event_ids: Vec<u32> = self
-            .definitions
-            .iter()
-            .filter(|d| d.is_client_achievement)
-            .flat_map(|d| d.conditions.iter())
-            .filter(|c| (!c.event_name.is_empty() && c.event_name == key) || parsed_id == Some(c.statistic_event_id))
-            .map(|c| c.statistic_event_id)
-            .collect();
-        event_ids.sort_unstable();
-        event_ids.dedup();
-        self.apply_statistic_event_ids(character_id, &event_ids, delta, now_unix, true, gateway);
+        crate::quasar_gateway::isolate_side_effect(
+            "quasar_achievements.on_client_counter_event",
+            || {
+                let parsed_id = key.parse::<u32>().ok();
+                let mut event_ids: Vec<u32> = self
+                    .definitions
+                    .iter()
+                    .filter(|d| d.is_client_achievement)
+                    .flat_map(|d| d.conditions.iter())
+                    .filter(|c| {
+                        (!c.event_name.is_empty() && c.event_name == key)
+                            || parsed_id == Some(c.statistic_event_id)
+                    })
+                    .map(|c| c.statistic_event_id)
+                    .collect();
+                event_ids.sort_unstable();
+                event_ids.dedup();
+                self.apply_statistic_event_ids(character_id, &event_ids, delta, now_unix, true, gateway);
+            },
+        );
     }
 
     pub fn apply_client_task_completions_and_counters(
@@ -684,24 +713,43 @@ impl AchievementManager {
         now_unix: u64,
         gateway: &PublicGatewayRouter,
     ) {
-        let mut any_marked = false;
-        for &aid in client_ids {
-            if self.is_client_achievement_id(aid) {
-                if let Ok(a) = self.mark_completed(char_id, aid, now_unix) {
-                    any_marked = true;
-                    emit_achievement_notices(char_id, a.def.id, a.def.category_id, a.progress, 0, true, &[], now_unix);
+        crate::quasar_gateway::isolate_side_effect(
+            "quasar_achievements.apply_client_task_completions_and_counters",
+            || {
+                let mut any_marked = false;
+                for &aid in client_ids {
+                    if self.is_client_achievement_id(aid) {
+                        if let Ok(a) = self.mark_completed(char_id, aid, now_unix) {
+                            any_marked = true;
+                            emit_achievement_notices(
+                                char_id,
+                                a.def.id,
+                                a.def.category_id,
+                                a.progress,
+                                0,
+                                true,
+                                &[],
+                                now_unix,
+                            );
+                        }
+                    }
                 }
-            }
-        }
-        if any_marked {
-            self.save_to_db();
-        }
-        for (k, delta) in counter_deltas {
-            self.on_client_counter_event(char_id, k, *delta, now_unix, gateway);
-        }
-        for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
-            let _ = gateway.publish_notice(scope, payload, ts);
-        }
+                if any_marked {
+                    self.save_to_db();
+                }
+                for (k, delta) in counter_deltas {
+                    self.on_client_counter_event(char_id, k, *delta, now_unix, gateway);
+                }
+                for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
+                    let _ = gateway.publish_notice_isolated(
+                        scope,
+                        "quasar_achievements.apply_client_task_completions_and_counters.notice",
+                        payload,
+                        ts,
+                    );
+                }
+            },
+        );
     }
 
     fn apply_statistic_event_ids(
@@ -713,21 +761,50 @@ impl AchievementManager {
         client_only: bool,
         gateway: &PublicGatewayRouter,
     ) {
-        let mut any_changed = false;
-        for &eid in event_ids {
-            let updates = self.record_statistic_event_filtered(character_id, eid, delta, now_unix, client_only);
-            for (a, just_completed, milestones) in updates {
-                any_changed = true;
-                let cat_score = if a.def.category_id > 0 { self.category_score(character_id, a.def.category_id) } else { 0 };
-                emit_achievement_notices(character_id, a.def.id, a.def.category_id, a.progress, cat_score, just_completed, &milestones, now_unix);
-            }
-        }
-        if any_changed {
-            self.save_to_db();
-        }
-        for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
-            let _ = gateway.publish_notice(scope, payload, ts);
-        }
+        crate::quasar_gateway::isolate_side_effect(
+            "quasar_achievements.apply_statistic_event_ids",
+            || {
+                let mut any_changed = false;
+                for &eid in event_ids {
+                    let updates = self.record_statistic_event_filtered(
+                        character_id,
+                        eid,
+                        delta,
+                        now_unix,
+                        client_only,
+                    );
+                    for (a, just_completed, milestones) in updates {
+                        any_changed = true;
+                        let cat_score = if a.def.category_id > 0 {
+                            self.category_score(character_id, a.def.category_id)
+                        } else {
+                            0
+                        };
+                        emit_achievement_notices(
+                            character_id,
+                            a.def.id,
+                            a.def.category_id,
+                            a.progress,
+                            cat_score,
+                            just_completed,
+                            &milestones,
+                            now_unix,
+                        );
+                    }
+                }
+                if any_changed {
+                    self.save_to_db();
+                }
+                for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
+                    let _ = gateway.publish_notice_isolated(
+                        scope,
+                        "quasar_achievements.apply_statistic_event_ids.notice",
+                        payload,
+                        ts,
+                    );
+                }
+            },
+        );
     }
 
     pub fn mark_completed(&self, character_id: u32, achievement_id: u32, now_unix: u64) -> Result<CharacterAchievement, (u32, String)> {
@@ -1011,52 +1088,52 @@ pub(crate) fn emit_achievement_notices(
     milestones: &[u32],
     now: u64,
 ) {
-    super::quasar_social_chat::ctx_queue_notice(
+    crate::quasar_gateway::queue_pb_notice(
         crate::quasar_gateway::NoticeScope::Character(cid),
+        "quasar_achievements.emit_achievement_notices.progressed",
         pb::message("eve_public.achievement.api.ProgressedNotice")
             .set("achievement.uuid", u32_to_uuid(aid))
-            .set("value", progress)
-            .must_to_any(),
+            .set("value", progress),
         now,
     );
     if completed {
-        super::quasar_social_chat::ctx_queue_notice(
+        crate::quasar_gateway::queue_pb_notice(
             crate::quasar_gateway::NoticeScope::Character(cid),
+            "quasar_achievements.emit_achievement_notices.completed",
             pb::message("eve_public.achievement.api.CompletedNotice")
-                .set("achievement.uuid", u32_to_uuid(aid))
-                .must_to_any(),
+                .set("achievement.uuid", u32_to_uuid(aid)),
             now,
         );
     }
     for m_id in milestones {
-        super::quasar_social_chat::ctx_queue_notice(
+        crate::quasar_gateway::queue_pb_notice(
             crate::quasar_gateway::NoticeScope::Character(cid),
+            "quasar_achievements.emit_achievement_notices.milestone_reached",
             pb::message("eve_public.achievement.milestone.api.ReachedNotice")
                 .set("achievement.uuid", u32_to_uuid(aid))
-                .set("milestone.uuid", u32_to_uuid(*m_id))
-                .must_to_any(),
+                .set("milestone.uuid", u32_to_uuid(*m_id)),
             now,
         );
 
         if cat_id > 0 {
-            super::quasar_social_chat::ctx_queue_notice(
+            crate::quasar_gateway::queue_pb_notice(
                 crate::quasar_gateway::NoticeScope::Character(cid),
+                "quasar_achievements.emit_achievement_notices.category_milestone_reached",
                 pb::message("eve_public.achievement.category.milestone.api.ReachedNotice")
                     .set("category.uuid", u32_to_uuid(cat_id))
-                    .set("milestone.uuid", u32_to_uuid(*m_id))
-                    .must_to_any(),
+                    .set("milestone.uuid", u32_to_uuid(*m_id)),
                 now,
             );
         }
     }
 
     if cat_id > 0 {
-        super::quasar_social_chat::ctx_queue_notice(
+        crate::quasar_gateway::queue_pb_notice(
             crate::quasar_gateway::NoticeScope::Character(cid),
+            "quasar_achievements.emit_achievement_notices.category_progressed",
             pb::message("eve_public.achievement.category.api.ProgressedNotice")
                 .set("category.uuid", u32_to_uuid(cat_id))
-                .set("score", cat_score)
-                .must_to_any(),
+                .set("score", cat_score),
             now,
         );
     }
@@ -1155,74 +1232,68 @@ pub(crate) fn empty_root_table_flatbuffer() -> Vec<u8> {
     buf
 }
 
-fn client_eve_storage_dirs(content_id: &str) -> Vec<std::path::PathBuf> {
-    let mut candidate_roots = Vec::new();
-    if let Ok(home) = std::env::var("HOME") {
-        candidate_roots.push(
-            std::path::PathBuf::from(home)
-                .join("Library")
-                .join("Application Support")
-                .join("CCP")
-                .join("EVE"),
+/// Returns the isolated FlatBuffer staging directory for `content_id` ONLY when
+/// `EVOMU_FLATBUFFER_STAGE_DIR` is explicitly set and non-empty (`#1120` / `#1089`).
+///
+/// `eve-server` never scans or mutates host EVE client directories (`%LOCALAPPDATA%\CCP\EVE` or
+/// `~/Library/Application Support/CCP/EVE`); live clients receive FlatBuffers and checksums over
+/// the in-process Quasar CDN endpoints.
+fn isolated_flatbuffer_stage_content_dir(content_id: &str) -> Option<std::path::PathBuf> {
+    let stage_dir = std::env::var_os("EVOMU_FLATBUFFER_STAGE_DIR")?;
+    if stage_dir.is_empty() {
+        return None;
+    }
+    let content_dir = std::path::PathBuf::from(stage_dir).join(content_id);
+    if let Err(err) = std::fs::create_dir_all(&content_dir) {
+        tracing::warn!(
+            content_id,
+            error = %err,
+            "Failed to create isolated FlatBuffer staging directory"
         );
+        return None;
     }
-    if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
-        candidate_roots.push(std::path::PathBuf::from(local_appdata).join("CCP").join("EVE"));
-    }
-    let mut content_dirs = Vec::new();
-    for eve_root in candidate_roots {
-        let Ok(entries) = std::fs::read_dir(&eve_root) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let storage_root = entry.path().join("cache").join("Storage");
-            if storage_root.is_dir() {
-                content_dirs.push(storage_root.join(content_id));
-            }
-        }
-    }
-    content_dirs
+    Some(content_dir)
 }
 
-/// Ensures `version.txt` and `data.bin` exist in any local EVE client `cache/Storage/<content_id>/`
-/// directory so `VersionCachedFlatbufferRepository._request_update_task` can read `_disk_storage.get()`
-/// when `FlatbufferContentProvider.fetch` returns `[None, None]` on first run without an external TLS CDN.
+/// Seeds FlatBuffer payload files ONLY inside the isolated staging root configured via
+/// `EVOMU_FLATBUFFER_STAGE_DIR` (`#1120` / `#1089`), leaving host EVE client directories untouched.
 pub(crate) fn ensure_client_flatbuffer_storage_seeded(
     content_id: &str,
     version_str: &str,
     data_bytes: &[u8],
 ) {
-    for content_dir in client_eve_storage_dirs(content_id) {
-        let _ = std::fs::create_dir_all(&content_dir);
-        let data_path = content_dir.join("data.bin");
-        let ver_path = content_dir.join("version.txt");
-        let needs_seed = std::fs::metadata(&data_path)
-            .map(|m| m.len() == 0)
-            .unwrap_or(true);
-        if needs_seed {
-            let _ = std::fs::write(&data_path, data_bytes);
-            let _ = std::fs::write(&ver_path, version_str.as_bytes());
-        }
+    let Some(content_dir) = isolated_flatbuffer_stage_content_dir(content_id) else {
+        return;
+    };
+    let data_path = content_dir.join("data.bin");
+    let ver_path = content_dir.join("version.txt");
+    let needs_seed = std::fs::metadata(&data_path)
+        .map(|m| m.len() == 0)
+        .unwrap_or(true);
+    if needs_seed {
+        let _ = std::fs::write(&data_path, data_bytes);
+        let _ = std::fs::write(&ver_path, version_str.as_bytes());
     }
 }
 
-/// Seeds `cache/Storage/achievements/` with the full `AchievementData` FlatBuffer and refreshes
-/// any stale empty/legacy-140-byte `data.bin` or mismatched `version.txt` (e.g. `"24.1.60"`).
+/// Seeds the isolated `achievements/` staging directory with the full `AchievementData` FlatBuffer
+/// and refreshes any stale empty/legacy-140-byte `data.bin` or mismatched `version.txt`
+/// (e.g. `"24.1.60"`), ONLY when `EVOMU_FLATBUFFER_STAGE_DIR` is explicitly set and non-empty.
 pub(crate) fn seed_or_upgrade_achievements_flatbuffer(version_str: &str, data_bytes: &[u8]) {
+    let Some(content_dir) = isolated_flatbuffer_stage_content_dir("achievements") else {
+        return;
+    };
     let legacy_empty = empty_achievement_flatbuffer();
-    for content_dir in client_eve_storage_dirs("achievements") {
-        let _ = std::fs::create_dir_all(&content_dir);
-        let data_path = content_dir.join("data.bin");
-        let ver_path = content_dir.join("version.txt");
-        let existing_data = std::fs::read(&data_path).unwrap_or_default();
-        let existing_ver = std::fs::read_to_string(&ver_path).unwrap_or_default();
-        let needs_upgrade = existing_data.is_empty()
-            || existing_data == legacy_empty
-            || existing_ver.trim() != version_str;
-        if needs_upgrade {
-            let _ = std::fs::write(&data_path, data_bytes);
-            let _ = std::fs::write(&ver_path, version_str.as_bytes());
-        }
+    let data_path = content_dir.join("data.bin");
+    let ver_path = content_dir.join("version.txt");
+    let existing_data = std::fs::read(&data_path).unwrap_or_default();
+    let existing_ver = std::fs::read_to_string(&ver_path).unwrap_or_default();
+    let needs_upgrade = existing_data.is_empty()
+        || existing_data == legacy_empty
+        || existing_ver.trim() != version_str;
+    if needs_upgrade {
+        let _ = std::fs::write(&data_path, data_bytes);
+        let _ = std::fs::write(&ver_path, version_str.as_bytes());
     }
 }
 
