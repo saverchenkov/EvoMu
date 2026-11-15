@@ -859,6 +859,14 @@ pub(crate) async fn handle_module_cycles(
                     } else if mod_type.group_id != 842 {
                         let locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
                         if !locks.iter().any(|l| l.target_id == target_id && l.locked) {
+                            ctx.db.with_mut_snapshot(|snap| {
+                                snap.module_active_states.remove(&module_id);
+                                snap.module_active_charges.remove(&module_id);
+                            });
+                            ctx.invalidate_and_push_fit(ship_id);
+                            crate::services::combat_weapons_spool::reset_entropic_spool(
+                                ctx, ship_id, module_id,
+                            );
                             return Some(Err(BridgeRpcError { code: "TargetNotLocked".into(), message: format!("Target {target_id} is not locked"), client_error: None }));
                         }
                     }

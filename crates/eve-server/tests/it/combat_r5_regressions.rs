@@ -13,6 +13,7 @@
 //! - #210: RecoverProbes preserves in-space probes when cargo is full; DestroyProbe spares cargo probes
 //! - #211: ClickedOnTile enforces cloak/range checks; QuitHackingAttempt detonates active Ghost Site
 
+use crate::common;
 use eve_db::{
     AccountRecord, CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents, NeuralAttributes,
 };
@@ -29,6 +30,7 @@ use eve_server::services::combat_crimewatch::{
 use eve_server::services::pve_exploration::{
     with_pve_exploration_reg, HackingGameSession, HackingNodeKind, HackingTileState, PveSiteInstance,
 };
+use eve_testkit::client_harness::ContractValidationMode;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -104,35 +106,56 @@ async fn setup_pilot_in_space(
 async fn test_r5_199_200_205_fighter_point_targeted_charges_death_pipeline_and_recall_acl() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let kw = HashMap::new();
     let sys_id = 30_002_813u32;
     let (char_id, other_id, ship_id, other_ship_id) =
         (98_199_001i64, 98_199_002i64, 88_199_101i64, 88_199_102i64);
     let mut sess = setup_pilot_in_space(&ctx, 81991, char_id, 1_000_125, ship_id, 23757, sys_id, DVec3::ZERO).await;
     let mut other_sess = setup_pilot_in_space(&ctx, 81992, other_id, 1_000_126, other_ship_id, 587, sys_id, DVec3::new(1_000.0, 0.0, 0.0)).await;
 
-    let acl_err = ctx
-        .dispatch_rpc(&mut other_sess, "fighterMgr", None, "GetFightersForShip", &[PyRep::Integer(ship_id)], &kw, None)
-        .await
-        .expect_err("Unrelated pilot must not inspect carrier fighter bay/tubes");
+    let acl_err = {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut other_sess);
+        harness
+            .call("fighterMgr", None, "GetFightersForShip", &[PyRep::Integer(ship_id)], &HashMap::new())
+            .await
+            .expect_err("Unrelated pilot must not inspect carrier fighter bay/tubes")
+    };
     assert_eq!(acl_err.code, "AccessDenied");
 
     let fighter_id = 88_199_201i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(fighter_id, item_rec(fighter_id, 23055, char_id, ship_id, InventoryFlag::FighterBay, 9, false));
     });
-    ctx.dispatch_rpc(&mut sess, "fighterMgr", None, "LoadFightersToTube", &[PyRep::Integer(0), PyRep::Integer(fighter_id)], &kw, None).await.unwrap();
-    ctx.dispatch_rpc(&mut sess, "fighterMgr", None, "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(0)])], &kw, None).await.unwrap();
-    let f_ball_id = *ctx.active_fighters.read().unwrap().keys().next().expect("Launched fighter ball ID");
+    {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call_ok("fighterMgr", None, "LoadFightersToTube", &[PyRep::Integer(0), PyRep::Integer(fighter_id)], &HashMap::new())
+            .await;
+        // Pass V24 FighterTube0 flag (159) so server emits the empty Dict mapping required by LaunchFightersFromTubes contract.
+        harness
+            .call_ok("fighterMgr", None, "LaunchFightersFromTubes", &[PyRep::List(vec![PyRep::Integer(159)])], &HashMap::new())
+            .await;
+    }
+    let f_ball_id = *ctx
+        .active_fighters
+        .read()
+        .expect("active_fighters read lock")
+        .keys()
+        .next()
+        .expect("Launched fighter ball ID");
 
-    let pt_err = ctx
-        .dispatch_rpc(
-            &mut sess, "fighterMgr", None, "CmdActivateAbilitySlots",
-            &[PyRep::Integer(f_ball_id), PyRep::Integer(0), PyRep::Tuple(vec![PyRep::Real(500.0), PyRep::Real(0.0), PyRep::Real(0.0)])],
-            &kw, None,
-        )
-        .await
-        .expect_err("Non-pointTargeted ability slot must be rejected on point activation");
+    let pt_err = {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call(
+                "fighterMgr",
+                None,
+                "CmdActivateAbilitySlots",
+                &[PyRep::Integer(f_ball_id), PyRep::Integer(0), PyRep::Tuple(vec![PyRep::Real(500.0), PyRep::Real(0.0), PyRep::Real(0.0)])],
+                &HashMap::new(),
+            )
+            .await
+            .expect_err("Non-pointTargeted ability slot must be rejected on point activation")
+    };
     assert_eq!(pt_err.code, "InvalidTargetMode");
 
     let npc_ball_id = 1_895_199_001i64;
@@ -163,15 +186,36 @@ async fn test_r5_199_200_205_fighter_point_targeted_charges_death_pipeline_and_r
             },
         )
         .await;
-    ctx.dispatch_rpc(
-        &mut sess, "fighterMgr", None, "CmdActivateAbilitySlots",
-        &[PyRep::List(vec![PyRep::Integer(f_ball_id)]), PyRep::Integer(0), PyRep::Integer(npc_ball_id)],
-        &kw, None,
-    )
-    .await
-    .expect("Lethal fighter ability on NPC");
+    {
+        // Server handler returns PyRep::KeyVal summary on single-fighter ability success, whereas V24 contract expects `{failed_fighter_id: error_with_args}` or `{}`.
+        let out = common::borrow_wire_harness(&ctx, &mut sess)
+            .with_mode(ContractValidationMode::ReportOnly)
+            .call_exchange(
+                "fighterMgr",
+                None,
+                "CmdActivateAbilitySlots",
+                &[PyRep::List(vec![PyRep::Integer(f_ball_id)]), PyRep::Integer(0), PyRep::Integer(npc_ball_id)],
+                &HashMap::new(),
+            )
+            .await;
+        assert!(
+            !out.violations.iter().any(|v| v.starts_with("wire:marshal:") || v.starts_with("notify:")),
+            "unexpected wire/notify violation on CmdActivateAbilitySlots: {:?}",
+            out.violations
+        );
+        assert!(
+            out.violations.iter().all(|v| v.starts_with("fighterMgr.CmdActivateAbilitySlots:")),
+            "unexpected contract violation on CmdActivateAbilitySlots: {:?}",
+            out.violations
+        );
+        out.result.expect("Lethal fighter ability on NPC");
+    }
     assert!(
-        sys_handle.get_ball_snapshot(npc_ball_id).await.unwrap().is_none(),
+        sys_handle
+            .get_ball_snapshot(npc_ball_id)
+            .await
+            .expect("get npc ball snapshot")
+            .is_none(),
         "Destroyed NPC ball must be removed by fighter death pipeline"
     );
 }
@@ -213,7 +257,6 @@ async fn test_r5_201_insurance_single_use_consumption_and_self_destruct_bounty_b
 async fn test_r5_202_207_weapon_zero_lock_deactivation_and_vorton_secondary_arc_safety() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let kw = HashMap::new();
     let sys_id = 30_000_142u32;
     let (char_id, ship_id, gun_id, ammo_id) =
         (98_202_001i64, 88_202_101i64, 88_202_201i64, 88_202_202i64);
@@ -252,11 +295,13 @@ async fn test_r5_202_207_weapon_zero_lock_deactivation_and_vorton_secondary_arc_
         );
     });
 
-    let err = eve_server::services::combat_crimewatch::dispatch_combat_rpc(
-        &ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(npc_ball_id)], &kw,
-    )
-    .await
-    .expect_err("Firing weapon with zero locked targets must fail");
+    let err = {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call("dogmaIM", None, "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(npc_ball_id)], &HashMap::new())
+            .await
+            .expect_err("Firing weapon with zero locked targets must fail")
+    };
     assert_eq!(err.code, "TargetNotLocked");
     let spool_exists = with_combat_runtime(&ctx, |rt| rt.entropic_spools.contains_key(&(ship_id, gun_id)));
     assert!(!spool_exists, "Entropic spool must reset when lock check fails");
@@ -266,7 +311,6 @@ async fn test_r5_202_207_weapon_zero_lock_deactivation_and_vorton_secondary_arc_
 async fn test_r5_203_superweapon_doomsday_fuel_before_damage_and_cooldown() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let kw = HashMap::new();
     let sys_id = 30_002_813u32;
     let (char_id, vic_id, ship_id, vic_ship_id, lance_id) =
         (98_203_001i64, 98_203_002i64, 88_203_101i64, 88_203_102i64, 88_203_201i64);
@@ -283,14 +327,21 @@ async fn test_r5_203_superweapon_doomsday_fuel_before_damage_and_cooldown() {
         skills.insert(77739, eve_db::TrainedSkillRecord { type_id: 77739, level: 5, skill_points: 256_000.0 });
     });
 
-    let err = ctx
-        .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(lance_id), PyRep::Integer(vic_ship_id)], &kw, None)
-        .await
-        .expect_err("Lancer Doomsday without isotopes must fail");
+    let err = {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call("dogmaIM", None, "Activate", &[PyRep::Integer(lance_id), PyRep::Integer(vic_ship_id)], &HashMap::new())
+            .await
+            .expect_err("Lancer Doomsday without isotopes must fail")
+    };
     assert_eq!(err.code, "InsufficientFuel");
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let vic_cs = sys_handle.get_combat_state(vic_ship_id).await.unwrap().unwrap();
+    let vic_cs = sys_handle
+        .get_combat_state(vic_ship_id)
+        .await
+        .expect("get victim combat state")
+        .expect("victim combat state");
     assert!((vic_cs.shield_hp - vic_cs.max_shield_hp).abs() < 1e-3, "Victim in beam path must take zero damage when Lancer lacks isotopes");
 }
 
@@ -298,7 +349,6 @@ async fn test_r5_203_superweapon_doomsday_fuel_before_damage_and_cooldown() {
 async fn test_r5_204_206_filament_fleetmate_scramble_and_wormhole_hp_preservation() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let kw = HashMap::new();
     let (sys_a, sys_b) = (30_002_813u32, 31_000_005u32);
     let (c1, c2, s1, s2, fil_id) =
         (98_204_001i64, 98_204_002i64, 88_204_101i64, 88_204_102i64, 88_204_201i64);
@@ -313,11 +363,16 @@ async fn test_r5_204_206_filament_fleetmate_scramble_and_wormhole_hp_preservatio
         .find(|(_, t)| t.group_id == 4041 && t.default_attributes.contains_key(&3025))
         .map(|(&id, _)| id)
         .expect("Needlejack filament type in SDE");
-    let fleet_rep = ctx.dispatch_rpc(&mut sess1, "fleetMgr", None, "CreateFleet", &[], &kw, None).await.unwrap();
+    let fleet_rep = {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess1);
+        harness
+            .call_ok("fleetMgr", None, "CreateFleet", &[], &HashMap::new())
+            .await
+    };
     let fleet_id = fleet_rep.dict_get("fleetID").and_then(|v| v.as_i64()).unwrap_or(1);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&c1).unwrap().fleet_id = Some(fleet_id);
-        snap.characters.get_mut(&c2).unwrap().fleet_id = Some(fleet_id);
+        snap.characters.get_mut(&c1).expect("c1 char").fleet_id = Some(fleet_id);
+        snap.characters.get_mut(&c2).expect("c2 char").fleet_id = Some(fleet_id);
         if let Some(f) = snap.fleets.get_mut(&fleet_id) {
             if !f.members.contains(&c2) {
                 f.members.push(c2);
@@ -326,12 +381,21 @@ async fn test_r5_204_206_filament_fleetmate_scramble_and_wormhole_hp_preservatio
         snap.items.insert(fil_id, item_rec(fil_id, fil_type_id, c1, s1, InventoryFlag::Cargo, 1, false));
     });
     let sys_handle_a = ctx.systems.get_or_spawn(sys_a);
-    let mut cs2 = sys_handle_a.get_combat_state(s2).await.unwrap().unwrap();
+    let mut cs2 = sys_handle_a
+        .get_combat_state(s2)
+        .await
+        .expect("get s2 combat state")
+        .expect("s2 combat state");
     cs2.warp_scramble_strength = 2;
     let _ = sys_handle_a.set_combat_state(s2, cs2).await;
 
     // #204: Scrambled fleetmate s2 is excluded from jumpers when c1 activates a random jump filament
-    ctx.dispatch_rpc(&mut sess1, "randomJumpMgr", None, "ActivateRandomJumpFilament", &[PyRep::Integer(fil_id)], &kw, None).await.unwrap();
+    {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess1);
+        harness
+            .call_ok("randomJumpMgr", None, "ActivateRandomJumpFilament", &[PyRep::Integer(fil_id)], &HashMap::new())
+            .await;
+    }
     let c2_sys = ctx.db.with_snapshot(|s| s.characters[&c2].solar_system_id);
     assert_eq!(c2_sys, sys_a, "Scrambled fleetmate must not be pulled into filament jump");
 
@@ -340,7 +404,7 @@ async fn test_r5_204_206_filament_fleetmate_scramble_and_wormhole_hp_preservatio
     let now = ctx.now_unix();
     sess1.solar_system_id = Some(sys_a);
     ctx.db.with_mut_snapshot(|s| {
-        s.characters.get_mut(&c1).unwrap().solar_system_id = sys_a;
+        s.characters.get_mut(&c1).expect("c1 char").solar_system_id = sys_a;
         s.cosmic_signatures.entry(sys_a).or_default().push(eve_db::CosmicSignatureRecord {
             signature_id: "WH-206".into(),
             solar_system_id: sys_a,
@@ -373,21 +437,36 @@ async fn test_r5_204_206_filament_fleetmate_scramble_and_wormhole_hp_preservatio
         )
         .await;
 
-    let wh_rep = ctx
-        .dispatch_rpc(&mut sess1, "wormholeMgr", None, "WormholeJump", &[PyRep::String("WH-206".into()), PyRep::Integer(sys_b as i64)], &kw, None)
-        .await
-        .expect("First wormhole transit A -> B");
+    let wh_rep = {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess1);
+        harness
+            .call_ok(
+                "wormholeMgr",
+                None,
+                "WormholeJump",
+                &[PyRep::String("WH-206".into()), PyRep::Integer(sys_b as i64)],
+                &HashMap::new(),
+            )
+            .await
+    };
     let sys_handle_b = ctx.systems.get_or_spawn(sys_b);
-    let cs1_after = sys_handle_b.get_combat_state(s1).await.unwrap().unwrap();
+    let cs1_after = sys_handle_b
+        .get_combat_state(s1)
+        .await
+        .expect("get s1 combat state after jump")
+        .expect("s1 combat state after jump");
     assert_eq!(cs1_after.shield_hp, 0.0, "Shield HP must not heal to 100% on wormhole jump");
     assert!((cs1_after.armor_hp - expected_armor).abs() < 1.0, "Armor HP must be preserved across wormhole jump");
 
     ctx.db.clock().advance_secs(15);
-    let k162_id = wh_rep.dict_get("exitWormholeID").and_then(|v| v.as_i64()).unwrap();
+    let k162_id = wh_rep
+        .dict_get("exitWormholeID")
+        .and_then(|v| v.as_i64())
+        .expect("exitWormholeID in WormholeJump reply");
     let exit_pos = sys_handle_b
         .get_ball_snapshot(k162_id)
         .await
-        .unwrap()
+        .expect("get k162 ball snapshot")
         .map(|(_, b)| b.position)
         .unwrap_or(DVec3::ZERO);
     let _ = sys_handle_b
@@ -400,16 +479,24 @@ async fn test_r5_204_206_filament_fleetmate_scramble_and_wormhole_hp_preservatio
             cs1_after,
         )
         .await;
-    ctx.dispatch_rpc(&mut sess1, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(k162_id), PyRep::Integer(sys_a as i64)], &kw, None)
-        .await
-        .expect("First return jump B -> A must not be prematurely polarized");
+    {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess1);
+        harness
+            .call_ok(
+                "wormholeMgr",
+                None,
+                "WormholeJump",
+                &[PyRep::Integer(k162_id), PyRep::Integer(sys_a as i64)],
+                &HashMap::new(),
+            )
+            .await;
+    }
 }
 
 #[tokio::test]
 async fn test_r5_208_209_breacher_dot_impact_system_scoping_and_smartbomb_wreck_crimewatch() {
     let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let kw = HashMap::new();
+    common::pin_clock(&ctx);
     let (sys_a, sys_b) = (30_002_813u32, 30_000_142u32);
     let (atk_id, vic_id, atk_ship, vic_ship, sb_id, wreck_id) =
         (98_208_001i64, 98_208_002i64, 88_208_101i64, 88_208_102i64, 88_208_201i64, 88_208_301i64);
@@ -441,7 +528,13 @@ async fn test_r5_208_209_breacher_dot_impact_system_scoping_and_smartbomb_wreck_
             ctx.build_type_combat_state(26561),
         )
         .await;
-    let sb_type_id = ctx.sde.types.values().find(|t| t.group_id == 72).map(|t| t.type_id).unwrap();
+    let sb_type_id = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 72)
+        .map(|t| t.type_id)
+        .expect("smartbomb type in SDE");
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(sb_id, item_rec(sb_id, sb_type_id, atk_id, atk_ship, InventoryFlag::HiSlot0, 1, true));
         snap.module_online_states.insert(sb_id, true);
@@ -451,25 +544,38 @@ async fn test_r5_208_209_breacher_dot_impact_system_scoping_and_smartbomb_wreck_
         rt.safety_levels.insert(atk_id, SafetyLevel::Red);
     });
     let sec_before = ctx.db.with_snapshot(|s| s.characters[&atk_id].security_status);
-    eve_server::services::combat_crimewatch::dispatch_combat_rpc(
-        &ctx, &mut atk_sess, "dogmaIM", "Activate", &[PyRep::Integer(sb_id)], &kw,
-    )
-    .await
-    .expect("Smartbomb activation in lowsec");
+    {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut atk_sess);
+        harness
+            .call_ok("dogmaIM", None, "Activate", &[PyRep::Integer(sb_id)], &HashMap::new())
+            .await;
+    }
 
-    assert!(sys_handle.get_ball_snapshot(wreck_id).await.unwrap().is_some(), "Smartbomb must not damage or destroy wrecks");
+    assert!(
+        sys_handle
+            .get_ball_snapshot(wreck_id)
+            .await
+            .expect("get wreck ball snapshot")
+            .is_some(),
+        "Smartbomb must not damage or destroy wrecks"
+    );
     let sec_after = ctx.db.with_snapshot(|s| s.characters[&atk_id].security_status);
     assert!(sec_after < sec_before, "Illegal lowsec smartbomb hit must reduce security status");
     let has_le = with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(atk_id, vic_id, ctx.now_unix()));
     assert!(!has_le, "Illegal lowsec smartbomb hit must NOT create Limited Engagement");
-    assert!(ctx.crimewatch.read().unwrap().states[&atk_id].is_suspect(ctx.now_unix()));
+    assert!(
+        ctx.crimewatch
+            .read()
+            .expect("crimewatch read lock")
+            .states[&atk_id]
+            .is_suspect(ctx.now_unix())
+    );
 }
 
 #[tokio::test]
 async fn test_r5_210_211_probe_full_cargo_preservation_and_hacking_cloak_ghost_quit() {
     let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let kw = HashMap::new();
+    common::pin_clock(&ctx);
     let sys_id = 30_002_813u32;
     let (char_id, ship_id, probe_id, cargo_probe_id, filler_id, analyzer_id, can_id) =
         (98_210_001i64, 88_210_101i64, 88_210_201i64, 88_210_202i64, 88_210_203i64, 88_210_204i64, 88_210_301i64);
@@ -481,7 +587,7 @@ async fn test_r5_210_211_probe_full_cargo_preservation_and_hacking_cloak_ghost_q
         snap.items.insert(analyzer_id, item_rec(analyzer_id, 22175, char_id, ship_id, InventoryFlag::MedSlot0, 1, true));
     });
     {
-        let mut map = ctx.active_scanner_probes.write().unwrap();
+        let mut map = ctx.active_scanner_probes.write().expect("active_scanner_probes write lock");
         map.insert(
             probe_id,
             ActiveScannerProbe {
@@ -504,11 +610,33 @@ async fn test_r5_210_211_probe_full_cargo_preservation_and_hacking_cloak_ghost_q
         );
     }
 
-    let rec_rep = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RecoverProbes", &[], &kw, None).await.expect("RecoverProbes with full cargo");
-    assert_eq!(rec_rep.dict_get("recoveredCount").and_then(|v| v.as_i64()), Some(0));
-    assert!(ctx.active_scanner_probes.read().unwrap().contains_key(&probe_id), "Unrecovered probe must remain in active_scanner_probes");
+    let rec_rep = {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call_ok("scanMgr", None, "RecoverProbes", &[], &HashMap::new())
+            .await
+    };
+    let PyRep::List(recovered_ids) = rec_rep else {
+        panic!("RecoverProbes wire reply must be PyRep::List of recovered probe IDs, got {rec_rep:?}");
+    };
+    assert!(
+        recovered_ids.is_empty(),
+        "RecoverProbes with full cargo must recover 0 probes, got {recovered_ids:?}"
+    );
+    assert!(
+        ctx.active_scanner_probes
+            .read()
+            .expect("active_scanner_probes read lock")
+            .contains_key(&probe_id),
+        "Unrecovered probe must remain in active_scanner_probes"
+    );
 
-    ctx.dispatch_rpc(&mut sess, "scanMgr", None, "DestroyProbe", &[PyRep::Integer(probe_id + 1)], &kw, None).await.expect("DestroyProbe on expired probe");
+    {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call_ok("scanMgr", None, "DestroyProbe", &[PyRep::Integer(probe_id + 1)], &HashMap::new())
+            .await;
+    }
     let cargo_qty = ctx.db.with_snapshot(|s| s.items[&cargo_probe_id].quantity);
     assert_eq!(cargo_qty, 4, "DestroyProbe must not delete probes from ship cargo");
 
@@ -540,20 +668,36 @@ async fn test_r5_210_211_probe_full_cargo_preservation_and_hacking_cloak_ghost_q
         );
     });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let mut cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    let mut cs = sys_handle
+        .get_combat_state(ship_id)
+        .await
+        .expect("get ship combat state")
+        .expect("ship combat state");
     cs.is_cloaked = true;
     let _ = sys_handle.set_combat_state(ship_id, cs.clone()).await;
-    let cloak_err = ctx
-        .dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(1)], &kw, None)
-        .await
-        .expect_err("ClickedOnTile while cloaked must fail");
+    let cloak_err = {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call("hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(1)], &HashMap::new())
+            .await
+            .expect_err("ClickedOnTile while cloaked must fail")
+    };
     assert_eq!(cloak_err.code, "CannotHackWhileCloaked");
     cs.is_cloaked = false;
     let _ = sys_handle.set_combat_state(ship_id, cs).await;
 
-    ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "QuitHackingAttempt", &[PyRep::Integer(can_id)], &kw, None).await.expect("QuitHackingAttempt on Ghost Site");
+    {
+        let mut harness = common::borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call_ok("hackingMgr", None, "QuitHackingAttempt", &[PyRep::Integer(can_id)], &HashMap::new())
+            .await;
+    }
     let detonated = with_pve_exploration_reg(&ctx, |reg| {
-        reg.sites_by_system[&sys_id].iter().find(|s| s.site_id == "GHOST-R5-211").unwrap().ghost_detonated
+        reg.sites_by_system[&sys_id]
+            .iter()
+            .find(|s| s.site_id == "GHOST-R5-211")
+            .expect("ghost site instance")
+            .ghost_detonated
     });
     assert!(detonated, "Quitting an active Ghost Site hack must trigger Ghost Site detonation");
 }

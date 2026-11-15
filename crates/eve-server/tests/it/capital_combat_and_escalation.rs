@@ -169,18 +169,19 @@ async fn test_pochven_capital_and_cyno_restrictions() {
     let mut sess = make_sess(char_id, dread_id, pochven_sys, None);
 
     // 1. Region-wide cyno jammer stops lighting a cyno in Pochven
-    let cyno_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(cyno_mod_id), PyRep::String("effects.CynosuralField".into())],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect_err("Cyno activation in Pochven must be blocked by region-wide cyno jammer");
+    let cyno_err = {
+        let mut harness = borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call(
+                "dogmaIM",
+                None,
+                "Activate",
+                &[PyRep::Integer(cyno_mod_id), PyRep::String("effects.CynosuralField".into())],
+                &HashMap::new(),
+            )
+            .await
+            .expect_err("Cyno activation in Pochven must be blocked by region-wide cyno jammer")
+    };
     assert!(
         cyno_err.code.contains("Cyno") || cyno_err.message.to_lowercase().contains("pochven") || cyno_err.message.to_lowercase().contains("jam"),
         "Unexpected cyno jammer error: {cyno_err:?}"
@@ -194,18 +195,13 @@ async fn test_pochven_capital_and_cyno_restrictions() {
         .find(|g| g.from_solar_system_id == pochven_sys)
         .map(|g| g.stargate_id)
         .unwrap_or(50_000_001);
-    let gate_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "beyonce",
-            None,
-            "CmdStargateJump",
-            &[PyRep::Integer(gate_id)],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect_err("Capital ship must not be able to use Pochven stargates");
+    let gate_err = {
+        let mut harness = borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call("beyonce", None, "CmdStargateJump", &[PyRep::Integer(gate_id)], &HashMap::new())
+            .await
+            .expect_err("Capital ship must not be able to use Pochven stargates")
+    };
     assert_eq!(gate_err.code, "CapitalShipCannotJumpStargate");
 
     // 3. Capital manufacturing jobs in Pochven are refused
@@ -236,23 +232,24 @@ async fn test_pochven_capital_and_cyno_restrictions() {
         );
     });
     let mut docked_sess = make_sess(char_id, dread_id, pochven_sys, Some(pochven_station));
-    let ind_err = ctx
-        .dispatch_rpc(
-            &mut docked_sess,
-            "industryManager",
-            None,
-            "InstallJob",
-            &[PyRep::keyval([
-                ("blueprintID", PyRep::Integer(bp_id)),
-                ("facilityID", PyRep::Integer(pochven_station)),
-                ("activityID", PyRep::Integer(1)),
-                ("runs", PyRep::Integer(1)),
-            ])],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect_err("Capital manufacturing in Pochven must be refused");
+    let ind_err = {
+        let mut harness = borrow_wire_harness(&ctx, &mut docked_sess);
+        harness
+            .call(
+                "industryManager",
+                None,
+                "InstallJob",
+                &[PyRep::keyval([
+                    ("blueprintID", PyRep::Integer(bp_id)),
+                    ("facilityID", PyRep::Integer(pochven_station)),
+                    ("activityID", PyRep::Integer(1)),
+                    ("runs", PyRep::Integer(1)),
+                ])],
+                &HashMap::new(),
+            )
+            .await
+            .expect_err("Capital manufacturing in Pochven must be refused")
+    };
     assert_eq!(ind_err.code, "CapitalConstructionForbiddenInPochven");
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -327,29 +324,24 @@ async fn test_pochven_capital_and_cyno_restrictions() {
         );
     });
     let mut cyno_sess = make_sess(cyno_char_id, cyno_ship_id, lowsec_sys, None);
-    let _ = ctx
-        .dispatch_rpc(
-            &mut cyno_sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(cyno_mod_id)],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("Activate low-sec cyno beacon");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "beyonce",
-        None,
-        "CmdJumpToFleetModuleBeacon",
-        &[PyRep::Integer(cyno_char_id), PyRep::Integer(i64::from(lowsec_sys))],
-        &HashMap::new(),
-        None,
-    )
-    .await
-    .expect("jump out of Pochven must succeed");
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut cyno_sess);
+        harness
+            .call_ok("dogmaIM", None, "Activate", &[PyRep::Integer(cyno_mod_id)], &HashMap::new())
+            .await
+    };
+    {
+        let mut harness = borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call_ok(
+                "beyonce",
+                None,
+                "CmdJumpToFleetModuleBeacon",
+                &[PyRep::Integer(cyno_char_id), PyRep::Integer(i64::from(lowsec_sys))],
+                &HashMap::new(),
+            )
+            .await;
+    }
     assert_eq!(sess.solar_system_id, Some(lowsec_sys), "Capital jumping out of Pochven must arrive in low-sec");
     let fuel_after = ctx.db.with_snapshot(|s| s.items.get(&fuel_id).map(|i| i.quantity).unwrap_or(0));
     assert!(fuel_after < 10_000, "Jumping out of Pochven must consume isotopes (remaining: {fuel_after})");
@@ -364,18 +356,19 @@ async fn test_pochven_capital_and_cyno_restrictions() {
             f.members.push(pochven_cyno_char);
         }
     });
-    let err_into_pochven = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "beyonce",
-            None,
-            "CmdJumpToFleetModuleBeacon",
-            &[PyRep::Integer(pochven_cyno_char), PyRep::Integer(i64::from(pochven_sys))],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect_err("Jumping into Pochven must be refused with CannotJumpToPochven");
+    let err_into_pochven = {
+        let mut harness = borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call(
+                "beyonce",
+                None,
+                "CmdJumpToFleetModuleBeacon",
+                &[PyRep::Integer(pochven_cyno_char), PyRep::Integer(i64::from(pochven_sys))],
+                &HashMap::new(),
+            )
+            .await
+            .expect_err("Jumping into Pochven must be refused with CannotJumpToPochven")
+    };
     assert_eq!(err_into_pochven.code, "CannotJumpToPochven");
 }
 
@@ -405,22 +398,16 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     seed_ship_in_space(&ctx, char_id, dread_id, 19_720, c5_sys, c5_site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
     let mut sess = make_sess(char_id, dread_id, c5_sys, None);
 
-    let _ = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "scanSvc",
-            None,
-            "EnterCombatAnomaly",
-            &[PyRep::String(site_id_c5.clone())],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("EnterCombatAnomaly C5 #1");
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call_ok("scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(site_id_c5.clone())], &HashMap::new())
+            .await
+    };
 
     let avengers_1: Vec<(i64, f64, f64, f64, f64)> = {
         let sys_handle = ctx.systems.get_or_spawn(c5_sys);
-        let bp = sys_handle.ballpark.read().unwrap();
+        let bp = sys_handle.ballpark.read().expect("ballpark read lock");
         with_combat_runtime(&ctx, |rt| {
             rt.npc_entities
                 .values()
@@ -445,18 +432,12 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     let char_id_2 = char_id + 1;
     seed_ship_in_space(&ctx, char_id_2, dread_id_2, 19_720, c5_sys, c5_site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
     let mut sess2 = make_sess(char_id_2, dread_id_2, c5_sys, None);
-    let _ = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "scanSvc",
-            None,
-            "EnterCombatAnomaly",
-            &[PyRep::String(site_id_c5.clone())],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("EnterCombatAnomaly C5 #2");
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut sess2);
+        harness
+            .call_ok("scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(site_id_c5.clone())], &HashMap::new())
+            .await
+    };
     let count_after_2 = with_combat_runtime(&ctx, |rt| {
         rt.npc_entities.values().filter(|n| n.solar_system_id == c5_sys && n.type_id == 37_472).count()
     });
@@ -466,18 +447,12 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     let char_id_3 = char_id + 2;
     seed_ship_in_space(&ctx, char_id_3, dread_id_3, 19_720, c5_sys, c5_site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
     let mut sess3 = make_sess(char_id_3, dread_id_3, c5_sys, None);
-    let _ = ctx
-        .dispatch_rpc(
-            &mut sess3,
-            "scanSvc",
-            None,
-            "EnterCombatAnomaly",
-            &[PyRep::String(site_id_c5.clone())],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("EnterCombatAnomaly C5 #3");
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut sess3);
+        harness
+            .call_ok("scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(site_id_c5.clone())], &HashMap::new())
+            .await
+    };
     let count_after_3 = with_combat_runtime(&ctx, |rt| {
         rt.npc_entities.values().filter(|n| n.solar_system_id == c5_sys && n.type_id == 37_472).count()
     });
@@ -487,18 +462,12 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     let carrier_char_id = char_id + 3;
     seed_ship_in_space(&ctx, carrier_char_id, carrier_id, 23_757, c5_sys, c5_site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
     let mut carrier_sess = make_sess(carrier_char_id, carrier_id, c5_sys, None);
-    let _ = ctx
-        .dispatch_rpc(
-            &mut carrier_sess,
-            "scanSvc",
-            None,
-            "EnterCombatAnomaly",
-            &[PyRep::String(site_id_c5.clone())],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("EnterCombatAnomaly C5 Carrier #1");
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut carrier_sess);
+        harness
+            .call_ok("scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(site_id_c5.clone())], &HashMap::new())
+            .await
+    };
     let count_with_carrier = with_combat_runtime(&ctx, |rt| {
         rt.npc_entities.values().filter(|n| n.solar_system_id == c5_sys && n.type_id == 37_472).count()
     });
@@ -507,7 +476,7 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     // 4. Moving capital > 100 km from warp-in despawns its escalation NPCs
     {
         let sys_handle = ctx.systems.get_or_spawn(c5_sys);
-        let mut bp = sys_handle.ballpark.write().unwrap();
+        let mut bp = sys_handle.ballpark.write().expect("ballpark write lock");
         if let Some(b) = bp.balls.get_mut(&carrier_id) {
             b.position = c5_site_pos + DVec3::new(150_000.0, 0.0, 0.0); // 150 km away from site
         }
@@ -524,18 +493,12 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     let dread_id_4 = 104_000_105i64;
     seed_ship_in_space(&ctx, char_id, dread_id_4, 19_720, c5_sys, c5_site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
     let mut sess4 = make_sess(char_id, dread_id_4, c5_sys, None);
-    let _ = ctx
-        .dispatch_rpc(
-            &mut sess4,
-            "scanSvc",
-            None,
-            "EnterCombatAnomaly",
-            &[PyRep::String(site_id_c5)],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("EnterCombatAnomaly C5 post-downtime");
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut sess4);
+        harness
+            .call_ok("scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(site_id_c5)], &HashMap::new())
+            .await
+    };
     let count_post_downtime = with_combat_runtime(&ctx, |rt| {
         rt.npc_entities.values().filter(|n| n.solar_system_id == c5_sys && n.type_id == 37_472).count()
     });
@@ -553,18 +516,12 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
     });
     seed_ship_in_space(&ctx, char_id, dread_c6_id, 19_720, c6_sys, c6_site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
     let mut sess_c6 = make_sess(char_id, dread_c6_id, c6_sys, None);
-    let _ = ctx
-        .dispatch_rpc(
-            &mut sess_c6,
-            "scanSvc",
-            None,
-            "EnterCombatAnomaly",
-            &[PyRep::String(site_id_c6)],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("EnterCombatAnomaly C6");
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut sess_c6);
+        harness
+            .call_ok("scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(site_id_c6)], &HashMap::new())
+            .await
+    };
     let c6_avengers = with_combat_runtime(&ctx, |rt| {
         rt.npc_entities.values().filter(|n| n.solar_system_id == c6_sys && n.type_id == 37_472).count()
     });
@@ -665,7 +622,7 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::living_world::NpcArchetype;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{dispatch_combat_rpc, evaluate_faction_police_response};
+use eve_server::services::combat_crimewatch::evaluate_faction_police_response;
 use eve_server::sp6_lifecycle::tick_background_cluster;
 use glam::DVec3;
 use std::collections::HashMap;
@@ -800,7 +757,7 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
     // Lock pod, set low HP so 1 shot destroys it, set Safety Red, and fire weapon via dogmaIM.Activate
     {
         let sys_handle = ctx.systems.get_or_spawn(highsec_sys);
-        let mut bp = sys_handle.ballpark.write().unwrap();
+        let mut bp = sys_handle.ballpark.write().expect("ballpark write lock");
         if let Some(cs) = bp.combat_states.get_mut(&vic_pod_id) {
             cs.shield_hp = 0.0;
             cs.armor_hp = 0.0;
@@ -808,43 +765,38 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
         }
     }
     let mut agg_sess = make_sess(aggressor_id, agg_ship_id, highsec_sys, None);
-    let _ = dispatch_combat_rpc(
-        &ctx,
-        &mut agg_sess,
-        "crimewatch",
-        "SetSafetyLevel",
-        &[PyRep::Integer(0)],
-        &HashMap::new(),
-    )
-    .await;
-    let _ = dispatch_combat_rpc(
-        &ctx,
-        &mut agg_sess,
-        "dogmaIM",
-        "AddTarget",
-        &[PyRep::Integer(vic_pod_id)],
-        &HashMap::new(),
-    )
-    .await
-    .expect("AddTarget pod");
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut agg_sess);
+        harness
+            .call_ok("crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)], &HashMap::new())
+            .await
+    };
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut agg_sess);
+        harness
+            .call_ok("dogmaIM", None, "AddTarget", &[PyRep::Integer(vic_pod_id)], &HashMap::new())
+            .await
+    };
     let sys_h = ctx.systems.get_or_spawn(highsec_sys);
     for _ in 0..60 {
         let _ = sys_h.step_manual(1.0).await;
     }
-    let _ = dispatch_combat_rpc(
-        &ctx,
-        &mut agg_sess,
-        "dogmaIM",
-        "Activate",
-        &[
-            PyRep::Integer(105_000_010),
-            PyRep::String("effects.HybridTurret".into()),
-            PyRep::Integer(vic_pod_id),
-        ],
-        &HashMap::new(),
-    )
-    .await
-    .expect("Activate weapon on pod");
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut agg_sess);
+        harness
+            .call_ok(
+                "dogmaIM",
+                None,
+                "Activate",
+                &[
+                    PyRep::Integer(105_000_010),
+                    PyRep::String("effects.HybridTurret".into()),
+                    PyRep::Integer(vic_pod_id),
+                ],
+                &HashMap::new(),
+            )
+            .await
+    };
     ctx.advance_secs(30);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
@@ -852,16 +804,12 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
     assert!(sec_after < sec_before, "Criminal pod kill must reduce aggressor security status ({sec_after} < {sec_before})");
 
     // Verify GetSecurityStatusTransactions returns a rowset with the recorded change
-    let tx_rep = dispatch_combat_rpc(
-        &ctx,
-        &mut agg_sess,
-        "crimewatch",
-        "GetSecurityStatusTransactions",
-        &[],
-        &HashMap::new(),
-    )
-    .await
-    .expect("GetSecurityStatusTransactions");
+    let tx_rep = {
+        let mut harness = borrow_wire_harness(&ctx, &mut agg_sess);
+        harness
+            .call_ok("crimewatch", None, "GetSecurityStatusTransactions", &[], &HashMap::new())
+            .await
+    };
     assert!(!matches!(tx_rep, PyRep::None), "GetSecurityStatusTransactions must return a rowset");
     if let PyRep::List(rows) = &tx_rep {
         assert!(!rows.is_empty(), "GetSecurityStatusTransactions must contain at least one transaction");
@@ -877,38 +825,26 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
 
     // Victim lists kill right for sale, cancels it, re-lists it, and third party buys/activates it
     let mut vic_sess = make_sess(victim_id, vic_pod_id, highsec_sys, None);
-    let _ = dispatch_combat_rpc(
-        &ctx,
-        &mut vic_sess,
-        "bountyProxy",
-        "SellKillRight",
-        &[PyRep::Integer(kr_id), PyRep::Real(5_000_000.0)],
-        &HashMap::new(),
-    )
-    .await
-    .expect("SellKillRight");
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut vic_sess);
+        harness
+            .call_ok("bountyProxy", None, "SellKillRight", &[PyRep::Integer(kr_id), PyRep::Real(5_000_000.0)], &HashMap::new())
+            .await
+    };
 
-    let _ = dispatch_combat_rpc(
-        &ctx,
-        &mut vic_sess,
-        "bountyProxy",
-        "CancelSellKillRight",
-        &[PyRep::Integer(kr_id)],
-        &HashMap::new(),
-    )
-    .await
-    .expect("CancelSellKillRight");
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut vic_sess);
+        harness
+            .call_ok("bountyProxy", None, "CancelSellKillRight", &[PyRep::Integer(kr_id)], &HashMap::new())
+            .await
+    };
 
-    let _ = dispatch_combat_rpc(
-        &ctx,
-        &mut vic_sess,
-        "bountyProxy",
-        "SellKillRight",
-        &[PyRep::Integer(kr_id), PyRep::Real(5_000_000.0)],
-        &HashMap::new(),
-    )
-    .await
-    .expect("Re-SellKillRight");
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut vic_sess);
+        harness
+            .call_ok("bountyProxy", None, "SellKillRight", &[PyRep::Integer(kr_id), PyRep::Real(5_000_000.0)], &HashMap::new())
+            .await
+    };
 
     ctx.db.with_mut_snapshot(|s| {
         if let Some(mut ch) = s.characters.get(&aggressor_id).cloned() {
@@ -920,16 +856,12 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
         }
     });
     let mut buyer_sess = make_sess(buyer_id, buyer_ship_id, highsec_sys, None);
-    let _ = dispatch_combat_rpc(
-        &ctx,
-        &mut buyer_sess,
-        "killRightMgr",
-        "BuyKillRight",
-        &[PyRep::Integer(kr_id), PyRep::Real(5_000_000.0)],
-        &HashMap::new(),
-    )
-    .await
-    .expect("BuyKillRight");
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut buyer_sess);
+        harness
+            .call_ok("killRightMgr", None, "BuyKillRight", &[PyRep::Integer(kr_id), PyRep::Real(5_000_000.0)], &HashMap::new())
+            .await
+    };
     let (is_active, has_buyer_j, has_seller_j) = ctx.db.with_snapshot(|s| (
         s.kill_rights.get(&kr_id).map(|kr| kr.is_active_suspect),
         s.wallet_journal.iter().any(|j| j.character_id == buyer_id && j.entry_type == "KillRightFee" && j.amount.0 < 0),
@@ -995,27 +927,47 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
             && eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, st.station_id, 27))
             .then_some(st.station_id)
     }).min().unwrap_or(lowsec_station);
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&char_id) {
+            ch.station_id = Some(sec_office_st);
+            ch.structure_id = None;
+        }
+        if let Some(sh) = s.items.get_mut(&ship_id) {
+            sh.location_id = sec_office_st;
+        }
+    });
     let mut sess = make_sess(char_id, ship_id, lowsec_sys, Some(sec_office_st));
-    let wrong_band_err = dispatch_combat_rpc(
-        &ctx,
-        &mut sess,
-        "crimewatch",
-        "ApplyTagsForSecStatus",
-        &[PyRep::Real(-9.5), PyRep::Dict(vec![(PyRep::Integer(33138), PyRep::Integer(1))])],
-        &HashMap::new(),
-    )
-    .await
-    .expect_err("Trainer tag must be refused at -6.0 sec status");
+    let wrong_band_err = {
+        let mut harness = borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call(
+                "crimewatch",
+                None,
+                "ApplyTagsForSecStatus",
+                &[PyRep::Real(-9.5), PyRep::Dict(vec![(PyRep::Integer(33138), PyRep::Integer(1))])],
+                &HashMap::new(),
+            )
+            .await
+            .expect_err("Trainer tag must be refused at -6.0 sec status")
+    };
     assert!(!wrong_band_err.code.is_empty());
 
     // 2. Negotiator tag (33141) at -0.3 raises security status to 0.0 (capped at 0.0 per V24)
     ctx.db.with_mut_snapshot(|s| {
-        if let Some(ch) = s.characters.get_mut(&char_id) { ch.security_status = -0.3; ch.station_id = sess.station_id; }
-        if let Some(sh) = s.items.get_mut(&ship_id) { sh.location_id = sec_office_st; }
+        if let Some(ch) = s.characters.get_mut(&char_id) { ch.security_status = -0.3; }
     });
-    let _ = dispatch_combat_rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Real(0.2), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(2))])], &HashMap::new())
-        .await
-        .expect("Negotiator tag at -0.3");
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call_ok(
+                "crimewatch",
+                None,
+                "ApplyTagsForSecStatus",
+                &[PyRep::Real(0.2), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(2))])],
+                &HashMap::new(),
+            )
+            .await
+    };
     let sec_post_tag = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(-1.0));
     assert!((sec_post_tag - 0.0).abs() < 1e-6, "Clone soldier tags must raise security status from -0.3 to 0.0 (got {sec_post_tag})");
 
@@ -1140,7 +1092,7 @@ async fn test_npc_navy_police_hauler_convoy_and_serverops_downtime() {
         st.space_object_meta.contains_key(&expired_wreck_id)
     });
     let (wreck_in_items, mission_room, mission_npcs) = ctx.db.with_snapshot(|s| {
-        let m = s.active_missions.get(&(char_id, 3_008_416)).unwrap();
+        let m = s.active_missions.get(&(char_id, 3_008_416)).expect("active mission");
         (s.items.contains_key(&expired_wreck_id), m.current_room_id, m.npcs_remaining)
     });
     assert!(!wreck_in_items && !wreck_in_meta, "11:00 UTC downtime must delete NPC wreck");
@@ -1180,23 +1132,24 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
         );
     });
     let mut sess = make_sess(char_id, ship_id, highsec_sys, Some(jita_station));
-    let cap_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "industryManager",
-            None,
-            "InstallJob",
-            &[PyRep::keyval([
-                ("blueprintID", PyRep::Integer(bp_id)),
-                ("facilityID", PyRep::Integer(jita_station)),
-                ("activityID", PyRep::Integer(1)),
-                ("runs", PyRep::Integer(1)),
-            ])],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect_err("Capital ship manufacturing in high-sec NPC station must be refused");
+    let cap_err = {
+        let mut harness = borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call(
+                "industryManager",
+                None,
+                "InstallJob",
+                &[PyRep::keyval([
+                    ("blueprintID", PyRep::Integer(bp_id)),
+                    ("facilityID", PyRep::Integer(jita_station)),
+                    ("activityID", PyRep::Integer(1)),
+                    ("runs", PyRep::Integer(1)),
+                ])],
+                &HashMap::new(),
+            )
+            .await
+            .expect_err("Capital ship manufacturing in high-sec NPC station must be refused")
+    };
     assert_eq!(cap_err.code, "CapitalConstructionForbiddenInHighSec");
 
     // 1b. Supercapital manufacturing in low-sec NPC station is refused
@@ -1228,23 +1181,24 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
         );
     });
     let mut low_sess = make_sess(char_id, ship_id, lowsec_sys, Some(lowsec_station));
-    let super_err = ctx
-        .dispatch_rpc(
-            &mut low_sess,
-            "industryManager",
-            None,
-            "InstallJob",
-            &[PyRep::keyval([
-                ("blueprintID", PyRep::Integer(super_bp_id)),
-                ("facilityID", PyRep::Integer(lowsec_station)),
-                ("activityID", PyRep::Integer(1)),
-                ("runs", PyRep::Integer(1)),
-            ])],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect_err("Supercapital manufacturing in low-sec NPC station must be refused");
+    let super_err = {
+        let mut harness = borrow_wire_harness(&ctx, &mut low_sess);
+        harness
+            .call(
+                "industryManager",
+                None,
+                "InstallJob",
+                &[PyRep::keyval([
+                    ("blueprintID", PyRep::Integer(super_bp_id)),
+                    ("facilityID", PyRep::Integer(lowsec_station)),
+                    ("activityID", PyRep::Integer(1)),
+                    ("runs", PyRep::Integer(1)),
+                ])],
+                &HashMap::new(),
+            )
+            .await
+            .expect_err("Supercapital manufacturing in low-sec NPC station must be refused")
+    };
     assert_eq!(super_err.code, "SupercapitalRequiresSovereignNullSec");
 
     // 2. Insurance contract via real InsureShip RPC: 12-week expiry -> 40% fallback + EVE-mail, and CONCORD criminal voiding
@@ -1259,18 +1213,18 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
         }
     });
     sess.station_id = Some(jita_station);
-    let _ = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "insuranceSvc",
-            None,
-            "InsureShip",
-            &[PyRep::Integer(ship_id), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("InsureShip");
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call_ok(
+                "insuranceSvc",
+                None,
+                "InsureShip",
+                &[PyRep::Integer(ship_id), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)],
+                &HashMap::new(),
+            )
+            .await
+    };
     let full_payout = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
         rt.insurance_contracts.get(&ship_id).map(|c| c.payout_isk).unwrap_or(0.0)
     });
@@ -1293,7 +1247,12 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
         s.items.insert(ship_id_2, InventoryItemRecord { item_id: ship_id_2, type_id: 587, owner_id: char_id, location_id: jita_station, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() });
     });
     sess.station_id = Some(jita_station);
-    let _ = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_id_2), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)], &HashMap::new(), None).await.expect("InsureShip ship 2");
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call_ok("insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_id_2), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)], &HashMap::new())
+            .await
+    };
     seed_ship_in_space(&ctx, char_id, ship_id_2, 587, highsec_sys, DVec3::ZERO).await;
     sess.station_id = None;
     assert_eq!(eve_server::services::combat_crimewatch::process_ship_insurance_payout(&ctx, char_id, ship_id_2, 587, true), 0.0);
@@ -1304,7 +1263,12 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
         s.items.insert(ship_sd, InventoryItemRecord { item_id: ship_sd, type_id: 587, owner_id: char_id, location_id: jita_station, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() });
     });
     sess.station_id = Some(jita_station);
-    let _ = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_sd), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)], &HashMap::new(), None).await.expect("InsureShip self-destruct");
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut sess);
+        harness
+            .call_ok("insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_sd), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)], &HashMap::new())
+            .await
+    };
     seed_ship_in_space(&ctx, char_id, ship_sd, 587, highsec_sys, DVec3::new(500.0, 0.0, 0.0)).await;
     sess.station_id = None;
     let sd_res = eve_server::combat::death_pipeline::execute_death_pipeline_sync_inner(&ctx, highsec_sys, char_id, ship_sd, char_id, DVec3::ZERO, 7, true).expect("Self-destruct death");
@@ -1316,8 +1280,18 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
         s.items.insert(ship_rep, InventoryItemRecord { item_id: ship_rep, type_id: 587, owner_id: char_id, location_id: jita_station, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() });
     });
     let mut rep_sess = make_sess(char_id, ship_id, highsec_sys, Some(jita_station));
-    let _ = ctx.dispatch_rpc(&mut rep_sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_rep), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)], &HashMap::new(), None).await.expect("InsureShip repackage");
-    let _ = ctx.dispatch_rpc(&mut rep_sess, "repackagingSvc", None, "RepackageItems", &[PyRep::List(vec![PyRep::Integer(ship_rep)])], &HashMap::new(), None).await.expect("RepackageItems");
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut rep_sess);
+        harness
+            .call_ok("insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_rep), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)], &HashMap::new())
+            .await
+    };
+    let _ = {
+        let mut harness = borrow_wire_harness(&ctx, &mut rep_sess);
+        harness
+            .call_ok("repackagingSvc", None, "RepackageItems", &[PyRep::List(vec![PyRep::Integer(ship_rep)])], &HashMap::new())
+            .await
+    };
     assert!(!eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| rt.insurance_contracts.contains_key(&ship_rep)), "RepackageItems must void active ship insurance contract");
 }
 
@@ -1335,12 +1309,13 @@ use crate::common::*;
 use eve_db::{InventoryFlag, InventoryItemRecord, PersistedInsurgencyCampaign};
 use eve_destiny::{MovementMode, WarpPhase};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::pve_dungeon_runtime::{
     with_dungeon_runtime_store, DungeonRuntimeInstance, DungeonRuntimeObject, DungeonRuntimeRoom,
 };
 use eve_server::services::pve_incursion_sites::make_site_npc_ball;
+use eve_testkit::client_harness::ClientErrorResponse;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -1361,9 +1336,9 @@ async fn call_svc(
     service: &str,
     method: &str,
     args: Vec<PyRep>,
-) -> Result<PyRep, BridgeRpcError> {
-    ctx.dispatch_rpc(sess, service, None, method, &args, &HashMap::new(), None)
-        .await
+) -> Result<PyRep, ClientErrorResponse> {
+    let mut harness = borrow_wire_harness(ctx, sess);
+    harness.call(service, None, method, &args, &HashMap::new()).await
 }
 
 fn py_keyval_to_map(rep: &PyRep) -> HashMap<String, PyRep> {
@@ -1386,7 +1361,12 @@ async fn seed_ship_in_space(
 ) {
     ctx.db.with_mut_snapshot(|snap| {
         if !snap.characters.contains_key(&char_id) {
-            let mut template = snap.characters.get(&90_001).or_else(|| snap.characters.values().next()).cloned().unwrap();
+            let mut template = snap
+                .characters
+                .get(&90_001)
+                .or_else(|| snap.characters.values().next())
+                .cloned()
+                .expect("seeded character template");
             template.character_id = char_id;
             template.name = format!("Pilot{char_id}");
             template.war_faction_id = None;
@@ -1470,14 +1450,18 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
         }
     });
     let mut sess = make_sess(char_id, titan_id, nullsec_sys, None);
-    let err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0)).await.unwrap_err();
+    let err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0))
+        .await
+        .expect_err("non-titan superweapon activation must fail");
     assert_eq!(err.code, "ShipCannotActivateSuperweapon");
 
     // 2. Negative: BOTH Highsec (0.95) AND Lowsec (0.44) Empire space refused (`disallowInEmpireSpace`)
     for emp_sys in [highsec_sys, lowsec_sys] {
         seed_ship_in_space(&ctx, char_id, titan_id, 11_567, emp_sys, DVec3::ZERO).await;
         let mut emp_sess = make_sess(char_id, titan_id, emp_sys, None);
-        let emp_err = call_svc(&ctx, &mut emp_sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0)).await.unwrap_err();
+        let emp_err = call_svc(&ctx, &mut emp_sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0))
+            .await
+            .expect_err("superweapon activation in empire space must fail");
         assert_eq!(emp_err.code, "CannotActivateInEmpireSpace");
     }
 
@@ -1485,15 +1469,23 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
     seed_ship_in_space(&ctx, char_id, titan_id, 11_567, nullsec_sys, DVec3::ZERO).await;
     ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&char_id) { c.station_id = Some(60_003_760); } });
     let mut docked_sess = make_sess(char_id, titan_id, nullsec_sys, Some(60_003_760));
-    let docked_err = call_svc(&ctx, &mut docked_sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0)).await.unwrap_err();
+    let docked_err = call_svc(&ctx, &mut docked_sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0))
+        .await
+        .expect_err("docked superweapon activation must fail");
     assert_eq!(docked_err.code, "CantDoThatWhileDocked");
     ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&char_id) { c.station_id = None; } });
 
     let sys = ctx.systems.get_or_spawn(nullsec_sys);
-    let mut t_cs = sys.get_combat_state(titan_id).await.unwrap().unwrap();
+    let mut t_cs = sys
+        .get_combat_state(titan_id)
+        .await
+        .expect("get titan combat state")
+        .expect("titan combat state");
     t_cs.is_cloaked = true;
     let _ = sys.set_combat_state(titan_id, t_cs.clone()).await;
-    let cloak_err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0)).await.unwrap_err();
+    let cloak_err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0))
+        .await
+        .expect_err("cloaked superweapon activation must fail");
     assert_eq!(cloak_err.code, "CantActivateWhileCloaked");
     t_cs.is_cloaked = false;
     let _ = sys.set_combat_state(titan_id, t_cs).await;
@@ -1502,11 +1494,15 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
         origin: DVec3::ZERO, destination: DVec3::new(1.0e7, 0.0, 0.0), warp_speed_au_s: 1.5,
         total_distance: 1.0e7, phase: WarpPhase::Accelerating, elapsed_warp_time: 0.0,
     }).await;
-    let warp_err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0)).await.unwrap_err();
+    let warp_err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0))
+        .await
+        .expect_err("warping superweapon activation must fail");
     assert_eq!(warp_err.code, "CantActivateInWarp");
     let _ = sys.force_stop_warp(titan_id);
 
-    let err_fuel = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0)).await.unwrap_err();
+    let err_fuel = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0))
+        .await
+        .expect_err("superweapon activation without fuel must fail");
     assert_eq!(err_fuel.code, "InsufficientFuel");
 
     // 4. Seed SDE Strontium Clathrates (16275) & Helium Isotopes (16274) + targets
@@ -1541,14 +1537,22 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
     seed_ship_in_space(&ctx, 90_005, reaper_hit_id, 638, nullsec_sys, DVec3::new(0.0, -20_000.0, 18_000.0)).await;
 
     for tid in [cone_frig_id, cone_cap_id] {
-        let mut cs = sys.get_combat_state(tid).await.unwrap().unwrap();
+        let mut cs = sys
+            .get_combat_state(tid)
+            .await
+            .expect("get target combat state")
+            .expect("target combat state");
         cs.shield_hp = 500_000.0;
         cs.max_shield_hp = 500_000.0;
         cs.shield_resonance = [1.0, 1.0, 1.0, 1.0];
         let _ = sys.set_combat_state(tid, cs).await;
     }
     for tid in [cone_tethered_id, gtfo_tethered_id] {
-        let mut cs = sys.get_combat_state(tid).await.unwrap().unwrap();
+        let mut cs = sys
+            .get_combat_state(tid)
+            .await
+            .expect("get tethered combat state")
+            .expect("tethered combat state");
         cs.is_tethered = true;
         let _ = sys.set_combat_state(tid, cs).await;
     }
@@ -1557,8 +1561,19 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
     let _ = sys.spawn_ball(struct_ball).await;
 
     // 5. Activate Bosonic Field Generator -> 10km 35k GJ neut pulse, 10s warmup (0 dmg at t=0), then sig-scaled DoT
-    assert!(sys.get_combat_state(neut_ship_id).await.unwrap().unwrap().capacitor > 0.0);
-    let pre_tether_cs = sys.get_combat_state(cone_tethered_id).await.unwrap().unwrap();
+    assert!(
+        sys.get_combat_state(neut_ship_id)
+            .await
+            .expect("get neut target state")
+            .expect("neut target state")
+            .capacitor
+            > 0.0
+    );
+    let pre_tether_cs = sys
+        .get_combat_state(cone_tethered_id)
+        .await
+        .expect("get pre-tether state")
+        .expect("pre-tether state");
     let cone_res = call_svc(
         &ctx,
         &mut sess,
@@ -1567,13 +1582,29 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
         vec![PyRep::Integer(dd_mod_id), PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
     )
     .await
-    .unwrap();
+    .expect("Bosonic ActivateSlashModule");
     let cone_kv = py_keyval_to_map(&cone_res);
     assert_eq!(cone_kv.get("mode").and_then(|v| v.as_str()), Some("Cone"));
     assert_eq!(cone_kv.get("status").and_then(|v| v.as_str()), Some("WarmingUp"));
     assert_eq!(cone_kv.get("fuelConsumed").and_then(|v| v.as_i64()), Some(2_000));
-    assert_eq!(sys.get_combat_state(neut_ship_id).await.unwrap().unwrap().capacitor, 0.0, "10km superweapon neut pulse must drain nearby ship capacitor");
-    assert_eq!(sys.get_combat_state(cone_frig_id).await.unwrap().unwrap().shield_hp, 500_000.0, "No Bosonic damage before 10s warmup");
+    assert_eq!(
+        sys.get_combat_state(neut_ship_id)
+            .await
+            .expect("get post-neut state")
+            .expect("post-neut state")
+            .capacitor,
+        0.0,
+        "10km superweapon neut pulse must drain nearby ship capacitor"
+    );
+    assert_eq!(
+        sys.get_combat_state(cone_frig_id)
+            .await
+            .expect("get cone frig state")
+            .expect("cone frig state")
+            .shield_hp,
+        500_000.0,
+        "No Bosonic damage before 10s warmup"
+    );
 
     let refire_err = call_svc(
         &ctx,
@@ -1583,41 +1614,140 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
         vec![PyRep::Integer(dd_mod_id), PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
     )
     .await
-    .unwrap_err();
+    .expect_err("superweapon reactivation during delay must fail");
     assert_eq!(refire_err.code, "ModuleInReactivationDelay");
-    assert_eq!(sys.get_ball_snapshot(titan_id).await.unwrap().unwrap().1.max_velocity, 0.0);
-    assert!(sys.get_combat_state(titan_id).await.unwrap().unwrap().disallow_assistance);
+    assert_eq!(
+        sys.get_ball_snapshot(titan_id)
+            .await
+            .expect("get titan ball")
+            .expect("titan ball")
+            .1
+            .max_velocity,
+        0.0
+    );
+    assert!(
+        sys.get_combat_state(titan_id)
+            .await
+            .expect("get titan state")
+            .expect("titan state")
+            .disallow_assistance
+    );
 
     ctx.advance_secs(10);
     let _ = sys.tick().await;
-    let frig_dmg = 500_000.0 - sys.get_combat_state(cone_frig_id).await.unwrap().unwrap().shield_hp;
-    let cap_dmg = 500_000.0 - sys.get_combat_state(cone_cap_id).await.unwrap().unwrap().shield_hp;
+    let frig_dmg = 500_000.0
+        - sys.get_combat_state(cone_frig_id)
+            .await
+            .expect("get cone frig post-tick")
+            .expect("cone frig post-tick")
+            .shield_hp;
+    let cap_dmg = 500_000.0
+        - sys.get_combat_state(cone_cap_id)
+            .await
+            .expect("get cone cap post-tick")
+            .expect("cone cap post-tick")
+            .shield_hp;
     assert!(frig_dmg > 0.0 && cap_dmg > frig_dmg * 5.0, "Bosonic damage must scale with target signatureRadius (cap={cap_dmg}, frig={frig_dmg})");
-    assert_eq!(sys.get_combat_state(cone_tethered_id).await.unwrap().unwrap().shield_hp, pre_tether_cs.shield_hp);
+    assert_eq!(
+        sys.get_combat_state(cone_tethered_id)
+            .await
+            .expect("get tethered post-tick")
+            .expect("tethered post-tick")
+            .shield_hp,
+        pre_tether_cs.shield_hp
+    );
     ctx.advance_secs(20);
     let _ = sys.tick().await;
 
     // 6. GTFO: range/NaN checks, 15s spool delay, subcapital-only filter (Dreadnought/tethered/structure excluded), and 60s warp suppression
-    let oor_err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSinglePointTargetedModule", slash_vec(gtfo_mod_id, 900_000.0, 0.0, 0.0)).await.unwrap_err();
+    let oor_err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSinglePointTargetedModule", slash_vec(gtfo_mod_id, 900_000.0, 0.0, 0.0))
+        .await
+        .expect_err("GTFO out-of-range must fail");
     assert_eq!(oor_err.code, "TargetOutOfRange");
-    let nan_err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSinglePointTargetedModule", slash_vec(gtfo_mod_id, f64::NAN, 0.0, 0.0)).await.unwrap_err();
+    let nan_err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSinglePointTargetedModule", slash_vec(gtfo_mod_id, f64::NAN, 0.0, 0.0))
+        .await
+        .expect_err("GTFO NaN point must fail");
     assert_eq!(nan_err.code, "InvalidTargetPoint");
-    let gtfo_res = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSinglePointTargetedModule", slash_vec(gtfo_mod_id, -35_000.0, 0.0, 0.0)).await.unwrap();
+    let gtfo_res = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSinglePointTargetedModule", slash_vec(gtfo_mod_id, -35_000.0, 0.0, 0.0))
+        .await
+        .expect("GTFO ActivateSinglePointTargetedModule");
     let gtfo_kv = py_keyval_to_map(&gtfo_res);
     assert_eq!(gtfo_kv.get("status").and_then(|v| v.as_str()), Some("WarmingUp"));
-    assert!(sys.get_ball_snapshot(gtfo_hit_id).await.unwrap().unwrap().1.position.distance(DVec3::new(-40_000.0, 0.0, 0.0)) < 1.0);
+    assert!(
+        sys.get_ball_snapshot(gtfo_hit_id)
+            .await
+            .expect("get gtfo hit pre-spool")
+            .expect("gtfo hit pre-spool")
+            .1
+            .position
+            .distance(DVec3::new(-40_000.0, 0.0, 0.0))
+            < 1.0
+    );
 
     ctx.advance_secs(15);
     let _ = sys.tick().await;
-    assert!(sys.get_ball_snapshot(gtfo_hit_id).await.unwrap().unwrap().1.position.distance(DVec3::new(-40_000.0, 0.0, 0.0)) > 500_000.0);
-    assert!(sys.get_combat_state(gtfo_hit_id).await.unwrap().unwrap().warp_scramble_strength >= 25, "GTFO must apply 60s warp suppression");
-    assert!(sys.get_ball_snapshot(gtfo_cap_id).await.unwrap().unwrap().1.position.distance(DVec3::new(-39_000.0, 0.0, 0.0)) < 1.0, "Capital ships must not be teleported by GTFO");
-    assert!(sys.get_ball_snapshot(gtfo_tethered_id).await.unwrap().unwrap().1.position.distance(DVec3::new(-38_000.0, 0.0, 0.0)) < 1.0);
-    assert!(sys.get_ball_snapshot(gtfo_struct_id).await.unwrap().unwrap().1.position.distance(DVec3::new(-37_000.0, 0.0, 0.0)) < 1.0);
+    assert!(
+        sys.get_ball_snapshot(gtfo_hit_id)
+            .await
+            .expect("get gtfo hit post-spool")
+            .expect("gtfo hit post-spool")
+            .1
+            .position
+            .distance(DVec3::new(-40_000.0, 0.0, 0.0))
+            > 500_000.0
+    );
+    assert!(
+        sys.get_combat_state(gtfo_hit_id)
+            .await
+            .expect("get gtfo hit state")
+            .expect("gtfo hit state")
+            .warp_scramble_strength
+            >= 25,
+        "GTFO must apply 60s warp suppression"
+    );
+    assert!(
+        sys.get_ball_snapshot(gtfo_cap_id)
+            .await
+            .expect("get gtfo cap ball")
+            .expect("gtfo cap ball")
+            .1
+            .position
+            .distance(DVec3::new(-39_000.0, 0.0, 0.0))
+            < 1.0,
+        "Capital ships must not be teleported by GTFO"
+    );
+    assert!(
+        sys.get_ball_snapshot(gtfo_tethered_id)
+            .await
+            .expect("get gtfo tethered ball")
+            .expect("gtfo tethered ball")
+            .1
+            .position
+            .distance(DVec3::new(-38_000.0, 0.0, 0.0))
+            < 1.0
+    );
+    assert!(
+        sys.get_ball_snapshot(gtfo_struct_id)
+            .await
+            .expect("get gtfo struct ball")
+            .expect("gtfo struct ball")
+            .1
+            .position
+            .distance(DVec3::new(-37_000.0, 0.0, 0.0))
+            < 1.0
+    );
 
     ctx.advance_secs(61);
     let _ = sys.tick().await;
-    assert_eq!(sys.get_combat_state(gtfo_hit_id).await.unwrap().unwrap().warp_scramble_strength, 0, "GTFO warp suppression must expire after 60s");
+    assert_eq!(
+        sys.get_combat_state(gtfo_hit_id)
+            .await
+            .expect("get gtfo hit post-expiry")
+            .expect("gtfo hit post-expiry")
+            .warp_scramble_strength,
+        0,
+        "GTFO warp suppression must expire after 60s"
+    );
 
     // 7. Reaper (40632): >100km arc cap rejected, then 10s warmup + 10s progressive sweep
     let arc_err = call_svc(
@@ -1632,10 +1762,15 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
         ],
     )
     .await
-    .unwrap_err();
+    .expect_err("Reaper sweep arc >100km must fail");
     assert_eq!(arc_err.code, "SweepArcTooLong");
 
-    let pre_reaper_hp = sys.get_combat_state(reaper_hit_id).await.unwrap().unwrap().shield_hp;
+    let pre_reaper_hp = sys
+        .get_combat_state(reaper_hit_id)
+        .await
+        .expect("get pre-reaper state")
+        .expect("pre-reaper state")
+        .shield_hp;
     let reaper_res = call_svc(
         &ctx,
         &mut sess,
@@ -1648,34 +1783,69 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
         ],
     )
     .await
-    .unwrap();
+    .expect("Reaper ActivateSlashModule");
     let reaper_kv = py_keyval_to_map(&reaper_res);
     assert_eq!(reaper_kv.get("fuelConsumed").and_then(|v| v.as_i64()), Some(50_000));
-    assert_eq!(sys.get_combat_state(reaper_hit_id).await.unwrap().unwrap().shield_hp, pre_reaper_hp, "Reaper must not deal instant damage before warmup");
+    assert_eq!(
+        sys.get_combat_state(reaper_hit_id)
+            .await
+            .expect("get reaper pre-warmup state")
+            .expect("reaper pre-warmup state")
+            .shield_hp,
+        pre_reaper_hp,
+        "Reaper must not deal instant damage before warmup"
+    );
 
     ctx.advance_secs(12);
     let _ = sys.tick().await;
     assert_eq!(
-        sys.get_combat_state(reaper_hit_id).await.unwrap().unwrap().shield_hp,
+        sys.get_combat_state(reaper_hit_id)
+            .await
+            .expect("get reaper early-sweep state")
+            .expect("reaper early-sweep state")
+            .shield_hp,
         pre_reaper_hp,
         "Target near end of Reaper arc (z=18km) must not be hit during early sweep ticks (z=0..6km)"
     );
     ctx.advance_secs(8);
     let _ = sys.tick().await;
-    assert!(sys.get_combat_state(reaper_hit_id).await.unwrap().is_none_or(|c| c.shield_hp < pre_reaper_hp));
+    assert!(
+        sys.get_combat_state(reaper_hit_id)
+            .await
+            .expect("get reaper post-sweep state")
+            .is_none_or(|c| c.shield_hp < pre_reaper_hp)
+    );
 
     ctx.advance_secs(10);
     let _ = sys.tick().await;
-    assert!(sys.get_ball_snapshot(titan_id).await.unwrap().unwrap().1.max_velocity > 0.0);
-    assert!(!sys.get_combat_state(titan_id).await.unwrap().unwrap().disallow_assistance);
+    assert!(
+        sys.get_ball_snapshot(titan_id)
+            .await
+            .expect("get titan ball post-reaper")
+            .expect("titan ball post-reaper")
+            .1
+            .max_velocity
+            > 0.0
+    );
+    assert!(
+        !sys.get_combat_state(titan_id)
+            .await
+            .expect("get titan state post-reaper")
+            .expect("titan state post-reaper")
+            .disallow_assistance
+    );
 
     // 8. Negative abuse checks: offline module & unfitted cargo module refused
     ctx.db.with_mut_snapshot(|snap| { snap.module_online_states.insert(reaper_mod_id, false); });
-    let offline_err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", vec![PyRep::Integer(reaper_mod_id), PyRep::Real(0.0), PyRep::Real(-20_000.0), PyRep::Real(0.0)]).await.unwrap_err();
+    let offline_err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", vec![PyRep::Integer(reaper_mod_id), PyRep::Real(0.0), PyRep::Real(-20_000.0), PyRep::Real(0.0)])
+        .await
+        .expect_err("offline superweapon activation must fail");
     assert_eq!(offline_err.code, "ModuleNotOnline");
 
     ctx.db.with_mut_snapshot(|snap| { if let Some(m) = snap.items.get_mut(&reaper_mod_id) { m.flag = InventoryFlag::Cargo; } });
-    let cargo_err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", vec![PyRep::Integer(reaper_mod_id), PyRep::Real(0.0), PyRep::Real(-20_000.0), PyRep::Real(0.0)]).await.unwrap_err();
+    let cargo_err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", vec![PyRep::Integer(reaper_mod_id), PyRep::Real(0.0), PyRep::Real(-20_000.0), PyRep::Real(0.0)])
+        .await
+        .expect_err("cargo superweapon activation must fail");
     assert_eq!(cargo_err.code, "ModuleNotFitted");
 }
 
@@ -1717,40 +1887,67 @@ async fn test_insurgency_ice_heist_lifecycle() {
     let mut sess = make_sess(char_id, ship_id, sys_id, None);
     sess.role = 1 << 29; // ROLE_QA without ROLE_GM_MASK
 
+    fn ice_heist_instances_for_sys(rep: PyRep, sys_id: u32) -> Vec<PyRep> {
+        let PyRep::Dict(entries) = rep else {
+            panic!("expected Dict from GetPirateInsurgencyIceHeistInstances: {rep:?}");
+        };
+        entries
+            .into_iter()
+            .find(|(k, _)| k.as_i64() == Some(sys_id as i64))
+            .and_then(|(_, v)| match v {
+                PyRep::List(items) => Some(items),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
     // 0. Negative: subrole ROLE_QA without ROLE_GM_MASK is refused on slash.SlashCmd with InsufficientRole
     let slash_err = call_svc(&ctx, &mut sess, "slash", "SlashCmd", vec![PyRep::String("/heal".into())])
         .await
-        .unwrap_err();
+        .expect_err("ROLE_QA without ROLE_GM_MASK must be rejected");
     assert_eq!(slash_err.code, "InsufficientRole");
 
     // 1. Negative: corruption stage < 3 does not spawn Ice Heist on 1 Hz tick
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys.tick().await;
-    let PyRep::List(pre_list) = call_svc(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances", vec![])
-        .await
-        .unwrap()
-    else {
-        panic!("expected List");
-    };
+    let pre_list = ice_heist_instances_for_sys(
+        call_svc(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances", vec![])
+            .await
+            .expect("GetPirateInsurgencyIceHeistInstances pre-spawn"),
+        sys_id,
+    );
     assert!(pre_list.is_empty(), "Ice Heist must not spawn below corruption stage 3");
 
     // 2. Advance corruption to stage 3 (600 pts) via live `add_system_corruption` and verify 1 Hz tick materializes balls
     eve_server::services::insurgency_services::add_system_corruption(&ctx, 1, sys_id, 600);
     let _ = sys.tick().await;
-    let PyRep::List(active_list) = call_svc(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances", vec![])
-        .await
-        .unwrap()
-    else {
-        panic!("expected List");
-    };
+    let active_list = ice_heist_instances_for_sys(
+        call_svc(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances", vec![])
+            .await
+            .expect("GetPirateInsurgencyIceHeistInstances active"),
+        sys_id,
+    );
     assert_eq!(active_list.len(), 1);
-    let inst_id = active_list[0].dict_get("instanceID").and_then(|v| v.as_i64()).unwrap();
+    let inst_id = active_list[0]
+        .dict_get("instanceID")
+        .and_then(|v| v.as_i64())
+        .expect("Ice Heist instanceID");
 
     let tanker_id = 1_896_000_000 + inst_id * 10 + 1;
     let guard_id = 1_896_000_000 + inst_id * 10 + 2;
-    let tanker_cs = sys.get_combat_state(tanker_id).await.unwrap().expect("Tanker ball must materialize in space");
+    let tanker_cs = sys
+        .get_combat_state(tanker_id)
+        .await
+        .expect("get tanker combat state")
+        .expect("Tanker ball must materialize in space");
     assert!(tanker_cs.warp_core_strength >= 100 && tanker_cs.is_web_immune);
-    assert!(sys.get_ball_snapshot(guard_id).await.unwrap().is_some(), "Thunderchild guard (79986) must materialize in space");
+    assert!(
+        sys.get_ball_snapshot(guard_id)
+            .await
+            .expect("get guard ball snapshot")
+            .is_some(),
+        "Thunderchild guard (79986) must materialize in space"
+    );
 
     // Spawn a pirate cruiser (621) and pirate capsule (670) within 25km of Thunderchild guard (150_000, 0, 190_000)
     let pirate_char_id = 90_002;
@@ -1766,25 +1963,46 @@ async fn test_insurgency_ice_heist_lifecycle() {
             }
         }
     });
-    let pre_pirate_hp = sys.get_combat_state(pirate_ship_id).await.unwrap().unwrap().shield_hp;
+    let pre_pirate_hp = sys
+        .get_combat_state(pirate_ship_id)
+        .await
+        .expect("get pre-pirate combat state")
+        .expect("pre-pirate combat state")
+        .shield_hp;
 
     // 3. Verify 1 tick deals weapon damage (NOT instant 1-tick deletion), then 80 ticks destroy pirate cruiser while sparing capsule
     let _ = sys.tick().await;
-    let after_one_cs = sys.get_combat_state(pirate_ship_id).await.unwrap().expect("Thunderchild guard must apply weapon DPS, not 1-tick instant deletion");
+    let after_one_cs = sys
+        .get_combat_state(pirate_ship_id)
+        .await
+        .expect("get after-one combat state")
+        .expect("Thunderchild guard must apply weapon DPS, not 1-tick instant deletion");
     assert!(after_one_cs.shield_hp < pre_pirate_hp);
 
     for _ in 0..80 {
         let _ = sys.tick().await;
     }
-    assert!(sys.get_ball_snapshot(pirate_ship_id).await.unwrap().is_none(), "Thunderchild guard weapon DPS must destroy nearby pirate ship");
-    assert!(sys.get_ball_snapshot(pirate_pod_id).await.unwrap().is_some(), "Thunderchild guard must not execute capsules (670)");
+    assert!(
+        sys.get_ball_snapshot(pirate_ship_id)
+            .await
+            .expect("get pirate ship post-80 ticks")
+            .is_none(),
+        "Thunderchild guard weapon DPS must destroy nearby pirate ship"
+    );
+    assert!(
+        sys.get_ball_snapshot(pirate_pod_id)
+            .await
+            .expect("get pirate pod post-80 ticks")
+            .is_some(),
+        "Thunderchild guard must not execute capsules (670)"
+    );
 
-    let PyRep::List(post_list) = call_svc(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances", vec![])
-        .await
-        .unwrap()
-    else {
-        panic!("expected List");
-    };
+    let post_list = ice_heist_instances_for_sys(
+        call_svc(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances", vec![])
+            .await
+            .expect("GetPirateInsurgencyIceHeistInstances post"),
+        sys_id,
+    );
     assert_eq!(post_list[0].dict_get("completed"), Some(&PyRep::Bool(true)));
     assert_eq!(post_list[0].dict_get("empireTankersSaved"), Some(&PyRep::Integer(10)));
 
@@ -1799,21 +2017,21 @@ async fn test_insurgency_ice_heist_lifecycle() {
 
     // 4. Verify 4h respawn cooldown blocks new Ice Heist on 1 Hz tick until 14,400s elapse
     let _ = sys.tick().await;
-    let PyRep::List(cd_list) = call_svc(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances", vec![])
-        .await
-        .unwrap()
-    else {
-        panic!("expected List");
-    };
+    let cd_list = ice_heist_instances_for_sys(
+        call_svc(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances", vec![])
+            .await
+            .expect("GetPirateInsurgencyIceHeistInstances cooldown"),
+        sys_id,
+    );
     assert_eq!(cd_list.len(), 1, "4-hour cooldown must block immediate Ice Heist respawn");
     ctx.advance_secs(14_401);
     let _ = sys.tick().await;
-    let PyRep::List(respawn_list) = call_svc(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances", vec![])
-        .await
-        .unwrap()
-    else {
-        panic!("expected List");
-    };
+    let respawn_list = ice_heist_instances_for_sys(
+        call_svc(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances", vec![])
+            .await
+            .expect("GetPirateInsurgencyIceHeistInstances respawn"),
+        sys_id,
+    );
     assert_eq!(respawn_list.len(), 2, "New Ice Heist instance must spawn after 4h cooldown expires");
 }
 
@@ -1939,14 +2157,18 @@ async fn test_deadspace_pocket_rules_and_mwd_disallowance() {
         vec![PyRep::String("item".into()), PyRep::Integer(room2_obj_id)],
     )
     .await
-    .unwrap_err();
+    .expect_err("direct warp into deadspace pocket must fail");
     assert_eq!(err_warp.code, "WarpBlockedByDeadspacePocket");
 
     // 2. ActivateAccelerationGate into Room 1 -> lands at room1_dest, and MWD activation succeeds
     call_svc(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", vec![PyRep::Integer(gate1_id)])
         .await
-        .unwrap();
-    let (_, b1) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        .expect("ActivateAccelerationGate gate1");
+    let (_, b1) = sys
+        .get_ball_snapshot(ship_id)
+        .await
+        .expect("get ship ball snapshot")
+        .expect("ship ball snapshot");
     assert!(b1.position.distance(DVec3::from_array(room1_dest)) < 5_000.0);
 
     call_svc(
@@ -1973,7 +2195,7 @@ async fn test_deadspace_pocket_rules_and_mwd_disallowance() {
     let _ = sys.spawn_ball(b_at_g2).await;
     call_svc(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", vec![PyRep::Integer(gate2_id)])
         .await
-        .unwrap();
+        .expect("ActivateAccelerationGate gate2");
 
     // 4. Negative: MWD propulsion activation refused in Room 2 where disallow_mwd == true
     let err_mwd = call_svc(
@@ -1984,7 +2206,7 @@ async fn test_deadspace_pocket_rules_and_mwd_disallowance() {
         vec![PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into())],
     )
     .await
-    .unwrap_err();
+    .expect_err("MWD activation in disallowed deadspace room must fail");
     assert_eq!(err_mwd.code, "MicroWarpdriveDisallowedInDeadspace");
 }
 
@@ -2000,12 +2222,13 @@ pub(crate) mod pirate_fob_spawn_defense_scaling {
 use crate::common::*;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::pve_abyssal_hazards::apply_abyssal_weather_to_ship_attrs;
 use eve_server::services::pve_incursion_sites::make_site_npc_ball;
 use eve_server::services::pve_special_sites_abyssal::AbyssalWeatherKind;
 use eve_server::sp6_lifecycle::tick_background_cluster;
+use eve_testkit::client_harness::ClientErrorResponse;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -2026,9 +2249,9 @@ async fn call_svc(
     service: &str,
     method: &str,
     args: Vec<PyRep>,
-) -> Result<PyRep, BridgeRpcError> {
-    ctx.dispatch_rpc(sess, service, None, method, &args, &HashMap::new(), None)
-        .await
+) -> Result<PyRep, ClientErrorResponse> {
+    let mut harness = borrow_wire_harness(ctx, sess);
+    harness.call(service, None, method, &args, &HashMap::new()).await
 }
 
 async fn seed_ship_in_space(
@@ -2041,7 +2264,12 @@ async fn seed_ship_in_space(
 ) {
     ctx.db.with_mut_snapshot(|snap| {
         if !snap.characters.contains_key(&char_id) {
-            let mut template = snap.characters.get(&90_001).or_else(|| snap.characters.values().next()).cloned().unwrap();
+            let mut template = snap
+                .characters
+                .get(&90_001)
+                .or_else(|| snap.characters.values().next())
+                .cloned()
+                .expect("seeded character template");
             template.character_id = char_id;
             template.name = format!("Pilot{char_id}");
             template.war_faction_id = None;
@@ -2091,11 +2319,17 @@ async fn test_pirate_fob_spawn_defense_scaling_and_loot_bounty() {
 
     // Negative: invalid faction and null-sec system refused
     assert_eq!(
-        eve_server::services::pve_fob_observatory::spawn_pirate_fob(&ctx, sys_id, 500_001).await.unwrap_err().code,
+        eve_server::services::pve_fob_observatory::spawn_pirate_fob(&ctx, sys_id, 500_001)
+            .await
+            .expect_err("invalid pirate faction must fail")
+            .code,
         "InvalidPirateFaction"
     );
     assert_eq!(
-        eve_server::services::pve_fob_observatory::spawn_pirate_fob(&ctx, 30_000_157, 500_012).await.unwrap_err().code,
+        eve_server::services::pve_fob_observatory::spawn_pirate_fob(&ctx, 30_000_157, 500_012)
+            .await
+            .expect_err("invalid system security must fail")
+            .code,
         "InvalidSystemSecurity"
     );
 
@@ -2114,7 +2348,11 @@ async fn test_pirate_fob_spawn_defense_scaling_and_loot_bounty() {
 
     let (fob_id, fob_pos, active_fob_count) = ctx.db.with_snapshot(|snap| {
         let total = snap.structures.values().filter(|s| matches!(s.type_id, 46_363 | 46_364)).count();
-        let st = snap.structures.values().find(|s| s.solar_system_id == sys_id && s.type_id == 46_364).unwrap();
+        let st = snap
+            .structures
+            .values()
+            .find(|s| s.solar_system_id == sys_id && s.type_id == 46_364)
+            .expect("Blood Raiders Stronghold structure");
         (st.structure_id, DVec3::from_array(st.position), total)
     });
     assert_eq!(active_fob_count, 3, "Living-world cluster tick must cap active Pirate FOBs at 3");
@@ -2202,7 +2440,10 @@ async fn test_pochven_observatory_flashpoint_and_world_ark() {
 
     // 1. Negative: non-Pochven system refused
     assert_eq!(
-        eve_server::services::pve_fob_observatory::spawn_observatory_flashpoint(&ctx, highsec_sys_id).await.unwrap_err().code,
+        eve_server::services::pve_fob_observatory::spawn_observatory_flashpoint(&ctx, highsec_sys_id)
+            .await
+            .expect_err("observatory flashpoint outside Pochven must fail")
+            .code,
         "NotInPochven"
     );
 
@@ -2235,22 +2476,48 @@ async fn test_pochven_observatory_flashpoint_and_world_ark() {
 
     // 3. Negative gate/pocket checks: direct warp blocked, docked blocked, >2,500m range blocked, capital blocked, <3 fleet & <0 standing blocked
     let mut sess = make_sess(char_id, ship_id, pochven_sys_id, None);
-    let err_warp = call_svc(&ctx, &mut sess, "beyonce", "CmdWarpToStuff", vec![PyRep::String("item".into()), PyRep::Integer(world_ark_id)]).await.unwrap_err();
+    let err_warp = call_svc(&ctx, &mut sess, "beyonce", "CmdWarpToStuff", vec![PyRep::String("item".into()), PyRep::Integer(world_ark_id)])
+        .await
+        .expect_err("direct warp into World Ark deadspace must fail");
     assert_eq!(err_warp.code, "WarpBlockedByDeadspacePocket");
 
     ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&char_id) { c.station_id = Some(60_003_760); } });
     let mut docked_sess = make_sess(char_id, ship_id, pochven_sys_id, Some(60_003_760));
-    assert_eq!(call_svc(&ctx, &mut docked_sess, "keeper", "ActivateAccelerationGate", vec![PyRep::Integer(gate_id)]).await.unwrap_err().code, "CantDoThatWhileDocked");
+    assert_eq!(
+        call_svc(&ctx, &mut docked_sess, "keeper", "ActivateAccelerationGate", vec![PyRep::Integer(gate_id)])
+            .await
+            .expect_err("docked gate activation must fail")
+            .code,
+        "CantDoThatWhileDocked"
+    );
     ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&char_id) { c.station_id = None; } });
 
     seed_ship_in_space(&ctx, char_id, ship_id, 587, pochven_sys_id, gate_pos + DVec3::new(10_000.0, 0.0, 0.0)).await;
-    assert_eq!(call_svc(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", vec![PyRep::Integer(gate_id)]).await.unwrap_err().code, "OutsideOperationalRange");
+    assert_eq!(
+        call_svc(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", vec![PyRep::Integer(gate_id)])
+            .await
+            .expect_err("out-of-range gate activation must fail")
+            .code,
+        "OutsideOperationalRange"
+    );
 
     seed_ship_in_space(&ctx, char_id, ship_id, 11_567, pochven_sys_id, gate_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
-    assert_eq!(call_svc(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", vec![PyRep::Integer(gate_id)]).await.unwrap_err().code, "ShipClassRestricted");
+    assert_eq!(
+        call_svc(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", vec![PyRep::Integer(gate_id)])
+            .await
+            .expect_err("capital gate activation must fail")
+            .code,
+        "ShipClassRestricted"
+    );
 
     seed_ship_in_space(&ctx, char_id, ship_id, 587, pochven_sys_id, gate_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
-    assert_eq!(call_svc(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", vec![PyRep::Integer(gate_id)]).await.unwrap_err().code, "InsufficientFleetComposition");
+    assert_eq!(
+        call_svc(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", vec![PyRep::Integer(gate_id)])
+            .await
+            .expect_err("insufficient fleet gate activation must fail")
+            .code,
+        "InsufficientFleetComposition"
+    );
 
     seed_ship_in_space(&ctx, 90_002, 88_600_002, 587, pochven_sys_id, gate_pos + DVec3::new(1_200.0, 0.0, 0.0)).await;
     seed_ship_in_space(&ctx, 90_003, 88_600_003, 587, pochven_sys_id, gate_pos + DVec3::new(1_400.0, 0.0, 0.0)).await;
@@ -2262,7 +2529,13 @@ async fn test_pochven_observatory_flashpoint_and_world_ark() {
             fleet_id: 777_001, boss_id: char_id, members: vec![char_id, 90_002, 90_003], ..Default::default()
         });
     });
-    assert_eq!(call_svc(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", vec![PyRep::Integer(gate_id)]).await.unwrap_err().code, "StandingAccessDenied");
+    assert_eq!(
+        call_svc(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", vec![PyRep::Integer(gate_id)])
+            .await
+            .expect_err("negative standing gate activation must fail")
+            .code,
+        "StandingAccessDenied"
+    );
 
     // 4. Seed 16 subcapital fleet ships within 2,500m of gate + 1 off-grid fleet ship, enter pocket via gate, and kill World Ark via live subcap weapon
     let mut fleet_ids = Vec::new();
@@ -2305,7 +2578,11 @@ async fn test_pochven_observatory_flashpoint_and_world_ark() {
     }
 
     let _ = sys.set_ball_position(88_610_000, site_pos + DVec3::new(0.0, 0.0, 2_000.0)).await;
-    let mut ark_cs = sys.get_combat_state(world_ark_id).await.unwrap().unwrap();
+    let mut ark_cs = sys
+        .get_combat_state(world_ark_id)
+        .await
+        .expect("get world ark combat state")
+        .expect("world ark combat state");
     ark_cs.shield_hp = 0.0;
     ark_cs.armor_hp = 0.0;
     ark_cs.structure_hp = 50.0;
@@ -2317,9 +2594,9 @@ async fn test_pochven_observatory_flashpoint_and_world_ark() {
         .expect("Live subcapital weapon kills World Ark boss");
 
     let (off_isk, p15_isk, p15_lp, p16_isk, site_exists) = ctx.db.with_snapshot(|snap| {
-        let coff = snap.characters.get(&offgrid_cid).unwrap();
-        let c15 = snap.characters.get(&fleet_ids[14]).unwrap();
-        let c16 = snap.characters.get(&fleet_ids[15]).unwrap();
+        let coff = snap.characters.get(&offgrid_cid).expect("offgrid char");
+        let c15 = snap.characters.get(&fleet_ids[14]).expect("fleet member 15");
+        let c16 = snap.characters.get(&fleet_ids[15]).expect("fleet member 16");
         (
             coff.balance.to_wire_f64(),
             c15.balance.to_wire_f64(),
@@ -2387,7 +2664,13 @@ async fn test_abyssal_weather_dogma_modifiers_all_five_storms() {
                 assert!(attrs[&272] > 0.5);
             }
         }
-        assert!(ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).unwrap().dynamic_attributes.is_empty()));
+        assert!(ctx.db.with_snapshot(|snap| {
+            snap.items
+                .get(&ship_id)
+                .expect("abyssal ship item")
+                .dynamic_attributes
+                .is_empty()
+        }));
     }
 
     // Enter an Abyssal pocket (Electrical T1 filament 47765) and verify V24 SDE Electrical weather modifiers on NPC
@@ -2404,9 +2687,17 @@ async fn test_abyssal_weather_dogma_modifiers_all_five_storms() {
     .await;
     assert!(!r1_npcs.is_empty());
     let abyss_sys = ctx.systems.get_or_spawn(32_000_001);
-    let (_, npc_ball) = abyss_sys.get_ball_snapshot(r1_npcs[0]).await.unwrap().unwrap();
+    let (_, npc_ball) = abyss_sys
+        .get_ball_snapshot(r1_npcs[0])
+        .await
+        .expect("get abyssal npc ball")
+        .expect("abyssal npc ball");
     let base_npc_cs = ctx.build_type_combat_state(npc_ball.type_id);
-    let npc_cs = abyss_sys.get_combat_state(r1_npcs[0]).await.unwrap().unwrap();
+    let npc_cs = abyss_sys
+        .get_combat_state(r1_npcs[0])
+        .await
+        .expect("get abyssal npc combat state")
+        .expect("abyssal npc combat state");
     assert!(
         npc_cs.armor_resonance[0] >= base_npc_cs.armor_resonance[0]
             && npc_cs.capacitor_recharge_time_ms < base_npc_cs.capacitor_recharge_time_ms,
@@ -2500,7 +2791,7 @@ async fn test_deathless_shipcaster_zarzakh_to_fob() {
         vec![PyRep::Integer(launcher_id), PyRep::Integer(i64::from(connected_sys_id)), PyRep::Integer(guristas_pad_id)],
     )
     .await
-    .unwrap_err();
+    .expect_err("non-pirate shipcaster jump must fail");
     assert_eq!(err_non_pirate.code, "NonPirateRefused");
 
     // 2. Negative: Angel Cartel (500011) refused on Guristas (500010) FOB pad
@@ -2517,7 +2808,7 @@ async fn test_deathless_shipcaster_zarzakh_to_fob() {
         vec![PyRep::Integer(launcher_id), PyRep::Integer(i64::from(connected_sys_id)), PyRep::Integer(guristas_pad_id)],
     )
     .await
-    .unwrap_err();
+    .expect_err("faction mismatch shipcaster jump must fail");
     assert_eq!(err_mismatch.code, "FobFactionMismatch");
 
     // 3. Negative: unconnected destination system rejected via SDE stargate topology (`InsurgencyWarzoneNotConnected`)
@@ -2534,7 +2825,7 @@ async fn test_deathless_shipcaster_zarzakh_to_fob() {
         vec![PyRep::Integer(launcher_id), PyRep::Integer(i64::from(unconnected_sys_id)), PyRep::Integer(unconnected_pad_id)],
     )
     .await
-    .unwrap_err();
+    .expect_err("unconnected warzone shipcaster jump must fail");
     assert_eq!(err_unconn.code, "InsurgencyWarzoneNotConnected");
 
     // 4. Positive: Guristas (500010) jumps to SDE stargate-connected insurgency warzone system
@@ -2546,7 +2837,7 @@ async fn test_deathless_shipcaster_zarzakh_to_fob() {
         vec![PyRep::Integer(launcher_id), PyRep::Integer(i64::from(connected_sys_id)), PyRep::Integer(guristas_pad_id)],
     )
     .await
-    .unwrap();
+    .expect("CmdJumpThroughShipcaster");
     assert_eq!(sess.solar_system_id, Some(connected_sys_id));
 
     // 5. Negative: persisted per-target cooldown blocks immediate repeat jump
@@ -2560,7 +2851,7 @@ async fn test_deathless_shipcaster_zarzakh_to_fob() {
         vec![PyRep::Integer(launcher_id), PyRep::Integer(i64::from(connected_sys_id)), PyRep::Integer(guristas_pad_id)],
     )
     .await
-    .unwrap_err();
+    .expect_err("cooldown shipcaster jump must fail");
     assert_eq!(err_cd.code, "ShipcasterTargetOnCooldown");
 }
 

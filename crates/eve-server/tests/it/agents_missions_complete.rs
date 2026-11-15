@@ -5,19 +5,29 @@ use eve_db::{
     ActiveMissionRecord, InventoryFlag, InventoryItemRecord, TypeId,
 };
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::agents_missions::*;
+use eve_testkit::client_harness::{ClientErrorResponse, ContractValidationMode};
 use std::collections::HashMap;
 
 const JITA_STATION_ID: i64 = 60_003_760;
 const JITA_SOLAR_SYSTEM_ID: u32 = 30_000_142;
 
+fn do_action_info(rep: &PyRep) -> &PyRep {
+    match rep {
+        PyRep::Tuple(items) if items.len() == 2 => &items[1],
+        other => other,
+    }
+}
+
 async fn setup_pilot(ctx: &ServerContext, session_id: u64, username: &str, password: &str, char_id: i64) -> SessionState {
     let kw = HashMap::new();
     let mut sess = SessionState::new(session_id);
     common::login_pilot(ctx, &mut sess, username, password).await;
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None).await.expect("SelectCharacterID");
+    common::borrow_wire_harness(ctx, &mut sess)
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw)
+        .await;
     let (ship_id, corp_id) = ctx.db.with_snapshot(|snap| {
         let ch = snap.characters.get(&char_id);
         (ch.map(|c| c.active_ship_id), ch.map(|c| c.corporation_id))
@@ -27,8 +37,10 @@ async fn setup_pilot(ctx: &ServerContext, session_id: u64, username: &str, passw
     sess
 }
 
-async fn rpc_call(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
-    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None).await
+async fn rpc_call(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, ClientErrorResponse> {
+    common::borrow_wire_harness(ctx, sess)
+        .call(service, None, method, args, &HashMap::new())
+        .await
 }
 
 fn colocate_with_agent(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, agent_id: i64) -> (u32, i64) {
@@ -72,6 +84,7 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     // parity: feat:pve.anomic-burner-missions
     eve_testkit::attest(&["feat:pve.anomic-burner-missions"]);
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 503, "demo", "demo-secret", char_id).await;
 
@@ -83,14 +96,14 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
 
     // 1. Courier Mission archetype offered by Distribution agent (division 22)
     let courier_offer = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(dist_agent_id)]).await.expect("Offer courier mission");
-    let courier_mid = courier_offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    let courier_mid = do_action_info(&courier_offer).dict_get("missionID").and_then(|v| v.as_i64()).expect("courier missionID") as u32;
 
     let (dest_station_id, courier_cargo_type, courier_cargo_qty, origin_sid) = ctx.db.with_snapshot(|snap| {
         let meta = load_mission_meta(snap, char_id, courier_mid).expect("courier mission meta");
         (meta.destination_station_id.expect("dest station"), meta.required_delivery_type_id.unwrap_or(3683), meta.required_delivery_qty.max(1), meta.origin_station_id.expect("origin station"))
     });
     assert_ne!(dest_station_id, dist_station_id, "Courier destination must differ from offer station");
-    let agent_sde_station = ctx.sde.agents.get(&dist_agent_id).and_then(|a| a.station_id).unwrap();
+    let agent_sde_station = ctx.sde.agents.get(&dist_agent_id).and_then(|a| a.station_id).expect("agent SDE station");
     assert_eq!(origin_sid, agent_sde_station, "origin_station_id must match SDE station");
 
     // Accept courier mission -> grants cargo into pilot station hangar
@@ -135,7 +148,7 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
 
     // Complete courier mission at destination station -> consumes cargo
     let courier_done = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(courier_mid as i64)]).await.expect("Complete courier mission");
-    assert_eq!(courier_done.dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
+    assert_eq!(do_action_info(&courier_done).dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
     let cargo_consumed = ctx.db.with_snapshot(|snap| !snap.items.values().any(|it| it.owner_id == char_id && it.type_id == courier_cargo_type && it.flag == InventoryFlag::Cargo));
     assert!(cargo_consumed, "Courier cargo must be consumed on completion");
 
@@ -156,7 +169,7 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     assert_eq!(trade_err.code, "MissionIncomplete");
     ctx.db.with_mut_snapshot(|snap| { snap.next_entity_id += 1; let tid_item = snap.next_entity_id; snap.items.insert(tid_item, make_item(tid_item, 21632, char_id, dist_station_id, 18, false)); });
     let trade_done = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(trade_mid as i64)]).await.expect("Trade completes");
-    assert_eq!(trade_done.dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
+    assert_eq!(do_action_info(&trade_done).dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
 
     // 3. Mining Mission archetype: DERIVED required ore and units from template title heuristic
     // Mission 4802: "Bountiful Banidine", DERIVED: requires 500 units of Banidine (28617)
@@ -166,7 +179,7 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     assert_eq!(mining_err.code, "MissionIncomplete");
     ctx.db.with_mut_snapshot(|snap| { snap.next_entity_id += 1; let oid = snap.next_entity_id; snap.items.insert(oid, make_item(oid, 28617, char_id, dist_station_id, 500, false)); });
     let mining_done = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(mining_mid as i64)]).await.expect("Mining completes");
-    assert_eq!(mining_done.dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
+    assert_eq!(do_action_info(&mining_done).dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
 
     // 4. Security Mission encounter & Anomic Burner Acceleration Gate
     let (agent_id, corp_id) = ctx.sde.agents.values()
@@ -178,7 +191,7 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
 
     let burner_offer = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(agent_id)])
         .await.expect("Offer Anomic Burner");
-    let burner_mid = burner_offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    let burner_mid = do_action_info(&burner_offer).dict_get("missionID").and_then(|v| v.as_i64()).expect("burner missionID") as u32;
 
     // Resolve SDE encounter to check derived NPC spawn group types
     let burner_tmpl = ctx.sde.missions.get(&burner_mid).expect("mission template");
@@ -276,6 +289,7 @@ async fn test_courier_mission_accept_quit_reclaims_cargo_regression() {
     // parity: feat:pve.mission-courier
     eve_testkit::attest(&["feat:pve.mission-courier"]);
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 504, "demo", "demo-secret", char_id).await;
 
@@ -296,11 +310,11 @@ async fn test_courier_mission_accept_quit_reclaims_cargo_regression() {
 
     let offer = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(dist_agent_id)])
         .await.expect("Offer courier mission");
-    let mid = offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    let mid = do_action_info(&offer).dict_get("missionID").and_then(|v| v.as_i64()).expect("missionID") as u32;
 
     let (cargo_tid, cargo_qty) = ctx.db.with_snapshot(|snap| {
-        let meta = load_mission_meta(snap, char_id, mid).unwrap();
-        (meta.required_delivery_type_id.unwrap(), meta.required_delivery_qty)
+        let meta = load_mission_meta(snap, char_id, mid).expect("mission meta");
+        (meta.required_delivery_type_id.expect("delivery type"), meta.required_delivery_qty)
     });
 
     // 1. Accept courier mission -> grants cargo into player's station hangar (R-MSN-COURIER-HANGAR)
@@ -369,13 +383,17 @@ async fn test_courier_mission_accept_quit_reclaims_cargo_regression() {
         PyRep::String("Mint Contract".into()), PyRep::String("".into()),
         PyRep::List(vec![PyRep::Integer(granted_cid)]), PyRep::List(vec![]),
     ];
-    let contract_err = ctx.dispatch_rpc(&mut sess, "contractProxy", None, "CreateContract", &contract_args, &HashMap::new(), None)
-        .await.expect_err("Courier cargo contract creation must fail");
+    let contract_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("contractProxy", None, "CreateContract", &contract_args, &HashMap::new())
+        .await
+        .expect_err("Courier cargo contract creation must fail");
     assert_eq!(contract_err.code, "ItemCannotBeContracted");
 
     // Attempt to deliver courier cargo to corp hangar -> must fail with ItemCannotBeTransferred (RV-MINT-CONTRACT-01)
-    let corp_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "DeliverToCorpHangar", &[PyRep::Integer(granted_cid), PyRep::Integer(1)], &HashMap::new(), None)
-        .await.expect_err("Courier cargo transfer to corp hangar must fail");
+    let corp_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("invbroker", None, "DeliverToCorpHangar", &[PyRep::Integer(granted_cid), PyRep::Integer(1)], &HashMap::new())
+        .await
+        .expect_err("Courier cargo transfer to corp hangar must fail");
     assert_eq!(corp_err.code, "ItemCannotBeTransferred");
 
     // 3. Attempt MultiMerge on courier cargo -> must fail (R-MSN-MINT-03)
@@ -389,7 +407,9 @@ async fn test_courier_mission_accept_quit_reclaims_cargo_regression() {
         ("locationID".into(), PyRep::Integer(dist_station_id)),
         ("flag".into(), PyRep::Integer(InventoryFlag::Hangar as i64)),
     ]);
-    let stack_res = ctx.dispatch_rpc(&mut sess, "invbroker", None, "StackAll", &[], &stack_kw, None).await.expect("StackAll");
+    let stack_res = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("invbroker", None, "StackAll", &[], &stack_kw)
+        .await;
     assert_eq!(stack_res.dict_get("mergedCount").and_then(|v| v.as_i64()), Some(0));
 
     // 5. Split stack -> split child is tracked and reclaimed on quit (R-MSN-MINT-02, R-MSN-MINT-03)
@@ -399,7 +419,7 @@ async fn test_courier_mission_accept_quit_reclaims_cargo_regression() {
     // Quit mission (Action 11)
     let quit_res = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(11), PyRep::Integer(mid as i64)])
         .await.expect("Quit courier mission");
-    assert_eq!(quit_res.dict_get("state").and_then(|v| v.as_str()), Some("Quit"));
+    assert_eq!(do_action_info(&quit_res).dict_get("state").and_then(|v| v.as_str()), Some("Quit"));
 
     // Verify granted cargo (both original and split child) was fully reclaimed and player's item preserved
     ctx.db.with_snapshot(|snap| {
@@ -411,7 +431,7 @@ async fn test_courier_mission_accept_quit_reclaims_cargo_regression() {
     // 6. Test calling AcceptMission on an "Offered" mission after offer expiry:
     // verify MissionOfferExpired error, persisted "Expired" state, and reclaimed cargo (RV-MSN-TEST-CLAIMS-01)
     let offer2 = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(dist_agent_id)]).await.expect("Offer mission 2");
-    let mid2 = offer2.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    let mid2 = do_action_info(&offer2).dict_get("missionID").and_then(|v| v.as_i64()).expect("missionID 2") as u32;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(mut meta) = load_mission_meta(snap, char_id, mid2) {
             meta.offer_expiry_unix = 1;
@@ -431,11 +451,8 @@ async fn test_courier_mission_accept_quit_reclaims_cargo_regression() {
 #[tokio::test]
 async fn test_non_courier_offers_decline_and_expiry_preserve_player_inventory_regression() {
     // parity: feat:pve.mission-decline, feat:pve.mission-expire
-    eve_testkit::attest(&[
-        "feat:pve.mission-decline",
-        "feat:pve.mission-expire",
-    ]);
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 505, "demo", "demo-secret", char_id).await;
     let ship_id = sess.ship_id.expect("active ship");
@@ -469,11 +486,11 @@ async fn test_non_courier_offers_decline_and_expiry_preserve_player_inventory_re
     });
     let rnd_offer = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(2), PyRep::Integer(rnd_agent_id)])
         .await.expect("Offer R&D mission");
-    let rnd_mid = rnd_offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    let rnd_mid = do_action_info(&rnd_offer).dict_get("missionID").and_then(|v| v.as_i64()).expect("rnd missionID") as u32;
 
     let decline_res = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(9), PyRep::Integer(rnd_mid as i64)])
         .await.expect("Decline R&D offer");
-    assert_eq!(decline_res.dict_get("state").and_then(|v| v.as_str()), Some("Declined"));
+    assert_eq!(do_action_info(&decline_res).dict_get("state").and_then(|v| v.as_str()), Some("Declined"));
 
     ctx.db.with_snapshot(|snap| {
         assert_eq!((snap.items.get(&tri_h).map(|i| i.quantity), snap.items.get(&tri_c).map(|i| i.quantity)), (Some(25_000), Some(500)));
@@ -491,7 +508,7 @@ async fn test_non_courier_offers_decline_and_expiry_preserve_player_inventory_re
     });
     let trade_offer = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(dist_agent_id)])
         .await.expect("Offer mission");
-    let trade_mid = trade_offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    let trade_mid = do_action_info(&trade_offer).dict_get("missionID").and_then(|v| v.as_i64()).expect("trade missionID") as u32;
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(mut meta) = load_mission_meta(snap, char_id, trade_mid) {
@@ -512,6 +529,7 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
     // parity: feat:pve.mission-courier
     eve_testkit::attest(&["feat:pve.mission-courier"]);
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 506, "demo", "demo-secret", char_id).await;
 
@@ -526,11 +544,11 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
 
     let offer = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(dist_agent_id)])
         .await.expect("Offer courier mission");
-    let mid = offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    let mid = do_action_info(&offer).dict_get("missionID").and_then(|v| v.as_i64()).expect("missionID") as u32;
 
     let (cargo_tid, cargo_qty) = ctx.db.with_snapshot(|snap| {
-        let meta = load_mission_meta(snap, char_id, mid).unwrap();
-        (meta.required_delivery_type_id.unwrap(), meta.required_delivery_qty)
+        let meta = load_mission_meta(snap, char_id, mid).expect("mission meta");
+        (meta.required_delivery_type_id.expect("delivery type"), meta.required_delivery_qty)
     });
 
     // Accept courier mission -> grants cargo into player's station hangar
@@ -571,9 +589,16 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
     let pre_split_count = ctx.db.with_snapshot(|s| s.items.len());
     let mut split_kw = HashMap::new();
     split_kw.insert("qty".into(), PyRep::Integer(1));
-    let split_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[
-        PyRep::Integer(granted_cid), PyRep::Integer(dist_station_id), PyRep::Integer(116),
-    ], &split_kw, None).await.expect_err("split add to corp div must fail");
+    let split_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "invbroker",
+            None,
+            "Add",
+            &[PyRep::Integer(granted_cid), PyRep::Integer(dist_station_id), PyRep::Integer(116)],
+            &split_kw,
+        )
+        .await
+        .expect_err("split add to corp div must fail");
     assert_eq!(split_err.code, "CannotDeliverCourierCargo");
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items.len(), pre_split_count, "Stack must NOT be split on failed pre-move validation (RV-ADD-SPLIT-BEFORE-VALIDATE-01)");
@@ -598,15 +623,40 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
         PyRep::String("Courier Test Contract".into()), PyRep::String("".into()),
         PyRep::List(vec![PyRep::Integer(granted_cid)]), PyRep::List(vec![]),
     ];
-    let contract_err = ctx.dispatch_rpc(&mut sess, "contractProxy", None, "CreateContract", &contract_args, &HashMap::new(), None).await.expect_err("courier cargo contract creation must fail");
+    let contract_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("contractProxy", None, "CreateContract", &contract_args, &HashMap::new())
+        .await
+        .expect_err("courier cargo contract creation must fail");
     assert_eq!(contract_err.code, "ItemCannotBeContracted");
 
     // RV-CLAIMS-ERRCODES-TESTS-01: trademgr.AddItem
     let partner_id = 90_000_002;
     let mut sess2 = setup_pilot(&ctx, 507, "other", "other-secret", partner_id).await;
     colocate_with_agent(&ctx, &mut sess2, partner_id, dist_agent_id);
-    let tr_rep = rpc_call(&ctx, &mut sess, "trademgr", "InitiateTrade", &[PyRep::Integer(partner_id)]).await.expect("init trade");
-    let tr_id = tr_rep.dict_get("tradeContainerID").and_then(|v| v.as_i64()).unwrap();
+    // Server V24 parity gap: `trademgr.InitiateTrade` returns KeyVal without `.List` wrapper
+    // and emits `OnTradeInitiate` with `trade_session: Integer` instead of `.List.tradeContainerID`.
+    let tr_out = common::borrow_wire_harness(&ctx, &mut sess)
+        .with_mode(ContractValidationMode::ReportOnly)
+        .call_exchange("trademgr", None, "InitiateTrade", &[PyRep::Integer(partner_id)], &HashMap::new())
+        .await;
+    assert!(
+        !tr_out.violations.iter().any(|v| v.starts_with("wire:marshal:")),
+        "unexpected wire:marshal error on InitiateTrade: {:?}",
+        tr_out.violations
+    );
+    assert!(
+        tr_out.violations.iter().all(|v| {
+            v.starts_with("trademgr.InitiateTrade:")
+                || v.starts_with("notify:OnTradeInitiate[arg1]:")
+        }),
+        "unexpected contract violation on InitiateTrade: {:?}",
+        tr_out.violations
+    );
+    let tr_rep = tr_out.result.expect("init trade");
+    let tr_id = tr_rep
+        .dict_get("tradeContainerID")
+        .and_then(|v| v.as_i64())
+        .expect("tradeContainerID");
     let tr_err = rpc_call(&ctx, &mut sess, "trademgr", "AddItem", &[PyRep::Integer(tr_id), PyRep::Integer(granted_cid), PyRep::Integer(1)]).await.expect_err("trademgr.AddItem courier cargo must fail");
     assert_eq!(tr_err.code, "InvalidTradeItem");
 
@@ -617,7 +667,10 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
     // RV-CLAIMS-ERRCODES-TESTS-01: ship.Jettison while in space
     ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { ch.station_id = None; } });
     sess.station_id = None; sess.structure_id = None;
-    let jet_err = ctx.dispatch_rpc(&mut sess, "ship", None, "Jettison", &[PyRep::List(vec![PyRep::Integer(granted_cid)])], &HashMap::new(), None).await.expect_err("ship.Jettison courier cargo must fail");
+    let jet_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("ship", None, "Jettison", &[PyRep::List(vec![PyRep::Integer(granted_cid)])], &HashMap::new())
+        .await
+        .expect_err("ship.Jettison courier cargo must fail");
     assert_eq!(jet_err.code, "ItemCannotBeJettisoned");
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -641,7 +694,7 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
 
     // Quit mission and verify all granted courier units are cleanly reclaimed, while the pilot's 10 original untagged units remain untouched!
     let quit_res = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(11), PyRep::Integer(mid as i64)]).await.expect("Quit courier mission");
-    assert_eq!(quit_res.dict_get("state").and_then(|v| v.as_str()), Some("Quit"));
+    assert_eq!(do_action_info(&quit_res).dict_get("state").and_then(|v| v.as_str()), Some("Quit"));
 
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&granted_cid), "Granted courier item must be reclaimed on quit");
@@ -655,6 +708,7 @@ async fn test_invbroker_partial_split_container_and_multiadd_validation_regressi
     // parity: feat:inventory.containers, feat:ships.cargo-capacity
     eve_testkit::attest(&["feat:inventory.containers", "feat:ships.cargo-capacity"]);
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 508, "demo", "demo-secret", char_id).await;
     let ship_id = sess.ship_id.expect("active ship");
@@ -669,25 +723,69 @@ async fn test_invbroker_partial_split_container_and_multiadd_validation_regressi
     });
 
     // 1. Partial split move into container succeeds when split volume fits even if full stack exceeds capacity (RV-ADD-PARTIAL-SPLIT-ORDER-01)
-    let split_res = ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(large_stack_id), PyRep::Integer(container_id), PyRep::Integer(InventoryFlag::Cargo as i64)], &HashMap::from([("qty".into(), PyRep::Integer(5_000))]), None).await.expect("Partial split into container must succeed");
-    let split_new_id = split_res.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    let split_res = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok(
+            "invbroker",
+            None,
+            "Add",
+            &[PyRep::Integer(large_stack_id), PyRep::Integer(container_id), PyRep::Integer(InventoryFlag::Cargo as i64)],
+            &HashMap::from([("qty".into(), PyRep::Integer(5_000))]),
+        )
+        .await;
+    let split_new_id = split_res.dict_get("itemID").and_then(|v| v.as_i64()).expect("split itemID");
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items.get(&large_stack_id).map(|i| i.quantity), Some(15_000));
         assert_eq!(snap.items.get(&split_new_id).map(|i| (i.quantity, i.location_id)), Some((5_000, container_id)));
     });
 
     // 2. Add rejects invalid quantity <= 0 (BF-ADD-QTY-CAPACITY-BYPASS-01)
-    let qty_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(large_stack_id), PyRep::Integer(container_id), PyRep::Integer(InventoryFlag::Cargo as i64)], &HashMap::from([("qty".into(), PyRep::Integer(0))]), None).await.expect_err("qty 0 rejected");
+    let qty_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "invbroker",
+            None,
+            "Add",
+            &[PyRep::Integer(large_stack_id), PyRep::Integer(container_id), PyRep::Integer(InventoryFlag::Cargo as i64)],
+            &HashMap::from([("qty".into(), PyRep::Integer(0))]),
+        )
+        .await
+        .expect_err("qty 0 rejected");
     assert_eq!(qty_err.code, "InvalidQuantity");
     // 3. MultiAdd rejects fitting module flags (RV-MULTIADD-BYPASS-VALIDATION-01)
-    let fit_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "MultiAdd", &[PyRep::List(vec![PyRep::Integer(large_stack_id)]), PyRep::Integer(ship_id), PyRep::Integer(11)], &HashMap::new(), None).await.expect_err("MultiAdd cannot fit modules");
+    let fit_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "invbroker",
+            None,
+            "MultiAdd",
+            &[PyRep::List(vec![PyRep::Integer(large_stack_id)]), PyRep::Integer(ship_id), PyRep::Integer(11)],
+            &HashMap::new(),
+        )
+        .await
+        .expect_err("MultiAdd cannot fit modules");
     assert_eq!(fit_err.code, "InvalidLocation");
     // 4. MultiAdd rejects active ship move (BF-MULTIADD-NONATOMIC-BYPASS-01)
-    let act_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "MultiAdd", &[PyRep::List(vec![PyRep::Integer(ship_id)]), PyRep::Integer(JITA_STATION_ID), PyRep::Integer(InventoryFlag::Hangar as i64)], &HashMap::new(), None).await.expect_err("CannotMoveActiveShip");
+    let act_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "invbroker",
+            None,
+            "MultiAdd",
+            &[PyRep::List(vec![PyRep::Integer(ship_id)]), PyRep::Integer(JITA_STATION_ID), PyRep::Integer(InventoryFlag::Hangar as i64)],
+            &HashMap::new(),
+        )
+        .await
+        .expect_err("CannotMoveActiveShip");
     assert_eq!(act_err.code, "CannotMoveActiveShip");
 
     // 5. MultiAdd fails and rolls back when batch exceeds cargo capacity (RV-MULTIADD-BYPASS-VALIDATION-01)
-    let cap_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "MultiAdd", &[PyRep::List(vec![PyRep::Integer(item_a_id), PyRep::Integer(item_b_id)]), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::Cargo as i64)], &HashMap::new(), None).await.expect_err("MultiAdd exceeding capacity must fail");
+    let cap_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call(
+            "invbroker",
+            None,
+            "MultiAdd",
+            &[PyRep::List(vec![PyRep::Integer(item_a_id), PyRep::Integer(item_b_id)]), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::Cargo as i64)],
+            &HashMap::new(),
+        )
+        .await
+        .expect_err("MultiAdd exceeding capacity must fail");
     assert_eq!(cap_err.code, "NotEnoughCargoSpace");
     ctx.db.with_snapshot(|snap| {
         assert_eq!((snap.items.get(&item_a_id).map(|i| i.location_id), snap.items.get(&item_b_id).map(|i| i.location_id)), (Some(JITA_STATION_ID), Some(JITA_STATION_ID)));
@@ -706,8 +804,9 @@ use eve_db::{
     ActiveMissionRecord, TrainedSkillRecord, TypeId,
 };
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::PyRep;
 use eve_server::router::ServerContext;
+use eve_testkit::client_harness::ClientErrorResponse;
 use std::collections::HashMap;
 
 const JITA_STATION_ID: i64 = 60_003_760;
@@ -730,17 +829,9 @@ async fn setup_pilot(
     let kw = HashMap::new();
     let mut sess = SessionState::new(session_id);
     common::login_pilot(ctx, &mut sess, username, password).await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    common::borrow_wire_harness(ctx, &mut sess)
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw)
+        .await;
     sess
 }
 
@@ -750,9 +841,10 @@ async fn rpc_call(
     service: &str,
     method: &str,
     args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
+) -> Result<PyRep, ClientErrorResponse> {
     let kw = HashMap::new();
-    ctx.dispatch_rpc(sess, service, None, method, args, &kw, None)
+    common::borrow_wire_harness(ctx, sess)
+        .call(service, None, method, args, &kw)
         .await
 }
 
@@ -859,12 +951,12 @@ async fn test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expira
     )
     .await
     .expect("Offer mission");
-    let mission_id = offer
+    let mission_id = do_action_info(&offer)
         .dict_get("missionID")
         .and_then(|v| v.as_i64())
         .expect("missionID") as u32;
-    assert!(offer.dict_get("iskReward").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
-    assert!(offer.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+    assert!(do_action_info(&offer).dict_get("iskReward").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+    assert!(do_action_info(&offer).dict_get("lpReward").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
 
     let journal = rpc_call(&ctx, &mut sess, "agentMgr", "GetMyJournalDetails", &[])
         .await
@@ -888,7 +980,7 @@ async fn test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expira
     .await
     .expect("First decline");
     assert_eq!(
-        decline_1
+        do_action_info(&decline_1)
             .dict_get("standingPenaltyApplied")
             .and_then(|v| v.as_bool()),
         Some(false)
@@ -904,10 +996,10 @@ async fn test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expira
     )
     .await
     .expect("Second offer");
-    let mission_id_2 = offer_2
+    let mission_id_2 = do_action_info(&offer_2)
         .dict_get("missionID")
         .and_then(|v| v.as_i64())
-        .unwrap() as u32;
+        .expect("missionID 2") as u32;
     let standing_before_decline2 = ctx.db.with_snapshot(|snap| {
         snap.characters
             .get(&char_id)
@@ -924,7 +1016,7 @@ async fn test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expira
     .await
     .expect("Second decline");
     assert_eq!(
-        decline_2
+        do_action_info(&decline_2)
             .dict_get("standingPenaltyApplied")
             .and_then(|v| v.as_bool()),
         Some(true)
@@ -947,10 +1039,10 @@ async fn test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expira
     )
     .await
     .expect("Third offer");
-    let mission_id_3 = offer_3
+    let mission_id_3 = do_action_info(&offer_3)
         .dict_get("missionID")
         .and_then(|v| v.as_i64())
-        .unwrap() as u32;
+        .expect("missionID 3") as u32;
     let accept_3 = rpc_call(
         &ctx,
         &mut sess,
@@ -961,10 +1053,10 @@ async fn test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expira
     .await
     .expect("Accept third mission");
     assert_eq!(
-        accept_3.dict_get("state").and_then(|v| v.as_str()),
+        do_action_info(&accept_3).dict_get("state").and_then(|v| v.as_str()),
         Some("Accepted")
     );
-    let bm3_id = accept_3.dict_get("bookmarkID").and_then(|v| v.as_i64()).unwrap_or(0);
+    let bm3_id = do_action_info(&accept_3).dict_get("bookmarkID").and_then(|v| v.as_i64()).unwrap_or(0);
     assert!(bm3_id > 0);
     assert!(ctx.db.with_snapshot(|snap| snap.bookmarks.contains_key(&bm3_id)));
 
@@ -1023,10 +1115,10 @@ async fn test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expira
     )
     .await
     .expect("Fourth offer");
-    let mission_id_4 = offer_4
+    let mission_id_4 = do_action_info(&offer_4)
         .dict_get("missionID")
         .and_then(|v| v.as_i64())
-        .unwrap() as u32;
+        .expect("missionID 4") as u32;
     rpc_call(
         &ctx,
         &mut sess,
@@ -1067,6 +1159,7 @@ async fn test_standings_formulas_derived_effective_corp_standing_data_and_transa
     // parity: feat:pve.mission-faction-standing-loss, feat:standings.npc-standings, feat:standings.standing-gain-missions, feat:standings.standing-loss, feat:standings.standing-compositions, feat:standings.effective-standing, feat:standings.corp-standings, feat:standings.standing-notifications, feat:standings.trig-edencom-standings
     eve_testkit::attest(&["feat:pve.mission-faction-standing-loss", "feat:standings.npc-standings", "feat:standings.standing-gain-missions", "feat:standings.standing-loss", "feat:standings.standing-compositions", "feat:standings.effective-standing", "feat:standings.corp-standings", "feat:standings.standing-notifications", "feat:standings.trig-edencom-standings"]);
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 505, "demo", "demo-secret", char_id).await;
 
@@ -1124,7 +1217,7 @@ async fn test_standings_formulas_derived_effective_corp_standing_data_and_transa
         let eff = items[0]
             .dict_get("effectiveStanding")
             .and_then(|v| v.as_f64())
-            .unwrap();
+            .expect("effectiveStanding");
         assert!((eff - expected_eff).abs() < 1e-6);
         eff_tenths.push((eff * 10.0).round() as i64);
     }
@@ -1153,7 +1246,7 @@ async fn test_standings_formulas_derived_effective_corp_standing_data_and_transa
         apply_faction_standing_with_derived, apply_mission_completion_standings, static_npc_faction_standings,
     };
     ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+        snap.characters.get_mut(&char_id).expect("pilot character").standings.clear();
         let mut chg = Vec::new();
         apply_faction_standing_with_derived(&ctx, snap, char_id, 500_002, 2.0, true, &mut chg);
         let st = &snap.characters[&char_id].standings;
@@ -1175,14 +1268,14 @@ async fn test_standings_formulas_derived_effective_corp_standing_data_and_transa
         }
 
         // Cap at secondary faction's standing toward primary (-5.00 for Amarr -> Minmatar per NPC_standings.md:156)
-        snap.characters.get_mut(&char_id).unwrap().standings.insert(500_003, -4.98);
+        snap.characters.get_mut(&char_id).expect("pilot character").standings.insert(500_003, -4.98);
         apply_faction_standing_with_derived(&ctx, snap, char_id, 500_002, 2.0, true, &mut chg);
         assert!((snap.characters[&char_id].standings[&500_003] - (-5.0)).abs() < 1e-9, "Amarr must cap at -5.00");
         apply_faction_standing_with_derived(&ctx, snap, char_id, 500_002, 2.0, true, &mut chg);
         assert!((snap.characters[&char_id].standings[&500_003] - (-5.0)).abs() < 1e-9, "Amarr at -5.00 must not drop further");
 
         // Asymmetric standing loss (NPC_standings.md:154): -2% Minmatar lowers friends (rel > 0), never raises enemies (rel < 0)
-        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+        snap.characters.get_mut(&char_id).expect("pilot character").standings.clear();
         apply_faction_standing_with_derived(&ctx, snap, char_id, 500_002, -2.0, true, &mut chg);
         let st_loss = &snap.characters[&char_id].standings;
         assert!((st_loss[&500_002] - (-0.20)).abs() < 1e-9);
@@ -1201,13 +1294,13 @@ async fn test_standings_formulas_derived_effective_corp_standing_data_and_transa
             .values()
             .find(|a| a.agent_type_id == 12 && ctx.sde.npc_corporations.get(&a.corporation_id).and_then(|c| c.faction_id) == Some(500_001))
             .expect("Caldari career agent (agent_type_id == 12) must exist in SDE");
-        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+        snap.characters.get_mut(&char_id).expect("pilot character").standings.clear();
         let (_, mid_changes) = apply_mission_completion_standings(&ctx, snap, char_id, career_ag.agent_id, 3096, career_ag.corporation_id, 5.0, false);
         assert!(mid_changes.iter().any(|&(eid, _, delta)| eid == 500_004 && delta < 0.0), "Intermediate career mission (1 of 10) must propagate derived standings");
-        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+        snap.characters.get_mut(&char_id).expect("pilot character").standings.clear();
         let (_, fin_changes) = apply_mission_completion_standings(&ctx, snap, char_id, career_ag.agent_id, 3173, career_ag.corporation_id, 5.0, false);
         assert!(!fin_changes.iter().any(|&(eid, _, _)| eid == 500_004), "Final career mission (10 of 10) must suppress derived standings");
-        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+        snap.characters.get_mut(&char_id).expect("pilot character").standings.clear();
     });
 
     // Complete a Storyline mission -> verifies asymptotic gain formula, derived faction propagation, and GetStandingTransactions
@@ -1303,14 +1396,15 @@ async fn test_agent_dialogue_and_access_standings() {
         }
     });
     let l1_ok = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(l1_agent_id)]).await.expect("L1 agent must allow access at 0.0 standing");
-    let l1_mid = l1_ok.dict_get("missionID").and_then(|v| v.as_i64()).unwrap();
-    assert!(!l1_ok.dict_get("briefing").and_then(|v| v.as_str()).unwrap_or("").is_empty());
-    assert!(!l1_ok.dict_get("objectives").and_then(|v| v.as_str()).unwrap_or("").is_empty());
-    assert!(l1_ok.dict_get("iskReward").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
-    assert!(l1_ok.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+    let l1_info = do_action_info(&l1_ok);
+    let l1_mid = l1_info.dict_get("missionID").and_then(|v| v.as_i64()).expect("l1 missionID");
+    assert!(!l1_info.dict_get("briefing").and_then(|v| v.as_str()).unwrap_or("").is_empty());
+    assert!(!l1_info.dict_get("objectives").and_then(|v| v.as_str()).unwrap_or("").is_empty());
+    assert!(l1_info.dict_get("iskReward").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+    assert!(l1_info.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
     let briefing_info = rpc_call(&ctx, &mut sess, "agentMgr", "GetMissionBriefingInfo", &[PyRep::Integer(l1_mid)]).await.expect("GetMissionBriefingInfo");
-    assert_eq!(briefing_info.dict_get("missionID").and_then(|v| v.as_i64()), Some(l1_mid));
-    assert!(!briefing_info.dict_get("briefing").and_then(|v| v.as_str()).unwrap_or("").is_empty());
+    assert_eq!(briefing_info.dict_get("ContentID").and_then(|v| v.as_i64()), Some(l1_mid));
+    assert!(!briefing_info.dict_get("Mission Briefing ID").and_then(|v| v.as_str()).unwrap_or("").is_empty());
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -1345,7 +1439,7 @@ async fn test_agent_dialogue_and_access_standings() {
         });
         let at_threshold = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(agent_id)]).await.expect("MAX(agent, corp, faction) at threshold must succeed");
         assert_eq!(
-            at_threshold.dict_get("state").and_then(|v| v.as_str()),
+            do_action_info(&at_threshold).dict_get("state").and_then(|v| v.as_str()),
             Some("Offered")
         );
     }
@@ -1359,13 +1453,14 @@ pub(crate) mod special_agents_arcs_and_lp_store {
 
 // Integration tests for Special Agents, Arcs, and LP Store.
 
-use crate::common;
 use eve_db::{
     ActiveMissionRecord, InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord, TypeId,
 };
+use crate::common;
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::PyRep;
 use eve_server::router::ServerContext;
+use eve_testkit::client_harness::ClientErrorResponse;
 use std::collections::HashMap;
 
 const JITA_STATION_ID: i64 = 60_003_760;
@@ -1379,20 +1474,13 @@ async fn setup_pilot(
     password: &str,
     char_id: i64,
 ) -> SessionState {
-    let kw = HashMap::new();
     let mut sess = SessionState::new(session_id);
     common::login_pilot(ctx, &mut sess, username, password).await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    let mut harness = common::borrow_wire_harness(ctx, &mut sess);
+    harness
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &HashMap::new())
+        .await;
+    drop(harness);
     sess
 }
 
@@ -1402,10 +1490,9 @@ async fn rpc_call(
     service: &str,
     method: &str,
     args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let kw = HashMap::new();
-    ctx.dispatch_rpc(sess, service, None, method, args, &kw, None)
-        .await
+) -> Result<PyRep, ClientErrorResponse> {
+    let mut harness = common::borrow_wire_harness(ctx, sess);
+    harness.call(service, None, method, args, &HashMap::new()).await
 }
 
 fn colocate_with_agent(
@@ -1522,15 +1609,18 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
         }
     });
 
-    let complete_16th = rpc_call(
-        &ctx,
-        &mut sess,
-        "agentMgr",
-        "DoAction",
-        &[PyRep::Integer(6), PyRep::Integer(reg_mid as i64)],
+    let complete_16th = do_action_info(
+        &rpc_call(
+            &ctx,
+            &mut sess,
+            "agentMgr",
+            "DoAction",
+            &[PyRep::Integer(6), PyRep::Integer(reg_mid as i64)],
+        )
+        .await
+        .expect("Complete 16th mission"),
     )
-    .await
-    .expect("Complete 16th mission");
+    .clone();
     assert_eq!(
         complete_16th
             .dict_get("missionTally")
@@ -1608,7 +1698,10 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
     let finale_mid = reg_mid;
     ctx.db.with_mut_snapshot(|snap| {
         let mut arcs = eve_server::services::agents_missions::load_epic_arc_states(snap, char_id);
-        let arc = arcs.iter_mut().find(|a| a.epic_arc_id == arc_id).unwrap();
+        let arc = arcs
+            .iter_mut()
+            .find(|a| a.epic_arc_id == arc_id)
+            .expect("epic arc state");
         arc.completed_missions = (0..(arc_total - 1)).map(|i| 90_000 + i as u32).collect();
         eve_server::services::agents_missions::save_epic_arc_states(snap, char_id, &arcs);
         snap.active_missions.insert(
@@ -1670,10 +1763,10 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
     )
     .await
     .expect("Career agent offer");
-    let career_mid = career_offer
+    let career_mid = do_action_info(&career_offer)
         .dict_get("missionID")
         .and_then(|v| v.as_i64())
-        .unwrap() as u32;
+        .expect("career missionID") as u32;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(m) = snap.active_missions.get_mut(&(char_id, career_mid)) {
             m.state = "Completed".into();
@@ -1729,10 +1822,10 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
     )
     .await
     .expect("Data Center offer");
-    let dc_mid = dc_offer
+    let dc_mid = do_action_info(&dc_offer)
         .dict_get("missionID")
         .and_then(|v| v.as_i64())
-        .unwrap() as u32;
+        .expect("dc missionID") as u32;
     rpc_call(
         &ctx,
         &mut sess,
@@ -1752,7 +1845,9 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
     .await
     .expect("Complete Data Center tag turn-in");
     assert_eq!(
-        dc_done.dict_get("state").and_then(|v| v.as_str()),
+        do_action_info(&dc_done)
+            .dict_get("state")
+            .and_then(|v| v.as_str()),
         Some("Completed")
     );
 
@@ -1811,7 +1906,7 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
     .await
     .expect("Start R&D Research");
     assert!(
-        start_rd
+        do_action_info(&start_rd)
             .dict_get("pointsPerDay")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0)
@@ -1844,7 +1939,7 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
     .await
     .expect("Redeem R&D Datacores");
     assert_eq!(
-        redeem_rd
+        do_action_info(&redeem_rd)
             .dict_get("datacoreTypeID")
             .and_then(|v| v.as_i64()),
         Some(20_417)
@@ -1859,7 +1954,9 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
         .cloned()
         .expect("Locator agent in SDE");
     let locator_agent_id = locator_agent.agent_id;
-    let agent_sys = locator_agent.solar_system_id.unwrap();
+    let agent_sys = locator_agent
+        .solar_system_id
+        .expect("locator solar_system_id");
     colocate_with_agent(&ctx, &mut sess, char_id, locator_agent_id);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -1883,7 +1980,7 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
     .await
     .expect("LocateCharacter via DoAction 15");
     assert_eq!(
-        locate_res
+        do_action_info(&locate_res)
             .dict_get("targetCharacterID")
             .and_then(|v| v.as_i64()),
         Some(90_000_002)
@@ -1910,6 +2007,7 @@ async fn test_lp_store_offers_exchange_rates_and_purchase_validation() {
     // parity: feat:lp.lp-balance, feat:lp.lp-corp-wallet, feat:lp.concord-lp, feat:lp.lp-reward-logs
     eve_testkit::attest(&["feat:lp.lp-balance", "feat:lp.lp-corp-wallet", "feat:lp.concord-lp", "feat:lp.lp-reward-logs"]);
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 506, "demo", "demo-secret", char_id).await;
     sess.station_id = Some(JITA_STATION_ID);
@@ -2065,12 +2163,13 @@ mod pve_agent_missions_ext {
 // Courier, Trade, Security combat waves, and Mining missions.
 
 use crate::common;
+use super::do_action_info;
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::agents_missions::*;
-use std::collections::HashMap;
+use eve_testkit::client_harness::ClientErrorResponse;
 
 const JITA_STATION_ID: i64 = 60_003_760;
 const JITA_SOLAR_SYSTEM_ID: u32 = 30_000_142;
@@ -2082,20 +2181,13 @@ async fn setup_pilot(
     password: &str,
     char_id: i64,
 ) -> SessionState {
-    let kw = HashMap::new();
     let mut sess = SessionState::new(session_id);
     common::login_pilot(ctx, &mut sess, username, password).await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    let mut harness = common::borrow_wire_harness(ctx, &mut sess);
+    harness
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &HashMap::new())
+        .await;
+    drop(harness);
     let (ship_id, corp_id) = ctx.db.with_snapshot(|snap| {
         let ch = snap.characters.get(&char_id);
         (ch.map(|c| c.active_ship_id), ch.map(|c| c.corporation_id))
@@ -2111,9 +2203,9 @@ async fn rpc_call(
     service: &str,
     method: &str,
     args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None)
-        .await
+) -> Result<PyRep, ClientErrorResponse> {
+    let mut harness = common::borrow_wire_harness(ctx, sess);
+    harness.call(service, None, method, args, &HashMap::new()).await
 }
 
 fn colocate_with_agent(
@@ -2187,6 +2279,7 @@ async fn test_pve_courier_mission_distribution_lifecycle_and_destination_transpo
     // parity: feat:pve.mission-courier
     eve_testkit::attest(&["feat:pve.mission-courier"]);
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 601, "demo", "demo-secret", char_id).await;
 
@@ -2210,7 +2303,10 @@ async fn test_pve_courier_mission_distribution_lifecycle_and_destination_transpo
     let offer = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(dist_agent_id)])
         .await
         .expect("Offer courier mission");
-    let mid = offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    let mid = do_action_info(&offer)
+        .dict_get("missionID")
+        .and_then(|v| v.as_i64())
+        .expect("courier missionID") as u32;
 
     let (dest_station_id, cargo_type_id, cargo_qty, origin_sid) = ctx.db.with_snapshot(|snap| {
         let meta = load_mission_meta(snap, char_id, mid).expect("courier mission meta");
@@ -2225,15 +2321,23 @@ async fn test_pve_courier_mission_distribution_lifecycle_and_destination_transpo
     assert_eq!(origin_sid, origin_station_id, "Origin station must match agent station");
     assert!(cargo_qty >= 1, "Cargo quantity must be at least 1 unit");
 
-    // Verify briefing / objective info contains data-driven destination station name
+    // Verify briefing / objective info contains data-driven destination station location
     let details = rpc_call(&ctx, &mut sess, "agentMgr", "GetMissionObjectiveInfo", &[PyRep::Integer(dist_agent_id), PyRep::Integer(mid as i64)])
         .await
         .expect("GetMissionObjectiveInfo");
-    let obj_text = details.dict_get("objectives").and_then(|v| v.as_str()).unwrap_or_default();
-    let dest_name = ctx.sde.stations.get(&dest_station_id).map(|s| s.name.as_str()).unwrap_or("station");
+    let PyRep::List(locations) = details
+        .dict_get("locations")
+        .expect("GetMissionObjectiveInfo locations")
+    else {
+        panic!("GetMissionObjectiveInfo.locations must be a List: {details:?}");
+    };
+    let has_dest_loc = locations.iter().any(|loc| {
+        loc.dict_get("stationID").and_then(|v| v.as_i64()) == Some(dest_station_id)
+            && loc.dict_get("locationType").and_then(|v| v.as_str()) == Some("objective.destination")
+    });
     assert!(
-        obj_text.contains(dest_name),
-        "Objective text '{obj_text}' must mention destination station '{dest_name}'"
+        has_dest_loc,
+        "Objective locations {locations:?} must include destination station {dest_station_id}"
     );
 
     // 2. Accept courier mission -> places cargo in agent station hangar
@@ -2280,7 +2384,7 @@ async fn test_pve_courier_mission_distribution_lifecycle_and_destination_transpo
     let done = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(mid as i64)])
         .await
         .expect("Complete courier mission at destination");
-    assert_eq!(done.dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
+    assert_eq!(do_action_info(&done).dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
 
     let cargo_consumed = ctx.db.with_snapshot(|snap| {
         !snap.items.values().any(|it| it.owner_id == char_id && it.type_id == cargo_type_id)
@@ -2292,7 +2396,10 @@ async fn test_pve_courier_mission_distribution_lifecycle_and_destination_transpo
     let offer2 = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(dist_agent_id)])
         .await
         .expect("Offer second courier mission");
-    let mid2 = offer2.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    let mid2 = do_action_info(&offer2)
+        .dict_get("missionID")
+        .and_then(|v| v.as_i64())
+        .expect("second courier missionID") as u32;
 
     rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid2 as i64)])
         .await
@@ -2327,6 +2434,7 @@ async fn test_pve_trade_mission_commodity_delivery_and_consumption() {
     // parity: feat:pve.mission-trade
     eve_testkit::attest(&["feat:pve.mission-trade"]);
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 602, "demo", "demo-secret", char_id).await;
 
@@ -2393,7 +2501,7 @@ async fn test_pve_trade_mission_commodity_delivery_and_consumption() {
                     mission_id: test_mid,
                     character_id: char_id,
                     agent_id,
-                    solar_system_id: sess.solar_system_id.unwrap(),
+                    solar_system_id: sess.solar_system_id.expect("session solar_system_id"),
                     state: "Accepted".into(),
                     current_room_id: 1,
                     npcs_remaining: 0,
@@ -2421,7 +2529,7 @@ async fn test_pve_trade_mission_commodity_delivery_and_consumption() {
         let done = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(test_mid as i64)])
             .await
             .expect("Trade mission must complete when commodities delivered");
-        assert_eq!(done.dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
+        assert_eq!(do_action_info(&done).dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
 
         let consumed = ctx.db.with_snapshot(|snap| !snap.items.contains_key(&commodity_item_id));
         assert!(consumed, "Delivered trade commodities must be consumed on completion");
@@ -2437,6 +2545,7 @@ async fn test_pve_security_mission_multi_npc_wave_and_elimination() {
     // parity: feat:pve.mission-security
     eve_testkit::attest(&["feat:pve.mission-security"]);
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 603, "demo", "demo-secret", char_id).await;
 
@@ -2460,7 +2569,10 @@ async fn test_pve_security_mission_multi_npc_wave_and_elimination() {
     let offer = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(sec_agent_id)])
         .await
         .expect("Offer security mission");
-    let mid = offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    let mid = do_action_info(&offer)
+        .dict_get("missionID")
+        .and_then(|v| v.as_i64())
+        .expect("security missionID") as u32;
 
     let tmpl = ctx.sde.missions.get(&mid).expect("mission template");
     let agent_info = ctx.sde.agents.get(&sec_agent_id).expect("agent info");
@@ -2527,7 +2639,7 @@ async fn test_pve_security_mission_multi_npc_wave_and_elimination() {
     let done = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(mid as i64)])
         .await
         .expect("Complete security mission when all hostile NPCs eliminated");
-    assert_eq!(done.dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
+    assert_eq!(do_action_info(&done).dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
 }
 
 /// feat:mining.mining-missions
@@ -2539,6 +2651,7 @@ async fn test_pve_mining_mission_asteroid_spawn_and_ore_delivery() {
     // parity: feat:mining.mining-missions, feat:pve.mission-mining
     eve_testkit::attest(&["feat:mining.mining-missions", "feat:pve.mission-mining"]);
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 604, "demo", "demo-secret", char_id).await;
 
@@ -2562,7 +2675,10 @@ async fn test_pve_mining_mission_asteroid_spawn_and_ore_delivery() {
     let offer = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(mining_agent_id)])
         .await
         .expect("Offer mining mission");
-    let mid = offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    let mid = do_action_info(&offer)
+        .dict_get("missionID")
+        .and_then(|v| v.as_i64())
+        .expect("mining missionID") as u32;
 
     let (req_ore_tid, req_units) = ctx.db.with_snapshot(|snap| {
         let meta = load_mission_meta(snap, char_id, mid).expect("mining mission meta");
@@ -2588,7 +2704,7 @@ async fn test_pve_mining_mission_asteroid_spawn_and_ore_delivery() {
     let expected_ast_id = 910_000_000 + (mid as i64) * 1000 + 1;
     let asteroid_record = ctx.db.with_snapshot(|snap| snap.asteroids.get(&expected_ast_id).cloned());
     assert!(asteroid_record.is_some(), "Mission mining asteroid must be spawned in DB snapshot");
-    let ast = asteroid_record.unwrap();
+    let ast = asteroid_record.expect("Mission mining asteroid record");
     assert_eq!(ast.type_id, req_ore_tid, "Spawned asteroid type must match required ore type");
     assert_eq!(ast.solar_system_id, sys_id, "Asteroid must spawn in mission solar system");
     assert!(ast.quantity >= req_units as i64, "Asteroid quantity must be sufficient for mission");
@@ -2617,7 +2733,7 @@ async fn test_pve_mining_mission_asteroid_spawn_and_ore_delivery() {
     let done = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(mid as i64)])
         .await
         .expect("Complete mining mission when ore is in hangar");
-    assert_eq!(done.dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
+    assert_eq!(do_action_info(&done).dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
 
     let ore_consumed = ctx.db.with_snapshot(|snap| !snap.items.contains_key(&ore_item_id));
     assert!(ore_consumed, "Delivered ore must be consumed from hangar on completion");
