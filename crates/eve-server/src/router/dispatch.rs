@@ -252,7 +252,7 @@ impl ServerContext {
         let is_outer_notify_scope =
             !crate::router::cache_notifications::has_staged_dispatch_notifications_scope();
         let start_time = std::time::Instant::now();
-        let res = maybe_with_dispatch_tx_error(
+        let mut res = maybe_with_dispatch_tx_error(
             is_outer_tx_scope,
             maybe_with_staged_dispatch_notifications(
                 is_outer_notify_scope,
