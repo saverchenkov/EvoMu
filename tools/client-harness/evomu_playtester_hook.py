@@ -3495,6 +3495,44 @@ def _settle_after_action(sm, pre_flight_seq, pre_scatter_seq, min_settle_ms=0, m
     return waited
 
 
+def _wait_session_settled(timeout_ms=5000, poll_ms=50):
+    """Yield non-busily until session.mutating and session.changing clear before actions."""
+    def _get_sess():
+        s = getattr(__builtin__, "session", None)
+        if s is None:
+            eve_obj = getattr(__builtin__, "eve", None)
+            s = getattr(eve_obj, "session", None) if eve_obj is not None else None
+        return s
+
+    def _is_settled(s):
+        if s is None:
+            return True
+        return (not getattr(s, "mutating", 0)) and (getattr(s, "changing", None) is None)
+
+    if _is_settled(_get_sess()):
+        return True
+
+    sleeper = H._sleep_ms
+    try:
+        mod = sys.modules.get(__name__)
+        if mod is not None and hasattr(mod, "_sleep_ms"):
+            sleeper = mod._sleep_ms
+    except Exception:
+        pass
+
+    step_ms = max(10, int(poll_ms or 50))
+    max_ms = max(0, int(timeout_ms or 0))
+    max_polls = max(1, (max_ms + step_ms - 1) // step_ms) if max_ms > 0 else 0
+    deadline = time.time() + (max_ms / 1000.0)
+    for _ in range(max_polls):
+        sleeper(step_ms)
+        if _is_settled(_get_sess()):
+            return True
+        if time.time() >= deadline:
+            break
+    return _is_settled(_get_sess())
+
+
 def _execute_action(sm, action):
     global _CONSUMED_FLIGHT_ERR_SEQ, _LAST_SNAPSHOT, _LAST_SNAPSHOT_SM, _LAST_SNAPSHOT_TS
     _install_flight_recorder_hooks(sm)
@@ -3623,6 +3661,8 @@ def _execute_action(sm, action):
 
     def _do_action():
         try:
+            if atype not in ("wait", "close_modal_or_window"):
+                _wait_session_settled(timeout_ms=5000, poll_ms=50)
             if atype in (
                 "open_window",
                 "close_modal_or_window",
