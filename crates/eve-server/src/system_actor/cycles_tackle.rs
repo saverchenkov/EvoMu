@@ -530,6 +530,7 @@ pub(crate) fn reconcile_tackle_and_bubbles(
             cs.disallow_assistance = disallow_assist;
             if ewar_immune {
                 cs.ecm_jammed_remaining_s = 0.0;
+                cs.ecm_jammed_by.clear();
             }
             if nullified_by_mod || nullified_by_hull {
                 cs.is_interdiction_nullified = true;
@@ -753,7 +754,12 @@ pub(crate) fn on_target_unlocked_in_actor(
     for idx in (0..active_module_cycles.len()).rev() {
         let matches_target = match target_id_opt {
             Some(tid) => active_module_cycles[idx].target_id == Some(tid),
-            None => active_module_cycles[idx].target_id.is_some(),
+            None => active_module_cycles[idx].target_id.is_some_and(|tid| {
+                !ballpark
+                    .target_locks
+                    .get(&source_id)
+                    .is_some_and(|locks| locks.iter().any(|l| l.target_id == tid))
+            }),
         };
         if (active_module_cycles[idx].ship_id == source_id
             || parse_siren_tackle_ids(&active_module_cycles[idx].effect_name)

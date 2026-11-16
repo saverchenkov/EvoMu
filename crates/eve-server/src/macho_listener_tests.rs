@@ -829,3 +829,96 @@ async fn re_undock_after_advance_clock_and_dock_delivers_set_state_and_subsequen
     drop(s);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 }
+
+#[tokio::test]
+async fn drain_pending_tick_frames_emits_service_call_for_target_fail_lock_target() {
+    use crate::outbound_sequencer::{OutFrame, SessionWireState};
+    use crate::router::NotificationTarget;
+
+    let ctx = Arc::new(ServerContext::new());
+    let char_id = 90_000_001_i64;
+    let target_id = 881_002_i64;
+    let client_id = 1_000_000_000_099_u64;
+
+    let mut session = SessionState::new(99);
+    session.user_id = Some(1);
+    session.character_id = Some(char_id);
+    session.live_notify_listener = true;
+    ctx.db
+        .acquire_online_lock(1, session.session_id, Some(char_id), true, ctx.now_unix_secs())
+        .expect("acquire_online_lock");
+    ctx.sync_session(&mut session);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let mut sys_rx = ctx.systems.get_or_spawn(30_000_142).subscribe();
+    let mut subscribed_sys_id = Some(30_000_142);
+    let mut wire_state = SessionWireState::new(session.session_id, client_id);
+    let mut wire_refs = CallReqWireRefs {
+        client_id,
+        sys_rx: &mut sys_rx,
+        subscribed_sys_id: &mut subscribed_sys_id,
+        wire_state: &mut wire_state,
+    };
+
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "FailLockTarget",
+        "service:target",
+        vec![PyRep::Integer(target_id)],
+    );
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnTarget",
+        "charid",
+        vec![PyRep::Integer(target_id), PyRep::String("lost".into())],
+    );
+
+    let (out_frames, wire_packets) =
+        drain_pending_tick_frames_for_wire_session(&ctx, &mut session, &mut wire_refs);
+
+    assert!(
+        out_frames.iter().any(|frame| matches!(
+            frame,
+            OutFrame::ServiceCall { service, method, args }
+                if service == "target"
+                    && method == "FailLockTarget"
+                    && args == &vec![PyRep::Integer(target_id)]
+        )),
+        "expected OutFrame::ServiceCall for service:target FailLockTarget, got {out_frames:?}"
+    );
+    assert!(
+        out_frames.iter().any(|frame| matches!(
+            frame,
+            OutFrame::Notification { event, .. } if event == "OnTarget"
+        )),
+        "expected OutFrame::Notification for charid OnTarget, got {out_frames:?}"
+    );
+
+    let decoded: Vec<MachoPacket> = wire_packets
+        .iter()
+        .map(|p| MachoPacket::from_pyrep(p).expect("decode wire packet"))
+        .collect();
+    let expected_payload = PyRep::Tuple(vec![PyRep::Tuple(vec![
+        PyRep::Integer(0),
+        PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+            PyRep::Integer(1),
+            PyRep::String("FailLockTarget".into()),
+            PyRep::Tuple(vec![PyRep::Integer(target_id)]),
+        ]))),
+    ])]);
+    assert!(
+        decoded.iter().any(|pkt| {
+            pkt.packet_type == MachoPacketType::Notification
+                && matches!(
+                    &pkt.destination,
+                    MachoAddress::Client {
+                        client_id: cid,
+                        service: Some(svc),
+                        ..
+                    } if *cid == client_id && svc == "target"
+                )
+                && pkt.payload == expected_payload
+        }),
+        "expected wire Notification targeting client service 'target' with FailLockTarget, got {decoded:?}"
+    );
+}

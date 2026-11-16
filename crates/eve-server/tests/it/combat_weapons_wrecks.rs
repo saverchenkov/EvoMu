@@ -1311,3 +1311,672 @@ async fn test_combat_insurance_void_and_expiry_and_pochven_loot_drop() {
     );
 }
 }
+
+#[allow(unused_imports)]
+pub(crate) mod gh1082_weapons_and_death {
+    use super::triglavian_entropic_spool_edencom_vorton::{fit_module_and_charge, setup_pilot_session};
+    use eve_db::{InventoryFlag, TrainedSkillRecord};
+    use eve_destiny::{Ball, CombatState, DVec3, MovementMode, TargetLock};
+    use eve_machonet::SessionState;
+    use eve_proto::{ClientError, PyRep, UserErrorKey};
+    use eve_server::combat::death_pipeline::execute_death_pipeline;
+    use eve_server::router::ServerContext;
+    use eve_server::system_actor::SystemHandle;
+    use std::collections::HashMap;
+
+    const ATT_CHAR: i64 = 90_000_001;
+    const VIC_CHAR: i64 = 90_000_002;
+    const OBS_CHAR: i64 = 90_000_003;
+    const SYS_ID: u32 = 30_000_142;
+
+    fn grant_gunnery_and_targeting(ctx: &ServerContext, char_id: i64) {
+        ctx.db.with_mut_snapshot(|snap| {
+            let sk = snap.skills.entry(char_id).or_default();
+            for sid in [3300u32, 3301, 3302, 3303, 3318, 3428, 3429] {
+                sk.insert(
+                    sid,
+                    TrainedSkillRecord {
+                        type_id: sid,
+                        level: 5,
+                        skill_points: 256_000.0,
+                    },
+                );
+            }
+        });
+    }
+
+    async fn setup_combatant_with_observer(
+        ctx: &ServerContext,
+        base_id: i64,
+        att_type: u32,
+        vic_type: u32,
+        vic_hp_override: Option<f64>,
+    ) -> (SessionState, i64, SessionState, i64, i64, SystemHandle) {
+        ctx.set_clock_paused(true);
+        ctx.set_invention_roll_override(Some(0.50));
+        let att_ship = base_id;
+        let vic_ship = base_id + 1;
+        let obs_ship = base_id + 2;
+        let att_sess = setup_pilot_session(
+            ctx,
+            (base_id as u64) + 10,
+            ATT_CHAR,
+            att_ship,
+            att_type,
+            SYS_ID,
+            DVec3::ZERO,
+        )
+        .await;
+        let vic_sess = setup_pilot_session(
+            ctx,
+            (base_id as u64) + 11,
+            VIC_CHAR,
+            vic_ship,
+            vic_type,
+            SYS_ID,
+            DVec3::new(1_500.0, 0.0, 0.0),
+        )
+        .await;
+        ctx.db.with_mut_snapshot(|snap| {
+            let obs_uid = (base_id as u64) + 12;
+            let obs_user = format!("obs_{base_id}");
+            snap.accounts.entry(obs_user.clone()).or_insert_with(|| eve_db::AccountRecord {
+                user_id: obs_uid,
+                username: obs_user.clone(),
+                password_token: eve_db::WorldRepository::hash_password_token(&obs_user, "obs-secret"),
+                role: eve_db::service_roles::ROLE_PLAYER_DEFAULT,
+                banned_until_unix: None,
+                ban_reason: None,
+            });
+            if !snap.characters.contains_key(&OBS_CHAR) {
+                if let Some(mut obs_ch) = snap.characters.get(&ATT_CHAR).cloned() {
+                    obs_ch.character_id = OBS_CHAR;
+                    obs_ch.user_id = obs_uid;
+                    obs_ch.name = "Observer Pilot".to_string();
+                    obs_ch.active_ship_id = obs_ship;
+                    obs_ch.solar_system_id = SYS_ID;
+                    obs_ch.station_id = None;
+                    obs_ch.structure_id = None;
+                    snap.characters.insert(OBS_CHAR, obs_ch);
+                }
+            }
+        });
+        let _obs_sess = setup_pilot_session(
+            ctx,
+            (base_id as u64) + 12,
+            OBS_CHAR,
+            obs_ship,
+            587,
+            SYS_ID,
+            DVec3::new(3_000.0, 0.0, 0.0),
+        )
+        .await;
+        grant_gunnery_and_targeting(ctx, ATT_CHAR);
+        grant_gunnery_and_targeting(ctx, OBS_CHAR);
+        let sys = ctx.systems.get_or_spawn(SYS_ID);
+        for &bid in &[att_ship, vic_ship, obs_ship] {
+            if let Ok(Some(mut cs)) = sys.get_combat_state(bid).await {
+                cs.undock_invulnerable_remaining_ticks = 0;
+                if bid == vic_ship {
+                    if let Some(hp) = vic_hp_override {
+                        cs.shield_hp = 0.0;
+                        cs.armor_hp = 0.0;
+                        cs.structure_hp = hp;
+                        cs.max_structure_hp = hp.max(100.0);
+                    }
+                }
+                let _ = sys.set_combat_state(bid, cs).await;
+            }
+        }
+        (att_sess, att_ship, vic_sess, vic_ship, obs_ship, sys)
+    }
+
+    async fn lock_target_sync(sys: &SystemHandle, source: i64, target: i64) {
+        let _ = sys
+            .add_target_lock(
+                source,
+                TargetLock {
+                    target_id: target,
+                    lock_time_ms: 500.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await;
+    }
+
+    fn parse_destiny_updates(updates: &PyRep) -> Vec<(String, Vec<PyRep>)> {
+        let PyRep::List(entries) = updates else {
+            return Vec::new();
+        };
+        entries
+            .iter()
+            .filter_map(|e| {
+                let PyRep::Tuple(outer) = e else { return None };
+                let PyRep::Tuple(action) = outer.get(1)? else { return None };
+                let name = action.first()?.as_str()?.to_string();
+                let args = match action.get(1) {
+                    Some(PyRep::Tuple(a)) => a.clone(),
+                    Some(other) => vec![other.clone()],
+                    None => Vec::new(),
+                };
+                Some((name, args))
+            })
+            .collect()
+    }
+
+    fn remove_ball_ids(args: &[PyRep]) -> Vec<i64> {
+        match args.first() {
+            Some(PyRep::Integer(id)) => vec![*id],
+            Some(PyRep::List(items)) => items.iter().filter_map(|x| x.as_i64()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn add_balls2_has_id(args: &[PyRep], target_id: i64) -> bool {
+        fn contains_int(r: &PyRep, target_id: i64) -> bool {
+            match r {
+                PyRep::Integer(v) => *v == target_id,
+                PyRep::List(xs) | PyRep::Tuple(xs) => xs.iter().any(|x| contains_int(x, target_id)),
+                PyRep::KeyVal(m) => m.values().any(|v| contains_int(v, target_id)),
+                PyRep::Dict(kvs) => kvs.iter().any(|(_, v)| contains_int(v, target_id)),
+                _ => false,
+            }
+        }
+        args.iter().any(|a| contains_int(a, target_id))
+    }
+
+    fn is_fx(n: &eve_server::router::cache_notifications::PendingMachoNotification, mod_id: i64, start_val: i64, guid: Option<&str>, charge: Option<u32>) -> bool {
+        if n.event != "OnSpecialFX" || n.args.len() != 14 {
+            return false;
+        }
+        let mod_ok = n.args[1].as_i64() == Some(mod_id);
+        let start_ok = n.args[7].as_i64() == Some(start_val);
+        let guid_ok = guid.map_or(true, |g| n.args[5].as_str() == Some(g));
+        let charge_ok = match charge {
+            Some(cid) => n.args[4].as_i64() == Some(i64::from(cid)),
+            None => matches!(n.args[4], PyRep::None),
+        };
+        mod_ok && start_ok && guid_ok && charge_ok
+    }
+
+    #[tokio::test]
+    async fn turret_consumes_ammo_hits_on_activation_stops_when_empty() {
+        // parity: feat:modules.turret-projectile, feat:modules.turret-hybrid, feat:modules.turret-laser, notify:OnSpecialFX, notify:OnDamageMessage, notify:OnDamageStateChange, notify:OnGodmaShipEffect
+        eve_testkit::attest(&[
+            "feat:modules.turret-projectile",
+            "feat:modules.turret-hybrid",
+            "feat:modules.turret-laser",
+            "notify:OnSpecialFX",
+            "notify:OnDamageMessage",
+            "notify:OnDamageStateChange",
+            "notify:OnGodmaShipEffect",
+        ]);
+
+        let ctx = ServerContext::new();
+        let (mut att_sess, att_ship, _vic_sess, vic_ship, _obs_ship, sys) =
+            setup_combatant_with_observer(&ctx, 790_000, 16236, 24690, None).await; // Coercer + Maelstrom
+        let kw = HashMap::new();
+
+        // 1. Negative: activating without a target lock raises UserErrorKey::TargetNotLocked
+        let ac_id = 791_001i64;
+        let ac_ammo = 791_002i64;
+        fit_module_and_charge(&ctx, ATT_CHAR, att_ship, ac_id, 486, InventoryFlag::HiSlot0, Some((ac_ammo, 185, 1)));
+        let hybrid_id = 791_003i64;
+        fit_module_and_charge(&ctx, ATT_CHAR, att_ship, hybrid_id, 10678, InventoryFlag::HiSlot1, Some((791_004, 222, 5)));
+        let laser_id = 791_005i64;
+        fit_module_and_charge(&ctx, ATT_CHAR, att_ship, laser_id, 3041, InventoryFlag::HiSlot2, Some((791_006, 246, 1)));
+
+        let no_lock_err = ctx
+            .dispatch_rpc(
+                &mut att_sess,
+                "dogmaIM",
+                None,
+                "Activate",
+                &[PyRep::Integer(ac_id), PyRep::String("projectileFired".into()), PyRep::Integer(vic_ship)],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            no_lock_err.to_client_error("dogmaIM", "Activate"),
+            ClientError::User { key: UserErrorKey::TargetNotLocked, args: Vec::new() }
+        );
+
+        lock_target_sync(&sys, att_ship, vic_ship).await;
+        let _ = ctx.drain_notifications_for_char(ATT_CHAR);
+        let _ = ctx.drain_notifications_for_char(VIC_CHAR);
+        let _ = ctx.drain_notifications_for_char(OBS_CHAR);
+
+        // 2. Projectile AutoCannon with 1 round: immediate volley damage, start FX (repeat=1000, effects.ProjectileFired),
+        //    and EffectAlreadyActive2 on duplicate activation.
+        let pre_cs = sys.get_combat_state(vic_ship).await.unwrap().unwrap();
+        let act_res = ctx
+            .dispatch_rpc(
+                &mut att_sess,
+                "dogmaIM",
+                None,
+                "Activate",
+                &[PyRep::Integer(ac_id), PyRep::String("projectileFired".into()), PyRep::Integer(vic_ship), PyRep::Integer(1000)],
+                &kw,
+                None,
+            )
+            .await
+            .expect("AutoCannon Activate");
+        assert_eq!(act_res.dict_get("active"), Some(&PyRep::Bool(true)));
+        let post_cs = sys.get_combat_state(vic_ship).await.unwrap().unwrap();
+        assert!(post_cs.shield_hp < pre_cs.shield_hp, "first cycle must apply immediate damage");
+        assert!(
+            ctx.db.with_snapshot(|s| !s.items.contains_key(&ac_ammo)),
+            "last round consumed must remove ammo item"
+        );
+
+        let att_n = ctx.drain_notifications_for_char(ATT_CHAR);
+        let vic_n = ctx.drain_notifications_for_char(VIC_CHAR);
+        let obs_n = ctx.drain_notifications_for_char(OBS_CHAR);
+        assert!(att_n.iter().any(|n| n.event == "OnDamageMessage"), "shooter must receive OnDamageMessage");
+        assert!(vic_n.iter().any(|n| n.event == "OnDamageStateChange"), "target must receive OnDamageStateChange");
+        let start_fx = att_n.iter().find(|n| is_fx(n, ac_id, 1, Some("effects.ProjectileFired"), Some(185)))
+            .expect("shooter must receive ProjectileFired start FX");
+        assert_eq!(start_fx.args[10], PyRep::Integer(1000), "start FX repeat must be 1000");
+        assert!(obs_n.iter().any(|n| is_fx(n, ac_id, 1, Some("effects.ProjectileFired"), Some(185))),
+            "observer must receive ProjectileFired start FX");
+
+        let dup_err = ctx
+            .dispatch_rpc(
+                &mut att_sess,
+                "dogmaIM",
+                None,
+                "Activate",
+                &[PyRep::Integer(ac_id), PyRep::String("projectileFired".into()), PyRep::Integer(vic_ship)],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            dup_err.to_client_error("dogmaIM", "Activate"),
+            ClientError::user_with_args(
+                UserErrorKey::EffectAlreadyActive2,
+                [("modulename", PyRep::String("200mm AutoCannon I".into()))],
+            )
+        );
+
+        // Advance past cycle duration -> last round stops effect with stop OnSpecialFX (start=0, charge=185) to owner + observer
+        let _ = ctx.drain_notifications_for_char(ATT_CHAR);
+        let _ = ctx.drain_notifications_for_char(OBS_CHAR);
+        for _ in 0..8 {
+            let _ = sys.step_manual(1.0).await.unwrap();
+        }
+        let att_stop = ctx.drain_notifications_for_char(ATT_CHAR);
+        let obs_stop = ctx.drain_notifications_for_char(OBS_CHAR);
+        assert!(
+            att_stop.iter().any(|n| is_fx(n, ac_id, 0, Some("effects.ProjectileFired"), Some(185))),
+            "owner must receive stop OnSpecialFX with chargeTypeID=185 when last round spent: {att_stop:?}"
+        );
+        assert!(
+            obs_stop.iter().any(|n| is_fx(n, ac_id, 0, Some("effects.ProjectileFired"), Some(185))),
+            "observer must receive stop OnSpecialFX with chargeTypeID=185: {obs_stop:?}"
+        );
+        assert!(!ctx.db.with_snapshot(|s| s.module_active_states.contains(&ac_id)));
+
+        // 3. Hybrid + Laser emit exact GUIDs (`effects.HybridFired`, `effects.Laser`) and decrement non-final charge stacksize - 1
+        let _ = ctx
+            .dispatch_rpc(&mut att_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(hybrid_id), PyRep::String("targetAttack".into()), PyRep::Integer(vic_ship)], &kw, None)
+            .await
+            .expect("Hybrid Activate");
+        assert_eq!(ctx.db.with_snapshot(|s| s.items[&791_004].quantity), 4);
+        let _ = ctx
+            .dispatch_rpc(&mut att_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(vic_ship)], &kw, None)
+            .await
+            .expect("Laser Activate");
+        let n_hyb_las = ctx.drain_notifications_for_char(ATT_CHAR);
+        assert!(n_hyb_las.iter().any(|n| is_fx(n, hybrid_id, 1, Some("effects.HybridFired"), Some(222))));
+        assert!(n_hyb_las.iter().any(|n| is_fx(n, laser_id, 1, Some("effects.Laser"), Some(246))));
+
+        // 4. Grouped turrets fan out OnSpecialFX start & stop per member and consume 1 charge per turret
+        let grp_a = 791_010i64;
+        let grp_b = 791_011i64;
+        let ammo_a = 791_012i64;
+        let ammo_b = 791_013i64;
+        fit_module_and_charge(&ctx, ATT_CHAR, att_ship, grp_a, 486, InventoryFlag::HiSlot3, Some((ammo_a, 185, 1)));
+        fit_module_and_charge(&ctx, ATT_CHAR, att_ship, grp_b, 486, InventoryFlag::HiSlot4, Some((ammo_b, 185, 1)));
+        let _ = ctx
+            .dispatch_rpc(&mut att_sess, "dogmaIM", None, "LinkWeapons", &[PyRep::Integer(att_ship), PyRep::Integer(grp_a), PyRep::Integer(grp_b)], &kw, None)
+            .await
+            .expect("LinkWeapons");
+        let _ = ctx.drain_notifications_for_char(ATT_CHAR);
+        let _ = ctx.drain_notifications_for_char(OBS_CHAR);
+
+        let _ = ctx
+            .dispatch_rpc(&mut att_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(grp_a), PyRep::String("projectileFired".into()), PyRep::Integer(vic_ship)], &kw, None)
+            .await
+            .expect("Grouped Activate");
+        assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&ammo_a) && !s.items.contains_key(&ammo_b)),
+            "grouped volley must consume 1 round from each turret");
+        let grp_start_att = ctx.drain_notifications_for_char(ATT_CHAR);
+        let grp_start_obs = ctx.drain_notifications_for_char(OBS_CHAR);
+        assert!(grp_start_att.iter().any(|n| is_fx(n, grp_a, 1, Some("effects.ProjectileFired"), Some(185))));
+        assert!(grp_start_att.iter().any(|n| is_fx(n, grp_b, 1, Some("effects.ProjectileFired"), Some(185))));
+        assert!(grp_start_obs.iter().any(|n| is_fx(n, grp_b, 1, Some("effects.ProjectileFired"), Some(185))));
+
+        for _ in 0..8 {
+            let _ = sys.step_manual(1.0).await.unwrap();
+        }
+        let grp_stop_obs = ctx.drain_notifications_for_char(OBS_CHAR);
+        assert!(grp_stop_obs.iter().any(|n| is_fx(n, grp_a, 0, Some("effects.ProjectileFired"), Some(185))));
+        assert!(grp_stop_obs.iter().any(|n| is_fx(n, grp_b, 0, Some("effects.ProjectileFired"), Some(185))));
+    }
+
+    #[tokio::test]
+    async fn civilian_turret_fires_without_charge() {
+        // parity: feat:modules.turret-projectile, notify:OnSpecialFX, notify:OnDamageMessage
+        eve_testkit::attest(&[
+            "feat:modules.turret-projectile",
+            "notify:OnSpecialFX",
+            "notify:OnDamageMessage",
+        ]);
+
+        let ctx = ServerContext::new();
+        let (mut att_sess, att_ship, _vic_sess, vic_ship, _obs_ship, sys) =
+            setup_combatant_with_observer(&ctx, 792_000, 587, 587, None).await;
+        let kw = HashMap::new();
+        let civ_gun = 792_010i64;
+        // 3636 = Civilian Gatling Autocannon (capacity = 0.0, fires without charge)
+        fit_module_and_charge(&ctx, ATT_CHAR, att_ship, civ_gun, 3636, InventoryFlag::HiSlot0, None);
+        lock_target_sync(&sys, att_ship, vic_ship).await;
+        let _ = ctx.drain_notifications_for_char(ATT_CHAR);
+        let _ = ctx.drain_notifications_for_char(OBS_CHAR);
+
+        let pre_cs = sys.get_combat_state(vic_ship).await.unwrap().unwrap();
+        let act = ctx
+            .dispatch_rpc(
+                &mut att_sess,
+                "dogmaIM",
+                None,
+                "Activate",
+                &[PyRep::Integer(civ_gun), PyRep::String("projectileFired".into()), PyRep::Integer(vic_ship), PyRep::Integer(1000)],
+                &kw,
+                None,
+            )
+            .await
+            .expect("Civilian turret must activate without ammo");
+        assert_eq!(act.dict_get("active"), Some(&PyRep::Bool(true)));
+        let post_cs = sys.get_combat_state(vic_ship).await.unwrap().unwrap();
+        assert!(post_cs.shield_hp < pre_cs.shield_hp, "civilian turret must deal damage without charge");
+
+        let att_n = ctx.drain_notifications_for_char(ATT_CHAR);
+        let obs_n = ctx.drain_notifications_for_char(OBS_CHAR);
+        assert!(att_n.iter().any(|n| n.event == "OnDamageMessage"));
+        assert!(att_n.iter().any(|n| is_fx(n, civ_gun, 1, Some("effects.ProjectileFired"), None)));
+        assert!(obs_n.iter().any(|n| is_fx(n, civ_gun, 1, Some("effects.ProjectileFired"), None)));
+    }
+
+    #[tokio::test]
+    async fn laser_stop_fx_targeted_and_kill_clears_target() {
+        // parity: feat:modules.turret-laser, notify:OnSpecialFX, notify:OnTarget, notify:OnGodmaShipEffect
+        eve_testkit::attest(&[
+            "feat:modules.turret-laser",
+            "notify:OnSpecialFX",
+            "notify:OnTarget",
+            "notify:OnGodmaShipEffect",
+        ]);
+
+        let ctx = ServerContext::new();
+        let (mut att_sess, att_ship, _vic_sess, vic_ship, _obs_ship, sys) =
+            setup_combatant_with_observer(&ctx, 793_000, 16236, 587, Some(1.0)).await;
+        let kw = HashMap::new();
+        let laser_id = 793_010i64;
+        fit_module_and_charge(&ctx, ATT_CHAR, att_ship, laser_id, 3041, InventoryFlag::HiSlot0, Some((793_011, 246, 1)));
+        lock_target_sync(&sys, att_ship, vic_ship).await;
+        let _ = ctx.drain_notifications_for_char(ATT_CHAR);
+        let _ = ctx.drain_notifications_for_char(OBS_CHAR);
+
+        // Fatal volley kills low-HP victim immediately, stops laser FX (no beam restart), and clears lock
+        let _ = ctx
+            .dispatch_rpc(
+                &mut att_sess,
+                "dogmaIM",
+                None,
+                "Activate",
+                &[PyRep::Integer(laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(vic_ship), PyRep::Integer(1000)],
+                &kw,
+                None,
+            )
+            .await
+            .expect("Fatal laser activation");
+
+        let att_n = ctx.drain_notifications_for_char(ATT_CHAR);
+        let obs_n = ctx.drain_notifications_for_char(OBS_CHAR);
+        assert!(
+            att_n.iter().any(|n| is_fx(n, laser_id, 0, Some("effects.Laser"), Some(246)) && n.args[3] == PyRep::Integer(vic_ship)),
+            "attacker must receive targeted stop OnSpecialFX with targetID={vic_ship}: {att_n:?}"
+        );
+        assert!(
+            obs_n.iter().any(|n| is_fx(n, laser_id, 0, Some("effects.Laser"), Some(246)) && n.args[3] == PyRep::Integer(vic_ship)),
+            "observer must receive targeted stop OnSpecialFX"
+        );
+        assert!(
+            att_n.iter().any(|n| n.event == "OnGodmaShipEffect" && n.args.first() == Some(&PyRep::Integer(laser_id)) && n.args.get(3) == Some(&PyRep::Integer(0)) && n.args.get(4) == Some(&PyRep::Integer(0))),
+            "laser OnGodmaShipEffect must deactivate in same tick"
+        );
+        assert!(
+            att_n.iter().any(|n| n.event == "OnTarget" && n.args == vec![PyRep::Integer(vic_ship), PyRep::String("lost".into())]),
+            "target kill must emit OnTarget lost"
+        );
+        assert!(sys.get_target_locks(att_ship).await.unwrap().is_empty());
+
+        // Advancing further does not restart any beam FX
+        let _ = sys.step_manual(1.0).await.unwrap();
+        let after_n = ctx.drain_notifications_for_char(ATT_CHAR);
+        assert!(!after_n.iter().any(|n| is_fx(n, laser_id, 1, None, None)), "no beam restart after kill");
+    }
+
+    #[tokio::test]
+    async fn target_death_stops_attacker_modules_immediately() {
+        // parity: feat:combat.ship-destruction, notify:OnSpecialFX, notify:OnGodmaShipEffect, notify:OnTarget
+        eve_testkit::attest(&[
+            "feat:combat.ship-destruction",
+            "notify:OnSpecialFX",
+            "notify:OnGodmaShipEffect",
+            "notify:OnTarget",
+        ]);
+
+        let ctx = ServerContext::new();
+        let (mut att_sess, att_ship, _vic_sess, vic_ship, _obs_ship, sys) =
+            setup_combatant_with_observer(&ctx, 794_000, 16236, 587, Some(1.0)).await;
+        let kw = HashMap::new();
+
+        // Spawn second unrelated live target
+        let live_target = 794_050i64;
+        let _ = sys
+            .spawn_ball_with_combat(
+                Ball {
+                    id: live_target,
+                    type_id: 24690,
+                    position: DVec3::new(1_800.0, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 100.0,
+                    inertia: 1.0,
+                    mass: 1e7,
+                    radius: 400.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                ctx.build_type_combat_state(24690),
+            )
+            .await;
+
+        let scram_dead = 794_010i64;
+        let gun_dead = 794_011i64;
+        let gun_live = 794_012i64;
+        fit_module_and_charge(&ctx, ATT_CHAR, att_ship, scram_dead, 447, InventoryFlag::MedSlot0, None);
+        fit_module_and_charge(&ctx, ATT_CHAR, att_ship, gun_dead, 486, InventoryFlag::HiSlot0, Some((794_013, 185, 10)));
+        fit_module_and_charge(&ctx, ATT_CHAR, att_ship, gun_live, 486, InventoryFlag::HiSlot1, Some((794_014, 185, 10)));
+        lock_target_sync(&sys, att_ship, vic_ship).await;
+        lock_target_sync(&sys, att_ship, live_target).await;
+
+        // Activate scram on soon-to-die vic_ship + gun on live_target, then kill vic_ship with gun_dead
+        let _ = ctx
+            .dispatch_rpc(&mut att_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(scram_dead), PyRep::String("warpScramble".into()), PyRep::Integer(vic_ship)], &kw, None)
+            .await
+            .expect("scram on victim");
+        let _ = ctx
+            .dispatch_rpc(&mut att_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(gun_live), PyRep::String("projectileFired".into()), PyRep::Integer(live_target)], &kw, None)
+            .await
+            .expect("gun on live target");
+        let _ = ctx.drain_notifications_for_char(ATT_CHAR);
+
+        let _ = ctx
+            .dispatch_rpc(&mut att_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(gun_dead), PyRep::String("projectileFired".into()), PyRep::Integer(vic_ship)], &kw, None)
+            .await
+            .expect("lethal shot");
+
+        // Both modules targeting dead vic_ship stopped immediately; module targeting live_target remains active; lock on live_target kept
+        assert_eq!(sys.update_module_overload(att_ship, scram_dead, false).await, Ok(false), "scram on dead target must stop");
+        assert_eq!(sys.update_module_overload(att_ship, gun_dead, false).await, Ok(false), "turret on dead target must stop");
+        assert_eq!(sys.update_module_overload(att_ship, gun_live, false).await, Ok(true), "module on unrelated live target stays active");
+        let rem_locks: Vec<i64> = sys.get_target_locks(att_ship).await.unwrap().into_iter().map(|l| l.target_id).collect();
+        assert_eq!(rem_locks, vec![live_target], "only dead target lock must be cleared");
+
+        // Re-activating against dead target raises TargetNotLocked
+        let dead_err = ctx
+            .dispatch_rpc(&mut att_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(scram_dead), PyRep::String("warpScramble".into()), PyRep::Integer(vic_ship)], &kw, None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            dead_err.to_client_error("dogmaIM", "Activate"),
+            ClientError::User { key: UserErrorKey::TargetNotLocked, args: Vec::new() }
+        );
+    }
+
+    #[tokio::test]
+    async fn ship_death_sequence_fx_remove_then_wreck_addballs() {
+        // parity: feat:combat.ship-destruction, destiny:TerminalPlayDestructionEffect, destiny:RemoveBalls, destiny:AddBalls2
+        eve_testkit::attest(&[
+            "feat:combat.ship-destruction",
+            "destiny:TerminalPlayDestructionEffect",
+            "destiny:RemoveBalls",
+            "destiny:AddBalls2",
+        ]);
+
+        let ctx = ServerContext::new();
+        let (_att_sess, _att_ship, _vic_sess, vic_ship, obs_ship, sys) =
+            setup_combatant_with_observer(&ctx, 795_000, 587, 587, None).await;
+        let _ = sys.drain_observer_updates(obs_ship).await.unwrap();
+
+        let res = execute_death_pipeline(&ctx, SYS_ID, VIC_CHAR, vic_ship, ATT_CHAR, DVec3::new(1_500.0, 0.0, 0.0), ctx.now_unix())
+            .await
+            .expect("ship death pipeline");
+        let wreck_id = res.wreck_item_id;
+
+        let (_tick, _evs, updates) = sys.drain_observer_updates(obs_ship).await.unwrap();
+        let actions = parse_destiny_updates(&updates);
+        let fx_pos = actions
+            .iter()
+            .position(|(n, a)| n == "TerminalPlayDestructionEffect" && a.first() == Some(&PyRep::Integer(vic_ship)))
+            .unwrap_or_else(|| panic!("missing TerminalPlayDestructionEffect in {actions:?}"));
+        let rem_pos = actions
+            .iter()
+            .position(|(n, a)| (n == "RemoveBall" || n == "RemoveBalls") && remove_ball_ids(a).contains(&vic_ship))
+            .unwrap_or_else(|| panic!("missing victim RemoveBall(s) in {actions:?}"));
+        let wreck_pos = actions
+            .iter()
+            .position(|(n, a)| n == "AddBalls2" && add_balls2_has_id(a, wreck_id))
+            .unwrap_or_else(|| panic!("missing wreck AddBalls2({wreck_id}) in {actions:?}"));
+        assert!(
+            fx_pos < rem_pos && rem_pos < wreck_pos,
+            "observer death sequence must be destruction FX ({fx_pos}) < victim remove ({rem_pos}) < wreck AddBalls2 ({wreck_pos}): {actions:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pod_ego_ball_after_shipid_session_change() {
+        // parity: feat:combat.ship-destruction, feat:combat.capsule-ejection-items, notify:OnSessionChanged, destiny:AddBalls2
+        eve_testkit::attest(&[
+            "feat:combat.ship-destruction",
+            "feat:combat.capsule-ejection-items",
+            "notify:OnSessionChanged",
+            "destiny:AddBalls2",
+        ]);
+
+        let ctx = ServerContext::new();
+        let (_att_sess, _att_ship, mut vic_sess, vic_ship, obs_ship, sys) =
+            setup_combatant_with_observer(&ctx, 796_000, 587, 587, None).await;
+        let _ = sys.drain_observer_updates(obs_ship).await.unwrap();
+        let _ = ctx.drain_notifications_for_char(VIC_CHAR);
+
+        let death = execute_death_pipeline(&ctx, SYS_ID, VIC_CHAR, vic_ship, ATT_CHAR, DVec3::new(1_500.0, 0.0, 0.0), ctx.now_unix())
+            .await
+            .expect("ship death");
+        let pod_id = death.ejected_capsule_id.expect("capsule ejected");
+        assert_ne!(pod_id, vic_ship);
+        assert_eq!(
+            ctx.db.with_snapshot(|s| s.characters[&VIC_CHAR].active_ship_id),
+            pod_id
+        );
+
+        let (_tick, _evs, obs_updates) = sys.drain_observer_updates(obs_ship).await.unwrap();
+        let actions = parse_destiny_updates(&obs_updates);
+        assert!(
+            actions.iter().any(|(n, a)| n == "AddBalls2" && add_balls2_has_id(a, pod_id)),
+            "ejected capsule {pod_id} must appear via AddBalls2"
+        );
+        let pod_ball = sys.get_ball_snapshot(pod_id).await.unwrap().expect("pod ball present");
+        assert_eq!(pod_ball.1.type_id, 670);
+
+        // Victim's session shipid transitions to capsule cleanly after pod AddBalls2 is on grid
+        let _ = ctx.execute_session_transition_sync(
+            Some(&mut vic_sess),
+            eve_server::router::SessionTransitionSpec::for_kind(
+                VIC_CHAR,
+                eve_server::router::TransitionKind::EjectToPod { capsule_id: pod_id },
+                "eject",
+            )
+            .with_apply_db(false),
+        );
+        assert_eq!(vic_sess.ship_id, Some(pod_id));
+        let vic_notifs = ctx.drain_notifications_for_char(VIC_CHAR);
+        assert!(
+            vic_notifs.iter().any(|n| n.event == "OnSessionChanged"),
+            "victim must receive session change notification for capsule shipid"
+        );
+    }
+
+    #[tokio::test]
+    async fn podded_capsule_removeballs_reaches_observers() {
+        // parity: feat:combat.pod-destruction, destiny:TerminalPlayDestructionEffect, destiny:RemoveBalls
+        eve_testkit::attest(&[
+            "feat:combat.pod-destruction",
+            "destiny:TerminalPlayDestructionEffect",
+            "destiny:RemoveBalls",
+        ]);
+
+        let ctx = ServerContext::new();
+        let (_att_sess, _att_ship, _vic_sess, vic_ship, obs_ship, sys) =
+            setup_combatant_with_observer(&ctx, 797_000, 587, 587, None).await;
+        let death = execute_death_pipeline(&ctx, SYS_ID, VIC_CHAR, vic_ship, ATT_CHAR, DVec3::new(1_500.0, 0.0, 0.0), ctx.now_unix())
+            .await
+            .expect("ship death");
+        let pod_id = death.ejected_capsule_id.expect("capsule ejected");
+        let _ = sys.drain_observer_updates(obs_ship).await.unwrap();
+
+        let _ = execute_death_pipeline(&ctx, SYS_ID, VIC_CHAR, pod_id, ATT_CHAR, DVec3::new(1_500.0, 0.0, 0.0), ctx.now_unix())
+            .await
+            .expect("pod death");
+
+        let (_tick, _evs, obs_updates) = sys.drain_observer_updates(obs_ship).await.unwrap();
+        let actions = parse_destiny_updates(&obs_updates);
+        let fx_pos = actions
+            .iter()
+            .position(|(n, a)| n == "TerminalPlayDestructionEffect" && a.first() == Some(&PyRep::Integer(pod_id)))
+            .unwrap_or_else(|| panic!("missing capsule TerminalPlayDestructionEffect in {actions:?}"));
+        let rem_pos = actions
+            .iter()
+            .position(|(n, a)| (n == "RemoveBall" || n == "RemoveBalls") && remove_ball_ids(a).contains(&pod_id))
+            .unwrap_or_else(|| panic!("missing capsule RemoveBall(s) in {actions:?}"));
+        assert!(fx_pos < rem_pos, "pod destruction FX ({fx_pos}) must precede RemoveBall(s) ({rem_pos})");
+    }
+}

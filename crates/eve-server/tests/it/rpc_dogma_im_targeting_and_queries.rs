@@ -604,3 +604,333 @@ async fn test_module_cycles_warp_and_range_deactivation() {
     let _ = sys.step_manual(1.0).await.unwrap();
     assert_eq!(sys.update_module_overload(ship1, 999_104, false).await, Ok(false), "cycle deactivates when target removed from ballpark");
 }
+
+#[tokio::test]
+async fn warp_fails_pending_lock_via_target_service_and_allows_retry() {
+    // parity: rpc:dogmaIM.CancelAddTarget, notify:OnTarget, notify:OnTargetClear
+    eve_testkit::attest(&[
+        "rpc:dogmaIM.CancelAddTarget",
+        "notify:OnTarget",
+        "notify:OnTargetClear",
+    ]);
+
+    let ctx = new_ctx();
+    let mut s1 = login_select(&ctx, C1, 9301).await;
+    let mut s2 = login_select(&ctx, C2, 9302).await;
+    let ship1 = 893_001;
+    let ship2 = 893_002;
+    board_in_space(&ctx, &mut s1, C1, ship1, 587, JITA, DVec3::ZERO).await;
+    board_in_space(&ctx, &mut s2, C2, ship2, 587, JITA, DVec3::new(3_000.0, 0.0, 0.0)).await;
+    let sys = ctx.systems.get_or_spawn(JITA);
+    eve_server::services::space_warp_jump::break_location_change_invulnerability(&ctx, C1);
+    eve_server::services::space_warp_jump::break_location_change_invulnerability(&ctx, C2);
+
+    // 1. CancelAddTarget clears pending lock with zero FailLockTarget/OnTarget/OnMultiEvent notifications, including across tick
+    let add_cancel = rpc(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(ship2)]).await;
+    assert_eq!(add_cancel.dict_get("locked"), Some(&PyRep::Bool(false)));
+    let _ = ctx.drain_notifications_for_char(C1);
+    let _ = ctx.drain_notifications_for_char(C2);
+    let _ = rpc(&ctx, &mut s1, "dogmaIM", "CancelAddTarget", &[PyRep::Integer(ship2)]).await;
+    assert!(
+        ctx.drain_notifications_for_char(C1).is_empty(),
+        "CancelAddTarget must not emit immediate notifications"
+    );
+    let _ = sys.step_manual(1.0).await.expect("step after CancelAddTarget");
+    let c1_after_cancel_tick = ctx.drain_notifications_for_char(C1);
+    let c2_after_cancel_tick = ctx.drain_notifications_for_char(C2);
+    assert!(
+        !c1_after_cancel_tick.iter().any(|n| matches!(
+            n.event.as_str(),
+            "OnTarget" | "OnMultiEvent" | "FailLockTarget"
+        )),
+        "CancelAddTarget must emit zero OnTarget/OnMultiEvent/FailLockTarget across tick: {c1_after_cancel_tick:?}"
+    );
+    assert!(
+        !c2_after_cancel_tick.iter().any(|n| matches!(
+            n.event.as_str(),
+            "OnTarget" | "OnMultiEvent" | "FailLockTarget"
+        )),
+        "CancelAddTarget must emit zero target notifications across tick: {c2_after_cancel_tick:?}"
+    );
+    assert_eq!(rpc(&ctx, &mut s1, "dogmaIM", "GetTargets", &[]).await, PyRep::List(vec![]));
+
+    // 2. Initiate pending lock then enter warp -> target.FailLockTarget(ship2), no OnTarget add, empty GetTargets
+    let add_pending = rpc(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(ship2)]).await;
+    assert_eq!(add_pending.dict_get("locked"), Some(&PyRep::Bool(false)));
+    let _ = ctx.drain_notifications_for_char(C1);
+
+    sys.set_movement_mode(
+        ship1,
+        MovementMode::new_warp(DVec3::ZERO, DVec3::new(200_000_000.0, 0.0, 0.0), 3.0),
+    )
+    .await
+    .expect("enter warp");
+    let _ = sys.step_manual(0.1).await.expect("step warp out");
+
+    let notifs = ctx.drain_notifications_for_char(C1);
+    let fail_n = notifs
+        .iter()
+        .find(|n| n.event == "FailLockTarget")
+        .unwrap_or_else(|| panic!("expected FailLockTarget notification on warp, got {notifs:?}"));
+    assert_eq!(fail_n.id_type, "service:target");
+    assert_eq!(fail_n.args, vec![PyRep::Integer(ship2)]);
+    let (pkt, _) = ServerContext::build_macho_notification_packet(
+        C1,
+        Some(1),
+        &fail_n.event,
+        &fail_n.id_type,
+        fail_n.args.clone(),
+    );
+    assert!(matches!(
+        pkt.destination,
+        eve_machonet::MachoAddress::Client { service: Some(ref s), .. } if s == "target"
+    ));
+    assert!(
+        !notifs.iter().any(|n| n.event == "OnTarget"
+            && matches!(n.args.first(), Some(PyRep::String(m)) if m == "add")),
+        "warping with pending lock must never emit OnTarget add: {notifs:?}"
+    );
+    assert_eq!(rpc(&ctx, &mut s1, "dogmaIM", "GetTargets", &[]).await, PyRep::List(vec![]));
+
+    // 3. Land from warp and retry AddTarget -> completes lock cleanly
+    sys.set_movement_mode(ship1, MovementMode::Stop).await.expect("stop after warp");
+    sys.set_ball_position(ship1, DVec3::ZERO).await;
+    eve_server::services::space_warp_jump::break_location_change_invulnerability(&ctx, C1);
+    let relock = rpc(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(ship2)]).await;
+    let lock_ms = relock.dict_get("lockTimeMs").and_then(|v| v.as_f64()).unwrap_or(1_000.0);
+    let _ = sys.step_manual((lock_ms / 1000.0) + 1.0).await.expect("complete relock");
+    assert_eq!(
+        rpc(&ctx, &mut s1, "dogmaIM", "GetTargets", &[]).await,
+        PyRep::List(vec![PyRep::Integer(ship2)])
+    );
+
+    // 4. RemoveTarget emits OnTarget/OnMultiEvent synchronously once and zero duplicates on the next tick
+    let _ = ctx.drain_notifications_for_char(C1);
+    let _ = ctx.drain_notifications_for_char(C2);
+    let _ = rpc(&ctx, &mut s1, "dogmaIM", "RemoveTarget", &[PyRep::Integer(ship2)]).await;
+    let c1_remove = ctx.drain_notifications_for_char(C1);
+    let c2_remove = ctx.drain_notifications_for_char(C2);
+    assert!(
+        c1_remove.iter().any(|n| n.event == "OnTarget" && n.args == vec![PyRep::Integer(ship2), PyRep::String("lost".into())]),
+        "RemoveTarget must emit OnTarget lost synchronously: {c1_remove:?}"
+    );
+    assert!(
+        c2_remove.iter().any(|n| n.event == "OnMultiEvent"),
+        "RemoveTarget must emit OnMultiEvent otherlost to target synchronously: {c2_remove:?}"
+    );
+    let _ = sys.step_manual(1.0).await.expect("step after RemoveTarget");
+    let c1_after_remove_tick = ctx.drain_notifications_for_char(C1);
+    let c2_after_remove_tick = ctx.drain_notifications_for_char(C2);
+    assert!(
+        !c1_after_remove_tick.iter().any(|n| matches!(n.event.as_str(), "OnTarget" | "OnMultiEvent")),
+        "RemoveTarget must not double-emit OnTarget/OnMultiEvent on next tick: {c1_after_remove_tick:?}"
+    );
+    assert!(
+        !c2_after_remove_tick.iter().any(|n| matches!(n.event.as_str(), "OnTarget" | "OnMultiEvent")),
+        "RemoveTarget must not double-emit otherlost on next tick: {c2_after_remove_tick:?}"
+    );
+
+    // 5. Target destroyed/removed while lock is in-progress -> FailLockTarget on service:target + OnTarget otherlost to target
+    let pending_before_kill = rpc(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(ship2)]).await;
+    assert_eq!(pending_before_kill.dict_get("locked"), Some(&PyRep::Bool(false)));
+    let _ = ctx.drain_notifications_for_char(C1);
+    let _ = ctx.drain_notifications_for_char(C2);
+    let _ = sys.remove_ball(ship2).await;
+    let _ = sys.step_manual(0.1).await.expect("step after remove_ball");
+    let c1_fail = ctx.drain_notifications_for_char(C1);
+    let c2_otherlost = ctx.drain_notifications_for_char(C2);
+    let fail_removed = c1_fail
+        .iter()
+        .find(|n| n.event == "FailLockTarget")
+        .unwrap_or_else(|| panic!("expected FailLockTarget when target removed mid-lock, got {c1_fail:?}"));
+    assert_eq!(fail_removed.id_type, "service:target");
+    assert_eq!(fail_removed.args, vec![PyRep::Integer(ship2)]);
+    assert!(
+        !c1_fail.iter().any(|n| n.event == "OnTarget"),
+        "pending lock on removed ball must not emit OnTarget to locker: {c1_fail:?}"
+    );
+    assert!(
+        c2_otherlost.iter().any(|n| {
+            n.event == "OnMultiEvent"
+                && format!("{:?}", n.args).contains("otherlost")
+                && format!("{:?}", n.args).contains(&ship1.to_string())
+        }),
+        "target removed mid-lock must receive OnTarget otherlost: {c2_otherlost:?}"
+    );
+    assert_eq!(rpc(&ctx, &mut s1, "dogmaIM", "GetTargets", &[]).await, PyRep::List(vec![]));
+}
+
+#[tokio::test]
+async fn lock_cap_base_two_raised_by_skills() {
+    // parity: plan:DG-4, notify:OnTargets
+    eve_testkit::attest(&["plan:DG-4", "notify:OnTargets"]);
+
+    let ctx = new_ctx();
+    let mut s1 = login_select(&ctx, C1, 9311).await;
+    let mut s2 = login_select(&ctx, C2, 9312).await;
+    let ship1 = 893_101;
+    // Clear Target Management (3429) & Adv Target Management (3430) -> base char cap = 2
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sk) = snap.skills.get_mut(&C1) {
+            sk.remove(&3429);
+            sk.remove(&3430);
+        }
+    });
+    // Rifter 587 has hull maxLockedTargets > 2 (4 in SDE), so char skill cap (2) is the bottleneck
+    board_in_space(&ctx, &mut s1, C1, ship1, 587, JITA, DVec3::ZERO).await;
+    board_in_space(&ctx, &mut s2, C2, 893_102, 587, JITA, DVec3::new(2_000.0, 0.0, 0.0)).await;
+    let sys = ctx.systems.get_or_spawn(JITA);
+    eve_server::services::space_warp_jump::break_location_change_invulnerability(&ctx, C1);
+    for idx in 0..6i64 {
+        let tid = 893_200 + idx;
+        let _ = sys
+            .spawn_ball(Ball {
+                id: tid,
+                type_id: 587,
+                position: DVec3::new(2_000.0 + (idx as f64) * 50.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+    }
+
+    assert!(rpc_fallible(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(893_200)]).await.is_ok());
+    assert!(rpc_fallible(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(893_201)]).await.is_ok());
+    let cap_err = rpc_fallible(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(893_202)])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        cap_err.to_client_error("dogmaIM", "AddTarget"),
+        eve_proto::ClientError::user_with_args(
+            eve_proto::UserErrorKey::TargetingAptitudeAlreadyFullyUtilized,
+            [("limit", PyRep::Integer(2))],
+        )
+    );
+
+    // Raise Target Management (3429) to level 5 (char cap = 7) -> bottleneck becomes ship's maxLockedTargets
+    let ship_max = ctx
+        .sde
+        .types
+        .get(&587)
+        .and_then(|t| t.default_attributes.get(&attr_ids::MAX_LOCKED_TARGETS))
+        .copied()
+        .unwrap_or(4.0) as usize;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(C1).or_default().insert(
+            3429,
+            TrainedSkillRecord { type_id: 3429, level: 5, skill_points: 256_000.0 },
+        );
+    });
+    ctx.invalidate_ship_fitting(ship1);
+
+    for idx in 2..ship_max as i64 {
+        assert!(
+            rpc_fallible(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(893_200 + idx)])
+                .await
+                .is_ok(),
+            "slot {idx} under ship_max={ship_max} must lock"
+        );
+    }
+    let ship_err = rpc_fallible(
+        &ctx,
+        &mut s1,
+        "dogmaIM",
+        "AddTarget",
+        &[PyRep::Integer(893_200 + ship_max as i64)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        ship_err.to_client_error("dogmaIM", "AddTarget"),
+        eve_proto::ClientError::user_with_args(
+            eve_proto::UserErrorKey::TargetingSystemsAlreadyFullyUtilized,
+            [("limit", PyRep::Integer(ship_max as i64))],
+        )
+    );
+}
+
+#[tokio::test]
+async fn ecm_drone_jam_restricts_relock_to_jammer() {
+    // parity: feat:modules.ecm, notify:OnTarget
+    eve_testkit::attest(&["feat:modules.ecm", "notify:OnTarget"]);
+
+    let ctx = new_ctx();
+    let mut s1 = login_select(&ctx, C1, 9321).await;
+    let mut s2 = login_select(&ctx, C2, 9322).await;
+    let ship1 = 893_301;
+    let other_ship = 893_302;
+    let ecm_drone_id = 893_303;
+    board_in_space(&ctx, &mut s1, C1, ship1, 587, JITA, DVec3::ZERO).await;
+    board_in_space(&ctx, &mut s2, C2, other_ship, 587, JITA, DVec3::new(3_000.0, 0.0, 0.0)).await;
+    let sys = ctx.systems.get_or_spawn(JITA);
+    eve_server::services::space_warp_jump::break_location_change_invulnerability(&ctx, C1);
+    eve_server::services::space_warp_jump::break_location_change_invulnerability(&ctx, C2);
+    let _ = sys
+        .spawn_ball(Ball {
+            id: ecm_drone_id,
+            type_id: 23707, // Hornet EC-300
+            position: DVec3::new(4_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 400.0,
+            inertia: 1.0,
+            mass: 2_500.0,
+            radius: 10.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+
+    // Lock both non-jammer and ECM drone before jam
+    for tid in [other_ship, ecm_drone_id] {
+        let _ = sys
+            .add_target_lock(
+                ship1,
+                TargetLock {
+                    target_id: tid,
+                    lock_time_ms: 500.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await;
+    }
+    let _ = ctx.drain_notifications_for_char(C1);
+
+    // ECM drone jams ship1 for 4s: non-jammer lock clears; relock on other fails with TargetingSystemsBeingJammed
+    assert!(sys.apply_ecm_jam_from(ecm_drone_id, ship1, 4.0).await.unwrap());
+    let _ = sys.remove_target_lock(ship1, ecm_drone_id).await; // Verify fresh relock on jammer succeeds too
+
+    let jammed_err = rpc_fallible(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(other_ship)])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        jammed_err.to_client_error("dogmaIM", "AddTarget"),
+        eve_proto::ClientError::user_with_args(
+            eve_proto::UserErrorKey::TargetingSystemsBeingJammed,
+            [("targetname", PyRep::String("Rifter".to_string()))],
+        )
+    );
+    assert!(
+        rpc_fallible(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(ecm_drone_id)])
+            .await
+            .is_ok(),
+        "must be able to lock active ECM drone jammer while jammed"
+    );
+
+    // Step past 4s jam duration -> non-jammer relock succeeds
+    for _ in 0..5 {
+        let _ = sys.step_manual(1.0).await.unwrap();
+    }
+    assert!(
+        rpc_fallible(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(other_ship)])
+            .await
+            .is_ok(),
+        "after ECM jam expiry, locking non-jammer targets must succeed"
+    );
+}

@@ -535,7 +535,16 @@ pub enum SystemCommand {
         target_id: BallId,
         reply: oneshot::Sender<bool>,
     },
+    RemoveTargetLockQuiet {
+        source_id: BallId,
+        target_id: BallId,
+        reply: oneshot::Sender<bool>,
+    },
     ClearTargetLocks {
+        source_id: BallId,
+        reply: oneshot::Sender<usize>,
+    },
+    ClearTargetLocksQuiet {
         source_id: BallId,
         reply: oneshot::Sender<usize>,
     },
@@ -626,6 +635,12 @@ pub enum SystemCommand {
         reply: oneshot::Sender<bool>,
     },
     ApplyEcmJam {
+        target_id: BallId,
+        duration_s: f64,
+        reply: oneshot::Sender<bool>,
+    },
+    ApplyEcmJamFrom {
+        source_id: BallId,
         target_id: BallId,
         duration_s: f64,
         reply: oneshot::Sender<bool>,

@@ -54,6 +54,9 @@ fn out_frame_to_wire_frame(
         OutFrame::Notification { event, args } => {
             ClientWireFrameKind::Notification { event, args }
         }
+        OutFrame::ServiceCall { method, args, .. } => {
+            ClientWireFrameKind::Notification { event: method, args }
+        }
     };
     ClientWireFrame { kind, wire_packet }
 }

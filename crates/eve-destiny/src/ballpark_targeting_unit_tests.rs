@@ -662,3 +662,134 @@ fn coverage_and_mutants_targeting_gate_decloak_and_collision_branches() {
     assert_eq!(apark.balls[&1].position, dyn_post.position);
     assert_eq!(apark.balls[&4].position, dyn_high_post.position);
 }
+
+#[test]
+fn warp_out_fails_pending_lock_and_drops_completed_lock() {
+    let mut park = Ballpark::new(30_000_142);
+    park.add_ball(make_ship(1, DVec3::ZERO, DVec3::ZERO));
+    park.add_ball(make_ship(2, DVec3::new(5_000.0, 0.0, 0.0), DVec3::ZERO));
+    park.add_ball(make_ship(3, DVec3::new(7_000.0, 0.0, 0.0), DVec3::ZERO));
+    assert!(park.add_target_lock(1, make_lock(2, 5_000.0, false)));
+    assert!(park.add_target_lock(1, make_lock(3, 5_000.0, true)));
+
+    park.pending_events.clear();
+    park.set_mode(
+        1,
+        MovementMode::new_warp(DVec3::ZERO, DVec3::new(200_000_000.0, 0.0, 0.0), 3.0),
+    )
+    .expect("enter warp");
+
+    let evs = std::mem::take(&mut park.pending_events);
+    assert!(
+        evs.iter().any(|e| matches!(
+            e,
+            DestinyEvent::TargetLockFailed { source_id: 1, target_id: 2 }
+        )),
+        "pending lock must emit TargetLockFailed on warp: {evs:?}"
+    );
+    assert!(
+        evs.iter().any(|e| matches!(
+            e,
+            DestinyEvent::OnTarget { source_id: 1, target_id: 3, mode } if mode == "lost"
+        )),
+        "completed lock must emit OnTarget lost on warp: {evs:?}"
+    );
+    assert!(
+        !evs.iter().any(|e| matches!(e, DestinyEvent::OnTarget { mode, .. } if mode == "add")),
+        "warp-out must never complete pending lock with OnTarget add: {evs:?}"
+    );
+    assert!(park.get_target_locks(1).is_empty());
+}
+
+#[test]
+fn apply_ecm_jam_from_retains_jammer_locks_and_clears_others_until_expiry() {
+    let mut park = Ballpark::new(30_000_142);
+    park.add_ball(make_ship(1, DVec3::ZERO, DVec3::ZERO));
+    park.add_ball(make_ship(2, DVec3::new(4_000.0, 0.0, 0.0), DVec3::ZERO));
+    park.add_ball(make_ship(3, DVec3::new(6_000.0, 0.0, 0.0), DVec3::ZERO));
+    assert!(park.add_target_lock(1, make_lock(2, 1_000.0, true)));
+    assert!(park.add_target_lock(1, make_lock(3, 1_000.0, true)));
+
+    // Ship 3 (e.g., ECM drone / jammer) jams ship 1 for 5s: lock on ship 2 drops, lock on jammer 3 remains.
+    park.pending_events.clear();
+    park.apply_ecm_jam_from(Some(3), 1, 5.0);
+    let evs = std::mem::take(&mut park.pending_events);
+    assert!(
+        evs.iter().any(|e| matches!(
+            e,
+            DestinyEvent::OnTarget { source_id: 1, target_id: 2, mode } if mode == "lost"
+        )),
+        "non-jammer lock must drop: {evs:?}"
+    );
+    let remaining_ids: Vec<i64> = park.get_target_locks(1).iter().map(|l| l.target_id).collect();
+    assert_eq!(remaining_ids, vec![3]);
+    let cs = &park.combat_states[&1];
+    assert!(cs.ecm_jammed_remaining_s > 0.0);
+    assert_eq!(cs.ecm_jammed_by, vec![3]);
+
+    // After jam duration expires, ecm_jammed_by clears.
+    for _ in 0..6 {
+        park.step(1.0);
+    }
+    let cs_after = &park.combat_states[&1];
+    assert_eq!(cs_after.ecm_jammed_remaining_s, 0.0);
+    assert!(cs_after.ecm_jammed_by.is_empty());
+}
+
+#[test]
+fn remove_target_lock_pending_is_silent_and_remove_ball_fails_pending_lock() {
+    let mut park = Ballpark::new(30_000_142);
+    park.add_ball(make_ship(1, DVec3::ZERO, DVec3::ZERO));
+    park.add_ball(make_ship(2, DVec3::new(3_000.0, 0.0, 0.0), DVec3::ZERO));
+    park.add_ball(make_ship(3, DVec3::new(4_000.0, 0.0, 0.0), DVec3::ZERO));
+
+    // Pending lock removed via remove_target_lock must not emit OnTarget("lost").
+    assert!(park.add_target_lock(1, make_lock(2, 5_000.0, false)));
+    park.pending_events.clear();
+    assert!(park.remove_target_lock(1, 2));
+    assert!(
+        !park
+            .pending_events
+            .iter()
+            .any(|e| matches!(e, DestinyEvent::OnTarget { .. } | DestinyEvent::TargetLockFailed { .. })),
+        "cancelling pending lock must not emit OnTarget or TargetLockFailed: {:?}",
+        park.pending_events
+    );
+
+    // Completed lock removed quietly emits nothing; normal removal emits OnTarget("lost").
+    assert!(park.add_target_lock(1, make_lock(2, 5_000.0, true)));
+    assert!(park.add_target_lock(1, make_lock(3, 5_000.0, true)));
+    park.pending_events.clear();
+    assert!(park.remove_target_lock_quiet(1, 2));
+    assert!(park.pending_events.is_empty());
+    assert!(park.remove_target_lock(1, 3));
+    assert!(park.pending_events.iter().any(|e| matches!(
+        e,
+        DestinyEvent::OnTarget { mode, source_id: 1, target_id: 3 } if mode == "lost"
+    )));
+
+    // remove_ball on target with a pending lock from ship 1 and completed lock from ship 3:
+    // ship 1 gets TargetLockFailed, ship 3 gets OnTarget("lost").
+    assert!(park.add_target_lock(1, make_lock(2, 5_000.0, false)));
+    assert!(park.add_target_lock(3, make_lock(2, 5_000.0, true)));
+    park.pending_events.clear();
+    let _ = park.remove_ball(2);
+    assert!(
+        park.pending_events.iter().any(|e| matches!(
+            e,
+            DestinyEvent::TargetLockFailed { source_id: 1, target_id: 2 }
+        )),
+        "pending lock on removed ball must emit TargetLockFailed: {:?}",
+        park.pending_events
+    );
+    assert!(
+        park.pending_events.iter().any(|e| matches!(
+            e,
+            DestinyEvent::OnTarget { mode, source_id: 3, target_id: 2 } if mode == "lost"
+        )),
+        "completed lock on removed ball must emit OnTarget lost: {:?}",
+        park.pending_events
+    );
+    assert!(park.get_target_locks(1).is_empty());
+    assert!(park.get_target_locks(3).is_empty());
+}

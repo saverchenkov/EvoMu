@@ -18,21 +18,30 @@ pub fn build_damage_state_tuple(
     armor: f64,
     structure: f64,
 ) -> PyRep {
+    build_damage_state_tuple_raw(Some(&ctx.db), Some(&ctx.sde), item_id, shield, armor, structure)
+}
+
+/// Builds the V24 `OnDamageStateChange` 3-tuple (`#990`) without requiring a full [`ServerContext`].
+pub fn build_damage_state_tuple_raw(
+    db_opt: Option<&eve_db::WorldRepository>,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
+    item_id: i64,
+    shield: f64,
+    armor: f64,
+    structure: f64,
+) -> PyRep {
     let (secs, nanos) = eve_db::clock::host_wall_unix_secs_and_nanos();
     let sim_ft = (secs as i64 + 11_644_473_600) * 10_000_000 + (nanos as i64 / 100);
-    let recharge_ms = ctx
-        .db
-        .with_snapshot(|snap| {
-            let it = snap.items.get(&item_id)?;
-            it.dynamic_attributes
-                .get(&479)
-                .copied()
-                .or_else(|| {
-                    ctx.sde
-                        .types
-                        .get(&it.type_id)
+    let recharge_ms = db_opt
+        .and_then(|db| {
+            db.with_snapshot(|snap| {
+                let it = snap.items.get(&item_id)?;
+                it.dynamic_attributes.get(&479).copied().or_else(|| {
+                    sde_opt
+                        .and_then(|sde| sde.types.get(&it.type_id))
                         .and_then(|t| t.default_attributes.get(&479).copied())
                 })
+            })
         })
         .filter(|&v| v > 0.0)
         .unwrap_or(100_000.0);

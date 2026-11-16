@@ -91,10 +91,10 @@ pub(crate) fn handle_apply_ecm_burst(
                     .is_some_and(|cs| cs.is_cloaked)
         })
         .collect();
-    let prev_jammed: HashMap<BallId, f64> = ballpark
+    let prev_jammed: HashMap<BallId, (f64, Vec<BallId>)> = ballpark
         .combat_states
         .iter()
-        .map(|(&id, cs)| (id, cs.ecm_jammed_remaining_s))
+        .map(|(&id, cs)| (id, (cs.ecm_jammed_remaining_s, cs.ecm_jammed_by.clone())))
         .collect();
     let mut cand_idx = 0usize;
     let jammed = ballpark.apply_ecm_burst(source_id, burst_radius_m + 1e-3, |cid| {
@@ -163,7 +163,13 @@ pub(crate) fn handle_apply_ecm_burst(
     });
     for &cid in &jammed {
         if let Some(cs) = ballpark.combat_states.get_mut(&cid) {
-            cs.ecm_jammed_remaining_s = prev_jammed.get(&cid).copied().unwrap_or(0.0);
+            if let Some((rem, by)) = prev_jammed.get(&cid) {
+                cs.ecm_jammed_remaining_s = *rem;
+                cs.ecm_jammed_by = by.clone();
+            } else {
+                cs.ecm_jammed_remaining_s = 0.0;
+                cs.ecm_jammed_by.clear();
+            }
         }
     }
     jammed

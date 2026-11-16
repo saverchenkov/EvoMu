@@ -138,12 +138,8 @@ pub(crate) async fn handle_dogma_ops(
             let fit_res = ctx.get_or_rebuild_ship_fitting(char_id, source_id);
 
             if let Ok(Some(cs)) = sys.get_combat_state(source_id).await {
-                if cs.ecm_jammed_remaining_s > 0.0 {
-                    return Some(Err(BridgeRpcError {
-                        code: "ShipJammed".into(),
-                        message: "Targeting systems are jammed by ECM".into(),
-                        client_error: None,
-                    }));
+                if cs.ecm_jammed_remaining_s > 0.0 && !cs.ecm_jammed_by.contains(&target_id) {
+                    return Some(Err(super::fitting_dogma_im::ship_jammed_rpc_error(ctx, target_id)));
                 }
                 if (cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0)
                     || cs.decloak_targeting_delay_remaining_s > 0.0
@@ -170,15 +166,17 @@ pub(crate) async fn handle_dogma_ops(
                 }));
             }
 
-            let max_locked = fit_res
+            let (max_locked, skill_bottleneck) = fit_res
                 .as_ref()
                 .map(|f| {
                     let ship_max = f.ship.get_attribute(attr_ids::MAX_LOCKED_TARGETS, &ctx.sde).max(1.0) as usize;
                     let tm_lvl = ctx.character_skill_levels(char_id).get(&3429).copied().unwrap_or(0);
                     let atm_lvl = ctx.character_skill_levels(char_id).get(&3430).copied().unwrap_or(0);
-                    eve_dogma::compute_effective_max_locked_targets(ship_max, tm_lvl, atm_lvl)
+                    let eff = eve_dogma::compute_effective_max_locked_targets(ship_max, tm_lvl, atm_lvl);
+                    let char_cap = 2usize + (tm_lvl.min(5) as usize) + (atm_lvl.min(5) as usize);
+                    (eff, char_cap < ship_max)
                 })
-                .unwrap_or(7);
+                .unwrap_or((7, false));
 
             let raw_locks = sys.get_target_locks(source_id).await.unwrap_or_default();
             let mut current_locks = Vec::with_capacity(raw_locks.len());
@@ -224,11 +222,10 @@ pub(crate) async fn handle_dogma_ops(
                     PyRep::List(Vec::new()),
                 ])));
             } else if current_locks.len() >= max_locked {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetingFailed".into(),
-                    message: format!("Max locked targets exceeded ({max_locked})"),
-                    client_error: None,
-                }));
+                return Some(Err(super::fitting_dogma_im::target_lock_cap_rpc_error(
+                    max_locked,
+                    skill_bottleneck,
+                )));
             }
 
             let scan_res = fit_res
@@ -321,24 +318,12 @@ pub(crate) async fn handle_dogma_ops(
                     client_error: None,
                 }));
             };
-            let mut removed = false;
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
-                removed = sys.remove_target_lock(ship_id, target_id).await.unwrap_or(false);
+                let _ = sys.remove_target_lock(ship_id, target_id).await;
             }
             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(target_id));
             crate::services::combat_weapons_spool::clear_entropic_spools_on_target_unlock(ctx, ship_id, char_id, Some(target_id));
-            ctx.emit_typed(
-                NotificationTarget::Character(char_id),
-                crate::router::notify_registry::OnTarget {
-                    arg0: PyRep::Integer(target_id),
-                    arg1: PyRep::String("lost".into()),
-                    reason: None,
-                },
-            );
-            if removed {
-                let _ = ctx.notify_target_events(char_id, &[("lost", target_id, "")]);
-            }
             Some(Ok(PyRep::None))
         }
 
@@ -383,7 +368,7 @@ pub(crate) async fn handle_dogma_ops(
 
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
-                let _ = sys.remove_target_lock(source_id, target_id).await;
+                let _ = sys.remove_target_lock_quiet(source_id, target_id).await;
             }
             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, source_id, Some(target_id));
             if is_assumed_structure {
@@ -426,7 +411,7 @@ pub(crate) async fn handle_dogma_ops(
                 if let Some(PyRep::List(list)) | Some(PyRep::Tuple(list)) = args.first() {
                     for it in list {
                         if let Some(tid) = it.as_i64() {
-                            let _ = sys.remove_target_lock(ship_id, tid).await;
+                            let _ = sys.remove_target_lock_quiet(ship_id, tid).await;
                             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(tid));
                             ctx.emit_typed(
                                 NotificationTarget::Character(char_id),
@@ -439,7 +424,7 @@ pub(crate) async fn handle_dogma_ops(
                         }
                     }
                 } else if let Some(tid) = args.first().and_then(|a| a.as_i64()) {
-                    let _ = sys.remove_target_lock(ship_id, tid).await;
+                    let _ = sys.remove_target_lock_quiet(ship_id, tid).await;
                     crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(tid));
                     ctx.emit_typed(
                         NotificationTarget::Character(char_id),
@@ -451,7 +436,7 @@ pub(crate) async fn handle_dogma_ops(
                     );
                 } else {
                     let current_locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
-                    let _ = sys.clear_target_locks(ship_id).await;
+                    let _ = sys.clear_target_locks_quiet(ship_id).await;
                     for lock in current_locks {
                         crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(lock.target_id));
                     }

@@ -351,6 +351,7 @@ pub enum DestinyDrain {
 pub struct TypedNotification {
     pub event: String,
     pub args: Vec<PyRep>,
+    pub service: Option<String>,
 }
 
 /// All outbound artifacts produced by completing a single `CallReq` (`C-3`).
@@ -388,6 +389,11 @@ pub enum OutFrame {
     },
     Notification {
         event: String,
+        args: Vec<PyRep>,
+    },
+    ServiceCall {
+        service: String,
+        method: String,
         args: Vec<PyRep>,
     },
 }
@@ -558,10 +564,18 @@ pub fn sequence_with_events(state: &mut SessionWireState, done: RpcCompletion) -
 
     // 5. Post-RPC notifications in causal emission order (ORD-5, ORD-6).
     for notif in done.notifications {
-        out.push(OutFrame::Notification {
-            event: notif.event,
-            args: notif.args,
-        });
+        if let Some(service) = notif.service {
+            out.push(OutFrame::ServiceCall {
+                service,
+                method: notif.event,
+                args: notif.args,
+            });
+        } else {
+            out.push(OutFrame::Notification {
+                event: notif.event,
+                args: notif.args,
+            });
+        }
     }
 
     SequenceOutcome {
@@ -809,6 +823,7 @@ mod tests {
                 notifications: vec![TypedNotification {
                     event: "OnItemChange".into(),
                     args: vec![],
+                    service: None,
                 }],
             },
         );
@@ -858,6 +873,7 @@ mod tests {
                 notifications: vec![TypedNotification {
                     event: "OnItemChange".into(),
                     args: vec![],
+                    service: None,
                 }],
             },
         );
@@ -888,6 +904,7 @@ mod tests {
                 notifications: vec![TypedNotification {
                     event: "OnCharNowInStation".into(),
                     args: vec![],
+                    service: None,
                 }],
             },
         );
@@ -977,6 +994,7 @@ mod tests {
                                 notifications: vec![TypedNotification {
                                     event: "OnItemChange".into(),
                                     args: vec![],
+                                    service: None,
                                 }],
                             },
                         );

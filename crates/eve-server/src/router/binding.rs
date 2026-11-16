@@ -1138,11 +1138,39 @@ impl ServerContext {
                 }
             }
 
-            let solar_system_id = db.with_mut_snapshot(|snap| {
+            let fanout_modules: Vec<i64> = if cycle.linked_turrets.is_empty() {
+                vec![cycle.module_id]
+            } else {
+                cycle.linked_turrets.clone()
+            };
+            let (solar_system_id, removed_charge_tid, fanout_types, user_id) = db.with_mut_snapshot(|snap| {
                 snap.module_active_states.remove(&cycle.module_id);
-                snap.module_active_charges.remove(&cycle.module_id);
-                snap.characters.get(&char_id).map(|c| c.solar_system_id)
+                let removed_charge = snap.module_active_charges.remove(&cycle.module_id);
+                for &mid in &fanout_modules {
+                    if mid != cycle.module_id {
+                        snap.module_active_states.remove(&mid);
+                        snap.module_active_charges.remove(&mid);
+                    }
+                }
+                let types: Vec<(i64, u32)> = fanout_modules
+                    .iter()
+                    .map(|&mid| {
+                        let tid = snap
+                            .items
+                            .get(&mid)
+                            .map(|i| i.type_id)
+                            .unwrap_or(cycle.module_type_id);
+                        (mid, tid)
+                    })
+                    .collect();
+                let (sys_id, uid) = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| (Some(c.solar_system_id), Some(c.user_id)))
+                    .unwrap_or((None, None));
+                (sys_id, removed_charge, types, uid)
             });
+            let charge_type_id = cycle.ammo_type_id.or(removed_charge_tid);
 
             let _ = crate::services::notify_emitters_space_dungeons::flush_module_ewar_end(
                 &step_ctx,
@@ -1180,7 +1208,6 @@ impl ServerContext {
                 PyRep::Integer(0),
                 PyRep::None,
             ];
-            let user_id = db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id));
             let (packet, marshaled_packet) =
                 ServerContext::build_macho_notification_packet(char_id, user_id, "OnGodmaShipEffect", "charid", args.clone());
             let notif = PendingMachoNotification {
@@ -1203,49 +1230,67 @@ impl ServerContext {
             }
             let _ = notify_tx.send((char_id, notif));
 
-            if let Some((sfx_guid, is_offensive)) = special_fx_guid_for_module_sde(
-                sde,
-                cycle.module_type_id,
-                effect_id,
-                Some(&cycle.effect_name),
-            ) {
-                let sfx_args = vec![
-                    PyRep::Integer(cycle.ship_id),
-                    PyRep::Integer(cycle.module_id),
-                    PyRep::Integer(cycle.module_type_id as i64),
-                    cycle.target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                    PyRep::None,
-                    PyRep::String(sfx_guid),
-                    PyRep::Bool(is_offensive),
-                    PyRep::Integer(0),
-                    PyRep::Integer(0),
-                    PyRep::Real(cycle.duration_s * 1000.0),
-                    PyRep::Integer(0),
-                    PyRep::Integer(now),
-                    PyRep::Real(0.0),
-                    PyRep::None,
-                ];
-                let (sfx_pkt, sfx_bytes) =
-                    ServerContext::build_macho_notification_packet(char_id, user_id, "OnSpecialFX", "charid", sfx_args.clone());
-                let sfx_notif = PendingMachoNotification {
-                    seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-                    recipient_char_id: char_id,
-                    event: "OnSpecialFX".to_string(),
-                    id_type: "charid".to_string(),
-                    args: sfx_args,
-                    packet: sfx_pkt,
-                    marshaled_packet: sfx_bytes,
-                    created_filetime: now,
-                };
-                {
-                    let mut q_guard = pending.write().unwrap_or_else(|e| e.into_inner());
-                    let q = q_guard.entry(char_id).or_default();
-                    if q.len() >= 512 {
-                        q.remove(0);
+            let observers = step_ctx.space_observer_chars_for_ship(cycle.ship_id, char_id);
+            for (fan_mod_id, fan_type_id) in fanout_types {
+                let fan_effect_id =
+                    effect_id_for_module_sde(sde, fan_type_id, Some(&cycle.effect_name)).unwrap_or(effect_id);
+                if let Some((sfx_guid, is_offensive)) = special_fx_guid_for_module_sde(
+                    sde,
+                    fan_type_id,
+                    fan_effect_id,
+                    Some(&cycle.effect_name),
+                ) {
+                    let sfx_args = vec![
+                        PyRep::Integer(cycle.ship_id),
+                        PyRep::Integer(fan_mod_id),
+                        PyRep::Integer(fan_type_id as i64),
+                        cycle.target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                        charge_type_id
+                            .map(|tid| PyRep::Integer(i64::from(tid)))
+                            .unwrap_or(PyRep::None),
+                        PyRep::String(sfx_guid),
+                        PyRep::Bool(is_offensive),
+                        PyRep::Integer(0),
+                        PyRep::Integer(0),
+                        PyRep::Real(cycle.duration_s * 1000.0),
+                        PyRep::Integer(0),
+                        PyRep::Integer(now),
+                        PyRep::Real(0.0),
+                        PyRep::None,
+                    ];
+                    let push_sfx = |recip_cid: i64, recip_uid: Option<u64>| {
+                        let (sfx_pkt, sfx_bytes) = ServerContext::build_macho_notification_packet(
+                            recip_cid,
+                            recip_uid,
+                            "OnSpecialFX",
+                            "charid",
+                            sfx_args.clone(),
+                        );
+                        let sfx_notif = PendingMachoNotification {
+                            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
+                            recipient_char_id: recip_cid,
+                            event: "OnSpecialFX".to_string(),
+                            id_type: "charid".to_string(),
+                            args: sfx_args.clone(),
+                            packet: sfx_pkt,
+                            marshaled_packet: sfx_bytes,
+                            created_filetime: now,
+                        };
+                        {
+                            let mut q_guard = pending.write().unwrap_or_else(|e| e.into_inner());
+                            let q = q_guard.entry(recip_cid).or_default();
+                            if q.len() >= 512 {
+                                q.remove(0);
+                            }
+                            q.push(sfx_notif.clone());
+                        }
+                        let _ = notify_tx.send((recip_cid, sfx_notif));
+                    };
+                    push_sfx(char_id, user_id);
+                    for &(obs_cid, obs_uid) in &observers {
+                        push_sfx(obs_cid, Some(obs_uid));
                     }
-                    q.push(sfx_notif.clone());
                 }
-                let _ = notify_tx.send((char_id, sfx_notif));
             }
 
             let auto_reload_ev: Option<(Vec<i64>, u32, f64)> = db.with_mut_snapshot(|snap| {

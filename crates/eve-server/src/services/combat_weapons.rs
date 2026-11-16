@@ -221,11 +221,11 @@ pub async fn handle_weapons(
                 };
                 let locks = sys_handle.get_target_locks(ship_id).await.unwrap_or_default();
                 if !locks.iter().any(|l| l.target_id == tid && l.locked) {
-                    return Some(Err(BridgeRpcError {
-                        code: "TargetNotLocked".into(),
-                        message: format!("Target {tid} is not locked"),
-                        client_error: None,
-                    }));
+                    return Some(Err(
+                        crate::services::inventory_fitting::fitting_module_cycles::target_not_locked_rpc_error(
+                            format!("Target {tid} is not locked"),
+                        ),
+                    ));
                 }
                 if ctx.db.with_snapshot(|snap| crate::services::structure_acl_defense_rules::is_structure_immune_to_ewar(snap, tid)) {
                     return Some(Ok(PyRep::keyval([
@@ -447,24 +447,36 @@ pub async fn handle_weapons(
                     })
                     .map(|i| (i.item_id, i.type_id))
             });
-            let Some((charge_item_id, charge_type_id)) = loaded_charge_opt else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoAmmoLoaded".into(),
-                    message: format!("Weapon module {module_id} has no compatible charge loaded"),
-                    client_error: None,
-                }));
+            let is_missile_launcher = matches!(
+                mod_type.group_id,
+                506..=511 | 524 | 1674 | 4500 | 4805 | 4807
+            );
+            let is_civilian_turret =
+                mod_type.capacity <= 0.0 || matches!(m.type_id, 3634 | 3636 | 3638 | 3640);
+            let (charge_item_id_opt, charge_type_id_opt) = match loaded_charge_opt {
+                Some((cid, ctid)) => (Some(cid), Some(ctid)),
+                None if is_civilian_turret && !is_missile_launcher => (None, None),
+                None => {
+                    return Some(Err(BridgeRpcError {
+                        code: "NoAmmoLoaded".into(),
+                        message: format!("Weapon module {module_id} has no compatible charge loaded"),
+                        client_error: None,
+                    }));
+                }
             };
-            if let Some(fm) = fit.modules.get_mut(&module_id) {
-                if fm.charge_type_id != Some(charge_type_id) {
-                    fm.charge_type_id = Some(charge_type_id);
-                    fm.charge_quantity = fm.charge_quantity.max(1);
-                    fit.recalculate_stats(&ctx.sde);
+            if let Some(charge_type_id) = charge_type_id_opt {
+                if let Some(fm) = fit.modules.get_mut(&module_id) {
+                    if fm.charge_type_id != Some(charge_type_id) {
+                        fm.charge_type_id = Some(charge_type_id);
+                        fm.charge_quantity = fm.charge_quantity.max(1);
+                        fit.recalculate_stats(&ctx.sde);
+                    }
                 }
             }
             let mod_state =
                 fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
-            let charge_type = &ctx.sde.types[&charge_type_id];
-            let is_fof_missile = matches!(charge_type.group_id, 394..=396);
+            let charge_type_opt = charge_type_id_opt.and_then(|ctid| ctx.sde.types.get(&ctid));
+            let is_fof_missile = charge_type_opt.is_some_and(|ct| matches!(ct.group_id, 394..=396));
             let is_entropic = mod_type.group_id == 1986;
 
             // Resolve target ball ID (FoF auto-targeting missiles can fire without a lock even while jammed!)
@@ -478,11 +490,11 @@ pub async fn handle_weapons(
                         });
                         ctx.invalidate_and_push_fit(ship_id);
                         combat_weapons_spool::reset_entropic_spool(ctx, ship_id, module_id);
-                        return Some(Err(BridgeRpcError {
-                            code: "TargetNotLocked".into(),
-                            message: format!("Target {tid} is not locked"),
-                            client_error: None,
-                        }));
+                        return Some(Err(
+                            crate::services::inventory_fitting::fitting_module_cycles::target_not_locked_rpc_error(
+                                format!("Target {tid} is not locked"),
+                            ),
+                        ));
                     }
                 }
                 tid
@@ -621,10 +633,8 @@ pub async fn handle_weapons(
 
             // Turret range validation BEFORE capacitor and ammo deduction (P1-ENTROPIC-PARTIAL-MUTATION-AND-AMMO-DEPLETION):
             // Calling dogmaIM.Activate out of range must fail without draining capacitor or ammo.
-            let range_mult = charge_type
-                .default_attributes
-                .get(&120)
-                .copied()
+            let range_mult = charge_type_opt
+                .and_then(|ct| ct.default_attributes.get(&120).copied())
                 .unwrap_or(1.0);
             let base_opt = {
                 let v = mod_state.get_attribute(54, &ctx.sde);
@@ -635,6 +645,9 @@ pub async fn handle_weapons(
                 }
             };
             let has_charge_mod = |attr: u16| {
+                let (Some(charge_item_id), Some(charge_type)) = (charge_item_id_opt, charge_type_opt) else {
+                    return false;
+                };
                 mod_state.modifiers.iter().any(|m| {
                     m.target_attribute_id == attr
                         && (m.source_item_id == charge_item_id
@@ -693,7 +706,13 @@ pub async fn handle_weapons(
                 || ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id))
                 || in_cycle || in_delay;
             if method == "Activate" && (in_delay || already_active) {
-                return Some(Err(BridgeRpcError { code: "ModuleAlreadyActive".into(), message: format!("Module {module_id} is already active in a cycle"), client_error: None }));
+                return Some(Err(
+                    crate::services::inventory_fitting::fitting_module_cycles::module_already_active_rpc_error(
+                        ctx,
+                        Some(m.type_id),
+                        format!("Module {module_id} is already active in a cycle"),
+                    ),
+                ));
             }
 
             // Capacitor check & deduction:
@@ -712,7 +731,9 @@ pub async fn handle_weapons(
                         mod_type.default_attributes.get(&6).copied().unwrap_or(0.0)
                     }
                 };
-                let cap_bonus_pct = charge_type.default_attributes.get(&317).copied().unwrap_or(0.0);
+                let cap_bonus_pct = charge_type_opt
+                    .and_then(|ct| ct.default_attributes.get(&317).copied())
+                    .unwrap_or(0.0);
                 if has_charge_mod(6) {
                     raw_cap.max(0.0)
                 } else {
@@ -742,24 +763,25 @@ pub async fn handle_weapons(
             }
 
             let charge_attr = |aid: u16, fallback: f64| -> f64 {
-                if let Some(ch) = fit.charge_state(module_id, &ctx.sde) {
-                    if ch.base_attributes.contains_key(&aid)
-                        || ch.modifiers.iter().any(|cm| cm.target_attribute_id == aid)
-                    {
-                        return ch.get_attribute(aid, &ctx.sde);
+                if charge_type_opt.is_some() {
+                    if let Some(ch) = fit.charge_state(module_id, &ctx.sde) {
+                        if ch.base_attributes.contains_key(&aid)
+                            || ch.modifiers.iter().any(|cm| cm.target_attribute_id == aid)
+                        {
+                            return ch.get_attribute(aid, &ctx.sde);
+                        }
                     }
                 }
-                charge_type
-                    .default_attributes
-                    .get(&aid)
-                    .copied()
+                charge_type_opt
+                    .and_then(|ct| ct.default_attributes.get(&aid).copied())
                     .unwrap_or(fallback)
             };
 
             // Charge consumption / Laser frequency crystal volatility (`feat:modules.turret-laser`)
             let mut crystal_damage_after = 0.0;
             let mut crystal_shattered = false;
-            if mod_type.group_id == 53 {
+            if let (Some(charge_item_id), Some(_charge_type)) = (charge_item_id_opt, charge_type_opt) {
+                if mod_type.group_id == 53 {
                 // Energy Laser Turret: uses frequency crystals (`group_id == 86 | 375`).
                 // T1 crystals (`attr 786 == 0.0`) do not degrade.
                 // T2 (`attr 786 == 1.0`, `783 == 0.1`, `784 == 0.01`) and Faction (`786 == 1.0`, `783 == 1.0`, `784 == 0.00025`) take volatility damage!
@@ -854,18 +876,19 @@ pub async fn handle_weapons(
                         None
                     }
                 });
-                if let Some((slot_flag, c_tid, pre_qty, new_qty)) = ammo_delta {
-                    if matches!(slot_flag as u16, 11..=34 | 125..=132) {
-                        crate::services::inventory_fitting::fitting_module_cycles::emit_charge_sublocation_quantity_change(
-                            ctx,
-                            char_id,
-                            ship_id,
-                            slot_flag,
-                            c_tid,
-                            pre_qty,
-                            new_qty,
-                        );
-                    }
+                        if let Some((slot_flag, c_tid, pre_qty, new_qty)) = ammo_delta {
+                            if matches!(slot_flag as u16, 11..=34 | 125..=132) {
+                                crate::services::inventory_fitting::fitting_module_cycles::emit_charge_sublocation_quantity_change(
+                                    ctx,
+                                    char_id,
+                                    ship_id,
+                                    slot_flag,
+                                    c_tid,
+                                    pre_qty,
+                                    new_qty,
+                                );
+                            }
+                        }
                 }
             }
 
@@ -885,6 +908,13 @@ pub async fn handle_weapons(
                 }
             };
             let eval_charge_dmg = |aid: u16| -> f64 {
+                if charge_type_opt.is_none() {
+                    let mv = mod_state.get_attribute(aid, &ctx.sde);
+                    if mv > 0.0 {
+                        return mv;
+                    }
+                    return mod_type.default_attributes.get(&aid).copied().unwrap_or(0.0);
+                }
                 let v = fit.get_charge_effective_attribute(module_id, aid, &ctx.sde);
                 if v > 0.0 {
                     v
@@ -910,6 +940,13 @@ pub async fn handle_weapons(
 
             // Handle Missile Launcher / Breacher Pod in-flight physics (`feat:modules.missile-launchers`, `feat:combat.missile-flight-physics-destruction`)
             if is_missile_launcher {
+                let (Some(charge_type_id), Some(charge_type)) = (charge_type_id_opt, charge_type_opt) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "NoAmmoLoaded".into(),
+                        message: format!("Weapon module {module_id} has no compatible charge loaded"),
+                        client_error: None,
+                    }));
+                };
 
                 return Some(
                     activate_missile_or_breacher_launcher(
@@ -934,10 +971,8 @@ pub async fn handle_weapons(
                 );
             }
             // Turret tracking, hit chance, Entropic spooling, and Vorton arc chaining
-            let tracking_mult = charge_type
-                .default_attributes
-                .get(&244)
-                .copied()
+            let tracking_mult = charge_type_opt
+                .and_then(|ct| ct.default_attributes.get(&244).copied())
                 .unwrap_or(1.0);
             let base_tracking = {
                 let v = mod_state.get_attribute(160, &ctx.sde);
@@ -992,7 +1027,7 @@ pub async fn handle_weapons(
             // Entropic Disintegrator consecutive target-specific spooling (`feat:modules.turret-precursor`)
             let (spool_cycles, spool_multiplier) = if is_entropic {
                 let duration_s = mod_attr_pos(51, 3_500.0) / 1000.0;
-                match combat_weapons_spool::handle_entropic_activation(ctx, char_id, ship_id, sys_id, module_id, target_ball_id, mod_type, Some(charge_item_id), base_dmg, base_cap_need, duration_s) {
+                match combat_weapons_spool::handle_entropic_activation(ctx, char_id, ship_id, sys_id, module_id, target_ball_id, mod_type, charge_item_id_opt, base_dmg, base_cap_need, duration_s) {
                     Ok(r) => r,
                     Err(e) => return Some(Err(e)),
                 }
@@ -1441,7 +1476,11 @@ pub async fn handle_weapons(
             } else {
                 ctx.db.with_mut_snapshot(|snap| {
                     snap.module_active_states.insert(module_id);
-                    snap.module_active_charges.insert(module_id, charge_type_id);
+                    if let Some(charge_type_id) = charge_type_id_opt {
+                        snap.module_active_charges.insert(module_id, charge_type_id);
+                    } else {
+                        snap.module_active_charges.remove(&module_id);
+                    }
                 });
                 let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
             }
@@ -1458,7 +1497,7 @@ pub async fn handle_weapons(
             Some(Ok(PyRep::keyval([
                 ("moduleID", PyRep::Integer(module_id)),
                 ("targetID", PyRep::Integer(target_ball_id)),
-                ("chargeTypeID", PyRep::Integer(charge_type_id as i64)),
+                ("chargeTypeID", charge_type_id_opt.map(|cid| PyRep::Integer(cid as i64)).unwrap_or(PyRep::None)),
                 ("hitChance", PyRep::Real(p_hit)), ("appliedDamage", PyRep::Real(applied_dmg)),
                 ("isWreckingShot", PyRep::Bool(is_wrecking)), ("capacitorBefore", PyRep::Real(cap_before)),
                 ("capacitorAfter", PyRep::Real(cap_after)), ("crystalDamageFraction", PyRep::Real(crystal_damage_after)),

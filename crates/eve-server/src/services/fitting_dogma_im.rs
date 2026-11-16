@@ -4,6 +4,52 @@
 
 use super::*;
 
+/// Builds a `ShipJammed` RPC error carrying V24 `UserError("TargetingSystemsBeingJammed")` (`#1082`).
+pub(crate) fn ship_jammed_rpc_error(ctx: &ServerContext, target_id: i64) -> BridgeRpcError {
+    let custom_name = ctx
+        .esi_state
+        .custom_item_names
+        .read()
+        .ok()
+        .and_then(|m| m.get(&target_id).filter(|s| !s.trim().is_empty()).cloned());
+    let target_name = custom_name
+        .or_else(|| {
+            ctx.db.with_snapshot(|snap| {
+                snap.items
+                    .get(&target_id)
+                    .and_then(|i| ctx.sde.types.get(&i.type_id).map(|t| t.name.clone()))
+            })
+        })
+        .unwrap_or_else(|| "Target".to_string());
+    BridgeRpcError::with_client_error(
+        "ShipJammed",
+        "Targeting systems are jammed by ECM",
+        eve_proto::ClientError::user_with_args(
+            eve_proto::UserErrorKey::TargetingSystemsBeingJammed,
+            [("targetname", PyRep::String(target_name))],
+        ),
+    )
+}
+
+/// Builds a `TargetingFailed` lock-cap error carrying exact V24 `UserError` (`#1082`):
+/// `TargetingAptitudeAlreadyFullyUtilized` when character skill cap bottlenecks, or
+/// `TargetingSystemsAlreadyFullyUtilized` when the ship hull/rig cap bottlenecks.
+pub(crate) fn target_lock_cap_rpc_error(
+    max_locked: usize,
+    skill_bottleneck: bool,
+) -> BridgeRpcError {
+    let key = if skill_bottleneck {
+        eve_proto::UserErrorKey::TargetingAptitudeAlreadyFullyUtilized
+    } else {
+        eve_proto::UserErrorKey::TargetingSystemsAlreadyFullyUtilized
+    };
+    BridgeRpcError::with_client_error(
+        "TargetingFailed",
+        format!("Max locked targets exceeded ({max_locked})"),
+        eve_proto::ClientError::user_with_args(key, [("limit", PyRep::Integer(max_locked as i64))]),
+    )
+}
+
 fn handle_item_get_info(
     ctx: &ServerContext,
     args: &[PyRep],
@@ -1014,8 +1060,13 @@ pub(crate) async fn handle_dogma_im(
                     return Some(Err(BridgeRpcError { code: "TargetInvulnerable".into(), message: format!("Target character {t_char} is invulnerable due to recent location change"), client_error: None }));
                 }
             }
-            if sys.get_combat_state(target_id).await.ok().flatten().is_some_and(|tcs| tcs.is_tethered) {
-                return Some(Err(BridgeRpcError { code: "TargetInvulnerable".into(), message: format!("Target {target_id} is tethered and invulnerable to target locks"), client_error: None }));
+            if let Some(tcs) = sys.get_combat_state(target_id).await.ok().flatten() {
+                if tcs.max_structure_hp > 0.0 && tcs.structure_hp <= 0.0 {
+                    return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Target {target_id} is destroyed"), client_error: None }));
+                }
+                if tcs.is_tethered {
+                    return Some(Err(BridgeRpcError { code: "TargetInvulnerable".into(), message: format!("Target {target_id} is tethered and invulnerable to target locks"), client_error: None }));
+                }
             }
             crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
             let fit = match ctx.fit(char_id, ship_id) {
@@ -1024,8 +1075,8 @@ pub(crate) async fn handle_dogma_im(
             };
 
             if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-                if cs.ecm_jammed_remaining_s > 0.0 {
-                    return Some(Err(BridgeRpcError { code: "ShipJammed".into(), message: "Targeting systems are jammed by ECM".into(), client_error: None }));
+                if cs.ecm_jammed_remaining_s > 0.0 && !cs.ecm_jammed_by.contains(&target_id) {
+                    return Some(Err(ship_jammed_rpc_error(ctx, target_id)));
                 }
                 if (cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0) || cs.decloak_targeting_delay_remaining_s > 0.0 {
                     return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: "Targeting systems cannot acquire lock while cloaked or during sensor recalibration delay".into(), client_error: None }));
@@ -1066,6 +1117,7 @@ pub(crate) async fn handle_dogma_im(
                 .round()
                 .max(0.0) as usize;
             let skill_char_max = 2 + (tm_lvl.min(5) as usize) + (atm_lvl.min(5) as usize);
+            let skill_bottleneck = char_eval.max(skill_char_max) < ship_max;
             let max_locked = ship_max
                 .min(char_eval.max(skill_char_max))
                 .max(eve_dogma::compute_effective_max_locked_targets(ship_max, tm_lvl, atm_lvl));
@@ -1133,7 +1185,7 @@ pub(crate) async fn handle_dogma_im(
                     ("passiveLock", PyRep::Bool(has_active_passive_targeter)),
                 ])));
             } else if current_locks.len() >= max_locked {
-                return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Max locked targets exceeded ({max_locked})"), client_error: None }));
+                return Some(Err(target_lock_cap_rpc_error(max_locked, skill_bottleneck)));
             }
 
             let scan_res = fit.ship.get_attribute(attr_ids::SCAN_RESOLUTION, &ctx.sde).max(1.0);
@@ -1202,7 +1254,7 @@ pub(crate) async fn handle_dogma_im(
             let (removed, sys_id_opt) = match (session.station_id, session.solar_system_id) {
                 (None, Some(sys_id)) => {
                     let sys = ctx.systems.get_or_spawn(sys_id);
-                    (sys.remove_target_lock(ship_id, target_id).await.unwrap_or(false), Some(sys_id))
+                    (sys.remove_target_lock_quiet(ship_id, target_id).await.unwrap_or(false), Some(sys_id))
                 }
                 _ => (false, None),
             };
@@ -1248,7 +1300,7 @@ pub(crate) async fn handle_dogma_im(
                 (None, Some(sys_id)) => {
                     let sys = ctx.systems.get_or_spawn(sys_id);
                     let prior = sys.get_target_locks(ship_id).await.unwrap_or_default();
-                    let _ = sys.clear_target_locks(ship_id).await;
+                    let _ = sys.clear_target_locks_quiet(ship_id).await;
                     let locked_ids: Vec<i64> = prior.into_iter().filter(|l| l.locked).map(|l| l.target_id).collect();
                     (locked_ids, Some(sys_id))
                 }
