@@ -174,6 +174,163 @@ fn setattr_industry_corp_division_roles_skills_and_fleet_emitters_kill_mutations
         PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(400))])
     );
 
+    // 3b. emit_industry_materials_for_scopes: preserves co-located material quantities when another type
+    //     changes, inserts 0 when an affected type is absent, and ignores unrelated scopes.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            990_703,
+            InventoryItemRecord {
+                item_id: 990_703,
+                type_id: 35,
+                owner_id: corp_id,
+                location_id: container_id,
+                flag: InventoryFlag::CorpSAG2,
+                quantity: 250,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    emit_industry_materials_for_scopes(
+        &ctx,
+        &[
+            (corp_id, container_id, InventoryFlag::CorpSAG1 as i64, 34),
+            (char_id, station_id, InventoryFlag::Hangar as i64, 34),
+        ],
+    );
+    assert!(
+        ctx.drain_notifications_for_char(char_id).is_empty(),
+        "unrelated location/flag must not trigger monitor 801"
+    );
+    emit_industry_materials_for_scopes(
+        &ctx,
+        &[(corp_id, container_id, InventoryFlag::CorpSAG2 as i64, 36)],
+    );
+    let scope_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(scope_notifs.len(), 1);
+    assert_eq!(scope_notifs[0].event, "OnIndustryMaterials");
+    assert_eq!(scope_notifs[0].args[0], PyRep::Integer(801));
+    assert_eq!(
+        scope_notifs[0].args[1],
+        PyRep::Dict(vec![
+            (PyRep::Integer(34), PyRep::Integer(400)),
+            (PyRep::Integer(35), PyRep::Integer(250)),
+            (PyRep::Integer(36), PyRep::Integer(0)),
+        ])
+    );
+
+    // 3c. Non-division corp hangar monitor (Deliveries) requires CEO/Director/FactoryManager (query bit for CorpSAG2 alone must NOT pass),
+    //     and items inside an impounded ancestor container are excluded from collect_available_monitor_materials.
+    let impounded_box = 990_710_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut monitors = load_industry_material_monitors(snap);
+        monitors.insert(
+            802,
+            IndustryMaterialMonitorSub {
+                char_id,
+                owner_id: corp_id,
+                location_id: station_id,
+                flag_id: InventoryFlag::Deliveries as i64,
+            },
+        );
+        monitors.insert(
+            803,
+            IndustryMaterialMonitorSub {
+                char_id,
+                owner_id: corp_id,
+                location_id: impounded_box,
+                flag_id: InventoryFlag::CorpSAG2 as i64,
+            },
+        );
+        save_industry_material_monitors(snap, &monitors);
+        snap.items.insert(
+            990_704,
+            InventoryItemRecord {
+                item_id: 990_704,
+                type_id: 34,
+                owner_id: corp_id,
+                location_id: station_id,
+                flag: InventoryFlag::Deliveries,
+                quantity: 600,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            impounded_box,
+            InventoryItemRecord {
+                item_id: impounded_box,
+                type_id: 23,
+                owner_id: corp_id,
+                location_id: station_id,
+                flag: InventoryFlag::Impounded,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            990_711,
+            InventoryItemRecord {
+                item_id: 990_711,
+                type_id: 34,
+                owner_id: corp_id,
+                location_id: impounded_box,
+                flag: InventoryFlag::CorpSAG2,
+                quantity: 999,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    // With only CorpSAG2 query bit, Deliveries monitor 802 is rejected
+    emit_industry_materials_for_scopes(
+        &ctx,
+        &[(corp_id, station_id, InventoryFlag::Deliveries as i64, 34)],
+    );
+    assert!(
+        ctx.drain_notifications_for_char(char_id).is_empty(),
+        "non-division corp monitor must reject member with only CorpSAG2 division query role"
+    );
+    // Grant ROLE_FACTORY_MANAGER -> Deliveries monitor 802 emits 600
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .member_roles
+            .insert(char_id, eve_db::corp_roles::ROLE_FACTORY_MANAGER);
+    });
+    emit_industry_materials_for_scopes(
+        &ctx,
+        &[(corp_id, station_id, InventoryFlag::Deliveries as i64, 34)],
+    );
+    let deliveries_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(deliveries_notifs.len(), 1);
+    assert_eq!(deliveries_notifs[0].args[0], PyRep::Integer(802));
+    assert_eq!(
+        deliveries_notifs[0].args[1],
+        PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(600))])
+    );
+    // Impounded ancestor container items are excluded (both helper and monitor 803 report 0)
+    let impounded_map = ctx.db.with_snapshot(|snap| {
+        collect_available_monitor_materials(snap, corp_id, impounded_box, InventoryFlag::CorpSAG2 as i64)
+    });
+    assert!(
+        impounded_map.is_empty(),
+        "items inside an Impounded container must be excluded: {impounded_map:?}"
+    );
+    emit_industry_materials_for_scopes(
+        &ctx,
+        &[(corp_id, impounded_box, InventoryFlag::CorpSAG2 as i64, 34)],
+    );
+    let impounded_notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(impounded_notifs.len(), 1);
+    assert_eq!(impounded_notifs[0].args[0], PyRep::Integer(803));
+    assert_eq!(
+        impounded_notifs[0].args[1],
+        PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(0))])
+    );
+
     // 4. emit_logon_skills_trained: higher level/SP in first tuple is preserved when a lower tuple follows
     emit_logon_skills_trained(
         &ctx,

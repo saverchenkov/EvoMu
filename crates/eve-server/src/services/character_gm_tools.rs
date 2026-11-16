@@ -1963,13 +1963,7 @@ pub async fn handle_gm_slash_ext(
 
         return match res {
             Ok(rec) => {
-                let inv_row = eve_proto::DBRowDescriptor::inv_item_header()
-                    .build_dbrow(crate::services::inventory_fitting::item_to_packed_cells(ctx, &rec));
-                let _ = ctx.notify_item_change(
-                    rec.owner_id,
-                    inv_row,
-                    vec![(3, PyRep::Integer(0)), (4, PyRep::Integer(0))],
-                );
+                ctx.notify_item_mutation(rec.owner_id, None, Some(&rec));
                 // V24.02 `menu_implant.PlugEmIn`, `dna.Load`, and `svc_invtools.SpawnRandom`
                 // index `slash.SlashCmd('/load ...')[0]` as the spawned `itemID`, while chat
                 // and `svc_slash.JobHandler` format non-`None` replies via `'slash result: %s' % res`.

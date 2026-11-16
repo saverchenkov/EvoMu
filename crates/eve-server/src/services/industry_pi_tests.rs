@@ -377,6 +377,19 @@ fn industry_job_queries_and_monitor_connect_disconnect_work() {
                 ..Default::default()
             },
         );
+        snap.items.insert(
+            8003,
+            InventoryItemRecord {
+                item_id: 8003,
+                type_id: 36,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 444,
+                singleton: false,
+                ..Default::default()
+            },
+        );
     });
 
     let counts = handle_industry_job_queries(
@@ -432,10 +445,21 @@ fn industry_job_queries_and_monitor_connect_disconnect_work() {
     )
     .unwrap()
     .unwrap();
-    let monitor_id = match conn {
-        PyRep::Tuple(v) => v[0].as_i64().unwrap(),
+    let (monitor_id, station_avail) = match conn {
+        PyRep::Tuple(v) => (v[0].as_i64().unwrap(), v[1].clone()),
         _ => panic!("expected tuple"),
     };
+    let PyRep::Dict(ref station_entries) = station_avail else {
+        panic!("expected Dict from ConnectJob(501)");
+    };
+    assert!(
+        station_entries.iter().any(|(k, v)| k.as_i64() == Some(34) && v.as_i64().is_some_and(|q| q >= 1200)),
+        "station monitor must report >= 1200 Tritanium: {station_entries:?}"
+    );
+    assert!(
+        station_entries.iter().any(|(k, v)| k.as_i64() == Some(36) && v.as_i64().is_some_and(|q| q >= 444)),
+        "station monitor must report >= 444 Mexallon: {station_entries:?}"
+    );
     let disc = handle_industry_job_queries(
         &ctx,
         &mut session,
@@ -462,6 +486,122 @@ fn industry_job_queries_and_monitor_connect_disconnect_work() {
         .expect("DisconnectJob(None/empty/non-positive) must return Ok(None)");
         assert_eq!(res, PyRep::None);
     }
+
+    // Nested inputLocation ObjectEx (client job.dump() format) resolves container itemID, flagID, and ownerID
+    let container_id = 990_555_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            990_556,
+            InventoryItemRecord {
+                item_id: 990_556,
+                type_id: 34,
+                owner_id: 90_000_001,
+                location_id: container_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 3000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let nested_job_dump = PyRep::Dict(vec![
+        (PyRep::String("facilityID".into()), PyRep::Integer(60_003_760)),
+        (
+            PyRep::String("inputLocation".into()),
+            PyRep::ObjectEx {
+                is_type_2: true,
+                header: Box::new(PyRep::Tuple(vec![
+                    PyRep::Tuple(vec![PyRep::Token("industry.job.Location".into())]),
+                    PyRep::Dict(vec![
+                        (PyRep::String("itemID".into()), PyRep::Integer(container_id)),
+                        (
+                            PyRep::String("flagID".into()),
+                            PyRep::Integer(InventoryFlag::Hangar as i64),
+                        ),
+                        (PyRep::String("ownerID".into()), PyRep::Integer(90_000_001)),
+                    ]),
+                ])),
+                list: Vec::new(),
+                dict: Vec::new(),
+            },
+        ),
+    ]);
+    let nested_conn = handle_industry_job_queries(
+        &ctx,
+        &mut session,
+        "industryMonitor",
+        "ConnectJob",
+        &[nested_job_dump],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::Tuple(nested_parts) = nested_conn else {
+        panic!("expected tuple from nested inputLocation ConnectJob");
+    };
+    let nested_mon_id = nested_parts[0].as_i64().unwrap();
+    assert_eq!(
+        nested_parts[1],
+        PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(3000))])
+    );
+    let _ = handle_industry_job_queries(
+        &ctx,
+        &mut session,
+        "industryMonitor",
+        "DisconnectJob",
+        &[PyRep::Integer(nested_mon_id)],
+        &HashMap::new(),
+    );
+
+    // Zero/placeholder IDs inside nested inputLocation fall back cleanly to facilityID / Hangar / char_id
+    let zero_id_job_dump = PyRep::Dict(vec![
+        (PyRep::String("facilityID".into()), PyRep::Integer(station_id)),
+        (
+            PyRep::String("inputLocation".into()),
+            PyRep::ObjectEx {
+                is_type_2: true,
+                header: Box::new(PyRep::Tuple(vec![
+                    PyRep::Tuple(vec![PyRep::Token("industry.job.Location".into())]),
+                    PyRep::Dict(vec![
+                        (PyRep::String("itemID".into()), PyRep::Integer(0)),
+                        (PyRep::String("flagID".into()), PyRep::Integer(0)),
+                        (PyRep::String("ownerID".into()), PyRep::Integer(0)),
+                    ]),
+                ])),
+                list: Vec::new(),
+                dict: Vec::new(),
+            },
+        ),
+    ]);
+    let zero_conn = handle_industry_job_queries(
+        &ctx,
+        &mut session,
+        "industryMonitor",
+        "ConnectJob",
+        &[zero_id_job_dump],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::Tuple(zero_parts) = zero_conn else {
+        panic!("expected tuple from zero-ID fallback ConnectJob");
+    };
+    let zero_mon_id = zero_parts[0].as_i64().unwrap();
+    assert_eq!(
+        zero_parts[1], station_avail,
+        "itemID/flagID/ownerID == 0 in inputLocation must fall back to facilityID/Hangar/char_id"
+    );
+    let zero_disc = handle_industry_job_queries(
+        &ctx,
+        &mut session,
+        "industryMonitor",
+        "DisconnectJob",
+        &[PyRep::Integer(zero_mon_id)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(zero_disc.as_bool(), Some(true));
 }
 
 #[cfg(test)]

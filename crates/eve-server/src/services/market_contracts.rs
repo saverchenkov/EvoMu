@@ -347,7 +347,7 @@ pub(crate) fn emit_expired_order_notifications(ctx: &ServerContext, expired: &[(
         }
         if let Some((rec, changes)) = follow_up.1 {
             if follow_up.2 {
-                ctx.notify_item_record_change_with_target(
+                ctx.emit_item_change_with_target(
                     NotificationTarget::Corporation(*owner_id),
                     "corpid",
                     &rec,
