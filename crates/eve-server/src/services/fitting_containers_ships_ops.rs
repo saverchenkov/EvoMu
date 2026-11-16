@@ -44,7 +44,7 @@ pub(crate) async fn handle_clear_charges(
                 client_error: None,
             });
         }
-        if ship.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(ship_id) {
+        if ship.flag == InventoryFlag::Locked || snap.is_item_or_ancestor_locked_or_impounded(ship_id) {
             return Err(BridgeRpcError {
                 code: "ItemLocked".into(),
                 message: format!("Ship {ship_id} is locked"),

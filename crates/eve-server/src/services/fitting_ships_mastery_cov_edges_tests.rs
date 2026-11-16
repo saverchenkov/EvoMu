@@ -543,7 +543,7 @@ async fn ships_mastery_launch_corvette_trash_mastery_killcounter_dirt_edge_paths
             container_id,
             InventoryItemRecord {
                 item_id: container_id,
-                type_id: 3468,
+                type_id: 23,
                 owner_id: char_id,
                 location_id: sys_id as i64,
                 flag: InventoryFlag::None,
@@ -586,7 +586,7 @@ async fn ships_mastery_launch_corvette_trash_mastery_killcounter_dirt_edge_paths
             audit_container,
             InventoryItemRecord {
                 item_id: audit_container,
-                type_id: 3468,
+                type_id: 17_366,
                 owner_id: char_id,
                 location_id: station_id,
                 flag: InventoryFlag::Hangar,
@@ -648,7 +648,7 @@ async fn ships_mastery_launch_corvette_trash_mastery_killcounter_dirt_edge_paths
                 actor_id: char_id,
                 action: "Lock".into(),
                 item_id: audit_container,
-                item_type_id: 3468,
+                item_type_id: 17_366,
                 quantity: 1,
             }],
         );
@@ -746,7 +746,7 @@ async fn ships_mastery_launch_corvette_trash_mastery_killcounter_dirt_edge_paths
             fallback_can_id,
             InventoryItemRecord {
                 item_id: fallback_can_id,
-                type_id: 3468,
+                type_id: 23,
                 owner_id: char_id,
                 location_id: sys_id as i64,
                 flag: InventoryFlag::None,
@@ -944,7 +944,7 @@ async fn ships_mastery_launch_corvette_trash_mastery_killcounter_dirt_edge_paths
             audit_container,
             InventoryItemRecord {
                 item_id: audit_container,
-                type_id: 3468,
+                type_id: 17_366,
                 owner_id: char_id,
                 location_id: station_id,
                 flag: InventoryFlag::Hangar,

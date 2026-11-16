@@ -1376,25 +1376,44 @@ impl WorldStateSnapshot {
         self.is_item_locked_excluding_trade(item_id, None)
     }
 
-    /// Returns `true` if `item_id` is escrowed in an active contract, industry job, direct trade (optionally excluding `exempt_trade_id`), or HyperNet raffle.
+    /// Returns `true` if `item_id` (or an ancestor container up to 8 hops) is escrowed in an active contract, industry job, direct trade (optionally excluding `exempt_trade_id`), or HyperNet raffle.
     pub fn is_item_locked_excluding_trade(&self, item_id: i64, exempt_trade_id: Option<i64>) -> bool {
         #[derive(serde::Deserialize)]
         struct TradeRef { #[serde(default)] trade_id: i64, #[serde(default)] char_a: i64, #[serde(default)] char_b: i64, #[serde(default)] station_id: i64, #[serde(default)] items_a: Vec<(i64, i32)>, #[serde(default)] items_b: Vec<(i64, i32)>, #[serde(default)] completed: bool, #[serde(default)] cancelled: bool }
         #[derive(serde::Deserialize)]
         struct RaffleRef { item_id: i64, #[serde(default)] winner_id: Option<i64>, #[serde(default)] expired: bool }
-        self.contracts.values().any(|c| matches!(c.status.as_str(), "Outstanding" | "InProgress") && c.item_ids.contains(&item_id))
-            || self.industry_jobs.values().any(|j| matches!(j.status.as_str(), "Active" | "Paused") && j.blueprint_item_id == item_id)
-            || self.owner_notes.values().any(|n| match n.character_id {
-                -73 => serde_json::from_str::<TradeRef>(&n.note).is_ok_and(|t| {
-                    let both_docked = t.station_id <= 0 || (
-                        self.characters.get(&t.char_a).is_none_or(|c| c.station_id.or(c.structure_id) == Some(t.station_id))
-                        && self.characters.get(&t.char_b).is_none_or(|c| c.station_id.or(c.structure_id) == Some(t.station_id))
-                    );
-                    exempt_trade_id != Some(t.trade_id) && !t.completed && !t.cancelled && both_docked && (t.items_a.iter().any(|(id, _)| *id == item_id) || t.items_b.iter().any(|(id, _)| *id == item_id))
-                }),
-                -74 => serde_json::from_str::<RaffleRef>(&n.note).is_ok_and(|r| !r.expired && r.winner_id.is_none() && r.item_id == item_id),
-                _ => false,
-            })
+        let is_direct_lock = |check_id: i64| -> bool {
+            self.contracts.values().any(|c| matches!(c.status.as_str(), "Outstanding" | "InProgress") && c.item_ids.contains(&check_id))
+                || self.industry_jobs.values().any(|j| matches!(j.status.as_str(), "Active" | "Paused") && j.blueprint_item_id == check_id)
+                || self.owner_notes.values().any(|n| match n.character_id {
+                    -73 => serde_json::from_str::<TradeRef>(&n.note).is_ok_and(|t| {
+                        let both_docked = t.station_id <= 0 || (
+                            self.characters.get(&t.char_a).is_none_or(|c| c.station_id.or(c.structure_id) == Some(t.station_id))
+                            && self.characters.get(&t.char_b).is_none_or(|c| c.station_id.or(c.structure_id) == Some(t.station_id))
+                        );
+                        exempt_trade_id != Some(t.trade_id) && !t.completed && !t.cancelled && both_docked && (t.items_a.iter().any(|(id, _)| *id == check_id) || t.items_b.iter().any(|(id, _)| *id == check_id))
+                    }),
+                    -74 => serde_json::from_str::<RaffleRef>(&n.note).is_ok_and(|r| !r.expired && r.winner_id.is_none() && r.item_id == check_id),
+                    _ => false,
+                })
+        };
+        let mut cur_id = item_id;
+        let mut visited = Vec::with_capacity(9);
+        for _ in 0..=8 {
+            visited.push(cur_id);
+            if is_direct_lock(cur_id) {
+                return true;
+            }
+            let Some(item) = self.items.get(&cur_id) else {
+                break;
+            };
+            let next_id = item.location_id;
+            if next_id <= 0 || visited.contains(&next_id) || self.structures.contains_key(&next_id) {
+                break;
+            }
+            cur_id = next_id;
+        }
+        false
     }
 
     /// Returns `true` if `item_id` is saved in `StructureExtendedState.previous_ship_by_structure`
@@ -1523,6 +1542,136 @@ impl WorldStateSnapshot {
         }
     }
 
+    /// Collects all descendant item IDs contained inside `root_id` (excluding `root_id` itself)
+    /// in breadth-first deterministic order with cycle protection.
+    pub fn collect_item_descendants(&self, root_id: i64) -> Vec<i64> {
+        self.collect_item_descendants_many(&[root_id])
+    }
+
+    /// Collects all descendant item IDs nested under any item in `root_ids` (excluding the roots
+    /// themselves), in breadth-first deterministic order with cycle protection.
+    pub fn collect_item_descendants_many(&self, root_ids: &[i64]) -> Vec<i64> {
+        if root_ids.is_empty() {
+            return Vec::new();
+        }
+        let mut by_parent: HashMap<i64, Vec<i64>> = HashMap::new();
+        for (&iid, it) in &self.items {
+            if it.location_id != iid {
+                by_parent.entry(it.location_id).or_default().push(iid);
+            }
+        }
+        for children in by_parent.values_mut() {
+            children.sort_unstable();
+        }
+        let mut result = Vec::new();
+        let mut visited: HashSet<i64> = root_ids.iter().copied().collect();
+        let mut queue: std::collections::VecDeque<i64> = root_ids.iter().copied().collect();
+        while let Some(parent_id) = queue.pop_front() {
+            if let Some(children) = by_parent.get(&parent_id) {
+                for &cid in children {
+                    if visited.insert(cid) {
+                        result.push(cid);
+                        queue.push_back(cid);
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Transfers ownership of all nested descendants of `root_ids` to `target_owner_id` without
+    /// altering their `location_id` or `flag`, clearing any armed self-destruct timers and
+    /// returning every descendant ID whose `owner_id` changed.
+    pub fn transfer_descendant_item_ownership(
+        &mut self,
+        root_ids: &[i64],
+        target_owner_id: i64,
+    ) -> Vec<i64> {
+        let descendants = self.collect_item_descendants_many(root_ids);
+        let mut transferred = Vec::new();
+        for child_id in descendants {
+            self.sp6_lifecycle.self_destructs.remove(&child_id);
+            if let Some(child) = self.items.get_mut(&child_id) {
+                if child.owner_id != target_owner_id {
+                    transferred.push(child_id);
+                }
+                child.owner_id = target_owner_id;
+                child.version += 1;
+            }
+        }
+        transferred
+    }
+
+    /// Completes escrow settlement of `item_ids` (plus any orphaned items directly at
+    /// `contract_id` when `include_contract_location_orphans` is true): moves top-level roots to
+    /// `target_location_id` with `target_flag` (or restores each root's saved `ContractOrigFlag`
+    /// defaulting to `Hangar` when `target_flag` is `None`), transfers ownership of both top-level
+    /// roots and all nested descendants to `target_owner_id`, clears `ContractOrigFlag` entries
+    /// and `self_destructs`, and returns every item ID whose `owner_id` changed.
+    pub fn settle_contract_escrow_items(
+        &mut self,
+        contract_id: i64,
+        item_ids: &[i64],
+        target_owner_id: i64,
+        target_location_id: i64,
+        target_flag: Option<InventoryFlag>,
+        include_contract_location_orphans: bool,
+    ) -> Vec<i64> {
+        let mut roots: Vec<i64> = item_ids.to_vec();
+        if include_contract_location_orphans {
+            let mut extra_ids: Vec<i64> = self
+                .items
+                .values()
+                .filter(|item| item.location_id == contract_id && !roots.contains(&item.item_id))
+                .map(|item| item.item_id)
+                .collect();
+            extra_ids.sort_unstable();
+            roots.extend(extra_ids);
+        }
+        let descendants = self.collect_item_descendants_many(&roots);
+        let mut transferred_ids = Vec::new();
+        for &iid in &roots {
+            let iid_sub = iid.to_string();
+            let kv_flag = self
+                .kv(crate::service_domains::Ns::ContractOrigFlag)
+                .get::<u16>(contract_id, &iid_sub);
+            self.kv_mut(crate::service_domains::Ns::ContractOrigFlag)
+                .remove(contract_id, &iid_sub);
+            let blob_flag = self
+                .service_state_blobs
+                .remove(&format!("contract_orig_flag:{contract_id}:{iid}"))
+                .and_then(|s| s.parse::<u16>().ok());
+            let resolved_flag = target_flag.unwrap_or_else(|| {
+                kv_flag
+                    .or(blob_flag)
+                    .map(InventoryFlag::from_u16)
+                    .filter(|f| *f != InventoryFlag::Locked)
+                    .unwrap_or(InventoryFlag::Hangar)
+            });
+            self.sp6_lifecycle.self_destructs.remove(&iid);
+            if let Some(item) = self.items.get_mut(&iid) {
+                if item.owner_id != target_owner_id {
+                    transferred_ids.push(iid);
+                }
+                item.owner_id = target_owner_id;
+                item.location_id = target_location_id;
+                item.flag = resolved_flag;
+                item.version += 1;
+            }
+        }
+        for &child_id in &descendants {
+            self.sp6_lifecycle.self_destructs.remove(&child_id);
+            if let Some(child) = self.items.get_mut(&child_id) {
+                if child.owner_id != target_owner_id {
+                    transferred_ids.push(child_id);
+                }
+                child.owner_id = target_owner_id;
+                child.version += 1;
+            }
+        }
+        transferred_ids
+    }
+
     /// Resolves an expired `Outstanding` or `InProgress` contract in-place.
     pub fn resolve_expired_contract(
         &mut self,
@@ -1564,42 +1713,14 @@ impl WorldStateSnapshot {
                         } else {
                             InventoryFlag::Hangar
                         };
-                        let mut transferred_ids = Vec::new();
-                        for iid in &c.item_ids {
-                            self.kv_mut(crate::service_domains::Ns::ContractOrigFlag)
-                                .remove(contract_id, &iid.to_string());
-                            self.service_state_blobs.remove(&format!("contract_orig_flag:{contract_id}:{iid}"));
-                            if let Some(item) = self.items.get_mut(iid) {
-                                if item.owner_id != winner_id {
-                                    transferred_ids.push(*iid);
-                                }
-                                item.owner_id = winner_id;
-                                item.location_id = c.start_station_id;
-                                item.flag = winner_flag;
-                                item.version += 1;
-                            }
-                        }
-                        let mut extra_ids: Vec<i64> = self
-                            .items
-                            .values()
-                            .filter(|item| item.location_id == contract_id)
-                            .map(|item| item.item_id)
-                            .collect();
-                        extra_ids.sort_unstable();
-                        for iid in extra_ids {
-                            self.kv_mut(crate::service_domains::Ns::ContractOrigFlag)
-                                .remove(contract_id, &iid.to_string());
-                            self.service_state_blobs.remove(&format!("contract_orig_flag:{contract_id}:{iid}"));
-                            if let Some(item) = self.items.get_mut(&iid) {
-                                if item.owner_id != winner_id {
-                                    transferred_ids.push(iid);
-                                }
-                                item.owner_id = winner_id;
-                                item.location_id = c.start_station_id;
-                                item.flag = winner_flag;
-                                item.version += 1;
-                            }
-                        }
+                        let transferred_ids = self.settle_contract_escrow_items(
+                            contract_id,
+                            &c.item_ids,
+                            winner_id,
+                            c.start_station_id,
+                            Some(winner_flag),
+                            true,
+                        );
                         self.kv_mut(crate::service_domains::Ns::ContractBidDiv)
                             .clear_entity(contract_id);
                         self.strip_ship_cosmetics(&transferred_ids);
@@ -1623,58 +1744,16 @@ impl WorldStateSnapshot {
                 {
                     self.credit_contract_issuer(&c, IskCents(dep_raw));
                 }
-                for iid in &c.item_ids {
-                    let iid_sub = iid.to_string();
-                    let kv_flag = self
-                        .kv(crate::service_domains::Ns::ContractOrigFlag)
-                        .get::<u16>(contract_id, &iid_sub);
-                    self.kv_mut(crate::service_domains::Ns::ContractOrigFlag)
-                        .remove(contract_id, &iid_sub);
-                    let orig_flag = kv_flag
-                        .or_else(|| {
-                            self.service_state_blobs
-                                .remove(&format!("contract_orig_flag:{contract_id}:{iid}"))
-                                .and_then(|s| s.parse::<u16>().ok())
-                        })
-                        .map(InventoryFlag::from_u16)
-                        .filter(|f| *f != InventoryFlag::Locked)
-                        .unwrap_or(InventoryFlag::Hangar);
-                    if let Some(item) = self.items.get_mut(iid) {
-                        item.owner_id = issuer_entity_id;
-                        item.location_id = c.start_station_id;
-                        item.flag = orig_flag;
-                        item.version += 1;
-                    }
-                }
-                let mut extra_ids: Vec<i64> = self
-                    .items
-                    .values()
-                    .filter(|item| item.location_id == contract_id)
-                    .map(|item| item.item_id)
-                    .collect();
-                extra_ids.sort_unstable();
-                for iid in extra_ids {
-                    let iid_sub = iid.to_string();
-                    let kv_flag = self
-                        .kv(crate::service_domains::Ns::ContractOrigFlag)
-                        .get::<u16>(contract_id, &iid_sub);
-                    self.kv_mut(crate::service_domains::Ns::ContractOrigFlag)
-                        .remove(contract_id, &iid_sub);
-                    let orig_flag = kv_flag
-                        .or_else(|| {
-                            self.service_state_blobs
-                                .remove(&format!("contract_orig_flag:{contract_id}:{iid}"))
-                                .and_then(|s| s.parse::<u16>().ok())
-                        })
-                        .map(InventoryFlag::from_u16)
-                        .filter(|f| *f != InventoryFlag::Locked)
-                        .unwrap_or(InventoryFlag::Hangar);
-                    if let Some(item) = self.items.get_mut(&iid) {
-                        item.owner_id = issuer_entity_id;
-                        item.location_id = c.start_station_id;
-                        item.flag = orig_flag;
-                        item.version += 1;
-                    }
+                let transferred_ids = self.settle_contract_escrow_items(
+                    contract_id,
+                    &c.item_ids,
+                    issuer_entity_id,
+                    c.start_station_id,
+                    None,
+                    true,
+                );
+                if !transferred_ids.is_empty() {
+                    self.strip_ship_cosmetics(&transferred_ids);
                 }
                 self.kv_mut(crate::service_domains::Ns::ContractBidDiv)
                     .clear_entity(contract_id);
@@ -1735,6 +1814,8 @@ impl WorldStateSnapshot {
         {
             self.credit_contract_issuer(&c, IskCents(dep_raw));
         }
+        let target_owner = c.acceptor_id.unwrap_or(issuer_entity_id);
+        let mut transferred_ids = self.transfer_descendant_item_ownership(&c.item_ids, target_owner);
         let mut wraps_to_remove = Vec::new();
         for iid in &c.item_ids {
             let parent_loc = self.items.get(iid).map(|it| it.location_id).unwrap_or(0);
@@ -1745,9 +1826,7 @@ impl WorldStateSnapshot {
                 }
             }
             let in_ship_container = self.items.get(iid).is_some_and(|item| self.items.contains_key(&item.location_id));
-            let mut transferred_ids = Vec::new();
             if let Some(item) = self.items.get_mut(iid) {
-                let target_owner = c.acceptor_id.unwrap_or(issuer_entity_id);
                 if item.owner_id != target_owner {
                     transferred_ids.push(*iid);
                 }
@@ -1755,9 +1834,9 @@ impl WorldStateSnapshot {
                 item.flag = if in_ship_container { InventoryFlag::Cargo } else { InventoryFlag::Hangar };
                 item.version += 1;
             }
-            if !transferred_ids.is_empty() {
-                self.strip_ship_cosmetics(&transferred_ids);
-            }
+        }
+        if !transferred_ids.is_empty() {
+            self.strip_ship_cosmetics(&transferred_ids);
         }
         for wid in wraps_to_remove {
             self.items.remove(&wid);

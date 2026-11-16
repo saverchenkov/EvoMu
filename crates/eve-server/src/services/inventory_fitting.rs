@@ -511,7 +511,7 @@ async fn handle_invbroker_add(
                                 client_error: None,
                             });
                         }
-                        if snap.is_item_locked_in_contract_or_job(item_id) {
+                        if snap.is_item_or_ancestor_locked_or_impounded(item_id) {
                             return Err(BridgeRpcError {
                                 code: "ItemLocked".into(),
                                 message: format!("Rig {item_id} is locked"),
@@ -613,7 +613,7 @@ async fn handle_invbroker_add(
                         });
                     }
                     if item.flag == InventoryFlag::Locked
-                        || snap.is_item_locked_in_contract_or_job(item_id)
+                        || snap.is_item_or_ancestor_locked_or_impounded(item_id)
                     {
                         return Err(BridgeRpcError {
                             code: "ItemLocked".into(),
@@ -666,6 +666,17 @@ async fn handle_invbroker_add(
                         return Err(BridgeRpcError {
                             code: "InvalidFittingTarget".into(),
                             message: format!("Target {new_loc} is not an owned ship"),
+                            client_error: None,
+                        });
+                    }
+                    if ship_item.flag == InventoryFlag::Locked
+                        || snap.is_item_or_ancestor_locked_or_impounded(new_loc)
+                    {
+                        return Err(BridgeRpcError {
+                            code: "ItemLocked".into(),
+                            message: format!(
+                                "Target ship {new_loc} is locked by an active contract, industry job, or container"
+                            ),
                             client_error: None,
                         });
                     }
@@ -1340,6 +1351,17 @@ async fn handle_invbroker_add(
                         return Err(BridgeRpcError {
                             code: "InvalidFittingTarget".into(),
                             message: format!("Target {new_loc} is not an owned ship"),
+                            client_error: None,
+                        });
+                    }
+                    if ship_item.flag == InventoryFlag::Locked
+                        || snap.is_item_or_ancestor_locked_or_impounded(new_loc)
+                    {
+                        return Err(BridgeRpcError {
+                            code: "ItemLocked".into(),
+                            message: format!(
+                                "Target ship {new_loc} is locked by an active contract, industry job, or container"
+                            ),
                             client_error: None,
                         });
                     }
