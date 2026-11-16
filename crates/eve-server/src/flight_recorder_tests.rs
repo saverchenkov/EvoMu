@@ -353,3 +353,49 @@ fn packet_perf_warnings_bounded_at_200() {
     assert_eq!(warnings.last().unwrap().arg_size, 268);
     assert!(warnings.last().unwrap().bootstrap);
 }
+
+#[test]
+fn sequencer_counters_violations_and_prevented_jolts_are_tracked_and_bounded() {
+    let fr = FlightRecorder::new();
+    fr.record_dropped_dependent_notification(77, "OnSlimItemChange");
+    fr.record_dropped_dependent_notification(77, "OnSlimItemChange");
+    fr.record_dropped_dependent_notification(77, "OnSpecialFX");
+
+    for i in 0..205 {
+        fr.record_invariant_violation(
+            77,
+            1,
+            100 + i as u32,
+            "remove-after-addballs",
+            &format!("detail_{i}"),
+        );
+        fr.record_prevented_jolt(77, 1, 90 + i as u32, 100 + i as u32, "stamp_regression");
+    }
+    fr.record_invariant_violation(88, 2, 10, "group-stamp-matches-update-stamp", "mismatch");
+
+    let c77 = fr.session_sequencer_counters(77);
+    assert_eq!(c77.dropped_dependent_notifications, 3);
+    assert_eq!(c77.dropped_dependent_by_name.get("OnSlimItemChange"), Some(&2));
+    assert_eq!(c77.dropped_dependent_by_name.get("OnSpecialFX"), Some(&1));
+    assert_eq!(c77.invariant_violations, 205);
+    assert_eq!(c77.invariant_violations_by_name.get("remove-after-addballs"), Some(&205));
+    assert_eq!(c77.prevented_jolts, 205);
+
+    let v77 = fr.get_session_invariant_violations(77, 500);
+    assert_eq!(v77.len(), MAX_INVARIANT_VIOLATIONS_PER_SESSION);
+    assert_eq!(v77.first().unwrap().stamp, 105);
+    assert_eq!(v77.last().unwrap().stamp, 304);
+
+    let j77 = fr.get_session_prevented_jolts(77, 500);
+    assert_eq!(j77.len(), MAX_PREVENTED_JOLTS_PER_SESSION);
+    assert_eq!(j77.first().unwrap().batch_stamp, 95);
+    assert_eq!(j77.last().unwrap().batch_stamp, 294);
+
+    let summary = fr.sequencer_observability_summary(10);
+    assert_eq!(summary.dropped_dependent_notifications_total, 3);
+    assert_eq!(summary.invariant_violations_total, 206);
+    assert_eq!(summary.prevented_jolts_total, 205);
+    assert_eq!(summary.sessions_with_counters, 2);
+    assert_eq!(summary.recent_invariant_violations.len(), 10);
+    assert_eq!(summary.recent_prevented_jolts.len(), 10);
+}

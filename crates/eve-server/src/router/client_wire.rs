@@ -49,6 +49,31 @@ pub struct ClientWireSession<'c> {
     pub wire_state: SessionWireState,
 }
 
+fn build_wire_state_for_session(
+    ctx: &ServerContext,
+    session: &SessionState,
+    client_id: u64,
+) -> SessionWireState {
+    let mut wire_state = SessionWireState::new(session.session_id, client_id)
+        .with_flight_recorder(std::sync::Arc::clone(&ctx.flight_recorder));
+    if session.character_id.is_some()
+        && session.solar_system_id.is_some()
+        && session.station_id.is_none()
+        && session.structure_id.is_none()
+    {
+        let ep = wire_state.enter_space(session.solar_system_id);
+        wire_state.destiny = crate::outbound_sequencer::DestinyStream::Live {
+            epoch: ep,
+            set_state_stamp: 0,
+            last_stamp: 0,
+        };
+        if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+            wire_state.seed_materialized_from_ballpark(ctx, sys_id, ship_id);
+        }
+    }
+    wire_state
+}
+
 impl<'c> ClientWireSession<'c> {
     /// Creates a fresh authenticated/pre-login wire session with `live_notify_listener = true`,
     /// matching `macho_listener::handle_macho_client`.
@@ -68,19 +93,7 @@ impl<'c> ClientWireSession<'c> {
             .systems
             .get_or_spawn(subscribed_sys_id.unwrap_or(0))
             .subscribe();
-        let mut wire_state = SessionWireState::new(session.session_id, client_id);
-        if session.character_id.is_some()
-            && session.solar_system_id.is_some()
-            && session.station_id.is_none()
-            && session.structure_id.is_none()
-        {
-            let ep = wire_state.enter_space(session.solar_system_id);
-            wire_state.destiny = crate::outbound_sequencer::DestinyStream::Live {
-                epoch: ep,
-                set_state_stamp: 0,
-                last_stamp: 0,
-            };
-        }
+        let wire_state = build_wire_state_for_session(ctx, &session, client_id);
         Self {
             ctx,
             session,
@@ -173,19 +186,7 @@ pub async fn dispatch_call_on_wire(
         .systems
         .get_or_spawn(subscribed_sys_id.unwrap_or(0))
         .subscribe();
-    let mut wire_state = SessionWireState::new(session.session_id, client_id);
-    if session.character_id.is_some()
-        && session.solar_system_id.is_some()
-        && session.station_id.is_none()
-        && session.structure_id.is_none()
-    {
-        let ep = wire_state.enter_space(session.solar_system_id);
-        wire_state.destiny = crate::outbound_sequencer::DestinyStream::Live {
-            epoch: ep,
-            set_state_stamp: 0,
-            last_stamp: 0,
-        };
-    }
+    let mut wire_state = build_wire_state_for_session(ctx, session, client_id);
     let mut wire_refs = CallReqWireRefs {
         client_id,
         sys_rx: &mut sys_rx,

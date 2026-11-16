@@ -20,7 +20,12 @@
 //! - On broadcast lag (`RecvError::Lagged`), `on_broadcast_lagged` transitions `Live` back to
 //!   `AwaitingSetState { epoch }` so an immediate `SetState` resync restores ballpark state (`ORD-5`).
 
+use crate::flight_recorder::{FlightRecorder, SessionSequencerCounters};
+use crate::sequencer_invariants::{InvariantValidatorMode, SequencerGuardState};
+use eve_destiny::BallId;
 use eve_proto::PyRep;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 /// Per-session destiny stream lifecycle state (`C-3`, `ORD-3`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -69,6 +74,9 @@ pub struct SessionWireState {
     pub solar_system_id: Option<u32>,
     pub in_space: bool,
     pub last_client_tick: Option<u64>,
+    pub materialized: HashSet<BallId>,
+    flight_recorder: Option<Arc<FlightRecorder>>,
+    guard: SequencerGuardState,
 }
 
 impl SessionWireState {
@@ -81,7 +89,95 @@ impl SessionWireState {
             solar_system_id: None,
             in_space: false,
             last_client_tick: None,
+            materialized: HashSet::new(),
+            flight_recorder: None,
+            guard: SequencerGuardState::default(),
         }
+    }
+
+    pub fn with_flight_recorder(mut self, flight_recorder: Arc<FlightRecorder>) -> Self {
+        self.flight_recorder = Some(flight_recorder);
+        self
+    }
+
+    pub fn set_flight_recorder(&mut self, flight_recorder: Option<Arc<FlightRecorder>>) {
+        self.flight_recorder = flight_recorder;
+    }
+
+    pub fn flight_recorder(&self) -> Option<&FlightRecorder> {
+        self.flight_recorder.as_deref()
+    }
+
+    pub fn set_invariant_validator_mode(&mut self, mode: InvariantValidatorMode) {
+        self.guard.mode = mode;
+    }
+
+    pub fn invariant_validator_mode(&self) -> InvariantValidatorMode {
+        self.guard.mode
+    }
+
+    pub fn sequencer_counters(&self) -> &SessionSequencerCounters {
+        &self.guard.counters
+    }
+
+    pub fn seed_materialized_entities<I: IntoIterator<Item = BallId>>(&mut self, ids: I) {
+        for id in ids {
+            if id > 0 {
+                self.materialized.insert(id);
+            }
+        }
+    }
+
+    /// Populates `materialized` from an already-live ballpark observer view (used only when
+    /// attaching `ClientWireSession` / `dispatch_call_on_wire` mid-flight to an already-live session).
+    pub fn seed_materialized_from_ballpark(
+        &mut self,
+        ctx: &crate::router::ServerContext,
+        solar_system_id: u32,
+        observer_ship_id: BallId,
+    ) {
+        if let Some(handle) = ctx.systems.get_handle(solar_system_id) {
+            if let Ok(bp) = handle.ballpark.read() {
+                if bp.balls.contains_key(&observer_ship_id) {
+                    for b in bp.visible_balls_for_observer(observer_ship_id) {
+                        self.materialized.insert(b.id);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Evaluates a standalone outgoing `MachoNet` notification against `materialized` (`GH #1084`).
+    pub fn gate_notification(&mut self, event: &str, args: &[PyRep]) -> Option<SequencerLedgerEvent> {
+        let stamp = match self.destiny {
+            DestinyStream::Live { last_stamp, .. } => last_stamp,
+            _ => 0,
+        };
+        self.guard.gate_notification(
+            &self.materialized,
+            self.flight_recorder.as_deref(),
+            self.session_id,
+            self.current_epoch(),
+            stamp,
+            event,
+            args,
+        )
+    }
+
+    /// Validates a single outgoing `DoDestinyUpdate` frame against all 4 invariants (`GH #1084`).
+    pub fn validate_outgoing_destiny_frame(
+        &mut self,
+        epoch: u32,
+        stamp: u32,
+        updates: &PyRep,
+    ) -> Vec<String> {
+        self.guard.validate_outgoing_destiny_frame(
+            self.flight_recorder.as_deref(),
+            self.session_id,
+            epoch,
+            stamp,
+            updates,
+        )
     }
 
     pub fn note_client_tick(&mut self, tick: u64) {
@@ -108,6 +204,8 @@ impl SessionWireState {
         let ep = self.allocate_epoch();
         self.in_space = true;
         self.solar_system_id = solar_system_id;
+        self.materialized.clear();
+        self.guard.reset_epoch_state();
         self.destiny = DestinyStream::AwaitingSetState { epoch: ep };
         ep
     }
@@ -128,6 +226,8 @@ impl SessionWireState {
     /// Transitions the session out of space (docking or logoff), setting `DestinyStream::Detached`.
     pub fn leave_space(&mut self) {
         self.in_space = false;
+        self.materialized.clear();
+        self.guard.reset_epoch_state();
         self.destiny = DestinyStream::Detached;
     }
 
@@ -191,6 +291,7 @@ pub struct SequencerLedgerEvent {
     pub epoch: u32,
     pub stamp: u32,
     pub reason: String,
+    pub packet_kind: Option<String>,
 }
 
 /// Full sequencing output including both outbound wire frames and drop/coalesce ledger events.
@@ -262,21 +363,26 @@ impl SessionWireState {
                     };
                     AcceptDestinyOutcome::Accepted(batch)
                 } else {
-                    if batch_stamp < set_state_stamp {
-                        return AcceptDestinyOutcome::Dropped {
-                            epoch: batch_epoch,
-                            stamp: batch_stamp,
-                            reason: format!(
-                                "stamp_below_set_state:{batch_stamp}<{set_state_stamp}"
-                            ),
+                    let trusted_stamp = last_stamp.max(set_state_stamp);
+                    if batch_stamp < set_state_stamp || batch_stamp < last_stamp {
+                        let reason = if batch_stamp < set_state_stamp {
+                            format!("stamp_below_set_state:{batch_stamp}<{set_state_stamp}")
+                        } else {
+                            format!("stamp_regression:{batch_stamp}<{last_stamp}")
                         };
-                    }
-                    // #1077 §A: Reject any non-SetState batch strictly below last_stamp for this session.
-                    if batch_stamp < last_stamp {
+                        self.guard.note_prevented_jolt_counter();
+                        crate::critical!(
+                            session_id = self.session_id,
+                            epoch = batch_epoch,
+                            batch_stamp = batch_stamp,
+                            trusted_stamp = trusted_stamp,
+                            reason = &reason,
+                            flight_recorder = self.flight_recorder.as_deref(),
+                        );
                         return AcceptDestinyOutcome::Dropped {
                             epoch: batch_epoch,
                             stamp: batch_stamp,
-                            reason: format!("stamp_regression:{batch_stamp}<{last_stamp}"),
+                            reason,
                         };
                     }
                     self.destiny = DestinyStream::Live {
@@ -451,6 +557,7 @@ fn eval_and_push_destiny_batch(
                             "equal_stamp_merge:stamp={}:merged_{merged_entries}_entries",
                             accepted.stamp
                         ),
+                        packet_kind: None,
                     });
                     return;
                 }
@@ -474,8 +581,48 @@ fn eval_and_push_destiny_batch(
                 epoch,
                 stamp,
                 reason,
+                packet_kind: None,
             });
         }
+    }
+}
+
+fn finalize_pending_destiny_frames(
+    state: &mut SessionWireState,
+    out: &mut Vec<OutFrame>,
+    start_idx: usize,
+    events: &mut Vec<SequencerLedgerEvent>,
+) {
+    let tail = out.split_off(start_idx);
+    for mut frame in tail {
+        if let OutFrame::DoDestinyUpdate {
+            epoch,
+            stamp,
+            updates,
+            ..
+        } = &mut frame
+        {
+            let keep = state.guard.reconcile_destiny_updates_with_gate(
+                &mut state.materialized,
+                state.flight_recorder.as_deref(),
+                state.session_id,
+                *epoch,
+                *stamp,
+                updates,
+                events,
+            );
+            if !keep {
+                continue;
+            }
+            state.guard.validate_outgoing_destiny_frame(
+                state.flight_recorder.as_deref(),
+                state.session_id,
+                *epoch,
+                *stamp,
+                updates,
+            );
+        }
+        out.push(frame);
     }
 }
 
@@ -505,12 +652,14 @@ pub fn sequence_with_events(state: &mut SessionWireState, done: RpcCompletion) -
     let mut destiny_drain = done.destiny_drain;
     if matches!(destiny_drain, DestinyDrain::Detach { .. }) {
         if let DestinyDrain::Detach { pre_detach } = std::mem::take(&mut destiny_drain) {
+            let pre_start = out.len();
             for tick_batch in pending_ticks.drain(..) {
                 eval_and_push_destiny_batch(state, tick_batch, &mut out, &mut events);
             }
             if let Some(batch) = pre_detach {
                 eval_and_push_destiny_batch(state, batch, &mut out, &mut events);
             }
+            finalize_pending_destiny_frames(state, &mut out, pre_start, &mut events);
             state.leave_space();
         }
     }
@@ -542,6 +691,7 @@ pub fn sequence_with_events(state: &mut SessionWireState, done: RpcCompletion) -
     }
 
     // 4. Buffered tick broadcasts followed by post-RPC direct destiny drain (ORD-3, #845, #1077 §A).
+    let step4_start = out.len();
     for tick_batch in pending_ticks {
         eval_and_push_destiny_batch(state, tick_batch, &mut out, &mut events);
     }
@@ -550,6 +700,8 @@ pub fn sequence_with_events(state: &mut SessionWireState, done: RpcCompletion) -
         DestinyDrain::Attach { epoch, set_state } => {
             if matches!(state.destiny, DestinyStream::Detached) {
                 state.in_space = true;
+                state.materialized.clear();
+                state.guard.reset_epoch_state();
                 state.destiny = DestinyStream::AwaitingSetState { epoch };
             }
             eval_and_push_destiny_batch(state, set_state, &mut out, &mut events);
@@ -559,6 +711,7 @@ pub fn sequence_with_events(state: &mut SessionWireState, done: RpcCompletion) -
         }
         DestinyDrain::None | DestinyDrain::Detach { .. } => {}
     }
+    finalize_pending_destiny_frames(state, &mut out, step4_start, &mut events);
 
     if let Some(sess_frame) = deferred_session_change.take() {
         out.push(OutFrame::SessionChange { frame: sess_frame });
@@ -567,8 +720,12 @@ pub fn sequence_with_events(state: &mut SessionWireState, done: RpcCompletion) -
         out.push(rsp);
     }
 
-    // 5. Post-RPC notifications in causal emission order (ORD-5, ORD-6).
+    // 5. Post-RPC notifications in causal emission order (ORD-5, ORD-6), gated against `materialized`.
     for notif in done.notifications {
+        if let Some(drop_ev) = state.gate_notification(&notif.event, &notif.args) {
+            events.push(drop_ev);
+            continue;
+        }
         if let Some(service) = notif.service {
             out.push(OutFrame::ServiceCall {
                 service,
@@ -591,7 +748,63 @@ pub fn sequence_with_events(state: &mut SessionWireState, done: RpcCompletion) -
 
 /// Sequences a standalone 1 Hz tick broadcast batch against `SessionWireState` (`ORD-3`, `#845`, `#1077 §A`).
 pub fn sequence_tick(state: &mut SessionWireState, batch: DestinyBatch) -> Option<OutFrame> {
-    sequence_tick_with_event(state, batch).0
+    sequence_tick_with_events(state, batch).0
+}
+
+/// Sequences a standalone 1 Hz tick broadcast batch, returning all gate/backstep ledger events.
+pub fn sequence_tick_with_events(
+    state: &mut SessionWireState,
+    batch: DestinyBatch,
+) -> (Option<OutFrame>, Vec<SequencerLedgerEvent>) {
+    match state.accept_destiny_batch_with_reason(batch) {
+        AcceptDestinyOutcome::Accepted(mut accepted) => {
+            let mut events = Vec::new();
+            let keep = state.guard.reconcile_destiny_updates_with_gate(
+                &mut state.materialized,
+                state.flight_recorder.as_deref(),
+                state.session_id,
+                accepted.epoch,
+                accepted.stamp,
+                &mut accepted.updates,
+                &mut events,
+            );
+            if !keep {
+                return (None, events);
+            }
+            state.guard.validate_outgoing_destiny_frame(
+                state.flight_recorder.as_deref(),
+                state.session_id,
+                accepted.epoch,
+                accepted.stamp,
+                &accepted.updates,
+            );
+            (
+                Some(OutFrame::DoDestinyUpdate {
+                    epoch: accepted.epoch,
+                    stamp: accepted.stamp,
+                    has_set_state: accepted.has_set_state,
+                    updates: accepted.updates,
+                    wait_for_bubble: accepted.wait_for_bubble,
+                }),
+                events,
+            )
+        }
+        AcceptDestinyOutcome::Empty => (None, Vec::new()),
+        AcceptDestinyOutcome::Dropped {
+            epoch,
+            stamp,
+            reason,
+        } => (
+            None,
+            vec![SequencerLedgerEvent {
+                kind: SequencerLedgerEventKind::Dropped,
+                epoch,
+                stamp,
+                reason,
+                packet_kind: None,
+            }],
+        ),
+    }
 }
 
 /// Sequences a standalone 1 Hz tick broadcast batch, returning an optional `Dropped` ledger event
@@ -600,32 +813,8 @@ pub fn sequence_tick_with_event(
     state: &mut SessionWireState,
     batch: DestinyBatch,
 ) -> (Option<OutFrame>, Option<SequencerLedgerEvent>) {
-    match state.accept_destiny_batch_with_reason(batch) {
-        AcceptDestinyOutcome::Accepted(accepted) => (
-            Some(OutFrame::DoDestinyUpdate {
-                epoch: accepted.epoch,
-                stamp: accepted.stamp,
-                has_set_state: accepted.has_set_state,
-                updates: accepted.updates,
-                wait_for_bubble: accepted.wait_for_bubble,
-            }),
-            None,
-        ),
-        AcceptDestinyOutcome::Empty => (None, None),
-        AcceptDestinyOutcome::Dropped {
-            epoch,
-            stamp,
-            reason,
-        } => (
-            None,
-            Some(SequencerLedgerEvent {
-                kind: SequencerLedgerEventKind::Dropped,
-                epoch,
-                stamp,
-                reason,
-            }),
-        ),
-    }
+    let (frame, events) = sequence_tick_with_events(state, batch);
+    (frame, events.into_iter().next())
 }
 
 #[cfg(test)]
@@ -1210,5 +1399,183 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn named_update(stamp: u32, action: &str, args: Vec<PyRep>) -> PyRep {
+        PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(i64::from(stamp)),
+            PyRep::Tuple(vec![PyRep::String(action.into()), PyRep::Tuple(args)]),
+        ])])
+    }
+
+    #[test]
+    fn entity_materialization_gate_orders_same_dispatch_and_drops_unknown_balls() {
+        let fr = Arc::new(FlightRecorder::new());
+        let mut wire = SessionWireState::new(1084_01, 9001).with_flight_recorder(Arc::clone(&fr));
+        let ep = wire.enter_space(Some(30_000_142));
+
+        let set_state = DestinyBatch::new(
+            ep,
+            10,
+            true,
+            named_update(
+                10,
+                "SetState",
+                vec![PyRep::keyval([("ego", PyRep::Integer(5001))])],
+            ),
+        );
+        assert!(sequence_tick(&mut wire, set_state).is_some());
+        assert!(wire.materialized.contains(&5001));
+
+        // Unmaterialized ball 8888: OnSlimItemChange notification & OnSpecialFX update are dropped (never queued).
+        let unmat_fx = DestinyBatch::new(ep, 11, false, named_update(11, "OnSpecialFX", vec![PyRep::Integer(8888)]));
+        let outcome1 = sequence_with_events(
+            &mut wire,
+            RpcCompletion {
+                call_id: 1,
+                response_frame: PyRep::None,
+                session_change_frame: None,
+                pending_tick_batches: vec![unmat_fx],
+                destiny_drain: DestinyDrain::None,
+                notifications: vec![TypedNotification {
+                    event: "OnSlimItemChange".into(),
+                    args: vec![PyRep::Integer(8888), PyRep::keyval([("itemID", PyRep::Integer(8888))])],
+                    service: None,
+                }],
+            },
+        );
+        assert!(!outcome1
+            .frames
+            .iter()
+            .any(|f| matches!(f, OutFrame::DoDestinyUpdate { .. } | OutFrame::Notification { .. })));
+        assert_eq!(outcome1.events.len(), 2);
+        assert!(outcome1
+            .events
+            .iter()
+            .all(|ev| ev.kind == SequencerLedgerEventKind::Dropped
+                && ev.reason.contains("entity-not-materialized")));
+
+        // Same dispatch: dependent OnSlimItemChange coalesced before AddBalls2(8888) AND notification OnDamageStateChange(8888)
+        // must both succeed, with AddBalls2 emitted BEFORE the dependent updates!
+        let premature_slim = DestinyBatch::new(
+            ep,
+            12,
+            false,
+            named_update(12, "OnSlimItemChange", vec![PyRep::Integer(8888), PyRep::None]),
+        );
+        let add_8888 = DestinyBatch::new(
+            ep,
+            12,
+            false,
+            named_update(12, "AddBalls2", vec![PyRep::Integer(8888)]),
+        );
+        let outcome2 = sequence_with_events(
+            &mut wire,
+            RpcCompletion {
+                call_id: 2,
+                response_frame: PyRep::None,
+                session_change_frame: None,
+                pending_tick_batches: vec![premature_slim],
+                destiny_drain: DestinyDrain::Updates(add_8888),
+                notifications: vec![TypedNotification {
+                    event: "OnDamageStateChange".into(),
+                    args: vec![PyRep::Integer(8888), PyRep::Tuple(vec![])],
+                    service: None,
+                }],
+            },
+        );
+        // Only the stamp-12 DoDestinyUpdate (with AddBalls2 before OnSlimItemChange) + stamp-12 OnDamageStateChange arrive;
+        // none of the earlier dropped events were queued.
+        let destiny_pos = outcome2
+            .frames
+            .iter()
+            .position(|f| matches!(f, OutFrame::DoDestinyUpdate { .. }))
+            .expect("DoDestinyUpdate present");
+        let notif_pos = outcome2
+            .frames
+            .iter()
+            .position(|f| matches!(f, OutFrame::Notification { event, .. } if event == "OnDamageStateChange"))
+            .expect("OnDamageStateChange present after AddBalls2");
+        assert!(destiny_pos < notif_pos);
+        if let OutFrame::DoDestinyUpdate {
+            updates: PyRep::List(items),
+            ..
+        } = &outcome2.frames[destiny_pos]
+        {
+            assert_eq!(items.len(), 2);
+            let names: Vec<&str> = items
+                .iter()
+                .filter_map(|it| match it {
+                    PyRep::Tuple(v) => match &v[1] {
+                        PyRep::Tuple(inner) => inner[0].as_str(),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(names, vec!["AddBalls2", "OnSlimItemChange"]);
+        } else {
+            panic!("expected DoDestinyUpdate with List updates");
+        }
+
+        let counters = fr.session_sequencer_counters(1084_01);
+        assert_eq!(counters.dropped_dependent_notifications, 2);
+        assert_eq!(counters.dropped_dependent_by_name.get("OnSpecialFX"), Some(&1));
+        assert_eq!(counters.dropped_dependent_by_name.get("OnSlimItemChange"), Some(&1));
+
+        wire.leave_space();
+        assert!(wire.materialized.is_empty());
+    }
+
+    #[test]
+    fn forced_stamp_backstep_emits_single_crt_marker_and_zero_frames() {
+        let fr = Arc::new(FlightRecorder::new());
+        let unique_sid = 98_108_409_u64;
+        let mut wire = SessionWireState::new(unique_sid, 9009).with_flight_recorder(Arc::clone(&fr));
+        let ep = wire.enter_space(Some(30_000_142));
+
+        assert!(sequence_tick(
+            &mut wire,
+            DestinyBatch::new(
+                ep,
+                200,
+                true,
+                named_update(200, "SetState", vec![PyRep::keyval([("ego", PyRep::Integer(1))])]),
+            ),
+        )
+        .is_some());
+        assert!(sequence_tick(
+            &mut wire,
+            DestinyBatch::new(ep, 210, false, named_update(210, "AddBalls2", vec![PyRep::Integer(2)])),
+        )
+        .is_some());
+
+        let (frame, events) = sequence_tick_with_events(
+            &mut wire,
+            DestinyBatch::new(ep, 209, false, named_update(209, "Stop", vec![PyRep::Integer(2)])),
+        );
+        assert!(frame.is_none());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, SequencerLedgerEventKind::Dropped);
+        assert!(events[0].reason.contains("stamp_regression:209<210"));
+
+        let counters = fr.session_sequencer_counters(unique_sid);
+        assert_eq!(counters.prevented_jolts, 1);
+        let jolts = fr.get_session_prevented_jolts(unique_sid, 10);
+        assert_eq!(jolts.len(), 1);
+        assert_eq!(jolts[0].batch_stamp, 209);
+        assert_eq!(jolts[0].trusted_stamp, 210);
+
+        let session_tag = format!("session={unique_sid} ");
+        let ring_lines = crate::log_ring_buffer::global_log_ring().snapshot_recent(500);
+        let crt_matches: Vec<&String> = ring_lines
+            .iter()
+            .filter(|line| line.contains("CRT") && line.contains(&session_tag))
+            .collect();
+        assert_eq!(
+            crt_matches.len(),
+            1,
+            "forced backstep must produce exactly 1 CRT marker for session, got {crt_matches:?}"
+        );
     }
 }

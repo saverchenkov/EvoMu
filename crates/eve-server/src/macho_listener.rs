@@ -375,10 +375,11 @@ fn record_sequencer_events(
                 crate::flight_recorder::OutboundDisposition::Coalesced
             }
         };
+        let packet_kind = ev.packet_kind.as_deref().unwrap_or("DoDestinyUpdate");
         ctx.flight_recorder.record_outbound(
             session_id,
             disposition,
-            "DoDestinyUpdate",
+            packet_kind,
             0,
             Some(ev.stamp),
             &ev.reason,
@@ -397,9 +398,9 @@ async fn emit_tick_batch_with_observability<W: AsyncWriteExt + Unpin>(
     batch: crate::outbound_sequencer::DestinyBatch,
     reason: &str,
 ) -> Result<()> {
-    let (frame_opt, ev_opt) = crate::outbound_sequencer::sequence_tick_with_event(wire_state, batch);
-    if let Some(ev) = ev_opt {
-        record_sequencer_events(ctx, session.session_id, &[ev], None, false);
+    let (frame_opt, events) = crate::outbound_sequencer::sequence_tick_with_events(wire_state, batch);
+    if !events.is_empty() {
+        record_sequencer_events(ctx, session.session_id, &events, None, false);
     }
     if let Some(frame) = frame_opt {
         record_out_frame_observability(
@@ -1208,7 +1209,8 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     let mut sys_rx = ctx.systems.get_or_spawn(30000142).subscribe();
     let mut subscribed_sys_id: Option<u32> = None;
     let mut notify_rx = ctx.notify_tx.subscribe();
-    let mut wire_state = crate::outbound_sequencer::SessionWireState::new(session_id, client_id);
+    let mut wire_state = crate::outbound_sequencer::SessionWireState::new(session_id, client_id)
+        .with_flight_recorder(Arc::clone(&ctx.flight_recorder));
 
     let (mut reader, mut writer) = stream.into_split();
     let is_authenticated_flag = Arc::new(AtomicBool::new(false));
@@ -1618,6 +1620,18 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         }
                         let mut write_failed = false;
                         for typed_notif in pending_notifs {
+                            if let Some(drop_ev) =
+                                wire_state.gate_notification(&typed_notif.event, &typed_notif.args)
+                            {
+                                record_sequencer_events(
+                                    &ctx,
+                                    session.session_id,
+                                    &[drop_ev],
+                                    None,
+                                    false,
+                                );
+                                continue;
+                            }
                             let notif_pkt = if let Some(ref service) = typed_notif.service {
                                 crate::router::ServerContext::build_macho_service_call_packet(
                                     MACHO_PROXY_NODE_ID,
@@ -2271,9 +2285,12 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
             );
             if effective_was_live {
                 for batch in pending_batches {
-                    if let Some(frame) =
-                        crate::outbound_sequencer::sequence_tick(wire.wire_state, batch)
-                    {
+                    let (frame_opt, tick_events) =
+                        crate::outbound_sequencer::sequence_tick_with_events(wire.wire_state, batch);
+                    if !tick_events.is_empty() {
+                        record_sequencer_events(ctx, session.session_id, &tick_events, None, false);
+                    }
+                    if let Some(frame) = frame_opt {
                         out_frames.push(frame);
                     }
                 }
@@ -2296,6 +2313,10 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
             continue;
         }
         if let Some(tn) = build_typed_notification(ctx, event, id_type.as_deref(), args) {
+            if let Some(drop_ev) = wire.wire_state.gate_notification(&tn.event, &tn.args) {
+                record_sequencer_events(ctx, session.session_id, &[drop_ev], None, false);
+                continue;
+            }
             if let Some(service) = tn.service {
                 out_frames.push(crate::outbound_sequencer::OutFrame::ServiceCall {
                     service,

@@ -1543,6 +1543,11 @@ async fn ship_eject_and_board_in_space_emit_incremental_destiny_without_set_stat
 
     // 2. ship.Board back into old_ship_id must emit incremental RemoveBall without SetState (#992).
     clock.advance_secs(12);
+    let _ = jita.step_manual(1.0).await.unwrap();
+    while tokio::time::timeout(std::time::Duration::from_millis(20), read_pkt(&mut s))
+        .await
+        .is_ok()
+    {}
     write_framed_pyrep(
         &mut s,
         &call(6, "ship", None, "Board", vec![PyRep::Integer(old_ship_id)]).to_pyrep(),
@@ -1874,8 +1879,9 @@ async fn ship_destruction_and_rapid_pod_death_respawn_suppress_self_terminal_exp
         .ejected_capsule_id
         .expect("ship destruction must eject into capsule");
     let mut saw_pod_sess = false;
-    for _ in 0..6 {
-        let Ok(Some(raw)) = tokio::time::timeout(std::time::Duration::from_millis(150), read_pkt(&mut s)).await else {
+    for _ in 0..24 {
+        let timeout_ms = if saw_pod_sess { 25 } else { 150 };
+        let Ok(Some(raw)) = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), read_pkt(&mut s)).await else {
             break;
         };
         assert!(
@@ -1919,7 +1925,7 @@ async fn ship_destruction_and_rapid_pod_death_respawn_suppress_self_terminal_exp
 
     let mut saw_respawn_sess: Option<usize> = None;
     let mut saw_respawn_notif: Option<usize> = None;
-    for idx in 0..10 {
+    for idx in 0..24 {
         let Ok(Some(raw)) = tokio::time::timeout(std::time::Duration::from_millis(200), read_pkt(&mut s)).await else {
             break;
         };

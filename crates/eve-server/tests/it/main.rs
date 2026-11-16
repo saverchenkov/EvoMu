@@ -556,3 +556,4 @@ mod observability_sequencer_ops;
 mod quasar_blast_radius_isolation;
 mod login_space_bootstrap_sequence;
 mod client_shape_pins;
+mod sequencer_gate_validator;
