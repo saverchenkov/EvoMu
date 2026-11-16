@@ -554,6 +554,7 @@ mod remediate_flagged_fake_quasar_cosmetics;
 mod serverops_tidi_autoscaler;
 mod shadow_client_convergence;
 mod observability_sequencer_ops;
+mod gm_soak_repro_ops;
 mod quasar_blast_radius_isolation;
 mod login_space_bootstrap_sequence;
 mod client_shape_pins;

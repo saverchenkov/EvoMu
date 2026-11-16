@@ -95,6 +95,9 @@ impl<'c> ClientWireSession<'c> {
             .get_or_spawn(subscribed_sys_id.unwrap_or(0))
             .subscribe();
         let wire_state = build_wire_state_for_session(ctx, &session, client_id);
+        if ctx.flight_recorder.get_wire_state(session.session_id).is_none() {
+            ctx.flight_recorder.record_wire_state(&wire_state);
+        }
         Self {
             ctx,
             session,

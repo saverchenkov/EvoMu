@@ -2370,6 +2370,27 @@ fn xmpp_scoped_channel_allowed(
     Err(())
 }
 
+/// XML-escapes text/attribute payloads for XMPP stanzas.
+pub fn xmpp_escape_xml(raw: &str) -> String {
+    escape_xml_attr(raw)
+}
+
+/// Returns the persisted non-empty channel MOTD for an XMPP room JID (or bare channel alias).
+pub fn xmpp_room_motd(ctx: &ServerContext, room_jid: &str) -> Option<String> {
+    let bare_room = room_jid.trim().split('/').next().unwrap_or(room_jid).trim();
+    let localpart = bare_room.split('@').next().unwrap_or(bare_room).trim();
+    if localpart.is_empty() || xmpp_is_service_jid(bare_room) {
+        return None;
+    }
+    ctx.db.with_snapshot(|snap| {
+        let key = find_existing_channel_key(snap, localpart).or_else(|| {
+            xmpp_alias_to_channel_key(localpart).and_then(|k| find_existing_channel_key(snap, &k))
+        })?;
+        let chan = snap.chat_channels.get(&key)?;
+        (!chan.motd.trim().is_empty()).then(|| chan.motd.clone())
+    })
+}
+
 /// Verifies whether an authenticated, bound XMPP caller is allowed to join/presence-sync `room_jid` (`#940`).
 pub fn xmpp_can_join_room(
     ctx: &ServerContext,

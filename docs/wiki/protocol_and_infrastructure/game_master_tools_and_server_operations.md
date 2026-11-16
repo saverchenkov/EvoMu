@@ -161,6 +161,7 @@ Arguments are shown as the handlers' usage strings give them. `me` means the cal
 | `/giveitem <type_id> [quantity]`, `/createitem <type_id> <quantity>` | Creates an item for the caller and sends the item-change notification |
 | `/setskill <skill_id> <level>`, `/giveskill <skill_id> <level>` | Sets a skill to a level, with the skill points for that level |
 | `/completeskills`, `/trainskills`, `/finishskills` | Advances skill queues |
+| `/backintime` | Resets the caller's trained skills, skill queue, and skill history back to their race's starter skill profile for NPE re-testing |
 | `/secstatus [char_id] <value>` | Sets security status, clamped to −10…10, and sends `OnSecurityStatusUpdate` |
 | `/energy [char_id] <amount>` | Sets the character's energy value |
 | `/contact <targetID> <standing>`, `/standing <targetID> <standing>` | Sets a contact standing |
@@ -181,13 +182,18 @@ Arguments are shown as the handlers' usage strings give them. `me` means the cal
 | `/spawn <type_id> [quantity]` | Spawns entities of a type in the caller's system |
 | `/unspawn <entity_id>`, `/despawn <entity_id>` | Removes an entity from space and from the database |
 | `/spawnnpc <type_id>` | Spawns an NPC from static data in the caller's system |
+| `/spawnwreck <type_id> [count]` | Spawns lootable wrecks in the caller's system with deterministic SDE-derived salvage and hull materials |
 | `/spawnanomaly [dungeon_id]` | Spawns a cosmic anomaly in the caller's system |
+| `/soak logi <count\|status\|stop>` | Spawns `count` NPC logistics cruisers in a ring around the GM ship that continuously cycle remote shield/armor repairs and command bursts |
+| `/deadwarp [status\|stop]` | Warps the GM ship to a deterministic safe anchor ~2 AU off-grid and back automatically |
+| `/sysjunkclear` | Purges wrecks, jetcans, and expired deployables/bubbles in the caller's system and returns counts |
 | `/teleport`, `/tr`, `/translocate`, `/moveme` `[me\|<char_id>] <location_id>` | Moves a character to a solar system, station, structure, stargate, celestial or object in space |
 
 **World and timers**
 
 | Command | Effect |
 |---|---|
+| `/session`, `/session ledger <target\|me> [limit]` | Dumps the caller's session dict, wire/sequencer state, pending session-change timer, and last 50 ledger/stamp/RPC entries (or fetches another active session's ledger) |
 | `/advancetime [secs]`, `/fastforward`, `/ff` | Advances the server clock (default 3600 s) and clears the caller's session-change timer |
 | `/cleartimers` | Clears the caller's session-change, combat and crimewatch timers |
 | `/upwelltimer`, `/structuretimer`, `/finishstructure` | Completes pending Upwell structure timers and reports the new states |
@@ -340,6 +346,7 @@ Ledger rows: `feat:serverops.config-file`, `feat:serverops.downtime`, `feat:serv
 |---|---|
 | [`config_tests.rs`](../../../crates/eve-server/src/config_tests.rs), [`config_edges_tests.rs`](../../../crates/eve-server/src/config_edges_tests.rs) | Parsing, defaults, validation, environment overrides |
 | [`character_gm_tools_unit_tests.rs`](../../../crates/eve-server/src/services/character_gm_tools_unit_tests.rs), [`account_admin_complete.rs`](../../../crates/eve-server/tests/it/account_admin_complete.rs) | Slash commands, bans, roles |
+| [`gm_soak_commands_tests.rs`](../../../crates/eve-server/src/services/gm_soak_commands_tests.rs), [`gm_soak_repro_ops.rs`](../../../crates/eve-server/tests/it/gm_soak_repro_ops.rs) | Soak logi ring, deadwarp round-trip, sysjunkclear, session wire dump, backintime, spawnwreck |
 | [`gm_admin_and_attribute_notices.rs`](../../../crates/eve-server/tests/it/notify_events/gm_admin_and_attribute_notices.rs) | Notifications sent by GM commands |
 | [`serverops_cluster_tests.rs`](../../../crates/eve-server/src/services/serverops_cluster_tests.rs), [`serverops_cluster_complete.rs`](../../../crates/eve-server/tests/it/serverops_cluster_complete.rs) | Downtime, shutdown, node balancing |
 | [`serverops_tidi_nodes_and_industry_pause_live.rs`](../../../crates/eve-server/tests/it/serverops_tidi_nodes_and_industry_pause_live.rs) | Time dilation |

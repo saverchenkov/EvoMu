@@ -611,6 +611,22 @@ async fn xmpp_stream_times_out_idle_connections_and_discovers_player_channels() 
         "expected id='err_45' and code='403' on presence error stanza: {pres_err}"
     );
 
+    // #1088: Joining rookie_help via XMPP <presence> emits groupchat <subject> containing overviewPreset: link
+    let rookie_join = xmpp_stanza_reply_with_ctx_and_auth(
+        Some(&ctx),
+        Some(&mut spoof_auth),
+        "<presence id='rookie_46' to='rookie_help@conference.chat.evomu.local/90000001'><x xmlns='http://jabber.org/protocol/muc'/></presence>",
+        &mut dummy_sc,
+    )
+    .expect("rookie_help presence reply");
+    assert!(
+        rookie_join.contains("<presence from='rookie_help@conference.chat.evomu.local/90000001'")
+            && rookie_join.contains("<message from='rookie_help@conference.chat.evomu.local/admin'")
+            && rookie_join.contains("type='groupchat'><subject>")
+            && rookie_join.contains("overviewPreset:"),
+        "expected rookie_help join reply with groupchat subject containing overviewPreset link: {rookie_join}"
+    );
+
     drop(cli);
     srv_task.await.unwrap();
 }

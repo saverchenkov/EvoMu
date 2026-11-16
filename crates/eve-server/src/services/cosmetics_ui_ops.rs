@@ -733,6 +733,386 @@ enum LinkKind {
     SharedSetting,
 }
 
+/// Curated shared overview preset title seeded into Rookie Help at boot (`#1088`).
+pub const ROOKIE_OVERVIEW_PRESET_NAME: &str = "EvoMu Rookie Overview";
+/// System chat channel ID for Rookie Help (`GetRookieChannel`).
+pub const ROOKIE_HELP_CHANNEL_ID: &str = "rookie_help";
+/// V24 `overviewPresets` deterministic list-of-pairs YAML seeded at boot for Rookie Help onboarding.
+pub const DEFAULT_ROOKIE_OVERVIEW_YAML: &str = r#"- - backgroundOrder
+  - - 13
+    - 44
+    - 52
+    - 11
+    - 12
+    - 14
+    - 15
+    - 16
+    - 45
+    - 49
+    - 19
+    - 18
+    - 9
+    - 51
+    - 50
+    - 53
+    - 10
+    - 20
+    - 21
+    - 17
+    - 48
+    - 66
+- - backgroundStates
+  - - 9
+    - 10
+    - 11
+    - 12
+    - 13
+    - 14
+    - 15
+    - 16
+    - 17
+    - 18
+    - 19
+    - 20
+    - 21
+    - 44
+    - 45
+    - 48
+    - 49
+    - 50
+    - 51
+    - 52
+    - 53
+- - columnOrder
+  - - ICON
+    - TAG
+    - DISTANCE
+    - NAME
+    - TYPE
+    - ALLIANCE
+    - CORPORATION
+    - VELOCITY
+    - ANGULARVELOCITY
+- - flagOrder
+  - - 13
+    - 44
+    - 52
+    - 11
+    - 12
+    - 14
+    - 15
+    - 16
+    - 45
+    - 9
+    - 51
+    - 50
+    - 53
+    - 19
+    - 18
+    - 49
+    - 10
+    - 17
+    - 48
+    - 21
+    - 20
+    - 66
+- - flagStates
+  - - 9
+    - 10
+    - 11
+    - 12
+    - 13
+    - 14
+    - 15
+    - 16
+    - 17
+    - 18
+    - 19
+    - 20
+    - 21
+    - 44
+    - 45
+    - 48
+    - 49
+    - 50
+    - 51
+    - 52
+    - 53
+- - overviewColumns
+  - - ICON
+    - DISTANCE
+    - NAME
+    - TYPE
+    - VELOCITY
+    - ANGULARVELOCITY
+- - presets
+  - - - Rookie_General
+      - - - alwaysShownStates
+          - - 11
+        - - filteredStates
+          - - 12
+            - 14
+            - 15
+            - 16
+            - 21
+            - 45
+            - 49
+        - - groups
+          - - 6
+            - 10
+            - 15
+            - 25
+            - 26
+            - 27
+            - 28
+            - 29
+            - 30
+            - 31
+            - 90
+            - 237
+            - 324
+            - 358
+            - 380
+            - 381
+            - 419
+            - 420
+            - 463
+            - 485
+            - 513
+            - 540
+            - 541
+            - 547
+            - 659
+            - 830
+            - 831
+            - 832
+            - 833
+            - 834
+            - 863
+            - 864
+            - 883
+            - 893
+            - 894
+            - 902
+            - 906
+            - 963
+            - 1022
+            - 1201
+            - 1283
+            - 1305
+            - 1527
+            - 1534
+            - 1538
+            - 1657
+            - 1972
+            - 4594
+            - 4902
+            - 5120
+        - - category_id
+          - 1
+    - - Rookie_Combat
+      - - - alwaysShownStates
+          - - 11
+        - - filteredStates
+          - - 12
+            - 14
+            - 15
+            - 16
+            - 21
+            - 45
+            - 49
+        - - groups
+          - - 25
+            - 26
+            - 27
+            - 28
+            - 29
+            - 30
+            - 31
+            - 90
+            - 237
+            - 324
+            - 358
+            - 380
+            - 381
+            - 419
+            - 420
+            - 463
+            - 479
+            - 485
+            - 513
+            - 540
+            - 541
+            - 543
+            - 547
+            - 549
+            - 659
+            - 830
+            - 831
+            - 832
+            - 833
+            - 834
+            - 863
+            - 864
+            - 883
+            - 893
+            - 894
+            - 902
+            - 906
+            - 963
+            - 1022
+            - 1023
+            - 1201
+            - 1202
+            - 1283
+            - 1305
+            - 1527
+            - 1534
+            - 1538
+            - 1548
+            - 1972
+            - 2001
+            - 4594
+            - 4902
+            - 5120
+        - - category_id
+          - 3
+    - - Rookie_Travel
+      - - - alwaysShownStates
+          - []
+        - - filteredStates
+          - []
+        - - groups
+          - - 6
+            - 7
+            - 8
+            - 9
+            - 10
+            - 15
+            - 988
+            - 1081
+            - 1082
+            - 1404
+            - 1406
+            - 1657
+            - 4547
+            - 4548
+            - 4549
+        - - category_id
+          - 2
+    - - Rookie_Mining
+      - - - alwaysShownStates
+          - []
+        - - filteredStates
+          - []
+        - - groups
+          - - 450
+            - 451
+            - 452
+            - 453
+            - 454
+            - 455
+            - 456
+            - 457
+            - 458
+            - 459
+            - 460
+            - 461
+            - 462
+            - 467
+            - 468
+            - 469
+        - - category_id
+          - 5
+- - shipLabelOrder
+  - - ship type
+    - alliance
+    - corporation
+    - ship name
+    - pilot name
+- - shipLabels
+  - - - ship type
+      - - - state
+          - 1
+        - - type
+          - ship type
+    - - alliance
+      - - - post
+          - ']'
+        - - pre
+          - ' ['
+        - - state
+          - 1
+        - - type
+          - alliance
+    - - corporation
+      - - - post
+          - ']'
+        - - pre
+          - ' ['
+        - - state
+          - 1
+        - - type
+          - corporation
+    - - ship name
+      - - - state
+          - 0
+        - - type
+          - ship name
+    - - pilot name
+      - - - post
+          - ']'
+        - - pre
+          - '['
+        - - state
+          - 1
+        - - type
+          - pilot name
+- - stateBlinks
+  - []
+- - stateColorsNameList
+  - []
+- - tabSetup
+  - - - 0
+      - - - bracket
+          - null
+        - - color
+          - null
+        - - name
+          - General
+        - - overview
+          - Rookie_General
+    - - 1
+      - - - bracket
+          - null
+        - - color
+          - null
+        - - name
+          - Combat
+        - - overview
+          - Rookie_Combat
+    - - 2
+      - - - bracket
+          - null
+        - - color
+          - null
+        - - name
+          - Travel
+        - - overview
+          - Rookie_Travel
+    - - 3
+      - - - bracket
+          - null
+        - - color
+          - null
+        - - name
+          - Mining
+        - - overview
+          - Rookie_Mining
+- - userSettings
+  - []
+"#;
+
 fn link_map(ext: &mut CosmeticsUiExtendedState, kind: LinkKind) -> &mut HashMap<i64, StoredLinkRecord> {
     match kind {
         LinkKind::OverviewPreset => &mut ext.overview_presets,
@@ -752,6 +1132,129 @@ fn compute_payload_hash(payload_str: &str) -> String {
     format!("{:016x}{:016x}", v1, v2)
 }
 
+fn store_link_in_snap(
+    snap: &mut WorldStateSnapshot,
+    kind: LinkKind,
+    owner_char_id: i64,
+    name: String,
+    payload_str: String,
+    setting_type: String,
+) -> (i64, String) {
+    const MAX_STORED_LINKS: usize = 10_000;
+    let hash = compute_payload_hash(&payload_str);
+    let mut ext = load_cosmetics_ui_state(snap);
+    let map = link_map(&mut ext, kind);
+    if map.len() >= MAX_STORED_LINKS {
+        if let Some(&oldest_id) = map.keys().min() {
+            map.remove(&oldest_id);
+        }
+    }
+    ext.next_link_id += 1;
+    let link_id = ext.next_link_id;
+    link_map(&mut ext, kind).insert(
+        link_id,
+        StoredLinkRecord {
+            owner_char_id,
+            name,
+            data: PyRep::String(payload_str),
+            hash: hash.clone(),
+            setting_type,
+        },
+    );
+    save_cosmetics_ui_state(snap, &ext);
+    (link_id, hash)
+}
+
+/// Seeds the shared Rookie Overview preset via `overviewPresetMgr` storage and links it in
+/// the `rookie_help` channel MOTD (`#1088`). Idempotent across reloads from SQLite.
+// parity: feat:ui.overview-presets, rpc:overviewPresetMgr.StoreLinkAndGetID, rpc:overviewPresetMgr.GetStoredPreset
+pub fn ensure_rookie_overview_seeded(ctx: &ServerContext) {
+    let expected_hash = compute_payload_hash(DEFAULT_ROOKIE_OVERVIEW_YAML);
+    ctx.db.with_mut_snapshot(|snap| {
+        let ext = load_cosmetics_ui_state(snap);
+        let existing = ext.overview_presets.iter().find_map(|(&id, rec)| {
+            (rec.name == ROOKIE_OVERVIEW_PRESET_NAME && rec.hash == expected_hash)
+                .then(|| (id, rec.hash.clone()))
+        });
+        let (sq_id, hash) = existing.unwrap_or_else(|| {
+            store_link_in_snap(
+                snap,
+                LinkKind::OverviewPreset,
+                0,
+                ROOKIE_OVERVIEW_PRESET_NAME.to_string(),
+                DEFAULT_ROOKIE_OVERVIEW_YAML.to_string(),
+                ROOKIE_OVERVIEW_PRESET_NAME.to_string(),
+            )
+        });
+        let motd = format!(
+            "Welcome to Rookie Help! Click <a href=\"overviewPreset:{hash}//{sq_id}\">{ROOKIE_OVERVIEW_PRESET_NAME}</a> to load the recommended starter overview."
+        );
+        if let Some(chan) = snap.chat_channels.get_mut(ROOKIE_HELP_CHANNEL_ID) {
+            if chan.motd.trim().is_empty() {
+                chan.motd = motd;
+            }
+        } else {
+            snap.chat_channels.insert(
+                ROOKIE_HELP_CHANNEL_ID.to_string(),
+                eve_db::ChatChannelRecord {
+                    channel_id: ROOKIE_HELP_CHANNEL_ID.to_string(),
+                    name: "Rookie Help".to_string(),
+                    motd,
+                    owner_id: None,
+                    members: std::collections::HashSet::new(),
+                    is_system_local: false,
+                    solar_system_id: None,
+                    is_private: false,
+                    operators: std::collections::HashSet::new(),
+                    password: None,
+                    is_delayed_local: false,
+                },
+            );
+        }
+    });
+}
+
+fn lookup_stored_link_in_map(
+    map: &HashMap<i64, StoredLinkRecord>,
+    args: &[PyRep],
+) -> Option<StoredLinkRecord> {
+    if args.len() >= 2 {
+        if let (Some(h), Some(id)) = (args[0].as_str(), args[1].as_i64()) {
+            return map.get(&id).filter(|r| h.is_empty() || r.hash == h).cloned();
+        }
+        if let (Some(id), Some(h)) = (args[0].as_i64(), args[1].as_str()) {
+            return map.get(&id).filter(|r| h.is_empty() || r.hash == h).cloned();
+        }
+    }
+    let first = args.first()?;
+    match first {
+        PyRep::Integer(id) => map.get(id).cloned(),
+        PyRep::String(s) => {
+            let trimmed = s.strip_prefix("overviewPreset:").unwrap_or(s);
+            if let Some((hash_part, id_part)) = trimmed.split_once("//") {
+                if let Ok(id) = id_part.parse::<i64>() {
+                    return map
+                        .get(&id)
+                        .filter(|r| hash_part.is_empty() || r.hash == hash_part)
+                        .cloned();
+                }
+            }
+            map.iter()
+                .filter(|(_, r)| r.hash == *s || r.name == *s)
+                .min_by_key(|entry| *entry.0)
+                .map(|(_, r)| r.clone())
+        }
+        PyRep::Tuple(items) | PyRep::List(items) => match items.as_slice() {
+            [PyRep::String(h), PyRep::Integer(id)] | [PyRep::Integer(id), PyRep::String(h)] => {
+                map.get(id).filter(|r| h.is_empty() || r.hash == *h).cloned()
+            }
+            [single] => lookup_stored_link_in_map(map, std::slice::from_ref(single)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// `StoreLinkAndGetID(yaml_str)` / `StoreSettingLinkAndGetID(setting_type, yaml_str)`: persists
 /// the payload under a fresh server-wide link ID and hash, returning the appropriate KeyVal.
 fn handle_store_link(
@@ -761,7 +1264,6 @@ fn handle_store_link(
     kind: LinkKind,
 ) -> Result<PyRep, BridgeRpcError> {
     const MAX_PAYLOAD_BYTES: usize = 65_536; // 64 KiB cap per payload
-    const MAX_STORED_LINKS: usize = 10_000;   // Bounded storage entries
     let (_, char_id) = ServerContext::require_character(session)?;
     let (name, data_rep, setting_type) = if args.len() >= 2 {
         let first_str = args.first().and_then(|a| a.as_str()).map(str::trim).unwrap_or("").to_string();
@@ -784,29 +1286,16 @@ fn handle_store_link(
     if payload_str.len() > MAX_PAYLOAD_BYTES {
         return Err(err("PayloadTooLarge", "Shared setting link payload exceeds 64 KiB limit"));
     }
-    let hash = compute_payload_hash(&payload_str);
 
-    ctx.db.try_with_mut_snapshot(|snap| {
-        let mut ext = load_cosmetics_ui_state(snap);
-        let map = link_map(&mut ext, kind);
-        if map.len() >= MAX_STORED_LINKS {
-            if let Some(&oldest_id) = map.keys().min() {
-                map.remove(&oldest_id);
-            }
-        }
-        ext.next_link_id += 1;
-        let link_id = ext.next_link_id;
-        link_map(&mut ext, kind).insert(
-            link_id,
-            StoredLinkRecord {
-                owner_char_id: char_id,
-                name,
-                data: PyRep::String(payload_str),
-                hash: hash.clone(),
-                setting_type: setting_type.clone(),
-            },
+    ctx.db.with_mut_snapshot(|snap| {
+        let (link_id, hash) = store_link_in_snap(
+            snap,
+            kind,
+            char_id,
+            name,
+            payload_str,
+            setting_type.clone(),
         );
-        save_cosmetics_ui_state(snap, &ext);
         match kind {
             LinkKind::OverviewPreset => Ok(PyRep::keyval([
                 ("sqID", PyRep::Integer(link_id)),
@@ -822,7 +1311,7 @@ fn handle_store_link(
 }
 
 /// `GetStoredPreset(linkID_or_hash)` / `GetStoredSharedSetting(linkID_or_key)`: any character
-/// holding the link or hash receives the stored YAML string.
+/// holding the link or hash receives the stored YAML string. V24 also passes `(hash, sqID)`.
 fn handle_get_link(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -830,20 +1319,14 @@ fn handle_get_link(
     kind: LinkKind,
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_character(session)?;
-    let first = args.first().ok_or_else(|| err("MissingLinkId", "Stored link lookup requires a link ID or hash"))?;
+    if args.is_empty() {
+        return Err(err("MissingLinkId", "Stored link lookup requires a link ID or hash"));
+    }
     ctx.db.with_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
         let map = link_map(&mut ext, kind);
-        let rec = match first {
-            PyRep::Integer(id) => map.get(id).cloned(),
-            PyRep::String(s) => map
-                .iter()
-                .filter(|(_, r)| r.hash == *s || r.name == *s)
-                .min_by_key(|entry| *entry.0)
-                .map(|(_, r)| r.clone()),
-            _ => None,
-        };
-        let rec = rec.ok_or_else(|| err("StoredLinkNotFound", "Stored link not found"))?;
+        let rec = lookup_stored_link_in_map(map, args)
+            .ok_or_else(|| err("StoredLinkNotFound", "Stored link not found"))?;
         match rec.data {
             PyRep::String(s) => Ok(PyRep::String(s)),
             other => Ok(PyRep::String(format!("{other:?}"))),

@@ -434,6 +434,8 @@ pub struct CombatRuntimeState {
     pub npc_sec_gain_intervals: HashMap<(i64, i32), (u64, f64)>,
     pub recently_destroyed_item_ids: VecDeque<i64>,
     pub self_destruct_sim_remaining_secs: HashMap<i64, f64>,
+    pub gm_logi_soaks: HashMap<u32, crate::services::gm_soak_commands::GmLogiSoakState>,
+    pub gm_deadwarps: HashMap<i64, crate::services::gm_soak_commands::GmDeadwarpState>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -148,6 +148,27 @@ pub struct SequencerObservabilitySummary {
     pub recent_prevented_jolts: Vec<PreventedJoltRecord>,
 }
 
+/// Snapshot of a session's outbound `DestinyStream` / sequencer wire state (`#1088`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WireSessionSnapshot {
+    pub session_id: u64,
+    pub client_id: u64,
+    pub materialized: bool,
+    #[serde(default)]
+    pub materialized_set_size: usize,
+    pub destiny_state: String,
+    pub epoch: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_state_stamp: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_stamp: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_client_tick: Option<u64>,
+    pub in_space: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solar_system_id: Option<u32>,
+}
+
 fn push_bounded_session_queue<T>(
     map: &mut HashMap<u64, VecDeque<T>>,
     session_id: u64,
@@ -277,6 +298,7 @@ pub struct FlightRecorder {
     sessions: RwLock<HashMap<u64, VecDeque<FlightRecorderEntry>>>,
     outbound_ledgers: RwLock<HashMap<u64, VecDeque<OutboundLedgerEntry>>>,
     destiny_stamps: RwLock<HashMap<u64, VecDeque<DestinyStampRecord>>>,
+    wire_states: RwLock<HashMap<u64, WireSessionSnapshot>>,
     latency_histograms: RwLock<LatencyHistogramState>,
     packet_perf_warnings: RwLock<VecDeque<PacketPerfWarning>>,
     sequencer_counters: RwLock<HashMap<u64, SessionSequencerCounters>>,
@@ -302,6 +324,7 @@ impl FlightRecorder {
             sessions: RwLock::new(HashMap::new()),
             outbound_ledgers: RwLock::new(HashMap::new()),
             destiny_stamps: RwLock::new(HashMap::new()),
+            wire_states: RwLock::new(HashMap::new()),
             latency_histograms: RwLock::new(LatencyHistogramState::default()),
             packet_perf_warnings: RwLock::new(VecDeque::new()),
             sequencer_counters: RwLock::new(HashMap::new()),
@@ -739,6 +762,63 @@ impl FlightRecorder {
             }
         }
         summary
+    }
+
+    /// Snapshots a session's outbound `DestinyStream` / sequencer state for `/session` inspection (`#1088`).
+    pub fn record_wire_state(&self, wire_state: &crate::outbound_sequencer::SessionWireState) {
+        use crate::outbound_sequencer::DestinyStream;
+        let (destiny_state, epoch, set_state_stamp, last_stamp) = match wire_state.destiny {
+            DestinyStream::Detached => ("Detached".to_string(), 0, None, None),
+            DestinyStream::AwaitingSetState { epoch } => {
+                ("AwaitingSetState".to_string(), epoch, None, None)
+            }
+            DestinyStream::Live {
+                epoch,
+                set_state_stamp,
+                last_stamp,
+            } => (
+                "Live".to_string(),
+                epoch,
+                Some(set_state_stamp),
+                Some(last_stamp),
+            ),
+        };
+        let snap = WireSessionSnapshot {
+            session_id: wire_state.session_id,
+            client_id: wire_state.client_id,
+            materialized: wire_state.destiny.is_live(),
+            materialized_set_size: wire_state.materialized.len(),
+            destiny_state,
+            epoch,
+            set_state_stamp,
+            last_stamp,
+            last_client_tick: wire_state.last_client_tick,
+            in_space: wire_state.in_space,
+            solar_system_id: wire_state.solar_system_id,
+        };
+        if let Ok(mut lock) = self.wire_states.write() {
+            if lock.len() >= MAX_TRACKED_SESSIONS && !lock.contains_key(&wire_state.session_id) {
+                if let Some(oldest) = lock.keys().next().copied() {
+                    lock.remove(&oldest);
+                }
+            }
+            lock.insert(wire_state.session_id, snap);
+        }
+    }
+
+    /// Removes the cached wire state snapshot when a connection closes (`#1088`).
+    pub fn remove_wire_state(&self, session_id: u64) {
+        if let Ok(mut lock) = self.wire_states.write() {
+            lock.remove(&session_id);
+        }
+    }
+
+    /// Returns the latest cached wire state snapshot for `session_id` (`#1088`).
+    pub fn get_wire_state(&self, session_id: u64) -> Option<WireSessionSnapshot> {
+        self.wire_states
+            .read()
+            .ok()
+            .and_then(|lock| lock.get(&session_id).cloned())
     }
 }
 

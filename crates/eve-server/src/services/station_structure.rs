@@ -846,32 +846,34 @@ pub async fn handle(
                 st.position
             };
 
-            let sde_target_radius = if is_structure {
+            let target_type_id = if is_structure {
                 ctx.db
                     .with_snapshot(|snap| snap.structures.get(&dock_id).map(|s| s.type_id))
-                    .and_then(|tid| ctx.sde.types.get(&tid))
-                    .map(|t| t.radius)
-                    .filter(|&r| r > 0.0)
-                    .unwrap_or(0.0)
             } else {
                 ctx.sde
                     .stations
                     .get(&dock_id)
-                    .and_then(|st| ctx.sde.types.get(&st.station_type_id))
-                    .map(|t| t.radius)
-                    .filter(|&r| r > 0.0)
-                    .unwrap_or(0.0)
+                    .map(|st| st.station_type_id)
             };
-            let target_radius = handle
+            let target_ball_radius = handle
                 .get_ball_snapshot(dock_id)
                 .await
                 .ok()
                 .flatten()
-                .map(|(_, b)| b.radius)
-                .filter(|&r| r > 0.0)
-                .unwrap_or(sde_target_radius);
+                .map(|(_, b)| b.radius);
+            let (target_radius, _) = crate::services::space_warp_jump::resolve_physical_radius(
+                ctx,
+                target_type_id,
+                Some(dock_id),
+                crate::services::space_warp_jump::PhysicalRadiusInput {
+                    item_radius: target_ball_radius,
+                    ..Default::default()
+                },
+            );
+            let effective_ball =
+                crate::services::space_warp_jump::resolve_ship_ball_for_perimeter(ctx, &ball);
             let arrived_at_warp_dest = match crate::services::space_warp_jump::evaluate_dock_perimeter(
-                &ball,
+                &effective_ball,
                 target_pos,
                 target_radius,
             ) {

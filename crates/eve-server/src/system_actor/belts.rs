@@ -18,6 +18,50 @@ use std::collections::{BTreeMap, HashMap};
 use std::hash::Hasher;
 use std::sync::Arc;
 
+/// Computes V24 `dunRotation` `[yaw_deg, pitch_deg, roll_deg]` so a stargate model's `+Z`
+/// forward vector aligns with `dest.galactic_pos_ly - origin.galactic_pos_ly` (`#1088`).
+///
+/// Matches V24 `SpaceObject.SetStaticRotation` (`math.radians` -> `geo2.QuaternionRotationSetYawPitchRoll`,
+/// i.e. `EulerRot::YXZ`) and `JumpTransitionCamera` (`QuaternionTransformVector(rot, (0, 0, 1))`).
+pub fn compute_stargate_dun_rotation(
+    origin_sys_id: SolarSystemId,
+    dest_sys_id: SolarSystemId,
+    sde: &SdeRegistry,
+) -> Option<[f64; 3]> {
+    let origin = sde.solar_systems.get(&origin_sys_id)?;
+    let dest = sde.solar_systems.get(&dest_sys_id)?;
+    let delta = DVec3::from_array(dest.galactic_pos_ly) - DVec3::from_array(origin.galactic_pos_ly);
+    if !delta.is_finite() || delta.length_squared() <= 1e-24 {
+        return None;
+    }
+    let dir = delta.normalize();
+    let pitch_rad = (-dir.y).clamp(-1.0, 1.0).asin();
+    let yaw_rad = if dir.x * dir.x + dir.z * dir.z > 1e-24 {
+        dir.x.atan2(dir.z)
+    } else {
+        0.0
+    };
+    let yaw_deg = yaw_rad.to_degrees();
+    let pitch_deg = pitch_rad.to_degrees();
+    if yaw_deg.is_finite() && pitch_deg.is_finite() {
+        Some([yaw_deg, pitch_deg, 0.0])
+    } else {
+        None
+    }
+}
+
+/// Evaluates the world-space `+Z` forward unit vector for V24 `dunRotation` `[yaw_deg, pitch_deg, roll_deg]`.
+pub fn stargate_forward_vector_from_dun_rotation(dun_rotation: [f64; 3]) -> DVec3 {
+    let [yaw_deg, pitch_deg, roll_deg] = dun_rotation;
+    let q = glam::DQuat::from_euler(
+        glam::EulerRot::YXZ,
+        yaw_deg.to_radians(),
+        pitch_deg.to_radians(),
+        roll_deg.to_radians(),
+    );
+    (q * DVec3::Z).normalize_or(DVec3::Z)
+}
+
 /// Populates a solar system's `Ballpark` with its real SDE stars, planets, moons, asteroid belts,
 /// stargates, and stations as static `MovementMode::Rigid` balls (`SP-1`).
 pub fn populate_system_celestials(
@@ -50,15 +94,18 @@ pub fn populate_system_celestials(
         } else {
             None
         };
-        let (origin_system_owner_id, dest_system_owner_id) = if cel.group_id == 10 {
+        let (origin_system_owner_id, dest_system_owner_id, dun_rotation) = if cel.group_id == 10 {
             (
                 sde.solar_system_faction_id(solar_system_id).map(i64::from),
                 jump_target
                     .and_then(|(_, dest_sys_id)| sde.solar_system_faction_id(dest_sys_id))
                     .map(i64::from),
+                jump_target.and_then(|(_, dest_sys_id)| {
+                    compute_stargate_dun_rotation(solar_system_id, dest_sys_id, sde)
+                }),
             )
         } else {
-            (None, None)
+            (None, None, None)
         };
         ballpark.add_static_ball_with_meta(
             Ball {
@@ -86,6 +133,7 @@ pub fn populate_system_celestials(
                 name: (!cel.name.is_empty()).then(|| cel.name.clone()),
                 origin_system_owner_id,
                 dest_system_owner_id,
+                dun_rotation,
                 ..Default::default()
             },
         );
@@ -138,6 +186,11 @@ pub fn populate_system_celestials(
                     dest_system_owner_id: sde
                         .solar_system_faction_id(jump.to_solar_system_id)
                         .map(i64::from),
+                    dun_rotation: compute_stargate_dun_rotation(
+                        solar_system_id,
+                        jump.to_solar_system_id,
+                        sde,
+                    ),
                     ..Default::default()
                 },
             );

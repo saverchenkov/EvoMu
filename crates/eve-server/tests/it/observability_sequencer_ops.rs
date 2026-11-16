@@ -184,7 +184,7 @@ async fn observability_gm_slash_session_ledger_and_negative_paths() {
         preserve_char_notifications: true,
     });
     for bad_cmd in [
-        "/session",
+        "/session unknown",
         "/session status",
         "/session ledger",
         "/session ledger me 0",
