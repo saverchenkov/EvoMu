@@ -3,10 +3,10 @@
 #![forbid(unsafe_code)]
 
 use crate::formulas::compute_insurance_quote;
+use crate::router::notify_registry::{OnAccountChange, OnDroneControlLost, OnDroneStateChange};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, KillmailRecord};
 use eve_destiny::{Ball, MovementMode, SlimItemMeta};
-use eve_proto::PyRep;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -1166,15 +1166,14 @@ pub fn execute_death_pipeline_sync_inner(
 
     if let Some((ins_corp, owner_id, bal_wire, mid, subject)) = ins_notify {
         if ins_corp {
-            let _ = ctx.notify(
-                crate::router::NotificationTarget::Corporation(owner_id),
-                "OnAccountChange",
+            let _ = ctx.emit_typed_with_id_type(
+                NotificationTarget::Corporation(owner_id),
                 "corpid",
-                vec![
-                    eve_proto::PyRep::String("cash".into()),
-                    eve_proto::PyRep::Integer(owner_id),
-                    eve_proto::PyRep::Real(bal_wire),
-                ],
+                OnAccountChange {
+                    account_key: "cash".into(),
+                    owner_id,
+                    balance: bal_wire,
+                },
             );
         } else {
             let _ = ctx.notify_account_change(owner_id, "cash", owner_id, bal_wire);
@@ -1708,19 +1707,17 @@ pub(crate) fn cleanup_destroyed_player_drone_sync(
         if let Some(ref old_item) = removed_item {
             ctx.emit_item_deleted_routed(d.owner_char_id, old_item);
         }
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(d.owner_char_id),
-            "OnDroneStateChange",
-            "charid",
-            vec![
-                PyRep::Integer(d.drone_item_id),
-                PyRep::Integer(0),
-                PyRep::Integer(0),
-                PyRep::Integer(0),
-                PyRep::Integer(d.type_id as i64),
-                PyRep::Integer(0),
-                PyRep::None,
-            ],
+            OnDroneStateChange {
+                drone_id: d.drone_item_id,
+                owner_id: 0,
+                controller_id: 0,
+                activity_state: 0,
+                drone_type_id: d.type_id as i64,
+                controller_owner_id: 0,
+                target_id: None,
+            },
         );
         crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(
             ctx,
@@ -1729,11 +1726,11 @@ pub(crate) fn cleanup_destroyed_player_drone_sync(
             0,
             None,
         );
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(d.owner_char_id),
-            "OnDroneControlLost",
-            "charid",
-            vec![PyRep::Integer(d.drone_item_id)],
+            OnDroneControlLost {
+                drone_id: d.drone_item_id,
+            },
         );
     }
     true

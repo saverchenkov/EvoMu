@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+use crate::router::notify_registry::OnJumpTimersUpdated;
 use crate::router::{BoundObjectEntry, NotificationTarget, ServerContext};
 use eve_db::types::UpwellStructureRecord;
 use eve_destiny::{DestinyEvent, MovementMode};
@@ -684,16 +685,14 @@ pub(crate) fn apply_jump_fatigue(ctx: &ServerContext, char_id: i64, distance_ly:
         }
         snap.character_last_jump_unix.insert(char_id, now);
     });
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnJumpTimersUpdated",
-        "charid",
-        vec![
-            PyRep::Integer(unix_to_filetime(cd_until)),
-            PyRep::Integer(unix_to_filetime(fat_until)),
-            PyRep::Integer(unix_to_filetime(now)),
-            PyRep::Bool(true),
-        ],
+        OnJumpTimersUpdated {
+            jump_activation: unix_to_filetime(cd_until),
+            jump_fatigue: unix_to_filetime(fat_until),
+            last_updated: unix_to_filetime(now),
+            do_alert: true,
+        },
     );
     (cd, fat)
 }

@@ -2,7 +2,8 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::ServerContext;
+use crate::router::notify_registry::OnSessionChanged;
+use crate::router::{NotificationTarget, ServerContext};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
@@ -1206,15 +1207,13 @@ pub async fn handle(
                         )]);
                         if let Some(online) = ctx.db.get_online_session(uid) {
                             if let Some(target_cid) = online.character_id {
-                                ctx.notify(
-                                    crate::router::NotificationTarget::Character(target_cid),
-                                    "OnSessionChanged",
-                                    "charid",
-                                    vec![
-                                        PyRep::Bool(false),
-                                        PyRep::String("role".into()),
-                                        sess_change.clone(),
-                                    ],
+                                ctx.emit_typed(
+                                    NotificationTarget::Character(target_cid),
+                                    OnSessionChanged {
+                                        is_remote: false,
+                                        session: PyRep::String("role".into()),
+                                        change: sess_change.clone(),
+                                    },
                                 );
                             }
                         }

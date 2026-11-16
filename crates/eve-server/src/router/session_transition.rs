@@ -17,6 +17,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::SdeRegistry;
 use glam::DVec3;
 
+use super::notify_registry::{push_typed_session_notification, OnSessionChanged, OnTradeCancel};
 use super::{NotificationTarget, ServerContext};
 
 /// Destination location domain for an atomic character/session transition.
@@ -973,16 +974,15 @@ pub fn emit_on_session_changed(
             )
         })
         .collect();
-    let args = vec![PyRep::Bool(false), sess_rep, PyRep::Dict(diff_entries)];
+    let notif = OnSessionChanged {
+        is_remote: false,
+        session: sess_rep,
+        change: PyRep::Dict(diff_entries),
+    };
     if let Some(sess) = session.as_deref_mut() {
-        sess.push_notification("OnSessionChanged", args.clone());
+        push_typed_session_notification(sess, notif.clone());
     }
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnSessionChanged",
-        "charid",
-        args,
-    );
+    ctx.emit_typed(NotificationTarget::Character(char_id), notif);
     if diff.keys().any(|k| {
         matches!(
             k.as_str(),
@@ -1209,11 +1209,11 @@ impl ServerContext {
                 .map_err(db_err_to_rpc)?;
             for (trade_id, char_a, char_b) in cancelled_trades {
                 for party in [char_a, char_b] {
-                    self.notify(
+                    self.emit_typed(
                         NotificationTarget::Character(party),
-                        "OnTradeCancel",
-                        "charid",
-                        vec![PyRep::Integer(trade_id)],
+                        OnTradeCancel {
+                            container_id: trade_id,
+                        },
                     );
                 }
             }
@@ -1390,11 +1390,11 @@ impl ServerContext {
                 .map_err(db_err_to_rpc)?;
             for (trade_id, char_a, char_b) in cancelled_trades {
                 for party in [char_a, char_b] {
-                    self.notify(
+                    self.emit_typed(
                         NotificationTarget::Character(party),
-                        "OnTradeCancel",
-                        "charid",
-                        vec![PyRep::Integer(trade_id)],
+                        OnTradeCancel {
+                            container_id: trade_id,
+                        },
                     );
                 }
             }
