@@ -45,8 +45,8 @@ pub const MAX_PREAUTH_CONNECTIONS_PER_IP: usize = 32;
 /// Maximum wall-clock delay before flushing a deferred dock `shipid: [None, shipID]` session change (`GH #1085`).
 pub const DEFERRED_SHIP_ID_DELAY_MS: u64 = 350;
 
-/// Pending post-dock `shipid: [None, shipID]` `SessionChangeNotification` held until station/structure
-/// hangar `invbroker` (`List`, `ListByFlags`, `GetSelfInvItem`) completes or 350 ms elapses (`GH #1085`).
+/// Pending post-dock `shipid: [None, shipID]` `SessionChangeNotification` held until NPC station
+/// hangar `invbroker` (`List`, `ListByFlags`, `GetSelfInvItem`) completes or 350 ms elapses (`GH #1085`, `#1140`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PendingDeferredShipId {
     pub char_id: i64,
@@ -1053,32 +1053,14 @@ pub async fn execute_call_req_wire(
     }
 
     let is_dock_hangar_flush = rpc_result.is_ok()
-        && service == "invbroker"
-        && (*wire.deferred_ship_id).is_some_and(|pending| match method {
-            "List" | "ListByFlags" | "GetSelfInvItem" => bound_id.is_some_and(|bid| {
-                ctx.bound_objects
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&bid)
-                    .is_some_and(|entry| {
-                        entry.service == "invbroker" && entry.object_id == pending.dock_id
-                    })
-            }),
-            "MachoBindObject" => {
-                let target_id = match call_args.first() {
-                    Some(PyRep::Integer(id)) => Some(*id),
-                    Some(PyRep::Tuple(items)) => items.first().and_then(PyRep::as_i64),
-                    _ => None,
-                };
-                let sub_method = match call_args.get(1) {
-                    Some(PyRep::Tuple(call_tuple)) => call_tuple.first().and_then(|m| m.as_str()),
-                    _ => None,
-                };
-                target_id == Some(pending.dock_id)
-                    && matches!(sub_method, Some("List" | "ListByFlags" | "GetSelfInvItem"))
-            }
-            _ => false,
-        });
+        && is_dock_hangar_flush_rpc(
+            ctx,
+            service,
+            bound_id,
+            method,
+            call_args,
+            *wire.deferred_ship_id,
+        );
     let (session_change_frame, deferred_flush_frame) = resolve_deferred_session_change_frame(
         ctx,
         wire.client_id,
@@ -2551,6 +2533,52 @@ pub(crate) fn build_deferred_ship_id_frame(
     build_filtered_session_change_packet(client_id, user_id, session_id, raw_payload)
 }
 
+/// Returns true when a completed RPC fetches the docked NPC station hangar inventory so a
+/// deferred `shipid: [None, shipID]` `SessionChangeNotification` can flush right after `CallRsp`
+/// (`GH #1085`, `#1140`).
+fn is_dock_hangar_flush_rpc(
+    ctx: &ServerContext,
+    service: &str,
+    bound_id: Option<u64>,
+    method: &str,
+    call_args: &[PyRep],
+    pending_ship: Option<PendingDeferredShipId>,
+) -> bool {
+    let Some(pending) = pending_ship else {
+        return false;
+    };
+    match method {
+        // Bound object RPCs on the live V24 wire arrive with `service == "machoNet"`; confirm
+        // via `ctx.bound_objects` that the target is the docked NPC station's `invbroker` object.
+        "List" | "ListByFlags" | "GetSelfInvItem" => {
+            matches!(service, "invbroker" | "machoNet")
+                && bound_id.is_some_and(|bid| {
+                    ctx.bound_objects
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&bid)
+                        .is_some_and(|entry| {
+                            entry.service == "invbroker" && entry.object_id == pending.dock_id
+                        })
+                })
+        }
+        "MachoBindObject" if service == "invbroker" => {
+            let target_id = match call_args.first() {
+                Some(PyRep::Integer(id)) => Some(*id),
+                Some(PyRep::Tuple(items)) => items.first().and_then(PyRep::as_i64),
+                _ => None,
+            };
+            let sub_method = match call_args.get(1) {
+                Some(PyRep::Tuple(call_tuple)) => call_tuple.first().and_then(|m| m.as_str()),
+                _ => None,
+            };
+            target_id == Some(pending.dock_id)
+                && matches!(sub_method, Some("List" | "ListByFlags" | "GetSelfInvItem"))
+        }
+        _ => false,
+    }
+}
+
 fn resolve_deferred_session_change_frame(
     ctx: &ServerContext,
     client_id: u64,
@@ -2602,9 +2630,14 @@ fn resolve_deferred_session_change_frame(
                 effective_prev.ship_id = None;
             }
         }
-    } else if docking_transition && !death_respawn_docking {
+    } else if docking_transition && !death_respawn_docking && session.structure_id.is_none() {
+        // Only defer `shipid` when docking at an NPC station. On Upwell structure docks
+        // (`structure_id` set), `godma.StateManager.Prime` sees `primeStructure = True`,
+        // immediately calls `dogmaIM.GetAllInfo`, and forwards `session.shipid` into
+        // `clientDogmaLocation._MakeShipActive` before any `invbroker` call, which logs
+        // `Unexpectedly got shipID = None` if `shipid` was masked (`GH #1140`, `#1141`).
         if let (Some(char_id), Some(ship_id), Some(dock_id)) =
-            (session.character_id, session.ship_id, cur_dock_id)
+            (session.character_id, session.ship_id, session.station_id)
         {
             effective_next.ship_id = None;
             *deferred_ship_id = Some(PendingDeferredShipId {
