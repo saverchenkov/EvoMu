@@ -1481,6 +1481,443 @@ fn transition_grace_retains_inflight_invbroker_metadata_and_enforces_expiry_and_
     );
 }
 
+#[test]
+fn transition_grace_crimewatch_binding_lifecycle_and_security_boundaries() {
+    let ctx = test_ctx();
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(
+        1_800_000_000,
+    )));
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let sid = 777_209_u64;
+    let jita_sys = 30_000_142_u32;
+    let perimeter_sys = 30_000_144_u32;
+    let amarr_sys = 30_002_187_u32;
+    let st_id = 60_003_760_i64;
+    let ship_a = ctx
+        .db
+        .get_character(char_id)
+        .expect("demo character")
+        .active_ship_id
+        .max(1_897_301_923);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = jita_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_a;
+        }
+        snap.items
+            .entry(ship_a)
+            .or_insert_with(|| InventoryItemRecord {
+                item_id: ship_a,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(jita_sys),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            });
+    });
+    ctx.db
+        .acquire_online_lock(user_id, sid, Some(char_id), true, ctx.now_unix())
+        .expect("acquire online lock");
+
+    let mut sess = SessionState::new(sid);
+    sess.user_id = Some(user_id);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(1_000_009);
+    sess.solar_system_id = Some(jita_sys);
+    sess.ship_id = Some(ship_a);
+
+    // Before recording any departure, crimewatch grace refuses unvisited solar systems.
+    assert!(
+        ctx.allocate_transition_grace_crimewatch_binding(&sess, i64::from(perimeter_sys), &[])
+            .is_none()
+    );
+
+    // 1. Overlapping /tr simulation: Perimeter (30000144) -> Jita (30000142) records departed solar system
+    //    even if crimewatch(30000144) was never bound prior to departure (#1209, #1211).
+    ctx.update_transition_departed_locations(
+        &sess,
+        Some(perimeter_sys),
+        None,
+        Some(jita_sys),
+        None,
+    );
+
+    let grace_bid = ctx
+        .allocate_transition_grace_crimewatch_binding(&sess, i64::from(perimeter_sys), &[])
+        .expect("crimewatch grace allocated within 30s");
+    assert!(
+        !ctx.bound_objects.read().unwrap().contains_key(&grace_bid),
+        "crimewatch grace bid must remain out of active bound_objects"
+    );
+    assert_eq!(
+        ctx.verify_bound_object(&sess, grace_bid).unwrap_err().code,
+        "InvalidBoundObject"
+    );
+    assert_eq!(
+        ctx.transition_grace_service_for_bound_id(&sess, grace_bid).as_deref(),
+        Some("crimewatch")
+    );
+    let resolved = ctx
+        .grace_bound_object_for_inflight_transition(&sess, grace_bid, "GetClientStates", &[])
+        .expect("GetClientStates grace authorized");
+    assert_eq!(resolved.service, "crimewatch");
+    assert_eq!(resolved.object_id, i64::from(perimeter_sys));
+
+    // Disjoint boundary preservation: departed SolarSystem does NOT grant ship.GetDirtTimestamp dock grace.
+    assert!(
+        ctx.allocate_transition_grace_ship_dirt_binding(
+            &sess,
+            i64::from(perimeter_sys),
+            &[PyRep::Integer(ship_a)],
+        )
+        .is_none(),
+        "departed solar system must not grant ship dock grace"
+    );
+
+    // Non-empty args and non-GetClientStates crimewatch/other methods must be rejected.
+    assert!(
+        ctx.allocate_transition_grace_crimewatch_binding(
+            &sess,
+            i64::from(perimeter_sys),
+            &[PyRep::Integer(1)],
+        )
+        .is_none()
+    );
+    assert!(
+        ctx.grace_bound_object_for_inflight_transition(
+            &sess,
+            grace_bid,
+            "GetClientStates",
+            &[PyRep::Integer(1)],
+        )
+        .is_none()
+    );
+    for blocked in [
+        "SetSafetyLevel",
+        "StartDuelChallenge",
+        "RespondToDuelChallenge",
+        "ApplyTagsForSecStatus",
+        "GetMySecurityStatus",
+        "GetCharacterSecurityStatus",
+        "GetSecurityStatusTransactions",
+        "GetDirtTimestamp",
+        "GetSelfInvItem",
+    ] {
+        assert!(
+            ctx.grace_bound_object_for_inflight_transition(&sess, grace_bid, blocked, &[])
+                .is_none(),
+            "{blocked} must be rejected on crimewatch transition grace"
+        );
+    }
+    assert!(
+        ctx.allocate_transition_grace_crimewatch_binding(&sess, i64::from(amarr_sys), &[])
+            .is_none(),
+        "unvisited solar system must be denied"
+    );
+
+    // Wrong session/user/char are rejected.
+    let mut wrong_sid = sess.clone();
+    wrong_sid.session_id = sid + 1;
+    assert!(
+        ctx.allocate_transition_grace_crimewatch_binding(
+            &wrong_sid,
+            i64::from(perimeter_sys),
+            &[],
+        )
+        .is_none()
+    );
+    let mut wrong_user = sess.clone();
+    wrong_user.user_id = Some(user_id + 1);
+    assert!(
+        ctx.grace_bound_object_for_inflight_transition(&wrong_user, grace_bid, "GetClientStates", &[])
+            .is_none()
+    );
+    let mut wrong_char = sess.clone();
+    wrong_char.character_id = Some(other_char);
+    assert!(
+        ctx.grace_bound_object_for_inflight_transition(&wrong_char, grace_bid, "GetClientStates", &[])
+            .is_none()
+    );
+
+    // 2. TTL boundary: valid at 20s, expired past 30s.
+    ctx.advance_secs(20);
+    assert!(
+        ctx.allocate_transition_grace_crimewatch_binding(&sess, i64::from(perimeter_sys), &[])
+            .is_some()
+    );
+    ctx.advance_secs(12);
+    assert!(
+        ctx.allocate_transition_grace_crimewatch_binding(&sess, i64::from(perimeter_sys), &[])
+            .is_none()
+    );
+    assert!(
+        ctx.grace_bound_object_for_inflight_transition(&sess, grace_bid, "GetClientStates", &[])
+            .is_none()
+    );
+
+    // 3. Undocking from st_id also authorizes crimewatch grace against departed dock st_id,
+    //    and returning to a previously departed location clears that location's grace.
+    ctx.update_transition_departed_locations(&sess, Some(jita_sys), Some(st_id), Some(jita_sys), None);
+    assert!(
+        ctx.allocate_transition_grace_crimewatch_binding(&sess, st_id, &[])
+            .is_some(),
+        "departed dock should authorize crimewatch.GetClientStates grace"
+    );
+    ctx.update_transition_departed_locations(&sess, Some(jita_sys), None, Some(perimeter_sys), None);
+    ctx.update_transition_departed_locations(&sess, Some(perimeter_sys), None, Some(jita_sys), None);
+    assert!(
+        ctx.allocate_transition_grace_crimewatch_binding(&sess, i64::from(jita_sys), &[])
+            .is_none(),
+        "returning to jita_sys clears jita_sys from departed locations"
+    );
+    assert!(
+        ctx.allocate_transition_grace_crimewatch_binding(&sess, i64::from(perimeter_sys), &[])
+            .is_some(),
+        "perimeter_sys departed in return jump remains valid"
+    );
+
+    // 4. Evicting active crimewatch(jita_sys) & beyonce(jita_sys) records both bound-entry and system grace,
+    //    while client release / logout / displaced lock purges cleanly.
+    let active_cw_bid = ctx
+        .bind_object(&sess, "crimewatch", i64::from(jita_sys))
+        .expect("bind active crimewatch to jita");
+    let active_cw_oid = ctx.verify_bound_object(&sess, active_cw_bid).unwrap().oid_str;
+    ctx.invalidate_bound_objects_for_session_transition(
+        char_id,
+        perimeter_sys,
+        None,
+        "slash_teleport",
+    );
+    assert!(
+        ctx.grace_bound_object_for_inflight_transition(&sess, active_cw_bid, "GetClientStates", &[])
+            .is_some(),
+        "evicted crimewatch binding retained for GetClientStates grace"
+    );
+    assert!(
+        ctx.allocate_transition_grace_crimewatch_binding(&sess, i64::from(jita_sys), &[])
+            .is_some(),
+        "evicted crimewatch system also records departed solar system"
+    );
+    ctx.release_bound_objects_from_pyrep(sid, &PyRep::List(vec![PyRep::ascii_bytes(active_cw_oid)]));
+    assert!(
+        ctx.grace_bound_object_for_inflight_transition(&sess, active_cw_bid, "GetClientStates", &[])
+            .is_none()
+    );
+
+    sess.solar_system_id = Some(jita_sys);
+    ctx.invalidate_bound_objects_for_session_transition(char_id, perimeter_sys, None, "logout");
+    assert!(
+        ctx.allocate_transition_grace_crimewatch_binding(&sess, i64::from(jita_sys), &[])
+            .is_none(),
+        "logout must purge departed location grace"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatch_rpc_tr_overlapping_transition_serves_crimewatch_get_client_states_via_grace() {
+    let ctx = test_ctx();
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let sid = 777_211_u64;
+    let jita_sys = 30_000_142_u32;
+    let perimeter_sys = 30_000_144_u32;
+    let amarr_sys = 30_002_187_u32;
+    let station_jita = 60_003_760_i64;
+    let kw = std::collections::HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = jita_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    let ship_id = ctx.db.get_character(char_id).unwrap().active_ship_id;
+    ctx.db
+        .acquire_online_lock(user_id, sid, Some(char_id), true, ctx.now_unix())
+        .expect("acquire online lock");
+
+    let mut sess = SessionState::new(sid);
+    sess.user_id = Some(user_id);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(1_000_009);
+    sess.solar_system_id = Some(jita_sys);
+    sess.ship_id = (ship_id > 0).then_some(ship_id);
+    sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+
+    // 1. Overlapping /tr sequence matching #1209 / #1211:
+    //    /tr me 30000144 (never binding crimewatch in 30000144), followed immediately by /tr me 60003760.
+    ctx.dispatch_rpc(
+        &mut sess,
+        "slash",
+        None,
+        "SlashCmd",
+        &[PyRep::String("/tr me 30000144".into())],
+        &kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("/tr me 30000144 succeeds");
+    assert_eq!(sess.solar_system_id, Some(perimeter_sys));
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "slash",
+        None,
+        "SlashCmd",
+        &[PyRep::String(format!("/tr me {station_jita}"))],
+        &kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("/tr me 60003760 succeeds");
+    assert_eq!(sess.solar_system_id, Some(jita_sys));
+    assert_eq!(sess.station_id, None);
+
+    // 2. Delayed client crimewatchSvc.ProcessSessionChange / OnSessionChanged calls
+    //    eveMoniker.CharGetCrimewatchLocation().GetClientStates() targeting departed Perimeter (30000144, 5).
+    let bind_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "crimewatch",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![
+                    PyRep::Integer(i64::from(perimeter_sys)),
+                    PyRep::Integer(5),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::String("GetClientStates".into()),
+                    PyRep::Tuple(Vec::new()),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("delayed crimewatch.MachoBindObject((30000144, 5), GetClientStates) must succeed via grace");
+
+    let PyRep::Tuple(pair) = bind_res else {
+        panic!("expected MachoBindObject (oid_rep, retval) tuple");
+    };
+    assert_eq!(pair.len(), 2);
+    let PyRep::Tuple(states) = &pair[1] else {
+        panic!("expected 4-tuple from GetClientStates, got {:?}", pair[1]);
+    };
+    assert_eq!(states.len(), 4);
+
+    let PyRep::SubStruct(inner) = &pair[0] else {
+        panic!("expected SubStruct OID ref, got {:?}", pair[0]);
+    };
+    let PyRep::SubStream(sub) = inner.as_ref() else {
+        panic!("expected SubStream inside OID SubStruct");
+    };
+    let PyRep::Tuple(oid_pair) = sub.as_ref() else {
+        panic!("expected (oid_str, ref_id) tuple");
+    };
+    let oid_str = oid_pair[0].as_str().expect("oid_str");
+    let grace_bid: u64 = oid_str
+        .rsplit_once(':')
+        .expect("N=node:bid")
+        .1
+        .parse()
+        .expect("numeric grace bid");
+    assert!(
+        !ctx.bound_objects.read().unwrap().contains_key(&grace_bid),
+        "grace bound_id must stay out of active bound_objects"
+    );
+
+    // 3. Direct ObjectCall(grace_bid, "GetClientStates") with wire service="machoNet" succeeds too.
+    let follow_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "machoNet",
+            Some(grace_bid),
+            "GetClientStates",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("follow-up GetClientStates on grace_bid must succeed");
+    let PyRep::Tuple(follow_states) = follow_res else {
+        panic!("expected 4-tuple from ObjectCall GetClientStates");
+    };
+    assert_eq!(follow_states.len(), 4);
+
+    // 4. Mutating crimewatch calls and unvisited solar systems are strictly denied.
+    let mutating_bind_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "crimewatch",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![
+                    PyRep::Integer(i64::from(perimeter_sys)),
+                    PyRep::Integer(5),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::String("SetSafetyLevel".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(0)]),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect_err("SetSafetyLevel must not be authorized via crimewatch grace bind");
+    assert_eq!(mutating_bind_err.code, super::ERR_BIND_AUTH_DENIED);
+
+    let mutating_obj_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "machoNet",
+            Some(grace_bid),
+            "SetSafetyLevel",
+            &[PyRep::Integer(0)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect_err("SetSafetyLevel must be rejected on grace bound_id");
+    assert_eq!(mutating_obj_err.code, "InvalidBoundObject");
+
+    let unvisited_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "crimewatch",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![
+                    PyRep::Integer(i64::from(amarr_sys)),
+                    PyRep::Integer(5),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::String("GetClientStates".into()),
+                    PyRep::Tuple(Vec::new()),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect_err("unvisited system Amarr must remain denied");
+    assert_eq!(unvisited_err.code, super::ERR_BIND_AUTH_DENIED);
+}
+
 #[cfg(test)]
 #[path = "binding_auth_unit_tests.rs"]
 mod binding_auth_unit_tests;

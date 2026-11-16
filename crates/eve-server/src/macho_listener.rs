@@ -1793,10 +1793,13 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     if should_drain {
                         let prev_session = session.clone();
                         ctx.sync_session(&mut session);
+                        ctx.sync_transition_grace_on_session_change(&prev_session, &session);
                         let mut pending_notifs = Vec::new();
                         for notif in ctx.drain_notifications_for_char(cid) {
                             if notif.event == "OnSessionChanged" {
+                                let notif_prev = session.clone();
                                 ctx.sync_session(&mut session);
+                                ctx.sync_transition_grace_on_session_change(&notif_prev, &session);
                                 continue;
                             }
                             if let Some(typed_notif) = build_typed_notification(
@@ -2932,6 +2935,7 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
     let prev_session = session.clone();
     if session.character_id.is_some() {
         ctx.sync_session(session);
+        ctx.sync_transition_grace_on_session_change(&prev_session, session);
     }
     let mut out_frames = Vec::new();
     let (session_change_frame, _) = resolve_deferred_session_change_frame(

@@ -298,9 +298,11 @@ impl ServerContext {
         if pre_sync_char_id.is_some() && session.character_id != pre_sync_char_id {
             self.purge_transition_grace_for_session(session.session_id);
         } else if pre_sync_char_id == session.character_id && session.character_id.is_some() {
-            self.update_transition_departed_dock(
+            self.update_transition_departed_locations(
                 session,
+                pre_sync_loc.0,
                 pre_sync_loc.1.or(pre_sync_loc.2),
+                post_sync_loc.0,
                 post_sync_loc.1.or(post_sync_loc.2),
             );
         }
@@ -571,9 +573,11 @@ impl ServerContext {
                     session.structure_id,
                 );
                 if res.is_ok() && session.character_id == initial_active_char_id {
-                    self.update_transition_departed_dock(
+                    self.update_transition_departed_locations(
                         session,
+                        post_sync_loc.0,
                         post_sync_loc.1.or(post_sync_loc.2),
+                        post_rpc_loc.0,
                         post_rpc_loc.1.or(post_rpc_loc.2),
                     );
                 }
@@ -611,6 +615,7 @@ impl ServerContext {
                         .read()
                         .ok()
                         .and_then(|m| m.get(&bid).map(|e| e.service.clone()))
+                        .or_else(|| self.transition_grace_service_for_bound_id(session, bid))
                 })
                 .unwrap_or_else(|| service.to_string());
             if effective_service == "scanMgr" && method == "GetSystemScanMgr" {
@@ -1090,26 +1095,32 @@ impl ServerContext {
             let parsed_piggyback = Self::parse_macho_bind_piggyback(args.get(1));
             let (bid, bound_in_map) = match self.bind_object(session, effective_service, obj_id) {
                 Ok(bid) => (bid, true),
-                Err(err)
-                    if err.code == "BindAuthorizationDenied" && effective_service == "ship" =>
-                {
-                    match &parsed_piggyback {
-                        Ok(Some((sub_method, sub_args, _)))
+                Err(err) if err.code == "BindAuthorizationDenied" => {
+                    let grace_bid = match (effective_service, &parsed_piggyback) {
+                        ("ship", Ok(Some((sub_method, sub_args, _))))
                             if *sub_method == "GetDirtTimestamp" =>
                         {
-                            if let Some(grace_bid) = self
-                                .allocate_transition_grace_ship_dirt_binding(
-                                    session,
-                                    obj_id,
-                                    sub_args,
-                                )
-                            {
-                                (grace_bid, false)
-                            } else {
-                                return Err(err);
-                            }
+                            self.allocate_transition_grace_ship_dirt_binding(
+                                session,
+                                obj_id,
+                                sub_args,
+                            )
                         }
-                        _ => return Err(err),
+                        ("crimewatch", Ok(Some((sub_method, sub_args, _))))
+                            if *sub_method == "GetClientStates" =>
+                        {
+                            self.allocate_transition_grace_crimewatch_binding(
+                                session,
+                                obj_id,
+                                sub_args,
+                            )
+                        }
+                        _ => None,
+                    };
+                    if let Some(grace_bid) = grace_bid {
+                        (grace_bid, false)
+                    } else {
+                        return Err(err);
                     }
                 }
                 Err(err) => return Err(err),
