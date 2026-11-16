@@ -4,7 +4,7 @@
 
 use super::{
     ActiveModuleCycle, ActiveNaniteRepair, AsteroidState, CharacterId,
-    MiningExtractionResult, SystemCommand, TickBroadcast,
+    MiningExtractionResult, SystemCommand, TickBroadcast, TryRepairCombatOutcome,
 };
 use eve_db::lock_rank::{
     assert_no_locks_held, RankedMutex, RankedRwLock, RANK_ACTOR_STATE, RANK_BALLPARK, RANK_LEAF,
@@ -27,6 +27,7 @@ pub struct SystemHandle {
     pub(crate) event_tx: broadcast::Sender<TickBroadcast>,
     pub(crate) ball_positions: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     pub(crate) scrambled_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+    pub(crate) tethered_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     pub(crate) committed_warp_balls: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     pub(crate) warp_stopped_at: Arc<RankedRwLock<HashMap<BallId, tokio::time::Instant>, RANK_LEAF>>,
     pub(crate) active_module_ships: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
@@ -129,21 +130,110 @@ impl SystemHandle {
         }
     }
 
-    pub fn is_ball_scrambled_sync(&self, ball_id: BallId) -> bool {
+    fn read_leaf_ball_set(
+        set: &RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>,
+        ball_id: BallId,
+    ) -> bool {
         if eve_db::lock_rank::held_lock_ranks()
             .iter()
             .any(|&r| r >= eve_db::lock_rank::RANK_LEAF)
         {
-            self.scrambled_balls
-                .read_unranked()
+            set.read_unranked()
                 .unwrap_or_else(|e| e.into_inner())
                 .contains(&ball_id)
         } else {
-            self.scrambled_balls
-                .read()
+            set.read()
                 .unwrap_or_else(|e| e.into_inner())
                 .contains(&ball_id)
         }
+    }
+
+    pub fn is_ball_scrambled_sync(&self, ball_id: BallId) -> bool {
+        Self::read_leaf_ball_set(&self.scrambled_balls, ball_id)
+    }
+
+    /// Lock-free (wrt `Ballpark`) check of whether `ball_id` is currently tethered (`#1167`).
+    pub fn is_ball_tethered_sync(&self, ball_id: BallId) -> bool {
+        Self::read_leaf_ball_set(&self.tethered_balls, ball_id)
+    }
+
+    /// Non-blockingly restores up to the priced `(hull_heal, armor_heal, shield_heal)` HP deltas
+    /// on `ball_id`'s `CombatState`: tries `ballpark.try_write()` directly (emitting
+    /// `OnDamageStateChange` and persisting the updated `CombatState` after releasing `ballpark`),
+    /// and if write-contended falls back to queuing [`SystemCommand::RepairCombatState`] onto the
+    /// system actor mailbox (`#1167`).
+    ///
+    /// Returns [`TryRepairCombatOutcome::NeedsAsyncFallback`] if the mailbox is full (or locks are
+    /// held) so callers outside DB locks can `.await` [`Self::repair_combat_state`].
+    /// Restoring exact priced deltas rather than snapping to `max_*_hp` ensures unsampled live
+    /// damage (when pre-sampling hit `WouldBlock` or concurrent damage landed mid-RPC) is never
+    /// repaired for free (`#1167`).
+    pub fn try_repair_combat_state_sync(
+        &self,
+        ball_id: BallId,
+        hull_heal: f64,
+        armor_heal: f64,
+        shield_heal: f64,
+    ) -> TryRepairCombatOutcome {
+        let hull_delta = hull_heal.max(0.0);
+        let armor_delta = armor_heal.max(0.0);
+        let shield_delta = shield_heal.max(0.0);
+        if hull_delta <= 0.0 && armor_delta <= 0.0 && shield_delta <= 0.0 {
+            return TryRepairCombatOutcome::Applied;
+        }
+        let updated_opt = match self.ballpark.try_write() {
+            Ok(mut bp) => {
+                let res = super::apply_repair_combat_state_in_ballpark(
+                    &mut bp,
+                    ball_id,
+                    hull_delta,
+                    armor_delta,
+                    shield_delta,
+                );
+                if res.is_none() {
+                    return TryRepairCombatOutcome::NotPresent;
+                }
+                res
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if self.get_ball_position_sync(ball_id).is_none() {
+                    return TryRepairCombatOutcome::NotPresent;
+                }
+                if !eve_db::lock_rank::held_lock_ranks().is_empty() {
+                    return TryRepairCombatOutcome::NeedsAsyncFallback;
+                }
+                let (tx, _rx) = oneshot::channel();
+                return match self.cmd_sender().try_send(SystemCommand::RepairCombatState {
+                    ball_id,
+                    hull_heal: hull_delta,
+                    armor_heal: armor_delta,
+                    shield_heal: shield_delta,
+                    reply: tx,
+                }) {
+                    Ok(()) => TryRepairCombatOutcome::QueuedAsync,
+                    Err(_) => TryRepairCombatOutcome::NeedsAsyncFallback,
+                };
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return TryRepairCombatOutcome::NotPresent;
+            }
+        };
+        if let Some(updated) = updated_opt {
+            let db_opt = self
+                .actor_state
+                .read()
+                .ok()
+                .and_then(|st| st.db_opt.clone());
+            if let Some(db) = db_opt {
+                crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
+                    &db,
+                    self.solar_system_id,
+                    std::iter::once((ball_id, &updated)),
+                );
+            }
+            return TryRepairCombatOutcome::Applied;
+        }
+        TryRepairCombatOutcome::NotPresent
     }
 
     pub fn try_set_ball_position(&self, ball_id: BallId, position: DVec3) {
@@ -1036,6 +1126,7 @@ impl SystemHandle {
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         if let Some(cs) = bp.combat_states.get_mut(&ball_id) {
             f(cs);
+            super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
             true
         } else {
             false
@@ -1061,6 +1152,7 @@ impl SystemHandle {
         };
         f(cs);
         bp.recompute_ball_attributes(ball_id);
+        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         true
     }
 
@@ -1854,6 +1946,36 @@ impl SystemHandle {
         rx.await.map_err(|_| "Solar system reply dropped".to_string())
     }
 
+    /// Asynchronously restores up to `(hull_heal, armor_heal, shield_heal)` HP deltas on
+    /// `ball_id` via `SystemActor`, emitting `OnDamageStateChange` and persisting the updated
+    /// `CombatState` (`#1167`).
+    pub async fn repair_combat_state(
+        &self,
+        ball_id: BallId,
+        hull_heal: f64,
+        armor_heal: f64,
+        shield_heal: f64,
+    ) -> Result<Option<CombatState>, String> {
+        let hull_delta = hull_heal.max(0.0);
+        let armor_delta = armor_heal.max(0.0);
+        let shield_delta = shield_heal.max(0.0);
+        if hull_delta <= 0.0 && armor_delta <= 0.0 && shield_delta <= 0.0 {
+            return Ok(None);
+        }
+        let (tx, rx) = oneshot::channel();
+        self.cmd_sender()
+            .send(SystemCommand::RepairCombatState {
+                ball_id,
+                hull_heal: hull_delta,
+                armor_heal: armor_delta,
+                shield_heal: shield_delta,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
     pub async fn add_module_cycle(&self, cycle: ActiveModuleCycle) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_sender()
@@ -2260,9 +2382,8 @@ pub(crate) use celestials_helpers::{
     collect_landed_warp_positions, fast_forward_clock_in_actor_with_epochs,
     persist_ball_positions_in_db, persist_landed_warps_in_db,
     record_spawned_ball_checkpoint_baseline, record_warp_stops_from_events_in_map,
-    register_committed_warp_cache,
-    register_db_system_ballpark, remove_ball_checkpoint_tracking, sync_ball_positions,
-    update_system_hibernation_flag,
+    register_committed_warp_cache, register_db_system_ballpark, register_tethered_balls_cache,
+    remove_ball_checkpoint_tracking, sync_ball_positions, update_system_hibernation_flag,
 };
 
 #[cfg(test)] #[path = "celestials_unit_tests.rs"] mod celestials_unit_tests;

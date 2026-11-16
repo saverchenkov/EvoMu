@@ -1,6 +1,5 @@
 # Lock-rank ratchet baseline: <held_rank>\t<acquired_rank>\t<relative_file>::<enclosing_fn_name>::<field_name>
 21	20	crates/eve-server/src/system_actor/cycles_extra_unit_tests.rs::system_handle_warp_module_removal_auto_step_and_full_tick_hooks::ballpark
-40	20	crates/eve-server/src/sp6_lifecycle.rs::read_unified_ship_damage_state::ballpark
 40	40	crates/eve-server/src/services/sov_gameplay_entosis_extra_unit_tests.rs::precheck_entosis_link_filter_clauses_and_tick_merc_den_precheck_mutants::with_demo_seed
 40	40	crates/eve-server/tests/it/character_esi_social_mail.rs::seed_demo_sqlite::with_demo_seed
 40	40	crates/eve-server/tests/it/character_progression_ext.rs::test_inv3_dna_fitting_string_encoder_decoder::with_demo_seed

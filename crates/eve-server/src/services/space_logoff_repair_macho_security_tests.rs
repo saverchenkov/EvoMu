@@ -291,6 +291,7 @@ async fn r7_tb_04_repair_in_space_blocked_and_station_repair_charges_isk_and_cle
     );
     assert_eq!(
         repair_service::handle_repair_items_in_location(&ctx, &sess, false, &[PyRep::Integer(ship_id)])
+            .await
             .unwrap_err()
             .code,
         "NotInStation"
@@ -321,6 +322,7 @@ async fn r7_tb_04_repair_in_space_blocked_and_station_repair_charges_isk_and_cle
         false,
         &[PyRep::Integer(ship_id)],
     )
+    .await
     .unwrap();
     let paid = rep.dict_get("totalCostISK").and_then(|v| v.as_f64()).unwrap_or(0.0);
     assert!(paid > 0.0, "Station repair of combat-damaged ship must charge positive ISK");

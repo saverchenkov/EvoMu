@@ -54,6 +54,7 @@ async fn test_repair_service_quotes_and_repair_in_station_and_structure() {
         false,
         &[PyRep::List(vec![PyRep::Integer(ship_id)])],
     )
+    .await
     .unwrap();
     assert_eq!(
         rep_res.dict_get("locationID").and_then(|v| v.as_i64()),
@@ -108,6 +109,7 @@ async fn test_repair_service_quotes_and_repair_in_station_and_structure() {
         true,
         &[PyRep::List(vec![PyRep::Integer(ship_id)])],
     )
+    .await
     .unwrap();
     assert_eq!(
         struct_rep

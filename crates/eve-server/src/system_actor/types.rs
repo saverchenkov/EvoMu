@@ -421,6 +421,20 @@ pub struct TakenBall {
     pub cycles_cleared: usize,
 }
 
+/// Result of non-blocking [`SystemHandle::try_repair_combat_state_sync`] (`#1167`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TryRepairCombatOutcome {
+    /// Target ball has no live combat state in this system (e.g., docked ship).
+    NotPresent,
+    /// Repaired synchronously on `Ballpark`, emitted `OnDamageStateChange`, and persisted to DB.
+    Applied,
+    /// `Ballpark` was write-contended (`WouldBlock`); repair command queued via `try_send`.
+    QueuedAsync,
+    /// `Ballpark` was write-contended and mailbox/locks prevented `try_send`; caller should `.await`
+    /// [`SystemHandle::repair_combat_state`] outside DB locks.
+    NeedsAsyncFallback,
+}
+
 pub enum SystemCommand {
     SpawnBall {
         ball: Ball,
@@ -670,6 +684,13 @@ pub enum SystemCommand {
     ModifyCombatState {
         ball_id: BallId,
         f: Box<dyn FnOnce(&mut CombatState) + Send>,
+        reply: oneshot::Sender<Option<CombatState>>,
+    },
+    RepairCombatState {
+        ball_id: BallId,
+        hull_heal: f64,
+        armor_heal: f64,
+        shield_heal: f64,
         reply: oneshot::Sender<Option<CombatState>>,
     },
     AddModuleCycle {

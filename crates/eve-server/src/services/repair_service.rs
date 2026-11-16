@@ -10,6 +10,34 @@ use crate::services::station_structure::structure_upwell_ops::{
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+use std::collections::HashMap;
+
+fn sample_live_repair_ship_hp(
+    ctx: &ServerContext,
+    session: &SessionState,
+    item_ids: &[i64],
+) -> HashMap<i64, crate::sp6_lifecycle::LiveShipCombatHp> {
+    let mut out = HashMap::new();
+    for id in item_ids.iter().copied().chain(session.ship_id) {
+        if out.contains_key(&id) {
+            continue;
+        }
+        if let Some(hp) =
+            crate::sp6_lifecycle::sample_live_ship_combat_hp(ctx, id, session.solar_system_id)
+        {
+            out.insert(id, hp);
+        }
+    }
+    out
+}
+
+struct ItemRepairMetrics {
+    total_dmg: f64,
+    max_hp: f64,
+    cost_per_unit: f64,
+    ship_layer_damage: Option<(f64, f64, f64)>,
+    ship_max_hp: (f64, f64, f64),
+}
 
 fn ship_combat_damage(
     ctx: &ServerContext,
@@ -18,18 +46,21 @@ fn ship_combat_damage(
     max_hull: f64,
     max_armor: f64,
     max_shield: f64,
-) -> (f64, bool) {
+    live_hp: Option<crate::sp6_lifecycle::LiveShipCombatHp>,
+) -> (f64, f64, f64) {
     let type_id = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(0);
-    let unified = crate::sp6_lifecycle::read_unified_ship_damage_state(
+    let unified = crate::sp6_lifecycle::read_unified_ship_damage_state_with_live(
         ctx,
         snap,
         ship_id,
         type_id,
         Some((max_hull, max_armor, max_shield)),
+        live_hp,
     );
     (
-        unified.hull_damage + unified.armor_damage + unified.shield_damage,
-        unified.shield_damage > 0.0,
+        unified.hull_damage,
+        unified.armor_damage,
+        unified.shield_damage,
     )
 }
 
@@ -37,7 +68,8 @@ fn item_repair_metrics(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
     item: &eve_db::InventoryItemRecord,
-) -> (f64, f64, f64) {
+    live_ship_hp: &HashMap<i64, crate::sp6_lifecycle::LiveShipCombatHp>,
+) -> ItemRepairMetrics {
     let mut dmg = item
         .dynamic_attributes
         .get(&eve_sde::attr_ids::DAMAGE)
@@ -67,12 +99,22 @@ fn item_repair_metrics(
         .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::SHIELD_CAPACITY).copied())
         .unwrap_or(0.0);
     let mut has_shield_dmg = false;
-    if is_ship {
-        let (combat_dmg, shield_damaged) =
-            ship_combat_damage(ctx, snap, item.item_id, max_hull, max_armor, max_shield);
-        dmg = dmg.max(combat_dmg);
-        has_shield_dmg = shield_damaged;
-    }
+    let ship_layer_damage = if is_ship {
+        let (h_dmg, a_dmg, s_dmg) = ship_combat_damage(
+            ctx,
+            snap,
+            item.item_id,
+            max_hull,
+            max_armor,
+            max_shield,
+            live_ship_hp.get(&item.item_id).copied(),
+        );
+        dmg = dmg.max(h_dmg + a_dmg + s_dmg);
+        has_shield_dmg = s_dmg > 0.0;
+        Some((h_dmg, a_dmg, s_dmg))
+    } else {
+        None
+    };
     let max_hp = if t_opt.is_some() {
         let base = max_hull + max_armor + if has_shield_dmg { max_shield } else { 0.0 };
         base.max(40.0)
@@ -87,7 +129,13 @@ fn item_repair_metrics(
         .unwrap_or(10_000.0);
     let repair_modifier = if is_ship { 7.5e-6 } else { 1.25e-3 };
     let cost_per_unit = (base_price * repair_modifier).max(0.01);
-    (dmg, max_hp, cost_per_unit)
+    ItemRepairMetrics {
+        total_dmg: dmg,
+        max_hp,
+        cost_per_unit,
+        ship_layer_damage,
+        ship_max_hp: (max_hull, max_armor, max_shield),
+    }
 }
 
 fn validate_structure_repair_access(
@@ -185,12 +233,16 @@ fn resolve_structure_repair_location(
     }
     let (sys_id, ship_id) = (session.solar_system_id?, session.ship_id?);
     let sys = ctx.systems.get_or_spawn(sys_id);
-    let (tethered, ship_pos) = {
-        let bp = sys.ballpark.read().ok()?;
-        (
+    let (tethered, ship_pos) = match sys.ballpark.try_read() {
+        Ok(bp) => (
             bp.combat_states.get(&ship_id).is_some_and(|cs| cs.is_tethered),
             bp.balls.get(&ship_id).map(|b| b.position)?,
-        )
+        ),
+        Err(std::sync::TryLockError::WouldBlock) => (
+            sys.is_ball_tethered_sync(ship_id),
+            sys.get_ball_position_sync(ship_id)?,
+        ),
+        Err(std::sync::TryLockError::Poisoned(_)) => return None,
     };
     if !tethered {
         return None;
@@ -304,6 +356,7 @@ pub fn handle_repair_get_quotes(
         )
     });
     let now = ctx.now_unix();
+    let live_ship_hp = sample_live_repair_ship_hp(ctx, session, &item_ids);
     let dict_entries = ctx.db.with_snapshot(|snap| -> Result<_, BridgeRpcError> {
         let tax_bps = resolve_structure_repair_tax_bps(ctx, snap, repair_sid, char_id, now)?;
         let is_upwell = repair_sid.is_some_and(|s| s >= 1_000_000_000_000 || snap.structures.contains_key(&s));
@@ -371,7 +424,12 @@ pub fn handle_repair_get_quotes(
             sub_items.sort_by_key(|i| i.item_id);
             let mut rows = Vec::new();
             for it in sub_items {
-                let (dmg, max_hp, cpu) = item_repair_metrics(ctx, snap, it);
+                let ItemRepairMetrics {
+                    total_dmg: dmg,
+                    max_hp,
+                    cost_per_unit: cpu,
+                    ..
+                } = item_repair_metrics(ctx, snap, it, &live_ship_hp);
                 let gid = ctx.sde.types.get(&it.type_id).map(|t| i64::from(t.group_id)).unwrap_or(0);
                 let base_cents = eve_db::IskCents::from_f64_isk(cpu).0;
                 let (tax_unit_cents, unit_cents) = if is_upwell {
@@ -410,7 +468,7 @@ pub fn handle_repair_get_quotes(
 
 /// `repairSvc.RepairItemsInStation(itemIDs, iskRepairValue)` and
 /// `repairSvc.RepairItemsInStructure(itemIDs)` (`base_repairshop.pyj:69,71`).
-pub fn handle_repair_items_in_location(
+pub async fn handle_repair_items_in_location(
     ctx: &ServerContext,
     session: &SessionState,
     is_structure: bool,
@@ -482,10 +540,13 @@ pub fn handle_repair_items_in_location(
     let active_ship = session.ship_id;
     let now_unix = ctx.now_unix();
     let struct_loc = (loc_id >= 1_000_000_000_000).then_some(loc_id).or(repair_sid);
-    let (repaired_ids, total_cost, new_bal) = ctx.db.try_with_mut_snapshot(|snap| {
+    let live_ship_hp = sample_live_repair_ship_hp(ctx, session, &item_ids);
+    let (repaired_ids, repaired_ship_heals, total_cost, new_bal) = ctx.db.try_with_mut_snapshot(|snap| {
         let tax_bps = resolve_structure_repair_tax_bps(ctx, snap, struct_loc, char_id, now_unix)?;
         let is_upwell = struct_loc.is_some_and(|s| s >= 1_000_000_000_000 || snap.structures.contains_key(&s));
         let mut target_ids = Vec::new();
+        let mut ship_paid_by_id: HashMap<i64, ((f64, f64, f64), (f64, f64, f64))> = HashMap::new();
+        let mut ship_heals: Vec<(i64, f64, f64, f64)> = Vec::new();
         let mut base_total_cents = eve_db::IskCents::ZERO;
         let mut total_cents = eve_db::IskCents::ZERO;
         for &req_id in &item_ids {
@@ -552,7 +613,13 @@ pub fn handle_repair_items_in_location(
                             && is_repairable_ship_child_flag(it.flag)))
                     && !target_ids.contains(&it.item_id)
                 {
-                    let (dmg, _, cpu) = item_repair_metrics(ctx, snap, it);
+                    let ItemRepairMetrics {
+                        total_dmg: dmg,
+                        cost_per_unit: cpu,
+                        ship_layer_damage,
+                        ship_max_hp,
+                        ..
+                    } = item_repair_metrics(ctx, snap, it, &live_ship_hp);
                     let dmg_units = dmg.ceil() as i64;
                     if dmg_units > 0 {
                         let base_cents = eve_db::IskCents::from_f64_isk(cpu).0;
@@ -599,6 +666,12 @@ pub fn handle_repair_items_in_location(
                     }
                     if it.item_id == req_id || dmg > 0.0 {
                         target_ids.push(it.item_id);
+                        if let Some((h_dmg, a_dmg, s_dmg)) = ship_layer_damage {
+                            ship_paid_by_id.insert(it.item_id, ((h_dmg, a_dmg, s_dmg), ship_max_hp));
+                            if h_dmg > 0.0 || a_dmg > 0.0 || s_dmg > 0.0 {
+                                ship_heals.push((it.item_id, h_dmg, a_dmg, s_dmg));
+                            }
+                        }
                     }
                 }
             }
@@ -676,9 +749,19 @@ pub fn handle_repair_items_in_location(
         }
         let bal = snap.characters.get(&char_id).map(|c| c.balance.to_wire_f64()).unwrap_or(0.0);
         for tid in &target_ids {
-            crate::sp6_lifecycle::clear_ship_combat_damage_in_snap(snap, *tid);
+            if let Some(&(paid, ship_max_hp)) = ship_paid_by_id.get(tid) {
+                crate::sp6_lifecycle::subtract_ship_combat_damage_in_snap(
+                    snap,
+                    *tid,
+                    paid,
+                    ship_max_hp,
+                    live_ship_hp.contains_key(tid),
+                );
+            } else {
+                crate::sp6_lifecycle::clear_ship_combat_damage_in_snap(snap, *tid);
+            }
         }
-        Ok((target_ids, total_cents.to_f64_isk(), bal))
+        Ok((target_ids, ship_heals, total_cents.to_f64_isk(), bal))
     })?;
     if let Ok(mut fits) = ctx.ship_fittings.write() {
         for fit in fits.values_mut() {
@@ -689,14 +772,24 @@ pub fn handle_repair_items_in_location(
             }
         }
     }
-    for &iid in &repaired_ids {
-        if let Some(sys_id) = session.solar_system_id.or_else(|| ctx.systems.find_ball_system_sync(iid)) {
-            if let Ok(mut bp) = ctx.systems.get_or_spawn(sys_id).ballpark.write() {
-                if let Some(cs) = bp.combat_states.get_mut(&iid) {
-                    cs.shield_hp = cs.max_shield_hp;
-                    cs.armor_hp = cs.max_armor_hp;
-                    cs.structure_hp = cs.max_structure_hp;
-                }
+    for (iid, hull_heal, armor_heal, shield_heal) in repaired_ship_heals {
+        let sys_opt = ctx
+            .systems
+            .find_ball_system_sync(iid)
+            .map(|sys_id| ctx.systems.get_or_spawn(sys_id))
+            .or_else(|| {
+                session
+                    .solar_system_id
+                    .and_then(|sys_id| ctx.systems.get_handle(sys_id))
+            });
+        if let Some(sys) = sys_opt {
+            if matches!(
+                sys.try_repair_combat_state_sync(iid, hull_heal, armor_heal, shield_heal),
+                crate::system_actor::TryRepairCombatOutcome::NeedsAsyncFallback
+            ) {
+                let _ = sys
+                    .repair_combat_state(iid, hull_heal, armor_heal, shield_heal)
+                    .await;
             }
         }
     }
