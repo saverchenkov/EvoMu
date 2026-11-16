@@ -1824,8 +1824,13 @@ async fn test_esi_market_history_and_prices_driven_by_real_market_orders() {
         .iter()
         .find(|p| p["type_id"] == serde_json::json!(34))
         .expect("Tritanium in /markets/prices");
+    let sde_base = ctx.sde.types[&trit_type].base_price;
     assert!((trit_price["average_price"].as_f64().unwrap() - 15.0).abs() < 1e-6);
-    assert!((trit_price["adjusted_price"].as_f64().unwrap() - 15.0).abs() < 1e-6);
+    assert!(
+        (trit_price["adjusted_price"].as_f64().unwrap() - sde_base).abs() < 1e-6,
+        "below-minimum-notional Day-1 volume (200 * 15 = 3000 ISK < 10000 ISK) keeps adjusted_price anchored at SDE base_price {sde_base}, got {}",
+        trit_price["adjusted_price"]
+    );
 }
 
 #[tokio::test]

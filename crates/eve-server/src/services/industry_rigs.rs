@@ -505,41 +505,123 @@ pub fn clear_sde_adjusted_prices() {
     *SDE_ADJUSTED_PRICES.write().unwrap() = None;
 }
 
-/// Computes all active rolling market adjusted prices (`feat:industry.eiv-adjusted-prices`, `feat:esi.market.prices`)
-/// from the explicit adjusted-price cache and 28-day clamped rolling EMA over executed `snap.market_history`.
-pub fn collect_live_market_adjusted_prices(
+fn canonical_sde_base_prices() -> &'static std::collections::HashMap<eve_sde::TypeId, f64> {
+    static CANONICAL_BASE_PRICES: std::sync::OnceLock<
+        std::collections::HashMap<eve_sde::TypeId, f64>,
+    > = std::sync::OnceLock::new();
+    CANONICAL_BASE_PRICES.get_or_init(|| {
+        let sde = eve_sde::SdeRegistry::with_canonical_seed();
+        sde.types
+            .iter()
+            .filter_map(|(&tid, t)| {
+                (t.base_price.is_finite() && t.base_price > 0.0).then_some((tid, t.base_price))
+            })
+            .collect()
+    })
+}
+
+#[inline]
+fn sde_base_price_for_type(
+    sde: &eve_sde::SdeRegistry,
+    type_id: eve_sde::TypeId,
+) -> Option<f64> {
+    sde.types
+        .get(&type_id)
+        .map(|t| t.base_price)
+        .filter(|&p| p.is_finite() && p > 0.0)
+}
+
+#[inline]
+fn utc_calendar_day(date: &str) -> &str {
+    let trimmed = date.trim();
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 10 && bytes[4] == b'-' && bytes[7] == b'-' {
+        &trimmed[..10]
+    } else {
+        trimmed
+    }
+}
+
+/// Computes a single type's cluster-wide UTC-day volume-weighted, SDE-anchored, volume-gated,
+/// daily-clamped 28-day EMA from market history records across all regions.
+fn compute_adjusted_price_from_history<'a>(
+    sde_base_price: Option<f64>,
+    records: impl Iterator<Item = &'a eve_db::MarketHistoryDayRecord>,
+) -> Option<f64> {
+    let mut by_day: std::collections::BTreeMap<&str, (f64, u128)> =
+        std::collections::BTreeMap::new();
+    for h in records {
+        if !h.average.is_finite() || h.average <= 0.0 || h.volume <= 0 {
+            continue;
+        }
+        let day_key = utc_calendar_day(&h.date);
+        if day_key.is_empty() {
+            continue;
+        }
+        let vol = h.volume as u128;
+        let entry = by_day.entry(day_key).or_insert((0.0, 0));
+        let new_total = entry.1.saturating_add(vol);
+        if new_total == 0 {
+            continue;
+        }
+        let weight = (vol as f64) / (new_total as f64);
+        entry.0 += (h.average - entry.0) * weight;
+        entry.1 = new_total;
+    }
+    if by_day.is_empty() {
+        return None;
+    }
+
+    let skip = by_day
+        .len()
+        .saturating_sub(crate::formulas::ADJUSTED_PRICE_EMA_WINDOW_DAYS);
+    let recent_28 = by_day.into_values().skip(skip);
+    let min_vol = crate::formulas::min_adjusted_price_daily_volume(sde_base_price);
+    let alpha = crate::formulas::ADJUSTED_PRICE_EMA_ALPHA;
+    let band = crate::formulas::ADJUSTED_PRICE_DAILY_BAND;
+
+    let mut rolling_adj = sde_base_price.filter(|&p| p.is_finite() && p > 0.0);
+    for (daily_avg, daily_vol) in recent_28 {
+        if !daily_avg.is_finite() || daily_avg <= 0.0 || daily_vol < min_vol {
+            continue;
+        }
+        rolling_adj = Some(match rolling_adj {
+            None => daily_avg,
+            Some(prev) => {
+                let ema = prev + alpha * (daily_avg - prev);
+                ema.clamp(prev * (1.0 - band), prev * (1.0 + band))
+            }
+        });
+    }
+    rolling_adj.filter(|&p| p.is_finite() && p > 0.0)
+}
+
+fn collect_live_market_adjusted_prices_with_lookup(
     snap: &eve_db::WorldStateSnapshot,
+    base_lookup: impl Fn(eve_sde::TypeId) -> Option<f64>,
 ) -> std::collections::HashMap<eve_sde::TypeId, f64> {
     let mut hist_by_type: std::collections::HashMap<
         eve_sde::TypeId,
         Vec<&eve_db::MarketHistoryDayRecord>,
     > = std::collections::HashMap::new();
     for ((_reg_id, tid), days) in &snap.market_history {
-        hist_by_type
-            .entry(*tid)
-            .or_default()
-            .extend(days.iter().filter(|h| h.average > 0.0));
+        if days
+            .iter()
+            .any(|h| h.average.is_finite() && h.average > 0.0 && h.volume > 0)
+        {
+            hist_by_type.entry(*tid).or_default().extend(days.iter());
+        }
     }
     let mut out = std::collections::HashMap::with_capacity(hist_by_type.len());
-    for (tid, mut days) in hist_by_type {
-        if days.is_empty() {
-            continue;
-        }
-        days.sort_by(|a, b| a.date.cmp(&b.date));
-        let recent_28 = &days[days.len().saturating_sub(28)..];
-        let mut rolling_adj = recent_28[0].average;
-        for d in &recent_28[1..] {
-            let clamped = d.average.clamp(rolling_adj * 0.5, rolling_adj * 2.0);
-            rolling_adj = (rolling_adj * 27.0 + clamped) / 28.0;
-        }
-        if rolling_adj > 0.0 {
-            out.insert(tid, rolling_adj);
+    for (tid, days) in hist_by_type {
+        if let Some(adj) = compute_adjusted_price_from_history(base_lookup(tid), days.into_iter()) {
+            out.insert(tid, adj);
         }
     }
     if let Ok(guard) = SDE_ADJUSTED_PRICES.read() {
         if let Some(map) = guard.as_ref() {
             for (&tid, &price) in map {
-                if price > 0.0 {
+                if price.is_finite() && price > 0.0 {
                     out.insert(tid, price);
                 }
             }
@@ -548,43 +630,72 @@ pub fn collect_live_market_adjusted_prices(
     out
 }
 
-/// Resolves a type's live rolling market adjusted price if trade history or cache exists (`None` if untraded).
-pub fn compute_market_adjusted_price_from_snap(
+fn compute_market_adjusted_price_with_lookup(
     snap: &eve_db::WorldStateSnapshot,
     type_id: eve_sde::TypeId,
+    base_lookup: impl Fn(eve_sde::TypeId) -> Option<f64>,
 ) -> Option<f64> {
     if let Ok(guard) = SDE_ADJUSTED_PRICES.read() {
         if let Some(map) = guard.as_ref() {
             if let Some(&price) = map.get(&type_id) {
-                if price > 0.0 {
+                if price.is_finite() && price > 0.0 {
                     return Some(price);
                 }
             }
         }
     }
-    let mut days: Vec<&eve_db::MarketHistoryDayRecord> = snap
-        .market_history
-        .iter()
-        .filter(|((_, tid), _)| *tid == type_id)
-        .flat_map(|(_, v)| v.iter())
-        .filter(|h| h.average > 0.0)
-        .collect();
-    if days.is_empty() {
-        return None;
-    }
-    days.sort_by(|a, b| a.date.cmp(&b.date));
-    let recent_28 = &days[days.len().saturating_sub(28)..];
-    let mut rolling_adj = recent_28[0].average;
-    for d in &recent_28[1..] {
-        let clamped = d.average.clamp(rolling_adj * 0.5, rolling_adj * 2.0);
-        rolling_adj = (rolling_adj * 27.0 + clamped) / 28.0;
-    }
-    (rolling_adj > 0.0).then_some(rolling_adj)
+    compute_adjusted_price_from_history(
+        base_lookup(type_id),
+        snap.market_history
+            .iter()
+            .filter(|((_, tid), _)| *tid == type_id)
+            .flat_map(|(_, v)| v.iter()),
+    )
+}
+
+/// Computes all active rolling market adjusted prices (`feat:industry.eiv-adjusted-prices`, `feat:esi.market.prices`)
+/// using an explicit [`eve_sde::SdeRegistry`] for SDE `base_price` anchoring and volume thresholds.
+pub fn collect_live_market_adjusted_prices_with_sde(
+    sde: &eve_sde::SdeRegistry,
+    snap: &eve_db::WorldStateSnapshot,
+) -> std::collections::HashMap<eve_sde::TypeId, f64> {
+    collect_live_market_adjusted_prices_with_lookup(snap, |tid| sde_base_price_for_type(sde, tid))
+}
+
+/// Computes all active rolling market adjusted prices (`feat:industry.eiv-adjusted-prices`, `feat:esi.market.prices`)
+/// from the explicit adjusted-price cache and 28-day clamped rolling EMA over executed `snap.market_history`,
+/// anchored to canonical SDE `base_price` and aggregated cluster-wide per UTC day.
+pub fn collect_live_market_adjusted_prices(
+    snap: &eve_db::WorldStateSnapshot,
+) -> std::collections::HashMap<eve_sde::TypeId, f64> {
+    let base_prices = canonical_sde_base_prices();
+    collect_live_market_adjusted_prices_with_lookup(snap, |tid| base_prices.get(&tid).copied())
+}
+
+/// Resolves a type's live rolling market adjusted price using an explicit [`eve_sde::SdeRegistry`]
+/// for SDE `base_price` anchoring (`None` if untraded).
+pub fn compute_market_adjusted_price_from_snap_with_sde(
+    sde: &eve_sde::SdeRegistry,
+    snap: &eve_db::WorldStateSnapshot,
+    type_id: eve_sde::TypeId,
+) -> Option<f64> {
+    compute_market_adjusted_price_with_lookup(snap, type_id, |tid| {
+        sde_base_price_for_type(sde, tid)
+    })
+}
+
+/// Resolves a type's live rolling market adjusted price if trade history or cache exists (`None` if untraded).
+pub fn compute_market_adjusted_price_from_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    type_id: eve_sde::TypeId,
+) -> Option<f64> {
+    let base_prices = canonical_sde_base_prices();
+    compute_market_adjusted_price_with_lookup(snap, type_id, |tid| base_prices.get(&tid).copied())
 }
 
 /// Resolves a material's adjusted price for EIV calculation (`feat:industry.eiv-adjusted-prices`):
 /// 1. Cached adjusted prices from `sde_adjusted_prices` / market price cache.
-/// 2. 28-day clamped EMA over `snap.market_history` for `type_id` (shared with `/markets/prices/` and insurance).
+/// 2. 28-day cluster-wide UTC-day collapsed, volume-gated, SDE-anchored clamped EMA over `snap.market_history`.
 /// 3. SDE `base_price` baseline when no live trades have executed yet.
 pub fn resolve_material_adjusted_price(
     ctx: &ServerContext,
@@ -592,10 +703,10 @@ pub fn resolve_material_adjusted_price(
     type_id: eve_sde::TypeId,
 ) -> f64 {
     let maybe_price = match snap {
-        Some(s) => compute_market_adjusted_price_from_snap(s, type_id),
+        Some(s) => compute_market_adjusted_price_from_snap_with_sde(&ctx.sde, s, type_id),
         None => ctx
             .db
-            .with_snapshot(|s| compute_market_adjusted_price_from_snap(s, type_id)),
+            .with_snapshot(|s| compute_market_adjusted_price_from_snap_with_sde(&ctx.sde, s, type_id)),
     };
     if let Some(price) = maybe_price {
         return price;
@@ -607,14 +718,18 @@ pub fn resolve_material_adjusted_price(
         .unwrap_or(10.0)
 }
 
-/// Computes ship insurance reference value incorporating live rolling market adjusted prices
-/// of the ship's ME-0 manufacturing material basket (shared with `/markets/prices` and blueprint EIV).
+/// Computes ship insurance reference value incorporating bounded live rolling market adjusted prices
+/// of the ship's ME-0 manufacturing material basket (shared with `/markets/prices` and blueprint EIV),
+/// clamped strictly around SDE `base_price` (`[0.50x, 1.20x]`, or `0.0` if `base_price <= 0.0`).
 pub fn compute_ship_insurance_reference_value_with_prices(
     sde: &eve_sde::SdeRegistry,
     live_prices: &std::collections::HashMap<eve_sde::TypeId, f64>,
     ship_type_id: eve_sde::TypeId,
 ) -> f64 {
     let base_hull_price = crate::formulas::compute_ship_insurance_reference_value(sde, ship_type_id);
+    if !base_hull_price.is_finite() || base_hull_price <= 0.0 {
+        return 0.0;
+    }
     if live_prices.is_empty() {
         return base_hull_price;
     }
@@ -640,24 +755,39 @@ pub fn compute_ship_insurance_reference_value_with_prices(
                 let b_px = sde
                     .types
                     .get(&tid)
-                    .map(|t| if t.base_price > 0.0 { t.base_price } else { 10.0 })
+                    .map(|t| {
+                        if t.base_price.is_finite() && t.base_price > 0.0 {
+                            t.base_price
+                        } else {
+                            10.0
+                        }
+                    })
                     .unwrap_or(10.0);
-                let l_px = live_prices.get(&tid).copied().unwrap_or(b_px);
+                let l_px = live_prices
+                    .get(&tid)
+                    .copied()
+                    .filter(|p| p.is_finite() && *p > 0.0)
+                    .map(|p| {
+                        p.clamp(
+                            b_px * crate::formulas::INSURANCE_MATERIAL_MIN_MULT,
+                            b_px * crate::formulas::INSURANCE_MATERIAL_MAX_MULT,
+                        )
+                    })
+                    .unwrap_or(b_px);
                 base_sum += (qty as f64) * b_px;
                 live_sum += (qty as f64) * l_px;
             }
-            if base_sum > 0.0 && live_sum > 0.0 {
-                return if base_hull_price > 0.0 {
-                    base_hull_price * (live_sum / base_sum)
-                } else {
-                    live_sum
-                };
+            if base_sum.is_finite() && base_sum > 0.0 && live_sum.is_finite() && live_sum > 0.0 {
+                return crate::formulas::clamp_ship_insurance_reference_value(
+                    base_hull_price,
+                    base_hull_price * (live_sum / base_sum),
+                );
             }
         }
     }
     if let Some(&hull_adj) = live_prices.get(&ship_type_id) {
-        if hull_adj > 0.0 {
-            return hull_adj;
+        if hull_adj.is_finite() && hull_adj > 0.0 {
+            return crate::formulas::clamp_ship_insurance_reference_value(base_hull_price, hull_adj);
         }
     }
     base_hull_price
@@ -668,7 +798,7 @@ pub fn compute_ship_insurance_reference_value_for_ctx(
     ship_type_id: eve_sde::TypeId,
 ) -> f64 {
     ctx.db.with_snapshot(|snap| {
-        let live_prices = collect_live_market_adjusted_prices(snap);
+        let live_prices = collect_live_market_adjusted_prices_with_sde(&ctx.sde, snap);
         compute_ship_insurance_reference_value_with_prices(&ctx.sde, &live_prices, ship_type_id)
     })
 }

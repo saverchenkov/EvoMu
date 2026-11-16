@@ -301,20 +301,40 @@ fn rolling_28_day_ema_window_and_insurance_activity_fallback_and_hull_adj_fallba
     });
 
     // Insurance reference value:
-    // 1. Empty live_prices returns base_hull_price
+    // 1. Empty live_prices returns base_hull_price (0.0 for unpriced/free hulls)
     let empty_prices = HashMap::new();
     let v_empty = compute_ship_insurance_reference_value_with_prices(&ctx.sde, &empty_prices, 880_101);
     assert_eq!(v_empty, 0.0);
 
-    // 2. Blueprint activity "1" materials with base_hull_price == 0.0 returns live_sum (100 * 25.0 = 2500.0)
+    // 2. Free/unpriced hulls (base_price == 0.0, e.g. Rookie Corvettes / Capsules) remain 0.0
+    // even when material or hull live prices are present.
     let live_mat = HashMap::from([(880_001, 25.0)]);
     let v_act = compute_ship_insurance_reference_value_with_prices(&ctx.sde, &live_mat, 880_101);
-    assert!((v_act - 2_500.0).abs() < 1e-9);
+    assert_eq!(v_act, 0.0);
 
-    // 3. Ship without material match in live_prices falls back to hull's own live_prices entry
     let live_hull = HashMap::from([(880_101, 77_777.0)]);
     let v_hull = compute_ship_insurance_reference_value_with_prices(&ctx.sde, &live_hull, 880_101);
-    assert!((v_hull - 77_777.0).abs() < 1e-9);
+    assert_eq!(v_hull, 0.0);
+
+    // 3. Priced synthetic hull (base_price = 10_000.0) clamps material and direct hull overrides to [0.50x, 1.20x]
+    let mut sde_priced = (*ctx.sde).clone();
+    sde_priced
+        .types
+        .insert(880_102, make_type(880_102, 25, 10_000.0, &[]));
+    let mut bp_priced = sde_priced
+        .blueprints
+        .values()
+        .find(|b| b.product_type_id == 880_101)
+        .expect("synthetic 880_101 blueprint")
+        .clone();
+    bp_priced.blueprint_type_id = 880_202;
+    bp_priced.product_type_id = 880_102;
+    sde_priced.blueprints.insert(880_202, bp_priced);
+    let v_priced_mat = compute_ship_insurance_reference_value_with_prices(&sde_priced, &live_mat, 880_102);
+    assert!((v_priced_mat - 12_000.0).abs() < 1e-9);
+    let live_hull_priced = HashMap::from([(880_102, 77_777.0)]);
+    let v_priced_hull = compute_ship_insurance_reference_value_with_prices(&sde_priced, &live_hull_priced, 880_102);
+    assert!((v_priced_hull - 12_000.0).abs() < 1e-9);
 
     set_sde_adjusted_price(880_001, 0.0); // non-positive price ignored by cache lookup
     clear_sde_adjusted_prices();
