@@ -7,6 +7,35 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
 use std::collections::{HashMap, HashSet};
 
+/// Returns fallback `cfg.eveowners` row metadata only for unseeded IDs in disjoint EVE owner ID
+/// ranges (`500_000..=599_999` factions, `1_000_000..=1_999_999` / `98_000_000..=98_999_999`
+/// corporations, `99_000_000..=99_999_999` alliances, and `3_000_000..=3_999_999` /
+/// `90_000_000..=97_999_999` / `2_100_000_000..=2_129_999_999` characters).
+///
+/// Inventory items and other `preInv64Items` (`100_000_000..=2_099_999_999`) are omitted so V24
+/// `idCheckers.IsCharacter`/`IsCorporation`/`IsAlliance` catch `KeyError` and evaluate to `false`,
+/// matching `Recordset._Prime` (`knownLuzers`) rather than opening `CharacterInfoWindow`.
+fn fallback_owner_row(id: i64) -> Option<Vec<PyRep>> {
+    let (name, type_id, gender) = match id {
+        1_000_000..=1_999_999 | 98_000_000..=98_999_999 => {
+            (format!("Corporation {id}"), 2_i64, PyRep::Bool(false))
+        }
+        500_000..=599_999 => (format!("Faction {id}"), 30_i64, PyRep::Bool(false)),
+        99_000_000..=99_999_999 => (format!("Alliance {id}"), 16159_i64, PyRep::Bool(false)),
+        3_000_000..=3_999_999 | 90_000_000..=97_999_999 | 2_100_000_000..=2_129_999_999 => {
+            (format!("Character {id}"), 1373_i64, PyRep::None)
+        }
+        _ => return None,
+    };
+    Some(vec![
+        PyRep::Integer(id),
+        PyRep::String(name),
+        PyRep::Integer(type_id),
+        gender,
+        PyRep::None,
+    ])
+}
+
 fn parse_id_list(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
@@ -216,42 +245,10 @@ pub fn handle(
                             PyRep::Bool(false),
                             PyRep::None,
                         ]);
-                    } else if (1_000_000..=1_999_999).contains(&id)
-                        || (98_000_000..=98_999_999).contains(&id)
-                    {
-                        // Unknown NPC or player corporation IDs must still carry corporation typeID (2).
-                        rows.push(vec![
-                            PyRep::Integer(id),
-                            PyRep::String(format!("Corporation {id}")),
-                            PyRep::Integer(2),
-                            PyRep::Bool(false),
-                            PyRep::None,
-                        ]);
-                    } else if (500_000..=599_999).contains(&id) {
-                        rows.push(vec![
-                            PyRep::Integer(id),
-                            PyRep::String(format!("Faction {id}")),
-                            PyRep::Integer(30),
-                            PyRep::Bool(false),
-                            PyRep::None,
-                        ]);
-                    } else if (99_000_000..=99_999_999).contains(&id) {
-                        rows.push(vec![
-                            PyRep::Integer(id),
-                            PyRep::String(format!("Alliance {id}")),
-                            PyRep::Integer(16159),
-                            PyRep::Bool(false),
-                            PyRep::None,
-                        ]);
-                    } else {
-                        // Never omit an unknown owner ID: EveOwners expects a row for every requested ID.
-                        rows.push(vec![
-                            PyRep::Integer(id),
-                            PyRep::String(format!("Unknown Owner {id}")),
-                            PyRep::Integer(1373),
-                            PyRep::None,
-                            PyRep::None,
-                        ]);
+                    } else if !snap.items.contains_key(&id) && !snap.structures.contains_key(&id) {
+                        if let Some(row) = fallback_owner_row(id) {
+                            rows.push(row);
+                        }
                     }
                 }
             });

@@ -475,14 +475,47 @@ fn config_corp_ticker_names_includes_governance_logo_fields() {
 }
 
 #[test]
-fn get_multi_owners_ex_returns_generic_and_npc_corp_fallback_rows_for_unknown_ids() {
+fn get_multi_owners_ex_resolves_owner_range_fallbacks_and_omits_non_owners() {
     let ctx = test_ctx();
     let mut sess = auth_session(930_002, 98_300_002, 30_000_142);
     let kw = HashMap::new();
     let unknown_npc_corp_id = 1_999_123_i64;
+    let unknown_player_corp_id = 98_999_123_i64;
     let unknown_faction_id = 599_123_i64;
     let unknown_alliance_id = 99_999_123_i64;
-    let unknown_generic_id = 888_777_666_i64;
+    let unknown_agent_id = 3_999_123_i64;
+    let unknown_gen2_char_id = 90_999_123_i64;
+    let unknown_gen3_char_id = 2_120_000_123_i64;
+    let cargo_item_id = 1_896_953_512_i64;
+    let structure_id = 1_050_000_001_i64;
+    let unknown_preinv64_id = 888_777_666_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cargo_item_id,
+            InventoryItemRecord {
+                item_id: cargo_item_id,
+                type_id: 222,
+                owner_id: 930_002,
+                location_id: 1_896_964_019,
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 1100,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            structure_id,
+            eve_db::UpwellStructureRecord {
+                structure_id,
+                type_id: 35_832,
+                owner_corp_id: 98_300_002,
+                solar_system_id: 30_000_142,
+                name: "Non-Owner Structure".to_string(),
+                ..Default::default()
+            },
+        );
+    });
 
     let rep = handle(
         &ctx,
@@ -491,9 +524,18 @@ fn get_multi_owners_ex_returns_generic_and_npc_corp_fallback_rows_for_unknown_id
         "GetMultiOwnersEx",
         &[PyRep::List(vec![
             PyRep::Integer(unknown_npc_corp_id),
+            PyRep::Integer(unknown_player_corp_id),
             PyRep::Integer(unknown_faction_id),
             PyRep::Integer(unknown_alliance_id),
-            PyRep::Integer(unknown_generic_id),
+            PyRep::Integer(unknown_agent_id),
+            PyRep::Integer(unknown_gen2_char_id),
+            PyRep::Integer(unknown_gen3_char_id),
+            PyRep::Integer(cargo_item_id),
+            PyRep::Integer(structure_id),
+            PyRep::Integer(unknown_preinv64_id),
+            PyRep::Integer(60_003_760),
+            PyRep::Integer(0),
+            PyRep::Integer(-1),
         ])],
         &kw,
     )
@@ -507,20 +549,53 @@ fn get_multi_owners_ex_returns_generic_and_npc_corp_fallback_rows_for_unknown_id
         columns,
         vec!["ownerID", "ownerName", "typeID", "gender", "ownerNameID"]
     );
-    assert_eq!(rows.len(), 4, "no requested owner ID may be dropped");
-    assert_eq!(rows[0].first(), Some(&PyRep::Integer(unknown_npc_corp_id)));
-    assert_eq!(rows[0].get(2), Some(&PyRep::Integer(2)));
-    assert_eq!(rows[0].get(3), Some(&PyRep::Bool(false)));
-    assert_eq!(rows[1].first(), Some(&PyRep::Integer(unknown_faction_id)));
-    assert_eq!(rows[1].get(2), Some(&PyRep::Integer(30)));
-    assert_eq!(rows[1].get(3), Some(&PyRep::Bool(false)));
-    assert_eq!(rows[2].first(), Some(&PyRep::Integer(unknown_alliance_id)));
-    assert_eq!(rows[2].get(2), Some(&PyRep::Integer(16159)));
-    assert_eq!(rows[2].get(3), Some(&PyRep::Bool(false)));
-    assert_eq!(rows[3].first(), Some(&PyRep::Integer(unknown_generic_id)));
-    assert_eq!(rows[3].get(2), Some(&PyRep::Integer(1373)));
-    assert_eq!(rows[3].get(3), Some(&PyRep::None));
-    assert_eq!(rows[3].get(4), Some(&PyRep::None));
+    assert_eq!(
+        rows.len(),
+        7,
+        "only disjoint owner-range fallbacks may resolve; items, structures, stations, and preInv64 IDs must be omitted: {rows:?}"
+    );
+    let expected = [
+        (unknown_npc_corp_id, 2_i64, PyRep::Bool(false)),
+        (unknown_player_corp_id, 2_i64, PyRep::Bool(false)),
+        (unknown_faction_id, 30_i64, PyRep::Bool(false)),
+        (unknown_alliance_id, 16159_i64, PyRep::Bool(false)),
+        (unknown_agent_id, 1373_i64, PyRep::None),
+        (unknown_gen2_char_id, 1373_i64, PyRep::None),
+        (unknown_gen3_char_id, 1373_i64, PyRep::None),
+    ];
+    for (idx, (id, type_id, gender)) in expected.into_iter().enumerate() {
+        assert_eq!(rows[idx].first(), Some(&PyRep::Integer(id)));
+        assert!(
+            rows[idx]
+                .get(1)
+                .and_then(PyRep::as_str)
+                .is_some_and(|s| !s.is_empty()),
+            "fallback owner row {id} must carry non-empty ownerName"
+        );
+        assert_eq!(rows[idx].get(2), Some(&PyRep::Integer(type_id)));
+        assert_eq!(rows[idx].get(3), Some(&gender));
+        assert_eq!(rows[idx].get(4), Some(&PyRep::None));
+    }
+
+    // Isolated ShowInfo prime probe on cargo item ID must return 0 rows so client KeyError -> IsCharacter() == false.
+    let item_probe = handle(
+        &ctx,
+        &mut sess,
+        "config",
+        "GetMultiOwnersEx",
+        &[PyRep::List(vec![PyRep::Integer(cargo_item_id)])],
+        &kw,
+    )
+    .unwrap()
+    .expect("GetMultiOwnersEx cargo item probe");
+    assert_eq!(
+        item_probe,
+        PyRep::tuple_set(
+            vec!["ownerID", "ownerName", "typeID", "gender", "ownerNameID"],
+            vec![],
+        ),
+        "cargo inventory item must never resolve as an owner or Character typeID 1373"
+    );
 }
 
 #[cfg(test)]
