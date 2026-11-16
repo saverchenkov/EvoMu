@@ -42,6 +42,8 @@ pub const STATUS_NOT_IMPLEMENTED: u32 = 501;
 pub const STATUS_SERVICE_UNAVAILABLE: u32 = 503;
 pub const STATUS_GATEWAY_TIMEOUT: u32 = 504;
 
+#[cold]
+#[inline(never)]
 fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
@@ -52,22 +54,56 @@ fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+#[cold]
+#[inline(never)]
+fn log_isolated_panic(label: &str, payload: Box<dyn std::any::Any + Send>) {
+    let panic_msg = panic_payload_to_string(payload);
+    tracing::warn!(
+        side_effect = label,
+        panic = %panic_msg,
+        "Isolated side-effect panicked; continuing primary RPC"
+    );
+}
+
+#[cold]
+#[inline(never)]
+fn log_isolated_error<E: std::fmt::Debug>(label: &str, err: &E) {
+    tracing::warn!(
+        side_effect = label,
+        error = ?err,
+        "Isolated side-effect returned error; continuing primary RPC"
+    );
+}
+
+std::thread_local! {
+    static IN_ISOLATED_SIDE_EFFECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct IsolatedSideEffectGuard(bool);
+
+impl Drop for IsolatedSideEffectGuard {
+    fn drop(&mut self) {
+        IN_ISOLATED_SIDE_EFFECT.with(|flag| flag.set(self.0));
+    }
+}
+
 /// Executes a secondary progression, notice, telemetry, or presence side-effect inside a
 /// `catch_unwind` boundary (`#1120`). Any panic is logged via `tracing::warn!` and converted to
 /// `None` so it can never unwind into `dispatch.rs` or abort a primary MachoNet gameplay RPC.
+/// Nested calls run directly under the active outer `catch_unwind` to avoid stacking debug unwind frames.
 pub fn isolate_side_effect<F, R>(label: &str, f: F) -> Option<R>
 where
     F: FnOnce() -> R,
 {
+    let already_isolated = IN_ISOLATED_SIDE_EFFECT.with(|flag| flag.get());
+    if already_isolated {
+        return Some(f());
+    }
+    let _guard = IN_ISOLATED_SIDE_EFFECT.with(|flag| IsolatedSideEffectGuard(flag.replace(true)));
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(val) => Some(val),
         Err(payload) => {
-            let panic_msg = panic_payload_to_string(payload);
-            tracing::warn!(
-                side_effect = label,
-                panic = %panic_msg,
-                "Isolated side-effect panicked; continuing primary RPC"
-            );
+            log_isolated_panic(label, payload);
             None
         }
     }
@@ -75,28 +111,31 @@ where
 
 /// Executes a fallible secondary side-effect inside a `catch_unwind` boundary (`#1120`), logging
 /// both `Err(e)` and panics via `tracing::warn!` and returning `None`.
+/// Nested calls reuse the active outer `catch_unwind` while still intercepting and logging `Err(e)`.
 pub fn isolate_side_effect_result<F, R, E>(label: &str, f: F) -> Option<R>
 where
     F: FnOnce() -> Result<R, E>,
     E: std::fmt::Debug,
 {
+    let already_isolated = IN_ISOLATED_SIDE_EFFECT.with(|flag| flag.get());
+    if already_isolated {
+        return match f() {
+            Ok(val) => Some(val),
+            Err(err) => {
+                log_isolated_error(label, &err);
+                None
+            }
+        };
+    }
+    let _guard = IN_ISOLATED_SIDE_EFFECT.with(|flag| IsolatedSideEffectGuard(flag.replace(true)));
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(Ok(val)) => Some(val),
         Ok(Err(err)) => {
-            tracing::warn!(
-                side_effect = label,
-                error = ?err,
-                "Isolated side-effect returned error; continuing primary RPC"
-            );
+            log_isolated_error(label, &err);
             None
         }
         Err(payload) => {
-            let panic_msg = panic_payload_to_string(payload);
-            tracing::warn!(
-                side_effect = label,
-                panic = %panic_msg,
-                "Isolated side-effect panicked; continuing primary RPC"
-            );
+            log_isolated_panic(label, payload);
             None
         }
     }
@@ -1121,7 +1160,7 @@ impl PublicGatewayRouter {
         payload: GoogleAny,
         now_unix: u64,
     ) -> Option<(EvePublicNotice, usize)> {
-        isolate_side_effect_result(label, || self.publish_notice(scope, payload, now_unix))
+        isolate_side_effect_result(label, || self.publish_notice_impl(scope, payload, now_unix))
     }
 
     /// Server-only notice publisher: publishes an `EvePublicNotice` to all connected clients matching `scope`.
@@ -1134,64 +1173,7 @@ impl PublicGatewayRouter {
         now_unix: u64,
     ) -> Result<(EvePublicNotice, usize), BridgeRpcError> {
         isolate_side_effect("quasar_gateway.publish_notice", || {
-            let seq = self.next_notice_seq.fetch_add(1, Ordering::Relaxed);
-            self.sync_meta_to_db();
-            let mut uuid = [0u8; 16];
-            uuid[0..8].copy_from_slice(&now_unix.to_be_bytes());
-            uuid[8..16].copy_from_slice(&seq.to_be_bytes());
-
-            let base_notice = EvePublicNotice {
-                dispatched: Some(GoogleTimestamp {
-                    seconds: now_unix as i64,
-                    nanos: 0,
-                }),
-                uuid: uuid.to_vec(),
-                internal_origin: "evomu.quasar.notice_publisher".to_string(),
-                tenant: self.tenant.clone(),
-                payload: Some(payload),
-                target_group: scope.base_target_group(),
-                trace_context: None,
-            };
-
-            let mut delivered = 0usize;
-            {
-                let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
-                for sub in subs.values_mut() {
-                    if scope.matches_subscriber(sub) {
-                        let payload_url = base_notice
-                            .payload
-                            .as_ref()
-                            .map(|p| p.type_url.as_str())
-                            .unwrap_or("");
-                        if !sub.accepts_payload_type(payload_url) {
-                            continue;
-                        }
-                        let mut targeted = base_notice.clone();
-                        targeted.target_group = Some(scope.target_group_for_subscriber(sub));
-                        sub.push_notice(targeted);
-                        delivered += 1;
-                    }
-                }
-            }
-
-            if delivered == 0 {
-                let is_ephemeral = base_notice
-                    .payload
-                    .as_ref()
-                    .map(|p| {
-                        p.type_url.ends_with("eve_public.chat.local.api.JoinNotice")
-                            || p.type_url.ends_with("eve_public.chat.local.api.LeaveNotice")
-                    })
-                    .unwrap_or(false);
-                if !is_ephemeral {
-                    self.routing_cache
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .add_notice(base_notice.clone(), scope, now_unix)?;
-                }
-            }
-
-            Ok((base_notice, delivered))
+            self.publish_notice_impl(scope, payload, now_unix)
         })
         .unwrap_or_else(|| {
             Err(BridgeRpcError {
@@ -1200,6 +1182,72 @@ impl PublicGatewayRouter {
                 client_error: None,
             })
         })
+    }
+
+    fn publish_notice_impl(
+        &self,
+        scope: NoticeScope,
+        payload: GoogleAny,
+        now_unix: u64,
+    ) -> Result<(EvePublicNotice, usize), BridgeRpcError> {
+        let seq = self.next_notice_seq.fetch_add(1, Ordering::Relaxed);
+        self.sync_meta_to_db();
+        let mut uuid = [0u8; 16];
+        uuid[0..8].copy_from_slice(&now_unix.to_be_bytes());
+        uuid[8..16].copy_from_slice(&seq.to_be_bytes());
+
+        let base_notice = EvePublicNotice {
+            dispatched: Some(GoogleTimestamp {
+                seconds: now_unix as i64,
+                nanos: 0,
+            }),
+            uuid: uuid.to_vec(),
+            internal_origin: "evomu.quasar.notice_publisher".to_string(),
+            tenant: self.tenant.clone(),
+            payload: Some(payload),
+            target_group: scope.base_target_group(),
+            trace_context: None,
+        };
+
+        let mut delivered = 0usize;
+        {
+            let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
+            for sub in subs.values_mut() {
+                if scope.matches_subscriber(sub) {
+                    let payload_url = base_notice
+                        .payload
+                        .as_ref()
+                        .map(|p| p.type_url.as_str())
+                        .unwrap_or("");
+                    if !sub.accepts_payload_type(payload_url) {
+                        continue;
+                    }
+                    let mut targeted = base_notice.clone();
+                    targeted.target_group = Some(scope.target_group_for_subscriber(sub));
+                    sub.push_notice(targeted);
+                    delivered += 1;
+                }
+            }
+        }
+
+        if delivered == 0 {
+            let is_ephemeral = base_notice
+                .payload
+                .as_ref()
+                .map(|p| {
+                    p.type_url.ends_with("eve_public.chat.local.api.JoinNotice")
+                        || p.type_url.ends_with("eve_public.chat.local.api.LeaveNotice")
+                })
+                .unwrap_or(false);
+            if !is_ephemeral {
+                self.routing_cache
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .add_notice(base_notice.clone(), scope, now_unix)?;
+            }
+        }
+
+        Ok((base_notice, delivered))
     }
 
     /// Extracts an embedded idempotency key (`eve.idempotency.Token`) from a dynamic message if present.
@@ -1688,6 +1736,32 @@ mod blast_radius_tests {
             Ok::<_, String>(1)
         });
         assert_eq!(res_panic, None);
+
+        // Nested Err still short-circuits cleanly via isolate_side_effect_result without
+        // unwinding, and nested panic unwinds to the outer catch_unwind boundary while resetting
+        // the thread-local reentrancy guard on drop.
+        let outer_after_nested_err = isolate_side_effect("test.outer_err", || {
+            let nested_err: Option<u32> =
+                isolate_side_effect_result("test.nested_err", || Err::<u32, _>("nested err"));
+            assert_eq!(nested_err, None);
+            let nested_ok = isolate_side_effect("test.nested_ok", || 99_u32);
+            assert_eq!(nested_ok, Some(99));
+            100_u32
+        });
+        assert_eq!(outer_after_nested_err, Some(100));
+
+        let outer_caught_nested_panic: Option<u32> = isolate_side_effect("test.outer_panic", || {
+            isolate_side_effect("test.inner_panic", || {
+                panic!("simulated nested panic");
+            });
+            123_u32
+        });
+        assert_eq!(outer_caught_nested_panic, None);
+        assert_eq!(isolate_side_effect("test.guard_reset_ok", || 55_u32), Some(55));
+        assert_eq!(
+            isolate_side_effect::<_, u32>("test.guard_reset_panic", || panic!("post-reset")),
+            None
+        );
     }
 
     #[test]

@@ -729,16 +729,10 @@ pub async fn handle(
         _ => {
             if service == BEYONCE_SVC && method == "CallComponentFromClient" {
                 return Some(
-                    handle_call_component_from_client(ctx, session, bound_entry, args).await,
+                    Box::pin(handle_call_component_from_client(ctx, session, bound_entry, args)).await,
                 );
             }
-            if let Some(res) =
-                space_warp_jump::handle(ctx, session, bound_entry, service, method, args, kwargs)
-                    .await
-            {
-                return Some(res);
-            }
-            if let Some(res) = space_cyno_filaments::handle(
+            if let Some(res) = Box::pin(space_warp_jump::handle(
                 ctx,
                 session,
                 bound_entry,
@@ -746,12 +740,12 @@ pub async fn handle(
                 method,
                 args,
                 kwargs,
-            )
+            ))
             .await
             {
                 return Some(res);
             }
-            handle_scan_and_wormhole_extras(
+            if let Some(res) = Box::pin(space_cyno_filaments::handle(
                 ctx,
                 session,
                 bound_entry,
@@ -759,7 +753,20 @@ pub async fn handle(
                 method,
                 args,
                 kwargs,
-            )
+            ))
+            .await
+            {
+                return Some(res);
+            }
+            Box::pin(handle_scan_and_wormhole_extras(
+                ctx,
+                session,
+                bound_entry,
+                service,
+                method,
+                args,
+                kwargs,
+            ))
             .await
         }
     }
