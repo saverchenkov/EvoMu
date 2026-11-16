@@ -79,6 +79,7 @@ pub fn stop_entropic_spool_and_deactivate(
             let _ = fit.deactivate_module(module_id, &ctx.sde);
         }
     }
+    let _ = ctx.invalidate_and_push_fit(ship_id);
     ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
         OnModulesDeactivating {

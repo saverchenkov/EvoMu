@@ -295,8 +295,8 @@ async fn target_spectrum_breaker_and_auto_targeting_system() {
     let tsb_mod_id = 1_000_400_103;
     let ats_mod_id = 1_000_400_104;
 
-    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id, 1);
-    ensure_char(&ctx, enemy_char_id, 98_000_002, sys_id, enemy_ship_id, 1);
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id, 2);
+    ensure_char(&ctx, enemy_char_id, 98_000_002, sys_id, enemy_ship_id, 2);
     insert_item(&ctx, ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1, true);
     insert_item(&ctx, enemy_ship_id, 587, enemy_char_id, sys_id as i64, InventoryFlag::None, 1, true);
     insert_item(&ctx, tsb_mod_id, 999_192, char_id, ship_id, InventoryFlag::MedSlot0, 1, true);
@@ -347,4 +347,188 @@ async fn target_spectrum_breaker_and_auto_targeting_system() {
         .await
         .expect("ATS activation");
     assert!(ats_res.dict_get("lockingCount").and_then(|v| v.as_i64()).unwrap_or(0) >= 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tactical_modules_sync_fit_projection_on_ats_entosis_and_command_burst() {
+    let ctx = test_ctx_with_custom_types(|sde| {
+        if let Some(ship_t) = sde.types.get_mut(&587) {
+            ship_t.default_attributes.insert(eve_dogma::attr_ids::HI_SLOTS, 4.0);
+            ship_t.default_attributes.insert(eve_dogma::attr_ids::CPU_OUTPUT, 500.0);
+            ship_t.default_attributes.insert(eve_dogma::attr_ids::POWER_OUTPUT, 500.0);
+        }
+        let mut ats_t = custom_inv_type(sde, 999_193, 96, 7, "Auto Targeting System", &[]);
+        ats_t.effect_ids = vec![12];
+        sde.types.insert(999_193, ats_t);
+
+        let mut ent_t = custom_inv_type(
+            sde,
+            999_194,
+            1313,
+            7,
+            "Entosis Link II",
+            &[(73, 50.0), (713, 1.0), (2112, 120_000.0), (2113, 120_000.0)],
+        );
+        ent_t.effect_ids = vec![12];
+        sde.types.insert(999_194, ent_t);
+
+        let mut burst_t = custom_inv_type(
+            sde,
+            999_195,
+            1770,
+            7,
+            "Shield Command Burst II",
+            &[(422, 2.0), (73, 10.0), (2468, 10.0), (2469, 12.0), (2474, 60.0)],
+        );
+        burst_t.effect_ids = vec![12];
+        sde.types.insert(999_195, burst_t);
+
+        sde.types.insert(
+            999_196,
+            custom_inv_type(sde, 999_196, 1769, 8, "Shield Extension Charge", &[(137, 1.0)]),
+        );
+    });
+    let char_id = 94_000_030;
+    let enemy_char_id = 94_000_031;
+    let sys_id = 30_004_759;
+    let ship_id = 1_000_400_301;
+    let enemy_ship_id = 1_000_400_302;
+    let ats_mod_id = 1_000_400_303;
+    let ent_mod_id = 1_000_400_304;
+    let burst_mod_id = 1_000_400_305;
+    let burst_charge_id = 1_000_400_306;
+    let ozone_id = 1_000_400_307;
+    let node_id = 1_000_400_308;
+
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id, 2);
+    ensure_char(&ctx, enemy_char_id, 98_000_002, sys_id, enemy_ship_id, 2);
+    grant_skill(&ctx, char_id, 3350, 5);
+    grant_skill(&ctx, char_id, 3351, 4);
+
+    insert_item(&ctx, ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, enemy_ship_id, 587, enemy_char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, ats_mod_id, 999_193, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, ent_mod_id, 999_194, char_id, ship_id, InventoryFlag::HiSlot1, 1, true);
+    insert_item(&ctx, burst_mod_id, 999_195, char_id, ship_id, InventoryFlag::HiSlot2, 1, true);
+    insert_item(&ctx, burst_charge_id, 999_196, char_id, ship_id, InventoryFlag::HiSlot2, 10, false);
+    insert_item(&ctx, ozone_id, 16275, char_id, ship_id, InventoryFlag::Cargo, 50, false);
+    insert_item(&ctx, node_id, 2977, 98_000_009, sys_id as i64, InventoryFlag::None, 1, true);
+
+    spawn_ship_ball_with_cs(&ctx, sys_id, ship_id, 587, char_id, DVec3::ZERO, 1_000.0).await;
+    spawn_ship_ball_with_cs(
+        &ctx,
+        sys_id,
+        enemy_ship_id,
+        587,
+        enemy_char_id,
+        DVec3::new(5_000.0, 0.0, 0.0),
+        1_000.0,
+    )
+    .await;
+    ctx.crimewatch
+        .write()
+        .unwrap()
+        .get_or_create(enemy_char_id)
+        .criminal_flag_until_unix = ctx.now_unix_secs() + 60;
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let rev0 = ctx
+        .invalidate_and_push_fit(ship_id)
+        .expect("initial FitProjection pushed");
+    let _ = sys.get_ball_snapshot(ship_id).await;
+    let proj0 = sys
+        .latest_fit_projection(ship_id)
+        .expect("actor must hold baseline FitProjection");
+    assert!(!matches!(
+        proj0.modules.get(&ats_mod_id).map(|m| m.state),
+        Some(eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded)
+    ));
+
+    // 1. Auto Targeting System activation must invalidate and push FitProjection to actor.
+    let fit0 = ctx
+        .get_or_rebuild_ship_fitting(char_id, ship_id)
+        .expect("fit0");
+    let ats_type = ctx.sde.types.get(&999_193).unwrap().clone();
+    let ats_state = DogmaItemState::from_sde(char_id, 999_193, &ctx.sde);
+    let _ = activate_auto_targeting_system(
+        &ctx, &sys, char_id, ship_id, ats_mod_id, &ats_type, &ats_state, &fit0,
+    )
+    .await
+    .expect("ATS activation");
+    let _ = sys.get_ball_snapshot(ship_id).await;
+    let rev1 = ctx.current_fit_rev(ship_id);
+    assert!(rev1.0 > rev0.0, "ATS activation must advance FitRev");
+    let proj1 = sys
+        .latest_fit_projection(ship_id)
+        .expect("ATS activation must push FitProjection to actor");
+    assert_eq!(proj1.rev, rev1);
+    assert_eq!(
+        proj1.modules.get(&ats_mod_id).map(|m| m.state),
+        Some(eve_dogma::ModuleState::Active)
+    );
+    assert!(
+        sys.latest_fit_projection(enemy_ship_id).is_none(),
+        "unrelated ship must not receive a FitProjection push"
+    );
+
+    // 2. Entosis Link activation must push updated FitProjection (not cache-only invalidation).
+    let ent_type = ctx.sde.types.get(&999_194).unwrap().clone();
+    let _ = handle_entosis_link_activation(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        ent_mod_id,
+        &ent_type,
+        Some(node_id),
+    )
+    .await
+    .expect("Entosis activation");
+    let _ = sys.get_ball_snapshot(ship_id).await;
+    let rev2 = ctx.current_fit_rev(ship_id);
+    assert!(rev2.0 > rev1.0, "Entosis activation must advance FitRev");
+    let proj2 = sys
+        .latest_fit_projection(ship_id)
+        .expect("Entosis activation must push FitProjection to actor");
+    assert_eq!(proj2.rev, rev2);
+    assert_eq!(
+        proj2.modules.get(&ent_mod_id).map(|m| m.state),
+        Some(eve_dogma::ModuleState::Active)
+    );
+
+    // 3. Command Burst activation must perform a single invalidate_and_push_fit step per affected ship (no redundant double push).
+    let fit_burst = ctx
+        .get_or_rebuild_ship_fitting(char_id, ship_id)
+        .expect("fit for command burst");
+    let burst_type = ctx.sde.types.get(&999_195).unwrap().clone();
+    let burst_state = DogmaItemState::from_sde(char_id, 999_195, &ctx.sde);
+    let _ = activate_command_burst(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        sys_id,
+        burst_mod_id,
+        &burst_type,
+        &burst_state,
+        Some(999_196),
+        &fit_burst,
+    )
+    .await
+    .expect("Command Burst activation");
+    let _ = sys.get_ball_snapshot(ship_id).await;
+    let rev3 = ctx.current_fit_rev(ship_id);
+    assert_eq!(
+        rev3.0 - rev2.0,
+        rev2.0 - rev1.0,
+        "Command Burst must perform a single invalidate_and_push_fit step without duplicate push_fit_projection"
+    );
+    let proj3 = sys
+        .latest_fit_projection(ship_id)
+        .expect("Command Burst activation must leave latest FitProjection on actor");
+    assert_eq!(proj3.rev, rev3);
+    assert_eq!(
+        proj3.modules.get(&burst_mod_id).map(|m| m.state),
+        Some(eve_dogma::ModuleState::Active)
+    );
 }

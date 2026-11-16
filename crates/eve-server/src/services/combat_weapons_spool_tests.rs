@@ -296,3 +296,130 @@ async fn step_system_entropic_spools_ramps_damage_consumes_ammo_and_handles_stop
     step_system_entropic_spools(&ctx, sys_id, 3.1).await;
     assert!(!ctx.db.with_snapshot(|s| s.module_active_states.contains(&mod1)), "out-of-range spool should deactivate");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_entropic_spool_and_deactivate_pushes_updated_fit_projection_to_actor() {
+    let (mut ctx, _, char_id, ship_id, sys_id) = make_spool_test_ctx();
+    {
+        let sde = Arc::make_mut(&mut ctx.sde);
+        if let Some(ship_t) = sde.types.get_mut(&47_271) {
+            ship_t.default_attributes.insert(eve_dogma::attr_ids::HI_SLOTS, 4.0);
+            ship_t.default_attributes.insert(eve_dogma::attr_ids::TURRET_SLOTS_LEFT, 4.0);
+            ship_t.default_attributes.insert(eve_dogma::attr_ids::CPU_OUTPUT, 500.0);
+            ship_t.default_attributes.insert(eve_dogma::attr_ids::POWER_OUTPUT, 500.0);
+        }
+        if let Some(disint_t) = sde.types.get_mut(&47_240) {
+            if !disint_t.effect_ids.contains(&12) {
+                disint_t.effect_ids.push(12);
+            }
+        }
+    }
+    let target_id = 300_000_060i64;
+    let mod1 = 740_030i64;
+    let ammo1 = 740_031i64;
+    let mod_idle = 740_032i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = sys_id;
+        }
+        snap.items.insert(
+            ship_id,
+            make_fighter_item(ship_id, 47_271, char_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            mod1,
+            make_fighter_item(mod1, 47_240, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.items.insert(
+            ammo1,
+            make_fighter_item(ammo1, 47_245, char_id, ship_id, InventoryFlag::HiSlot0, 5),
+        );
+        snap.items.insert(
+            mod_idle,
+            make_fighter_item(mod_idle, 47_240, char_id, ship_id, InventoryFlag::HiSlot1, 1),
+        );
+        snap.module_active_states.insert(mod1);
+    });
+
+    spawn_spool_ball(&ctx, sys_id, ship_id, 47_271, DVec3::ZERO, 1_000.0, 1_000.0, 1_000.0, 500.0).await;
+    spawn_spool_ball(
+        &ctx,
+        sys_id,
+        target_id,
+        587,
+        DVec3::new(5_000.0, 0.0, 0.0),
+        3_000.0,
+        1_000.0,
+        1_000.0,
+        500.0,
+    )
+    .await;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    let rev_before = ctx
+        .invalidate_and_push_fit(ship_id)
+        .expect("initial FitProjection pushed");
+    let _ = sys_handle.get_ball_snapshot(ship_id).await;
+    let proj_before = sys_handle
+        .latest_fit_projection(ship_id)
+        .expect("initial FitProjection stored in actor");
+    assert_eq!(
+        proj_before.modules.get(&mod1).map(|m| m.state),
+        Some(eve_dogma::ModuleState::Active)
+    );
+    assert!(
+        !matches!(
+            proj_before.modules.get(&mod_idle).map(|m| m.state),
+            Some(eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded)
+        ),
+        "idle module must remain inactive before spool stop"
+    );
+
+    let disint_t = ctx.sde.types.get(&47_240).unwrap();
+    handle_entropic_activation(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        mod1,
+        target_id,
+        disint_t,
+        Some(ammo1),
+        DamageVector::new(0.0, 300.0, 0.0, 0.0),
+        40.0,
+        3.0,
+    )
+    .unwrap();
+
+    stop_entropic_spool_and_deactivate(&ctx, char_id, ship_id, mod1);
+    let _ = sys_handle.get_ball_snapshot(ship_id).await;
+
+    assert!(!ctx.db.with_snapshot(|s| s.module_active_states.contains(&mod1)));
+    let rev_after = ctx.current_fit_rev(ship_id);
+    assert!(
+        rev_after.0 > rev_before.0,
+        "stop_entropic_spool_and_deactivate must advance FitRev (before={}, after={})",
+        rev_before.0,
+        rev_after.0
+    );
+    let proj_after = sys_handle
+        .latest_fit_projection(ship_id)
+        .expect("stop_entropic_spool_and_deactivate must push updated FitProjection");
+    assert_eq!(proj_after.rev, rev_after);
+    assert!(
+        !matches!(
+            proj_after.modules.get(&mod1).map(|m| m.state),
+            Some(eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded)
+        ),
+        "deactivated entropic module must no longer be Active in actor FitProjection"
+    );
+    assert!(
+        !matches!(
+            proj_after.modules.get(&mod_idle).map(|m| m.state),
+            Some(eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded)
+        ),
+        "unrelated module state must remain unchanged"
+    );
+}
