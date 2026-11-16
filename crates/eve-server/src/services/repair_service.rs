@@ -12,6 +12,24 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 
+/// Returns `true` when `ship_id` has an actual ball entry in `sys_id`'s `Ballpark` without
+/// blocking on a write-locked `Ballpark` or violating lock ordering.
+fn has_ball_in_fallback_system(ctx: &ServerContext, ship_id: i64, sys_id: u32) -> bool {
+    if eve_db::lock_rank::held_lock_ranks()
+        .iter()
+        .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
+    {
+        return false;
+    }
+    let Some(handle) = ctx.systems.get_handle(sys_id) else {
+        return false;
+    };
+    let Ok(bp) = handle.ballpark.try_read() else {
+        return false;
+    };
+    bp.balls.contains_key(&ship_id)
+}
+
 fn sample_live_repair_ship_hp(
     ctx: &ServerContext,
     session: &SessionState,
@@ -22,8 +40,18 @@ fn sample_live_repair_ship_hp(
         if out.contains_key(&id) {
             continue;
         }
+        // Only fall back to `session.solar_system_id` when the ship still has a live `Ball` in
+        // that system's `Ballpark` (orphaned `combat_states` entries left after docking must not
+        // be sampled as live in-space HP).
+        let fallback_sys = if ctx.systems.find_ball_system_sync(id).is_some() {
+            None
+        } else {
+            session
+                .solar_system_id
+                .filter(|&sys_id| has_ball_in_fallback_system(ctx, id, sys_id))
+        };
         if let Some(hp) =
-            crate::sp6_lifecycle::sample_live_ship_combat_hp(ctx, id, session.solar_system_id)
+            crate::sp6_lifecycle::sample_live_ship_combat_hp(ctx, id, fallback_sys)
         {
             out.insert(id, hp);
         }
@@ -780,6 +808,7 @@ pub async fn handle_repair_items_in_location(
             .or_else(|| {
                 session
                     .solar_system_id
+                    .filter(|&sys_id| has_ball_in_fallback_system(ctx, iid, sys_id))
                     .and_then(|sys_id| ctx.systems.get_handle(sys_id))
             });
         if let Some(sys) = sys_opt {

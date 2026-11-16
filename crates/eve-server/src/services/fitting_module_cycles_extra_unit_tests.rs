@@ -772,3 +772,165 @@ async fn reloading_survey_scanner_specialized_result_and_unload_ammo_boundaries(
         assert_eq!(snap.items[&charge_sibling].flag, InventoryFlag::Cargo);
     });
 }
+
+#[tokio::test]
+async fn slot_charge_scan_ignores_sibling_modules_and_incompatible_charges_gh1220() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let sys_id = 30_002_537_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 77_950_001_i64;
+    let target_id = 77_950_002_i64;
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id);
+    insert_item(&ctx, ship_id, 19_722, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+
+    // Two Zero-Point Mass Entangler (49099, group 2008) modules sharing HiSlot0 must not
+    // misclassify the sibling module (category 7, skill 11446) as a loaded charge.
+    let zpme_1 = 77_950_101_i64;
+    let zpme_2 = 77_950_102_i64;
+    insert_item(&ctx, zpme_1, 49_099, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, zpme_2, 49_099, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+
+    // Quad 3500mm Siege Artillery I (20454) + EMP XL (17668, no skill reqs) sharing HiSlot0
+    // with an earlier Interdiction Sphere Launcher I (22782) + Warp Disrupt Probe (22778, skill 3412).
+    let hic_id = 77_950_201_i64;
+    let probe_id = 77_950_202_i64;
+    let gun_id = 77_950_203_i64;
+    let ammo_id = 77_950_204_i64;
+    insert_item(&ctx, hic_id, 22_782, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, probe_id, 22_778, char_id, ship_id, InventoryFlag::HiSlot0, 5, false);
+    insert_item(&ctx, gun_id, 20_454, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, ammo_id, 17_668, char_id, ship_id, InventoryFlag::HiSlot0, 20, false);
+
+    let zpme_type = ctx.sde.types.get(&49_099).unwrap();
+    let gun_type = ctx.sde.types.get(&20_454).unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert!(!is_slot_loaded_charge_item(
+            &ctx,
+            zpme_type,
+            &snap.items[&zpme_1],
+            ship_id,
+            InventoryFlag::HiSlot0 as u16,
+            zpme_2,
+        ));
+        assert!(!is_slot_loaded_charge_item(
+            &ctx,
+            gun_type,
+            &snap.items[&hic_id],
+            ship_id,
+            InventoryFlag::HiSlot0 as u16,
+            gun_id,
+        ));
+        assert!(!is_slot_loaded_charge_item(
+            &ctx,
+            gun_type,
+            &snap.items[&probe_id],
+            ship_id,
+            InventoryFlag::HiSlot0 as u16,
+            gun_id,
+        ));
+        assert!(is_slot_loaded_charge_item(
+            &ctx,
+            gun_type,
+            &snap.items[&ammo_id],
+            ship_id,
+            InventoryFlag::HiSlot0 as u16,
+            gun_id,
+        ));
+    });
+
+    let mut cs = CombatState::default();
+    cs.capacitor = 50_000.0;
+    cs.max_capacitor = 50_000.0;
+    spawn_ship_with(&ctx, sys_id, ship_id, 19_722, char_id, cs.clone(), false).await;
+    spawn_ship_with(&ctx, sys_id, target_id, 587, char_id + 1, cs, false).await;
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_h
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id,
+                lock_time_ms: 100.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
+
+    let mut sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+    let act_gun = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(gun_id), PyRep::Integer(target_id)],
+        &kw,
+    )
+    .await
+    .expect("dispatched");
+    assert!(act_gun.is_ok(), "compatible EMP XL must activate despite leftover probe in HiSlot0: {act_gun:?}");
+
+    assert!(
+        resolve_snapshot_fitted_module(&ctx, ship_id, zpme_2)
+            .is_some_and(|fm| fm.charge_type_id.is_none()),
+        "resolve_snapshot_fitted_module must not treat sibling ZPME module in HiSlot0 as a loaded charge"
+    );
+
+    if let Some(Err(err)) = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(zpme_2)],
+        &kw,
+    )
+    .await
+    {
+        assert_ne!(
+            err.code, "SkillPrerequisitesNotMet",
+            "sibling ZPME module must not trigger SkillPrerequisitesNotMet: {err:?}"
+        );
+    }
+
+    // Activate a second ZPME sharing HiSlot0 on an eligible HIC hull (Devoter 12017) without
+    // Heavy Interdiction Cruisers IV (skill 11446) -> must succeed without SkillPrerequisitesNotMet.
+    let hic_ship = 77_950_301_i64;
+    let hic_zpme_1 = 77_950_302_i64;
+    let hic_zpme_2 = 77_950_303_i64;
+    insert_item(&ctx, hic_ship, 12_017, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, hic_zpme_1, 49_099, char_id, hic_ship, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, hic_zpme_2, 49_099, char_id, hic_ship, InventoryFlag::HiSlot0, 1, true);
+    let mut hic_cs = CombatState::default();
+    hic_cs.capacitor = 50_000.0;
+    hic_cs.max_capacitor = 50_000.0;
+    spawn_ship_with(&ctx, sys_id, hic_ship, 12_017, char_id, hic_cs, false).await;
+    sess.ship_id = Some(hic_ship);
+    let act_hic_zpme2 = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(hic_zpme_2)],
+        &kw,
+    )
+    .await
+    .expect("dispatched");
+    assert!(
+        act_hic_zpme2.is_ok(),
+        "second ZPME in HiSlot0 on Devoter must activate cleanly: {act_hic_zpme2:?}"
+    );
+}

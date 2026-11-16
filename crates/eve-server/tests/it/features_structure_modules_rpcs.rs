@@ -367,7 +367,7 @@ async fn run_overheat_fit(thermo_lvl: u8) -> (f64, f64, f64, f64, f64, f64, f64,
             77_103_010,
             InventoryItemRecord {
                 item_id: 77_103_010,
-                type_id: 212, // EMP S
+                type_id: 185, // EMP S
                 owner_id: PILOT_1,
                 location_id: ship_id,
                 flag: InventoryFlag::HiSlot0,

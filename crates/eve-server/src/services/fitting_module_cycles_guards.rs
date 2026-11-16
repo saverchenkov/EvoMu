@@ -166,6 +166,70 @@ pub(crate) fn fallback_fitted_weapon_module(
     })
 }
 
+fn is_slot_loaded_charge_item_inner(
+    ctx: &ServerContext,
+    mod_type: &eve_sde::InvType,
+    item: &eve_db::InventoryItemRecord,
+    ship_id: i64,
+    slot_flag_u16: u16,
+    module_item_id: i64,
+    allow_scripts: bool,
+) -> bool {
+    if item.location_id != ship_id
+        || (item.flag as u16) != slot_flag_u16
+        || item.item_id == module_item_id
+        || item.quantity <= 0
+    {
+        return false;
+    }
+    let Some(ct) = ctx.sde.types.get(&item.type_id) else {
+        return false;
+    };
+    if ct.category_id != 8 || (!allow_scripts && ct.group_id == 908) {
+        return false;
+    }
+    let has_charge_groups = [604_u16, 605, 606, 609, 610]
+        .iter()
+        .any(|attr| mod_type.default_attributes.contains_key(attr));
+    if has_charge_groups
+        || mod_type.type_id == 28_748
+        || ct.default_attributes.contains_key(&137)
+    {
+        return ServerContext::is_charge_compatible_with_weapon(mod_type, ct);
+    }
+    true
+}
+
+/// Returns `true` iff `item` is a non-script charge (`category_id == 8`, excluding scripts
+/// `group_id == 908`) loaded in `(ship_id, slot_flag_u16)` for `mod_type`.
+///
+/// Rejects sibling modules (`category_id != 8`), excludes scripts (`group_id == 908`), and enforces
+/// `ServerContext::is_charge_compatible_with_weapon` whenever `mod_type` declares `chargeGroup*`
+/// or `ct` declares `launcherGroup` (`137`).
+pub(crate) fn is_slot_loaded_charge_item(
+    ctx: &ServerContext,
+    mod_type: &eve_sde::InvType,
+    item: &eve_db::InventoryItemRecord,
+    ship_id: i64,
+    slot_flag_u16: u16,
+    module_item_id: i64,
+) -> bool {
+    is_slot_loaded_charge_item_inner(ctx, mod_type, item, ship_id, slot_flag_u16, module_item_id, false)
+}
+
+/// Returns `true` iff `item` is a compatible charge or script (`category_id == 8`) loaded in
+/// `(ship_id, slot_flag_u16)` for `mod_type`.
+pub(crate) fn is_slot_loaded_charge_or_script_item(
+    ctx: &ServerContext,
+    mod_type: &eve_sde::InvType,
+    item: &eve_db::InventoryItemRecord,
+    ship_id: i64,
+    slot_flag_u16: u16,
+    module_item_id: i64,
+) -> bool {
+    is_slot_loaded_charge_item_inner(ctx, mod_type, item, ship_id, slot_flag_u16, module_item_id, true)
+}
+
 #[cfg(test)]
 #[path = "fitting_module_cycles_guards_edges_tests.rs"]
 mod fitting_module_cycles_guards_edges_tests;
