@@ -68,6 +68,7 @@ impl Ballpark {
         self.same_tick_owner_goto_tick
             .retain(|_, tick| *tick >= current_tick);
         self.flush_due_scheduled_observer_events();
+        let _ = self.settle_stargate_activation_transitions(dt, None);
 
         let dynamic_ids: Vec<BallId> = self
             .balls

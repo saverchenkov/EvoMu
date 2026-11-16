@@ -628,10 +628,11 @@ impl ServerContext {
     ) -> Self {
         let _ = world_seeder::seed_dual_anchor_markets(&db, &sde);
         let clock = db.clock();
-        let unrebased_clock_offset_secs = db
-            .persisted_unrebased_clock_offset_secs()
-            .unwrap_or(0)
-            .min(clock.offset_secs());
+        let unrebased_clock_offset_secs = Arc::new(AtomicU64::new(
+            db.persisted_unrebased_clock_offset_secs()
+                .unwrap_or(0)
+                .min(clock.offset_secs()),
+        ));
         let cataloged_services = Arc::clone(Self::default_cataloged_services());
         let quasar_domains = Arc::clone(Self::default_quasar_domains());
         let (notify_tx, _) = tokio::sync::broadcast::channel(256);
@@ -651,7 +652,8 @@ impl ServerContext {
             SystemRegistry::with_sde_and_db(sde.clone(), Arc::clone(&db))
                 .with_mechanic_rng(Arc::clone(&mechanic_rng))
                 .with_tactical_state(Arc::clone(&tactical_state))
-                .with_notifications(Arc::clone(&pending_notifications), notify_tx.clone()),
+                .with_notifications(Arc::clone(&pending_notifications), notify_tx.clone())
+                .with_unrebased_clock_offset_secs(Arc::clone(&unrebased_clock_offset_secs)),
         );
         let combat_ephemeral = {
             let mut rt = crate::services::combat_crimewatch::CombatRuntimeState::default();
@@ -769,7 +771,7 @@ impl ServerContext {
             cluster_tick_last_unix: Arc::new(AtomicU64::new(0)),
             cluster_tick_persisted_unix: Arc::new(AtomicU64::new(0)),
             dedicated_physics_ticker_active: Arc::new(AtomicBool::new(false)),
-            unrebased_clock_offset_secs: Arc::new(AtomicU64::new(unrebased_clock_offset_secs)),
+            unrebased_clock_offset_secs,
             fw_idle_last_step_unix: Arc::new(RankedRwLock::new(HashMap::new())),
             space_ballpark_bootstrapped: Arc::new(RankedRwLock::new(HashMap::new())),
             brain_primed_sessions: Arc::new(RankedRwLock::new(HashSet::new())),
@@ -1077,6 +1079,7 @@ impl ServerContext {
         }
         ctx.set_esi_port(cfg.esi_port);
         ctx.set_xmpp_port(cfg.xmpp_port);
+        ctx.systems.set_lazy_stargate_activation(true);
         if cfg.feature_flags.seed_demo {
             ctx.seed_demo_world_fixtures();
             ctx.db.with_mut_snapshot(|snap| {
@@ -1191,7 +1194,9 @@ impl ServerContext {
                 }
             }
         }
-        Self::with_repository(db)
+        let ctx = Self::with_repository(db);
+        ctx.systems.set_lazy_stargate_activation(true);
+        ctx
     }
 
     #[cfg(any(test, feature = "testkit"))]
@@ -2016,11 +2021,20 @@ impl ServerContext {
     /// [`Self::advance_secs_without_sim_clock_rebase`] (`timeControl.AdvanceClock` / `/advancetime`)
     /// so live client `ClockSyncDaemon` never skews `timeSyncAdjustFactor` above 1.0x (#1031).
     pub fn now_machonet_wallclock_filetime_ticks(&self) -> i64 {
-        let unrebased_secs = self.unrebased_clock_offset_secs.load(Ordering::Acquire);
-        let unrebased_ticks = i64::try_from(unrebased_secs)
-            .unwrap_or(i64::MAX)
-            .saturating_mul(10_000_000);
-        self.now_blueos_filetime_ticks().saturating_sub(unrebased_ticks)
+        let clock = self.clock();
+        crate::system_actor::machonet_wallclock_filetime_ticks(
+            clock.as_ref(),
+            &self.unrebased_clock_offset_secs,
+        )
+    }
+
+    /// Returns wall-clock milliseconds derived from [`Self::now_machonet_wallclock_filetime_ticks`] (`#1080`).
+    pub fn now_machonet_wallclock_ms(&self) -> u64 {
+        let clock = self.clock();
+        crate::system_actor::machonet_wallclock_ms(
+            clock.as_ref(),
+            &self.unrebased_clock_offset_secs,
+        )
     }
 
     /// Seconds added via [`Self::advance_secs_without_sim_clock_rebase`] (`/advancetime`)

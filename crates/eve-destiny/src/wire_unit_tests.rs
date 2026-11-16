@@ -1456,3 +1456,88 @@ fn unpiloted_ship_clears_interactive_flag_and_goto_encodes_world_space_point() {
         "truncated GOTO_Struct must return Err"
     );
 }
+
+#[test]
+fn stargate_slim_activation_state_and_timed_special_fx_wire_encoding() {
+    // parity: feat:navigation.stargate-jump, destiny:OnSpecialFX
+    let mut park = Ballpark::new(30_000_142);
+    let gate_ball = sample_ball(500_001, MovementMode::Rigid);
+    let gate_meta = SlimItemMeta {
+        group_id: 10,
+        owner_id: 1,
+        ..Default::default()
+    };
+
+    let find_activation = |p: Option<&Ballpark>| -> Option<PyRep> {
+        let PyRep::Dict(entries) = slim_item_dict_with_park(p, &gate_ball, &gate_meta) else {
+            panic!("expected SlimItem Dict");
+        };
+        entries
+            .into_iter()
+            .find(|(k, _)| matches!(k, PyRep::String(s) if s == "activationState"))
+            .map(|(_, v)| v)
+    };
+
+    // Unset stargate state defaults to OPEN (`2`) for non-lazy contexts.
+    assert_eq!(
+        find_activation(None),
+        Some(PyRep::Integer(crate::STARGATE_ACTIVATION_STATE_OPEN))
+    );
+    assert_eq!(
+        find_activation(Some(&park)),
+        Some(PyRep::Integer(crate::STARGATE_ACTIVATION_STATE_OPEN))
+    );
+
+    park.init_stargate_activation_state(500_001, crate::STARGATE_ACTIVATION_STATE_CLOSED);
+    assert_eq!(
+        find_activation(Some(&park)),
+        Some(PyRep::Integer(crate::STARGATE_ACTIVATION_STATE_CLOSED))
+    );
+
+    assert!(park.activate_stargate_transition(
+        500_001,
+        crate::STARGATE_ACTIVATION_TRANSITION_MS,
+        Some(5_000),
+    ));
+    assert_eq!(
+        find_activation(Some(&park)),
+        Some(PyRep::Integer(crate::STARGATE_ACTIVATION_STATE_ACTIVATING))
+    );
+
+    // Timed 14-arg OnSpecialFX wire encoding for GateActivity (`1 ms` short source pulse).
+    let fx_wire = encode_destiny_event(
+        105,
+        &DestinyEvent::OnSpecialFXTimed {
+            ball_id: 500_001,
+            module_id: None,
+            target_id: Some(100_000_001),
+            guid: "effects.GateActivity".into(),
+            start: true,
+            is_active: true,
+            duration_ms: Some(1.0),
+            repeat: Some(0),
+            graphic_info: Some(vec![30_000_144]),
+        },
+        Some(&park),
+    );
+    let PyRep::Tuple(outer) = fx_wire else {
+        panic!("expected stamped tuple");
+    };
+    assert_eq!(outer[0], PyRep::Integer(105));
+    let PyRep::Tuple(action) = &outer[1] else {
+        panic!("expected destiny action tuple");
+    };
+    assert_eq!(action[0], PyRep::String("OnSpecialFX".into()));
+    let PyRep::Tuple(args) = &action[1] else {
+        panic!("expected 14-arg OnSpecialFX tuple");
+    };
+    assert_eq!(args.len(), 14);
+    assert_eq!(args[0], PyRep::Integer(500_001));
+    assert_eq!(args[3], PyRep::Integer(100_000_001));
+    assert_eq!(args[5], PyRep::String("effects.GateActivity".into()));
+    assert_eq!(args[7], PyRep::Integer(1));
+    assert_eq!(args[8], PyRep::Integer(1));
+    assert_eq!(args[9], PyRep::Real(1.0));
+    assert_eq!(args[10], PyRep::Integer(0));
+    assert_eq!(args[13], PyRep::List(vec![PyRep::Integer(30_000_144)]));
+}

@@ -456,7 +456,7 @@ async fn test_space_navigation_warp_dock_undock_gate() {
     assert!(h.set_ball_position(ship_id, gate_pos + DVec3::new(100_000.0, 0.0, 0.0)).await);
     assert_eq!(
         rpc_bound_err(&ctx, &mut sess, "beyonce", bid_space, "CmdStargateJump", &[PyRep::Integer(gate_id)]).await,
-        "OutsideStargateJumpRange"
+        "NotCloseEnoughToJump"
     );
 
     // Positive: Move ship to gate contact radius and jump

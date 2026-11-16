@@ -1303,7 +1303,7 @@ async fn test_waypoints_warp_vector_and_align_tick_rounding() {
     let far_jump = ctx
         .dispatch_rpc(&mut sess, "beyonce", Some(b_jita), "CmdStargateJump", &[PyRep::Integer(jita_jump.stargate_id)], &kw, None)
         .await;
-    assert_eq!(far_jump.unwrap_err().code, "OutsideStargateJumpRange");
+    assert_eq!(far_jump.unwrap_err().code, "NotCloseEnoughToJump");
 
     // Stargate jump arrival pops matching front waypoint (`dest_sys_id`)
     spawn_in_space(&ctx, char_id, ship_id, 587, jita_sys, jita_jump.position).await;

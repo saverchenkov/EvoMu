@@ -828,6 +828,8 @@ pub struct ClusterNodeRegistry {
     pub manual_tidi_overrides: HashMap<SolarSystemId, f64>,
     /// Last emitted authoritative destiny `(anchor_wall_ft, anchor_sim_ft, tidi_factor)` per system.
     pub sim_clock_anchoring: HashMap<SolarSystemId, (i64, i64, f64)>,
+    /// Preserved per-character continuous jump clock `(anchor_wall_ft, anchor_sim_ft, tidi_factor)` across TiDi jumps (`#1080`).
+    pub character_jump_clocks: HashMap<i64, (i64, i64, f64)>,
     pub node_load_tidi_threshold: usize,
     pub next_dedicated_node_id: u32,
     pub auto_tidi_enabled: bool,
@@ -852,6 +854,7 @@ impl Default for ClusterNodeRegistry {
             reinforced_nodes: HashMap::new(),
             manual_tidi_overrides: HashMap::new(),
             sim_clock_anchoring: HashMap::new(),
+            character_jump_clocks: HashMap::new(),
             node_load_tidi_threshold: DEFAULT_NODE_LOAD_TIDI_THRESHOLD,
             next_dedicated_node_id: 100,
             auto_tidi_enabled: false,

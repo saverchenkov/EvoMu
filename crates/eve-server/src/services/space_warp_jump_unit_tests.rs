@@ -398,7 +398,7 @@ async fn stargate_jump_and_dock_enforce_range_timers_and_complete_transitions() 
         ..Default::default()
     };
 
-    // Spawn ship far from gate -> OutsideStargateJumpRange
+    // Spawn ship far from gate -> NotCloseEnoughToJump
     spawn_ship_in_space(
         &ctx,
         char_id,
@@ -437,7 +437,7 @@ async fn stargate_jump_and_dock_enforce_range_timers_and_complete_transitions() 
         .unwrap()
         .unwrap_err()
         .code,
-        "OutsideStargateJumpRange"
+        "NotCloseEnoughToJump"
     );
 
     // Move within 500m of gate and jump
@@ -1720,7 +1720,7 @@ async fn supercapital_dock_and_gate_perimeters_include_ship_ball_radius() {
     );
     titan.position = gate_pos + DVec3::new(gate_radius + avatar_radius + 2_600.0, 0.0, 0.0);
     let gate_err = evaluate_stargate_jump_perimeter(&titan, gate_pos, gate_radius).unwrap_err();
-    assert_eq!(gate_err.code, "OutsideStargateJumpRange");
+    assert_eq!(gate_err.code, "NotCloseEnoughToJump");
     assert!(
         gate_err.message.contains("2600.0"),
         "expected surface distance 2600.0 m in message, got: {}",
@@ -1968,7 +1968,7 @@ async fn titan_keepstar_dock_and_fax_gate_jump_succeed_within_surface_perimeter(
         .unwrap()
         .unwrap_err()
         .code,
-        "OutsideStargateJumpRange"
+        "NotCloseEnoughToJump"
     );
 
     assert!(
@@ -1996,4 +1996,167 @@ async fn titan_keepstar_dock_and_fax_gate_jump_succeed_within_surface_perimeter(
         Some(&PyRep::Integer(gate.to_solar_system_id as i64))
     );
     assert_eq!(sess.solar_system_id, Some(gate.to_solar_system_id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stargate_jump_negative_paths_and_outbound_tidi_rebase_order() {
+    // parity: feat:navigation.stargate-jump, feat:navigation.session-change-timer, feat:serverops.time-dilation, notify:DoSimClockRebase
+    use crate::outbound_sequencer::{
+        sequence_with_events, DestinyBatch, DestinyDrain, OutFrame, RpcCompletion,
+        SessionWireState, TypedNotification,
+    };
+    use eve_proto::{ClientError, UserErrorKey};
+
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+    let gate = ctx
+        .sde
+        .jumps
+        .values()
+        .find(|j| {
+            j.from_solar_system_id != j.to_solar_system_id
+                && j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                && j.to_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+        })
+        .cloned()
+        .expect("SDE must contain a stargate");
+    let other_gate = ctx
+        .sde
+        .jumps
+        .values()
+        .find(|j| j.from_solar_system_id != gate.from_solar_system_id)
+        .cloned()
+        .expect("SDE must contain a stargate in another solar system");
+
+    let char_id = 90_000_001_i64;
+    let ship_id = 895_401_i64;
+    let mut sess = SessionState::new(98_040);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(gate.from_solar_system_id);
+
+    // 1. Docked session -> ShipDocked with no session change.
+    sess.station_id = Some(60_003_760);
+    let docked_err = handle(
+        &ctx,
+        &mut sess,
+        None,
+        "beyonce",
+        "CmdStargateJump",
+        &[PyRep::Integer(gate.stargate_id)],
+        &kw,
+    )
+    .await
+    .expect("CmdStargateJump docked must return Result")
+    .unwrap_err();
+    assert_eq!(docked_err.code, "ShipDocked");
+    assert_eq!(sess.solar_system_id, Some(gate.from_solar_system_id));
+
+    // 2. Wrong-system stargateID -> StargateWrongSystem with no session change.
+    sess.station_id = None;
+    spawn_ship_in_space(&ctx, char_id, ship_id, 587, gate.from_solar_system_id, gate.position);
+    let wrong_sys_err = handle(
+        &ctx,
+        &mut sess,
+        None,
+        "beyonce",
+        "CmdStargateJump",
+        &[PyRep::Integer(other_gate.stargate_id)],
+        &kw,
+    )
+    .await
+    .expect("CmdStargateJump wrong-system must return Result")
+    .unwrap_err();
+    assert_eq!(wrong_sys_err.code, "StargateWrongSystem");
+    assert_eq!(sess.solar_system_id, Some(gate.from_solar_system_id));
+
+    // 3. Typed ClientError wire representations for GateClosed and NotCloseEnoughToJump.
+    let closed_err = BridgeRpcError::gate_closed(gate.stargate_id);
+    match closed_err.to_client_error("beyonce", "CmdStargateJump") {
+        ClientError::User { key, args } => {
+            assert_eq!(key, UserErrorKey::CustomInfo);
+            assert_eq!(
+                args,
+                vec![(
+                    "info".to_string(),
+                    PyRep::Tuple(vec![
+                        PyRep::Integer(101),
+                        PyRep::String(eve_proto::UI_LABEL_GATE_CLOSED.into()),
+                    ]),
+                )]
+            );
+        }
+        other => panic!("expected CustomInfo User error, got {other:?}"),
+    }
+
+    let range_err = BridgeRpcError::not_close_enough_to_jump(2_600.0, 16_691.0, 16_591.0, 2_500.0);
+    match range_err.to_client_error("beyonce", "CmdStargateJump") {
+        ClientError::User { key, args } => {
+            assert_eq!(key, UserErrorKey::NotCloseEnoughToJump);
+            assert!(
+                args.iter()
+                    .any(|(k, v)| k == "maxdist" && *v == PyRep::Integer(2_500)),
+                "NotCloseEnoughToJump must carry maxdist=2500, got {args:?}"
+            );
+        }
+        other => panic!("expected NotCloseEnoughToJump User error, got {other:?}"),
+    }
+
+    // 4. OutboundSequencer Attach hoists DoSimClockRebase ahead of SetState while keeping other notifications after.
+    let mut wire = SessionWireState::new(1, 1);
+    wire.enter_space(Some(gate.from_solar_system_id));
+    let new_epoch = wire.enter_space(Some(gate.to_solar_system_id));
+    let set_state_batch = DestinyBatch::new(
+        new_epoch,
+        42,
+        true,
+        PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(42),
+            PyRep::Tuple(vec![PyRep::String("SetState".into()), PyRep::Tuple(vec![])]),
+        ])]),
+    );
+    let outcome = sequence_with_events(
+        &mut wire,
+        RpcCompletion {
+            call_id: 7,
+            response_frame: PyRep::None,
+            session_change_frame: Some(PyRep::Tuple(vec![PyRep::String("SessionChange".into())])),
+            pending_tick_batches: Vec::new(),
+            destiny_drain: DestinyDrain::Attach {
+                epoch: new_epoch,
+                set_state: set_state_batch,
+            },
+            notifications: vec![
+                TypedNotification {
+                    event: "OnWarpFinished".into(),
+                    args: vec![PyRep::Integer(101)],
+                    service: None,
+                },
+                TypedNotification {
+                    event: "DoSimClockRebase".into(),
+                    args: vec![PyRep::Tuple(vec![PyRep::Integer(100), PyRep::Integer(100)])],
+                    service: None,
+                },
+            ],
+            item_change_before_session_change: false,
+        },
+    );
+    let rebase_idx = outcome
+        .frames
+        .iter()
+        .position(|f| matches!(f, OutFrame::Notification { event, .. } if event == "DoSimClockRebase"))
+        .expect("DoSimClockRebase frame");
+    let warp_fin_idx = outcome
+        .frames
+        .iter()
+        .position(|f| matches!(f, OutFrame::Notification { event, .. } if event == "OnWarpFinished"))
+        .expect("OnWarpFinished frame");
+    let set_state_idx = outcome
+        .frames
+        .iter()
+        .position(|f| matches!(f, OutFrame::DoDestinyUpdate { has_set_state: true, .. }))
+        .expect("SetState frame");
+    assert!(rebase_idx < set_state_idx, "DoSimClockRebase must precede SetState");
+    assert!(set_state_idx < warp_fin_idx, "non-clock notifications must follow SetState");
 }

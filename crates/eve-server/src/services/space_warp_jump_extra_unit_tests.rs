@@ -754,7 +754,7 @@ async fn warp_targets_mission_fleet_celestial_rigid_stargate_pochven_zarzakh_and
     sess.station_id = None;
     sess.ship_id = Some(ship_id);
 
-    // 5. CmdStargateJump: OutsideStargateJumpRange, Pochven standing gate, Zarzakh gate lock
+    // 5. CmdStargateJump: NotCloseEnoughToJump, Pochven standing gate, Zarzakh gate lock
     if let Some(gate) = ctx.sde.jumps.values().find(|j| j.from_solar_system_id == sys_id).cloned() {
         spawn_ship_in_space(&ctx, char_id, ship_id, 606, sys_id, gate.position + DVec3::new(100_000.0, 0.0, 0.0));
         assert_eq!(
@@ -762,7 +762,7 @@ async fn warp_targets_mission_fleet_celestial_rigid_stargate_pochven_zarzakh_and
                 .await
                 .unwrap_err()
                 .code,
-            "OutsideStargateJumpRange"
+            "NotCloseEnoughToJump"
         );
     }
     // Pochven home system (Kino/Niarja/Archee) jump standing check
@@ -1031,14 +1031,14 @@ async fn fleet_warp_signatures_zarzakh_entry_and_dock_fallback_outlaw_guards() {
         "WarpScrambled"
     );
 
-    // CmdStargateJump: SessionChangeInProgress, ShipInWarp, ShipCannotUseStargate (Zarzakh capital), OutsideStargateJumpRange
+    // CmdStargateJump: SessionChangeInProgress, ShipInWarp, ShipCannotUseStargate (Zarzakh capital), NotCloseEnoughToJump
     if let Some(gate) = ctx.sde.jumps.values().find(|j| j.from_solar_system_id == sys_id).cloned() {
         let _ = handle.remove_ball(ship_id).await;
         spawn_ship_in_space(&ctx, char_id, ship_id, 606, sys_id, gate.position + DVec3::new(1_000_000.0, 0.0, 0.0));
         assert_eq!(
             call_beyonce(&ctx, &mut sess, None, "CmdStargateJump", &[PyRep::Integer(gate.stargate_id)], &kw)
                 .await.unwrap_err().code,
-            "OutsideStargateJumpRange"
+            "NotCloseEnoughToJump"
         );
         let _ = handle.remove_ball(ship_id).await;
         let _ = handle

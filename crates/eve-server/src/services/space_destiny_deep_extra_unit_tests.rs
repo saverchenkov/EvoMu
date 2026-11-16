@@ -362,7 +362,7 @@ async fn cmd_stargate_jump_and_cmd_dock_restrictions_and_execution() {
     let _ = sys_handle.spawn_ball(mk_ball(ship_id, 587, DVec3::new(60_000.0, 0.0, 0.0))).await;
     assert_eq!(
         handle(&ctx, &mut sess, Some(&bnd), "beyonce", "CmdStargateJump", &[PyRep::Integer(gate_id)], &empty_kw).await.unwrap().unwrap_err().code,
-        "OutsideStargateJumpRange"
+        "NotCloseEnoughToJump"
     );
 
     let _ = sys_handle.spawn_ball(mk_ball(ship_id, 587, DVec3::new(10_500.0, 0.0, 0.0))).await;

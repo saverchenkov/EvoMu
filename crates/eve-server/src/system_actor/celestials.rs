@@ -165,6 +165,52 @@ impl SystemHandle {
         }
     }
 
+    /// Reads the tracked activation state for stargate `gate_id`, if present (`#1080`).
+    pub fn stargate_activation_state(&self, gate_id: BallId) -> Option<eve_destiny::StargateActivationState> {
+        self.ballpark
+            .read()
+            .ok()
+            .and_then(|bp| bp.stargate_activation_state(gate_id))
+    }
+
+    /// Transitions a `CLOSED` stargate into `ACTIVATING` (`#1080`).
+    pub fn activate_stargate_transition(
+        &self,
+        gate_id: BallId,
+        transition_ms: u64,
+        now_ms_opt: Option<u64>,
+    ) -> bool {
+        self.ballpark
+            .write()
+            .is_ok_and(|mut bp| bp.activate_stargate_transition(gate_id, transition_ms, now_ms_opt))
+    }
+
+    /// Explicitly sets stargate activation state (`#1080`).
+    pub fn set_stargate_activation_state(
+        &self,
+        gate_id: BallId,
+        activation_state: i64,
+        transition_remaining_ms: u64,
+        activation_transition_at_ms: u64,
+    ) -> bool {
+        self.ballpark.write().is_ok_and(|mut bp| {
+            bp.set_stargate_activation_state(
+                gate_id,
+                activation_state,
+                transition_remaining_ms,
+                activation_transition_at_ms,
+            )
+        })
+    }
+
+    /// Settles any elapsed `ACTIVATING` stargates against `now_ms`, returning opened gate IDs (`#1080`).
+    pub fn settle_stargate_activation_states(&self, now_ms: u64) -> Vec<BallId> {
+        self.ballpark
+            .write()
+            .map(|mut bp| bp.settle_stargate_activation_transitions(0.0, Some(now_ms)))
+            .unwrap_or_default()
+    }
+
     pub async fn spawn_ball(&self, ball: Ball) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_sender()

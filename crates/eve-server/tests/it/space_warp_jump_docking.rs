@@ -3934,7 +3934,7 @@ async fn it_titan_keepstar_docking_and_fax_stargate_jump_use_ship_ball_radius() 
         )
         .await
         .unwrap_err();
-    assert_eq!(far_gate_err.code, "OutsideStargateJumpRange");
+    assert_eq!(far_gate_err.code, "NotCloseEnoughToJump");
 
     assert!(
         low_h
@@ -3961,4 +3961,758 @@ async fn it_titan_keepstar_docking_and_fax_stargate_jump_use_ship_ball_radius() 
         Some(&PyRep::Integer(gate.to_solar_system_id as i64))
     );
     assert_eq!(sess.solar_system_id, Some(gate.to_solar_system_id));
+}
+
+use jump_cloak::setup_nav_pilot;
+
+fn is_non_special_roundtrip_gate(ctx: &ServerContext, j: &eve_sde::StargateJump) -> bool {
+    j.from_solar_system_id != j.to_solar_system_id
+        && j.from_solar_system_id != 30_100_000
+        && j.to_solar_system_id != 30_100_000
+        && ctx
+            .sde
+            .solar_systems
+            .get(&j.from_solar_system_id)
+            .is_some_and(|s| s.security_status >= 0.45 && s.region_id != 10_000_070)
+        && ctx
+            .sde
+            .solar_systems
+            .get(&j.to_solar_system_id)
+            .is_some_and(|s| s.security_status >= 0.45 && s.region_id != 10_000_070)
+        && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+}
+
+fn pick_non_special_roundtrip_gate(ctx: &ServerContext) -> eve_sde::StargateJump {
+    ctx.sde
+        .jumps
+        .values()
+        .filter(|j| is_non_special_roundtrip_gate(ctx, j))
+        .min_by_key(|j| j.stargate_id)
+        .cloned()
+        .expect("SDE must contain a round-trip non-Pochven non-Zarzakh highsec stargate pair")
+}
+
+/// Resolves the exact stargate ball radius matching `populate_system_celestials` without spawning the system.
+fn stargate_radius(ctx: &ServerContext, gate: &eve_sde::StargateJump) -> f64 {
+    if let Some(cel) = ctx
+        .sde
+        .celestials_in_system_slice(gate.from_solar_system_id)
+        .iter()
+        .find(|c| c.celestial_id == gate.stargate_id)
+    {
+        if cel.radius > 0.0 {
+            return cel.radius;
+        }
+        return ctx
+            .sde
+            .types
+            .get(&cel.type_id)
+            .map(|t| t.radius)
+            .filter(|&r| r > 0.0)
+            .unwrap_or(1_000.0);
+    }
+    let gate_type_id = ctx
+        .sde
+        .stargate_type_and_name(gate.stargate_id)
+        .map(|(tid, _)| tid)
+        .unwrap_or(16);
+    ctx.sde
+        .types
+        .get(&gate_type_id)
+        .or_else(|| ctx.sde.types.get(&16))
+        .map(|t| t.radius)
+        .filter(|&r| r > 0.0)
+        .unwrap_or(14_051.0)
+}
+
+async fn bind_beyonce_in_sys(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32) -> u64 {
+    let kw = HashMap::new();
+    let res = ctx
+        .dispatch_rpc(
+            sess,
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(sys_id as i64), PyRep::None],
+            &kw,
+            None,
+        )
+        .await
+        .expect("MachoBindObject(beyonce)");
+    eve_testkit::client_harness::extract_bound_id_from_wire_rep(&res)
+        .expect("MachoBindObject(beyonce) must return bound oid")
+}
+
+fn slim_activation_state(slim: &PyRep) -> Option<i64> {
+    let entries = match slim {
+        PyRep::Dict(entries) => entries,
+        PyRep::Object { args, .. } => match args.as_ref() {
+            PyRep::Dict(entries) => entries,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    entries
+        .iter()
+        .find(|(k, _)| matches!(k, PyRep::String(s) if s == "activationState"))
+        .and_then(|(_, v)| v.as_i64())
+}
+
+#[tokio::test]
+async fn gate_opens_through_activating_state() {
+    // parity: feat:navigation.stargate-jump, destiny:OnSpecialFX
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ctx.systems.set_lazy_stargate_activation(true);
+    let gate = pick_non_special_roundtrip_gate(&ctx);
+    let kw = HashMap::new();
+
+    let char_id = 91_080_001_i64;
+    let ship_id = 101_080_001_i64;
+    let mut sess = setup_nav_pilot(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position + DVec3::new(30_000.0, 0.0, 0.0),
+    )
+    .await;
+    let beyonce_id = bind_beyonce_in_sys(&ctx, &mut sess, gate.from_solar_system_id).await;
+    let src_h = ctx.systems.get_handle(gate.from_solar_system_id).expect("source loaded");
+
+    assert!(!ctx.systems.is_system_loaded(gate.to_solar_system_id));
+    assert_eq!(
+        src_h.stargate_activation_state(gate.stargate_id).map(|s| s.activation_state),
+        Some(eve_destiny::STARGATE_ACTIVATION_STATE_CLOSED)
+    );
+    let closed_slim = src_h.get_ball_slim_item(gate.stargate_id).await.unwrap().unwrap();
+    assert_eq!(
+        slim_activation_state(&closed_slim),
+        Some(eve_destiny::STARGATE_ACTIVATION_STATE_CLOSED)
+    );
+
+    // Approach intent lazily loads destination and transitions gate to ACTIVATING with deadline > now.
+    let now_before_ms = ctx.now_machonet_wallclock_ms();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_id),
+        "CmdFollowBall",
+        &[PyRep::Integer(gate.stargate_id), PyRep::Real(2_500.0)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CmdFollowBall to stargate");
+
+    assert!(ctx.systems.is_system_loaded(gate.to_solar_system_id));
+    let activating = src_h
+        .stargate_activation_state(gate.stargate_id)
+        .expect("activating state");
+    assert_eq!(
+        activating.activation_state,
+        eve_destiny::STARGATE_ACTIVATION_STATE_ACTIVATING
+    );
+    assert!(
+        activating.activation_transition_at_ms > now_before_ms,
+        "activationTransitionAt must be in the future while ACTIVATING"
+    );
+
+    // Stepping 1s stays ACTIVATING; jumping while ACTIVATING still raises GateClosed.
+    src_h.step_manual(1.0).await.unwrap();
+    assert_eq!(
+        src_h.stargate_activation_state(gate.stargate_id).map(|s| s.activation_state),
+        Some(eve_destiny::STARGATE_ACTIVATION_STATE_ACTIVATING)
+    );
+
+    // Stepping past STARGATE_ACTIVATION_TRANSITION_MS (~3s) opens the gate with transition 0.
+    src_h.step_manual(1.0).await.unwrap();
+    src_h.step_manual(1.0).await.unwrap();
+    let open = src_h.stargate_activation_state(gate.stargate_id).unwrap();
+    assert_eq!(open.activation_state, eve_destiny::STARGATE_ACTIVATION_STATE_OPEN);
+    assert_eq!(open.activation_transition_at_ms, 0);
+    assert_eq!(open.transition_remaining_ms, 0);
+    let open_slim = src_h.get_ball_slim_item(gate.stargate_id).await.unwrap().unwrap();
+    assert_eq!(
+        slim_activation_state(&open_slim),
+        Some(eve_destiny::STARGATE_ACTIVATION_STATE_OPEN)
+    );
+}
+
+#[tokio::test]
+async fn jump_closed_gate_raises_custominfo_gateclosed() {
+    // parity: feat:navigation.stargate-jump
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ctx.systems.set_lazy_stargate_activation(true);
+    let gate = pick_non_special_roundtrip_gate(&ctx);
+    let kw = HashMap::new();
+
+    let gate_radius = stargate_radius(&ctx, &gate);
+    let char_id = 91_080_002_i64;
+    let ship_id = 101_080_002_i64;
+    let mut sess = setup_nav_pilot(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position + DVec3::new(gate_radius + 1_000.0, 0.0, 0.0),
+    )
+    .await;
+    let beyonce_id = bind_beyonce_in_sys(&ctx, &mut sess, gate.from_solar_system_id).await;
+
+    let err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "GateClosed");
+    assert_eq!(sess.solar_system_id, Some(gate.from_solar_system_id));
+    match err.to_client_error("beyonce", "CmdStargateJump") {
+        eve_proto::ClientError::User { key, args } => {
+            assert_eq!(key, eve_proto::UserErrorKey::CustomInfo);
+            assert_eq!(
+                args,
+                vec![(
+                    "info".to_string(),
+                    PyRep::Tuple(vec![
+                        PyRep::Integer(101),
+                        PyRep::String(eve_proto::UI_LABEL_GATE_CLOSED.into()),
+                    ]),
+                )]
+            );
+        }
+        other => panic!(
+            "expected UserError('CustomInfo', info=(101, {})), got {other:?}",
+            eve_proto::UI_LABEL_GATE_CLOSED
+        ),
+    }
+}
+
+async fn jump_outside_2500m_on_gate(
+    ctx: &ServerContext,
+    gate: &eve_sde::StargateJump,
+    char_id: i64,
+    ship_id: i64,
+) -> (f64, f64, eve_proto::BridgeRpcError) {
+    let kw = HashMap::new();
+    let gate_radius = stargate_radius(ctx, gate);
+    // setup_nav_pilot uses radius 120.0; place ship 2,600 m outside ball-to-ball surface perimeter.
+    let mut sess = setup_nav_pilot(
+        ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position + DVec3::new(gate_radius + 120.0 + 2_600.0, 0.0, 0.0),
+    )
+    .await;
+    let src_h = ctx
+        .systems
+        .get_handle(gate.from_solar_system_id)
+        .expect("source system loaded");
+    let (_, gate_ball) = src_h
+        .get_ball_snapshot(gate.stargate_id)
+        .await
+        .unwrap()
+        .expect("stargate ball spawned");
+    let beyonce_id = bind_beyonce_in_sys(ctx, &mut sess, gate.from_solar_system_id).await;
+
+    let err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    (gate_radius, gate_ball.radius, err)
+}
+
+#[tokio::test]
+async fn jump_outside_2500m_raises_client_user_error() {
+    // parity: feat:navigation.stargate-jump
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let gate = pick_non_special_roundtrip_gate(&ctx);
+    let mut cases = vec![(gate.clone(), 91_080_003_i64, 101_080_003_i64)];
+    if let Some(largest_gate) = ctx
+        .sde
+        .jumps
+        .values()
+        .filter(|j| is_non_special_roundtrip_gate(&ctx, j))
+        .max_by(|a, b| {
+            stargate_radius(&ctx, a)
+                .total_cmp(&stargate_radius(&ctx, b))
+                .then_with(|| a.stargate_id.cmp(&b.stargate_id))
+        })
+        .cloned()
+        .filter(|g| g.stargate_id != gate.stargate_id)
+    {
+        cases.push((largest_gate, 91_080_103_i64, 101_080_103_i64));
+    }
+    for (target_gate, char_id, ship_id) in cases {
+        let (gate_radius, ball_radius, err) =
+            jump_outside_2500m_on_gate(&ctx, &target_gate, char_id, ship_id).await;
+        assert!(
+            (ball_radius - gate_radius).abs() < 1e-6,
+            "stargate_radius ({gate_radius}) must match Ballpark gate ball radius ({ball_radius})"
+        );
+        assert_eq!(err.code, "NotCloseEnoughToJump");
+        assert_eq!(
+            err.client_presentation("beyonce", "CmdStargateJump"),
+            eve_proto::UserErrorPresentation::Notify
+        );
+        match err.to_client_error("beyonce", "CmdStargateJump") {
+            eve_proto::ClientError::User { key, args } => {
+                assert_eq!(key, eve_proto::UserErrorKey::NotCloseEnoughToJump);
+                assert!(
+                    args.iter()
+                        .any(|(k, v)| k == "maxdist" && *v == PyRep::Integer(2_500)),
+                    "NotCloseEnoughToJump must carry maxdist=2500, got {args:?}"
+                );
+            }
+            other => panic!("expected ClientError::User(NotCloseEnoughToJump), got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn closed_gate_jump_does_not_load_destination() {
+    // parity: feat:navigation.stargate-jump
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ctx.systems.set_lazy_stargate_activation(true);
+    let gate = pick_non_special_roundtrip_gate(&ctx);
+    let kw = HashMap::new();
+
+    let gate_radius = stargate_radius(&ctx, &gate);
+    let char_id = 91_080_004_i64;
+    let ship_id = 101_080_004_i64;
+    let mut sess = setup_nav_pilot(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position + DVec3::new(gate_radius + 800.0, 0.0, 0.0),
+    )
+    .await;
+    let beyonce_id = bind_beyonce_in_sys(&ctx, &mut sess, gate.from_solar_system_id).await;
+
+    assert!(!ctx.systems.is_system_loaded(gate.to_solar_system_id));
+    let err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "GateClosed");
+    assert!(
+        !ctx.systems.is_system_loaded(gate.to_solar_system_id),
+        "jumping a closed gate must NOT lazily load destination system"
+    );
+}
+
+#[tokio::test]
+async fn gate_fx_durations_source_short_destination_long() {
+    // parity: feat:navigation.stargate-jump, destiny:OnSpecialFX, destiny:AddBalls2
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let gate = pick_non_special_roundtrip_gate(&ctx);
+    let dest_gate = ctx.sde.jumps[&gate.destination_stargate_id].clone();
+    let kw = HashMap::new();
+
+    let gate_radius = stargate_radius(&ctx, &gate);
+    let dest_gate_radius = stargate_radius(&ctx, &dest_gate);
+    let char_id = 91_080_005_i64;
+    let ship_id = 101_080_005_i64;
+    let mut sess = setup_nav_pilot(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position + DVec3::new(gate_radius + 800.0, 0.0, 0.0),
+    )
+    .await;
+    let beyonce_id = bind_beyonce_in_sys(&ctx, &mut sess, gate.from_solar_system_id).await;
+
+    // Spawn source watcher and destination watcher on the respective gate grids.
+    let src_watcher_id = 102_080_005_i64;
+    let dest_watcher_id = 103_080_005_i64;
+    let _ = setup_nav_pilot(
+        &ctx,
+        92_080_005,
+        src_watcher_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position + DVec3::new(gate_radius + 1_200.0, 500.0, 0.0),
+    )
+    .await;
+    let _ = setup_nav_pilot(
+        &ctx,
+        93_080_005,
+        dest_watcher_id,
+        587,
+        gate.to_solar_system_id,
+        dest_gate.position + DVec3::new(dest_gate_radius + 1_200.0, 500.0, 0.0),
+    )
+    .await;
+
+    let src_h = ctx.systems.get_or_spawn(gate.from_solar_system_id);
+    let dest_h = ctx.systems.get_or_spawn(gate.to_solar_system_id);
+    src_h.push_set_state(src_watcher_id).await.unwrap();
+    dest_h.push_set_state(dest_watcher_id).await.unwrap();
+    let _ = src_h.drain_observer_updates(src_watcher_id).await.unwrap();
+    let _ = dest_h.drain_observer_updates(dest_watcher_id).await.unwrap();
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_id),
+        "CmdStargateJump",
+        &[PyRep::Integer(gate.stargate_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CmdStargateJump");
+
+    let (_, src_events, _) = src_h.drain_observer_updates(src_watcher_id).await.unwrap();
+    let (dest_tick, dest_events, _) = dest_h.drain_observer_updates(dest_watcher_id).await.unwrap();
+    let (_, pilot_dest_events, _) = dest_h.drain_observer_updates(ship_id).await.unwrap();
+
+    let src_gate_activity_ms = src_events.iter().find_map(|ev| match ev {
+        eve_destiny::DestinyEvent::OnSpecialFXTimed {
+            ball_id,
+            guid,
+            duration_ms,
+            ..
+        } if *ball_id == gate.stargate_id && guid == "effects.GateActivity" => *duration_ms,
+        _ => None,
+    });
+    assert_eq!(
+        src_gate_activity_ms,
+        Some(1.0),
+        "source grid must receive short 1.0 ms GateActivity FX, got {src_events:?}"
+    );
+    assert!(src_events.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::OnClientControllerEvent {
+            ball_id,
+            event_name,
+            ..
+        } if *ball_id == gate.stargate_id && event_name == "GateActivate"
+    )));
+    assert!(src_events.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::OnSpecialFXTimed {
+            ball_id,
+            guid,
+            graphic_info: Some(info),
+            ..
+        } if *ball_id == ship_id && guid == "effects.JumpOut" && info == &vec![gate.to_solar_system_id as i64]
+    )));
+
+    let dest_gate_activity_ms = dest_events.iter().find_map(|ev| match ev {
+        eve_destiny::DestinyEvent::OnSpecialFXTimed {
+            ball_id,
+            guid,
+            duration_ms,
+            ..
+        } if *ball_id == gate.destination_stargate_id && guid == "effects.GateActivity" => {
+            *duration_ms
+        }
+        _ => None,
+    });
+    assert_eq!(
+        dest_gate_activity_ms,
+        Some(5_000.0),
+        "destination grid must receive long 5000.0 ms GateActivity FX, got {dest_events:?}"
+    );
+    assert!(src_gate_activity_ms.unwrap() < dest_gate_activity_ms.unwrap());
+
+    // #871 + #1084: while arriving pilot holds gate cloak, destination grid watcher must NOT
+    // receive AddBalls2(ship_id) or ship-targeted OnSpecialFX(ship_id).
+    assert!(
+        !dest_events.iter().any(|ev| matches!(ev, eve_destiny::DestinyEvent::AddBalls2 { balls } if balls.iter().any(|b| b.id == ship_id))),
+        "gate-cloaked arrival must not leak AddBalls2 to destination grid watcher: {dest_events:?}"
+    );
+    assert!(
+        !dest_events.iter().any(|ev| matches!(ev, eve_destiny::DestinyEvent::OnSpecialFXTimed { ball_id, .. } if *ball_id == ship_id)),
+        "gate-cloaked arrival must not emit unmaterialized OnSpecialFX(ship_id) to watcher: {dest_events:?}"
+    );
+
+    // Pilot's own destination queue starts with SetState (materializing ship_id) before long JumpIn FX.
+    let pilot_set_state_idx = pilot_dest_events
+        .iter()
+        .position(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. }))
+        .expect("pilot destination queue must begin with SetState");
+    let pilot_jump_in_idx = pilot_dest_events
+        .iter()
+        .position(|ev| matches!(
+            ev,
+            eve_destiny::DestinyEvent::OnSpecialFXTimed {
+                ball_id,
+                guid,
+                duration_ms: Some(d),
+                ..
+            } if *ball_id == ship_id && guid == "effects.JumpIn" && (*d - 5_000.0).abs() < f64::EPSILON
+        ))
+        .expect("pilot must receive 5000.0 ms JumpIn FX");
+    assert!(pilot_set_state_idx < pilot_jump_in_idx);
+
+    // #1077 E14: breaking gate cloak reveals AddBalls2 to destination watcher cleanly at/after arrival tick.
+    assert!(dest_h.break_gate_cloak(ship_id).await.unwrap());
+    let (decloak_tick, decloak_events, decloak_wire) =
+        dest_h.drain_observer_updates(dest_watcher_id).await.unwrap();
+    assert!(
+        decloak_tick >= dest_tick,
+        "decloak AddBalls2 tick {decloak_tick} must not precede arrival tick {dest_tick}"
+    );
+    assert!(
+        decloak_events
+            .iter()
+            .any(|ev| matches!(ev, eve_destiny::DestinyEvent::AddBalls2 { balls } if balls.iter().any(|b| b.id == ship_id))),
+        "destination grid watcher must receive AddBalls2 when pilot decloaks: {decloak_events:?}"
+    );
+    assert!(
+        decloak_events
+            .iter()
+            .any(|ev| matches!(ev, eve_destiny::DestinyEvent::CloakBall { ball_id, cloaked: 0 } if *ball_id == ship_id)),
+        "destination grid watcher must receive CloakBall(cloaked=0) on decloak: {decloak_events:?}"
+    );
+    let PyRep::List(wire_updates) = decloak_wire else {
+        panic!("expected DoDestinyUpdate PyRep::List");
+    };
+    assert!(wire_updates.iter().all(|entry| match entry {
+        PyRep::Tuple(pair) => pair[0].as_i64() == Some(decloak_tick as i64),
+        _ => false,
+    }));
+}
+
+#[tokio::test]
+async fn tidi_notice_precedes_ballpark_on_jump_in() {
+    // parity: feat:navigation.stargate-jump, feat:serverops.time-dilation, notify:DoSimClockRebase, destiny:AddBalls2
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let gate = pick_non_special_roundtrip_gate(&ctx);
+    let kw = HashMap::new();
+
+    let gate_radius = stargate_radius(&ctx, &gate);
+    let char_id = 91_080_006_i64;
+    let ship_id = 101_080_006_i64;
+    let mut sess = setup_nav_pilot(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position + DVec3::new(gate_radius + 800.0, 0.0, 0.0),
+    )
+    .await;
+    let beyonce_id = bind_beyonce_in_sys(&ctx, &mut sess, gate.from_solar_system_id).await;
+    eve_server::services::serverops_cluster::set_system_tidi_factor(&ctx, gate.to_solar_system_id, 0.50);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let mut wire = eve_server::router::client_wire::ClientWireSession::from_session(&ctx, sess);
+    let out = wire
+        .call_wire(
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+        )
+        .await;
+    let jump_kv = out
+        .rpc_result
+        .as_ref()
+        .expect("CmdStargateJump into TiDi failed");
+    let PyRep::KeyVal(kv) = jump_kv else {
+        panic!("expected KeyVal from CmdStargateJump, got {jump_kv:?}");
+    };
+    let dest_beyonce_id = kv
+        .get("beyonceBoundID")
+        .and_then(|v| v.as_i64())
+        .expect("beyonceBoundID from CmdStargateJump") as u64;
+    assert!(
+        !out.out_frames.iter().any(|f| matches!(
+            f,
+            eve_server::outbound_sequencer::OutFrame::DoDestinyUpdate {
+                has_set_state: true,
+                ..
+            }
+        )),
+        "CmdStargateJump must defer destination SetState until destination ballpark init"
+    );
+    let state_out = wire
+        .call_wire("beyonce", Some(dest_beyonce_id), "UpdateStateRequest", &[], &kw)
+        .await;
+    assert!(
+        state_out.rpc_result.is_ok(),
+        "destination UpdateStateRequest after TiDi jump failed: {:?}",
+        state_out.rpc_result
+    );
+    let all_frames: Vec<_> = out
+        .out_frames
+        .iter()
+        .chain(state_out.out_frames.iter())
+        .collect();
+
+    let rebase_pos = all_frames
+        .iter()
+        .position(|f| {
+            matches!(
+                f,
+                eve_server::outbound_sequencer::OutFrame::Notification { event, .. }
+                    if event == "DoSimClockRebase"
+            )
+        })
+        .expect("DoSimClockRebase must be emitted when jumping into dilated system");
+    let set_state_pos = all_frames
+        .iter()
+        .position(|f| {
+            matches!(
+                f,
+                eve_server::outbound_sequencer::OutFrame::DoDestinyUpdate {
+                    has_set_state: true,
+                    ..
+                }
+            )
+        })
+        .expect("SetState frame must be emitted on destination ballpark init");
+    assert!(
+        rebase_pos < set_state_pos,
+        "DoSimClockRebase (idx {rebase_pos}) must precede first ballpark SetState (idx {set_state_pos})"
+    );
+}
+
+#[tokio::test]
+async fn jump_clock_continuity_across_tidi() {
+    // parity: feat:navigation.stargate-jump, feat:navigation.session-change-timer, feat:serverops.time-dilation
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let gate = pick_non_special_roundtrip_gate(&ctx);
+    let kw = HashMap::new();
+
+    let gate_radius = stargate_radius(&ctx, &gate);
+    let char_id = 91_080_007_i64;
+    let ship_id = 101_080_007_i64;
+    let mut sess = setup_nav_pilot(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position + DVec3::new(gate_radius + 800.0, 0.0, 0.0),
+    )
+    .await;
+    let src_beyonce_id = bind_beyonce_in_sys(&ctx, &mut sess, gate.from_solar_system_id).await;
+    eve_server::services::serverops_cluster::set_system_tidi_factor(&ctx, gate.to_solar_system_id, 0.50);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Jump into 0.50 TiDi system: session change timer must remain 7,000 ms wall-clock independent of TiDi.
+    let wall_before_in = ctx.now_machonet_wallclock_filetime_ticks();
+    let res_in = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(src_beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("CmdStargateJump into 0.50 TiDi");
+    let PyRep::KeyVal(kv_in) = res_in else {
+        panic!("expected KeyVal from CmdStargateJump");
+    };
+    let dest_beyonce_id = kv_in.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+    assert_eq!(
+        kv_in.get("sessionChangeTimerSeconds").and_then(|v| v.as_i64()),
+        Some(7)
+    );
+    assert_eq!(
+        kv_in.get("sessionChangeTimerFiletime").and_then(|v| v.as_i64()),
+        Some(wall_before_in + 70_000_000)
+    );
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Advance 12s wall time inside 0.50 TiDi, drain intermediate clock tick notifications, move near return gate, and jump back to 1.0 TiDi.
+    ctx.advance_secs(12);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let dest_gate = ctx.sde.jumps[&gate.destination_stargate_id].clone();
+    let dest_gate_radius = stargate_radius(&ctx, &dest_gate);
+    let dest_h = ctx.systems.get_handle(gate.to_solar_system_id).unwrap();
+    assert!(
+        dest_h
+            .set_ball_position(
+                ship_id,
+                dest_gate.position + DVec3::new(dest_gate_radius + 800.0, 0.0, 0.0),
+            )
+            .await
+    );
+
+    let wall_before_out = ctx.now_machonet_wallclock_filetime_ticks();
+    let res_out = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(dest_beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.destination_stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("CmdStargateJump out of 0.50 TiDi");
+    let PyRep::KeyVal(kv_out) = res_out else {
+        panic!("expected KeyVal from return CmdStargateJump");
+    };
+    assert_eq!(
+        kv_out.get("sessionChangeTimerSeconds").and_then(|v| v.as_i64()),
+        Some(7)
+    );
+    assert_eq!(
+        kv_out.get("sessionChangeTimerFiletime").and_then(|v| v.as_i64()),
+        Some(wall_before_out + 70_000_000)
+    );
+
+    let out_notifs = ctx.drain_notifications_for_char(char_id);
+    let rebase_tuple = out_notifs
+        .iter()
+        .find_map(|n| {
+            if n.event == "DoSimClockRebase" {
+                if let Some(PyRep::Tuple(pair)) = n.args.first() {
+                    return Some((pair[0].as_i64().unwrap(), pair[1].as_i64().unwrap()));
+                }
+            }
+            None
+        })
+        .expect("DoSimClockRebase on leaving dilated system");
+    // Dilated clock ran at 0.50x for 12s (+6s = +60M ticks), jumping out advances by full 12s wall time (+120M ticks).
+    assert_eq!(rebase_tuple.0, wall_before_in + 60_000_000);
+    assert_eq!(rebase_tuple.1, wall_before_in + 120_000_000);
 }

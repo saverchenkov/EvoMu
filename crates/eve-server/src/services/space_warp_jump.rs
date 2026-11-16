@@ -684,6 +684,13 @@ async fn handle_cmd_warp_to_stuff(
     }
     match handle.set_movement_mode(ship_id, mode).await {
         Ok(tick) => {
+            if stuff_type == "item" && target_id > 0 {
+                let _ = ctx.systems.ensure_stargate_destination_loaded_for_intent(
+                    sys_id,
+                    target_id,
+                    ctx.now_machonet_wallclock_ms(),
+                );
+            }
             // [plan:DG-4] Entering warp halts active non-warp module cycles (weapons, scrams, webs, mining lasers, etc.)
             crate::services::nav_warp_interdiction::on_warp_initiated_hooks(
                 ctx, &handle, char_id, ship_id, sys_id,
@@ -893,6 +900,14 @@ async fn handle_cmd_stargate_jump(
 
     let arrived_at_warp_dest = warp_perimeter?;
 
+    let _ = old_handle.settle_stargate_activation_states(ctx.now_machonet_wallclock_ms());
+    if old_handle
+        .stargate_activation_state(gate_id)
+        .is_some_and(|st| st.activation_state != eve_destiny::STARGATE_ACTIVATION_STATE_OPEN)
+    {
+        return Err(BridgeRpcError::gate_closed(gate_id));
+    }
+
     let dest_sys_id = jump.to_solar_system_id;
     let dest_gate_pos = ctx
         .sde
@@ -911,6 +926,38 @@ async fn handle_cmd_stargate_jump(
                 event_name: "GateActivate".into(),
                 value: 1,
                 delay: None,
+            },
+        )
+        .await;
+    let _ = old_handle
+        .emit_destiny_event(
+            ship_id,
+            eve_destiny::DestinyEvent::OnSpecialFXTimed {
+                ball_id: gate_id,
+                module_id: None,
+                target_id: None,
+                guid: "effects.GateActivity".into(),
+                start: true,
+                is_active: false,
+                duration_ms: Some(1.0),
+                repeat: None,
+                graphic_info: None,
+            },
+        )
+        .await;
+    let _ = old_handle
+        .emit_destiny_event(
+            ship_id,
+            eve_destiny::DestinyEvent::OnSpecialFXTimed {
+                ball_id: ship_id,
+                module_id: None,
+                target_id: Some(gate_id),
+                guid: "effects.JumpOut".into(),
+                start: true,
+                is_active: false,
+                duration_ms: None,
+                repeat: None,
+                graphic_info: Some(vec![dest_sys_id as i64]),
             },
         )
         .await;
@@ -1036,7 +1083,9 @@ async fn handle_cmd_stargate_jump(
     });
     ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
 
+    let old_tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, old_sys);
     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
+    let dest_tidi = new_handle.tidi_factor();
     let mut new_ball = taken.ball;
     new_ball.position = arrival_pos;
     new_ball.velocity = DVec3::ZERO;
@@ -1051,7 +1100,56 @@ async fn handle_cmd_stargate_jump(
     let mut slim_meta = ctx.build_ship_slim_meta(char_id, new_ball.type_id);
     slim_meta.is_cloaked = true;
     let spawn_tick = new_handle.spawn_ball_with_meta(new_ball, combat_state, slim_meta).await.unwrap_or(0);
+    // Destination grid watchers already have the destination stargate materialized and must not
+    // receive `AddBalls2` or `OnSpecialFX(ship_id)` while the arriving ship holds gate cloak (#871/#1084).
+    // Emit the long 5000 ms gate arrival activity FX on the stargate to all grid observers, and
+    // deliver ship-bound `effects.JumpIn` solely to the pilot's observer queue (`SetState` prepends index 0).
+    let _ = new_handle
+        .emit_destiny_event(
+            ship_id,
+            eve_destiny::DestinyEvent::OnSpecialFXTimed {
+                ball_id: jump.destination_stargate_id,
+                module_id: None,
+                target_id: None,
+                guid: "effects.GateActivity".into(),
+                start: true,
+                is_active: false,
+                duration_ms: Some(5_000.0),
+                repeat: None,
+                graphic_info: None,
+            },
+        )
+        .await;
+    let _ = new_handle
+        .emit_observer_destiny_event(
+            ship_id,
+            eve_destiny::DestinyEvent::OnSpecialFXTimed {
+                ball_id: ship_id,
+                module_id: None,
+                target_id: None,
+                guid: "effects.JumpIn".into(),
+                start: true,
+                is_active: false,
+                duration_ms: Some(5_000.0),
+                repeat: None,
+                graphic_info: None,
+            },
+        )
+        .await;
     let _ = ctx.living_world.materialize_system_lod2(dest_sys_id, &ctx.systems, &ctx.sde).await;
+    let _ = crate::services::serverops_cluster::sync_jump_clock_and_emit_rebase_if_needed(
+        ctx,
+        char_id,
+        old_sys,
+        dest_sys_id,
+        old_tidi,
+        dest_tidi,
+    );
+    let _ = crate::services::serverops_cluster::emit_sim_clock_rebase_on_entry_if_needed(
+        ctx,
+        char_id,
+        dest_sys_id,
+    );
     let _ = new_handle.push_set_state(ship_id).await;
     crate::services::notify_emitters_space_dungeons::emit_jump_cloak_started(ctx, char_id, ship_id);
     crate::services::notify_emitters_seasons_tactical::emit_restoring_invuln_updated(ctx, char_id, ship_id, 600_000_000);
@@ -1104,11 +1202,6 @@ async fn handle_cmd_stargate_jump(
     );
 
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, dest_sys_id as i64)?;
-    let _ = crate::services::serverops_cluster::emit_sim_clock_rebase_on_entry_if_needed(
-        ctx,
-        char_id,
-        dest_sys_id,
-    );
     let ready_at_ft = transition_ready_at_filetime_ticks(ctx);
 
     Ok(PyRep::keyval([
@@ -1190,7 +1283,7 @@ fn evaluate_surface_perimeter(
 ///   `gate_radius + ball.radius + 2,500 m` of `gate_pos` AND the ship is either already inside
 ///   that range or within the final `<= 4.0 s` of `WarpPhase::Decelerating` (`#1001`); all other
 ///   warp states return `ShipInWarp`.
-/// - For non-warp movement modes, returns `OutsideStargateJumpRange` when
+/// - For non-warp movement modes, returns `NotCloseEnoughToJump` when
 ///   `(dist - ball.radius - gate_radius).max(0.0) > 2,500.0` and `Ok(false)` otherwise.
 pub(crate) fn evaluate_stargate_jump_perimeter(
     ball: &eve_destiny::Ball,
@@ -1206,13 +1299,13 @@ pub(crate) fn evaluate_stargate_jump_perimeter(
             message: "Cannot jump stargate while ship is still in warp".into(),
             client_error: None,
         },
-        |_dist, _max_dist, surface_dist| BridgeRpcError {
-            code: "OutsideStargateJumpRange".into(),
-            message: format!(
-                "Ship is {:.1} m from stargate (must be <= 2500 m)",
-                surface_dist
-            ),
-            client_error: None,
+        |dist, max_dist, surface_dist| {
+            BridgeRpcError::not_close_enough_to_jump(
+                surface_dist,
+                dist,
+                max_dist,
+                SURFACE_PERIMETER_METERS,
+            )
         },
     )
 }

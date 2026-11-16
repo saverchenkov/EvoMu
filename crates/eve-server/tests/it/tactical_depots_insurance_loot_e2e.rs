@@ -247,7 +247,7 @@ async fn fast_fly_stargates_to(ctx: &ServerContext, sess: &mut SessionState, des
         ctx.advance_secs(11);
         let jump_args = [PyRep::Integer(fg), PyRep::Integer(i64::from(next_sys))];
         if let Err(e) = rpc(ctx, sess, "beyonce", "CmdStargateJump", &jump_args).await {
-            if e.code == "OutsideStargateJumpRange" || e.code == "ShipInWarp" {
+            if e.code == "NotCloseEnoughToJump" || e.code == "ShipInWarp" {
                 move_ship_to_ball(ctx, sess, cur_sys, ship_id, "item", PyRep::Integer(fg)).await;
                 ctx.advance_secs(11);
                 rpc(ctx, sess, "beyonce", "CmdStargateJump", &jump_args)

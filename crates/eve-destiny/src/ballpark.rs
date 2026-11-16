@@ -2,9 +2,11 @@
 
 use crate::{
     Ball, BallId, Ballpark, CombatState, DamageVector, DestinyEvent, GridBubble, MovementMode,
-    SlimItemMeta, WarpBubble, WarpBubbleMgr, WarpPhase, BUBBLE_RADIUS_METERS,
-    BUBBLE_TRANSITION_THRESHOLD_METERS, DECLOAK_DISTANCE_METERS,
+    SlimItemMeta, StargateActivationState, WarpBubble, WarpBubbleMgr, WarpPhase,
+    BUBBLE_RADIUS_METERS, BUBBLE_TRANSITION_THRESHOLD_METERS, DECLOAK_DISTANCE_METERS,
     GRID_WALL_EXPANSION_THRESHOLD_METERS, MAX_GRID_EXTENT_METERS,
+    STARGATE_ACTIVATION_STATE_ACTIVATING, STARGATE_ACTIVATION_STATE_CLOSED,
+    STARGATE_ACTIVATION_STATE_OPEN,
 };
 use glam::DVec3;
 use std::collections::{BTreeMap, BTreeSet};
@@ -83,6 +85,7 @@ impl Ballpark {
             ball_harmonics: BTreeMap::new(),
             ball_interactive_overrides: BTreeMap::new(),
             ball_wormhole_stages: BTreeMap::new(),
+            stargate_activation_states: BTreeMap::new(),
             active_wubble_multipliers: BTreeMap::new(),
             sim_unix_secs: 0,
             registered_observers: None,
@@ -181,6 +184,124 @@ impl Ballpark {
             self.emit_event(Some(ball_id), DestinyEvent::OnSlimItemChange { ball_id });
         }
         true
+    }
+
+    /// Initializes the stargate activation state without emitting `OnSlimItemChange` during bootstrap (`#1080`).
+    pub fn init_stargate_activation_state(&mut self, ball_id: BallId, state: i64) {
+        self.stargate_activation_states.insert(
+            ball_id,
+            StargateActivationState {
+                activation_state: state,
+                transition_remaining_ms: 0,
+                activation_transition_at_ms: 0,
+            },
+        );
+    }
+
+    /// Returns the tracked stargate activation state for `ball_id`, if any (`#1080`).
+    pub fn stargate_activation_state(&self, ball_id: BallId) -> Option<StargateActivationState> {
+        self.stargate_activation_states.get(&ball_id).copied()
+    }
+
+    /// Returns `true` if `ball_id` is open (`OPEN`) or has no explicit state entry (`#1080`).
+    pub fn is_stargate_open(&self, ball_id: BallId) -> bool {
+        self.stargate_activation_states
+            .get(&ball_id)
+            .is_none_or(|st| st.activation_state == STARGATE_ACTIVATION_STATE_OPEN)
+    }
+
+    /// Explicitly sets stargate activation state, emitting `OnSlimItemChange` when changed (`#1080`).
+    pub fn set_stargate_activation_state(
+        &mut self,
+        ball_id: BallId,
+        activation_state: i64,
+        transition_remaining_ms: u64,
+        activation_transition_at_ms: u64,
+    ) -> bool {
+        let next = StargateActivationState {
+            activation_state,
+            transition_remaining_ms,
+            activation_transition_at_ms,
+        };
+        if self.stargate_activation_states.get(&ball_id) == Some(&next) {
+            return false;
+        }
+        self.stargate_activation_states.insert(ball_id, next);
+        if self.balls.contains_key(&ball_id) {
+            self.emit_event(Some(ball_id), DestinyEvent::OnSlimItemChange { ball_id });
+        }
+        true
+    }
+
+    /// Transitions a stargate from `CLOSED` (or uninitialized) into `ACTIVATING` with `transition_ms`
+    /// (`STARGATE_ACTIVATION_TRANSITION_MS`), or directly to `OPEN` if `transition_ms == 0` (`#1080`).
+    pub fn activate_stargate_transition(
+        &mut self,
+        ball_id: BallId,
+        transition_ms: u64,
+        now_ms_opt: Option<u64>,
+    ) -> bool {
+        let cur_state = self
+            .stargate_activation_states
+            .get(&ball_id)
+            .map(|s| s.activation_state)
+            .unwrap_or(STARGATE_ACTIVATION_STATE_CLOSED);
+        if cur_state != STARGATE_ACTIVATION_STATE_CLOSED {
+            return false;
+        }
+        if transition_ms == 0 {
+            return self.set_stargate_activation_state(
+                ball_id,
+                STARGATE_ACTIVATION_STATE_OPEN,
+                0,
+                0,
+            );
+        }
+        let deadline_ms = now_ms_opt.map(|n| n.saturating_add(transition_ms)).unwrap_or(0);
+        self.set_stargate_activation_state(
+            ball_id,
+            STARGATE_ACTIVATION_STATE_ACTIVATING,
+            transition_ms,
+            deadline_ms,
+        )
+    }
+
+    /// Advances active `ACTIVATING` stargates by `dt_secs` and/or checks `now_ms_opt`,
+    /// transitioning settled gates to `OPEN` with transition `0` and emitting `OnSlimItemChange` (`#1080`).
+    pub fn settle_stargate_activation_transitions(
+        &mut self,
+        dt_secs: f64,
+        now_ms_opt: Option<u64>,
+    ) -> Vec<BallId> {
+        let elapsed_ms = if dt_secs > 0.0 && dt_secs.is_finite() {
+            (dt_secs * 1_000.0).round() as u64
+        } else {
+            0
+        };
+        let mut opened = Vec::new();
+        for (&ball_id, st) in self.stargate_activation_states.iter_mut() {
+            if st.activation_state != STARGATE_ACTIVATION_STATE_ACTIVATING {
+                continue;
+            }
+            if elapsed_ms > 0 {
+                st.transition_remaining_ms = st.transition_remaining_ms.saturating_sub(elapsed_ms);
+            }
+            let by_dt = st.transition_remaining_ms == 0 && (elapsed_ms > 0 || st.activation_transition_at_ms == 0);
+            let by_wall = now_ms_opt
+                .is_some_and(|now_ms| st.activation_transition_at_ms > 0 && now_ms >= st.activation_transition_at_ms);
+            if by_dt || by_wall {
+                st.activation_state = STARGATE_ACTIVATION_STATE_OPEN;
+                st.transition_remaining_ms = 0;
+                st.activation_transition_at_ms = 0;
+                opened.push(ball_id);
+            }
+        }
+        for &ball_id in &opened {
+            if self.balls.contains_key(&ball_id) {
+                self.emit_event(Some(ball_id), DestinyEvent::OnSlimItemChange { ball_id });
+            }
+        }
+        opened
     }
 
     /// Returns `true` if `ball_id` is a system-wide static celestial/gate/station (`MovementMode::Rigid` / `static_ball_ids`).
