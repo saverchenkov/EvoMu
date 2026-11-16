@@ -811,6 +811,10 @@ impl SystemRegistry {
         let panic_next_command_for_test = Arc::new(std::sync::atomic::AtomicBool::new(false));
         #[cfg(test)]
         let panic_next_command_actor = panic_next_command_for_test.clone();
+        #[cfg(test)]
+        let panic_on_command_countdown_for_test = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        #[cfg(test)]
+        let panic_on_command_countdown_actor = panic_on_command_countdown_for_test.clone();
 
         tokio::spawn(async move {
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();
@@ -818,7 +822,21 @@ impl SystemRegistry {
             while let Some(cmd) = cmd_rx.recv().await {
                 let cmd_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 #[cfg(test)]
-                if panic_next_command_actor.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                let countdown_hit = {
+                    let rem = panic_on_command_countdown_actor
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                    if rem > 0 {
+                        panic_on_command_countdown_actor
+                            .store(rem - 1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    rem == 1
+                };
+                #[cfg(test)]
+                let should_panic =
+                    panic_next_command_actor.swap(false, std::sync::atomic::Ordering::SeqCst)
+                        || countdown_hit;
+                #[cfg(test)]
+                if should_panic {
                     panic!("injected SystemActor command panic for #841 supervision test");
                 }
                 let mut ballpark = ballpark_actor.write().unwrap_or_else(|e| e.into_inner());
@@ -984,38 +1002,10 @@ impl SystemRegistry {
                                     return;
                                 }
                                 let mut ast_ball = ball;
-                                ast_ball.mode = eve_destiny::MovementMode::Rigid;
-                                let (group_id, category_id, name) = sde_opt
-                                    .as_ref()
-                                    .and_then(|s| s.types.get(&ast_ball.type_id))
-                                    .map(|t| {
-                                        (
-                                            t.group_id,
-                                            t.category_id,
-                                            (!t.name.is_empty()).then(|| t.name.clone()),
-                                        )
-                                    })
-                                    .unwrap_or((25, 25, None));
-                                ballpark.add_static_ball_with_meta(
-                                    ast_ball.clone(),
-                                    SlimItemMeta {
-                                        group_id,
-                                        category_id,
-                                        owner_id: 1,
-                                        char_id: None,
-                                        corp_id: -1,
-                                        alliance_id: -1,
-                                        security_status: 0.0,
-                                        is_cloaked: false,
-                                        name,
-                                        ..Default::default()
-                                    },
-                                );
-                                ballpark.queue_event_for_all_grid_observers(
-                                    Some(ball_id),
-                                    &DestinyEvent::AddBalls2 {
-                                        balls: vec![ast_ball.clone()],
-                                    },
+                                SystemHandle::spawn_asteroid_ball_in_ballpark(
+                                    &mut ballpark,
+                                    &sde_opt,
+                                    &mut ast_ball,
                                 );
                                 if let Some(db) = &db_opt {
                                     if db.get_asteroid(ball_id).is_none() {
@@ -2773,6 +2763,8 @@ impl SystemRegistry {
             dynamic_ball_count,
             #[cfg(test)]
             panic_next_command_for_test,
+            #[cfg(test)]
+            panic_on_command_countdown_for_test,
             npc_death_hook: Arc::clone(&self.npc_death_hook),
             module_deactivation_hook: Arc::clone(&self.module_deactivation_hook),
             target_lock_completed_hook: Arc::clone(&self.target_lock_completed_hook),

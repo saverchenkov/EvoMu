@@ -935,6 +935,40 @@ pub(crate) async fn execute_gm_heal(
     ]))
 }
 
+/// Clears runtime NPC AI and combat state for `entity_id` in `sys_id`.
+fn remove_npc_runtime_state(ctx: &ServerContext, sys_id: u32, entity_id: i64) {
+    if let Ok(mut map) = ctx.npc_spawns.write() {
+        if let Some(mgr) = map.get_mut(&sys_id) {
+            mgr.entities.remove(&entity_id);
+        }
+    }
+    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        rt.npc_entities.remove(&entity_id);
+    });
+}
+
+/// Rolls back partially spawned `/spawn` DB, runtime NPC, and ballpark records when an actor spawn fails.
+async fn rollback_spawned_entities(
+    ctx: &ServerContext,
+    handle: &crate::system_actor::SystemHandle,
+    sys_id: u32,
+    failed_id: i64,
+    prior_ids: &[i64],
+) {
+    ctx.db.with_mut_snapshot(|snap| {
+        for &id in std::iter::once(&failed_id).chain(prior_ids.iter()) {
+            snap.items.remove(&id);
+            snap.asteroids.remove(&id);
+        }
+    });
+    for &id in std::iter::once(&failed_id).chain(prior_ids.iter()) {
+        remove_npc_runtime_state(ctx, sys_id, id);
+    }
+    for &id in prior_ids {
+        let _ = handle.remove_ball(id).await;
+    }
+}
+
 pub async fn handle_gm_slash_ext(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -957,11 +991,12 @@ pub async fn handle_gm_slash_ext(
         let Some(inv_type) = ctx.sde.types.get(&type_id).cloned() else {
             return Some(Err(BridgeRpcError { code: "TypeNotFound".into(), message: format!("Type ID {type_id} not found in SDE"), client_error: None }));
         };
-        let (sys_id, ship_id) = ctx
+        let (db_sys_id, db_ship_id) = ctx
             .db
             .with_snapshot(|snap| snap.characters.get(&cid).map(|c| (c.solar_system_id, c.active_ship_id)))
-            .or_else(|| session.solar_system_id.map(|s| (s, 0)))
             .unwrap_or((0, 0));
+        let sys_id = session.solar_system_id.filter(|&s| s > 0).unwrap_or(db_sys_id);
+        let ship_id = session.ship_id.filter(|&id| id > 0).unwrap_or(db_ship_id);
 
         let handle = ctx.systems.get_or_spawn(sys_id);
         let origin = if ship_id > 0 {
@@ -1019,8 +1054,8 @@ pub async fn handle_gm_slash_ext(
                 }
                 id
             });
-            if inv_type.category_id == 25 {
-                let _ = handle
+            let spawn_res = if inv_type.category_id == 25 {
+                handle
                     .spawn_asteroid(
                         crate::system_actor::AsteroidState {
                             asteroid_id: entity_id,
@@ -1045,7 +1080,8 @@ pub async fn handle_gm_slash_ext(
                             mode: MovementMode::Rigid,
                         },
                     )
-                    .await;
+                    .await
+                    .map(|_| ())
             } else if inv_type.category_id == 2 {
                 let ball = Ball {
                     id: entity_id,
@@ -1072,10 +1108,13 @@ pub async fn handle_gm_slash_ext(
                     name: (!inv_type.name.is_empty()).then(|| inv_type.name.clone()),
                     ..Default::default()
                 };
-                let _ = handle.spawn_ball_with_meta(ball, combat, meta).await;
-                if let Ok(mut bp) = handle.ballpark.write() {
-                    bp.static_ball_ids.insert(entity_id);
+                let res = handle.spawn_ball_with_meta(ball, combat, meta).await;
+                if res.is_ok() {
+                    if let Ok(mut bp) = handle.ballpark.write() {
+                        bp.static_ball_ids.insert(entity_id);
+                    }
                 }
+                res.map(|_| ())
             } else if inv_type.category_id == 11 {
                 let archetype =
                     crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype(
@@ -1111,33 +1150,36 @@ pub async fn handle_gm_slash_ext(
                     name: (!inv_type.name.is_empty()).then(|| inv_type.name.clone()),
                     ..Default::default()
                 };
-                let _ = handle.spawn_ball_with_meta(ball, combat, meta).await;
-                let legacy_ent = crate::combat::npc_ai::NpcCombatEntity {
-                    ball_id: entity_id,
-                    type_id,
-                    faction_id: entity.faction_id,
-                    state: crate::combat::npc_ai::NpcAiState::Idle,
-                    spawn_group_id: 0,
-                    spawn_pos: pos,
-                    target_id: None,
-                    bounty_isk: entity.bounty_isk,
-                    optimal_range: entity.optimal_range,
-                    orbit_range: entity.orbit_range,
-                    base_dps: entity.damage_vector.total(),
-                    damage_vector: entity.damage_vector,
-                    last_attack_tick: 0,
-                    has_shield_rep: entity.remote_shield_rep > 0.0,
-                    has_armor_rep: entity.remote_armor_rep > 0.0,
-                };
-                if let Ok(mut map) = ctx.npc_spawns.write() {
-                    map.entry(sys_id)
-                        .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new)
-                        .entities
-                        .insert(entity_id, legacy_ent);
+                let res = handle.spawn_ball_with_meta(ball, combat, meta).await;
+                if res.is_ok() {
+                    let legacy_ent = crate::combat::npc_ai::NpcCombatEntity {
+                        ball_id: entity_id,
+                        type_id,
+                        faction_id: entity.faction_id,
+                        state: crate::combat::npc_ai::NpcAiState::Idle,
+                        spawn_group_id: 0,
+                        spawn_pos: pos,
+                        target_id: None,
+                        bounty_isk: entity.bounty_isk,
+                        optimal_range: entity.optimal_range,
+                        orbit_range: entity.orbit_range,
+                        base_dps: entity.damage_vector.total(),
+                        damage_vector: entity.damage_vector,
+                        last_attack_tick: 0,
+                        has_shield_rep: entity.remote_shield_rep > 0.0,
+                        has_armor_rep: entity.remote_armor_rep > 0.0,
+                    };
+                    if let Ok(mut map) = ctx.npc_spawns.write() {
+                        map.entry(sys_id)
+                            .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new)
+                            .entities
+                            .insert(entity_id, legacy_ent);
+                    }
+                    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                        rt.npc_entities.insert(entity_id, entity);
+                    });
                 }
-                crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-                    rt.npc_entities.insert(entity_id, entity);
-                });
+                res.map(|_| ())
             } else {
                 let ball = Ball {
                     id: entity_id,
@@ -1154,8 +1196,8 @@ pub async fn handle_gm_slash_ext(
                 let combat = ctx.build_type_combat_state(type_id);
                 let mut meta = ctx.build_ship_slim_meta(cid, type_id);
                 meta.char_id = None;
-                let _ = handle.spawn_ball_with_meta(ball, combat, meta).await;
-                if inv_type.category_id == 6 {
+                let res = handle.spawn_ball_with_meta(ball, combat, meta).await;
+                if res.is_ok() && inv_type.category_id == 6 {
                     // Record `isInteractive = false` on the ballpark for unpiloted spawned ship hulls
                     // so subsequent `SetState` / `AddBalls2` / `SetBallInteractive` frames keep
                     // `ball.isInteractive == False` until boarded (`#983`).
@@ -1169,6 +1211,15 @@ pub async fn handle_gm_slash_ext(
                         )
                         .await;
                 }
+                res.map(|_| ())
+            };
+            if let Err(err) = spawn_res {
+                rollback_spawned_entities(ctx, &handle, sys_id, entity_id, &spawned_ids).await;
+                return Some(Err(BridgeRpcError {
+                    code: "SpawnFailed".into(),
+                    message: err,
+                    client_error: None,
+                }));
             }
             spawned_ids.push(entity_id);
         }
@@ -1202,14 +1253,7 @@ pub async fn handle_gm_slash_ext(
         });
         let handle = ctx.systems.get_or_spawn(sys_id);
         let removed_ball = handle.remove_ball(target_id).await.is_some();
-        if let Ok(mut map) = ctx.npc_spawns.write() {
-            if let Some(mgr) = map.get_mut(&sys_id) {
-                mgr.entities.remove(&target_id);
-            }
-        }
-        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-            rt.npc_entities.remove(&target_id);
-        });
+        remove_npc_runtime_state(ctx, sys_id, target_id);
         if removed_ball {
             crate::services::pve_incursion_sites::mark_incursion_boss_destroyed(ctx, sys_id, target_id);
             crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_core(&ctx.systems, &ctx.db, sys_id, target_id).await;

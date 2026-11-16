@@ -14,7 +14,7 @@ use eve_destiny::{
     TargetLock,
 };
 use eve_proto::PyRep;
-use eve_sde::SolarSystemId;
+use eve_sde::{SdeRegistry, SolarSystemId};
 use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -46,6 +46,8 @@ pub struct SystemHandle {
     pub command_panics: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(test)]
     pub(crate) panic_next_command_for_test: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    pub(crate) panic_on_command_countdown_for_test: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) npc_death_hook: Arc<RankedRwLock<Option<super::NpcDeathHook>, RANK_LEAF>>,
     pub(crate) module_deactivation_hook: Arc<RankedRwLock<Option<super::ModuleDeactivationHook>, RANK_LEAF>>,
     pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<super::TargetLockCompletedHook>, RANK_LEAF>>,
@@ -812,14 +814,16 @@ impl SystemHandle {
         }
     }
 
-    pub fn try_spawn_asteroid(&self, asteroid: AsteroidState, ball: Ball) {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-        let ball_id = ball.id;
-        let mut ast_ball = ball;
-        ast_ball.mode = eve_destiny::MovementMode::Rigid;
-        let (group_id, category_id, name) = st
-            .sde_opt
+    /// Inserts a rigid static asteroid ball and neutral `SlimItemMeta` into `bp` without adding it
+    /// to dynamic `grids`/`ball_grid_ids`, and broadcasts `AddBalls2` to all grid observers.
+    pub(super) fn spawn_asteroid_ball_in_ballpark(
+        bp: &mut Ballpark,
+        sde_opt: &Option<Arc<SdeRegistry>>,
+        ast_ball: &mut Ball,
+    ) {
+        let ball_id = ast_ball.id;
+        ast_ball.mode = MovementMode::Rigid;
+        let (group_id, category_id, name) = sde_opt
             .as_ref()
             .and_then(|s| s.types.get(&ast_ball.type_id))
             .map(|t| {
@@ -845,12 +849,22 @@ impl SystemHandle {
                 ..Default::default()
             },
         );
+        // Keep spawned asteroids static outside dynamic `grids`/`ball_grid_ids` (matching
+        // `belts.rs`) so empty dynamic grids contract/delete and `remove_ball` emits `RemoveBall`.
         bp.queue_event_for_all_grid_observers(
             Some(ball_id),
-            &eve_destiny::DestinyEvent::AddBalls2 {
+            &DestinyEvent::AddBalls2 {
                 balls: vec![ast_ball.clone()],
             },
         );
+    }
+
+    pub fn try_spawn_asteroid(&self, asteroid: AsteroidState, ball: Ball) {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        let ball_id = ball.id;
+        let mut ast_ball = ball;
+        Self::spawn_asteroid_ball_in_ballpark(&mut bp, &st.sde_opt, &mut ast_ball);
         st.asteroid_templates
             .insert(ball_id, (asteroid.clone(), ast_ball));
         st.asteroids.insert(ball_id, asteroid);
