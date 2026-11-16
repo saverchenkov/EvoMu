@@ -233,9 +233,131 @@ pub(crate) fn get_aggregated_ship_dbuffs(
     out
 }
 
-/// Applies active `dbuff` modifiers and system-wide wormhole/storm modifiers to a ship's attribute map.
+/// Removes all `ship_dbuffs` entries originating from `source_module_id` (plus expired entries)
+/// for `ctx.instance_id`, returning the sorted affected ship IDs.
+pub(crate) fn clear_ship_dbuffs_by_source_module(
+    ctx: &ServerContext,
+    source_module_id: i64,
+) -> Vec<i64> {
+    let now_unix = ctx.now_unix_secs();
+    let mut st = scanners_superweapons_state()
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut affected = Vec::new();
+    st.ship_dbuffs.retain(|&(inst_id, ship_id), entries| {
+        if inst_id != ctx.instance_id {
+            return true;
+        }
+        let before = entries.len();
+        entries.retain(|e| e.source_module_id != source_module_id && e.expires_at_unix > now_unix);
+        if entries.len() != before {
+            affected.push(ship_id);
+        }
+        !entries.is_empty()
+    });
+    affected.sort_unstable();
+    affected.dedup();
+    affected
+}
+
+/// Collects the effective `(dbuffCollectionID, value, expiryFiletime)` list for `DestinyEvent::OnDbuffUpdated`,
+/// preserving ship tether invulnerability (`60`) if currently tethered in `sys_opt`.
+pub(crate) fn collect_ship_destiny_dbuffs(
+    ctx: &ServerContext,
+    sys_opt: Option<&crate::system_actor::SystemHandle>,
+    ship_id: i64,
+    now_unix: u64,
+) -> Vec<(i64, f64, i64)> {
+    let agg = get_aggregated_ship_dbuffs(ctx, ship_id, now_unix);
+    let mut dbuffs: Vec<(i64, f64, i64)> = agg
+        .into_iter()
+        .map(|(id, (val, exp_unix))| {
+            (
+                i64::from(id),
+                val,
+                eve_destiny::unix_to_filetime(exp_unix),
+            )
+        })
+        .collect();
+    if let Some(sys) = sys_opt {
+        let tethered = sys
+            .ballpark
+            .try_read()
+            .map(|bp| bp.combat_states.get(&ship_id).is_some_and(|cs| cs.is_tethered))
+            .unwrap_or(false);
+        if tethered && !dbuffs.iter().any(|&(id, _, _)| id == 60) {
+            dbuffs.push((60, 1.0, eve_destiny::unix_to_filetime(now_unix + 3600)));
+        }
+    }
+    dbuffs.sort_unstable_by_key(|&(id, _, _)| id);
+    dbuffs
+}
+
+fn resolve_ship_system_handle_sync(
+    ctx: &ServerContext,
+    ship_id: i64,
+) -> Option<crate::system_actor::SystemHandle> {
+    ctx.systems
+        .find_ball_system_sync(ship_id)
+        .or_else(|| {
+            ctx.db.with_snapshot(|snap| {
+                snap.items
+                    .get(&ship_id)
+                    .and_then(|i| u32::try_from(i.location_id).ok())
+                    .filter(|s| {
+                        ctx.sde.solar_systems.contains_key(s)
+                            || (32_000_000..=32_999_999).contains(s)
+                    })
+            })
+        })
+        .and_then(|sys_id| ctx.systems.get_handle(sys_id))
+}
+
+/// Pushes refreshed fittings and non-blocking `DestinyEvent::OnDbuffUpdated` state to affected ships.
+pub(crate) fn sync_ship_dbuffs_and_destiny_sync(
+    ctx: &ServerContext,
+    ship_ids: &[i64],
+    now_unix: u64,
+) {
+    for &ship_id in ship_ids {
+        ctx.invalidate_and_push_fit(ship_id);
+        if let Some(sys) = resolve_ship_system_handle_sync(ctx, ship_id) {
+            let dbuffs = collect_ship_destiny_dbuffs(ctx, Some(&sys), ship_id, now_unix);
+            let _ = sys.try_emit_destiny_event(
+                ship_id,
+                eve_destiny::DestinyEvent::OnDbuffUpdated {
+                    ball_id: ship_id,
+                    dbuffs,
+                },
+            );
+        }
+    }
+}
+
+/// Pushes refreshed fittings and `DestinyEvent::OnDbuffUpdated` state onto `sys` for `ship_ids`.
+pub(crate) async fn sync_ship_dbuffs_and_destiny(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    ship_ids: &[i64],
+    now_unix: u64,
+) {
+    for &ship_id in ship_ids {
+        ctx.invalidate_and_push_fit(ship_id);
+        let dbuffs = collect_ship_destiny_dbuffs(ctx, Some(sys), ship_id, now_unix);
+        let _ = sys
+            .emit_destiny_event(
+                ship_id,
+                eve_destiny::DestinyEvent::OnDbuffUpdated {
+                    ball_id: ship_id,
+                    dbuffs,
+                },
+            )
+            .await;
+    }
+}
+
 /// Purges expired command-burst `ship_dbuffs` for `ctx.instance_id` at `now_unix` and pushes
-/// updated fit projections to affected in-space actors (`#834`, `#922`).
+/// updated fit projections and `DestinyEvent::OnDbuffUpdated` to affected in-space actors (`#834`, `#922`, `#1122`).
 pub fn purge_expired_ship_dbuffs_all(ctx: &ServerContext, now_unix: u64) {
     let expired_ships: Vec<i64> = {
         let mut st = scanners_superweapons_state()
@@ -253,11 +375,11 @@ pub fn purge_expired_ship_dbuffs_all(ctx: &ServerContext, now_unix: u64) {
             }
             !entries.is_empty()
         });
+        affected.sort_unstable();
+        affected.dedup();
         affected
     };
-    for ship_id in expired_ships {
-        ctx.invalidate_and_push_fit(ship_id);
-    }
+    sync_ship_dbuffs_and_destiny_sync(ctx, &expired_ships, now_unix);
 }
 
 pub fn apply_active_dbuffs_and_system_effects_to_ship_attrs(
@@ -979,6 +1101,13 @@ fn handle_system_wide_effects(
                         source_item_id: reset_sys as i64,
                     },
                 );
+                let in_space = session.station_id.is_none() && session.structure_id.is_none();
+                crate::services::notify_emitters_tournaments_anomalies::emit_update_system_wide_effects_info(
+                    ctx,
+                    char_id,
+                    session.solar_system_id,
+                    in_space,
+                );
                 return Some(Ok(PyRep::keyval([
                     ("solarSystemID", PyRep::Integer(reset_sys as i64)),
                     ("active", PyRep::Bool(false)),
@@ -1010,12 +1139,21 @@ fn handle_system_wide_effects(
                     if ship_id > 0 {
                         ctx.invalidate_and_push_fit(ship_id);
                     }
-                    ctx.emit_typed(
-                        crate::router::NotificationTarget::Character(char_id),
-                        crate::router::notify_registry::OnSystemWideEffectAdd {
-                            source_item_id: sys_id as i64,
-                            source_type_id: req_tid as i64,
-                        },
+                    if crate::services::notify_emitters_tournaments_anomalies::is_info_bubble_system_wide_effect_type(req_tid) {
+                        ctx.emit_typed(
+                            crate::router::NotificationTarget::Character(char_id),
+                            crate::router::notify_registry::OnSystemWideEffectAdd {
+                                source_item_id: sys_id as i64,
+                                source_type_id: req_tid as i64,
+                            },
+                        );
+                    }
+                    let in_space = session.station_id.is_none() && session.structure_id.is_none();
+                    crate::services::notify_emitters_tournaments_anomalies::emit_update_system_wide_effects_info(
+                        ctx,
+                        char_id,
+                        session.solar_system_id,
+                        in_space,
                     );
                 }
             }

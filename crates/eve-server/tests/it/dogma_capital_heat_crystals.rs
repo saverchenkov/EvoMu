@@ -851,6 +851,25 @@ async fn test_dg4_siege_triage_bastion_industrial_core_phenomena_and_zpme() {
     )
     .await
     .expect("Deactivate Amarr Phenomena Generator");
+    let ship_info_after_phenom = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "ItemGetInfo",
+            &[PyRep::Integer(ship_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ItemGetInfo after Deactivate Amarr Phenomena Generator");
+    let cap_recharge_after_phenom = extract_attr_from_info(&ship_info_after_phenom, 55);
+    let kin_res_after_phenom = extract_attr_from_info(&ship_info_after_phenom, 269);
+    assert!(
+        (cap_recharge_after_phenom - cap_recharge_before_phenom).abs() < 1e-3
+            && (kin_res_after_phenom - kin_res_before_phenom).abs() < 1e-4,
+        "Deactivating Phenomena Generator must clear dbuffs cleanly (cap {cap_recharge_after_phenom} vs {cap_recharge_before_phenom}, kin {kin_res_after_phenom} vs {kin_res_before_phenom})"
+    );
 
     // 6. Zero-Point Mass Entangler (49099) on Devoter Heavy Interdiction Cruiser (12017) (feat:modules.zero-point-mass-entangler)
     let mwd_id = 100_002_204i64;

@@ -793,6 +793,7 @@ pub type TargetLockCompletedHook = Arc<dyn Fn(CharacterId, BallId) + Send + Sync
 pub type SystemStepFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 pub type SystemStepHook =
     Arc<dyn Fn(SolarSystemId, f64, Vec<(BallId, Option<CharacterId>)>) -> SystemStepFuture + Send + Sync>;
+pub(crate) type PostUnlockHookAction = Box<dyn FnOnce() + Send>;
 
 /// DERIVED: Default active-entity + module-cycle load units per worker node before load-induced Time Dilation engages.
 pub const DEFAULT_NODE_LOAD_TIDI_THRESHOLD: usize = 80;

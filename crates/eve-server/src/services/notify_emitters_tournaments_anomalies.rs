@@ -15,7 +15,8 @@ use crate::router::notify_registry::{
     OnInfluenceUpdate, OnLeaveTournamentSystem, OnMatchMakingFailure, OnOreMinedByOther,
     OnProbeWarpEnd, OnProgressionLeft, OnProvingGroundsMatchFound, OnSignalTrackerFullState,
     OnSpaceWhiteOutStart, OnSystemActivityUpdated, OnSystemEffectStarted,
-    OnSystemWideEffectStop, OnTaleData, OnTaleRemove, OnTournamentMatchStateChange,
+    OnSystemWideEffectStart, OnSystemWideEffectStop, OnTaleData, OnTaleRemove,
+    OnTournamentMatchStateChange, OnUpdateSystemWideEffectsInfo,
 };
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::lock_rank::AnyRwLock;
@@ -678,6 +679,146 @@ pub fn emit_system_effect_started(ctx: &ServerContext, solar_system_id: u32, typ
     ctx.emit_typed(
         NotificationTarget::SolarSystem(solar_system_id),
         OnSystemEffectStarted { type_ids },
+    );
+}
+
+pub fn is_info_bubble_system_wide_effect_type(type_id: u32) -> bool {
+    // Only V24 `infoBubbles.static` (`infoBubbleTypeBonuses`) system-wide effect types
+    // (`group_id` 920 & 4033) can populate `SystemWideEffectButton` tooltips without `KeyError`.
+    matches!(
+        type_id,
+        3069
+            | 3493
+            | 3494
+            | 30844..=30854
+            | 30860..=30884
+            | 52247..=52249
+            | 54215
+            | 54330..=54333
+            | 54838
+            | 56057..=56064
+            | 56967
+            | 56997
+            | 74002
+            | 87294
+            | 90144..=90147
+    )
+}
+
+pub fn emit_system_wide_effect_start(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    char_id_fallback: Option<i64>,
+    effect_id: i64,
+    source_item_id: i64,
+    source_type_id: u32,
+) -> bool {
+    if !is_info_bubble_system_wide_effect_type(source_type_id) {
+        return false;
+    }
+    let notif = OnSystemWideEffectStart {
+        effect_id,
+        source_item_id,
+        source_type_id: i64::from(source_type_id),
+    };
+    let sent = ctx.emit_typed(NotificationTarget::SolarSystem(solar_system_id), notif.clone());
+    if let Some(char_id) = char_id_fallback {
+        if !sent.iter().any(|n| n.recipient_char_id == char_id) {
+            ctx.emit_typed_with_id_type(NotificationTarget::Character(char_id), "charid", notif);
+        }
+    }
+    true
+}
+
+pub fn build_system_wide_effects_on_ship_dict(
+    ctx: &ServerContext,
+    solar_system_id: Option<u32>,
+    in_space: bool,
+) -> PyRep {
+    let Some(sys_id) = solar_system_id.filter(|_| in_space) else {
+        return PyRep::Dict(Vec::new());
+    };
+    let mut active: Vec<(i64, u32)> = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|i| {
+                i.location_id == i64::from(sys_id) && is_info_bubble_system_wide_effect_type(i.type_id)
+            })
+            .map(|i| (i.item_id, i.type_id))
+            .collect()
+    });
+    let mut override_seen = false;
+    {
+        let sw = crate::services::inventory_fitting::scanners_superweapons_state()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(&tid) = sw.system_wide_effects.get(&sys_id) {
+            override_seen = true;
+            if is_info_bubble_system_wide_effect_type(tid)
+                && !active.iter().any(|&(_, existing)| existing == tid)
+            {
+                active.push((i64::from(sys_id), tid));
+            }
+        }
+        if let Some(list) = sw.system_wide_effect_lists.get(&sys_id) {
+            override_seen = true;
+            for &tid in list {
+                if is_info_bubble_system_wide_effect_type(tid)
+                    && !active.iter().any(|&(_, existing)| existing == tid)
+                {
+                    active.push((i64::from(sys_id), tid));
+                }
+            }
+        }
+    }
+    if !override_seen {
+        if let Some((_, _, _, wh_tid)) =
+            eve_dogma::resolve_system_wormhole_phenomenon(&ctx.sde, sys_id, None)
+        {
+            if is_info_bubble_system_wide_effect_type(wh_tid)
+                && !active.iter().any(|&(_, existing)| existing == wh_tid)
+            {
+                active.push((i64::from(sys_id), wh_tid));
+            }
+        }
+    }
+    active.sort_unstable();
+    active.dedup();
+    let entries = active
+        .into_iter()
+        .map(|(source_item_id, source_type_id)| {
+            let effect_id = ctx
+                .sde
+                .types
+                .get(&source_type_id)
+                .and_then(|t| t.effect_ids.first().copied())
+                .map(i64::from)
+                .unwrap_or_else(|| i64::from(source_type_id));
+            (
+                PyRep::Tuple(vec![
+                    PyRep::Integer(source_item_id),
+                    PyRep::Integer(i64::from(source_type_id)),
+                ]),
+                PyRep::Set(vec![PyRep::Integer(effect_id)]),
+            )
+        })
+        .collect();
+    PyRep::Dict(entries)
+}
+
+pub fn emit_update_system_wide_effects_info(
+    ctx: &ServerContext,
+    char_id: i64,
+    solar_system_id: Option<u32>,
+    in_space: bool,
+) {
+    let system_wide_effects_on_ship =
+        build_system_wide_effects_on_ship_dict(ctx, solar_system_id, in_space);
+    ctx.emit_typed(
+        NotificationTarget::Character(char_id),
+        OnUpdateSystemWideEffectsInfo {
+            system_wide_effects_on_ship,
+        },
     );
 }
 

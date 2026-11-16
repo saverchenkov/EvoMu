@@ -1754,6 +1754,16 @@ define_notifications! {
         fields: { svc: String, node_id: i64 },
         samples: || vec![vec![PyRep::String("dogmaIM".into()), PyRep::Integer(26_000)]],
     },
+    OnUpdateSystemWideEffectsInfo => "OnUpdateSystemWideEffectsInfo" ("charid") {
+        fields: { system_wide_effects_on_ship: PyRep },
+        samples: || vec![
+            vec![PyRep::Dict(Vec::new())],
+            vec![PyRep::Dict(vec![(
+                PyRep::Tuple(vec![PyRep::Integer(30_000_142), PyRep::Integer(30_844)]),
+                PyRep::Set(vec![PyRep::Integer(6_753)]),
+            )])],
+        ],
+    },
     OnVictoryPointStateUpdated => "OnVictoryPointStateUpdated" ("solarsystemid") {
         fields: { solar_system_id: i64, new_victory_point_state: PyRep },
         samples: || vec![vec![PyRep::Integer(30_000_142), PyRep::Dict(Vec::new())]],

@@ -1498,6 +1498,20 @@ pub(crate) fn build_all_info(
         ctx.push_brain_update(char_id);
     }
 
+    let in_space = session.station_id.is_none()
+        && session.structure_id.is_none()
+        && ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .get(&char_id)
+                .is_none_or(|c| c.station_id.is_none() && c.structure_id.is_none())
+        });
+    let system_wide_effects_on_ship =
+        crate::services::notify_emitters_tournaments_anomalies::build_system_wide_effects_on_ship_dict(
+            ctx,
+            session.solar_system_id,
+            in_space,
+        );
+
     PyRep::keyval([
         ("shipID", PyRep::Integer(ship_id)),
         ("charID", PyRep::Integer(char_id)),
@@ -1508,7 +1522,7 @@ pub(crate) fn build_all_info(
         ("shipInfo", ship_info),
         ("charInfo", char_info),
         ("shipModifiedCharAttribs", PyRep::None),
-        ("systemWideEffectsOnShip", PyRep::Dict(Vec::new())),
+        ("systemWideEffectsOnShip", system_wide_effects_on_ship),
         ("shipState", ship_state),
     ])
 }

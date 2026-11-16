@@ -1274,9 +1274,13 @@ pub(crate) async fn commit_post_cycle_activation_effects(
                 }
             }
         }
-        for &sid in &dyn_ship_ids {
-            ctx.invalidate_ship_fitting(sid);
-        }
+        super::fitting_scanners_superweapons::sync_ship_dbuffs_and_destiny(
+            ctx,
+            sys,
+            &dyn_ship_ids,
+            now_unix,
+        )
+        .await;
     }
 
     if let Some((burst_center, burst_radius, victims)) = deferred.burst_projector {
@@ -1391,25 +1395,9 @@ pub(crate) fn emit_committed_ewar_and_system_wide_notifications(
     hic_bubble_radius_m: Option<f64>,
     target_id_opt: Option<i64>,
 ) {
-    if mod_type.group_id == 1815 {
-        let effect_id = mod_type.effect_ids.first().copied().unwrap_or(6753) as i64;
-        let sw_notif = crate::router::notify_registry::OnSystemWideEffectStart {
-            effect_id,
-            source_item_id: module_id,
-            source_type_id: i64::from(module_type_id),
-        };
-        let sent = ctx.emit_typed(
-            crate::router::NotificationTarget::SolarSystem(sys_id),
-            sw_notif.clone(),
-        );
-        if !sent.iter().any(|n| n.recipient_char_id == char_id) {
-            ctx.emit_typed_with_id_type(
-                crate::router::NotificationTarget::Character(char_id),
-                "charid",
-                sw_notif,
-            );
-        }
-    }
+    // Phenomena Generators (`group_id == 1815`) render via Destiny `OnDbuffUpdated` (`Slot_TitanBurst`)
+    // rather than `OnSystemWideEffectStart`, since their module types are absent from V24 `infoBubbles.static`.
+    let _ = (sys_id, module_type_id, mod_type.group_id);
 
     let Some(target_id) = target_id_opt.filter(|&tid| tid > 0 && tid != ship_id) else {
         return;

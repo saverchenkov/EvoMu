@@ -4,7 +4,7 @@ use super::*;
 
 // parity: notify:OnFighterTubeContentUpdate, notify:OnFighterTubeContentEmpty, notify:OnFighterTubeTaskStatus
 // parity: notify:OnFighterAddedToController, notify:OnFighterAbilitySlotActivated, notify:OnFighterAbilitySlotDeactivated
-// parity: notify:OnInSpaceSquadronSizeChanged, notify:OnFighterRemovedFromController, notify:OnSystemWideEffectStart
+// parity: notify:OnInSpaceSquadronSizeChanged, notify:OnFighterRemovedFromController, notify:OnSystemWideEffectStart, notify:OnUpdateSystemWideEffectsInfo
 // parity: notify:OnEwarStart, notify:OnMutualWarsUpdated_Remote, notify:OnItemsChanged
 // parity: notify:OnSignalTrackerSignatureUpdate, notify:OnSignalTrackerAnomalyUpdate, notify:OnSignalTrackerStructureUpdate
 #[tokio::test]
@@ -19,6 +19,7 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
         "notify:OnInSpaceSquadronSizeChanged",
         "notify:OnFighterRemovedFromController",
         "notify:OnSystemWideEffectStart",
+        "notify:OnUpdateSystemWideEffectsInfo",
         "notify:OnEwarStart",
         "notify:OnMutualWarsUpdated_Remote",
         "notify:OnItemsChanged",
@@ -164,10 +165,66 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
         snap.items.insert(fuel_id, make_item(fuel_id, 16_274, PILOT_A, carrier_id, InventoryFlag::Cargo, 40_000, false));
     });
     ctx.invalidate_ship_fitting(carrier_id);
+    let sys_handle = ctx.systems.get_or_spawn(sys_lowsec);
+    let _ = std::mem::take(&mut sys_handle.ballpark.write().unwrap().pending_events);
     rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", &[PyRep::Integer(phenom_id), PyRep::String("TitanPhenomenaGenerator".into()), PyRep::None, PyRep::Integer(1)]).await.expect("Phenomena");
     let phenom_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    let sw_args = find_notif(&phenom_notifs, "OnSystemWideEffectStart");
-    assert_eq!((sw_args.len(), &sw_args[1], &sw_args[2]), (3, &PyRep::Integer(phenom_id), &PyRep::Integer(43_658)));
+    assert!(
+        !phenom_notifs.iter().any(|(e, _)| e == "OnSystemWideEffectStart"),
+        "Phenomena Generators (43658) must not emit OnSystemWideEffectStart: {phenom_notifs:?}"
+    );
+    let phenom_destiny = std::mem::take(&mut sys_handle.ballpark.write().unwrap().pending_events);
+    assert!(
+        phenom_destiny.iter().any(|ev| matches!(
+            ev,
+            eve_destiny::DestinyEvent::OnDbuffUpdated { ball_id, dbuffs }
+                if *ball_id == carrier_id && !dbuffs.is_empty()
+        )),
+        "Phenomena activation must emit non-empty Destiny OnDbuffUpdated on BuffBar: {phenom_destiny:?}"
+    );
+    rpc(&ctx, &mut sess_a, "dogmaIM", "Deactivate", &[PyRep::Integer(phenom_id), PyRep::String("TitanPhenomenaGenerator".into())]).await.expect("Deactivate Phenomena");
+    let phenom_clear_destiny = std::mem::take(&mut sys_handle.ballpark.write().unwrap().pending_events);
+    assert!(
+        phenom_clear_destiny.iter().any(|ev| matches!(
+            ev,
+            eve_destiny::DestinyEvent::OnDbuffUpdated { ball_id, dbuffs }
+                if *ball_id == carrier_id && dbuffs.is_empty()
+        )),
+        "Phenomena deactivation must emit cleared Destiny OnDbuffUpdated: {phenom_clear_destiny:?}"
+    );
+    assert!(
+        !eve_server::services::notify_emitters_tournaments_anomalies::emit_system_wide_effect_start(
+            &ctx, sys_lowsec, Some(PILOT_A), 6753, phenom_id, 43_658,
+        )
+    );
+    assert!(
+        eve_server::services::notify_emitters_tournaments_anomalies::emit_system_wide_effect_start(
+            &ctx, sys_lowsec, Some(PILOT_A), 6753, i64::from(sys_lowsec), 30_844,
+        )
+    );
+    let sw_drained = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let sw_args = find_notif(&sw_drained, "OnSystemWideEffectStart");
+    assert_eq!((sw_args.len(), &sw_args[1], &sw_args[2]), (3, &PyRep::Integer(i64::from(sys_lowsec)), &PyRep::Integer(30_844)));
+
+    // #1122: OnSessionChanged syncs systemWideEffectsOnShip via `OnUpdateSystemWideEffectsInfo`
+    // and `GetAllInfo` exposes only `infoBubbles`-backed system-wide effects.
+    let mut sess_sync = sess_a.clone();
+    let snap_sync = sess_sync.clone();
+    eve_server::router::emit_on_session_changed(
+        &ctx,
+        Some(&mut sess_sync),
+        &snap_sync,
+        PILOT_A,
+        &std::collections::HashMap::from([(
+            "solarsystemid".to_string(),
+            (PyRep::Integer(31_000_001), PyRep::Integer(i64::from(sys_lowsec))),
+        )]),
+    );
+    let sw_sync_drained = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let sw_sync_args = find_notif(&sw_sync_drained, "OnUpdateSystemWideEffectsInfo");
+    assert_eq!(sw_sync_args, &[PyRep::Dict(Vec::new())]);
+    let all_info = rpc(&ctx, &mut sess_a, "dogmaIM", "GetAllInfo", &[PyRep::Bool(false), PyRep::Bool(false), PyRep::Bool(false)]).await.expect("GetAllInfo");
+    assert_eq!(all_info.dict_get("systemWideEffectsOnShip"), Some(&PyRep::Dict(Vec::new())));
 
     // 9. SignalTrackerRegister (zero initial spam) + real signature/anomaly/structure delta updates
     rpc(&ctx, &mut sess_a, "scanMgr", "SignalTrackerRegister", &[]).await.expect("SignalTrackerRegister");
