@@ -1899,3 +1899,241 @@ async fn weapon_autoload_defers_commit_on_partial_missile_bank_and_precondition_
     assert!(ok_notifs.iter().any(|n| n.event == "OnModuleAttributeChanges"));
     assert!(ok_notifs.iter().any(|n| n.event == "OnChargeLoadedToModule"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn weapon_autoload_damaged_crystal_preserves_dynamic_attributes_and_mutaplasmid_gh1124() {
+    use eve_proto::PyRep;
+
+    let mut ctx = new_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 97_993_001_i64;
+    let other_char_id = 97_993_002_i64;
+    let ship_id = 97_993_100_i64;
+    let target_ship_id = 97_993_101_i64;
+    let laser_singleton_id = 97_993_201_i64;
+    let laser_split_id = 97_993_202_i64;
+    let laser_fastpath_id = 97_993_203_i64;
+    let crys_singleton_id = 97_993_301_i64;
+    let crys_split_id = 97_993_302_i64;
+    let crys_fastpath_id = 97_993_303_i64;
+
+    let mut laser_type = synth_type(
+        53_912,
+        53,
+        "Pulse Laser II",
+        &[10],
+        &[(604, 86.0), (128, 1.0), (51, 3000.0), (54, 15_000.0), (158, 5_000.0), (160, 1.0), (6, 5.0), (64, 1.0)],
+    );
+    laser_type.capacity = 5.0;
+    let mut crystal_type = synth_type(
+        86_912,
+        86,
+        "Scorch S",
+        &[],
+        &[
+            (128, 1.0),
+            (114, 25.0),
+            (118, 25.0),
+            (786, 1.0),
+            (783, 1.0),
+            (784, 0.05),
+            (9, 1.0),
+        ],
+    );
+    crystal_type.category_id = 8;
+    crystal_type.volume = 1.0;
+    {
+        let sde_mut = Arc::make_mut(&mut ctx.sde);
+        sde_mut.types.insert(53_912, laser_type);
+        sde_mut.types.insert(86_912, crystal_type);
+    }
+
+    let mut sess = setup_gh1124_space_pilot_and_ship(&ctx, char_id, ship_id, sys_id, true);
+    let _ = setup_gh1124_space_pilot_and_ship(&ctx, other_char_id, target_ship_id, sys_id, false);
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    spawn_test_ball(&sys, ship_id, 587, DVec3::ZERO, MovementMode::Stop, 500.0).await;
+    spawn_test_ball(&sys, target_ship_id, 587, DVec3::new(1_000.0, 0.0, 0.0), MovementMode::Stop, 500.0).await;
+    let _ = sys
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: target_ship_id,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
+
+    // 1. Move-in-place branch (`singleton: true`): damaged crystal keeps damage + source_mutaplasmid_id
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            laser_singleton_id,
+            InventoryItemRecord {
+                item_id: laser_singleton_id,
+                type_id: 53_912,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            laser_split_id,
+            InventoryItemRecord {
+                item_id: laser_split_id,
+                type_id: 53_912,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot1,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            laser_fastpath_id,
+            InventoryItemRecord {
+                item_id: laser_fastpath_id,
+                type_id: 53_912,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot2,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        let mut s_dyn = HashMap::new();
+        s_dyn.insert(eve_sde::attr_ids::DAMAGE, 0.45);
+        snap.items.insert(
+            crys_singleton_id,
+            InventoryItemRecord {
+                item_id: crys_singleton_id,
+                type_id: 86_912,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                dynamic_attributes: s_dyn,
+                source_mutaplasmid_id: Some(49_711),
+                ..Default::default()
+            },
+        );
+    });
+    ctx.invalidate_and_push_fit(ship_id);
+    let kw = HashMap::new();
+    crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(laser_singleton_id), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .expect("Some")
+    .expect("singleton damaged crystal autoload must succeed");
+    ctx.db.with_snapshot(|s| {
+        let loaded = &s.items[&crys_singleton_id];
+        assert_eq!(loaded.flag, InventoryFlag::HiSlot0);
+        assert!(loaded.singleton);
+        assert_eq!(loaded.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE), Some(&0.45));
+        assert_eq!(loaded.source_mutaplasmid_id, Some(49_711));
+    });
+
+    // 2. Stack-split branch (`singleton: false`): damaged non-singleton crystal keeps damage + source_mutaplasmid_id
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ns_dyn = HashMap::new();
+        ns_dyn.insert(eve_sde::attr_ids::DAMAGE, 0.62);
+        snap.items.insert(
+            crys_split_id,
+            InventoryItemRecord {
+                item_id: crys_split_id,
+                type_id: 86_912,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                dynamic_attributes: ns_dyn,
+                source_mutaplasmid_id: Some(49_712),
+                ..Default::default()
+            },
+        );
+    });
+    crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(laser_split_id), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .expect("Some")
+    .expect("non-singleton damaged crystal autoload must succeed");
+    ctx.db.with_snapshot(|s| {
+        let loaded = s
+            .items
+            .values()
+            .find(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot1 && i.item_id != laser_split_id)
+            .expect("split damaged crystal loaded into HiSlot1");
+        assert_eq!(loaded.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE), Some(&0.62));
+        assert_eq!(loaded.source_mutaplasmid_id, Some(49_712));
+    });
+
+    // 3. Direct `combat_weapons::handle_weapons` autoload preserves damaged crystal & advances volatility from 0.40 -> 0.45
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut fp_dyn = HashMap::new();
+        fp_dyn.insert(eve_sde::attr_ids::DAMAGE, 0.40);
+        snap.items.insert(
+            crys_fastpath_id,
+            InventoryItemRecord {
+                item_id: crys_fastpath_id,
+                type_id: 86_912,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                dynamic_attributes: fp_dyn,
+                source_mutaplasmid_id: Some(49_713),
+                ..Default::default()
+            },
+        );
+    });
+    let res = crate::services::combat_crimewatch::combat_weapons::handle_weapons(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(laser_fastpath_id), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .expect("Some")
+    .expect("handle_weapons damaged crystal autoload + fire must succeed");
+    let frac = match &res {
+        PyRep::KeyVal(entries) => entries.get("crystalDamageFraction").and_then(|v| v.as_f64()),
+        _ => None,
+    }
+    .expect("crystalDamageFraction in response");
+    assert!((frac - 0.45).abs() < 1e-6, "expected 0.40 + 0.05 = 0.45 damage, got {frac}");
+    ctx.db.with_snapshot(|s| {
+        let loaded = s
+            .items
+            .values()
+            .find(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot2 && i.item_id != laser_fastpath_id)
+            .expect("fastpath crystal loaded into HiSlot2");
+        let dmg = loaded.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied().unwrap_or(0.0);
+        assert!((dmg - 0.45).abs() < 1e-6, "slot crystal damage must advance from 0.40 to 0.45, got {dmg}");
+        assert_eq!(loaded.source_mutaplasmid_id, Some(49_713));
+    });
+}

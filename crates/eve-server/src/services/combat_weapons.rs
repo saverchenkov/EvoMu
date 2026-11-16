@@ -22,7 +22,7 @@ fn emit_limited_engagement_created(ctx: &ServerContext, char_a: i64, char_b: i64
     );
 }
 
-fn emit_weapon_charge_diff(
+pub(crate) fn emit_weapon_charge_diff(
     ctx: &ServerContext,
     char_id: i64,
     ship_id: i64,
@@ -44,6 +44,33 @@ fn emit_weapon_charge_diff(
     if depleted {
         ctx.invalidate_and_push_fit(ship_id);
     }
+}
+
+pub(crate) fn consume_one_weapon_round_and_emit(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    charge_item_id: i64,
+) {
+    let ammo_diff = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ci) = snap.items.get_mut(&charge_item_id) {
+            let pre_rec = ci.clone();
+            let post_rec = if ci.quantity > 1 {
+                ci.quantity -= 1;
+                ci.version += 1;
+                Some(ci.clone())
+            } else {
+                snap.items.remove(&charge_item_id);
+                snap.module_active_charges.remove(&module_id);
+                None
+            };
+            Some((Some(pre_rec), post_rec))
+        } else {
+            None
+        }
+    });
+    emit_weapon_charge_diff(ctx, char_id, ship_id, ammo_diff);
 }
 
 pub async fn handle_weapons(
@@ -427,6 +454,49 @@ pub async fn handle_weapons(
             }
 
             // 2-4. Smartbomb (`72`), Bomb Launcher (`862`), and Defender Launcher (`512`)
+            if matches!(mod_type.group_id, 862 | 512) {
+                if mod_type.group_id == 862 {
+                    if let Err(e) = super::combat_missiles_aoe::check_bomb_launcher_preconditions(
+                        ctx, char_id, sys_id, sys_sec,
+                    ) {
+                        return Some(Err(e));
+                    }
+                }
+                let allowed_groups: &[u32] = if mod_type.group_id == 862 {
+                    &[90, 863, 864]
+                } else {
+                    &[88]
+                };
+                if let Some((_cid, ctid)) =
+                    super::combat_missiles_aoe::find_loaded_aoe_launcher_charge(
+                        ctx,
+                        ship_id,
+                        module_id,
+                        m.flag_id,
+                        allowed_groups,
+                    )
+                {
+                    if let Err(e) = ctx.db.with_snapshot(|snap| {
+                        ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, ctid)
+                    }) {
+                        return Some(Err(e));
+                    }
+                } else {
+                    match crate::services::inventory_fitting::fitting_ewar_capital::plan_weapon_autoload(
+                        ctx, char_id, ship_id, module_id, mod_type,
+                    ) {
+                        Ok(Some(plan)) => {
+                            if let Err(e) = crate::services::inventory_fitting::fitting_ewar_capital::commit_and_emit_weapon_autoload(
+                                ctx, char_id, ship_id, mod_type, &plan,
+                            ) {
+                                return Some(Err(e));
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => return Some(Err(e)),
+                    }
+                }
+            }
             if let Some(aoe_res) = crate::router::box_fut(|| {
                 activate_aoe_or_defender_module(
                     ctx,
@@ -477,28 +547,65 @@ pub async fn handle_weapons(
             );
             let is_civilian_turret =
                 mod_type.capacity <= 0.0 || matches!(m.type_id, 3634 | 3636 | 3638 | 3640);
-            let (charge_item_id_opt, charge_type_id_opt) = match loaded_charge_opt {
-                Some((cid, ctid)) => (Some(cid), Some(ctid)),
+            let mut pending_weapon_autoload: Option<
+                crate::services::inventory_fitting::fitting_ewar_capital::PendingWeaponAutoload,
+            > = None;
+            let (mut charge_item_id_opt, charge_type_id_opt) = match loaded_charge_opt {
+                Some((cid, ctid)) => {
+                    if let Err(e) = ctx.db.with_snapshot(|snap| {
+                        ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, ctid)
+                    }) {
+                        return Some(Err(e));
+                    }
+                    (Some(cid), Some(ctid))
+                }
                 None if is_civilian_turret && !is_missile_launcher => (None, None),
                 None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "NoAmmoLoaded".into(),
-                        message: format!("Weapon module {module_id} has no compatible charge loaded"),
-                        client_error: None,
-                    }));
-                }
-            };
-            if let Some(charge_type_id) = charge_type_id_opt {
-                if let Some(fm) = fit.modules.get_mut(&module_id) {
-                    if fm.charge_type_id != Some(charge_type_id) {
-                        fm.charge_type_id = Some(charge_type_id);
-                        fm.charge_quantity = fm.charge_quantity.max(1);
-                        fit.recalculate_stats(&ctx.sde);
+                    match crate::services::inventory_fitting::fitting_ewar_capital::plan_weapon_autoload(
+                        ctx, char_id, ship_id, module_id, mod_type,
+                    ) {
+                        Ok(Some(plan)) => {
+                            let ammo_tid = plan.ammo_type_id;
+                            pending_weapon_autoload = Some(plan);
+                            (None, Some(ammo_tid))
+                        }
+                        Ok(None) => {
+                            return Some(Err(BridgeRpcError {
+                                code: "NoAmmoLoaded".into(),
+                                message: format!(
+                                    "Weapon module {module_id} has no compatible charge loaded"
+                                ),
+                                client_error: None,
+                            }));
+                        }
+                        Err(e) => return Some(Err(e)),
                     }
                 }
-            }
-            let mod_state =
-                fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
+            };
+            let mod_state = if let Some(plan) = pending_weapon_autoload.as_ref() {
+                let mut pre_fit = fit.clone();
+                if let Some(fm) = pre_fit.modules.get_mut(&module_id) {
+                    fm.charge_type_id = Some(plan.ammo_type_id);
+                    fm.charge_quantity = plan
+                        .slot_allocations
+                        .iter()
+                        .find(|&&(tid, _, _)| tid == module_id)
+                        .map_or(1, |&(_, _, q)| q.max(0) as u32);
+                }
+                pre_fit.recalculate_stats(&ctx.sde);
+                pre_fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde)
+            } else {
+                if let Some(charge_type_id) = charge_type_id_opt {
+                    if let Some(fm) = fit.modules.get_mut(&module_id) {
+                        if fm.charge_type_id != Some(charge_type_id) {
+                            fm.charge_type_id = Some(charge_type_id);
+                            fm.charge_quantity = fm.charge_quantity.max(1);
+                            fit.recalculate_stats(&ctx.sde);
+                        }
+                    }
+                }
+                fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde)
+            };
             let charge_type_opt = charge_type_id_opt.and_then(|ctid| ctx.sde.types.get(&ctid));
             let is_fof_missile = charge_type_opt.is_some_and(|ct| matches!(ct.group_id, 394..=396));
             let is_entropic = mod_type.group_id == 1986;
@@ -668,13 +775,13 @@ pub async fn handle_weapons(
                     mod_type.default_attributes.get(&54).copied().unwrap_or(5_000.0)
                 }
             };
-            let has_charge_mod = |attr: u16| {
-                let (Some(charge_item_id), Some(charge_type)) = (charge_item_id_opt, charge_type_opt) else {
+            let has_charge_mod = |attr: u16, active_charge_item_id: Option<i64>| {
+                let Some(charge_type) = charge_type_opt else {
                     return false;
                 };
                 mod_state.modifiers.iter().any(|m| {
                     m.target_attribute_id == attr
-                        && (m.source_item_id == charge_item_id
+                        && (active_charge_item_id.is_some_and(|cid| m.source_item_id == cid)
                             || (m.source_item_id == 0
                                 && m.effect_id
                                     .is_some_and(|eid| charge_type.effect_ids.contains(&eid))))
@@ -683,7 +790,7 @@ pub async fn handle_weapons(
             let dark_mult = crate::services::pve_abyssal_hazards::dark_weather_midpocket_turret_mult(
                 ctx, char_id, sys_id, is_missile_launcher, module_id, &mod_type,
             );
-            let optimal_range = (if has_charge_mod(54) { base_opt } else { base_opt * range_mult }) * dark_mult;
+            let optimal_range = (if has_charge_mod(54, charge_item_id_opt) { base_opt } else { base_opt * range_mult }) * dark_mult;
             let falloff_v = mod_state.get_attribute(158, &ctx.sde);
             let falloff_range = (if falloff_v > 0.0 { falloff_v } else {
                 mod_type.default_attributes.get(&158).copied().unwrap_or(5_000.0)
@@ -762,7 +869,7 @@ pub async fn handle_weapons(
                 let cap_bonus_pct = charge_type_opt
                     .and_then(|ct| ct.default_attributes.get(&317).copied())
                     .unwrap_or(0.0);
-                if has_charge_mod(6) {
+                if has_charge_mod(6, charge_item_id_opt) {
                     raw_cap.max(0.0)
                 } else {
                     (raw_cap * (1.0 + cap_bonus_pct / 100.0)).max(0.0)
@@ -770,7 +877,8 @@ pub async fn handle_weapons(
             };
             let mut cap_before = 0.0;
             let mut cap_after = 0.0;
-            if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
+            let mut pending_cap_after: Option<f64> = None;
+            if let Ok(Some(cs)) = sys_handle.get_combat_state(ship_id).await {
                 cap_before = cs.capacitor;
                 if base_cap_need > 0.0 {
                     if cs.capacitor + 1e-6 < base_cap_need {
@@ -783,11 +891,41 @@ pub async fn handle_weapons(
                             client_error: None,
                         }));
                     }
-                    cs.capacitor = (cs.capacitor - base_cap_need).max(0.0);
-                    let new_cap = cs.capacitor;
-                    let _ = sys_handle.set_capacitor(ship_id, new_cap).await;
+                    cap_after = (cs.capacitor - base_cap_need).max(0.0);
+                    pending_cap_after = Some(cap_after);
+                } else {
+                    cap_after = cs.capacitor;
                 }
-                cap_after = cs.capacitor;
+            }
+            if let Some(plan) = pending_weapon_autoload.take() {
+                let committed = match crate::services::inventory_fitting::fitting_ewar_capital::commit_and_emit_weapon_autoload(
+                    ctx,
+                    char_id,
+                    ship_id,
+                    mod_type,
+                    &plan,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => return Some(Err(e)),
+                };
+                charge_item_id_opt = committed
+                    .created_slot_charges
+                    .iter()
+                    .find(|&&(tid, _)| tid == module_id)
+                    .map(|&(_, cid)| cid);
+                if let Some(fm) = fit.modules.get_mut(&module_id) {
+                    fm.charge_type_id = Some(plan.ammo_type_id);
+                    fm.charge_quantity = plan
+                        .slot_allocations
+                        .iter()
+                        .find(|&&(tid, _, _)| tid == module_id)
+                        .map_or(1, |&(_, _, q)| q.max(0) as u32);
+                }
+                m.charge_type_id = Some(plan.ammo_type_id);
+                fit.recalculate_stats(&ctx.sde);
+            }
+            if let Some(new_cap) = pending_cap_after {
+                let _ = sys_handle.set_capacitor(ship_id, new_cap).await;
             }
 
             let charge_attr = |aid: u16, fallback: f64| -> f64 {
@@ -874,25 +1012,8 @@ pub async fn handle_weapons(
                 }
             } else {
                 // Consume 1 round of projectile/hybrid/exotic-plasma/vorton/missile/breacher ammo
-                let ammo_diff = ctx.db.with_mut_snapshot(|snap| {
-                    if let Some(ci) = snap.items.get_mut(&charge_item_id) {
-                        let pre_rec = ci.clone();
-                        let post_rec = if ci.quantity > 1 {
-                            ci.quantity -= 1;
-                            ci.version += 1;
-                            Some(ci.clone())
-                        } else {
-                            snap.items.remove(&charge_item_id);
-                            snap.module_active_charges.remove(&module_id);
-                            None
-                        };
-                        Some((Some(pre_rec), post_rec))
-                    } else {
-                        None
-                    }
-                });
-                emit_weapon_charge_diff(ctx, char_id, ship_id, ammo_diff);
-                }
+                consume_one_weapon_round_and_emit(ctx, char_id, ship_id, module_id, charge_item_id);
+            }
             }
 
             // Weapon damage calculation (evaluated via `ShipFittingEngine` for both charge & launcher/turret)
@@ -993,7 +1114,7 @@ pub async fn handle_weapons(
                 .map(|cs| cs.tracking_speed_multiplier)
                 .filter(|&m| m > 0.0)
                 .unwrap_or(1.0);
-            let tracking_speed = (if has_charge_mod(160) {
+            let tracking_speed = (if has_charge_mod(160, charge_item_id_opt) {
                 base_tracking
             } else {
                 base_tracking * tracking_mult

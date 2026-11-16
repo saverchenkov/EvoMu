@@ -65,7 +65,7 @@ fn is_weapon_autoload_stack_consumable(
     ServerContext::is_charge_compatible_with_weapon(mod_type, ct)
 }
 
-fn plan_weapon_autoload(
+pub(crate) fn plan_weapon_autoload(
     ctx: &ServerContext,
     char_id: i64,
     ship_id: i64,
@@ -160,19 +160,20 @@ fn plan_weapon_autoload(
     })
 }
 
-struct CommittedWeaponAutoload {
-    autoload_diffs: Vec<(
+pub(crate) struct CommittedWeaponAutoload {
+    pub autoload_diffs: Vec<(
         Option<eve_db::InventoryItemRecord>,
         Option<eve_db::InventoryItemRecord>,
     )>,
-    loaded_bank: Vec<i64>,
-    cycle_consume_diffs: Vec<(
+    pub loaded_bank: Vec<i64>,
+    pub cycle_consume_diffs: Vec<(
         eve_db::InventoryItemRecord,
         Option<eve_db::InventoryItemRecord>,
     )>,
+    pub created_slot_charges: Vec<(i64, i64)>,
 }
 
-fn commit_pending_weapon_autoload_in_snapshot(
+pub(crate) fn commit_pending_weapon_autoload_in_snapshot(
     ctx: &ServerContext,
     snap: &mut eve_db::WorldStateSnapshot,
     char_id: i64,
@@ -209,6 +210,8 @@ fn commit_pending_weapon_autoload_in_snapshot(
     let mut autoload_diffs = Vec::new();
     let mut loaded_bank = Vec::with_capacity(plan.slot_allocations.len());
     let mut created_slot_charges: Vec<(i64, i64)> = Vec::with_capacity(plan.slot_allocations.len());
+    let pre_dynamic_attributes = stack_pre.dynamic_attributes.clone();
+    let pre_source_mutaplasmid_id = stack_pre.source_mutaplasmid_id;
 
     if stack_pre.singleton && plan.total_take == 1 && plan.slot_allocations.len() == 1 {
         let (tid, tf, _) = plan.slot_allocations[0];
@@ -216,6 +219,8 @@ fn commit_pending_weapon_autoload_in_snapshot(
         if let Some(st) = snap.items.get_mut(&plan.cargo_stack_id) {
             st.flag = tf;
             st.version += 1;
+            st.dynamic_attributes = pre_dynamic_attributes.clone();
+            st.source_mutaplasmid_id = pre_source_mutaplasmid_id;
             moved = st.clone();
         }
         snap.module_active_charges.insert(tid, plan.ammo_type_id);
@@ -247,6 +252,8 @@ fn commit_pending_weapon_autoload_in_snapshot(
                 quantity: give,
                 singleton: false,
                 version: 1,
+                dynamic_attributes: pre_dynamic_attributes.clone(),
+                source_mutaplasmid_id: pre_source_mutaplasmid_id,
                 ..Default::default()
             };
             snap.items.insert(cid, new_rec.clone());
@@ -258,6 +265,7 @@ fn commit_pending_weapon_autoload_in_snapshot(
     }
 
     let mut cycle_consume_diffs = Vec::new();
+    let mut final_slot_charges = Vec::with_capacity(created_slot_charges.len());
     if plan.consume_one_round_per_slot {
         for (tid, cid) in created_slot_charges {
             if let Some(pre) = snap.items.get(&cid).cloned() {
@@ -266,18 +274,68 @@ fn commit_pending_weapon_autoload_in_snapshot(
                 if let Ok(post) = snap.consume_exact_item_quantity(cid, 1, opts) {
                     if post.is_none() {
                         snap.module_active_charges.remove(&tid);
+                    } else {
+                        final_slot_charges.push((tid, cid));
                     }
                     cycle_consume_diffs.push((pre, post));
                 }
             }
         }
+    } else {
+        final_slot_charges = created_slot_charges;
     }
 
     Ok(CommittedWeaponAutoload {
         autoload_diffs,
         loaded_bank,
         cycle_consume_diffs,
+        created_slot_charges: final_slot_charges,
     })
+}
+
+pub(crate) fn emit_committed_weapon_autoload_notifications(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    autoload_diffs: &[(
+        Option<eve_db::InventoryItemRecord>,
+        Option<eve_db::InventoryItemRecord>,
+    )],
+    loaded_bank: &[i64],
+) {
+    ctx.invalidate_and_push_fit(ship_id);
+    crate::services::inventory_fitting::fitting_module_cycles::emit_ship_charge_item_diffs(
+        ctx,
+        char_id,
+        ship_id,
+        autoload_diffs,
+    );
+    crate::services::notify_emitters_seasons_tactical::emit_charge_and_bank_ammo_loaded(
+        ctx,
+        char_id,
+        ship_id,
+        loaded_bank,
+    );
+}
+
+pub(crate) fn commit_and_emit_weapon_autoload(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    mod_type: &eve_sde::InvType,
+    plan: &PendingWeaponAutoload,
+) -> Result<CommittedWeaponAutoload, BridgeRpcError> {
+    let committed = ctx.db.try_with_mut_snapshot(|snap| {
+        commit_pending_weapon_autoload_in_snapshot(ctx, snap, char_id, ship_id, mod_type, plan)
+    })?;
+    emit_committed_weapon_autoload_notifications(
+        ctx,
+        char_id,
+        ship_id,
+        &committed.autoload_diffs,
+        &committed.loaded_bank,
+    );
+    Ok(committed)
 }
 
 /// Collects eligible ship fuel stacks for `fuel_type_id` in `SpecializedFuelBay` (`133`)
@@ -1455,17 +1513,11 @@ pub(crate) async fn commit_post_cycle_activation_effects(
             },
         )?;
         if let Some((autoload_diffs, loaded_bank)) = committed_autoload {
-            ctx.invalidate_and_push_fit(ship_id);
-            crate::services::inventory_fitting::fitting_module_cycles::emit_ship_charge_item_diffs(
+            emit_committed_weapon_autoload_notifications(
                 ctx,
                 char_id,
                 ship_id,
                 &autoload_diffs,
-            );
-            crate::services::notify_emitters_seasons_tactical::emit_charge_and_bank_ammo_loaded(
-                ctx,
-                char_id,
-                ship_id,
                 &loaded_bank,
             );
         }

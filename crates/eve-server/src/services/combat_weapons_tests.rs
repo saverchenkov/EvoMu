@@ -1534,3 +1534,443 @@ async fn weapon_ammo_depletion_one_to_zero_emits_item_tombstone_and_sublocation_
         "1 -> 0 round depletion must emit OnModuleAttributeChanges(805: 1.0 -> 0.0)"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handle_weapons_and_fastpath_enforce_skill_prereqs_and_gated_autoload_gh1124() {
+    use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, SafetyLevel};
+    use crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles;
+
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let kwargs = HashMap::new();
+    let victim_char = 90_009_124_i64;
+    let victim_ship = 200_091_124_i64;
+    let far_npc = 930_912_124_i64;
+
+    let mut sde = (*ctx.sde).clone();
+    sde.types.insert(
+        19_868,
+        make_fighter_type(
+            19_868,
+            1986,
+            7,
+            5.0,
+            vec![
+                (6, 20.0),
+                (51, 3_000.0),
+                (54, 10_000.0),
+                (158, 2_000.0),
+                (160, 1.0),
+                (604, 1987.0),
+                (128, 1.0),
+                (620, 40_000.0),
+                (64, 1.0),
+                (2733, 0.10),
+                (2734, 1.50),
+            ],
+        ),
+    );
+    sde.types.insert(
+        19_878,
+        make_fighter_type(19_878, 1987, 8, 0.01, vec![(117, 50.0), (118, 50.0), (128, 1.0)]),
+    );
+    sde.types.insert(
+        19_879,
+        make_fighter_type(
+            19_879,
+            1987,
+            8,
+            0.01,
+            vec![(117, 80.0), (118, 80.0), (128, 1.0), (182, 12_210.0), (277, 1.0)],
+        ),
+    );
+    sde.types.insert(
+        40_608,
+        make_fighter_type(
+            40_608,
+            4060,
+            7,
+            5.0,
+            vec![(6, 20.0), (51, 3_000.0), (54, 10_000.0), (158, 2_000.0), (604, 4061.0), (128, 1.0), (64, 1.0)],
+        ),
+    );
+    sde.types.insert(
+        40_619,
+        make_fighter_type(
+            40_619,
+            4061,
+            8,
+            0.01,
+            vec![(114, 60.0), (117, 60.0), (128, 1.0), (182, 12_210.0), (277, 1.0)],
+        ),
+    );
+    sde.types.insert(
+        86_208,
+        make_fighter_type(
+            86_208,
+            862,
+            7,
+            75.0,
+            vec![(51, 5_000.0), (604, 90.0), (128, 1.0)],
+        ),
+    );
+    sde.types.insert(
+        90_008,
+        make_fighter_type(90_008, 90, 8, 75.0, vec![(114, 500.0), (37, 2_500.0), (281, 12_000.0), (99, 15_000.0), (654, 400.0)]),
+    );
+    sde.types.insert(
+        90_009,
+        make_fighter_type(
+            90_009,
+            90,
+            8,
+            75.0,
+            vec![(114, 750.0), (182, 12_210.0), (277, 1.0)],
+        ),
+    );
+    sde.types.insert(
+        10_098,
+        make_fighter_type(10_098, 550, 11, 1_000.0, vec![(eve_sde::attr_ids::ENTITY_KILL_BOUNTY, 10_000.0)]),
+    );
+    ctx.sde = std::sync::Arc::new(sde);
+
+    ctx.db
+        .acquire_online_lock(session.user_id.unwrap_or(1), 999_224, Some(char_id), true, ctx.now_unix())
+        .unwrap();
+
+    let entropic_preloaded_id = 831_001_i64;
+    let entropic_t2_slot_ammo = 831_002_i64;
+    let vorton_preloaded_id = 831_003_i64;
+    let vorton_t2_slot_ammo = 831_004_i64;
+    let entropic_auto_id = 831_005_i64;
+    let cargo_t2_ammo = 831_006_i64;
+    let cargo_t1_ammo = 831_007_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let tmpl = snap.characters[&char_id].clone();
+        let mut vch = tmpl;
+        vch.character_id = victim_char;
+        vch.user_id = victim_char as u64;
+        vch.active_ship_id = victim_ship;
+        vch.solar_system_id = sys_id;
+        vch.station_id = None;
+        vch.structure_id = None;
+        snap.characters.insert(victim_char, vch);
+        snap.items.insert(
+            victim_ship,
+            make_fighter_item(victim_ship, 23_915, victim_char, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            entropic_preloaded_id,
+            make_fighter_item(entropic_preloaded_id, 19_868, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        let mut e_pre = make_fighter_item(entropic_t2_slot_ammo, 19_879, char_id, ship_id, InventoryFlag::HiSlot0, 5);
+        e_pre.singleton = false;
+        snap.items.insert(entropic_t2_slot_ammo, e_pre);
+
+        snap.items.insert(
+            vorton_preloaded_id,
+            make_fighter_item(vorton_preloaded_id, 40_608, char_id, ship_id, InventoryFlag::HiSlot1, 1),
+        );
+        let mut v_pre = make_fighter_item(vorton_t2_slot_ammo, 40_619, char_id, ship_id, InventoryFlag::HiSlot1, 5);
+        v_pre.singleton = false;
+        snap.items.insert(vorton_t2_slot_ammo, v_pre);
+
+        snap.items.insert(
+            entropic_auto_id,
+            make_fighter_item(entropic_auto_id, 19_868, char_id, ship_id, InventoryFlag::HiSlot2, 1),
+        );
+        let mut c_t2 = make_fighter_item(cargo_t2_ammo, 19_879, char_id, ship_id, InventoryFlag::Cargo, 10);
+        c_t2.singleton = false;
+        snap.items.insert(cargo_t2_ammo, c_t2);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for (id, tid, pos, cap) in [
+        (ship_id, 23_915_u32, DVec3::ZERO, 500.0),
+        (victim_ship, 23_915_u32, DVec3::new(3_000.0, 0.0, 0.0), 500.0),
+        (far_npc, 10_098_u32, DVec3::new(50_000.0, 0.0, 0.0), 500.0),
+    ] {
+        sys_handle
+            .spawn_ball_with_combat(
+                Ball {
+                    id,
+                    type_id: tid,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 200.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    shield_hp: 2_000.0,
+                    max_shield_hp: 2_000.0,
+                    armor_hp: 2_000.0,
+                    max_armor_hp: 2_000.0,
+                    structure_hp: 2_000.0,
+                    max_structure_hp: 2_000.0,
+                    capacitor: cap,
+                    max_capacitor: 500.0,
+                    signature_radius: 120.0,
+                    base_signature_radius: Some(120.0),
+                    ..CombatState::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    for tid in [victim_ship, far_npc] {
+        sys_handle
+            .add_target_lock(
+                ship_id,
+                TargetLock {
+                    target_id: tid,
+                    lock_time_ms: 0.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: Some(100_000.0),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Red);
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Preloaded untrained T2 charge on Entropic fast-path (`handle_module_cycles -> handle_weapons`) -> SkillPrerequisitesNotMet
+    let err_ent_pre = handle_module_cycles(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(entropic_preloaded_id), PyRep::String("targetAttack".into()), PyRep::Integer(victim_ship)],
+        &kwargs,
+    )
+    .await
+    .expect("Some")
+    .expect_err("untrained preloaded Entropic charge must fail");
+    assert_eq!(err_ent_pre.code, "SkillPrerequisitesNotMet");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&entropic_t2_slot_ammo].quantity), 5);
+    assert!(with_combat_runtime(&ctx, |rt| !rt.entropic_spools.contains_key(&(ship_id, entropic_preloaded_id))));
+
+    // 2. Preloaded untrained T2 charge on Vorton `handle_weapons` -> SkillPrerequisitesNotMet
+    let err_vor_pre = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(vorton_preloaded_id), PyRep::String("targetAttack".into()), PyRep::Integer(victim_ship)],
+        &kwargs,
+    )
+    .await
+    .expect("Some")
+    .expect_err("untrained preloaded Vorton charge must fail");
+    assert_eq!(err_vor_pre.code, "SkillPrerequisitesNotMet");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&vorton_t2_slot_ammo].quantity), 5);
+
+    // 3. Empty Entropic gun with ONLY untrained T2 ammo in Cargo -> SkillPrerequisitesNotMet, zero mutation
+    let err_ent_auto_untrained = handle_module_cycles(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(entropic_auto_id), PyRep::String("targetAttack".into()), PyRep::Integer(victim_ship)],
+        &kwargs,
+    )
+    .await
+    .expect("Some")
+    .expect_err("untrained cargo Entropic autoload must fail");
+    assert_eq!(err_ent_auto_untrained.code, "SkillPrerequisitesNotMet");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&cargo_t2_ammo].quantity), 10);
+
+    // 4. Add trained T1 ammo alongside untrained T2 ammo; precondition failures must NEVER mutate cargo/slot/notifications
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut c_t1 = make_fighter_item(cargo_t1_ammo, 19_878, char_id, ship_id, InventoryFlag::Cargo, 10);
+        c_t1.singleton = false;
+        snap.items.insert(cargo_t1_ammo, c_t1);
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let assert_clean_entropic = |label: &str| {
+        ctx.db.with_snapshot(|s| {
+            assert_eq!(s.items.get(&cargo_t1_ammo).map(|i| i.quantity), Some(10), "{label}: cargo T1 stack untouched");
+            assert!(
+                !s.items.values().any(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot2 && i.item_id != entropic_auto_id),
+                "{label}: HiSlot2 must remain empty"
+            );
+            assert!(!s.module_active_charges.contains_key(&entropic_auto_id), "{label}: no active charge recorded");
+        });
+        assert!(with_combat_runtime(&ctx, |rt| !rt.entropic_spools.contains_key(&(ship_id, entropic_auto_id))), "{label}: no spool started");
+        let notifs = ctx.drain_notifications_for_char(char_id);
+        assert!(
+            !notifs.iter().any(|n| matches!(n.event.as_str(), "OnItemChange" | "OnGodmaPrimeItem" | "OnModuleAttributeChanges" | "OnChargeLoadedToModule")),
+            "{label}: zero reload notifications allowed, got {:?}",
+            notifs.iter().map(|n| n.event.as_str()).collect::<Vec<_>>()
+        );
+    };
+
+    assert_eq!(
+        handle_module_cycles(&ctx, &mut session, None, "dogmaIM", "Activate", &[PyRep::Integer(entropic_auto_id), PyRep::String("targetAttack".into()), PyRep::Integer(999_888_777)], &kwargs)
+            .await.expect("Some").expect_err("unlocked target").code,
+        "TargetNotLocked"
+    );
+    assert_clean_entropic("TargetNotLocked");
+
+    assert_eq!(
+        handle_module_cycles(&ctx, &mut session, None, "dogmaIM", "Activate", &[PyRep::Integer(entropic_auto_id), PyRep::String("targetAttack".into()), PyRep::Integer(far_npc)], &kwargs)
+            .await.expect("Some").expect_err("out of range").code,
+        "TargetOutOfRange"
+    );
+    assert_clean_entropic("TargetOutOfRange");
+
+    sys_handle.set_capacitor(ship_id, 0.0).await.unwrap();
+    assert_eq!(
+        handle_module_cycles(&ctx, &mut session, None, "dogmaIM", "Activate", &[PyRep::Integer(entropic_auto_id), PyRep::String("targetAttack".into()), PyRep::Integer(victim_ship)], &kwargs)
+            .await.expect("Some").expect_err("zero cap").code,
+        "NotEnoughCapacitor"
+    );
+    assert_clean_entropic("NotEnoughCapacitor");
+
+    sys_handle.set_capacitor(ship_id, 500.0).await.unwrap();
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Green);
+    });
+    assert_eq!(
+        handle_module_cycles(&ctx, &mut session, None, "dogmaIM", "Activate", &[PyRep::Integer(entropic_auto_id), PyRep::String("targetAttack".into()), PyRep::Integer(victim_ship)], &kwargs)
+            .await.expect("Some").expect_err("Safety Green in Jita").code,
+        "CantDoInCurrentSafetyLevel"
+    );
+    assert_clean_entropic("CantDoInCurrentSafetyLevel");
+
+    // 5. All preconditions pass -> silently autoloads trained T1 stack, consumes 1 round, starts spool cleanly
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Red);
+    });
+    handle_module_cycles(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(entropic_auto_id), PyRep::String("targetAttack".into()), PyRep::Integer(victim_ship)],
+        &kwargs,
+    )
+    .await
+    .expect("Some")
+    .expect("Entropic activation with valid preconditions must silently autoload and fire");
+
+    ctx.db.with_snapshot(|s| {
+        assert!(!s.items.contains_key(&cargo_t1_ammo), "trained T1 cargo stack moved into HiSlot2");
+        assert_eq!(s.items[&cargo_t2_ammo].quantity, 10, "untrained T2 stack untouched");
+        let slot_charge = s
+            .items
+            .values()
+            .find(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot2 && i.item_id != entropic_auto_id)
+            .expect("T1 charge loaded into HiSlot2");
+        assert_eq!(slot_charge.type_id, 19_878);
+        assert_eq!(slot_charge.quantity, 9, "10 loaded then 1 round fired -> 9 remaining");
+        assert!(with_combat_runtime(&ctx, |rt| {
+            rt.entropic_spools.get(&(ship_id, entropic_auto_id)).and_then(|st| st.charge_item_id) == Some(slot_charge.item_id)
+        }));
+    });
+    let ok_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(ok_notifs.iter().any(|n| n.event == "OnGodmaPrimeItem"));
+    assert!(ok_notifs.iter().any(|n| n.event == "OnModuleAttributeChanges"));
+    assert!(ok_notifs.iter().any(|n| n.event == "OnChargeLoadedToModule"));
+
+    // 6. Bomb Launcher (group 862) fast-path: enforces skill prereqs + gates autoload behind highsec/safety preconditions
+    let bomb_launcher_id = 831_008_i64;
+    let bomb_untrained_cargo_id = 831_009_i64;
+    let bomb_trained_cargo_id = 831_010_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            bomb_launcher_id,
+            make_fighter_item(bomb_launcher_id, 86_208, char_id, ship_id, InventoryFlag::HiSlot3, 1),
+        );
+        let mut b_untrained = make_fighter_item(bomb_untrained_cargo_id, 90_009, char_id, ship_id, InventoryFlag::Cargo, 1);
+        b_untrained.singleton = false;
+        snap.items.insert(bomb_untrained_cargo_id, b_untrained);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Untrained bomb in cargo rejected in lowsec with Red safety
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.modified_system_securities.insert(sys_id, 0.2);
+        rt.safety_levels.insert(char_id, SafetyLevel::Red);
+    });
+    assert_eq!(
+        handle_module_cycles(&ctx, &mut session, None, "dogmaIM", "Activate", &[PyRep::Integer(bomb_launcher_id)], &kwargs)
+            .await
+            .expect("Some")
+            .expect_err("untrained cargo bomb must fail")
+            .code,
+        "SkillPrerequisitesNotMet"
+    );
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&bomb_untrained_cargo_id].quantity), 1);
+
+    // Add trained bomb in cargo; highsec & Green safety must fail BEFORE autoloading or mutating cargo
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut b_trained = make_fighter_item(bomb_trained_cargo_id, 90_008, char_id, ship_id, InventoryFlag::Cargo, 1);
+        b_trained.singleton = false;
+        snap.items.insert(bomb_trained_cargo_id, b_trained);
+    });
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.modified_system_securities.remove(&sys_id);
+    });
+    assert_eq!(
+        handle_module_cycles(&ctx, &mut session, None, "dogmaIM", "Activate", &[PyRep::Integer(bomb_launcher_id)], &kwargs)
+            .await
+            .expect("Some")
+            .expect_err("highsec blocks bomb before autoload")
+            .code,
+        "BombDisallowedInHighSec"
+    );
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&bomb_trained_cargo_id].quantity), 1);
+
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.modified_system_securities.insert(sys_id, 0.2);
+        rt.safety_levels.insert(char_id, SafetyLevel::Green);
+    });
+    assert_eq!(
+        handle_module_cycles(&ctx, &mut session, None, "dogmaIM", "Activate", &[PyRep::Integer(bomb_launcher_id)], &kwargs)
+            .await
+            .expect("Some")
+            .expect_err("Green safety blocks bomb in lowsec before autoload")
+            .code,
+        "CantDoInCurrentSafetyLevel"
+    );
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&bomb_trained_cargo_id].quantity), 1);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty(), "precondition failures must emit zero reload notifications");
+
+    // Lowsec + Red safety -> autoloads 1 trained bomb, launches it, consumes 1 -> 0 with tombstone
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Red);
+    });
+    handle_module_cycles(&ctx, &mut session, None, "dogmaIM", "Activate", &[PyRep::Integer(bomb_launcher_id)], &kwargs)
+        .await
+        .expect("Some")
+        .expect("lowsec Red safety autoloads and launches trained bomb");
+    ctx.db.with_snapshot(|s| {
+        assert!(!s.items.contains_key(&bomb_trained_cargo_id), "trained bomb moved and consumed");
+        assert!(
+            !s.items.values().any(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot3 && i.item_id != bomb_launcher_id),
+            "1 -> 0 bomb depletion removes charge item from slot"
+        );
+    });
+    let bomb_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        bomb_notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args[0].dbrow_get("locationID") == Some(&PyRep::Integer(6))
+                && n.args[0].dbrow_get("quantity") == Some(&PyRep::Integer(0))
+        }),
+        "bomb 1 -> 0 depletion must emit OnItemChange tombstone"
+    );
+}
