@@ -279,7 +279,7 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
                             eve_proto::pb::raw_message(encode_skyhook(snap, &sde, id, now)),
                         );
                     }
-                    Ok::<_, RpcError>(builder.must_encode())
+                    builder.encode_or_internal_err()
                 })?;
                 Ok(any("eve_public.sovereignty.skyhook.api.GetAllLocalResponse", out))
             }),
@@ -320,7 +320,7 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
                             eve_proto::pb::raw_message(encode_skyhook(snap, &sde, id, now)),
                         );
                     }
-                    Ok(builder.must_encode())
+                    builder.encode_or_internal_err()
                 })?;
                 Ok(any("eve_public.sovereignty.skyhook.api.GetAllByCorporationResponse", out))
             }),
@@ -354,7 +354,7 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
             Arc::new(move |ctx, _any, dyn_msg| {
                 let sys = required_id(dyn_msg, 1, "Solar system")? as u32;
                 let now = ctx.now_unix();
-                let any_resp = db.with_snapshot(|snap| {
+                db.with_snapshot(|snap| {
                     let mut builder = eve_proto::pb::message(
                         "eve_public.sovereignty.skyhook.api.GetTheftVulnerableSkyhooksInSolarSystemResponse",
                     );
@@ -367,9 +367,8 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
                             });
                         }
                     }
-                    builder.must_to_any()
-                });
-                Ok(any_resp)
+                    builder.to_any_or_internal_err()
+                })
             }),
         );
     }

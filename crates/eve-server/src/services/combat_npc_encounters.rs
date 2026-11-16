@@ -967,42 +967,44 @@ pub fn record_npc_kill_progression(
     if killer_char_id <= 0 {
         return;
     }
-    ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(
-        killer_char_id as u32,
-        1,
-        1,
-        &ctx.quasar_gateway,
-    );
-    ctx.quasar_gateway.progression.career_goals.on_gameplay_event(
-        killer_char_id as u32,
-        "combat",
-        1,
-        &ctx.quasar_gateway,
-    );
-    ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
-        killer_char_id as u32,
-        &["destroyHostileNPC", "entityGroupDestroyed"],
-        1,
-        ctx.now_unix(),
-        &ctx.quasar_gateway,
-    );
-    crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
-        ctx,
-        killer_char_id,
-        &["DamageNPCShips", "DestroyNPCShips"],
-        1,
-        npc_type_id.map(|t| t as i64),
-    );
-    let tid = npc_type_id.unwrap_or(0);
-    let gid = ctx.sde.types.get(&tid).map(|t| t.group_id).unwrap_or(0);
-    let params = [("typeID", tid.to_string()), ("groupID", gid.to_string())];
-    crate::services::operations_manager_helpers::record_server_operation_event(
-        ctx,
-        killer_char_id,
-        "somethingExplode",
-        &params,
-        1,
-    );
+    crate::quasar_gateway::isolate_side_effect("combat_npc_encounters.npc_destroyed_progression", || {
+        ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(
+            killer_char_id as u32,
+            1,
+            1,
+            &ctx.quasar_gateway,
+        );
+        ctx.quasar_gateway.progression.career_goals.on_gameplay_event(
+            killer_char_id as u32,
+            "combat",
+            1,
+            &ctx.quasar_gateway,
+        );
+        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
+            killer_char_id as u32,
+            &["destroyHostileNPC", "entityGroupDestroyed"],
+            1,
+            ctx.now_unix(),
+            &ctx.quasar_gateway,
+        );
+        crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
+            ctx,
+            killer_char_id,
+            &["DamageNPCShips", "DestroyNPCShips"],
+            1,
+            npc_type_id.map(|t| t as i64),
+        );
+        let tid = npc_type_id.unwrap_or(0);
+        let gid = ctx.sde.types.get(&tid).map(|t| t.group_id).unwrap_or(0);
+        let params = [("typeID", tid.to_string()), ("groupID", gid.to_string())];
+        crate::services::operations_manager_helpers::record_server_operation_event(
+            ctx,
+            killer_char_id,
+            "somethingExplode",
+            &params,
+            1,
+        );
+    });
 }
 
 #[cfg(test)]

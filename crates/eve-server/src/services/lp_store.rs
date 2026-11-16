@@ -809,14 +809,18 @@ fn handle_take_offer(
                     } else {
                         "eve_public.entitlement.character.ship.corplogo"
                     };
-                    let any = eve_proto::pb::message(&format!("{pkg}.GrantedNotice"))
-                        .set_raw_message("entitlement", ident)
-                        .must_to_any();
-                    let _ = ctx.quasar_gateway.publish_notice(
-                        crate::quasar_gateway::NoticeScope::Character(char_id as u32),
-                        any,
-                        ctx.now_unix(),
-                    );
+                    if let Some(any) = crate::quasar_gateway::pb_to_any_or_log(
+                        "lp_store.logo_granted_notice",
+                        eve_proto::pb::message(&format!("{pkg}.GrantedNotice"))
+                            .set_raw_message("entitlement", ident),
+                    ) {
+                        let _ = ctx.quasar_gateway.publish_notice_isolated(
+                            crate::quasar_gateway::NoticeScope::Character(char_id as u32),
+                            "lp_store.logo_granted_notice",
+                            any,
+                            ctx.now_unix(),
+                        );
+                    }
                 }
             }
             if is_corp_take {

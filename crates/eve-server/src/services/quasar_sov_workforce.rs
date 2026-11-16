@@ -205,8 +205,11 @@ fn fill_configuration(b: ProtoBuilder, m: &PersistedWorkforceMode) -> ProtoBuild
 
 /// Encodes `eve_public.sovereignty.hub.workforce.Configuration` for a persisted mode.
 pub fn encode_configuration(m: &PersistedWorkforceMode) -> Vec<u8> {
-    fill_configuration(pb::message("eve_public.sovereignty.hub.workforce.Configuration"), m)
-        .must_encode()
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_sov_workforce.encode_configuration",
+        fill_configuration(pb::message("eve_public.sovereignty.hub.workforce.Configuration"), m),
+    )
+    .unwrap_or_default()
 }
 
 fn fill_export_destination(b: ProtoBuilder, destination: Option<u32>) -> ProtoBuilder {
@@ -247,8 +250,11 @@ fn fill_state(
 
 /// Encodes the computed `eve_public.sovereignty.hub.workforce.State` of a hub.
 pub fn encode_state(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Vec<u8> {
-    fill_state(pb::message("eve_public.sovereignty.hub.workforce.State"), snap, sde, hub_id)
-        .must_encode()
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_sov_workforce.encode_state",
+        fill_state(pb::message("eve_public.sovereignty.hub.workforce.State"), snap, sde, hub_id),
+    )
+    .unwrap_or_default()
 }
 
 /// Decodes a `Configuration` sub-message into a persisted workforce mode.
@@ -397,16 +403,13 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
             "eve_public.sovereignty.hub.workforce.api.GetStateRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
                 let hub_id = required_id(dyn_msg, 1, "Hub")?;
-                let resp = db.with_snapshot(|snap| {
+                db.with_snapshot(|snap| {
                     let c = caller(ctx, snap)?;
                     owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
-                    Ok::<_, RpcError>(
-                        pb::message("eve_public.sovereignty.hub.workforce.api.GetStateResponse")
-                            .set_with("state", |st| fill_state(st, snap, &sde, hub_id))
-                            .must_to_any(),
-                    )
-                })?;
-                Ok(resp)
+                    pb::message("eve_public.sovereignty.hub.workforce.api.GetStateResponse")
+                        .set_with("state", |st| fill_state(st, snap, &sde, hub_id))
+                        .to_any_or_internal_err()
+                })
             }),
         );
     }
@@ -416,17 +419,14 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
             "eve_public.sovereignty.hub.workforce.api.GetConfigurationRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
                 let hub_id = required_id(dyn_msg, 1, "Hub")?;
-                let resp = db.with_snapshot(|snap| {
+                db.with_snapshot(|snap| {
                     let c = caller(ctx, snap)?;
                     owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
                     let m = mode(snap, hub_id);
-                    Ok::<_, RpcError>(
-                        pb::message("eve_public.sovereignty.hub.workforce.api.GetConfigurationResponse")
-                            .set_with("configuration", |cfg| fill_configuration(cfg, &m))
-                            .must_to_any(),
-                    )
-                })?;
-                Ok(resp)
+                    pb::message("eve_public.sovereignty.hub.workforce.api.GetConfigurationResponse")
+                        .set_with("configuration", |cfg| fill_configuration(cfg, &m))
+                        .to_any_or_internal_err()
+                })
             }),
         );
     }
@@ -515,13 +515,16 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                             break;
                         }
                     }
-                    let n = pb::message(CONFIGURED_NOTICE)
-                        .set("solar_system.sequential", sys)
-                        .set_with("old_configuration", |c| fill_configuration(c, &old))
-                        .set_with("new_configuration", |c| fill_configuration(c, &new_mode))
-                        .set("hub.sequential", hub_id as u64)
-                        .must_encode();
-                    push_notice(&pending, sys, CONFIGURED_NOTICE, n);
+                    if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
+                        "quasar_sov_workforce.configure.configured",
+                        pb::message(CONFIGURED_NOTICE)
+                            .set("solar_system.sequential", sys)
+                            .set_with("old_configuration", |c| fill_configuration(c, &old))
+                            .set_with("new_configuration", |c| fill_configuration(c, &new_mode))
+                            .set("hub.sequential", hub_id as u64),
+                    ) {
+                        push_notice(&pending, sys, CONFIGURED_NOTICE, n);
+                    }
                     for &id in &all_hub_ids {
                         let changed = snap
                             .sov_runtime
@@ -530,28 +533,31 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                             .is_some_and(|h| prev_upgrades.get(&id) != Some(&h.upgrades));
                         if changed {
                             if let Some(h_sys) = hub_sys(snap, id) {
-                                let sim_n = pb::message(
-                                    "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
-                                )
-                                .set_raw_message(
-                                    "hub_upgrades",
-                                    encode_hub_upgrades(&sde, id, snap.sov_runtime.sov_hubs.get(&id)),
-                                )
-                                .must_encode();
-                                push_notice(
-                                    &pending,
-                                    h_sys,
-                                    "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
-                                    sim_n,
-                                );
+                                if let Some(sim_n) = crate::quasar_gateway::pb_encode_or_log(
+                                    "quasar_sov_workforce.configure.upgrades_simulated",
+                                    pb::message(
+                                        "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
+                                    )
+                                    .set_raw_message(
+                                        "hub_upgrades",
+                                        encode_hub_upgrades(&sde, id, snap.sov_runtime.sov_hubs.get(&id)),
+                                    ),
+                                ) {
+                                    push_notice(
+                                        &pending,
+                                        h_sys,
+                                        "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
+                                        sim_n,
+                                    );
+                                }
                             }
                         }
                     }
                     emit_hub_diffs(&pending, &before, &hub_views(snap, &sde, &extra));
                     Ok(())
                 })?;
-                Ok(pb::message("eve_public.sovereignty.hub.workforce.api.ConfigureResponse")
-                    .must_to_any())
+                pb::message("eve_public.sovereignty.hub.workforce.api.ConfigureResponse")
+                    .to_any_or_internal_err()
             }),
         );
     }
@@ -561,7 +567,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
             "eve_public.sovereignty.hub.workforce.api.GetNetworkableHubsRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
                 let hub_id = required_id(dyn_msg, 1, "Hub")?;
-                let resp = db.with_snapshot(|snap| {
+                db.with_snapshot(|snap| {
                     let c = caller(ctx, snap)?;
                     owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
                     let mut b = pb::message(
@@ -576,9 +582,8 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                                 .set_with("state", |st| fill_state(st, snap, &sde, other))
                         });
                     }
-                    Ok::<_, RpcError>(b.must_to_any())
-                })?;
-                Ok(resp)
+                    b.to_any_or_internal_err()
+                })
             }),
         );
     }

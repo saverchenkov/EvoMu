@@ -30,15 +30,18 @@ pub fn publish_achievement_milestone_reached_notice(
     aid: u32,
     milestone_id: u32,
 ) {
-    let notice = pb::message("eve_public.achievement.milestone.api.ReachedNotice")
-        .set("achievement.uuid", id_to_uuid(aid))
-        .set("milestone.uuid", id_to_uuid(milestone_id))
-        .must_to_any();
-    gateway
-        .pending_notices
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((crate::quasar_gateway::NoticeScope::Character(cid), notice));
+    if let Some(notice) = crate::quasar_gateway::pb_to_any_or_log(
+        "quasar_achievements_ops.publish_achievement_milestone_reached_notice",
+        pb::message("eve_public.achievement.milestone.api.ReachedNotice")
+            .set("achievement.uuid", id_to_uuid(aid))
+            .set("milestone.uuid", id_to_uuid(milestone_id)),
+    ) {
+        gateway
+            .pending_notices
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((crate::quasar_gateway::NoticeScope::Character(cid), notice));
+    }
 }
 
 pub fn publish_achievement_version_check_notice(
@@ -47,17 +50,19 @@ pub fn publish_achievement_version_check_notice(
     minor: u64,
     patch: u64,
 ) {
-    let notice = pb::message("eve_public.achievement.definition.version.api.CheckVersionNotice")
-        .set("version.major", major as u32)
-        .set("version.minor", minor as u32)
-        .set("version.patch", patch as u32)
-        .must_to_any();
-
-    gateway
-        .pending_notices
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((crate::quasar_gateway::NoticeScope::Broadcast, notice));
+    if let Some(notice) = crate::quasar_gateway::pb_to_any_or_log(
+        "quasar_achievements_ops.publish_achievement_version_check_notice",
+        pb::message("eve_public.achievement.definition.version.api.CheckVersionNotice")
+            .set("version.major", major as u32)
+            .set("version.minor", minor as u32)
+            .set("version.patch", patch as u32),
+    ) {
+        gateway
+            .pending_notices
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((crate::quasar_gateway::NoticeScope::Broadcast, notice));
+    }
 }
 
 pub fn publish_achievement_category_progress_notice(
@@ -66,15 +71,18 @@ pub fn publish_achievement_category_progress_notice(
     category_id: u32,
     score: u32,
 ) {
-    let notice = pb::message("eve_public.achievement.category.api.ProgressedNotice")
-        .set("category.uuid", id_to_uuid(category_id))
-        .set("score", score)
-        .must_to_any();
-    gateway
-        .pending_notices
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((crate::quasar_gateway::NoticeScope::Character(cid), notice));
+    if let Some(notice) = crate::quasar_gateway::pb_to_any_or_log(
+        "quasar_achievements_ops.publish_achievement_category_progress_notice",
+        pb::message("eve_public.achievement.category.api.ProgressedNotice")
+            .set("category.uuid", id_to_uuid(category_id))
+            .set("score", score),
+    ) {
+        gateway
+            .pending_notices
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((crate::quasar_gateway::NoticeScope::Character(cid), notice));
+    }
 }
 
 pub fn publish_achievement_category_milestone_notice(
@@ -83,15 +91,18 @@ pub fn publish_achievement_category_milestone_notice(
     category_id: u32,
     milestone_id: u32,
 ) {
-    let notice = pb::message("eve_public.achievement.category.milestone.api.ReachedNotice")
-        .set("category.uuid", id_to_uuid(category_id))
-        .set("milestone.uuid", id_to_uuid(milestone_id))
-        .must_to_any();
-    gateway
-        .pending_notices
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((crate::quasar_gateway::NoticeScope::Character(cid), notice));
+    if let Some(notice) = crate::quasar_gateway::pb_to_any_or_log(
+        "quasar_achievements_ops.publish_achievement_category_milestone_notice",
+        pb::message("eve_public.achievement.category.milestone.api.ReachedNotice")
+            .set("category.uuid", id_to_uuid(category_id))
+            .set("milestone.uuid", id_to_uuid(milestone_id)),
+    ) {
+        gateway
+            .pending_notices
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((crate::quasar_gateway::NoticeScope::Character(cid), notice));
+    }
 }
 
 /// Registers all admin handlers for achievement progress, completion, reset, and version control.
@@ -237,7 +248,7 @@ pub fn register_achievement_admin_handlers(
             let cat_prog = pb::message("eve_public.achievement.category.api.ProgressedNotice")
                 .set("category.uuid", id_to_uuid(cat_id))
                 .set("score", 0u32)
-                .must_to_any();
+                .to_any_or_internal_err()?;
             super::quasar_social_chat::ctx_queue_notice(
                 crate::quasar_gateway::NoticeScope::Character(cid),
                 cat_prog,
@@ -258,7 +269,7 @@ pub fn register_achievement_admin_handlers(
                     .set("version.major", 24u32)
                     .set("version.minor", 1u32)
                     .set("version.patch", 0u32)
-                    .must_to_any();
+                    .to_any_or_internal_err()?;
 
             super::quasar_social_chat::ctx_queue_notice(
                 crate::quasar_gateway::NoticeScope::Broadcast,
@@ -332,7 +343,7 @@ pub fn register_achievement_handlers(
                 });
             }
 
-            Ok(msg.must_to_any())
+            msg.to_any_or_internal_err()
         }),
     );
 
@@ -350,9 +361,9 @@ pub fn register_achievement_handlers(
                 .filter(|&id| id > 0)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing category identifier".into()))?;
             let score = mgr.category_score(cid, cat_id);
-            Ok(pb::message("eve_public.achievement.category.api.GetResponse")
+            pb::message("eve_public.achievement.category.api.GetResponse")
                 .set("score", score)
-                .must_to_any())
+                .to_any_or_internal_err()
         }),
     );
 
@@ -373,9 +384,9 @@ pub fn register_achievement_handlers(
             };
 
             let score = mgr_sc.total_character_score(target_cid);
-            Ok(pb::message("eve_public.achievement.showcase.api.GetCharacterScoreResponse")
+            pb::message("eve_public.achievement.showcase.api.GetCharacterScoreResponse")
                 .set("score", score)
-                .must_to_any())
+                .to_any_or_internal_err()
         }),
     );
 
@@ -406,7 +417,7 @@ pub fn register_achievement_handlers(
                     }
                 }
             }
-            Ok(msg.must_to_any())
+            msg.to_any_or_internal_err()
         }),
     );
 
@@ -559,7 +570,7 @@ pub fn register_achievement_handlers(
                     }
                 });
 
-            Ok(msg.must_to_any())
+            msg.to_any_or_internal_err()
         }),
     );
 
@@ -575,10 +586,10 @@ pub fn register_achievement_handlers(
                 .effective_character_id()
                 .map(|cid| mgr.total_character_score(cid))
                 .unwrap_or(0);
-            Ok(pb::message("eve.achievement.api.GetResponse")
+            pb::message("eve.achievement.api.GetResponse")
                 .set("not_completed", true)
                 .set("progress_value", score as u64)
-                .must_to_any())
+                .to_any_or_internal_err()
         }),
     );
 
@@ -596,9 +607,9 @@ pub fn register_achievement_handlers(
                 .effective_character_id()
                 .map(|cid| mgr.category_score(cid, cat_id))
                 .unwrap_or(0);
-            Ok(pb::message("eve.achievement.category.api.GetResponse")
+            pb::message("eve.achievement.category.api.GetResponse")
                 .set("score", score)
-                .must_to_any())
+                .to_any_or_internal_err()
         }),
     );
 
@@ -609,9 +620,9 @@ pub fn register_achievement_handlers(
         Arc::new(move |_ctx, _any, _dyn| {
             let json_bytes = serde_json::to_vec(&mgr_cdn_eve.definitions).unwrap_or_default();
             let hash = sha256_hex(&json_bytes);
-            Ok(pb::message("eve.achievement.definition.api.GetLatestResponse")
+            pb::message("eve.achievement.definition.api.GetLatestResponse")
                 .set("checkpoint.url", &hash)
-                .must_to_any())
+                .to_any_or_internal_err()
         }),
     );
 
@@ -619,14 +630,14 @@ pub fn register_achievement_handlers(
     router.register_handler(
         "eve.achievement.definition.version.api.ListRequest",
         Arc::new(move |_ctx, _any, _dyn| {
-            Ok(pb::message("eve.achievement.definition.version.api.ListResponse")
+            pb::message("eve.achievement.definition.version.api.ListResponse")
                 .add_with("versions", |v| {
                     v.set("major", 24u32)
                         .set("minor", 1u32)
                         .set("patch", 1u32)
                         .add("build_tags", "air-achievements")
                 })
-                .must_to_any())
+                .to_any_or_internal_err()
         }),
     );
 
@@ -634,14 +645,12 @@ pub fn register_achievement_handlers(
     router.register_handler(
         "eve.achievement.definition.version.api.GetDefaultVersionRequest",
         Arc::new(move |_ctx, _any, _dyn| {
-            Ok(
-                pb::message("eve.achievement.definition.version.api.GetDefaultVersionResponse")
-                    .set("version.major", 24u32)
-                    .set("version.minor", 1u32)
-                    .set("version.patch", 1u32)
-                    .add("version.build_tags", "air-achievements")
-                    .must_to_any(),
-            )
+            pb::message("eve.achievement.definition.version.api.GetDefaultVersionResponse")
+                .set("version.major", 24u32)
+                .set("version.minor", 1u32)
+                .set("version.patch", 1u32)
+                .add("version.build_tags", "air-achievements")
+                .to_any_or_internal_err()
         }),
     );
 
@@ -673,7 +682,7 @@ pub fn register_achievement_handlers(
                     }
                 }
             }
-            Ok(msg.must_to_any())
+            msg.to_any_or_internal_err()
         }),
     );
 
@@ -693,9 +702,9 @@ pub fn register_achievement_handlers(
                     .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid character identifier".into()))?,
             };
             let score = mgr.total_character_score(target_cid);
-            Ok(pb::message("eve.achievement.showcase.api.GetCharacterScoreResponse")
+            pb::message("eve.achievement.showcase.api.GetCharacterScoreResponse")
                 .set("score", score)
-                .must_to_any())
+                .to_any_or_internal_err()
         }),
     );
 }

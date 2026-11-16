@@ -809,23 +809,25 @@ pub fn handle(
                     let _ =
                         ctx.notify_new_skill_queue_saved(char_id, skill_queue_rowset(ctx, char_id));
                     if activate {
-                        let (sk_gid, sk_cid) = ctx
-                            .sde
-                            .types
-                            .get(&tid)
-                            .map(|t| (t.group_id, t.category_id))
-                            .unwrap_or((0, 0));
-                        crate::services::operations_manager_helpers::record_server_operation_event(
-                            ctx,
-                            char_id,
-                            "skillTrainingStarted",
-                            &[
-                                ("typeID", tid.to_string()),
-                                ("groupID", sk_gid.to_string()),
-                                ("categoryID", sk_cid.to_string()),
-                            ],
-                            1,
-                        );
+                        crate::quasar_gateway::isolate_side_effect("character_skills.skill_training_started", || {
+                            let (sk_gid, sk_cid) = ctx
+                                .sde
+                                .types
+                                .get(&tid)
+                                .map(|t| (t.group_id, t.category_id))
+                                .unwrap_or((0, 0));
+                            crate::services::operations_manager_helpers::record_server_operation_event(
+                                ctx,
+                                char_id,
+                                "skillTrainingStarted",
+                                &[
+                                    ("typeID", tid.to_string()),
+                                    ("groupID", sk_gid.to_string()),
+                                    ("categoryID", sk_cid.to_string()),
+                                ],
+                                1,
+                            );
+                        });
                     } else {
                         let _ = ctx.notify_skill_queue_paused_server(char_id);
                     }

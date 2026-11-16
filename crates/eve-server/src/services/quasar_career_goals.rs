@@ -604,55 +604,57 @@ impl CareerGoalManager {
         delta: u64,
         gateway: &PublicGatewayRouter,
     ) {
-        let now_unix = self
-            .db
-            .as_ref()
-            .map(|db| db.clock().now_unix_secs())
-            .unwrap_or(0);
-        let mut progressed = Vec::new();
-        {
-            let mut map = self
-                .character_career_goals
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            let goals = map.entry(char_id).or_default();
-            self.ensure_goals_for_list(goals);
+        crate::quasar_gateway::isolate_side_effect("quasar_career_goals.on_gameplay_event", || {
+            let now_unix = self
+                .db
+                .as_ref()
+                .map(|db| db.clock().now_unix_secs())
+                .unwrap_or(0);
+            let mut progressed = Vec::new();
+            {
+                let mut map = self
+                    .character_career_goals
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                let goals = map.entry(char_id).or_default();
+                self.ensure_goals_for_list(goals);
 
-            for g in goals.iter_mut() {
-                if g.def.activity_kind == activity_kind && !g.completed {
-                    let prev = g.completed;
-                    g.progress = g.progress.saturating_add(delta);
-                    if g.progress >= g.def.target {
-                        g.completed = true;
-                        g.completed_time = Some(now_unix);
+                for g in goals.iter_mut() {
+                    if g.def.activity_kind == activity_kind && !g.completed {
+                        let prev = g.completed;
+                        g.progress = g.progress.saturating_add(delta);
+                        if g.progress >= g.def.target {
+                            g.completed = true;
+                            g.completed_time = Some(now_unix);
+                        }
+                        let just_completed = !prev && g.completed;
+                        progressed.push((g.uuid, g.progress, just_completed));
                     }
-                    let just_completed = !prev && g.completed;
-                    progressed.push((g.uuid, g.progress, just_completed));
                 }
             }
-        }
-        self.save_to_db();
+            self.save_to_db();
 
-        for (uuid, new_progress, just_completed) in progressed {
-            let _ = gateway.publish_notice(
-                crate::quasar_gateway::NoticeScope::Character(char_id),
-                pb::message("eve_public.career.goal.api.ProgressedNotice")
-                    .set("goal.uuid", uuid.to_vec())
-                    .set("amount", new_progress.min(u64::from(u32::MAX)) as u32)
-                    .must_to_any(),
-                now_unix,
-            );
-
-            if just_completed {
-                let _ = gateway.publish_notice(
+            for (uuid, new_progress, just_completed) in progressed {
+                let _ = gateway.publish_pb_notice(
                     crate::quasar_gateway::NoticeScope::Character(char_id),
-                    pb::message("eve_public.career.goal.api.CompletedNotice")
+                    "quasar_career_goals.on_gameplay_event.progressed",
+                    pb::message("eve_public.career.goal.api.ProgressedNotice")
                         .set("goal.uuid", uuid.to_vec())
-                        .must_to_any(),
+                        .set("amount", new_progress.min(u64::from(u32::MAX)) as u32),
                     now_unix,
                 );
+
+                if just_completed {
+                    let _ = gateway.publish_pb_notice(
+                        crate::quasar_gateway::NoticeScope::Character(char_id),
+                        "quasar_career_goals.on_gameplay_event.completed",
+                        pb::message("eve_public.career.goal.api.CompletedNotice")
+                            .set("goal.uuid", uuid.to_vec()),
+                        now_unix,
+                    );
+                }
             }
-        }
+        });
     }
 
     pub fn add_progress(
@@ -959,7 +961,7 @@ pub fn register_career_goal_handlers(
                 encode_career_milestone_goal_wire(&ms, cp, reached, claimed, &mut mw);
                 resp = resp.add("goals", pb::raw_message(&mw));
             }
-            Ok(resp.must_to_any())
+            resp.to_any_or_internal_err()
         }),
     );
 
@@ -984,7 +986,7 @@ pub fn register_career_goal_handlers(
                     encode_career_milestone_definition_wire(ms, &mut mw);
                     resp = resp.add("goals", pb::raw_message(&mw));
                 }
-                Ok(resp.must_to_any())
+                resp.to_any_or_internal_err()
             }),
         );
     }
@@ -1010,7 +1012,7 @@ pub fn register_career_goal_handlers(
                 let _ = mgr.claim_reward(cid, &target_uuid, &db_claim)?;
                 mgr.save_to_db();
             }
-            Ok(pb::message("eve_public.career.goal.api.ClaimRewardResponse").must_to_any())
+            pb::message("eve_public.career.goal.api.ClaimRewardResponse").to_any_or_internal_err()
         }),
     );
 
@@ -1058,26 +1060,26 @@ pub fn register_career_goal_handlers(
             };
             mgr.save_to_db();
 
-            super::quasar_social_chat::ctx_queue_notice(
+            crate::quasar_gateway::queue_pb_notice(
                 crate::quasar_gateway::NoticeScope::Character(target_char),
+                "quasar_career_goals.admin_progress.progressed",
                 pb::message("eve_public.career.goal.api.ProgressedNotice")
                     .set("goal.uuid", target_uuid.to_vec())
-                    .set("amount", goal.progress.min(u64::from(u32::MAX)) as u32)
-                    .must_to_any(),
+                    .set("amount", goal.progress.min(u64::from(u32::MAX)) as u32),
                 ctx.now_unix(),
             );
 
             if just_completed {
-                super::quasar_social_chat::ctx_queue_notice(
+                crate::quasar_gateway::queue_pb_notice(
                     crate::quasar_gateway::NoticeScope::Character(target_char),
+                    "quasar_career_goals.admin_progress.completed",
                     pb::message("eve_public.career.goal.api.CompletedNotice")
-                        .set("goal.uuid", target_uuid.to_vec())
-                        .must_to_any(),
+                        .set("goal.uuid", target_uuid.to_vec()),
                     ctx.now_unix(),
                 );
             }
 
-            Ok(pb::message("eve_public.career.goal.api.admin.ProgressResponse").must_to_any())
+            pb::message("eve_public.career.goal.api.admin.ProgressResponse").to_any_or_internal_err()
         }),
     );
 
@@ -1098,15 +1100,15 @@ pub fn register_career_goal_handlers(
             let _ = mgr.mark_completed(target_char, &target_uuid, ctx.now_unix())?;
             mgr.save_to_db();
 
-            super::quasar_social_chat::ctx_queue_notice(
+            crate::quasar_gateway::queue_pb_notice(
                 crate::quasar_gateway::NoticeScope::Character(target_char),
+                "quasar_career_goals.admin_complete.completed",
                 pb::message("eve_public.career.goal.api.CompletedNotice")
-                    .set("goal.uuid", target_uuid.to_vec())
-                    .must_to_any(),
+                    .set("goal.uuid", target_uuid.to_vec()),
                 ctx.now_unix(),
             );
 
-            Ok(pb::message("eve_public.career.goal.api.admin.CompleteResponse").must_to_any())
+            pb::message("eve_public.career.goal.api.admin.CompleteResponse").to_any_or_internal_err()
         }),
     );
 
@@ -1131,7 +1133,7 @@ pub fn register_career_goal_handlers(
                 encode_career_milestone_goal_wire(&ms, cp, reached, claimed, &mut mw);
                 resp = resp.add("goals", pb::raw_message(&mw));
             }
-            Ok(resp.must_to_any())
+            resp.to_any_or_internal_err()
         }),
     );
 
@@ -1156,9 +1158,9 @@ pub fn register_career_goal_handlers(
                 let _ = mgr.claim_reward(cid, &target_uuid, &db_app_claim)?;
                 mgr.save_to_db();
             }
-            Ok(pb::message("eve_public.app.eveonline.career.goal.ClaimRewardResponse")
+            pb::message("eve_public.app.eveonline.career.goal.ClaimRewardResponse")
                 .set("goal.uuid", target_uuid.to_vec())
-                .must_to_any())
+                .to_any_or_internal_err()
         }),
     );
 
@@ -1183,7 +1185,7 @@ pub fn register_career_goal_handlers(
                     encode_internal_career_milestone_definition_wire(ms, &mut mw);
                     resp = resp.add("goals", pb::raw_message(&mw));
                 }
-                Ok(resp.must_to_any())
+                resp.to_any_or_internal_err()
             }),
         );
     }
@@ -1216,7 +1218,7 @@ pub fn register_career_goal_handlers(
                     encode_career_milestone_goal_wire(&ms, cp, reached, claimed, &mut mw);
                     resp = resp.add("goals", pb::raw_message(&mw));
                 }
-                Ok(resp.must_to_any())
+                resp.to_any_or_internal_err()
             }),
         );
     }
@@ -1241,7 +1243,7 @@ pub fn register_career_goal_handlers(
                 };
                 let _ = mgr.mark_completed(target_char, &target_uuid, ctx.now_unix())?;
                 mgr.save_to_db();
-                Ok(pb::message("eve.career.goal.api.admin.CompleteResponse").must_to_any())
+                pb::message("eve.career.goal.api.admin.CompleteResponse").to_any_or_internal_err()
             }),
         );
     }
@@ -1264,9 +1266,9 @@ pub fn register_career_goal_handlers(
                 .find(|g| g.uuid == target_uuid)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Career goal not found".into()))?;
 
-            Ok(pb::message("eve.character.career.goal.GetProgressResponse")
+            pb::message("eve.character.career.goal.GetProgressResponse")
                 .set("progress", g.progress.min(u64::from(u32::MAX)) as u32)
-                .must_to_any())
+                .to_any_or_internal_err()
         }),
     );
 
@@ -1288,9 +1290,9 @@ pub fn register_career_goal_handlers(
                 .find(|g| g.uuid == target_uuid)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Career goal not found".into()))?;
 
-            Ok(pb::message("eve.character.career.goal.HasClaimedRewardResponse")
+            pb::message("eve.character.career.goal.HasClaimedRewardResponse")
                 .set("claimed", g.claimed)
-                .must_to_any())
+                .to_any_or_internal_err()
         }),
     );
 }

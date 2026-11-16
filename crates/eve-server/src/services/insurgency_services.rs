@@ -216,11 +216,13 @@ pub fn init_insurgency_campaign(
 /// Encodes `(field 1: solarsystem.Identifier, field 2: math.Fraction)` for pirate `SetNotice` / `ResetNotice`.
 ///
 /// Schema (`eveProto/generated/eve_public/pirate/{corruption,suppression}/api/notices_pb2.pyj`):
-fn fraction_bytes(numerator: u64, denominator: u64) -> Vec<u8> {
-    pb::message("eve_public.math.Fraction")
-        .set("numerator", numerator)
-        .set("denominator", denominator)
-        .must_encode()
+fn fraction_bytes(numerator: u64, denominator: u64) -> Option<Vec<u8>> {
+    crate::quasar_gateway::pb_encode_or_log(
+        "insurgency_services.fraction",
+        pb::message("eve_public.math.Fraction")
+            .set("numerator", numerator)
+            .set("denominator", denominator),
+    )
 }
 
 /// Encodes `SetNotice` / `ResetNotice` (`eveProto/generated/eve_public/pirate/{corruption,suppression}/api/notices_pb2.pyj`):
@@ -232,12 +234,14 @@ fn build_pirate_progress_notice_any(
     sys_id: u32,
     numerator: u64,
     denominator: u64,
-) -> GoogleAny {
-    pb::message(notice_type)
-        .set("system.sequential", u64::from(sys_id))
-        .set("progress.numerator", numerator)
-        .set("progress.denominator", denominator)
-        .must_to_any()
+) -> Option<GoogleAny> {
+    crate::quasar_gateway::pb_to_any_or_log(
+        notice_type,
+        pb::message(notice_type)
+            .set("system.sequential", u64::from(sys_id))
+            .set("progress.numerator", numerator)
+            .set("progress.denominator", denominator),
+    )
 }
 
 /// Encodes `IncreasedNotice` (`eveProto/generated/eve_public/pirate/{corruption,suppression}/api/notices_pb2.pyj`):
@@ -253,10 +257,13 @@ fn build_pirate_increased_notice_any(
     sys_id: u32,
     old_pts: u64,
     new_pts: u64,
-) -> GoogleAny {
-    let sys_bytes = pb::message("eve_public.solarsystem.Identifier")
-        .set("sequential", u64::from(sys_id))
-        .must_encode();
+) -> Option<GoogleAny> {
+    let sys_bytes = crate::quasar_gateway::pb_encode_or_log(
+        notice_type,
+        pb::message("eve_public.solarsystem.Identifier").set("sequential", u64::from(sys_id)),
+    )?;
+    let old_frac = fraction_bytes(old_pts, 1000)?;
+    let new_frac = fraction_bytes(new_pts, 1000)?;
     // NOTE: `capsuleers` (field 4) and `vanguard` (field 5) share `oneof instigators` in
     // `quasar_descriptors.sqlite`, so `pb::message` only allows one branch. Preserve both
     // wire tags `(4=1, 5=0)` for existing IT assertions in
@@ -269,11 +276,11 @@ fn build_pirate_increased_notice_any(
             },
             WireField {
                 field_number: 2,
-                value: WireValue::LengthDelimited(fraction_bytes(old_pts, 1000)),
+                value: WireValue::LengthDelimited(old_frac),
             },
             WireField {
                 field_number: 3,
-                value: WireValue::LengthDelimited(fraction_bytes(new_pts, 1000)),
+                value: WireValue::LengthDelimited(new_frac),
             },
             WireField {
                 field_number: 4,
@@ -286,10 +293,10 @@ fn build_pirate_increased_notice_any(
         ],
     }
     .encode();
-    GoogleAny {
+    Some(GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{notice_type}"),
         value: payload,
-    }
+    })
 }
 
 /// Ends an active pirate insurgency campaign and emits `OnInsurgencyCampaignEndingForLocation`,
@@ -335,11 +342,14 @@ pub fn end_insurgency_campaign(ctx: &ServerContext, campaign_id: i64) {
                 "eve_public.pirate.corruption.api.ResetNotice",
                 "eve_public.pirate.suppression.api.ResetNotice",
             ] {
-                let _ = ctx.quasar_gateway.publish_notice(
-                    NoticeScope::SolarSystem(*sys),
-                    build_pirate_progress_notice_any(notice_type, *sys, 0, 1000),
-                    now,
-                );
+                if let Some(notice) = build_pirate_progress_notice_any(notice_type, *sys, 0, 1000) {
+                    let _ = ctx.quasar_gateway.publish_notice_isolated(
+                        NoticeScope::SolarSystem(*sys),
+                        notice_type,
+                        notice,
+                        now,
+                    );
+                }
             }
         }
     }
@@ -457,9 +467,14 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
                 1000,
             )
         };
-        let _ = ctx
-            .quasar_gateway
-            .publish_notice(NoticeScope::SolarSystem(sys_id), notice, now);
+        if let Some(notice) = notice {
+            let _ = ctx.quasar_gateway.publish_notice_isolated(
+                NoticeScope::SolarSystem(sys_id),
+                "insurgency_services.corruption_notice",
+                notice,
+                now,
+            );
+        }
     }
     if stage >= 5 {
         ctx.emit_typed(
@@ -528,9 +543,14 @@ pub fn add_system_suppression(ctx: &ServerContext, campaign_id: i64, sys_id: u32
                 1000,
             )
         };
-        let _ = ctx
-            .quasar_gateway
-            .publish_notice(NoticeScope::SolarSystem(sys_id), notice, now);
+        if let Some(notice) = notice {
+            let _ = ctx.quasar_gateway.publish_notice_isolated(
+                NoticeScope::SolarSystem(sys_id),
+                "insurgency_services.suppression_notice",
+                notice,
+                now,
+            );
+        }
     }
     if stage >= 5 {
         ctx.emit_typed(
@@ -805,13 +825,19 @@ pub fn notify_stronghold_destruction(
     let now = db.clock().now_unix_secs();
 
     if let Some(gw) = gw {
-        let notice = build_pirate_increased_notice_any(
+        if let Some(notice) = build_pirate_increased_notice_any(
             "eve_public.pirate.suppression.api.IncreasedNotice",
             info.solar_system_id,
             info.old_suppression as u64,
             info.new_suppression as u64,
-        );
-        let _ = gw.publish_notice(NoticeScope::SolarSystem(info.solar_system_id), notice, now);
+        ) {
+            let _ = gw.publish_notice_isolated(
+                NoticeScope::SolarSystem(info.solar_system_id),
+                "insurgency_services.stronghold_suppression_notice",
+                notice,
+                now,
+            );
+        }
     }
 
     let mut system_chars = db.with_snapshot(|snap| {

@@ -59,7 +59,7 @@ pub fn extract_raw_length_delimited_field(wire_bytes: &[u8], field_number: u32) 
 pub fn encode_goal_contribution_config(matcher_type: &str, filter_id: Option<i64>) -> Vec<u8> {
     let b = pb::message("eve_public.goal.ContributionConfiguration");
     let positive_id = filter_id.filter(|&v| v > 0).map(|v| v as u64);
-    match matcher_type {
+    let builder = match matcher_type {
         "DeliverItem" => b.set_with("deliver_item", |c| {
             c.add_with("contribution_methods", |m| {
                 m.set_opt("delivered_item_type.sequential", positive_id)
@@ -124,8 +124,9 @@ pub fn encode_goal_contribution_config(matcher_type: &str, filter_id: Option<i64
             // `manual` (`ManualContributionConfiguration {}`, field 1)
             b.set_with("manual", |m| m)
         }
-    }
-    .must_encode()
+    };
+    crate::quasar_gateway::pb_encode_or_log("quasar_goal_tale_notices.encode_goal_contribution_config", builder)
+        .unwrap_or_default()
 }
 
 /// Snapshot of the goal attributes carried by `eve_public.goal.Attributes`.
@@ -164,88 +165,110 @@ pub fn encode_goal_attributes(attrs: &GoalAttributesView<'_>) -> Vec<u8> {
     };
     let corp = attrs.corp_id.filter(|&c| c > 0);
 
-    pb::message("eve_public.goal.Attributes")
-        .set("created", created_ts)
-        .set("user_input_name", attrs.name)
-        .set("user_input_description", attrs.description)
-        .when(attrs.creator_id > 0, |b| {
-            b.set("creator.sequential", attrs.creator_id)
-        })
-        .set("progress.desired", attrs.desired)
-        .set("progress.current", attrs.current)
-        .set("state", state as i32)
-        .set_raw_message("contribution_config", cfg_bytes)
-        .when(corp.is_some(), |b| {
-            let cid = corp.unwrap();
-            // Attributes.organization = Organization { corporation = 1 }
-            // V24.01 goal_formatter also reads assigner (19) and assignee (20).
-            b.set("organization.corporation.sequential", cid)
-                .set("assigner.corporation.sequential", cid)
-                .set("assignee.corporation.sequential", cid)
-        })
-        .when(state == GOAL_STATE_ACTIVE, |b| b.set("not_finished", true))
-        .when(state != GOAL_STATE_ACTIVE, |b| {
-            b.set("finished", created_ts)
-        })
-        .set("no_due_timestamp", true)
-        .set("unlimited", true)
-        .set("contribution_unlimited", true)
-        .set("default", true)
-        .must_encode()
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_goal_tale_notices.encode_goal_attributes",
+        pb::message("eve_public.goal.Attributes")
+            .set("created", created_ts)
+            .set("user_input_name", attrs.name)
+            .set("user_input_description", attrs.description)
+            .when(attrs.creator_id > 0, |b| {
+                b.set("creator.sequential", attrs.creator_id)
+            })
+            .set("progress.desired", attrs.desired)
+            .set("progress.current", attrs.current)
+            .set("state", state as i32)
+            .set_raw_message("contribution_config", cfg_bytes)
+            .when(corp.is_some(), |b| {
+                let cid = corp.unwrap();
+                // Attributes.organization = Organization { corporation = 1 }
+                // V24.01 goal_formatter also reads assigner (19) and assignee (20).
+                b.set("organization.corporation.sequential", cid)
+                    .set("assigner.corporation.sequential", cid)
+                    .set("assignee.corporation.sequential", cid)
+            })
+            .when(state == GOAL_STATE_ACTIVE, |b| b.set("not_finished", true))
+            .when(state != GOAL_STATE_ACTIVE, |b| {
+                b.set("finished", created_ts)
+            })
+            .set("no_due_timestamp", true)
+            .set("unlimited", true)
+            .set("contribution_unlimited", true)
+            .set("default", true),
+    )
+    .unwrap_or_default()
 }
 
 /// `eve_public.goal.api.CreatedNotice { id = 1, goal = 2 }`.
 pub fn goal_created(uuid: &[u8; 16], attrs: &GoalAttributesView<'_>) -> GoogleAny {
-    pb::message("eve_public.goal.api.CreatedNotice")
-        .set("id.uuid", uuid)
-        .set_raw_message("goal", encode_goal_attributes(attrs))
-        .must_to_any()
+    crate::quasar_gateway::pb_to_any_or_log(
+        "quasar_goal_tale_notices.goal_created",
+        pb::message("eve_public.goal.api.CreatedNotice")
+            .set("id.uuid", uuid)
+            .set_raw_message("goal", encode_goal_attributes(attrs)),
+    )
+    .unwrap_or_default()
 }
 
 /// `eve_public.goal.api.DeletedNotice { goal = 1 }`.
 pub fn goal_deleted(uuid: &[u8; 16]) -> GoogleAny {
-    pb::message("eve_public.goal.api.DeletedNotice")
-        .set("goal.uuid", uuid)
-        .must_to_any()
+    crate::quasar_gateway::pb_to_any_or_log(
+        "quasar_goal_tale_notices.goal_deleted",
+        pb::message("eve_public.goal.api.DeletedNotice").set("goal.uuid", uuid),
+    )
+    .unwrap_or_default()
 }
 
 /// `eve_public.goal.api.ClosedNotice { goal = 1, closer = 2 }`.
 pub fn goal_closed(uuid: &[u8; 16], closer_id: u32) -> GoogleAny {
-    pb::message("eve_public.goal.api.ClosedNotice")
-        .set("goal.uuid", uuid)
-        .set("closer.sequential", closer_id)
-        .must_to_any()
+    crate::quasar_gateway::pb_to_any_or_log(
+        "quasar_goal_tale_notices.goal_closed",
+        pb::message("eve_public.goal.api.ClosedNotice")
+            .set("goal.uuid", uuid)
+            .set("closer.sequential", closer_id),
+    )
+    .unwrap_or_default()
 }
 
 /// `eve_public.goal.api.CompletedNotice { goal = 1 }`.
 pub fn goal_completed(uuid: &[u8; 16]) -> GoogleAny {
-    pb::message("eve_public.goal.api.CompletedNotice")
-        .set("goal.uuid", uuid)
-        .must_to_any()
+    crate::quasar_gateway::pb_to_any_or_log(
+        "quasar_goal_tale_notices.goal_completed",
+        pb::message("eve_public.goal.api.CompletedNotice").set("goal.uuid", uuid),
+    )
+    .unwrap_or_default()
 }
 
 /// `eve_public.goal.api.ProgressedNotice { goal = 1, current_progress = 2 }`.
 pub fn goal_progressed(uuid: &[u8; 16], current: u64) -> GoogleAny {
-    pb::message("eve_public.goal.api.ProgressedNotice")
-        .set("goal.uuid", uuid)
-        .set("current_progress", current)
-        .must_to_any()
+    crate::quasar_gateway::pb_to_any_or_log(
+        "quasar_goal_tale_notices.goal_progressed",
+        pb::message("eve_public.goal.api.ProgressedNotice")
+            .set("goal.uuid", uuid)
+            .set("current_progress", current),
+    )
+    .unwrap_or_default()
 }
 
 /// `eve_public.goal.api.NameChangedNotice { goal = 1, admin_designated_new_name = 2 }`.
 pub fn goal_name_changed(uuid: &[u8; 16], new_name: &str) -> GoogleAny {
-    pb::message("eve_public.goal.api.NameChangedNotice")
-        .set("goal.uuid", uuid)
-        .set("admin_designated_new_name", new_name)
-        .must_to_any()
+    crate::quasar_gateway::pb_to_any_or_log(
+        "quasar_goal_tale_notices.goal_name_changed",
+        pb::message("eve_public.goal.api.NameChangedNotice")
+            .set("goal.uuid", uuid)
+            .set("admin_designated_new_name", new_name),
+    )
+    .unwrap_or_default()
 }
 
 /// `eve_public.goal.api.DescriptionChangedNotice { goal = 1, admin_designated_new_description = 2 }`.
 pub fn goal_description_changed(uuid: &[u8; 16], new_description: &str) -> GoogleAny {
-    pb::message("eve_public.goal.api.DescriptionChangedNotice")
-        .set("goal.uuid", uuid)
-        .set("admin_designated_new_description", new_description)
-        .must_to_any()
+    crate::quasar_gateway::pb_to_any_or_log(
+        "quasar_goal_tale_notices.goal_description_changed",
+        pb::message("eve_public.goal.api.DescriptionChangedNotice")
+            .set("goal.uuid", uuid)
+            .set("admin_designated_new_description", new_description),
+    )
+    .unwrap_or_default()
 }
 
 /// `eve_public.goal.contribution.api.ContributedNotice
@@ -257,13 +280,16 @@ pub fn goal_contributed(
     current: u64,
     now_unix: u64,
 ) -> GoogleAny {
-    pb::message("eve_public.goal.contribution.api.ContributedNotice")
-        .set("timestamp", GoogleTimestamp::from_unix(now_unix as i64, 0))
-        .set("contributor.sequential", contributor_id)
-        .set("goal.uuid", uuid)
-        .set("previous_progress", previous)
-        .set("current_progress", current)
-        .must_to_any()
+    crate::quasar_gateway::pb_to_any_or_log(
+        "quasar_goal_tale_notices.goal_contributed",
+        pb::message("eve_public.goal.contribution.api.ContributedNotice")
+            .set("timestamp", GoogleTimestamp::from_unix(now_unix as i64, 0))
+            .set("contributor.sequential", contributor_id)
+            .set("goal.uuid", uuid)
+            .set("previous_progress", previous)
+            .set("current_progress", current),
+    )
+    .unwrap_or_default()
 }
 
 /// `eve_public.tale.api.StartedNotice` / `StoppedNotice`
@@ -279,11 +305,14 @@ pub fn tale_lifecycle(
     } else {
         "eve_public.tale.api.StoppedNotice"
     };
-    pb::message(name)
-        .set("tale.sequential", tale_id)
-        .set("spawntemplate.sequential", template_id)
-        .set("solar_system.sequential", solar_system_id)
-        .must_to_any()
+    crate::quasar_gateway::pb_to_any_or_log(
+        "quasar_goal_tale_notices.tale_lifecycle",
+        pb::message(name)
+            .set("tale.sequential", tale_id)
+            .set("spawntemplate.sequential", template_id)
+            .set("solar_system.sequential", solar_system_id),
+    )
+    .unwrap_or_default()
 }
 
 /// Audience for tale lifecycle notices. The client's tale service keeps a universe-wide
@@ -420,6 +449,29 @@ pub fn handle_opportunity_event(
 /// (`achievements.static` + `achievementevents.fsdbinary`) directly in `quasar_opportunities`,
 /// decoupled from `quasar_achievements` and unreachable from client `PublishEventPayload` calls.
 pub fn record_server_opportunity_event(
+    db: &eve_db::WorldRepository,
+    definitions: &[crate::services::quasar_achievements::AchievementDef],
+    character_id: u32,
+    event_names: &[&str],
+    delta: u64,
+    now_unix: u64,
+) {
+    crate::quasar_gateway::isolate_side_effect(
+        "quasar_goal_tale_notices.record_server_opportunity_event",
+        || {
+            record_server_opportunity_event_inner(
+                db,
+                definitions,
+                character_id,
+                event_names,
+                delta,
+                now_unix,
+            );
+        },
+    );
+}
+
+fn record_server_opportunity_event_inner(
     db: &eve_db::WorldRepository,
     definitions: &[crate::services::quasar_achievements::AchievementDef],
     character_id: u32,
@@ -597,10 +649,20 @@ pub fn publish_community_track_progressed_notices(
             type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.ProgressedNotice"),
             value: not_bytes,
         };
-        let _ = gateway.publish_notice(NoticeScope::Broadcast, notice, now_unix);
+        let _ = gateway.publish_notice_isolated(
+            NoticeScope::Broadcast,
+            "quasar_goal_tale_notices.community_track_progressed",
+            notice,
+            now_unix,
+        );
     }
     for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
-        let _ = gateway.publish_notice(scope, payload, ts);
+        let _ = gateway.publish_notice_isolated(
+            scope,
+            "quasar_goal_tale_notices.local_notice",
+            payload,
+            ts,
+        );
     }
 }
 

@@ -1273,13 +1273,15 @@ pub async fn handle(
                             }
                         }
                     }
-                    ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
-                        char_id as u32,
-                        &["refineOreCount", "finishedReprocessingCount", "reprocessingInput", "reprocessingOutput"],
-                        batch_results.len().max(1) as u64,
-                        ctx.now_unix(),
-                        &ctx.quasar_gateway,
-                    );
+                    crate::quasar_gateway::isolate_side_effect("space_entity_mining.reprocess_achievements", || {
+                        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
+                            char_id as u32,
+                            &["refineOreCount", "finishedReprocessingCount", "reprocessingInput", "reprocessingOutput"],
+                            batch_results.len().max(1) as u64,
+                            ctx.now_unix(),
+                            &ctx.quasar_gateway,
+                        );
+                    });
                     // parity: notify:OnReprocessingMaterialsChanged
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),

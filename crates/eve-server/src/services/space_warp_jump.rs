@@ -658,20 +658,25 @@ async fn handle_cmd_warp_to_stuff(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(ship_id, char_id);
-            ctx.db.with_mut_snapshot(|snap| {
-                let mut ext = crate::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
-                if !ext.characters_warped.contains(&char_id) {
-                    ext.characters_warped.push(char_id);
-                    crate::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
-                }
-            });
-            ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["timesWarped"], 1, ctx.now_unix(), &ctx.quasar_gateway);
-            crate::services::operations_manager_helpers::record_server_operation_event(
-                ctx,
-                char_id,
-                "warpToLocation",
-                &[],
-                1,
+            crate::quasar_gateway::isolate_side_effect(
+                "space_warp_jump.CmdWarpToStuff.progression",
+                || {
+                    ctx.db.with_mut_snapshot(|snap| {
+                        let mut ext = crate::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
+                        if !ext.characters_warped.contains(&char_id) {
+                            ext.characters_warped.push(char_id);
+                            crate::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
+                        }
+                    });
+                    ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["timesWarped"], 1, ctx.now_unix(), &ctx.quasar_gateway);
+                    crate::services::operations_manager_helpers::record_server_operation_event(
+                        ctx,
+                        char_id,
+                        "warpToLocation",
+                        &[],
+                        1,
+                    );
+                },
             );
             Ok(PyRep::Integer(tick as i64))
         }
@@ -1054,23 +1059,27 @@ async fn handle_cmd_stargate_jump(
         dest_sys_id,
         now_unix,
     );
-    if let Some(expiry) = zarzakh_lock_expiry {
-        let _ = crate::services::quasar_sov_services::publish_stargate_lock_activated_notice(
-            &ctx.quasar_gateway, char_id, dest_sys_id, jump.destination_stargate_id as u64, expiry, now_unix,
-        );
-    }
-
     record_session_change_timer(ctx, char_id, now_unix, dest_sys_id, spawn_tick, "stargate_jump");
 
-    ctx.quasar_gateway
-        .progression
-        .daily_goals
-        .on_gameplay_event(char_id as u32, 4, 1, &ctx.quasar_gateway);
-    ctx.quasar_gateway
-        .progression
-        .career_goals
-        .on_gameplay_event(char_id as u32, "travel", 1, &ctx.quasar_gateway);
-    ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["stargateJumps"], 1, now_unix, &ctx.quasar_gateway);
+    crate::quasar_gateway::isolate_side_effect(
+        "space_warp_jump.CmdStargateJump.secondary_hooks",
+        || {
+            if let Some(expiry) = zarzakh_lock_expiry {
+                let _ = crate::services::quasar_sov_services::publish_stargate_lock_activated_notice(
+                    &ctx.quasar_gateway, char_id, dest_sys_id, jump.destination_stargate_id as u64, expiry, now_unix,
+                );
+            }
+            ctx.quasar_gateway
+                .progression
+                .daily_goals
+                .on_gameplay_event(char_id as u32, 4, 1, &ctx.quasar_gateway);
+            ctx.quasar_gateway
+                .progression
+                .career_goals
+                .on_gameplay_event(char_id as u32, "travel", 1, &ctx.quasar_gateway);
+            ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["stargateJumps"], 1, now_unix, &ctx.quasar_gateway);
+        },
+    );
 
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, dest_sys_id as i64)?;
 
@@ -1541,8 +1550,10 @@ async fn handle_dock(
                     ctx, dock_id, char_id, corp_id, ally_id, fac_id, st_type_id, ship_id,
                 );
             }
-            ctx.quasar_gateway.on_session_changed(session, now_unix);
-            ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["dockInStation"], 1, now_unix, &ctx.quasar_gateway);
+            crate::quasar_gateway::isolate_side_effect("space_warp_jump.dock.quasar_hooks", || {
+                ctx.quasar_gateway.on_session_changed(session, now_unix);
+                ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["dockInStation"], 1, now_unix, &ctx.quasar_gateway);
+            });
             Ok(PyRep::keyval([
                 ("locationID", PyRep::Integer(dock_id)),
                 ("isStructure", PyRep::Bool(is_structure)),

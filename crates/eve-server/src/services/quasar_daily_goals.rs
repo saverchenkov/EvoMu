@@ -1076,71 +1076,79 @@ impl DailyGoalManager {
         delta: u64,
         gateway: &PublicGatewayRouter,
     ) {
-        let now_unix = self.now_unix();
-        let mut progressed = Vec::new();
-        let mut bonus_just_completed = false;
-        {
-            let mut map = self
-                .character_goals
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            let goals = map.entry(char_id).or_default();
-            self.ensure_character_goals(goals, now_unix);
+        crate::quasar_gateway::isolate_side_effect("quasar_daily_goals.on_gameplay_event", || {
+            let now_unix = self.now_unix();
+            let mut progressed = Vec::new();
+            let mut bonus_just_completed = false;
+            {
+                let mut map = self
+                    .character_goals
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                let goals = map.entry(char_id).or_default();
+                self.ensure_character_goals(goals, now_unix);
 
-            for g in goals.iter_mut() {
-                if g.template.category == category && !g.completed && !g.expired {
-                    let prev = g.completed;
-                    g.current_progress = g.current_progress.saturating_add(delta);
-                    if g.current_progress >= g.template.target {
-                        g.completed = true;
-                        g.completed_at_unix = Some(now_unix);
-                    }
-                    let just_completed = !prev && g.completed;
-                    progressed.push((g.uuid, g.current_progress, just_completed));
-                }
-            }
-
-            let num_completed_regular = goals
-                .iter()
-                .filter(|g| g.template.category != 6 && g.completed && !g.expired)
-                .count() as u64;
-            for g in goals.iter_mut() {
-                if g.template.category == 6 && !g.completed && !g.expired {
-                    let prev = g.completed;
-                    g.current_progress = num_completed_regular;
-                    if g.current_progress >= g.template.target {
-                        g.completed = true;
-                        g.completed_at_unix = Some(now_unix);
-                    }
-                    let just_completed = !prev && g.completed;
-                    if just_completed {
-                        bonus_just_completed = true;
-                    }
-                    if g.current_progress > 0 {
+                for g in goals.iter_mut() {
+                    if g.template.category == category && !g.completed && !g.expired {
+                        let prev = g.completed;
+                        g.current_progress = g.current_progress.saturating_add(delta);
+                        if g.current_progress >= g.template.target {
+                            g.completed = true;
+                            g.completed_at_unix = Some(now_unix);
+                        }
+                        let just_completed = !prev && g.completed;
                         progressed.push((g.uuid, g.current_progress, just_completed));
                     }
                 }
-            }
-        }
-        if bonus_just_completed {
-            self.record_daily_bonus_completion(char_id, now_unix);
-        }
-        self.save_to_db();
 
-        for (uuid, current_progress, just_completed) in progressed {
-            let notice = pb::message("eve_public.dailygoal.api.ProgressedNotice")
-                .set("goal.uuid", uuid)
-                .set("current_progress", current_progress)
-                .must_to_any();
-            let _ = gateway.publish_notice(NoticeScope::Character(char_id), notice, now_unix);
-
-            if just_completed {
-                let comp = pb::message("eve_public.dailygoal.api.CompletedNotice")
-                    .set("goal.uuid", uuid)
-                    .must_to_any();
-                let _ = gateway.publish_notice(NoticeScope::Character(char_id), comp, now_unix);
+                let num_completed_regular = goals
+                    .iter()
+                    .filter(|g| g.template.category != 6 && g.completed && !g.expired)
+                    .count() as u64;
+                for g in goals.iter_mut() {
+                    if g.template.category == 6 && !g.completed && !g.expired {
+                        let prev = g.completed;
+                        g.current_progress = num_completed_regular;
+                        if g.current_progress >= g.template.target {
+                            g.completed = true;
+                            g.completed_at_unix = Some(now_unix);
+                        }
+                        let just_completed = !prev && g.completed;
+                        if just_completed {
+                            bonus_just_completed = true;
+                        }
+                        if g.current_progress > 0 {
+                            progressed.push((g.uuid, g.current_progress, just_completed));
+                        }
+                    }
+                }
             }
-        }
+            if bonus_just_completed {
+                self.record_daily_bonus_completion(char_id, now_unix);
+            }
+            self.save_to_db();
+
+            for (uuid, current_progress, just_completed) in progressed {
+                let _ = gateway.publish_pb_notice(
+                    NoticeScope::Character(char_id),
+                    "quasar_daily_goals.on_gameplay_event.progressed",
+                    pb::message("eve_public.dailygoal.api.ProgressedNotice")
+                        .set("goal.uuid", uuid)
+                        .set("current_progress", current_progress),
+                    now_unix,
+                );
+
+                if just_completed {
+                    let _ = gateway.publish_pb_notice(
+                        NoticeScope::Character(char_id),
+                        "quasar_daily_goals.on_gameplay_event.completed",
+                        pb::message("eve_public.dailygoal.api.CompletedNotice")
+                            .set("goal.uuid", uuid),
+                        now_unix,
+                    );
+                }
+            }
+        });
     }
 }
 
@@ -1150,16 +1158,20 @@ impl DailyGoalManager {
 
 /// Encodes `eve_public.dailygoal.Identifier` / `eve.dailygoal.Identifier`: `1: bytes uuid`.
 pub fn encode_goal_identifier(uuid: &[u8; 16], out: &mut Vec<u8>) {
-    pb::message("eve_public.dailygoal.Identifier")
-        .set("uuid", uuid)
-        .must_encode_into(out);
+    crate::quasar_gateway::pb_encode_into_or_log(
+        "quasar_daily_goals.encode_goal_identifier",
+        pb::message("eve_public.dailygoal.Identifier").set("uuid", uuid),
+        out,
+    );
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 fn encode_loc_message_id(seq: u32) -> Vec<u8> {
-    pb::message("eve_public.localization.message.Identifier")
-        .set("sequential", seq)
-        .must_encode()
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_daily_goals.encode_loc_message_id",
+        pb::message("eve_public.localization.message.Identifier").set("sequential", seq),
+    )
+    .unwrap_or_default()
 }
 
 fn fill_contribution_configuration(cfg: ProtoBuilder, category: u32) -> ProtoBuilder {
@@ -1198,16 +1210,20 @@ fn fill_contribution_configuration(cfg: ProtoBuilder, category: u32) -> ProtoBui
 
 #[cfg_attr(not(test), allow(dead_code))]
 fn encode_isk_unit(isk: i64) -> Vec<u8> {
-    pb::message("eve_public.dailygoal.Unit")
-        .set("isk.amount.units", isk)
-        .must_encode()
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_daily_goals.encode_isk_unit",
+        pb::message("eve_public.dailygoal.Unit").set("isk.amount.units", isk),
+    )
+    .unwrap_or_default()
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 fn encode_sp_unit(sp: u32) -> Vec<u8> {
-    pb::message("eve_public.dailygoal.Unit")
-        .set("sp.amount", sp)
-        .must_encode()
+    crate::quasar_gateway::pb_encode_or_log(
+        "quasar_daily_goals.encode_sp_unit",
+        pb::message("eve_public.dailygoal.Unit").set("sp.amount", sp),
+    )
+    .unwrap_or_default()
 }
 
 fn build_daily_goal_attributes(
@@ -1288,13 +1304,16 @@ pub fn encode_goal_attributes_with_window(
     active_until_unix: u64,
     out: &mut Vec<u8>,
 ) {
-    build_daily_goal_attributes(
-        "eve_public.dailygoal.Attributes",
-        tpl,
-        active_after_unix,
-        active_until_unix,
-    )
-    .must_encode_into(out);
+    crate::quasar_gateway::pb_encode_into_or_log(
+        "quasar_daily_goals.encode_goal_attributes_with_window",
+        build_daily_goal_attributes(
+            "eve_public.dailygoal.Attributes",
+            tpl,
+            active_after_unix,
+            active_until_unix,
+        ),
+        out,
+    );
 }
 
 fn add_daily_goal_earnings(mut builder: ProtoBuilder, tpl: &DailyGoalTemplate) -> ProtoBuilder {
@@ -1315,22 +1334,28 @@ fn add_daily_goal_earnings(mut builder: ProtoBuilder, tpl: &DailyGoalTemplate) -
 pub fn encode_goal_earnings(tpl: &DailyGoalTemplate, field_num: u32, out: &mut Vec<u8>) {
     let mut fields = Vec::new();
     if tpl.isk_reward > 0 {
-        let bytes = pb::message("eve_public.dailygoal.api.Earning")
-            .set("unit.isk.amount.units", tpl.isk_reward)
-            .must_encode();
-        fields.push(WireField {
-            field_number: field_num,
-            value: WireValue::LengthDelimited(bytes),
-        });
+        if let Some(bytes) = crate::quasar_gateway::pb_encode_or_log(
+            "quasar_daily_goals.encode_goal_earnings.isk",
+            pb::message("eve_public.dailygoal.api.Earning")
+                .set("unit.isk.amount.units", tpl.isk_reward),
+        ) {
+            fields.push(WireField {
+                field_number: field_num,
+                value: WireValue::LengthDelimited(bytes),
+            });
+        }
     }
     if tpl.sp_reward > 0.0 {
-        let bytes = pb::message("eve_public.dailygoal.api.Earning")
-            .set("unit.sp.amount", tpl.sp_reward as u32)
-            .must_encode();
-        fields.push(WireField {
-            field_number: field_num,
-            value: WireValue::LengthDelimited(bytes),
-        });
+        if let Some(bytes) = crate::quasar_gateway::pb_encode_or_log(
+            "quasar_daily_goals.encode_goal_earnings.sp",
+            pb::message("eve_public.dailygoal.api.Earning")
+                .set("unit.sp.amount", tpl.sp_reward as u32),
+        ) {
+            fields.push(WireField {
+                field_number: field_num,
+                value: WireValue::LengthDelimited(bytes),
+            });
+        }
     }
     if !fields.is_empty() {
         out.extend_from_slice(&WireMessage { fields }.encode());
@@ -1387,7 +1412,7 @@ pub fn register_daily_goal_handlers(
                     .when(g.paid_completion, |ge| ge.set("paid_completion", true))
                 });
             }
-            Ok(out.must_to_any())
+            out.to_any_or_internal_err()
         }),
     );
 
@@ -1415,13 +1440,13 @@ pub fn register_daily_goal_handlers(
                 after,
                 until,
             );
-            Ok(add_daily_goal_earnings(
+            add_daily_goal_earnings(
                 pb::message("eve_public.dailygoal.api.GetResponse")
                     .set("goal", attrs)
                     .set("progress", g.current_progress),
                 &g.template,
             )
-            .must_to_any())
+            .to_any_or_internal_err()
         }),
     );
 
@@ -1439,7 +1464,7 @@ pub fn register_daily_goal_handlers(
             for g in goals.iter().filter(|g| g.completed) {
                 out = out.add_with("goals", |ge| ge.set("id.uuid", g.uuid));
             }
-            Ok(out.must_to_any())
+            out.to_any_or_internal_err()
         }),
     );
 
@@ -1456,7 +1481,7 @@ pub fn register_daily_goal_handlers(
             for g in goals.iter().filter(|g| g.completed && !g.claimed) {
                 out = out.add_with("ids", |id| id.set("uuid", g.uuid));
             }
-            Ok(out.must_to_any())
+            out.to_any_or_internal_err()
         }),
     );
 
@@ -1476,12 +1501,11 @@ pub fn register_daily_goal_handlers(
             mgr.save_to_db();
 
             // Publish RedeemedNotice
-            let notice = pb::message("eve_public.dailygoal.api.RedeemedNotice")
-                .set("goal.uuid", redeemed.uuid)
-                .must_to_any();
-            super::quasar_social_chat::ctx_queue_notice(
+            crate::quasar_gateway::queue_pb_notice(
                 NoticeScope::Character(cid),
-                notice,
+                "quasar_daily_goals.redeem.redeemed",
+                pb::message("eve_public.dailygoal.api.RedeemedNotice")
+                    .set("goal.uuid", redeemed.uuid),
                 ctx.now_unix(),
             );
 
@@ -1504,12 +1528,11 @@ pub fn register_daily_goal_handlers(
             let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
             for g in goals.iter().filter(|g| g.completed && !g.claimed) {
                 if let Ok(redeemed) = mgr.redeem_goal(cid, &g.uuid, ctx.now_unix(), &db_redeem_all) {
-                    let notice = pb::message("eve_public.dailygoal.api.RedeemedNotice")
-                        .set("goal.uuid", redeemed.uuid)
-                        .must_to_any();
-                    super::quasar_social_chat::ctx_queue_notice(
+                    crate::quasar_gateway::queue_pb_notice(
                         NoticeScope::Character(cid),
-                        notice,
+                        "quasar_daily_goals.redeem_all.redeemed",
+                        pb::message("eve_public.dailygoal.api.RedeemedNotice")
+                            .set("goal.uuid", redeemed.uuid),
                         ctx.now_unix(),
                     );
                 }
@@ -1538,23 +1561,21 @@ pub fn register_daily_goal_handlers(
             mgr.save_to_db();
 
             // 1. ProgressedNotice
-            let prog_notice = pb::message("eve_public.dailygoal.api.ProgressedNotice")
-                .set("goal.uuid", goal.uuid)
-                .set("current_progress", goal.current_progress)
-                .must_to_any();
-            super::quasar_social_chat::ctx_queue_notice(
+            crate::quasar_gateway::queue_pb_notice(
                 NoticeScope::Character(cid),
-                prog_notice,
+                "quasar_daily_goals.pay_for_completion.progressed",
+                pb::message("eve_public.dailygoal.api.ProgressedNotice")
+                    .set("goal.uuid", goal.uuid)
+                    .set("current_progress", goal.current_progress),
                 ctx.now_unix(),
             );
 
             // 2. CompletedNotice
-            let comp_notice = pb::message("eve_public.dailygoal.api.CompletedNotice")
-                .set("goal.uuid", goal.uuid)
-                .must_to_any();
-            super::quasar_social_chat::ctx_queue_notice(
+            crate::quasar_gateway::queue_pb_notice(
                 NoticeScope::Character(cid),
-                comp_notice,
+                "quasar_daily_goals.pay_for_completion.completed",
+                pb::message("eve_public.dailygoal.api.CompletedNotice")
+                    .set("goal.uuid", goal.uuid),
                 ctx.now_unix(),
             );
 
@@ -1606,23 +1627,21 @@ pub fn register_daily_goal_handlers(
             mgr.save_to_db();
 
             if let Some((goal, just_completed)) = updated {
-                let prog_notice = pb::message("eve_public.dailygoal.api.ProgressedNotice")
-                    .set("goal.uuid", target_uuid)
-                    .set("current_progress", goal.current_progress)
-                    .must_to_any();
-                super::quasar_social_chat::ctx_queue_notice(
+                crate::quasar_gateway::queue_pb_notice(
                     NoticeScope::Character(target_char),
-                    prog_notice,
+                    "quasar_daily_goals.admin_progress.progressed",
+                    pb::message("eve_public.dailygoal.api.ProgressedNotice")
+                        .set("goal.uuid", target_uuid)
+                        .set("current_progress", goal.current_progress),
                     ctx.now_unix(),
                 );
 
                 if just_completed {
-                    let comp_notice = pb::message("eve_public.dailygoal.api.CompletedNotice")
-                        .set("goal.uuid", target_uuid)
-                        .must_to_any();
-                    super::quasar_social_chat::ctx_queue_notice(
+                    crate::quasar_gateway::queue_pb_notice(
                         NoticeScope::Character(target_char),
-                        comp_notice,
+                        "quasar_daily_goals.admin_progress.completed",
+                        pb::message("eve_public.dailygoal.api.CompletedNotice")
+                            .set("goal.uuid", target_uuid),
                         ctx.now_unix(),
                     );
                 }
@@ -1659,9 +1678,9 @@ pub fn register_daily_goal_handlers(
                 after,
                 until,
             );
-            Ok(pb::message("eve.dailygoal.api.GetResponse")
+            pb::message("eve.dailygoal.api.GetResponse")
                 .set("goal", attrs)
-                .must_to_any())
+                .to_any_or_internal_err()
         }),
     );
 
@@ -1678,7 +1697,7 @@ pub fn register_daily_goal_handlers(
             for g in &goals {
                 out = out.add_with("goals", |id| id.set("uuid", g.uuid));
             }
-            Ok(out.must_to_any())
+            out.to_any_or_internal_err()
         }),
     );
 
@@ -1699,7 +1718,7 @@ pub fn register_daily_goal_handlers(
                 .find(|g| g.uuid == target_uuid)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Daily goal not found".into()))?;
 
-            Ok(add_daily_goal_earnings(
+            add_daily_goal_earnings(
                 pb::message("eve.dailygoal.api.GetProgressResponse")
                     .set("current", g.current_progress)
                     .when(g.completed, |b| {
@@ -1712,7 +1731,7 @@ pub fn register_daily_goal_handlers(
                     .when(!g.completed, |b| b.set("not_completed", true)),
                 &g.template,
             )
-            .must_to_any())
+            .to_any_or_internal_err()
         }),
     );
 

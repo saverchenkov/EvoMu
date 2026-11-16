@@ -255,8 +255,11 @@ pub fn encode_contribution_method_definition(
     params: &[(&str, &str, &str)],
     out: &mut Vec<u8>,
 ) {
-    build_contribution_method_definition(name, title_id, progress_desc_id, icon, params)
-        .must_encode_into(out);
+    crate::quasar_gateway::pb_encode_into_or_log(
+        "quasar_campaign_definitions.encode_contribution_method_definition",
+        build_contribution_method_definition(name, title_id, progress_desc_id, icon, params),
+        out,
+    );
 }
 
 fn build_trigger_eventmatch_definition(name: &str, params: &[(&str, &str)]) -> ProtoBuilder {
@@ -276,7 +279,11 @@ pub fn encode_trigger_eventmatch_definition(
     params: &[(&str, &str)],
     out: &mut Vec<u8>,
 ) {
-    build_trigger_eventmatch_definition(name, params).must_encode_into(out);
+    crate::quasar_gateway::pb_encode_into_or_log(
+        "quasar_campaign_definitions.encode_trigger_eventmatch_definition",
+        build_trigger_eventmatch_definition(name, params),
+        out,
+    );
 }
 
 /// Registers campaign definition handlers on the public router.
@@ -322,7 +329,7 @@ pub fn register_campaign_definition_handlers(
                 }
             }
 
-            Ok(resp.must_to_any())
+            resp.to_any_or_internal_err()
         }),
     );
 
@@ -360,7 +367,7 @@ pub fn register_campaign_definition_handlers(
                     build_trigger_eventmatch_definition(&name, &params),
                 );
             }
-            Ok(resp.must_to_any())
+            resp.to_any_or_internal_err()
         }),
     );
 }

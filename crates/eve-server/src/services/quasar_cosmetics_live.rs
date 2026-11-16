@@ -19,7 +19,6 @@
 #![forbid(unsafe_code)]
 
 use super::quasar_auth_user::read_identity_store;
-use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
     require_admin_role, MachoNotifySink, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
     STATUS_FORBIDDEN, STATUS_NOT_FOUND,
@@ -604,49 +603,55 @@ fn ship_states_in_space(snap: &WorldStateSnapshot, sde: &SdeRegistry, solar_syst
 /// owner's solar system when the ship is in space (everyone on grid sees the new SKIN), otherwise
 /// to the owner only.
 pub fn publish_ship_skin_set(gateway: &PublicGatewayRouter, db: &WorldRepository, sde: &SdeRegistry, ship_id: i64, now_unix: u64) {
-    let found = db.with_snapshot(|s| {
-        let state = build_ship_state(s, sde, ship_id.max(0) as u64)?;
-        let owner = s.items.get(&ship_id).map(|i| i.owner_id)?;
-        let ch = s.characters.get(&owner);
-        let in_space = ch.is_some_and(|c| c.active_ship_id == ship_id && c.station_id.is_none() && c.structure_id.is_none());
-        Some((state, owner as u32, ch.map(|c| c.solar_system_id).filter(|_| in_space)))
+    crate::quasar_gateway::isolate_side_effect("quasar_cosmetics_live.publish_ship_skin_set", || {
+        let found = db.with_snapshot(|s| {
+            let state = build_ship_state(s, sde, ship_id.max(0) as u64)?;
+            let owner = s.items.get(&ship_id).map(|i| i.owner_id)?;
+            let ch = s.characters.get(&owner);
+            let in_space = ch.is_some_and(|c| c.active_ship_id == ship_id && c.station_id.is_none() && c.structure_id.is_none());
+            Some((state, owner as u32, ch.map(|c| c.solar_system_id).filter(|_| in_space)))
+        });
+        if let Some((state, owner, system)) = found {
+            let scope = system.map_or(NoticeScope::Character(owner), NoticeScope::SolarSystem);
+            let _ = gateway.publish_pb_notice(
+                scope,
+                "quasar_cosmetics_live.publish_ship_skin_set",
+                pb::message("eve_public.cosmetic.ship.api.SetNotice").set("state", state),
+                now_unix,
+            );
+        }
     });
-    if let Some((state, owner, system)) = found {
-        let scope = system.map_or(NoticeScope::Character(owner), NoticeScope::SolarSystem);
-        let notice = pb::message("eve_public.cosmetic.ship.api.SetNotice")
-            .set("state", state)
-            .must_to_any();
-        let _ = gateway.publish_notice(scope, notice, now_unix);
-    }
 }
 
 /// When a pilot enters space (undock), sends them the SKIN states of every ship already in the
 /// system (`SetAllInBubbleNotice`) and the system's structure paintworks (`SetAllInSolarSystemNotice`).
 pub fn publish_arrival_cosmetics(gateway: &PublicGatewayRouter, db: &WorldRepository, sde: &SdeRegistry, char_id: i64, now_unix: u64) {
-    // The persisted blob is the source of truth (every handler saves after mutating).
-    let Some((system, states, data)) = db.with_snapshot(|s| {
-        let sys = s.characters.get(&char_id)?.solar_system_id;
-        let data: CosmeticsLiveData =
-            s.quasar_state_blobs.get(BLOB_KEY).and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default();
-        Some((sys, ship_states_in_space(s, sde, sys), data))
-    }) else {
-        return;
-    };
-    let mut bubble = pb::message("eve_public.cosmetic.ship.api.SetAllInBubbleNotice");
-    for st in states {
-        bubble = bubble.add("state", st);
-    }
-    let scope = NoticeScope::Character(char_id as u32);
-    let _ = gateway.publish_notice(scope.clone(), bubble.must_to_any(), now_unix);
-    let mut paint = pb::message("eve_public.cosmetic.structure.paintwork.api.SetAllInSolarSystemNotice")
-        .set("solar_system.sequential", system as u64);
-    for lic in licenses_in_system(&data, system) {
-        paint = paint.add_with("paintworks", |b| {
-            b.set("structure.sequential", lic.structure_id)
-                .set("paintwork", build_slots(&lic.slots))
-        });
-    }
-    let _ = gateway.publish_notice(scope, paint.must_to_any(), now_unix);
+    crate::quasar_gateway::isolate_side_effect("quasar_cosmetics_live.publish_arrival_cosmetics", || {
+        // The persisted blob is the source of truth (every handler saves after mutating).
+        let Some((system, states, data)) = db.with_snapshot(|s| {
+            let sys = s.characters.get(&char_id)?.solar_system_id;
+            let data: CosmeticsLiveData =
+                s.quasar_state_blobs.get(BLOB_KEY).and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default();
+            Some((sys, ship_states_in_space(s, sde, sys), data))
+        }) else {
+            return;
+        };
+        let mut bubble = pb::message("eve_public.cosmetic.ship.api.SetAllInBubbleNotice");
+        for st in states {
+            bubble = bubble.add("state", st);
+        }
+        let scope = NoticeScope::Character(char_id as u32);
+        let _ = gateway.publish_pb_notice(scope.clone(), "quasar_cosmetics_live.publish_arrival_cosmetics.bubble", bubble, now_unix);
+        let mut paint = pb::message("eve_public.cosmetic.structure.paintwork.api.SetAllInSolarSystemNotice")
+            .set("solar_system.sequential", system as u64);
+        for lic in licenses_in_system(&data, system) {
+            paint = paint.add_with("paintworks", |b| {
+                b.set("structure.sequential", lic.structure_id)
+                    .set("paintwork", build_slots(&lic.slots))
+            });
+        }
+        let _ = gateway.publish_pb_notice(scope, "quasar_cosmetics_live.publish_arrival_cosmetics.paintwork", paint, now_unix);
+    });
 }
 
 fn licenses_in_system(data: &CosmeticsLiveData, system: u32) -> Vec<PaintworkLicense> {
@@ -704,11 +709,14 @@ fn build_license_attrs(l: &PaintworkLicense) -> ProtoBuilder {
 
 /// Paintwork `SetNotice` for one structure, broadcast to its solar system.
 fn queue_structure_paintwork(structure_id: u64, system: u32, slots: &[Option<u32>; 7], now: u64) {
-    let notice = pb::message("eve_public.cosmetic.structure.paintwork.api.SetNotice")
-        .set("structure.sequential", structure_id)
-        .set("paintwork", build_slots(slots))
-        .must_to_any();
-    ctx_queue_notice(NoticeScope::SolarSystem(system), notice, now);
+    crate::quasar_gateway::queue_pb_notice(
+        NoticeScope::SolarSystem(system),
+        "quasar_cosmetics_live.queue_structure_paintwork",
+        pb::message("eve_public.cosmetic.structure.paintwork.api.SetNotice")
+            .set("structure.sequential", structure_id)
+            .set("paintwork", build_slots(slots)),
+        now,
+    );
 }
 
 fn parse_rgb(m: Option<&DynamicQuasarMessage>) -> Result<Option<[u32; 3]>, (u32, String)> {
@@ -840,7 +848,7 @@ fn logo_display(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &Dynam
     st.data.write().unwrap_or_else(|e| e.into_inner()).ship_logos.entry(ship).or_default().insert(index, kind);
     st.save();
     emit_ship_logo_macho_notifications(&st.macho_sink, &st.db, ship, index, PyRep::Integer(logo_kind_to_fsd_cosmetic_type(kind)));
-    Ok(pb::message("eve_public.cosmetic.ship.logo.DisplayResponse").must_to_any())
+    pb::message("eve_public.cosmetic.ship.logo.DisplayResponse").to_any_or_internal_err()
 }
 
 fn logo_clear(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
@@ -858,7 +866,7 @@ fn logo_clear(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &Dynamic
     }
     st.save();
     emit_ship_logo_macho_notifications(&st.macho_sink, &st.db, ship, index, PyRep::None);
-    Ok(pb::message("eve_public.cosmetic.ship.logo.ClearResponse").must_to_any())
+    pb::message("eve_public.cosmetic.ship.logo.ClearResponse").to_any_or_internal_err()
 }
 
 fn ship_get(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
@@ -868,9 +876,9 @@ fn ship_get(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &DynamicQu
         .db
         .with_snapshot(|s| build_ship_state(s, &st.sde, ship))
         .ok_or_else(|| (STATUS_NOT_FOUND, format!("Ship {ship} not found")))?;
-    Ok(pb::message("eve_public.cosmetic.ship.api.GetResponse")
+    pb::message("eve_public.cosmetic.ship.api.GetResponse")
         .set("state", state)
-        .must_to_any())
+        .to_any_or_internal_err()
 }
 
 fn ship_get_all_in_bubble(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, _msg: &DynamicQuasarMessage) -> HandlerResult {
@@ -884,7 +892,7 @@ fn ship_get_all_in_bubble(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, _
     for state in states {
         resp = resp.add("states", state);
     }
-    Ok(resp.must_to_any())
+    resp.to_any_or_internal_err()
 }
 
 fn palette_get(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
@@ -892,9 +900,9 @@ fn palette_get(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &Dynami
     let corp = sub(msg, 1).and_then(|m| seq_of(m, 1)).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing corporation identifier".to_string()))? as u32;
     let p = st.data.read().unwrap_or_else(|e| e.into_inner()).palettes.get(&corp).cloned();
     let p = p.ok_or_else(|| (STATUS_NOT_FOUND, format!("Corporation {corp} has no palette")))?;
-    Ok(pb::message("eve_public.cosmetic.corporation.palette.api.GetResponse")
+    pb::message("eve_public.cosmetic.corporation.palette.api.GetResponse")
         .set("attributes", build_palette(&p))
-        .must_to_any())
+        .to_any_or_internal_err()
 }
 
 fn palette_get_own(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, _msg: &DynamicQuasarMessage) -> HandlerResult {
@@ -902,11 +910,11 @@ fn palette_get_own(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, _msg: &D
     let corp = st.db.with_snapshot(|s| char_corp(s, cid)).ok_or_else(|| (STATUS_NOT_FOUND, "Character not found".to_string()))?;
     let p = st.data.read().unwrap_or_else(|e| e.into_inner()).palettes.get(&corp).cloned();
     let p = p.ok_or_else(|| (STATUS_NOT_FOUND, format!("Corporation {corp} has no palette")))?;
-    Ok(pb::message("eve_public.cosmetic.corporation.palette.api.GetOwnResponse")
+    pb::message("eve_public.cosmetic.corporation.palette.api.GetOwnResponse")
         .set("attributes", build_palette(&p))
         .set("last_modifier.sequential", p.last_modifier as u64)
         .set("last_modified", GoogleTimestamp::from_unix(p.last_modified_unix as i64, 0))
-        .must_to_any())
+        .to_any_or_internal_err()
 }
 
 fn palette_set(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
@@ -931,15 +939,15 @@ fn palette_set(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &Dynami
     st.reload_ship_logos_from_db();
     st.data.write().unwrap_or_else(|e| e.into_inner()).palettes.insert(corp, record);
     st.save();
-    Ok(pb::message("eve_public.cosmetic.corporation.palette.api.SetResponse").must_to_any())
+    pb::message("eve_public.cosmetic.corporation.palette.api.SetResponse").to_any_or_internal_err()
 }
 
 fn palette_can_edit(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, _msg: &DynamicQuasarMessage) -> HandlerResult {
     let cid = require_char(ctx)?;
     let can = st.db.with_snapshot(|s| char_corp(s, cid).is_some_and(|c| can_edit_palette(ctx, s, cid, c)));
-    Ok(pb::message("eve_public.cosmetic.corporation.palette.api.CanEditResponse")
+    pb::message("eve_public.cosmetic.corporation.palette.api.CanEditResponse")
         .set("can_edit", can)
-        .must_to_any())
+        .to_any_or_internal_err()
 }
 
 fn paintwork_get(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
@@ -947,10 +955,10 @@ fn paintwork_get(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &Dyna
     let structure = seq_of(msg, 1).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing structure identifier".to_string()))?;
     let lic = st.data.read().unwrap_or_else(|e| e.into_inner()).paint_licenses.values().find(|l| l.structure_id == structure).cloned();
     let lic = lic.ok_or_else(|| (STATUS_NOT_FOUND, format!("Structure {structure} has no paintwork")))?;
-    Ok(pb::message("eve_public.cosmetic.structure.paintwork.api.GetResponse")
+    pb::message("eve_public.cosmetic.structure.paintwork.api.GetResponse")
         .set("license.uuid", lic.uuid.to_vec())
         .set("paintwork", build_slots(&lic.slots))
-        .must_to_any())
+        .to_any_or_internal_err()
 }
 
 fn paintwork_get_all_in_system(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, _msg: &DynamicQuasarMessage) -> HandlerResult {
@@ -965,7 +973,7 @@ fn paintwork_get_all_in_system(st: &CosmeticsLiveState, ctx: &AuthoritativeConte
                 .set("paintwork", build_slots(&lic.slots))
         });
     }
-    Ok(resp.must_to_any())
+    resp.to_any_or_internal_err()
 }
 
 fn license_get(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
@@ -975,9 +983,9 @@ fn license_get(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &Dynami
     let lic = st.data.read().unwrap_or_else(|e| e.into_inner()).paint_licenses.get(&hex(&uuid)).cloned();
     // Licenses are visible only to the owning corporation.
     let lic = lic.filter(|l| Some(l.corporation_id) == corp).ok_or_else(|| (STATUS_NOT_FOUND, "License not found".to_string()))?;
-    Ok(pb::message("eve_public.cosmetic.structure.paintwork.license.api.GetResponse")
+    pb::message("eve_public.cosmetic.structure.paintwork.license.api.GetResponse")
         .set("attributes", build_license_attrs(&lic))
-        .must_to_any())
+        .to_any_or_internal_err()
 }
 
 fn license_get_all_owned(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, _msg: &DynamicQuasarMessage) -> HandlerResult {
@@ -1000,7 +1008,7 @@ fn license_get_all_owned(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, _m
                 .set("attributes", build_license_attrs(l))
         });
     }
-    Ok(resp.must_to_any())
+    resp.to_any_or_internal_err()
 }
 
 /// Removes a license; the structure reverts to its default (all-empty) paintwork.
@@ -1036,7 +1044,7 @@ fn license_revoke_by_corp(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, m
         return Err((STATUS_FORBIDDEN, "Director role required to revoke paintwork licenses".to_string()));
     }
     revoke(st, &uuid, Some(corp.unwrap_or(0)), ctx.now_unix())?;
-    Ok(pb::message("eve_public.cosmetic.structure.paintwork.license.api.RevokeResponse").must_to_any())
+    pb::message("eve_public.cosmetic.structure.paintwork.license.api.RevokeResponse").to_any_or_internal_err()
 }
 
 pub const PARAGON_CORP_ID: i64 = 1_000_419;
@@ -1160,7 +1168,7 @@ fn license_issue_inner(
                 .set("structure.sequential", lic.structure_id)
         });
     }
-    Ok(resp.must_to_any())
+    resp.to_any_or_internal_err()
 }
 
 fn license_issue(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
@@ -1197,7 +1205,7 @@ fn license_get_catalogue(_st: &CosmeticsLiveState, _ctx: &AuthoritativeContext, 
                 .set("price.amount", lp_cost)
         });
     }
-    Ok(resp.must_to_any())
+    resp.to_any_or_internal_err()
 }
 
 /// Resolves `(ship_type_id, fsd_cosmetic_type)` (`1 = Corp Emblem`, `2 = Alliance Emblem`) for a
@@ -1309,12 +1317,10 @@ pub fn activate_ship_emblem_license(
     } else {
         "eve_public.entitlement.character.ship.corplogo.GrantedNotice"
     };
-    let notice = pb::message(notice_pkg)
-        .set("entitlement", pb::raw_message(&ident))
-        .must_to_any();
-    let _ = ctx.quasar_gateway.publish_notice(
+    let _ = ctx.quasar_gateway.publish_pb_notice(
         NoticeScope::Character(char_id as u32),
-        notice,
+        "quasar_cosmetics_live.activate_ship_emblem_license",
+        pb::message(notice_pkg).set("entitlement", pb::raw_message(&ident)),
         ctx.now_unix(),
     );
     let act_args = vec![PyRep::Integer(i64::from(license_type_id)), PyRep::Integer(char_id)];
@@ -1444,7 +1450,7 @@ fn license_admin_revoke(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg
     require_admin_role(ctx)?;
     let uuid = uuid_of(msg, 1).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing license identifier".to_string()))?;
     revoke(st, &uuid, None, ctx.now_unix())?;
-    Ok(pb::message("eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeResponse").must_to_any())
+    pb::message("eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeResponse").to_any_or_internal_err()
 }
 
 #[cfg(test)]

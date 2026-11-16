@@ -920,6 +920,26 @@ pub fn record_server_operation_event_in_db(
     increment: u32,
     now: u64,
 ) -> (Option<(i64, i64, i64)>, OperationRewardOutcome) {
+    crate::quasar_gateway::isolate_side_effect(
+        "operations_manager_helpers.record_server_operation_event_in_db",
+        || {
+            record_server_operation_event_in_db_inner(
+                db, sde, char_id, event_name, params, increment, now,
+            )
+        },
+    )
+    .unwrap_or((None, OperationRewardOutcome::default()))
+}
+
+fn record_server_operation_event_in_db_inner(
+    db: &eve_db::WorldRepository,
+    sde: &eve_sde::SdeRegistry,
+    char_id: i64,
+    event_name: &str,
+    params: &[(&str, String)],
+    increment: u32,
+    now: u64,
+) -> (Option<(i64, i64, i64)>, OperationRewardOutcome) {
     if char_id <= 0 || increment == 0 {
         return (None, OperationRewardOutcome::default());
     }
@@ -1044,33 +1064,63 @@ pub fn record_server_operation_event(
     params: &[(&str, String)],
     increment: u32,
 ) {
-    let (completed_task, outcome) = record_server_operation_event_in_db(
-        &ctx.db,
-        &ctx.sde,
-        char_id,
-        event_name,
-        params,
-        increment,
-        ctx.now_unix(),
+    crate::quasar_gateway::isolate_side_effect(
+        "operations_manager_helpers.record_server_operation_event",
+        || {
+            let (completed_task, outcome) = record_server_operation_event_in_db(
+                &ctx.db,
+                &ctx.sde,
+                char_id,
+                event_name,
+                params,
+                increment,
+                ctx.now_unix(),
+            );
+            emit_operation_reward_notifications(ctx, char_id, &outcome);
+            crate::services::air_npe_nodegraph_runner::on_server_gameplay_event(
+                ctx, char_id, event_name, params,
+            );
+            if let Some((cat_id, op_id, tid)) = completed_task {
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    OnOperationTaskCompleted {
+                        category_id: cat_id,
+                        operation_id: op_id,
+                        task_id: tid,
+                    },
+                );
+            }
+        },
     );
-    emit_operation_reward_notifications(ctx, char_id, &outcome);
-    crate::services::air_npe_nodegraph_runner::on_server_gameplay_event(
-        ctx, char_id, event_name, params,
-    );
-    if let Some((cat_id, op_id, tid)) = completed_task {
-        ctx.emit_typed(
-            NotificationTarget::Character(char_id),
-            OnOperationTaskCompleted {
-                category_id: cat_id,
-                operation_id: op_id,
-                task_id: tid,
-            },
-        );
-    }
 }
 
 /// Authoritative `invbroker.Add` gameplay hook for fitting modules, loading charges, and looting wrecks/containers in space.
 pub fn record_invbroker_add_operation_event(
+    ctx: &ServerContext,
+    char_id: i64,
+    orig_source_loc_id: i64,
+    new_loc: i64,
+    flag: eve_db::InventoryFlag,
+    type_id: u32,
+    qty: i32,
+) {
+    crate::quasar_gateway::isolate_side_effect(
+        "operations_manager_helpers.record_invbroker_add_operation_event",
+        || {
+            record_invbroker_add_operation_event_inner(
+                ctx,
+                char_id,
+                orig_source_loc_id,
+                new_loc,
+                flag,
+                type_id,
+                qty,
+            );
+        },
+    );
+}
+
+fn record_invbroker_add_operation_event_inner(
     ctx: &ServerContext,
     char_id: i64,
     orig_source_loc_id: i64,
@@ -1155,41 +1205,46 @@ pub fn advance_and_notify_server_operation_tasks(
     delta: u64,
     now_unix: u64,
 ) {
-    let inc = u32::try_from(delta).unwrap_or(u32::MAX);
-    for &ev in event_names {
-        let (completed_task, outcome) =
-            record_server_operation_event_in_db(db, sde, char_id, ev, params, inc, now_unix);
-        if completed_task.is_none()
-            && outcome.new_balance_cents.is_none()
-            && outcome.created_hangar_items.is_empty()
-            && !outcome.enqueued_redeem_tokens
-        {
-            continue;
-        }
-        let Some(sink) = gateway
-            .macho_notify_sink
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .cloned()
-        else {
-            continue;
-        };
-        emit_operation_reward_notifications_with_sink(sde, &*sink, char_id, &outcome);
-        if let Some((cat_id, op_id, tid)) = completed_task {
-            sink(
-                NotificationTarget::Character(char_id),
-                OnOperationTaskCompleted::EVENT,
-                OnOperationTaskCompleted::DEFAULT_ID_TYPE,
-                OnOperationTaskCompleted {
-                    category_id: cat_id,
-                    operation_id: op_id,
-                    task_id: tid,
+    crate::quasar_gateway::isolate_side_effect(
+        "operations_manager_helpers.advance_and_notify_server_operation_tasks",
+        || {
+            let inc = u32::try_from(delta).unwrap_or(u32::MAX);
+            for &ev in event_names {
+                let (completed_task, outcome) =
+                    record_server_operation_event_in_db(db, sde, char_id, ev, params, inc, now_unix);
+                if completed_task.is_none()
+                    && outcome.new_balance_cents.is_none()
+                    && outcome.created_hangar_items.is_empty()
+                    && !outcome.enqueued_redeem_tokens
+                {
+                    continue;
                 }
-                .into_args(),
-            );
-        }
-    }
+                let Some(sink) = gateway
+                    .macho_notify_sink
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    .cloned()
+                else {
+                    continue;
+                };
+                emit_operation_reward_notifications_with_sink(sde, &*sink, char_id, &outcome);
+                if let Some((cat_id, op_id, tid)) = completed_task {
+                    sink(
+                        NotificationTarget::Character(char_id),
+                        OnOperationTaskCompleted::EVENT,
+                        OnOperationTaskCompleted::DEFAULT_ID_TYPE,
+                        OnOperationTaskCompleted {
+                            category_id: cat_id,
+                            operation_id: op_id,
+                            task_id: tid,
+                        }
+                        .into_args(),
+                    );
+                }
+            }
+        },
+    );
 }
 
 static OPERATION_DEFS_CACHE: std::sync::OnceLock<OperationDefinitions> = std::sync::OnceLock::new();

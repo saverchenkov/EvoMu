@@ -96,19 +96,24 @@ pub fn pause_milestone_playtime_in_snap(
     char_id: i64,
     now_unix: u64,
 ) {
-    let Some(mut existing) = load_milestone_state(snap, char_id) else {
-        return;
-    };
-    if existing.active_session {
-        if existing.last_activity_unix > 0 {
-            existing.accumulated_playtime_secs = existing
-                .accumulated_playtime_secs
-                .saturating_add(now_unix.saturating_sub(existing.last_activity_unix));
-        }
-        existing.last_activity_unix = now_unix;
-        existing.active_session = false;
-        save_milestone_state(snap, char_id, &existing);
-    }
+    crate::quasar_gateway::isolate_side_effect(
+        "campaigns_milestones_playtime.pause_milestone_playtime_in_snap",
+        || {
+            let Some(mut existing) = load_milestone_state(snap, char_id) else {
+                return;
+            };
+            if existing.active_session {
+                if existing.last_activity_unix > 0 {
+                    existing.accumulated_playtime_secs = existing
+                        .accumulated_playtime_secs
+                        .saturating_add(now_unix.saturating_sub(existing.last_activity_unix));
+                }
+                existing.last_activity_unix = now_unix;
+                existing.active_session = false;
+                save_milestone_state(snap, char_id, &existing);
+            }
+        },
+    );
 }
 
 /// Persistently flushes and pauses accumulated milestone playtime for `char_id`.
@@ -117,9 +122,14 @@ pub fn pause_milestone_playtime(
     char_id: i64,
     now_unix: u64,
 ) {
-    db.with_mut_snapshot(|snap| {
-        pause_milestone_playtime_in_snap(snap, char_id, now_unix);
-    });
+    crate::quasar_gateway::isolate_side_effect(
+        "campaigns_milestones_playtime.pause_milestone_playtime",
+        || {
+            db.with_mut_snapshot(|snap| {
+                pause_milestone_playtime_in_snap(snap, char_id, now_unix);
+            });
+        },
+    );
 }
 
 /// Resolves the active daily login campaign for `char_id` from per-character enrollment,

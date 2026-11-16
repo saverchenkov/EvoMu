@@ -46,7 +46,7 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
                         .set("attributes", track_attributes_builder(&t))
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any_or_internal_err()
         }),
     );
 
@@ -81,7 +81,7 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
                         .set("stats", track_stats_builder(&t))
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any_or_internal_err()
         }),
     );
 
@@ -103,7 +103,7 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
                         .set("stats", track_participant_stats_builder(&t, char_id))
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any_or_internal_err()
         }),
     );
 
@@ -117,7 +117,7 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
             let res = mgr.commit_to_objective(char_id, oid, ctx.now_unix(), &mut notices);
             queue_notices(notices, ctx.now_unix());
             res?;
-            Ok(pb::message("eve_public.campaign.objective.api.CommitResponse").must_to_any())
+            pb::message("eve_public.campaign.objective.api.CommitResponse").to_any_or_internal_err()
         }),
     );
 
@@ -131,7 +131,7 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
             let res = mgr.resign_from_objective(char_id, oid, ctx.now_unix(), &mut notices);
             queue_notices(notices, ctx.now_unix());
             res?;
-            Ok(pb::message("eve_public.campaign.objective.api.ResignResponse").must_to_any())
+            pb::message("eve_public.campaign.objective.api.ResignResponse").to_any_or_internal_err()
         }),
     );
 
@@ -142,7 +142,7 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
             let char_id = ctx.effective_character_id().ok_or((STATUS_FORBIDDEN, "Active character required".to_string()))?;
             let oid = require_id(extract_campaign_id(dyn_msg.get(1)), "campaign objective")?;
             mgr.redeem_objective_rewards(char_id, oid)?;
-            Ok(pb::message("eve_public.campaign.objective.api.RedeemRewardsResponse").must_to_any())
+            pb::message("eve_public.campaign.objective.api.RedeemRewardsResponse").to_any_or_internal_err()
         }),
     );
 
@@ -161,7 +161,7 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
                         .set("stats", objective_stats_builder(&obj))
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any_or_internal_err()
         }),
     );
 
@@ -189,7 +189,7 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
                     }
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any_or_internal_err()
         }),
     );
 
@@ -207,7 +207,7 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
                 .cloned()
                 .ok_or((STATUS_NOT_FOUND, "Campaign track not found".to_string()))?;
             let units = mgr.campaign_committed_units(trk.campaign_id);
-            Ok(ticking_prediction_builder(&trk, units).must_to_any())
+            ticking_prediction_builder(&trk, units).to_any_or_internal_err()
         }),
     );
 
@@ -218,7 +218,7 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
             let char_id = ctx.effective_character_id().ok_or((STATUS_FORBIDDEN, "Active character required".to_string()))?;
             let tid = require_id(extract_campaign_id(dyn_msg.get(1)), "campaign track")?;
             mgr.redeem_track_rewards(char_id, tid)?;
-            Ok(pb::message("eve_public.campaign.track.api.RedeemParticipantRewardsResponse").must_to_any())
+            pb::message("eve_public.campaign.track.api.RedeemParticipantRewardsResponse").to_any_or_internal_err()
         }),
     );
 }

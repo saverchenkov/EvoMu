@@ -42,6 +42,140 @@ pub const STATUS_NOT_IMPLEMENTED: u32 = 501;
 pub const STATUS_SERVICE_UNAVAILABLE: u32 = 503;
 pub const STATUS_GATEWAY_TIMEOUT: u32 = 504;
 
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
+/// Executes a secondary progression, notice, telemetry, or presence side-effect inside a
+/// `catch_unwind` boundary (`#1120`). Any panic is logged via `tracing::warn!` and converted to
+/// `None` so it can never unwind into `dispatch.rs` or abort a primary MachoNet gameplay RPC.
+pub fn isolate_side_effect<F, R>(label: &str, f: F) -> Option<R>
+where
+    F: FnOnce() -> R,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(val) => Some(val),
+        Err(payload) => {
+            let panic_msg = panic_payload_to_string(payload);
+            tracing::warn!(
+                side_effect = label,
+                panic = %panic_msg,
+                "Isolated side-effect panicked; continuing primary RPC"
+            );
+            None
+        }
+    }
+}
+
+/// Executes a fallible secondary side-effect inside a `catch_unwind` boundary (`#1120`), logging
+/// both `Err(e)` and panics via `tracing::warn!` and returning `None`.
+pub fn isolate_side_effect_result<F, R, E>(label: &str, f: F) -> Option<R>
+where
+    F: FnOnce() -> Result<R, E>,
+    E: std::fmt::Debug,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(Ok(val)) => Some(val),
+        Ok(Err(err)) => {
+            tracing::warn!(
+                side_effect = label,
+                error = ?err,
+                "Isolated side-effect returned error; continuing primary RPC"
+            );
+            None
+        }
+        Err(payload) => {
+            let panic_msg = panic_payload_to_string(payload);
+            tracing::warn!(
+                side_effect = label,
+                panic = %panic_msg,
+                "Isolated side-effect panicked; continuing primary RPC"
+            );
+            None
+        }
+    }
+}
+
+/// Maps a [`eve_proto::pb::PbError`] into a Quasar `(STATUS_INTERNAL_ERROR, String)` tuple while
+/// logging a warning so handler failures are observable without panicking.
+pub fn pb_err_to_internal(err: eve_proto::pb::PbError) -> (u32, String) {
+    tracing::warn!(error = %err, "ProtoBuilder encoding failed");
+    (STATUS_INTERNAL_ERROR, err.to_string())
+}
+
+/// Encodes a fire-and-forget [`eve_proto::pb::ProtoBuilder`] into [`GoogleAny`], logging a
+/// warning and returning `None` on descriptor/schema errors instead of panicking.
+pub fn pb_to_any_or_log(label: &str, builder: eve_proto::pb::ProtoBuilder) -> Option<GoogleAny> {
+    match builder.to_any() {
+        Ok(any) => Some(any),
+        Err(err) => {
+            tracing::warn!(
+                side_effect = label,
+                error = %err,
+                "Failed to build Quasar GoogleAny payload; dropping notice"
+            );
+            None
+        }
+    }
+}
+
+/// Encodes a fire-and-forget [`eve_proto::pb::ProtoBuilder`] into protobuf wire bytes, logging a
+/// warning and returning `None` on descriptor/schema errors instead of panicking.
+pub fn pb_encode_or_log(label: &str, builder: eve_proto::pb::ProtoBuilder) -> Option<Vec<u8>> {
+    match builder.encode() {
+        Ok(bytes) => Some(bytes),
+        Err(err) => {
+            tracing::warn!(
+                side_effect = label,
+                error = %err,
+                "Failed to encode Quasar protobuf payload; skipping"
+            );
+            None
+        }
+    }
+}
+
+/// Encodes a fire-and-forget [`eve_proto::pb::ProtoBuilder`] into `out`, logging a warning on
+/// descriptor/schema errors instead of panicking. Returns `true` on success.
+pub fn pb_encode_into_or_log(
+    label: &str,
+    builder: eve_proto::pb::ProtoBuilder,
+    out: &mut Vec<u8>,
+) -> bool {
+    match builder.encode_into(out) {
+        Ok(()) => true,
+        Err(err) => {
+            tracing::warn!(
+                side_effect = label,
+                error = %err,
+                "Failed to encode Quasar protobuf payload into buffer; skipping"
+            );
+            false
+        }
+    }
+}
+
+/// Queues a fire-and-forget Quasar notice from a [`eve_proto::pb::ProtoBuilder`] into the local
+/// notice queue, logging a warning instead of panicking if descriptor encoding fails.
+pub fn queue_pb_notice(
+    scope: NoticeScope,
+    label: &str,
+    builder: eve_proto::pb::ProtoBuilder,
+    now_unix: u64,
+) {
+    if let Some(any) = pb_to_any_or_log(label, builder) {
+        isolate_side_effect(label, || {
+            crate::services::quasar_social_chat::ctx_queue_notice(scope, any, now_unix);
+        });
+    }
+}
+
 /// Matches `EXPIRY_DELAY_SECS = 10` in `publicGateway/notice/notice_routing_cache.pyj`.
 pub const NOTICE_CACHE_EXPIRY_DELAY_SECS: u64 = 10;
 /// Matches `MAX_SIZE_BYTES = 2000000` in `publicGateway/notice/notice_routing_cache.pyj`.
@@ -919,40 +1053,43 @@ impl PublicGatewayRouter {
     /// Updates a subscriber's session tenancy attributes (`charid`, `corpid`, `allianceid`, `solarsystemid2`, `fleetid`)
     /// and flushes any newly valid notices from `NoticeRoutingCache`.
     pub fn on_session_changed(&self, session: &SessionState, now_unix: u64) -> usize {
-        let updated_sub = {
+        isolate_side_effect("quasar_gateway.on_session_changed", || {
+            let updated_sub = {
+                let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
+                let Some(sub) = subs.get_mut(&session.session_id) else {
+                    return 0;
+                };
+                sub.update_from_session(session);
+                sub.clone()
+            };
+            let newly_valid = self
+                .routing_cache
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .drain_newly_valid_for_subscriber(&updated_sub, now_unix);
+            if newly_valid.is_empty() {
+                return 0;
+            }
             let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
             let Some(sub) = subs.get_mut(&session.session_id) else {
                 return 0;
             };
-            sub.update_from_session(session);
-            sub.clone()
-        };
-        let newly_valid = self
-            .routing_cache
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .drain_newly_valid_for_subscriber(&updated_sub, now_unix);
-        if newly_valid.is_empty() {
-            return 0;
-        }
-        let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
-        let Some(sub) = subs.get_mut(&session.session_id) else {
-            return 0;
-        };
-        let mut delivered = 0usize;
-        for notice in newly_valid {
-            if sub.accepts_payload_type(
-                notice
-                    .payload
-                    .as_ref()
-                    .map(|p| p.type_url.as_str())
-                    .unwrap_or(""),
-            ) {
-                sub.push_notice(notice);
-                delivered += 1;
+            let mut delivered = 0usize;
+            for notice in newly_valid {
+                if sub.accepts_payload_type(
+                    notice
+                        .payload
+                        .as_ref()
+                        .map(|p| p.type_url.as_str())
+                        .unwrap_or(""),
+                ) {
+                    sub.push_notice(notice);
+                    delivered += 1;
+                }
             }
-        }
-        delivered
+            delivered
+        })
+        .unwrap_or(0)
     }
 
     pub fn poll_notices(&self, session_id: u64) -> Vec<EvePublicNotice> {
@@ -961,6 +1098,30 @@ impl PublicGatewayRouter {
             return Vec::new();
         };
         sub.inbox.drain(..).collect()
+    }
+
+    /// Best-effort server-only notice publisher from a [`eve_proto::pb::ProtoBuilder`].
+    /// Never panics or propagates errors to the caller.
+    pub fn publish_pb_notice(
+        &self,
+        scope: NoticeScope,
+        label: &str,
+        builder: eve_proto::pb::ProtoBuilder,
+        now_unix: u64,
+    ) -> Option<(EvePublicNotice, usize)> {
+        let payload = pb_to_any_or_log(label, builder)?;
+        self.publish_notice_isolated(scope, label, payload, now_unix)
+    }
+
+    /// Best-effort server-only notice publisher wrapped in [`isolate_side_effect_result`].
+    pub fn publish_notice_isolated(
+        &self,
+        scope: NoticeScope,
+        label: &str,
+        payload: GoogleAny,
+        now_unix: u64,
+    ) -> Option<(EvePublicNotice, usize)> {
+        isolate_side_effect_result(label, || self.publish_notice(scope, payload, now_unix))
     }
 
     /// Server-only notice publisher: publishes an `EvePublicNotice` to all connected clients matching `scope`.
@@ -972,64 +1133,73 @@ impl PublicGatewayRouter {
         payload: GoogleAny,
         now_unix: u64,
     ) -> Result<(EvePublicNotice, usize), BridgeRpcError> {
-        let seq = self.next_notice_seq.fetch_add(1, Ordering::Relaxed);
-        self.sync_meta_to_db();
-        let mut uuid = [0u8; 16];
-        uuid[0..8].copy_from_slice(&now_unix.to_be_bytes());
-        uuid[8..16].copy_from_slice(&seq.to_be_bytes());
+        isolate_side_effect("quasar_gateway.publish_notice", || {
+            let seq = self.next_notice_seq.fetch_add(1, Ordering::Relaxed);
+            self.sync_meta_to_db();
+            let mut uuid = [0u8; 16];
+            uuid[0..8].copy_from_slice(&now_unix.to_be_bytes());
+            uuid[8..16].copy_from_slice(&seq.to_be_bytes());
 
-        let base_notice = EvePublicNotice {
-            dispatched: Some(GoogleTimestamp {
-                seconds: now_unix as i64,
-                nanos: 0,
-            }),
-            uuid: uuid.to_vec(),
-            internal_origin: "evomu.quasar.notice_publisher".to_string(),
-            tenant: self.tenant.clone(),
-            payload: Some(payload),
-            target_group: scope.base_target_group(),
-            trace_context: None,
-        };
+            let base_notice = EvePublicNotice {
+                dispatched: Some(GoogleTimestamp {
+                    seconds: now_unix as i64,
+                    nanos: 0,
+                }),
+                uuid: uuid.to_vec(),
+                internal_origin: "evomu.quasar.notice_publisher".to_string(),
+                tenant: self.tenant.clone(),
+                payload: Some(payload),
+                target_group: scope.base_target_group(),
+                trace_context: None,
+            };
 
-        let mut delivered = 0usize;
-        {
-            let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
-            for sub in subs.values_mut() {
-                if scope.matches_subscriber(sub) {
-                    let payload_url = base_notice
-                        .payload
-                        .as_ref()
-                        .map(|p| p.type_url.as_str())
-                        .unwrap_or("");
-                    if !sub.accepts_payload_type(payload_url) {
-                        continue;
+            let mut delivered = 0usize;
+            {
+                let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
+                for sub in subs.values_mut() {
+                    if scope.matches_subscriber(sub) {
+                        let payload_url = base_notice
+                            .payload
+                            .as_ref()
+                            .map(|p| p.type_url.as_str())
+                            .unwrap_or("");
+                        if !sub.accepts_payload_type(payload_url) {
+                            continue;
+                        }
+                        let mut targeted = base_notice.clone();
+                        targeted.target_group = Some(scope.target_group_for_subscriber(sub));
+                        sub.push_notice(targeted);
+                        delivered += 1;
                     }
-                    let mut targeted = base_notice.clone();
-                    targeted.target_group = Some(scope.target_group_for_subscriber(sub));
-                    sub.push_notice(targeted);
-                    delivered += 1;
                 }
             }
-        }
 
-        if delivered == 0 {
-            let is_ephemeral = base_notice
-                .payload
-                .as_ref()
-                .map(|p| {
-                    p.type_url.ends_with("eve_public.chat.local.api.JoinNotice")
-                        || p.type_url.ends_with("eve_public.chat.local.api.LeaveNotice")
-                })
-                .unwrap_or(false);
-            if !is_ephemeral {
-                self.routing_cache
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .add_notice(base_notice.clone(), scope, now_unix)?;
+            if delivered == 0 {
+                let is_ephemeral = base_notice
+                    .payload
+                    .as_ref()
+                    .map(|p| {
+                        p.type_url.ends_with("eve_public.chat.local.api.JoinNotice")
+                            || p.type_url.ends_with("eve_public.chat.local.api.LeaveNotice")
+                    })
+                    .unwrap_or(false);
+                if !is_ephemeral {
+                    self.routing_cache
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .add_notice(base_notice.clone(), scope, now_unix)?;
+                }
             }
-        }
 
-        Ok((base_notice, delivered))
+            Ok((base_notice, delivered))
+        })
+        .unwrap_or_else(|| {
+            Err(BridgeRpcError {
+                code: "InternalNoticeError".into(),
+                message: "Isolated notice publication panicked".into(),
+                client_error: None,
+            })
+        })
     }
 
     /// Extracts an embedded idempotency key (`eve.idempotency.Token`) from a dynamic message if present.
@@ -1263,12 +1433,19 @@ impl PublicGatewayRouter {
 
         let pre_notice_len = self.pending_notices.read().unwrap_or_else(|e| e.into_inner()).len();
         let (status_code, status_message, rsp_payload) = match handler_opt {
-            Some(handler) => match handler(&auth_ctx, payload_any, &dyn_msg) {
-                Ok(any_out) if any_out.type_url.is_empty() && any_out.value.is_empty() => {
+            Some(handler) => match isolate_side_effect("quasar_gateway.handler", || {
+                handler(&auth_ctx, payload_any, &dyn_msg)
+            }) {
+                Some(Ok(any_out)) if any_out.type_url.is_empty() && any_out.value.is_empty() => {
                     (STATUS_OK, "OK".to_string(), None)
                 }
-                Ok(any_out) => (STATUS_OK, "OK".to_string(), Some(any_out)),
-                Err((code, msg)) => (code, msg, None),
+                Some(Ok(any_out)) => (STATUS_OK, "OK".to_string(), Some(any_out)),
+                Some(Err((code, msg))) => (code, msg, None),
+                None => (
+                    STATUS_INTERNAL_ERROR,
+                    format!("Quasar handler for '{norm_type}' panicked"),
+                    None,
+                ),
             },
             None => (
                 STATUS_NOT_IMPLEMENTED,
@@ -1283,7 +1460,12 @@ impl PublicGatewayRouter {
         for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
             #[cfg(any(test, feature = "demo-seed"))]
             tapped_notices.push(payload.clone());
-            let _ = self.publish_notice(scope, payload, ts);
+            let _ = self.publish_notice_isolated(
+                scope,
+                "quasar_gateway.handle_public_request.local_notice",
+                payload,
+                ts,
+            );
         }
 
         #[cfg(any(test, feature = "demo-seed"))]
@@ -1312,7 +1494,12 @@ impl PublicGatewayRouter {
         for (scope, payload) in queued {
             #[cfg(any(test, feature = "demo-seed"))]
             tapped_notices.push(payload.clone());
-            let _ = self.publish_notice(scope, payload, now_unix);
+            let _ = self.publish_notice_isolated(
+                scope,
+                "quasar_gateway.handle_public_request.pending_notice",
+                payload,
+                now_unix,
+            );
         }
 
         let final_rsp = build_response(status_code, status_message, rsp_payload);
@@ -1407,22 +1594,31 @@ impl PublicGatewayRouter {
             .with_service_roles(session.role),
         );
         if let Some(ref payload) = event.payload {
-            crate::services::quasar_progression_extra::handle_opportunity_event(
-                &self.progression,
-                &self.descriptors,
-                session,
-                payload,
-                now_unix,
-            );
-            crate::services::quasar_cosmetics_services::handle_app_domain_event(
-                &self.db,
-                &self.descriptors,
-                session,
-                payload,
-                now_unix,
-            );
+            isolate_side_effect("quasar_gateway.handle_opportunity_event", || {
+                crate::services::quasar_progression_extra::handle_opportunity_event(
+                    &self.progression,
+                    &self.descriptors,
+                    session,
+                    payload,
+                    now_unix,
+                );
+            });
+            isolate_side_effect("quasar_gateway.handle_app_domain_event", || {
+                crate::services::quasar_cosmetics_services::handle_app_domain_event(
+                    &self.db,
+                    &self.descriptors,
+                    session,
+                    payload,
+                    now_unix,
+                );
+            });
             for (scope, notice_payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
-                let _ = self.publish_notice(scope, notice_payload, ts);
+                let _ = self.publish_notice_isolated(
+                    scope,
+                    "quasar_gateway.publish_event_local_notice",
+                    notice_payload,
+                    ts,
+                );
             }
         }
         let mut events = self.published_events.write().unwrap_or_else(|e| e.into_inner());
@@ -1463,4 +1659,97 @@ mod quasar_gateway_extra_tests;
 #[cfg(test)]
 #[path = "quasar_gateway_edges_tests.rs"]
 mod quasar_gateway_edges_tests;
+
+#[cfg(test)]
+mod blast_radius_tests {
+    use super::*;
+
+    #[test]
+    fn isolate_side_effect_catches_panics_and_errors_without_unwinding() {
+        let ok = isolate_side_effect("test.ok", || 42_u32);
+        assert_eq!(ok, Some(42));
+
+        let panicked: Option<u32> = isolate_side_effect("test.panic", || {
+            panic!("simulated progression panic");
+        });
+        assert_eq!(panicked, None);
+
+        let res_ok: Option<u32> = isolate_side_effect_result("test.res_ok", || Ok::<_, String>(7));
+        assert_eq!(res_ok, Some(7));
+
+        let res_err: Option<u32> =
+            isolate_side_effect_result("test.res_err", || Err::<u32, _>("simulated err"));
+        assert_eq!(res_err, None);
+
+        let res_panic: Option<u32> = isolate_side_effect_result("test.res_panic", || {
+            if true {
+                panic!("simulated result panic");
+            }
+            Ok::<_, String>(1)
+        });
+        assert_eq!(res_panic, None);
+    }
+
+    #[test]
+    fn empty_quasar_descriptor_registry_isolates_pb_builders_notices_and_hooks() {
+        let empty = Arc::new(QuasarDescriptorRegistry::empty_with_builtins());
+        let db = Arc::new(WorldRepository::with_demo_seed());
+        let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+        let router = PublicGatewayRouter::new(Arc::clone(&empty), db, sde);
+
+        eve_proto::pb::with_registry_override(empty, || {
+            let _ = crate::services::quasar_social_chat::drain_local_notices();
+            assert!(pb_to_any_or_log(
+                "test.empty_any",
+                eve_proto::pb::message("eve_public.goal.api.ProgressedNotice"),
+            )
+            .is_none());
+            assert!(pb_encode_or_log(
+                "test.empty_encode",
+                eve_proto::pb::message("eve_public.goal.api.ProgressedNotice"),
+            )
+            .is_none());
+
+            queue_pb_notice(
+                NoticeScope::Broadcast,
+                "test.empty_queue",
+                eve_proto::pb::message("eve_public.goal.api.ProgressedNotice"),
+                1_700_000_000,
+            );
+            assert!(crate::services::quasar_social_chat::drain_local_notices().is_empty());
+
+            assert!(router
+                .publish_pb_notice(
+                    NoticeScope::Broadcast,
+                    "test.empty_publish",
+                    eve_proto::pb::message("eve_public.goal.api.ProgressedNotice"),
+                    1_700_000_000,
+                )
+                .is_none());
+
+            let mut sess = SessionState::new(901);
+            sess.user_id = Some(1);
+            sess.character_id = Some(90_000_001);
+            sess.corporation_id = Some(1_000_125);
+            sess.solar_system_id = Some(30_000_142);
+            router.on_session_changed(&sess, 1_700_000_000);
+
+            router.progression.achievements.on_gameplay_event_by_name(
+                90_000_001,
+                &["destroyHostileNPC"],
+                1,
+                1_700_000_000,
+                &router,
+            );
+            router
+                .progression
+                .daily_goals
+                .on_gameplay_event(90_000_001, 1, 1, &router);
+            router
+                .progression
+                .career_goals
+                .on_gameplay_event(90_000_001, "combat", 1, &router);
+        });
+    }
+}
 

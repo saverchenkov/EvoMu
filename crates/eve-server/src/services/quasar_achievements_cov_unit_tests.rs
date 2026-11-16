@@ -272,41 +272,62 @@ fn sde_hydration_db_reload_and_filtered_wallet_sp_reward_claims() {
 }
 
 #[test]
-fn flatbuffer_disk_storage_seeding_writes_empty_and_preserves_existing() {
+fn flatbuffer_disk_storage_seeding_ignores_host_appdata_and_uses_stage_dir() {
     let tmp_base = std::env::temp_dir().join(format!("evomu_ach_fb_test_{}", std::process::id()));
-    let storage_dir = tmp_base
+    let host_storage_dir = tmp_base
         .join("CCP")
         .join("EVE")
         .join("tq_profile")
         .join("cache")
         .join("Storage");
+    let stage_dir = tmp_base.join("isolated_stage");
     let _ = std::fs::remove_dir_all(&tmp_base);
-    std::fs::create_dir_all(&storage_dir).expect("create temp Storage dir");
+    std::fs::create_dir_all(&host_storage_dir).expect("create temp host Storage dir");
 
-    struct LocalAppDataGuard {
-        prev: Option<std::ffi::OsString>,
+    struct EnvGuard {
+        prev_local_appdata: Option<std::ffi::OsString>,
+        prev_stage_dir: Option<std::ffi::OsString>,
         _lock: crate::TestEnvWriteGuard,
     }
-    impl Drop for LocalAppDataGuard {
+    impl Drop for EnvGuard {
         fn drop(&mut self) {
-            match self.prev.take() {
+            match self.prev_local_appdata.take() {
                 Some(v) => std::env::set_var("LOCALAPPDATA", v),
                 None => std::env::remove_var("LOCALAPPDATA"),
+            }
+            match self.prev_stage_dir.take() {
+                Some(v) => std::env::set_var("EVOMU_FLATBUFFER_STAGE_DIR", v),
+                None => std::env::remove_var("EVOMU_FLATBUFFER_STAGE_DIR"),
             }
         }
     }
     let _lock = crate::lock_test_env_write();
-    let _env_guard = LocalAppDataGuard {
-        prev: std::env::var_os("LOCALAPPDATA"),
+    let _env_guard = EnvGuard {
+        prev_local_appdata: std::env::var_os("LOCALAPPDATA"),
+        prev_stage_dir: std::env::var_os("EVOMU_FLATBUFFER_STAGE_DIR"),
         _lock,
     };
     std::env::set_var("LOCALAPPDATA", &tmp_base);
+    std::env::remove_var("EVOMU_FLATBUFFER_STAGE_DIR");
 
     let payload = empty_achievement_flatbuffer();
+    // Without EVOMU_FLATBUFFER_STAGE_DIR, host %LOCALAPPDATA%\CCP\EVE must NEVER be mutated.
     ensure_client_flatbuffer_storage_seeded("test_ach_content", "v1_hash", &payload);
+    assert!(
+        !host_storage_dir.join("test_ach_content").exists(),
+        "eve-server must not mutate host CCP/EVE cache directories"
+    );
 
-    let data_path = storage_dir.join("test_ach_content").join("data.bin");
-    let ver_path = storage_dir.join("test_ach_content").join("version.txt");
+    // With EVOMU_FLATBUFFER_STAGE_DIR explicitly set, write into the isolated staging dir only.
+    std::env::set_var("EVOMU_FLATBUFFER_STAGE_DIR", &stage_dir);
+    ensure_client_flatbuffer_storage_seeded("test_ach_content", "v1_hash", &payload);
+    assert!(
+        !host_storage_dir.join("test_ach_content").exists(),
+        "host CCP/EVE cache directory must stay untouched even when staging is enabled"
+    );
+
+    let data_path = stage_dir.join("test_ach_content").join("data.bin");
+    let ver_path = stage_dir.join("test_ach_content").join("version.txt");
     assert_eq!(std::fs::read(&data_path).unwrap(), payload);
     assert_eq!(std::fs::read_to_string(&ver_path).unwrap(), "v1_hash");
 
@@ -606,19 +627,25 @@ fn sde_achievement_flatbuffer_encodes_all_roots_categories_methods_and_definitio
 #[test]
 fn get_latest_request_upgrades_stale_legacy_140_byte_achievements_flatbuffer() {
     let tmp_base = std::env::temp_dir().join(format!("evomu_ach_upgrade_test_{}", std::process::id()));
-    let storage_dir = tmp_base
+    let host_storage_dir = tmp_base
         .join("CCP")
         .join("EVE")
         .join("tq_profile")
         .join("cache")
         .join("Storage");
+    let stage_dir = tmp_base.join("isolated_stage");
     let _ = std::fs::remove_dir_all(&tmp_base);
-    std::fs::create_dir_all(storage_dir.join("achievements")).expect("create achievements dir");
+    std::fs::create_dir_all(host_storage_dir.join("achievements")).expect("create host achievements dir");
+    std::fs::create_dir_all(stage_dir.join("achievements")).expect("create stage achievements dir");
 
-    let data_path = storage_dir.join("achievements").join("data.bin");
-    let ver_path = storage_dir.join("achievements").join("version.txt");
+    let host_data_path = host_storage_dir.join("achievements").join("data.bin");
+    let host_ver_path = host_storage_dir.join("achievements").join("version.txt");
+    let data_path = stage_dir.join("achievements").join("data.bin");
+    let ver_path = stage_dir.join("achievements").join("version.txt");
     let legacy = empty_achievement_flatbuffer();
     assert_eq!(legacy.len(), 140);
+    std::fs::write(&host_data_path, &legacy).unwrap();
+    std::fs::write(&host_ver_path, "24.1.60").unwrap();
     std::fs::write(&data_path, &legacy).unwrap();
     std::fs::write(&ver_path, "24.1.60").unwrap();
 
@@ -626,6 +653,7 @@ fn get_latest_request_upgrades_stale_legacy_140_byte_achievements_flatbuffer() {
         prev_home: Option<std::ffi::OsString>,
         prev_local: Option<std::ffi::OsString>,
         prev_cdn: Option<std::ffi::OsString>,
+        prev_stage: Option<std::ffi::OsString>,
         _lock: crate::TestEnvWriteGuard,
     }
     impl Drop for EnvGuard {
@@ -642,17 +670,23 @@ fn get_latest_request_upgrades_stale_legacy_140_byte_achievements_flatbuffer() {
                 Some(v) => std::env::set_var("EVOMU_CDN_BASE_URL", v),
                 None => std::env::remove_var("EVOMU_CDN_BASE_URL"),
             }
+            match self.prev_stage.take() {
+                Some(v) => std::env::set_var("EVOMU_FLATBUFFER_STAGE_DIR", v),
+                None => std::env::remove_var("EVOMU_FLATBUFFER_STAGE_DIR"),
+            }
         }
     }
     let _guard = EnvGuard {
         prev_home: std::env::var_os("HOME"),
         prev_local: std::env::var_os("LOCALAPPDATA"),
         prev_cdn: std::env::var_os("EVOMU_CDN_BASE_URL"),
+        prev_stage: std::env::var_os("EVOMU_FLATBUFFER_STAGE_DIR"),
         _lock: crate::lock_test_env_write(),
     };
     std::env::remove_var("HOME");
     std::env::remove_var("EVOMU_CDN_BASE_URL");
     std::env::set_var("LOCALAPPDATA", &tmp_base);
+    std::env::set_var("EVOMU_FLATBUFFER_STAGE_DIR", &stage_dir);
 
     let db = Arc::new(WorldRepository::with_demo_seed());
     let sde = shared_sde();
@@ -702,6 +736,9 @@ fn get_latest_request_upgrades_stale_legacy_140_byte_achievements_flatbuffer() {
         std::fs::read_to_string(&ver_path).unwrap(),
         format!("24.2.{}", mgr.sde_achievement_count)
     );
+    // Host %LOCALAPPDATA%\CCP\EVE directory must remain completely untouched.
+    assert_eq!(std::fs::read(&host_data_path).unwrap(), legacy);
+    assert_eq!(std::fs::read_to_string(&host_ver_path).unwrap(), "24.1.60");
 
     drop(_guard);
     let _ = std::fs::remove_dir_all(&tmp_base);

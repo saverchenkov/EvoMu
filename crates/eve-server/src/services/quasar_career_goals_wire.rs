@@ -12,9 +12,11 @@ use eve_proto::quasar::{
 };
 
 pub fn encode_career_goal_identifier(uuid: &[u8; 16], out: &mut Vec<u8>) {
-    pb::message("eve_public.career.goal.Identifier")
-        .set("uuid", uuid)
-        .must_encode_into(out);
+    crate::quasar_gateway::pb_encode_into_or_log(
+        "quasar_career_goals_wire.encode_career_goal_identifier",
+        pb::message("eve_public.career.goal.Identifier").set("uuid", uuid),
+        out,
+    );
 }
 
 fn build_ui_annotation(type_name: &str, key: &str, value: &str) -> ProtoBuilder {
@@ -39,26 +41,29 @@ fn add_career_goal_rewards(mut attr: ProtoBuilder, def: &CareerGoalDef) -> Proto
 
 /// Wire encoder for `eve_public.career.goal.api.GetAllResponse.Goal`.
 pub fn encode_career_goal_wire(g: &CharacterCareerGoal, out: &mut Vec<u8>) {
-    pb::message("eve_public.career.goal.api.GetAllResponse.Goal")
-        .set("goal.uuid", g.uuid)
-        .set("progress", g.progress)
-        .set("not_completed", !g.completed)
-        .set_opt(
-            "completed_time",
-            g.completed_time
-                .map(|ts| GoogleTimestamp::from_unix(ts as i64, 0)),
-        )
-        .add_with("reward_label_states", |s| {
-            s.set("label", 1i32) // REWARD_LABEL_ALPHA
-                .when(g.claimed, |s| {
-                    s.set(
-                        "claimed_time",
-                        GoogleTimestamp::from_unix(g.completed_time.unwrap_or(0) as i64, 0),
-                    )
-                })
-                .when(!g.claimed, |s| s.set("not_claimed", true))
-        })
-        .must_encode_into(out);
+    crate::quasar_gateway::pb_encode_into_or_log(
+        "quasar_career_goals_wire.encode_career_goal_wire",
+        pb::message("eve_public.career.goal.api.GetAllResponse.Goal")
+            .set("goal.uuid", g.uuid)
+            .set("progress", g.progress)
+            .set("not_completed", !g.completed)
+            .set_opt(
+                "completed_time",
+                g.completed_time
+                    .map(|ts| GoogleTimestamp::from_unix(ts as i64, 0)),
+            )
+            .add_with("reward_label_states", |s| {
+                s.set("label", 1i32) // REWARD_LABEL_ALPHA
+                    .when(g.claimed, |s| {
+                        s.set(
+                            "claimed_time",
+                            GoogleTimestamp::from_unix(g.completed_time.unwrap_or(0) as i64, 0),
+                        )
+                    })
+                    .when(!g.claimed, |s| s.set("not_claimed", true))
+            }),
+        out,
+    );
 }
 
 fn add_career_goal_ui_annotations(
@@ -154,26 +159,29 @@ fn career_milestone_message_ids(ms: &CareerMilestoneDef) -> (u32, u32) {
 
 /// Wire encoder for `eve_public.career.goal.api.GetDefinitionsResponse.Goal`.
 pub fn encode_career_goal_definition_wire(def: &CareerGoalDef, out: &mut Vec<u8>) {
-    pb::message("eve_public.career.goal.api.GetDefinitionsResponse.Goal")
-        .set("goal.uuid", def.uuid)
-        .set_with("attributes", |attr| {
-            let attr = attr
-                .set("name.sequential", def.effective_name_message_id() as u64)
-                .set(
-                    "description.sequential",
-                    def.effective_description_message_id() as u64,
-                )
-                .set("progress", 0u32)
-                .set("target", def.target.max(1))
-                .with(|a| add_career_goal_ui_annotations(a, "eve_public.ui.Annotation", def))
-                .set("threat", def.effective_threat() as u32)
-                .set("completed", false)
-                .set("career", def.career_id.clamp(1, 4))
-                .set("career_points", def.career_points)
-                .set("claimed", false);
-            add_career_goal_rewards(attr, def)
-        })
-        .must_encode_into(out);
+    crate::quasar_gateway::pb_encode_into_or_log(
+        "quasar_career_goals_wire.encode_career_goal_definition_wire",
+        pb::message("eve_public.career.goal.api.GetDefinitionsResponse.Goal")
+            .set("goal.uuid", def.uuid)
+            .set_with("attributes", |attr| {
+                let attr = attr
+                    .set("name.sequential", def.effective_name_message_id() as u64)
+                    .set(
+                        "description.sequential",
+                        def.effective_description_message_id() as u64,
+                    )
+                    .set("progress", 0u32)
+                    .set("target", def.target.max(1))
+                    .with(|a| add_career_goal_ui_annotations(a, "eve_public.ui.Annotation", def))
+                    .set("threat", def.effective_threat() as u32)
+                    .set("completed", false)
+                    .set("career", def.career_id.clamp(1, 4))
+                    .set("career_points", def.career_points)
+                    .set("claimed", false);
+                add_career_goal_rewards(attr, def)
+            }),
+        out,
+    );
 }
 
 pub fn encode_career_milestone_definition_wire(ms: &CareerMilestoneDef, out: &mut Vec<u8>) {
@@ -186,48 +194,51 @@ pub fn encode_career_milestone_definition_wire(ms: &CareerMilestoneDef, out: &mu
     };
 
     let anno = "eve_public.ui.Annotation";
-    pb::message("eve_public.career.goal.api.GetDefinitionsResponse.Goal")
-        .set("goal.uuid", uuid)
-        .set_with("attributes", |attr| {
-            attr.set("name.sequential", name_msg_id as u64)
-                .set("description.sequential", desc_msg_id as u64)
-                .set("progress", 0u32)
-                .set("target", ms.required_points.max(1))
-                .add("ui_annotations", build_ui_annotation(anno, "group", group))
-                .add("ui_annotations", build_ui_annotation(anno, "subtype", subtype))
-                .add(
-                    "ui_annotations",
-                    build_ui_annotation(anno, "name", &ms.description),
-                )
-                .add(
-                    "ui_annotations",
-                    build_ui_annotation(anno, "description", &ms.description),
-                )
-                .add("ui_annotations", build_ui_annotation(anno, "duration", "0"))
-                .add(
-                    "ui_annotations",
-                    build_ui_annotation(anno, "auraTextID", &desc_msg_id.to_string()),
-                )
-                .add(
-                    "ui_annotations",
-                    build_ui_annotation(anno, "order", &ms.milestone_id.to_string()),
-                )
-                .set("threat", 1u32)
-                .set("completed", false)
-                .set(
-                    "career",
-                    ms.career_id.map(|c| c.clamp(1, 4)).unwrap_or(0),
-                )
-                .set("career_points", 0u32)
-                .set("claimed", false)
-                .when(ms.sp_reward > 0.0, |a| {
-                    a.add_with("rewards", |r| {
-                        r.set("reward_type.skill_points", ms.sp_reward as u64)
-                            .set("reward_label", 1i32)
+    crate::quasar_gateway::pb_encode_into_or_log(
+        "quasar_career_goals_wire.encode_career_milestone_definition_wire",
+        pb::message("eve_public.career.goal.api.GetDefinitionsResponse.Goal")
+            .set("goal.uuid", uuid)
+            .set_with("attributes", |attr| {
+                attr.set("name.sequential", name_msg_id as u64)
+                    .set("description.sequential", desc_msg_id as u64)
+                    .set("progress", 0u32)
+                    .set("target", ms.required_points.max(1))
+                    .add("ui_annotations", build_ui_annotation(anno, "group", group))
+                    .add("ui_annotations", build_ui_annotation(anno, "subtype", subtype))
+                    .add(
+                        "ui_annotations",
+                        build_ui_annotation(anno, "name", &ms.description),
+                    )
+                    .add(
+                        "ui_annotations",
+                        build_ui_annotation(anno, "description", &ms.description),
+                    )
+                    .add("ui_annotations", build_ui_annotation(anno, "duration", "0"))
+                    .add(
+                        "ui_annotations",
+                        build_ui_annotation(anno, "auraTextID", &desc_msg_id.to_string()),
+                    )
+                    .add(
+                        "ui_annotations",
+                        build_ui_annotation(anno, "order", &ms.milestone_id.to_string()),
+                    )
+                    .set("threat", 1u32)
+                    .set("completed", false)
+                    .set(
+                        "career",
+                        ms.career_id.map(|c| c.clamp(1, 4)).unwrap_or(0),
+                    )
+                    .set("career_points", 0u32)
+                    .set("claimed", false)
+                    .when(ms.sp_reward > 0.0, |a| {
+                        a.add_with("rewards", |r| {
+                            r.set("reward_type.skill_points", ms.sp_reward as u64)
+                                .set("reward_label", 1i32)
+                        })
                     })
-                })
-        })
-        .must_encode_into(out);
+            }),
+        out,
+    );
 }
 
 pub fn encode_internal_career_milestone_definition_wire(ms: &CareerMilestoneDef, out: &mut Vec<u8>) {
@@ -240,41 +251,44 @@ pub fn encode_internal_career_milestone_definition_wire(ms: &CareerMilestoneDef,
     };
 
     let anno = "eve.ui.Annotation";
-    pb::message("eve.career.goal.api.GetDefinitionsResponse.Goal")
-        .set("goal.uuid", uuid)
-        .set_with("attributes", |attr| {
-            attr.set("name.sequential", name_msg_id as u64)
-                .set("description.sequential", desc_msg_id as u64)
-                .set("target", ms.required_points.max(1))
-                .add("ui_annotations", build_ui_annotation(anno, "group", group))
-                .add("ui_annotations", build_ui_annotation(anno, "subtype", subtype))
-                .add(
-                    "ui_annotations",
-                    build_ui_annotation(anno, "name", &ms.description),
-                )
-                .add("ui_annotations", build_ui_annotation(anno, "duration", "0"))
-                .add(
-                    "ui_annotations",
-                    build_ui_annotation(anno, "auraTextID", &desc_msg_id.to_string()),
-                )
-                .add(
-                    "ui_annotations",
-                    build_ui_annotation(anno, "order", &ms.milestone_id.to_string()),
-                )
-                .set("threat", 1u32)
-                .set(
-                    "career",
-                    ms.career_id.map(|c| c.clamp(1, 4)).unwrap_or(0),
-                )
-                .set("career_points", 0u32)
-                .when(ms.sp_reward > 0.0, |a| {
-                    a.add_with("rewards", |r| {
-                        r.set("reward_type.skill_points", ms.sp_reward as u64)
-                            .set("reward_label", 1i32)
+    crate::quasar_gateway::pb_encode_into_or_log(
+        "quasar_career_goals_wire.encode_internal_career_milestone_definition_wire",
+        pb::message("eve.career.goal.api.GetDefinitionsResponse.Goal")
+            .set("goal.uuid", uuid)
+            .set_with("attributes", |attr| {
+                attr.set("name.sequential", name_msg_id as u64)
+                    .set("description.sequential", desc_msg_id as u64)
+                    .set("target", ms.required_points.max(1))
+                    .add("ui_annotations", build_ui_annotation(anno, "group", group))
+                    .add("ui_annotations", build_ui_annotation(anno, "subtype", subtype))
+                    .add(
+                        "ui_annotations",
+                        build_ui_annotation(anno, "name", &ms.description),
+                    )
+                    .add("ui_annotations", build_ui_annotation(anno, "duration", "0"))
+                    .add(
+                        "ui_annotations",
+                        build_ui_annotation(anno, "auraTextID", &desc_msg_id.to_string()),
+                    )
+                    .add(
+                        "ui_annotations",
+                        build_ui_annotation(anno, "order", &ms.milestone_id.to_string()),
+                    )
+                    .set("threat", 1u32)
+                    .set(
+                        "career",
+                        ms.career_id.map(|c| c.clamp(1, 4)).unwrap_or(0),
+                    )
+                    .set("career_points", 0u32)
+                    .when(ms.sp_reward > 0.0, |a| {
+                        a.add_with("rewards", |r| {
+                            r.set("reward_type.skill_points", ms.sp_reward as u64)
+                                .set("reward_label", 1i32)
+                        })
                     })
-                })
-        })
-        .must_encode_into(out);
+            }),
+        out,
+    );
 }
 
 pub fn encode_career_milestone_goal_wire(
@@ -285,39 +299,45 @@ pub fn encode_career_milestone_goal_wire(
     out: &mut Vec<u8>,
 ) {
     let uuid = career_milestone_uuid(ms.milestone_id);
-    pb::message("eve_public.career.goal.api.GetAllResponse.Goal")
-        .set("goal.uuid", uuid)
-        .set("progress", progress.min(ms.required_points))
-        .set("not_completed", !reached)
-        .add_with("reward_label_states", |s| {
-            s.set("label", 1i32)
-                .when(claimed, |s| {
-                    s.set("claimed_time", GoogleTimestamp::from_unix(0, 0))
-                })
-                .when(!claimed, |s| s.set("not_claimed", true))
-        })
-        .must_encode_into(out);
+    crate::quasar_gateway::pb_encode_into_or_log(
+        "quasar_career_goals_wire.encode_career_milestone_goal_wire",
+        pb::message("eve_public.career.goal.api.GetAllResponse.Goal")
+            .set("goal.uuid", uuid)
+            .set("progress", progress.min(ms.required_points))
+            .set("not_completed", !reached)
+            .add_with("reward_label_states", |s| {
+                s.set("label", 1i32)
+                    .when(claimed, |s| {
+                        s.set("claimed_time", GoogleTimestamp::from_unix(0, 0))
+                    })
+                    .when(!claimed, |s| s.set("not_claimed", true))
+            }),
+        out,
+    );
 }
 
 /// Wire encoder for `eve.career.goal.api.GetDefinitionsResponse.Goal`.
 pub fn encode_internal_career_goal_definition_wire(def: &CareerGoalDef, out: &mut Vec<u8>) {
-    pb::message("eve.career.goal.api.GetDefinitionsResponse.Goal")
-        .set("goal.uuid", def.uuid)
-        .set_with("attributes", |attr| {
-            let attr = attr
-                .set("name.sequential", def.effective_name_message_id() as u64)
-                .set(
-                    "description.sequential",
-                    def.effective_description_message_id() as u64,
-                )
-                .set("target", def.target.max(1))
-                .with(|a| add_career_goal_ui_annotations(a, "eve.ui.Annotation", def))
-                .set("threat", def.effective_threat() as u32)
-                .set("career", def.career_id.clamp(1, 4))
-                .set("career_points", def.career_points);
-            add_career_goal_rewards(attr, def)
-        })
-        .must_encode_into(out);
+    crate::quasar_gateway::pb_encode_into_or_log(
+        "quasar_career_goals_wire.encode_internal_career_goal_definition_wire",
+        pb::message("eve.career.goal.api.GetDefinitionsResponse.Goal")
+            .set("goal.uuid", def.uuid)
+            .set_with("attributes", |attr| {
+                let attr = attr
+                    .set("name.sequential", def.effective_name_message_id() as u64)
+                    .set(
+                        "description.sequential",
+                        def.effective_description_message_id() as u64,
+                    )
+                    .set("target", def.target.max(1))
+                    .with(|a| add_career_goal_ui_annotations(a, "eve.ui.Annotation", def))
+                    .set("threat", def.effective_threat() as u32)
+                    .set("career", def.career_id.clamp(1, 4))
+                    .set("career_points", def.career_points);
+                add_career_goal_rewards(attr, def)
+            }),
+        out,
+    );
 }
 
 pub fn extract_uuid(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> Option<[u8; 16]> {

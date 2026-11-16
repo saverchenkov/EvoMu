@@ -1300,34 +1300,36 @@ pub fn finalize_completed_industry_job_response(
 ) -> Result<PyRep, BridgeRpcError> {
     emit_industry_job(ctx, char_id, char_id, job_id, job.blueprint_item_id, 101, job.runs as i64);
     if job.activity_id == 1 {
-        crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
-            ctx,
-            char_id,
-            &["ManufactureItems"],
-            job.runs.max(1) as u64,
-            Some(job.product_type_id as i64),
-        );
-        ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(char_id as u32, 5, 1, &ctx.quasar_gateway);
-        ctx.quasar_gateway.progression.career_goals.on_gameplay_event(char_id as u32, "manufacturing", 1, &ctx.quasar_gateway);
-        ctx.quasar_gateway.progression.extra.on_campaign_gameplay_event(
-            char_id as u32,
-            crate::services::quasar_campaign_state::CampaignEvent {
-                method: "ManufactureItem",
-                type_id: Some(job.product_type_id),
-                solar_system_id: None,
-                faction_id: None,
-            },
-            1,
-            ctx.now_unix(),
-            &ctx.quasar_gateway,
-        );
-        ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
-            char_id as u32,
-            &["industryManufacturingJobDeliveredCount", "typeManufacturedCount"],
-            1,
-            ctx.now_unix(),
-            &ctx.quasar_gateway,
-        );
+        crate::quasar_gateway::isolate_side_effect("industry_pi.job_delivery_progression", || {
+            crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
+                ctx,
+                char_id,
+                &["ManufactureItems"],
+                job.runs.max(1) as u64,
+                Some(job.product_type_id as i64),
+            );
+            ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(char_id as u32, 5, 1, &ctx.quasar_gateway);
+            ctx.quasar_gateway.progression.career_goals.on_gameplay_event(char_id as u32, "manufacturing", 1, &ctx.quasar_gateway);
+            ctx.quasar_gateway.progression.extra.on_campaign_gameplay_event(
+                char_id as u32,
+                crate::services::quasar_campaign_state::CampaignEvent {
+                    method: "ManufactureItem",
+                    type_id: Some(job.product_type_id),
+                    solar_system_id: None,
+                    faction_id: None,
+                },
+                1,
+                ctx.now_unix(),
+                &ctx.quasar_gateway,
+            );
+            ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
+                char_id as u32,
+                &["industryManufacturingJobDeliveredCount", "typeManufacturedCount"],
+                1,
+                ctx.now_unix(),
+                &ctx.quasar_gateway,
+            );
+        });
     }
     if method == "CompleteJob" && job.activity_id == 8 && prod_item_id == 0 {
         return Err(BridgeRpcError {

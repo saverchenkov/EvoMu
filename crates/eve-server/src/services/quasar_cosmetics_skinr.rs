@@ -9,7 +9,6 @@
 
 #![forbid(unsafe_code)]
 
-use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
     STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED,
@@ -626,7 +625,7 @@ fn handle_comp_license_get_owned(state: &SkinrCosmeticsState, ctx: &Authoritativ
             );
         }
     }
-    Ok(rsp.must_to_any())
+    rsp.to_any_or_internal_err()
 }
 
 fn handle_finite_get(
@@ -649,7 +648,7 @@ fn handle_finite_get(
     let Some(lic) = data.finite_licenses.get(&key) else {
         return Err((STATUS_NOT_FOUND, "Finite component license not found".into()));
     };
-    Ok(pb::message(
+    pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.GetResponse",
     )
     .set(
@@ -657,7 +656,7 @@ fn handle_finite_get(
         GoogleTimestamp::from_unix(lic.first_acquired_unix as i64, 0),
     )
     .set("license.capacity", lic.capacity)
-    .must_to_any())
+    .to_any_or_internal_err()
 }
 
 fn handle_finite_admin_grant(
@@ -711,7 +710,7 @@ fn handle_finite_admin_grant(
     state.save();
     queue_component_license_granted_notice(cid, comp_id, is_pattern, Some(capacity), now);
 
-    Ok(pb::message(
+    pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.GrantResponse",
     )
     .set(
@@ -723,7 +722,7 @@ fn handle_finite_admin_grant(
             is_pattern,
         ),
     )
-    .must_to_any())
+    .to_any_or_internal_err()
 }
 
 fn handle_finite_admin_revoke(
@@ -776,7 +775,7 @@ fn handle_infinite_get(
     let Some(lic) = data.infinite_licenses.get(&key) else {
         return Err((STATUS_NOT_FOUND, "Infinite component license not found".into()));
     };
-    Ok(pb::message(
+    pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.GetResponse",
     )
     .with(|b| {
@@ -789,7 +788,7 @@ fn handle_infinite_get(
             )
         }
     })
-    .must_to_any())
+    .to_any_or_internal_err()
 }
 
 fn handle_infinite_admin_grant(
@@ -826,7 +825,7 @@ fn handle_infinite_admin_grant(
     state.save();
     queue_component_license_granted_notice(cid, comp_id, is_pattern, None, now);
 
-    Ok(pb::message(
+    pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.admin.GrantResponse",
     )
     .set(
@@ -838,7 +837,7 @@ fn handle_infinite_admin_grant(
             is_pattern,
         ),
     )
-    .must_to_any())
+    .to_any_or_internal_err()
 }
 
 fn handle_infinite_admin_revoke(
@@ -1117,13 +1116,13 @@ fn handle_title_def_get_latest(
     } else {
         build_semver(prefix, ver)
     };
-    Ok(pb::message(format!(
+    pb::message(format!(
         "{prefix}.cosmetic.character.title.definition.api.GetLatestResponse"
     ))
     .set("checkpoint.url", &url)
     .set("checkpoint.version", ver_builder)
     .set("checkpoint.crc.crc", crc)
-    .must_to_any())
+    .to_any_or_internal_err()
 }
 
 fn handle_title_def_list(state: &SkinrCosmeticsState, _req_type: &str) -> HandlerResult {
@@ -1138,16 +1137,19 @@ fn handle_title_def_list(state: &SkinrCosmeticsState, _req_type: &str) -> Handle
                 .set("internal_name", &def.internal_name)
         });
     }
-    Ok(rsp.must_to_any())
+    rsp.to_any_or_internal_err()
 }
 
 fn broadcast_title_version_notice(ver: [u32; 3], now_unix: u64) {
-    let notice = pb::message(
-        "eve_public.cosmetic.character.title.definition.version.api.CheckVersionNotice",
-    )
-    .set("version", build_semver("eve_public", ver))
-    .must_to_any();
-    ctx_queue_notice(NoticeScope::Broadcast, notice, now_unix);
+    crate::quasar_gateway::queue_pb_notice(
+        NoticeScope::Broadcast,
+        "quasar_cosmetics_skinr.broadcast_title_version_notice",
+        pb::message(
+            "eve_public.cosmetic.character.title.definition.version.api.CheckVersionNotice",
+        )
+        .set("version", build_semver("eve_public", ver)),
+        now_unix,
+    );
 }
 
 fn handle_title_version_set_default(
@@ -1207,11 +1209,11 @@ fn handle_title_version_override_tenant(
 
 fn handle_title_version_get_default(state: &SkinrCosmeticsState) -> HandlerResult {
     let ver = state.data.read().unwrap_or_else(|e| e.into_inner()).title_def_version;
-    Ok(pb::message(
+    pb::message(
         "eve.cosmetic.character.title.definition.version.api.GetDefaultVersionResponse",
     )
     .set("version", build_semver("eve", ver))
-    .must_to_any())
+    .to_any_or_internal_err()
 }
 
 pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {

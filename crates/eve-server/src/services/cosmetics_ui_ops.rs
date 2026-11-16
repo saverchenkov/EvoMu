@@ -860,12 +860,17 @@ fn handle_achievements_update(ctx: &ServerContext, session: &mut SessionState, a
         Ok(PyRep::None)
     });
     if res.is_ok() {
-        mgr.apply_client_task_completions_and_counters(
-            char_id as u32,
-            &client_ids,
-            &counter_deltas,
-            ctx.now_unix(),
-            &ctx.quasar_gateway,
+        crate::quasar_gateway::isolate_side_effect(
+            "cosmetics_ui_ops.UpdateClientAchievmentsAndCounters",
+            || {
+                mgr.apply_client_task_completions_and_counters(
+                    char_id as u32,
+                    &client_ids,
+                    &counter_deltas,
+                    ctx.now_unix(),
+                    &ctx.quasar_gateway,
+                );
+            },
         );
     }
     res
