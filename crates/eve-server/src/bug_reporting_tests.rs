@@ -222,6 +222,40 @@ fn test_helpers_stack_hash_sanitization_and_zip_extraction() {
         disambiguate_uthread_stack_hash(-1_040_548_311, "MollycoddledUthread", trace_a)
     );
 
+    // Server InternalError / DatabasePersistenceError RuntimeErrors must disambiguate even
+    // outside MollycoddledUthread so server panics never collide with client-call-site bugs
+    // such as #286 (16470365), #342 (1335766134), and #346 (-655675819).
+    let warp_stack_key = "autopilot.py:90 -> CmdWarpToStuff";
+    let warp_user_error_trace =
+        "Thrown at:\n<pre>spaceMgr.py:210</pre>\nFormatted exception info: UserError: ('WarpTooShort', {})\nEXCEPTION END";
+    assert_eq!(
+        disambiguate_uthread_stack_hash(1_335_766_134, warp_stack_key, warp_user_error_trace),
+        1_335_766_134
+    );
+
+    let internal_err_a =
+        "Thrown at:\n<pre>spaceMgr.py:210</pre>\nFormatted exception info: RuntimeError: InternalError: RPC handler panicked\nEXCEPTION END";
+    let internal_err_b =
+        "Thrown at:\n<pre>spaceMgr.py:210</pre>\nFormatted exception info: RuntimeError: InternalError: Quasar mismatch\nEXCEPTION END";
+    let db_persist_err =
+        "Thrown at:\n<pre>spaceMgr.py:210</pre>\nFormatted exception info:\nRuntimeError: DatabasePersistenceError: WAL write failed\nEXCEPTION END";
+    let h_int_a = disambiguate_uthread_stack_hash(1_335_766_134, warp_stack_key, internal_err_a);
+    let h_int_b = disambiguate_uthread_stack_hash(1_335_766_134, warp_stack_key, internal_err_b);
+    let h_db = disambiguate_uthread_stack_hash(16_470_365, "menuEntryData.py:44", db_persist_err);
+    assert_ne!(h_int_a, 1_335_766_134);
+    assert_ne!(h_int_a, h_int_b);
+    assert_ne!(h_db, 16_470_365);
+    // Identical InternalError at the same call site still deduplicates deterministically.
+    assert_eq!(
+        h_int_a,
+        disambiguate_uthread_stack_hash(1_335_766_134, warp_stack_key, internal_err_a)
+    );
+    // Non-internal RuntimeError outside MollycoddledUthread stays untouched, and markers after EXCEPTION END are ignored.
+    assert_eq!(
+        disambiguate_uthread_stack_hash(-655_675_819, "autopilot.py:55 -> CmdDock", "Formatted exception info: RuntimeError: WarpDistanceTooShort\nEXCEPTION END\nRuntimeError: InternalError: ignored"),
+        -655_675_819
+    );
+
     // Session info parser
     assert_eq!(
         parse_char_id_from_session_info("Intro\nCharacter: Aura Pilot (90000001)\nSolarSystem: Jita"),

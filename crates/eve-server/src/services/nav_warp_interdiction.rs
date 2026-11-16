@@ -858,14 +858,10 @@ pub async fn handle_use_warp_vector(
         }
         let dist_m = ship_ball.position.distance(dest_pos);
         if dist_m < 150_000.0 {
-            return Err(BridgeRpcError {
-                code: "WarpDistanceTooShort".into(),
-                message: format!(
-                    "Warp vector distance {:.1} m is below minimum 150,000 m",
-                    dist_m
-                ),
-                client_error: None,
-            });
+            return Err(BridgeRpcError::warp_distance_too_short(format!(
+                "Warp vector distance {:.1} m is below minimum 150,000 m",
+                dist_m
+            )));
         }
 
         snap.cluster_and_runtime

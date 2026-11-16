@@ -352,6 +352,8 @@ pub enum UserErrorKey {
     ShipInWarp,
     ShipNotBoardable,
     NoActiveBeacon,
+    WarpTooShort,
+    WarpDestinationGone,
 
     // --- Skills, Clones & Crimewatch ---
     SkillMissing,
@@ -409,7 +411,7 @@ pub enum UserErrorKey {
 }
 
 impl UserErrorKey {
-    /// Exhaustive slice of all 95 typed [`UserErrorKey`] variants.
+    /// Exhaustive slice of all 98 typed [`UserErrorKey`] variants.
     pub const ALL: &[Self] = &[
         Self::InsureShipFailedSingleContract,
         Self::InsureShipFailedMultipleContracts,
@@ -461,6 +463,8 @@ impl UserErrorKey {
         Self::ShipInWarp,
         Self::ShipNotBoardable,
         Self::NoActiveBeacon,
+        Self::WarpTooShort,
+        Self::WarpDestinationGone,
         Self::SkillMissing,
         Self::SkillUnavailableForPurchase,
         Self::JumpCloneNotFound,
@@ -564,6 +568,8 @@ impl UserErrorKey {
             Self::ShipInWarp => "ShipInWarp",
             Self::ShipNotBoardable => "ShipNotBoardable",
             Self::NoActiveBeacon => "NoActiveBeacon",
+            Self::WarpTooShort => "WarpTooShort",
+            Self::WarpDestinationGone => "WarpDestinationGone",
             Self::SkillMissing => "SkillMissing",
             Self::SkillUnavailableForPurchase => "SkillUnavailableForPurchase",
             Self::JumpCloneNotFound => "JumpCloneNotFound",
@@ -676,6 +682,8 @@ impl UserErrorKey {
             Self::ShipInWarp => Some(1565),
             Self::ShipNotBoardable => Some(1571),
             Self::NoActiveBeacon => Some(2211),
+            Self::WarpTooShort => Some(3435),
+            Self::WarpDestinationGone => Some(1679),
             Self::SkillMissing => None,
             Self::SkillUnavailableForPurchase => Some(7577),
             Self::JumpCloneNotFound => Some(1021),
@@ -797,6 +805,8 @@ impl UserErrorKey {
             | Self::ShipCloaked
             | Self::ShipInWarp
             | Self::ShipNotBoardable
+            | Self::WarpTooShort
+            | Self::WarpDestinationGone
             | Self::JumpCloneNotFound
             | Self::AlreadyInNewbieShip
             | Self::CannotEjectFromCapsule
@@ -1552,6 +1562,15 @@ impl BridgeRpcError {
         )
     }
 
+    /// Constructs a typed `WarpTooShort` (`WarpDistanceTooShort`) error.
+    pub fn warp_distance_too_short(message: impl Into<String>) -> Self {
+        Self::with_client_error(
+            "WarpDistanceTooShort",
+            message.into(),
+            ClientError::user(UserErrorKey::WarpTooShort),
+        )
+    }
+
     /// Converts this [`BridgeRpcError`] into a typed [`ClientError`] without parsing or scraping
     /// `self.message`.
     pub fn to_client_error(&self, service: &str, method: &str) -> ClientError {
@@ -1605,6 +1624,12 @@ impl BridgeRpcError {
             },
             "OutsideDockingPerimeter" | "DockingApproach" => {
                 ClientError::user(UserErrorKey::DockingApproach)
+            }
+            "WarpDistanceTooShort" | "WarpTooShort" => {
+                ClientError::user(UserErrorKey::WarpTooShort)
+            }
+            "InvalidWarpDestination" | "WarpDestinationGone" => {
+                ClientError::user(UserErrorKey::WarpDestinationGone)
             }
             "TargetOutOfRange" => ClientError::User {
                 key: UserErrorKey::TargetTooFar,
@@ -2080,6 +2105,74 @@ mod tests {
                     args: Vec::new(),
                 }
             );
+        }
+    }
+
+    #[test]
+    fn warp_too_short_and_destination_gone_decode_as_v24_notify_errors() {
+        assert_eq!(UserErrorKey::ALL.len(), 98);
+        let expected = [
+            (UserErrorKey::WarpTooShort, "WarpTooShort", 3435),
+            (UserErrorKey::WarpDestinationGone, "WarpDestinationGone", 1679),
+        ];
+        for (key, wire_name, dialog_id) in expected {
+            assert_eq!(key.as_str(), wire_name);
+            assert_eq!(UserErrorKey::from_code(wire_name), Some(key));
+            assert_eq!(key.v24_dialog_id(), Some(dialog_id));
+            assert_eq!(key.v24_dialog_type(), Some(3));
+            assert_eq!(key.presentation(), UserErrorPresentation::Notify);
+            assert!(key.default_args().is_empty());
+
+            let client_err = ClientError::user(key);
+            assert_eq!(client_err.presentation(), UserErrorPresentation::Notify);
+            let (decoded_key, decoded_dict) =
+                decode_wrapped_user_error(&client_err.to_macho_error_body(6));
+            assert_eq!(decoded_key, wire_name);
+            assert!(decoded_dict.is_empty());
+        }
+
+        let warp_short_helper = BridgeRpcError::warp_distance_too_short(
+            "Warp vector distance 1000.0 m is below minimum 150,000 m",
+        );
+        assert_eq!(warp_short_helper.code, "WarpDistanceTooShort");
+        assert_eq!(
+            warp_short_helper.client_presentation("beyonce", "CmdWarpToStuff"),
+            UserErrorPresentation::Notify
+        );
+        assert_eq!(
+            warp_short_helper.to_client_error("beyonce", "CmdWarpToStuff"),
+            ClientError::user(UserErrorKey::WarpTooShort)
+        );
+
+        for (code, expected_key, expected_wire) in [
+            ("WarpDistanceTooShort", UserErrorKey::WarpTooShort, "WarpTooShort"),
+            ("WarpTooShort", UserErrorKey::WarpTooShort, "WarpTooShort"),
+            (
+                "InvalidWarpDestination",
+                UserErrorKey::WarpDestinationGone,
+                "WarpDestinationGone",
+            ),
+            (
+                "WarpDestinationGone",
+                UserErrorKey::WarpDestinationGone,
+                "WarpDestinationGone",
+            ),
+        ] {
+            let err = BridgeRpcError {
+                code: code.into(),
+                message: "cannot warp".into(),
+                client_error: None,
+            };
+            assert_eq!(
+                err.client_presentation("beyonce", "CmdWarpToStuff"),
+                UserErrorPresentation::Notify
+            );
+            let client_err = err.to_client_error("beyonce", "CmdWarpToStuff");
+            assert_eq!(client_err, ClientError::user(expected_key));
+            let (decoded_key, decoded_dict) =
+                decode_wrapped_user_error(&client_err.to_macho_error_body(6));
+            assert_eq!(decoded_key, expected_wire);
+            assert!(decoded_dict.is_empty());
         }
     }
 }
