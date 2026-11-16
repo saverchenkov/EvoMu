@@ -1,0 +1,141 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EvoMuPlaytesterExecutorDecision",
+  "description": "Fast Tactical Executor decision (hydrogen-l-tf-medium) running on dynamic/fallback steps. Executes one atomic step of the Parent Planner's delegated plan, self-corrects minor UI hiccups, or escalates anomalies/bugs back to the Parent Planner.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "observation",
+    "previous_action_verification",
+    "reasoning",
+    "batch_step_number",
+    "batch_status",
+    "escalation_reason",
+    "action"
+  ],
+  "properties": {
+    "observation": {
+      "type": "string",
+      "description": "Brief observation of the current UI state, state_diff, and progress along the delegated batch plan."
+    },
+    "previous_action_verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expectation_met",
+        "discrepancy_summary"
+      ],
+      "properties": {
+        "expectation_met": {
+          "type": "boolean",
+          "description": "True if the previous action succeeded and updated the UI/game state as expected (or if this is step 1 of the batch, or if ok:false was a recoverable UI/input rejection without log_exceptions). False if the previous action succeeded (ok:true) yet caused a silent UI-state desync or game bug."
+        },
+        "discrepancy_summary": {
+          "type": "string",
+          "description": "If expectation_met is false, describe the exact UI or game mechanic discrepancy so the Parent Planner can diagnose and file a bug report. Empty string if expectation_met is true."
+        }
+      }
+    },
+    "reasoning": {
+      "type": "string",
+      "description": "How this action executes the current step of the Planner's delegated plan, how you are self-correcting a minor UI hiccup, or why you are escalating back to the Parent Planner."
+    },
+    "batch_step_number": {
+      "type": "integer",
+      "description": "1-based step index within the current delegated batch."
+    },
+    "batch_status": {
+      "type": "string",
+      "enum": [
+        "continue",
+        "completed",
+        "escalate"
+      ],
+      "description": "'continue' if more steps remain in the batch after this action; 'completed' if this action completes the Planner's delegated plan (or success_criteria are met); 'escalate' to immediately pause before executing an action and return control to the Parent Planner (hydrogen-l-tf-high / fallback) due to a bug, UI-state desync, or abort condition."
+    },
+    "escalation_reason": {
+      "type": "string",
+      "description": "If batch_status is 'escalate', explain why control is being returned to the Parent Planner (e.g. silent UI-state desync, exception, missing widget after retry, or abort condition). Empty string otherwise."
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "target",
+        "command",
+        "x",
+        "y",
+        "dest_x",
+        "dest_y",
+        "right_click",
+        "double_click",
+        "wait_ms",
+        "expected_ui_and_state_change"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "click_widget",
+            "click_xy",
+            "drag_widget",
+            "type_text",
+            "press_key",
+            "open_neocom",
+            "close_window",
+            "undock",
+            "dock",
+            "jump_gate",
+            "warp_to",
+            "approach",
+            "orbit",
+            "keep_at_range",
+            "lock_target",
+            "activate_module",
+            "train_skill",
+            "complete_skills",
+            "advance_upwell_timer",
+            "complete_industry_jobs",
+            "advance_server_time",
+            "clear_timers",
+            "open_plex_store",
+            "open_structure_cosmetics",
+            "slash_command",
+            "wait"
+          ]
+        },
+        "target": {
+          "type": ["string", "null"]
+        },
+        "command": {
+          "type": ["string", "null"]
+        },
+        "x": {
+          "type": ["integer", "null"]
+        },
+        "y": {
+          "type": ["integer", "null"]
+        },
+        "dest_x": {
+          "type": ["integer", "null"]
+        },
+        "dest_y": {
+          "type": ["integer", "null"]
+        },
+        "right_click": {
+          "type": "boolean"
+        },
+        "double_click": {
+          "type": "boolean"
+        },
+        "wait_ms": {
+          "type": "integer"
+        },
+        "expected_ui_and_state_change": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

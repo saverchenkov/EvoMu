@@ -73,6 +73,7 @@
             "close_window",
             "undock",
             "dock",
+            "jump_gate",
             "warp_to",
             "approach",
             "orbit",

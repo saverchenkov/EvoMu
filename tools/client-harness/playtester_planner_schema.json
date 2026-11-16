@@ -1,0 +1,270 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EvoMuPlaytesterPlannerDecision",
+  "description": "Strategic Planner decision for the Hybrid Planner + Executor playtester architecture. Verifies prior outcomes/escalations, files bug reports, updates persistent memory/coverage frontier, and formulates a self-contained multi-step tactical plan (with executable direct actions/assertions when unambiguous) for the Runner & Fast Executor (hydrogen-l-tf-medium).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "observation",
+    "previous_action_verification",
+    "reasoning",
+    "current_goal",
+    "delegated_plan",
+    "memory_update",
+    "bug_report"
+  ],
+  "properties": {
+    "observation": {
+      "type": "string",
+      "description": "Concise synthesis of the current EVE.app screenshot, UI scene graph, previous batch execution summary or escalation telemetry, and character state."
+    },
+    "previous_action_verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expectation_met"
+      ],
+      "properties": {
+        "expectation_met": {
+          "type": "boolean",
+          "description": "True if the previous action/batch updated the UI, window state, skill queue, inventory, wallet, or space scene as expected in EVE Online (or if this is the start of a fresh session). False if a game mechanic or UI state failed to update or raised an exception."
+        },
+        "discrepancy_summary": {
+          "type": "string",
+          "description": "If expectation_met is false, explain the exact UI element, RPC return, scatter event, or game mechanic discrepancy observed. Empty string if expectation_met is true."
+        }
+      }
+    },
+    "reasoning": {
+      "type": "string",
+      "description": "Strategic analysis of any escalated anomaly from the Executor, which persona directive or frontier feature to target next, and how to decompose the next sequence into clear steps for the faster Executor model."
+    },
+    "current_goal": {
+      "type": "string",
+      "description": "Active high-level gameplay goal for the persona."
+    },
+    "delegated_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_goal",
+        "horizon_rationale",
+        "max_batch_steps",
+        "steps",
+        "success_criteria",
+        "abort_conditions"
+      ],
+      "properties": {
+        "plan_goal": {
+          "type": "string",
+          "description": "Clear tactical objective for the Executor to accomplish in this batch."
+        },
+        "horizon_rationale": {
+          "type": "string",
+          "description": "Why you chose this max_batch_steps horizon given the complexity/risk of the UI state and the Executor's limited context."
+        },
+        "max_batch_steps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Maximum number of atomic steps the Executor may take in this batch before returning control to the Planner (1-10, chosen by your judgment)."
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "step_number",
+              "exec_mode"
+            ],
+            "properties": {
+              "step_number": {
+                "type": "integer"
+              },
+              "exec_mode": {
+                "type": "string",
+                "enum": ["direct", "llm"],
+                "description": "'direct' executes the concrete action directly in Python (0 LLM calls, ~0.3s) whenever targets are known/predictable (slash commands, open_neocom, close_window, space commands, known widget/menu labels); 'llm' invokes the Fast Executor only when dynamic child widgets must be discovered after a window opens."
+              },
+              "capture_screenshot": {
+                "type": "boolean",
+                "description": "Set false on routine 'direct' mid-batch steps; set true only if visual pixel confirmation is specifically required before continuing."
+              },
+              "instruction": {
+                "type": "string",
+                "description": "Concrete instruction for this step, including fallback guidance if a menu/window needs opening or closing."
+              },
+              "action_type_hint": {
+                "type": "string",
+                "description": "Recommended action.type (e.g. click_widget, open_neocom, slash_command, undock, warp_to, lock_target, activate_module)."
+              },
+              "target_or_command_hint": {
+                "type": "string",
+                "description": "Exact widget path/name, item_id, or slash command hint from the current scene graph."
+              },
+              "expected_outcome": {
+                "type": "string",
+                "description": "What UI, session, or space state change to verify after executing this step."
+              },
+              "action": {
+                "type": ["object", "null"],
+                "additionalProperties": false,
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "click_widget",
+                      "click_xy",
+                      "drag_widget",
+                      "type_text",
+                      "press_key",
+                      "open_neocom",
+                      "close_window",
+                      "undock",
+                      "dock",
+                      "jump_gate",
+                      "warp_to",
+                      "approach",
+                      "orbit",
+                      "keep_at_range",
+                      "lock_target",
+                      "activate_module",
+                      "train_skill",
+                      "complete_skills",
+                      "advance_upwell_timer",
+                      "complete_industry_jobs",
+                      "advance_server_time",
+                      "clear_timers",
+                      "open_plex_store",
+                      "open_structure_cosmetics",
+                      "slash_command",
+                      "wait"
+                    ]
+                  },
+                  "target": { "type": ["string", "null"] },
+                  "command": { "type": ["string", "null"] },
+                  "x": { "type": ["integer", "null"] },
+                  "y": { "type": ["integer", "null"] },
+                  "dest_x": { "type": ["integer", "null"] },
+                  "dest_y": { "type": ["integer", "null"] },
+                  "right_click": { "type": "boolean" },
+                  "double_click": { "type": "boolean" },
+                  "wait_ms": { "type": "integer" },
+                  "expected_ui_and_state_change": { "type": "string" }
+                }
+              },
+              "assertions": {
+                "type": ["object", "null"],
+                "additionalProperties": false,
+                "required": [],
+                "properties": {
+                  "expect_window_open": { "type": ["string", "null"] },
+                  "expect_window_closed": { "type": ["string", "null"] },
+                  "expect_modal_absent": { "type": "boolean" },
+                  "expect_context_menu_item": { "type": ["string", "null"] },
+                  "expect_ball_present": { "type": ["string", "null"] },
+                  "expect_session_field": { "type": ["string", "null"] }
+                }
+              }
+            }
+          }
+        },
+        "success_criteria": {
+          "type": "string",
+          "description": "Concrete condition under which the Executor should mark batch_status = 'completed' and hand control back to the Planner."
+        },
+        "abort_conditions": {
+          "type": "string",
+          "description": "Conditions under which the Executor must immediately stop and set batch_status = 'escalate' so the Parent Planner can diagnose and file a bug or re-plan."
+        }
+      }
+    },
+    "memory_update": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "working_memory": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Updated short-term scratchpad (keep 3-10 concise bullet points)."
+        },
+        "long_term_note_to_append": {
+          "type": ["string", "null"],
+          "description": "Optional durable discovery about game state, character progression, or verified behavior to append to long-term notes."
+        },
+        "mark_tested_features": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Feature IDs or window names that were successfully verified."
+        },
+        "mark_buggy_features": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Feature IDs or window names where an exception, timeout, missing animation, or silent UI-state desync was observed."
+        },
+        "new_frontier_features": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Newly discovered buttons, tabs, windows, or gameplay loops to add to the exploration frontier."
+        }
+      }
+    },
+    "bug_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "should_file"
+      ],
+      "properties": {
+        "should_file": {
+          "type": "boolean",
+          "description": "Set true whenever a Python exception, Quasar/MachoNet timeout, missing animation, blank/stuck window, OR silent UI-state desync was observed in the previous step or escalated batch."
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "none",
+            "client_exception",
+            "protocol_timeout",
+            "ui_state_desync",
+            "missing_animation",
+            "blank_or_stuck_window",
+            "broken_game_mechanic"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "critical",
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "reproduction_steps": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "expected_behavior": {
+          "type": "string"
+        },
+        "actual_behavior": {
+          "type": "string"
+        },
+        "subsystem": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

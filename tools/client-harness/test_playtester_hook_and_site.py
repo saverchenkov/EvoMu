@@ -2772,6 +2772,79 @@ class TestHookWindowCommandsAndRpcCompat(unittest.TestCase):
         self.assertTrue(shut_resp["result"].get("shutting_down"))
         self.assertFalse(srv.running)
 
+    def test_execute_action_waits_for_session_mutating_and_changing_to_settle(self):
+        """Regression for #1215: wait for ship.Board session mutation before OpenFitting."""
+        hook = _load_hook_with_py2_stubs()
+        sess = types.SimpleNamespace(
+            shipid=None,
+            mutating=1,
+            changing="shipid",
+            stationid=60003760,
+            solarsystemid2=30000142,
+        )
+        observed_ship_ids = []
+
+        def fake_open_fitting():
+            observed_ship_ids.append((sess.shipid, sess.mutating, sess.changing))
+
+        fake_cmd = types.SimpleNamespace(OpenFitting=fake_open_fitting)
+        fake_uicore = types.SimpleNamespace(cmd=fake_cmd, registry=None, layer=None, desktop=None)
+        fake_sm = mock.MagicMock()
+
+        sleep_calls = []
+
+        def fake_sleep(ms):
+            sleep_calls.append(ms)
+            if len(sleep_calls) == 2:
+                sess.changing = None
+            elif len(sleep_calls) >= 3:
+                sess.shipid = 1000000001234
+                sess.mutating = 0
+
+        snap = {
+            "open_windows": [],
+            "modals": [],
+            "ui": {},
+            "space": {},
+            "skills_state": {},
+            "wallet_state": {},
+            "active_view": "hangar",
+        }
+        with mock.patch.dict(builtins.__dict__, {"session": sess}), \
+             mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value=snap), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_close_neocom_panels_if_outside"), \
+             mock.patch.object(hook, "_close_utilmenu_if_outside"), \
+             mock.patch.object(hook, "_close_context_menus_if_outside"), \
+             mock.patch.object(hook, "_dismiss_pinned_tooltip_if_outside", return_value=False), \
+             mock.patch.object(hook.H, "_sleep_ms", side_effect=fake_sleep, create=True):
+            res = hook._execute_action(
+                fake_sm,
+                {"type": "open_neocom", "target": "fitting", "wait_ms": 0},
+            )
+
+        self.assertTrue(res.get("action_ok"), res)
+        self.assertEqual(observed_ship_ids, [(1000000001234, 0, None)])
+        self.assertEqual(sleep_calls[:3], [50, 50, 50])
+
+        # Normal settled session executes immediately without extra _wait_session_settled polling,
+        # and a permanently wedged session respects the bounded timeout without spinning forever.
+        settled_sleeps = []
+        settled_sess = types.SimpleNamespace(shipid=1000000001234, mutating=0, changing=None)
+        with mock.patch.dict(builtins.__dict__, {"session": settled_sess}), \
+             mock.patch.object(hook.H, "_sleep_ms", side_effect=lambda ms: settled_sleeps.append(ms), create=True):
+            self.assertTrue(hook._wait_session_settled(timeout_ms=500, poll_ms=50))
+        self.assertEqual(settled_sleeps, [])
+
+        wedged_sleeps = []
+        wedged_sess = types.SimpleNamespace(shipid=None, mutating=1, changing="shipid")
+        with mock.patch.dict(builtins.__dict__, {"session": wedged_sess}), \
+             mock.patch.object(hook.H, "_sleep_ms", side_effect=lambda ms: wedged_sleeps.append(ms), create=True):
+            self.assertFalse(hook._wait_session_settled(timeout_ms=200, poll_ms=50))
+        self.assertEqual(wedged_sleeps, [50, 50, 50, 50])
 
 
 if __name__ == "__main__":
