@@ -633,11 +633,14 @@ fn filter_remaining_module_cooldowns(
                 .solar_system_id
                 .map(|sid| ctx.systems.get_system_sim_elapsed(sid))
                 .unwrap_or(0.0);
-            ServerContext::remaining_cooldown_secs(
+            let (tidi_factor, has_tidi_history) = ctx.resolve_sys_tidi_mode(entry.solar_system_id);
+            ServerContext::remaining_cooldown_secs_with_tidi(
                 entry,
                 now_unix_f64,
                 entry.solar_system_id,
                 cur_sys_sim_s,
+                tidi_factor,
+                has_tidi_history,
             ) > 1e-6
         })
         .collect()

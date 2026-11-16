@@ -68,13 +68,67 @@ pub(crate) fn set_modules_reload_until(
     module_ids: &[i64],
     reload_until_unix: u64,
 ) {
+    if module_ids.is_empty() {
+        return;
+    }
+    let now_unix = ctx.now_unix_secs();
+    // Resolve ship + solar system outside the DB write lock so lock ranking with
+    // `cluster_nodes` / `SystemRegistry` stays clean.
+    let (ship_id_opt, db_sys_opt) = ctx.db.with_snapshot(|snap| {
+        let mut found_ship = None;
+        for &mid in module_ids {
+            if let Some(it) = snap.items.get(&mid) {
+                found_ship = Some(it.location_id);
+                break;
+            }
+        }
+        let sys_opt = found_ship.and_then(|sid| {
+            snap.characters
+                .values()
+                .find(|c| {
+                    c.active_ship_id == sid
+                        && c.station_id.is_none()
+                        && c.structure_id.is_none()
+                })
+                .map(|c| c.solar_system_id)
+                .or_else(|| {
+                    snap.items.get(&sid).and_then(|it| {
+                        (30_000_000..=33_000_000)
+                            .contains(&it.location_id)
+                            .then_some(it.location_id as u32)
+                    })
+                })
+        });
+        (found_ship, sys_opt)
+    });
+    let sys_opt = ship_id_opt
+        .and_then(|sid| ctx.systems.find_ball_system_sync(sid))
+        .or(db_sys_opt);
+    let tidi = sys_opt
+        .map(|sid| crate::services::serverops_cluster::get_system_tidi_factor(ctx, sid))
+        .unwrap_or(1.0);
+    let base_sim_s = reload_until_unix.saturating_sub(now_unix) as f64;
+    let effective_until = if reload_until_unix > now_unix && tidi < 0.995 {
+        let scaled_wall_s = (base_sim_s / tidi.clamp(0.10, 1.0)).ceil().max(1.0) as u64;
+        now_unix.saturating_add(scaled_wall_s)
+    } else {
+        reload_until_unix
+    };
     ctx.db.with_mut_snapshot(|snap| {
         for &mid in module_ids {
             snap.cluster_and_runtime
                 .module_reload_until_unix
-                .insert(mid, reload_until_unix);
+                .insert(mid, effective_until);
         }
     });
+    if let (Some(sys_id), Some(ship_id)) = (sys_opt, ship_id_opt) {
+        if let Some(handle) = ctx.systems.get_handle(sys_id) {
+            let rem_sim_s = if reload_until_unix > now_unix { base_sim_s } else { 0.0 };
+            for &mid in module_ids {
+                handle.try_track_module_reload_sim(mid, ship_id, rem_sim_s);
+            }
+        }
+    }
 }
 
 pub(crate) fn check_module_reloading(

@@ -276,7 +276,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                             name_opt,
                         )
                     {
-                        let now = ctx.now_client_sim_filetime_ticks();
+                        let now = ctx.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
                         ctx.emit_typed(
                             crate::router::NotificationTarget::Character(char_id),
                             crate::router::notify_registry::OnSpecialFX {

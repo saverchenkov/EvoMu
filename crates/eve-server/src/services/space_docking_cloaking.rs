@@ -1524,6 +1524,11 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                 Ok(b) => b,
                 Err(e) => return Some(Err(e)),
             };
+            crate::services::serverops_cluster::emit_sim_clock_rebase_on_entry_if_needed(
+                ctx,
+                char_id,
+                dest_sys_id,
+            );
 
             Some(Ok(PyRep::keyval([
                 ("success", PyRep::Bool(true)), ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),

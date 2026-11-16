@@ -1416,11 +1416,28 @@ impl ServerContext {
         (type_id, sys_opt, cur_sys_sim_s)
     }
 
-    pub(crate) fn remaining_cooldown_secs(
+    pub(crate) fn resolve_sys_tidi_mode(&self, sys_opt: Option<u32>) -> (f64, bool) {
+        let Some(sid) = sys_opt else {
+            return (1.0, false);
+        };
+        let tidi = self.systems.get_system_tidi_factor(sid);
+        let has_anchor = self
+            .systems
+            .cluster_nodes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .sim_clock_anchoring
+            .contains_key(&sid);
+        (tidi, has_anchor || tidi < 0.999_999)
+    }
+
+    pub(crate) fn remaining_cooldown_secs_with_tidi(
         entry: &ModuleCooldownEntry,
         now_unix_f64: f64,
         sys_opt: Option<u32>,
         cur_sys_sim_s: f64,
+        tidi_factor: f64,
+        has_tidi_history: bool,
     ) -> f64 {
         // If `recorded_unix_f64` sits in the future relative to `now_unix_f64` (e.g. persisted from
         // an earlier `/advancetime` session before server restart reset the virtual clock), treat
@@ -1434,17 +1451,26 @@ impl ServerContext {
             return 0.0;
         }
         let wall_elapsed = (now_unix_f64 - entry.recorded_unix_f64).max(0.0);
-        let sim_elapsed = if entry.solar_system_id.is_some()
+        let has_sim = entry.solar_system_id.is_some()
             && entry.solar_system_id == sys_opt
             && cur_sys_sim_s.is_finite()
             && entry.recorded_sys_sim_s.is_finite()
-            && cur_sys_sim_s >= entry.recorded_sys_sim_s
-        {
+            && cur_sys_sim_s >= entry.recorded_sys_sim_s;
+        let sim_elapsed = if has_sim {
             (cur_sys_sim_s - entry.recorded_sys_sim_s).max(0.0)
         } else {
             0.0
         };
-        (entry.delay_s - wall_elapsed.max(sim_elapsed)).max(0.0)
+        let elapsed = if has_sim && (has_tidi_history || tidi_factor < 0.999_999) {
+            if cur_sys_sim_s > 0.0 || entry.recorded_sys_sim_s > 0.0 {
+                sim_elapsed
+            } else {
+                (wall_elapsed * tidi_factor.clamp(0.10, 1.0)).max(sim_elapsed)
+            }
+        } else {
+            wall_elapsed.max(sim_elapsed)
+        };
+        (entry.delay_s - elapsed).max(0.0)
     }
 
     /// Resolves the Unix expiry timestamp (`f64`) of `(ship_id, module_id)`'s active reactivation
@@ -1452,13 +1478,32 @@ impl ServerContext {
     fn resolve_active_reactivation_cooldown(&self, ship_id: i64, module_id: i64) -> Option<f64> {
         let now = self.now_unix_secs() as f64;
         let (type_id, sys_opt, cur_sys_sim_s) = self.resolve_ship_cooldown_clock(ship_id, module_id);
+        let (tidi_factor, has_tidi_history) = self.resolve_sys_tidi_mode(sys_opt);
         let guard = self
             .module_reactivation_cooldowns
             .read()
             .unwrap_or_else(|e| e.into_inner());
         guard.get(&(ship_id, module_id, type_id)).and_then(|entry| {
-            let rem = Self::remaining_cooldown_secs(entry, now, sys_opt, cur_sys_sim_s);
-            (rem > 1e-6).then_some(entry.recorded_unix_f64 + entry.delay_s)
+            let rem = Self::remaining_cooldown_secs_with_tidi(
+                entry,
+                now,
+                sys_opt,
+                cur_sys_sim_s,
+                tidi_factor,
+                has_tidi_history,
+            );
+            if rem <= 1e-6 {
+                None
+            } else {
+                let eff_tidi = tidi_factor.clamp(0.10, 1.0);
+                if eff_tidi < 0.999_999 {
+                    Some(now + rem / eff_tidi)
+                } else if has_tidi_history {
+                    Some(now + rem)
+                } else {
+                    Some(entry.recorded_unix_f64 + entry.delay_s)
+                }
+            }
         })
     }
 
@@ -1475,13 +1520,24 @@ impl ServerContext {
         }
         let now = self.now_unix_secs() as f64;
         let (type_id, sys_opt, cur_sys_sim_s) = self.resolve_ship_cooldown_clock(ship_id, module_id);
+        let (tidi_factor, has_tidi_history) = self.resolve_sys_tidi_mode(sys_opt);
         let mut guard = self
             .module_reactivation_cooldowns
             .write()
             .unwrap_or_else(|e| e.into_inner());
         let effective_delay = guard
             .get(&(ship_id, module_id, type_id))
-            .map(|e| Self::remaining_cooldown_secs(e, now, sys_opt, cur_sys_sim_s).max(delay_s))
+            .map(|e| {
+                Self::remaining_cooldown_secs_with_tidi(
+                    e,
+                    now,
+                    sys_opt,
+                    cur_sys_sim_s,
+                    tidi_factor,
+                    has_tidi_history,
+                )
+                .max(delay_s)
+            })
             .unwrap_or(delay_s);
         guard.insert(
             (ship_id, module_id, type_id),
@@ -1899,6 +1955,60 @@ impl ServerContext {
     /// >24h into the client's future and trigger `godma.py ActualStopEffect` sleep overflows.
     pub fn now_client_sim_filetime_ticks(&self) -> i64 {
         host_wall_blueos_filetime_ticks()
+    }
+
+    /// Returns a BlueOS 100ns FILETIME timestamp anchored to `solar_system_id`'s sim clock
+    /// (`sim_clock_anchoring`) when present, clamping monotonically against
+    /// `last_sim_activation_ft_by_system` so `0.5 -> 1.0` transitions preserve the current sim
+    /// stamp and immediate post-transition activations emit history-safe timestamps (`#1081`).
+    pub fn now_system_sim_filetime_ticks(&self, solar_system_id: Option<u32>) -> i64 {
+        let Some(sys_id) = solar_system_id else {
+            return self.now_client_sim_filetime_ticks();
+        };
+        let now_wall_ft = self.now_blueos_filetime_ticks();
+        let mut cn = self
+            .systems
+            .cluster_nodes
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(&(anchor_wall_ft, anchor_sim_ft, factor)) = cn.sim_clock_anchoring.get(&sys_id)
+        else {
+            drop(cn);
+            return self.now_client_sim_filetime_ticks();
+        };
+        let elapsed_wall_ft = now_wall_ft.saturating_sub(anchor_wall_ft);
+        let dilated_ft = ((elapsed_wall_ft as f64) * factor.clamp(0.10, 1.0)).round() as i64;
+        let base_ft = anchor_sim_ft.saturating_add(dilated_ft);
+        let prev = cn
+            .last_sim_activation_ft_by_system
+            .get(&sys_id)
+            .copied()
+            .unwrap_or(0);
+        let safe_ft = if base_ft <= prev {
+            prev.saturating_add(1)
+        } else {
+            base_ft
+        };
+        cn.last_sim_activation_ft_by_system.insert(sys_id, safe_ft);
+        safe_ft
+    }
+
+    /// Resolves `(char_id, ship_id)` to a solar system if in space and returns
+    /// [`Self::now_system_sim_filetime_ticks`] (`#1081`).
+    pub fn now_system_sim_filetime_ticks_for_ship(&self, char_id: i64, ship_id: i64) -> i64 {
+        let sys_opt = self.systems.find_ball_system_sync(ship_id).or_else(|| {
+            if char_id > 0 {
+                self.db.with_snapshot(|s| {
+                    s.characters
+                        .get(&char_id)
+                        .filter(|c| c.station_id.is_none() && c.structure_id.is_none())
+                        .map(|c| c.solar_system_id)
+                })
+            } else {
+                None
+            }
+        });
+        self.now_system_sim_filetime_ticks(sys_opt)
     }
 
     /// Returns a BlueOS 100ns FILETIME timestamp for `machoNet.GetTime` (`blue.os.GetWallclockTimeNow()`),

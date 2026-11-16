@@ -156,8 +156,10 @@ pub async fn step_combat_system(
     solar_system_id: u32,
     dt: f64,
 ) -> Vec<InFlightMissileState> {
-    crate::services::combat_weapons_spool::step_system_entropic_spools(ctx, solar_system_id, dt).await;
-    step_missiles_and_breachers(ctx, solar_system_id, dt).await
+    let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, solar_system_id);
+    let dt_sim = (dt * tidi).max(0.0);
+    crate::services::combat_weapons_spool::step_system_entropic_spools(ctx, solar_system_id, dt_sim).await;
+    step_missiles_and_breachers(ctx, solar_system_id, dt_sim).await
 }
 
 pub async fn step_missiles_and_breachers(
@@ -356,14 +358,35 @@ pub async fn step_missiles_and_breachers(
     // Step active Breacher Pod DoTs (non-stacking per target) ONLY for targets in `solar_system_id` (#208)
     crate::services::r6_t1_p1_helpers::step_active_breacher_dots(ctx, &sys_handle, solar_system_id, dt).await;
 
-    // Complete any self-destruct countdowns in `solar_system_id` whose timer has elapsed (`feat:ships.self-destruct-countdown`)
+    // Complete any self-destruct countdowns in `solar_system_id` whose sim-clock timer has elapsed (`feat:ships.self-destruct-countdown`, `#1081`)
     let now_unix = ctx.now_unix();
-    let rt_self_destructs: Vec<SelfDestructCountdown> = with_combat_runtime(ctx, |rt| {
-        rt.self_destruct_countdowns
-            .values()
-            .filter(|cd| cd.solar_system_id == solar_system_id)
-            .cloned()
-            .collect()
+    let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, solar_system_id)
+        .clamp(0.10, 1.0);
+    let rt_self_destructs: Vec<SelfDestructCountdown> = with_mut_combat_runtime(ctx, |rt| {
+        let mut out = Vec::new();
+        for cd in rt.self_destruct_countdowns.values_mut() {
+            if cd.solar_system_id != solar_system_id {
+                continue;
+            }
+            if dt > 0.0 {
+                let rem = rt
+                    .self_destruct_sim_remaining_secs
+                    .entry(cd.ship_id)
+                    .or_insert_with(|| {
+                        ((cd.detonate_at_unix.saturating_sub(now_unix) as f64) * tidi)
+                            .min(crate::services::combat_crimewatch::SELF_DESTRUCT_COUNTDOWN_SECS as f64)
+                    });
+                *rem -= dt;
+                if *rem <= 1e-6 {
+                    cd.detonate_at_unix = now_unix;
+                } else {
+                    cd.detonate_at_unix =
+                        now_unix.saturating_add((*rem / tidi).ceil().max(1.0) as u64);
+                }
+            }
+            out.push(cd.clone());
+        }
+        out
     });
     let due_countdowns: Vec<SelfDestructCountdown> =
         crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
@@ -404,6 +427,7 @@ pub async fn step_missiles_and_breachers(
         with_mut_combat_runtime(ctx, |rt| {
             for cd in &due_countdowns {
                 rt.self_destruct_countdowns.remove(&cd.ship_id);
+                rt.self_destruct_sim_remaining_secs.remove(&cd.ship_id);
             }
         });
     }

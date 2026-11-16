@@ -433,6 +433,7 @@ pub struct CombatRuntimeState {
     pub npc_scrambled_ships: HashMap<u32, std::collections::HashSet<i64>>,
     pub npc_sec_gain_intervals: HashMap<(i64, i32), (u64, f64)>,
     pub recently_destroyed_item_ids: VecDeque<i64>,
+    pub self_destruct_sim_remaining_secs: HashMap<i64, f64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -486,6 +487,7 @@ struct PersistedCombatExtendedPayload {
     npc_scrambled_ships: HashMap<u32, std::collections::HashSet<i64>>,
     npc_sec_gain_intervals: Vec<((i64, i32), (u64, f64))>,
     recently_destroyed_item_ids: VecDeque<i64>,
+    self_destruct_sim_remaining_secs: HashMap<i64, f64>,
 }
 
 impl CombatRuntimeState {
@@ -649,6 +651,7 @@ impl CombatRuntimeState {
             self.npc_scrambled_ships.clear();
             self.npc_sec_gain_intervals.clear();
             self.recently_destroyed_item_ids.clear();
+            self.self_destruct_sim_remaining_secs.clear();
         } else if let Ok(ext) =
             serde_json::from_str::<PersistedCombatExtendedPayload>(&p.extended_runtime_json)
         {
@@ -698,6 +701,7 @@ impl CombatRuntimeState {
             self.npc_scrambled_ships = ext.npc_scrambled_ships;
             self.npc_sec_gain_intervals = ext.npc_sec_gain_intervals.into_iter().collect();
             self.recently_destroyed_item_ids = ext.recently_destroyed_item_ids;
+            self.self_destruct_sim_remaining_secs = ext.self_destruct_sim_remaining_secs;
         }
     }
 
@@ -708,6 +712,7 @@ impl CombatRuntimeState {
             || !self.aggression_assist_log.is_empty()
             || !self.container_lifetimes.is_empty()
             || !self.self_destruct_countdowns.is_empty()
+            || !self.self_destruct_sim_remaining_secs.is_empty()
             || !self.modified_system_securities.is_empty()
             || !self.sentry_gun_aggression.is_empty()
             || !self.crimewatch_timer_states.is_empty()
@@ -805,6 +810,7 @@ impl CombatRuntimeState {
                     .map(|(k, v)| (*k, *v))
                     .collect(),
                 recently_destroyed_item_ids: self.recently_destroyed_item_ids.clone(),
+                self_destruct_sim_remaining_secs: self.self_destruct_sim_remaining_secs.clone(),
             };
             payload.entropic_spools.sort_by_key(|(k, _)| *k);
             payload.sentry_gun_aggression.sort_by_key(|(k, _)| *k);

@@ -689,10 +689,48 @@ pub(super) fn drain_tick_events_without_encode(ballpark: &mut Ballpark) {
         .retain(|id, evs| !evs.is_empty() || balls.contains_key(id));
 }
 
+/// Encodes a Destiny event batch while ensuring `OnSpecialFX` stamps never backstep behind
+/// `fx_floor_stamp` (max of owner-visible / prime update stamp) while scene `stamp` is unchanged (`#1081`).
+pub(super) fn encode_destiny_updates_with_fx_floor(
+    stamp: u32,
+    fx_floor_stamp: u32,
+    events: &[DestinyEvent],
+    ballpark: Option<&Ballpark>,
+    last_fx_stamp_opt: Option<&std::sync::atomic::AtomicU64>,
+) -> PyRep {
+    let items: Vec<PyRep> = events
+        .iter()
+        .map(|ev| {
+            let ev_stamp = if matches!(ev, DestinyEvent::OnSpecialFX { .. }) {
+                let s = stamp.max(fx_floor_stamp);
+                if let Some(a) = last_fx_stamp_opt {
+                    a.fetch_max(u64::from(s), std::sync::atomic::Ordering::AcqRel);
+                }
+                s
+            } else {
+                stamp
+            };
+            encode_destiny_event(ev_stamp, ev, ballpark)
+        })
+        .collect();
+    PyRep::List(items)
+}
+
 pub(super) fn build_tick_broadcast(
     solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
+    events: Vec<DestinyEvent>,
+) -> TickBroadcast {
+    build_tick_broadcast_with_fx_floor(solar_system_id, ballpark, events, 0, None, None)
+}
+
+pub(super) fn build_tick_broadcast_with_fx_floor(
+    solar_system_id: SolarSystemId,
+    ballpark: &mut Ballpark,
     mut events: Vec<DestinyEvent>,
+    fx_floor_stamp: u32,
+    last_visible_stamp_opt: Option<&std::sync::atomic::AtomicU64>,
+    last_fx_stamp_opt: Option<&std::sync::atomic::AtomicU64>,
 ) -> TickBroadcast {
     events.append(&mut ballpark.pending_events);
     let ready_obs_ids: Vec<BallId> = ballpark
@@ -723,10 +761,35 @@ pub(super) fn build_tick_broadcast(
         .observer_events
         .retain(|id, evs| !evs.is_empty() || balls.contains_key(id));
     let stamp = ballpark.current_tick as u32;
+    let effective_fx_floor = stamp.max(fx_floor_stamp);
     let mut observer_updates_pyrep = BTreeMap::new();
     let mut event_cache: HashMap<u64, Vec<(&DestinyEvent, PyRep)>> = HashMap::new();
     let mut batch_cache: HashMap<u64, Vec<(&[DestinyEvent], PyRep)>> = HashMap::new();
     for (&obs_id, obs_evs) in &observer_events {
+        let has_set_state = obs_evs
+            .iter()
+            .any(|ev| matches!(ev, DestinyEvent::SetState { .. }));
+        if has_set_state {
+            if let Some(a) = last_visible_stamp_opt {
+                a.fetch_max(ballpark.current_tick, std::sync::atomic::Ordering::AcqRel);
+            }
+        }
+        let has_fx = obs_evs
+            .iter()
+            .any(|ev| matches!(ev, DestinyEvent::OnSpecialFX { .. }));
+        if has_fx && effective_fx_floor > stamp {
+            observer_updates_pyrep.insert(
+                obs_id,
+                encode_destiny_updates_with_fx_floor(
+                    stamp,
+                    effective_fx_floor,
+                    obs_evs,
+                    Some(ballpark),
+                    last_fx_stamp_opt,
+                ),
+            );
+            continue;
+        }
         let mut batch_hasher = DefaultHasher::new();
         batch_hasher.write_usize(obs_evs.len());
         let mut ev_hashes = Vec::with_capacity(obs_evs.len());
@@ -740,6 +803,11 @@ pub(super) fn build_tick_broadcast(
             .get(&bh)
             .and_then(|bucket| bucket.iter().find(|(s, _)| *s == obs_evs.as_slice()))
         {
+            if has_fx {
+                if let Some(a) = last_fx_stamp_opt {
+                    a.fetch_max(u64::from(effective_fx_floor), std::sync::atomic::Ordering::AcqRel);
+                }
+            }
             observer_updates_pyrep.insert(obs_id, cached.1.clone());
             continue;
         }
@@ -755,6 +823,11 @@ pub(super) fn build_tick_broadcast(
                     .filter(|(_, e)| !matches!(e, DestinyEvent::SetState { .. })),
             )
         {
+            if matches!(ev, DestinyEvent::OnSpecialFX { .. }) {
+                if let Some(a) = last_fx_stamp_opt {
+                    a.fetch_max(u64::from(effective_fx_floor), std::sync::atomic::Ordering::AcqRel);
+                }
+            }
             let eh = ev_hashes[idx];
             let pyrep = if let Some(hit) = event_cache
                 .get(&eh)

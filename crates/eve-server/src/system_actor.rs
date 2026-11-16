@@ -15,6 +15,8 @@ mod disruptors;
 pub(crate) use disruptors::*;
 mod missiles;
 pub(crate) use missiles::*;
+pub mod tidi_autoscaler;
+pub use tidi_autoscaler::*;
 mod types;
 pub use types::*;
 
@@ -27,7 +29,7 @@ use eve_db::lock_rank::{
     RANK_LEAF, RANK_SERVICE_STATE, RANK_SYSTEM_REGISTRY,
 };
 use eve_destiny::wire::{
-    encode_destiny_updates, encode_set_state_payload, encode_set_state_update,
+    encode_set_state_payload, encode_set_state_update,
 };
 use eve_destiny::{Ball, BallId, Ballpark, DestinyEvent, SlimItemMeta};
 use eve_proto::PyRep;
@@ -616,6 +618,12 @@ impl SystemRegistry {
             .unwrap_or(1.0).clamp(0.10, 1.0);
         let tidi_factor_bits = Arc::new(std::sync::atomic::AtomicU64::new(initial_tidi.to_bits()));
         let tidi_factor_bits_actor = tidi_factor_bits.clone();
+        let sim_elapsed_secs_bits = Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits()));
+        let sim_elapsed_secs_bits_actor = sim_elapsed_secs_bits.clone();
+        let last_visible_stamp = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let last_visible_stamp_actor = last_visible_stamp.clone();
+        let last_fx_stamp = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let last_fx_stamp_actor = last_fx_stamp.clone();
         let command_panics = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let command_panics_actor = command_panics.clone();
         #[cfg(test)]
@@ -656,6 +664,7 @@ impl SystemRegistry {
                     ball_space_entry_epochs,
                     fit_projections,
                     weapon_cycle_start_modules,
+                    module_reload_sim_remaining,
                     pending_missile_launches,
                     pending_missile_deploy_fx,
                     active_guided_missiles,
@@ -971,6 +980,13 @@ impl SystemRegistry {
                                 reply,
                             } => {
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
+                                // #1081 Req 5: Stop active propulsion OnSpecialFX on grid before detaching ball on dock.
+                                emit_propulsion_stop_fx_before_detach(
+                                    &mut ballpark,
+                                    active_module_cycles,
+                                    &sde_opt,
+                                    ship_id,
+                                );
                                 remove_all_ship_module_cycles(
                                     &mut ballpark,
                                     active_module_cycles,
@@ -1012,6 +1028,15 @@ impl SystemRegistry {
                                     ball_id,
                                 );
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
+                                if accept_docking_target.is_some() {
+                                    // #1081 Req 5: Stop active propulsion OnSpecialFX on grid before detaching ball on dock.
+                                    emit_propulsion_stop_fx_before_detach(
+                                        &mut ballpark,
+                                        active_module_cycles,
+                                        &sde_opt,
+                                        ball_id,
+                                    );
+                                }
                                 remove_all_ship_module_cycles(
                                     &mut ballpark,
                                     active_module_cycles,
@@ -1305,6 +1330,17 @@ impl SystemRegistry {
                                     )));
                                 }
                             }
+                            SystemCommand::TrackModuleReloadSim {
+                                module_id,
+                                ship_id,
+                                remaining_sim_s,
+                            } => {
+                                if remaining_sim_s.is_finite() && remaining_sim_s > 0.0 {
+                                    module_reload_sim_remaining.insert(module_id, (ship_id, remaining_sim_s));
+                                } else {
+                                    module_reload_sim_remaining.remove(&module_id);
+                                }
+                            }
                             SystemCommand::GetBallSnapshot { ball_id, reply } => {
                                 let res = ballpark.balls.get(&ball_id).cloned().map(|b| (ballpark.current_tick, b));
                                 let _ = reply.send(res);
@@ -1341,6 +1377,10 @@ impl SystemRegistry {
                                 reply,
                             } => {
                                 if ballpark.balls.contains_key(&observer_ball_id) {
+                                    last_visible_stamp_actor.fetch_max(
+                                        ballpark.current_tick,
+                                        std::sync::atomic::Ordering::AcqRel,
+                                    );
                                     let payload = encode_set_state_payload(&ballpark, observer_ball_id);
                                     let update_list = PyRep::List(vec![encode_set_state_update(
                                         &ballpark,
@@ -1368,9 +1408,23 @@ impl SystemRegistry {
                                     .any(|ev| matches!(ev, DestinyEvent::SetState { .. }))
                                 {
                                     ballpark.current_tick = ballpark.current_tick.saturating_add(1);
+                                    last_visible_stamp_actor.fetch_max(
+                                        ballpark.current_tick,
+                                        std::sync::atomic::Ordering::AcqRel,
+                                    );
                                 }
                                 let stamp = ballpark.current_tick as u32;
-                                let pyrep = encode_destiny_updates(stamp, &events, Some(&ballpark));
+                                let fx_floor = last_visible_stamp_actor
+                                    .load(std::sync::atomic::Ordering::Acquire)
+                                    .max(last_fx_stamp_actor.load(std::sync::atomic::Ordering::Acquire))
+                                    as u32;
+                                let pyrep = belts::encode_destiny_updates_with_fx_floor(
+                                    stamp,
+                                    fx_floor,
+                                    &events,
+                                    Some(&ballpark),
+                                    Some(&last_fx_stamp_actor),
+                                );
                                 let _ = reply.send((ballpark.current_tick, events, pyrep));
                             }
                             SystemCommand::ApplyDamage { ball_id, damage, reply } => {
@@ -1919,6 +1973,10 @@ impl SystemRegistry {
                                     Some(eve_destiny::MovementMode::Warp { .. })
                                 );
                                 fast_forward_clock_in_actor_with_epochs(solar_system_id, &mut ballpark, ship_id, secs, sim_elapsed_secs, &db_opt, ball_space_entry_epochs, &ball_positions_actor, &scrambled_balls_actor, &event_tx_actor);
+                                sim_elapsed_secs_bits_actor.store(
+                                    sim_elapsed_secs.to_bits(),
+                                    std::sync::atomic::Ordering::Release,
+                                );
                                 let now_warping = matches!(
                                     ballpark.balls.get(&ship_id).map(|b| &b.mode),
                                     Some(eve_destiny::MovementMode::Warp { .. })
@@ -2075,12 +2133,18 @@ impl SystemRegistry {
                                         for obs_id in ready_obs_ids {
                                             let obs_evs = ballpark.drain_observer_events(obs_id);
                                             if !obs_evs.is_empty() {
+                                                let fx_floor = last_visible_stamp_actor
+                                                    .load(std::sync::atomic::Ordering::Acquire)
+                                                    .max(last_fx_stamp_actor.load(std::sync::atomic::Ordering::Acquire))
+                                                    as u32;
                                                 observer_updates_pyrep.insert(
                                                     obs_id,
-                                                    encode_destiny_updates(
+                                                    belts::encode_destiny_updates_with_fx_floor(
                                                         stamp,
+                                                        fx_floor,
                                                         &obs_evs,
                                                         Some(&ballpark),
+                                                        Some(&last_fx_stamp_actor),
                                                     ),
                                                 );
                                                 observer_events.insert(obs_id, obs_evs);
@@ -2122,6 +2186,10 @@ impl SystemRegistry {
                             let dt_sim = if dt > 0.0 && dt.is_finite() { dt * tidi } else { dt };
                             if dt_sim > 0.0 && dt_sim.is_finite() {
                                 *sim_elapsed_secs += dt_sim;
+                                sim_elapsed_secs_bits_actor.store(
+                                    sim_elapsed_secs.to_bits(),
+                                    std::sync::atomic::Ordering::Release,
+                                );
                             }
                             respawn_due_asteroids(
                                 &mut ballpark,
@@ -2214,6 +2282,13 @@ impl SystemRegistry {
                                     }
                                 }
                             }
+                            cycles::step_module_reloads_sim_clock(
+                                module_reload_sim_remaining,
+                                Some(module_reload_sim_deadlines.as_ref()),
+                                &db_opt,
+                                dt_sim,
+                                tidi,
+                            );
                             let mut missile_destroyed = Vec::new();
                             missiles::step_guided_missiles_in_actor(
                                 &mut ballpark,
@@ -2226,13 +2301,15 @@ impl SystemRegistry {
                                 &mut missile_destroyed,
                                 dt_sim,
                             );
-                            let mut destroyed_balls = step_cycles_and_capacitor_with_missiles(
+                            let mut destroyed_balls = cycles::step_cycles_and_capacitor_with_missiles_and_tidi(
                                 &mut ballpark, active_module_cycles, pending_anchoring_disruptors,
                                 active_nanite_repairs, ship_rack_heat, rah_incoming_damage,
                                 &base_scramble_strengths, &base_core_strengths, &sde_opt, &db_opt,
                                 ball_space_entry_epochs, fit_projections, weapon_cycle_start_modules,
                                 pending_missile_launches,
-                                mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, *sim_elapsed_secs, dt_sim, deact_guard.as_ref(),
+                                mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions,
+                                *sim_elapsed_secs, dt_sim, tidi,
+                                Some(module_reload_sim_remaining), deact_guard.as_ref(),
                             );
                             destroyed_balls.extend(missile_destroyed);
                             missiles::flush_pending_missile_launches(
@@ -2374,7 +2451,18 @@ impl SystemRegistry {
                             let current_tick = ballpark.current_tick;
                             let has_subscribers = event_tx_actor.receiver_count() > 0;
                             let broadcast_opt = if has_subscribers || matches!(step_reply, StepReply::Full(_)) {
-                                let broadcast = build_tick_broadcast(solar_system_id, &mut ballpark, events);
+                                let fx_floor = last_visible_stamp_actor
+                                    .load(std::sync::atomic::Ordering::Acquire)
+                                    .max(last_fx_stamp_actor.load(std::sync::atomic::Ordering::Acquire))
+                                    as u32;
+                                let broadcast = belts::build_tick_broadcast_with_fx_floor(
+                                    solar_system_id,
+                                    &mut ballpark,
+                                    events,
+                                    fx_floor,
+                                    Some(&last_visible_stamp_actor),
+                                    Some(&last_fx_stamp_actor),
+                                );
                                 celestials::record_warp_stops_from_events_in_map(&broadcast.events, &warp_stopped_at_actor);
                                 if has_subscribers {
                                     let _ = event_tx_actor.send(broadcast.clone());
@@ -2467,6 +2555,9 @@ impl SystemRegistry {
             actor_state: actor_state_shared,
             last_auto_stepped_unix,
             tidi_factor_bits,
+            sim_elapsed_secs_bits,
+            last_visible_stamp,
+            last_fx_stamp,
             command_panics,
             hibernated,
             hibernated_since_unix,

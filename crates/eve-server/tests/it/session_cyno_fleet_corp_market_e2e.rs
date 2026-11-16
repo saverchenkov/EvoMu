@@ -332,7 +332,7 @@ async fn test_session_change_timer_10s_and_canonical_payload() {
 
     let _ = ctx.db.acquire_online_lock_with_computer_hash(1, 7001, Some(char_id), None, true, now_unix);
 
-    services::space_destiny::record_session_change_timer(&ctx, char_id, now_unix, sys_id, 100, "stargate_jump");
+    services::space_destiny::record_session_change_timer(&ctx, char_id, now_unix, sys_id, 100, "jump");
 
     let notifs = ctx.drain_notifications_for_char(char_id);
     let sc = notifs.iter().find(|n| n.event == "OnSessionChanged").expect("OnSessionChanged emitted");

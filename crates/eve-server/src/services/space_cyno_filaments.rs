@@ -401,6 +401,11 @@ async fn handle_wormhole_jump(
     );
 
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, dest_sys_id as i64)?;
+    let _ = crate::services::serverops_cluster::emit_sim_clock_rebase_on_entry_if_needed(
+        ctx,
+        char_id,
+        dest_sys_id,
+    );
     Ok(PyRep::keyval([
         ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),
         ("beyonceBoundID", PyRep::Integer(new_beyonce_id as i64)),
@@ -828,6 +833,11 @@ async fn handle_random_jump_filament(
                     change: change_dict,
                 },
             );
+            let _ = crate::services::serverops_cluster::emit_sim_clock_rebase_on_entry_if_needed(
+                ctx,
+                p_char,
+                dest_sys_id,
+            );
         }
     }
 
@@ -845,6 +855,11 @@ async fn handle_random_jump_filament(
     );
 
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, dest_sys_id as i64)?;
+    let _ = crate::services::serverops_cluster::emit_sim_clock_rebase_on_entry_if_needed(
+        ctx,
+        char_id,
+        dest_sys_id,
+    );
     Ok(PyRep::keyval([
         ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),
         ("beyonceBoundID", PyRep::Integer(new_beyonce_id as i64)),
@@ -1124,6 +1139,11 @@ async fn handle_cmd_jump_to_structure_beacon(
     let _ = (dest_const_id, dest_reg_id);
     crate::services::map_service::record_solar_system_jump(ctx, char_id, target_sys_id);
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, target_sys_id as i64)?;
+    let _ = crate::services::serverops_cluster::emit_sim_clock_rebase_on_entry_if_needed(
+        ctx,
+        char_id,
+        target_sys_id,
+    );
 
     Ok(PyRep::keyval([
         ("solarSystemID", PyRep::Integer(target_sys_id as i64)),
@@ -1627,6 +1647,11 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
     );
     crate::services::map_service::record_solar_system_jump(ctx, char_id, target_sys_id);
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, target_sys_id as i64)?;
+    let _ = crate::services::serverops_cluster::emit_sim_clock_rebase_on_entry_if_needed(
+        ctx,
+        char_id,
+        target_sys_id,
+    );
 
     Ok(PyRep::keyval([
         ("solarSystemID", PyRep::Integer(target_sys_id as i64)), ("beaconID", PyRep::Integer(beacon.beacon_id)),

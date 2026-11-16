@@ -1245,6 +1245,7 @@ async fn test_sp4_stargate_capital_restriction_session_timers_and_jump_cloak_imm
         .unwrap_err();
     assert_eq!(early_jump_err.code, "SessionChangeInProgress");
 
+    ctx.advance_secs(eve_server::services::space_destiny::STARGATE_SESSION_CHANGE_TIMER_SECS);
     for _ in 0..10 {
         dest_handle.step_manual(1.0).await.unwrap();
     }

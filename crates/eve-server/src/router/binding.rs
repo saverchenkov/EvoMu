@@ -1135,13 +1135,19 @@ impl ServerContext {
                 };
                 if reactiv_delay_s > 0.0 {
                     let now_s = db.clock().now_unix_secs() as f64;
+                    let solar_system_id = db.with_snapshot(|snap| {
+                        snap.characters.get(&char_id).map(|c| c.solar_system_id)
+                    });
+                    let sys_sim_s = solar_system_id
+                        .map(|sid| step_ctx.systems.get_system_sim_elapsed(sid))
+                        .unwrap_or(0.0);
                     step_ctx.module_reactivation_cooldowns.write().unwrap_or_else(|e| e.into_inner()).insert(
                         (cycle.ship_id, cycle.module_id, cycle.module_type_id),
                         super::context::ModuleCooldownEntry {
                             recorded_unix_f64: now_s,
                             delay_s: reactiv_delay_s,
-                            solar_system_id: None,
-                            recorded_sys_sim_s: 0.0,
+                            solar_system_id,
+                            recorded_sys_sim_s: sys_sim_s,
                         },
                     );
                 }
@@ -1230,7 +1236,7 @@ impl ServerContext {
             }
 
             let effect_id = effect_id_for_module_sde(sde, cycle.module_type_id, Some(&cycle.effect_name)).unwrap_or(0);
-            let now = crate::router::host_wall_blueos_filetime_ticks();
+            let now = step_ctx.now_system_sim_filetime_ticks(solar_system_id);
             let environment = PyRep::Tuple(vec![
                 PyRep::Integer(cycle.module_id),
                 PyRep::Integer(char_id),

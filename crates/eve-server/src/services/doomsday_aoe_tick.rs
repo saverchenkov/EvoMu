@@ -265,6 +265,20 @@ pub fn step_bosonic_doomsday_in_ballpark(
 
 /// Advances all persisted AoE superweapon cycles (`Cone`, `SpatialGtfo`, `ReaperSweep`) on the
 /// 1 Hz system step after their SDE warmup delay (`attr 2262`).
+/// Scales a base doomsday delay (warmup, immobilize, warp suppression) by active system TiDi (`#1081`).
+pub(crate) fn scale_delay_secs_for_tidi(base_secs: u64, tidi: f64) -> u64 {
+    let clamped = if tidi.is_finite() {
+        tidi.clamp(0.10, 1.0)
+    } else {
+        1.0
+    };
+    if clamped < 0.995 && base_secs > 0 {
+        ((base_secs as f64) / clamped).ceil().max(1.0) as u64
+    } else {
+        base_secs
+    }
+}
+
 pub async fn step_bosonic_doomsday_system(ctx: &ServerContext, sys_id: u32) {
     let has_runtime = ctx.db.with_snapshot(|s| {
         !s.superweapon_runtime.active_cycles.is_empty()
@@ -281,11 +295,18 @@ pub async fn step_bosonic_doomsday_system(ctx: &ServerContext, sys_id: u32) {
                 if cycle.sys_id != sys_id {
                     continue;
                 }
+                let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id)
+                    .clamp(0.10, 1.0);
                 let elapsed = now_unix.saturating_sub(cycle.started_at_unix);
                 if elapsed >= cycle.warmup_secs && cycle.ticks_applied < cycle.total_ticks {
                     let prev_ticks = cycle.ticks_applied;
-                    let target_ticks =
-                        ((elapsed - cycle.warmup_secs + 1) as usize).min(cycle.total_ticks);
+                    let since_fire = elapsed - cycle.warmup_secs;
+                    let sim_ticks = if tidi < 0.995 {
+                        (((since_fire as f64) * tidi).floor() as usize).saturating_add(1)
+                    } else {
+                        (since_fire + 1) as usize
+                    };
+                    let target_ticks = sim_ticks.min(cycle.total_ticks);
                     if target_ticks > prev_ticks {
                         cycle.ticks_applied = target_ticks;
                         batches.push((idx, cycle.clone(), prev_ticks, target_ticks));
@@ -672,10 +693,12 @@ async fn execute_scheduled_gtfo_teleport(
         let _ = sys
             .set_warp_scramble_strength(b.id, GTFO_WARP_SUPPRESSION_STRENGTH)
             .await;
+        let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id);
+        let sup_secs = scale_delay_secs_for_tidi(GTFO_WARP_SUPPRESSION_SECS, tidi);
         new_suppressions.push(PersistedWarpSuppression {
             sys_id,
             ship_id: b.id,
-            suppressed_until_unix: now_unix.saturating_add(GTFO_WARP_SUPPRESSION_SECS),
+            suppressed_until_unix: now_unix.saturating_add(sup_secs),
             orig_warp_scramble_strength: 0,
         });
         apply_doomsday_capsuleer_crimewatch(
