@@ -1517,6 +1517,19 @@ pub(crate) fn format_domain_entry_key<K: KeyCodec>(prefix: &str, field: &str, ke
     }
 }
 
+/// Bit-exact structural comparison via `FnvSerializer` (`v.to_bits()` for floats).
+/// Used only as a fallback when `PartialEq` (`!=`) returns `true` and JSON checking fails
+/// with `TxError::NonFinite`, so pre-existing untouched `NaN` values are not falsely re-emitted.
+fn serialized_bits_equal<T: Serialize + ?Sized>(left: &T, right: &T) -> bool {
+    fn fingerprint<T: Serialize + ?Sized>(val: &T) -> Option<u64> {
+        let mut hasher = super::fingerprints::FnvHasher::new();
+        val.serialize(super::fingerprints::FnvSerializer(&mut hasher))
+            .ok()?;
+        Some(hasher.finish())
+    }
+    matches!((fingerprint(left), fingerprint(right)), (Some(a), Some(b)) if a == b)
+}
+
 pub(crate) fn diff_scalar<T: PartialEq + Serialize>(
     domain: &'static str,
     field: &str,
@@ -1534,10 +1547,14 @@ pub(crate) fn diff_scalar<T: PartialEq + Serialize>(
             key: field.to_owned(),
         });
     } else {
+        let value = to_checked_domain_json(domain, field, after);
+        if matches!(value, Err(TxError::NonFinite { .. })) && serialized_bits_equal(before, after) {
+            return;
+        }
         out.push(DomainRowChange::Upsert {
             domain,
             key: field.to_owned(),
-            value: to_checked_domain_json(domain, field, after),
+            value,
         });
     }
 }
@@ -1557,10 +1574,11 @@ pub(crate) fn diff_map_with_mapped<'a, K: KeyCodec + 'a, V: PartialEq + 'a, S: S
 ) {
     let mut kept = 0usize;
     for (k, v) in after_iter {
-        let changed = match before_get(k) {
-            Some(prev) => {
+        let prev = before_get(k);
+        let changed = match prev {
+            Some(p) => {
                 kept += 1;
-                prev != v
+                p != v
             }
             None => true,
         };
@@ -1568,6 +1586,14 @@ pub(crate) fn diff_map_with_mapped<'a, K: KeyCodec + 'a, V: PartialEq + 'a, S: S
             let full_key = format_domain_entry_key(prefix, field, k);
             let serializable = to_serializable(v);
             let value = to_checked_domain_json(domain, &full_key, &serializable);
+            if matches!(value, Err(TxError::NonFinite { .. })) {
+                if let Some(p) = prev {
+                    let prev_serializable = to_serializable(p);
+                    if serialized_bits_equal(&prev_serializable, &serializable) {
+                        continue;
+                    }
+                }
+            }
             out.push(DomainRowChange::Upsert {
                 domain,
                 key: full_key,
@@ -2501,6 +2527,148 @@ mod tests {
             assert!(msg.contains("custom.float_domain"), "{msg}");
             assert!(msg.contains("4242"), "{msg}");
         }
+    }
+
+    #[test]
+    fn untouched_preexisting_nan_is_skipped_while_new_or_modified_nan_fails_closed() {
+        let mk_sample = |id: u64, ratio: f64| SampleWith128AndFloat {
+            id,
+            amount_u128: 10,
+            delta_i128: -5,
+            pair: (1, 2),
+            opt_u128: None,
+            ratio,
+            nested_map: BTreeMap::new(),
+        };
+
+        // 1. `diff_map_with`: untouched NaN entry emits no diff, while sibling finite mutation emits normally.
+        let mut before_map: HashMap<i64, SampleWith128AndFloat> = HashMap::new();
+        before_map.insert(30000142, mk_sample(1, f64::NAN));
+        before_map.insert(30000144, mk_sample(2, 1.5));
+
+        let mut after_map = before_map.clone();
+        let mut ops = Vec::new();
+        diff_map_with(
+            DOMAIN_PVE_AND_SPACE_EVENTS,
+            "cosmic_anomalies",
+            before_map.len(),
+            after_map.iter(),
+            |k| before_map.get(k),
+            before_map.keys(),
+            |k| after_map.contains_key(k),
+            &mut ops,
+        );
+        assert!(ops.is_empty(), "untouched NaN entry must emit no diff");
+
+        after_map.get_mut(&30000144).unwrap().ratio = 2.5;
+        ops.clear();
+        diff_map_with(
+            DOMAIN_PVE_AND_SPACE_EVENTS,
+            "cosmic_anomalies",
+            before_map.len(),
+            after_map.iter(),
+            |k| before_map.get(k),
+            before_map.keys(),
+            |k| after_map.contains_key(k),
+            &mut ops,
+        );
+        assert_eq!(ops.len(), 1);
+        validate_domain_row_changes(&ops, 1024 * 1024).expect("finite sibling change succeeds");
+
+        // Modifying another field on the NaN entry (or introducing NaN to a finite/new key) fails closed.
+        let mut modified_nan_map = before_map.clone();
+        modified_nan_map.get_mut(&30000142).unwrap().id = 99;
+        ops.clear();
+        diff_map_with(
+            DOMAIN_PVE_AND_SPACE_EVENTS,
+            "cosmic_anomalies",
+            before_map.len(),
+            modified_nan_map.iter(),
+            |k| before_map.get(k),
+            before_map.keys(),
+            |k| modified_nan_map.contains_key(k),
+            &mut ops,
+        );
+        let err = validate_domain_row_changes(&ops, 1024 * 1024)
+            .expect_err("modified entry containing NaN must still fail");
+        assert!(matches!(err, TxError::NonFinite { .. }), "{err}");
+
+        // 2. `diff_scalar`: identical NaN is skipped; modified entry with NaN fails closed.
+        let def_scalar = mk_sample(0, 0.0);
+        let scalar_nan_a = mk_sample(7, f64::NAN);
+        let scalar_nan_b = mk_sample(7, f64::NAN);
+        ops.clear();
+        diff_scalar(
+            DOMAIN_PVE_AND_SPACE_EVENTS,
+            "scalar_sample",
+            &scalar_nan_a,
+            &scalar_nan_b,
+            &def_scalar,
+            &mut ops,
+        );
+        assert!(ops.is_empty(), "untouched NaN scalar must emit no diff");
+
+        let scalar_nan_mod = mk_sample(8, f64::NAN);
+        diff_scalar(
+            DOMAIN_PVE_AND_SPACE_EVENTS,
+            "scalar_sample",
+            &scalar_nan_a,
+            &scalar_nan_mod,
+            &def_scalar,
+            &mut ops,
+        );
+        let err = validate_domain_row_changes(&ops, 1024 * 1024)
+            .expect_err("modified scalar containing NaN must still fail");
+        assert!(matches!(err, TxError::NonFinite { .. }), "{err}");
+
+        // 3. End-to-end `WorldRepository` guard: pre-existing NaN via `corrupt_in_memory_snapshot_for_test`
+        // survives no-op and sibling-key mutations, while mutating that system's anomalies fails closed.
+        let repo = WorldRepository::with_demo_seed();
+        repo.corrupt_in_memory_snapshot_for_test(|snap| {
+            snap.cosmic_anomalies.entry(30000142).or_default().push(
+                crate::types::CosmicAnomalyRecord {
+                    anomaly_id: "DNG-NAN-TEST".into(),
+                    solar_system_id: 30000142,
+                    name: "NaN Site".into(),
+                    anomaly_type: "Combat".into(),
+                    position: [f64::NAN, 0.0, 0.0],
+                    signal_strength: 1.0,
+                    ore_types: Vec::new(),
+                    remaining_volume: 0.0,
+                    created_unix: 0,
+                    lifetime_seconds: 3600,
+                    cleared: false,
+                },
+            );
+        });
+        repo.with_mut_snapshot(|_| {});
+        let sibling_ok: Result<(), TxError> = repo.tx("sibling_system_ok", |wtx| {
+            wtx.snap.cosmic_anomalies.insert(30000144, Vec::new());
+            Ok(())
+        });
+        sibling_ok.expect("sibling system mutation must succeed");
+        let mutated_corrupt: Result<(), TxError> = repo.tx("touch_nan_key_fails", |wtx| {
+            wtx.snap.cosmic_anomalies.entry(30000142).or_default().push(
+                crate::types::CosmicAnomalyRecord {
+                    anomaly_id: "DNG-FINITE-SIBLING".into(),
+                    solar_system_id: 30000142,
+                    name: "Finite Site".into(),
+                    anomaly_type: "Combat".into(),
+                    position: [1.0, 2.0, 3.0],
+                    signal_strength: 1.0,
+                    ore_types: Vec::new(),
+                    remaining_volume: 0.0,
+                    created_unix: 0,
+                    lifetime_seconds: 3600,
+                    cleared: false,
+                },
+            );
+            Ok(())
+        });
+        assert!(
+            matches!(mutated_corrupt, Err(TxError::NonFinite { .. })),
+            "mutating entry containing NaN must still fail closed: {mutated_corrupt:?}"
+        );
     }
 
     #[test]
