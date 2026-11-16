@@ -1060,7 +1060,7 @@ pub async fn handle(
     match method {
         "GetCombatAnomalyInstances" => {
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
-            crate::services::pve_special_sites::ensure_special_sites_spawned(ctx).await;
+            crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(ctx, sys_id).await;
             let _ = crate::services::pve_special_sites::ensure_seasonal_event_sites_for_system(ctx, sys_id).await;
             let mut by_dungeon = registry_instances(ctx, sys_id, false);
             for (did, iids) in anomaly_instances(ctx, sys_id, "SeasonalEventSite") {
@@ -1230,7 +1230,14 @@ pub async fn handle(
         }
         "GetHomefrontSiteInstances" => {
             let res = crate::services::pve_homefront_sites::handle_get_homefront_site_instances(ctx, session, args);
-            crate::services::pve_special_sites::ensure_special_sites_spawned(ctx).await;
+            let target_sys = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .and_then(|raw| u32::try_from(raw).ok())
+                .unwrap_or(sys_id);
+            if session.solar_system_id == Some(target_sys) {
+                crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(ctx, target_sys).await;
+            }
             Some(res)
         }
         _ => {

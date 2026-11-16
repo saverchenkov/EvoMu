@@ -2567,3 +2567,149 @@ async fn physical_radius_resolution_chain_provenance_and_keepstar_titan_dock_che
     zero_radius_titan.radius = 0.0;
     assert!(evaluate_dock_perimeter(&zero_radius_titan, keepstar_pos, keepstar_r).is_err());
 }
+
+#[tokio::test]
+async fn merlin_3_95au_warp_under_dedicated_ticker_avoids_spurious_tidi_and_dock_stop_errors_1207() {
+    let ctx = test_ctx();
+    ctx.dedicated_physics_ticker_active
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_144_u32;
+    let ship_id = 1_897_362_930_i64;
+    let astra_id = 1_001_897_110_848_i64;
+    let astra_pos = DVec3::ZERO;
+    let start_pos = DVec3::new(590_860_935_345.6, 0.0, 0.0);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            astra_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: astra_id,
+                type_id: 35832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: sys_id,
+                name: "Perimeter Astrahus".into(),
+                state: "ShieldVulnerable".into(),
+                position: astra_pos.to_array(),
+                shield_hp: 500.0,
+                armor_hp: 500.0,
+                hull_hp: 500.0,
+                quantum_core_installed: true,
+                fuel_blocks: 1000,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+
+    let (astra_radius, _) = resolve_physical_radius(
+        &ctx,
+        Some(35832),
+        Some(astra_id),
+        PhysicalRadiusInput::default(),
+    );
+
+    spawn_ship_in_space(&ctx, char_id, ship_id, 603, sys_id, start_pos);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    // Align Merlin physics attributes (5.0 AU/s, mass=997000, inertia=3.6, max_velocity=320.0).
+    let _ = sys_handle.spawn_ball(Ball {
+        id: astra_id,
+        type_id: 35832,
+        position: astra_pos,
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1e12,
+        radius: astra_radius,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    }).await;
+    let _ = sys_handle.spawn_ball(Ball {
+        id: ship_id,
+        type_id: 603,
+        position: start_pos,
+        velocity: DVec3::ZERO,
+        max_velocity: 320.0,
+        inertia: 3.6,
+        mass: 997_000.0,
+        radius: 39.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    }).await;
+
+    let mut sess = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        station_id: None,
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+
+    handle(
+        &ctx,
+        &mut sess,
+        None,
+        "beyonce",
+        "CmdWarpToStuff",
+        &[PyRep::String("item".into()), PyRep::Integer(astra_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("CmdWarpToStuff to Astrahus must succeed");
+
+    // Step at 1 Hz under dedicated physics ticker budget; with zero cluster lag TiDi must stay 1.00
+    // and Merlin must exit warp cleanly by tick 26 (5s align + 20s warp).
+    for _ in 0..26 {
+        crate::sp6_lifecycle::step_active_systems_physics_tick_with_budget(
+            &ctx,
+            1,
+            0.0,
+            crate::sp6_lifecycle::PHYSICS_TICK_STEP_BUDGET,
+        )
+        .await;
+    }
+
+    assert!(
+        (sys_handle.tidi_factor() - 1.0).abs() < 1e-6,
+        "dedicated physics ticker within budget must never engage TiDi ({})",
+        sys_handle.tidi_factor()
+    );
+    let arrived_ball = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+    assert!(
+        !matches!(arrived_ball.mode, MovementMode::Warp { .. }),
+        "Merlin 3.95 AU warp must exit warp within 26 1s ticks (mode={:?})",
+        arrived_ball.mode
+    );
+    assert!(
+        evaluate_dock_perimeter(&arrived_ball, astra_pos, astra_radius).is_ok(),
+        "arrived Merlin must satisfy Astrahus dock perimeter without ShipInWarp"
+    );
+    let beyonce_bound = BoundObjectEntry {
+        bound_id: 1,
+        session_id: 1,
+        user_id: 1,
+        character_id: char_id,
+        service: "beyonce".into(),
+        object_id: sys_id as i64,
+        oid_str: format!("N=1:{sys_id}"),
+        ref_id: 1,
+    };
+    crate::services::space_destiny::handle(
+        &ctx,
+        &mut sess,
+        Some(&beyonce_bound),
+        "beyonce",
+        "CmdStop",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("CmdStop after arrival must succeed without ShipAlreadyInWarp");
+}

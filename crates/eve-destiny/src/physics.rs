@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 const PROXIMITY_CELL_SIZE_METERS: f64 = 4_000.0;
 const MAX_PROXIMITY_CELLS_PER_BALL: i128 = 64;
+/// V24 `_destiny.so` `Destiny::AlignForWarp` forces warp entry after 181 aligning ticks (`#1159`).
+const FORCED_WARP_ALIGN_TICKS: u32 = 181;
 
 #[inline]
 pub(crate) fn aabb_overlaps(min_a: DVec3, max_a: DVec3, min_b: DVec3, max_b: DVec3) -> bool {
@@ -134,6 +136,7 @@ impl Ballpark {
         let mut expired_mushrooms = Vec::new();
         let mut frozen_trolls = Vec::new();
         let non_free_ball_ids = self.non_free_ball_ids.clone();
+        let mut warp_align_ticks = std::mem::take(&mut self.warp_align_ticks);
 
         for &ball_id in &dynamic_ids {
             let Some(ball) = self.balls.get_mut(&ball_id) else {
@@ -222,7 +225,7 @@ impl Ballpark {
                 warp_speed_au_s,
                 mut phase,
                 mut elapsed_warp_time,
-                origin,
+                mut origin,
                 mut total_distance,
             } = ball.mode.clone()
             {
@@ -246,6 +249,21 @@ impl Ballpark {
                 }
 
                 let was_aligning = phase == WarpPhase::Aligning;
+                if phase == WarpPhase::Aligning && dt > 0.0 {
+                    let align_ticks = warp_align_ticks
+                        .entry(ball.id)
+                        .and_modify(|c| *c = c.saturating_add(1))
+                        .or_insert(1);
+                    if *align_ticks >= FORCED_WARP_ALIGN_TICKS {
+                        // Match V24 `_destiny.so` `Destiny::AlignForWarp` (`-effectStamp >= 181`):
+                        // capitals/titans whose effective align exceeds 181s force-enter warp
+                        // rather than remaining stuck in `mode 3` indefinitely (`#1159`).
+                        phase = WarpPhase::Accelerating;
+                        origin = ball.position;
+                        total_distance = (destination - origin).length();
+                        elapsed_warp_time = 0.0;
+                    }
+                }
                 let mut pre_intercepted = false;
                 if !is_nullified_or_shuttle && phase == WarpPhase::Aligning {
                     let to_dest = destination - ball.position;
@@ -295,6 +313,17 @@ impl Ballpark {
             let goal_velocity = compute_subwarp_goal_velocity(ball, &positions, dt);
             integrate_subwarp(ball, goal_velocity, dt);
         }
+
+        warp_align_ticks.retain(|id, _| {
+            matches!(
+                self.balls.get(id).map(|b| &b.mode),
+                Some(MovementMode::Warp {
+                    phase: WarpPhase::Aligning,
+                    ..
+                })
+            )
+        });
+        self.warp_align_ticks = warp_align_ticks;
 
         for id in expired_mushrooms {
             let _ = self.remove_ball(id);

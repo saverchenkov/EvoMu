@@ -6,7 +6,8 @@
 
 use crate::router::ServerContext;
 use crate::services::pve_special_sites::{
-    spec_now_sec, with_pve_special_reg, AbyssalWeatherKind, PveSpecialSitesRegistry,
+    read_pve_special_reg, spec_now_sec, with_pve_special_reg, AbyssalWeatherKind,
+    PveSpecialSitesRegistry,
 };
 use eve_db::{CosmicAnomalyRecord, InventoryFlag, InventoryItemRecord};
 use eve_proto::PyRep;
@@ -216,7 +217,7 @@ pub fn advance_roaming_storms(
 }
 
 pub fn sync_metaliminal_storm_effects_and_sites(ctx: &ServerContext) {
-    let storms = with_pve_special_reg(ctx, |reg| reg.roaming_storms.clone());
+    let storms = read_pve_special_reg(ctx, |reg| reg.roaming_storms.clone());
     let now = ctx.now_unix();
 
     let mut effect_lists_by_sys: HashMap<SolarSystemId, Vec<TypeId>> = HashMap::new();
@@ -245,6 +246,49 @@ pub fn sync_metaliminal_storm_effects_and_sites(ctx: &ServerContext) {
                 list.push(weak_tid);
             }
         }
+    }
+
+    let needs_db_sync = ctx.db.with_snapshot(|snap| {
+        let has_stale_beacon = snap.items.values().any(|it| {
+            it.flag == InventoryFlag::None
+                && is_storm_beacon_type(it.type_id)
+                && !effect_lists_by_sys
+                    .get(&(it.location_id as u32))
+                    .is_some_and(|list| list.contains(&it.type_id))
+        });
+        if has_stale_beacon {
+            return true;
+        }
+        let missing_beacon = effect_lists_by_sys.iter().any(|(sid, tids)| {
+            tids.iter().any(|&tid| {
+                !snap.items.values().any(|it| {
+                    it.location_id == *sid as i64
+                        && it.type_id == tid
+                        && it.flag == InventoryFlag::None
+                })
+            })
+        });
+        if missing_beacon {
+            return true;
+        }
+        let has_stale_anom = snap.cosmic_anomalies.iter().any(|(sid, anoms)| {
+            !core_systems.contains(sid)
+                && anoms.iter().any(|a| {
+                    a.anomaly_id.starts_with("DNG-9042-")
+                        || a.anomaly_id.starts_with("DNG-9043-")
+                })
+        });
+        if has_stale_anom {
+            return true;
+        }
+        core_systems.iter().any(|cs| {
+            let anoms = snap.cosmic_anomalies.get(cs);
+            !anoms.is_some_and(|list| list.iter().any(|a| a.anomaly_id.starts_with("DNG-9042-")))
+                || !anoms.is_some_and(|list| list.iter().any(|a| a.anomaly_id.starts_with("DNG-9043-")))
+        })
+    });
+    if !needs_db_sync {
+        return;
     }
 
     let mut removed_beacons: Vec<(SolarSystemId, i64, u32)> = Vec::new();
@@ -414,49 +458,56 @@ pub fn sync_metaliminal_storm_effects_and_sites(ctx: &ServerContext) {
     }
 }
 
-pub fn get_all_roaming_weather_systems(ctx: &ServerContext) -> Vec<PyRep> {
-    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
-    with_pve_special_reg(ctx, |reg| {
-        crate::services::pve_special_sites_ops::ensure_full_roaming_storm_set(ctx, reg);
-        let mut out = Vec::new();
-        let mut seen: HashSet<(u32, SolarSystemId)> = HashSet::new();
-        for storm in &reg.roaming_storms {
-            if seen.insert((storm.storm_id, storm.center_solar_system_id)) {
+fn collect_roaming_weather_systems(reg: &PveSpecialSitesRegistry) -> Vec<PyRep> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<(u32, SolarSystemId)> = HashSet::new();
+    for storm in &reg.roaming_storms {
+        if seen.insert((storm.storm_id, storm.center_solar_system_id)) {
+            out.push(PyRep::keyval([
+                ("locationID", PyRep::Integer(storm.center_solar_system_id as i64)),
+                ("solarSystemID", PyRep::Integer(storm.center_solar_system_id as i64)),
+                ("sceneType", PyRep::Integer(4)),
+                ("weather", PyRep::String(storm.weather.as_str().into())),
+                ("stormID", PyRep::Integer(storm.storm_id as i64)),
+                ("isCore", PyRep::Bool(true)),
+            ]));
+        }
+        for &core_sys in &storm.strong_core_systems {
+            if seen.insert((storm.storm_id, core_sys)) {
                 out.push(PyRep::keyval([
-                    ("locationID", PyRep::Integer(storm.center_solar_system_id as i64)),
-                    ("solarSystemID", PyRep::Integer(storm.center_solar_system_id as i64)),
+                    ("locationID", PyRep::Integer(core_sys as i64)),
+                    ("solarSystemID", PyRep::Integer(core_sys as i64)),
                     ("sceneType", PyRep::Integer(4)),
                     ("weather", PyRep::String(storm.weather.as_str().into())),
                     ("stormID", PyRep::Integer(storm.storm_id as i64)),
                     ("isCore", PyRep::Bool(true)),
                 ]));
             }
-            for &core_sys in &storm.strong_core_systems {
-                if seen.insert((storm.storm_id, core_sys)) {
-                    out.push(PyRep::keyval([
-                        ("locationID", PyRep::Integer(core_sys as i64)),
-                        ("solarSystemID", PyRep::Integer(core_sys as i64)),
-                        ("sceneType", PyRep::Integer(4)),
-                        ("weather", PyRep::String(storm.weather.as_str().into())),
-                        ("stormID", PyRep::Integer(storm.storm_id as i64)),
-                        ("isCore", PyRep::Bool(true)),
-                    ]));
-                }
-            }
-            for &periph_sys in &storm.weak_periphery_systems {
-                if seen.insert((storm.storm_id, periph_sys)) {
-                    out.push(PyRep::keyval([
-                        ("locationID", PyRep::Integer(periph_sys as i64)),
-                        ("solarSystemID", PyRep::Integer(periph_sys as i64)),
-                        ("sceneType", PyRep::Integer(1)),
-                        ("weather", PyRep::String(storm.weather.as_str().into())),
-                        ("stormID", PyRep::Integer(storm.storm_id as i64)),
-                        ("isCore", PyRep::Bool(false)),
-                    ]));
-                }
+        }
+        for &periph_sys in &storm.weak_periphery_systems {
+            if seen.insert((storm.storm_id, periph_sys)) {
+                out.push(PyRep::keyval([
+                    ("locationID", PyRep::Integer(periph_sys as i64)),
+                    ("solarSystemID", PyRep::Integer(periph_sys as i64)),
+                    ("sceneType", PyRep::Integer(1)),
+                    ("weather", PyRep::String(storm.weather.as_str().into())),
+                    ("stormID", PyRep::Integer(storm.storm_id as i64)),
+                    ("isCore", PyRep::Bool(false)),
+                ]));
             }
         }
-        out
+    }
+    out
+}
+
+pub fn get_all_roaming_weather_systems(ctx: &ServerContext) -> Vec<PyRep> {
+    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
+    if read_pve_special_reg(ctx, |reg| !reg.roaming_storms.is_empty()) {
+        return read_pve_special_reg(ctx, collect_roaming_weather_systems);
+    }
+    with_pve_special_reg(ctx, |reg| {
+        crate::services::pve_special_sites_ops::ensure_full_roaming_storm_set(ctx, reg);
+        collect_roaming_weather_systems(reg)
     })
 }
 

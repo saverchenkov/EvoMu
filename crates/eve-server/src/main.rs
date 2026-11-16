@@ -131,6 +131,7 @@ async fn run_server(boot_start: std::time::Instant) -> Result<()> {
         let mut physics_shutdown = shutdown_tx.subscribe();
         tokio::spawn(async move {
             let mut last_step = std::time::Instant::now();
+            let mut subsec_remainder = std::time::Duration::ZERO;
             let mut physics_ticker = tokio::time::interval(Duration::from_secs(1));
             physics_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             physics_ticker.tick().await;
@@ -148,9 +149,12 @@ async fn run_server(boot_start: std::time::Instant) -> Result<()> {
                 }
                 let raw_elapsed = last_step.elapsed();
                 let lateness_ms = (raw_elapsed.as_millis() as i64).saturating_sub(1_000);
-                let elapsed = eve_server::sp6_lifecycle::clamp_physics_ticker_backlog(
-                    raw_elapsed.as_secs(),
-                );
+                let (elapsed, next_remainder) =
+                    eve_server::sp6_lifecycle::accumulate_physics_ticker_steps(
+                        raw_elapsed,
+                        subsec_remainder,
+                    );
+                subsec_remainder = next_remainder;
                 let cadence_lateness_ms = (raw_elapsed.as_secs_f64() * 1_000.0
                     - eve_server::system_actor::TIDI_TARGET_WINDOW_MS)
                     .max(0.0);
@@ -158,10 +162,11 @@ async fn run_server(boot_start: std::time::Instant) -> Result<()> {
                 let tick_work_start = std::time::Instant::now();
                 if !physics_ctx.is_clock_paused() {
                     if let Err(panic_msg) = eve_server::sp6_lifecycle::catch_unwind_future(
-                        eve_server::sp6_lifecycle::step_active_systems_physics_tick_with_lateness(
+                        eve_server::sp6_lifecycle::step_active_systems_physics_tick_with_budget(
                             &physics_ctx,
                             elapsed,
                             cadence_lateness_ms,
+                            eve_server::sp6_lifecycle::PHYSICS_TICK_STEP_BUDGET,
                         ),
                     )
                     .await

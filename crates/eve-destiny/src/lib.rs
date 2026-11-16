@@ -1461,6 +1461,9 @@ pub struct Ballpark {
     /// Live scene tick at which each dynamic ball was last acquired via `add_ball` or `AddBalls2` grid entry/decloak (`#1078`).
     #[serde(skip, default)]
     pub last_acquired_tick_by_ball: BTreeMap<BallId, u64>,
+    /// Tracks elapsed simulation ticks spent in `WarpPhase::Aligning` per ball (`#1159`).
+    #[serde(skip, default)]
+    pub(crate) warp_align_ticks: BTreeMap<BallId, u32>,
 }
 
 /// Converts Unix epoch seconds to Windows FILETIME (`100ns` ticks since 1601-01-01 UTC).

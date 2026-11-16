@@ -396,6 +396,12 @@ fn apply_system_tidi_from_autoscaler(
     let handle = ctx.systems.get_or_spawn(solar_system_id);
     let old_factor = handle.set_tidi_factor_raw(factor);
     if (factor - old_factor).abs() >= crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA {
+        tracing::info!(
+            solar_system_id,
+            old_factor,
+            new_factor = factor,
+            "Auto-TiDi factor changed for solar system"
+        );
         emit_sim_clock_rebase(ctx, solar_system_id, old_factor, factor);
     }
     factor

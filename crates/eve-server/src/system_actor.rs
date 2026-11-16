@@ -117,6 +117,17 @@ pub struct SystemRegistry {
     lazy_stargate_activation: Arc<std::sync::atomic::AtomicBool>,
     /// Shared `/advancetime` un-rebased clock offset in seconds so gate activation deadlines match MachoNet wallclock (`#1080`).
     unrebased_clock_offset_secs: Arc<std::sync::atomic::AtomicU64>,
+    /// Per-system in-flight physics-step atomic flags preventing a wedged system from accumulating overlapping ticks (`#1208`).
+    physics_step_flags: RankedMutex<HashMap<SolarSystemId, Arc<std::sync::atomic::AtomicBool>>, RANK_LEAF>,
+}
+
+/// Lock-free RAII guard releasing a system's in-flight physics-step slot upon completion or panic.
+pub(crate) struct PhysicsStepGuard(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for PhysicsStepGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 
 impl Default for SystemRegistry {
@@ -148,6 +159,31 @@ impl SystemRegistry {
             cluster_nodes: RankedRwLock::new(ClusterNodeRegistry::default()),
             lazy_stargate_activation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unrebased_clock_offset_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            physics_step_flags: RankedMutex::new(HashMap::new()),
+        }
+    }
+
+    /// Acquires the exclusive per-system physics-step slot if no prior step for `solar_system_id` is still in flight.
+    pub(crate) fn try_begin_physics_step(&self, solar_system_id: SolarSystemId) -> Option<PhysicsStepGuard> {
+        let flag = {
+            let mut flags = self.physics_step_flags.lock().unwrap_or_else(|e| e.into_inner());
+            flags
+                .entry(solar_system_id)
+                .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+                .clone()
+        };
+        if flag
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            Some(PhysicsStepGuard(flag))
+        } else {
+            None
         }
     }
 

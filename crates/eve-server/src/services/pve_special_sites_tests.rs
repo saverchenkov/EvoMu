@@ -466,6 +466,97 @@ async fn rpc_dispatch_interference_storms_and_errors() {
     advance_pve_special_clock(&ctx, 3_600);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn special_site_queries_do_not_spawn_unvisited_system_actors() {
+    let jita: SolarSystemId = 30_000_142;
+    let (ctx, mut session, _char_id, _ship_id) = make_ctx_and_pilot(jita, true);
+    let kw = HashMap::new();
+
+    // Querying combat anomalies, homefront sites, triglavian info, weather, and interference
+    // in Jita must lazily initialize metadata without spawning all ~135 unvisited special-site systems.
+    let _ = crate::services::pve_dungeon_cache::handle(
+        &ctx,
+        &mut session,
+        "dungeonInstanceCacheMgr",
+        "GetCombatAnomalyInstances",
+        &[],
+        &kw,
+    )
+    .await;
+    let _ = handle_pve_special_sites(
+        &ctx,
+        &mut session,
+        "dungeonInstanceCacheMgr",
+        "GetHomefrontSiteInstances",
+        &[],
+        &kw,
+    )
+    .await;
+    let _ = handle_pve_special_sites(
+        &ctx,
+        &mut session,
+        "dungeonInstanceCacheMgr",
+        "GetTriglavianSiteInstances",
+        &[PyRep::Integer(30_000_012)],
+        &kw,
+    )
+    .await;
+    let _ = handle_pve_special_sites(
+        &ctx,
+        &mut session,
+        "map",
+        "GetAllRoamingWeatherSystems",
+        &[],
+        &kw,
+    )
+    .await;
+
+    on_server_clock_advanced(&ctx, 1);
+
+    assert!(
+        ctx.systems.get_handle(31_000_005).is_none(),
+        "unvisited Drifter hive 31000005 must not be spawned from Jita RPCs (`#1159`)"
+    );
+    assert!(
+        ctx.systems.get_handle(30_003_088).is_none(),
+        "unvisited EDENCOM system 30003088 must not be spawned from Jita RPCs (`#1159`)"
+    );
+    assert!(
+        ctx.systems.get_handle(30_000_012).is_none(),
+        "remote Triglavian query must not spawn unvisited 30000012 (`#1159`)"
+    );
+
+    // Entering the active Triglavian system spawns only that system, still leaving others unspawned.
+    let trig_sys: SolarSystemId = 30_000_012;
+    session.solar_system_id = Some(trig_sys);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&_char_id) {
+            c.solar_system_id = trig_sys;
+        }
+    });
+    let _ = handle_pve_special_sites(
+        &ctx,
+        &mut session,
+        "dungeonInstanceCacheMgr",
+        "GetTriglavianSiteInstances",
+        &[],
+        &kw,
+    )
+    .await;
+    assert!(
+        ctx.systems.get_handle(trig_sys).is_some(),
+        "active caller system 30000012 should spawn its special sites lazily"
+    );
+    assert!(
+        ctx.systems.get_handle(31_000_005).is_none(),
+        "unvisited Drifter hive 31000005 must remain unspawned"
+    );
+    assert!(
+        ctx.systems.get_handle(30_003_088).is_none(),
+        "unvisited EDENCOM system 30003088 must remain unspawned"
+    );
+}
+
 #[cfg(test)]
 #[path = "pve_special_sites_extra_unit_tests.rs"]
 mod pve_special_sites_extra_unit_tests;
