@@ -464,9 +464,7 @@ fn freelance_builders_decode_strictly_with_descriptors() {
             .rsplit('/')
             .next()
             .unwrap_or(&any_msg.type_url);
-        if short_type != "eve_public.freelance.project.api.DeletedNotice" {
-            roundtrip(short_type, &any_msg.value);
-        }
+        roundtrip(short_type, &any_msg.value);
     }
 }
 

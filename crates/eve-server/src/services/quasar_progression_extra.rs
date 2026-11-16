@@ -20,10 +20,7 @@ use super::quasar_goal_tale_notices as notices;
 use super::quasar_social_chat::ctx_queue_notice;
 use eve_db::WorldRepository;
 use eve_proto::pb::{self, ProtoBuilder};
-use eve_proto::quasar::{
-    DynamicQuasarMessage, DynamicValue, GoogleAny, WireField, WireMessage, WireValue,
-    TYPE_GOOGLEAPIS_PREFIX,
-};
+use eve_proto::quasar::{DynamicQuasarMessage, DynamicValue, GoogleAny};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -51,6 +48,24 @@ pub struct CommunityTrackState {
     pub active: bool,
     #[serde(default)]
     pub tale_templates: Vec<u32>,
+}
+
+impl CommunityTrackState {
+    /// Advances `current_progress` by `delta`, clamped to `target_progress`,
+    /// returning `true` iff this update transitioned the track to completed.
+    pub fn advance_progress(&mut self, delta: u64) -> bool {
+        self.set_progress(self.current_progress.saturating_add(delta))
+    }
+
+    /// Sets `current_progress` to `value`, clamped to `target_progress`,
+    /// returning `true` iff this update transitioned the track to completed.
+    pub fn set_progress(&mut self, value: u64) -> bool {
+        let prev = self.current_progress;
+        self.current_progress = value.min(self.target_progress);
+        self.target_progress > 0
+            && prev < self.target_progress
+            && self.current_progress >= self.target_progress
+    }
 }
 
 pub fn uuid_to_hex(u: &[u8; 16]) -> String {
@@ -365,20 +380,40 @@ impl ProgressionExtraManager {
     }
 
     pub fn add_community_progress(&self, track_id: u32, delta: u64) -> Option<CommunityTrackState> {
+        self.add_community_progress_with_completion(track_id, delta)
+            .map(|(state, _)| state)
+    }
+
+    pub fn add_community_progress_with_completion(
+        &self,
+        track_id: u32,
+        delta: u64,
+    ) -> Option<(CommunityTrackState, bool)> {
         let mut map = self.community_tracks.write().unwrap_or_else(|e| e.into_inner());
         let key = resolve_track_key(&map, track_id)?;
         let track = map.get_mut(&key)?;
-        track.current_progress = track.current_progress.saturating_add(delta).min(track.target_progress);
-        Some(track.clone())
+        let completed = track.advance_progress(delta);
+        Some((track.clone(), completed))
     }
 
     pub fn record_tale_contribution(&self, tale_template_id: u32, delta: u64) -> Vec<CommunityTrackState> {
+        self.record_tale_contribution_with_completion(tale_template_id, delta)
+            .into_iter()
+            .map(|(state, _)| state)
+            .collect()
+    }
+
+    pub fn record_tale_contribution_with_completion(
+        &self,
+        tale_template_id: u32,
+        delta: u64,
+    ) -> Vec<(CommunityTrackState, bool)> {
         let mut map = self.community_tracks.write().unwrap_or_else(|e| e.into_inner());
         let mut updated = Vec::new();
         for track in map.values_mut() {
             if track.active && track.tale_templates.contains(&tale_template_id) {
-                track.current_progress = track.current_progress.saturating_add(delta).min(track.target_progress);
-                updated.push(track.clone());
+                let completed = track.advance_progress(delta);
+                updated.push((track.clone(), completed));
             }
         }
         updated
@@ -440,6 +475,22 @@ fn seq_id_of(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> Option<u64> {
 // Registration
 // ============================================================================
 
+fn encode_community_track_get_response(
+    resp_type: &str,
+    track: &CommunityTrackState,
+) -> Result<GoogleAny, (u32, String)> {
+    let def_tid = if track.template_id != 0 {
+        track.template_id
+    } else {
+        track.track_id
+    };
+    let progress = u32::try_from(track.current_progress).unwrap_or(u32::MAX);
+    pb::message(resp_type)
+        .set("attributes.definition.sequential", def_tid)
+        .set("attributes.progress", progress)
+        .to_any_or_internal_err()
+}
+
 pub fn register_progression_extra_handlers(
     router: &PublicGatewayRouter,
     _db: Arc<WorldRepository>,
@@ -475,33 +526,7 @@ pub fn register_progression_extra_handlers(
                 .get_community_track(tid)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
 
-            // Legacy wire divergence from `eve_public.communitytrack.instance.Attributes`
-            // (which only defines `1: definition`, `2: progress`): unit tests assert extra
-            // fields `3: target_progress`, `4: name`, `5: active`.
-            let def_tid = if track.template_id != 0 { track.template_id } else { track.track_id };
-            let def_id = WireMessage {
-                fields: vec![WireField { field_number: 1, value: WireValue::Varint(def_tid as u64) }],
-            }
-            .encode();
-            let attr_bytes = WireMessage {
-                fields: vec![
-                    WireField { field_number: 1, value: WireValue::LengthDelimited(def_id) },
-                    WireField { field_number: 2, value: WireValue::Varint(track.current_progress) },
-                    WireField { field_number: 3, value: WireValue::Varint(track.target_progress) },
-                    WireField { field_number: 4, value: WireValue::LengthDelimited(track.name.as_bytes().to_vec()) },
-                    WireField { field_number: 5, value: WireValue::Varint(if track.active { 1 } else { 0 }) },
-                ],
-            }
-            .encode();
-            let out = WireMessage {
-                fields: vec![WireField { field_number: 1, value: WireValue::LengthDelimited(attr_bytes) }],
-            }
-            .encode();
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.GetResponse"),
-                value: out,
-            })
+            encode_community_track_get_response("eve_public.communitytrack.api.GetResponse", &track)
         }),
     );
 
@@ -515,27 +540,7 @@ pub fn register_progression_extra_handlers(
                 .get_community_track(tid)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
 
-            // Legacy wire divergence from `eve.communitytrack.instance.Attributes`
-            // (`1: definition` submessage, `2: progress`): tests assert `1: track_id`,
-            // `2: name`, `3: target_progress`, `4: current_progress`.
-            let attr_bytes = WireMessage {
-                fields: vec![
-                    WireField { field_number: 1, value: WireValue::Varint(track.track_id as u64) },
-                    WireField { field_number: 2, value: WireValue::LengthDelimited(track.name.as_bytes().to_vec()) },
-                    WireField { field_number: 3, value: WireValue::Varint(track.target_progress) },
-                    WireField { field_number: 4, value: WireValue::Varint(track.current_progress) },
-                ],
-            }
-            .encode();
-            let out = WireMessage {
-                fields: vec![WireField { field_number: 1, value: WireValue::LengthDelimited(attr_bytes) }],
-            }
-            .encode();
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.communitytrack.api.GetResponse"),
-                value: out,
-            })
+            encode_community_track_get_response("eve.communitytrack.api.GetResponse", &track)
         }),
     );
 
@@ -544,9 +549,9 @@ pub fn register_progression_extra_handlers(
         "eve.communitytrack.api.AddProgressRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             require_admin_role(ctx)?;
-            let Some(cid) = ctx.effective_character_id() else {
+            if ctx.effective_character_id().is_none() {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
+            }
             let tid = extract_track_id(dyn_msg)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing community track Identifier".into()))?;
             let delta = dyn_msg
@@ -560,20 +565,20 @@ pub fn register_progression_extra_handlers(
                 })
                 .filter(|&d| d > 0)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or non-positive community track progress delta".into()))?;
-            let updated = mgr
-                .add_community_progress(tid, delta)
+            let (updated, completed) = mgr
+                .add_community_progress_with_completion(tid, delta)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
             mgr.save_to_db();
 
-            // Synthetic gateway notice `eve_public.communitytrack.api.ProgressedNotice` is absent
-            // from V24.01 `quasar_descriptors.sqlite` (only `eve.communitytrack.api.Progressed` exists).
-            let not_bytes = WireMessage {
-                fields: vec![WireField { field_number: 1, value: WireValue::Varint(updated.track_id as u64) }],
+            if completed {
+                if let Some(notice) = notices::community_track_completed_notice(updated.track_id) {
+                    ctx_queue_notice(
+                        crate::quasar_gateway::NoticeScope::Broadcast,
+                        notice,
+                        ctx.now_unix(),
+                    );
+                }
             }
-            .encode();
-            let notice = GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.ProgressedNotice"), value: not_bytes };
-            super::quasar_social_chat::ctx_queue_notice(crate::quasar_gateway::NoticeScope::Broadcast, notice.clone(), ctx.now_unix());
-            super::quasar_social_chat::ctx_queue_notice(crate::quasar_gateway::NoticeScope::Character(cid), notice, ctx.now_unix());
 
             pb::message("eve.communitytrack.api.AddProgressResponse")
                 .to_any_or_internal_err()
@@ -646,15 +651,24 @@ pub fn register_progression_extra_handlers(
                     _ => None,
                 })
                 .unwrap_or(0);
-            {
+            let completed_track_id = {
                 let mut tracks = mgr.community_tracks.write().unwrap_or_else(|e| e.into_inner());
                 let key = resolve_track_key(&tracks, tid)
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
-                if let Some(track) = tracks.get_mut(&key) {
-                    track.current_progress = val.min(track.target_progress);
+                tracks
+                    .get_mut(&key)
+                    .and_then(|track| track.set_progress(val).then_some(track.track_id))
+            };
+            mgr.save_to_db();
+            if let Some(track_id) = completed_track_id {
+                if let Some(notice) = notices::community_track_completed_notice(track_id) {
+                    ctx_queue_notice(
+                        crate::quasar_gateway::NoticeScope::Broadcast,
+                        notice,
+                        ctx.now_unix(),
+                    );
                 }
             }
-            mgr.save_to_db();
             pb::message("eve.communitytrack.admin.api.SetProgressResponse")
                 .to_any_or_internal_err()
         }),
@@ -721,20 +735,19 @@ pub fn register_progression_extra_handlers(
             };
             let now = ctx.now_unix();
             if !stopped.is_empty() {
-                let progressed = mgr.record_tale_contribution(template_id, stopped.len() as u64);
+                let progressed =
+                    mgr.record_tale_contribution_with_completion(template_id, stopped.len() as u64);
                 mgr.save_to_db();
-                for tr in progressed {
-                    // Synthetic gateway notice `eve_public.communitytrack.api.ProgressedNotice` is absent
-                    // from V24.01 `quasar_descriptors.sqlite`.
-                    let not_bytes = WireMessage {
-                        fields: vec![WireField { field_number: 1, value: WireValue::Varint(tr.track_id as u64) }],
+                for (tr, completed) in progressed {
+                    if completed {
+                        if let Some(notice) = notices::community_track_completed_notice(tr.track_id) {
+                            ctx_queue_notice(
+                                crate::quasar_gateway::NoticeScope::Broadcast,
+                                notice,
+                                now,
+                            );
+                        }
                     }
-                    .encode();
-                    let notice = GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.ProgressedNotice"),
-                        value: not_bytes,
-                    };
-                    ctx_queue_notice(crate::quasar_gateway::NoticeScope::Broadcast, notice, now);
                 }
             }
             for (tale_id, system_id) in stopped {
@@ -1542,30 +1555,13 @@ pub fn register_progression_extra_handlers(
             } else {
                 Vec::new()
             };
-            // Legacy wire divergence from `eve.seasonalevent.challenge.Identifier`
-            // (which only defines `1: sequential`; fields 2/3 are ratcheted in `quasar_tap_ratchet.json`
-            // and asserted by `quasar_progression_extra_extra_unit_tests`).
-            let fields = challenges
-                .into_iter()
-                .map(|ch| {
-                    let chal = WireMessage {
-                        fields: vec![
-                            WireField { field_number: 1, value: WireValue::Varint(ch.challenge_id as u64) },
-                            WireField { field_number: 2, value: WireValue::Varint(ch.max_progress as u64) },
-                            WireField { field_number: 3, value: WireValue::Varint(ch.progress as u64) },
-                        ],
-                    }
-                    .encode();
-                    WireField { field_number: 1, value: WireValue::LengthDelimited(chal) }
-                })
-                .collect();
-            let out = WireMessage { fields }.encode();
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.seasonalevent.challenge.GetChallengesForCharacterResponse"
-                ),
-                value: out,
-            })
+            let mut out = pb::message(
+                "eve.seasonalevent.challenge.GetChallengesForCharacterResponse",
+            );
+            for ch in challenges {
+                out = out.add_with("challenges", |m| m.set("sequential", ch.challenge_id as u64));
+            }
+            out.to_any_or_internal_err()
         }),
     );
 

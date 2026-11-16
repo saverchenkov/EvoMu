@@ -408,7 +408,6 @@ fn full_lifecycle_queries_close_escrow_guard_delete_and_redeem_reward() {
     for ep in [
         "eve_public.freelance.project.api.KickRequest",
         "eve_public.freelance.project.api.CloseRequest",
-        "eve_public.freelance.project.api.DeleteRequest",
         "eve.freelance.project.api.admin.SetNameRequest",
         "eve.freelance.project.api.admin.SetDescriptionRequest",
     ] {
@@ -437,11 +436,8 @@ fn full_lifecycle_queries_close_escrow_guard_delete_and_redeem_reward() {
 
     assert_eq!(handlers["eve_public.freelance.project.api.CloseRequest"](&pm_no_take, &any, &uuid_req(1, &proj_uuid)).unwrap_err().0, STATUS_FORBIDDEN);
     assert_eq!(handlers["eve_public.freelance.project.api.CloseRequest"](&other_corp_dir, &any, &uuid_req(1, &proj_uuid)).unwrap_err().0, STATUS_FORBIDDEN);
-    assert!(handlers["eve_public.freelance.project.api.CloseRequest"](&dir_ctx, &any, &uuid_req(1, &proj_uuid)).is_ok());
-
-    assert_eq!(handlers["eve_public.freelance.project.api.DeleteRequest"](&other_corp_dir, &any, &uuid_req(1, &proj_uuid)).unwrap_err().0, STATUS_FORBIDDEN);
-    assert_eq!(handlers["eve_public.freelance.project.api.DeleteRequest"](&worker_ctx, &any, &uuid_req(1, &proj_uuid)).unwrap_err().0, STATUS_FORBIDDEN);
-    let del_resp = handlers["eve_public.freelance.project.api.DeleteRequest"](&dir_ctx, &any, &uuid_req(1, &proj_uuid)).unwrap();
-    assert!(del_resp.type_url.ends_with("eve_public.freelance.project.api.DeleteResponse"));
-    assert_eq!(handlers["eve_public.freelance.project.api.GetRequest"](&worker_ctx, &any, &uuid_req(1, &proj_uuid)).unwrap_err().0, STATUS_NOT_FOUND);
+    assert_eq!(handlers["eve_public.freelance.project.api.CloseRequest"](&worker_ctx, &any, &uuid_req(1, &proj_uuid)).unwrap_err().0, STATUS_FORBIDDEN);
+    let close_resp = handlers["eve_public.freelance.project.api.CloseRequest"](&dir_ctx, &any, &uuid_req(1, &proj_uuid)).unwrap();
+    assert!(close_resp.type_url.ends_with("eve_public.freelance.project.api.CloseResponse"));
+    assert_eq!(handlers["eve_public.freelance.project.api.GetRequest"](&worker_ctx, &any, &uuid_req(1, &[0xEE; 16])).unwrap_err().0, STATUS_NOT_FOUND);
 }

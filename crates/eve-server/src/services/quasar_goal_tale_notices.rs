@@ -14,10 +14,7 @@
 
 use crate::quasar_gateway::NoticeScope;
 use eve_proto::pb;
-use eve_proto::quasar::{
-    DynamicValue, GoogleAny, GoogleTimestamp, WireField, WireMessage, WireValue,
-    TYPE_GOOGLEAPIS_PREFIX,
-};
+use eve_proto::quasar::{DynamicValue, GoogleAny, GoogleTimestamp, WireMessage, WireValue};
 
 /// Prefix of the 16-byte goal UUID used for goals backed by the corporation project ledger.
 pub const CORP_GOAL_UUID_PREFIX: &[u8; 8] = b"CORPGOAL";
@@ -628,33 +625,31 @@ pub fn tale_matches_completed_encounter(
     }
 }
 
-/// Publishes `eve_public.communitytrack.api.ProgressedNotice` directly to subscribed Quasar gateway clients
+/// Builds an `eve_public.communitytrack.api.CompletedNotice` for a completed community track.
+pub fn community_track_completed_notice(track_id: u32) -> Option<GoogleAny> {
+    crate::quasar_gateway::pb_to_any_or_log(
+        "quasar_goal_tale_notices.community_track_completed_notice",
+        pb::message("eve_public.communitytrack.api.CompletedNotice")
+            .set("instance.sequential", track_id),
+    )
+}
+
+/// Publishes `eve_public.communitytrack.api.CompletedNotice` directly to subscribed Quasar gateway clients
 /// and flushes any thread-local queued notices so worker threads never strand notices in TLS.
-pub fn publish_community_track_progressed_notices(
+pub fn publish_community_track_completed_notices(
     gateway: &crate::quasar_gateway::PublicGatewayRouter,
-    tracks: &[super::quasar_progression_extra::CommunityTrackState],
+    completed_tracks: &[super::quasar_progression_extra::CommunityTrackState],
     now_unix: u64,
 ) {
-    for tr in tracks {
-        // Synthetic gateway notice `eve_public.communitytrack.api.ProgressedNotice` is absent
-        // from V24.01 `quasar_descriptors.sqlite` (only `eve.communitytrack.api.Progressed` exists).
-        let not_bytes = WireMessage {
-            fields: vec![WireField {
-                field_number: 1,
-                value: WireValue::Varint(tr.track_id as u64),
-            }],
+    for tr in completed_tracks {
+        if let Some(notice) = community_track_completed_notice(tr.track_id) {
+            let _ = gateway.publish_notice_isolated(
+                NoticeScope::Broadcast,
+                "quasar_goal_tale_notices.community_track_completed_notice",
+                notice,
+                now_unix,
+            );
         }
-        .encode();
-        let notice = GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.ProgressedNotice"),
-            value: not_bytes,
-        };
-        let _ = gateway.publish_notice_isolated(
-            NoticeScope::Broadcast,
-            "quasar_goal_tale_notices.community_track_progressed",
-            notice,
-            now_unix,
-        );
     }
     for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
         let _ = gateway.publish_notice_isolated(
@@ -690,18 +685,22 @@ pub fn complete_system_tale_encounter(
         matching_templates.insert(crate::services::pve_incursion_sites::INCURSION_TALE_TEMPLATE_ID as u32);
     }
     let mut all_progressed = Vec::new();
+    let mut newly_completed = Vec::new();
     if !matching_templates.is_empty() {
         let mut map = mgr.community_tracks.write().unwrap_or_else(|e| e.into_inner());
         for track in map.values_mut() {
             if track.active && track.tale_templates.iter().any(|tpl| matching_templates.contains(tpl)) {
-                track.current_progress = track.current_progress.saturating_add(delta).min(track.target_progress);
+                let completed = track.advance_progress(delta);
                 all_progressed.push(track.clone());
+                if completed {
+                    newly_completed.push(track.clone());
+                }
             }
         }
     }
     if !all_progressed.is_empty() {
         mgr.save_to_db();
-        publish_community_track_progressed_notices(gateway, &all_progressed, now_unix);
+        publish_community_track_completed_notices(gateway, &newly_completed, now_unix);
     }
     all_progressed
 }

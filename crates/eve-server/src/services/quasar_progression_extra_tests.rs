@@ -809,42 +809,109 @@ fn community_track_and_tale_mutations_pass_quasar_tap_response_pairing() {
     let track_id_msg = seq_id_msg(1, 702);
     let tale_id_msg = seq_id_msg(1, 888);
 
-    for (req_name, expected_rsp, req_msg) in [
+    let mut complete_msg = seq_id_msg(1, 702);
+    complete_msg.fields.insert(2, DynamicValue::Uint64(100));
+    let mut repeat_msg = seq_id_msg(1, 702);
+    repeat_msg.fields.insert(2, DynamicValue::Uint64(1));
+
+    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    for (req_name, expected_rsp, req_msg, expect_completed) in [
         (
             "eve.communitytrack.api.StartRequest",
             "eve.communitytrack.api.StartResponse",
             &track_id_msg,
+            false,
         ),
         (
             "eve.communitytrack.api.AddProgressRequest",
             "eve.communitytrack.api.AddProgressResponse",
             &add_msg,
+            false,
         ),
         (
             "eve.communitytrack.admin.api.SetProgressRequest",
             "eve.communitytrack.admin.api.SetProgressResponse",
             &set_msg,
+            false,
         ),
         (
             "eve.communitytrack.api.StopRequest",
             "eve.communitytrack.api.StopResponse",
             &track_id_msg,
+            false,
         ),
         (
             "eve.tale.api.StartTaleRequest",
             "eve.tale.api.StartTaleResponse",
             &start_tale,
+            false,
         ),
         (
             "eve.tale.api.StopTalesRequest",
             "eve.tale.api.StopTalesResponse",
             &tale_id_msg,
+            false,
+        ),
+        (
+            "eve.communitytrack.api.AddProgressRequest",
+            "eve.communitytrack.api.AddProgressResponse",
+            &complete_msg,
+            true,
+        ),
+        (
+            "eve.communitytrack.api.AddProgressRequest",
+            "eve.communitytrack.api.AddProgressResponse",
+            &repeat_msg,
+            false,
         ),
     ] {
         let rsp = handlers[req_name](&gm_ctx, &dummy_any, req_msg)
             .unwrap_or_else(|e| panic!("{req_name} failed: {e:?}"));
         assert_eq!(rsp.normalized_type_name(), expected_rsp);
         assert!(rsp.value.is_empty(), "{expected_rsp} should carry empty wire payload");
+        let emitted: Vec<GoogleAny> = crate::services::quasar_social_chat::drain_local_notices()
+            .into_iter()
+            .map(|(_, any, _)| any)
+            .collect();
+        assert!(
+            !emitted.iter().any(|n| n.type_url.contains("eve.communitytrack.")),
+            "internal eve.communitytrack.* event must not be emitted on public gateway"
+        );
+        if expect_completed {
+            assert_eq!(emitted.len(), 1, "completion must emit one CompletedNotice");
+            assert_eq!(
+                emitted[0].normalized_type_name(),
+                "eve_public.communitytrack.api.CompletedNotice"
+            );
+        }
+        let violations =
+            eve_testkit::quasar_tap::tap_exchange(&reg, req_name, 200, Some(&rsp), &emitted);
+        assert!(
+            violations.is_empty(),
+            "unexpected quasar tap violations for {req_name}: {violations:#?}"
+        );
+    }
+
+    for (req_name, expected_rsp, req_msg) in [
+        (
+            "eve_public.communitytrack.api.GetRequest",
+            "eve_public.communitytrack.api.GetResponse",
+            &track_id_msg,
+        ),
+        (
+            "eve.communitytrack.api.GetRequest",
+            "eve.communitytrack.api.GetResponse",
+            &track_id_msg,
+        ),
+        (
+            "eve.seasonalevent.challenge.GetChallengesForCharacterRequest",
+            "eve.seasonalevent.challenge.GetChallengesForCharacterResponse",
+            &DynamicQuasarMessage::new("Req"),
+        ),
+    ] {
+        let rsp = handlers[req_name](&gm_ctx, &dummy_any, req_msg)
+            .unwrap_or_else(|e| panic!("{req_name} failed: {e:?}"));
+        assert_eq!(rsp.normalized_type_name(), expected_rsp);
         let violations =
             eve_testkit::quasar_tap::tap_exchange(&reg, req_name, 200, Some(&rsp), &[]);
         assert!(
