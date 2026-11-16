@@ -43,6 +43,18 @@ import evomu_bridge  # noqa: E402
 DEFAULT_CLIENT_APP = os.path.expanduser(
     "~/Library/Application Support/EVE Online/SharedCache/tq/EVE.app"
 )
+JOURNEY_SPECS = {
+    "structures": {
+        "id": "structures",
+        "title": "Upwell Structure Lifecycle (Anchor -> Quantum Core -> Online -> Dock -> Control)",
+        "persona": "upwell_structures_and_citadels",
+    },
+    "titans": {
+        "id": "titans",
+        "title": "Titans & Capital Warfare (Avatar -> Doomsday -> Phenomena Generator -> Jump Drive)",
+        "persona": "titans_and_capital_warfare",
+    },
+}
 ERROR_LINE_RE = re.compile(
     r"UnimplementedRPC|panicked at|Traceback \(most recent|\bEXCEPTION\b|_LogException\b|\bLogException\b|\bLogTraceback\b|SendClientStackTraceAlert|client exception report saved"
 )
@@ -1275,7 +1287,7 @@ def main():
                 "user": user_pw[0],
                 "password": pw,
                 "char_id": int(args.auto_select_character or 90000001),
-                "only_journeys": [j["id"] for j in journey_list] if len(journey_list) < 29 else None,
+                "only_journeys": [j["id"] for j in journey_list],
             }
             inclient_cfg_path = os.path.join(out_dir, "inclient_cfg.json")
             with open(inclient_cfg_path, "w") as icf:
@@ -1356,6 +1368,32 @@ def main():
             if p not in client_logs:
                 client_logs.append(p)
     log_errors = scan_logs_for_errors([server_log_path] + client_logs)
+    destiny_log_classification = None
+    existing_client_logs = [p for p in client_logs if os.path.exists(p) and os.path.getsize(p) > 0]
+    classifier_script = os.path.join(REPO_ROOT, "tools", "classify_client_log.py")
+    if existing_client_logs and os.path.exists(classifier_script):
+        try:
+            cls_proc = subprocess.run(
+                [sys.executable, classifier_script, "--expect", "parity", "--allow-empty", "--json"]
+                + existing_client_logs,
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if cls_proc.stdout.strip():
+                destiny_log_classification = json.loads(cls_proc.stdout)
+                stale_actions = int(destiny_log_classification.get("stale_at_action", 0) or 0)
+                if stale_actions > 0:
+                    log_errors.append(
+                        "[classify_client_log] FAIL: stale-at-action=%d (stale-at-history=%d)"
+                        % (
+                            stale_actions,
+                            int(destiny_log_classification.get("stale_at_history", 0) or 0),
+                        )
+                    )
+        except Exception as exc:
+            sys.stderr.write("[run_journeys] classify_client_log failed: %r\n" % (exc,))
 
     client_app_exists = os.path.exists(args.client_app)
     journeys_out = {}
@@ -1389,6 +1427,7 @@ def main():
         "client_app_present": client_app_exists,
         "concurrent_clients_tested": 2,
         "log_errors": log_errors,
+        "destiny_log_classification": destiny_log_classification,
     }
     res_path = os.path.join(out_dir, "result.json")
     with open(res_path, "w") as rf:

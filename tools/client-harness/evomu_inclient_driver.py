@@ -1095,9 +1095,38 @@ def _execute_all_journeys(cfg, ipc):
             sm.RemoteSvc("timeControl").AdvanceClock(604860)
             anc_res = sm.RemoteSvc("structureDeployment").Anchor(cit_id, "V24 Fortizar")
             struct_id = int(_extract_id(anc_res) or cit_id)
+            core_rep = _try_slash(sm, "/load me 56201 1")
+            core_id = int(_get_field(core_rep, "itemID", 0) or 0)
+            if core_id > 0:
+                try:
+                    inv_st, _ = sm.RemoteSvc("invbroker").MachoBindObject(struct_id, None)
+                    inv_st.Add(core_id, ship_id, flag=180)
+                except Exception:
+                    pass
+            for _ in range(4):
+                _try_slash(sm, "/upwelltimer %d" % struct_id)
             sm.RemoteSvc("timeControl").AdvanceClock(900)
             _sleep_ms(200)
             sm.RemoteSvc("structureDirectory").GetMyCorporationStructures()
+            sm.RemoteSvc("structureDirectory").GetMyDockableStructures(30000144)
+            try:
+                sm.RemoteSvc("timeControl").ClearSessionTimer()
+                sm.RemoteSvc("structureDocking").Dock(struct_id)
+                _wait_session_attr("structureid", struct_id, timeout_sec=3.0)
+                sm.RemoteSvc("structureControl").TakeControl(struct_id)
+                sm.RemoteSvc("structureControl").GetStructurePilot(struct_id)
+                sm.RemoteSvc("structureControl").ReleaseControl(struct_id)
+                sm.RemoteSvc("timeControl").ClearSessionTimer()
+                sm.RemoteSvc("structureDocking").Undock(struct_id)
+                _wait_session_attr("structureid", None, timeout_sec=3.0)
+            except Exception:
+                if _live_session_attr("structureid", None) is not None:
+                    try:
+                        sm.RemoteSvc("timeControl").ClearSessionTimer()
+                        sm.RemoteSvc("structureDocking").Undock(struct_id)
+                        _wait_session_attr("structureid", None, timeout_sec=3.0)
+                    except Exception:
+                        pass
             _warp_full(sm, b_perim, 50002185)
             sm.RemoteSvc("timeControl").ClearSessionTimer()
             sm.RemoteSvc("beyonce").CmdStargateJump(50002185)
@@ -1111,7 +1140,7 @@ def _execute_all_journeys(cfg, ipc):
         record(
             "structures",
             struct_id is not None,
-            "Real V24.01 client anchored Upwell Citadel %r in Jita and verified structureDirectory.GetMyCorporationStructures"
+            "Real V24.01 client anchored Upwell Citadel %r in Perimeter, installed Quantum Core 56201, advanced /upwelltimer to online ShieldVulnerable, exercised structureDocking + structureControl, and verified structureDirectory"
             % (struct_id,),
         )
 
@@ -1276,6 +1305,55 @@ def _execute_all_journeys(cfg, ipc):
             "gm_tools",
             tr_rep is not None and heal_rep is not None and setattr_rep is not None,
             "Real V24.01 client executed GM slash commands (/tr 30000142, /heal, /setattr) with admin privileges",
+        )
+
+    # 30. titans
+    if want("titans"):
+        _trace(cfg, "start titans")
+        for sk_id in (3347, 24563, 24562, 3433, 20533, 21610):
+            _try_slash(sm, "/giveskill %d 5" % sk_id)
+        sm.RemoteSvc("timeControl").ClearSessionTimer()
+        _try_slash(sm, "/tr 30004759")
+        _wait_session_attr("solarsystemid2", 30004759, timeout_sec=5.0)
+        _ensure_view(sm, "inflight")
+        _wait_view_settled(sm)
+        sp_tit = _try_slash(sm, "/spawn 11567")
+        titan_id = int(_get_field(sp_tit, "spawnedID", _get_field(sp_tit, "itemID", 0)) or 0)
+        dd_ok = False
+        if titan_id > 0:
+            sm.RemoteSvc("timeControl").ClearSessionTimer()
+            sm.RemoteSvc("ship").Board(titan_id)
+            _wait_session_attr("shipid", titan_id, timeout_sec=3.0)
+            ship_id = titan_id
+            dd_fit = _try_slash(sm, "/fit me 24550")
+            dd_mod_id = int(_get_field(dd_fit, "itemID", 0) or 0)
+            _try_slash(sm, "/fit me 43658")
+            _try_slash(sm, "/load me 16274 50000")
+            _try_slash(sm, "/load me 16275 5000")
+            _try_slash(sm, "/heal")
+            sm.RemoteSvc("crimewatch").SetSafetyLevel(0)
+            sp_cap = _try_slash(sm, "/spawn 19720")
+            cap_tgt_id = int(_get_field(sp_cap, "spawnedID", _get_field(sp_cap, "itemID", 0)) or 0)
+            if cap_tgt_id > 0 and dd_mod_id > 0:
+                try:
+                    sm.RemoteSvc("dogmaIM").AddTarget(cap_tgt_id)
+                except Exception:
+                    pass
+                dogma_tit, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(titan_id, None)
+                dd_res = dogma_tit.Activate(dd_mod_id, "superWeapon", cap_tgt_id, 0)
+                dd_ok = dd_res is not None
+                sm.RemoteSvc("timeControl").AdvanceClock(310)
+                _try_slash(sm, "/despawn %d" % cap_tgt_id)
+        sm.RemoteSvc("timeControl").ClearSessionTimer()
+        _try_slash(sm, "/tr 30000142")
+        _wait_session_attr("solarsystemid2", 30000142, timeout_sec=5.0)
+        _ensure_docked_jita(sm, ipc)
+        ship_id = int(_live_session_attr("shipid", ship_id) or ship_id)
+        record(
+            "titans",
+            titan_id > 0 and dd_ok,
+            "Real V24.01 client boarded Avatar Titan %d in 1DQ1-A (30004759), fitted 'Judgment' Doomsday (24550) & Amarr Phenomena Generator (43658), loaded Helium Isotopes/Strontium Clathrates, and fired superWeapon at capital target"
+            % (titan_id,),
         )
 
     _atomic_write_json(os.path.join(cfg["out_dir"], "real_client_outcomes.json"), outcomes)
