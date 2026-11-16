@@ -1,19 +1,41 @@
-//! SQLite persistence for first-class typed service domain registries (`#588`).
+//! SQLite persistence for `entity_kv` and Family 6 typed service domain registries (`#588`, `#916`).
+//!
+//! All 17 typed service domains decompose field- and map/set-entry-wise into `domain_rows`;
+//! `entity_kv` remains in its dedicated `WITHOUT ROWID` table (`ENTITY_KV_SCHEMA_VERSION = 7`).
 
-use crate::sqlite_store::fingerprints::{canonical_fp, TableFingerprints};
+use super::domain_rows::{
+    from_checked_domain_json, table_exists, to_checked_domain_json, DomainRowChange, KeyCodec,
+    Persist, DOMAIN_ABYSSAL_STATE, DOMAIN_CLUSTER_AND_RUNTIME, DOMAIN_CRAB_BEACONS,
+    DOMAIN_DEPLOYABLE_STATE, DOMAIN_DUNGEON_EDITOR, DOMAIN_DUNGEON_RUNTIME,
+    DOMAIN_FLEET_AND_SOCIAL_OPS, DOMAIN_FOB_OBSERVATORY_STATE, DOMAIN_INSURGENCY_COMPLEX_OPS,
+    DOMAIN_MINING_AND_ESS_STATE, DOMAIN_NODE_GRAPH_STATE, DOMAIN_PVE_SPECIAL_SITES,
+    DOMAIN_PVP_FILAMENT_STATE, DOMAIN_QUASAR_COMMERCE, DOMAIN_SEASONS_AND_CAMPAIGNS,
+    DOMAIN_SUPERWEAPON_RUNTIME, DOMAIN_TOURNEY_STATE,
+};
+use super::fingerprints::{canonical_fp, TableFingerprints};
+use crate::service_domains::{
+    AbyssalRuntimeStore, ClusterAndRuntimeStore, CrabBeaconStore, DungeonEditorStore,
+    DungeonRuntimeStore, EntityKvKey, EntityKvRow, FleetAndSocialOpsStore, FobObservatoryStore,
+    InsurgencyComplexOpsState, MiningAndEssRuntimeStore, MobileDeployableRuntimeState,
+    NodeGraphAndProgressionStore, PersistedSuperweaponRuntime, PveSpecialSitesState,
+    PvpFilamentStore, QuasarCommerceStore, SeasonsAndCampaignsStore, TourneyStore,
+};
 use crate::types::WorldStateSnapshot;
 use rusqlite::{params, Connection, Transaction};
 use serde::{de::DeserializeOwned, Serialize};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-pub const SERVICE_DOMAINS_SCHEMA_VERSION: i64 = 6;
 pub const ENTITY_KV_SCHEMA_VERSION: i64 = 7;
 
-const SERVICE_DOMAINS_SCHEMA_SQL: &str = r#"
+#[cfg(test)]
+pub(crate) const LEGACY_SERVICE_DOMAIN_STATE_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS service_domain_state (
     domain_key TEXT PRIMARY KEY,
     payload_json TEXT NOT NULL
 );
+"#;
 
+const ENTITY_KV_SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS entity_kv (
     ns           TEXT    NOT NULL,
     entity_id    INTEGER NOT NULL,
@@ -26,42 +48,18 @@ CREATE TABLE IF NOT EXISTS entity_kv (
 CREATE INDEX IF NOT EXISTS entity_kv_by_entity ON entity_kv(entity_id, ns);
 "#;
 
+/// Fingerprints for `entity_kv` (all 17 typed service domains migrated to `domain_rows` in `#916`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServiceDomainsFingerprints {
-    pub pve_special_sites: u64,
-    pub crab_beacons: u64,
-    pub abyssal_state: u64,
-    pub dungeon_runtime: u64,
-    pub dungeon_editor: u64,
-    pub fob_observatory_state: u64,
-    pub mining_and_ess_state: u64,
-    pub pvp_filament_state: u64,
-    pub tourney_state: u64,
-    pub deployable_state: u64,
-    pub superweapon_runtime: u64,
-    pub insurgency_complex_ops: u64,
-    pub node_graph_state: u64,
-    pub seasons_and_campaigns: u64,
-    pub quasar_commerce: u64,
-    pub fleet_and_social_ops: u64,
-    pub cluster_and_runtime: u64,
     pub entity_kv_fp: u64,
-    pub entity_kv_rows: std::collections::BTreeMap<crate::service_domains::EntityKvKey, u64>,
+    pub entity_kv_rows: BTreeMap<EntityKvKey, u64>,
 }
 
+/// Applies the schema DDL for `entity_kv` (legacy `service_domain_state` now lives in `domain_rows`).
 pub fn apply_service_domains_migration(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(SERVICE_DOMAINS_SCHEMA_SQL)
+    conn.execute_batch(ENTITY_KV_SCHEMA_SQL)
         .map_err(|e| e.to_string())?;
     let now_unix = crate::clock::host_wall_unix_secs_and_nanos().0 as i64;
-    conn.execute(
-        "INSERT OR IGNORE INTO schema_migrations (version, name, applied_unix) VALUES (?1, ?2, ?3)",
-        params![
-            SERVICE_DOMAINS_SCHEMA_VERSION,
-            "0006_service_domain_state",
-            now_unix
-        ],
-    )
-    .map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, name, applied_unix) VALUES (?1, ?2, ?3)",
         params![ENTITY_KV_SCHEMA_VERSION, "0007_entity_kv", now_unix],
@@ -82,32 +80,856 @@ fn fp_domain<T: Default + PartialEq + Serialize>(val: &T) -> u64 {
     }
 }
 
-fn load_domain_row_checked<T: Default + DeserializeOwned>(
-    conn: &Connection,
+pub fn compute_service_domains_fingerprints(
+    snap: &WorldStateSnapshot,
+) -> ServiceDomainsFingerprints {
+    let mut fp = ServiceDomainsFingerprints {
+        entity_kv_fp: fp_domain(&snap.entity_kv),
+        entity_kv_rows: BTreeMap::new(),
+    };
+    for (k, v) in &snap.entity_kv {
+        let rfp = canonical_fp(v);
+        fp.entity_kv_rows.insert(k.clone(), if rfp == 0 { 1 } else { rfp });
+    }
+    fp
+}
+
+// ============================================================================
+// Shared `domain_rows` Helpers for Decomposed Service Domains (`#916`)
+// ============================================================================
+
+fn diff_scalar<T: PartialEq + Serialize>(
+    domain: &'static str,
+    field: &'static str,
+    before: &T,
+    after: &T,
+    def: &T,
+    out: &mut Vec<DomainRowChange>,
+) {
+    if before == after {
+        return;
+    }
+    if after == def {
+        out.push(DomainRowChange::Delete {
+            domain,
+            key: field.to_owned(),
+        });
+    } else {
+        out.push(DomainRowChange::Upsert {
+            domain,
+            key: field.to_owned(),
+            value: to_checked_domain_json(domain, field, after),
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn diff_map_with<'a, K: KeyCodec + 'a, V: PartialEq + Serialize + 'a>(
+    domain: &'static str,
+    field: &'static str,
+    before_len: usize,
+    after_iter: impl Iterator<Item = (&'a K, &'a V)>,
+    before_get: impl Fn(&K) -> Option<&'a V>,
+    before_keys: impl Iterator<Item = &'a K>,
+    after_contains: impl Fn(&K) -> bool,
+    out: &mut Vec<DomainRowChange>,
+) {
+    let mut kept = 0usize;
+    for (k, v) in after_iter {
+        let changed = match before_get(k) {
+            Some(prev) => {
+                kept += 1;
+                prev != v
+            }
+            None => true,
+        };
+        if changed {
+            let full_key = format!("{field}/{}", k.encode_key());
+            let value = to_checked_domain_json(domain, &full_key, v);
+            out.push(DomainRowChange::Upsert {
+                domain,
+                key: full_key,
+                value,
+            });
+        }
+    }
+    if kept < before_len {
+        for k in before_keys {
+            if !after_contains(k) {
+                out.push(DomainRowChange::Delete {
+                    domain,
+                    key: format!("{field}/{}", k.encode_key()),
+                });
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn diff_set_with<'a, K: KeyCodec + 'a>(
+    domain: &'static str,
+    field: &'static str,
+    before_len: usize,
+    after_iter: impl Iterator<Item = &'a K>,
+    before_contains: impl Fn(&K) -> bool,
+    before_iter: impl Iterator<Item = &'a K>,
+    after_contains: impl Fn(&K) -> bool,
+    out: &mut Vec<DomainRowChange>,
+) {
+    let mut kept = 0usize;
+    for k in after_iter {
+        if before_contains(k) {
+            kept += 1;
+        } else {
+            out.push(DomainRowChange::Upsert {
+                domain,
+                key: format!("{field}/{}", k.encode_key()),
+                value: Ok("true".to_owned()),
+            });
+        }
+    }
+    if kept < before_len {
+        for k in before_iter {
+            if !after_contains(k) {
+                out.push(DomainRowChange::Delete {
+                    domain,
+                    key: format!("{field}/{}", k.encode_key()),
+                });
+            }
+        }
+    }
+}
+
+fn should_upsert<V: PartialEq + DeserializeOwned>(
+    existing: &HashMap<String, String>,
     key: &str,
-    dst: &mut T,
+    new_val: &V,
+    new_json: &str,
+) -> bool {
+    match existing.get(key) {
+        None => true,
+        Some(old_json) if old_json == new_json => false,
+        Some(old_json) => match from_checked_domain_json::<V>(old_json) {
+            Ok(old_val) => old_val != *new_val,
+            Err(_) => true,
+        },
+    }
+}
+
+struct DomainSyncState {
+    domain: &'static str,
+    existing: HashMap<String, String>,
+    live_keys: HashSet<String>,
+    upserts: Vec<(String, String)>,
+}
+
+impl DomainSyncState {
+    fn load(tx: &Transaction<'_>, domain: &'static str) -> Result<Self, String> {
+        let mut existing = HashMap::new();
+        {
+            let mut stmt = tx
+                .prepare("SELECT key, value FROM domain_rows WHERE domain = ?1")
+                .map_err(|e| format!("domain_rows sync prepare({domain}): {e}"))?;
+            let mut rows = stmt
+                .query(params![domain])
+                .map_err(|e| format!("domain_rows sync query({domain}): {e}"))?;
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| format!("domain_rows sync step({domain}): {e}"))?
+            {
+                let k: String = row.get(0).map_err(|e| e.to_string())?;
+                let v: String = row.get(1).map_err(|e| e.to_string())?;
+                existing.insert(k, v);
+            }
+        }
+        Ok(Self {
+            domain,
+            existing,
+            live_keys: HashSet::new(),
+            upserts: Vec::new(),
+        })
+    }
+
+    fn push_scalar<T: PartialEq + Serialize + DeserializeOwned>(
+        &mut self,
+        field: &'static str,
+        val: &T,
+        def: &T,
+    ) -> Result<(), String> {
+        if val != def {
+            let json =
+                to_checked_domain_json(self.domain, field, val).map_err(|e| e.to_string())?;
+            if should_upsert(&self.existing, field, val, &json) {
+                self.upserts.push((field.to_owned(), json));
+            }
+            self.live_keys.insert(field.to_owned());
+        }
+        Ok(())
+    }
+
+    fn push_map<'a, K: KeyCodec + 'a, V: PartialEq + Serialize + DeserializeOwned + 'a>(
+        &mut self,
+        field: &'static str,
+        entries: impl Iterator<Item = (&'a K, &'a V)>,
+    ) -> Result<(), String> {
+        for (k, v) in entries {
+            let full_key = format!("{field}/{}", k.encode_key());
+            let json =
+                to_checked_domain_json(self.domain, &full_key, v).map_err(|e| e.to_string())?;
+            if should_upsert(&self.existing, &full_key, v, &json) {
+                self.upserts.push((full_key.clone(), json));
+            }
+            self.live_keys.insert(full_key);
+        }
+        Ok(())
+    }
+
+    fn push_set<'a, K: KeyCodec + 'a>(
+        &mut self,
+        field: &'static str,
+        entries: impl Iterator<Item = &'a K>,
+    ) -> Result<(), String> {
+        for k in entries {
+            let full_key = format!("{field}/{}", k.encode_key());
+            if should_upsert(&self.existing, &full_key, &true, "true") {
+                self.upserts.push((full_key.clone(), "true".to_owned()));
+            }
+            self.live_keys.insert(full_key);
+        }
+        Ok(())
+    }
+
+    fn finish(self, tx: &Transaction<'_>) -> Result<bool, String> {
+        let has_deletes = self.existing.len() > self.live_keys.len()
+            || self.existing.keys().any(|k| !self.live_keys.contains(k));
+        if self.upserts.is_empty() && !has_deletes {
+            return Ok(false);
+        }
+        if !self.upserts.is_empty() {
+            let mut upsert_stmt = tx
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO domain_rows (domain, key, value) VALUES (?1, ?2, ?3)",
+                )
+                .map_err(|e| format!("domain_rows sync upsert prepare({}): {e}", self.domain))?;
+            for (k, v) in &self.upserts {
+                upsert_stmt
+                    .execute(params![self.domain, k, v])
+                    .map_err(|e| format!("domain_rows sync upsert({}, {k}): {e}", self.domain))?;
+            }
+        }
+        if has_deletes {
+            let mut del_stmt = tx
+                .prepare_cached("DELETE FROM domain_rows WHERE domain = ?1 AND key = ?2")
+                .map_err(|e| format!("domain_rows sync delete prepare({}): {e}", self.domain))?;
+            for old_key in self.existing.keys() {
+                if !self.live_keys.contains(old_key) {
+                    del_stmt
+                        .execute(params![self.domain, old_key])
+                        .map_err(|e| {
+                            format!("domain_rows sync delete({}, {old_key}): {e}", self.domain)
+                        })?;
+                }
+            }
+        }
+        Ok(true)
+    }
+}
+
+fn fetch_domain_row_entries(
+    conn: &Connection,
+    domain: &'static str,
+) -> Result<Vec<(i64, String, String)>, String> {
+    if !table_exists(conn, "domain_rows")? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare("SELECT rowid, key, value FROM domain_rows WHERE domain = ?1 ORDER BY key ASC")
+        .map_err(|e| format!("domain_rows load prepare({domain}): {e}"))?;
+    let mut rows = stmt
+        .query(params![domain])
+        .map_err(|e| format!("domain_rows load query({domain}): {e}"))?;
+    let mut out = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("domain_rows load step({domain}): {e}"))?
+    {
+        out.push((
+            row.get(0).map_err(|e| e.to_string())?,
+            row.get(1).map_err(|e| e.to_string())?,
+            row.get(2).map_err(|e| e.to_string())?,
+        ));
+    }
+    Ok(out)
+}
+
+fn decode_map_entry<K: KeyCodec, V: DeserializeOwned>(
+    subkey: &str,
+    raw_val: &str,
+) -> Result<(K, V), String> {
+    let key = K::decode_key(subkey)?;
+    let val = from_checked_domain_json::<V>(raw_val)?;
+    Ok((key, val))
+}
+
+fn decode_set_entry<K: KeyCodec>(subkey: &str, raw_val: &str) -> Result<K, String> {
+    let key = K::decode_key(subkey)?;
+    if !from_checked_domain_json::<bool>(raw_val)? {
+        return Err(format!("expected boolean true for set key '{subkey}'"));
+    }
+    Ok(key)
+}
+
+trait LegacyMerge: Sized {
+    fn merge_legacy(&mut self, legacy: Self);
+}
+
+macro_rules! impl_service_domain_persist {
+    (
+        $ty:ty,
+        maps: [ $($map_f:ident),* $(,)? ],
+        sets: [ $($set_f:ident),* $(,)? ],
+        scalars: [ $($scalar_f:ident),* $(,)? ]
+    ) => {
+        impl Persist for $ty {
+            fn collect_diff_ops(
+                &self,
+                after: &Self,
+                domain: &'static str,
+                out: &mut Vec<DomainRowChange>,
+            ) {
+                let def = Self::default();
+                let _ = &def;
+                $(
+                    if !(self.$map_f.is_empty() && after.$map_f.is_empty()) {
+                        diff_map_with(
+                            domain,
+                            stringify!($map_f),
+                            self.$map_f.len(),
+                            after.$map_f.iter(),
+                            |k| self.$map_f.get(k),
+                            self.$map_f.keys(),
+                            |k| after.$map_f.contains_key(k),
+                            out,
+                        );
+                    }
+                )*
+                $(
+                    if !(self.$set_f.is_empty() && after.$set_f.is_empty()) {
+                        diff_set_with(
+                            domain,
+                            stringify!($set_f),
+                            self.$set_f.len(),
+                            after.$set_f.iter(),
+                            |k| self.$set_f.contains(k),
+                            self.$set_f.iter(),
+                            |k| after.$set_f.contains(k),
+                            out,
+                        );
+                    }
+                )*
+                $(
+                    diff_scalar(
+                        domain,
+                        stringify!($scalar_f),
+                        &self.$scalar_f,
+                        &after.$scalar_f,
+                        &def.$scalar_f,
+                        out,
+                    );
+                )*
+            }
+
+            fn sync_full(&self, tx: &Transaction<'_>, domain: &'static str) -> Result<bool, String> {
+                let mut state = DomainSyncState::load(tx, domain)?;
+                let def = Self::default();
+                let _ = &def;
+                $(
+                    state.push_map(stringify!($map_f), self.$map_f.iter())?;
+                )*
+                $(
+                    state.push_set(stringify!($set_f), self.$set_f.iter())?;
+                )*
+                $(
+                    state.push_scalar(stringify!($scalar_f), &self.$scalar_f, &def.$scalar_f)?;
+                )*
+                state.finish(tx)
+            }
+
+            fn load_domain(
+                conn: &Connection,
+                domain: &'static str,
+                ctx: &mut super::quarantine::LoadContext,
+            ) -> Result<Self, String> {
+                let rows = fetch_domain_row_entries(conn, domain)?;
+                let mut out = Self::default();
+                for (rowid, raw_key, raw_val) in rows {
+                    let split = match raw_key.split_once('/') {
+                        Some((f, sub)) => (f, Some(sub)),
+                        None => (raw_key.as_str(), None),
+                    };
+                    let res: Result<(), String> = match split {
+                        $(
+                            (stringify!($map_f), Some(sub)) => {
+                                decode_map_entry(sub, &raw_val).map(|(k, v)| {
+                                    out.$map_f.insert(k, v);
+                                })
+                            }
+                        )*
+                        $(
+                            (stringify!($set_f), Some(sub)) => {
+                                decode_set_entry(sub, &raw_val).map(|k| {
+                                    out.$set_f.insert(k);
+                                })
+                            }
+                        )*
+                        $(
+                            (stringify!($scalar_f), None) => {
+                                from_checked_domain_json(&raw_val).map(|v| {
+                                    out.$scalar_f = v;
+                                })
+                            }
+                        )*
+                        _ => Err(format!("unknown domain_rows key '{raw_key}' for {domain}")),
+                    };
+                    if let Err(err) = res {
+                        ctx.record_bad_row("domain_rows", domain, raw_key, raw_val, err, Some(rowid))?;
+                    }
+                }
+                Ok(out)
+            }
+        }
+
+        impl LegacyMerge for $ty {
+            fn merge_legacy(&mut self, legacy: Self) {
+                let def = Self::default();
+                let _ = &def;
+                $(
+                    for (k, v) in legacy.$map_f {
+                        self.$map_f.entry(k).or_insert(v);
+                    }
+                )*
+                $(
+                    for k in legacy.$set_f {
+                        self.$set_f.insert(k);
+                    }
+                )*
+                $(
+                    if self.$scalar_f == def.$scalar_f && legacy.$scalar_f != def.$scalar_f {
+                        self.$scalar_f = legacy.$scalar_f;
+                    }
+                )*
+            }
+        }
+    };
+}
+
+impl_service_domain_persist!(
+    PveSpecialSitesState,
+    maps: [
+        incursions,
+        incursion_lifecycle,
+        incursion_site_waves,
+        world_event_tales,
+        incursion_lp_logs,
+        homefront_sites,
+        drifter_hives,
+        triglavian_sites,
+        interference_by_system,
+        seasonal_event_sites,
+    ],
+    sets: [],
+    scalars: [
+        initialized,
+        roaming_storms,
+        edencom_fortress_systems,
+        edencom_minor_victory_systems,
+        triglavian_minor_victory_systems,
+        sim_clock_sec,
+        next_seq,
+    ]
+);
+
+impl_service_domain_persist!(
+    CrabBeaconStore,
+    maps: [beacons],
+    sets: [],
+    scalars: []
+);
+
+impl_service_domain_persist!(
+    AbyssalRuntimeStore,
+    maps: [
+        pockets,
+        traces,
+        void_space_sessions,
+        active_clouds,
+        boundary_ticks,
+        void_space_content,
+    ],
+    sets: [deathzone_active_ships],
+    scalars: [next_seq]
+);
+
+impl_service_domain_persist!(
+    DungeonRuntimeStore,
+    maps: [instances],
+    sets: [],
+    scalars: [next_instance_id]
+);
+
+impl_service_domain_persist!(
+    DungeonEditorStore,
+    maps: [rooms_by_dungeon, dungeon_disallow_mwd, active_editors],
+    sets: [],
+    scalars: [next_custom_room_id, next_custom_object_id]
+);
+
+impl_service_domain_persist!(
+    FobObservatoryStore,
+    maps: [
+        observatory_sites,
+        observatory_respawn_until,
+        fob_combatants,
+        fob_factions,
+        fob_respawn_until,
+    ],
+    sets: [fob_defense_triggered],
+    scalars: []
+);
+
+impl_service_domain_persist!(
+    MiningAndEssRuntimeStore,
+    maps: [
+        ess_reserve_pulses,
+        phased_asteroid_fields,
+        mining_ledger_waste,
+    ],
+    sets: [],
+    scalars: [
+        phased_field_last_tick_unix,
+        moon_fractured_fields,
+        metenox_last_tick_unix,
+    ]
+);
+
+impl_service_domain_persist!(
+    PvpFilamentStore,
+    maps: [
+        queue,
+        stats,
+        event_stats,
+        active_matches,
+        match_teams,
+        match_eliminated,
+        match_arena_offsets,
+        match_filament_types,
+        hazard_ticks,
+        queue_refund_targets,
+        queue_tickets,
+        origin_positions,
+    ],
+    sets: [],
+    scalars: [events, seeded_default_events, next_ticket_id, next_match_id]
+);
+
+impl_service_domain_persist!(
+    TourneyStore,
+    maps: [matches, ban_sessions, tournaments, arena_systems],
+    sets: [],
+    scalars: [active_match_id]
+);
+
+impl_service_domain_persist!(
+    MobileDeployableRuntimeState,
+    maps: [
+        deployables,
+        damaged_items,
+        observatory_pings_done,
+        cloak_activated_unix,
+        mmju_spools,
+        siphon_last_cycle_unix,
+    ],
+    sets: [],
+    scalars: [pending_decloak_notifications]
+);
+
+impl_service_domain_persist!(
+    PersistedSuperweaponRuntime,
+    maps: [],
+    sets: [],
+    scalars: [active_cycles, warp_suppressions]
+);
+
+impl_service_domain_persist!(
+    InsurgencyComplexOpsState,
+    maps: [
+        outpost_raids,
+        mining_ambushes,
+        subpoint_remainders,
+        named_roamer_rolls,
+        ice_heist_respawn_until,
+    ],
+    sets: [],
+    scalars: []
+);
+
+impl_service_domain_persist!(
+    NodeGraphAndProgressionStore,
+    maps: [
+        air_npe_runners,
+        client_node_graphs,
+        node_graph_blackboards,
+        expert_systems,
+        certificates,
+    ],
+    sets: [],
+    scalars: [client_node_graph_seq]
+);
+
+impl_service_domain_persist!(
+    SeasonsAndCampaignsStore,
+    maps: [
+        season_states,
+        active_seasons,
+        seasons_catalog,
+        season_loot_tables,
+        announced_season_states,
+        hacking_wins,
+        milestone_playtime,
+        login_campaign_enrollments,
+        auto_injected_rewards,
+        login_reward_expiry,
+        project_discovery_players,
+        project_discovery_votes,
+        character_activities,
+        fast_checkout_states,
+    ],
+    sets: [],
+    scalars: [
+        season_configuration,
+        challenge_definitions,
+        announced_season_init,
+        daily_login_campaign_schedule,
+        seasonal_login_schedule,
+        project_discovery_store,
+    ]
+);
+
+impl_service_domain_persist!(
+    QuasarCommerceStore,
+    maps: [nes_store_offer_tags, targeted_offers],
+    sets: [lp_asset_ops_completed],
+    scalars: [
+        payment_tokens,
+        payment_receipts,
+        payment_schedules,
+        plex_tx_logs,
+        nes_store_catalog,
+        plex_invoices,
+        cosmetics_market,
+        orchestrator,
+        failed_fulfillments,
+        acl_registry,
+    ]
+);
+
+impl_service_domain_persist!(
+    FleetAndSocialOpsStore,
+    maps: [
+        fleet_saved_setups,
+        fleet_stored_formations,
+        fleet_adverts,
+        fleet_join_requests,
+        fleet_watchlist,
+        fleet_voice_enabled,
+        fleet_loot_logging,
+        corp_allow_war,
+        hypernet_subs,
+        contract_deposits,
+        delayed_rewards,
+        agent_char_disabled_missions,
+        agent_replay_ts,
+        signal_tracker_subs,
+        wh_local_witnesses,
+    ],
+    sets: [mission_taxed_journal, agent_global_disabled_missions],
+    scalars: [
+        corp_recruitment_ads,
+        ingamereport_tickets,
+        lp_store_offers,
+        pending_probe_scans,
+    ]
+);
+
+impl_service_domain_persist!(
+    ClusterAndRuntimeStore,
+    maps: [
+        structure_defense,
+        alliance_sov_cfg,
+        session_registry,
+        cluster_service_states,
+        macho_global_config,
+        alert_bean_counts,
+        alert_log_modes,
+        localization_qa_wrap_users,
+        portraits,
+        paperdoll_states,
+        char_system_visits,
+        module_reload_until_unix,
+        auto_reloaded_event,
+        warp_vector_cooldown_until,
+        ship_clone_offers,
+        mct_slots,
+        account_resculpt_tokens,
+        char_cohorts,
+        user_cohorts,
+        character_locks,
+    ],
+    sets: [resculpt_pending, omega_downgraded],
+    scalars: [
+        cluster_misc_state,
+        clone_vat_bay_state,
+        load_service_state,
+        active_sessions,
+        cluster_node_table,
+        cluster_admin_broadcasts,
+        cluster_attacks,
+        external_queue_events,
+        cluster_downtime_state,
+        macho_client_code_hash,
+        user_sessions,
+        gm_audit_log,
+        alert_client_traces,
+        alert_proxy_traces,
+        alert_group_bean_bytes,
+        browser_lockdown_policy,
+        client_stat_logger_strings,
+        blacklisted_planets,
+        server_runtime_json,
+    ]
+);
+
+// ============================================================================
+// Typed Service Domain Table Dispatch & Legacy Migration
+// ============================================================================
+
+macro_rules! for_each_service_domain_spec {
+    ($cb:ident $($extra:tt)*) => {
+        $cb!(
+            $($extra)*
+            (pve_special_sites, PveSpecialSitesState, DOMAIN_PVE_SPECIAL_SITES, "pve_special_sites"),
+            (crab_beacons, CrabBeaconStore, DOMAIN_CRAB_BEACONS, "crab_beacons"),
+            (abyssal_state, AbyssalRuntimeStore, DOMAIN_ABYSSAL_STATE, "abyssal_state"),
+            (dungeon_runtime, DungeonRuntimeStore, DOMAIN_DUNGEON_RUNTIME, "dungeon_runtime"),
+            (dungeon_editor, DungeonEditorStore, DOMAIN_DUNGEON_EDITOR, "dungeon_editor"),
+            (fob_observatory_state, FobObservatoryStore, DOMAIN_FOB_OBSERVATORY_STATE, "fob_observatory_state"),
+            (mining_and_ess_state, MiningAndEssRuntimeStore, DOMAIN_MINING_AND_ESS_STATE, "mining_and_ess_state"),
+            (pvp_filament_state, PvpFilamentStore, DOMAIN_PVP_FILAMENT_STATE, "pvp_filament_state"),
+            (tourney_state, TourneyStore, DOMAIN_TOURNEY_STATE, "tourney_state"),
+            (deployable_state, MobileDeployableRuntimeState, DOMAIN_DEPLOYABLE_STATE, "deployable_state"),
+            (superweapon_runtime, PersistedSuperweaponRuntime, DOMAIN_SUPERWEAPON_RUNTIME, "superweapon_runtime"),
+            (insurgency_complex_ops, InsurgencyComplexOpsState, DOMAIN_INSURGENCY_COMPLEX_OPS, "insurgency_complex_ops"),
+            (node_graph_state, NodeGraphAndProgressionStore, DOMAIN_NODE_GRAPH_STATE, "node_graph_state"),
+            (seasons_and_campaigns, SeasonsAndCampaignsStore, DOMAIN_SEASONS_AND_CAMPAIGNS, "seasons_and_campaigns"),
+            (quasar_commerce, QuasarCommerceStore, DOMAIN_QUASAR_COMMERCE, "quasar_commerce"),
+            (fleet_and_social_ops, FleetAndSocialOpsStore, DOMAIN_FLEET_AND_SOCIAL_OPS, "fleet_and_social_ops"),
+            (cluster_and_runtime, ClusterAndRuntimeStore, DOMAIN_CLUSTER_AND_RUNTIME, "cluster_and_runtime"),
+        );
+    };
+}
+
+macro_rules! define_staged_service_domains {
+    ($(($field:ident, $ty:ty, $domain:ident, $legacy:expr),)+) => {
+        struct StagedServiceDomains {
+            $($field: $ty,)+
+        }
+
+        impl StagedServiceDomains {
+            fn load_from_domain_rows(
+                conn: &Connection,
+                ctx: &mut super::quarantine::LoadContext,
+            ) -> Result<Self, String> {
+                Ok(Self {
+                    $($field: <$ty>::load_domain(conn, $domain, ctx)?,)+
+                })
+            }
+
+            fn merge_legacy_row(&mut self, domain_key: &str, raw_payload: &str) -> Option<Result<(), String>> {
+                match domain_key {
+                    $(
+                        $legacy => Some(
+                            from_checked_domain_json::<$ty>(raw_payload).map(|val| {
+                                self.$field.merge_legacy(val);
+                            }),
+                        ),
+                    )+
+                    _ => None,
+                }
+            }
+
+            fn apply_to(self, snap: &mut WorldStateSnapshot) {
+                $(snap.$field = self.$field;)+
+            }
+        }
+    };
+}
+
+for_each_service_domain_spec!(define_staged_service_domains);
+
+fn validate_legacy_blob_table(
+    conn: &Connection,
+    sql: &str,
+    source_table: &'static str,
+    table_display: &str,
     ctx: &mut super::quarantine::LoadContext,
 ) -> Result<(), String> {
-    let mut stmt = match conn
-        .prepare("SELECT rowid, payload_json FROM service_domain_state WHERE domain_key = ?1")
-    {
-        Ok(s) => s,
-        Err(_) => return Ok(()),
+    let Ok(mut stmt) = conn.prepare(sql) else {
+        return Ok(());
     };
-    let mut rows = stmt.query(params![key]).map_err(|e| e.to_string())?;
-    if let Some(r) = rows.next().map_err(|e| e.to_string())? {
+    let Ok(mut rows) = stmt.query([]) else {
+        return Ok(());
+    };
+    while let Some(r) = rows.next().map_err(|e| e.to_string())? {
         let rowid = r.get::<_, i64>(0).ok();
-        let raw_payload = super::quarantine::row_col_string(r, 1);
-        match r
-            .get::<_, String>(1)
+        let key = super::quarantine::row_col_string(r, 1);
+        let raw_payload = super::quarantine::row_col_string(r, 2);
+        let parsed = r
+            .get::<_, String>(2)
             .map_err(|e| e.to_string())
-            .and_then(|json| serde_json::from_str::<T>(&json).map_err(|e| e.to_string()))
-        {
-            Ok(parsed) => {
-                *dst = parsed;
-            }
-            Err(err) => {
-                *dst = T::default();
+            .and_then(|s| from_checked_domain_json::<serde_json::Value>(&s));
+        if let Err(err) = parsed {
+            ctx.record_bad_row(source_table, table_display, key, raw_payload, err, rowid)?;
+        }
+    }
+    Ok(())
+}
+
+fn stage_service_domains_rows(
+    conn: &Connection,
+    ctx: &mut super::quarantine::LoadContext,
+) -> Result<(StagedServiceDomains, bool), String> {
+    let mut staged = StagedServiceDomains::load_from_domain_rows(conn, ctx)?;
+    let had_legacy = table_exists(conn, "service_domain_state")?;
+
+    if had_legacy {
+        let mut stmt = conn
+            .prepare("SELECT rowid, domain_key, payload_json FROM service_domain_state")
+            .map_err(|e| format!("legacy service_domain_state prepare: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("legacy service_domain_state query: {e}"))?;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            let rowid = r.get::<_, i64>(0).ok();
+            let key = super::quarantine::row_col_string(r, 1);
+            let raw_payload = super::quarantine::row_col_string(r, 2);
+            let parse_res = r
+                .get::<_, String>(2)
+                .map_err(|e| e.to_string())
+                .and_then(|s| match staged.merge_legacy_row(&key, &s) {
+                    Some(res) => res,
+                    None => from_checked_domain_json::<serde_json::Value>(&s).map(|_| ()),
+                });
+            if let Err(err) = parse_res {
                 ctx.record_bad_row(
                     "service_domain_state",
                     "service_domain_state (service_domain_blobs)",
@@ -118,129 +940,50 @@ fn load_domain_row_checked<T: Default + DeserializeOwned>(
                 )?;
             }
         }
-    } else {
-        *dst = T::default();
     }
-    Ok(())
+
+    validate_legacy_blob_table(
+        conn,
+        "SELECT rowid, domain_key, COALESCE(payload_json, domain_json) FROM service_domain_blobs",
+        "service_domain_blobs",
+        "service_domain_blobs (service_domain_state)",
+        ctx,
+    )?;
+
+    Ok((staged, had_legacy))
 }
 
-fn load_domain_row_for_rollback<T: Default + DeserializeOwned>(
-    conn: &Connection,
-    key: &str,
-    expected_fp: u64,
-) -> Result<T, String> {
-    match conn.query_row(
-        "SELECT payload_json FROM service_domain_state WHERE domain_key = ?1",
-        params![key],
-        |r| r.get::<_, String>(0),
-    ) {
-        Ok(json) => serde_json::from_str::<T>(&json)
-            .map_err(|e| format!("rollback service_domain_state '{key}' parse failed: {e}")),
-        Err(rusqlite::Error::QueryReturnedNoRows) if expected_fp == 0 => Ok(T::default()),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Err(format!(
-            "rollback service_domain_state '{key}' missing row for non-zero fingerprint {expected_fp}"
-        )),
-        Err(e) => Err(format!(
-            "rollback service_domain_state '{key}' query failed: {e}"
-        )),
-    }
+/// Drops the retired legacy `service_domain_state` table once migrated rows are flushed into `domain_rows`.
+pub(crate) fn drop_legacy_service_domain_tables(tx: &Transaction<'_>) -> Result<(), String> {
+    tx.execute_batch("DROP TABLE IF EXISTS service_domain_state;")
+        .map_err(|e| format!("drop legacy service_domain_state table: {e}"))
 }
 
-fn sync_domain_row<T: Default + PartialEq + Serialize>(
-    tx: &Transaction,
-    key: &str,
-    val: &T,
-    old_fp: &mut u64,
-) -> Result<bool, String> {
-    let cur_fp = fp_domain(val);
-    if cur_fp == *old_fp {
-        return Ok(false);
-    }
-    if *val == T::default() {
-        tx.execute(
-            "DELETE FROM service_domain_state WHERE domain_key = ?1",
-            params![key],
-        )
-        .map_err(|e| e.to_string())?;
-    } else {
-        let json = super::fingerprints::to_checked_json_string(val)?;
-        tx.execute(
-            "INSERT OR REPLACE INTO service_domain_state (domain_key, payload_json) VALUES (?1, ?2)",
-            params![key, json],
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    *old_fp = cur_fp;
-    Ok(true)
-}
-
-macro_rules! for_each_service_domain_batch {
-    ($cb:ident $($extra:tt)*) => {
-        $cb!(
-            $($extra)*
-            pve_special_sites: "pve_special_sites",
-            crab_beacons: "crab_beacons",
-            abyssal_state: "abyssal_state",
-            dungeon_runtime: "dungeon_runtime",
-            dungeon_editor: "dungeon_editor",
-            fob_observatory_state: "fob_observatory_state",
-            mining_and_ess_state: "mining_and_ess_state",
-            pvp_filament_state: "pvp_filament_state",
-            tourney_state: "tourney_state",
-            deployable_state: "deployable_state",
-            superweapon_runtime: "superweapon_runtime",
-            insurgency_complex_ops: "insurgency_complex_ops",
-            node_graph_state: "node_graph_state",
-            seasons_and_campaigns: "seasons_and_campaigns",
-            quasar_commerce: "quasar_commerce",
-            fleet_and_social_ops: "fleet_and_social_ops",
-            cluster_and_runtime: "cluster_and_runtime",
-        );
-    };
-}
-
-macro_rules! __dispatch_service_domain_each {
-    ($cb:ident; $($field:ident : $key:expr,)+) => {
-        $( $cb!($field, $key); )+
-    };
-}
-
-macro_rules! for_each_service_domain {
-    ($cb:ident) => {
-        for_each_service_domain_batch!(__dispatch_service_domain_each $cb;);
-    };
-}
-
-pub fn compute_service_domains_fingerprints(
+/// Synchronizes all 17 Family 6 service domains into `domain_rows`.
+pub(crate) fn sync_service_domains_rows(
+    tx: &Transaction<'_>,
     snap: &WorldStateSnapshot,
-) -> ServiceDomainsFingerprints {
-    let mut fp = ServiceDomainsFingerprints::default();
-    macro_rules! compute_one {
-        ($field:ident, $key:expr) => {
-            fp.$field = fp_domain(&snap.$field);
+) -> Result<bool, String> {
+    let mut dirty = false;
+    macro_rules! sync_domains {
+        ($(($field:ident, $ty:ty, $domain:ident, $legacy:expr),)+) => {
+            $(dirty |= snap.$field.sync_full(tx, $domain)?;)+
         };
     }
-    for_each_service_domain!(compute_one);
-    fp.entity_kv_fp = fp_domain(&snap.entity_kv);
-    for (k, v) in &snap.entity_kv {
-        let rfp = canonical_fp(v);
-        fp.entity_kv_rows.insert(k.clone(), if rfp == 0 { 1 } else { rfp });
-    }
-    fp
+    for_each_service_domain_spec!(sync_domains);
+    Ok(dirty)
 }
+
+// ============================================================================
+// `entity_kv` Persistence (unchanged in `#916`)
+// ============================================================================
 
 fn read_entity_kv_map(
     conn: &Connection,
     ctx: &mut super::quarantine::LoadContext,
     fail_on_prepare_err: bool,
-) -> Result<
-    std::collections::BTreeMap<
-        crate::service_domains::EntityKvKey,
-        crate::service_domains::EntityKvRow,
-    >,
-    String,
-> {
-    let mut out = std::collections::BTreeMap::new();
+) -> Result<BTreeMap<EntityKvKey, EntityKvRow>, String> {
+    let mut out = BTreeMap::new();
     let mut stmt = match conn
         .prepare("SELECT ns, entity_id, sub_key, value, updated_unix FROM entity_kv")
     {
@@ -263,13 +1006,7 @@ fn read_entity_kv_map(
             super::quarantine::row_col_string(r, 2)
         );
         let raw_payload = super::quarantine::row_col_string(r, 3);
-        let parsed_res = (|| -> Result<
-            (
-                crate::service_domains::EntityKvKey,
-                crate::service_domains::EntityKvRow,
-            ),
-            String,
-        > {
+        let parsed_res = (|| -> Result<(EntityKvKey, EntityKvRow), String> {
             let ns_str: String = r.get(0).map_err(|e| e.to_string())?;
             let entity_id: i64 = r.get(1).map_err(|e| e.to_string())?;
             let sub_key: String = r.get(2).map_err(|e| e.to_string())?;
@@ -291,12 +1028,12 @@ fn read_entity_kv_map(
                 .ok_or_else(|| format!("unknown entity_kv namespace '{ns_str}'"))?;
             crate::service_domains::validate_entity_kv_value(ns, &value_json)?;
             Ok((
-                crate::service_domains::EntityKvKey {
+                EntityKvKey {
                     ns,
                     entity_id,
                     sub_key,
                 },
-                crate::service_domains::EntityKvRow {
+                EntityKvRow {
                     value_json,
                     updated_unix: updated_unix_i64.max(0) as u64,
                 },
@@ -320,7 +1057,11 @@ fn read_entity_kv_map(
     }
     drop(rows);
     drop(stmt);
-    if !quarantined_pks.is_empty() && ctx.quarantine_unreadable && ctx.persist_quarantine && conn.is_autocommit() {
+    if !quarantined_pks.is_empty()
+        && ctx.quarantine_unreadable
+        && ctx.persist_quarantine
+        && conn.is_autocommit()
+    {
         for (c0, c1, c2) in quarantined_pks {
             let _ = conn.execute(
                 "DELETE FROM entity_kv WHERE ns IS ?1 AND entity_id IS ?2 AND sub_key IS ?3",
@@ -329,16 +1070,6 @@ fn read_entity_kv_map(
         }
     }
     Ok(out)
-}
-
-fn load_entity_kv_checked(
-    conn: &Connection,
-    snap: &mut WorldStateSnapshot,
-    ctx: &mut super::quarantine::LoadContext,
-) -> Result<(), String> {
-    let loaded = read_entity_kv_map(conn, ctx, false)?;
-    snap.entity_kv = loaded;
-    Ok(())
 }
 
 pub fn sync_entity_kv(
@@ -353,11 +1084,15 @@ pub fn sync_entity_kv(
         return Ok(false);
     }
     let mut changed = false;
-    let mut new_rows = std::collections::BTreeMap::new();
+    let mut new_rows = BTreeMap::new();
     for (k, row) in &snap.entity_kv {
         let rfp = {
             let h = canonical_fp(row);
-            if h == 0 { 1 } else { h }
+            if h == 0 {
+                1
+            } else {
+                h
+            }
         };
         if fp.service_domains.entity_kv_rows.get(k).copied() != Some(rfp) {
             crate::service_domains::validate_entity_kv_value(k.ns, &row.value_json)?;
@@ -394,13 +1129,7 @@ pub fn sync_entity_kv(
 fn load_entity_kv_for_rollback(
     conn: &Connection,
     fp: &TableFingerprints,
-) -> Result<
-    std::collections::BTreeMap<
-        crate::service_domains::EntityKvKey,
-        crate::service_domains::EntityKvRow,
-    >,
-    String,
-> {
+) -> Result<BTreeMap<EntityKvKey, EntityKvRow>, String> {
     let mut ctx = super::quarantine::LoadContext::new(false);
     let out = read_entity_kv_map(conn, &mut ctx, true)?;
     if out.is_empty() && !fp.service_domains.entity_kv_rows.is_empty() {
@@ -408,10 +1137,11 @@ fn load_entity_kv_for_rollback(
     }
     for (k, &expected_row_fp) in &fp.service_domains.entity_kv_rows {
         match out.get(k) {
-            Some(row) if {
-                let h = canonical_fp(row);
-                (if h == 0 { 1 } else { h }) == expected_row_fp
-            } => {}
+            Some(row)
+                if {
+                    let h = canonical_fp(row);
+                    (if h == 0 { 1 } else { h }) == expected_row_fp
+                } => {}
             Some(_) => {
                 return Err(format!(
                     "rollback entity_kv mismatched baseline row ({}:{}:{})",
@@ -433,94 +1163,23 @@ fn load_entity_kv_for_rollback(
     Ok(out)
 }
 
+/// Loads all 17 typed service domains (from `domain_rows` and optional legacy `service_domain_state`)
+/// plus `entity_kv`, committing to `snap` only after all staged queries and parses succeed.
+///
+/// Returns `true` when legacy `service_domain_state` existed and awaits dropping once committed.
 pub fn load_service_domains_checked(
     conn: &Connection,
     snap: &mut WorldStateSnapshot,
     ctx: &mut super::quarantine::LoadContext,
-) -> Result<(), String> {
-    let mut staged = WorldStateSnapshot::default();
-    let mut known_keys = std::collections::HashSet::with_capacity(20);
-    macro_rules! load_one {
-        ($field:ident, $key:expr) => {
-            known_keys.insert($key);
-            load_domain_row_checked(conn, $key, &mut staged.$field, ctx)?;
-        };
-    }
-    for_each_service_domain!(load_one);
-
-    // Validate any extra rows in `service_domain_state` or alias table `service_domain_blobs`.
-    if let Ok(mut stmt) =
-        conn.prepare("SELECT rowid, domain_key, payload_json FROM service_domain_state")
-    {
-        if let Ok(mut rows) = stmt.query([]) {
-            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
-                let rowid = r.get::<_, i64>(0).ok();
-                let key = super::quarantine::row_col_string(r, 1);
-                if known_keys.contains(key.as_str()) {
-                    continue;
-                }
-                let raw_payload = super::quarantine::row_col_string(r, 2);
-                if let Err(err) = r
-                    .get::<_, String>(2)
-                    .map_err(|e| e.to_string())
-                    .and_then(|s| {
-                        serde_json::from_str::<serde_json::Value>(&s).map_err(|e| e.to_string())
-                    })
-                {
-                    ctx.record_bad_row(
-                        "service_domain_state",
-                        "service_domain_state (service_domain_blobs)",
-                        key,
-                        raw_payload,
-                        err,
-                        rowid,
-                    )?;
-                }
-            }
-        }
-    }
-
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT rowid, domain_key, COALESCE(payload_json, domain_json) FROM service_domain_blobs",
-    ) {
-        if let Ok(mut rows) = stmt.query([]) {
-            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
-                let rowid = r.get::<_, i64>(0).ok();
-                let key = super::quarantine::row_col_string(r, 1);
-                let raw_payload = super::quarantine::row_col_string(r, 2);
-                if let Err(err) = r
-                    .get::<_, String>(2)
-                    .map_err(|e| e.to_string())
-                    .and_then(|s| {
-                        serde_json::from_str::<serde_json::Value>(&s).map_err(|e| e.to_string())
-                    })
-                {
-                    ctx.record_bad_row(
-                        "service_domain_blobs",
-                        "service_domain_blobs (service_domain_state)",
-                        key,
-                        raw_payload,
-                        err,
-                        rowid,
-                    )?;
-                }
-            }
-        }
-    }
-
-    load_entity_kv_checked(conn, &mut staged, ctx)?;
-
-    macro_rules! commit_one {
-        ($field:ident, $key:expr) => {
-            snap.$field = staged.$field;
-        };
-    }
-    for_each_service_domain!(commit_one);
-    snap.entity_kv = staged.entity_kv;
-
-    Ok(())
+) -> Result<bool, String> {
+    let (staged, had_legacy) = stage_service_domains_rows(conn, ctx)?;
+    let staged_entity_kv = read_entity_kv_map(conn, ctx, false)?;
+    staged.apply_to(snap);
+    snap.entity_kv = staged_entity_kv;
+    Ok(had_legacy)
 }
 
+/// Convenience loader using an in-memory quarantine context (skips corrupt rows cleanly).
 pub fn load_service_domains(conn: &Connection, snap: &mut WorldStateSnapshot) {
     let _ = load_service_domains_checked(
         conn,
@@ -529,25 +1188,13 @@ pub fn load_service_domains(conn: &Connection, snap: &mut WorldStateSnapshot) {
     );
 }
 
+/// Synchronizes `entity_kv` changes (service domain rows sync incrementally via `domain_rows`).
 pub fn sync_service_domains(
     tx: &Transaction,
     snap: &WorldStateSnapshot,
     fp: &mut TableFingerprints,
 ) -> Result<bool, String> {
-    let mut changed = false;
-    macro_rules! sync_one {
-        ($field:ident, $key:expr) => {
-            changed |= sync_domain_row(
-                tx,
-                $key,
-                &snap.$field,
-                &mut fp.service_domains.$field,
-            )?;
-        };
-    }
-    for_each_service_domain!(sync_one);
-    changed |= sync_entity_kv(tx, snap, fp)?;
-    Ok(changed)
+    sync_entity_kv(tx, snap, fp)
 }
 
 fn rollback_service_domains_inner(
@@ -555,42 +1202,29 @@ fn rollback_service_domains_inner(
     snap: &mut WorldStateSnapshot,
     fp: &TableFingerprints,
 ) -> Result<(), String> {
-    macro_rules! stage_and_commit_all {
-        ($($field:ident : $key:expr,)+) => {
-            $(
-                let $field = if fp_domain(&snap.$field) != fp.service_domains.$field {
-                    Some(load_domain_row_for_rollback(
-                        conn,
-                        $key,
-                        fp.service_domains.$field,
-                    )?)
-                } else {
-                    None
-                };
-            )+
-            let staged_entity_kv = if fp_domain(&snap.entity_kv) != fp.service_domains.entity_kv_fp
-                || snap.entity_kv.len() != fp.service_domains.entity_kv_rows.len()
-            {
-                Some(load_entity_kv_for_rollback(conn, fp)?)
-            } else {
-                None
-            };
-            $(
-                if let Some(val) = $field {
-                    snap.$field = val;
-                }
-            )+
-            if let Some(kv) = staged_entity_kv {
-                snap.entity_kv = kv;
-            }
-        };
+    let has_domain_rows = table_exists(conn, "domain_rows")?;
+    let has_legacy_table = table_exists(conn, "service_domain_state")?;
+    if !has_domain_rows && !has_legacy_table {
+        return Err("rollback service_domains missing domain_rows table".into());
     }
-    for_each_service_domain_batch!(stage_and_commit_all);
+    let staged_entity_kv = if fp_domain(&snap.entity_kv) != fp.service_domains.entity_kv_fp
+        || snap.entity_kv.len() != fp.service_domains.entity_kv_rows.len()
+    {
+        Some(load_entity_kv_for_rollback(conn, fp)?)
+    } else {
+        None
+    };
+    let mut ctx = super::quarantine::LoadContext::new(false);
+    let (staged, _) = stage_service_domains_rows(conn, &mut ctx)?;
+    staged.apply_to(snap);
+    if let Some(kv) = staged_entity_kv {
+        snap.entity_kv = kv;
+    }
     Ok(())
 }
 
-/// Restores dirty typed service domains and `entity_kv` from SQLite into temporaries,
-/// only mutating `snap` after every required query and parse succeeds.
+/// Restores dirty typed service domains (from `domain_rows`) and `entity_kv` from SQLite into
+/// temporaries, mutating `snap` only after every required query and parse succeeds.
 pub fn rollback_service_domains(
     conn: &Connection,
     snap: &mut WorldStateSnapshot,

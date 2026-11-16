@@ -711,13 +711,20 @@ fn service_domains_store_hash_json_all_variants_and_corrupt_load() {
         }),
     );
 
-    let mut fp = TableFingerprints::default();
+    let fp = TableFingerprints::default();
     {
         let tx = conn.transaction().unwrap();
-        assert!(service_domains_store::sync_service_domains(&tx, &snap, &mut fp).unwrap());
+        assert!(domain_rows::sync_service_domains_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
-    assert_ne!(fp.service_domains.cluster_and_runtime, 0);
+    let stored_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM domain_rows WHERE domain = ?1 AND key = 'session_registry/mix'",
+            [domain_rows::DOMAIN_CLUSTER_AND_RUNTIME],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_count, 1);
 
     // Rollback restores mutated cluster_and_runtime
     let expected = snap.cluster_and_runtime.session_registry.clone();
@@ -725,19 +732,18 @@ fn service_domains_store_hash_json_all_variants_and_corrupt_load() {
     service_domains_store::rollback_service_domains(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.cluster_and_runtime.session_registry, expected);
 
-    // Corrupt rows in service_domain_state are gracefully skipped by load_service_domains
+    // Corrupt rows in domain_rows are gracefully skipped by load_service_domains
     conn.execute(
-        "UPDATE service_domain_state SET payload_json = '{corrupt' WHERE domain_key = 'cluster_and_runtime'",
-        [],
+        "UPDATE domain_rows SET value = '{corrupt' WHERE domain = ?1 AND key = 'session_registry/mix'",
+        [domain_rows::DOMAIN_CLUSTER_AND_RUNTIME],
     )
     .unwrap();
     let mut loaded = WorldStateSnapshot::default();
     service_domains_store::load_service_domains(&conn, &mut loaded);
     assert!(loaded.cluster_and_runtime.session_registry.is_empty());
 
-    // Dropping service_domain_state fails sync cleanly
-    conn.execute("DROP TABLE service_domain_state", []).unwrap();
-    let mut empty_fp = TableFingerprints::default();
+    // Dropping domain_rows fails sync_service_domains_rows cleanly
+    conn.execute("DROP TABLE domain_rows", []).unwrap();
     let tx = conn.transaction().unwrap();
-    assert!(service_domains_store::sync_service_domains(&tx, &snap, &mut empty_fp).is_err());
+    assert!(domain_rows::sync_service_domains_rows(&tx, &snap).is_err());
 }

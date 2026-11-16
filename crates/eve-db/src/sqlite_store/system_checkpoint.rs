@@ -760,8 +760,9 @@ pub fn read_legacy_server_runtime_blob(conn: &Connection) -> Result<Option<Strin
     .map_err(|e| format!("read legacy server_runtime_state blob: {e}"))
 }
 
-/// Deletes the retired `server_runtime_state` monolith entry from `service_state_blobs` and
-/// clears `cluster_and_runtime.server_runtime_json` / `sp6_lifecycle.server_runtime_json`
+/// Deletes the retired `server_runtime_state` monolith entry from `service_state_blobs`,
+/// clears `server_runtime_json` from `domain_rows`, and clears legacy
+/// `cluster_and_runtime.server_runtime_json` / `sp6_lifecycle.server_runtime_json`
 /// in `service_domain_state` if present.
 pub fn retire_legacy_server_runtime_blobs(conn: &Connection) -> Result<usize, String> {
     let mut removed = 0usize;
@@ -772,6 +773,17 @@ pub fn retire_legacy_server_runtime_blobs(conn: &Connection) -> Result<usize, St
                 params![LEGACY_SERVER_RUNTIME_STATE_BLOB_KEY],
             )
             .map_err(|e| format!("delete legacy server_runtime_state blob: {e}"))?;
+    }
+    if sqlite_table_exists(conn, "domain_rows")? {
+        removed += conn
+            .execute(
+                "DELETE FROM domain_rows WHERE domain = ?1 AND key = ?2",
+                params![
+                    super::domain_rows::DOMAIN_CLUSTER_AND_RUNTIME,
+                    "server_runtime_json",
+                ],
+            )
+            .map_err(|e| format!("delete domain_rows server_runtime_json: {e}"))?;
     }
     if sqlite_table_exists(conn, "service_domain_state")? {
         for (domain_key, json_field) in [
@@ -1032,6 +1044,25 @@ mod tests {
             .is_some());
         let retired = retire_legacy_server_runtime_blobs(&conn).expect("retire legacy");
         assert_eq!(retired, 2);
+
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS domain_rows (
+                domain TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (domain, key)
+            );",
+        )
+        .expect("create domain_rows");
+        conn.execute(
+            "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'server_runtime_json', '\"{}\"')",
+            params![crate::sqlite_store::domain_rows::DOMAIN_CLUSTER_AND_RUNTIME],
+        )
+        .expect("seed domain_rows server_runtime_json");
+        assert_eq!(
+            retire_legacy_server_runtime_blobs(&conn).expect("retire domain_rows runtime"),
+            1
+        );
         assert!(read_legacy_server_runtime_blob(&conn)
             .expect("legacy blob removed")
             .is_none());

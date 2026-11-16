@@ -104,8 +104,8 @@ fn typed_service_domains_sqlite_roundtrip_and_rollback() {
     tx.commit().expect("commit");
     let count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM service_domain_state WHERE domain_key = 'quasar_commerce'",
-            [],
+            "SELECT COUNT(*) FROM domain_rows WHERE domain = ?1",
+            [crate::sqlite_store::domain_rows::DOMAIN_QUASAR_COMMERCE],
             |r| r.get(0),
         )
         .expect("count");
@@ -401,7 +401,7 @@ fn rollback_domain_row_expected_fp_zero_and_missing_table_branches() {
     load_service_domains(&mem, &mut s);
     let mut fake_fp = TableFingerprints::default();
     fake_fp.service_domains = ServiceDomainsFingerprints {
-        node_graph_state: 123,
+        entity_kv_fp: 123,
         ..Default::default()
     };
     assert!(rollback_service_domains(&mem, &mut s, &fake_fp).is_err());
@@ -885,16 +885,19 @@ fn rollback_service_domains_and_entity_kv_fail_closed_preserving_live_maps() {
         .set_with_unix(90_000_002, "", &"tok-uncommitted", 1_700_000_002)
         .expect("set dirty kv");
 
-    // 1. Corrupt `fleet_and_social_ops` JSON while `node_graph_state` is valid in SQLite:
+    // 1. Corrupt `fleet_and_social_ops` JSON in `domain_rows` while `node_graph_state` is valid:
     // rollback must fail closed without partially restoring `node_graph_state` or overwriting `entity_kv`.
     conn.execute(
-        "UPDATE service_domain_state SET payload_json = '{corrupt' WHERE domain_key = 'fleet_and_social_ops'",
-        [],
+        "UPDATE domain_rows SET value = '{corrupt' WHERE domain = ?1 AND key = 'contract_deposits/1'",
+        [crate::sqlite_store::domain_rows::DOMAIN_FLEET_AND_SOCIAL_OPS],
     )
     .expect("corrupt domain row");
     let failures_before = crate::persist_failures_total();
     let err = rollback_service_domains(&conn, &mut dirty, &fp).unwrap_err();
-    assert!(err.contains("fleet_and_social_ops"), "unexpected err: {err}");
+    assert!(
+        err.contains(crate::sqlite_store::domain_rows::DOMAIN_FLEET_AND_SOCIAL_OPS),
+        "unexpected err: {err}"
+    );
     assert!(crate::persist_failures_total() >= failures_before + 1);
     assert!(dirty.node_graph_state.certificates.is_empty());
     assert_eq!(dirty.fleet_and_social_ops.contract_deposits.get(&2), Some(&999));
@@ -903,19 +906,17 @@ fn rollback_service_domains_and_entity_kv_fail_closed_preserving_live_maps() {
         Some("tok-uncommitted")
     );
 
-    // 2. Delete a committed non-empty `service_domain_state` row: must fail closed instead of
-    // silently treating missing row as Default::default().
-    conn.execute(
-        "DELETE FROM service_domain_state WHERE domain_key = 'fleet_and_social_ops'",
-        [],
-    )
-    .expect("delete domain row");
-    let err_missing = rollback_service_domains(&conn, &mut dirty, &fp).unwrap_err();
-    assert!(err_missing.contains("fleet_and_social_ops"), "unexpected err: {err_missing}");
+    // 2. Delete a committed non-empty `entity_kv` row while `domain_rows` is valid: must fail closed
+    // without touching dirty service domains or live `entity_kv`.
+    replace_sqlite_from_snapshot(&mut conn, &base).expect("reseed");
+    conn.execute("DELETE FROM entity_kv", [])
+        .expect("delete committed entity_kv row");
+    let err_missing_kv = rollback_service_domains(&conn, &mut dirty, &fp).unwrap_err();
+    assert!(err_missing_kv.contains("entity_kv"), "unexpected err: {err_missing_kv}");
     assert!(dirty.node_graph_state.certificates.is_empty());
     assert_eq!(dirty.fleet_and_social_ops.contract_deposits.get(&2), Some(&999));
 
-    // 3. Re-seed valid `service_domain_state` rows, then inject a corrupt `entity_kv` row:
+    // 3. Re-seed valid `domain_rows` + `entity_kv`, then inject a corrupt `entity_kv` row:
     // rollback must fail closed without clearing `dirty.entity_kv` or touching dirty domains.
     replace_sqlite_from_snapshot(&mut conn, &base).expect("reseed");
     conn.execute(
@@ -931,6 +932,255 @@ fn rollback_service_domains_and_entity_kv_fail_closed_preserving_live_maps() {
         dirty.kv(Ns::XmppAuthToken).get::<String>(90_000_002, "").as_deref(),
         Some("tok-uncommitted")
     );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn legacy_service_domain_state_migrates_to_domain_rows_and_drops_legacy_table() {
+    let path = temp_db_path("legacy_table_drop");
+    let conn = Connection::open(&path).expect("open");
+    apply_migrations(&conn).expect("migrate");
+
+    // Simulate a pre-#916 SQLite database carrying retired `service_domain_state` rows.
+    conn.execute_batch(crate::sqlite_store::service_domains_store::LEGACY_SERVICE_DOMAIN_STATE_SQL)
+        .expect("create legacy table");
+
+    let mut legacy_mining = crate::service_domains::MiningAndEssRuntimeStore::default();
+    legacy_mining.metenox_last_tick_unix = 1_700_000_777;
+    legacy_mining.mining_ledger_waste.insert(4, 1_250);
+
+    let mut legacy_fleet = crate::service_domains::FleetAndSocialOpsStore::default();
+    legacy_fleet.contract_deposits.insert(101, 50_000);
+    legacy_fleet.mission_taxed_journal.insert(8801);
+
+    let mut legacy_quasar = crate::service_domains::QuasarCommerceStore::default();
+    legacy_quasar.plex_invoices.push("inv-legacy".into());
+    legacy_quasar.lp_asset_ops_completed.insert("op-1".into());
+
+    for (key, payload) in [
+        (
+            "mining_and_ess_state",
+            serde_json::to_string(&legacy_mining).expect("json mining"),
+        ),
+        (
+            "fleet_and_social_ops",
+            serde_json::to_string(&legacy_fleet).expect("json fleet"),
+        ),
+        (
+            "quasar_commerce",
+            serde_json::to_string(&legacy_quasar).expect("json quasar"),
+        ),
+    ] {
+        conn.execute(
+            "INSERT INTO service_domain_state (domain_key, payload_json) VALUES (?1, ?2)",
+            rusqlite::params![key, payload],
+        )
+        .expect("seed legacy row");
+    }
+
+    let (migrated, _fp) = load_snapshot_from_sqlite(&conn).expect("load + migrate");
+    assert_eq!(migrated.mining_and_ess_state, legacy_mining);
+    assert_eq!(migrated.fleet_and_social_ops, legacy_fleet);
+    assert_eq!(migrated.quasar_commerce, legacy_quasar);
+
+    // Retired `service_domain_state` must be dropped while `entity_kv` stays intact and
+    // decomposed entries live in `domain_rows`.
+    let legacy_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'service_domain_state'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("check dropped table");
+    assert_eq!(legacy_exists, 0);
+
+    let entity_kv_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'entity_kv'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("check entity_kv");
+    assert_eq!(entity_kv_exists, 1);
+
+    let migrated_waste: String = conn
+        .query_row(
+            "SELECT value FROM domain_rows WHERE domain = ?1 AND key = 'mining_ledger_waste/4'",
+            [crate::sqlite_store::domain_rows::DOMAIN_MINING_AND_ESS_STATE],
+            |r| r.get(0),
+        )
+        .expect("migrated waste row");
+    assert_eq!(migrated_waste, "1250");
+
+    let (reloaded, _) = load_snapshot_from_sqlite(&conn).expect("reload post-migration");
+    assert_eq!(reloaded.mining_and_ess_state, legacy_mining);
+    assert_eq!(reloaded.fleet_and_social_ops, legacy_fleet);
+    assert_eq!(reloaded.quasar_commerce, legacy_quasar);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn service_domains_tx_writes_single_row_with_zero_cold_clones_and_rejects_non_finite() {
+    use crate::sqlite_store::domain_rows::{
+        apply_domain_row_changes, validate_domain_row_changes, DOMAIN_FLEET_AND_SOCIAL_OPS,
+        DOMAIN_PVE_SPECIAL_SITES,
+    };
+    use crate::tx_engine::{ChangeSet, TxError, TxSqlExecutor};
+
+    let path = temp_db_path("tx_row_granularity");
+    let _ = std::fs::remove_file(&path);
+    let repo = crate::persistence::WorldRepository::open_sqlite(&path).expect("open_sqlite");
+
+    let seed_res: Result<(), TxError> = repo.tx("seed_service_domains", |wtx| {
+        wtx.snap.pve_special_sites.initialized = true;
+        wtx.snap.pve_special_sites.incursions.insert(
+            20_000_001,
+            IncursionTaleRecord {
+                tale_id: 1,
+                constellation_id: 20_000_001,
+                constellation_name: "Kimotoro".into(),
+                staging_solar_system_id: 30_000_142,
+                vanguard_solar_system_ids: vec![30_000_142],
+                assault_solar_system_ids: vec![],
+                hq_solar_system_id: 30_000_144,
+                influence: 0.5,
+                state: "active".into(),
+                mothership_spawned: false,
+                mothership_defeated: false,
+                sites: vec![],
+                lockout_until_filetime: None,
+                tale_stop_published: false,
+            },
+        );
+        wtx.snap.fleet_and_social_ops.contract_deposits.insert(10, 1_000);
+        wtx.snap.fleet_and_social_ops.contract_deposits.insert(20, 2_000);
+        Ok(())
+    });
+    seed_res.expect("seed tx");
+
+    // Mutating 1 entry inside `fleet_and_social_ops` executes with 0 cold fingerprint clones.
+    crate::persistence::reset_thread_cold_fp_clones_for_test();
+    let update_res: Result<(), TxError> = repo.tx("update_one_deposit", |wtx| {
+        wtx.snap.fleet_and_social_ops.contract_deposits.insert(10, 9_500);
+        Ok(())
+    });
+    update_res.expect("update tx");
+    assert_eq!(
+        crate::persistence::thread_cold_fp_clones_for_test(),
+        0,
+        "migrated service_domains mutation must trigger 0 cold fingerprint clones"
+    );
+
+    // Direct `ChangeSet::diff` + `apply_domain_row_changes` mutates strictly 1 SQLite row.
+    let before_snap = repo.with_snapshot(Clone::clone);
+    let mut after_snap = before_snap.clone();
+    after_snap.fleet_and_social_ops.contract_deposits.insert(20, 7_777);
+    let changes = ChangeSet::diff(2, &before_snap, &after_snap);
+    assert_eq!(changes.domain_rows.len(), 1);
+    assert!(!changes.cold_domains.service_domains);
+
+    let mut mem_conn = Connection::open_in_memory().expect("open mem sqlite");
+    apply_migrations(&mem_conn).expect("migrate mem");
+    replace_sqlite_from_snapshot(&mut mem_conn, &before_snap).expect("seed mem");
+    let before_changes = mem_conn.total_changes();
+    {
+        let sql_tx = mem_conn.transaction().expect("begin tx");
+        let mut exec = TxSqlExecutor::new(&sql_tx, crate::tx_engine::TxFaultPlan::None);
+        apply_domain_row_changes(&mut exec, &changes.domain_rows).expect("apply 1 row");
+        sql_tx.commit().expect("commit 1 row");
+    }
+    assert_eq!(
+        mem_conn.total_changes() - before_changes,
+        1,
+        "mutating 1 service domain map entry must write strictly 1 SQLite row"
+    );
+    let row_val: String = mem_conn
+        .query_row(
+            "SELECT value FROM domain_rows WHERE domain = ?1 AND key = 'contract_deposits/20'",
+            [DOMAIN_FLEET_AND_SOCIAL_OPS],
+            |r| r.get(0),
+        )
+        .expect("query updated row");
+    assert_eq!(row_val, "7777");
+
+    // Non-finite float (NaN / Inf) inside a service domain fails tx naming domain and key.
+    for bad_influence in [f64::NAN, f64::INFINITY] {
+        let mut nan_after = before_snap.clone();
+        nan_after
+            .pve_special_sites
+            .incursions
+            .get_mut(&20_000_001)
+            .unwrap()
+            .influence = bad_influence;
+        let nan_changes = ChangeSet::diff(3, &before_snap, &nan_after);
+        let check_err = validate_domain_row_changes(&nan_changes.domain_rows, 1024 * 1024)
+            .expect_err("non-finite must fail validation");
+        assert!(
+            matches!(check_err, TxError::NonFinite { .. }),
+            "expected NonFinite, got: {check_err}"
+        );
+        let msg = check_err.to_string();
+        assert!(msg.contains(DOMAIN_PVE_SPECIAL_SITES), "{msg}");
+        assert!(msg.contains("incursions/20000001"), "{msg}");
+
+        let tx_err: Result<(), TxError> = repo.tx("reject_bad_float", |wtx| {
+            wtx.snap
+                .pve_special_sites
+                .incursions
+                .get_mut(&20_000_001)
+                .unwrap()
+                .influence = bad_influence;
+            Ok(())
+        });
+        let err_msg = tx_err.expect_err("repo.tx must fail on NaN/Inf").to_string();
+        assert!(err_msg.contains(DOMAIN_PVE_SPECIAL_SITES), "{err_msg}");
+        assert!(err_msg.contains("incursions/20000001"), "{err_msg}");
+    }
+    assert_eq!(
+        repo.with_snapshot(|s| s.pve_special_sites.incursions[&20_000_001].influence),
+        0.5
+    );
+
+    drop(repo);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn load_service_domains_checked_fails_closed_without_mutating_snapshot() {
+    use crate::sqlite_store::domain_rows::{
+        DOMAIN_FLEET_AND_SOCIAL_OPS, DOMAIN_PVE_SPECIAL_SITES,
+    };
+    use crate::sqlite_store::service_domains_store::load_service_domains_checked;
+    use crate::sqlite_store::LoadContext;
+
+    let path = temp_db_path("fail_closed_load");
+    let conn = Connection::open(&path).expect("open");
+    apply_migrations(&conn).expect("migrate");
+
+    conn.execute(
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'sim_clock_sec', '999')",
+        [DOMAIN_PVE_SPECIAL_SITES],
+    )
+    .expect("seed valid pve row");
+    conn.execute(
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'contract_deposits/1', '{corrupt')",
+        [DOMAIN_FLEET_AND_SOCIAL_OPS],
+    )
+    .expect("seed corrupt fleet row");
+
+    let mut snap = WorldStateSnapshot::default();
+    snap.pve_special_sites.sim_clock_sec = 42;
+    snap.node_graph_state.client_node_graph_seq = 77;
+    snap.fleet_and_social_ops.contract_deposits.insert(1, 500);
+
+    let mut ctx = LoadContext::new(false);
+    let err = load_service_domains_checked(&conn, &mut snap, &mut ctx).unwrap_err();
+    assert!(err.contains(DOMAIN_FLEET_AND_SOCIAL_OPS), "unexpected err: {err}");
+    assert_eq!(snap.pve_special_sites.sim_clock_sec, 42);
+    assert_eq!(snap.node_graph_state.client_node_graph_seq, 77);
+    assert_eq!(snap.fleet_and_social_ops.contract_deposits.get(&1), Some(&500));
 
     let _ = std::fs::remove_file(&path);
 }

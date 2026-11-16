@@ -172,8 +172,14 @@ impl ChangeSet {
     /// Computes a `ChangeSet` between `before` and `after` snapshots (`O(k log N)` for `CowMap`s).
     pub fn diff(seq: u64, before: &WorldStateSnapshot, after: &WorldStateSnapshot) -> Self {
         use crate::sqlite_store::domain_rows::{
-            Persist, DOMAIN_ACCOUNT_PLEX_VAULT, DOMAIN_CHAR_LP_LOGS, DOMAIN_CORP_LP_BALANCES,
-            DOMAIN_MARKET_TRANSACTIONS, DOMAIN_OWNER_NOTES, DOMAIN_WALLET_JOURNAL_META,
+            Persist, DOMAIN_ABYSSAL_STATE, DOMAIN_ACCOUNT_PLEX_VAULT, DOMAIN_CHAR_LP_LOGS,
+            DOMAIN_CLUSTER_AND_RUNTIME, DOMAIN_CORP_LP_BALANCES, DOMAIN_CRAB_BEACONS,
+            DOMAIN_DEPLOYABLE_STATE, DOMAIN_DUNGEON_EDITOR, DOMAIN_DUNGEON_RUNTIME,
+            DOMAIN_FLEET_AND_SOCIAL_OPS, DOMAIN_FOB_OBSERVATORY_STATE,
+            DOMAIN_INSURGENCY_COMPLEX_OPS, DOMAIN_MARKET_TRANSACTIONS, DOMAIN_MINING_AND_ESS_STATE,
+            DOMAIN_NODE_GRAPH_STATE, DOMAIN_OWNER_NOTES, DOMAIN_PVE_SPECIAL_SITES,
+            DOMAIN_PVP_FILAMENT_STATE, DOMAIN_QUASAR_COMMERCE, DOMAIN_SEASONS_AND_CAMPAIGNS,
+            DOMAIN_SUPERWEAPON_RUNTIME, DOMAIN_TOURNEY_STATE, DOMAIN_WALLET_JOURNAL_META,
         };
 
         let meta_changed = before.next_entity_id != after.next_entity_id
@@ -187,35 +193,37 @@ impl ChangeSet {
         let market_orders = diff_cow_map(&before.market_orders, &after.market_orders);
 
         let mut domain_rows = Vec::new();
-        before.wallet_journal_meta.collect_diff_ops(
-            &after.wallet_journal_meta,
-            DOMAIN_WALLET_JOURNAL_META,
-            &mut domain_rows,
-        );
-        before.market_transactions.collect_diff_ops(
-            &after.market_transactions,
-            DOMAIN_MARKET_TRANSACTIONS,
-            &mut domain_rows,
-        );
-        before.account_plex_vault.collect_diff_ops(
-            &after.account_plex_vault,
-            DOMAIN_ACCOUNT_PLEX_VAULT,
-            &mut domain_rows,
-        );
-        before.owner_notes.collect_diff_ops(
-            &after.owner_notes,
-            DOMAIN_OWNER_NOTES,
-            &mut domain_rows,
-        );
-        before.corp_lp_balances.collect_diff_ops(
-            &after.corp_lp_balances,
-            DOMAIN_CORP_LP_BALANCES,
-            &mut domain_rows,
-        );
-        before.char_lp_logs.collect_diff_ops(
-            &after.char_lp_logs,
-            DOMAIN_CHAR_LP_LOGS,
-            &mut domain_rows,
+        macro_rules! push_domain_diff {
+            ($($field:ident => $domain:ident),+ $(,)?) => {
+                $(
+                    before.$field.collect_diff_ops(&after.$field, $domain, &mut domain_rows);
+                )+
+            };
+        }
+        push_domain_diff!(
+            wallet_journal_meta => DOMAIN_WALLET_JOURNAL_META,
+            market_transactions => DOMAIN_MARKET_TRANSACTIONS,
+            account_plex_vault => DOMAIN_ACCOUNT_PLEX_VAULT,
+            owner_notes => DOMAIN_OWNER_NOTES,
+            corp_lp_balances => DOMAIN_CORP_LP_BALANCES,
+            char_lp_logs => DOMAIN_CHAR_LP_LOGS,
+            pve_special_sites => DOMAIN_PVE_SPECIAL_SITES,
+            crab_beacons => DOMAIN_CRAB_BEACONS,
+            abyssal_state => DOMAIN_ABYSSAL_STATE,
+            dungeon_runtime => DOMAIN_DUNGEON_RUNTIME,
+            dungeon_editor => DOMAIN_DUNGEON_EDITOR,
+            fob_observatory_state => DOMAIN_FOB_OBSERVATORY_STATE,
+            mining_and_ess_state => DOMAIN_MINING_AND_ESS_STATE,
+            pvp_filament_state => DOMAIN_PVP_FILAMENT_STATE,
+            tourney_state => DOMAIN_TOURNEY_STATE,
+            deployable_state => DOMAIN_DEPLOYABLE_STATE,
+            superweapon_runtime => DOMAIN_SUPERWEAPON_RUNTIME,
+            insurgency_complex_ops => DOMAIN_INSURGENCY_COMPLEX_OPS,
+            node_graph_state => DOMAIN_NODE_GRAPH_STATE,
+            seasons_and_campaigns => DOMAIN_SEASONS_AND_CAMPAIGNS,
+            quasar_commerce => DOMAIN_QUASAR_COMMERCE,
+            fleet_and_social_ops => DOMAIN_FLEET_AND_SOCIAL_OPS,
+            cluster_and_runtime => DOMAIN_CLUSTER_AND_RUNTIME,
         );
 
         let cold_domains = compute_cold_domain_diff(before, after);
@@ -428,24 +436,7 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
         || before.insurance_contracts != after.insurance_contracts
         || before.mining_ledger != after.mining_ledger;
 
-    let service_domains = before.pve_special_sites != after.pve_special_sites
-        || before.crab_beacons != after.crab_beacons
-        || before.abyssal_state != after.abyssal_state
-        || before.dungeon_runtime != after.dungeon_runtime
-        || before.dungeon_editor != after.dungeon_editor
-        || before.fob_observatory_state != after.fob_observatory_state
-        || before.mining_and_ess_state != after.mining_and_ess_state
-        || before.pvp_filament_state != after.pvp_filament_state
-        || before.tourney_state != after.tourney_state
-        || before.deployable_state != after.deployable_state
-        || before.superweapon_runtime != after.superweapon_runtime
-        || before.insurgency_complex_ops != after.insurgency_complex_ops
-        || before.node_graph_state != after.node_graph_state
-        || before.seasons_and_campaigns != after.seasons_and_campaigns
-        || before.quasar_commerce != after.quasar_commerce
-        || before.fleet_and_social_ops != after.fleet_and_social_ops
-        || before.cluster_and_runtime != after.cluster_and_runtime
-        || before.entity_kv != after.entity_kv;
+    let service_domains = before.entity_kv != after.entity_kv;
 
     ColdDomainDiff {
         part1_cold,
