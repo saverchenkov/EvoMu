@@ -10,8 +10,8 @@
 #![forbid(unsafe_code)]
 
 use crate::formulas::{
-    compute_invention_probability, compute_manufacturing_material_qty,
-    compute_manufacturing_time_seconds,
+    compute_invention_probability, try_compute_manufacturing_material_qty,
+    try_compute_manufacturing_time_seconds,
 };
 use crate::router::ServerContext;
 use crate::services::industry_pi::{
@@ -33,6 +33,87 @@ use std::collections::HashMap;
 
 #[path = "industry_jobs_lifecycle.rs"]
 mod industry_jobs_lifecycle;
+
+/// Maximum multi-run manufacturing/reaction job duration enforced by V24 `IndustryWnd` (30 days).
+pub(super) const MAX_PRODUCTION_JOB_DURATION_SEC: u64 = 30 * 86_400;
+
+/// Returns per-run product output quantity for manufacturing (`1`) or reactions (`9`), >= 1.
+pub(super) fn blueprint_activity_product_qty_per_run(
+    bp: &eve_sde::BlueprintInfo,
+    activity_id: u8,
+) -> u64 {
+    let (key, alt_key) = if activity_id == 9 {
+        ("reaction", "9")
+    } else {
+        ("manufacturing", "1")
+    };
+    bp.activities
+        .get(key)
+        .or_else(|| bp.activities.get(alt_key))
+        .and_then(|a| a.products.first())
+        .map(|p| p.quantity.max(1))
+        .unwrap_or_else(|| u64::from(bp.product_quantity.max(1)))
+}
+
+/// Computes checked `i64` material consumption for manufacturing/reactions, rejecting overflow or non-positive totals.
+fn checked_industry_material_qty(
+    runs: u32,
+    base_qty: u64,
+    me_level: u8,
+    eff_mat_bonus_pct: f64,
+    rig_mat_bonus: f64,
+    type_id: TypeId,
+) -> Result<i64, BridgeRpcError> {
+    let req_u64 = try_compute_manufacturing_material_qty(
+        runs,
+        base_qty,
+        me_level,
+        eff_mat_bonus_pct,
+        rig_mat_bonus,
+    )
+    .ok_or_else(|| BridgeRpcError {
+        code: "InvalidIndustryJobParameters".into(),
+        message: format!("Material requirement overflow for type {type_id} over {runs} runs"),
+        client_error: None,
+    })?;
+    if req_u64 == 0 {
+        return Err(BridgeRpcError {
+            code: "InvalidIndustryJobParameters".into(),
+            message: format!(
+                "Material requirement for type {type_id} over {runs} runs must be positive"
+            ),
+            client_error: None,
+        });
+    }
+    i64::try_from(req_u64).map_err(|_| BridgeRpcError {
+        code: "InvalidIndustryJobParameters".into(),
+        message: format!(
+            "Material requirement {req_u64} for type {type_id} exceeds representable bounds"
+        ),
+        client_error: None,
+    })
+}
+
+/// Validates checked `i64` production output quantity for manufacturing (`1`) or reactions (`9`).
+pub(super) fn checked_production_output_qty(
+    bp: &eve_sde::BlueprintInfo,
+    activity_id: u8,
+    runs: u32,
+) -> Result<i64, BridgeRpcError> {
+    let per_run = blueprint_activity_product_qty_per_run(bp, activity_id);
+    u64::from(runs)
+        .checked_mul(per_run)
+        .and_then(|total| i64::try_from(total).ok())
+        .filter(|&total| total > 0)
+        .ok_or_else(|| BridgeRpcError {
+            code: "InvalidIndustryJobParameters".into(),
+            message: format!(
+                "Output product quantity overflow for blueprint {} over {runs} runs",
+                bp.blueprint_type_id
+            ),
+            client_error: None,
+        })
+}
 
 pub fn handle_industry_jobs(
     ctx: &ServerContext,
@@ -186,7 +267,13 @@ pub fn handle_industry_jobs(
                     client_error: None,
                 }));
             }
-            let (runs, runs_i32) = (runs_raw as u32, runs_raw as i32);
+            let (Ok(runs), Ok(runs_i32)) = (u32::try_from(runs_raw), i32::try_from(runs_raw)) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidIndustryJobParameters".into(),
+                    message: "Runs must fit within representable bounds".into(),
+                    client_error: None,
+                }));
+            };
 
             let Some(bp) = ctx.sde.blueprints.get(&bp_type_id) else {
                 return Some(Err(BridgeRpcError {
@@ -509,7 +596,7 @@ pub fn handle_industry_jobs(
                                     now_unix,
                                 )
                             };
-                            (true, div_id, acc_key as i32, w_ceo, w_roles)
+                            (true, div_id, i32::try_from(acc_key).unwrap_or(1000), w_ceo, w_roles)
                         } else {
                             return Err(BridgeRpcError {
                                 code: "OwnerAccessDenied".into(),
@@ -886,7 +973,7 @@ pub fn handle_industry_jobs(
                         .get("invention")
                         .or_else(|| bp.activities.get("8"))
                         .and_then(|a| a.products.first())
-                        .map(|p| (p.type_id, (p.quantity as i32).max(1)))
+                        .map(|p| (p.type_id, i32::try_from(p.quantity.max(1)).unwrap_or(i32::MAX)))
                         .unwrap_or((11372, 1))
                 } else if activity_id == 9 {
                     let r_prod = bp
@@ -901,7 +988,7 @@ pub fn handle_industry_jobs(
                     (bp.product_type_id, 1)
                 };
 
-                let invented_runs = (base_inv_runs + dec_runs_mod).max(1);
+                let invented_runs = base_inv_runs.saturating_add(dec_runs_mod).max(1);
                 let invented_me = (2.0 + dec_me_mod).clamp(0.0, 10.0);
                 let invented_te = (4.0 + dec_te_mod).clamp(0.0, 20.0);
 
@@ -927,14 +1014,21 @@ pub fn handle_industry_jobs(
                     (1.0 - 0.05 * f64::from(skill_lvl(3402).min(5))) * adv_ind_mult;
 
                 let duration_sec = match activity_id {
-                    1 => compute_manufacturing_time_seconds(
+                    1 => try_compute_manufacturing_time_seconds(
                         runs,
                         bp.manufacturing_time_sec,
                         te_level,
                         industry_lvl,
                         adv_industry_lvl,
                         eff_time_bonus_pct,
-                    ),
+                    )
+                    .ok_or_else(|| BridgeRpcError {
+                        code: "InvalidIndustryJobParameters".into(),
+                        message: format!(
+                            "Industry job duration overflow for blueprint {bp_type_id} over {runs} runs"
+                        ),
+                        client_error: None,
+                    })?,
                     3 | 4 => {
                         const LVL_SECS: [u64; 10] = [105, 250, 595, 1_414, 3_360, 8_000, 19_000, 45_255, 107_700, 256_000];
                         let (cur_lvl, base_sec, skill_mult) = if activity_id == 4 {
@@ -950,7 +1044,7 @@ pub fn handle_industry_jobs(
                         .max(1.0) as u64)
                         .saturating_mul(u64::from(total_copy_runs)),
                     8 => (((bp.invention_time_sec.max(1) as f64) * eff_time_mod).round().max(1.0) as u64)
-                        .saturating_mul(runs as u64),
+                        .saturating_mul(u64::from(runs)),
                     9 => {
                         let base_react_sec = bp
                             .activities
@@ -959,14 +1053,125 @@ pub fn handle_industry_jobs(
                             .map(|a| a.time)
                             .unwrap_or(10_800)
                             .max(1);
-                        let react_skill_factor = (1.0 - 0.04 * (reactions_lvl.min(5) as f64)).max(0.20);
-                        (((base_react_sec as f64) * react_skill_factor * eff_time_mod).round().max(1.0) as u64)
-                            .saturating_mul(runs as u64)
+                        let react_skill_factor = (1.0 - 0.04 * f64::from(reactions_lvl.min(5))).max(0.20);
+                        let per_run_raw = (base_react_sec as f64) * react_skill_factor * eff_time_mod;
+                        if !per_run_raw.is_finite() || per_run_raw < 0.0 {
+                            return Err(BridgeRpcError {
+                                code: "InvalidIndustryJobParameters".into(),
+                                message: format!("Invalid reaction duration for blueprint {bp_type_id}"),
+                                client_error: None,
+                            });
+                        }
+                        (per_run_raw.round().max(1.0) as u64)
+                            .checked_mul(u64::from(runs))
+                            .ok_or_else(|| BridgeRpcError {
+                                code: "InvalidIndustryJobParameters".into(),
+                                message: format!(
+                                    "Reaction job duration overflow for blueprint {bp_type_id} over {runs} runs"
+                                ),
+                                client_error: None,
+                            })?
                     }
                     _ => 600,
                 };
-                let trit_req =
-                    compute_manufacturing_material_qty(runs, 32_000, me_level, eff_mat_bonus_pct, rig_mat_bonus);
+                // Enforce V24 `IndustryWnd` 30-day cap on multi-run production/reaction jobs while
+                // permitting single-run supercapital/capital jobs whose 1-run base time exceeds 30 days.
+                if matches!(activity_id, 1 | 9)
+                    && runs > 1
+                    && duration_sec > MAX_PRODUCTION_JOB_DURATION_SEC
+                {
+                    return Err(BridgeRpcError {
+                        code: "InvalidIndustryJobParameters".into(),
+                        message: format!(
+                            "Industry job duration {duration_sec}s for {runs} runs exceeds 30-day limit ({MAX_PRODUCTION_JOB_DURATION_SEC}s)"
+                        ),
+                        client_error: None,
+                    });
+                }
+                if matches!(activity_id, 1 | 9) {
+                    checked_production_output_qty(bp, activity_id, runs)?;
+                }
+                let checked_mfg_mats: Vec<(TypeId, i64)> = if activity_id == 1 {
+                    bp.materials
+                        .iter()
+                        .map(|mat| {
+                            checked_industry_material_qty(
+                                runs,
+                                mat.quantity,
+                                me_level,
+                                eff_mat_bonus_pct,
+                                rig_mat_bonus,
+                                mat.type_id,
+                            )
+                            .map(|q| (mat.type_id, q))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    Vec::new()
+                };
+                let checked_inv_mats: Vec<(TypeId, i64)> = if activity_id == 8 {
+                    bp.activities
+                        .get("invention")
+                        .or_else(|| bp.activities.get("8"))
+                        .map(|a| {
+                            a.materials
+                                .iter()
+                                .map(|m| {
+                                    m.quantity
+                                        .max(1)
+                                        .checked_mul(u64::from(runs))
+                                        .and_then(|v| i64::try_from(v).ok())
+                                        .ok_or_else(|| BridgeRpcError {
+                                            code: "InvalidIndustryJobParameters".into(),
+                                            message: format!(
+                                                "Invention material overflow for type {} over {runs} runs",
+                                                m.type_id
+                                            ),
+                                            client_error: None,
+                                        })
+                                        .map(|q| (m.type_id, q))
+                                })
+                                .collect::<Result<Vec<_>, _>>()
+                        })
+                        .transpose()?
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let checked_react_mats: Vec<(TypeId, i64)> = if activity_id == 9 {
+                    bp.activities
+                        .get("reaction")
+                        .or_else(|| bp.activities.get("9"))
+                        .map(|a| {
+                            a.materials
+                                .iter()
+                                .map(|m| {
+                                    checked_industry_material_qty(
+                                        runs,
+                                        m.quantity,
+                                        0,
+                                        eff_mat_bonus_pct,
+                                        rig_mat_bonus,
+                                        m.type_id,
+                                    )
+                                    .map(|q| (m.type_id, q))
+                                })
+                                .collect::<Result<Vec<_>, _>>()
+                        })
+                        .transpose()?
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let trit_req = try_compute_manufacturing_material_qty(
+                    runs,
+                    32_000,
+                    me_level,
+                    eff_mat_bonus_pct,
+                    rig_mat_bonus,
+                )
+                .and_then(|v| i64::try_from(v).ok())
+                .unwrap_or(i64::MAX);
                 let inv_prob = compute_invention_probability(
                     bp.invention_base_probability,
                     sci1_lvl,
@@ -1135,17 +1340,26 @@ pub fn handle_industry_jobs(
                         client_error: None,
                     });
                 }
-                let mut consumed_materials: Vec<(TypeId, i32)> = Vec::new();
-                let mut consume_material = |snap: &mut eve_db::WorldStateSnapshot, mat_tid: TypeId, req_qty: i32, err_code: &str| -> Result<(), BridgeRpcError> {
-                    if req_qty <= 0 { return Ok(()); }
+                let mut consumed_materials: Vec<(TypeId, i64)> = Vec::new();
+                let mut consume_material = |snap: &mut eve_db::WorldStateSnapshot, mat_tid: TypeId, req_qty: i64, err_code: &str| -> Result<(), BridgeRpcError> {
+                    if req_qty <= 0 {
+                        return Err(BridgeRpcError {
+                            code: "InvalidIndustryJobParameters".into(),
+                            message: format!("Material requirement for type {mat_tid} must be positive (got {req_qty})"),
+                            client_error: None,
+                        });
+                    }
                     let mut matching_stacks: Vec<(bool, i64, i32)> = snap.items.values().filter(|i| {
                         let loc_ok = input_container_id.map_or(i.location_id == station_id || i.location_id == bp_rec.location_id, |cid| i.location_id == cid);
                         let flag_ok = explicit_input_flag.map_or(true, |ef| input_is_non_office_container || i.flag == ef);
                         loc_ok && flag_ok && can_use_industry_source_item(snap, i) && i.type_id == mat_tid && i.quantity > 0 && !i.singleton && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
                     }).map(|i| (i.owner_id != job_owner_id || i.flag != effective_input_flag, i.item_id, i.quantity)).collect();
                     matching_stacks.sort_by_key(|(is_fallback, id, _)| (*is_fallback, *id));
-                    let total_avail: i64 = matching_stacks.iter().map(|(_, _, q)| i64::from(*q)).sum();
-                    if total_avail < i64::from(req_qty) {
+                    let total_avail: i64 = matching_stacks
+                        .iter()
+                        .try_fold(0_i64, |acc, &(_, _, q)| acc.checked_add(i64::from(q)))
+                        .unwrap_or(i64::MAX);
+                    if total_avail < req_qty {
                         return Err(BridgeRpcError { code: err_code.into(), message: format!("Missing {req_qty}x material type {mat_tid} at {station_id}"), client_error: None });
                     }
                     let mut rem = req_qty;
@@ -1156,7 +1370,15 @@ pub fn handle_industry_jobs(
                         let Some((m_owner, m_avail)) = snap.items.get(&mid).map(|i| (i.owner_id, i.quantity)) else {
                             continue;
                         };
-                        let take = m_avail.min(rem);
+                        let take_i64 = i64::from(m_avail).min(rem);
+                        let take = i32::try_from(take_i64).map_err(|_| BridgeRpcError {
+                            code: "InvalidIndustryJobParameters".into(),
+                            message: format!("Material stack take {take_i64} exceeds stack bounds for type {mat_tid}"),
+                            client_error: None,
+                        })?;
+                        if take <= 0 {
+                            continue;
+                        }
                         let mut mat_opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
                         mat_opts.expected_owner_id = m_owner;
                         // Corp hangar division roles were already verified by `has_corp_div_take` (which respects `session.corp_role`).
@@ -1166,10 +1388,21 @@ pub fn handle_industry_jobs(
                             message: e.to_string(),
                             client_error: None,
                         })?;
-                        rem -= take;
+                        rem -= i64::from(take);
+                    }
+                    if rem > 0 {
+                        return Err(BridgeRpcError {
+                            code: err_code.into(),
+                            message: format!("Missing {rem}x remaining material type {mat_tid} at {station_id}"),
+                            client_error: None,
+                        });
                     }
                     if let Some(entry) = consumed_materials.iter_mut().find(|(t, _)| *t == mat_tid) {
-                        entry.1 = entry.1.saturating_add(req_qty);
+                        entry.1 = entry.1.checked_add(req_qty).ok_or_else(|| BridgeRpcError {
+                            code: "InvalidIndustryJobParameters".into(),
+                            message: format!("Consumed material sum overflow for type {mat_tid}"),
+                            client_error: None,
+                        })?;
                     } else {
                         consumed_materials.push((mat_tid, req_qty));
                     }
@@ -1184,15 +1417,8 @@ pub fn handle_industry_jobs(
                             client_error: None,
                         });
                     }
-                    for mat in &bp.materials {
-                        let req_qty = compute_manufacturing_material_qty(
-                            runs,
-                            mat.quantity,
-                            me_level,
-                            eff_mat_bonus_pct,
-                            rig_mat_bonus,
-                        ) as i32;
-                        consume_material(snap, mat.type_id, req_qty, "InsufficientManufacturingMaterials")?;
+                    for (mat_tid, req_qty) in checked_mfg_mats {
+                        consume_material(snap, mat_tid, req_qty, "InsufficientManufacturingMaterials")?;
                     }
                 } else if activity_id == 8 {
                     if bp.invention_base_probability <= 0.0 {
@@ -1209,20 +1435,9 @@ pub fn handle_industry_jobs(
                             client_error: None,
                         });
                     }
-                    let req_dc = runs as i32;
-                    let sde_inv_mats: Vec<(TypeId, i32)> = bp
-                        .activities
-                        .get("invention")
-                        .or_else(|| bp.activities.get("8"))
-                        .map(|a| {
-                            a.materials
-                                .iter()
-                                .map(|m| (m.type_id, (m.quantity as i32).max(1) * req_dc))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if !sde_inv_mats.is_empty() {
-                        for (dc_type, q) in sde_inv_mats {
+                    let req_dc = i64::from(runs);
+                    if !checked_inv_mats.is_empty() {
+                        for (dc_type, q) in checked_inv_mats {
                             consume_material(snap, dc_type, q, "InsufficientInventionDatacores")?;
                         }
                     } else {
@@ -1241,22 +1456,14 @@ pub fn handle_industry_jobs(
                             client_error: None,
                         });
                     }
-                    let react_mats: Vec<(TypeId, u64)> = bp
-                        .activities
-                        .get("reaction")
-                        .or_else(|| bp.activities.get("9"))
-                        .map(|a| a.materials.iter().map(|m| (m.type_id, m.quantity)).collect())
-                        .unwrap_or_default();
-                    if react_mats.is_empty() {
+                    if checked_react_mats.is_empty() {
                         return Err(BridgeRpcError {
                             code: "BlueprintNotReactionFormula".into(),
                             message: format!("Type {bp_type_id} has no SDE reaction activity materials"),
                             client_error: None,
                         });
                     }
-                    for (mtid, mqty) in react_mats {
-                        let req_qty =
-                            compute_manufacturing_material_qty(runs, mqty, 0, eff_mat_bonus_pct, rig_mat_bonus) as i32;
+                    for (mtid, req_qty) in checked_react_mats {
                         consume_material(snap, mtid, req_qty, "InsufficientReactionMaterials")?;
                     }
                 }
@@ -1493,7 +1700,7 @@ pub fn handle_industry_jobs(
                         ("activityID", PyRep::Integer(activity_id as i64)), ("runs", PyRep::Integer(runs as i64)),
                         ("productTypeID", PyRep::Integer(product_type_id as i64)), ("inventedRuns", PyRep::Integer(cost_meta.invented_runs as i64)),
                         ("inventedME", PyRep::Real(cost_meta.invented_me)), ("inventedTE", PyRep::Real(cost_meta.invented_te)),
-                        ("durationSeconds", PyRep::Integer(duration_sec as i64)), ("tritaniumRequired", PyRep::Integer(trit_req as i64)),
+                        ("durationSeconds", PyRep::Integer(duration_sec as i64)), ("tritaniumRequired", PyRep::Integer(trit_req)),
                         ("inventionProbability", PyRep::Real(inv_prob)), ("probability", PyRep::Real(inv_prob)),
                         ("estimatedItemValue", PyRep::Real(cost_meta.eiv_isk)), ("estimatedItemValueISK", PyRep::Real(cost_meta.eiv_isk)),
                         ("systemCostIndex", PyRep::Real(cost_meta.system_cost_index)), ("structureCostModifier", PyRep::Real(cost_meta.structure_cost_modifier)),

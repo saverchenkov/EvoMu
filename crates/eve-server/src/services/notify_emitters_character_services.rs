@@ -415,7 +415,7 @@ pub fn emit_industry_materials_consumed(
     use_corp: bool,
     input_flag: eve_db::InventoryFlag,
     input_container_id: Option<i64>,
-    consumed: &[(u32, i32)],
+    consumed: &[(u32, i64)],
 ) {
     if consumed.is_empty() {
         return;

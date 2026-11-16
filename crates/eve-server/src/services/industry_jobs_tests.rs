@@ -907,6 +907,456 @@ fn install_job_v24_ignores_corporation_id_and_enforces_account_rbac() {
     assert_eq!(corp_rep.dict_get("ownerID"), Some(&PyRep::Integer(corp_id)));
 }
 
+#[test]
+fn test_p0_1176_u64_material_overflow_and_multistack_refund_delivery() {
+    let mut sde = SdeRegistry::with_canonical_seed();
+    // Synthetic extreme-output & overflow blueprints for bounds validation
+    sde.blueprints.insert(
+        999_101,
+        BlueprintInfo {
+            blueprint_type_id: 999_101,
+            product_type_id: 587,
+            product_quantity: 1,
+            max_production_limit: 10,
+            manufacturing_time_sec: 0,
+            research_me_time_sec: 100,
+            research_te_time_sec: 100,
+            copy_time_sec: 100,
+            invention_time_sec: 100,
+            invention_base_probability: 0.0,
+            materials: vec![BlueprintMaterial { type_id: 34, quantity: u64::MAX }],
+            activities: HashMap::new(),
+        },
+    );
+    sde.blueprints.insert(
+        999_102,
+        BlueprintInfo {
+            blueprint_type_id: 999_102,
+            product_type_id: 587,
+            product_quantity: 1_500_000_000,
+            max_production_limit: 10,
+            manufacturing_time_sec: 600,
+            research_me_time_sec: 100,
+            research_te_time_sec: 100,
+            copy_time_sec: 100,
+            invention_time_sec: 100,
+            invention_base_probability: 0.0,
+            materials: vec![BlueprintMaterial { type_id: 34, quantity: 10 }],
+            activities: HashMap::from([(
+                "manufacturing".into(),
+                BlueprintActivity {
+                    time: 600,
+                    materials: vec![BlueprintMaterial { type_id: 34, quantity: 10 }],
+                    products: vec![BlueprintProduct {
+                        type_id: 587,
+                        quantity: 1_500_000_000,
+                        probability: None,
+                    }],
+                    skills: vec![],
+                },
+            )]),
+        },
+    );
+    sde.blueprints.insert(
+        999_103,
+        BlueprintInfo {
+            blueprint_type_id: 999_103,
+            product_type_id: 16_670,
+            product_quantity: 1,
+            max_production_limit: 100,
+            manufacturing_time_sec: 0,
+            research_me_time_sec: 0,
+            research_te_time_sec: 0,
+            copy_time_sec: 0,
+            invention_time_sec: 0,
+            invention_base_probability: 0.0,
+            materials: vec![],
+            activities: HashMap::from([(
+                "reaction".into(),
+                BlueprintActivity {
+                    time: 3_600,
+                    materials: vec![BlueprintMaterial { type_id: 34, quantity: 1_500_000_000 }],
+                    products: vec![BlueprintProduct { type_id: 16_670, quantity: 1, probability: None }],
+                    skills: vec![],
+                },
+            )]),
+        },
+    );
+    sde.blueprints.insert(
+        999_104,
+        BlueprintInfo {
+            blueprint_type_id: 999_104,
+            product_type_id: 587,
+            product_quantity: 1,
+            max_production_limit: 1,
+            manufacturing_time_sec: 9_000_000,
+            research_me_time_sec: 100,
+            research_te_time_sec: 100,
+            copy_time_sec: 100,
+            invention_time_sec: 100,
+            invention_base_probability: 0.0,
+            materials: vec![BlueprintMaterial { type_id: 34, quantity: 10 }],
+            activities: HashMap::new(),
+        },
+    );
+    let ctx = ServerContext::with_sde_and_repository(
+        Arc::new(sde),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 90_000_001_i64;
+    let corp_id = ctx.db.with_snapshot(|s| s.characters[&char_id].corporation_id);
+    let station_id = 60_003_760_i64;
+    let mut sess = char_session(char_id, corp_id);
+    let kw = HashMap::new();
+
+    // Seed BPO 37030 (80M Tritanium/run, 72_000s/run) with secondary minerals only (0 Tritanium).
+    let bp_37030_id = 990_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_isk(100_000_000_000);
+        }
+        snap.skills.entry(char_id).or_default().extend([
+            (3380, TrainedSkillRecord { type_id: 3380, level: 5, skill_points: 256_000.0 }),
+            (3387, TrainedSkillRecord { type_id: 3387, level: 5, skill_points: 256_000.0 }),
+            (3388, TrainedSkillRecord { type_id: 3388, level: 5, skill_points: 256_000.0 }),
+            (3400, TrainedSkillRecord { type_id: 3400, level: 5, skill_points: 256_000.0 }),
+            (24625, TrainedSkillRecord { type_id: 24625, level: 5, skill_points: 256_000.0 }),
+            (45746, TrainedSkillRecord { type_id: 45746, level: 5, skill_points: 256_000.0 }),
+        ]);
+        // Remove starter Tritanium so hangar has 0 Tritanium.
+        snap.items.retain(|_, it| !(it.owner_id == char_id && it.type_id == 34));
+        let mut insert_item = |id: i64, tid: u32, loc: i64, qty: i32, single: bool| {
+            snap.items.insert(
+                id,
+                InventoryItemRecord {
+                    item_id: id,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: loc,
+                    flag: InventoryFlag::Hangar,
+                    quantity: qty,
+                    singleton: single,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        };
+        insert_item(bp_37030_id, 37_030, station_id, 1, true);
+        let bp_info = ctx.sde.blueprints[&37_030].clone();
+        for (idx, m) in bp_info.materials.iter().enumerate() {
+            if m.type_id != 34 {
+                insert_item(990_010 + idx as i64, m.type_id, station_id, (m.quantity * 27) as i32, false);
+            }
+        }
+    });
+
+    let jobs_before = ctx.db.with_snapshot(|s| s.industry_jobs.len());
+    let items_before = ctx.db.with_snapshot(|s| s.items.len());
+
+    // 1. 27 runs on 37030 requires 2,160,000,000 Tritanium (> i32::MAX); with 0 Tritanium,
+    // must fail cleanly with InsufficientManufacturingMaterials (never wrap negative and install!).
+    let err_27 = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(bp_37030_id)),
+            ("blueprintTypeID", PyRep::Integer(37_030)),
+            ("facilityID", PyRep::Integer(station_id)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(27)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_27.code, "InsufficientManufacturingMaterials");
+
+    // 2. 135 runs on 37030 (9,720,000s > 30 days) fails cleanly on run/duration limit before mutation.
+    let err_135 = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(bp_37030_id)),
+            ("blueprintTypeID", PyRep::Integer(37_030)),
+            ("facilityID", PyRep::Integer(station_id)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(135)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_135.code, "InvalidIndustryJobParameters");
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.industry_jobs.len(), jobs_before);
+        assert_eq!(s.items.len(), items_before);
+        assert_eq!(s.items[&bp_37030_id].flag, InventoryFlag::Hangar);
+    });
+
+    // 3. With 2,500,000,000 Tritanium split across two stacks, 27 runs installs, consumes exact
+    // 2,160,000,000 (leaving 340,000,000), records i64 metadata, and CancelJob refunds full 2.16B!
+    ctx.db.with_mut_snapshot(|snap| {
+        for (id, qty) in [(990_050_i64, 1_500_000_000_i32), (990_051_i64, 1_000_000_000_i32)] {
+            snap.items.insert(
+                id,
+                InventoryItemRecord {
+                    item_id: id,
+                    type_id: 34,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: qty,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    let ok_27 = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(bp_37030_id)),
+            ("blueprintTypeID", PyRep::Integer(37_030)),
+            ("facilityID", PyRep::Integer(station_id)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(27)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .expect("27 runs with 2.5B Tritanium across stacks must succeed");
+    let jid_27 = ok_27.dict_get("jobID").and_then(|v| v.as_i64()).unwrap();
+    ctx.db.with_snapshot(|s| {
+        let trit_left: i64 = s
+            .items
+            .values()
+            .filter(|i| i.owner_id == char_id && i.location_id == station_id && i.type_id == 34)
+            .map(|i| i64::from(i.quantity))
+            .sum();
+        assert_eq!(trit_left, 340_000_000);
+        let meta = crate::services::industry_pi::load_job_cost_meta(s, jid_27).unwrap();
+        assert!(meta.consumed_materials.contains(&(34, 2_160_000_000)));
+    });
+    handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "CancelJob",
+        &[PyRep::Integer(jid_27)],
+        &kw,
+    )
+    .unwrap()
+    .expect("CancelJob must refund full 2.16B across valid i32 stacks");
+    ctx.db.with_snapshot(|s| {
+        let trit_restored: i64 = s
+            .items
+            .values()
+            .filter(|i| {
+                i.owner_id == char_id && i.location_id == station_id && i.type_id == 34 && i.quantity > 0
+            })
+            .map(|i| i64::from(i.quantity))
+            .sum();
+        assert_eq!(trit_restored, 2_500_000_000);
+        assert_eq!(s.items[&bp_37030_id].flag, InventoryFlag::Hangar);
+    });
+
+    // 4. Overflow u64::MAX material requirement rejects cleanly before mutation; 1-run >30d capital-time
+    // blueprint is allowed; huge product output (3B) delivers across valid i32 stacks without wrap.
+    ctx.db.with_mut_snapshot(|snap| {
+        for (id, tid) in [(990_060_i64, 999_101_u32), (990_061_i64, 999_102_u32), (990_062_i64, 999_104_u32)] {
+            snap.items.insert(
+                id,
+                InventoryItemRecord {
+                    item_id: id,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    let err_u64 = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(990_060)),
+            ("blueprintTypeID", PyRep::Integer(999_101)),
+            ("facilityID", PyRep::Integer(station_id)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(2)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_u64.code, "InvalidIndustryJobParameters");
+
+    let ok_1run_long = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(990_062)),
+            ("blueprintTypeID", PyRep::Integer(999_104)),
+            ("facilityID", PyRep::Integer(station_id)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .expect("1-run manufacturing >30d base time must remain permitted");
+    let jid_long = ok_1run_long.dict_get("jobID").and_then(|v| v.as_i64()).unwrap();
+    handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "CancelJob",
+        &[PyRep::Integer(jid_long)],
+        &kw,
+    )
+    .unwrap()
+    .expect("cancel long single-run job");
+
+    let ok_big_out = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(990_061)),
+            ("blueprintTypeID", PyRep::Integer(999_102)),
+            ("facilityID", PyRep::Integer(station_id)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(2)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .expect("2 runs with 1.5B output/run must install");
+    let jid_out = ok_big_out.dict_get("jobID").and_then(|v| v.as_i64()).unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.retain(|_, i| !(i.owner_id == char_id && i.type_id == 587 && !i.singleton));
+        snap.industry_jobs.get_mut(&jid_out).unwrap().start_unix = 0;
+    });
+    handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "CompleteJob",
+        &[PyRep::Integer(jid_out)],
+        &kw,
+    )
+    .unwrap()
+    .expect("CompleteJob 3B output across valid i32 stacks");
+    ctx.db.with_snapshot(|snap| {
+        let stacks: Vec<i32> = snap
+            .items
+            .values()
+            .filter(|i| i.owner_id == char_id && i.location_id == station_id && i.type_id == 587 && !i.singleton)
+            .map(|i| i.quantity)
+            .collect();
+        assert_eq!(stacks.len(), 2);
+        assert!(stacks.iter().all(|&q| q > 0));
+        let delivered_sum: i64 = stacks.iter().map(|&q| i64::from(q)).sum();
+        assert_eq!(delivered_sum, 3_000_000_000);
+    });
+
+    // 5. Reaction (activity 9) requiring 3,000,000,000 (> i32::MAX) with 0 stock rejects cleanly.
+    let lowsec_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .filter(|s| s.solar_system_id < 30_100_000 && s.security_status > 0.05 && s.security_status < 0.40)
+        .min_by_key(|s| s.solar_system_id)
+        .unwrap()
+        .solar_system_id;
+    let ls_athanor = 1_099_999_001_i64;
+    let react_bp_id = 990_070_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            ls_athanor,
+            eve_db::UpwellStructureRecord {
+                structure_id: ls_athanor,
+                type_id: 35_835,
+                owner_corp_id: corp_id,
+                solar_system_id: lowsec_sys,
+                name: "Test Athanor".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            990_071,
+            InventoryItemRecord {
+                item_id: 990_071,
+                type_id: 45_537,
+                owner_id: corp_id,
+                location_id: ls_athanor,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(990_071, true);
+        snap.items.insert(
+            react_bp_id,
+            InventoryItemRecord {
+                item_id: react_bp_id,
+                type_id: 999_103,
+                owner_id: char_id,
+                location_id: ls_athanor,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.retain(|_, i| !(i.owner_id == char_id && i.type_id == 34));
+    });
+    sess.station_id = None;
+    sess.structure_id = Some(ls_athanor);
+    sess.solar_system_id = Some(lowsec_sys);
+    let react_err = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(react_bp_id)),
+            ("blueprintTypeID", PyRep::Integer(999_103)),
+            ("facilityID", PyRep::Integer(ls_athanor)),
+            ("activityID", PyRep::Integer(9)),
+            ("runs", PyRep::Integer(2)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(react_err.code, "InsufficientReactionMaterials");
+}
+
 #[cfg(test)]
 #[path = "industry_jobs_extra_unit_tests.rs"]
 mod extra_unit_tests;

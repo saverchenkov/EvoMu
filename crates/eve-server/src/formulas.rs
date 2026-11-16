@@ -542,6 +542,47 @@ pub fn compute_insurance_levels(reference_value: f64) -> [(&'static str, f64, f6
     ]
 }
 
+/// #75-#82: Checked Manufacturing Material Efficiency (ME `0..10`) calculation returning
+/// `None` if bonuses are non-finite or the ceiled total exceeds `u64::MAX`.
+/// $$M_{\text{req}} = \max\left(\text{runs}, \left\lceil \text{runs} \cdot M_{\text{base}} \cdot \left(1 - \frac{\text{ME}}{100}\right) \cdot (1 - f_{\text{structure}}) \right\rceil\right)$$
+pub fn try_compute_manufacturing_material_qty(
+    runs: u32,
+    base_qty: u64,
+    me_level: u8,
+    structure_role_bonus_pct: f64,
+    rig_bonus_pct: f64,
+) -> Option<u64> {
+    const U64_UPPER_BOUND_F64: f64 = 18_446_744_073_709_551_616.0_f64;
+    if runs == 0 {
+        return Some(0);
+    }
+    if base_qty <= 1 {
+        return Some(u64::from(runs));
+    }
+    if !structure_role_bonus_pct.is_finite() || !rig_bonus_pct.is_finite() {
+        return None;
+    }
+    let me_clamped = me_level.min(10);
+    if me_clamped == 0 && structure_role_bonus_pct == 0.0 && rig_bonus_pct == 0.0 {
+        // Exact integer path avoids IEEE-754 53-bit precision loss when bonuses are zero.
+        return u64::from(runs)
+            .checked_mul(base_qty)
+            .map(|qty| qty.max(u64::from(runs)));
+    }
+    let me_mult = 1.0 - f64::from(me_clamped) / 100.0;
+    let struct_mult = (1.0 - (structure_role_bonus_pct / 100.0)).max(0.0);
+    let rig_mult = (1.0 - (rig_bonus_pct / 100.0)).max(0.0);
+    let raw = f64::from(runs) * (base_qty as f64) * me_mult * struct_mult * rig_mult;
+    if !raw.is_finite() || raw < 0.0 {
+        return None;
+    }
+    let ceiled = raw.ceil();
+    if !ceiled.is_finite() || ceiled >= U64_UPPER_BOUND_F64 {
+        return None;
+    }
+    Some((ceiled as u64).max(u64::from(runs)))
+}
+
 /// #75-#82: Manufacturing Material Efficiency (ME `0..10`) & Time Efficiency (TE `0..20`):
 /// $$M_{\text{req}} = \max\left(\text{runs}, \left\lceil \text{runs} \cdot M_{\text{base}} \cdot \left(1 - \frac{\text{ME}}{100}\right) \cdot (1 - f_{\text{structure}}) \right\rceil\right)$$
 pub fn compute_manufacturing_material_qty(
@@ -551,14 +592,48 @@ pub fn compute_manufacturing_material_qty(
     structure_role_bonus_pct: f64,
     rig_bonus_pct: f64,
 ) -> u64 {
-    if base_qty == 1 {
-        return runs as u64;
+    try_compute_manufacturing_material_qty(
+        runs,
+        base_qty,
+        me_level,
+        structure_role_bonus_pct,
+        rig_bonus_pct,
+    )
+    .unwrap_or(u64::MAX)
+}
+
+/// Checked manufacturing duration in seconds returning `None` on non-finite bonuses or `u64` overflow.
+pub fn try_compute_manufacturing_time_seconds(
+    runs: u32,
+    base_time_sec: u64,
+    te_level: u8,
+    industry_level: u8,
+    adv_industry_level: u8,
+    structure_time_bonus_pct: f64,
+) -> Option<u64> {
+    const U64_UPPER_BOUND_F64: f64 = 18_446_744_073_709_551_616.0_f64;
+    if !structure_time_bonus_pct.is_finite() {
+        return None;
     }
-    let me_mult = 1.0 - (me_level.min(10) as f64) / 100.0;
-    let struct_mult = 1.0 - (structure_role_bonus_pct / 100.0);
-    let rig_mult = 1.0 - (rig_bonus_pct / 100.0);
-    let raw = (runs as f64) * (base_qty as f64) * me_mult * struct_mult * rig_mult;
-    (raw.ceil() as u64).max(runs as u64)
+    let te_clamped = te_level.min(20);
+    let te_mult = 1.0 - f64::from(te_clamped) / 100.0;
+    let ind_mult = 1.0 - 0.04 * f64::from(industry_level.min(5));
+    let adv_mult = 1.0 - 0.03 * f64::from(adv_industry_level.min(5));
+    let struct_mult = (1.0 - (structure_time_bonus_pct / 100.0)).max(0.0);
+    let raw = f64::from(runs)
+        * (base_time_sec as f64)
+        * te_mult
+        * ind_mult
+        * adv_mult
+        * struct_mult;
+    if !raw.is_finite() || raw < 0.0 {
+        return None;
+    }
+    let ceiled = raw.ceil();
+    if !ceiled.is_finite() || ceiled >= U64_UPPER_BOUND_F64 {
+        return None;
+    }
+    Some((ceiled as u64).max(1))
 }
 
 pub fn compute_manufacturing_time_seconds(
@@ -569,13 +644,15 @@ pub fn compute_manufacturing_time_seconds(
     adv_industry_level: u8,
     structure_time_bonus_pct: f64,
 ) -> u64 {
-    let te_mult = 1.0 - (te_level.min(20) as f64) / 100.0;
-    let ind_mult = 1.0 - 0.04 * (industry_level.min(5) as f64);
-    let adv_mult = 1.0 - 0.03 * (adv_industry_level.min(5) as f64);
-    let struct_mult = 1.0 - (structure_time_bonus_pct / 100.0);
-    let raw =
-        (runs as f64) * (base_time_sec as f64) * te_mult * ind_mult * adv_mult * struct_mult;
-    raw.ceil().max(1.0) as u64
+    try_compute_manufacturing_time_seconds(
+        runs,
+        base_time_sec,
+        te_level,
+        industry_level,
+        adv_industry_level,
+        structure_time_bonus_pct,
+    )
+    .unwrap_or(u64::MAX)
 }
 
 /// #83-#88: T2 Invention Success Probability:
@@ -803,6 +880,34 @@ mod tests {
             skill_training_time_seconds_with_multiplier(0.0, 3_000.0, 20.0, 20.0, 1.0, 100.0);
         assert!((base_t - 6_000.0).abs() < 1e-9);
         assert!((fast_t - 60.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_checked_manufacturing_qty_and_time_bounds() {
+        assert_eq!(
+            try_compute_manufacturing_material_qty(27, 80_000_000, 0, 0.0, 0.0),
+            Some(2_160_000_000)
+        );
+        assert_eq!(
+            try_compute_manufacturing_material_qty(135, 80_000_000, 0, 0.0, 0.0),
+            Some(10_800_000_000)
+        );
+        assert_eq!(
+            try_compute_manufacturing_material_qty(2, u64::MAX, 0, 0.0, 0.0),
+            None
+        );
+        assert_eq!(
+            try_compute_manufacturing_material_qty(2, 100, 0, f64::NAN, 0.0),
+            None
+        );
+        assert_eq!(
+            try_compute_manufacturing_time_seconds(2, u64::MAX, 0, 0, 0, 0.0),
+            None
+        );
+        assert_eq!(
+            try_compute_manufacturing_time_seconds(2, 100, 0, 0, 0, f64::INFINITY),
+            None
+        );
     }
 }
 

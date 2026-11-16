@@ -18,6 +18,78 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
 use std::collections::HashMap;
 
+/// Credits `qty` non-singleton units into valid `1..=i32::MAX` stacks, optionally topping up
+/// matching existing stacks before creating overflow stacks so large refunds/outputs never truncate.
+fn add_non_singleton_stacks(
+    snap: &mut eve_db::WorldStateSnapshot,
+    owner_id: i64,
+    location_id: i64,
+    flag: InventoryFlag,
+    type_id: TypeId,
+    mut qty: i64,
+    top_up_existing: bool,
+) -> Vec<InventoryItemRecord> {
+    let mut created = Vec::new();
+    if qty <= 0 {
+        return created;
+    }
+    if top_up_existing {
+        let mut target_ids: Vec<i64> = snap
+            .items
+            .values()
+            .filter(|i| {
+                i.owner_id == owner_id
+                    && i.location_id == location_id
+                    && i.type_id == type_id
+                    && i.flag == flag
+                    && !i.singleton
+                    && i.quantity >= 0
+                    && i.quantity < i32::MAX
+            })
+            .map(|i| i.item_id)
+            .collect();
+        target_ids.sort_unstable();
+        for tid in target_ids {
+            if qty <= 0 {
+                break;
+            }
+            if let Some(existing) = snap.items.get_mut(&tid) {
+                let room = (i64::from(i32::MAX) - i64::from(existing.quantity)).max(0);
+                let add = qty.min(room);
+                if add > 0 {
+                    existing.quantity += add as i32;
+                    existing.version += 1;
+                    qty -= add;
+                }
+            }
+        }
+    }
+    while qty > 0 {
+        let chunk = qty.min(i64::from(i32::MAX)) as i32;
+        snap.next_entity_id += 1;
+        let new_id = snap.next_entity_id;
+        let rec = InventoryItemRecord {
+            item_id: new_id,
+            type_id,
+            owner_id,
+            location_id,
+            flag,
+            quantity: chunk,
+            singleton: false,
+            version: 1,
+            dynamic_attributes: HashMap::new(),
+            source_mutaplasmid_id: None,
+            insured_payout_isk: 0.0,
+            is_blueprint_copy: false,
+            blueprint_runs_remaining: None,
+        };
+        snap.items.insert(new_id, rec.clone());
+        created.push(rec);
+        qty -= i64::from(chunk);
+    }
+    created
+}
+
 pub(super) fn handle_cancel_or_complete_industry_job(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -121,37 +193,15 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                     if *mat_qty <= 0 {
                         continue;
                     }
-                    if let Some(existing) = snap.items.values_mut().find(|i| {
-                        i.owner_id == refund_owner_id
-                            && i.location_id == job.facility_id
-                            && i.type_id == *mat_tid
-                            && i.flag == refund_flag
-                            && !i.singleton
-                    }) {
-                        existing.quantity = existing.quantity.saturating_add(*mat_qty);
-                        existing.version += 1;
-                    } else {
-                        snap.next_entity_id += 1;
-                        let new_id = snap.next_entity_id;
-                        snap.items.insert(
-                            new_id,
-                            InventoryItemRecord {
-                                item_id: new_id,
-                                type_id: *mat_tid,
-                                owner_id: refund_owner_id,
-                                location_id: job.facility_id,
-                                flag: refund_flag,
-                                quantity: *mat_qty,
-                                singleton: false,
-                                version: 1,
-                                dynamic_attributes: HashMap::new(),
-                                source_mutaplasmid_id: None,
-                                insured_payout_isk: 0.0,
-                                is_blueprint_copy: false,
-                                blueprint_runs_remaining: None,
-                            },
-                        );
-                    }
+                    add_non_singleton_stacks(
+                        snap,
+                        refund_owner_id,
+                        job.facility_id,
+                        refund_flag,
+                        *mat_tid,
+                        *mat_qty,
+                        true,
+                    );
                 }
                 Ok(job)
             });
@@ -269,6 +319,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                         .get(&job.blueprint_type_id)
                         .map(|t| t.group_id == 971)
                         .unwrap_or(false);
+                    let job_runs_i32 = i32::try_from(job.runs).unwrap_or(i32::MAX);
                     let bp_valid = snap
                         .items
                         .get(&job.blueprint_item_id)
@@ -286,7 +337,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                                 && (is_ancient_relic
                                     || !bp.is_blueprint_copy
                                     || !matches!(job.activity_id, 1 | 8)
-                                    || bp.blueprint_runs_remaining.unwrap_or(0) >= job.runs as i32)
+                                    || bp.blueprint_runs_remaining.unwrap_or(0) >= job_runs_i32)
                         })
                         .unwrap_or(false);
                     if !bp_valid {
@@ -308,8 +359,8 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                         if let Some(bp_mut) = snap.items.get_mut(&job.blueprint_item_id) {
                             let unlocked_flag = restore_blueprint_flag(bp_mut.owner_id, &meta);
                             if is_ancient_relic && !bp_mut.is_blueprint_copy {
-                                if bp_mut.quantity > job.runs as i32 {
-                                    bp_mut.quantity -= job.runs as i32;
+                                if bp_mut.quantity > job_runs_i32 {
+                                    bp_mut.quantity -= job_runs_i32;
                                     bp_mut.flag = unlocked_flag;
                                     bp_mut.version += 1;
                                     remove_bpc = false;
@@ -318,7 +369,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                                 let rem = bp_mut
                                     .blueprint_runs_remaining
                                     .unwrap_or(1)
-                                    .saturating_sub(job.runs as i32);
+                                    .saturating_sub(job_runs_i32);
                                 if rem > 0 {
                                     bp_mut.blueprint_runs_remaining = Some(rem);
                                     bp_mut.flag = unlocked_flag;
@@ -440,7 +491,7 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                             let rem = bp_mut
                                 .blueprint_runs_remaining
                                 .unwrap_or(1)
-                                .saturating_sub(job.runs as i32);
+                                .saturating_sub(job_runs_i32);
                             if rem <= 0 {
                                 remove_consumed_bpc = true;
                             } else {
@@ -487,38 +538,36 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                             .sde
                             .blueprints
                             .get(&job.blueprint_type_id)
-                            .and_then(|bp| {
-                                let key = if job.activity_id == 9 {
-                                    "reaction"
-                                } else {
-                                    "manufacturing"
-                                };
-                                bp.activities
-                                    .get(key)
-                                    .and_then(|a| a.products.first())
-                                    .map(|p| (p.quantity as i32).max(1))
+                            .map(|bp| {
+                                super::blueprint_activity_product_qty_per_run(bp, job.activity_id)
                             })
                             .unwrap_or(1);
-                        let total_out_qty = (job.runs as i32).saturating_mul(prod_qty_per_run);
-                        snap.next_entity_id += 1;
-                        let prod_item_id = snap.next_entity_id;
-                        let created_prod = InventoryItemRecord {
-                            item_id: prod_item_id,
-                            type_id: job.product_type_id,
-                            owner_id: out_owner_id,
-                            location_id: out_loc_id,
-                            flag: out_flag,
-                            quantity: total_out_qty,
-                            singleton: false,
-                            version: 1,
-                            dynamic_attributes: HashMap::new(),
-                            source_mutaplasmid_id: None,
-                            insured_payout_isk: 0.0,
-                            is_blueprint_copy: false,
-                            blueprint_runs_remaining: None,
-                        };
-                        snap.items.insert(prod_item_id, created_prod.clone());
-                        created_items.push(created_prod);
+                        let total_out_qty = u64::from(job.runs)
+                            .checked_mul(prod_qty_per_run)
+                            .and_then(|v| i64::try_from(v).ok())
+                            .filter(|&v| v > 0)
+                            .ok_or_else(|| BridgeRpcError {
+                                code: "InvalidIndustryJobParameters".into(),
+                                message: format!(
+                                    "Completed job {job_id} output quantity overflow for blueprint {}",
+                                    job.blueprint_type_id
+                                ),
+                                client_error: None,
+                            })?;
+                        let delivered = add_non_singleton_stacks(
+                            snap,
+                            out_owner_id,
+                            out_loc_id,
+                            out_flag,
+                            job.product_type_id,
+                            total_out_qty,
+                            false,
+                        );
+                        let prod_item_id = delivered
+                            .first()
+                            .map(|item| item.item_id)
+                            .unwrap_or(job.blueprint_item_id);
+                        created_items.extend(delivered);
                         Ok(Ok((prod_item_id, job.product_type_id, job, bp_pre, bp_post, created_items)))
                     } else if job.activity_id == 5 {
                         let copy_runs = i32::try_from(job.licensed_runs.unwrap_or(1).max(1))
