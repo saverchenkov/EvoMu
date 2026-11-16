@@ -55,6 +55,45 @@ pub(crate) fn register_db_system_ballpark(
     );
 }
 
+fn leaf_write_value<T>(lock: &RankedRwLock<T, RANK_LEAF>, leaf_held: bool, value: T) {
+    if leaf_held {
+        if let Ok(mut g) = lock.try_write_unranked() {
+            *g = value;
+        }
+    } else {
+        *lock.write().unwrap_or_else(|e| e.into_inner()) = value;
+    }
+}
+
+fn register_weak_leaf_cache<T>(
+    map: &std::sync::Mutex<HashMap<usize, std::sync::Weak<RankedRwLock<T, RANK_LEAF>>>>,
+    cache: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    target: &Arc<RankedRwLock<T, RANK_LEAF>>,
+) {
+    let key = Arc::as_ptr(cache) as usize;
+    let mut g = map.lock().unwrap_or_else(|e| e.into_inner());
+    if g.len() > 256 {
+        g.retain(|_, w| w.strong_count() > 0);
+    }
+    g.insert(key, Arc::downgrade(target));
+}
+
+fn update_weak_leaf_cache<T>(
+    map: &std::sync::Mutex<HashMap<usize, std::sync::Weak<RankedRwLock<T, RANK_LEAF>>>>,
+    cache_key: usize,
+    leaf_held: bool,
+    value: T,
+) {
+    let arc_opt = map
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&cache_key)
+        .and_then(|w| w.upgrade());
+    if let Some(arc) = arc_opt {
+        leaf_write_value(&arc, leaf_held, value);
+    }
+}
+
 fn committed_warp_cache_map(
 ) -> &'static std::sync::Mutex<
     HashMap<usize, std::sync::Weak<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>>,
@@ -71,14 +110,29 @@ pub(crate) fn register_committed_warp_cache(
     cache: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     committed_warps: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
 ) {
-    let key = Arc::as_ptr(cache) as usize;
-    let mut g = committed_warp_cache_map()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if g.len() > 256 {
-        g.retain(|_, w| w.strong_count() > 0);
-    }
-    g.insert(key, Arc::downgrade(committed_warps));
+    register_weak_leaf_cache(committed_warp_cache_map(), cache, committed_warps);
+}
+
+fn tethered_balls_cache_map(
+) -> &'static std::sync::Mutex<
+    HashMap<usize, std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>>,
+> {
+    static MAP: std::sync::OnceLock<
+        std::sync::Mutex<
+            HashMap<
+                usize,
+                std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+            >,
+        >,
+    > = std::sync::OnceLock::new();
+    MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn register_tethered_balls_cache(
+    cache: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    tethered_balls: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+) {
+    register_weak_leaf_cache(tethered_balls_cache_map(), cache, tethered_balls);
 }
 
 fn static_position_sync_state(
@@ -198,6 +252,13 @@ pub(crate) fn sync_ball_positions(
         }
     }
 
+    let mut teth = std::collections::HashSet::new();
+    for (&id, cs) in &ballpark.combat_states {
+        if cs.is_tethered && ballpark.balls.contains_key(&id) {
+            teth.insert(id);
+        }
+    }
+
     let mut warps = HashMap::new();
     if ballpark.balls.len() > cur_static_count {
         for (&id, ball) in &ballpark.balls {
@@ -214,27 +275,9 @@ pub(crate) fn sync_ball_positions(
         }
     }
 
-    if leaf_held {
-        if let Ok(mut g) = scrambled.try_write_unranked() {
-            *g = scram;
-        }
-    } else {
-        *scrambled.write().unwrap_or_else(|e| e.into_inner()) = scram;
-    }
-    let warp_arc_opt = committed_warp_cache_map()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&cache_key)
-        .and_then(|w| w.upgrade());
-    if let Some(warp_arc) = warp_arc_opt {
-        if leaf_held {
-            if let Ok(mut g) = warp_arc.try_write_unranked() {
-                *g = warps;
-            }
-        } else {
-            *warp_arc.write().unwrap_or_else(|e| e.into_inner()) = warps;
-        }
-    }
+    leaf_write_value(scrambled, leaf_held, scram);
+    update_weak_leaf_cache(committed_warp_cache_map(), cache_key, leaf_held, warps);
+    update_weak_leaf_cache(tethered_balls_cache_map(), cache_key, leaf_held, teth);
 }
 
 /// Synchronously removes `ball_id` from `solar_system_id`'s `Ballpark` if spawned for `db`.

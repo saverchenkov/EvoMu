@@ -397,6 +397,15 @@ impl SystemRegistry {
             .is_some_and(|h| h.is_ball_scrambled_sync(ball_id))
     }
 
+    pub fn is_ball_tethered_sync(
+        &self,
+        solar_system_id: SolarSystemId,
+        ball_id: BallId,
+    ) -> bool {
+        self.get_handle(solar_system_id)
+            .is_some_and(|h| h.is_ball_tethered_sync(ball_id))
+    }
+
     pub fn has_active_modules_or_cloak_sync(
         &self,
         solar_system_id: SolarSystemId,
@@ -741,6 +750,8 @@ impl SystemRegistry {
             Arc::new(RankedRwLock::new(HashMap::new()));
         let scrambled_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>> =
             Arc::new(RankedRwLock::new(std::collections::HashSet::new()));
+        let tethered_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>> =
+            Arc::new(RankedRwLock::new(std::collections::HashSet::new()));
         let committed_warp_balls: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>> =
             Arc::new(RankedRwLock::new(HashMap::new()));
         let warp_stopped_at: Arc<RankedRwLock<HashMap<BallId, tokio::time::Instant>, RANK_LEAF>> =
@@ -748,6 +759,7 @@ impl SystemRegistry {
         let active_module_ships: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>> =
             Arc::new(RankedRwLock::new(std::collections::HashSet::new()));
         register_committed_warp_cache(&ball_positions, &committed_warp_balls);
+        register_tethered_balls_cache(&ball_positions, &tethered_balls);
         sync_ball_positions(&initial_ballpark, &ball_positions, &scrambled_balls);
         let ball_positions_actor = ball_positions.clone();
         let scrambled_balls_actor = scrambled_balls.clone();
@@ -2754,6 +2766,7 @@ impl SystemRegistry {
             event_tx,
             ball_positions,
             scrambled_balls,
+            tethered_balls,
             committed_warp_balls,
             warp_stopped_at,
             active_module_ships,

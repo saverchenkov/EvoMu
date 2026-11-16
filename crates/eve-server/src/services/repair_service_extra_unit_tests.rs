@@ -1087,3 +1087,264 @@ async fn mutants_cov_ship_combat_damage_tether_acl_and_structure_tax() {
         (rep_tax.dict_get("totalCostISK").and_then(|v| v.as_f64()).unwrap() - 3.00).abs() < 0.02
     );
 }
+
+async fn setup_tethered_ship_repair_fixture(
+    hull_dmg: f64,
+    armor_dmg: f64,
+) -> (ServerContext, SessionState, i64, i64, u32, i64) {
+    let (ctx, mut sess, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let struct_id = 1_000_000_009_101_i64;
+    let corp_id = sess.corporation_id.unwrap_or(1_000_009);
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(sys_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+            ch.balance = IskCents::from_isk(1_000_000_000);
+        }
+        snap.corporations.entry(corp_id).or_insert_with(|| {
+            let mut corp = CorporationRecord::default();
+            corp.corporation_id = corp_id;
+            corp.name = "TetherRepairCorp".into();
+            corp.ticker = "TRC".into();
+            corp.ceo_id = char_id;
+            corp.ensure_wallet_divisions();
+            corp
+        });
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = sys_id as i64;
+            sh.flag = InventoryFlag::None;
+            if hull_dmg > 0.0 {
+                sh.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, hull_dmg);
+            }
+            if armor_dmg > 0.0 {
+                sh.dynamic_attributes.insert(eve_sde::attr_ids::ARMOR_DAMAGE, armor_dmg);
+            }
+        }
+        snap.structures.insert(
+            struct_id,
+            UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "TetherRepairCitadel".into(),
+                state: "ShieldVulnerable".into(),
+                position: [0.0, 0.0, 0.0],
+                fuel_blocks: 100,
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        let mut ext = load_ext_state(snap);
+        let mut prof = StructureAccessProfile {
+            profile_id: 9_101,
+            owner_corp_id: corp_id,
+            name: "TetherRepairProfile".into(),
+            corp_only: false,
+            ..Default::default()
+        };
+        prof.service_settings.insert(13, 500);
+        ext.structure_profile_id.insert(struct_id, 9_101);
+        ext.profiles_by_id.insert(9_101, prof.clone());
+        ext.access_profiles.insert(struct_id, prof);
+        save_ext_state(snap, &ext);
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball_with_combat(
+        Ball {
+            id: ship_id,
+            type_id: 23_915,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            is_tethered: true,
+            max_structure_hp: 500.0,
+            structure_hp: (500.0 - hull_dmg).max(0.0),
+            max_armor_hp: 500.0,
+            armor_hp: (500.0 - armor_dmg).max(0.0),
+            max_shield_hp: 500.0,
+            shield_hp: 500.0,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("spawn tethered ship ball");
+    assert!(sys.is_ball_tethered_sync(ship_id));
+    (ctx, sess, char_id, ship_id, sys_id, struct_id)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tethered_repair_completes_without_blocking_while_ballpark_write_locked() {
+    let (ctx, sess, _char_id, ship_id, sys_id, struct_id) =
+        setup_tethered_ship_repair_fixture(20.0, 30.0).await;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    // Live-only unsampled shield damage must not be healed for free when `WouldBlock` prevents
+    // sampling live ballpark combat state.
+    assert!(sys.try_update_combat_state(ship_id, |cs| cs.shield_hp = 400.0));
+
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let sys_bg = sys.clone();
+    let bg = std::thread::spawn(move || {
+        let _bp = sys_bg.ballpark.write().unwrap();
+        held_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    held_rx.recv().unwrap();
+
+    let ctx_rep = ctx.clone();
+    let sess_rep = sess.clone();
+    let repair_task = tokio::task::spawn_blocking(move || {
+        call_repair(&ctx_rep, &sess_rep, true, &[PyRep::Integer(ship_id)])
+    });
+
+    // Must complete while `ballpark.write()` is still held by `bg`.
+    let rep = tokio::time::timeout(std::time::Duration::from_secs(2), repair_task)
+        .await
+        .expect("handle_repair_items_in_location blocked on ballpark.write()")
+        .expect("repair task panicked")
+        .expect("tethered repair should succeed without ballpark read lock");
+    assert_eq!(
+        rep.dict_get("locationID").and_then(|v| v.as_i64()),
+        Some(struct_id)
+    );
+    assert!(
+        rep.dict_get("totalCostISK")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
+            > 0.0
+    );
+
+    release_tx.send(()).unwrap();
+    bg.join().unwrap();
+
+    // Non-blocking fallback queued exact priced hull/armor deltas onto SystemActor without healing
+    // unsampled live shield damage for free.
+    let cs = sys
+        .get_combat_state(ship_id)
+        .await
+        .expect("system actor alive")
+        .expect("tethered ship combat state remains present");
+    assert!((cs.structure_hp - cs.max_structure_hp).abs() < 1e-6);
+    assert!((cs.armor_hp - cs.max_armor_hp).abs() < 1e-6);
+    assert!((cs.shield_hp - 400.0).abs() < 1e-6);
+
+    // Subsequent uncontended repair samples and restores the live shield damage cleanly.
+    let rep_live = call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).unwrap();
+    assert!(
+        rep_live
+            .dict_get("totalCostISK")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
+            > 0.0
+    );
+    let cs_after = sys
+        .get_combat_state(ship_id)
+        .await
+        .expect("system actor alive")
+        .expect("tethered ship combat state after live repair");
+    assert!((cs_after.shield_hp - cs_after.max_shield_hp).abs() < 1e-6);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tethered_repair_and_goto_point_100_iterations_complete_without_deadlock() {
+    let (ctx, sess, _char_id, ship_id, sys_id, struct_id) =
+        setup_tethered_ship_repair_fixture(0.0, 0.0).await;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let start = std::time::Instant::now();
+
+    let ctx_rep = ctx.clone();
+    let sess_rep = sess.clone();
+    let b_rep = std::sync::Arc::clone(&barrier);
+    let repair_task = tokio::task::spawn_blocking(move || {
+        b_rep.wait();
+        for _ in 0..100 {
+            let res = call_repair(&ctx_rep, &sess_rep, true, &[PyRep::Integer(ship_id)])
+                .expect("concurrent tethered repair must succeed");
+            assert_eq!(
+                res.dict_get("locationID").and_then(|v| v.as_i64()),
+                Some(struct_id)
+            );
+        }
+    });
+
+    let rt_handle = tokio::runtime::Handle::current();
+    let b_goto = std::sync::Arc::clone(&barrier);
+    let goto_task = tokio::task::spawn_blocking(move || {
+        b_goto.wait();
+        rt_handle.block_on(async move {
+            for i in 0..100 {
+                sys.goto_point(ship_id, DVec3::new((i % 10) as f64, 0.0, 0.0))
+                    .await
+                    .expect("concurrent GotoPoint must succeed");
+            }
+        });
+    });
+
+    repair_task.await.unwrap();
+    goto_task.await.unwrap();
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(2),
+        "100 concurrent repair + GotoPoint iterations took {:?}",
+        start.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn read_unified_ship_damage_state_skips_ballpark_inside_mut_snapshot() {
+    let (ctx, _sess, _char_id, ship_id, sys_id, _struct_id) =
+        setup_tethered_ship_repair_fixture(15.0, 25.0).await;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    assert!(sys.try_update_combat_state(ship_id, |cs| cs.shield_hp = 400.0));
+
+    // Hold `ballpark.write()` across `with_mut_snapshot` to prove `read_unified_ship_damage_state`
+    // skips rank-20 ballpark acquisition when `RANK_WORLD_INNER` (40) is held.
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let sys_bg = sys.clone();
+    let bg = std::thread::spawn(move || {
+        let _bp = sys_bg.ballpark.write().unwrap();
+        held_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    held_rx.recv().unwrap();
+
+    let (hull_dmg, armor_dmg, shield_dmg_in_tx) = ctx.db.with_mut_snapshot(|snap| {
+        let u = crate::sp6_lifecycle::read_unified_ship_damage_state(
+            &ctx, snap, ship_id, 23_915, None,
+        );
+        (u.hull_damage, u.armor_damage, u.shield_damage)
+    });
+    assert!((hull_dmg - 15.0).abs() < 1e-6);
+    assert!((armor_dmg - 25.0).abs() < 1e-6);
+    assert!(
+        shield_dmg_in_tx.abs() < 1e-6,
+        "live shield damage must be skipped inside RANK_WORLD_INNER, got {shield_dmg_in_tx}"
+    );
+
+    release_tx.send(()).unwrap();
+    bg.join().unwrap();
+
+    // Outside `writer` (rank 40 not held), `with_snapshot` reads live ballpark shield damage normally.
+    let shield_dmg_after = ctx.db.with_snapshot(|snap| {
+        crate::sp6_lifecycle::read_unified_ship_damage_state(&ctx, snap, ship_id, 23_915, None)
+            .shield_damage
+    });
+    assert!((shield_dmg_after - 100.0).abs() < 1e-6);
+}

@@ -27,6 +27,7 @@ pub struct SystemHandle {
     pub(crate) event_tx: broadcast::Sender<TickBroadcast>,
     pub(crate) ball_positions: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     pub(crate) scrambled_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+    pub(crate) tethered_balls: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     pub(crate) committed_warp_balls: Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     pub(crate) warp_stopped_at: Arc<RankedRwLock<HashMap<BallId, tokio::time::Instant>, RANK_LEAF>>,
     pub(crate) active_module_ships: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
@@ -129,20 +130,82 @@ impl SystemHandle {
         }
     }
 
-    pub fn is_ball_scrambled_sync(&self, ball_id: BallId) -> bool {
+    fn read_leaf_ball_set(
+        set: &RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>,
+        ball_id: BallId,
+    ) -> bool {
         if eve_db::lock_rank::held_lock_ranks()
             .iter()
             .any(|&r| r >= eve_db::lock_rank::RANK_LEAF)
         {
-            self.scrambled_balls
-                .read_unranked()
+            set.read_unranked()
                 .unwrap_or_else(|e| e.into_inner())
                 .contains(&ball_id)
         } else {
-            self.scrambled_balls
-                .read()
+            set.read()
                 .unwrap_or_else(|e| e.into_inner())
                 .contains(&ball_id)
+        }
+    }
+
+    pub fn is_ball_scrambled_sync(&self, ball_id: BallId) -> bool {
+        Self::read_leaf_ball_set(&self.scrambled_balls, ball_id)
+    }
+
+    /// Lock-free (wrt `Ballpark`) check of whether `ball_id` is currently tethered (`#1167`).
+    pub fn is_ball_tethered_sync(&self, ball_id: BallId) -> bool {
+        Self::read_leaf_ball_set(&self.tethered_balls, ball_id)
+    }
+
+    /// Non-blockingly restores up to the priced `(hull_heal, armor_heal, shield_heal)` HP deltas
+    /// on `ball_id`'s `CombatState`: tries `ballpark.try_write()` directly, and if write-contended
+    /// falls back to queuing a `ModifyCombatState` command onto the system actor mailbox (`#1167`).
+    ///
+    /// Restoring exact priced deltas rather than snapping to `max_*_hp` ensures unsampled live
+    /// damage (when pre-sampling hit `WouldBlock` or concurrent damage landed mid-RPC) is never
+    /// repaired for free (`#1167`).
+    pub fn try_repair_combat_state_sync(
+        &self,
+        ball_id: BallId,
+        hull_heal: f64,
+        armor_heal: f64,
+        shield_heal: f64,
+    ) -> bool {
+        let hull_delta = hull_heal.max(0.0);
+        let armor_delta = armor_heal.max(0.0);
+        let shield_delta = shield_heal.max(0.0);
+        if hull_delta <= 0.0 && armor_delta <= 0.0 && shield_delta <= 0.0 {
+            return true;
+        }
+        let apply_heal = move |cs: &mut CombatState| {
+            cs.shield_hp = (cs.shield_hp + shield_delta).min(cs.max_shield_hp);
+            cs.armor_hp = (cs.armor_hp + armor_delta).min(cs.max_armor_hp);
+            cs.structure_hp = (cs.structure_hp + hull_delta).min(cs.max_structure_hp);
+        };
+        match self.ballpark.try_write() {
+            Ok(mut bp) => {
+                if let Some(cs) = bp.combat_states.get_mut(&ball_id) {
+                    apply_heal(cs);
+                    return true;
+                }
+                false
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if self.get_ball_position_sync(ball_id).is_none()
+                    || !eve_db::lock_rank::held_lock_ranks().is_empty()
+                {
+                    return false;
+                }
+                let (tx, _rx) = oneshot::channel();
+                self.cmd_sender()
+                    .try_send(SystemCommand::ModifyCombatState {
+                        ball_id,
+                        f: Box::new(apply_heal),
+                        reply: tx,
+                    })
+                    .is_ok()
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => false,
         }
     }
 
@@ -1036,6 +1099,7 @@ impl SystemHandle {
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         if let Some(cs) = bp.combat_states.get_mut(&ball_id) {
             f(cs);
+            super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
             true
         } else {
             false
@@ -2260,9 +2324,8 @@ pub(crate) use celestials_helpers::{
     collect_landed_warp_positions, fast_forward_clock_in_actor_with_epochs,
     persist_ball_positions_in_db, persist_landed_warps_in_db,
     record_spawned_ball_checkpoint_baseline, record_warp_stops_from_events_in_map,
-    register_committed_warp_cache,
-    register_db_system_ballpark, remove_ball_checkpoint_tracking, sync_ball_positions,
-    update_system_hibernation_flag,
+    register_committed_warp_cache, register_db_system_ballpark, register_tethered_balls_cache,
+    remove_ball_checkpoint_tracking, sync_ball_positions, update_system_hibernation_flag,
 };
 
 #[cfg(test)] #[path = "celestials_unit_tests.rs"] mod celestials_unit_tests;

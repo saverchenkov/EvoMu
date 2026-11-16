@@ -226,12 +226,12 @@ pub fn validate_ratchet_against_workspace(raw: &str, root: &Path) -> Result<usiz
                 RANK_SQLITE_CONN, RANK_SQLITE_FP, entry.held_rank, entry.acquired_rank, entry.key
             ));
         }
-        if entry.held_rank == RANK_LEAF
+        if (entry.held_rank == RANK_LEAF || entry.held_rank == RANK_WORLD_INNER)
             && (entry.acquired_rank == RANK_BALLPARK || entry.acquired_rank == RANK_ACTOR_STATE)
         {
             errors.push(format!(
-                "forbidden 60 -> {} ratchet entry: {}",
-                entry.acquired_rank, entry.key
+                "forbidden {} -> {} ratchet entry: {}",
+                entry.held_rank, entry.acquired_rank, entry.key
             ));
         }
 
@@ -1791,9 +1791,10 @@ mod tests {
         );
         assert!(
             parsed.iter().all(|(h, a, _)| {
-                !(*h == RANK_LEAF && (*a == RANK_BALLPARK || *a == RANK_ACTOR_STATE))
+                !((*h == RANK_LEAF || *h == RANK_WORLD_INNER)
+                    && (*a == RANK_BALLPARK || *a == RANK_ACTOR_STATE))
             }),
-            "committed ratchet must never allow RANK_LEAF (60) -> Ballpark (20) / ActorState (21) inversions"
+            "committed ratchet must never allow RANK_LEAF (60) / RANK_WORLD_INNER (40) -> Ballpark (20) / ActorState (21) inversions"
         );
 
         let path = temp_ratchet_path("roundtrip");
@@ -1866,6 +1867,18 @@ mod tests {
         assert!(
             validate_ratchet_against_workspace(dup, &root).is_err(),
             "duplicate structured ratchet entries must fail loudly"
+        );
+        let forbidden_world_to_ballpark =
+            "40\t20\tcrates/eve-server/src/sp6_lifecycle.rs::read_unified_ship_damage_state::ballpark\n";
+        assert!(
+            validate_ratchet_against_workspace(forbidden_world_to_ballpark, &root).is_err(),
+            "40 -> 20 WorldInner -> Ballpark ratchet entries must be rejected"
+        );
+        let forbidden_world_to_actor =
+            "40\t21\tcrates/eve-server/src/sp6_lifecycle.rs::read_unified_ship_damage_state::actor_state\n";
+        assert!(
+            validate_ratchet_against_workspace(forbidden_world_to_actor, &root).is_err(),
+            "40 -> 21 WorldInner -> ActorState ratchet entries must be rejected"
         );
     }
 
