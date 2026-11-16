@@ -878,6 +878,263 @@ fn parse_pi_xfer_entries(
     }
 }
 
+struct PlannedPocoImports {
+    consumptions: Vec<(i64, i32)>,
+    pin_additions: Vec<(TypeId, u64)>,
+    total_vol_m3: f64,
+    total_base_isk: f64,
+}
+
+fn is_in_poco_or_ship_import_location(
+    it: &eve_db::InventoryItemRecord,
+    customs_office_loc_id: i64,
+    planet_id: i64,
+    orbital_id_opt: Option<i64>,
+    ship_id_opt: Option<i64>,
+) -> bool {
+    let in_poco_hangar = (it.location_id == customs_office_loc_id
+        || it.location_id == planet_id
+        || orbital_id_opt.is_some_and(|oid| it.location_id == oid))
+        && it.flag == InventoryFlag::Hangar;
+    let in_ship_cargo = ship_id_opt.is_some_and(|sid| it.location_id == sid)
+        && matches!(
+            it.flag,
+            InventoryFlag::Cargo | InventoryFlag::SpecializedPlanetaryCommoditiesHold
+        );
+    in_poco_hangar || in_ship_cargo
+}
+
+fn plan_poco_import_transfers(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    import_map: &std::collections::BTreeMap<i64, u64>,
+    customs_office_loc_id: i64,
+    planet_id: i64,
+    orbital_id_opt: Option<i64>,
+    ship_id_opt: Option<i64>,
+    commodity_opts: &eve_db::ConsumeExactOptions,
+) -> Result<PlannedPocoImports, BridgeRpcError> {
+    use crate::services::industry_pi::{
+        ensure_valid_pi_commodity_type, is_valid_pi_commodity_type, pi_commodity_tier_base_cost,
+    };
+
+    let mut consumptions = Vec::new();
+    let mut pin_additions = Vec::with_capacity(import_map.len());
+    let mut reserved_by_item: HashMap<i64, i32> = HashMap::new();
+    let mut total_vol_m3 = 0.0_f64;
+    let mut total_base_isk = 0.0_f64;
+
+    for (&key_id, &qty) in import_map {
+        let qty_i32 = i32::try_from(qty).map_err(|_| BridgeRpcError {
+            code: "InvalidCommodityQuantity".into(),
+            message: format!("Import quantity {qty} overflows i32"),
+            client_error: None,
+        })?;
+        let tid = if let Some(item) = snap.items.get(&key_id) {
+            if item.owner_id != char_id {
+                return Err(BridgeRpcError {
+                    code: "ItemNotFound".into(),
+                    message: format!("Import item {key_id} not found or not owned"),
+                    client_error: None,
+                });
+            }
+            ensure_valid_pi_commodity_type(&ctx.sde, item.type_id)?;
+            if item.flag == InventoryFlag::Locked
+                || snap.is_item_or_ancestor_locked_or_impounded(item.item_id)
+            {
+                return Err(BridgeRpcError {
+                    code: "ItemLocked".into(),
+                    message: format!("Import item {key_id} is locked"),
+                    client_error: None,
+                });
+            }
+            if !is_in_poco_or_ship_import_location(
+                item,
+                customs_office_loc_id,
+                planet_id,
+                orbital_id_opt,
+                ship_id_opt,
+            ) {
+                return Err(BridgeRpcError {
+                    code: "ColocationRequired".into(),
+                    message: format!(
+                        "Import item {key_id} must be in customs office hangar or active ship cargo"
+                    ),
+                    client_error: None,
+                });
+            }
+            snap.validate_item_for_consumption(item, commodity_opts)
+                .map_err(|err| BridgeRpcError {
+                    code: "InvalidCommodityItemState".into(),
+                    message: format!("Import item {key_id} cannot be imported ({err})"),
+                    client_error: None,
+                })?;
+            let reserved = reserved_by_item.get(&key_id).copied().unwrap_or(0);
+            let remaining_avail = u64::try_from(item.quantity.saturating_sub(reserved)).unwrap_or(0);
+            if remaining_avail < qty {
+                return Err(BridgeRpcError {
+                    code: "InsufficientCommodityQuantity".into(),
+                    message: format!(
+                        "Import item {key_id} has quantity {}, cannot import {qty}",
+                        remaining_avail
+                    ),
+                    client_error: None,
+                });
+            }
+            reserved_by_item.insert(key_id, reserved.saturating_add(qty_i32));
+            consumptions.push((key_id, qty_i32));
+            pin_additions.push((item.type_id, qty));
+            item.type_id
+        } else {
+            let Some(tid) = u32::try_from(key_id)
+                .ok()
+                .filter(|&t| ctx.sde.types.contains_key(&t) || is_valid_pi_commodity_type(&ctx.sde, t))
+            else {
+                return Err(BridgeRpcError {
+                    code: "ItemNotFound".into(),
+                    message: format!("Import commodity/item {key_id} not found"),
+                    client_error: None,
+                });
+            };
+            ensure_valid_pi_commodity_type(&ctx.sde, tid)?;
+
+            let mut matching_ids: Vec<i64> = Vec::new();
+            let mut first_locked_id: Option<i64> = None;
+            let mut first_invalid_state_err: Option<String> = None;
+            for it in snap.items.values() {
+                if it.owner_id != char_id
+                    || it.type_id != tid
+                    || it.quantity <= 0
+                    || !is_in_poco_or_ship_import_location(
+                        it,
+                        customs_office_loc_id,
+                        planet_id,
+                        orbital_id_opt,
+                        ship_id_opt,
+                    )
+                {
+                    continue;
+                }
+                if it.flag == InventoryFlag::Locked
+                    || snap.is_item_or_ancestor_locked_or_impounded(it.item_id)
+                {
+                    if first_locked_id.is_none() {
+                        first_locked_id = Some(it.item_id);
+                    }
+                    continue;
+                }
+                if let Err(err) = snap.validate_item_for_consumption(it, commodity_opts) {
+                    if first_invalid_state_err.is_none() {
+                        first_invalid_state_err = Some(err.to_string());
+                    }
+                    continue;
+                }
+                matching_ids.push(it.item_id);
+            }
+            matching_ids.sort();
+
+            let avail_u128: u128 = matching_ids
+                .iter()
+                .filter_map(|iid| snap.items.get(iid))
+                .filter_map(|it| {
+                    let res = reserved_by_item.get(&it.item_id).copied().unwrap_or(0);
+                    u64::try_from(it.quantity.saturating_sub(res)).ok()
+                })
+                .map(u128::from)
+                .sum();
+            if avail_u128 < u128::from(qty) {
+                if let Some(reason) = first_invalid_state_err {
+                    return Err(BridgeRpcError {
+                        code: "InvalidCommodityItemState".into(),
+                        message: format!(
+                            "Commodity type {tid} cannot be imported because matching items are non-stackable, locked, or modified ({reason})"
+                        ),
+                        client_error: None,
+                    });
+                }
+                if let Some(locked_id) = first_locked_id {
+                    return Err(BridgeRpcError {
+                        code: "ItemLocked".into(),
+                        message: format!(
+                            "Commodity type {tid} stack {locked_id} is locked"
+                        ),
+                        client_error: None,
+                    });
+                }
+                if avail_u128 == 0 {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: format!(
+                            "Commodity type {tid} not found in customs office hangar or ship cargo"
+                        ),
+                        client_error: None,
+                    });
+                }
+                return Err(BridgeRpcError {
+                    code: "InsufficientCommodityQuantity".into(),
+                    message: format!(
+                        "Available quantity ({avail_u128}) of type {tid} is less than import quantity ({qty})"
+                    ),
+                    client_error: None,
+                });
+            }
+
+            let mut rem = qty;
+            for iid in matching_ids {
+                if rem == 0 {
+                    break;
+                }
+                let Some(it) = snap.items.get(&iid) else {
+                    continue;
+                };
+                let res = reserved_by_item.get(&iid).copied().unwrap_or(0);
+                let avail_i32 = it.quantity.saturating_sub(res);
+                let Ok(avail_u64) = u64::try_from(avail_i32) else {
+                    continue;
+                };
+                let take_u64 = avail_u64.min(rem);
+                if take_u64 == 0 {
+                    continue;
+                }
+                let take_i32 = i32::try_from(take_u64).map_err(|_| BridgeRpcError {
+                    code: "InvalidCommodityQuantity".into(),
+                    message: format!("Import quantity {take_u64} overflows i32"),
+                    client_error: None,
+                })?;
+                reserved_by_item.insert(iid, res.saturating_add(take_i32));
+                consumptions.push((iid, take_i32));
+                rem -= take_u64;
+            }
+            if rem > 0 {
+                return Err(BridgeRpcError {
+                    code: "InsufficientCommodityQuantity".into(),
+                    message: format!("Unable to allocate {qty} units of commodity type {tid}"),
+                    client_error: None,
+                });
+            }
+            pin_additions.push((tid, qty));
+            tid
+        };
+
+        let unit_vol = ctx
+            .sde
+            .types
+            .get(&tid)
+            .map(|t| t.volume.max(0.005))
+            .unwrap_or(0.38);
+        total_vol_m3 += unit_vol * (qty as f64);
+        total_base_isk += pi_commodity_tier_base_cost(&ctx.sde, tid) * (qty as f64);
+    }
+
+    Ok(PlannedPocoImports {
+        consumptions,
+        pin_additions,
+        total_vol_m3,
+        total_base_isk,
+    })
+}
+
 fn handle_import_export_with_planet(
     ctx: &ServerContext,
     session: &SessionState,
@@ -885,11 +1142,11 @@ fn handle_import_export_with_planet(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
-    use crate::formulas::compute_poco_export_tax;
     use crate::services::industry_pi::{
-        is_launchpad_pin, load_orbital_settings, load_pi_network, pi_commodity_tier_base_cost,
-        pin_contents_volume_m3, pin_storage_capacity_m3, resolve_character_orbital_access_and_tax,
-        resolve_orbital_and_planet, save_pi_network,
+        commit_poco_commodity_tax, ensure_valid_pi_commodity_type, is_launchpad_pin,
+        load_pi_network, pi_commodity_tier_base_cost, pin_contents_volume_m3,
+        pin_storage_capacity_m3, prepare_poco_commodity_tax, resolve_orbital_and_planet,
+        save_pi_network,
     };
 
     let (_, char_id) = ServerContext::require_character(session)?;
@@ -1047,141 +1304,36 @@ fn handle_import_export_with_planet(
         }
 
         let customs_office_loc_id = orbital_id_opt.unwrap_or(planet_id);
-        let is_co_hangar_item = |it: &eve_db::InventoryItemRecord| -> bool {
-            it.owner_id == char_id
-                && it.quantity > 0
-                && it.flag != InventoryFlag::Locked
-                && !snap.is_item_locked_in_contract_or_job(it.item_id)
-                && ((it.location_id == customs_office_loc_id
-                    || it.location_id == planet_id
-                    || orbital_id_opt.is_some_and(|oid| it.location_id == oid))
-                    && it.flag == InventoryFlag::Hangar
-                    || ship_id_opt.is_some_and(|sid| it.location_id == sid)
-                        && matches!(
-                            it.flag,
-                            InventoryFlag::Cargo
-                                | InventoryFlag::SpecializedPlanetaryCommoditiesHold
-                        ))
+        let commodity_opts = eve_db::ConsumeExactOptions {
+            active_ship_id: ship_id_opt,
+            ..eve_db::ConsumeExactOptions::for_character_commodity(char_id)
         };
-
-        // Plan & validate imports (`item_id -> qty` or `type_id -> qty`)
-        enum ImportSource {
-            ByItemId(i64, TypeId, u64),
-            ByTypeId(TypeId, u64, Vec<i64>),
-        }
-        let mut planned_imports = Vec::with_capacity(import_map.len());
-        let mut import_vol_m3 = 0.0_f64;
-        let mut import_base_isk = 0.0_f64;
-        for (&key_id, &qty) in &import_map {
-            let _ = i32::try_from(qty).map_err(|_| BridgeRpcError {
-                code: "InvalidCommodityQuantity".into(),
-                message: format!("Import quantity {qty} overflows i32"),
-                client_error: None,
-            })?;
-            let tid = if let Some(item) = snap.items.get(&key_id) {
-                if item.owner_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "ItemNotFound".into(),
-                        message: format!("Import item {key_id} not found or not owned"),
-                        client_error: None,
-                    });
-                }
-                if item.flag == InventoryFlag::Locked
-                    || snap.is_item_locked_in_contract_or_job(item.item_id)
-                {
-                    return Err(BridgeRpcError {
-                        code: "ItemLocked".into(),
-                        message: format!("Import item {key_id} is locked"),
-                        client_error: None,
-                    });
-                }
-                if !is_co_hangar_item(item) {
-                    return Err(BridgeRpcError {
-                        code: "ColocationRequired".into(),
-                        message: format!(
-                            "Import item {key_id} must be in customs office hangar or active ship cargo"
-                        ),
-                        client_error: None,
-                    });
-                }
-                if (item.quantity as u64) < qty {
-                    return Err(BridgeRpcError {
-                        code: "InsufficientCommodityQuantity".into(),
-                        message: format!(
-                            "Import item {key_id} has quantity {}, cannot import {qty}",
-                            item.quantity
-                        ),
-                        client_error: None,
-                    });
-                }
-                planned_imports.push(ImportSource::ByItemId(key_id, item.type_id, qty));
-                item.type_id
-            } else if let Some(tid) =
-                u32::try_from(key_id).ok().filter(|t| ctx.sde.types.contains_key(t))
-            {
-                let mut matching_ids: Vec<i64> = snap
-                    .items
-                    .values()
-                    .filter(|it| it.type_id == tid && is_co_hangar_item(it))
-                    .map(|it| it.item_id)
-                    .collect();
-                matching_ids.sort();
-                let avail: u64 = matching_ids
-                    .iter()
-                    .filter_map(|iid| snap.items.get(iid))
-                    .map(|it| it.quantity.max(0) as u64)
-                    .sum();
-                if avail == 0 {
-                    return Err(BridgeRpcError {
-                        code: "ItemNotFound".into(),
-                        message: format!(
-                            "Commodity type {tid} not found in customs office hangar or ship cargo"
-                        ),
-                        client_error: None,
-                    });
-                }
-                if avail < qty {
-                    return Err(BridgeRpcError {
-                        code: "InsufficientCommodityQuantity".into(),
-                        message: format!(
-                            "Available quantity ({avail}) of type {tid} is less than import quantity ({qty})"
-                        ),
-                        client_error: None,
-                    });
-                }
-                planned_imports.push(ImportSource::ByTypeId(tid, qty, matching_ids));
-                tid
-            } else {
-                return Err(BridgeRpcError {
-                    code: "ItemNotFound".into(),
-                    message: format!("Import commodity/item {key_id} not found"),
-                    client_error: None,
-                });
-            };
-            let unit_vol = ctx
-                .sde
-                .types
-                .get(&tid)
-                .map(|t| t.volume.max(0.005))
-                .unwrap_or(0.38);
-            import_vol_m3 += unit_vol * (qty as f64);
-            import_base_isk += pi_commodity_tier_base_cost(&ctx.sde, tid) * (qty as f64);
-        }
+        let planned_imports = plan_poco_import_transfers(
+            ctx,
+            snap,
+            char_id,
+            &import_map,
+            customs_office_loc_id,
+            planet_id,
+            orbital_id_opt,
+            ship_id_opt,
+            &commodity_opts,
+        )?;
+        let import_vol_m3 = planned_imports.total_vol_m3;
+        let import_base_isk = planned_imports.total_base_isk;
 
         // Plan & validate exports (`type_id -> qty`)
-        let mut planned_exports: Vec<(TypeId, u64)> = Vec::with_capacity(export_map.len());
+        let mut planned_exports: Vec<(TypeId, u64, i32)> = Vec::with_capacity(export_map.len());
         let mut export_vol_m3 = 0.0_f64;
         let mut export_base_isk = 0.0_f64;
         for (&tid_raw, &qty) in &export_map {
-            let tid = u32::try_from(tid_raw)
-                .ok()
-                .filter(|t| ctx.sde.types.contains_key(t))
-                .ok_or_else(|| BridgeRpcError {
-                    code: "InvalidCommodity".into(),
-                    message: format!("Unknown commodity typeID {tid_raw}"),
-                    client_error: None,
-                })?;
-            let _ = i32::try_from(qty).map_err(|_| BridgeRpcError {
+            let tid = u32::try_from(tid_raw).map_err(|_| BridgeRpcError {
+                code: "InvalidCommodity".into(),
+                message: format!("Unknown commodity typeID {tid_raw}"),
+                client_error: None,
+            })?;
+            ensure_valid_pi_commodity_type(&ctx.sde, tid)?;
+            let qty_i32 = i32::try_from(qty).map_err(|_| BridgeRpcError {
                 code: "InvalidCommodityQuantity".into(),
                 message: format!("Export quantity {qty} overflows i32"),
                 client_error: None,
@@ -1204,7 +1356,7 @@ fn handle_import_export_with_planet(
                 .unwrap_or(0.38);
             export_vol_m3 += unit_vol * (qty as f64);
             export_base_isk += pi_commodity_tier_base_cost(&ctx.sde, tid) * (qty as f64);
-            planned_exports.push((tid, qty));
+            planned_exports.push((tid, qty, qty_i32));
         }
 
         // Capacity validation: launchpad (10,000 m3) and customs office hangar (35,000 m3)
@@ -1247,101 +1399,38 @@ fn handle_import_export_with_planet(
             }
         }
 
-        // POCO/Skyhook access & tax calculation
-        let (player_poco_rate, _) =
-            resolve_character_orbital_access_and_tax(snap, char_id, planet_id)?;
-        let customs_lvl = snap
-            .skills
-            .get(&char_id)
-            .and_then(|m| m.get(&33467))
-            .map(|s| s.level.clamp(0, 5))
-            .unwrap_or(0);
-        let npc_customs_tax_rate = if ctx
-            .sde
-            .solar_systems
-            .get(&col.solar_system_id)
-            .map(|s| s.security_status >= 0.45)
-            .unwrap_or(true)
-        {
-            0.10
-        } else {
-            0.0
-        };
-        let import_tax_isk = if import_base_isk > 0.0 {
-            0.5 * compute_poco_export_tax(import_base_isk, npc_customs_tax_rate, customs_lvl, player_poco_rate)
-        } else {
-            0.0
-        };
-        let export_tax_isk = if export_base_isk > 0.0 {
-            compute_poco_export_tax(export_base_isk, npc_customs_tax_rate, customs_lvl, player_poco_rate)
-        } else {
-            0.0
-        };
-        let total_tax_isk = import_tax_isk + export_tax_isk;
-        let tax_cents = IskCents::from_f64_isk(total_tax_isk);
-        if tax_cents.0 > 0 {
-            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                let new_bal = ch.balance.checked_sub(tax_cents).ok_or_else(|| BridgeRpcError {
-                    code: "InsufficientFunds".into(),
-                    message: format!(
-                        "Insufficient ISK to pay POCO import/export tax ({total_tax_isk:.2} ISK)"
-                    ),
+        // Pre-validate POCO access and tax affordability read-only before mutating any state.
+        let prepared_tax = prepare_poco_commodity_tax(
+            ctx,
+            snap,
+            char_id,
+            planet_id,
+            col.solar_system_id,
+            0.5 * import_base_isk + export_base_isk,
+            1.0,
+            "import/export",
+        )?;
+
+        // Apply import consumptions atomically (propagate errors so tx rolls back).
+        for (iid, take_i32) in planned_imports.consumptions {
+            snap.consume_exact_item_quantity(iid, take_i32, commodity_opts)
+                .map_err(|err| BridgeRpcError {
+                    code: "InvalidCommodityItemState".into(),
+                    message: format!("Failed to consume import commodity item {iid}: {err}"),
                     client_error: None,
                 })?;
-                ch.balance = new_bal;
-                snap.append_journal(
-                    char_id,
-                    "CustomOfficeTax",
-                    tax_cents,
-                    new_bal,
-                    format!("POCO import/export tax on planet {planet_id}"),
-                );
-            }
-            if let Some(cfg) = load_orbital_settings(snap, planet_id) {
-                let player_share =
-                    IskCents::from_f64_isk((0.5 * import_base_isk + export_base_isk) * player_poco_rate);
-                if player_share.0 > 0 {
-                    if let Some(corp) = snap.corporations.get_mut(&cfg.owner_corp_id) {
-                        corp.credit_division(1, player_share);
-                    }
-                }
-            }
+        }
+        for (tid, qty) in planned_imports.pin_additions {
+            let entry = net.pins[pin_idx].contents.entry(tid).or_insert(0);
+            *entry = entry.checked_add(qty).ok_or_else(|| BridgeRpcError {
+                code: "InvalidCommodityQuantity".into(),
+                message: format!("Launchpad commodity quantity overflow for type {tid}"),
+                client_error: None,
+            })?;
         }
 
-        // Apply import deductions & pin additions
-        for src in planned_imports {
-            match src {
-                ImportSource::ByItemId(iid, tid, qty) => {
-                    let q_i32 = qty as i32;
-                    let Some(it_owner) = snap.items.get(&iid).map(|it| it.owner_id) else { continue };
-                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), it_owner);
-                    opts.reject_singleton = false;
-                    if snap.consume_exact_item_quantity(iid, q_i32, opts).is_ok() {
-                        *net.pins[pin_idx].contents.entry(tid).or_insert(0) += qty;
-                    }
-                }
-                ImportSource::ByTypeId(tid, qty, matching_ids) => {
-                    let mut rem = qty as i32;
-                    for iid in matching_ids {
-                        let Some((it_owner, avail)) = snap.items.get(&iid).map(|it| (it.owner_id, it.quantity)) else { continue };
-                        let take = rem.min(avail);
-                        if take <= 0 { continue; }
-                        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), it_owner);
-                        opts.reject_singleton = false;
-                        if snap.consume_exact_item_quantity(iid, take, opts).is_ok() {
-                            rem -= take;
-                        }
-                        if rem == 0 {
-                            break;
-                        }
-                    }
-                    *net.pins[pin_idx].contents.entry(tid).or_insert(0) += qty;
-                }
-            }
-        }
-
-        // Apply export deductions & customs office hangar spawns/merges
-        for (tid, qty) in planned_exports {
+        // Apply export deductions & customs office hangar spawns/merges into clean commodity stacks only.
+        for (tid, qty, qty_i32) in planned_exports {
             if let Some(cnt) = net.pins[pin_idx].contents.get_mut(&tid) {
                 if *cnt <= qty {
                     net.pins[pin_idx].contents.remove(&tid);
@@ -1352,17 +1441,27 @@ fn handle_import_export_with_planet(
             let existing_id = snap
                 .items
                 .values()
-                .find(|it| {
+                .filter(|it| {
                     it.owner_id == char_id
                         && it.location_id == customs_office_loc_id
                         && it.flag == InventoryFlag::Hangar
                         && it.type_id == tid
-                        && !it.singleton
+                        && snap.is_clean_stackable_item(it)
+                        && it.quantity.checked_add(qty_i32).is_some()
                 })
+                .min_by_key(|it| it.item_id)
                 .map(|it| it.item_id);
             if let Some(eid) = existing_id {
                 if let Some(stack) = snap.items.get_mut(&eid) {
-                    stack.quantity = stack.quantity.saturating_add(qty as i32);
+                    stack.quantity = stack.quantity.checked_add(qty_i32).ok_or_else(|| {
+                        BridgeRpcError {
+                            code: "InvalidCommodityQuantity".into(),
+                            message: format!(
+                                "Export quantity {qty_i32} overflows customs office stack {eid}"
+                            ),
+                            client_error: None,
+                        }
+                    })?;
                     stack.version += 1;
                 }
             } else {
@@ -1376,8 +1475,10 @@ fn handle_import_export_with_planet(
                         owner_id: char_id,
                         location_id: customs_office_loc_id,
                         flag: InventoryFlag::Hangar,
-                        quantity: qty as i32,
+                        quantity: qty_i32,
                         singleton: false,
+                        is_blueprint_copy: false,
+                        blueprint_runs_remaining: None,
                         version: 1,
                         ..Default::default()
                     },
@@ -1385,6 +1486,14 @@ fn handle_import_export_with_planet(
             }
         }
 
+        commit_poco_commodity_tax(
+            snap,
+            char_id,
+            planet_id,
+            prepared_tax,
+            format!("POCO import/export tax on planet {planet_id}"),
+            "import/export",
+        )?;
         save_pi_network(snap, char_id, planet_id, &net);
         Ok(customs_office_loc_id)
     })?;

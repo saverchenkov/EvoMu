@@ -1891,6 +1891,11 @@ fn root_location_constraint_consumption_and_system_cleanup() {
     let mut bpc_opts = ok_opts;
     bpc_opts.reject_blueprint_copy = true;
     assert!(snap.validate_item_for_consumption(&bpc_item, &bpc_opts).is_err());
+    let mut run_bounded_item = leaf_rec.clone();
+    run_bounded_item.blueprint_runs_remaining = Some(1);
+    assert!(snap.validate_item_for_consumption(&run_bounded_item, &bpc_opts).is_err());
+    assert!(snap.is_clean_stackable_item(&leaf_rec));
+    assert!(!snap.is_clean_stackable_item(&run_bounded_item));
 
     assert!(snap.validate_item_for_consumption(&snap.items[&c1], &ConsumeExactOptions::for_owner_exact(Some(owner_id), owner_id)).is_err());
 

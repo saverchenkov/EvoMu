@@ -318,6 +318,91 @@ async fn test_pi_orbitals_flush_launch_import_and_program_rpcs() {
     );
 }
 
+#[test]
+fn test_pi_orbitals_rejects_non_pi_types_and_overflow_quantities() {
+    let ctx = make_ctx();
+    let char_id = 90_000_001_i64;
+    let planet_id = 40_009_082_i64;
+    let sys_id = 30_000_142_u32;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.planetary_colonies.insert(
+            (char_id, planet_id),
+            PlanetaryColonyRecord {
+                planet_id,
+                owner_id: char_id,
+                solar_system_id: sys_id,
+                command_center_level: 2,
+                pins_count: 1,
+                extracted_commodities: HashMap::new(),
+                last_extracted_unix: 0,
+            },
+        );
+        let net = PiColonyNetworkState {
+            cpu_max: 7_057.0,
+            pg_max: 9_000.0,
+            pins: vec![PiPinState {
+                pin_id: 401,
+                type_id: 2543, // Gas Launchpad
+                contents: HashMap::from([(3645, 100)]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        save_pi_network(snap, char_id, planet_id, &net);
+    });
+
+    let mut session = SessionState::default();
+    session.user_id = Some(1);
+    session.character_id = Some(char_id);
+    session.solar_system_id = Some(sys_id);
+
+    for bad_type in [683_i64, 587, 380, 2543, 999_999] {
+        for dest in ["Import", "ImportToColony", "CustomsOffice", "Storage"] {
+            let err = handle_pi_orbitals(
+                &ctx,
+                &mut session,
+                "planetMgr",
+                "UserLaunchCommodities",
+                &[
+                    PyRep::Integer(planet_id),
+                    PyRep::Integer(bad_type),
+                    PyRep::Integer(1),
+                    PyRep::String(dest.into()),
+                ],
+                &HashMap::new(),
+                None,
+            )
+            .unwrap()
+            .unwrap_err();
+            assert_eq!(err.code, "InvalidCommodity", "type {bad_type} dest {dest}");
+        }
+    }
+
+    let err_overflow = handle_pi_orbitals(
+        &ctx,
+        &mut session,
+        "planetMgr",
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(planet_id),
+            PyRep::Integer(3645),
+            PyRep::Integer(i64::from(i32::MAX) + 1),
+            PyRep::String("CustomsOffice".into()),
+        ],
+        &HashMap::new(),
+        None,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_overflow.code, "InvalidCommodityQuantity");
+
+    ctx.db.with_snapshot(|snap| {
+        let net = load_pi_network(snap, char_id, planet_id, 2);
+        assert_eq!(net.pins[0].contents.get(&3645).copied(), Some(100));
+    });
+}
+
 #[cfg(test)]
 #[path = "pi_orbitals_extra_unit_tests.rs"]
 mod extra_unit_tests;
