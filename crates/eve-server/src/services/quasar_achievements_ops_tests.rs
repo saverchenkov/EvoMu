@@ -1,7 +1,7 @@
 use super::*;
 use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::test_ctx_and_clock;
 use crate::services::quasar_achievements::{AchievementConditionDef, AchievementDef};
-use eve_proto::quasar::{AuthoritativeContext, DynamicQuasarMessage};
+use eve_proto::quasar::{AuthoritativeContext, DynamicQuasarMessage, GoogleAny};
 
 #[test]
 fn achievement_notices_and_gateway_handlers() {
@@ -135,6 +135,88 @@ fn achievement_notices_and_gateway_handlers() {
         &DynamicQuasarMessage::new("Empty"),
     )
     .unwrap();
+}
+
+#[test]
+fn achievement_cdn_uses_dynamic_esi_port_and_matches_achv_flatbuffer_crc() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let ctx = Arc::new(ctx);
+    ctx.set_esi_port(39_555);
+    assert_eq!(ctx.quasar_gateway.esi_port(), 39_555);
+
+    let mgr = &ctx.quasar_gateway.progression.achievements;
+    let expected_fb = mgr.flatbuffer_bytes();
+    assert_eq!(expected_fb.get(4..8), Some(b"ACHV".as_slice()));
+    let expected_crc = crate::router::cache_notifications::crc32_ieee(&expected_fb) as u32;
+
+    let req = pb::message("eve_public.achievement.definition.api.cdn.GetLatestRequest")
+        .set("no_local_version_available", true)
+        .must_encode();
+    let auth = AuthoritativeContext::for_session(Some(1), Some(90_000_001), None, 0, "tranquility", Vec::new());
+    let any = eve_proto::quasar::GoogleAny {
+        type_url: format!(
+            "{}eve_public.achievement.definition.api.cdn.GetLatestRequest",
+            eve_proto::quasar::TYPE_EVETECH_PREFIX
+        ),
+        value: req,
+    };
+    let dyn_msg = ctx
+        .quasar_gateway
+        .descriptors
+        .decode_dynamic_or_wire("eve_public.achievement.definition.api.cdn.GetLatestRequest", &any.value)
+        .expect("decode GetLatestRequest");
+    let handlers = ctx.quasar_gateway.handlers.read().unwrap();
+    let rsp_any = handlers["eve_public.achievement.definition.api.cdn.GetLatestRequest"](&auth, &any, &dyn_msg)
+        .expect("GetLatestRequest must succeed");
+    // Clean desktop client with empty GetLatestRequest (no current_version, no_local = false)
+    // and type.evetech.net/ prefix also receives the GetLatestResponse checkpoint (#1128).
+    let clean_any = eve_proto::quasar::GoogleAny {
+        type_url: any.type_url.clone(),
+        value: Vec::new(),
+    };
+    let clean_dyn = DynamicQuasarMessage::new("eve_public.achievement.definition.api.cdn.GetLatestRequest");
+    let clean_rsp = handlers["eve_public.achievement.definition.api.cdn.GetLatestRequest"](&auth, &clean_any, &clean_dyn)
+        .expect("clean client GetLatestRequest must succeed");
+    drop(handlers);
+    assert_eq!(clean_rsp.value, rsp_any.value);
+    assert_eq!(
+        rsp_any.normalized_type_name(),
+        "eve_public.achievement.definition.api.cdn.GetLatestResponse"
+    );
+
+    let wm = eve_proto::quasar::WireMessage::decode(&rsp_any.value).expect("decode response");
+    let cp_bytes = wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).expect("checkpoint");
+    let cp_wm = eve_proto::quasar::WireMessage::decode(cp_bytes).expect("decode checkpoint");
+    let url = cp_wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 1)
+        .and_then(|f| f.value.as_str().ok().flatten())
+        .expect("checkpoint.url");
+    let path = url
+        .strip_prefix("http://127.0.0.1:39555")
+        .expect("checkpoint URL must reflect ctx.set_esi_port(39_555)");
+    assert_eq!(
+        path,
+        format!("/cdn/achievements/v24.1.{}/{}.fb", mgr.sde_achievement_count, mgr.sde_achievement_hash)
+    );
+    let crc_bytes = cp_wm.fields.iter().find(|f| f.field_number == 3).and_then(|f| f.value.as_bytes()).expect("crc");
+    let crc_wm = eve_proto::quasar::WireMessage::decode(crc_bytes).expect("decode crc");
+    let crc_val = crc_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()).expect("crc u32");
+    assert_eq!(crc_val as u32, expected_crc);
+
+    let esi = crate::esi::router::EsiRouter::new(Arc::clone(&ctx));
+    let http = esi.handle_request(&crate::esi::EsiHttpRequest::new("GET", path));
+    assert_eq!(http.status_code, 200);
+    assert_eq!(http.header("content-type"), Some("application/octet-stream"));
+    assert_eq!(http.body, expected_fb);
+
+    let legacy_json_path = path.replace(".fb", ".json");
+    assert_eq!(
+        esi.handle_request(&crate::esi::EsiHttpRequest::new("GET", legacy_json_path))
+            .status_code,
+        404
+    );
 }
 
 #[cfg(test)]

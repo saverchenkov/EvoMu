@@ -7971,7 +7971,7 @@ pub(crate) mod esi_corp_blueprints_structures_live {
     use eve_db::{CorporationRecord, InventoryFlag, IskCents};
     use eve_destiny::{Ball, MovementMode};
     use eve_machonet::SessionState;
-    use eve_proto::quasar::{encode_bytes_field, encode_string_field, encode_varint_field};
+    use eve_proto::quasar::{encode_bytes_field, encode_string_field, encode_varint_field, WireMessage};
     use eve_proto::PyRep;
     use eve_server::esi::router::EsiRouter;
     use eve_server::esi::{EsiHttpRequest, OpenApiSpec};
@@ -8201,7 +8201,7 @@ pub(crate) mod esi_corp_blueprints_structures_live {
         let router = EsiRouter::new(Arc::clone(&ctx));
         let mut s = sess(70_202, 90_000_001, 98_000_001, 30_000_142, 0);
 
-        // 1. Character title definitions GetLatestRequest returns CDN URL; no school-synthesized titles
+        // 1. Character title definitions GetLatestRequest returns .fb CDN URL & authentic TITL FlatBuffer
         let latest_rsp = rpc(
             &ctx,
             &mut s,
@@ -8215,13 +8215,25 @@ pub(crate) mod esi_corp_blueprints_structures_live {
         let url_bytes = field(&cp, 1).expect("url");
         let url = String::from_utf8(url_bytes).expect("utf8 url");
         let path = url.strip_prefix("http://127.0.0.1:26004").expect("local ESI HTTP CDN URL");
-        assert_eq!(path, "/cdn/cosmetics/character/title/definitions/v24.1.0/en-us.json");
+        assert_eq!(path, "/cdn/cosmetics/character/title/definitions/v24.1.0/en-us.fb");
+        let title_crc_msg = field(&cp, 3).expect("title crc");
+        let title_crc_wm = WireMessage::decode(&title_crc_msg).expect("decode title crc");
+        let title_crc = title_crc_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 1)
+            .and_then(|f| f.value.as_varint())
+            .expect("title crc u32") as u32;
         let cdn_http = router.handle_request(&EsiHttpRequest::new("GET", path));
         assert_eq!(cdn_http.status_code, 200);
-        let parsed_defs: Value = serde_json::from_slice(&cdn_http.body).expect("title defs JSON");
-        assert_eq!(parsed_defs, json!([]));
+        assert_eq!(cdn_http.header("content-type"), Some("application/octet-stream"));
+        assert_eq!(cdn_http.body.get(4..8), Some(b"TITL".as_slice()));
+        assert_eq!(
+            eve_server::router::cache_notifications::crc32_ieee(&cdn_http.body) as u32,
+            title_crc
+        );
 
-        // 3. Space CDN GetUpdateRequest returns configurable CDN URL; EsiRouter does not serve invented MAPT binary
+        // 3. Space CDN GetUpdateRequest returns configurable CDN URL & EsiRouter serves untagged Universe FlatBuffer
         let mut no_local = Vec::new();
         encode_varint_field(2, 1, &mut no_local);
         let space_rsp = rpc(&ctx, &mut s, "eve_public.space.api.cdn.GetUpdateRequest", no_local).await;
@@ -8230,10 +8242,23 @@ pub(crate) mod esi_corp_blueprints_structures_live {
         let space_url = String::from_utf8(field(&space_cp, 1).unwrap()).unwrap();
         let space_path = space_url.strip_prefix("http://127.0.0.1:26004").expect("local ESI HTTP URL");
         assert_eq!(space_path, format!("/cdn/maptags/v24.2.{}/universe.fb", ctx.sde.solar_systems.len()));
+        let space_crc_msg = field(&space_cp, 3).expect("space crc");
+        let space_crc_wm = WireMessage::decode(&space_crc_msg).expect("decode space crc");
+        let space_crc = space_crc_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 1)
+            .and_then(|f| f.value.as_varint())
+            .expect("space crc u32") as u32;
         let map_http = router.handle_request(&EsiHttpRequest::new("GET", space_path));
-        assert_eq!(map_http.status_code, 404);
+        assert_eq!(map_http.status_code, 200);
+        assert_eq!(map_http.header("content-type"), Some("application/octet-stream"));
+        assert_eq!(
+            eve_server::router::cache_notifications::crc32_ieee(&map_http.body) as u32,
+            space_crc
+        );
 
-        // 4. Achievement definition CDN GetLatestRequest returns local EsiRouter JSON bundle
+        // 4. Achievement definition CDN GetLatestRequest returns local EsiRouter ACHV FlatBuffer bundle
         let ach_rsp = rpc(
             &ctx,
             &mut s,
@@ -8246,14 +8271,27 @@ pub(crate) mod esi_corp_blueprints_structures_live {
         let ach_url = String::from_utf8(field(&ach_cp, 1).unwrap()).unwrap();
         let ach_path = ach_url.strip_prefix("http://127.0.0.1:26004").expect("local ESI HTTP URL");
         let ach_mgr = &ctx.quasar_gateway.progression.achievements;
-        assert_eq!(ach_path, format!("/cdn/achievements/v24.1.{}/{}.json", ach_mgr.sde_achievement_count, ach_mgr.sde_achievement_hash));
+        assert_eq!(ach_path, format!("/cdn/achievements/v24.1.{}/{}.fb", ach_mgr.sde_achievement_count, ach_mgr.sde_achievement_hash));
+        let ach_crc_msg = field(&ach_cp, 3).expect("ach crc");
+        let ach_crc_wm = WireMessage::decode(&ach_crc_msg).expect("decode ach crc");
+        let ach_crc = ach_crc_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 1)
+            .and_then(|f| f.value.as_varint())
+            .expect("ach crc u32") as u32;
         let ach_http = router.handle_request(&EsiHttpRequest::new("GET", ach_path));
         assert_eq!(ach_http.status_code, 200);
-        let ach_defs: Value = serde_json::from_slice(&ach_http.body).expect("ach defs JSON");
-        assert_eq!(ach_defs.as_array().unwrap().len(), ach_mgr.sde_achievement_count);
+        assert_eq!(ach_http.header("content-type"), Some("application/octet-stream"));
+        assert_eq!(ach_http.body.get(4..8), Some(b"ACHV".as_slice()));
+        assert_eq!(ach_http.body, ach_mgr.flatbuffer_bytes());
+        assert_eq!(
+            eve_server::router::cache_notifications::crc32_ieee(&ach_http.body) as u32,
+            ach_crc
+        );
 
-        // 5. GlobalConfig includes ejabberd_client_address (#298) and V24.01 desktop flatbuffer CDN
-        //    requests return 200 OK without triggering HTTPS handshake failures (#288, #304).
+        // 5. GlobalConfig includes ejabberd_client_address (#298) and V24.02 type.evetech.net/ CDN
+        //    requests return GetLatestResponse with local HTTP .fb checkpoint URL & CRC (#1128).
         let gcfg = eve_server::bug_reporting::build_client_global_config(&ctx, Some("127.0.0.1"));
         assert!(gcfg.contains_key("ejabberd_client_address"));
         let evetech_ach_req = eve_proto::quasar::EvePublicRequest {
@@ -8266,7 +8304,14 @@ pub(crate) mod esi_corp_blueprints_structures_live {
         };
         let evetech_ach_rsp = ctx.quasar_gateway.handle_public_request(&s, &evetech_ach_req, None, false, 1_700_000_000);
         assert_eq!(evetech_ach_rsp.status_code, STATUS_OK);
-        assert!(evetech_ach_rsp.payload.is_none());
+        let ev_payload = evetech_ach_rsp.payload.expect("evetech GetLatestResponse");
+        assert_eq!(
+            ev_payload.normalized_type_name(),
+            "eve_public.achievement.definition.api.cdn.GetLatestResponse"
+        );
+        let ev_cp = field(&ev_payload.value, 1).expect("evetech checkpoint");
+        let ev_url = String::from_utf8(field(&ev_cp, 1).unwrap()).unwrap();
+        assert!(ev_url.ends_with(".fb"), "expected .fb url, got {ev_url}");
     }
 
     #[tokio::test]

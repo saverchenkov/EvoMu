@@ -441,7 +441,7 @@ fn stargate_lock_expiry_non_zarzakh_ai_broadcast_and_cdn_evetech_flatbuffer() {
     .unwrap();
     assert!(!ai_anon_rsp.value.is_empty());
 
-    // 3. CDN GetUpdateRequest with type.evetech.net/ prefix & no current_version seeds flatbuffer and returns empty type_url
+    // 3. CDN GetUpdateRequest with type.evetech.net/ prefix & no current_version returns GetUpdateResponse checkpoint
     let h = router
         .handlers
         .read()
@@ -456,6 +456,24 @@ fn stargate_lock_expiry_non_zarzakh_ai_broadcast_and_cdn_evetech_flatbuffer() {
         value: Vec::new(),
     };
     let cdn_fb_rsp = h(&ctx, &evetech_any, &cdn_no_local).unwrap();
-    assert!(cdn_fb_rsp.type_url.is_empty());
-    assert!(cdn_fb_rsp.value.is_empty());
+    assert_eq!(
+        cdn_fb_rsp.type_url,
+        format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.space.api.cdn.GetUpdateResponse")
+    );
+    assert!(!cdn_fb_rsp.value.is_empty());
+    let wm = eve_proto::quasar::WireMessage::decode(&cdn_fb_rsp.value).expect("decode GetUpdateResponse");
+    let cp_bytes = wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 1)
+        .and_then(|f| f.value.as_bytes())
+        .expect("checkpoint");
+    let cp_wm = eve_proto::quasar::WireMessage::decode(cp_bytes).expect("decode checkpoint");
+    let url_str = cp_wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 1)
+        .and_then(|f| f.value.as_str().ok().flatten())
+        .expect("checkpoint url");
+    assert!(url_str.ends_with("/universe.fb"), "unexpected url {url_str}");
 }

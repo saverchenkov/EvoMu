@@ -385,11 +385,13 @@ fn esi_catalog_meta_headers_etag_error_limit_and_get_sweep() {
     let cdn = router.handle_request(&EsiHttpRequest::new(
         "GET",
         format!(
-            "/latest/cdn/achievements/v24.1.{}/{}.json",
+            "/latest/cdn/achievements/v24.1.{}/{}.fb",
             mgr.sde_achievement_count, mgr.sde_achievement_hash
         ),
     ));
     assert_eq!(cdn.status_code, 200);
+    assert_eq!(cdn.header("content-type"), Some("application/octet-stream"));
+    assert_eq!(cdn.body.get(4..8), Some(b"ACHV".as_slice()));
 
     let bad_date = router.handle_request(
         &EsiHttpRequest::new("GET", "/latest/status")

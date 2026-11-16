@@ -481,3 +481,165 @@ fn skin_escrow_isolated_across_concurrent_db_entitlement_syncs() {
     assert_eq!(lic.unactivated, 1);
     assert_eq!(lic.escrowed, 1);
 }
+
+#[test]
+fn title_definitions_flatbuffer_schema_clean_client_and_dynamic_esi_port() {
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let sde = shared_sde();
+    let state = Arc::new(SkinrCosmeticsState::load(Arc::clone(&db), Arc::clone(&sde)));
+    {
+        let mut data = state.data.write().unwrap();
+        data.title_definitions = vec![
+            TitleDefinitionRecord {
+                title_id: 42,
+                name: "Fleet Commander".into(),
+                internal_name: "title_fleet_commander".into(),
+            },
+            TitleDefinitionRecord {
+                title_id: 99,
+                name: "Master Explorator".into(),
+                internal_name: "title_explorator".into(),
+            },
+        ];
+    }
+
+    let reg = QuasarDescriptorRegistry::open_default_or_empty();
+    let router = PublicGatewayRouter::new(Arc::clone(&reg), Arc::clone(&db), Arc::clone(&sde));
+    register(&router, Arc::clone(&state));
+    router.set_esi_port(38_421);
+
+    let player = sess(Some(10), Some(90_000_001), 0);
+    // Clean V24.02 desktop client sends type.evetech.net/ with no current_version and no_local=true.
+    let no_local_req = pb::message("eve_public.cosmetic.character.title.definition.api.GetLatestRequest")
+        .set("no_local_version_available", true)
+        .set("language.code", "de")
+        .must_encode();
+    let rsp = router.handle_public_request(
+        &player,
+        &EvePublicRequest {
+            correlation_uuid: vec![12; 16],
+            payload: Some(GoogleAny {
+                type_url: format!(
+                    "{}eve_public.cosmetic.character.title.definition.api.GetLatestRequest",
+                    eve_proto::quasar::TYPE_EVETECH_PREFIX
+                ),
+                value: no_local_req,
+            }),
+            ..Default::default()
+        },
+        None,
+        false,
+        1_700_000_500,
+    );
+    assert_eq!(rsp.status_code, STATUS_OK);
+    let payload = rsp.payload.expect("clean client must receive GetLatestResponse");
+    assert_eq!(
+        payload.normalized_type_name(),
+        "eve_public.cosmetic.character.title.definition.api.GetLatestResponse"
+    );
+    assert!(!payload.value.is_empty());
+
+    let fb = encode_title_definitions_flatbuffer(&state.data.read().unwrap().title_definitions);
+    assert_eq!(fb.get(4..8), Some(b"TITL".as_slice()));
+    let expected_crc = crate::router::cache_notifications::crc32_ieee(&fb) as u32;
+
+    let dyn_rsp = reg
+        .decode_dynamic("eve_public.cosmetic.character.title.definition.api.GetLatestResponse", &payload.value)
+        .expect("decode GetLatestResponse");
+    let Some(eve_proto::quasar::DynamicValue::Message(cp)) = dyn_rsp.get(1) else {
+        panic!("missing checkpoint");
+    };
+    assert_eq!(
+        cp.get(1),
+        Some(&eve_proto::quasar::DynamicValue::String(
+            "http://127.0.0.1:38421/cdn/cosmetics/character/title/definitions/v24.1.0/de.fb".into()
+        ))
+    );
+    let Some(eve_proto::quasar::DynamicValue::Message(crc_msg)) = cp.get(3) else {
+        panic!("missing crc");
+    };
+    assert_eq!(
+        crc_msg.get(1),
+        Some(&eve_proto::quasar::DynamicValue::Uint32(expected_crc))
+    );
+
+    // Also verify eve.cosmetic.character.title.definition.api.GetLatestRequest enum Language (2 = DE).
+    let mut eve_req = Vec::new();
+    eve_proto::quasar::encode_varint_field(1, 2, &mut eve_req);
+    let eve_rsp = call(
+        &router,
+        &player,
+        "eve.cosmetic.character.title.definition.api.GetLatestRequest",
+        eve_req,
+        1_700_000_501,
+    );
+    assert_eq!(eve_rsp.status_code, STATUS_OK);
+    let eve_dyn = reg
+        .decode_dynamic(
+            "eve.cosmetic.character.title.definition.api.GetLatestResponse",
+            &eve_rsp.payload.expect("eve response").value,
+        )
+        .expect("decode eve GetLatestResponse");
+    let Some(eve_proto::quasar::DynamicValue::Message(eve_cp)) = eve_dyn.get(1) else {
+        panic!("missing eve checkpoint");
+    };
+    assert_eq!(
+        eve_cp.get(1),
+        Some(&eve_proto::quasar::DynamicValue::String(
+            "http://127.0.0.1:38421/cdn/cosmetics/character/title/definitions/v24.1.0/de.fb".into()
+        ))
+    );
+
+    // Structurally walk the 'TITL' FlatBuffer binary (root Titles -> [Title]).
+    let fb_u16 = |pos: usize| u16::from_le_bytes(fb[pos..pos + 2].try_into().unwrap());
+    let fb_u32 = |pos: usize| u32::from_le_bytes(fb[pos..pos + 4].try_into().unwrap());
+    let fb_i32 = |pos: usize| i32::from_le_bytes(fb[pos..pos + 4].try_into().unwrap());
+    let table_field = |tpos: usize, slot: usize| -> Option<usize> {
+        let vt = (tpos as isize - fb_i32(tpos) as isize) as usize;
+        let vt_len = fb_u16(vt) as usize;
+        let slot_off = 4 + slot * 2;
+        if slot_off + 2 > vt_len {
+            return None;
+        }
+        let rel = fb_u16(vt + slot_off) as usize;
+        (rel != 0).then_some(tpos + rel)
+    };
+    let read_str = |fpos: usize| -> String {
+        let spos = fpos + fb_u32(fpos) as usize;
+        let len = fb_u32(spos) as usize;
+        std::str::from_utf8(&fb[spos + 4..spos + 4 + len]).unwrap().to_string()
+    };
+
+    let root_pos = fb_u32(0) as usize;
+    let titles_vec_fpos = table_field(root_pos, 0).expect("Titles.Titles slot");
+    let titles_vec_pos = titles_vec_fpos + fb_u32(titles_vec_fpos) as usize;
+    assert_eq!(fb_u32(titles_vec_pos), 2);
+    let mut parsed_titles = Vec::new();
+    for idx in 0..2 {
+        let slot_pos = titles_vec_pos + 4 + idx * 4;
+        let title_pos = slot_pos + fb_u32(slot_pos) as usize;
+        let id = read_str(table_field(title_pos, 0).expect("Title.Id"));
+        let name = read_str(table_field(title_pos, 1).expect("Title.Name"));
+        let internal = read_str(table_field(title_pos, 2).expect("Title.InternalName"));
+        let vis = table_field(title_pos, 3).map_or(0u8, |p| fb[p]);
+        assert!(table_field(title_pos, 4).is_none(), "ReleaseDateUnixMs omitted");
+        parsed_titles.push((id, name, internal, vis));
+    }
+    let expected_uuid_42 = crate::services::quasar_achievements_flatbuffer::uuid_bytes_to_hyphenated_string(
+        crate::services::quasar_cosmetics_drafts::id_to_uuid_bytes(42),
+    );
+    let expected_uuid_99 = crate::services::quasar_achievements_flatbuffer::uuid_bytes_to_hyphenated_string(
+        crate::services::quasar_cosmetics_drafts::id_to_uuid_bytes(99),
+    );
+    assert_eq!(
+        parsed_titles,
+        vec![
+            (expected_uuid_42, "Fleet Commander".into(), "title_fleet_commander".into(), 0),
+            (expected_uuid_99, "Master Explorator".into(), "title_explorator".into(), 0),
+        ]
+    );
+
+    // Empty title catalog still yields a valid 'TITL' FlatBuffer with length-0 vector.
+    let empty_fb = encode_title_definitions_flatbuffer(&[]);
+    assert_eq!(empty_fb.get(4..8), Some(b"TITL".as_slice()));
+}

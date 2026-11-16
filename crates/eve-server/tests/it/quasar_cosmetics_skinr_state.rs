@@ -440,12 +440,12 @@ async fn character_title_definitions_and_version_notices() {
     let mut player = player_sess(50_321, 90_000_321, 98_000_001);
     let mut rx = subscribe(&ctx, &mut player).await;
 
-    // 1. GetLatestRequest returns Checkpoint with semantic version (24, 1, 0) and language-specific URL/CRC
+    // 1. GetLatestRequest returns Checkpoint with semantic version (24, 1, 0) and language-specific .fb URL/CRC
     let latest_en = rpc(&ctx, &mut player, "eve_public.cosmetic.character.title.definition.api.GetLatestRequest", Vec::new()).await;
     assert_eq!(latest_en.status_code, STATUS_OK);
     let en_msg = decode(&reg, latest_en.payload.as_ref().unwrap());
     let Some(DynamicValue::Message(cp_en)) = en_msg.get(1) else { panic!("checkpoint") };
-    assert!(matches!(cp_en.get(1), Some(DynamicValue::String(u)) if u.contains("v24.1.0/en-us.json")));
+    assert!(matches!(cp_en.get(1), Some(DynamicValue::String(u)) if u.contains("v24.1.0/en-us.fb")));
     let Some(DynamicValue::Message(ver_en)) = cp_en.get(2) else { panic!("version") };
     assert_eq!(ver_en.get(1), Some(&DynamicValue::Uint32(24)));
     assert_eq!(ver_en.get(2), Some(&DynamicValue::Uint32(1)));
@@ -473,7 +473,7 @@ async fn character_title_definitions_and_version_notices() {
     let latest_after = rpc(&ctx, &mut player, "eve_public.cosmetic.character.title.definition.api.GetLatestRequest", Vec::new()).await;
     let after_msg = decode(&reg, latest_after.payload.as_ref().unwrap());
     let Some(DynamicValue::Message(cp_after)) = after_msg.get(1) else { panic!("checkpoint after") };
-    assert!(matches!(cp_after.get(1), Some(DynamicValue::String(u)) if u.contains("v24.2.5/en-us.json")));
+    assert!(matches!(cp_after.get(1), Some(DynamicValue::String(u)) if u.contains("v24.2.5/en-us.fb")));
 }
 
 #[tokio::test]

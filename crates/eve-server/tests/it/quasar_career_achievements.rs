@@ -476,10 +476,13 @@ async fn test_authentic_achievements_and_cdn_metadata() {
     let crc_wm = WireMessage::decode(crc_field.value.as_bytes().expect("crc bytes")).expect("decode crc");
     let crc_val = crc_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()).expect("crc val");
     assert!(crc_val > 0, "CRC32 checksum must be non-zero");
+    assert!(cdn_path.ends_with(".fb"), "CDN path must serve .fb FlatBuffer: {cdn_path}");
     let esi = eve_server::esi::router::EsiRouter::new(std::sync::Arc::clone(&ctx));
     let cdn_http = esi.handle_request(&eve_server::esi::EsiHttpRequest::new("GET", cdn_path));
-    assert_eq!(cdn_http.status_code, 200, "EsiRouter must serve /cdn/achievements JSON");
-    assert_eq!((eve_server::router::cache_notifications::crc32_ieee(&cdn_http.body) as u32) as u64, crc_val, "Served JSON CRC32 must match checkpoint CRC32");
+    assert_eq!(cdn_http.status_code, 200, "EsiRouter must serve /cdn/achievements FlatBuffer");
+    assert_eq!(cdn_http.header("content-type"), Some("application/octet-stream"));
+    assert_eq!(cdn_http.body.get(4..8), Some(b"ACHV".as_slice()));
+    assert_eq!((eve_server::router::cache_notifications::crc32_ieee(&cdn_http.body) as u32) as u64, crc_val, "Served FlatBuffer CRC32 must match checkpoint CRC32");
 
     // 2. eve_public.achievement.api.GetRequest -> GetResponse (V24 oneof completion) + disabled achievement excluded
     let make_ident_req = |id: u32| -> Vec<u8> {

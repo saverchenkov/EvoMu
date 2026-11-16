@@ -504,3 +504,58 @@ fn space_handlers_fail_closed_when_ids_are_missing() {
         STATUS_NOT_FOUND
     );
 }
+
+#[test]
+fn maptags_universe_flatbuffer_encodes_untagged_sorted_containers() {
+    let sde = shared_sde();
+    let fb = encode_universe_maptags_flatbuffer(&sde);
+    assert_eq!(fb, encode_universe_maptags_flatbuffer(&sde), "encoding must be deterministic");
+    assert_ne!(fb.get(4..8), Some(b"MAPT".as_slice()), "Universe has no FlatBuffer file id");
+
+    let fb_u16 = |pos: usize| u16::from_le_bytes(fb[pos..pos + 2].try_into().unwrap());
+    let fb_u32 = |pos: usize| u32::from_le_bytes(fb[pos..pos + 4].try_into().unwrap());
+    let fb_i32 = |pos: usize| i32::from_le_bytes(fb[pos..pos + 4].try_into().unwrap());
+    let fb_u64 = |pos: usize| u64::from_le_bytes(fb[pos..pos + 8].try_into().unwrap());
+    let table_field = |tpos: usize, slot: usize| -> Option<usize> {
+        let vt = (tpos as isize - fb_i32(tpos) as isize) as usize;
+        let vt_len = fb_u16(vt) as usize;
+        let slot_off = 4 + slot * 2;
+        if slot_off + 2 > vt_len {
+            return None;
+        }
+        let rel = fb_u16(vt + slot_off) as usize;
+        (rel != 0).then_some(tpos + rel)
+    };
+    let read_container_ids = |root: usize, slot: usize| -> Vec<u64> {
+        let fpos = table_field(root, slot).expect("container vector slot");
+        let vpos = fpos + fb_u32(fpos) as usize;
+        let len = fb_u32(vpos) as usize;
+        let mut ids = Vec::with_capacity(len);
+        for idx in 0..len {
+            let elem_slot = vpos + 4 + idx * 4;
+            let elem_pos = elem_slot + fb_u32(elem_slot) as usize;
+            let cid = table_field(elem_pos, 0).map_or(0, fb_u64);
+            let tags_fpos = table_field(elem_pos, 1).expect("Tags slot");
+            let tags_vpos = tags_fpos + fb_u32(tags_fpos) as usize;
+            assert_eq!(fb_u32(tags_vpos), 0);
+            ids.push(cid);
+        }
+        ids
+    };
+
+    let root_pos = fb_u32(0) as usize;
+    let mut expected_regions: Vec<u64> = sde.regions.keys().map(|&id| u64::from(id)).collect();
+    expected_regions.sort_unstable();
+    let mut expected_consts: Vec<u64> = sde.constellations.keys().map(|&id| u64::from(id)).collect();
+    expected_consts.sort_unstable();
+    let mut expected_systems: Vec<u64> = sde.solar_systems.keys().map(|&id| u64::from(id)).collect();
+    expected_systems.sort_unstable();
+
+    assert_eq!(read_container_ids(root_pos, 0), expected_regions);
+    assert_eq!(read_container_ids(root_pos, 1), expected_consts);
+    assert_eq!(read_container_ids(root_pos, 2), expected_systems);
+
+    // Empty SDE still produces a valid 3-slot untagged Universe table with empty vectors.
+    let empty_fb = encode_universe_maptags_flatbuffer(&SdeRegistry::default());
+    assert!(empty_fb.len() >= 12);
+}

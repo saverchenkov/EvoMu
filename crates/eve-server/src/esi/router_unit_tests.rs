@@ -164,7 +164,7 @@ fn handle_request_meta_endpoints_cdn_portrait_auth_and_conditional_etag() {
     // Meta / swagger / versions / status.json / CDN endpoints
     let mgr = &ctx.quasar_gateway.progression.achievements;
     let cdn_ach = format!(
-        "/cdn/achievements/v24.1.{}/{}.json",
+        "/cdn/achievements/v24.1.{}/{}.fb",
         mgr.sde_achievement_count, mgr.sde_achievement_hash
     );
     for path in [

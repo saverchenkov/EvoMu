@@ -1178,11 +1178,13 @@ async fn test_q3_legal_pii_cdn_localization() {
             panic!("Expected url string in checkpoint");
         };
         let path = url.strip_prefix("http://127.0.0.1:26004").expect("local ESI HTTP URL");
-        assert!(path.starts_with("/cdn/achievements/v24.1.60/"), "unexpected path {path}");
+        assert!(path.starts_with("/cdn/achievements/v24.1.60/") && path.ends_with(".fb"), "unexpected path {path}");
         let esi = eve_server::esi::router::EsiRouter::new(std::sync::Arc::clone(&ctx));
         let cdn_http = esi.handle_request(&eve_server::esi::EsiHttpRequest::new("GET", path));
-        assert_eq!(cdn_http.status_code, 200, "EsiRouter must serve achievement JSON bundle");
-        assert_eq!(cdn_http.body, ctx.quasar_gateway.progression.achievements.sde_definitions_json);
+        assert_eq!(cdn_http.status_code, 200, "EsiRouter must serve achievement FlatBuffer bundle");
+        assert_eq!(cdn_http.header("content-type"), Some("application/octet-stream"));
+        assert_eq!(cdn_http.body.get(4..8), Some(b"ACHV".as_slice()));
+        assert_eq!(cdn_http.body, ctx.quasar_gateway.progression.achievements.flatbuffer_bytes());
         if let Some(eve_proto::quasar::DynamicValue::Message(ver)) = cp.get(2) {
             match ver.get(3) {
                 Some(eve_proto::quasar::DynamicValue::Uint32(p)) => assert_eq!(*p, 60),

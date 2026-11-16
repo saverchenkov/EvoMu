@@ -16,8 +16,7 @@ use crate::quasar_gateway::{
 use eve_db::WorldRepository;
 use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
-    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp,
-    WireMessage,
+    AuthoritativeContext, DynamicQuasarMessage, GoogleAny, GoogleTimestamp, WireMessage,
 };
 use eve_sde::SdeRegistry;
 use serde_json::Value;
@@ -1045,82 +1044,89 @@ fn parse_semver_wire(raw: &[u8], field_num: u32) -> Option<[u32; 3]> {
     Some([major, minor, patch])
 }
 
-fn compute_title_def_crc(defs: &[TitleDefinitionRecord], ver: [u32; 3], lang: &str) -> u32 {
-    let mut hash: u32 = 0x811C_9DC5;
-    for b in lang.as_bytes() {
-        hash ^= *b as u32;
-        hash = hash.wrapping_mul(0x0100_0193);
+/// Encode character title definitions as an authentic V24.02 `'TITL'` FlatBuffer matching
+/// `cosmetics.client.character.title.model.flatbuffer.generated.{Titles,Title}` (`#1126`).
+///
+/// Layout:
+/// - File identifier: `*b"TITL"` (`TitlesBufferHasIdentifier`).
+/// - Root `Titles` (1 slot): `0 -> Titles ([Title])`.
+/// - `Title` (5 slots): `0 -> Id (UUID string)`, `1 -> Name (string)`,
+///   `2 -> InternalName (string)`, `3 -> Visibility (uint8: 0 = AlwaysVisible)`,
+///   `4 -> ReleaseDateUnixMs (int64, omitted when immediately released)`.
+pub(crate) fn encode_title_definitions_flatbuffer(defs: &[TitleDefinitionRecord]) -> Vec<u8> {
+    use super::quasar_achievements_flatbuffer::{uuid_bytes_to_hyphenated_string, FlatBufferWriter};
+
+    let mut w = FlatBufferWriter::with_capacity(256 + defs.len() * 128);
+    let mut title_offsets = Vec::with_capacity(defs.len());
+    for def in defs {
+        let uuid_bytes =
+            crate::services::quasar_cosmetics_drafts::id_to_uuid_bytes(def.title_id as u64);
+        let uuid_str = uuid_bytes_to_hyphenated_string(uuid_bytes);
+        let id_off = w.create_string(&uuid_str);
+        let name_off = w.create_string(&def.name);
+        let internal_off = w.create_string(&def.internal_name);
+
+        let mut tbl = w.start_table(5);
+        w.add_offset(&mut tbl, 0, id_off);
+        w.add_offset(&mut tbl, 1, name_off);
+        w.add_offset(&mut tbl, 2, internal_off);
+        w.add_u8(&mut tbl, 3, 0, 0);
+        title_offsets.push(w.end_table(tbl));
     }
-    for v in ver {
-        hash ^= v;
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    for d in defs {
-        hash ^= d.title_id;
-        hash = hash.wrapping_mul(0x0100_0193);
-        for b in d.name.as_bytes() {
-            hash ^= *b as u32;
-            hash = hash.wrapping_mul(0x0100_0193);
+    let titles_vec = w.create_offset_vector(&title_offsets);
+    let mut root = w.start_table(1);
+    w.add_offset(&mut root, 0, titles_vec);
+    let root_off = w.end_table(root);
+    w.finish(root_off, *b"TITL")
+}
+
+fn title_language_tag(req_type: &str, dyn_msg: &DynamicQuasarMessage) -> String {
+    if req_type.starts_with("eve.") {
+        return match dyn_msg.get(1).and_then(as_u64) {
+            Some(1) => "zh",
+            Some(2) => "de",
+            Some(3) => "fr",
+            Some(4) => "ja",
+            Some(5) => "ru",
+            Some(6) => "ko",
+            Some(7) => "es",
+            _ => "en-us",
         }
+        .to_string();
     }
-    hash
+    sub(dyn_msg, 3)
+        .and_then(|l| str_of(l, 1))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "en-us".to_string())
 }
 
 fn handle_title_def_get_latest(
     state: &SkinrCosmeticsState,
     req_type: &str,
-    any_type_url: &str,
     dyn_msg: &DynamicQuasarMessage,
+    esi_port: &std::sync::atomic::AtomicU16,
 ) -> HandlerResult {
-    let lang = sub(dyn_msg, 3).and_then(|l| str_of(l, 1)).filter(|s| !s.is_empty()).unwrap_or_else(|| "en-us".to_string());
-    if dyn_msg.get(1).is_none() && any_type_url.starts_with("type.evetech.net/") && std::env::var("EVOMU_CDN_BASE_URL").ok().filter(|s| !s.trim().is_empty()).is_none() {
-        let fb = crate::services::quasar_achievements::empty_root_table_flatbuffer();
-        crate::services::quasar_achievements::ensure_client_flatbuffer_storage_seeded("character_titles", "24.1.1", &fb);
-        crate::services::quasar_achievements::ensure_client_flatbuffer_storage_seeded(&format!("character_titles_{lang}"), "24.1.1", &fb);
-        crate::services::quasar_achievements::ensure_client_flatbuffer_storage_seeded("character_titles_en-us", "24.1.1", &fb);
-        return Ok(GoogleAny { type_url: String::new(), value: Vec::new() });
-    }
+    let lang = title_language_tag(req_type, dyn_msg);
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
     let ver = data.title_def_version;
-    let crc = compute_title_def_crc(&data.title_definitions, ver, &lang);
-    let cdn_base = std::env::var("EVOMU_CDN_BASE_URL").ok().map(|s| s.trim_end_matches('/').to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "http://127.0.0.1:26004/cdn".to_string());
-    let url = format!("{cdn_base}/cosmetics/character/title/definitions/v{}.{}.{}/{}.json", ver[0], ver[1], ver[2], lang);
+    let fb = encode_title_definitions_flatbuffer(&data.title_definitions);
+    drop(data);
+
+    let crc = crate::router::cache_notifications::crc32_ieee(&fb) as u32;
+    let cdn_base = crate::quasar_gateway::resolve_cdn_base_url(
+        esi_port.load(std::sync::atomic::Ordering::Acquire),
+    );
+    let url = format!(
+        "{cdn_base}/cosmetics/character/title/definitions/v{}.{}.{}/{}.fb",
+        ver[0], ver[1], ver[2], lang
+    );
 
     let prefix = if req_type.starts_with("eve.") { "eve" } else { "eve_public" };
-    let semver_type = format!("{prefix}.semanticversion.Specification");
-    let ver_builder = if let Some(DynamicValue::Message(client_ver)) = dyn_msg.get(1) {
-        let mut b = pb::message(&semver_type);
-        if let Some(v) = client_ver.get(1).and_then(as_u64) {
-            b = b.set("major", v as u32);
-        }
-        if let Some(v) = client_ver.get(2).and_then(as_u64) {
-            b = b.set("minor", v as u32);
-        }
-        if let Some(v) = client_ver.get(3).and_then(as_u64) {
-            b = b.set("patch", v as u32);
-        }
-        for (fno, field_name) in [(4u32, "prerelease_tags"), (5u32, "build_tags")] {
-            match client_ver.get(fno) {
-                Some(DynamicValue::String(tag)) => b = b.add(field_name, tag),
-                Some(DynamicValue::Repeated(tags)) => {
-                    for t in tags {
-                        if let DynamicValue::String(tag) = t {
-                            b = b.add(field_name, tag);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        b
-    } else {
-        build_semver(prefix, ver)
-    };
     pb::message(format!(
         "{prefix}.cosmetic.character.title.definition.api.GetLatestResponse"
     ))
     .set("checkpoint.url", &url)
-    .set("checkpoint.version", ver_builder)
+    .set("checkpoint.version", build_semver(prefix, ver))
     .set("checkpoint.crc.crc", crc)
     .to_any_or_internal_err()
 }
@@ -1270,9 +1276,12 @@ pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
         "eve_public.cosmetic.character.title.definition.api.GetLatestRequest",
         "eve.cosmetic.character.title.definition.api.GetLatestRequest",
     ] {
-        reg!(req_name, move |s: &Arc<SkinrCosmeticsState>, _ctx, any: &GoogleAny, d| {
-            handle_title_def_get_latest(s, req_name, &any.type_url, d)
-        });
+        let s = Arc::clone(&state);
+        let esi_port = Arc::clone(&router.esi_port);
+        router.register_handler(
+            req_name,
+            Arc::new(move |_ctx, _any, d| handle_title_def_get_latest(&s, req_name, d, &esi_port)),
+        );
     }
     for req_name in [
         "eve_public.cosmetic.character.title.definition.api.GetAllRequest",

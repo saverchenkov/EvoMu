@@ -3503,7 +3503,7 @@ async fn test_parity_remediation_quasar_title_definitions_and_space_cdn() {
     let router = EsiRouter::new(Arc::clone(&ctx));
     let mut s = sess(70_202, 90_000_001, 98_000_001, 30_000_142, 0);
 
-    // 1. Character title definitions GetLatestRequest returns CDN URL; no school-synthesized titles
+    // 1. Character title definitions GetLatestRequest returns .fb CDN URL & authentic TITL FlatBuffer
     let latest_rsp = rpc(
         &ctx,
         &mut s,
@@ -3517,13 +3517,13 @@ async fn test_parity_remediation_quasar_title_definitions_and_space_cdn() {
     let url_bytes = field(&cp, 1).expect("url");
     let url = String::from_utf8(url_bytes).expect("utf8 url");
     let path = url.strip_prefix("http://127.0.0.1:26004").expect("local ESI HTTP CDN URL");
-    assert_eq!(path, "/cdn/cosmetics/character/title/definitions/v24.1.0/en-us.json");
+    assert_eq!(path, "/cdn/cosmetics/character/title/definitions/v24.1.0/en-us.fb");
     let cdn_http = router.handle_request(&EsiHttpRequest::new("GET", path));
     assert_eq!(cdn_http.status_code, 200);
-    let parsed_defs: Value = serde_json::from_slice(&cdn_http.body).expect("title defs JSON");
-    assert_eq!(parsed_defs, json!([]));
+    assert_eq!(cdn_http.header("content-type"), Some("application/octet-stream"));
+    assert_eq!(cdn_http.body.get(4..8), Some(b"TITL".as_slice()));
 
-    // 3. Space CDN GetUpdateRequest returns configurable CDN URL; EsiRouter does not serve invented MAPT binary
+    // 3. Space CDN GetUpdateRequest returns configurable CDN URL & EsiRouter serves Universe FlatBuffer
     let mut no_local = Vec::new();
     encode_varint_field(2, 1, &mut no_local);
     let space_rsp = rpc(&ctx, &mut s, "eve_public.space.api.cdn.GetUpdateRequest", no_local).await;
@@ -3533,9 +3533,10 @@ async fn test_parity_remediation_quasar_title_definitions_and_space_cdn() {
     let space_path = space_url.strip_prefix("http://127.0.0.1:26004").expect("local ESI HTTP URL");
     assert_eq!(space_path, format!("/cdn/maptags/v24.2.{}/universe.fb", ctx.sde.solar_systems.len()));
     let map_http = router.handle_request(&EsiHttpRequest::new("GET", space_path));
-    assert_eq!(map_http.status_code, 404);
+    assert_eq!(map_http.status_code, 200);
+    assert_eq!(map_http.header("content-type"), Some("application/octet-stream"));
 
-    // 4. Achievement definition CDN GetLatestRequest returns local EsiRouter JSON bundle
+    // 4. Achievement definition CDN GetLatestRequest returns local EsiRouter ACHV FlatBuffer bundle
     let ach_rsp = rpc(
         &ctx,
         &mut s,
@@ -3548,11 +3549,12 @@ async fn test_parity_remediation_quasar_title_definitions_and_space_cdn() {
     let ach_url = String::from_utf8(field(&ach_cp, 1).unwrap()).unwrap();
     let ach_path = ach_url.strip_prefix("http://127.0.0.1:26004").expect("local ESI HTTP URL");
     let ach_mgr = &ctx.quasar_gateway.progression.achievements;
-    assert_eq!(ach_path, format!("/cdn/achievements/v24.1.{}/{}.json", ach_mgr.sde_achievement_count, ach_mgr.sde_achievement_hash));
+    assert_eq!(ach_path, format!("/cdn/achievements/v24.1.{}/{}.fb", ach_mgr.sde_achievement_count, ach_mgr.sde_achievement_hash));
     let ach_http = router.handle_request(&EsiHttpRequest::new("GET", ach_path));
     assert_eq!(ach_http.status_code, 200);
-    let ach_defs: Value = serde_json::from_slice(&ach_http.body).expect("ach defs JSON");
-    assert_eq!(ach_defs.as_array().unwrap().len(), ach_mgr.sde_achievement_count);
+    assert_eq!(ach_http.header("content-type"), Some("application/octet-stream"));
+    assert_eq!(ach_http.body.get(4..8), Some(b"ACHV".as_slice()));
+    assert_eq!(ach_http.body, ach_mgr.flatbuffer_bytes());
 }
 
 #[tokio::test]

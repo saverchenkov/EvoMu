@@ -20,13 +20,13 @@ const ROOT_TIME_LIMITED_UUID: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
 const ROOT_MANUAL_UUID: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 4];
 const CUMULATIVE_METHOD_UUID: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1];
 
-struct TableState {
+pub(crate) struct TableState {
     field_offsets: Vec<u32>,
     table_end_offset: u32,
 }
 
 /// Safe, zero-dependency, backward-growing FlatBuffer binary encoder with vtable deduplication.
-struct FlatBufferWriter {
+pub(crate) struct FlatBufferWriter {
     buf: Vec<u8>,
     head: usize,
     minalign: usize,
@@ -34,7 +34,7 @@ struct FlatBufferWriter {
 }
 
 impl FlatBufferWriter {
-    fn with_capacity(cap: usize) -> Self {
+    pub(crate) fn with_capacity(cap: usize) -> Self {
         let cap = cap.max(256);
         Self {
             buf: vec![0u8; cap],
@@ -99,7 +99,7 @@ impl FlatBufferWriter {
         self.push_bytes(&v.to_le_bytes());
     }
 
-    fn create_string(&mut self, s: &str) -> u32 {
+    pub(crate) fn create_string(&mut self, s: &str) -> u32 {
         let bytes = s.as_bytes();
         self.prep(4, bytes.len() + 1);
         self.push_u8(0);
@@ -108,7 +108,7 @@ impl FlatBufferWriter {
         self.offset()
     }
 
-    fn create_offset_vector(&mut self, offsets: &[u32]) -> u32 {
+    pub(crate) fn create_offset_vector(&mut self, offsets: &[u32]) -> u32 {
         self.prep(4, 4 + offsets.len() * 4);
         for &target in offsets.iter().rev() {
             let rel = self.offset() + 4 - target;
@@ -118,14 +118,14 @@ impl FlatBufferWriter {
         self.offset()
     }
 
-    fn start_table(&self, num_slots: usize) -> TableState {
+    pub(crate) fn start_table(&self, num_slots: usize) -> TableState {
         TableState {
             field_offsets: vec![0; num_slots],
             table_end_offset: self.offset(),
         }
     }
 
-    fn add_u8(&mut self, tbl: &mut TableState, slot: usize, val: u8, default: u8) {
+    pub(crate) fn add_u8(&mut self, tbl: &mut TableState, slot: usize, val: u8, default: u8) {
         if val != default {
             self.prep(1, 0);
             self.push_u8(val);
@@ -141,7 +141,7 @@ impl FlatBufferWriter {
         }
     }
 
-    fn add_u64(&mut self, tbl: &mut TableState, slot: usize, val: u64, default: u64) {
+    pub(crate) fn add_u64(&mut self, tbl: &mut TableState, slot: usize, val: u64, default: u64) {
         if val != default {
             self.prep(8, 0);
             self.push_u64(val);
@@ -149,7 +149,7 @@ impl FlatBufferWriter {
         }
     }
 
-    fn add_offset(&mut self, tbl: &mut TableState, slot: usize, target_off: u32) {
+    pub(crate) fn add_offset(&mut self, tbl: &mut TableState, slot: usize, target_off: u32) {
         if target_off != 0 {
             self.prep(4, 0);
             let rel = self.offset() + 4 - target_off;
@@ -158,7 +158,7 @@ impl FlatBufferWriter {
         }
     }
 
-    fn end_table(&mut self, tbl: TableState) -> u32 {
+    pub(crate) fn end_table(&mut self, tbl: TableState) -> u32 {
         self.prep(4, 4);
         self.push_u32(0); // placeholder for vtable soffset
         let table_start = self.offset();
@@ -199,10 +199,23 @@ impl FlatBufferWriter {
         table_start
     }
 
-    fn finish(mut self, root_table: u32, file_identifier: [u8; 4]) -> Vec<u8> {
+    pub(crate) fn finish(self, root_table: u32, file_identifier: [u8; 4]) -> Vec<u8> {
+        self.finish_inner(root_table, Some(file_identifier))
+    }
+
+    /// Finalize a FlatBuffer whose root schema defines no 4-byte file identifier
+    /// (for example `maptags.generated.eve_public.map.Universe`).
+    pub(crate) fn finish_untagged(self, root_table: u32) -> Vec<u8> {
+        self.finish_inner(root_table, None)
+    }
+
+    fn finish_inner(mut self, root_table: u32, file_identifier: Option<[u8; 4]>) -> Vec<u8> {
         let minalign = self.minalign.max(4);
-        self.prep(minalign, 8);
-        self.push_bytes(&file_identifier);
+        let header_len = if file_identifier.is_some() { 8 } else { 4 };
+        self.prep(minalign, header_len);
+        if let Some(file_id) = file_identifier {
+            self.push_bytes(&file_id);
+        }
         let root_rel = self.offset() + 4 - root_table;
         self.push_u32(root_rel);
         self.buf[self.head..].to_vec()

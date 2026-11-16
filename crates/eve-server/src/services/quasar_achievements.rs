@@ -1216,7 +1216,8 @@ pub(crate) fn empty_achievement_flatbuffer() -> Vec<u8> {
     buf
 }
 
-/// Minimal valid FlatBuffer root table with all field offsets `0` (for `content_map_tags` `Universe`).
+/// Minimal valid FlatBuffer root table with all field offsets `0` (kept for unit-test coverage).
+#[cfg(test)]
 pub(crate) fn empty_root_table_flatbuffer() -> Vec<u8> {
     let mut buf = Vec::with_capacity(16);
     buf.extend_from_slice(&12u32.to_le_bytes());
@@ -1252,6 +1253,7 @@ fn isolated_flatbuffer_stage_content_dir(content_id: &str) -> Option<std::path::
 
 /// Seeds FlatBuffer payload files ONLY inside the isolated staging root configured via
 /// `EVOMU_FLATBUFFER_STAGE_DIR` (`#1120` / `#1089`), leaving host EVE client directories untouched.
+#[cfg(test)]
 pub(crate) fn ensure_client_flatbuffer_storage_seeded(
     content_id: &str,
     version_str: &str,

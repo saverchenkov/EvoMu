@@ -330,17 +330,20 @@ fn esi_router_meta_cdn_verify_compat_date_datasource_and_error_limit() {
     );
     assert_eq!(port_404_char.status_code, 404);
 
-    // 4. CDN achievements & title definitions (404 mismatch vs 200 valid)
+    // 4. CDN achievements, title definitions & maptags FlatBuffers (404 mismatch vs 200 valid)
     let ach_mgr = &ctx.quasar_gateway.progression.achievements;
     let ach_ok_path = format!(
-        "/cdn/achievements/v24.1.{}/{}.json",
+        "/cdn/achievements/v24.1.{}/{}.fb",
         ach_mgr.sde_achievement_count, ach_mgr.sde_achievement_hash
     );
-    assert_eq!(router.handle_request(&EsiHttpRequest::new("GET", ach_ok_path)).status_code, 200);
+    let ach_ok = router.handle_request(&EsiHttpRequest::new("GET", ach_ok_path));
+    assert_eq!(ach_ok.status_code, 200);
+    assert_eq!(ach_ok.header("content-type"), Some("application/octet-stream"));
+    assert_eq!(ach_ok.body.get(4..8), Some(b"ACHV".as_slice()));
     assert_eq!(
         router
             .handle_request(
-                &EsiHttpRequest::new("GET", "/cdn/achievements/v24.1.0/wronghash.json")
+                &EsiHttpRequest::new("GET", "/cdn/achievements/v24.1.0/wronghash.fb")
                     .with_peer_ip("10.0.1.4")
             )
             .status_code,
@@ -353,15 +356,35 @@ fn esi_router_meta_cdn_verify_compat_date_datasource_and_error_limit() {
     );
     let ver = skinr.data.read().unwrap().title_def_version;
     let titles_ok_path = format!(
-        "/cdn/cosmetics/character/title/definitions/v{}.{}.{}/defs.json",
+        "/cdn/cosmetics/character/title/definitions/v{}.{}.{}/defs.fb",
         ver[0], ver[1], ver[2]
     );
-    assert_eq!(router.handle_request(&EsiHttpRequest::new("GET", titles_ok_path)).status_code, 200);
+    let titles_ok = router.handle_request(&EsiHttpRequest::new("GET", titles_ok_path));
+    assert_eq!(titles_ok.status_code, 200);
+    assert_eq!(titles_ok.header("content-type"), Some("application/octet-stream"));
+    assert_eq!(titles_ok.body.get(4..8), Some(b"TITL".as_slice()));
     assert_eq!(
         router
             .handle_request(
-                &EsiHttpRequest::new("GET", "/cdn/cosmetics/character/title/definitions/v0.0.0/defs.json")
+                &EsiHttpRequest::new("GET", "/cdn/cosmetics/character/title/definitions/v0.0.0/defs.fb")
                     .with_peer_ip("10.0.1.5")
+            )
+            .status_code,
+        404
+    );
+    let (mt_maj, mt_min, mt_pat) =
+        crate::services::quasar_space_services::maptags_cdn_version(&ctx.sde);
+    let maptags_ok = router.handle_request(&EsiHttpRequest::new(
+        "GET",
+        format!("/cdn/maptags/v{mt_maj}.{mt_min}.{mt_pat}/universe.fb"),
+    ));
+    assert_eq!(maptags_ok.status_code, 200);
+    assert_eq!(maptags_ok.header("content-type"), Some("application/octet-stream"));
+    assert_eq!(
+        router
+            .handle_request(
+                &EsiHttpRequest::new("GET", "/cdn/maptags/v0.0.0/universe.fb")
+                    .with_peer_ip("10.0.1.7")
             )
             .status_code,
         404
