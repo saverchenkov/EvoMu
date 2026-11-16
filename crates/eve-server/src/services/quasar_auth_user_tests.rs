@@ -99,3 +99,121 @@ fn identity_store_omega_license_and_auth_user_handlers() {
     )
     .unwrap();
 }
+
+#[test]
+fn omega_user_license_notices_and_get_request_use_v2402_license_type() {
+    use eve_proto::quasar::QuasarDescriptorRegistry;
+
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let db = &ctx.db;
+    let router = &ctx.quasar_gateway;
+    let reg = QuasarDescriptorRegistry::open_default_or_empty();
+    register_handlers(router, Arc::clone(db));
+
+    let exp = activate_user_omega_license(db, &router.pending_notices, 1, 86_400, 1_700_000_000);
+    let act_notice = router
+        .pending_notices
+        .write()
+        .unwrap()
+        .drain(..)
+        .find(|(_, any)| any.type_url.ends_with("eve_public.user.license.api.ActivatedNotice"))
+        .expect("ActivatedNotice queued")
+        .1;
+    let act_dec = reg
+        .decode_dynamic(&act_notice.type_url, &act_notice.value)
+        .expect("decode ActivatedNotice");
+    let act_ident = match act_dec.get(1) {
+        Some(DynamicValue::Message(m)) => m.as_ref(),
+        other => panic!("expected license Identifier, got {other:?}"),
+    };
+    assert_eq!(
+        act_ident.get(1),
+        Some(&DynamicValue::String("eve_clonestate_omega".into()))
+    );
+    let act_attr = match act_dec.get(2) {
+        Some(DynamicValue::Message(m)) => m.as_ref(),
+        other => panic!("expected license Attributes, got {other:?}"),
+    };
+    let act_exp = match act_attr.get(2) {
+        Some(DynamicValue::Message(m)) => m.get(1).cloned(),
+        other => panic!("expected expiry_date, got {other:?}"),
+    };
+    assert_eq!(act_exp, Some(DynamicValue::Int64(exp as i64)));
+    let act_mod = match act_attr.get(3) {
+        Some(DynamicValue::Message(m)) => m.get(1).cloned(),
+        other => panic!("expected last_modified, got {other:?}"),
+    };
+    assert_eq!(act_mod, Some(DynamicValue::Int64(1_700_000_000)));
+
+    let auth_ctx = AuthoritativeContext::for_session_at(
+        Some(1),
+        Some(90_000_001),
+        Some(1_000_009),
+        0,
+        "tranquility",
+        vec![],
+        1_700_000_000,
+    );
+    let dummy_any = GoogleAny::default();
+    let handlers = router.handlers.read().unwrap();
+
+    for req_lt in ["eve_clonestate_omega", "omega", ""] {
+        let mut req_msg = DynamicQuasarMessage::new("eve_public.user.license.api.GetRequest");
+        if !req_lt.is_empty() {
+            let mut ident = DynamicQuasarMessage::new("eve_public.user.license.Identifier");
+            ident.set(1, DynamicValue::String(req_lt.into()));
+            req_msg.set(1, DynamicValue::Message(Box::new(ident)));
+        }
+        let ok_any = handlers["eve_public.user.license.api.GetRequest"](
+            &auth_ctx,
+            &dummy_any,
+            &req_msg,
+        )
+        .unwrap();
+        let ok_dec = reg
+            .decode_dynamic(&ok_any.type_url, &ok_any.value)
+            .expect("decode user.license GetResponse");
+        let ok_attr = match ok_dec.get(1) {
+            Some(DynamicValue::Message(m)) => m.as_ref(),
+            other => panic!("expected license Attributes, got {other:?}"),
+        };
+        let lm_sec = match ok_attr.get(3) {
+            Some(DynamicValue::Message(m)) => m.get(1).cloned(),
+            other => panic!("expected last_modified, got {other:?}"),
+        };
+        assert_eq!(lm_sec, Some(DynamicValue::Int64(1_700_000_000)));
+    }
+
+    let mut bogus_req = DynamicQuasarMessage::new("eve_public.user.license.api.GetRequest");
+    let mut bogus_ident = DynamicQuasarMessage::new("eve_public.user.license.Identifier");
+    bogus_ident.set(1, DynamicValue::String("unknown_license".into()));
+    bogus_req.set(1, DynamicValue::Message(Box::new(bogus_ident)));
+    let bogus_err = handlers["eve_public.user.license.api.GetRequest"](
+        &auth_ctx,
+        &dummy_any,
+        &bogus_req,
+    )
+    .unwrap_err();
+    assert_eq!(bogus_err.0, crate::quasar_gateway::STATUS_NOT_FOUND);
+
+    expire_user_omega_license(db, &router.pending_notices, 1);
+    let exp_notice = router
+        .pending_notices
+        .write()
+        .unwrap()
+        .drain(..)
+        .find(|(_, any)| any.type_url.ends_with("eve_public.user.license.api.ExpiredNotice"))
+        .expect("ExpiredNotice queued")
+        .1;
+    let exp_dec = reg
+        .decode_dynamic(&exp_notice.type_url, &exp_notice.value)
+        .expect("decode ExpiredNotice");
+    let exp_ident = match exp_dec.get(1) {
+        Some(DynamicValue::Message(m)) => m.as_ref(),
+        other => panic!("expected license Identifier, got {other:?}"),
+    };
+    assert_eq!(
+        exp_ident.get(1),
+        Some(&DynamicValue::String("eve_clonestate_omega".into()))
+    );
+}

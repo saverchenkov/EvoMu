@@ -678,3 +678,139 @@ async fn test_quasar_achievements_progression_and_claims() {
     assert_eq!(a101.def.reward_isk, 250_000);
     assert_eq!(a101.def.reward_sp, 5_000);
 }
+
+#[tokio::test]
+async fn test_v2402_omega_upsell_store_flow_and_license_notices() {
+    use eve_proto::pb::{self, enum_name};
+    use eve_proto::quasar::{DynamicQuasarMessage, DynamicValue, QuasarDescriptorRegistry};
+
+    // parity: quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/user/license/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/user/license/api/notices_pb2.pyj
+    eve_testkit::attest(&[
+        "quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/user/license/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/user/license/api/notices_pb2.pyj",
+    ]);
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let reg = QuasarDescriptorRegistry::open_default_or_empty();
+    let (uid, cid) = (1u64, 90_000_001);
+    let mut sess = build_sess(3601, uid, cid);
+    let mut notice_rx = ctx.quasar_gateway.subscribe_session(&sess, vec![], ctx.now_unix());
+
+    fn as_msg(val: Option<&DynamicValue>) -> &DynamicQuasarMessage {
+        match val {
+            Some(DynamicValue::Message(m)) => m.as_ref(),
+            other => panic!("expected message value, got {other:?}"),
+        }
+    }
+    fn dyn_list(msg: &DynamicQuasarMessage, field: u32) -> Vec<&DynamicValue> {
+        match msg.get(field) {
+            Some(DynamicValue::Repeated(vs)) => vs.iter().collect(),
+            Some(v) => vec![v],
+            None => Vec::new(),
+        }
+    }
+
+    // 1. V24.02 DefaultOfferCard flow: GetAllByTagRequest(CATALOG_REAL_MONEY, "UpsellStarterPack") -> ["1001"]
+    let starter_req = pb::message("eve_public.store.offer.api.GetAllByTagRequest")
+        .set("catalog", enum_name("CATALOG_REAL_MONEY"))
+        .set("tag", "UpsellStarterPack")
+        .must_encode();
+    let starter_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.store.offer.api.GetAllByTagRequest", starter_req).await;
+    assert_eq!(starter_rsp.status_code, STATUS_OK);
+    let starter_dec = reg
+        .decode_dynamic("eve_public.store.offer.api.GetAllByTagResponse", &starter_rsp.payload.unwrap().value)
+        .expect("decode GetAllByTagResponse");
+    let starter_ids: Vec<&str> = dyn_list(&starter_dec, 1)
+        .into_iter()
+        .filter_map(|v| match as_msg(Some(v)).get(1) {
+            Some(DynamicValue::String(s)) => Some(s.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starter_ids, vec!["1001"]);
+
+    // 2. AllOffersPage flow: GetAllByTagRequest(CATALOG_REAL_MONEY, "omega") includes "1001"
+    let omega_req = pb::message("eve_public.store.offer.api.GetAllByTagRequest")
+        .set("catalog", enum_name("CATALOG_REAL_MONEY"))
+        .set("tag", "omega")
+        .must_encode();
+    let omega_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.store.offer.api.GetAllByTagRequest", omega_req).await;
+    assert_eq!(omega_rsp.status_code, STATUS_OK);
+    let omega_dec = reg
+        .decode_dynamic("eve_public.store.offer.api.GetAllByTagResponse", &omega_rsp.payload.unwrap().value)
+        .expect("decode omega GetAllByTagResponse");
+    let omega_ids: Vec<&str> = dyn_list(&omega_dec, 1)
+        .into_iter()
+        .filter_map(|v| match as_msg(Some(v)).get(1) {
+            Some(DynamicValue::String(s)) => Some(s.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(omega_ids.contains(&"1001"));
+
+    // 3. StoreOffer fetch for "1001": verify dual pricing, schedule, category, and product 101 link
+    let off_req = pb::message("eve_public.store.offer.api.GetRequest")
+        .set("offer.store_offer", "1001")
+        .must_encode();
+    let off_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.store.offer.api.GetRequest", off_req).await;
+    assert_eq!(off_rsp.status_code, STATUS_OK);
+    let off_dec = reg
+        .decode_dynamic("eve_public.store.offer.api.GetResponse", &off_rsp.payload.unwrap().value)
+        .expect("decode offer 1001");
+    let off_attr = as_msg(off_dec.get(1));
+    assert_eq!(as_msg(as_msg(off_attr.get(12)).get(4)).get(2), Some(&DynamicValue::Int64(1_999)));
+    assert_eq!(as_msg(as_msg(off_attr.get(12)).get(6)).get(1), Some(&DynamicValue::Sint64(50_000)));
+    assert_eq!(as_msg(as_msg(off_attr.get(13)).get(4)).get(2), Some(&DynamicValue::Int64(1_999)));
+    assert_eq!(as_msg(as_msg(off_attr.get(10)).get(1)).get(1), Some(&DynamicValue::Int64(2_592_000)));
+    assert_eq!(as_msg(as_msg(Some(dyn_list(off_attr, 15)[0])).get(1)).get(1), Some(&DynamicValue::Uint32(101)));
+
+    // 4. StoreProduct fetch for 101: emits license (duration=30d, type="eve_clonestate_omega")
+    let prod_req = pb::message("eve_public.store.product.api.GetRequest")
+        .set("product.sequential", 101u32)
+        .set("product.catalog", enum_name("CATALOG_REAL_MONEY"))
+        .must_encode();
+    let prod_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.store.product.api.GetRequest", prod_req).await;
+    assert_eq!(prod_rsp.status_code, STATUS_OK);
+    let prod_dec = reg
+        .decode_dynamic("eve_public.store.product.api.GetResponse", &prod_rsp.payload.unwrap().value)
+        .expect("decode product 101");
+    let prod_lic = as_msg(as_msg(prod_dec.get(1)).get(6));
+    assert_eq!(as_msg(prod_lic.get(1)).get(1), Some(&DynamicValue::Int64(2_592_000)));
+    assert_eq!(prod_lic.get(2), Some(&DynamicValue::String("eve_clonestate_omega".into())));
+
+    // 5. User license notices & GetRequest validation with "eve_clonestate_omega"
+    let _exp = activate_user_omega_license(&ctx.db, &ctx.quasar_gateway.pending_notices, uid, 86_400, ctx.now_unix());
+    flush_pending_notices(&ctx);
+    let act_notices = drain_notices(&mut notice_rx);
+    let act_payload = act_notices
+        .iter()
+        .find_map(|n| n.payload.as_ref().filter(|p| p.type_url.contains("user.license.api.ActivatedNotice")))
+        .expect("ActivatedNotice delivered");
+    let act_dec = reg.decode_dynamic("eve_public.user.license.api.ActivatedNotice", &act_payload.value).expect("decode ActivatedNotice");
+    assert_eq!(as_msg(act_dec.get(1)).get(1), Some(&DynamicValue::String("eve_clonestate_omega".into())));
+
+    let lic_req = pb::message("eve_public.user.license.api.GetRequest")
+        .set("license.license_type", "eve_clonestate_omega")
+        .must_encode();
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.user.license.api.GetRequest", lic_req).await.status_code, STATUS_OK);
+    let bad_lic_req = pb::message("eve_public.user.license.api.GetRequest")
+        .set("license.license_type", "invalid_license")
+        .must_encode();
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.user.license.api.GetRequest", bad_lic_req).await.status_code, STATUS_NOT_FOUND);
+
+    expire_user_omega_license(&ctx.db, &ctx.quasar_gateway.pending_notices, uid);
+    flush_pending_notices(&ctx);
+    let exp_notices = drain_notices(&mut notice_rx);
+    let exp_payload = exp_notices
+        .iter()
+        .find_map(|n| n.payload.as_ref().filter(|p| p.type_url.contains("user.license.api.ExpiredNotice")))
+        .expect("ExpiredNotice delivered");
+    let exp_dec = reg.decode_dynamic("eve_public.user.license.api.ExpiredNotice", &exp_payload.value).expect("decode ExpiredNotice");
+    assert_eq!(as_msg(exp_dec.get(1)).get(1), Some(&DynamicValue::String("eve_clonestate_omega".into())));
+}

@@ -572,6 +572,204 @@ fn payment_store_types_builders_decode_strictly_with_descriptors() {
         .expect("decode assetholding operation GetResponse");
 }
 
+#[test]
+fn omega_upsell_seed_backfill_and_get_all_by_tag_catalog_filtering() {
+    let router = new_router();
+    let reg = QuasarDescriptorRegistry::open_default_or_empty();
+    let now = 1_700_000_500u64;
+    let player = make_sess(Some(10), Some(90_000_010), 0);
+
+    let extract_offer_ids = |rsp: EvePublicResponse| -> (Vec<String>, Option<String>) {
+        assert_eq!(rsp.status_code, STATUS_OK);
+        let any = rsp.payload.expect("GetAllByTagResponse payload");
+        let dec = reg
+            .decode_dynamic(&any.type_url, &any.value)
+            .expect("decode GetAllByTagResponse");
+        let ids = match dec.get(1) {
+            Some(DynamicValue::Repeated(items)) => items
+                .iter()
+                .filter_map(|v| match v {
+                    DynamicValue::Message(m) => match m.get(1) {
+                        Some(DynamicValue::String(s)) => Some(s.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect(),
+            Some(DynamicValue::Message(m)) => match m.get(1) {
+                Some(DynamicValue::String(s)) => vec![s.clone()],
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        let next = match dec.get(2) {
+            Some(DynamicValue::Message(np)) => match np.get(1) {
+                Some(DynamicValue::String(tok)) if !tok.is_empty() => Some(tok.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        (ids, next)
+    };
+
+    // 1. Canonical seeded DB exposes offer 1001 for both UpsellStarterPack and omega in CATALOG_REAL_MONEY
+    let starter_req = pb::message("eve_public.store.offer.api.GetAllByTagRequest")
+        .set("catalog", enum_name("CATALOG_REAL_MONEY"))
+        .set("tag", "UpsellStarterPack")
+        .must_encode();
+    let (starter_ids, starter_next) = extract_offer_ids(call(
+        &router,
+        &player,
+        "eve_public.store.offer.api.GetAllByTagRequest",
+        starter_req,
+        now,
+    ));
+    assert_eq!(starter_ids, vec!["1001".to_string()]);
+    assert_eq!(starter_next, None);
+
+    // 2. Existing seeded DB missing fiat price, product 101, and tags on 1001 gets backfilled idempotently
+    router.db.with_mut_snapshot(|snap| {
+        let mut cat = read_store_catalog(snap);
+        cat.products.retain(|p| p.id != 101);
+        if let Some(o1001) = cat.offers.iter_mut().find(|o| o.id == 1001) {
+            o1001.price_cents = None;
+            o1001.currency = None;
+            o1001.product_ids.clear();
+        }
+        cat.offers.push(StoreOffer {
+            id: 5001,
+            name: "Omega PLEX Exclusive".into(),
+            description: "NES PLEX only".into(),
+            category_id: 1,
+            price_plex: 500,
+            product_ids: vec![101],
+            targeted: false,
+            price_cents: None,
+            currency: None,
+        });
+        cat.offers.push(StoreOffer {
+            id: 5002,
+            name: "Omega Cash Exclusive".into(),
+            description: "Real money only".into(),
+            category_id: 1,
+            price_plex: 0,
+            product_ids: vec![101],
+            targeted: false,
+            price_cents: Some(1_499),
+            currency: Some("USD".into()),
+        });
+        cat.offers.push(StoreOffer {
+            id: 5003,
+            name: "Targeted Omega Offer".into(),
+            description: "Targeted".into(),
+            category_id: 1,
+            price_plex: 500,
+            product_ids: vec![101],
+            targeted: true,
+            price_cents: Some(999),
+            currency: Some("USD".into()),
+        });
+        save_store_catalog(snap, &cat);
+        snap.quasar_commerce.nes_store_offer_tags.clear();
+        snap.quasar_commerce
+            .nes_store_offer_tags
+            .insert(5001, vec!["omega".into()]);
+        snap.quasar_commerce
+            .nes_store_offer_tags
+            .insert(5002, vec!["omega".into()]);
+        snap.quasar_commerce
+            .nes_store_offer_tags
+            .insert(5003, vec!["omega".into()]);
+
+        ensure_store_catalog_seeded(snap, shared_sde().as_ref());
+        ensure_store_catalog_seeded(snap, shared_sde().as_ref());
+
+        let reloaded = read_store_catalog(snap);
+        assert!(reloaded.products.iter().any(|p| p.id == 101));
+        let o1001 = reloaded.offers.iter().find(|o| o.id == 1001).unwrap();
+        assert_eq!(o1001.price_cents, Some(1_999));
+        assert_eq!(o1001.currency.as_deref(), Some("USD"));
+        assert_eq!(o1001.product_ids, vec![101]);
+        let tags = read_store_offer_tags(snap);
+        assert_eq!(
+            tags.get(&1001).unwrap(),
+            &vec!["UpsellStarterPack".to_string(), "omega".to_string()]
+        );
+    });
+
+    // 3. Catalog filtering + pagination on GetAllByTagRequest
+    let rm_omega = pb::message("eve_public.store.offer.api.GetAllByTagRequest")
+        .set("catalog", enum_name("CATALOG_REAL_MONEY"))
+        .set("tag", "omega")
+        .must_encode();
+    let (rm_ids, _) = extract_offer_ids(call(
+        &router,
+        &player,
+        "eve_public.store.offer.api.GetAllByTagRequest",
+        rm_omega,
+        now,
+    ));
+    assert_eq!(rm_ids, vec!["1001".to_string(), "5002".to_string()]);
+
+    let nes_omega = pb::message("eve_public.store.offer.api.GetAllByTagRequest")
+        .set("catalog", enum_name("CATALOG_NES"))
+        .set("tag", "omega")
+        .must_encode();
+    let (nes_ids, _) = extract_offer_ids(call(
+        &router,
+        &player,
+        "eve_public.store.offer.api.GetAllByTagRequest",
+        nes_omega,
+        now,
+    ));
+    assert_eq!(nes_ids, vec!["1001".to_string(), "5001".to_string()]);
+
+    let ent_omega = pb::message("eve_public.store.offer.api.GetAllByTagRequest")
+        .set("catalog", enum_name("CATALOG_ENTITLEMENT"))
+        .set("tag", "omega")
+        .must_encode();
+    let (ent_ids, _) = extract_offer_ids(call(
+        &router,
+        &player,
+        "eve_public.store.offer.api.GetAllByTagRequest",
+        ent_omega,
+        now,
+    ));
+    assert!(ent_ids.is_empty());
+
+    let p1_req = pb::message("eve_public.store.offer.api.GetAllByTagRequest")
+        .set("catalog", enum_name("CATALOG_REAL_MONEY"))
+        .set("tag", "omega")
+        .set("page.size", 1u32)
+        .set("page.token", "0")
+        .must_encode();
+    let (p1_ids, p1_next) = extract_offer_ids(call(
+        &router,
+        &player,
+        "eve_public.store.offer.api.GetAllByTagRequest",
+        p1_req,
+        now,
+    ));
+    assert_eq!(p1_ids, vec!["1001".to_string()]);
+    assert_eq!(p1_next.as_deref(), Some("1"));
+
+    let p2_req = pb::message("eve_public.store.offer.api.GetAllByTagRequest")
+        .set("catalog", enum_name("CATALOG_REAL_MONEY"))
+        .set("tag", "omega")
+        .set("page.size", 1u32)
+        .set("page.token", "1")
+        .must_encode();
+    let (p2_ids, p2_next) = extract_offer_ids(call(
+        &router,
+        &player,
+        "eve_public.store.offer.api.GetAllByTagRequest",
+        p2_req,
+        now,
+    ));
+    assert_eq!(p2_ids, vec!["5002".to_string()]);
+    assert_eq!(p2_next, None);
+}
+
 #[cfg(test)]
 #[path = "quasar_payment_store_types_extra_unit_tests.rs"]
 mod quasar_payment_store_types_extra_unit_tests;
