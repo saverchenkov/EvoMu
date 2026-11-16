@@ -884,6 +884,101 @@ fn tick_capacitor_deltas_emit_attr_18_and_repair_unhydrated_cap() {
     }));
 }
 
+#[test]
+fn cap_telemetry_coalesces_and_evicts_before_state_notifications() {
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let char_id = 90_000_001_i64;
+    let ship_id = db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
+    let q_p: RwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>> =
+        RwLock::new(HashMap::new());
+    let now = 133_500_000_000_000_000_i64;
+
+    enqueue_cycle_char_notification(
+        Some(&db),
+        &q_p,
+        None,
+        now,
+        char_id,
+        "OnSovereigntyChanged",
+        vec![eve_proto::PyRep::Integer(30_000_142), eve_proto::PyRep::None],
+    );
+    enqueue_cycle_char_notification(
+        Some(&db),
+        &q_p,
+        None,
+        now,
+        char_id,
+        "OnSolarSystemSovStructuresUpdated",
+        vec![
+            eve_proto::PyRep::Integer(30_000_142),
+            eve_proto::PyRep::List(vec![]),
+            eve_proto::PyRep::Dict(vec![]),
+        ],
+    );
+    // Unrelated non-capacitor OnModuleAttributeChanges (attr 9) must not be coalesced with attr 18.
+    enqueue_cycle_char_notification(
+        Some(&db),
+        &q_p,
+        None,
+        now,
+        char_id,
+        "OnModuleAttributeChanges",
+        vec![eve_proto::PyRep::List(vec![eve_proto::PyRep::Tuple(vec![
+            eve_proto::PyRep::String("OnModuleAttributeChange".into()),
+            eve_proto::PyRep::Integer(char_id),
+            eve_proto::PyRep::Integer(ship_id),
+            eve_proto::PyRep::Integer(9),
+            eve_proto::PyRep::Integer(now),
+            eve_proto::PyRep::Real(100.0),
+            eve_proto::PyRep::Real(90.0),
+            eve_proto::PyRep::None,
+        ])])],
+    );
+
+    // 1. 150 passive recharge ticks for one ship coalesce to the latest cap pair without evicting sov notices.
+    for tick in 1..=150_u32 {
+        let mut actions = vec![PendingCycleAction::ShipCapacitorChanged {
+            char_id,
+            ship_id,
+            new_cap: 250.0 + f64::from(tick),
+            max_cap: 1_500.0,
+            old_cap: 249.0 + f64::from(tick),
+            notified: false,
+        }];
+        flush_pending_cycle_damage_notifications(Some(&db), Some(&q_p), None, &mut actions);
+    }
+    {
+        let q = &q_p.read().unwrap()[&char_id];
+        assert_eq!(q.len(), 5, "expected 3 non-telemetry notices + latest cap pair");
+        assert!(q.iter().any(|n| n.event == "OnSovereigntyChanged"));
+        assert!(q.iter().any(|n| n.event == "OnSolarSystemSovStructuresUpdated"));
+        let latest_cap = q
+            .iter()
+            .find(|n| n.event == "OnCapacitorChange")
+            .and_then(|n| n.args.get(1))
+            .and_then(eve_proto::PyRep::as_f64);
+        assert_eq!(latest_cap, Some(400.0));
+    }
+
+    // 2. Overflowing MAX_PENDING_NOTIFICATIONS_PER_CHAR across many distinct ships evicts old cap
+    //    telemetry first rather than dropping earlier state notifications.
+    for extra_ship in 1..=crate::router::MAX_PENDING_NOTIFICATIONS_PER_CHAR as i64 {
+        let mut actions = vec![PendingCycleAction::ShipCapacitorChanged {
+            char_id,
+            ship_id: ship_id + extra_ship,
+            new_cap: 300.0,
+            max_cap: 1_000.0,
+            old_cap: 250.0,
+            notified: false,
+        }];
+        flush_pending_cycle_damage_notifications(Some(&db), Some(&q_p), None, &mut actions);
+    }
+    let q = &q_p.read().unwrap()[&char_id];
+    assert_eq!(q.len(), crate::router::MAX_PENDING_NOTIFICATIONS_PER_CHAR);
+    assert!(q.iter().any(|n| n.event == "OnSovereigntyChanged"));
+    assert!(q.iter().any(|n| n.event == "OnSolarSystemSovStructuresUpdated"));
+}
+
 #[tokio::test]
 async fn ecm_jam_and_burst_clear_target_bound_cycles_and_fit_projection_syncs_turret_on_cycle_boundary() {
     let reg = SystemRegistry::new();
