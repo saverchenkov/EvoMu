@@ -228,7 +228,8 @@ async fn b02_sim_clock_rebase_dilated_progression_and_step_manual_tidi() {
     let _ = set_system_tidi_factor(&ctx, jita, 0.50);
     let _ = ctx.drain_notifications_for_char(char_id);
 
-    // Advance 10 wall seconds under 0.50 TiDi -> sim clock must advance 5.0s (50_000_000 ticks), NOT 10.0s
+    // Advance 10 wall seconds under 0.50 TiDi -> client 1.0x clock advanced 10.0s while sim clock
+    // advanced 5.0s (50_000_000 ticks), so DoSimClockRebase adjusts client timers by -5.0s.
     ctx.db.clock().advance_secs(10);
     let _ = set_system_tidi_factor(&ctx, jita, 0.25);
     let notes1 = ctx.drain_notifications_for_char(char_id);
@@ -236,10 +237,11 @@ async fn b02_sim_clock_rebase_dilated_progression_and_step_manual_tidi() {
     let PyRep::Tuple(pair1) = &rebase1.args[0] else { panic!("expected 2-tuple"); };
     let old1 = pair1[0].as_i64().unwrap();
     let new1 = pair1[1].as_i64().unwrap();
-    assert_eq!(new1 - old1, 50_000_000, "0.50 TiDi over 10s must advance sim clock by 5.0s");
+    assert_eq!(old1 - new1, 50_000_000, "0.50 TiDi over 10s must accumulate 5.0s lag relative to 1.0x clock");
     assert!(new1 < ctx.now_blueos_filetime_ticks(), "sim clock must stay dilated behind wall clock");
 
-    // Advance 20 wall seconds under 0.25 TiDi -> sim clock must advance 5.0s (50_000_000 ticks)
+    // Advance 20 wall seconds under 0.25 TiDi -> client 1.0x advanced 20.0s above `new1` while sim
+    // clock advanced 5.0s (50_000_000 ticks), so delta = -15.0s and total delta matches sim lag.
     ctx.db.clock().advance_secs(20);
     let _ = set_system_tidi_factor(&ctx, jita, 1.0);
     let notes2 = ctx.drain_notifications_for_char(char_id);
@@ -247,8 +249,9 @@ async fn b02_sim_clock_rebase_dilated_progression_and_step_manual_tidi() {
     let PyRep::Tuple(pair2) = &rebase2.args[0] else { panic!("expected 2-tuple"); };
     let old2 = pair2[0].as_i64().unwrap();
     let new2 = pair2[1].as_i64().unwrap();
-    assert_eq!(old2, new1);
-    assert_eq!(new2 - old2, 50_000_000, "0.25 TiDi over 20s must advance sim clock by 5.0s");
+    assert_eq!(old2 - new1, 200_000_000, "old2 must reflect 20 wall seconds elapsed since new1");
+    assert_eq!(new2 - new1, 50_000_000, "0.25 TiDi over 20s must advance sim clock by 5.0s");
+    assert_eq!(new2 - old2, -150_000_000, "delta must compensate 15.0s dilation lag without pushing forward");
 
     // Verify step_manual scales dt by tidi_factor for system_step_hook
     let observed_dts: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));

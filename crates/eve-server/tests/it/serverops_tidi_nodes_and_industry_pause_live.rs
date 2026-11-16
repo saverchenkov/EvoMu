@@ -91,7 +91,7 @@ async fn test_live_serverops_time_dilation_and_node_balancing() {
             assert_eq!(times.len(), 2, "DoSimClockRebase tuple must have 2 elements");
             let old_t = times[0].as_i64().expect("oldSimTime");
             let new_t = times[1].as_i64().expect("newSimTime");
-            assert!(old_t < new_t, "sim clock must advance forward: {old_t} < {new_t}");
+            assert!(new_t <= old_t, "DoSimClockRebase must never push client timers into future: {old_t} -> {new_t}");
         }
         other => panic!("expected 2-tuple rebaseTimes, got {other:?}"),
     }

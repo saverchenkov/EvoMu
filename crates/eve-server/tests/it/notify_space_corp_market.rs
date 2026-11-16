@@ -3178,7 +3178,7 @@ async fn test_batch3_sim_clock_rebase_and_crimewatch_timers() {
         panic!("expected 2-tuple in DoSimClockRebase");
     };
     assert_eq!(pair.len(), 2);
-    assert!(pair[0].as_i64().unwrap() < pair[1].as_i64().unwrap());
+    assert!(pair[1].as_i64().unwrap() <= pair[0].as_i64().unwrap());
     assert!(
         !amarr_notifs.iter().any(|(e, _)| e == "DoSimClockRebase"),
         "Amarr pilot must not receive Jita DoSimClockRebase"
