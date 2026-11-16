@@ -166,7 +166,7 @@ async fn test_quasar_cdn_client_and_constellation() {
     let dyn_cp = reg.decode_dynamic("eve.cdn.Checkpoint", &cp_buf).expect("decode eve.cdn.Checkpoint");
     assert_eq!(get_str(&dyn_cp, 1), Some("https://cdn.evomu.org/checkpoints/v1/meta.bin"));
 
-    // GlobalConfig ejabberd_client_address and desktop flatbuffer CDN fallback without HTTPS errors (#288, #298, #304)
+    // GlobalConfig ejabberd_client_address and type.evetech.net/ flatbuffer CDN GetLatestRequest (#1128)
     let gcfg = eve_server::bug_reporting::build_client_global_config(&ctx, Some("127.0.0.1"));
     assert!(gcfg.contains_key("ejabberd_client_address"));
     let evetech_ach_req = EvePublicRequest {
@@ -179,7 +179,21 @@ async fn test_quasar_cdn_client_and_constellation() {
     };
     let evetech_ach_rsp = ctx.quasar_gateway.handle_public_request(&sess, &evetech_ach_req, None, false, 1_700_000_000);
     assert_eq!(evetech_ach_rsp.status_code, STATUS_OK);
-    assert!(evetech_ach_rsp.payload.is_none());
+    let evetech_payload = evetech_ach_rsp.payload.expect("evetech achievement GetLatestResponse");
+    assert_eq!(
+        evetech_payload.normalized_type_name(),
+        "eve_public.achievement.definition.api.cdn.GetLatestResponse"
+    );
+    let evetech_dyn = reg
+        .decode_dynamic("eve_public.achievement.definition.api.cdn.GetLatestResponse", &evetech_payload.value)
+        .expect("decode GetLatestResponse");
+    let Some(eve_proto::quasar::DynamicValue::Message(ev_cp)) = evetech_dyn.get(1) else {
+        panic!("expected checkpoint in GetLatestResponse");
+    };
+    let Some(eve_proto::quasar::DynamicValue::String(ev_url)) = ev_cp.get(1) else {
+        panic!("expected url in checkpoint");
+    };
+    assert!(ev_url.ends_with(".fb"), "expected .fb CDN URL, got {ev_url}");
 
     // 2. Quasar Client (feat:quasar.client)
     // Descriptor registry verification for client domain (4 proto files)

@@ -705,6 +705,7 @@ impl ServerContext {
         });
         let (fighter_cooldown_state, fighter_charge_state, active_fighters, fighter_tube_loads) =
             make_fighter_lenses(&fighters);
+        let esi_port = Arc::clone(&quasar_gateway.esi_port);
         let ctx = Self {
             instance_id,
             sde,
@@ -752,7 +753,7 @@ impl ServerContext {
             return_warps: Arc::new(RankedMutex::new(HashSet::new())),
             location_change_invuln: Arc::new(RankedMutex::new(HashMap::new())),
             feature_flags: Arc::new(RwLock::new(crate::config::FeatureFlagsConfig::default())),
-            esi_port: Arc::new(AtomicU16::new(26_004)),
+            esi_port,
             xmpp_port: Arc::new(AtomicU16::new(5222)),
             esi_state: Arc::new(crate::esi::runtime_state::EsiRuntimeState::new()),
             fleet_extras: Arc::new(RankedMutex::new(Default::default())),

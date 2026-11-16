@@ -24,7 +24,7 @@ use eve_proto::quasar::{
 use eve_proto::{BridgeRpcError, PyRep};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 
@@ -546,6 +546,30 @@ static UNTAPPED_QUASAR_ENDPOINTS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
 > = std::sync::OnceLock::new();
 
+/// Default HTTP port for `EsiServer` / `/cdn/...` endpoints when no override is active.
+pub const DEFAULT_CDN_HTTP_PORT: u16 = 26_004;
+
+/// Resolve the base URL prefix for server-hosted Quasar FlatBuffer `/cdn/...` assets.
+///
+/// Honors a non-empty `EVOMU_CDN_BASE_URL` environment override first (trimming whitespace
+/// and trailing slashes); otherwise returns `http://127.0.0.1:<esi_port>/cdn` using the live
+/// `EsiServer` listen port (falling back to `DEFAULT_CDN_HTTP_PORT` when `esi_port == 0`).
+pub fn resolve_cdn_base_url(esi_port: u16) -> String {
+    if let Some(env_base) = std::env::var("EVOMU_CDN_BASE_URL")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return env_base;
+    }
+    let port = if esi_port == 0 {
+        DEFAULT_CDN_HTTP_PORT
+    } else {
+        esi_port
+    };
+    format!("http://127.0.0.1:{port}/cdn")
+}
+
 pub struct PublicGatewayRouter {
     pub descriptors: Arc<QuasarDescriptorRegistry>,
     pub db: Arc<WorldRepository>,
@@ -564,6 +588,8 @@ pub struct PublicGatewayRouter {
     pub macho_notify_sink: Arc<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>,
     pub free_fast_checkout_plex: Arc<std::sync::atomic::AtomicBool>,
     pub has_persisted_free_fast_checkout_plex: Arc<std::sync::atomic::AtomicBool>,
+    /// Shared HTTP/CDN (`EsiServer`) listen port, aliased with `ServerContext::esi_port`.
+    pub esi_port: Arc<AtomicU16>,
     pub progression: Arc<crate::services::quasar_progression::ProgressionManagers>,
     pub chat_moderation: Arc<crate::services::quasar_social_chat::ChatModerationState>,
     // rollback_epoch removed by CoW tx_engine (#915)
@@ -572,6 +598,22 @@ pub struct PublicGatewayRouter {
 }
 
 impl PublicGatewayRouter {
+    /// Return the configured HTTP/CDN (`EsiServer`) listen port seen by this Quasar router.
+    #[inline]
+    pub fn esi_port(&self) -> u16 {
+        self.esi_port.load(Ordering::Acquire)
+    }
+
+    /// Update the configured HTTP/CDN (`EsiServer`) listen port seen by this Quasar router.
+    #[inline]
+    pub fn set_esi_port(&self, port: u16) {
+        self.esi_port.store(port, Ordering::Release);
+    }
+
+    /// Build the Quasar CDN base URL from `EVOMU_CDN_BASE_URL` or this router's `esi_port`.
+    pub fn cdn_base_url(&self) -> String {
+        resolve_cdn_base_url(self.esi_port())
+    }
     #[cfg(any(test, feature = "demo-seed"))]
     pub fn install_quasar_tap_hook(hook: QuasarTapHookFn) {
         let mut guard = QUASAR_TAP_HOOK.write().unwrap_or_else(|e| e.into_inner());
@@ -657,6 +699,7 @@ impl PublicGatewayRouter {
             macho_notify_sink: Arc::new(RankedRwLock::new(None)),
             free_fast_checkout_plex: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             has_persisted_free_fast_checkout_plex: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            esi_port: Arc::new(AtomicU16::new(DEFAULT_CDN_HTTP_PORT)),
             // synced_rollback_epoch removed (#915)
             rehydrate_hooks: RankedRwLock::new(Vec::new()),
             sync_hooks: RankedRwLock::new(Vec::new()),

@@ -468,10 +468,10 @@ impl EsiRouter {
                         body: img_body,
                     };
                 }
-                p if p.starts_with("/cdn/achievements/v24.1.") && p.ends_with(".json") => {
+                p if p.starts_with("/cdn/achievements/v24.1.") && p.ends_with(".fb") => {
                     let mgr = &self.ctx.quasar_gateway.progression.achievements;
                     let expected = format!(
-                        "/cdn/achievements/v24.1.{}/{}.json",
+                        "/cdn/achievements/v24.1.{}/{}.fb",
                         mgr.sde_achievement_count, mgr.sde_achievement_hash
                     );
                     if p != expected {
@@ -485,23 +485,18 @@ impl EsiRouter {
                             true,
                         );
                     }
-                    return self.finalize_cached_response(
+                    return self.finalize_binary_cdn_response(
                         req,
                         now,
                         req_id,
                         compat_date,
                         remain_initial,
                         reset_initial,
-                        200,
-                        mgr.sde_definitions_json.clone(),
-                        3600,
-                        false,
-                        None,
-                        None,
+                        mgr.flatbuffer_bytes(),
                     );
                 }
                 p if p.starts_with("/cdn/cosmetics/character/title/definitions/")
-                    && p.ends_with(".json") =>
+                    && p.ends_with(".fb") =>
                 {
                     let skinr =
                         crate::services::quasar_cosmetics_skinr::SkinrCosmeticsState::load(
@@ -514,7 +509,11 @@ impl EsiRouter {
                         "/cdn/cosmetics/character/title/definitions/v{}.{}.{}/",
                         ver[0], ver[1], ver[2]
                     );
-                    if !p.starts_with(&prefix) {
+                    let valid_lang = p
+                        .strip_prefix(&prefix)
+                        .and_then(|rest| rest.strip_suffix(".fb"))
+                        .is_some_and(|lang| !lang.is_empty() && !lang.contains('/'));
+                    if !valid_lang {
                         return self.build_error_response(
                             &client_key,
                             now,
@@ -525,21 +524,49 @@ impl EsiRouter {
                             true,
                         );
                     }
-                    let body = serde_json::to_vec(&data.title_definitions)
-                        .unwrap_or_else(|_| b"[]".to_vec());
-                    return self.finalize_cached_response(
+                    let body =
+                        crate::services::quasar_cosmetics_skinr::encode_title_definitions_flatbuffer(
+                            &data.title_definitions,
+                        );
+                    drop(data);
+                    return self.finalize_binary_cdn_response(
                         req,
                         now,
                         req_id,
                         compat_date,
                         remain_initial,
                         reset_initial,
-                        200,
                         body,
-                        3600,
-                        false,
-                        None,
-                        None,
+                    );
+                }
+                p if p.starts_with("/cdn/maptags/") => {
+                    let (v_major, v_minor, v_patch) =
+                        crate::services::quasar_space_services::maptags_cdn_version(&self.ctx.sde);
+                    let expected =
+                        format!("/cdn/maptags/v{v_major}.{v_minor}.{v_patch}/universe.fb");
+                    if p != expected {
+                        return self.build_error_response(
+                            &client_key,
+                            now,
+                            req_id,
+                            compat_date,
+                            404,
+                            "Map tags bundle not found",
+                            true,
+                        );
+                    }
+                    let body =
+                        crate::services::quasar_space_services::encode_universe_maptags_flatbuffer(
+                            &self.ctx.sde,
+                        );
+                    return self.finalize_binary_cdn_response(
+                        req,
+                        now,
+                        req_id,
+                        compat_date,
+                        remain_initial,
+                        reset_initial,
+                        body,
                     );
                 }
                 _ => {}
@@ -954,6 +981,37 @@ impl EsiRouter {
             headers,
             body,
         }
+    }
+
+    fn finalize_binary_cdn_response(
+        &self,
+        req: &EsiHttpRequest,
+        now: u64,
+        req_id: u64,
+        compat_date: &str,
+        remain: u32,
+        reset: u64,
+        body: Vec<u8>,
+    ) -> EsiHttpResponse {
+        let mut resp = self.finalize_cached_response(
+            req,
+            now,
+            req_id,
+            compat_date,
+            remain,
+            reset,
+            200,
+            body,
+            3600,
+            false,
+            None,
+            None,
+        );
+        if resp.status_code == 200 {
+            resp.headers
+                .insert("Content-Type".to_string(), "application/octet-stream".to_string());
+        }
+        resp
     }
 }
 

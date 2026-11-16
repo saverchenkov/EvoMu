@@ -113,12 +113,12 @@ fn handle_request_covers_auth_scopes_roles_alliance_cdn_portrait_lang_and_204() 
     assert_eq!(raw_img.status_code, 200);
     assert_eq!(raw_img.body, b"raw-jpeg-bytes");
 
-    // CDN achievements 404 + CDN character title definitions 200 & 404
+    // CDN achievements 404 + CDN character title definitions 200 & 404 + CDN maptags 404
     assert_eq!(
         router
             .handle_request(&EsiHttpRequest::new(
                 "GET",
-                "/cdn/achievements/v24.1.999999/deadbeef.json",
+                "/cdn/achievements/v24.1.999999/deadbeef.fb",
             ))
             .status_code,
         404
@@ -131,23 +131,30 @@ fn handle_request_covers_auth_scopes_roles_alliance_cdn_portrait_lang_and_204() 
         let d = skinr.data.read().unwrap();
         d.title_def_version
     };
+    let titles_ok = router.handle_request(&EsiHttpRequest::new(
+        "GET",
+        &format!(
+            "/cdn/cosmetics/character/title/definitions/v{}.{}.{}/defs.fb",
+            title_ver[0], title_ver[1], title_ver[2]
+        ),
+    ));
+    assert_eq!(titles_ok.status_code, 200);
+    assert_eq!(titles_ok.header("content-type"), Some("application/octet-stream"));
+    assert_eq!(titles_ok.body.get(4..8), Some(b"TITL".as_slice()));
     assert_eq!(
         router
             .handle_request(&EsiHttpRequest::new(
                 "GET",
-                &format!(
-                    "/cdn/cosmetics/character/title/definitions/v{}.{}.{}/defs.json",
-                    title_ver[0], title_ver[1], title_ver[2]
-                ),
+                "/cdn/cosmetics/character/title/definitions/v99.99.99/defs.fb",
             ))
             .status_code,
-        200
+        404
     );
     assert_eq!(
         router
             .handle_request(&EsiHttpRequest::new(
                 "GET",
-                "/cdn/cosmetics/character/title/definitions/v99.99.99/defs.json",
+                "/cdn/maptags/v99.99.99/universe.fb",
             ))
             .status_code,
         404

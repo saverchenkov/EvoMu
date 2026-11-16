@@ -118,9 +118,12 @@ fn sde_hydration_db_reload_and_filtered_wallet_sp_reward_claims() {
     assert_eq!(empty_hash.len(), 16);
 
     // Real SDE hydration + DB reload refreshing stale `a.def` and parsing `quasar_achievement_cat_scores`
-    let sde = shared_sde();
     let db = Arc::new(WorldRepository::with_demo_seed());
-    let mgr_initial = AchievementManager::new_with_sde(Some(Arc::clone(&db)), Some(Arc::clone(&sde)));
+    let sde = shared_sde();
+    let mgr_initial = {
+        let _env_read = crate::lock_test_env_read();
+        AchievementManager::new_with_sde(Some(Arc::clone(&db)), Some(Arc::clone(&sde)))
+    };
     assert!(!mgr_initial.definitions.is_empty());
     let sample_id = mgr_initial.definitions[0].id;
     let cid = 90_000_001_u32;
@@ -135,7 +138,10 @@ fn sde_hydration_db_reload_and_filtered_wallet_sp_reward_claims() {
         );
     });
 
-    let mgr_reloaded = AchievementManager::new_with_sde(Some(Arc::clone(&db)), Some(Arc::clone(&sde)));
+    let mgr_reloaded = {
+        let _env_read = crate::lock_test_env_read();
+        AchievementManager::new_with_sde(Some(Arc::clone(&db)), Some(Arc::clone(&sde)))
+    };
     assert_eq!(mgr_reloaded.category_score(cid, 2), 120);
     assert!(mgr_reloaded
         .get_or_init_achievements(cid)
@@ -343,10 +349,13 @@ fn flatbuffer_disk_storage_seeding_ignores_host_appdata_and_uses_stage_dir() {
 #[test]
 fn save_to_db_and_rehydrate_refreshes_sde_definitions_kill_mutants() {
     let db = Arc::new(WorldRepository::with_demo_seed());
-    let sde = shared_sde();
     let cid = 90_000_001_u32;
 
-    let mgr = AchievementManager::new_with_sde(Some(Arc::clone(&db)), Some(Arc::clone(&sde)));
+    let mgr = {
+        let _env_read = crate::lock_test_env_read();
+        let sde = shared_sde();
+        AchievementManager::new_with_sde(Some(Arc::clone(&db)), Some(Arc::clone(&sde)))
+    };
     let sample_def = mgr
         .definitions
         .first()
@@ -502,9 +511,13 @@ impl<'a> FbTableView<'a> {
 
 #[test]
 fn sde_achievement_flatbuffer_encodes_all_roots_categories_methods_and_definitions() {
-    let sde = shared_sde();
-    let sde_achs = sde.load_achievements().expect("SDE achievements load");
-    let mgr = AchievementManager::new_with_sde(None, Some(Arc::clone(&sde)));
+    let (sde_achs, mgr) = {
+        let _env_read = crate::lock_test_env_read();
+        let sde = shared_sde();
+        let sde_achs = sde.load_achievements().expect("SDE achievements load");
+        let mgr = AchievementManager::new_with_sde(None, Some(Arc::clone(&sde)));
+        (sde_achs, mgr)
+    };
     let fb = mgr.flatbuffer_bytes();
 
     assert_eq!(fb.len() % 4, 0, "FlatBuffer must preserve 4-byte alignment");
@@ -676,6 +689,18 @@ fn get_latest_request_upgrades_stale_legacy_140_byte_achievements_flatbuffer() {
             }
         }
     }
+    // Initialize shared SDE and load achievements under read lock BEFORE clearing HOME / mutating
+    // LOCALAPPDATA so `eve_sde::resolve_resfiles_base_dir` discovers the real SharedCache cleanly.
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let sde = shared_sde();
+    let mgr = {
+        let _env_read = crate::lock_test_env_read();
+        Arc::new(AchievementManager::new_with_sde(
+            Some(Arc::clone(&db)),
+            Some(Arc::clone(&sde)),
+        ))
+    };
+
     let _guard = EnvGuard {
         prev_home: std::env::var_os("HOME"),
         prev_local: std::env::var_os("LOCALAPPDATA"),
@@ -688,12 +713,6 @@ fn get_latest_request_upgrades_stale_legacy_140_byte_achievements_flatbuffer() {
     std::env::set_var("LOCALAPPDATA", &tmp_base);
     std::env::set_var("EVOMU_FLATBUFFER_STAGE_DIR", &stage_dir);
 
-    let db = Arc::new(WorldRepository::with_demo_seed());
-    let sde = shared_sde();
-    let mgr = Arc::new(AchievementManager::new_with_sde(
-        Some(Arc::clone(&db)),
-        Some(Arc::clone(&sde)),
-    ));
     let expected_fb = mgr.flatbuffer_bytes();
     assert!(expected_fb.len() > legacy.len());
 
@@ -703,10 +722,11 @@ fn get_latest_request_upgrades_stale_legacy_140_byte_achievements_flatbuffer() {
         Arc::clone(&sde),
     );
     register_achievement_handlers(&router, Arc::clone(&db), Arc::clone(&mgr));
-
-    // Re-seed stale legacy 140-byte cache to specifically exercise GetLatestRequest upgrade path too.
-    std::fs::write(&data_path, &legacy).unwrap();
-    std::fs::write(&ver_path, "24.1.60").unwrap();
+    assert_eq!(std::fs::read(&data_path).unwrap(), expected_fb);
+    assert_eq!(
+        std::fs::read_to_string(&ver_path).unwrap(),
+        format!("24.2.{}", mgr.sde_achievement_count)
+    );
 
     let ctx = eve_proto::quasar::AuthoritativeContext::for_session(
         Some(1),
@@ -728,14 +748,12 @@ fn get_latest_request_upgrades_stale_legacy_140_byte_achievements_flatbuffer() {
         &DynamicQuasarMessage::new("GetLatestRequest"),
     )
     .expect("GetLatestRequest succeeds");
-    assert!(resp.type_url.is_empty());
-    assert!(resp.value.is_empty());
-
-    assert_eq!(std::fs::read(&data_path).unwrap(), expected_fb);
     assert_eq!(
-        std::fs::read_to_string(&ver_path).unwrap(),
-        format!("24.2.{}", mgr.sde_achievement_count)
+        resp.type_url,
+        "type.googleapis.com/eve_public.achievement.definition.api.cdn.GetLatestResponse"
     );
+    assert!(!resp.value.is_empty());
+
     // Host %LOCALAPPDATA%\CCP\EVE directory must remain completely untouched.
     assert_eq!(std::fs::read(&host_data_path).unwrap(), legacy);
     assert_eq!(std::fs::read_to_string(&host_ver_path).unwrap(), "24.1.60");

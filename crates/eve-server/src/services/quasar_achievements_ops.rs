@@ -14,7 +14,7 @@ use super::quasar_achievements::{
 use eve_db::WorldRepository;
 use eve_proto::pb;
 use eve_proto::quasar::{
-    sha256_hex, DynamicValue, GoogleAny, GoogleEmpty, GoogleTimestamp, QuasarMessage,
+    sha256_hex, DynamicValue, GoogleEmpty, GoogleTimestamp, QuasarMessage,
 };
 use std::sync::Arc;
 
@@ -476,9 +476,10 @@ pub fn register_achievement_handlers(
 
     // 6. eve_public.achievement.definition.api.cdn.GetLatestRequest -> GetLatestResponse
     let mgr_cdn = Arc::clone(&manager);
+    let esi_port_cdn = Arc::clone(&router.esi_port);
     router.register_handler(
         "eve_public.achievement.definition.api.cdn.GetLatestRequest",
-        Arc::new(move |_ctx, any, dyn_msg| {
+        Arc::new(move |_ctx, _any, dyn_msg| {
             let no_local = dyn_msg.get(2).and_then(|v| match v {
                 DynamicValue::Bool(b) => Some(*b),
                 DynamicValue::Uint64(u) => Some(*u != 0),
@@ -487,20 +488,6 @@ pub fn register_achievement_handlers(
                 DynamicValue::Int32(i) => Some(*i != 0),
                 _ => None,
             }).unwrap_or(false);
-
-            if !no_local
-                && any.type_url.starts_with("type.evetech.net/")
-                && std::env::var("EVOMU_CDN_BASE_URL")
-                    .ok()
-                    .filter(|s| !s.trim().is_empty())
-                    .is_none()
-            {
-                seed_client_achievements_storage(&mgr_cdn);
-                return Ok(GoogleAny {
-                    type_url: String::new(),
-                    value: Vec::new(),
-                });
-            }
 
             if dyn_msg.get(1).is_some() && !no_local {
                 return Err((
@@ -511,15 +498,13 @@ pub fn register_achievement_handlers(
             }
             let count = mgr_cdn.sde_achievement_count;
             let hash = &mgr_cdn.sde_achievement_hash;
-            let cdn_base = std::env::var("EVOMU_CDN_BASE_URL")
-                .ok()
-                .map(|s| s.trim_end_matches('/').to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "http://127.0.0.1:26004/cdn".to_string());
-            let url = format!("{cdn_base}/achievements/v24.1.{count}/{hash}.json");
+            let cdn_base = crate::quasar_gateway::resolve_cdn_base_url(
+                esi_port_cdn.load(std::sync::atomic::Ordering::Acquire),
+            );
+            let url = format!("{cdn_base}/achievements/v24.1.{count}/{hash}.fb");
 
-            let crc_val =
-                crate::router::cache_notifications::crc32_ieee(&mgr_cdn.sde_definitions_json) as u32;
+            let fb = mgr_cdn.flatbuffer_bytes();
+            let crc_val = crate::router::cache_notifications::crc32_ieee(&fb) as u32;
             let msg = pb::message("eve_public.achievement.definition.api.cdn.GetLatestResponse")
                 .set("checkpoint.url", &url)
                 .set("checkpoint.crc.crc", crc_val)

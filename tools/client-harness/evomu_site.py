@@ -21,6 +21,7 @@ _HOOKED_LOGMODULE = False
 _HOOKED_TARGETS = set()
 _HOOKED_XMPP_PREFS = False
 _HOOKED_XMPP_PORT = False
+_HOOKED_FLATBUFFER_CDN = False
 _HOOKED_TYPELIST_PRELOAD = False
 _HOOKED_CAMERA_GUARD_TARGETS = set()
 _DRIVER_SCHEDULED = False
@@ -264,6 +265,152 @@ def _install_xmpp_port_guard():
     try:
         xc_cls.__init__ = _patched_init
         _HOOKED_XMPP_PORT = True
+    except Exception:
+        pass
+
+
+class _UnsignedCrc32ZlibProxy(object):
+    """Wrap `zlib` so `crc32` returns an unsigned 32-bit int on Python 2.7 (`#1128`)."""
+
+    _evomu_unsigned_crc32 = True
+
+    def __init__(self, orig_zlib):
+        self._orig = orig_zlib
+
+    def crc32(self, data, *args):
+        return self._orig.crc32(data, *args) & 0xFFFFFFFF
+
+    def __getattr__(self, name):
+        return getattr(self._orig, name)
+
+
+def _load_httplib():
+    try:
+        import httplib
+        return httplib
+    except ImportError:
+        import http.client as httplib
+        return httplib
+
+
+def _strip_host_port(netloc):
+    if netloc.startswith("["):
+        end = netloc.find("]")
+        if end != -1:
+            host = netloc[1:end]
+            rest = netloc[end + 1:]
+            return host, rest.startswith(":") and len(rest) > 1
+    if ":" in netloc:
+        host, port_part = netloc.rsplit(":", 1)
+        if port_part.isdigit():
+            return host, True
+    return netloc, False
+
+
+def _install_flatbuffer_cdn_http_guard():
+    """Patch `content.client.flatbuffer.provider` so `http://host:port/...` CDN URLs use
+    plain HTTP preserving `:port` instead of `HTTPSConnection(..., port=443)` and so
+    `zlib.crc32` returns unsigned uint32 values matching server protobuf checksums (`#1128`)."""
+    global _HOOKED_FLATBUFFER_CDN
+    if _HOOKED_FLATBUFFER_CDN:
+        return
+    provider_mod = sys.modules.get("content.client.flatbuffer.provider")
+    if provider_mod is None:
+        return
+    provider_cls = getattr(provider_mod, "FlatbufferContentProvider", None)
+    if provider_cls is None:
+        return
+
+    cur_zlib = getattr(provider_mod, "zlib", None)
+    if cur_zlib is not None and not getattr(cur_zlib, "_evomu_unsigned_crc32", False):
+        try:
+            provider_mod.zlib = _UnsignedCrc32ZlibProxy(cur_zlib)
+        except Exception:
+            pass
+
+    orig_retrieve = getattr(provider_cls, "retrieve_data_from_cdn", None)
+    orig_send_http = getattr(provider_cls, "_send_http_request", None)
+    separate_host_and_request = getattr(provider_mod, "separate_host_and_request", None)
+    if orig_retrieve is None or orig_send_http is None:
+        return
+    if getattr(orig_send_http, "_evomu_flatbuffer_cdn_patched", False):
+        _HOOKED_FLATBUFFER_CDN = True
+        return
+
+    active_schemes = {}
+
+    def _patched_retrieve(self, url, crc, *args, **kwargs):
+        scheme = None
+        key = None
+        if url is not None and hasattr(url, "split") and "://" in url:
+            scheme = url.split("://", 1)[0].lower()
+            if separate_host_and_request is not None:
+                try:
+                    host, req_path = separate_host_and_request(url)
+                    key = (id(self), host, req_path)
+                except Exception:
+                    key = None
+        if key is not None and scheme is not None:
+            active_schemes.setdefault(key, []).append(scheme)
+        try:
+            return orig_retrieve(self, url, crc, *args, **kwargs)
+        finally:
+            if key is not None and key in active_schemes:
+                stack = active_schemes[key]
+                if stack:
+                    stack.pop()
+                if not stack:
+                    del active_schemes[key]
+
+    def _patched_send_http_request(self, host, request, timeout_seconds=10):
+        stack = active_schemes.get((id(self), host, request))
+        scheme = stack[-1] if stack else None
+        netloc = host
+        req_path = request
+
+        if netloc and "://" in netloc:
+            explicit_scheme, rest = netloc.split("://", 1)
+            scheme = explicit_scheme.lower()
+            if "/" in rest:
+                netloc, suffix = rest.split("/", 1)
+                if not req_path:
+                    req_path = "/" + suffix
+            else:
+                netloc = rest
+
+        hostname, has_explicit_port = _strip_host_port(netloc or "")
+        is_loopback = hostname.lower() in ("127.0.0.1", "localhost", "::1")
+        use_plain_http = (scheme == "http") or (scheme is None and is_loopback)
+
+        if use_plain_http or (scheme == "https" and has_explicit_port):
+            httplib = _load_httplib()
+            conn_cls = httplib.HTTPConnection if use_plain_http else httplib.HTTPSConnection
+            conn = conn_cls(netloc, timeout=timeout_seconds)
+            try:
+                conn.putrequest("GET", req_path or "/")
+                conn.endheaders()
+                response = conn.getresponse()
+                data = response.read()
+                if response.status < 200 or response.status >= 300:
+                    raise httplib.HTTPException(
+                        "CDN HTTP %s %s for %s"
+                        % (response.status, getattr(response, "reason", ""), req_path)
+                    )
+                return data
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        return orig_send_http(self, host, request, timeout_seconds)
+
+    _patched_retrieve._evomu_flatbuffer_cdn_patched = True
+    _patched_send_http_request._evomu_flatbuffer_cdn_patched = True
+    try:
+        provider_cls.retrieve_data_from_cdn = _patched_retrieve
+        provider_cls._send_http_request = _patched_send_http_request
+        _HOOKED_FLATBUFFER_CDN = True
     except Exception:
         pass
 
@@ -775,6 +922,7 @@ def _maybe_schedule_driver_on_main_thread():
             return
     except Exception:
         return
+    _install_flatbuffer_cdn_http_guard()
     _install_fsd_typelist_preload_hook()
     _install_camera_dock_guard()
     _DRIVER_SCHEDULED = True
@@ -794,6 +942,7 @@ class _EvomuMetaHook(object):
         _install_logmodule_hook()
         _install_xmpp_plaintext_guard()
         _install_xmpp_port_guard()
+        _install_flatbuffer_cdn_http_guard()
         _install_fsd_typelist_preload_hook()
         _install_camera_dock_guard()
         _maybe_schedule_driver_on_main_thread()

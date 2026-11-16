@@ -1136,9 +1136,10 @@ pub fn register_handlers(
     }
     {
         let sde_cdn = Arc::clone(&sde);
+        let esi_port_cdn = Arc::clone(&router.esi_port);
         router.register_handler(
             "eve_public.space.api.cdn.GetUpdateRequest",
-            Arc::new(move |_ctx, any, dyn_msg| {
+            Arc::new(move |_ctx, _any, dyn_msg| {
                 let cur_ver = match dyn_msg.get(1) {
                     Some(DynamicValue::Message(m)) => Some((
                         get_int_field(m, 1).unwrap_or(0) as u32,
@@ -1160,57 +1161,80 @@ pub fn register_handlers(
                             .to_string(),
                     ));
                 }
-                let v_major = eve_machonet::V24_VERSION_NUMBER.trunc() as u32;
-                let v_minor = (eve_machonet::V24_VERSION_NUMBER.fract() * 100.0).round() as u32;
-                let latest = cur_ver.unwrap_or((v_major, v_minor, sde_cdn.solar_systems.len() as u32));
-                if (cur_ver.is_none() || cur_ver == Some(latest))
-                    && any.type_url.starts_with("type.evetech.net/")
-                    && std::env::var("EVOMU_CDN_BASE_URL")
-                        .ok()
-                        .filter(|s| !s.trim().is_empty())
-                        .is_none()
-                {
-                    let fb = crate::services::quasar_achievements::empty_root_table_flatbuffer();
-                    let fb_ver = format!("{v_major}.{v_minor}.{}", eve_machonet::V24_BOOT_BUILD);
-                    crate::services::quasar_achievements::ensure_client_flatbuffer_storage_seeded(
-                        "content_map_tags",
-                        &fb_ver,
-                        &fb,
-                    );
-                    return Ok(GoogleAny {
-                        type_url: String::new(),
-                        value: Vec::new(),
-                    });
-                }
-                let msg = if no_local || cur_ver != Some(latest) {
-                    let crc_val = ((sde_cdn.solar_systems.len() as u32).wrapping_mul(2654435761))
-                        ^ ((sde_cdn.constellations.len() as u32).wrapping_mul(2246822519))
-                        ^ ((sde_cdn.regions.len() as u32).wrapping_mul(3266489917));
-                    let cdn_base = std::env::var("EVOMU_CDN_BASE_URL")
-                        .ok()
-                        .map(|s| s.trim_end_matches('/').to_string())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| "http://127.0.0.1:26004/cdn".to_string());
-                    let url = format!(
-                        "{cdn_base}/maptags/v{}.{}.{}/universe.fb",
-                        latest.0, latest.1, latest.2
-                    );
-                    pb::message("eve_public.space.api.cdn.GetUpdateResponse")
-                        .set("checkpoint.url", &url)
-                        .set("checkpoint.version.major", latest.0)
-                        .set("checkpoint.version.minor", latest.1)
-                        .set("checkpoint.version.patch", latest.2)
-                        .set("checkpoint.crc.crc", crc_val)
-                } else {
-                    pb::message("eve_public.space.api.cdn.GetUpdateResponse")
-                };
-                msg.to_any()
+                let latest = maptags_cdn_version(&sde_cdn);
+                let fb = encode_universe_maptags_flatbuffer(&sde_cdn);
+                let crc_val = crate::router::cache_notifications::crc32_ieee(&fb) as u32;
+                let cdn_base = crate::quasar_gateway::resolve_cdn_base_url(
+                    esi_port_cdn.load(std::sync::atomic::Ordering::Acquire),
+                );
+                let url = format!(
+                    "{cdn_base}/maptags/v{}.{}.{}/universe.fb",
+                    latest.0, latest.1, latest.2
+                );
+                pb::message("eve_public.space.api.cdn.GetUpdateResponse")
+                    .set("checkpoint.url", &url)
+                    .set("checkpoint.version.major", latest.0)
+                    .set("checkpoint.version.minor", latest.1)
+                    .set("checkpoint.version.patch", latest.2)
+                    .set("checkpoint.crc.crc", crc_val)
+                    .to_any()
                     .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
 
     super::quasar_space_domain::register_handlers(router, db, sde);
+}
+
+/// Deterministic `(major, minor, patch)` version tuple for MapTags `Universe` FlatBuffer bundles.
+pub(crate) fn maptags_cdn_version(sde: &SdeRegistry) -> (u32, u32, u32) {
+    let v_major = eve_machonet::V24_VERSION_NUMBER.trunc() as u32;
+    let v_minor = (eve_machonet::V24_VERSION_NUMBER.fract() * 100.0).round() as u32;
+    (v_major, v_minor, sde.solar_systems.len() as u32)
+}
+
+/// Encode an untagged `maptags.generated.eve_public.map.Universe` FlatBuffer matching V24.02
+/// `MapTagProvider._build_buf` (`#1127`).
+///
+/// Slot layout:
+/// - `Universe`: `0 -> Regions ([Region])`, `1 -> Constellations ([Constellation])`, `2 -> Systems ([System])`
+/// - `Region` / `Constellation` / `System`: `0 -> ContainerId (uint64)`, `1 -> Tags ([string])`
+/// Container IDs are sorted ascending so serialized bytes and IEEE CRC32 are deterministic.
+pub(crate) fn encode_universe_maptags_flatbuffer(sde: &SdeRegistry) -> Vec<u8> {
+    use super::quasar_achievements_flatbuffer::FlatBufferWriter;
+
+    let mut region_ids: Vec<u64> = sde.regions.keys().map(|&id| u64::from(id)).collect();
+    region_ids.sort_unstable();
+    let mut const_ids: Vec<u64> = sde.constellations.keys().map(|&id| u64::from(id)).collect();
+    const_ids.sort_unstable();
+    let mut system_ids: Vec<u64> = sde.solar_systems.keys().map(|&id| u64::from(id)).collect();
+    system_ids.sort_unstable();
+
+    let mut w = FlatBufferWriter::with_capacity(
+        256 + (region_ids.len() + const_ids.len() + system_ids.len()) * 32,
+    );
+    let empty_tags = w.create_offset_vector(&[]);
+    let mut write_container_vec = |ids: &[u64]| -> u32 {
+        let mut offsets = Vec::with_capacity(ids.len());
+        for &cid in ids {
+            let mut tbl = w.start_table(2);
+            w.add_u64(&mut tbl, 0, cid, 0);
+            w.add_offset(&mut tbl, 1, empty_tags);
+            offsets.push(w.end_table(tbl));
+        }
+        w.create_offset_vector(&offsets)
+    };
+
+    let regions_vec = write_container_vec(&region_ids);
+    let constellations_vec = write_container_vec(&const_ids);
+    let systems_vec = write_container_vec(&system_ids);
+
+    let mut root = w.start_table(3);
+    w.add_offset(&mut root, 0, regions_vec);
+    w.add_offset(&mut root, 1, constellations_vec);
+    w.add_offset(&mut root, 2, systems_vec);
+    let root_off = w.end_table(root);
+    w.finish_untagged(root_off)
 }
 
 #[cfg(test)]
@@ -1226,18 +1250,19 @@ mod tests {
     use eve_proto::quasar::{EvePublicRequest, TYPE_EVETECH_PREFIX};
 
     #[test]
-    fn space_cdn_get_update_evetech_refresh_with_current_version_returns_no_checkpoint() {
+    fn space_cdn_get_update_evetech_returns_checkpoint_and_honors_esi_port() {
         let ctx = ServerContext::new();
+        ctx.set_esi_port(37_123);
         let mut sess = SessionState::new(77_101);
         sess.user_id = Some(1);
         sess.character_id = Some(90_000_001);
 
-        let v_major = eve_machonet::V24_VERSION_NUMBER.trunc() as u32;
-        let v_minor = (eve_machonet::V24_VERSION_NUMBER.fract() * 100.0).round() as u32;
-        let req_bytes = pb::message("eve_public.space.api.cdn.GetUpdateRequest")
-            .set("current_version.major", v_major)
-            .set("current_version.minor", v_minor)
-            .set("current_version.patch", eve_machonet::V24_BOOT_BUILD)
+        let (v_major, v_minor, v_patch) = maptags_cdn_version(&ctx.sde);
+        let expected_fb = encode_universe_maptags_flatbuffer(&ctx.sde);
+        let expected_crc = crate::router::cache_notifications::crc32_ieee(&expected_fb) as u32;
+
+        let no_local_req = pb::message("eve_public.space.api.cdn.GetUpdateRequest")
+            .set("no_local_version_available", true)
             .must_encode();
 
         let pub_req = EvePublicRequest {
@@ -1248,7 +1273,7 @@ mod tests {
             correlation_uuid: vec![1u8; 16],
             payload: Some(GoogleAny {
                 type_url: format!("{TYPE_EVETECH_PREFIX}eve_public.space.api.cdn.GetUpdateRequest"),
-                value: req_bytes,
+                value: no_local_req,
             }),
             external_origin: format!("eve-desktop-client/{} tq", eve_machonet::V24_BOOT_BUILD),
             application_instance_uuid: vec![2u8; 16],
@@ -1263,10 +1288,66 @@ mod tests {
             ctx.now_unix(),
         );
         assert_eq!(rsp.status_code, 200);
-        assert!(
-            rsp.payload.as_ref().is_none_or(|p| p.value.is_empty()),
-            "up-to-date evetech client must not receive checkpoint URL"
+        let payload = rsp.payload.expect("GetUpdateResponse payload");
+        assert_eq!(payload.normalized_type_name(), "eve_public.space.api.cdn.GetUpdateResponse");
+        assert!(!payload.value.is_empty());
+
+        let reg = QuasarDescriptorRegistry::open_default_or_empty();
+        let dyn_rsp = reg
+            .decode_dynamic("eve_public.space.api.cdn.GetUpdateResponse", &payload.value)
+            .expect("decode GetUpdateResponse");
+        let Some(DynamicValue::Message(cp)) = dyn_rsp.get(1) else {
+            panic!("missing checkpoint");
+        };
+        assert_eq!(
+            cp.get(1),
+            Some(&DynamicValue::String(format!(
+                "http://127.0.0.1:37123/cdn/maptags/v{v_major}.{v_minor}.{v_patch}/universe.fb"
+            )))
         );
+        let Some(DynamicValue::Message(ver)) = cp.get(2) else {
+            panic!("missing version");
+        };
+        assert_eq!(ver.get(1), Some(&DynamicValue::Uint32(v_major)));
+        assert_eq!(ver.get(2), Some(&DynamicValue::Uint32(v_minor)));
+        assert_eq!(ver.get(3), Some(&DynamicValue::Uint32(v_patch)));
+        let Some(DynamicValue::Message(crc_msg)) = cp.get(3) else {
+            panic!("missing crc");
+        };
+        assert_eq!(crc_msg.get(1), Some(&DynamicValue::Uint32(expected_crc)));
+
+        // Refresh request with matching current_version still returns authoritative checkpoint.version
+        // so FlatbufferContentProvider detects local_version == version cleanly without empty Any.
+        let matching_req = pb::message("eve_public.space.api.cdn.GetUpdateRequest")
+            .set("current_version.major", v_major)
+            .set("current_version.minor", v_minor)
+            .set("current_version.patch", v_patch)
+            .must_encode();
+        let refresh_rsp = ctx.quasar_gateway.handle_public_request(
+            &sess,
+            &EvePublicRequest {
+                payload: Some(GoogleAny {
+                    type_url: format!("{TYPE_EVETECH_PREFIX}eve_public.space.api.cdn.GetUpdateRequest"),
+                    value: matching_req,
+                }),
+                ..pub_req
+            },
+            None,
+            false,
+            ctx.now_unix(),
+        );
+        assert_eq!(refresh_rsp.status_code, 200);
+        let refresh_payload = refresh_rsp.payload.expect("refresh GetUpdateResponse");
+        let refresh_dyn = reg
+            .decode_dynamic("eve_public.space.api.cdn.GetUpdateResponse", &refresh_payload.value)
+            .expect("decode refresh GetUpdateResponse");
+        let Some(DynamicValue::Message(rcp)) = refresh_dyn.get(1) else {
+            panic!("missing refresh checkpoint");
+        };
+        let Some(DynamicValue::Message(rver)) = rcp.get(2) else {
+            panic!("missing refresh version");
+        };
+        assert_eq!(rver.get(3), Some(&DynamicValue::Uint32(v_patch)));
     }
 }
 

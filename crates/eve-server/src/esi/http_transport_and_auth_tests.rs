@@ -173,27 +173,27 @@ fn esi_meta_auth_scopes_etag_language_and_error_limit_enforcement() {
     assert_eq!(portrait.status_code, 200);
 
     let ach_path = format!(
-        "/cdn/achievements/v24.1.{}/{}.json",
+        "/cdn/achievements/v24.1.{}/{}.fb",
         ctx.quasar_gateway.progression.achievements.sde_achievement_count,
         ctx.quasar_gateway.progression.achievements.sde_achievement_hash
     );
-    assert_eq!(
-        router.handle_request(&EsiHttpRequest::new("GET", &ach_path)).status_code,
-        200
-    );
+    let ach_resp = router.handle_request(&EsiHttpRequest::new("GET", &ach_path));
+    assert_eq!(ach_resp.status_code, 200);
+    assert_eq!(ach_resp.header("content-type"), Some("application/octet-stream"));
+    assert_eq!(ach_resp.body.get(4..8), Some(b"ACHV".as_slice()));
     let skinr = crate::services::quasar_cosmetics_skinr::SkinrCosmeticsState::load(
         Arc::clone(&ctx.db),
         Arc::clone(&ctx.sde),
     );
     let title_ver = skinr.data.read().unwrap().title_def_version;
     let title_path = format!(
-        "/cdn/cosmetics/character/title/definitions/v{}.{}.{}/titles.json",
+        "/cdn/cosmetics/character/title/definitions/v{}.{}.{}/titles.fb",
         title_ver[0], title_ver[1], title_ver[2]
     );
-    assert_eq!(
-        router.handle_request(&EsiHttpRequest::new("GET", &title_path)).status_code,
-        200
-    );
+    let title_resp = router.handle_request(&EsiHttpRequest::new("GET", &title_path));
+    assert_eq!(title_resp.status_code, 200);
+    assert_eq!(title_resp.header("content-type"), Some("application/octet-stream"));
+    assert_eq!(title_resp.body.get(4..8), Some(b"TITL".as_slice()));
 
     // Language negotiation & invalid parameters
     let de_type = router.handle_request(
