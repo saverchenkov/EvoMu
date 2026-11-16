@@ -61,6 +61,14 @@ impl ConsumeExactOptions {
         }
     }
 
+    /// Preset for unmodifiable stackable commodity consumption (e.g. PI commodities): rejects singletons, BPCs, fitted items, non-empty containers, and dynamic/mutated items.
+    pub fn for_character_commodity(char_id: i64) -> Self {
+        Self {
+            reject_blueprint_copy: true,
+            ..Self::for_character_stack(char_id)
+        }
+    }
+
     /// Preset for consuming specific singleton-capable items (e.g., skillbooks, implants, crates, BPCs) by exact `item_id`.
     pub fn for_owner_exact(actor_char_id: Option<i64>, expected_owner_id: i64) -> Self {
         Self {
@@ -1155,7 +1163,7 @@ impl WorldStateSnapshot {
         true
     }
 
-    fn validate_item_for_consumption(
+    pub fn validate_item_for_consumption(
         &self,
         item: &InventoryItemRecord,
         opts: &ConsumeExactOptions,
@@ -1222,6 +1230,25 @@ impl WorldStateSnapshot {
         if opts.reject_singleton && item.singleton {
             return Err(DbError::ValidationError(format!(
                 "Cannot consume assembled singleton item {}",
+                item.item_id
+            )));
+        }
+        if opts.reject_singleton
+            && (!item.dynamic_attributes.is_empty() || item.source_mutaplasmid_id.is_some())
+        {
+            return Err(DbError::ValidationError(format!(
+                "Cannot consume mutated item {}",
+                item.item_id
+            )));
+        }
+        if opts.reject_singleton
+            && self
+                .item_custom_names
+                .get(&item.item_id)
+                .is_some_and(|tag| tag.starts_with("courier_cargo:"))
+        {
+            return Err(DbError::ValidationError(format!(
+                "Cannot consume courier cargo item {}",
                 item.item_id
             )));
         }

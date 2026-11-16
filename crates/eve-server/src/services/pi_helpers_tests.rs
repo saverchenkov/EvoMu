@@ -454,3 +454,248 @@ fn pi_1hz_processor_ticks_complete_cycle_and_background_tick() {
         assert_eq!(proc_pin.last_cycle_unix, Some(base_now + 1_800));
     });
 }
+
+#[test]
+fn test_pi_commodity_type_validation_and_strict_import_consumption() {
+    let ctx = make_ctx();
+    // All PI tiers P0..P4 are valid commodities/resources (SDE categories 42 and 43).
+    for valid_tid in [2268, 3645, 44, 2344, 2867] {
+        assert!(
+            is_valid_pi_commodity_type(&ctx.sde, valid_tid),
+            "expected PI commodity type {valid_tid} to be valid"
+        );
+        assert!(ensure_valid_pi_commodity_type(&ctx.sde, valid_tid).is_ok());
+    }
+    // Zero, blueprints (cat 9), ships (cat 6), modules (cat 7), PI pins (cat 41), and unknown IDs are rejected.
+    for invalid_tid in [0, 683, 587, 380, 2534, 2543, 999_999] {
+        assert!(
+            !is_valid_pi_commodity_type(&ctx.sde, invalid_tid),
+            "expected non-PI type {invalid_tid} to be invalid"
+        );
+        assert_eq!(
+            ensure_valid_pi_commodity_type(&ctx.sde, invalid_tid)
+                .unwrap_err()
+                .code,
+            "InvalidCommodity"
+        );
+    }
+
+    let char_id = 90_000_001_i64;
+    let planet_id = 40_009_082_i64;
+    let ship_id = 777_001_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        // Zero quantity import must fail explicitly.
+        let err_zero = consume_pi_import_commodities(
+            snap,
+            char_id,
+            planet_id,
+            3645,
+            0,
+            Some(ship_id),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err_zero.code, "InvalidCommodityQuantity");
+
+        // Singleton, BPC, and mutated/dynamic items must all be rejected intact without consumption.
+        snap.items.insert(
+            900_001,
+            InventoryItemRecord {
+                item_id: 900_001,
+                type_id: 3645,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let err_singleton = consume_pi_import_commodities(
+            snap,
+            char_id,
+            planet_id,
+            3645,
+            1,
+            Some(ship_id),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err_singleton.code, "InvalidCommodityItemState");
+        assert_eq!(snap.items[&900_001].quantity, 1);
+
+        snap.items.insert(
+            900_002,
+            InventoryItemRecord {
+                item_id: 900_002,
+                type_id: 683,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                is_blueprint_copy: true,
+                blueprint_runs_remaining: Some(1),
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let err_bpc = consume_pi_import_commodities(
+            snap,
+            char_id,
+            planet_id,
+            683,
+            1,
+            Some(ship_id),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err_bpc.code, "InvalidCommodityItemState");
+        assert!(snap.items[&900_002].is_blueprint_copy);
+        assert_eq!(snap.items[&900_002].blueprint_runs_remaining, Some(1));
+
+        snap.items.insert(
+            900_003,
+            InventoryItemRecord {
+                item_id: 900_003,
+                type_id: 2268,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 5,
+                singleton: false,
+                dynamic_attributes: HashMap::from([(64, 1.25)]),
+                source_mutaplasmid_id: Some(47_841),
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // Also place a valid 5-unit stack so total = 10 only if the mutated stack were allowed.
+        snap.items.insert(
+            900_004,
+            InventoryItemRecord {
+                item_id: 900_004,
+                type_id: 2268,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 5,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let err_mutated = consume_pi_import_commodities(
+            snap,
+            char_id,
+            planet_id,
+            2268,
+            10,
+            Some(ship_id),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err_mutated.code, "InvalidCommodityItemState");
+        assert_eq!(snap.items[&900_003].quantity, 5);
+        assert_eq!(snap.items[&900_004].quantity, 5);
+
+        // Overflowing qty > i32::MAX must not narrow-wrap (`qty as i32`) when stock is small.
+        let over_i32 = (i32::MAX as u64) + 1;
+        let err_over = consume_pi_import_commodities(
+            snap,
+            char_id,
+            planet_id,
+            2268,
+            over_i32,
+            Some(ship_id),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err_over.code, "InvalidCommodityItemState");
+        assert_eq!(snap.items[&900_004].quantity, 5);
+
+        // Multi-stack crossing i32::MAX boundary consumes cleanly across two valid stacks.
+        snap.items.insert(
+            900_005,
+            InventoryItemRecord {
+                item_id: 900_005,
+                type_id: 44,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::SpecializedPlanetaryCommoditiesHold,
+                quantity: i32::MAX,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            900_006,
+            InventoryItemRecord {
+                item_id: 900_006,
+                type_id: 44,
+                owner_id: char_id,
+                location_id: planet_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 5,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        consume_pi_import_commodities(
+            snap,
+            char_id,
+            planet_id,
+            44,
+            (i32::MAX as u64) + 2,
+            Some(ship_id),
+            None,
+            None,
+        )
+        .expect("multi-stack import across i32::MAX boundary succeeds");
+        assert_eq!(
+            snap.items.get(&900_005).map(|i| i.quantity).unwrap_or(0),
+            0
+        );
+        assert_eq!(snap.items[&900_006].quantity, 3);
+
+        // Courier mission cargo tagged in item_custom_names must never be consumed under reject_singleton.
+        snap.items.insert(
+            900_007,
+            InventoryItemRecord {
+                item_id: 900_007,
+                type_id: 3645,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 5,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.item_custom_names
+            .insert(900_007, "courier_cargo:90000001:42".into());
+        let err_courier = consume_pi_import_commodities(
+            snap,
+            char_id,
+            planet_id,
+            3645,
+            5,
+            Some(ship_id),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err_courier.code, "InvalidCommodityItemState");
+        assert_eq!(snap.items[&900_007].quantity, 5);
+    });
+}

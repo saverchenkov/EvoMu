@@ -922,8 +922,20 @@ pub fn handle_pi_colonies(
                                         .collect(),
                                     _ => Vec::new(),
                                 };
-                                let ctype = els.get(3).and_then(|v| v.as_i64()).unwrap_or(0) as TypeId;
-                                let qty = els.get(4).and_then(|v| v.as_i64()).unwrap_or(1).max(1) as u32;
+                                let ctype_raw = els.get(3).and_then(|v| v.as_i64()).unwrap_or(0);
+                                let ctype = TypeId::try_from(ctype_raw).map_err(|_| BridgeRpcError {
+                                    code: "InvalidCommodity".into(),
+                                    message: format!("Invalid commodity type ID {ctype_raw}"),
+                                    client_error: None,
+                                })?;
+                                let qty_raw = els.get(4).and_then(|v| v.as_i64()).unwrap_or(1).max(1);
+                                let qty = u32::try_from(qty_raw).map_err(|_| BridgeRpcError {
+                                    code: "InvalidCommodityQuantity".into(),
+                                    message: format!(
+                                        "Route commodity quantity {qty_raw} exceeds maximum u32"
+                                    ),
+                                    client_error: None,
+                                })?;
                                 let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)).cloned() else {
                                     return Err(BridgeRpcError {
                                         code: "ColonyNotFound".into(),
@@ -931,6 +943,7 @@ pub fn handle_pi_colonies(
                                         client_error: None,
                                     });
                                 };
+                                ensure_valid_pi_commodity_type(&ctx.sde, ctype)?;
                                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
                                 if path_ids.len() < 2 {
                                     return Err(BridgeRpcError {

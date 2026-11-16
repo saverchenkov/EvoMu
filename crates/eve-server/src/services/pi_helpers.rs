@@ -105,6 +105,39 @@ pub fn is_command_center_type(ctx: &ServerContext, type_id: TypeId) -> bool {
     is_command_center_pin(&ctx.sde, type_id)
 }
 
+/// Returns `true` if `type_id` is a valid Planetary Interaction commodity/resource
+/// (SDE category `42` Planetary Resources or category `43` Planetary Commodities, or an
+/// input/output entry of an SDE planet schematic when type category metadata is absent).
+pub fn is_valid_pi_commodity_type(sde: &eve_sde::SdeRegistry, type_id: TypeId) -> bool {
+    if type_id == 0 {
+        return false;
+    }
+    if let Some(inv_type) = sde.types.get(&type_id) {
+        return matches!(inv_type.category_id, 42 | 43);
+    }
+    sde.planet_schematics
+        .values()
+        .any(|s| s.types.iter().any(|entry| entry.type_id == type_id))
+}
+
+/// Validates that `type_id` is a valid PI commodity/resource type; otherwise returns `InvalidCommodity`.
+pub fn ensure_valid_pi_commodity_type(
+    sde: &eve_sde::SdeRegistry,
+    type_id: TypeId,
+) -> Result<(), BridgeRpcError> {
+    if is_valid_pi_commodity_type(sde, type_id) {
+        Ok(())
+    } else {
+        Err(BridgeRpcError {
+            code: "InvalidCommodity".into(),
+            message: format!(
+                "Type {type_id} is not a valid planetary resource or planetary commodity"
+            ),
+            client_error: None,
+        })
+    }
+}
+
 pub fn pin_storage_capacity_m3(sde: &eve_sde::SdeRegistry, type_id: TypeId) -> f64 {
     sde.types.get(&type_id).map(|t| {
         if t.capacity > 0.0 {
@@ -1122,6 +1155,203 @@ pub fn upgrade_command_center_logic(
     ]))
 }
 
+fn item_matches_pi_import_location(
+    snap: &WorldStateSnapshot,
+    it: &eve_db::InventoryItemRecord,
+    char_id: i64,
+    planet_id: i64,
+    type_id: TypeId,
+    ship_id_opt: Option<i64>,
+    station_id_opt: Option<i64>,
+    structure_id_opt: Option<i64>,
+) -> bool {
+    if it.owner_id != char_id
+        || it.type_id != type_id
+        || it.quantity <= 0
+        || it.flag == eve_db::InventoryFlag::Locked
+        || snap.is_item_or_ancestor_locked_or_impounded(it.item_id)
+    {
+        return false;
+    }
+    let in_cargo = ship_id_opt.is_some_and(|sid| it.location_id == sid)
+        && matches!(
+            it.flag,
+            eve_db::InventoryFlag::Cargo
+                | eve_db::InventoryFlag::SpecializedPlanetaryCommoditiesHold
+        );
+    let in_customs_or_hangar = (it.location_id == planet_id
+        || snap
+            .sp6_lifecycle
+            .space_object_meta
+            .get(&it.location_id)
+            .and_then(|m| m.planet_id)
+            == Some(planet_id)
+        || station_id_opt.is_some_and(|sid| it.location_id == sid)
+        || structure_id_opt.is_some_and(|sid| it.location_id == sid))
+        && it.flag == eve_db::InventoryFlag::Hangar;
+    in_cargo || in_customs_or_hangar
+}
+
+/// Validates and plans stack consumptions for importing `qty` units of `type_id` into a colony
+/// without mutating `snap`. Rejects singletons, BPCs, dynamic/mutated items, and overflow slices.
+pub fn plan_pi_import_consumptions(
+    snap: &WorldStateSnapshot,
+    char_id: i64,
+    planet_id: i64,
+    type_id: TypeId,
+    qty: u64,
+    ship_id_opt: Option<i64>,
+    station_id_opt: Option<i64>,
+    structure_id_opt: Option<i64>,
+) -> Result<Vec<(i64, i32)>, BridgeRpcError> {
+    if qty == 0 {
+        return Err(BridgeRpcError {
+            code: "InvalidCommodityQuantity".into(),
+            message: "Commodity import quantity must be greater than zero".into(),
+            client_error: None,
+        });
+    }
+
+    let opts = eve_db::ConsumeExactOptions::for_character_commodity(char_id);
+    let mut matching_item_ids: Vec<i64> = Vec::new();
+    let mut first_invalid_state_err: Option<String> = None;
+
+    for it in snap.items.values() {
+        if !item_matches_pi_import_location(
+            snap,
+            it,
+            char_id,
+            planet_id,
+            type_id,
+            ship_id_opt,
+            station_id_opt,
+            structure_id_opt,
+        ) {
+            continue;
+        }
+        if let Err(err) = snap.validate_item_for_consumption(it, &opts) {
+            if first_invalid_state_err.is_none() {
+                first_invalid_state_err = Some(err.to_string());
+            }
+            continue;
+        }
+        if it.blueprint_runs_remaining.is_some() {
+            if first_invalid_state_err.is_none() {
+                first_invalid_state_err = Some(format!(
+                    "Cannot consume blueprint-run item {}",
+                    it.item_id
+                ));
+            }
+            continue;
+        }
+        matching_item_ids.push(it.item_id);
+    }
+
+    matching_item_ids.sort();
+
+    let total_available: u128 = matching_item_ids
+        .iter()
+        .filter_map(|iid| snap.items.get(iid))
+        .filter_map(|it| u64::try_from(it.quantity).ok())
+        .map(u128::from)
+        .sum();
+
+    if total_available == 0 {
+        if let Some(reason) = first_invalid_state_err {
+            return Err(BridgeRpcError {
+                code: "InvalidCommodityItemState".into(),
+                message: format!(
+                    "Commodity item type {type_id} cannot be imported because matching items are non-stackable or modified ({reason})"
+                ),
+                client_error: None,
+            });
+        }
+        return Err(BridgeRpcError {
+            code: "ItemNotFound".into(),
+            message: format!(
+                "Commodity item type {type_id} not found in ship cargo or customs office hangar"
+            ),
+            client_error: None,
+        });
+    }
+    if total_available < u128::from(qty) {
+        if let Some(reason) = first_invalid_state_err {
+            return Err(BridgeRpcError {
+                code: "InvalidCommodityItemState".into(),
+                message: format!(
+                    "Available stackable commodity quantity ({total_available}) is less than required import quantity ({qty}); ineligible items skipped ({reason})"
+                ),
+                client_error: None,
+            });
+        }
+        return Err(BridgeRpcError {
+            code: "InsufficientCommodityQuantity".into(),
+            message: format!(
+                "Available quantity ({total_available}) is less than required import quantity ({qty})"
+            ),
+            client_error: None,
+        });
+    }
+
+    let mut plan = Vec::with_capacity(matching_item_ids.len());
+    let mut remaining = qty;
+    for iid in matching_item_ids {
+        if remaining == 0 {
+            break;
+        }
+        let Some(avail_i32) = snap.items.get(&iid).map(|it| it.quantity) else {
+            continue;
+        };
+        if avail_i32 <= 0 {
+            continue;
+        }
+        let avail_u64 = u64::try_from(avail_i32).unwrap_or(0);
+        let take_u64 = avail_u64.min(remaining);
+        let take = i32::try_from(take_u64).map_err(|_| BridgeRpcError {
+            code: "InvalidCommodityQuantity".into(),
+            message: format!(
+                "Import stack slice {take_u64} exceeds maximum i32 stack size"
+            ),
+            client_error: None,
+        })?;
+        plan.push((iid, take));
+        remaining -= take_u64;
+    }
+
+    if remaining != 0 {
+        return Err(BridgeRpcError {
+            code: "InsufficientCommodityQuantity".into(),
+            message: format!(
+                "Unable to allocate full import quantity ({qty}); {remaining} remaining"
+            ),
+            client_error: None,
+        });
+    }
+
+    Ok(plan)
+}
+
+/// Applies a pre-validated consumption plan generated by [`plan_pi_import_consumptions`].
+pub fn apply_pi_import_consumptions(
+    snap: &mut WorldStateSnapshot,
+    char_id: i64,
+    plan: &[(i64, i32)],
+) -> Result<(), BridgeRpcError> {
+    let opts = eve_db::ConsumeExactOptions::for_character_commodity(char_id);
+    for &(iid, take) in plan {
+        if take <= 0 {
+            continue;
+        }
+        snap.consume_exact_item_quantity(iid, take, opts)
+            .map_err(|e| BridgeRpcError {
+                code: "InventoryError".into(),
+                message: e.to_string(),
+                client_error: None,
+            })?;
+    }
+    Ok(())
+}
+
 pub fn consume_pi_import_commodities(
     snap: &mut WorldStateSnapshot,
     char_id: i64,
@@ -1132,83 +1362,17 @@ pub fn consume_pi_import_commodities(
     station_id_opt: Option<i64>,
     structure_id_opt: Option<i64>,
 ) -> Result<(), BridgeRpcError> {
-    let mut matching_item_ids: Vec<i64> = snap
-        .items
-        .values()
-        .filter(|it| {
-            if it.owner_id != char_id
-                || it.type_id != type_id
-                || it.quantity <= 0
-                || it.flag == eve_db::InventoryFlag::Locked
-                || snap.is_item_or_ancestor_locked_or_impounded(it.item_id)
-            {
-                return false;
-            }
-            let in_cargo = ship_id_opt.is_some_and(|sid| it.location_id == sid)
-                && matches!(
-                    it.flag,
-                    eve_db::InventoryFlag::Cargo
-                        | eve_db::InventoryFlag::SpecializedPlanetaryCommoditiesHold
-                );
-            let in_customs_or_hangar = (it.location_id == planet_id
-                || snap
-                    .sp6_lifecycle
-                    .space_object_meta
-                    .get(&it.location_id)
-                    .and_then(|m| m.planet_id)
-                    == Some(planet_id)
-                || station_id_opt.is_some_and(|sid| it.location_id == sid)
-                || structure_id_opt.is_some_and(|sid| it.location_id == sid))
-                && it.flag == eve_db::InventoryFlag::Hangar;
-            in_cargo || in_customs_or_hangar
-        })
-        .map(|it| it.item_id)
-        .collect();
-
-    let total_available: i64 = matching_item_ids
-        .iter()
-        .map(|iid| snap.items.get(iid).map(|i| i.quantity as i64).unwrap_or(0))
-        .sum();
-
-    if total_available == 0 {
-        return Err(BridgeRpcError {
-            code: "ItemNotFound".into(),
-            message: format!("Commodity item type {type_id} not found in ship cargo or customs office hangar"),
-            client_error: None,
-        });
-    }
-    if total_available < qty as i64 {
-        return Err(BridgeRpcError {
-            code: "InsufficientCommodityQuantity".into(),
-            message: format!("Available quantity ({total_available}) is less than required import quantity ({qty})"),
-            client_error: None,
-        });
-    }
-
-    matching_item_ids.sort();
-    let mut remaining = qty as i32;
-    for iid in matching_item_ids {
-        let Some(avail) = snap.items.get(&iid).map(|it| it.quantity) else {
-            continue;
-        };
-        let take = avail.min(remaining);
-        if take <= 0 {
-            continue;
-        }
-        let opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id);
-        snap.consume_exact_item_quantity(iid, take, opts)
-            .map_err(|e| BridgeRpcError {
-                code: "InventoryError".into(),
-                message: e.to_string(),
-                client_error: None,
-            })?;
-        remaining -= take;
-        if remaining == 0 {
-            break;
-        }
-    }
-
-    Ok(())
+    let plan = plan_pi_import_consumptions(
+        snap,
+        char_id,
+        planet_id,
+        type_id,
+        qty,
+        ship_id_opt,
+        station_id_opt,
+        structure_id_opt,
+    )?;
+    apply_pi_import_consumptions(snap, char_id, &plan)
 }
 
 pub fn user_transfer_commodities_logic(
@@ -1352,16 +1516,6 @@ pub fn user_transfer_commodities_logic(
         });
     }
 
-    let total_transfer_vol_m3: f64 = comm_map
-        .iter()
-        .map(|(&tid, &qty)| {
-            let unit_vol = ctx.sde.types.get(&tid).map(|t| t.volume.max(0.01)).unwrap_or(0.38);
-            (qty as f64) * unit_vol
-        })
-        .sum();
-    let cooldown_secs = (300.0_f64 + 0.03_f64 * total_transfer_vol_m3 * 60.0_f64).round() as u64;
-    let now_unix = ctx.now_unix();
-
     let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)).cloned() else {
         return Err(BridgeRpcError {
             code: "ColonyNotFound".into(),
@@ -1381,6 +1535,20 @@ pub fn user_transfer_commodities_logic(
         message: format!("Destination pin {dst_pin_id} not found on planet {planet_id}"),
         client_error: None,
     })?;
+
+    for &comm_type_id in comm_map.keys() {
+        ensure_valid_pi_commodity_type(&ctx.sde, comm_type_id)?;
+    }
+
+    let total_transfer_vol_m3: f64 = comm_map
+        .iter()
+        .map(|(&tid, &qty)| {
+            let unit_vol = ctx.sde.types.get(&tid).map(|t| t.volume.max(0.01)).unwrap_or(0.38);
+            (qty as f64) * unit_vol
+        })
+        .sum();
+    let cooldown_secs = (300.0_f64 + 0.03_f64 * total_transfer_vol_m3 * 60.0_f64).round() as u64;
+    let now_unix = ctx.now_unix();
 
     // Verify every hop in path exists and link bandwidth accommodates volume
     has_pi_link_path(&net.links, &path, total_transfer_vol_m3)?;
@@ -1446,12 +1614,17 @@ pub fn user_transfer_commodities_logic(
 
     save_pi_network(snap, char_id, planet_id, &net);
     let (first_tid, first_qty) = comm_map.iter().next().map(|(&t, &q)| (t, q)).unwrap_or((0, 0));
+    let first_qty_i64 = i64::try_from(first_qty).map_err(|_| BridgeRpcError {
+        code: "InvalidCommodityQuantity".into(),
+        message: format!("Commodity quantity {first_qty} overflows i64"),
+        client_error: None,
+    })?;
     Ok(PyRep::keyval([
         ("planetID", PyRep::Integer(planet_id)),
         ("sourcePinID", PyRep::Integer(src_pin_id)),
         ("destPinID", PyRep::Integer(dst_pin_id)),
         ("commodityTypeID", PyRep::Integer(first_tid as i64)),
-        ("quantity", PyRep::Integer(first_qty as i64)),
+        ("quantity", PyRep::Integer(first_qty_i64)),
         ("volumeM3", PyRep::Real(total_transfer_vol_m3)),
         ("cooldownSeconds", PyRep::Integer(cooldown_secs as i64)),
     ]))

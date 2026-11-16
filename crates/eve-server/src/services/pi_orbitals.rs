@@ -49,6 +49,98 @@ pub fn pi_commodity_tier_base_cost(sde: &eve_sde::SdeRegistry, type_id: TypeId) 
     400.0
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PreparedPocoTax {
+    tax_isk: f64,
+    tax_cents: IskCents,
+    player_share: IskCents,
+    orbital_tid: TypeId,
+}
+
+fn prepare_poco_commodity_tax(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    planet_id: i64,
+    solar_system_id: u32,
+    base_value_isk: f64,
+    tax_mult: f64,
+    action_label: &str,
+) -> Result<PreparedPocoTax, BridgeRpcError> {
+    let (player_poco_rate, orbital_tid) =
+        resolve_character_orbital_access_and_tax(snap, char_id, planet_id)?;
+    let customs_lvl = snap
+        .skills
+        .get(&char_id)
+        .and_then(|m| m.get(&33467))
+        .map(|s| s.level.clamp(0, 5))
+        .unwrap_or(0);
+    let npc_customs_tax_rate = if ctx
+        .sde
+        .solar_systems
+        .get(&solar_system_id)
+        .map(|s| s.security_status >= 0.45)
+        .unwrap_or(true)
+    {
+        0.10
+    } else {
+        0.0
+    };
+    let tax_isk = tax_mult
+        * compute_poco_export_tax(base_value_isk, npc_customs_tax_rate, customs_lvl, player_poco_rate);
+    let tax_cents = IskCents::from_f64_isk(tax_isk);
+    if tax_cents.0 > 0 {
+        if let Some(ch) = snap.characters.get(&char_id) {
+            if ch.balance.checked_sub(tax_cents).is_none() {
+                return Err(BridgeRpcError {
+                    code: "InsufficientFunds".into(),
+                    message: format!("Insufficient ISK to pay POCO {action_label} tax ({tax_isk:.2} ISK)"),
+                    client_error: None,
+                });
+            }
+        }
+    }
+    let player_share = IskCents::from_f64_isk(tax_mult * base_value_isk * player_poco_rate);
+    Ok(PreparedPocoTax {
+        tax_isk,
+        tax_cents,
+        player_share,
+        orbital_tid,
+    })
+}
+
+fn commit_poco_commodity_tax(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    planet_id: i64,
+    tax: PreparedPocoTax,
+    journal_note: String,
+    action_label: &str,
+) -> Result<(), BridgeRpcError> {
+    if tax.tax_cents.0 <= 0 {
+        return Ok(());
+    }
+    if let Some(ch) = snap.characters.get_mut(&char_id) {
+        let new_bal = ch.balance.checked_sub(tax.tax_cents).ok_or_else(|| BridgeRpcError {
+            code: "InsufficientFunds".into(),
+            message: format!(
+                "Insufficient ISK to pay POCO {action_label} tax ({:.2} ISK)",
+                tax.tax_isk
+            ),
+            client_error: None,
+        })?;
+        ch.balance = new_bal;
+        let bal_after = ch.balance;
+        snap.append_journal(char_id, "CustomOfficeTax", tax.tax_cents, bal_after, journal_note);
+    }
+    if let Some(cfg) = load_orbital_settings(snap, planet_id) {
+        if let Some(corp) = snap.corporations.get_mut(&cfg.owner_corp_id) {
+            corp.credit_division(1, tax.player_share);
+        }
+    }
+    Ok(())
+}
+
 fn parse_extractor_heads_rep(rep: Option<&PyRep>) -> Option<Vec<(i64, f64, f64)>> {
     match rep {
         Some(PyRep::List(list) | PyRep::Tuple(list)) => Some(
@@ -562,6 +654,22 @@ pub fn handle_pi_orbitals(
                     client_error: None,
                 }));
             }
+            if let Err(e) = ensure_valid_pi_commodity_type(&ctx.sde, type_id) {
+                return Some(Err(e));
+            }
+            let qty_i32 = match i32::try_from(qty) {
+                Ok(v) if v > 0 => v,
+                _ => {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidCommodityQuantity".into(),
+                        message: format!(
+                            "Commodity quantity {qty} is invalid or exceeds maximum stack size ({})",
+                            i32::MAX
+                        ),
+                        client_error: None,
+                    }));
+                }
+            };
 
             let current_sys_id = session.solar_system_id;
             let now_unix = ctx.now_unix();
@@ -627,8 +735,14 @@ pub fn handle_pi_orbitals(
                             client_error: None,
                         });
                     }
+                    let existing_pin_qty = net.pins[target_idx].contents.get(&type_id).copied().unwrap_or(0);
+                    let new_pin_qty = existing_pin_qty.checked_add(qty).ok_or_else(|| BridgeRpcError {
+                        code: "InvalidCommodityQuantity".into(),
+                        message: "Target pin commodity quantity overflow".into(),
+                        client_error: None,
+                    })?;
 
-                    consume_pi_import_commodities(
+                    let import_plan = plan_pi_import_consumptions(
                         snap,
                         char_id,
                         planet_id,
@@ -638,42 +752,39 @@ pub fn handle_pi_orbitals(
                         session.station_id,
                         session.structure_id,
                     )?;
-                    let (player_poco_rate, orbital_tid) = resolve_character_orbital_access_and_tax(snap, char_id, planet_id)?;
-                    let customs_lvl = snap.skills.get(&char_id).and_then(|m| m.get(&33467)).map(|s| s.level.clamp(0, 5)).unwrap_or(0);
-                    let npc_customs_tax_rate = if ctx.sde.solar_systems.get(&col.solar_system_id).map(|s| s.security_status >= 0.45).unwrap_or(true) { 0.10 } else { 0.0 };
-                    let import_tax_isk = 0.5 * compute_poco_export_tax(unit_base * (qty as f64), npc_customs_tax_rate, customs_lvl, player_poco_rate);
-                    let tax_cents = IskCents::from_f64_isk(import_tax_isk);
-                    if tax_cents.0 > 0 {
-                        if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            let new_bal = ch.balance.checked_sub(tax_cents).ok_or_else(|| BridgeRpcError {
-                                code: "InsufficientFunds".into(),
-                                message: format!("Insufficient ISK to pay POCO import tax ({import_tax_isk:.2} ISK)"),
-                                client_error: None,
-                            })?;
-                            ch.balance = new_bal;
-                            let bal_after = ch.balance;
-                            snap.append_journal(
-                                char_id,
-                                "CustomOfficeTax",
-                                tax_cents,
-                                bal_after,
-                                format!(
-                                    "POCO import tax for {qty}x type {type_id} on planet {planet_id}"
-                                ),
-                            );
-                        }
-                        if let Some(cfg) = load_orbital_settings(snap, planet_id) {
-                            let player_share = IskCents::from_f64_isk(0.5 * unit_base * (qty as f64) * player_poco_rate);
-                            if let Some(corp) = snap.corporations.get_mut(&cfg.owner_corp_id) {
-                                corp.credit_division(1, player_share);
-                            }
-                        }
-                    }
+                    let poco_tax = prepare_poco_commodity_tax(
+                        ctx,
+                        snap,
+                        char_id,
+                        planet_id,
+                        col.solar_system_id,
+                        unit_base * (qty as f64),
+                        0.5,
+                        "import",
+                    )?;
 
-                    *net.pins[target_idx].contents.entry(type_id).or_insert(0) += qty;
+                    apply_pi_import_consumptions(snap, char_id, &import_plan)?;
+                    commit_poco_commodity_tax(
+                        snap,
+                        char_id,
+                        planet_id,
+                        poco_tax,
+                        format!("POCO import tax for {qty}x type {type_id} on planet {planet_id}"),
+                        "import",
+                    )?;
+
+                    net.pins[target_idx].contents.insert(type_id, new_pin_qty);
                     save_pi_network(snap, char_id, planet_id, &net);
 
-                    return Ok((qty, import_tax_isk, import_tax_isk, orbital_tid, 0_i64, col.solar_system_id, [0.0; 3]));
+                    return Ok((
+                        qty,
+                        poco_tax.tax_isk,
+                        poco_tax.tax_isk,
+                        poco_tax.orbital_tid,
+                        0_i64,
+                        col.solar_system_id,
+                        [0.0; 3],
+                    ));
                 }
 
                 let cc_lvl = col.command_center_level;
@@ -732,30 +843,27 @@ pub fn handle_pi_orbitals(
                 }
 
                 if destination == "CustomsOffice" || destination == "Skyhook" || destination == "Hangar" || is_cc {
-                    let (player_poco_rate, otid) = resolve_character_orbital_access_and_tax(snap, char_id, planet_id)?;
-                    orbital_tid = otid;
-                    let customs_lvl = snap.skills.get(&char_id).and_then(|m| m.get(&33467)).map(|s| s.level.clamp(0, 5)).unwrap_or(0);
-                    let npc_customs_tax_rate = if ctx.sde.solar_systems.get(&col.solar_system_id).map(|s| s.security_status >= 0.45).unwrap_or(true) { 0.10 } else { 0.0 };
                     let tax_mult = if is_cc { 1.5 } else { 1.0 };
-                    export_tax_isk = tax_mult * compute_poco_export_tax(unit_base * (qty as f64), npc_customs_tax_rate, customs_lvl, player_poco_rate);
-                    let tax_cents = IskCents::from_f64_isk(export_tax_isk);
-                    if tax_cents.0 > 0 {
-                        if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            ch.balance = ch.balance.checked_sub(tax_cents).ok_or_else(|| BridgeRpcError {
-                                code: "InsufficientFunds".into(),
-                                message: format!("Insufficient ISK to pay POCO export tax ({export_tax_isk:.2} ISK)"),
-                                client_error: None,
-                            })?;
-                            let bal_after = ch.balance;
-                            snap.append_journal(char_id, "CustomOfficeTax", tax_cents, bal_after, format!("POCO export tax for {qty}x type {type_id} on planet {planet_id}"));
-                        }
-                        if let Some(cfg) = load_orbital_settings(snap, planet_id) {
-                            let player_share = IskCents::from_f64_isk(tax_mult * unit_base * (qty as f64) * player_poco_rate);
-                            if let Some(corp) = snap.corporations.get_mut(&cfg.owner_corp_id) {
-                                corp.credit_division(1, player_share);
-                            }
-                        }
-                    }
+                    let poco_tax = prepare_poco_commodity_tax(
+                        ctx,
+                        snap,
+                        char_id,
+                        planet_id,
+                        col.solar_system_id,
+                        unit_base * (qty as f64),
+                        tax_mult,
+                        "export",
+                    )?;
+                    orbital_tid = poco_tax.orbital_tid;
+                    export_tax_isk = poco_tax.tax_isk;
+                    commit_poco_commodity_tax(
+                        snap,
+                        char_id,
+                        planet_id,
+                        poco_tax,
+                        format!("POCO export tax for {qty}x type {type_id} on planet {planet_id}"),
+                        "export",
+                    )?;
                 }
                 let mut created_launch_id = 0_i64;
                 let mut launch_pos = [0.0_f64; 3];
@@ -783,8 +891,9 @@ pub fn handle_pi_orbitals(
                                 owner_id: char_id,
                                 location_id: col.planet_id,
                                 flag: InventoryFlag::Hangar,
-                                quantity: i32::try_from(qty).unwrap_or(i32::MAX),
+                                quantity: qty_i32,
                                 singleton: false,
+                                is_blueprint_copy: false,
                                 version: 1,
                                 ..Default::default()
                             },
@@ -831,8 +940,9 @@ pub fn handle_pi_orbitals(
                                 owner_id: char_id,
                                 location_id: canister_id,
                                 flag: InventoryFlag::Hangar,
-                                quantity: i32::try_from(qty).unwrap_or(i32::MAX),
+                                quantity: qty_i32,
                                 singleton: false,
+                                is_blueprint_copy: false,
                                 version: 1,
                                 ..Default::default()
                             },
