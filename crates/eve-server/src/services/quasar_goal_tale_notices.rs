@@ -625,29 +625,27 @@ pub fn tale_matches_completed_encounter(
     }
 }
 
-/// Builds an `eve.communitytrack.api.Progressed` notice for `track_id` and `current_progress`.
-pub fn community_track_progressed(track_id: u32, current_progress: u64) -> Option<GoogleAny> {
-    let progress = u32::try_from(current_progress).unwrap_or(u32::MAX);
+/// Builds an `eve_public.communitytrack.api.CompletedNotice` for a completed community track.
+pub fn community_track_completed_notice(track_id: u32) -> Option<GoogleAny> {
     crate::quasar_gateway::pb_to_any_or_log(
-        "quasar_goal_tale_notices.community_track_progressed",
-        pb::message("eve.communitytrack.api.Progressed")
-            .set("id.sequential", track_id)
-            .set("progress", progress),
+        "quasar_goal_tale_notices.community_track_completed_notice",
+        pb::message("eve_public.communitytrack.api.CompletedNotice")
+            .set("instance.sequential", track_id),
     )
 }
 
-/// Publishes `eve.communitytrack.api.Progressed` directly to subscribed Quasar gateway clients
+/// Publishes `eve_public.communitytrack.api.CompletedNotice` directly to subscribed Quasar gateway clients
 /// and flushes any thread-local queued notices so worker threads never strand notices in TLS.
-pub fn publish_community_track_progressed_notices(
+pub fn publish_community_track_completed_notices(
     gateway: &crate::quasar_gateway::PublicGatewayRouter,
-    tracks: &[super::quasar_progression_extra::CommunityTrackState],
+    completed_tracks: &[super::quasar_progression_extra::CommunityTrackState],
     now_unix: u64,
 ) {
-    for tr in tracks {
-        if let Some(notice) = community_track_progressed(tr.track_id, tr.current_progress) {
+    for tr in completed_tracks {
+        if let Some(notice) = community_track_completed_notice(tr.track_id) {
             let _ = gateway.publish_notice_isolated(
                 NoticeScope::Broadcast,
-                "quasar_goal_tale_notices.community_track_progressed",
+                "quasar_goal_tale_notices.community_track_completed_notice",
                 notice,
                 now_unix,
             );
@@ -687,18 +685,22 @@ pub fn complete_system_tale_encounter(
         matching_templates.insert(crate::services::pve_incursion_sites::INCURSION_TALE_TEMPLATE_ID as u32);
     }
     let mut all_progressed = Vec::new();
+    let mut newly_completed = Vec::new();
     if !matching_templates.is_empty() {
         let mut map = mgr.community_tracks.write().unwrap_or_else(|e| e.into_inner());
         for track in map.values_mut() {
             if track.active && track.tale_templates.iter().any(|tpl| matching_templates.contains(tpl)) {
-                track.current_progress = track.current_progress.saturating_add(delta).min(track.target_progress);
+                let completed = track.advance_progress(delta);
                 all_progressed.push(track.clone());
+                if completed {
+                    newly_completed.push(track.clone());
+                }
             }
         }
     }
     if !all_progressed.is_empty() {
         mgr.save_to_db();
-        publish_community_track_progressed_notices(gateway, &all_progressed, now_unix);
+        publish_community_track_completed_notices(gateway, &newly_completed, now_unix);
     }
     all_progressed
 }

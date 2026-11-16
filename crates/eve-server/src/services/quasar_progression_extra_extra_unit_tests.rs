@@ -1328,13 +1328,21 @@ fn goal_mutations_notices_capacity_contribs_and_community_tales_wire_payloads() 
     assert_eq!(mgr.get_community_track(555).unwrap().current_progress, 42);
     let stop_notices = crate::services::quasar_social_chat::drain_local_notices();
     assert_eq!(stop_notices.iter().filter(|(_, a, _)| a.type_url.ends_with("StoppedNotice")).count(), 2);
-    let track_prog = stop_notices
+    assert!(
+        !stop_notices.iter().any(|(_, a, _)| a.type_url.contains("communitytrack")),
+        "partial track progress (42/120) must emit neither CompletedNotice nor internal eve/* events"
+    );
+    let mut comp_add = seq_msg(1, DynamicValue::Uint32(555));
+    comp_add.fields.insert(2, DynamicValue::Uint64(80));
+    call_gw(&router, "eve.communitytrack.api.AddProgressRequest", &gm_ctx, &comp_add).unwrap();
+    assert_eq!(mgr.get_community_track(555).unwrap().current_progress, 120);
+    let comp_notices = crate::services::quasar_social_chat::drain_local_notices();
+    let track_comp = comp_notices
         .iter()
-        .find(|(_, a, _)| a.type_url.ends_with("eve.communitytrack.api.Progressed"))
-        .expect("eve.communitytrack.api.Progressed notice emitted");
-    let prog_id = wm_field_bytes(&track_prog.1.value, 1).unwrap();
-    assert_eq!(wm_field_varint(&prog_id, 1), Some(555));
-    assert_eq!(wm_field_varint(&track_prog.1.value, 2), Some(42));
+        .find(|(_, a, _)| a.type_url.ends_with("eve_public.communitytrack.api.CompletedNotice"))
+        .expect("eve_public.communitytrack.api.CompletedNotice emitted upon completion");
+    let comp_id = wm_field_bytes(&track_comp.1.value, 1).unwrap();
+    assert_eq!(wm_field_varint(&comp_id, 1), Some(555));
     // Stopping unmatched template leaves notices empty
     call_gw(&router, "eve.tale.api.StopTalesRequest", &gm_ctx, &seq_msg(1, DynamicValue::Uint32(999_111))).unwrap();
     assert!(crate::services::quasar_social_chat::drain_local_notices().is_empty());

@@ -903,7 +903,13 @@ fn tale_matching_archetypes_and_inactive_tracks() {
     // Wrong system yields empty
     assert!(complete_system_tale_encounter(mgr, 30_000_144, "Event", 9104, 25, 1_760_000_010, &router).is_empty());
 
-    // Queue a TLS notice so publish_community_track_progressed_notices flushes it too
+    // Partial progress (40 -> 45 < 50) does NOT emit CompletedNotice or internal eve/* events
+    let partial = complete_system_tale_encounter(mgr, 30_000_142, "Event", 9104, 5, 1_760_000_010, &router);
+    assert_eq!(partial.len(), 1);
+    assert_eq!(partial[0].current_progress, 45);
+    assert!(rx.try_recv().is_err(), "partial progress must not emit public-gateway notice");
+
+    // Queue a TLS notice so publish_community_track_completed_notices flushes it too
     crate::services::quasar_social_chat::ctx_queue_notice(
         crate::quasar_gateway::NoticeScope::Broadcast,
         GoogleAny {
@@ -925,20 +931,23 @@ fn tale_matching_archetypes_and_inactive_tracks() {
             noticed.push(p);
         }
     }
-    let prog = noticed
+    assert!(
+        !noticed.iter().any(|p| p.type_url.contains("eve.communitytrack.")),
+        "internal eve/ communitytrack event must never be published on public gateway"
+    );
+    let comp = noticed
         .iter()
-        .find(|p| p.type_url.ends_with("eve.communitytrack.api.Progressed"))
-        .expect("eve.communitytrack.api.Progressed notice emitted");
+        .find(|p| p.type_url.ends_with("eve_public.communitytrack.api.CompletedNotice"))
+        .expect("eve_public.communitytrack.api.CompletedNotice emitted on completion");
     let dec = reg
-        .decode_dynamic("eve.communitytrack.api.Progressed", &prog.value)
-        .expect("decode eve.communitytrack.api.Progressed");
-    assert_eq!(reg.encode_dynamic(&dec).unwrap(), prog.value);
+        .decode_dynamic("eve_public.communitytrack.api.CompletedNotice", &comp.value)
+        .expect("decode eve_public.communitytrack.api.CompletedNotice");
+    assert_eq!(reg.encode_dynamic(&dec).unwrap(), comp.value);
     let id_msg = match dec.get(1) {
         Some(eve_proto::quasar::DynamicValue::Message(m)) => m,
-        other => panic!("expected Identifier submessage, got {other:?}"),
+        other => panic!("expected instance Identifier submessage, got {other:?}"),
     };
     assert_eq!(id_msg.get(1), Some(&eve_proto::quasar::DynamicValue::Uint32(82)));
-    assert_eq!(dec.get(2), Some(&eve_proto::quasar::DynamicValue::Uint32(50)));
     assert!(noticed.iter().any(|p| p.type_url.ends_with("eve_public.test.FlushedNotice")));
 }
 

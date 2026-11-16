@@ -50,6 +50,24 @@ pub struct CommunityTrackState {
     pub tale_templates: Vec<u32>,
 }
 
+impl CommunityTrackState {
+    /// Advances `current_progress` by `delta`, clamped to `target_progress`,
+    /// returning `true` iff this update transitioned the track to completed.
+    pub fn advance_progress(&mut self, delta: u64) -> bool {
+        self.set_progress(self.current_progress.saturating_add(delta))
+    }
+
+    /// Sets `current_progress` to `value`, clamped to `target_progress`,
+    /// returning `true` iff this update transitioned the track to completed.
+    pub fn set_progress(&mut self, value: u64) -> bool {
+        let prev = self.current_progress;
+        self.current_progress = value.min(self.target_progress);
+        self.target_progress > 0
+            && prev < self.target_progress
+            && self.current_progress >= self.target_progress
+    }
+}
+
 pub fn uuid_to_hex(u: &[u8; 16]) -> String {
     u.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -362,20 +380,40 @@ impl ProgressionExtraManager {
     }
 
     pub fn add_community_progress(&self, track_id: u32, delta: u64) -> Option<CommunityTrackState> {
+        self.add_community_progress_with_completion(track_id, delta)
+            .map(|(state, _)| state)
+    }
+
+    pub fn add_community_progress_with_completion(
+        &self,
+        track_id: u32,
+        delta: u64,
+    ) -> Option<(CommunityTrackState, bool)> {
         let mut map = self.community_tracks.write().unwrap_or_else(|e| e.into_inner());
         let key = resolve_track_key(&map, track_id)?;
         let track = map.get_mut(&key)?;
-        track.current_progress = track.current_progress.saturating_add(delta).min(track.target_progress);
-        Some(track.clone())
+        let completed = track.advance_progress(delta);
+        Some((track.clone(), completed))
     }
 
     pub fn record_tale_contribution(&self, tale_template_id: u32, delta: u64) -> Vec<CommunityTrackState> {
+        self.record_tale_contribution_with_completion(tale_template_id, delta)
+            .into_iter()
+            .map(|(state, _)| state)
+            .collect()
+    }
+
+    pub fn record_tale_contribution_with_completion(
+        &self,
+        tale_template_id: u32,
+        delta: u64,
+    ) -> Vec<(CommunityTrackState, bool)> {
         let mut map = self.community_tracks.write().unwrap_or_else(|e| e.into_inner());
         let mut updated = Vec::new();
         for track in map.values_mut() {
             if track.active && track.tale_templates.contains(&tale_template_id) {
-                track.current_progress = track.current_progress.saturating_add(delta).min(track.target_progress);
-                updated.push(track.clone());
+                let completed = track.advance_progress(delta);
+                updated.push((track.clone(), completed));
             }
         }
         updated
@@ -511,9 +549,9 @@ pub fn register_progression_extra_handlers(
         "eve.communitytrack.api.AddProgressRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             require_admin_role(ctx)?;
-            let Some(cid) = ctx.effective_character_id() else {
+            if ctx.effective_character_id().is_none() {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
+            }
             let tid = extract_track_id(dyn_msg)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing community track Identifier".into()))?;
             let delta = dyn_msg
@@ -527,24 +565,19 @@ pub fn register_progression_extra_handlers(
                 })
                 .filter(|&d| d > 0)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or non-positive community track progress delta".into()))?;
-            let updated = mgr
-                .add_community_progress(tid, delta)
+            let (updated, completed) = mgr
+                .add_community_progress_with_completion(tid, delta)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
             mgr.save_to_db();
 
-            if let Some(notice) =
-                notices::community_track_progressed(updated.track_id, updated.current_progress)
-            {
-                ctx_queue_notice(
-                    crate::quasar_gateway::NoticeScope::Broadcast,
-                    notice.clone(),
-                    ctx.now_unix(),
-                );
-                ctx_queue_notice(
-                    crate::quasar_gateway::NoticeScope::Character(cid),
-                    notice,
-                    ctx.now_unix(),
-                );
+            if completed {
+                if let Some(notice) = notices::community_track_completed_notice(updated.track_id) {
+                    ctx_queue_notice(
+                        crate::quasar_gateway::NoticeScope::Broadcast,
+                        notice,
+                        ctx.now_unix(),
+                    );
+                }
             }
 
             pb::message("eve.communitytrack.api.AddProgressResponse")
@@ -618,15 +651,24 @@ pub fn register_progression_extra_handlers(
                     _ => None,
                 })
                 .unwrap_or(0);
-            {
+            let completed_track_id = {
                 let mut tracks = mgr.community_tracks.write().unwrap_or_else(|e| e.into_inner());
                 let key = resolve_track_key(&tracks, tid)
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Community track not found".into()))?;
-                if let Some(track) = tracks.get_mut(&key) {
-                    track.current_progress = val.min(track.target_progress);
+                tracks
+                    .get_mut(&key)
+                    .and_then(|track| track.set_progress(val).then_some(track.track_id))
+            };
+            mgr.save_to_db();
+            if let Some(track_id) = completed_track_id {
+                if let Some(notice) = notices::community_track_completed_notice(track_id) {
+                    ctx_queue_notice(
+                        crate::quasar_gateway::NoticeScope::Broadcast,
+                        notice,
+                        ctx.now_unix(),
+                    );
                 }
             }
-            mgr.save_to_db();
             pb::message("eve.communitytrack.admin.api.SetProgressResponse")
                 .to_any_or_internal_err()
         }),
@@ -693,13 +735,18 @@ pub fn register_progression_extra_handlers(
             };
             let now = ctx.now_unix();
             if !stopped.is_empty() {
-                let progressed = mgr.record_tale_contribution(template_id, stopped.len() as u64);
+                let progressed =
+                    mgr.record_tale_contribution_with_completion(template_id, stopped.len() as u64);
                 mgr.save_to_db();
-                for tr in progressed {
-                    if let Some(notice) =
-                        notices::community_track_progressed(tr.track_id, tr.current_progress)
-                    {
-                        ctx_queue_notice(crate::quasar_gateway::NoticeScope::Broadcast, notice, now);
+                for (tr, completed) in progressed {
+                    if completed {
+                        if let Some(notice) = notices::community_track_completed_notice(tr.track_id) {
+                            ctx_queue_notice(
+                                crate::quasar_gateway::NoticeScope::Broadcast,
+                                notice,
+                                now,
+                            );
+                        }
                     }
                 }
             }

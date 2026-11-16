@@ -223,16 +223,7 @@ async fn quasar_community_progression_tales_and_goals() {
     assert_eq!(track_after_attr.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(25));
 
     let notifs = drain_notices(&mut stream_rx);
-    assert!(!notifs.is_empty(), "Track notice should be emitted");
-    let prog_payload = notifs[0].payload.as_ref().unwrap();
-    assert_eq!(prog_payload.normalized_type_name(), "eve.communitytrack.api.Progressed");
-    let prog_wm = WireMessage::decode(&prog_payload.value).expect("decode Progressed notice");
-    let prog_id = WireMessage::decode(
-        prog_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap(),
-    )
-    .expect("decode Progressed id");
-    assert_eq!(prog_id.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()), Some(tid as u64));
-    assert_eq!(prog_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(25));
+    assert!(notifs.is_empty(), "partial track progress (25/100) must not emit CompletedNotice or internal eve/* events");
 
     // Starting Vanguard Nemesis tale 488 emits StartedNotice only (does not advance track); stopping advances track once (+1 -> 26)
     let start_rsp = quasar_rpc(&ctx, &mut sess, "eve.tale.api.StartTaleRequest", make_tale_start(488, 30_000_142)).await;
@@ -250,9 +241,8 @@ async fn quasar_community_progression_tales_and_goals() {
     let stop_rsp = quasar_rpc(&ctx, &mut sess, "eve.tale.api.StopTalesRequest", make_sequential_id_request(488)).await;
     assert_eq!(stop_rsp.status_code, STATUS_OK);
     let tale_stop_notifs = drain_notices(&mut stream_rx);
-    assert_eq!(tale_stop_notifs.len(), 2, "eve.communitytrack.api.Progressed + StoppedNotice should be emitted on StopTalesRequest");
-    assert!(tale_stop_notifs.iter().any(|n| n.payload.as_ref().unwrap().normalized_type_name() == "eve_public.tale.api.StoppedNotice"));
-    assert!(tale_stop_notifs.iter().any(|n| n.payload.as_ref().unwrap().normalized_type_name() == "eve.communitytrack.api.Progressed"));
+    assert_eq!(tale_stop_notifs.len(), 1, "only StoppedNotice should be emitted on partial StopTalesRequest");
+    assert_eq!(tale_stop_notifs[0].payload.as_ref().unwrap().normalized_type_name(), "eve_public.tale.api.StoppedNotice");
     assert_eq!(ctx.quasar_gateway.progression.extra.get_community_track(tid).unwrap().current_progress, 26);
     {
         let mut tracks = ctx.quasar_gateway.progression.extra.community_tracks.write().unwrap();
@@ -264,10 +254,34 @@ async fn quasar_community_progression_tales_and_goals() {
         state: "Mobilizing".into(), mothership_spawned: false, incursion_ended: false,
     };
     eve_server::services::pve_incursion_sites::notify_incursion_site_completed(&ctx.quasar_gateway, &ctx.db, 30_000_142, &inc_res);
-    assert_eq!(ctx.quasar_gateway.progression.extra.get_community_track(tid).unwrap().current_progress, 27, "Incursion site clear must increment community track once (+1), not double-count");
+    let track_after_inc = ctx.quasar_gateway.progression.extra.get_community_track(tid).unwrap();
+    assert_eq!(track_after_inc.current_progress, 27, "Incursion site clear must increment community track once (+1), not double-count");
     let inc_notifs = drain_notices(&mut stream_rx);
-    assert_eq!(inc_notifs.len(), 1);
-    assert_eq!(inc_notifs[0].payload.as_ref().unwrap().normalized_type_name(), "eve.communitytrack.api.Progressed");
+    assert!(inc_notifs.is_empty(), "partial encounter progress (27/{}) must not emit CompletedNotice", track_after_inc.target_progress);
+
+    // Completing the community track emits eve_public.communitytrack.api.CompletedNotice once (and never duplicates on overflow)
+    let rem_to_complete = track_after_inc.target_progress.saturating_sub(track_after_inc.current_progress).max(1);
+    let mut comp_req = make_sequential_id_request(tid);
+    eve_proto::quasar::encode_varint_field(2, rem_to_complete, &mut comp_req);
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.communitytrack.api.AddProgressRequest", comp_req).await.status_code, STATUS_OK);
+    let comp_notifs = drain_notices(&mut stream_rx);
+    assert_eq!(comp_notifs.len(), 1, "completing track must emit one eve_public.communitytrack.api.CompletedNotice");
+    let comp_payload = comp_notifs[0].payload.as_ref().unwrap();
+    assert_eq!(comp_payload.normalized_type_name(), "eve_public.communitytrack.api.CompletedNotice");
+    let reg = eve_proto::quasar::QuasarDescriptorRegistry::open_default().expect("open default descriptors");
+    let dec = reg
+        .decode_dynamic("eve_public.communitytrack.api.CompletedNotice", &comp_payload.value)
+        .expect("decode CompletedNotice");
+    let inst_msg = match dec.get(1) {
+        Some(eve_proto::quasar::DynamicValue::Message(m)) => m,
+        other => panic!("expected CompletedNotice.instance submessage, got {other:?}"),
+    };
+    assert_eq!(inst_msg.get(1), Some(&eve_proto::quasar::DynamicValue::Uint32(tid)));
+
+    let mut dup_req = make_sequential_id_request(tid);
+    eve_proto::quasar::encode_varint_field(2, 5, &mut dup_req);
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.communitytrack.api.AddProgressRequest", dup_req).await.status_code, STATUS_OK);
+    assert!(drain_notices(&mut stream_rx).is_empty(), "post-completion AddProgressRequest must not emit duplicate CompletedNotice");
     let count_after_stop = quasar_rpc(
         &ctx,
         &mut sess,
