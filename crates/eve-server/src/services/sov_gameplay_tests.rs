@@ -548,7 +548,58 @@ async fn sov_gameplay_mercden_repair_dispatch_hack_and_anchor_error_guards() {
             (cid, aid, oaid, i_den, i_den_owner, i_den_hangar, i_hub_owner, i_hub_hangar, i_ch1, i_ch2)
         });
 
-    assert_eq!(ctx.db.with_snapshot(|s| ship_free_cargo_m3(&ctx, s, ship_zero_cap)).unwrap_err().code, "NotEnoughCargoSpace");
+    let zero_cap_err = ctx
+        .db
+        .with_snapshot(|s| ship_free_cargo_m3(&ctx, s, ship_zero_cap))
+        .unwrap_err();
+    assert_eq!(zero_cap_err.code, "NotEnoughCargoSpace");
+    assert_eq!(
+        zero_cap_err.to_client_error("beyonce", "CallComponentFromClient"),
+        eve_proto::ClientError::User {
+            key: eve_proto::UserErrorKey::NotEnoughCargoSpace,
+            args: vec![
+                ("volume".into(), PyRep::Real(0.0)),
+                ("available".into(), PyRep::Real(0.0)),
+            ],
+        }
+    );
+    let PyRep::Tuple(parts) = zero_cap_err
+        .to_client_error("beyonce", "CallComponentFromClient")
+        .to_macho_error_body(1)
+    else {
+        panic!("expected ErrorResponse tuple");
+    };
+    let PyRep::Tuple(inner) = &parts[2] else {
+        panic!("expected inner tuple");
+    };
+    let PyRep::Bytes(raw) = &inner[0] else {
+        panic!("expected marshaled bytes");
+    };
+    let PyRep::ObjectEx { header, .. } = eve_proto::marshal::decode(raw).expect("decode UserError") else {
+        panic!("expected ObjectEx");
+    };
+    let PyRep::Tuple(hdr) = *header else {
+        panic!("expected header tuple");
+    };
+    assert_eq!(hdr[0], PyRep::Token("eveexceptions.UserError".into()));
+    let PyRep::Tuple(u_args) = &hdr[1] else {
+        panic!("expected UserError args tuple");
+    };
+    assert_eq!(u_args[0].as_str(), Some("NotEnoughCargoSpace"));
+    let PyRep::Dict(entries) = &u_args[1] else {
+        panic!("expected UserError dict");
+    };
+    let wire_kv: Vec<(String, f64)> = entries
+        .iter()
+        .map(|(k, v)| match (k.as_str(), v) {
+            (Some(name), PyRep::Real(num)) => (name.to_string(), *num),
+            other => panic!("expected (str, PyRep::Real), got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        wire_kv,
+        vec![("volume".to_string(), 0.0), ("available".to_string(), 0.0)]
+    );
 
     let mut sess = SessionState::new(9600);
     sess.user_id = Some(1);

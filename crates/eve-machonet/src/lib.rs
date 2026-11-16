@@ -93,7 +93,7 @@ pub fn wrapped_runtime_error_body(original_command: i64, message: &str) -> PyRep
 
 /// Body of a V24 `machoNetPacket.ErrorResponse` carrying a wrapped `eveexceptions.UserError`
 /// with a custom dict (`UserError(user_error_name, dict_entries)`), e.g.
-/// `UserError('NotEnoughCargoSpace', {'free': 10.0, 'required': 25.0})`.
+/// `UserError('NotEnoughCargoSpace', {'volume': 25.0, 'available': 10.0})`.
 pub fn wrapped_user_error_with_dict_body(
     original_command: i64,
     user_error_name: &str,

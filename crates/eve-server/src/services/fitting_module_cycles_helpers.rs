@@ -463,7 +463,7 @@ pub(crate) fn handle_unload_ammo(
             if hold_cap <= 0.0 {
                 return Err(BridgeRpcError::user_error_with_args(
                     eve_proto::UserErrorKey::NotEnoughCargoSpace,
-                    [("free", PyRep::Real(0.0)), ("required", PyRep::Real(1.0))],
+                    [("volume", PyRep::Real(1.0)), ("available", PyRep::Real(0.0))],
                 ));
             }
             Some(hold_cap)
@@ -476,7 +476,7 @@ pub(crate) fn handle_unload_ammo(
             if cont_cap <= 0.0 {
                 return Err(BridgeRpcError::user_error_with_args(
                     eve_proto::UserErrorKey::NotEnoughCargoSpace,
-                    [("free", PyRep::Real(0.0)), ("required", PyRep::Real(1.0))],
+                    [("volume", PyRep::Real(1.0)), ("available", PyRep::Real(0.0))],
                 ));
             }
             Some(cont_cap)
@@ -514,10 +514,10 @@ pub(crate) fn handle_unload_ammo(
                 }
                 if let Some(cap) = dest_cap {
                     if cap > 0.0 && used_cargo + vol > cap + 1e-4 {
-                        let free = (cap - used_cargo).max(0.0);
+                        let available = (cap - used_cargo).max(0.0);
                         return Err(BridgeRpcError::user_error_with_args(
                             eve_proto::UserErrorKey::NotEnoughCargoSpace,
-                            [("free", PyRep::Real(free)), ("required", PyRep::Real(vol))],
+                            [("volume", PyRep::Real(vol)), ("available", PyRep::Real(available))],
                         ));
                     }
                 }

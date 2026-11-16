@@ -648,7 +648,7 @@ async fn slash_fetch_remote_command_list_and_unknown_cmd_return_slash_error_with
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wire_invbroker_capacity_overflow_returns_typed_user_error_with_free_and_required() {
+async fn wire_invbroker_capacity_overflow_returns_typed_user_error_with_volume_and_available() {
     let ctx = Arc::new(ServerContext::new());
     let addr = spawn_listener(Arc::clone(&ctx)).await;
     let char_id = 90_000_001_i64;
@@ -672,7 +672,7 @@ async fn wire_invbroker_capacity_overflow_returns_typed_user_error_with_free_and
                 ..Default::default()
             },
         );
-        // 10,000 Tritanium (0.01 m3 each) = 100 m3 -> overflows 50 m3 cargo hold (free=50.0, required=100.0)
+        // 10,000 Tritanium (0.01 m3 each) = 100 m3 -> overflows 50 m3 cargo hold (volume=100.0, available=50.0)
         snap.items.insert(
             tritanium_id,
             eve_db::InventoryItemRecord {
@@ -747,27 +747,27 @@ async fn wire_invbroker_capacity_overflow_returns_typed_user_error_with_free_and
         let PyRep::Dict(entries) = &args[1] else {
             panic!("expected UserError dict");
         };
-        let mut free = None;
-        let mut required = None;
+        let mut volume = None;
+        let mut available = None;
         for (k, v) in entries {
             match k.as_str() {
-                Some("free") => free = match v {
+                Some("volume") => volume = match v {
                     PyRep::Real(x) => Some(*x),
                     PyRep::Integer(n) => Some(*n as f64),
                     _ => None,
                 },
-                Some("required") => required = match v {
+                Some("available") => available = match v {
                     PyRep::Real(x) => Some(*x),
                     PyRep::Integer(n) => Some(*n as f64),
                     _ => None,
                 },
-                _ => {}
+                other => panic!("unexpected capacity dict key {other:?}"),
             }
         }
         (
             name,
-            free.expect("free param missing"),
-            required.expect("required param missing"),
+            volume.expect("volume param missing"),
+            available.expect("available param missing"),
         )
     };
 
@@ -779,7 +779,7 @@ async fn wire_invbroker_capacity_overflow_returns_typed_user_error_with_free_and
     .unwrap();
     assert_eq!(read_until_call_reply(&mut s).await.packet_type, MachoPacketType::CallRsp);
 
-    // 1. Cargo hold (flag 5) -> NotEnoughCargoSpace with free=50.0, required=100.0
+    // 1. Cargo hold (flag 5) -> NotEnoughCargoSpace with volume=100.0, available=50.0
     write_framed_pyrep(
         &mut s,
         &call(
@@ -796,12 +796,12 @@ async fn wire_invbroker_capacity_overflow_returns_typed_user_error_with_free_and
     )
     .await
     .unwrap();
-    let (name, free, req) = decode_space_error(read_until_call_reply(&mut s).await);
+    let (name, volume, avail) = decode_space_error(read_until_call_reply(&mut s).await);
     assert_eq!(name, "NotEnoughCargoSpace");
-    assert!((free - 50.0).abs() < 1e-6, "free={free}");
-    assert!((req - 100.0).abs() < 1e-6, "required={req}");
+    assert!((volume - 100.0).abs() < 1e-6, "volume={volume}");
+    assert!((avail - 50.0).abs() < 1e-6, "available={avail}");
 
-    // 2. DroneBay (flag 87) -> NotEnoughDroneBaySpace with free=10.0, required=20.0
+    // 2. DroneBay (flag 87) -> NotEnoughDroneBaySpace with volume=20.0, available=10.0
     write_framed_pyrep(
         &mut s,
         &call(
@@ -818,12 +818,12 @@ async fn wire_invbroker_capacity_overflow_returns_typed_user_error_with_free_and
     )
     .await
     .unwrap();
-    let (name, free, req) = decode_space_error(read_until_call_reply(&mut s).await);
+    let (name, volume, avail) = decode_space_error(read_until_call_reply(&mut s).await);
     assert_eq!(name, "NotEnoughDroneBaySpace");
-    assert!((free - 10.0).abs() < 1e-6, "free={free}");
-    assert!((req - 20.0).abs() < 1e-6, "required={req}");
+    assert!((volume - 20.0).abs() < 1e-6, "volume={volume}");
+    assert!((avail - 10.0).abs() < 1e-6, "available={avail}");
 
-    // 3. SpecializedOreHold (flag 134) -> NotEnoughSpecialBaySpace with free=5000.0, required=6000.0
+    // 3. SpecializedOreHold (flag 134) -> NotEnoughSpecialBaySpace with volume=6000.0, available=5000.0
     write_framed_pyrep(
         &mut s,
         &call(
@@ -840,10 +840,10 @@ async fn wire_invbroker_capacity_overflow_returns_typed_user_error_with_free_and
     )
     .await
     .unwrap();
-    let (name, free, req) = decode_space_error(read_until_call_reply(&mut s).await);
+    let (name, volume, avail) = decode_space_error(read_until_call_reply(&mut s).await);
     assert_eq!(name, "NotEnoughSpecialBaySpace");
-    assert!((free - 5000.0).abs() < 1e-6, "free={free}");
-    assert!((req - 6000.0).abs() < 1e-6, "required={req}");
+    assert!((volume - 6000.0).abs() < 1e-6, "volume={volume}");
+    assert!((avail - 5000.0).abs() < 1e-6, "available={avail}");
 }
 
 #[test]

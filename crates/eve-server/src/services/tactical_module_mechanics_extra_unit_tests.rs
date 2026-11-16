@@ -317,9 +317,64 @@ async fn activate_interdiction_sphere_launcher_guards_excess_return_auto_reload_
             flag: InventoryFlag::Cargo, quantity: 3, singleton: false, ..Default::default()
         });
     });
-    assert_eq!(activate_interdiction_sphere_launcher(
+    let space_err = activate_interdiction_sphere_launcher(
         &ctx, &sys_null, null_sys, char_id, ship_id, dictor_ship_tid, mod_id, &fitted_mod, &mod_type, "useMissiles", None,
-    ).await.unwrap_err().code, "NotEnoughCargoSpace");
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(space_err.code, "NotEnoughCargoSpace");
+    let (vol, avail) = match space_err.to_client_error("dogmaIM", "Activate") {
+        eve_proto::ClientError::User {
+            key: eve_proto::UserErrorKey::NotEnoughCargoSpace,
+            args,
+        } => match args.as_slice() {
+            [(k0, PyRep::Real(v)), (k1, PyRep::Real(a))]
+                if k0 == "volume" && k1 == "available" => (*v, *a),
+            other => panic!("expected [('volume', Real), ('available', Real)], got {other:?}"),
+        },
+        other => panic!("expected UserError::NotEnoughCargoSpace, got {other:?}"),
+    };
+    assert!(
+        vol > 0.0 && avail >= 0.0 && vol > avail,
+        "expected volume > available >= 0.0, got vol={vol}, avail={avail}"
+    );
+    let PyRep::Tuple(parts) = space_err
+        .to_client_error("dogmaIM", "Activate")
+        .to_macho_error_body(1)
+    else {
+        panic!("expected ErrorResponse tuple");
+    };
+    let PyRep::Tuple(inner) = &parts[2] else {
+        panic!("expected inner tuple");
+    };
+    let PyRep::Bytes(raw) = &inner[0] else {
+        panic!("expected marshaled bytes");
+    };
+    let PyRep::ObjectEx { header, .. } = eve_proto::marshal::decode(raw).expect("decode UserError") else {
+        panic!("expected ObjectEx");
+    };
+    let PyRep::Tuple(hdr) = *header else {
+        panic!("expected header tuple");
+    };
+    assert_eq!(hdr[0], PyRep::Token("eveexceptions.UserError".into()));
+    let PyRep::Tuple(u_args) = &hdr[1] else {
+        panic!("expected UserError args tuple");
+    };
+    assert_eq!(u_args[0].as_str(), Some("NotEnoughCargoSpace"));
+    let PyRep::Dict(entries) = &u_args[1] else {
+        panic!("expected UserError dict");
+    };
+    let wire_kv: Vec<(String, f64)> = entries
+        .iter()
+        .map(|(k, v)| match (k.as_str(), v) {
+            (Some(name), PyRep::Real(num)) => (name.to_string(), *num),
+            other => panic!("expected (str, PyRep::Real), got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        wire_kv,
+        vec![("volume".to_string(), vol), ("available".to_string(), avail)]
+    );
 
     // 7. Set charge qty = 1 in launcher while 3 wubble probes are in Cargo -> fires & auto-reloads wubble probes
     ctx.db.with_mut_snapshot(|snap| { snap.items.get_mut(&charge_id).unwrap().quantity = 1; });

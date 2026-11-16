@@ -740,11 +740,69 @@ async fn test_cargo_capacity_move_items_and_packaged_volumes() {
     let notes = ctx.drain_notifications_for_char(C1);
     assert!(notes.iter().any(|n| n.event == "ProcessInventoryChange"), "ProcessInventoryChange must be pushed");
 
-    // Venture cargo (50 m3) accepts 4,000 Tritanium (40 m3) and rejects another 2,000 Tritanium (20 m3).
+    // Venture cargo (50 m3) accepts 4,000 Tritanium (40 m3) and rejects another 2,000 Tritanium (20 m3)
+    // with V24.01 UserError('NotEnoughCargoSpace', {'volume': 20.0, 'available': 10.0}).
     seed(&ctx, 720_004, 34, C1, JITA44, InventoryFlag::Hangar, 4_000, false);
     seed(&ctx, 720_005, 34, C1, JITA44, InventoryFlag::Hangar, 2_000, false);
     call(&ctx, &mut s1, "invbroker", "Add", add(720_004, 720_001, InventoryFlag::Cargo)).await.unwrap();
-    assert_eq!(call(&ctx, &mut s1, "invbroker", "Add", add(720_005, 720_001, InventoryFlag::Cargo)).await.unwrap_err().code, "NotEnoughCargoSpace");
+    let cap_err = call(&ctx, &mut s1, "invbroker", "Add", add(720_005, 720_001, InventoryFlag::Cargo)).await.unwrap_err();
+    assert_eq!(cap_err.code, "NotEnoughCargoSpace");
+    let decode_user_error_dict = |err: &BridgeRpcError| -> (String, Vec<(String, f64)>) {
+        let PyRep::Tuple(parts) = err.to_client_error("invbroker", "Add").to_macho_error_body(1) else {
+            panic!("expected ErrorResponse tuple");
+        };
+        let PyRep::Tuple(inner) = &parts[2] else {
+            panic!("expected inner tuple");
+        };
+        let PyRep::Bytes(raw) = &inner[0] else {
+            panic!("expected marshaled bytes");
+        };
+        let PyRep::ObjectEx { header, .. } = eve_proto::marshal::decode(raw).expect("decode UserError") else {
+            panic!("expected ObjectEx");
+        };
+        let PyRep::Tuple(hdr) = *header else {
+            panic!("expected header tuple");
+        };
+        assert_eq!(hdr[0], PyRep::Token("eveexceptions.UserError".into()));
+        let PyRep::Tuple(u_args) = &hdr[1] else {
+            panic!("expected UserError args tuple");
+        };
+        let key = u_args[0].as_str().expect("UserError key").to_string();
+        let PyRep::Dict(entries) = &u_args[1] else {
+            panic!("expected UserError dict");
+        };
+        let kv = entries
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().expect("dict key").to_string(),
+                    v.as_f64().expect("real arg"),
+                )
+            })
+            .collect();
+        (key, kv)
+    };
+    let (err_key, err_kv) = decode_user_error_dict(&cap_err);
+    assert_eq!(err_key, "NotEnoughCargoSpace");
+    assert_eq!(
+        err_kv,
+        vec![("volume".to_string(), 20.0), ("available".to_string(), 10.0)]
+    );
+
+    // GH #1074 regression: overfilled Merlin (603, 150 m3 cargo holding 200 m3 Tritanium) rejects
+    // 200x Tritanium (2.0 m3) with {'volume': 2.0, 'available': 0.0} (clamped at 0.0, never negative).
+    seed(&ctx, 720_030, 603, C1, JITA44, InventoryFlag::Hangar, 1, true);
+    seed(&ctx, 720_031, 34, C1, 720_030, InventoryFlag::Cargo, 20_000, false);
+    seed(&ctx, 720_032, 34, C1, JITA44, InventoryFlag::Hangar, 200, false);
+    let merlin_err = call(&ctx, &mut s1, "invbroker", "Add", add(720_032, 720_030, InventoryFlag::Cargo))
+        .await
+        .unwrap_err();
+    let (m_key, m_kv) = decode_user_error_dict(&merlin_err);
+    assert_eq!(m_key, "NotEnoughCargoSpace");
+    assert_eq!(
+        m_kv,
+        vec![("volume".to_string(), 2.0), ("available".to_string(), 0.0)]
+    );
 
     // Venture Ore Hold (flag 134) accepts Veldspar (1228) and rejects refined mineral Tritanium (34).
     seed(&ctx, 720_006, 1228, C1, JITA44, InventoryFlag::Hangar, 1_000, false);

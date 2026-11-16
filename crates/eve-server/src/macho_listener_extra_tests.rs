@@ -593,16 +593,16 @@ fn map_call_req_error_body_preserves_existing_rpc_error_mappings() {
     let cargo_err = eve_proto::BridgeRpcError::user_error_with_args(
         eve_proto::UserErrorKey::NotEnoughCargoSpace,
         [
-            ("free", PyRep::Real(12.5)),
-            ("required", PyRep::Real(40.0)),
+            ("volume", PyRep::Real(40.0)),
+            ("available", PyRep::Real(12.5)),
         ],
     );
     let (key, dict) = decode_wrapped_user_error(map_call_req_error_body("inv", "Add", &cargo_err));
     assert_eq!(key, "NotEnoughCargoSpace");
-    assert_eq!(dict[0].0, "free");
-    assert_eq!(dict[0].1.as_f64(), Some(12.5));
-    assert_eq!(dict[1].0, "required");
-    assert_eq!(dict[1].1.as_f64(), Some(40.0));
+    assert_eq!(dict[0].0, "volume");
+    assert_eq!(dict[0].1.as_f64(), Some(40.0));
+    assert_eq!(dict[1].0, "available");
+    assert_eq!(dict[1].1.as_f64(), Some(12.5));
 
     let max_orders = eve_proto::BridgeRpcError::max_open_orders_reached(17, 17);
     let (key, dict) = decode_wrapped_user_error(map_call_req_error_body("marketProxy", "PlaceBuyOrder", &max_orders));

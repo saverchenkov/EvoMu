@@ -86,11 +86,13 @@ pub(crate) fn ship_free_cargo_m3(
         .or_else(|| ctx.sde.types.get(&ship_item.type_id).map(|t| t.capacity))
         .unwrap_or(0.0);
     if cap <= 0.0 {
-        return Err(BridgeRpcError {
-            code: "NotEnoughCargoSpace".into(),
-            message: format!("Active ship {ship_id} has no cargo hold capacity"),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::user_error_with_args(
+            eve_proto::UserErrorKey::NotEnoughCargoSpace,
+            [
+                ("volume", PyRep::Real(0.0)),
+                ("available", PyRep::Real(0.0)),
+            ],
+        ));
     }
     let used: f64 = snap
         .items
@@ -657,11 +659,13 @@ pub async fn handle_mercden_component_call(
         let full_tax_qty = (total.saturating_mul(tax_pct)) / 100;
         let full_owner_qty = total.saturating_sub(full_tax_qty);
         if full_owner_qty > 0 && max_owner_units == 0 {
-            return Err(BridgeRpcError {
-                code: "NotEnoughCargoSpace".into(),
-                message: "Active ship does not have enough free cargo capacity to extract Infomorph Decryption Keys".into(),
-                client_error: None,
-            });
+            return Err(BridgeRpcError::user_error_with_args(
+                eve_proto::UserErrorKey::NotEnoughCargoSpace,
+                [
+                    ("volume", PyRep::Real(unit_vol)),
+                    ("available", PyRep::Real(free_m3.max(0.0))),
+                ],
+            ));
         }
         let extracted_total = if max_owner_units >= full_owner_qty || tax_pct >= 100 {
             total
@@ -669,11 +673,13 @@ pub async fn handle_mercden_component_call(
             ((u64::from(max_owner_units) * 100) / u64::from(100 - tax_pct)).min(u64::from(total)) as u32
         };
         if extracted_total == 0 {
-            return Err(BridgeRpcError {
-                code: "NotEnoughCargoSpace".into(),
-                message: "Active ship does not have enough free cargo capacity to extract Infomorph Decryption Keys".into(),
-                client_error: None,
-            });
+            return Err(BridgeRpcError::user_error_with_args(
+                eve_proto::UserErrorKey::NotEnoughCargoSpace,
+                [
+                    ("volume", PyRep::Real(unit_vol)),
+                    ("available", PyRep::Real(free_m3.max(0.0))),
+                ],
+            ));
         }
         let den_mut = snap.sov_runtime.mercenary_dens.get_mut(&den_id).expect("checked");
         den_mut.infomorphs = total.saturating_sub(extracted_total);
