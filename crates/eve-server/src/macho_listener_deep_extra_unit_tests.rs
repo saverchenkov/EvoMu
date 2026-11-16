@@ -1879,7 +1879,7 @@ async fn ship_destruction_and_rapid_pod_death_respawn_suppress_self_terminal_exp
         .ejected_capsule_id
         .expect("ship destruction must eject into capsule");
     let mut saw_pod_sess = false;
-    for _ in 0..24 {
+    for _ in 0..32 {
         let timeout_ms = if saw_pod_sess { 25 } else { 150 };
         let Ok(Some(raw)) = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), read_pkt(&mut s)).await else {
             break;
@@ -1925,15 +1925,15 @@ async fn ship_destruction_and_rapid_pod_death_respawn_suppress_self_terminal_exp
 
     let mut saw_respawn_sess: Option<usize> = None;
     let mut saw_respawn_notif: Option<usize> = None;
-    for idx in 0..24 {
+    for idx in 0..32 {
         let Ok(Some(raw)) = tokio::time::timeout(std::time::Duration::from_millis(200), read_pkt(&mut s)).await else {
             break;
         };
+        let pkt = MachoPacket::from_pyrep(&raw).unwrap();
         assert!(
             !pyrep_contains_ascii(&raw, "TerminalPlayDestructionEffect"),
             "rapid pod DeathRespawn must NOT deliver TerminalPlayDestructionEffect (#1039): {raw:?}"
         );
-        let pkt = MachoPacket::from_pyrep(&raw).unwrap();
         if pkt.packet_type == MachoPacketType::SessionChangeNotification {
             saw_respawn_sess.get_or_insert(idx);
         } else if pkt.packet_type == MachoPacketType::Notification

@@ -73,6 +73,7 @@ const OTHER_CORP_ID: i64 = 98_000_002;
 const ALLIANCE_ID: i64 = 99_000_001;
 const STATION_ID: i64 = 60_003_760;
 const SYSTEM_ID: u32 = 30_000_142;
+const SOV_SYSTEM_ID: u32 = 30_001_161;
 const SHIP_ID: i64 = 100_000_001;
 const MODULE_ID: i64 = 100_000_005;
 const HANGAR_ITEM_ID: i64 = 100_000_003;
@@ -494,6 +495,18 @@ fn seed_comprehensive_world(ctx: &ServerContext) {
                 label: "N:My Note".into(),
                 note: "Note body".into(),
                 timestamp_unix: now,
+            },
+        );
+        snap.system_states.insert(
+            SOV_SYSTEM_ID,
+            SystemDynamicState {
+                solar_system_id: SOV_SYSTEM_ID,
+                dbs_multiplier: 1.35,
+                sov_alliance_id: Some(ALLIANCE_ID),
+                military_index: 2,
+                industrial_index: 2,
+                strategic_index: 3,
+                ..Default::default()
             },
         );
     });
@@ -1342,6 +1355,12 @@ fn build_candidate_arg_sets(
 ) -> Vec<Vec<PyRep>> {
     if service == "miningScanMgr" && method == "perform_scan" {
         return vec![vec![PyRep::Integer(MODULE_ID)]];
+    }
+    if service == "devIndexManager" && method == "GetDevelopmentIndicesForSystem" {
+        return vec![
+            vec![PyRep::Integer(SOV_SYSTEM_ID as i64)],
+            vec![PyRep::Integer(SYSTEM_ID as i64)],
+        ];
     }
     let mut base = Vec::with_capacity(arity);
     for i in 0..arity {
