@@ -1,5 +1,6 @@
 //! Server execution context, runtime state caches, and simulation clock management.
 
+use super::notify_registry::{OnMoonScanComplete, OnRemoveMoonProbe, OnScanNoMaterials};
 use crate::living_world::LivingWorldDirector;
 use crate::system_actor::SystemRegistry;
 use crate::world_seeder;
@@ -1838,11 +1839,9 @@ impl ServerContext {
                         moon_id,
                     );
                     if composition.is_empty() {
-                        self.notify(
+                        self.emit_typed(
                             crate::router::NotificationTarget::Character(p.owner_char_id),
-                            "OnScanNoMaterials",
-                            "charid",
-                            vec![eve_proto::PyRep::Integer(moon_id)],
+                            OnScanNoMaterials { moon_id },
                         );
                     } else {
                         let resources_dict = eve_proto::PyRep::Dict(
@@ -1856,20 +1855,21 @@ impl ServerContext {
                                 })
                                 .collect(),
                         );
-                        self.notify(
+                        self.emit_typed(
                             crate::router::NotificationTarget::Character(p.owner_char_id),
-                            "OnMoonScanComplete",
-                            "charid",
-                            vec![eve_proto::PyRep::Integer(moon_id), resources_dict],
+                            OnMoonScanComplete {
+                                moon_id,
+                                results: resources_dict,
+                            },
                         );
                     }
                 }
             }
-            self.notify(
+            self.emit_typed(
                 crate::router::NotificationTarget::Character(p.owner_char_id),
-                "OnRemoveMoonProbe",
-                "charid",
-                vec![eve_proto::PyRep::Integer(p.probe_id)],
+                OnRemoveMoonProbe {
+                    probe_id: p.probe_id,
+                },
             );
         }
     }

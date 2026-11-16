@@ -3,7 +3,8 @@
 #![forbid(unsafe_code)]
 
 use crate::formulas::abyssal_attribute_roll;
-use crate::router::{BoundObjectEntry, ServerContext};
+use crate::router::notify_registry::{OnModuleFitted, ProcessInventoryChange};
+use crate::router::{BoundObjectEntry, NotificationTarget, ServerContext};
 use eve_db::{InventoryFlag, IskCents, SavedFittingRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
@@ -1819,9 +1820,15 @@ async fn handle_invbroker_add(
                             (9, PyRep::Integer(old_target_qty)),
                         ],
                     );
-                    ctx.notify(crate::router::NotificationTarget::Character(char_id), "ProcessInventoryChange", "charid", vec![
-                        PyRep::Integer(merged_item.item_id), PyRep::Integer(merged_item.location_id), PyRep::Integer(merged_item.flag as i64),
-                    ]);
+                    ctx.emit_typed(
+                        NotificationTarget::Character(char_id),
+                        ProcessInventoryChange {
+                            arg0: PyRep::Integer(merged_item.item_id),
+                            arg1: PyRep::Integer(merged_item.location_id),
+                            arg2: PyRep::Integer(merged_item.flag as i64),
+                            arg3: None,
+                        },
+                    );
                     Some(Ok(PyRep::keyval([
                         ("itemID", PyRep::Integer(merged_item.item_id)), ("locationID", PyRep::Integer(merged_item.location_id)),
                         ("flagID", PyRep::Integer(merged_item.flag as i64)), ("quantity", PyRep::Integer(merged_item.quantity as i64)),
@@ -1958,11 +1965,14 @@ async fn handle_invbroker_add(
                             item_changes,
                         );
                     }
-                    ctx.notify(
-                        crate::router::NotificationTarget::Character(char_id),
-                        "ProcessInventoryChange",
-                        "charid",
-                        vec![PyRep::Integer(updated.item_id), PyRep::Integer(updated.location_id), PyRep::Integer(updated.flag as i64)],
+                    ctx.emit_typed(
+                        NotificationTarget::Character(char_id),
+                        ProcessInventoryChange {
+                            arg0: PyRep::Integer(updated.item_id),
+                            arg1: PyRep::Integer(updated.location_id),
+                            arg2: PyRep::Integer(updated.flag as i64),
+                            arg3: None,
+                        },
                     );
 
                     if old_was_fitted {
@@ -1987,16 +1997,14 @@ async fn handle_invbroker_add(
                             .get(&updated.type_id)
                             .map(|t| i64::from(t.group_id))
                             .unwrap_or(0);
-                        ctx.notify(
-                            crate::router::NotificationTarget::Character(char_id),
-                            "OnModuleFitted",
-                            "charid",
-                            vec![
-                                PyRep::Integer(char_id),
-                                PyRep::Integer(flag as i64),
-                                PyRep::Integer(updated.type_id as i64),
-                                PyRep::Integer(group_id),
-                            ],
+                        ctx.emit_typed(
+                            NotificationTarget::Character(char_id),
+                            OnModuleFitted {
+                                char_id,
+                                flag: flag as i64,
+                                type_id: updated.type_id as i64,
+                                group_id,
+                            },
                         );
                         let _ = ctx.notify_module_online_state(char_id, item_id, online);
                         if let (Some((old_cpu, old_pg)), Some(new_fit)) = (old_fit_loads, new_fit_opt) {

@@ -2133,6 +2133,13 @@ define_notifications! {
         fields: { extraction: Option<PyRep> },
         samples: || vec![vec![PyRep::None]],
     },
+    OnMoonScanComplete => "OnMoonScanComplete" ("charid") {
+        fields: { moon_id: i64, results: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(40_000_001),
+            PyRep::Dict(vec![(PyRep::Integer(45_490), PyRep::Real(0.25))]),
+        ]],
+    },
     OnMutualWarsUpdatedRemote => "OnMutualWarsUpdated_Remote" ("corpid") {
         samples: || vec![vec![]],
     },
@@ -2301,6 +2308,10 @@ define_notifications! {
             PyRep::Bool(true),
         ]],
     },
+    OnRemoveMoonProbe => "OnRemoveMoonProbe" ("charid") {
+        fields: { probe_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
     OnRemoveProbe => "OnRemoveProbe" ("charid") {
         fields: { probe_id: i64 },
         samples: || vec![vec![PyRep::Integer(100_000_001)]],
@@ -2311,6 +2322,10 @@ define_notifications! {
     OnSanctionedActionChanged => "OnSanctionedActionChanged" ("corpid") {
         fields: { corporation_id: i64, vote_case_id: i64 },
         samples: || vec![vec![PyRep::Integer(98_000_001), PyRep::Integer(1)]],
+    },
+    OnScanNoMaterials => "OnScanNoMaterials" ("charid") {
+        fields: { moon_id: i64 },
+        samples: || vec![vec![PyRep::Integer(40_000_001)]],
     },
     OnScannerInfoRemoved => "OnScannerInfoRemoved" ("charid") {
         samples: || vec![vec![]],

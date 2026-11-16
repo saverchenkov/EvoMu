@@ -491,6 +491,31 @@ fn typed_notification_into_args_preserves_registered_arity() {
         .len(),
         10
     );
+
+    use super::notify_registry::{OnMoonScanComplete, OnRemoveMoonProbe, OnScanNoMaterials};
+    assert_eq!(OnMoonScanComplete::DEFAULT_ID_TYPE, "charid");
+    assert_eq!(
+        OnMoonScanComplete {
+            moon_id: 40_000_001,
+            results: PyRep::Dict(vec![(PyRep::Integer(45_490), PyRep::Real(0.25))]),
+        }
+        .into_args()
+        .len(),
+        2
+    );
+    assert_eq!(OnRemoveMoonProbe::DEFAULT_ID_TYPE, "charid");
+    assert_eq!(
+        OnRemoveMoonProbe { probe_id: 1 }.into_args(),
+        vec![PyRep::Integer(1)]
+    );
+    assert_eq!(OnScanNoMaterials::DEFAULT_ID_TYPE, "charid");
+    assert_eq!(
+        OnScanNoMaterials {
+            moon_id: 40_000_001,
+        }
+        .into_args(),
+        vec![PyRep::Integer(40_000_001)]
+    );
 }
 
 #[test]
@@ -668,6 +693,14 @@ fn raw_notify_ratchet_holds_and_migrated_files_stay_clean() {
         "services/structure_acl_defense_rules.rs",
         "services/structure_lifecycle_cargo_fuel.rs",
         "services/structure_profile_services.rs",
+        // Final Disjoint Sweep (Refs #932)
+        "combat/death_pipeline.rs",
+        "router/context.rs",
+        "router/session_transition.rs",
+        "services/character_gm_tools.rs",
+        "services/inventory_fitting.rs",
+        "services/space_nav_travel.rs",
+        "services/tactical_modules.rs",
     ];
     for rel in zero_raw_files {
         let count = report.per_file_raw_notify.get(rel).copied().unwrap_or(0);
@@ -678,6 +711,7 @@ fn raw_notify_ratchet_holds_and_migrated_files_stay_clean() {
     }
 
     let dynamic_helper_files = [
+        "services/auth_cache.rs",
         "services/notify_emitters_ess_bounties.rs",
         "services/notify_emitters_combat_ess_progression.rs",
         "services/notify_emitters_tournaments_anomalies.rs",

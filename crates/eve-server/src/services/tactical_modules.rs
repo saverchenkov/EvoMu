@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+use crate::router::notify_registry::OnDbuffUpdated;
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::inventory_fitting::{scanners_superweapons_state, ActiveDbuffEntry};
 use crate::system_actor::SystemHandle;
@@ -1043,7 +1044,12 @@ pub async fn activate_command_burst(
     });
     for &(member_cid, member_sid) in &affected_ships {
         let _ = ctx.invalidate_and_push_fit(member_sid);
-        ctx.notify(NotificationTarget::Character(member_cid), "OnDbuffUpdated", "charid", vec![PyRep::Integer(member_sid), PyRep::List(dbuff_id_reps.clone())]);
+        ctx.emit_typed(
+            NotificationTarget::Character(member_cid),
+            OnDbuffUpdated {
+                ship_id: member_sid,
+            },
+        );
     }
     crate::services::notify_emitters_space_dungeons::emit_fleet_boosted(ctx, char_id, mod_type.type_id, affected_ships.len());
 

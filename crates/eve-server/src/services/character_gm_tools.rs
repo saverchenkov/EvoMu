@@ -4,7 +4,11 @@
 
 use super::{catch_up_skill_queue, is_valid_doll_or_portrait_payload, notify_watchlist_logon, serialize_doll_pyrep};
 use crate::combat::death_pipeline::execute_death_pipeline;
-use crate::router::ServerContext;
+use crate::router::notify_registry::{
+    OnModuleAttributeChanges, OnModuleFitted, OnRemoteMessage, OnSecurityStatusUpdate,
+    OnSetPlayerStanding,
+};
+use crate::router::{NotificationTarget, ServerContext};
 use eve_db::{InventoryFlag, InventoryItemRecord, KillmailRecord, SkillHistoryEntry};
 use eve_destiny::{Ball, CombatState, MovementMode};
 use eve_machonet::SessionState;
@@ -900,24 +904,30 @@ pub(crate) async fn execute_gm_heal(
             push_change(&mut attr_changes, mod_id, aid, 0.0, old_val);
         }
         if !attr_changes.is_empty() {
-            ctx.notify(
-                crate::router::NotificationTarget::Character(target_char_id),
-                "OnModuleAttributeChanges",
-                "charid",
-                vec![PyRep::List(attr_changes)],
+            ctx.emit_typed(
+                NotificationTarget::Character(target_char_id),
+                OnModuleAttributeChanges {
+                    changes: PyRep::List(attr_changes),
+                },
             );
         }
         let _ = ctx.notify_damage_state_change(
-            crate::router::NotificationTarget::Character(target_char_id),
+            NotificationTarget::Character(target_char_id),
             target_ship_id,
             1.0,
             1.0,
             1.0,
         );
-        let _ = ctx.notify_remote_message(
-            crate::router::NotificationTarget::Character(target_char_id),
-            "CustomNotify",
-            vec![("notify", PyRep::String("Ship healed".into()))],
+        let _ = ctx.emit_typed(
+            NotificationTarget::Character(target_char_id),
+            OnRemoteMessage {
+                msg_id: "CustomNotify".into(),
+                dict: Some(PyRep::Dict(vec![(
+                    PyRep::String("notify".into()),
+                    PyRep::String("Ship healed".into()),
+                )])),
+                kw: None,
+            },
         );
     }
 
@@ -1822,16 +1832,14 @@ pub async fn handle_gm_slash_ext(
                         .get(&type_id)
                         .map(|t| i64::from(t.group_id))
                         .unwrap_or(0);
-                    ctx.notify(
-                        crate::router::NotificationTarget::Character(rec.owner_id),
-                        "OnModuleFitted",
-                        "charid",
-                        vec![
-                            PyRep::Integer(rec.owner_id),
-                            PyRep::Integer(chosen_flag as i64),
-                            PyRep::Integer(type_id as i64),
-                            PyRep::Integer(group_id),
-                        ],
+                    ctx.emit_typed(
+                        NotificationTarget::Character(rec.owner_id),
+                        OnModuleFitted {
+                            char_id: rec.owner_id,
+                            flag: chosen_flag as i64,
+                            type_id: type_id as i64,
+                            group_id,
+                        },
                     );
                     let _ = ctx.notify_module_online_state(rec.owner_id, rec.item_id, is_online);
                     if is_online {
@@ -2336,7 +2344,13 @@ pub async fn handle_gm_slash_ext(
                 }
             });
         }
-        ctx.notify(crate::router::NotificationTarget::Character(cid), "OnSetPlayerStanding", "charid", vec![PyRep::Integer(target_id), PyRep::Real(standing)]);
+        ctx.emit_typed(
+            NotificationTarget::Character(cid),
+            OnSetPlayerStanding {
+                contact_id: target_id,
+                standing,
+            },
+        );
         return Some(Ok(PyRep::keyval([("contactID", PyRep::Integer(target_id)), ("standing", PyRep::Real(standing))])));
     }
 
@@ -2441,7 +2455,12 @@ pub async fn handle_gm_slash_ext(
         if !updated {
             return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_cid} not found"), client_error: None }));
         }
-        ctx.notify(crate::router::NotificationTarget::Character(target_cid), "OnSecurityStatusUpdate", "charid", vec![PyRep::Real(clamped)]);
+        ctx.emit_typed(
+            NotificationTarget::Character(target_cid),
+            OnSecurityStatusUpdate {
+                new_security_status: clamped,
+            },
+        );
         return Some(Ok(PyRep::Real(clamped)));
     }
 
