@@ -462,6 +462,88 @@ pub async fn step_missiles_and_breachers(
 }
 
 
+pub(crate) fn check_bomb_launcher_preconditions(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id: u32,
+    sys_sec: f64,
+) -> Result<(), BridgeRpcError> {
+    if sys_sec >= 0.45 {
+        return Err(BridgeRpcError {
+            code: "BombDisallowedInHighSec".into(),
+            message: format!(
+                "Bomb launchers cannot be activated in high-security space (system {sys_id} security {sys_sec:.2})"
+            ),
+            client_error: None,
+        });
+    }
+    let safety = with_combat_runtime(ctx, |rt| {
+        rt.safety_levels
+            .get(&char_id)
+            .copied()
+            .unwrap_or(SafetyLevel::Red)
+    });
+    let corr_stage5 =
+        crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id) >= 5;
+    if sys_sec > 0.0 && !corr_stage5 && safety == SafetyLevel::Green {
+        return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
+    }
+    Ok(())
+}
+
+pub(crate) fn find_loaded_aoe_launcher_charge(
+    ctx: &ServerContext,
+    ship_id: i64,
+    module_id: i64,
+    flag_id: u16,
+    allowed_charge_groups: &[u32],
+) -> Option<(i64, u32)> {
+    ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .find(|i| {
+                i.location_id == ship_id
+                    && (i.flag as u16) == flag_id
+                    && i.item_id != module_id
+                    && i.quantity > 0
+                    && ctx
+                        .sde
+                        .types
+                        .get(&i.type_id)
+                        .is_some_and(|t| allowed_charge_groups.contains(&t.group_id))
+            })
+            .map(|i| (i.item_id, i.type_id))
+    })
+}
+
+fn resolve_and_consume_aoe_launcher_charge(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    flag_id: u16,
+    allowed_charge_groups: &[u32],
+    no_ammo_message: &str,
+) -> Result<(i64, u32), BridgeRpcError> {
+    let Some((charge_item_id, charge_type_id)) =
+        find_loaded_aoe_launcher_charge(ctx, ship_id, module_id, flag_id, allowed_charge_groups)
+    else {
+        return Err(BridgeRpcError {
+            code: "NoAmmoLoaded".into(),
+            message: no_ammo_message.into(),
+            client_error: None,
+        });
+    };
+    crate::services::combat_crimewatch::combat_weapons::consume_one_weapon_round_and_emit(
+        ctx,
+        char_id,
+        ship_id,
+        module_id,
+        charge_item_id,
+    );
+    Ok((charge_item_id, charge_type_id))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn activate_aoe_or_defender_module(
     ctx: &ServerContext,
@@ -738,60 +820,22 @@ pub async fn activate_aoe_or_defender_module_with_cap(
 
             // 3. Bomb Launcher (`group_id == 862`, `feat:modules.bomb-launcher`, `feat:combat.bomb-damage-void-lockbreaker`)
             if mod_type.group_id == 862 {
-                if sys_sec >= 0.45 {
-                    return Some(Err(BridgeRpcError {
-                        code: "BombDisallowedInHighSec".into(),
-                        message: format!(
-                            "Bomb launchers cannot be activated in high-security space (system {sys_id} security {sys_sec:.2})"
-                        ),
-                        client_error: None,
-                    }));
-                }
-                let safety = with_combat_runtime(ctx, |rt| {
-                    rt.safety_levels
-                        .get(&char_id)
-                        .copied()
-                        .unwrap_or(SafetyLevel::Red)
-                });
-                let corr_stage5 =
-                    crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id) >= 5;
-                if sys_sec > 0.0 && !corr_stage5 && safety == SafetyLevel::Green {
-                    return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
+                if let Err(e) = check_bomb_launcher_preconditions(ctx, char_id, sys_id, sys_sec) {
+                    return Some(Err(e));
                 }
 
-                let loaded_bomb_opt = ctx.db.with_snapshot(|snap| {
-                    snap.items
-                        .values()
-                        .find(|i| {
-                            i.location_id == ship_id
-                                && (i.flag as u16) == m.flag_id
-                                && i.item_id != module_id
-                                && i.quantity > 0
-                                && ctx
-                                    .sde
-                                    .types
-                                    .get(&i.type_id)
-                                    .is_some_and(|t| matches!(t.group_id, 90 | 863 | 864))
-                        })
-                        .map(|i| (i.item_id, i.type_id))
-                });
-                let Some((bomb_item_id, bomb_type_id)) = loaded_bomb_opt else {
-                    return Some(Err(BridgeRpcError {
-                        code: "NoAmmoLoaded".into(),
-                        message: "Bomb Launcher has no bomb charge loaded".into(),
-                        client_error: None,
-                    }));
+                let (_bomb_item_id, bomb_type_id) = match resolve_and_consume_aoe_launcher_charge(
+                    ctx,
+                    char_id,
+                    ship_id,
+                    module_id,
+                    m.flag_id,
+                    &[90, 863, 864],
+                    "Bomb Launcher has no bomb charge loaded",
+                ) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
                 };
-                ctx.db.with_mut_snapshot(|snap| {
-                    if let Some(bi) = snap.items.get_mut(&bomb_item_id) {
-                        if bi.quantity > 1 {
-                            bi.quantity -= 1;
-                            bi.version += 1;
-                        } else {
-                            snap.items.remove(&bomb_item_id);
-                        }
-                    }
-                });
 
                 let bomb_sde = &ctx.sde.types[&bomb_type_id];
                 let bomb_vel = bomb_sde.default_attributes.get(&37).copied().unwrap_or(2_500.0);
@@ -1015,35 +1059,18 @@ pub async fn activate_aoe_or_defender_module_with_cap(
 
             // 4. Defender Launcher (`group_id == 512`, `feat:modules.missile-defender`, `feat:combat.missile-flight-physics-destruction`)
             if mod_type.group_id == 512 {
-                let loaded_def_opt = ctx.db.with_snapshot(|snap| {
-                    snap.items
-                        .values()
-                        .find(|i| {
-                            i.location_id == ship_id
-                                && (i.flag as u16) == m.flag_id
-                                && i.item_id != module_id
-                                && i.quantity > 0
-                                && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 88)
-                        })
-                        .map(|i| (i.item_id, i.type_id))
-                });
-                let Some((def_item_id, def_type_id)) = loaded_def_opt else {
-                    return Some(Err(BridgeRpcError {
-                        code: "NoAmmoLoaded".into(),
-                        message: "Defender Launcher has no Defender Missile loaded".into(),
-                        client_error: None,
-                    }));
+                let (_def_item_id, def_type_id) = match resolve_and_consume_aoe_launcher_charge(
+                    ctx,
+                    char_id,
+                    ship_id,
+                    module_id,
+                    m.flag_id,
+                    &[88],
+                    "Defender Launcher has no Defender Missile loaded",
+                ) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
                 };
-                ctx.db.with_mut_snapshot(|snap| {
-                    if let Some(di) = snap.items.get_mut(&def_item_id) {
-                        if di.quantity > 1 {
-                            di.quantity -= 1;
-                            di.version += 1;
-                        } else {
-                            snap.items.remove(&def_item_id);
-                        }
-                    }
-                });
                 let intercepted_missile_id = with_mut_combat_runtime(ctx, |rt| {
                     let cand_id = target_id_opt
                         .filter(|tid| rt.in_flight_missiles.contains_key(tid))

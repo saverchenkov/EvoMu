@@ -4,6 +4,16 @@
 
 use super::*;
 
+#[derive(Clone, Debug)]
+pub(crate) struct PendingWeaponAutoload {
+    pub cargo_stack_id: i64,
+    pub ammo_type_id: u32,
+    pub owner_id: i64,
+    pub total_take: i32,
+    pub slot_allocations: Vec<(i64, eve_db::InventoryFlag, i32)>,
+    pub consume_one_round_per_slot: bool,
+}
+
 #[derive(Default)]
 pub(crate) struct DeferredPostCycleEffects {
     pub projected_assist_dist_m: Option<f64>,
@@ -15,6 +25,317 @@ pub(crate) struct DeferredPostCycleEffects {
     pub cap_booster_charge_id: Option<i64>,
     pub ancillary_charge_to_consume: Option<(i64, i32)>,
     pub turret_charge_consumptions: Vec<(i64, i64)>,
+    pub weapon_autoload: Option<PendingWeaponAutoload>,
+}
+
+fn is_weapon_autoload_stack_consumable(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    ship_id: i64,
+    item: &eve_db::InventoryItemRecord,
+    mod_type: &eve_sde::InvType,
+) -> bool {
+    if item.location_id != ship_id || item.quantity <= 0 || item.owner_id != char_id {
+        return false;
+    }
+    let is_consumable = match item.flag {
+        eve_db::InventoryFlag::Cargo => {
+            snap.is_item_consumable_by(item, char_id, None, Some(ship_id))
+        }
+        eve_db::InventoryFlag::SpecializedAmmoHold => {
+            !snap.is_item_or_ancestor_locked_or_impounded(item.item_id)
+                && !snap.is_item_locked_in_contract_or_job(ship_id)
+                && !snap.is_item_or_ancestor_locked_or_impounded(ship_id)
+                && snap.is_ship_colocated_with_character(char_id, ship_id, None)
+        }
+        _ => false,
+    };
+    if !is_consumable {
+        return false;
+    }
+    let Some(ct) = ctx.sde.types.get(&item.type_id) else {
+        return false;
+    };
+    let is_crystal_singleton =
+        matches!(ct.group_id, 86 | 374 | 375 | 482 | 663) && item.quantity == 1;
+    if item.singleton && !is_crystal_singleton {
+        return false;
+    }
+    ServerContext::is_charge_compatible_with_weapon(mod_type, ct)
+}
+
+pub(crate) fn plan_weapon_autoload(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    mod_type: &eve_sde::InvType,
+) -> Result<Option<PendingWeaponAutoload>, BridgeRpcError> {
+    ctx.db.with_snapshot(|snap| {
+        let bank = snap
+            .weapon_banks
+            .get(&ship_id)
+            .and_then(|b| b.get(&module_id))
+            .cloned()
+            .unwrap_or_else(|| vec![module_id]);
+        let valid_slots: Vec<(i64, eve_db::InventoryFlag)> = bank
+            .iter()
+            .filter_map(|&tid| snap.items.get(&tid).map(|i| (tid, i.flag)))
+            .collect();
+        if valid_slots.is_empty() {
+            return Ok(None);
+        }
+
+        let mut candidates: Vec<&eve_db::InventoryItemRecord> = snap
+            .items
+            .values()
+            .filter(|i| {
+                is_weapon_autoload_stack_consumable(ctx, snap, char_id, ship_id, i, mod_type)
+            })
+            .collect();
+        candidates.sort_by_key(|i| i.item_id);
+
+        let mut selected: Option<&eve_db::InventoryItemRecord> = None;
+        let mut first_skill_err: Option<BridgeRpcError> = None;
+        for cand in candidates {
+            match ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, cand.type_id) {
+                Ok(()) => {
+                    selected = Some(cand);
+                    break;
+                }
+                Err(e) => {
+                    if first_skill_err.is_none() {
+                        first_skill_err = Some(e);
+                    }
+                }
+            }
+        }
+        let Some(chosen) = selected else {
+            if let Some(err) = first_skill_err {
+                return Err(err);
+            }
+            return Ok(None);
+        };
+
+        let is_guided_missile =
+            crate::system_actor::is_guided_missile_launcher_group(i64::from(mod_type.group_id));
+        let num_mods = valid_slots.len() as i32;
+        if is_guided_missile && chosen.quantity < num_mods {
+            return Err(BridgeRpcError::no_charges(mod_type.type_id as i64));
+        }
+
+        let charge_vol = ctx
+            .sde
+            .types
+            .get(&chosen.type_id)
+            .map(|t| t.volume.max(0.0001))
+            .unwrap_or(0.0025);
+        let cap_rounds = if mod_type.capacity > 0.0 {
+            (mod_type.capacity / charge_vol).floor() as i32
+        } else {
+            1
+        }
+        .max(1);
+        let total_take = (cap_rounds * num_mods).min(chosen.quantity).max(1);
+        let base = total_take / num_mods;
+        let rem = total_take % num_mods;
+        let slot_allocations: Vec<(i64, eve_db::InventoryFlag, i32)> = valid_slots
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, (tid, tf))| {
+                let give = base + if (idx as i32) < rem { 1 } else { 0 };
+                (give > 0).then_some((tid, tf, give))
+            })
+            .collect();
+
+        Ok(Some(PendingWeaponAutoload {
+            cargo_stack_id: chosen.item_id,
+            ammo_type_id: chosen.type_id,
+            owner_id: chosen.owner_id,
+            total_take,
+            slot_allocations,
+            consume_one_round_per_slot: false,
+        }))
+    })
+}
+
+pub(crate) struct CommittedWeaponAutoload {
+    pub autoload_diffs: Vec<(
+        Option<eve_db::InventoryItemRecord>,
+        Option<eve_db::InventoryItemRecord>,
+    )>,
+    pub loaded_bank: Vec<i64>,
+    pub cycle_consume_diffs: Vec<(
+        eve_db::InventoryItemRecord,
+        Option<eve_db::InventoryItemRecord>,
+    )>,
+    pub created_slot_charges: Vec<(i64, i64)>,
+}
+
+pub(crate) fn commit_pending_weapon_autoload_in_snapshot(
+    ctx: &ServerContext,
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    ship_id: i64,
+    mod_type: &eve_sde::InvType,
+    plan: &PendingWeaponAutoload,
+) -> Result<CommittedWeaponAutoload, BridgeRpcError> {
+    ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, plan.ammo_type_id)?;
+    let Some(stack_pre) = snap.items.get(&plan.cargo_stack_id).cloned() else {
+        return Err(BridgeRpcError::no_charges(mod_type.type_id as i64));
+    };
+    if stack_pre.type_id != plan.ammo_type_id
+        || stack_pre.quantity < plan.total_take
+        || !is_weapon_autoload_stack_consumable(ctx, snap, char_id, ship_id, &stack_pre, mod_type)
+    {
+        return Err(BridgeRpcError::no_charges(mod_type.type_id as i64));
+    }
+    for &(slot_id, slot_flag, _) in &plan.slot_allocations {
+        if !snap.items.contains_key(&slot_id) {
+            return Err(BridgeRpcError::no_charges(mod_type.type_id as i64));
+        }
+        let has_existing = snap.items.values().any(|i| {
+            i.location_id == ship_id
+                && i.flag == slot_flag
+                && i.item_id != slot_id
+                && i.quantity > 0
+                && ctx.sde.types.get(&i.type_id).is_none_or(|t| t.group_id != 908)
+        });
+        if has_existing {
+            return Err(BridgeRpcError::no_charges(mod_type.type_id as i64));
+        }
+    }
+
+    let mut autoload_diffs = Vec::new();
+    let mut loaded_bank = Vec::with_capacity(plan.slot_allocations.len());
+    let mut created_slot_charges: Vec<(i64, i64)> = Vec::with_capacity(plan.slot_allocations.len());
+    let pre_dynamic_attributes = stack_pre.dynamic_attributes.clone();
+    let pre_source_mutaplasmid_id = stack_pre.source_mutaplasmid_id;
+
+    if stack_pre.singleton && plan.total_take == 1 && plan.slot_allocations.len() == 1 {
+        let (tid, tf, _) = plan.slot_allocations[0];
+        let mut moved = stack_pre.clone();
+        if let Some(st) = snap.items.get_mut(&plan.cargo_stack_id) {
+            st.flag = tf;
+            st.version += 1;
+            st.dynamic_attributes = pre_dynamic_attributes.clone();
+            st.source_mutaplasmid_id = pre_source_mutaplasmid_id;
+            moved = st.clone();
+        }
+        snap.module_active_charges.insert(tid, plan.ammo_type_id);
+        autoload_diffs.push((Some(stack_pre), Some(moved)));
+        loaded_bank.push(tid);
+        created_slot_charges.push((tid, plan.cargo_stack_id));
+    } else {
+        if let Some(st) = snap.items.get_mut(&plan.cargo_stack_id) {
+            if st.quantity > plan.total_take {
+                st.quantity -= plan.total_take;
+                st.version += 1;
+            } else {
+                snap.items.remove(&plan.cargo_stack_id);
+            }
+        }
+        let post_stack = snap.items.get(&plan.cargo_stack_id).cloned();
+        autoload_diffs.push((Some(stack_pre), post_stack));
+        for &(tid, tf, give) in &plan.slot_allocations {
+            if give <= 0 {
+                continue;
+            }
+            let cid = snap.alloc_entity_id();
+            let new_rec = eve_db::InventoryItemRecord {
+                item_id: cid,
+                type_id: plan.ammo_type_id,
+                owner_id: plan.owner_id,
+                location_id: ship_id,
+                flag: tf,
+                quantity: give,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: pre_dynamic_attributes.clone(),
+                source_mutaplasmid_id: pre_source_mutaplasmid_id,
+                ..Default::default()
+            };
+            snap.items.insert(cid, new_rec.clone());
+            snap.module_active_charges.insert(tid, plan.ammo_type_id);
+            autoload_diffs.push((None, Some(new_rec)));
+            loaded_bank.push(tid);
+            created_slot_charges.push((tid, cid));
+        }
+    }
+
+    let mut cycle_consume_diffs = Vec::new();
+    let mut final_slot_charges = Vec::with_capacity(created_slot_charges.len());
+    if plan.consume_one_round_per_slot {
+        for (tid, cid) in created_slot_charges {
+            if let Some(pre) = snap.items.get(&cid).cloned() {
+                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+                opts.reject_fitted = false;
+                if let Ok(post) = snap.consume_exact_item_quantity(cid, 1, opts) {
+                    if post.is_none() {
+                        snap.module_active_charges.remove(&tid);
+                    } else {
+                        final_slot_charges.push((tid, cid));
+                    }
+                    cycle_consume_diffs.push((pre, post));
+                }
+            }
+        }
+    } else {
+        final_slot_charges = created_slot_charges;
+    }
+
+    Ok(CommittedWeaponAutoload {
+        autoload_diffs,
+        loaded_bank,
+        cycle_consume_diffs,
+        created_slot_charges: final_slot_charges,
+    })
+}
+
+pub(crate) fn emit_committed_weapon_autoload_notifications(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    autoload_diffs: &[(
+        Option<eve_db::InventoryItemRecord>,
+        Option<eve_db::InventoryItemRecord>,
+    )],
+    loaded_bank: &[i64],
+) {
+    ctx.invalidate_and_push_fit(ship_id);
+    crate::services::inventory_fitting::fitting_module_cycles::emit_ship_charge_item_diffs(
+        ctx,
+        char_id,
+        ship_id,
+        autoload_diffs,
+    );
+    crate::services::notify_emitters_seasons_tactical::emit_charge_and_bank_ammo_loaded(
+        ctx,
+        char_id,
+        ship_id,
+        loaded_bank,
+    );
+}
+
+pub(crate) fn commit_and_emit_weapon_autoload(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    mod_type: &eve_sde::InvType,
+    plan: &PendingWeaponAutoload,
+) -> Result<CommittedWeaponAutoload, BridgeRpcError> {
+    let committed = ctx.db.try_with_mut_snapshot(|snap| {
+        commit_pending_weapon_autoload_in_snapshot(ctx, snap, char_id, ship_id, mod_type, plan)
+    })?;
+    emit_committed_weapon_autoload_notifications(
+        ctx,
+        char_id,
+        ship_id,
+        &committed.autoload_diffs,
+        &committed.loaded_bank,
+    );
+    Ok(committed)
 }
 
 /// Collects eligible ship fuel stacks for `fuel_type_id` in `SpecializedFuelBay` (`133`)
@@ -105,6 +426,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         }
                     }
                 }
+                let mut pending_weapon_autoload: Option<PendingWeaponAutoload> = None;
                 if matches!(
                     mod_type.group_id,
                     53 | 55
@@ -160,81 +482,17 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         });
                         let mut has_loaded_ammo = has_slot_item;
                         if !has_loaded_ammo {
-                            has_loaded_ammo = ctx.db.with_mut_snapshot(|snap| {
-                                let bank = snap
-                                    .weapon_banks
-                                    .get(&ship_id)
-                                    .and_then(|b| b.get(&module_id))
-                                    .cloned()
-                                    .unwrap_or_else(|| vec![module_id]);
-                                let cargo_charge = snap
-                                    .items
-                                    .values()
-                                    .find(|i| {
-                                        i.location_id == ship_id
-                                            && matches!(
-                                                i.flag,
-                                                eve_db::InventoryFlag::Cargo
-                                                    | eve_db::InventoryFlag::SpecializedAmmoHold
-                                            )
-                                            && i.quantity > 0
-                                            && ctx.sde.types.get(&i.type_id).is_some_and(|ct| {
-                                                ServerContext::is_charge_compatible_with_weapon(
-                                                    mod_type, ct,
-                                                )
-                                            })
-                                    })
-                                    .map(|i| (i.item_id, i.type_id, i.owner_id, i.quantity));
-                                let Some((stack_id, ammo_tid, owner_id, avail_qty)) = cargo_charge else {
-                                    return false;
-                                };
-                                let charge_vol = ctx
-                                    .sde
-                                    .types
-                                    .get(&ammo_tid)
-                                    .map(|t| t.volume.max(0.0001))
-                                    .unwrap_or(0.0025);
-                                let cap_rounds = if mod_type.capacity > 0.0 {
-                                    (mod_type.capacity / charge_vol).floor() as i32
-                                } else {
-                                    1
+                            match plan_weapon_autoload(ctx, char_id, ship_id, module_id, mod_type) {
+                                Ok(Some(plan)) => {
+                                    has_loaded_ammo = true;
+                                    pending_weapon_autoload = Some(plan);
                                 }
-                                .max(1);
-                                let num_mods = bank.len().max(1) as i32;
-                                let per_mod = cap_rounds.min((avail_qty / num_mods).max(1));
-                                let total_take = (per_mod * num_mods).min(avail_qty);
-                                if let Some(st) = snap.items.get_mut(&stack_id) {
-                                    if st.quantity > total_take {
-                                        st.quantity -= total_take;
-                                        st.version += 1;
-                                    } else {
-                                        snap.items.remove(&stack_id);
+                                Ok(None) => {}
+                                Err(e) => {
+                                    if !(m.charge_type_id.is_some() && m.charge_quantity > 0) {
+                                        return Some(Err(e));
                                     }
                                 }
-                                for &tid in &bank {
-                                    if let Some(tf) = snap.items.get(&tid).map(|i| i.flag) {
-                                        let cid = snap.alloc_entity_id();
-                                        snap.items.insert(
-                                            cid,
-                                            eve_db::InventoryItemRecord {
-                                                item_id: cid,
-                                                type_id: ammo_tid,
-                                                owner_id,
-                                                location_id: ship_id,
-                                                flag: tf,
-                                                quantity: per_mod,
-                                                singleton: false,
-                                                version: 1,
-                                                ..Default::default()
-                                            },
-                                        );
-                                        snap.module_active_charges.insert(tid, ammo_tid);
-                                    }
-                                }
-                                true
-                            });
-                            if has_loaded_ammo {
-                                ctx.invalidate_ship_fitting(ship_id);
                             }
                         }
                         if !has_loaded_ammo {
@@ -322,7 +580,10 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                 let mut grappler_optimal_m = 0.0;
                 let mut grappler_falloff_m = 0.0;
                 let mut grappler_speed_factor_pct = 0.0;
-                let mut deferred_post_cycle = DeferredPostCycleEffects::default();
+                let mut deferred_post_cycle = DeferredPostCycleEffects {
+                    weapon_autoload: pending_weapon_autoload,
+                    ..Default::default()
+                };
                 let mut immobilize_self = false;
                 let mut self_disallow_assistance = false;
                 let mut self_ewar_immune = false;
@@ -1169,73 +1430,97 @@ pub(crate) async fn commit_post_cycle_activation_effects(
     target_id_opt: Option<i64>,
     deferred: DeferredPostCycleEffects,
 ) -> Result<(), BridgeRpcError> {
-    if deferred.fuel_to_deduct.is_some()
+    if deferred.weapon_autoload.is_some()
+        || deferred.fuel_to_deduct.is_some()
         || deferred.cap_booster_charge_id.is_some()
         || deferred.ancillary_charge_to_consume.is_some()
         || !deferred.turret_charge_consumptions.is_empty()
     {
-        let item_diffs = ctx.db.with_mut_snapshot(|snap| {
-            let mut diffs: Vec<(
-                eve_db::InventoryItemRecord,
-                Option<eve_db::InventoryItemRecord>,
-            )> = Vec::new();
-            if let Some((fuel_type_id, fuel_qty_needed)) = deferred.fuel_to_deduct {
-                let stacks = collect_ship_fuel_stacks(snap, ship_id, fuel_type_id);
-                let total_avail: i64 = stacks.iter().map(|&(_, _, q)| i64::from(q)).sum();
-                if total_avail >= i64::from(fuel_qty_needed) && fuel_qty_needed > 0 {
-                    let mut remaining = fuel_qty_needed;
-                    for (_, fid, _) in stacks {
-                        if remaining <= 0 {
-                            break;
+        let (committed_autoload, item_diffs) = ctx.db.try_with_mut_snapshot(
+            |snap| -> Result<_, BridgeRpcError> {
+                let mut diffs: Vec<(
+                    eve_db::InventoryItemRecord,
+                    Option<eve_db::InventoryItemRecord>,
+                )> = Vec::new();
+                let mut committed_autoload_info = None;
+                if let Some(plan) = deferred.weapon_autoload.as_ref() {
+                    let committed = commit_pending_weapon_autoload_in_snapshot(
+                        ctx, snap, char_id, ship_id, mod_type, plan,
+                    )?;
+                    diffs.extend(committed.cycle_consume_diffs);
+                    committed_autoload_info =
+                        Some((committed.autoload_diffs, committed.loaded_bank));
+                }
+                if let Some((fuel_type_id, fuel_qty_needed)) = deferred.fuel_to_deduct {
+                    let stacks = collect_ship_fuel_stacks(snap, ship_id, fuel_type_id);
+                    let total_avail: i64 = stacks.iter().map(|&(_, _, q)| i64::from(q)).sum();
+                    if total_avail >= i64::from(fuel_qty_needed) && fuel_qty_needed > 0 {
+                        let mut remaining = fuel_qty_needed;
+                        for (_, fid, _) in stacks {
+                            if remaining <= 0 {
+                                break;
+                            }
+                            let Some(pre) = snap.items.get(&fid).cloned() else {
+                                continue;
+                            };
+                            let take = remaining.min(pre.quantity);
+                            if take <= 0 {
+                                continue;
+                            }
+                            let opts =
+                                eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+                            if let Ok(post) = snap.consume_exact_item_quantity(fid, take, opts) {
+                                remaining -= take;
+                                diffs.push((pre, post));
+                            }
                         }
-                        let Some(pre) = snap.items.get(&fid).cloned() else {
-                            continue;
-                        };
-                        let take = remaining.min(pre.quantity);
-                        if take <= 0 {
-                            continue;
-                        }
-                        let opts =
+                    }
+                }
+                if let Some(cid) = deferred.cap_booster_charge_id {
+                    if let Some(pre) = snap.items.get(&cid).cloned() {
+                        let mut opts =
                             eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
-                        if let Ok(post) = snap.consume_exact_item_quantity(fid, take, opts) {
-                            remaining -= take;
+                        opts.reject_fitted = false;
+                        if let Ok(post) = snap.consume_exact_item_quantity(cid, 1, opts) {
                             diffs.push((pre, post));
                         }
                     }
                 }
-            }
-            if let Some(cid) = deferred.cap_booster_charge_id {
-                if let Some(pre) = snap.items.get(&cid).cloned() {
-                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
-                    opts.reject_fitted = false;
-                    if let Ok(post) = snap.consume_exact_item_quantity(cid, 1, opts) {
-                        diffs.push((pre, post));
-                    }
-                }
-            }
-            if let Some((cid, qty)) = deferred.ancillary_charge_to_consume {
-                if let Some(pre) = snap.items.get(&cid).cloned() {
-                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
-                    opts.reject_fitted = false;
-                    if let Ok(post) = snap.consume_exact_item_quantity(cid, qty, opts) {
-                        diffs.push((pre, post));
-                    }
-                }
-            }
-            for (turret_id, charge_id) in deferred.turret_charge_consumptions {
-                if let Some(pre) = snap.items.get(&charge_id).cloned() {
-                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
-                    opts.reject_fitted = false;
-                    if let Ok(post) = snap.consume_exact_item_quantity(charge_id, 1, opts) {
-                        if post.is_none() {
-                            snap.module_active_charges.remove(&turret_id);
+                if let Some((cid, qty)) = deferred.ancillary_charge_to_consume {
+                    if let Some(pre) = snap.items.get(&cid).cloned() {
+                        let mut opts =
+                            eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+                        opts.reject_fitted = false;
+                        if let Ok(post) = snap.consume_exact_item_quantity(cid, qty, opts) {
+                            diffs.push((pre, post));
                         }
-                        diffs.push((pre, post));
                     }
                 }
-            }
-            diffs
-        });
+                for (turret_id, charge_id) in deferred.turret_charge_consumptions {
+                    if let Some(pre) = snap.items.get(&charge_id).cloned() {
+                        let mut opts =
+                            eve_db::ConsumeExactOptions::for_owner_exact(None, pre.owner_id);
+                        opts.reject_fitted = false;
+                        if let Ok(post) = snap.consume_exact_item_quantity(charge_id, 1, opts) {
+                            if post.is_none() {
+                                snap.module_active_charges.remove(&turret_id);
+                            }
+                            diffs.push((pre, post));
+                        }
+                    }
+                }
+                Ok((committed_autoload_info, diffs))
+            },
+        )?;
+        if let Some((autoload_diffs, loaded_bank)) = committed_autoload {
+            emit_committed_weapon_autoload_notifications(
+                ctx,
+                char_id,
+                ship_id,
+                &autoload_diffs,
+                &loaded_bank,
+            );
+        }
         for (pre, post) in &item_diffs {
             ctx.notify_item_mutation(char_id, Some(pre), post.as_ref());
             if matches!(pre.flag as u16, 11..=34 | 125..=132) {

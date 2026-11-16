@@ -2069,6 +2069,9 @@ pub(crate) fn emit_ship_charge_item_diffs(
         ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
         match (pre, post) {
             (Some(old_it), Some(new_it)) if is_fitted_slot(new_it.flag) => {
+                if !is_fitted_slot(old_it.flag) {
+                    emit_godma_charge_sublocation_prime(ctx, char_id, ship_id, new_it);
+                }
                 let old_qty = if old_it.flag == new_it.flag {
                     old_it.quantity
                 } else {

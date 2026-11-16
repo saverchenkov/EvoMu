@@ -152,6 +152,29 @@ pub fn handle_entropic_activation(
         .copied()
         .unwrap_or(2.125);
 
+    ctx.db.with_snapshot(|snap| -> Result<(), BridgeRpcError> {
+        if let Some(cid) = charge_item_id {
+            if let Some(ci) = snap.items.get(&cid) {
+                ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, ci.type_id)?;
+            }
+        } else if let Some(&ctid) = snap.module_active_charges.get(&module_id) {
+            ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, ctid)?;
+        } else if let Some(mod_flag) = snap.items.get(&module_id).map(|m| m.flag) {
+            if let Some(ci) = snap.items.values().find(|i| {
+                i.location_id == ship_id
+                    && i.flag == mod_flag
+                    && i.item_id != module_id
+                    && i.quantity > 0
+                    && ctx.sde.types.get(&i.type_id).is_some_and(|ct| {
+                        ServerContext::is_charge_compatible_with_weapon(mod_type, ct)
+                    })
+            }) {
+                ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, ci.type_id)?;
+            }
+        }
+        Ok(())
+    })?;
+
     let is_active_in_db = ctx.db.with_snapshot(|snap| {
         snap.module_active_states.contains(&module_id)
     });
@@ -1093,7 +1116,7 @@ pub async fn step_system_entropic_spools(
 
             // Resolve loaded charge
             let ammo_cid = ctx.db.with_snapshot(|snap| {
-                state
+                let cand_id = state
                     .charge_item_id
                     .filter(|cid| snap.items.get(cid).is_some_and(|i| i.quantity > 0))
                     .or_else(|| {
@@ -1106,7 +1129,11 @@ pub async fn step_system_entropic_spools(
                                 && i.quantity > 0
                                 && ctx.sde.types.get(&i.type_id).is_some_and(|ct| ServerContext::is_charge_compatible_with_weapon(mod_type, ct))
                         }).map(|i| i.item_id)
-                    })
+                    })?;
+                let ci = snap.items.get(&cand_id)?;
+                ctx.check_type_skill_prerequisites_in_snapshot(snap, state.attacker_char_id, ci.type_id)
+                    .ok()?;
+                Some(cand_id)
             });
             let Some(ammo_cid) = ammo_cid else {
                 stop_entropic_spool_and_deactivate(ctx, state.attacker_char_id, ship_id, module_id);
@@ -1128,19 +1155,36 @@ pub async fn step_system_entropic_spools(
             }
 
             // Consume one round
-            state.charge_item_id = ctx.db.with_mut_snapshot(|snap| {
-                match snap.items.get_mut(&ammo_cid) {
-                    Some(ci) if ci.quantity > 1 => {
-                        ci.quantity -= 1;
-                        ci.version += 1;
-                        Some(ammo_cid)
-                    }
-                    _ => {
-                        snap.items.remove(&ammo_cid);
-                        None
-                    }
+            let (next_charge_id, ammo_diff) = ctx.db.with_mut_snapshot(|snap| {
+                let Some(ci) = snap.items.get_mut(&ammo_cid) else {
+                    snap.module_active_charges.remove(&module_id);
+                    return (None, None);
+                };
+                let pre_rec = ci.clone();
+                if ci.quantity > 1 {
+                    ci.quantity -= 1;
+                    ci.version += 1;
+                    let post_rec = ci.clone();
+                    (Some(ammo_cid), Some((Some(pre_rec), Some(post_rec))))
+                } else {
+                    snap.items.remove(&ammo_cid);
+                    snap.module_active_charges.remove(&module_id);
+                    (None, Some((Some(pre_rec), None)))
                 }
             });
+            state.charge_item_id = next_charge_id;
+            if let Some((pre_rec, post_rec)) = ammo_diff {
+                let depleted = post_rec.is_none();
+                crate::services::inventory_fitting::fitting_module_cycles::emit_ship_charge_item_diffs(
+                    ctx,
+                    state.attacker_char_id,
+                    ship_id,
+                    &[(pre_rec, post_rec)],
+                );
+                if depleted {
+                    ctx.invalidate_and_push_fit(ship_id);
+                }
+            }
 
             // Target signature with player MWD bloom
             let player_target_info = ctx.db.with_snapshot(|snap| {

@@ -423,3 +423,193 @@ async fn stop_entropic_spool_and_deactivate_pushes_updated_fit_projection_to_act
         "unrelated module state must remain unchanged"
     );
 }
+
+#[tokio::test]
+async fn entropic_spool_ammo_depletion_emits_tombstone_and_sublocation_expel_gh1124() {
+    let (ctx, session, char_id, ship_id, sys_id) = make_spool_test_ctx();
+    let mod1 = 740_901_i64;
+    let ammo1 = 740_902_i64;
+    let target_id = 1_896_901_i64;
+
+    ctx.db
+        .acquire_online_lock(session.user_id.unwrap_or(1), 999_201, Some(char_id), true, ctx.now_unix())
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            mod1,
+            make_fighter_item(mod1, 47_240, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        let mut ammo_rec = make_fighter_item(ammo1, 47_245, char_id, ship_id, InventoryFlag::HiSlot0, 1);
+        ammo_rec.singleton = false;
+        snap.items.insert(ammo1, ammo_rec);
+        snap.module_active_states.insert(mod1);
+        snap.module_active_charges.insert(mod1, 47_245);
+    });
+    spawn_spool_ball(&ctx, sys_id, ship_id, 47_271, DVec3::ZERO, 1_000.0, 1_000.0, 1_000.0, 500.0).await;
+    spawn_spool_ball(&ctx, sys_id, target_id, 587, DVec3::new(5_000.0, 0.0, 0.0), 3_000.0, 1_000.0, 1_000.0, 500.0).await;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            TargetLock {
+                target_id,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(50_000.0),
+            },
+        )
+        .await
+        .unwrap();
+
+    let disint_t = ctx.sde.types.get(&47_240).unwrap();
+    handle_entropic_activation(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        mod1,
+        target_id,
+        disint_t,
+        Some(ammo1),
+        DamageVector::new(0.0, 300.0, 0.0, 0.0),
+        40.0,
+        3.0,
+    )
+    .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    step_system_entropic_spools(&ctx, sys_id, 3.1).await;
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&ammo1), "entropic last round must be removed from snap.items");
+        assert!(!snap.module_active_charges.contains_key(&mod1), "depleted module_active_charges must be removed");
+    });
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args[0].dbrow_get("itemID") == Some(&PyRep::Integer(ammo1))
+                && n.args[0].dbrow_get("locationID") == Some(&PyRep::Integer(6))
+                && n.args[0].dbrow_get("flagID") == Some(&PyRep::Integer(0))
+                && n.args[0].dbrow_get("quantity") == Some(&PyRep::Integer(0))
+        }),
+        "entropic 1 -> 0 round depletion must emit OnItemChange tombstone"
+    );
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnModuleAttributeChanges"
+                && matches!(n.args.first(), Some(PyRep::List(rows)) if rows.iter().any(|r| {
+                    matches!(r, PyRep::Tuple(cols)
+                        if cols.get(3) == Some(&PyRep::Integer(805))
+                            && cols.get(5) == Some(&PyRep::Real(0.0))
+                            && cols.get(6) == Some(&PyRep::Real(1.0)))
+                }))
+        }),
+        "entropic 1 -> 0 round depletion must emit OnModuleAttributeChanges(805: 1.0 -> 0.0)"
+    );
+
+    step_system_entropic_spools(&ctx, sys_id, 3.1).await;
+    assert!(!ctx.db.with_snapshot(|s| s.module_active_states.contains(&mod1)), "next cycle with 0 rounds stops module");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entropic_spool_rejects_untrained_charge_on_activation_and_step_gh1124() {
+    let (mut ctx, session, char_id, ship_id, sys_id) = make_spool_test_ctx();
+    let mut sde = (*ctx.sde).clone();
+    if let Some(ch) = sde.types.get_mut(&47_245) {
+        ch.default_attributes.insert(182, 12_210.0);
+        ch.default_attributes.insert(277, 1.0);
+    }
+    ctx.sde = Arc::new(sde);
+
+    let mod1 = 740_951_i64;
+    let ammo1 = 740_952_i64;
+    let target_id = 1_896_951_i64;
+    ctx.db
+        .acquire_online_lock(session.user_id.unwrap_or(1), 999_202, Some(char_id), true, ctx.now_unix())
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            mod1,
+            make_fighter_item(mod1, 47_240, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        let mut ammo_rec = make_fighter_item(ammo1, 47_245, char_id, ship_id, InventoryFlag::HiSlot0, 5);
+        ammo_rec.singleton = false;
+        snap.items.insert(ammo1, ammo_rec);
+    });
+    spawn_spool_ball(&ctx, sys_id, ship_id, 47_271, DVec3::ZERO, 1_000.0, 1_000.0, 1_000.0, 500.0).await;
+    spawn_spool_ball(&ctx, sys_id, target_id, 587, DVec3::new(5_000.0, 0.0, 0.0), 3_000.0, 1_000.0, 1_000.0, 500.0).await;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            TargetLock {
+                target_id,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(50_000.0),
+            },
+        )
+        .await
+        .unwrap();
+
+    let disint_t = ctx.sde.types.get(&47_240).unwrap();
+    let err = handle_entropic_activation(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        mod1,
+        target_id,
+        disint_t,
+        Some(ammo1),
+        DamageVector::new(0.0, 300.0, 0.0, 0.0),
+        40.0,
+        3.0,
+    )
+    .expect_err("untrained Entropic charge must fail handle_entropic_activation");
+    assert_eq!(err.code, "SkillPrerequisitesNotMet");
+
+    // Train skill 12210 level 1 -> activation succeeds
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            12_210,
+            eve_db::TrainedSkillRecord {
+                type_id: 12_210,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+        snap.module_active_states.insert(mod1);
+        snap.module_active_charges.insert(mod1, 47_245);
+    });
+    handle_entropic_activation(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        mod1,
+        target_id,
+        disint_t,
+        Some(ammo1),
+        DamageVector::new(0.0, 300.0, 0.0, 0.0),
+        40.0,
+        3.0,
+    )
+    .expect("trained Entropic charge activation succeeds");
+
+    // Remove prerequisite skill before next spool cycle -> step stops cleanly without consuming ammo
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(m) = snap.skills.get_mut(&char_id) {
+            m.remove(&12_210);
+        }
+    });
+    step_system_entropic_spools(&ctx, sys_id, 3.1).await;
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&ammo1].quantity, 5, "untrained spool step must not consume charge");
+        assert!(!snap.module_active_states.contains(&mod1), "untrained spool step must stop module");
+    });
+}
