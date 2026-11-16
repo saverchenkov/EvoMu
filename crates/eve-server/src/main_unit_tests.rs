@@ -460,30 +460,6 @@ async fn xmpp_stream_times_out_idle_connections_and_discovers_player_channels() 
         )
         .await;
     });
-    fn encode_xmpp_b64(input: &[u8]) -> String {
-        const TABLE: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-        for chunk in input.chunks(3) {
-            let b0 = chunk[0] as u32;
-            let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-            let b2 = *chunk.get(2).unwrap_or(&0) as u32;
-            let triple = (b0 << 16) | (b1 << 8) | b2;
-            out.push(TABLE[((triple >> 18) & 0x3f) as usize] as char);
-            out.push(TABLE[((triple >> 12) & 0x3f) as usize] as char);
-            out.push(if chunk.len() > 1 {
-                TABLE[((triple >> 6) & 0x3f) as usize] as char
-            } else {
-                '='
-            });
-            out.push(if chunk.len() > 2 {
-                TABLE[(triple & 0x3f) as usize] as char
-            } else {
-                '='
-            });
-        }
-        out
-    }
 
     // Unauthenticated IQ fails closed before SASL + <bind>
     cli.write_all(
@@ -839,4 +815,285 @@ fn static_data_startup_validation_fails_fast_and_honors_override() {
     assert!(bypassed.quasar_descriptors.get_message("google.protobuf.Empty").is_some());
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+fn encode_xmpp_b64(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((triple >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((triple >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(triple & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+async fn provision_test_xmpp_token(ctx: &Arc<ServerContext>, character_id: i64) -> String {
+    let mut sess = SessionState::new(1);
+    sess.user_id = Some(character_id as u64);
+    sess.character_id = Some(character_id);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "chatAuthenticationService",
+        None,
+        "GetAuthenticationToken",
+        &[],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .unwrap()
+    .as_str()
+    .expect("CSPRNG XMPP auth token")
+    .to_string()
+}
+
+async fn read_xmpp_until(cli: &mut tokio::io::DuplexStream, marker: &str) -> String {
+    let mut out = String::new();
+    let mut buf = [0u8; 4096];
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !out.contains(marker) {
+        let n = timeout_at(deadline, cli.read(&mut buf))
+            .await
+            .expect("timed out waiting for XMPP reply")
+            .expect("read XMPP reply");
+        assert!(n > 0, "unexpected EOF before {marker:?}; received: {out:?}");
+        out.push_str(&String::from_utf8_lossy(&buf[..n]));
+    }
+    out
+}
+
+#[tokio::test]
+async fn xmpp_unauthenticated_idle_stream_times_out_cleanly() {
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(
+        Arc::new(eve_sde::SdeRegistry::default()),
+        Arc::new(eve_db::WorldRepository::with_demo_seed()),
+    ));
+
+    // 1. Completely silent unauthenticated connection closes after `idle_read_timeout`.
+    let (client_io, server_io) = duplex(1024);
+    let ctx_1 = Arc::clone(&ctx);
+    let srv_1 = tokio::spawn(async move {
+        handle_xmpp_stream_with_timeouts(
+            server_io,
+            Some(&ctx_1),
+            Duration::from_millis(25),
+            Duration::from_millis(50),
+            Duration::from_millis(40),
+        )
+        .await;
+    });
+    timeout(Duration::from_millis(250), srv_1)
+        .await
+        .expect("silent unauthenticated XMPP stream must time out")
+        .unwrap();
+    drop(client_io);
+
+    // 2. Stream that opens `<stream:stream>` (and even fails SASL) remains unauthenticated and times out.
+    let (mut cli, srv) = duplex(2048);
+    let ctx_2 = Arc::clone(&ctx);
+    let srv_2 = tokio::spawn(async move {
+        handle_xmpp_stream_with_timeouts(
+            srv,
+            Some(&ctx_2),
+            Duration::from_millis(25),
+            Duration::from_millis(50),
+            Duration::from_millis(40),
+        )
+        .await;
+    });
+    cli.write_all(b"<?xml version='1.0'?><stream:stream to='chat.evomu.local'>")
+        .await
+        .unwrap();
+    let open_reply = read_xmpp_until(&mut cli, "</stream:features>").await;
+    assert!(open_reply.contains("xmpp-sasl"));
+    cli.write_all(
+        b"<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>AGNoYXJfOTAwMDAwMDEAYmFk</auth>",
+    )
+    .await
+    .unwrap();
+    let fail_reply = read_xmpp_until(&mut cli, "</failure>").await;
+    assert!(fail_reply.contains("<not-authorized/>"));
+
+    timeout(Duration::from_millis(250), srv_2)
+        .await
+        .expect("unauthenticated XMPP stream after failed SASL must time out on idle_read_timeout")
+        .unwrap();
+    drop(cli);
+}
+
+#[tokio::test]
+async fn xmpp_authenticated_idle_stream_persists_past_idle_timeout_and_handles_leave_room() {
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(
+        Arc::new(eve_sde::SdeRegistry::default()),
+        Arc::new(eve_db::WorldRepository::with_demo_seed()),
+    ));
+    let token = provision_test_xmpp_token(&ctx, 90_000_001).await;
+
+    let (mut cli, srv) = duplex(4096);
+    let ctx_clone = Arc::clone(&ctx);
+    let srv_task = tokio::spawn(async move {
+        handle_xmpp_stream_with_timeouts(
+            srv,
+            Some(&ctx_clone),
+            Duration::from_millis(25),
+            Duration::from_millis(100),
+            Duration::from_millis(40),
+        )
+        .await;
+    });
+
+    cli.write_all(b"<?xml version='1.0'?><stream:stream to='chat.evomu.local'>")
+        .await
+        .unwrap();
+    let _ = read_xmpp_until(&mut cli, "</stream:features>").await;
+
+    let sasl_b64 = encode_xmpp_b64(format!("\0char_90000001\0{token}").as_bytes());
+    cli.write_all(
+        format!(
+            "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>{sasl_b64}</auth>"
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let auth_reply = read_xmpp_until(&mut cli, "xmpp-sasl'/>").await;
+    assert!(auth_reply.contains("<success"));
+
+    // Even before `<bind>`, an authenticated SASL stream must survive >3x `idle_read_timeout`
+    // without disconnecting or emitting leading whitespace before the restarted XML declaration.
+    tokio::time::sleep(Duration::from_millis(85)).await;
+    assert!(
+        !srv_task.is_finished(),
+        "authenticated XMPP stream must not drop on idle_read_timeout before resource bind"
+    );
+
+    cli.write_all(b"<stream:stream to='chat.evomu.local'>")
+        .await
+        .unwrap();
+    let reopen_reply = read_xmpp_until(&mut cli, "</stream:features>").await;
+    assert!(
+        reopen_reply.starts_with("<?xml"),
+        "pre-bind authenticated stream must not emit leading whitespace before <?xml: {reopen_reply:?}"
+    );
+    assert!(reopen_reply.contains("xmpp-bind"));
+
+    cli.write_all(
+        b"<iq type='set' id='bind_1'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'><resource>eve</resource></bind></iq>",
+    )
+    .await
+    .unwrap();
+    let bind_reply = read_xmpp_until(&mut cli, "</iq>").await;
+    assert!(bind_reply.contains("char_90000001@chat.evomu.local/eve"));
+
+    // Sit idle well past `idle_read_timeout` (25ms) to verify persistent connection survival (#1095).
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert!(
+        !srv_task.is_finished(),
+        "authenticated bound XMPP stream must remain open after idle_read_timeout elapses"
+    );
+
+    // Read XEP-0199 ping emitted across idle ticks and verify zero raw `\n` whitespace keepalives
+    // (V24's SAX `XmppContentHandler.characters` crashes on inter-stanza whitespace).
+    let ping_reply = read_xmpp_until(&mut cli, "<ping xmlns='urn:xmpp:ping'/></iq>").await;
+    assert!(
+        ping_reply.starts_with(
+            "<iq id='evomu_ping_1' type='get' from='chat.evomu.local' to='char_90000001@chat.evomu.local/eve'><ping xmlns='urn:xmpp:ping'/></iq>"
+        ),
+        "bound authenticated stream must emit valid XEP-0199 ping keepalive without leading whitespace: {ping_reply:?}"
+    );
+    assert!(
+        !ping_reply.contains('\n'),
+        "XMPP stream must not emit raw '\\n' whitespace keepalives that crash V24 SAX parser: {ping_reply:?}"
+    );
+
+    // Client acknowledges XEP-0199 ping (`type='result'`) and immediately queries `post_idle_iq`.
+    // Server must consume the ping result silently (no `<iq type='result' id='evomu_ping_...'/>` echo).
+    cli.write_all(
+        b"<iq id='evomu_ping_1' type='result' from='char_90000001@chat.evomu.local/eve' to='chat.evomu.local'/><iq type='get' id='post_idle_iq'><query xmlns='http://jabber.org/protocol/disco#items' node='forme'/></iq>",
+    )
+    .await
+    .unwrap();
+    let mut iq_reply = String::new();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !iq_reply
+        .find("id='post_idle_iq'")
+        .is_some_and(|idx| iq_reply[idx..].contains("</iq>"))
+    {
+        iq_reply.push_str(&read_xmpp_until(&mut cli, "</iq>").await);
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for post_idle_iq reply: {iq_reply:?}"
+        );
+    }
+    assert!(
+        !iq_reply.contains("type='result' id='evomu_ping_"),
+        "server must not echo `<iq type='result'/>` for client XEP-0199 ping pongs: {iq_reply:?}"
+    );
+    assert!(
+        !iq_reply.contains('\n'),
+        "XMPP stream must not emit raw '\\n' whitespace keepalives: {iq_reply:?}"
+    );
+    assert!(
+        iq_reply.contains("<iq type='result' id='post_idle_iq'"),
+        "XEP-0199 ping keepalives must not corrupt subsequent IQ replies: {iq_reply:?}"
+    );
+
+    // Stargate jump channel leave (`LeaveRoom` -> `<presence type='unavailable'/>`) still works post-idle.
+    cli.write_all(
+        b"<presence id='leave_after_idle' type='unavailable' to='local_30000142@conference.chat.evomu.local/90000001'/>",
+    )
+    .await
+    .unwrap();
+    let leave_reply = read_xmpp_until(&mut cli, "</presence>").await;
+    assert!(leave_reply.contains("type='unavailable' id='leave_after_idle'"));
+
+    // Partial-stanza slowloris protection (`stanza_timeout`) still applies on authenticated streams.
+    cli.write_all(b"<iq type='get' id='stalled'").await.unwrap();
+    timeout(Duration::from_millis(250), srv_task)
+        .await
+        .expect("authenticated stream with stalled partial stanza must time out on stanza_timeout")
+        .unwrap();
+    drop(cli);
+}
+
+#[test]
+fn xmpp_iq_result_and_error_stanzas_do_not_echo_reply() {
+    let mut stream_count = 2;
+    assert_eq!(
+        xmpp_stanza_reply(
+            "<iq id='evomu_ping_1' type='result' from='char_90000001@chat.evomu.local/eve' to='chat.evomu.local'/>",
+            &mut stream_count,
+        ),
+        None
+    );
+    assert_eq!(
+        xmpp_stanza_reply(
+            "<iq id='evomu_ping_2' type=\"error\" from='char_90000001@chat.evomu.local/eve' to='chat.evomu.local'/>",
+            &mut stream_count,
+        ),
+        None
+    );
+    assert_eq!(
+        xmpp_stanza_reply(
+            "<iq id='ping_get' type='get'><query type='result'/></iq>",
+            &mut stream_count,
+        )
+        .as_deref(),
+        Some("<iq type='result' id='ping_get'/>")
+    );
 }

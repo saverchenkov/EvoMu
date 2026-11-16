@@ -28,6 +28,7 @@ use eve_server::router::NEXT_TRANSPORT_SESSION_ID as NEXT_SESSION_ID;
 const MAX_CONCURRENT_CONNECTIONS: usize = 512;
 const SHUTDOWN_RPC_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
+// Idle timeout for unauthenticated XMPP streams and XEP-0199 ping keepalive cadence once authenticated.
 const XMPP_IDLE_READ_TIMEOUT: Duration = Duration::from_secs(300);
 const XMPP_STANZA_TIMEOUT: Duration = Duration::from_secs(15);
 const XMPP_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1010,6 +1011,7 @@ async fn handle_xmpp_stream_with_timeouts<S>(
     let mut read_buf = [0u8; 2048];
     let mut stanza_buf: Vec<u8> = Vec::with_capacity(2048);
     let mut stream_count = 0u32;
+    let mut ping_seq = 0u64;
     let mut auth = eve_server::services::fleet_social::XmppStreamAuth::default();
     let mut stanza_deadline: Option<Instant> = None;
 
@@ -1060,13 +1062,46 @@ async fn handle_xmpp_stream_with_timeouts<S>(
             break 'conn;
         }
 
-        let read_res = if let Some(deadline) = stanza_deadline {
-            timeout_at(deadline, stream.read(&mut read_buf)).await
+        let n = if let Some(deadline) = stanza_deadline {
+            // Partial stanzas (including on authenticated streams) must finish within `stanza_timeout`.
+            let Ok(Ok(n)) = timeout_at(deadline, stream.read(&mut read_buf)).await else {
+                break 'conn;
+            };
+            n
+        } else if !auth.sasl_authenticated {
+            // Unauthenticated / half-open XMPP streams still time out after `idle_read_timeout`.
+            let Ok(Ok(n)) = timeout(idle_read_timeout, stream.read(&mut read_buf)).await else {
+                break 'conn;
+            };
+            n
         } else {
-            timeout(idle_read_timeout, stream.read(&mut read_buf)).await
-        };
-        let Ok(Ok(n)) = read_res else {
-            break 'conn;
+            // V24 clients keep one long-lived authenticated XMPP TCP socket across sessions and
+            // stargate jumps; never drop idle authenticated streams on `idle_read_timeout` (#1095).
+            loop {
+                match timeout(idle_read_timeout, stream.read(&mut read_buf)).await {
+                    Ok(Ok(n)) => break n,
+                    Ok(Err(_)) => break 'conn,
+                    Err(_) => {
+                        // Once resource binding has reopened `<stream:stream>`, emit an XEP-0199 ping
+                        // with no inter-tag whitespace: V24's SAX `XmppContentHandler.characters`
+                        // accesses `self.current_element.text` without a `None` check, so bare
+                        // RFC 6120 `\n` keepalives break the client Expat parser.
+                        if let Some(bound_jid) = auth.bound_jid.as_deref() {
+                            ping_seq = ping_seq.saturating_add(1);
+                            let esc_jid = xmpp_escape_attr_value(bound_jid);
+                            let ping = format!(
+                                "<iq id='evomu_ping_{ping_seq}' type='get' from='chat.evomu.local' to='{esc_jid}'><ping xmlns='urn:xmpp:ping'/></iq>"
+                            );
+                            if timeout(write_timeout, stream.write_all(ping.as_bytes()))
+                                .await
+                                .map_or(true, |r| r.is_err())
+                            {
+                                break 'conn;
+                            }
+                        }
+                    }
+                }
+            }
         };
         if n == 0 {
             break 'conn;
@@ -1083,7 +1118,7 @@ fn xmpp_stanza_reply(chunk: &str, stream_count: &mut u32) -> Option<String> {
     xmpp_stanza_reply_with_ctx_and_auth(None, None, chunk, stream_count)
 }
 
-fn xmpp_root_tag(stanza: &str) -> Option<&str> {
+fn xmpp_opening_element(stanza: &str) -> Option<&str> {
     let mut s = stanza.trim_start();
     while s.starts_with("<?") {
         let end = s.find("?>")?;
@@ -1092,12 +1127,43 @@ fn xmpp_root_tag(stanza: &str) -> Option<&str> {
     if !s.starts_with('<') || s.starts_with("</") || s.starts_with("<!") {
         return None;
     }
+    Some(s)
+}
+
+fn xmpp_root_tag(stanza: &str) -> Option<&str> {
+    let s = xmpp_opening_element(stanza)?;
     let after_lt = &s[1..];
     let end = after_lt
         .find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
         .unwrap_or(after_lt.len());
     let tag = &after_lt[..end];
     (!tag.is_empty()).then_some(tag)
+}
+
+fn xmpp_opening_tag(stanza: &str) -> Option<&str> {
+    let s = xmpp_opening_element(stanza)?;
+    let mut in_quote: Option<u8> = None;
+    for (idx, &b) in s.as_bytes().iter().enumerate().skip(1) {
+        if let Some(q) = in_quote {
+            if b == q {
+                in_quote = None;
+            }
+        } else if b == b'\'' || b == b'"' {
+            in_quote = Some(b);
+        } else if b == b'>' {
+            return Some(&s[..=idx]);
+        }
+    }
+    None
+}
+
+fn xmpp_escape_attr_value(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('\'', "&apos;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn xmpp_extract_attr<'a>(xml: &'a str, name: &str) -> Option<&'a str> {
@@ -1196,6 +1262,16 @@ fn xmpp_stanza_reply_with_ctx_and_auth(
             None
         }
         Some("iq") => {
+            // RFC 6120 §8.2.3: IQ `result` and `error` stanzas (such as XEP-0199 ping pongs)
+            // are terminal responses and must never trigger an echoed `<iq type='result'/>`.
+            if xmpp_opening_tag(chunk)
+                .and_then(|tag| xmpp_extract_attr(tag, "type"))
+                .is_some_and(|iq_type| {
+                    iq_type.eq_ignore_ascii_case("result") || iq_type.eq_ignore_ascii_case("error")
+                })
+            {
+                return None;
+            }
             let stanza_id = xmpp_extract_attr(chunk, "id")?;
             Some(
                 eve_server::services::fleet_social::xmpp_iq_reply_with_auth_mut(
