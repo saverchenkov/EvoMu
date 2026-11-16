@@ -12,7 +12,9 @@ use crate::services::pve_incursion_sites::{
     IncursionNpcSpawn, IncursionSiteEntry, IncursionSystemEffects, IncursionTaleRecord,
     INCURSION_TALE_TEMPLATE_ID,
 };
-use crate::services::pve_special_sites::{next_spec_seq, spec_now_sec, with_pve_special_reg};
+use crate::services::pve_special_sites::{
+    next_spec_seq, read_pve_special_reg, spec_now_sec, with_pve_special_reg,
+};
 use crate::system_actor::SystemRegistry;
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
 use eve_proto::{BridgeRpcError, PyRep};
@@ -496,7 +498,7 @@ pub fn get_incursion_system_wide_dbuffs(
 /// Synchronizes SDE Sansha Incursion System Effect beacons (`3069`, `3493`, `3494`) in `snap.items`
 /// for all active incursion systems and removes them from withdrawing/ended systems.
 pub fn sync_incursion_system_effect_beacons(ctx: &ServerContext) {
-    let desired_by_sys: HashMap<SolarSystemId, u32> = with_pve_special_reg(ctx, |reg| {
+    let desired_by_sys: HashMap<SolarSystemId, u32> = read_pve_special_reg(ctx, |reg| {
         let mut map = HashMap::new();
         for inc in reg.incursions.values() {
             if inc.influence <= 0.0
@@ -517,6 +519,30 @@ pub fn sync_incursion_system_effect_beacons(ctx: &ServerContext) {
         }
         map
     });
+
+    let needs_sync = ctx.db.with_snapshot(|snap| {
+        let has_stale = snap.items.values().any(|item| {
+            matches!(
+                item.type_id,
+                INCURSION_EFFECT_BEACON_VANGUARD
+                    | INCURSION_EFFECT_BEACON_ASSAULT
+                    | INCURSION_EFFECT_BEACON_HQ
+            ) && desired_by_sys.get(&(u32::try_from(item.location_id).unwrap_or(0)))
+                != Some(&item.type_id)
+        });
+        if has_stale {
+            return true;
+        }
+        desired_by_sys.iter().any(|(&sys_id, &beacon_tid)| {
+            !snap.items.values().any(|item| {
+                item.type_id == beacon_tid
+                    && u32::try_from(item.location_id).ok() == Some(sys_id)
+            })
+        })
+    });
+    if !needs_sync {
+        return;
+    }
 
     ctx.db.with_mut_snapshot(|snap| {
         let stale_ids: Vec<i64> = snap
@@ -750,7 +776,13 @@ pub fn advance_incursion_lifecycles(ctx: &ServerContext) {
         (started, ended_list, regen_list, despawn, spawn_balls)
     });
 
-    sync_incursion_system_effect_beacons(ctx);
+    if !started_tales.is_empty()
+        || !ended_tales.is_empty()
+        || !balls_to_despawn.is_empty()
+        || !balls_to_spawn.is_empty()
+    {
+        sync_incursion_system_effect_beacons(ctx);
+    }
 
     let now_u = ctx.now_unix();
     for (tale_id, staging) in started_tales {
@@ -785,8 +817,9 @@ pub fn advance_incursion_lifecycles(ctx: &ServerContext) {
         let sde = ctx.sde.clone();
         tokio::spawn(async move {
             for (sys_id, bid) in balls_to_despawn {
-                let h = systems.get_or_spawn(sys_id);
-                let _ = h.remove_ball(bid).await;
+                if let Some(h) = systems.get_handle(sys_id) {
+                    let _ = h.remove_ball(bid).await;
+                }
             }
             for (sys_id, bid, tid, pos) in balls_to_spawn {
                 if !systems.claim_special_site_ball(sys_id, bid) {

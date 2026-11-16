@@ -565,3 +565,178 @@ fn force_stop_warp_emits_zero_velocity_event_for_warp_and_subwarp_gh1025() {
         "subwarp force_stop_warp must emit SetBallVelocity([0,0,0]): {sub_evs:?}"
     );
 }
+
+#[test]
+fn forced_warp_after_181_align_ticks_for_slow_capital_and_reset_on_stop() {
+    let mut park = Ballpark::new(30_004_759);
+    // Extreme-tau capital (tau = 0.25 * 2.275e9 * 1e-6 = 568.75s -> natural 0.75*v requires > 780s)
+    // must still enter warp after V24's 181-tick AlignForWarp cap (`#1159`).
+    let ship_id: BallId = 1_897_140_648;
+    let mut titan = make_ship_ball(ship_id, DVec3::ZERO, 70.0);
+    titan.mass = 2.275e9;
+    titan.inertia = 0.25;
+    park.add_ball(titan);
+
+    let dest = DVec3::new(10.0 * AU_METERS, 0.0, 0.0);
+    park.set_mode(
+        ship_id,
+        MovementMode::Warp {
+            origin: DVec3::ZERO,
+            destination: dest,
+            warp_speed_au_s: 1.5,
+            total_distance: dest.length(),
+            phase: WarpPhase::Aligning,
+            elapsed_warp_time: 0.0,
+        },
+    )
+    .expect("enter warp align");
+
+    for tick in 1..=180 {
+        let _ = park.step(1.0);
+        assert!(
+            matches!(
+                park.balls[&ship_id].mode,
+                MovementMode::Warp {
+                    phase: WarpPhase::Aligning,
+                    ..
+                }
+            ),
+            "expected ship to still be aligning at tick {tick}"
+        );
+    }
+
+    // Tick 181 triggers forced warp entry into Accelerating even though speed < 0.75 * max_velocity.
+    assert!(park.balls[&ship_id].velocity.length() < park.balls[&ship_id].max_velocity * 0.75);
+    let _ = park.step(1.0);
+    assert!(
+        matches!(
+            park.balls[&ship_id].mode,
+            MovementMode::Warp {
+                phase: WarpPhase::Accelerating,
+                ..
+            }
+        ),
+        "expected forced warp entry at tick 181, got {:?}",
+        park.balls[&ship_id].mode
+    );
+
+    // Interrupting alignment before tick 181 resets the forced-warp counter.
+    let reset_ship: BallId = 1_897_140_649;
+    let mut second = make_ship_ball(reset_ship, DVec3::ZERO, 70.0);
+    second.mass = 2.275e9;
+    second.inertia = 0.25;
+    park.add_ball(second);
+
+    let warp_mode = MovementMode::Warp {
+        origin: DVec3::ZERO,
+        destination: dest,
+        warp_speed_au_s: 1.5,
+        total_distance: dest.length(),
+        phase: WarpPhase::Aligning,
+        elapsed_warp_time: 0.0,
+    };
+    park.set_mode(reset_ship, warp_mode.clone()).unwrap();
+    for _ in 0..120 {
+        let _ = park.step(1.0);
+    }
+    assert!(matches!(
+        park.balls[&reset_ship].mode,
+        MovementMode::Warp {
+            phase: WarpPhase::Aligning,
+            ..
+        }
+    ));
+
+    park.set_mode(reset_ship, MovementMode::Stop).unwrap();
+    park.balls.get_mut(&reset_ship).unwrap().velocity = DVec3::ZERO;
+    park.set_mode(reset_ship, warp_mode).unwrap();
+
+    for _ in 0..100 {
+        let _ = park.step(1.0);
+    }
+    assert!(
+        matches!(
+            park.balls[&reset_ship].mode,
+            MovementMode::Warp {
+                phase: WarpPhase::Aligning,
+                ..
+            }
+        ),
+        "counter must reset after Stop instead of firing at 120 + 61 = 181"
+    );
+    for _ in 0..80 {
+        let _ = park.step(1.0);
+    }
+    assert!(matches!(
+        park.balls[&reset_ship].mode,
+        MovementMode::Warp {
+            phase: WarpPhase::Aligning,
+            ..
+        }
+    ));
+    let _ = park.step(1.0);
+    assert!(matches!(
+        park.balls[&reset_ship].mode,
+        MovementMode::Warp {
+            phase: WarpPhase::Accelerating,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn merlin_3_95au_warp_completes_on_time_at_1x_vs_tidi_desync_1207() {
+    let dist_m = 590_860_935_345.6_f64;
+    let dest = DVec3::new(dist_m, 0.0, 0.0);
+
+    let make_merlin = |id: BallId| Ball {
+        id,
+        type_id: 603,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 320.0,
+        inertia: 3.6,
+        mass: 997_000.0,
+        radius: 39.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Warp {
+            origin: DVec3::ZERO,
+            destination: dest,
+            warp_speed_au_s: 5.0,
+            total_distance: dist_m,
+            phase: WarpPhase::Accelerating,
+            elapsed_warp_time: 0.0,
+        },
+    };
+
+    // 1. At 1.0x sim speed, a 5.0 AU/s Merlin finishes the 3.95 AU warp leg cleanly in 20 1s ticks.
+    let mut park_1x = Ballpark::new(30_000_144);
+    park_1x.add_ball(make_merlin(1_897_362_930));
+    let mut exit_tick_1x = None;
+    for t in 1..=30 {
+        let _ = park_1x.step(1.0);
+        if !matches!(park_1x.balls[&1_897_362_930].mode, MovementMode::Warp { .. }) {
+            exit_tick_1x = Some(t);
+            break;
+        }
+    }
+    assert_eq!(
+        exit_tick_1x,
+        Some(20),
+        "1.0x Merlin 3.95 AU warp leg must complete in 20 ticks"
+    );
+
+    // 2. Spurious 0.73x auto-TiDi leaves the ship mid-warp >6 s past the 1.0x exit tick (#1207).
+    let mut park_tidi = Ballpark::new(30_000_144);
+    park_tidi.add_ball(make_merlin(1_897_362_931));
+    for _ in 0..25 {
+        let _ = park_tidi.step(0.73);
+    }
+    assert!(
+        matches!(
+            park_tidi.balls[&1_897_362_931].mode,
+            MovementMode::Warp { .. }
+        ),
+        "0.73x TiDi stalls Merlin in Warp beyond 25 s wall time"
+    );
+}

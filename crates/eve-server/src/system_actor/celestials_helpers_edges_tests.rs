@@ -195,7 +195,7 @@ async fn fast_forward_clock_and_force_stop_warp_edge_branches() {
         &scram_cache,
         &tx,
     );
-    assert!(bp.current_tick <= tick_before + 1);
+    assert_eq!(bp.current_tick, tick_before);
     let bcast = rx.try_recv().expect("moving ship broadcast");
     assert!(matches!(
         bcast.events.first(),
@@ -556,7 +556,7 @@ fn persist_ball_positions_and_landed_warps_kill_all_mutants() {
         &ev_tx,
     );
     assert!((sim_elapsed - 14.0).abs() < 1e-6);
-    assert!(bp.current_tick > tick_before);
+    assert_eq!(bp.current_tick, tick_before);
     assert!(bp.balls[&id_subwarp_far].position.x > 200.0);
     assert!(ball_pos_map.read().unwrap().get(&id_subwarp_far).is_some());
 }
@@ -658,5 +658,58 @@ fn incremental_sync_ball_positions_tracks_dynamic_moves_and_static_changes() {
     sync_ball_positions(&bp, &cache, &scram);
     assert!(!cache.read().unwrap().contains_key(&40_000_001));
     assert_eq!(cache.read().unwrap()[&40_000_002], DVec3::new(20_000.0, 0.0, 0.0));
+}
+
+#[test]
+fn fast_forward_clock_preserves_tick_stamp_across_repeated_calls() {
+    let mut bp = Ballpark::new(30_000_142);
+    bp.current_tick = 1_000;
+    let ship_id = 1_897_140_648;
+    bp.add_ball(Ball {
+        id: ship_id,
+        type_id: 11_567,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 70.0,
+        inertia: 0.034,
+        mass: 2.275e9,
+        radius: 7_500.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::GotoDirection { direction: DVec3::X },
+    });
+    let cache = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new()));
+    let scram = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashSet::new()));
+    let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+    let mut sim_elapsed = 0.0;
+
+    // Repeated AdvanceClock calls must advance simulation state without pushing
+    // `ballpark.current_tick` cumulatively ahead of client Destiny `currentTime` (`#1159`, `#1165`).
+    for call_idx in 1..=5 {
+        fast_forward_clock_in_actor(
+            30_000_142,
+            &mut bp,
+            ship_id,
+            10,
+            &mut sim_elapsed,
+            &None,
+            &cache,
+            &scram,
+            &tx,
+        );
+        assert_eq!(
+            bp.current_tick, 1_000,
+            "call {call_idx} must not advance current_tick ahead of client clock"
+        );
+        let broadcast = rx.try_recv().expect("expected tick broadcast");
+        assert_eq!(broadcast.tick, 1_000);
+        assert!(
+            broadcast
+                .events
+                .iter()
+                .any(|e| matches!(e, DestinyEvent::SetBallPosition { ball_id, .. } if *ball_id == ship_id))
+        );
+    }
+    assert!((sim_elapsed - 50.0).abs() < 1e-9);
+    assert!(bp.balls[&ship_id].position.x > 0.0);
 }
 

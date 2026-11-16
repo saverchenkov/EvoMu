@@ -23,11 +23,13 @@ mod drone_reconnect_finish;
 pub mod drone_return;
 
 pub use cluster_tick::{
-    catch_unwind_future, clamp_physics_ticker_backlog, on_advance_secs, on_advance_secs_internal,
+    accumulate_physics_ticker_steps, catch_unwind_future, clamp_physics_ticker_backlog,
+    compute_physics_step_lateness_ms, on_advance_secs, on_advance_secs_internal,
     on_advance_secs_with_sim_clock_rebase, populate_persisted_space_objects,
     seed_persisted_abandoned_drones, step_active_systems_physics_tick,
-    step_active_systems_physics_tick_with_lateness, tick_background_cluster,
-    tick_background_cluster_with_step, MAX_PHYSICS_BACKLOG_STEPS, SYSTEM_STEP_ASK_TIMEOUT,
+    step_active_systems_physics_tick_with_budget, step_active_systems_physics_tick_with_lateness,
+    tick_background_cluster, tick_background_cluster_with_step, MAX_PHYSICS_BACKLOG_STEPS,
+    PHYSICS_TICK_STEP_BUDGET, SYSTEM_STEP_ASK_TIMEOUT,
 };
 pub(crate) use cluster_tick::sweep_expired_cosmic_anomalies_and_signatures;
 pub use cluster_tick_downtime::{
@@ -221,7 +223,7 @@ pub fn sde_ship_physics(
         .get(&ship_type_id)
         .map(|t| {
             let max_vel = t.default_attributes.get(&37).copied().unwrap_or(300.0).max(50.0);
-            let inertia = t.default_attributes.get(&70).copied().unwrap_or(2.5).max(0.5);
+            let inertia = t.default_attributes.get(&70).copied().unwrap_or(2.5).max(0.001);
             let base_warp = t.default_attributes.get(&1281).copied().unwrap_or(1.0).max(0.5);
             let warp_mult = t.default_attributes.get(&600).copied().unwrap_or(3.0).max(1.0);
             let warp_speed_au_s = (base_warp * warp_mult).clamp(1.5, 12.0);

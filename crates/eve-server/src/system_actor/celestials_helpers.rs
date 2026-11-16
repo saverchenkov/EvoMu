@@ -864,7 +864,12 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs(
             break;
         }
     }
-    ballpark.current_tick = (initial_tick + 1).min(ballpark.current_tick);
+    // Preserve `initial_tick` instead of bumping `ballpark.current_tick` ahead of live clients:
+    // `AdvanceClock` advances server simulation state without rebasing client `blue.os`, and V24
+    // `destiny/net/client/_ticker.pyj` buffers (+1..+2) or forces `_parent_Evolve` / recoverable
+    // desync (>= +3) when server stamps drift ahead of client `currentTime` (`#1159`, `#1165`),
+    // while `outbound_sequencer` and `_util.merge_state_into_history` accept equal stamps.
+    ballpark.current_tick = initial_tick;
     if is_moving {
         if let Some((pos, vel)) = ballpark
             .balls

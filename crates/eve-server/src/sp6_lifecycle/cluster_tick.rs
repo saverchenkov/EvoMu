@@ -2093,10 +2093,43 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
 pub const MAX_PHYSICS_BACKLOG_STEPS: u64 = 3;
 /// Per-system physics step ask timeout so a wedged actor never hangs the ticker (`#841`).
 pub const SYSTEM_STEP_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// Per-tick wait budget for the dedicated physics ticker so one stalled system cannot delay healthy systems past the 1 Hz boundary (`#1208`).
+pub const PHYSICS_TICK_STEP_BUDGET: std::time::Duration = std::time::Duration::from_millis(850);
 
 /// Clamps wall-clock physics ticker elapsed seconds to `1..=MAX_PHYSICS_BACKLOG_STEPS` (`#870`).
 pub fn clamp_physics_ticker_backlog(raw_elapsed_secs: u64) -> u64 {
     raw_elapsed_secs.clamp(1, MAX_PHYSICS_BACKLOG_STEPS)
+}
+
+/// Accumulates wall-clock ticker elapsed time while preserving sub-second remainders across
+/// slight >1 s jitter (`#1207`), returning `(clamped_steps, next_remainder)`.
+pub fn accumulate_physics_ticker_steps(
+    raw_elapsed: std::time::Duration,
+    subsec_remainder: std::time::Duration,
+) -> (u64, std::time::Duration) {
+    let total = raw_elapsed.saturating_add(subsec_remainder);
+    let full_secs = total.as_secs();
+    let next_remainder = if full_secs == 0 || full_secs > MAX_PHYSICS_BACKLOG_STEPS {
+        std::time::Duration::ZERO
+    } else {
+        total.saturating_sub(std::time::Duration::from_secs(full_secs))
+    };
+    (clamp_physics_ticker_backlog(full_secs), next_remainder)
+}
+
+/// Computes effective TiDi autoscaler lateness (ms overrun past the 1,000 ms tick window) from
+/// ticker cadence lateness and per-system step duration (`#1207`).
+pub fn compute_physics_step_lateness_ms(
+    cadence_lateness_ms: f64,
+    step_ms: f64,
+    ticker_active: bool,
+) -> f64 {
+    let step_overrun_ms = if ticker_active {
+        (step_ms - crate::system_actor::TIDI_TARGET_WINDOW_MS).max(0.0)
+    } else {
+        0.0
+    };
+    cadence_lateness_ms.max(0.0).max(step_overrun_ms)
 }
 
 struct CatchUnwindBoxFuture<F>(std::pin::Pin<Box<F>>);
@@ -2163,23 +2196,37 @@ async fn step_single_system_physics_step_with_lateness(
                     return;
                 }
             };
+        // Run synchronous NPC AI / deployables off the Tokio async worker pool under timeout so
+        // heavy systems neither starve async RPC/actor tasks nor defeat `SYSTEM_STEP_ASK_TIMEOUT` (`#1208`).
+        let ctx_ai = ctx.clone();
+        let handle_ai = handle.clone();
         let _ = tokio::time::timeout(
             SYSTEM_STEP_ASK_TIMEOUT,
-            crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai(ctx, sys_id),
+            tokio::task::spawn_blocking(move || {
+                crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(
+                    &ctx_ai, sys_id,
+                );
+                let has_spawns = ctx_ai
+                    .npc_spawns
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&sys_id)
+                    .is_some_and(|mgr| !mgr.entities.is_empty());
+                if has_spawns {
+                    let tick = handle_ai.ballpark.try_read().map(|b| b.current_tick).unwrap_or(0);
+                    let tidi = crate::services::serverops_cluster::get_system_tidi_factor(
+                        &ctx_ai, sys_id,
+                    );
+                    crate::combat::npc_ai::step_system_npc_spawns_ai_sync(
+                        &ctx_ai,
+                        sys_id,
+                        tick,
+                        1.0 * tidi,
+                    );
+                }
+            }),
         )
         .await;
-        let has_spawns = {
-            ctx.npc_spawns
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&sys_id)
-                .is_some_and(|mgr| !mgr.entities.is_empty())
-        };
-        if has_spawns {
-            let tick = handle.ballpark.try_read().map(|b| b.current_tick).unwrap_or(0);
-            let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id);
-            crate::combat::npc_ai::step_system_npc_spawns_ai_sync(ctx, sys_id, tick, 1.0 * tidi);
-        }
         // NOTE (#1079 merge hook): missile flight, breacher DoTs, and self-destruct progress follow sim clock in step_combat_system.
         let _ = crate::services::combat_crimewatch::step_combat_system(ctx, sys_id, 1.0).await;
         let ticker_active = ctx
@@ -2191,7 +2238,8 @@ async fn step_single_system_physics_step_with_lateness(
             } else {
                 0.0
             };
-            let total_lateness_ms = cadence_lateness_ms.max(step_ms);
+            let total_lateness_ms =
+                compute_physics_step_lateness_ms(cadence_lateness_ms, step_ms, ticker_active);
             crate::services::serverops_cluster::evaluate_system_tidi_autoscaler_window(
                 ctx,
                 sys_id,
@@ -2229,6 +2277,32 @@ pub async fn step_active_systems_physics_tick_with_lateness(
     elapsed_secs: u64,
     cadence_lateness_ms: f64,
 ) {
+    step_active_systems_physics_tick_inner(ctx, elapsed_secs, cadence_lateness_ms, None).await;
+}
+
+/// Variant of [`step_active_systems_physics_tick_with_lateness`] that bounds how long the caller
+/// waits for slow/stalled systems so one wedged system cannot hold up healthy systems' 1 Hz cadence (`#1208`).
+pub async fn step_active_systems_physics_tick_with_budget(
+    ctx: &ServerContext,
+    elapsed_secs: u64,
+    cadence_lateness_ms: f64,
+    wait_budget: std::time::Duration,
+) {
+    step_active_systems_physics_tick_inner(
+        ctx,
+        elapsed_secs,
+        cadence_lateness_ms,
+        Some(wait_budget),
+    )
+    .await;
+}
+
+async fn step_active_systems_physics_tick_inner(
+    ctx: &ServerContext,
+    elapsed_secs: u64,
+    cadence_lateness_ms: f64,
+    wait_budget: Option<std::time::Duration>,
+) {
     let now_unix = ctx.now_unix();
     let mult = ctx.time_acceleration_multiplier();
     let steps = elapsed_secs
@@ -2252,8 +2326,11 @@ pub async fn step_active_systems_physics_tick_with_lateness(
         }
         active_to_step.push((sys_id, handle));
     }
-    if active_to_step.len() <= 1 {
+    if active_to_step.len() <= 1 && wait_budget.is_none() {
         for (sys_id, handle) in active_to_step {
+            let Some(_step_guard) = ctx.systems.try_begin_physics_step(sys_id) else {
+                continue;
+            };
             for step_idx in 0..steps {
                 if step_idx == 0 && handle.take_auto_stepped_at(now_unix) {
                     continue;
@@ -2268,10 +2345,17 @@ pub async fn step_active_systems_physics_tick_with_lateness(
             }
         }
     } else {
-        let mut join_set = tokio::task::JoinSet::new();
+        let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let mut launched = 0usize;
         for (sys_id, handle) in active_to_step {
+            let Some(step_guard) = ctx.systems.try_begin_physics_step(sys_id) else {
+                continue;
+            };
             let ctx_cloned = ctx.clone();
-            join_set.spawn(async move {
+            let tx = done_tx.clone();
+            launched += 1;
+            tokio::spawn(async move {
+                let _step_guard = step_guard;
                 for step_idx in 0..steps {
                     if step_idx == 0 && handle.take_auto_stepped_at(now_unix) {
                         continue;
@@ -2284,9 +2368,32 @@ pub async fn step_active_systems_physics_tick_with_lateness(
                     )
                     .await;
                 }
+                let _ = tx.send(());
             });
         }
-        while join_set.join_next().await.is_some() {}
+        drop(done_tx);
+        if launched == 0 {
+            return;
+        }
+        let wait_all = async {
+            let mut remaining = launched;
+            while remaining > 0 {
+                if done_rx.recv().await.is_none() {
+                    break;
+                }
+                remaining -= 1;
+            }
+        };
+        if let Some(budget) = wait_budget {
+            if tokio::time::timeout(budget, wait_all).await.is_err() {
+                tracing::debug!(
+                    budget_ms = budget.as_millis() as u64,
+                    "Physics tick wait budget reached; slow systems continue in background (#1208)"
+                );
+            }
+        } else {
+            wait_all.await;
+        }
     }
 }
 

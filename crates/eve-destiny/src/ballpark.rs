@@ -93,6 +93,7 @@ impl Ballpark {
             special_fx_meta: BTreeMap::new(),
             same_tick_owner_goto_tick: BTreeMap::new(),
             last_acquired_tick_by_ball: BTreeMap::new(),
+            warp_align_ticks: BTreeMap::new(),
         }
     }
 
@@ -927,6 +928,7 @@ impl Ballpark {
         self.pending_handoff_observers.remove(&ball_id);
         self.same_tick_owner_goto_tick.remove(&ball_id);
         self.last_acquired_tick_by_ball.remove(&ball_id);
+        self.warp_align_ticks.remove(&ball_id);
         self.scheduled_observer_events
             .retain(|(_, obs_id, _)| *obs_id != ball_id);
         Some((removed, old_grid_id, was_static))

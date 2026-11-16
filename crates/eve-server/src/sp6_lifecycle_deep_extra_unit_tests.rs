@@ -148,8 +148,23 @@ fn deep_sde_helpers_hp_persistence_and_metadata_boundaries() {
     assert_eq!(mass_lo, 1_000.0);
     assert_eq!(rad_lo, 20.0);
     assert_eq!(vel_lo, 50.0);
-    assert_eq!(in_lo, 0.5);
+    assert_eq!(in_lo, 0.1);
     assert_eq!(warp_lo, 1.5);
+
+    // Avatar-scale capital inertia (0.034) is preserved rather than inflated to 0.5,
+    // while pathological <= 0.0 values still clamp safely at 0.001 (`#1159`).
+    let mut avatar = mk_type(11_567, vec![(37, 70.0), (70, 0.034), (600, 1.5)]);
+    avatar.mass = 2.275e9;
+    avatar.radius = 7500.0;
+    sde.types.insert(11_567, avatar);
+    let (_, _, avatar_mass, _, avatar_vel, avatar_inertia, _) = sde_ship_physics(&sde, 11_567);
+    assert_eq!(avatar_mass, 2.275e9);
+    assert_eq!(avatar_vel, 70.0);
+    assert!((avatar_inertia - 0.034).abs() < 1e-9);
+
+    sde.types.get_mut(&11_567).unwrap().default_attributes.insert(70, 0.0001);
+    let (_, _, _, _, _, clamped_inertia, _) = sde_ship_physics(&sde, 11_567);
+    assert_eq!(clamped_inertia, 0.001);
 
     let (_g2, _c2, _m2, _r2, vel_hi, _i2, warp_hi) = sde_ship_physics(&sde, 9005);
     assert_eq!(vel_hi, 900.0);

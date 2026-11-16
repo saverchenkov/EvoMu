@@ -89,13 +89,20 @@ fn record_warp_progression(ctx: &ServerContext, char_id: i64) {
     crate::quasar_gateway::isolate_side_effect(
         "space_warp_jump.CmdWarpToStuff.cosmetics",
         || {
-            ctx.db.with_mut_snapshot(|snap| {
-                let mut ext = crate::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
-                if !ext.characters_warped.contains(&char_id) {
-                    ext.characters_warped.push(char_id);
-                    crate::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
-                }
+            let already_warped = ctx.db.with_snapshot(|snap| {
+                crate::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap)
+                    .characters_warped
+                    .contains(&char_id)
             });
+            if !already_warped {
+                ctx.db.with_mut_snapshot(|snap| {
+                    let mut ext = crate::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
+                    if !ext.characters_warped.contains(&char_id) {
+                        ext.characters_warped.push(char_id);
+                        crate::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
+                    }
+                });
+            }
         },
     );
     ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(

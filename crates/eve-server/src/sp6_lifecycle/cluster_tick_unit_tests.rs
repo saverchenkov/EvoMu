@@ -2370,3 +2370,91 @@ async fn cluster_tick_npc_ai_ship_death_flushes_projected_ewar_without_lock_rank
         "sibling system npc_spawns entity must survive concurrent physics tick"
     );
 }
+
+#[tokio::test]
+async fn physics_tick_subsec_accumulation_overrun_lateness_and_isolation_1207_1208() {
+    use std::time::Duration;
+
+    // 1. Sub-second remainder preserves 0.6s jitter across ticks so catch-up replays on tick 2 (#1207).
+    let (steps_1, rem_1) =
+        accumulate_physics_ticker_steps(Duration::from_millis(1_600), Duration::ZERO);
+    assert_eq!(steps_1, 1);
+    assert_eq!(rem_1, Duration::from_millis(600));
+    let (steps_2, rem_2) =
+        accumulate_physics_ticker_steps(Duration::from_millis(1_600), rem_1);
+    assert_eq!(steps_2, 2);
+    assert_eq!(rem_2, Duration::from_millis(200));
+    let (steps_cap, rem_cap) =
+        accumulate_physics_ticker_steps(Duration::from_secs(10), Duration::from_millis(500));
+    assert_eq!(steps_cap, MAX_PHYSICS_BACKLOG_STEPS);
+    assert_eq!(rem_cap, Duration::ZERO);
+
+    // 2. Per-system step duration inside the 1,000 ms tick window reports 0 ms lateness (#1207).
+    assert_eq!(compute_physics_step_lateness_ms(0.0, 270.0, true), 0.0);
+    assert!(
+        (compute_physics_step_lateness_ms(0.0, 1_270.0, true) - 270.0).abs() < 1e-9,
+        "step_ms beyond 1000 ms must report exact overrun lateness"
+    );
+    assert!((compute_physics_step_lateness_ms(50.0, 2_000.0, false) - 50.0).abs() < 1e-9);
+
+    // 3. Budgeted physics tick with healthy Jita + wedged wormhole isolates Jita at 1.0x TiDi (#1208).
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    ctx.dedicated_physics_ticker_active
+        .store(true, std::sync::atomic::Ordering::Release);
+    let sys_jita = 30_000_142_u32;
+    let sys_wh = 31_000_005_u32;
+    let h_jita = ctx.systems.get_or_spawn(sys_jita);
+    let h_wh_orig = ctx.systems.get_or_spawn(sys_wh);
+
+    // Replace sys_wh cmd_tx with an unresponsive sink task that ignores commands so
+    // step_manual_tick_only stalls until SYSTEM_STEP_ASK_TIMEOUT (2s).
+    let (stall_tx, mut stall_rx) = tokio::sync::mpsc::channel(8);
+    let _stall_sink = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Some(cmd) = stall_rx.recv().await {
+            held.push(cmd);
+        }
+    });
+    {
+        let mut reg = ctx
+            .systems
+            .systems
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut wedged = h_wh_orig.clone();
+        wedged.cmd_tx = stall_tx;
+        reg.insert(sys_wh, wedged);
+    }
+
+    let jita_sim_0 = h_jita.sim_elapsed_secs();
+    let t0 = std::time::Instant::now();
+    step_active_systems_physics_tick_with_budget(&ctx, 1, 0.0, Duration::from_millis(200)).await;
+    let elapsed_tick_1 = t0.elapsed();
+    assert!(
+        elapsed_tick_1 < Duration::from_millis(1_000),
+        "budgeted physics tick must return near 200ms budget without blocking on wedged sys_wh (got {:?})",
+        elapsed_tick_1
+    );
+    assert!(
+        (h_jita.sim_elapsed_secs() - (jita_sim_0 + 1.0)).abs() < 1e-6,
+        "healthy sys_jita must advance 1.0s during first tick despite wedged sys_wh"
+    );
+    assert!(
+        (h_jita.tidi_factor() - 1.0).abs() < 1e-6,
+        "healthy sys_jita must remain at 1.0x TiDi"
+    );
+
+    // Second tick immediately after skips the still-in-flight wedged sys_wh in <200ms while advancing sys_jita cleanly.
+    let t1 = std::time::Instant::now();
+    step_active_systems_physics_tick_with_budget(&ctx, 1, 0.0, Duration::from_millis(200)).await;
+    let elapsed_tick_2 = t1.elapsed();
+    assert!(
+        elapsed_tick_2 < Duration::from_millis(150),
+        "in-flight wedged sys_wh must be skipped without blocking second tick (got {:?})",
+        elapsed_tick_2
+    );
+    assert!(
+        (h_jita.sim_elapsed_secs() - (jita_sim_0 + 2.0)).abs() < 1e-6,
+        "healthy sys_jita must advance another 1.0s cleanly"
+    );
+}

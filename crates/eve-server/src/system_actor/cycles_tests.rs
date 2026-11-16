@@ -1456,3 +1456,98 @@ async fn fit_projection_sync_updates_mwd_rep_cloak_and_preserves_hic_wdfg_fields
         ball_after.max_velocity
     );
 }
+
+#[test]
+fn tethered_ship_without_heat_damage_skips_mut_snapshot_1207() {
+    let mut bp = Ballpark::new(30_000_144);
+    let ship_id = 1_897_362_930_i64;
+    let mod_id = 1_897_362_931_i64;
+    bp.add_ball(make_ship(ship_id, 603, DVec3::ZERO));
+    bp.combat_states.insert(
+        ship_id,
+        CombatState {
+            is_tethered: true,
+            ..Default::default()
+        },
+    );
+
+    let db = eve_db::WorldRepository::with_demo_seed();
+    db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            mod_id,
+            eve_db::InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 434,
+                owner_id: 90_000_001,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    let db_arc = Arc::new(db);
+    let sde_opt = Some(make_sde_for_cycles());
+    let db_opt = Some(Arc::clone(&db_arc));
+
+    let ep_before = db_arc.state_epoch();
+    for _ in 0..3 {
+        step_cycles_and_capacitor(
+            &mut bp,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &sde_opt,
+            &db_opt,
+            &None,
+            &Arc::new(RwLock::new(Default::default())),
+            &mut Vec::new(),
+            1.0,
+            None,
+        );
+    }
+    assert_eq!(
+        db_arc.state_epoch(),
+        ep_before,
+        "tethered ship with zero heat damage must not trigger DB write commits per tick (#1207)"
+    );
+
+    // Once heat damage is present on a fitted slot, tether repair acquires mut snapshot and clears it.
+    db_arc.with_mut_snapshot(|snap| {
+        snap.items
+            .get_mut(&mod_id)
+            .unwrap()
+            .dynamic_attributes
+            .insert(eve_sde::attr_ids::DAMAGE, 1.5);
+    });
+    step_cycles_and_capacitor(
+        &mut bp,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &sde_opt,
+        &db_opt,
+        &None,
+        &Arc::new(RwLock::new(Default::default())),
+        &mut Vec::new(),
+        1.0,
+        None,
+    );
+    db_arc.with_snapshot(|snap| {
+        assert!(
+            !snap.items[&mod_id]
+                .dynamic_attributes
+                .contains_key(&eve_sde::attr_ids::DAMAGE),
+            "tether repair must clear fitted module heat damage when present"
+        );
+    });
+}

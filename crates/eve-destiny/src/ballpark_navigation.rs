@@ -354,6 +354,7 @@ impl Ballpark {
             _ => {}
         }
         ball.mode = mode;
+        self.warp_align_ticks.remove(&ball_id);
         if let Some((_, emit_to_owner)) = &goto_event {
             if *emit_to_owner {
                 self.same_tick_owner_goto_tick.insert(ball_id, current_tick);
@@ -447,6 +448,7 @@ impl Ballpark {
             self.emit_warp_cancelled_events(ball_id);
         }
         self.same_tick_owner_goto_tick.remove(&ball_id);
+        self.warp_align_ticks.remove(&ball_id);
         self.emit_event(Some(ball_id), DestinyEvent::Stop { ball_id });
         self.emit_event(
             Some(ball_id),
