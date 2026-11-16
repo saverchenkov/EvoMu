@@ -661,7 +661,9 @@ macro_rules! collect_snapshot_domain_diffs {
         substructs: [ $(($sub_f:ident, $sub_prefix:literal)),* $(,)? ]
     ) => {{
         $(
-            if !($before.$map_f.is_empty() && $after.$map_f.is_empty()) {
+            if !$before.$map_f.ptr_eq(&$after.$map_f)
+                && !($before.$map_f.is_empty() && $after.$map_f.is_empty())
+            {
                 diff_map_with_mapped(
                     $domain,
                     "",
@@ -677,7 +679,9 @@ macro_rules! collect_snapshot_domain_diffs {
             }
         )*
         $(
-            if !($before.$ssmap_f.is_empty() && $after.$ssmap_f.is_empty()) {
+            if !$before.$ssmap_f.ptr_eq(&$after.$ssmap_f)
+                && !($before.$ssmap_f.is_empty() && $after.$ssmap_f.is_empty())
+            {
                 diff_map_with_mapped(
                     $domain,
                     "",
@@ -693,20 +697,24 @@ macro_rules! collect_snapshot_domain_diffs {
             }
         )*
         $(
-            if $before.$scalar_f != $after.$scalar_f {
+            if !$before.$scalar_f.ptr_eq(&$after.$scalar_f)
+                && *$before.$scalar_f != *$after.$scalar_f
+            {
                 let def = Default::default();
                 diff_scalar(
                     $domain,
                     stringify!($scalar_f),
-                    &$before.$scalar_f,
-                    &$after.$scalar_f,
+                    &*$before.$scalar_f,
+                    &*$after.$scalar_f,
                     &def,
                     $out,
                 );
             }
         )*
         $(
-            if $before.$sub_f != $after.$sub_f {
+            if !$before.$sub_f.ptr_eq(&$after.$sub_f)
+                && *$before.$sub_f != *$after.$sub_f
+            {
                 $before.$sub_f.collect_prefixed_diffs(
                     &$after.$sub_f,
                     $domain,
@@ -742,7 +750,7 @@ macro_rules! sync_snapshot_domain {
         )*
         $(
             let def = Default::default();
-            state.push_scalar(stringify!($scalar_f), &$snap.$scalar_f, &def)?;
+            state.push_scalar(stringify!($scalar_f), &*$snap.$scalar_f, &def)?;
         )*
         $(
             $snap.$sub_f.push_prefixed_sync(&mut state, $sub_prefix)?;
@@ -1005,10 +1013,10 @@ impl StagedCorpCrimewatch {
                 scalars: [ $($scalar_f:ident),* $(,)? ],
                 substructs: [ $(($sub_f:ident, $_sub_prefix:literal)),* $(,)? ]
             ) => {{
-                $(snap.$map_f = $src.$map_f;)*
-                $(snap.$ssmap_f = $src.$ssmap_f;)*
-                $(snap.$scalar_f = $src.$scalar_f;)*
-                $(snap.$sub_f = $src.$sub_f;)*
+                $(snap.$map_f = $src.$map_f.into();)*
+                $(snap.$ssmap_f = $src.$ssmap_f.into();)*
+                $(snap.$scalar_f = $src.$scalar_f.into();)*
+                $(snap.$sub_f = $src.$sub_f.into();)*
             }};
         }
         macro_rules! apply_corp {

@@ -1494,8 +1494,9 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
     assert!((get_dict_val(&st_tax_res, "stationTaxRate").unwrap().as_f64().unwrap() - 0.03).abs() < 1e-6);
     assert!(get_dict_val(&st_tax_res, "reprocessingTaxISK").unwrap().as_f64().unwrap() > 0.0);
     let (journal_added, corp_wallet) = ctx.db.with_snapshot(|snap| {
-        let added = snap.wallet_journal[journal_before..]
+        let added = snap.wallet_journal
             .iter()
+            .skip(journal_before)
             .any(|e| e.character_id == char_id && e.entry_type == "ReprocessingTax" && e.amount.0 > 0);
         let cw = snap.corporations.get(&owner_corp_id).map(|c| c.master_wallet_balance().0).unwrap_or(0);
         (added, cw)

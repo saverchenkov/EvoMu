@@ -1691,7 +1691,7 @@ async fn test_corp_governance_divisions_ceo_placement_tax() {
     ctx.db.with_snapshot(|s| {
         let lp_gained = s.characters[&PILOT_2].loyalty_points.get(&ag_corp).copied().unwrap_or(0) - lp_pre;
         assert_eq!(lp_gained, expected_net_lp, "11% NPC corp LP tax must apply when mission ISK >= 100k");
-        let new_entries = &s.wallet_journal[journal_idx..];
+        let new_entries: Vec<_> = s.wallet_journal.iter().skip(journal_idx).collect();
         assert!(
             new_entries.iter().any(|e| {
                 e.character_id == PILOT_2

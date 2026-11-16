@@ -260,8 +260,8 @@ pub fn resolve_insurgency_campaign_in_snap(
     forced_outcome: Option<&str>,
     now: u64,
 ) -> Result<CampaignResolutionEffects, BridgeRpcError> {
-    let camp = snap
-        .insurgency_runtime
+    let ins_rt = &mut *snap.insurgency_runtime;
+    let camp = ins_rt
         .campaigns
         .get_mut(&campaign_id)
         .ok_or_else(|| BridgeRpcError {
@@ -272,15 +272,13 @@ pub fn resolve_insurgency_campaign_in_snap(
     let pirate_fac = camp.pirate_faction_id;
     let fob_sys = camp.fob_solar_system_id;
     let sys_list = camp.systems.clone();
-    if let Some(existing) = snap.insurgency_runtime.campaign_outcomes.get(&campaign_id) {
-        let p = snap
-            .insurgency_runtime
+    if let Some(existing) = ins_rt.campaign_outcomes.get(&campaign_id) {
+        let p = ins_rt
             .pirate_ambition_modifier
             .get(&pirate_fac)
             .copied()
             .unwrap_or(0);
-        let e = snap
-            .insurgency_runtime
+        let e = ins_rt
             .empire_ambition_modifier
             .get(&pirate_fac)
             .copied()
@@ -297,15 +295,13 @@ pub fn resolve_insurgency_campaign_in_snap(
             updated_balances: Vec::new(),
         });
     }
-    let mut p_mod = snap
-        .insurgency_runtime
+    let mut p_mod = ins_rt
         .pirate_ambition_modifier
         .get(&pirate_fac)
         .copied()
         .unwrap_or(0)
         .min(5);
-    let mut e_mod = snap
-        .insurgency_runtime
+    let mut e_mod = ins_rt
         .empire_ambition_modifier
         .get(&pirate_fac)
         .copied()

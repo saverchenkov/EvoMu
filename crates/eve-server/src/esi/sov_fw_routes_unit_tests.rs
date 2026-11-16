@@ -122,7 +122,7 @@ fn dispatch_sov_map_structures_campaigns_incursions_and_fw_wars() {
     assert!(fw_res.body.as_ref().unwrap().as_array().unwrap().len() >= 4);
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.fw_wars = vec![(500_001, 500_002)];
+        snap.fw_wars = vec![(500_001, 500_002)].into();
     });
     let fw_custom = dispatch_sov_route(&ctx, "GET", "/fw/wars").unwrap();
     assert_eq!(
@@ -274,7 +274,7 @@ fn sov_map_structures_campaigns_and_fw_wars_cover_edge_branches() {
             .command_node_scores
             .insert(s_hull_camp, vec![(1, 0.35)]);
 
-        snap.fw_wars = vec![(500_001, 500_002)];
+        snap.fw_wars = vec![(500_001, 500_002)].into();
         snap.wars.insert(
             55_001,
             eve_db::WarRecord {

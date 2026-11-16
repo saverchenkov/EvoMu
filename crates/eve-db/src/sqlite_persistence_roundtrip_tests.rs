@@ -445,7 +445,7 @@ fn sqlite_store_insert_update_rollback_delete_and_wal_recovery() {
         assert_eq!(snap.character_doll_info[&cid].0, "dna_b");
         assert_eq!(snap.corp_member_limits[&corp_id], 500);
         assert_eq!(snap.mining_ledger.len(), 1);
-        assert_eq!(snap.fw_wars, vec![(500_001, 500_004)]);
+        assert_eq!(*snap.fw_wars, vec![(500_001, 500_004)]);
         assert_eq!(
             snap.ship_fit_inputs[&100_000_001].active_stance_type_id,
             Some(34321)

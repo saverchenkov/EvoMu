@@ -430,11 +430,11 @@ where
 }
 
 pub fn load_pvp_store(snap: &eve_db::WorldStateSnapshot) -> PvpFilamentStore {
-    snap.pvp_filament_state.clone()
+    snap.pvp_filament_state.as_inner().clone()
 }
 
 pub fn save_pvp_store(snap: &mut eve_db::WorldStateSnapshot, store: &PvpFilamentStore) {
-    snap.pvp_filament_state = store.clone();
+    snap.pvp_filament_state = store.clone().into();
 }
 
 fn get_stats_source(

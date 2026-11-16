@@ -380,7 +380,7 @@ fn sov_campaigns_incursions_and_fw_wars_cover_all_filters_and_fallbacks() {
         );
 
         // Wars in snap.wars for /fw/wars resolution
-        snap.fw_wars = vec![(500_001, 500_004)];
+        snap.fw_wars = vec![(500_001, 500_004)].into();
         snap.wars.insert(
             88001,
             eve_db::WarRecord {

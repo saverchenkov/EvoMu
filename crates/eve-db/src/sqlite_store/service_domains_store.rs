@@ -580,7 +580,7 @@ macro_rules! define_staged_service_domains {
             }
 
             fn apply_to(self, snap: &mut WorldStateSnapshot) {
-                $(snap.$field = self.$field;)+
+                $(snap.$field = self.$field.into();)+
             }
         }
     };
@@ -679,7 +679,10 @@ pub(crate) fn sync_service_domains_rows(
     let mut dirty = false;
     macro_rules! sync_domains {
         ($(($field:ident, $ty:ty, $domain:ident, $legacy:expr),)+) => {
-            $(dirty |= snap.$field.sync_full(tx, $domain)?;)+
+            $(
+                let inner: &$ty = &snap.$field;
+                dirty |= inner.sync_full(tx, $domain)?;
+            )+
         };
     }
     for_each_service_domain_spec!(sync_domains);
@@ -887,7 +890,7 @@ pub fn load_service_domains_checked(
     let (staged, had_legacy) = stage_service_domains_rows(conn, ctx)?;
     let staged_entity_kv = read_entity_kv_map(conn, ctx, false)?;
     staged.apply_to(snap);
-    snap.entity_kv = staged_entity_kv;
+    snap.entity_kv = staged_entity_kv.into_iter().collect();
     Ok(had_legacy)
 }
 
@@ -930,7 +933,7 @@ fn rollback_service_domains_inner(
     let (staged, _) = stage_service_domains_rows(conn, &mut ctx)?;
     staged.apply_to(snap);
     if let Some(kv) = staged_entity_kv {
-        snap.entity_kv = kv;
+        snap.entity_kv = kv.into_iter().collect();
     }
     Ok(())
 }

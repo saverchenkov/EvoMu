@@ -397,12 +397,12 @@ pub fn sync_stage_gated_insurgency_sites_in_snap(
             st.insurgency_corruption_stage
         };
         let p_u32 = pirate_fac as u32;
+        let ins_rt = &mut *snap.insurgency_runtime;
         let mut ensure_site = |stype: &str, sname: &dyn Fn() -> String, rew: f64, target_sys: u32| {
-            if !snap.insurgency_runtime.insurgency_instances.iter().any(|s| {
+            if !ins_rt.insurgency_instances.iter().any(|s| {
                 s.solar_system_id == target_sys && s.site_type == stype && !s.completed
             }) {
-                let sid = snap
-                    .insurgency_runtime
+                let sid = ins_rt
                     .insurgency_instances
                     .iter()
                     .filter(|s| s.instance_id < 1_800_000_000)
@@ -411,7 +411,7 @@ pub fn sync_stage_gated_insurgency_sites_in_snap(
                     .unwrap_or(960_000)
                     .max(960_000)
                     + 1;
-                snap.insurgency_runtime
+                ins_rt
                     .insurgency_instances
                     .push(eve_db::PersistedInsurgencySiteRecord {
                         instance_id: sid,
@@ -446,14 +446,12 @@ pub fn sync_stage_gated_insurgency_sites_in_snap(
                 300.0,
                 sys_id,
             );
-            if !snap
-                .insurgency_runtime
+            if !ins_rt
                 .ice_heist_instances
                 .iter()
                 .any(|h| h.solar_system_id == sys_id && !h.completed)
             {
-                let hid = snap
-                    .insurgency_runtime
+                let hid = ins_rt
                     .ice_heist_instances
                     .iter()
                     .map(|h| h.instance_id)
@@ -461,7 +459,7 @@ pub fn sync_stage_gated_insurgency_sites_in_snap(
                     .unwrap_or(860_000)
                     .max(860_000)
                     + 1;
-                snap.insurgency_runtime
+                ins_rt
                     .ice_heist_instances
                     .push(eve_db::PersistedIceHeistRecord {
                         instance_id: hid,

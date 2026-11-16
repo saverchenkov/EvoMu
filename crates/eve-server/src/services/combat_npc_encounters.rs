@@ -407,7 +407,7 @@ pub async fn handle_npc_destroyed_in_space(
                                 other_type_id: Some(npc_type_id),
                             });
                     }
-                    snap.combat_crimewatch_state = rt.to_persisted();
+                    snap.combat_crimewatch_state = rt.to_persisted().into();
                 }
                 rt.destroyed_npc_cache.insert(killed_ball_id, npc);
             });
@@ -433,7 +433,7 @@ pub async fn handle_npc_destroyed_in_space(
         db.with_mut_snapshot(|s| {
             let mut guard = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
             guard.sync_core_from_persisted(&s.combat_crimewatch_state);
-            s.combat_crimewatch_state = guard.to_persisted();
+            s.combat_crimewatch_state = guard.to_persisted().into();
         });
     }
 }

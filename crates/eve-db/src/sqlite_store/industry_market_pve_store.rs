@@ -163,14 +163,54 @@ macro_rules! define_staged_industry_market_pve {
             service_state_blobs: HashMap<String, String>,
         }
 
+        trait AssignFrom<S> {
+            fn assign_from(&mut self, src: S);
+        }
+
+        impl<K, V> AssignFrom<HashMap<K, V>> for HashMap<K, V> {
+            fn assign_from(&mut self, src: HashMap<K, V>) {
+                *self = src;
+            }
+        }
+
+        impl<K, V> AssignFrom<HashMap<K, V>> for crate::cow::CowCell<HashMap<K, V>> {
+            fn assign_from(&mut self, src: HashMap<K, V>) {
+                *self = crate::cow::CowCell::new(src);
+            }
+        }
+
+        impl<K: Ord + Clone, V: Clone> AssignFrom<HashMap<K, V>> for crate::cow::CowMap<K, V> {
+            fn assign_from(&mut self, src: HashMap<K, V>) {
+                *self = src.into_iter().collect();
+            }
+        }
+
+        impl<T> AssignFrom<HashSet<T>> for HashSet<T> {
+            fn assign_from(&mut self, src: HashSet<T>) {
+                *self = src;
+            }
+        }
+
+        impl<T> AssignFrom<HashSet<T>> for crate::cow::CowCell<HashSet<T>> {
+            fn assign_from(&mut self, src: HashSet<T>) {
+                *self = crate::cow::CowCell::new(src);
+            }
+        }
+
+        impl<T> AssignFrom<Vec<T>> for crate::cow::CowCell<Vec<T>> {
+            fn assign_from(&mut self, src: Vec<T>) {
+                *self = crate::cow::CowCell::new(src);
+            }
+        }
+
         impl StagedIndustryMarketPve {
             fn apply_to(self, snap: &mut WorldStateSnapshot) {
                 $(
-                    $( snap.$map_f = self.$map_f; )*
-                    $( snap.$set_f = self.$set_f; )*
-                    $( snap.$scalar_f = self.$scalar_f; )*
+                    $( AssignFrom::assign_from(&mut snap.$map_f, self.$map_f); )*
+                    $( AssignFrom::assign_from(&mut snap.$set_f, self.$set_f); )*
+                    $( AssignFrom::assign_from(&mut snap.$scalar_f, self.$scalar_f); )*
                 )*
-                snap.service_state_blobs = self.service_state_blobs;
+                snap.service_state_blobs = self.service_state_blobs.into();
             }
         }
     };
@@ -454,6 +494,38 @@ pub(crate) fn collect_industry_market_pve_domain_row_diffs(
     after: &WorldStateSnapshot,
     out: &mut Vec<DomainRowChange>,
 ) {
+    trait MaybePtrEq {
+        fn ptr_eq_fast(&self, other: &Self) -> bool;
+    }
+
+    impl<T> MaybePtrEq for crate::cow::CowCell<T> {
+        #[inline]
+        fn ptr_eq_fast(&self, other: &Self) -> bool {
+            self.ptr_eq(other)
+        }
+    }
+
+    impl<K: Ord + Clone, V: Clone> MaybePtrEq for crate::cow::CowMap<K, V> {
+        #[inline]
+        fn ptr_eq_fast(&self, other: &Self) -> bool {
+            self.ptr_eq(other)
+        }
+    }
+
+    impl<K, V> MaybePtrEq for HashMap<K, V> {
+        #[inline]
+        fn ptr_eq_fast(&self, _other: &Self) -> bool {
+            false
+        }
+    }
+
+    impl<T> MaybePtrEq for HashSet<T> {
+        #[inline]
+        fn ptr_eq_fast(&self, _other: &Self) -> bool {
+            false
+        }
+    }
+
     macro_rules! collect_all {
         (
             $(
@@ -467,37 +539,41 @@ pub(crate) fn collect_industry_market_pve_domain_row_diffs(
         ) => {
             $(
                 $(
-                    diff_map_with(
-                        $domain_const,
-                        stringify!($map_f),
-                        before.$map_f.len(),
-                        after.$map_f.iter(),
-                        |k| before.$map_f.get(k),
-                        before.$map_f.keys(),
-                        |k| after.$map_f.contains_key(k),
-                        out,
-                    );
+                    if !before.$map_f.ptr_eq_fast(&after.$map_f) {
+                        diff_map_with(
+                            $domain_const,
+                            stringify!($map_f),
+                            before.$map_f.len(),
+                            after.$map_f.iter(),
+                            |k| before.$map_f.get(k),
+                            before.$map_f.keys(),
+                            |k| after.$map_f.contains_key(k),
+                            out,
+                        );
+                    }
                 )*
                 $(
-                    diff_set_with(
-                        $domain_const,
-                        stringify!($set_f),
-                        before.$set_f.len(),
-                        after.$set_f.iter(),
-                        |k| before.$set_f.contains(k),
-                        before.$set_f.iter(),
-                        |k| after.$set_f.contains(k),
-                        out,
-                    );
+                    if !before.$set_f.ptr_eq_fast(&after.$set_f) {
+                        diff_set_with(
+                            $domain_const,
+                            stringify!($set_f),
+                            before.$set_f.len(),
+                            after.$set_f.iter(),
+                            |k| before.$set_f.contains(k),
+                            before.$set_f.iter(),
+                            |k| after.$set_f.contains(k),
+                            out,
+                        );
+                    }
                 )*
                 $(
-                    {
+                    if !before.$scalar_f.ptr_eq(&after.$scalar_f) {
                         let def: $sv = Default::default();
                         diff_scalar(
                             $domain_const,
                             stringify!($scalar_f),
-                            &before.$scalar_f,
-                            &after.$scalar_f,
+                            &*before.$scalar_f,
+                            &*after.$scalar_f,
                             &def,
                             out,
                         );
@@ -509,7 +585,9 @@ pub(crate) fn collect_industry_market_pve_domain_row_diffs(
 
     for_each_industry_market_pve_domain!(collect_all);
 
-    if before.service_state_blobs != after.service_state_blobs {
+    if !before.service_state_blobs.ptr_eq(&after.service_state_blobs)
+        && before.service_state_blobs != after.service_state_blobs
+    {
         if let Err(msg) = validate_service_state_blobs(&after.service_state_blobs) {
             record_service_state_blob_limit_violation(&msg);
         } else {
@@ -557,7 +635,7 @@ pub fn sync_industry_market_pve_domain_rows(
                     $(
                         {
                             let def: $sv = Default::default();
-                            state.push_scalar(stringify!($scalar_f), &snap.$scalar_f, &def)?;
+                            state.push_scalar(stringify!($scalar_f), &*snap.$scalar_f, &def)?;
                         }
                     )*
                     changed |= state.finish(tx)?;
@@ -690,7 +768,7 @@ fn rollback_industry_market_pve_inner(
 
     staged.apply_to(snap);
     if let Some(ledger) = staged_ledger {
-        snap.mining_ledger = ledger;
+        snap.mining_ledger = ledger.into();
     }
     Ok(())
 }

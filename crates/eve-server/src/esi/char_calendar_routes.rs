@@ -49,7 +49,7 @@ fn load_calendar_events_from_game_state(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
 ) -> (HashMap<i64, UnifiedCalendarEvent>, HashMap<(i64, i64), String>) {
-    let mut merged = snap.calendar_events.clone();
+    let mut merged = snap.calendar_events.as_inner().clone();
     if let Ok(s) = ctx.social_extras.lock() {
         for (&eid, ev) in &s.calendar_events {
             merged.insert(

@@ -200,6 +200,15 @@ impl ChangeSet {
                 )+
             };
         }
+        macro_rules! push_cow_domain_diff {
+            ($($field:ident => $domain:ident),+ $(,)?) => {
+                $(
+                    if !before.$field.ptr_eq(&after.$field) {
+                        (*before.$field).collect_diff_ops(&*after.$field, $domain, &mut domain_rows);
+                    }
+                )+
+            };
+        }
         push_domain_diff!(
             wallet_journal_meta => DOMAIN_WALLET_JOURNAL_META,
             market_transactions => DOMAIN_MARKET_TRANSACTIONS,
@@ -208,10 +217,12 @@ impl ChangeSet {
             corp_lp_balances => DOMAIN_CORP_LP_BALANCES,
             char_lp_logs => DOMAIN_CHAR_LP_LOGS,
             pve_special_sites => DOMAIN_PVE_SPECIAL_SITES,
-            crab_beacons => DOMAIN_CRAB_BEACONS,
             abyssal_state => DOMAIN_ABYSSAL_STATE,
             dungeon_runtime => DOMAIN_DUNGEON_RUNTIME,
             dungeon_editor => DOMAIN_DUNGEON_EDITOR,
+        );
+        push_cow_domain_diff!(
+            crab_beacons => DOMAIN_CRAB_BEACONS,
             fob_observatory_state => DOMAIN_FOB_OBSERVATORY_STATE,
             mining_and_ess_state => DOMAIN_MINING_AND_ESS_STATE,
             pvp_filament_state => DOMAIN_PVP_FILAMENT_STATE,
@@ -456,7 +467,7 @@ pub fn validate_changeset(
     )?;
 
     let cd = &changes.cold_domains;
-    if cd.part1_cold {
+    if cd.part1_cold && !before.saved_fittings.ptr_eq(&after.saved_fittings) {
         for (k, v) in &after.saved_fittings {
             if before.saved_fittings.get(k) != Some(v) {
                 validate_row("saved_fittings", k.to_string(), v, max_row_bytes)?;
@@ -464,36 +475,48 @@ pub fn validate_changeset(
         }
     }
     if cd.part2_activity {
-        for (k, v) in &after.contracts {
-            if before.contracts.get(k) != Some(v) {
-                validate_row("contracts", k.to_string(), v, max_row_bytes)?;
+        if !before.contracts.ptr_eq(&after.contracts) {
+            for (k, v) in &after.contracts {
+                if before.contracts.get(k) != Some(v) {
+                    validate_row("contracts", k.to_string(), v, max_row_bytes)?;
+                }
             }
         }
-        for (k, v) in &after.industry_jobs {
-            if before.industry_jobs.get(k) != Some(v) {
-                validate_row("industry_jobs", k.to_string(), v, max_row_bytes)?;
+        if !before.industry_jobs.ptr_eq(&after.industry_jobs) {
+            for (k, v) in &after.industry_jobs {
+                if before.industry_jobs.get(k) != Some(v) {
+                    validate_row("industry_jobs", k.to_string(), v, max_row_bytes)?;
+                }
             }
         }
-        for (k, v) in &after.bookmarks {
-            if before.bookmarks.get(k) != Some(v) {
-                validate_row("bookmarks", k.to_string(), v, max_row_bytes)?;
+        if !before.bookmarks.ptr_eq(&after.bookmarks) {
+            for (k, v) in &after.bookmarks {
+                if before.bookmarks.get(k) != Some(v) {
+                    validate_row("bookmarks", k.to_string(), v, max_row_bytes)?;
+                }
             }
         }
     }
     if cd.part4_world_tail {
-        for (k, v) in &after.structures {
-            if before.structures.get(k) != Some(v) {
-                validate_row("structures", k.to_string(), v, max_row_bytes)?;
+        if !before.structures.ptr_eq(&after.structures) {
+            for d in before.structures.diff(&after.structures) {
+                if let Some(v) = d.after_val() {
+                    validate_row("structures", d.key().to_string(), v, max_row_bytes)?;
+                }
             }
         }
-        for (k, v) in &after.system_states {
-            if before.system_states.get(k) != Some(v) {
-                validate_row("system_states", k.to_string(), v, max_row_bytes)?;
+        if !before.system_states.ptr_eq(&after.system_states) {
+            for (k, v) in &after.system_states {
+                if before.system_states.get(k) != Some(v) {
+                    validate_row("system_states", k.to_string(), v, max_row_bytes)?;
+                }
             }
         }
-        for (k, v) in &after.asteroids {
-            if before.asteroids.get(k) != Some(v) {
-                validate_row("asteroids", k.to_string(), v, max_row_bytes)?;
+        if !before.asteroids.ptr_eq(&after.asteroids) {
+            for (k, v) in &after.asteroids {
+                if before.asteroids.get(k) != Some(v) {
+                    validate_row("asteroids", k.to_string(), v, max_row_bytes)?;
+                }
             }
         }
     }
@@ -841,6 +864,9 @@ impl<'a> WorldTx<'a> {
     /// Aborting or panicking after calling this method still burns the allocated ID and keeps the
     /// persisted `world_meta.next_entity_block` high-water mark so IDs are never reissued.
     pub fn alloc_entity_id(&mut self) -> Result<i64, TxError> {
+        if self.snap.active_missions.is_dirty_ids() {
+            self.snap.active_missions.reconcile_id_index();
+        }
         if self.snap.next_entity_id > self.entity_ids.current() {
             self.entity_ids
                 .advance_to(self.conn, self.snap.next_entity_id)

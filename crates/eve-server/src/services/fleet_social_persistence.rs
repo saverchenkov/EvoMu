@@ -363,10 +363,10 @@ pub(crate) fn sync_mailing_lists_to_db(ctx: &ServerContext) {
             })
             .collect()
     };
-    let matches_db = ctx.db.with_snapshot(|snap| snap.mailing_lists == lists);
+    let matches_db = ctx.db.with_snapshot(|snap| *snap.mailing_lists == lists);
     if !matches_db {
         ctx.db.with_mut_snapshot(|snap| {
-            snap.mailing_lists = lists;
+            snap.mailing_lists = lists.into();
         });
     }
 }
@@ -380,13 +380,13 @@ pub(crate) fn sync_calendar_events_to_db(ctx: &ServerContext) {
     let db_evs = ctx.db.with_snapshot(|snap| snap.calendar_events.clone());
     let events: HashMap<i64, eve_db::CalendarEventRecord> = {
         let mut s = ctx.social_extras.lock().unwrap_or_else(|e| e.into_inner());
-        for (eid, ev) in db_evs {
+        for (&eid, ev) in &db_evs {
             s.next_id = s.next_id.max(eid);
             let entry = s.calendar_events.entry(eid).or_insert_with(|| CalendarEventState {
                 event_id: ev.event_id, owner_id: ev.owner_id, creator_id: ev.creator_id,
                 event_date_time: ev.event_date_time, duration: ev.duration, importance: ev.importance,
-                title: ev.title, description: ev.description, _scope: ev.scope,
-                responses: ev.responses, is_deleted: ev.is_deleted,
+                title: ev.title.clone(), description: ev.description.clone(), _scope: ev.scope.clone(),
+                responses: ev.responses.clone(), is_deleted: ev.is_deleted,
             });
             if ev.is_deleted {
                 entry.is_deleted = true;
@@ -404,10 +404,10 @@ pub(crate) fn sync_calendar_events_to_db(ctx: &ServerContext) {
             })
             .collect()
     };
-    let matches_db = ctx.db.with_snapshot(|snap| snap.calendar_events == events);
+    let matches_db = ctx.db.with_snapshot(|snap| *snap.calendar_events == events);
     if !matches_db {
         ctx.db.with_mut_snapshot(|snap| {
-            snap.calendar_events = events;
+            snap.calendar_events = events.into();
         });
     }
 }
@@ -506,16 +506,16 @@ pub fn hydrate_social_state_from_db(ctx: &ServerContext) {
         se.blocked_in_channel.clear();
         se.muted_in_channel.clear();
         se.mailing_lists_seeded = seeded;
-        for (cid, charge) in cspa_charges {
+        for (&cid, &charge) in &cspa_charges {
             se.cspa_charges.insert(cid, charge);
         }
-        for pair in trashed_mails {
+        for &pair in &trashed_mails {
             se.trashed_mails.insert(pair);
         }
-        for (k, v) in char_notes {
+        for (k, v) in char_notes.into_inner() {
             se.char_notes.insert(k, v);
         }
-        for (ml_id, ml) in mailing_lists {
+        for (ml_id, ml) in mailing_lists.into_inner() {
             se.next_id = se.next_id.max(ml_id + 1);
             se.mailing_lists.insert(
                 ml_id,
@@ -533,7 +533,7 @@ pub fn hydrate_social_state_from_db(ctx: &ServerContext) {
                 },
             );
         }
-        for (ev_id, ev) in calendar_events {
+        for (ev_id, ev) in calendar_events.into_inner() {
             se.next_id = se.next_id.max(ev_id + 1);
             se.calendar_events.insert(
                 ev_id,
@@ -552,7 +552,7 @@ pub fn hydrate_social_state_from_db(ctx: &ServerContext) {
                 },
             );
         }
-        for (char_id, list) in char_contacts {
+        for (char_id, list) in char_contacts.into_inner() {
             let mut cmap = HashMap::new();
             let mut bset = HashSet::new();
             for c in list {
@@ -566,7 +566,7 @@ pub fn hydrate_social_state_from_db(ctx: &ServerContext) {
             se.contacts.insert(char_id, cmap);
             se.blocked.insert(char_id, bset);
         }
-        for (chan_id, acl) in chat_channel_acl {
+        for (chan_id, acl) in chat_channel_acl.into_inner() {
             if !acl.deny_list.is_empty() {
                 se.blocked_in_channel
                     .insert(chan_id.clone(), acl.deny_list.into_iter().collect());

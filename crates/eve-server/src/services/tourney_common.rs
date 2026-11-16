@@ -98,11 +98,11 @@ impl TourneyStoreExt for TourneyStore {
 }
 
 pub fn load_store(snap: &eve_db::WorldStateSnapshot) -> TourneyStore {
-    snap.tourney_state.clone()
+    snap.tourney_state.as_inner().clone()
 }
 
 pub fn save_store(snap: &mut eve_db::WorldStateSnapshot, store: &TourneyStore, _now_unix: u64) {
-    snap.tourney_state = store.clone();
+    snap.tourney_state = store.clone().into();
 }
 
 /// Registers (or updates) a tournament and its arena system in the persisted tourney store.

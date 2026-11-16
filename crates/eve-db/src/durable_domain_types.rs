@@ -139,6 +139,91 @@ pub mod sorted_map_of_sets_serde {
     }
 }
 
+pub mod cow_cell_tuple_map_serde {
+    use crate::cow::CowCell;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+    use std::hash::Hash;
+
+    pub fn serialize<S, K1, K2, V>(
+        cell: &CowCell<HashMap<(K1, K2), V>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        K1: Serialize + Copy + Ord,
+        K2: Serialize + Copy + Ord,
+        V: Serialize,
+    {
+        super::tuple_map_serde::serialize(cell.as_inner(), serializer)
+    }
+
+    pub fn deserialize<'de, D, K1, K2, V>(
+        deserializer: D,
+    ) -> Result<CowCell<HashMap<(K1, K2), V>>, D::Error>
+    where
+        D: Deserializer<'de>,
+        K1: Deserialize<'de> + Eq + Hash,
+        K2: Deserialize<'de> + Eq + Hash,
+        V: Deserialize<'de>,
+    {
+        super::tuple_map_serde::deserialize(deserializer).map(CowCell::new)
+    }
+}
+
+pub mod cow_cell_sorted_set_serde {
+    use crate::cow::CowCell;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashSet;
+    use std::hash::Hash;
+
+    pub fn serialize<S, T>(cell: &CowCell<HashSet<T>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        T: Serialize + Ord,
+    {
+        super::sorted_set_serde::serialize(cell.as_inner(), serializer)
+    }
+
+    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<CowCell<HashSet<T>>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de> + Eq + Hash,
+    {
+        super::sorted_set_serde::deserialize(deserializer).map(CowCell::new)
+    }
+}
+
+pub mod cow_cell_sorted_map_of_sets_serde {
+    use crate::cow::CowCell;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::{HashMap, HashSet};
+    use std::hash::Hash;
+
+    pub fn serialize<S, K, V>(
+        cell: &CowCell<HashMap<K, HashSet<V>>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        K: Serialize + Ord,
+        V: Serialize + Ord,
+    {
+        super::sorted_map_of_sets_serde::serialize(cell.as_inner(), serializer)
+    }
+
+    pub fn deserialize<'de, D, K, V>(
+        deserializer: D,
+    ) -> Result<CowCell<HashMap<K, HashSet<V>>>, D::Error>
+    where
+        D: Deserializer<'de>,
+        K: Deserialize<'de> + Eq + Hash,
+        V: Deserialize<'de> + Eq + Hash,
+    {
+        super::sorted_map_of_sets_serde::deserialize(deserializer).map(CowCell::new)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CorpGovState {

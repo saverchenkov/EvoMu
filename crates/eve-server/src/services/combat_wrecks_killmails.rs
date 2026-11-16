@@ -44,7 +44,7 @@ pub fn sync_ship_insurance_contracts(ctx: &ServerContext, owner_id: i64) {
             })
             .map(|i| (i.item_id, i.type_id, i.owner_id, i.singleton, i.insured_payout_isk))
             .collect();
-        (items, snap.insurance_contracts.clone())
+        (items, snap.insurance_contracts.as_inner().clone())
     });
     let container_st =
         crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx);

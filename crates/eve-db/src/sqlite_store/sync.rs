@@ -495,26 +495,22 @@ fn sync_part1_cold_tables(
     // 10. wallet_journal
     if snap.wallet_journal.len() < fp.wallet_journal_len
         || (fp.wallet_journal_len > 0
-            && fp_wallet_journal_slice(&snap.wallet_journal[..fp.wallet_journal_len])
-                != fp.wallet_journal_hash)
+            && snap.wallet_journal.prefix_hash(fp.wallet_journal_len) != fp.wallet_journal_hash)
     {
         cold_changed = true;
         tx.execute("DELETE FROM wallet_journal", [])
             .map_err(|e| e.to_string())?;
         fp.wallet_journal_len = 0;
-        fp.wallet_journal_hash = fp_wallet_journal_slice(&[]);
+        fp.wallet_journal_hash = snap.wallet_journal.prefix_hash(0);
     }
     if snap.wallet_journal.len() > fp.wallet_journal_len {
-        for (idx, entry) in snap.wallet_journal[fp.wallet_journal_len..]
-            .iter()
-            .enumerate()
-        {
-            let seq_idx = (fp.wallet_journal_len + idx) as i64;
+        let start = fp.wallet_journal_len;
+        for (seq_idx, entry) in snap.wallet_journal.iter_from(start) {
             tx.execute(
                 "INSERT OR REPLACE INTO wallet_journal (seq_idx, entry_id, character_id, entry_type, amount_cents, balance_after_cents, reason)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
-                    seq_idx,
+                    seq_idx as i64,
                     entry.entry_id,
                     entry.character_id,
                     entry.entry_type,
@@ -527,7 +523,7 @@ fn sync_part1_cold_tables(
             delta.appended_wallet_journal.push(entry.clone());
         }
         fp.wallet_journal_len = snap.wallet_journal.len();
-        fp.wallet_journal_hash = fp_wallet_journal_slice(&snap.wallet_journal);
+        fp.wallet_journal_hash = snap.wallet_journal.prefix_hash(fp.wallet_journal_len);
     }
     Ok(cold_changed)
 }
@@ -851,27 +847,28 @@ fn sync_part2_activity_tables(
 
     // 19. mails
     if snap.mails.len() < fp.mails_len
-        || (fp.mails_len > 0 && fp_mails_slice(&snap.mails[..fp.mails_len]) != fp.mails_hash)
+        || (fp.mails_len > 0
+            && snap.mails.prefix_hash(fp.mails_len) != fp.mails_hash)
     {
         cold_changed = true;
         tx.execute("DELETE FROM mail", [])
             .map_err(|e| e.to_string())?;
         fp.mails_len = 0;
-        fp.mails_hash = fp_mails_slice(&[]);
+        fp.mails_hash = snap.mails.prefix_hash(0);
     }
     if snap.mails.len() > fp.mails_len {
         cold_changed = true;
-        for (idx, m) in snap.mails[fp.mails_len..].iter().enumerate() {
-            let seq_idx = (fp.mails_len + idx) as i64;
+        let start = fp.mails_len;
+        for (seq_idx, m) in snap.mails.iter_from(start) {
             tx.execute(
                 "INSERT OR REPLACE INTO mail (seq_idx, message_id, sender_id, recipient_id, subject, body)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![seq_idx, m.message_id, m.sender_id, m.recipient_id, m.subject, m.body],
+                params![seq_idx as i64, m.message_id, m.sender_id, m.recipient_id, m.subject, m.body],
             )
             .map_err(|e| e.to_string())?;
         }
         fp.mails_len = snap.mails.len();
-        fp.mails_hash = fp_mails_slice(&snap.mails);
+        fp.mails_hash = snap.mails.prefix_hash(fp.mails_len);
     }
     Ok(cold_changed)
 }
@@ -1218,31 +1215,35 @@ fn sync_part4_world_tail_tables(
     }
 
     // 29. idempotency_keys
-    let rem_idem: Vec<(i64, String)> = fp
+    if !fp
         .committed_idempotency_keys
-        .iter()
-        .filter(|k| !snap.committed_idempotency_keys.contains(*k))
-        .cloned()
-        .collect();
-    for (cid, key) in rem_idem {
-        cold_changed = true;
-        tx.execute(
-            "DELETE FROM idempotency_keys WHERE character_id = ?1 AND idem_key = ?2",
-            params![cid, key],
-        )
-        .map_err(|e| e.to_string())?;
-        fp.committed_idempotency_keys.remove(&(cid, key));
-    }
-    for k in &snap.committed_idempotency_keys {
-        if !fp.committed_idempotency_keys.contains(k) {
+        .ptr_eq(&snap.committed_idempotency_keys)
+    {
+        let rem_idem: Vec<(i64, String)> = fp
+            .committed_idempotency_keys
+            .iter()
+            .filter(|k| !snap.committed_idempotency_keys.contains(*k))
+            .cloned()
+            .collect();
+        for (cid, key) in &rem_idem {
+            cold_changed = true;
             tx.execute(
-                "INSERT OR REPLACE INTO idempotency_keys (character_id, idem_key) VALUES (?1, ?2)",
-                params![k.0, k.1],
+                "DELETE FROM idempotency_keys WHERE character_id = ?1 AND idem_key = ?2",
+                params![cid, key],
             )
             .map_err(|e| e.to_string())?;
-            fp.committed_idempotency_keys.insert(k.clone());
-            delta.added_idempotency_keys.push(k.clone());
         }
+        for k in &snap.committed_idempotency_keys {
+            if !fp.committed_idempotency_keys.contains(k) {
+                tx.execute(
+                    "INSERT OR REPLACE INTO idempotency_keys (character_id, idem_key) VALUES (?1, ?2)",
+                    params![k.0, k.1],
+                )
+                .map_err(|e| e.to_string())?;
+                delta.added_idempotency_keys.push(k.clone());
+            }
+        }
+        fp.committed_idempotency_keys = snap.committed_idempotency_keys.clone();
     }
 
     // 30. licensed_skins

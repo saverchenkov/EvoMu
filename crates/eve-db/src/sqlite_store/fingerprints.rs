@@ -810,11 +810,13 @@ pub(crate) fn fp_structure(s: &UpwellStructureRecord) -> u64 {
     canonical_fp(s)
 }
 
+#[cfg(test)]
 #[inline]
 pub(crate) fn fp_wallet_journal_slice(entries: &[WalletJournalEntry]) -> u64 {
     canonical_fp(entries)
 }
 
+#[cfg(test)]
 #[inline]
 pub(crate) fn fp_mails_slice(entries: &[MailRecord]) -> u64 {
     canonical_fp(entries)
@@ -876,7 +878,7 @@ pub struct TableFingerprints {
     pub kill_rights: HashMap<i64, u64>,
     pub structures: HashMap<i64, u64>,
     pub system_states: HashMap<SolarSystemId, u64>,
-    pub committed_idempotency_keys: HashSet<(i64, String)>,
+    pub committed_idempotency_keys: crate::cow::CowCell<HashSet<(i64, String)>>,
     pub licensed_skins: HashMap<i64, u64>,
     pub applied_ship_skins: HashMap<i64, u32>,
     pub asteroids: HashMap<i64, u64>,
@@ -903,12 +905,12 @@ pub fn compute_fingerprints(snap: &WorldStateSnapshot) -> TableFingerprints {
         wal_seq: snap.wal_seq,
         markets_seeded: snap.markets_seeded,
         wallet_journal_len: snap.wallet_journal.len(),
-        wallet_journal_hash: fp_wallet_journal_slice(&snap.wallet_journal),
+        wallet_journal_hash: snap.wallet_journal.prefix_hash(snap.wallet_journal.len()),
         mails_len: snap.mails.len(),
-        mails_hash: fp_mails_slice(&snap.mails),
+        mails_hash: snap.mails.prefix_hash(snap.mails.len()),
         committed_idempotency_keys: snap.committed_idempotency_keys.clone(),
-        mission_tally: snap.mission_tally.clone(),
-        applied_ship_skins: snap.applied_ship_skins.clone(),
+        mission_tally: snap.mission_tally.as_inner().clone(),
+        applied_ship_skins: snap.applied_ship_skins.as_inner().clone(),
         ..Default::default()
     };
     for (k, v) in &snap.accounts {

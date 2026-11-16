@@ -257,28 +257,32 @@ macro_rules! social_domain_ops {
             out: &mut Vec<DomainRowChange>,
         ) {
             $(
-                diff_set_with(
-                    $domain,
-                    stringify!($set_field),
-                    before.$set_field.len(),
-                    after.$set_field.iter(),
-                    |k| before.$set_field.contains(k),
-                    before.$set_field.iter(),
-                    |k| after.$set_field.contains(k),
-                    out,
-                );
+                if !before.$set_field.ptr_eq(&after.$set_field) {
+                    diff_set_with(
+                        $domain,
+                        stringify!($set_field),
+                        before.$set_field.len(),
+                        after.$set_field.iter(),
+                        |k| before.$set_field.contains(k),
+                        before.$set_field.iter(),
+                        |k| after.$set_field.contains(k),
+                        out,
+                    );
+                }
             )*
             $(
-                diff_map_with(
-                    $domain,
-                    stringify!($map_field),
-                    before.$map_field.len(),
-                    after.$map_field.iter(),
-                    |k| before.$map_field.get(k),
-                    before.$map_field.keys(),
-                    |k| after.$map_field.contains_key(k),
-                    out,
-                );
+                if !before.$map_field.ptr_eq(&after.$map_field) {
+                    diff_map_with(
+                        $domain,
+                        stringify!($map_field),
+                        before.$map_field.len(),
+                        after.$map_field.iter(),
+                        |k| before.$map_field.get(k),
+                        before.$map_field.keys(),
+                        |k| after.$map_field.contains_key(k),
+                        out,
+                    );
+                }
             )*
         }
 
@@ -368,52 +372,58 @@ fn diff_social_chat_calendar(
     after: &WorldStateSnapshot,
     out: &mut Vec<DomainRowChange>,
 ) {
-    diff_map_with(
-        DOMAIN_SOCIAL_CHAT_CALENDAR,
-        "calendar_events",
-        before.calendar_events.len(),
-        after.calendar_events.iter(),
-        |k| before.calendar_events.get(k),
-        before.calendar_events.keys(),
-        |k| after.calendar_events.contains_key(k),
-        out,
-    );
-    diff_map_with(
-        DOMAIN_SOCIAL_CHAT_CALENDAR,
-        "chat_channels",
-        before.chat_channels.len(),
-        after.chat_channels.iter(),
-        |k| before.chat_channels.get(k),
-        before.chat_channels.keys(),
-        |k| after.chat_channels.contains_key(k),
-        out,
-    );
-    diff_map_with(
-        DOMAIN_SOCIAL_CHAT_CALENDAR,
-        "chat_channel_acl",
-        before.chat_channel_acl.len(),
-        after
-            .chat_channel_acl
-            .iter()
-            .filter(|(_, acl)| is_chat_acl_non_empty(acl)),
-        |k| {
-            before
-                .chat_channel_acl
-                .get(k)
-                .filter(|acl| is_chat_acl_non_empty(acl))
-        },
-        before
-            .chat_channel_acl
-            .iter()
-            .filter_map(|(k, acl)| is_chat_acl_non_empty(acl).then_some(k)),
-        |k| {
+    if !before.calendar_events.ptr_eq(&after.calendar_events) {
+        diff_map_with(
+            DOMAIN_SOCIAL_CHAT_CALENDAR,
+            "calendar_events",
+            before.calendar_events.len(),
+            after.calendar_events.iter(),
+            |k| before.calendar_events.get(k),
+            before.calendar_events.keys(),
+            |k| after.calendar_events.contains_key(k),
+            out,
+        );
+    }
+    if !before.chat_channels.ptr_eq(&after.chat_channels) {
+        diff_map_with(
+            DOMAIN_SOCIAL_CHAT_CALENDAR,
+            "chat_channels",
+            before.chat_channels.len(),
+            after.chat_channels.iter(),
+            |k| before.chat_channels.get(k),
+            before.chat_channels.keys(),
+            |k| after.chat_channels.contains_key(k),
+            out,
+        );
+    }
+    if !before.chat_channel_acl.ptr_eq(&after.chat_channel_acl) {
+        diff_map_with(
+            DOMAIN_SOCIAL_CHAT_CALENDAR,
+            "chat_channel_acl",
+            before.chat_channel_acl.len(),
             after
                 .chat_channel_acl
-                .get(k)
-                .is_some_and(is_chat_acl_non_empty)
-        },
-        out,
-    );
+                .iter()
+                .filter(|(_, acl)| is_chat_acl_non_empty(acl)),
+            |k| {
+                before
+                    .chat_channel_acl
+                    .get(k)
+                    .filter(|acl| is_chat_acl_non_empty(acl))
+            },
+            before
+                .chat_channel_acl
+                .iter()
+                .filter_map(|(k, acl)| is_chat_acl_non_empty(acl).then_some(k)),
+            |k| {
+                after
+                    .chat_channel_acl
+                    .get(k)
+                    .is_some_and(is_chat_acl_non_empty)
+            },
+            out,
+        );
+    }
 }
 
 fn sync_social_chat_calendar(
@@ -836,30 +846,30 @@ fn load_staged_social(
 }
 
 fn apply_staged_social(staged: StagedSocialState, snap: &mut WorldStateSnapshot) {
-    snap.read_mails = staged.read_mails;
-    snap.deleted_mails = staged.deleted_mails;
-    snap.trashed_mails = staged.trashed_mails;
-    snap.mail_labels = staged.mail_labels;
-    snap.mail_assigned_labels = staged.mail_assigned_labels;
-    snap.mailing_lists = staged.mailing_lists;
-    snap.calendar_events = staged.calendar_events;
-    snap.bookmark_folders = staged.bookmark_folders;
-    snap.bookmark_subfolders = staged.bookmark_subfolders;
-    snap.bookmark_subfolder_parents = staged.bookmark_subfolder_parents;
-    snap.bookmark_expiries = staged.bookmark_expiries;
-    snap.bookmark_folder_acls = staged.bookmark_folder_acls;
-    snap.access_groups = staged.access_groups;
-    snap.bookmark_folder_known_by = staged.bookmark_folder_known_by;
-    snap.chat_channels = staged.chat_channels;
-    snap.chat_channel_acl = staged.chat_channel_acl;
-    snap.char_contacts = staged.char_contacts;
-    snap.char_contact_notifications = staged.char_contact_notifications;
-    snap.char_contact_labels = staged.char_contact_labels;
-    snap.corp_contacts = staged.corp_contacts;
-    snap.corp_contact_labels = staged.corp_contact_labels;
-    snap.alliance_contacts = staged.alliance_contacts;
-    snap.alliance_contact_labels = staged.alliance_contact_labels;
-    snap.char_notes = staged.char_notes;
+    snap.read_mails = staged.read_mails.into();
+    snap.deleted_mails = staged.deleted_mails.into();
+    snap.trashed_mails = staged.trashed_mails.into();
+    snap.mail_labels = staged.mail_labels.into();
+    snap.mail_assigned_labels = staged.mail_assigned_labels.into();
+    snap.mailing_lists = staged.mailing_lists.into();
+    snap.calendar_events = staged.calendar_events.into();
+    snap.bookmark_folders = staged.bookmark_folders.into();
+    snap.bookmark_subfolders = staged.bookmark_subfolders.into();
+    snap.bookmark_subfolder_parents = staged.bookmark_subfolder_parents.into();
+    snap.bookmark_expiries = staged.bookmark_expiries.into();
+    snap.bookmark_folder_acls = staged.bookmark_folder_acls.into();
+    snap.access_groups = staged.access_groups.into();
+    snap.bookmark_folder_known_by = staged.bookmark_folder_known_by.into();
+    snap.chat_channels = staged.chat_channels.into();
+    snap.chat_channel_acl = staged.chat_channel_acl.into();
+    snap.char_contacts = staged.char_contacts.into();
+    snap.char_contact_notifications = staged.char_contact_notifications.into();
+    snap.char_contact_labels = staged.char_contact_labels.into();
+    snap.corp_contacts = staged.corp_contacts.into();
+    snap.corp_contact_labels = staged.corp_contact_labels.into();
+    snap.alliance_contacts = staged.alliance_contacts.into();
+    snap.alliance_contact_labels = staged.alliance_contact_labels.into();
+    snap.char_notes = staged.char_notes.into();
 }
 
 /// Loads all 24 Family 3 (`social`) collections from `domain_rows` (and any unmigrated legacy

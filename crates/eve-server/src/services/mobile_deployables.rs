@@ -75,7 +75,7 @@ pub use eve_db::{
 };
 
 pub fn read_deployable_state_snap(snap: &eve_db::WorldStateSnapshot) -> MobileDeployableRuntimeState {
-    snap.deployable_state.clone()
+    snap.deployable_state.as_inner().clone()
 }
 
 pub fn write_deployable_state_snap<R>(

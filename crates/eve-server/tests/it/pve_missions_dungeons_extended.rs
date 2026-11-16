@@ -206,7 +206,7 @@ async fn test_mission_lp_isk_reward_formula() {
 
     // Verify wallet journal entries were written for mission reward & bonus reward
     ctx.db.with_snapshot(|snap| {
-        let added_entries = &snap.wallet_journal[journal_count_before..];
+        let added_entries: Vec<_> = snap.wallet_journal.iter().skip(journal_count_before).collect();
         let has_reward_journal = added_entries.iter().any(|e| {
             e.character_id == char_id
                 && e.entry_type == "agent_mission_reward"

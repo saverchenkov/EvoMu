@@ -121,11 +121,12 @@ pub fn advance_skyhook_theft_window_in_snap(
         .get(&skyhook_id)
         .and_then(|st| snap.corp_governance.get(&st.owner_corp_id))
         .map(|g| g.reinforce_hour);
-    let window = snap.sov_runtime.skyhook_theft_windows.get_mut(&skyhook_id)?;
+    let sov_rt = &mut *snap.sov_runtime;
+    let window = sov_rt.skyhook_theft_windows.get_mut(&skyhook_id)?;
     if now_unix >= window.1 {
         *window = next_skyhook_theft_window(skyhook_id, window.0, reinforce_hour, now_unix);
         if now_unix < window.0 {
-            snap.sov_runtime.skyhook_hackable.insert(skyhook_id, false);
+            sov_rt.skyhook_hackable.insert(skyhook_id, false);
         }
     }
     Some(*window)

@@ -474,70 +474,70 @@ impl WorldRepository {
             next_entity_id: 200_000_000,
             wal_seq: 0,
             markets_seeded: false,
-            accounts,
+            accounts: accounts.into(),
             characters,
             skills,
             skill_queues: CowMap::new(),
-            jump_clones: HashMap::new(),
-            active_implants: HashMap::new(),
+            jump_clones: Default::default(),
+            active_implants: Default::default(),
             items,
-            saved_fittings: HashMap::new(),
+            saved_fittings: Default::default(),
             market_orders,
-            wallet_journal: Vec::new(),
-            contracts: HashMap::new(),
-            industry_jobs: HashMap::new(),
-            planetary_colonies: HashMap::new(),
-            active_missions: HashMap::new(),
-            mission_tally: HashMap::new(),
-            standing_transactions: HashMap::new(),
-            npe_progress,
-            bookmarks: HashMap::new(),
-            mails: Vec::new(),
-            fleets: HashMap::new(),
-            corporations,
-            alliances: HashMap::new(),
-            wars: HashMap::new(),
-            corp_projects: HashMap::new(),
-            killmails: HashMap::new(),
-            kill_rights: HashMap::new(),
-            structures: HashMap::new(),
-            system_states,
-            committed_idempotency_keys: HashSet::new(),
-            licensed_skins: HashMap::new(),
-            applied_ship_skins: HashMap::new(),
-            chat_channels: HashMap::new(),
-            cosmic_signatures: HashMap::new(),
-            read_mails: HashSet::new(),
-            deleted_mails: HashSet::new(),
-            mail_labels: HashMap::new(),
-            mail_assigned_labels: HashMap::new(),
-            bookmark_folders: HashMap::new(),
-            wh_polarizations: HashMap::new(),
-            mining_ledger: Vec::new(),
+            wallet_journal: Default::default(),
+            contracts: Default::default(),
+            industry_jobs: Default::default(),
+            planetary_colonies: Default::default(),
+            active_missions: Default::default(),
+            mission_tally: Default::default(),
+            standing_transactions: Default::default(),
+            npe_progress: npe_progress.into(),
+            bookmarks: Default::default(),
+            mails: Default::default(),
+            fleets: Default::default(),
+            corporations: corporations.into(),
+            alliances: Default::default(),
+            wars: Default::default(),
+            corp_projects: Default::default(),
+            killmails: Default::default(),
+            kill_rights: Default::default(),
+            structures: Default::default(),
+            system_states: system_states.into(),
+            committed_idempotency_keys: Default::default(),
+            licensed_skins: Default::default(),
+            applied_ship_skins: Default::default(),
+            chat_channels: Default::default(),
+            cosmic_signatures: Default::default(),
+            read_mails: Default::default(),
+            deleted_mails: Default::default(),
+            mail_labels: Default::default(),
+            mail_assigned_labels: Default::default(),
+            bookmark_folders: Default::default(),
+            wh_polarizations: Default::default(),
+            mining_ledger: Default::default(),
             module_online_states: HashMap::new(),
             module_active_states: HashSet::new(),
             module_active_charges: HashMap::new(),
-            ship_fit_inputs: HashMap::new(),
-            weapon_banks: HashMap::new(),
-            asteroids: HashMap::new(),
-            moon_extractions: HashMap::new(),
-            auto_moon_miners: HashMap::new(),
-            observer_mining_ledger: HashMap::new(),
+            ship_fit_inputs: Default::default(),
+            weapon_banks: Default::default(),
+            asteroids: Default::default(),
+            moon_extractions: Default::default(),
+            auto_moon_miners: Default::default(),
+            observer_mining_ledger: Default::default(),
             owner_notes: crate::cow::CowMap::new(),
             paused_skill_queues: HashSet::new(),
-            cosmic_anomalies: HashMap::new(),
-            sov_prospecting_levels: HashMap::new(),
-            last_mission_decline_times: HashMap::new(),
-            character_last_jump_unix: HashMap::new(),
-            character_cspa_charges: HashMap::new(),
-            mail_timestamps: HashMap::new(),
-            character_login_stats: HashMap::new(),
-            item_custom_names: HashMap::new(),
-            item_positions: HashMap::new(),
-            structure_vulnerability_windows: HashMap::new(),
-            skill_history,
-            character_doll_info: HashMap::new(),
-            fw_system_occupations: HashMap::new(),
+            cosmic_anomalies: Default::default(),
+            sov_prospecting_levels: Default::default(),
+            last_mission_decline_times: Default::default(),
+            character_last_jump_unix: Default::default(),
+            character_cspa_charges: Default::default(),
+            mail_timestamps: CowMap::new(),
+            character_login_stats: Default::default(),
+            item_custom_names: CowMap::new(),
+            item_positions: Default::default(),
+            structure_vulnerability_windows: Default::default(),
+            skill_history: skill_history.into(),
+            character_doll_info: Default::default(),
+            fw_system_occupations: Default::default(),
             ..Default::default()
         };
         let mut initial_snap = initial_snap;
@@ -548,7 +548,7 @@ impl WorldRepository {
 
     pub fn populate_demo_snapshot(snap: &mut WorldStateSnapshot) {
         let demo = Self::create_demo_snapshot();
-        for (k, v) in demo.accounts {
+        for (k, v) in demo.accounts.into_inner() {
             snap.accounts.entry(k).or_insert(v);
         }
         for (k, v) in demo.characters {
@@ -557,7 +557,7 @@ impl WorldRepository {
         for (k, v) in demo.skills {
             snap.skills.entry(k).or_insert(v);
         }
-        for (k, v) in demo.skill_history {
+        for (k, v) in demo.skill_history.into_inner() {
             snap.skill_history.entry(k).or_insert(v);
         }
         for (k, v) in demo.items {
@@ -566,22 +566,22 @@ impl WorldRepository {
         for (k, v) in demo.market_orders {
             snap.market_orders.entry(k).or_insert(v);
         }
-        for (k, v) in demo.planetary_colonies {
+        for (k, v) in demo.planetary_colonies.into_inner() {
             snap.planetary_colonies.entry(k).or_insert(v);
         }
-        for (k, v) in demo.corporations {
+        for (k, v) in demo.corporations.into_inner() {
             snap.corporations.entry(k).or_insert(v);
         }
-        for (k, v) in demo.system_states {
+        for (k, v) in demo.system_states.into_inner() {
             snap.system_states.entry(k).or_insert(v);
         }
-        for (k, v) in demo.npe_progress {
+        for (k, v) in demo.npe_progress.into_inner() {
             snap.npe_progress.entry(k).or_insert(v);
         }
         for (k, v) in demo.account_plex_vault {
             snap.account_plex_vault.entry(k).or_insert(v);
         }
-        for (k, v) in demo.fw_system_occupations {
+        for (k, v) in demo.fw_system_occupations.into_inner() {
             snap.fw_system_occupations.entry(k).or_insert(v);
         }
         if snap.next_entity_id < demo.next_entity_id {

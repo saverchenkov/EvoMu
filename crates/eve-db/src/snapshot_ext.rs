@@ -636,70 +636,70 @@ pub struct WorldStateSnapshot {
     #[serde(default)]
     pub markets_seeded: bool,
     #[serde(default)]
-    pub service_state_blobs: HashMap<String, String>,
+    pub service_state_blobs: CowCell<HashMap<String, String>>,
     #[serde(skip, default)]
-    pub sessions: HashMap<u64, OnlineSessionRecord>,
-    pub accounts: HashMap<String, AccountRecord>,
+    pub sessions: CowCell<HashMap<u64, OnlineSessionRecord>>,
+    pub accounts: CowCell<HashMap<String, AccountRecord>>,
     pub characters: CowMap<i64, CharacterRecord>,
     pub skills: CowMap<i64, HashMap<TypeId, TrainedSkillRecord>>,
     pub skill_queues: CowMap<i64, Vec<SkillQueueEntry>>,
-    pub jump_clones: HashMap<i64, Vec<JumpCloneRecord>>,
-    pub active_implants: HashMap<i64, Vec<TypeId>>,
+    pub jump_clones: CowCell<HashMap<i64, Vec<JumpCloneRecord>>>,
+    pub active_implants: CowCell<HashMap<i64, Vec<TypeId>>>,
     pub items: CowMap<i64, InventoryItemRecord>,
     #[serde(skip, default)] pub transient_items: CowMap<i64, InventoryItemRecord>,
     #[serde(skip, default)] pub transient_item_attributes: HashMap<i64, HashMap<AttributeId, f64>>,
-    pub saved_fittings: HashMap<i64, SavedFittingRecord>,
+    pub saved_fittings: CowCell<HashMap<i64, SavedFittingRecord>>,
     pub market_orders: CowMap<i64, MarketOrderRecord>,
-    pub wallet_journal: Vec<WalletJournalEntry>,
-    pub contracts: HashMap<i64, ContractRecord>,
-    pub industry_jobs: HashMap<i64, IndustryJobRecord>,
-    #[serde(with = "tuple_map_serde")]
-    pub planetary_colonies: HashMap<(i64, i64), PlanetaryColonyRecord>,
-    #[serde(with = "tuple_map_serde")]
-    pub active_missions: HashMap<(i64, u32), ActiveMissionRecord>,
-    pub mission_tally: HashMap<i64, u32>,
+    pub wallet_journal: CowIdVec<WalletJournalEntry>,
+    pub contracts: CowCell<HashMap<i64, ContractRecord>>,
+    pub industry_jobs: CowCell<HashMap<i64, IndustryJobRecord>>,
+    #[serde(with = "cow_cell_tuple_map_serde")]
+    pub planetary_colonies: CowCell<HashMap<(i64, i64), PlanetaryColonyRecord>>,
+    #[serde(with = "crate::cow_collections::cow_active_missions_tuple_serde")]
+    pub active_missions: CowActiveMissions,
+    pub mission_tally: CowCell<HashMap<i64, u32>>,
     #[serde(default)]
-    pub standing_transactions: HashMap<i64, Vec<StandingTransactionRecord>>,
-    pub npe_progress: HashMap<i64, NpeProgressRecord>,
-    pub bookmarks: HashMap<i64, BookmarkRecord>,
-    pub mails: Vec<MailRecord>,
-    pub fleets: HashMap<i64, FleetRecord>,
-    pub corporations: HashMap<i64, CorporationRecord>,
+    pub standing_transactions: CowCell<HashMap<i64, Vec<StandingTransactionRecord>>>,
+    pub npe_progress: CowCell<HashMap<i64, NpeProgressRecord>>,
+    pub bookmarks: CowCell<HashMap<i64, BookmarkRecord>>,
+    pub mails: CowIdVec<MailRecord>,
+    pub fleets: CowCell<HashMap<i64, FleetRecord>>,
+    pub corporations: CowCell<HashMap<i64, CorporationRecord>>,
     #[serde(default)]
-    pub quasar_state_blobs: HashMap<String, String>,
+    pub quasar_state_blobs: CowCell<HashMap<String, String>>,
     #[serde(default)]
-    pub alliances: HashMap<i64, AllianceRecord>,
+    pub alliances: CowCell<HashMap<i64, AllianceRecord>>,
     #[serde(default)]
-    pub wars: HashMap<i64, WarRecord>,
-    pub corp_projects: HashMap<i64, CorpProjectRecord>,
-    pub killmails: HashMap<i64, KillmailRecord>,
-    pub kill_rights: HashMap<i64, KillRightRecord>,
-    pub structures: HashMap<i64, UpwellStructureRecord>,
-    pub system_states: HashMap<SolarSystemId, SystemDynamicState>,
-    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
-    pub committed_idempotency_keys: HashSet<(i64, String)>,
+    pub wars: CowCell<HashMap<i64, WarRecord>>,
+    pub corp_projects: CowCell<HashMap<i64, CorpProjectRecord>>,
+    pub killmails: CowCell<HashMap<i64, KillmailRecord>>,
+    pub kill_rights: CowCell<HashMap<i64, KillRightRecord>>,
+    pub structures: CowMap<i64, UpwellStructureRecord>,
+    pub system_states: CowCell<HashMap<SolarSystemId, SystemDynamicState>>,
+    #[serde(default, with = "crate::durable_domain_types::cow_cell_sorted_set_serde")]
+    pub committed_idempotency_keys: CowCell<HashSet<(i64, String)>>,
     #[serde(default)]
-    pub licensed_skins: HashMap<i64, Vec<u32>>,
+    pub licensed_skins: CowCell<HashMap<i64, Vec<u32>>>,
     #[serde(default)]
-    pub applied_ship_skins: HashMap<i64, u32>,
+    pub applied_ship_skins: CowCell<HashMap<i64, u32>>,
     #[serde(default)]
-    pub chat_channels: HashMap<String, ChatChannelRecord>,
+    pub chat_channels: CowCell<HashMap<String, ChatChannelRecord>>,
     #[serde(default)]
-    pub cosmic_signatures: HashMap<SolarSystemId, Vec<CosmicSignatureRecord>>,
-    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
-    pub read_mails: HashSet<(i64, i64)>,
-    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
-    pub deleted_mails: HashSet<(i64, i64)>,
+    pub cosmic_signatures: CowCell<HashMap<SolarSystemId, Vec<CosmicSignatureRecord>>>,
+    #[serde(default, with = "crate::durable_domain_types::cow_cell_sorted_set_serde")]
+    pub read_mails: CowCell<HashSet<(i64, i64)>>,
+    #[serde(default, with = "crate::durable_domain_types::cow_cell_sorted_set_serde")]
+    pub deleted_mails: CowCell<HashSet<(i64, i64)>>,
     #[serde(default)]
-    pub mail_labels: HashMap<i64, Vec<MailLabelRecord>>,
-    #[serde(default, with = "tuple_map_serde")]
-    pub mail_assigned_labels: HashMap<(i64, i64), Vec<i64>>,
+    pub mail_labels: CowCell<HashMap<i64, Vec<MailLabelRecord>>>,
+    #[serde(default, with = "cow_cell_tuple_map_serde")]
+    pub mail_assigned_labels: CowCell<HashMap<(i64, i64), Vec<i64>>>,
     #[serde(default)]
-    pub bookmark_folders: HashMap<i64, BookmarkFolderRecord>,
-    #[serde(default, with = "tuple_map_serde")]
-    pub wh_polarizations: HashMap<(i64, i64), u64>,
+    pub bookmark_folders: CowCell<HashMap<i64, BookmarkFolderRecord>>,
+    #[serde(default, with = "cow_cell_tuple_map_serde")]
+    pub wh_polarizations: CowCell<HashMap<(i64, i64), u64>>,
     #[serde(default)]
-    pub mining_ledger: Vec<MiningLedgerRecord>,
+    pub mining_ledger: CowCell<Vec<MiningLedgerRecord>>,
     pub module_online_states: HashMap<i64, bool>,
     /// Fitted modules currently cycling, set by `dogmaIM.Activate` and cleared by `dogmaIM.Deactivate`.
     #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
@@ -708,121 +708,121 @@ pub struct WorldStateSnapshot {
     #[serde(default)]
     pub module_active_charges: HashMap<i64, u32>,
     #[serde(default)]
-    pub ship_fit_inputs: HashMap<i64, ShipFitInputsRecord>,
+    pub ship_fit_inputs: CowCell<HashMap<i64, ShipFitInputsRecord>>,
     #[serde(default)]
-    pub weapon_banks: HashMap<i64, HashMap<i64, Vec<i64>>>,
+    pub weapon_banks: CowCell<HashMap<i64, HashMap<i64, Vec<i64>>>>,
     #[serde(default)]
-    pub asteroids: HashMap<i64, AsteroidRecord>,
+    pub asteroids: CowCell<HashMap<i64, AsteroidRecord>>,
     #[serde(default)]
-    pub moon_extractions: HashMap<i64, MoonExtractionRecord>,
+    pub moon_extractions: CowCell<HashMap<i64, MoonExtractionRecord>>,
     #[serde(default)]
-    pub auto_moon_miners: HashMap<i64, AutoMoonMinerRecord>,
+    pub auto_moon_miners: CowCell<HashMap<i64, AutoMoonMinerRecord>>,
     #[serde(default)]
-    pub observer_mining_ledger: HashMap<i64, Vec<ObserverMiningRecord>>,
+    pub observer_mining_ledger: CowCell<HashMap<i64, Vec<ObserverMiningRecord>>>,
     #[serde(default)]
     pub owner_notes: crate::cow::CowMap<i64, OwnerNoteRecord>,
     #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub paused_skill_queues: HashSet<i64>,
     #[serde(default)]
-    pub cosmic_anomalies: HashMap<SolarSystemId, Vec<CosmicAnomalyRecord>>,
+    pub cosmic_anomalies: CowCell<HashMap<SolarSystemId, Vec<CosmicAnomalyRecord>>>,
     #[serde(default)]
-    pub sov_prospecting_levels: HashMap<SolarSystemId, u32>,
+    pub sov_prospecting_levels: CowCell<HashMap<SolarSystemId, u32>>,
     #[serde(default)]
-    pub last_mission_decline_times: HashMap<i64, u64>,
+    pub last_mission_decline_times: CowCell<HashMap<i64, u64>>,
     #[serde(default)]
-    pub character_last_jump_unix: HashMap<i64, u64>,
+    pub character_last_jump_unix: CowCell<HashMap<i64, u64>>,
     #[serde(default)]
-    pub character_cspa_charges: HashMap<i64, IskCents>,
+    pub character_cspa_charges: CowCell<HashMap<i64, IskCents>>,
     #[serde(default)]
-    pub mail_timestamps: HashMap<i64, u64>,
+    pub mail_timestamps: CowMap<i64, u64>,
     #[serde(default)]
-    pub character_login_stats: HashMap<i64, CharacterLoginStats>,
+    pub character_login_stats: CowCell<HashMap<i64, CharacterLoginStats>>,
     #[serde(default)]
-    pub item_custom_names: HashMap<i64, String>,
+    pub item_custom_names: CowMap<i64, String>,
     #[serde(default)]
-    pub item_positions: HashMap<i64, [f64; 3]>,
+    pub item_positions: CowCell<HashMap<i64, [f64; 3]>>,
     #[serde(default)]
-    pub structure_vulnerability_windows: HashMap<i64, (u64, u64)>,
+    pub structure_vulnerability_windows: CowCell<HashMap<i64, (u64, u64)>>,
     #[serde(default)]
-    pub skill_history: HashMap<i64, Vec<SkillHistoryEntry>>,
+    pub skill_history: CowCell<HashMap<i64, Vec<SkillHistoryEntry>>>,
     #[serde(default)]
-    pub character_doll_info: HashMap<i64, (String, String)>,
+    pub character_doll_info: CowCell<HashMap<i64, (String, String)>>,
     #[serde(default)]
-    pub system_jump_events: Vec<SystemJumpEvent>,
+    pub system_jump_events: CowCell<Vec<SystemJumpEvent>>,
     #[serde(default)]
-    pub system_kill_events: Vec<SystemKillEvent>,
+    pub system_kill_events: CowCell<Vec<SystemKillEvent>>,
     #[serde(default)]
-    pub incursions: HashMap<u32, IncursionRecord>,
+    pub incursions: CowCell<HashMap<u32, IncursionRecord>>,
     #[serde(default)]
-    pub sov_campaign_scores: HashMap<i64, SovCampaignScoreRecord>,
+    pub sov_campaign_scores: CowCell<HashMap<i64, SovCampaignScoreRecord>>,
     #[serde(default)]
-    pub fw_character_stats: HashMap<i64, FwCharacterStatsRecord>,
+    pub fw_character_stats: CowCell<HashMap<i64, FwCharacterStatsRecord>>,
     #[serde(default)]
-    pub fw_corp_enlisted_on: HashMap<i64, u64>,
+    pub fw_corp_enlisted_on: CowCell<HashMap<i64, u64>>,
     #[serde(default)]
-    pub fw_system_occupations: HashMap<SolarSystemId, FwSystemOccupationRecord>,
+    pub fw_system_occupations: CowCell<HashMap<SolarSystemId, FwSystemOccupationRecord>>,
     #[serde(default)]
-    pub fw_wars: Vec<(i64, i64)>,
+    pub fw_wars: CowCell<Vec<(i64, i64)>>,
     #[serde(default)]
-    pub war_lifecycle_meta: HashMap<i64, WarLifecycleMeta>,
+    pub war_lifecycle_meta: CowCell<HashMap<i64, WarLifecycleMeta>>,
     #[serde(default)]
-    pub killmail_details: HashMap<i64, KillmailDetailRecord>,
+    pub killmail_details: CowCell<HashMap<i64, KillmailDetailRecord>>,
     #[serde(default)]
-    pub station_office_rental_costs: HashMap<i64, f64>,
+    pub station_office_rental_costs: CowCell<HashMap<i64, f64>>,
     #[serde(default)]
-    pub alliance_lifecycle_meta: HashMap<i64, AllianceLifecycleMeta>,
+    pub alliance_lifecycle_meta: CowCell<HashMap<i64, AllianceLifecycleMeta>>,
     #[serde(default)]
-    pub corp_hangar_divisions: HashMap<i64, HashMap<u8, String>>,
+    pub corp_hangar_divisions: CowCell<HashMap<i64, HashMap<u8, String>>>,
     #[serde(default)]
-    pub structure_esi_timer_meta: HashMap<i64, StructureEsiTimerMeta>,
+    pub structure_esi_timer_meta: CowCell<HashMap<i64, StructureEsiTimerMeta>>,
     #[serde(default)]
-    pub corp_alliance_history: HashMap<i64, Vec<CorpAllianceHistoryEntry>>,
+    pub corp_alliance_history: CowCell<HashMap<i64, Vec<CorpAllianceHistoryEntry>>>,
     #[serde(default)]
-    pub corp_container_logs: HashMap<i64, Vec<CorpContainerLogEntry>>,
+    pub corp_container_logs: CowCell<HashMap<i64, Vec<CorpContainerLogEntry>>>,
     #[serde(default)]
-    pub corp_medals: HashMap<i64, Vec<CorpMedalEntry>>,
+    pub corp_medals: CowCell<HashMap<i64, Vec<CorpMedalEntry>>>,
     #[serde(default)]
-    pub corp_issued_medals: HashMap<i64, Vec<CorpIssuedMedalEntry>>,
+    pub corp_issued_medals: CowCell<HashMap<i64, Vec<CorpIssuedMedalEntry>>>,
     #[serde(default)]
-    pub corp_member_limits: HashMap<i64, i64>,
+    pub corp_member_limits: CowCell<HashMap<i64, i64>>,
     #[serde(default)]
-    pub corp_titles: HashMap<i64, Vec<CorpTitleEntry>>,
-    #[serde(default, with = "tuple_map_serde")]
-    pub corp_member_titles: HashMap<(i64, i64), Vec<i64>>,
-    #[serde(default, with = "tuple_map_serde")]
-    pub corp_role_assignments: HashMap<(i64, i64), CorpMemberRoleAssignment>,
+    pub corp_titles: CowCell<HashMap<i64, Vec<CorpTitleEntry>>>,
+    #[serde(default, with = "cow_cell_tuple_map_serde")]
+    pub corp_member_titles: CowCell<HashMap<(i64, i64), Vec<i64>>>,
+    #[serde(default, with = "cow_cell_tuple_map_serde")]
+    pub corp_role_assignments: CowCell<HashMap<(i64, i64), CorpMemberRoleAssignment>>,
     #[serde(default)]
-    pub corp_role_history: HashMap<i64, Vec<CorpRoleHistoryEntry>>,
+    pub corp_role_history: CowCell<HashMap<i64, Vec<CorpRoleHistoryEntry>>>,
     #[serde(default)]
-    pub corp_shareholders: HashMap<i64, Vec<CorpShareholderEntry>>,
+    pub corp_shareholders: CowCell<HashMap<i64, Vec<CorpShareholderEntry>>>,
     #[serde(default)]
-    pub starbase_settings: HashMap<i64, StarbaseDetailSettings>,
+    pub starbase_settings: CowCell<HashMap<i64, StarbaseDetailSettings>>,
     #[serde(default)]
-    pub corp_project_contributors: HashMap<i64, Vec<CorpProjectContributorEntry>>,
+    pub corp_project_contributors: CowCell<HashMap<i64, Vec<CorpProjectContributorEntry>>>,
     #[serde(default)]
-    pub char_research_agents: HashMap<i64, Vec<CharacterResearchAgentRecord>>,
+    pub char_research_agents: CowCell<HashMap<i64, Vec<CharacterResearchAgentRecord>>>,
     #[serde(default)]
-    pub char_medals: HashMap<i64, Vec<CharacterMedalRecord>>,
+    pub char_medals: CowCell<HashMap<i64, Vec<CharacterMedalRecord>>>,
     #[serde(default)]
-    pub char_scoped_roles: HashMap<i64, CharacterScopedRolesRecord>,
+    pub char_scoped_roles: CowCell<HashMap<i64, CharacterScopedRolesRecord>>,
     #[serde(default)]
-    pub loyalty_store_offers: HashMap<i64, Vec<LoyaltyStoreOfferRecord>>,
+    pub loyalty_store_offers: CowCell<HashMap<i64, Vec<LoyaltyStoreOfferRecord>>>,
     #[serde(default)]
-    pub wallet_journal_timestamps: HashMap<i64, u64>,
+    pub wallet_journal_timestamps: CowMap<i64, u64>,
     #[serde(default)]
-    pub char_wallet_transactions: HashMap<i64, Vec<WalletTransactionRecord>>,
-    #[serde(default, with = "tuple_map_serde")]
-    pub corp_wallet_journals: HashMap<(i64, i64), Vec<CorpWalletJournalRecord>>,
-    #[serde(default, with = "tuple_map_serde")]
-    pub corp_wallet_transactions: HashMap<(i64, i64), Vec<WalletTransactionRecord>>,
+    pub char_wallet_transactions: CowCell<HashMap<i64, Vec<WalletTransactionRecord>>>,
+    #[serde(default, with = "cow_cell_tuple_map_serde")]
+    pub corp_wallet_journals: CowCell<HashMap<(i64, i64), Vec<CorpWalletJournalRecord>>>,
+    #[serde(default, with = "cow_cell_tuple_map_serde")]
+    pub corp_wallet_transactions: CowCell<HashMap<(i64, i64), Vec<WalletTransactionRecord>>>,
     #[serde(default)]
-    pub market_order_meta: HashMap<i64, MarketOrderMeta>,
-    #[serde(default, with = "tuple_map_serde")]
-    pub market_history: HashMap<(u32, TypeId), Vec<MarketHistoryDayRecord>>,
-    #[serde(default, with = "tuple_map_serde")]
-    pub planetary_colony_layouts: HashMap<(i64, i64), PlanetaryColonyLayoutRecord>,
+    pub market_order_meta: CowCell<HashMap<i64, MarketOrderMeta>>,
+    #[serde(default, with = "cow_cell_tuple_map_serde")]
+    pub market_history: CowCell<HashMap<(u32, TypeId), Vec<MarketHistoryDayRecord>>>,
+    #[serde(default, with = "cow_cell_tuple_map_serde")]
+    pub planetary_colony_layouts: CowCell<HashMap<(i64, i64), PlanetaryColonyLayoutRecord>>,
     #[serde(default)]
-    pub corp_customs_offices: HashMap<i64, Vec<CustomsOfficeRecord>>,
+    pub corp_customs_offices: CowCell<HashMap<i64, Vec<CustomsOfficeRecord>>>,
     /// Journal parties/context metadata keyed by journal entry ID (`crate::ledger`).
     #[serde(default)]
     pub wallet_journal_meta: crate::cow::CowMap<i64, crate::ledger::JournalMeta>,
@@ -833,15 +833,15 @@ pub struct WorldStateSnapshot {
     #[serde(default)]
     pub account_plex_vault: crate::cow::CowMap<u64, i64>,
     #[serde(default)]
-    pub corp_vote_cases: HashMap<i64, CorpVoteCaseRecord>,
-    #[serde(default, with = "tuple_map_serde")]
-    pub corp_vote_ballots: HashMap<(i64, i64), CorpVoteBallotRecord>,
+    pub corp_vote_cases: CowCell<HashMap<i64, CorpVoteCaseRecord>>,
+    #[serde(default, with = "cow_cell_tuple_map_serde")]
+    pub corp_vote_ballots: CowCell<HashMap<(i64, i64), CorpVoteBallotRecord>>,
     #[serde(default)]
-    pub orbital_provision_types: HashMap<i64, i64>,
+    pub orbital_provision_types: CowCell<HashMap<i64, i64>>,
     #[serde(default, with = "crate::durable_domain_types::cow_tuple_map_serde")]
     pub corp_lp_balances: crate::cow::CowMap<(i64, i64), i64>,
     #[serde(default)]
-    pub char_lp_logs: crate::cow::CowMap<i64, Vec<LpRewardLogEntry>>,
+    pub char_lp_logs: CowLpLogs,
     #[serde(default)]
     pub next_alliance_id: i64,
     #[serde(default)]
@@ -850,72 +850,72 @@ pub struct WorldStateSnapshot {
     pub next_notification_id: i64,
     #[serde(default)]
     pub next_report_id: i64,
-    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
-    pub trashed_mails: HashSet<(i64, i64)>,
+    #[serde(default, with = "crate::durable_domain_types::cow_cell_sorted_set_serde")]
+    pub trashed_mails: CowCell<HashSet<(i64, i64)>>,
     #[serde(default)]
-    pub mailing_lists: HashMap<i64, MailingListRecord>,
+    pub mailing_lists: CowCell<HashMap<i64, MailingListRecord>>,
     #[serde(default)]
-    pub calendar_events: HashMap<i64, CalendarEventRecord>,
+    pub calendar_events: CowCell<HashMap<i64, CalendarEventRecord>>,
     #[serde(default)]
-    pub char_contacts: HashMap<i64, Vec<SocialContactRecord>>,
+    pub char_contacts: CowCell<HashMap<i64, Vec<SocialContactRecord>>>,
     #[serde(default)]
-    pub char_contact_notifications: HashMap<i64, Vec<crate::durable_domain_types::SocialContactNotificationRecord>>,
+    pub char_contact_notifications: CowCell<HashMap<i64, Vec<crate::durable_domain_types::SocialContactNotificationRecord>>>,
     #[serde(default)]
-    pub char_contact_labels: HashMap<i64, Vec<(i64, String)>>,
+    pub char_contact_labels: CowCell<HashMap<i64, Vec<(i64, String)>>>,
     #[serde(default)]
-    pub corp_contacts: HashMap<i64, Vec<SocialContactRecord>>,
+    pub corp_contacts: CowCell<HashMap<i64, Vec<SocialContactRecord>>>,
     #[serde(default)]
-    pub corp_contact_labels: HashMap<i64, Vec<(i64, String, u32)>>,
+    pub corp_contact_labels: CowCell<HashMap<i64, Vec<(i64, String, u32)>>>,
     #[serde(default)]
-    pub alliance_contacts: HashMap<i64, Vec<SocialContactRecord>>,
+    pub alliance_contacts: CowCell<HashMap<i64, Vec<SocialContactRecord>>>,
     #[serde(default)]
-    pub alliance_contact_labels: HashMap<i64, Vec<(i64, String)>>,
-    #[serde(default, with = "tuple_map_serde")]
-    pub char_notes: HashMap<(i64, i64), String>,
+    pub alliance_contact_labels: CowCell<HashMap<i64, Vec<(i64, String)>>>,
+    #[serde(default, with = "cow_cell_tuple_map_serde")]
+    pub char_notes: CowCell<HashMap<(i64, i64), String>>,
     #[serde(default)]
-    pub bookmark_subfolders: HashMap<i64, i64>,
+    pub bookmark_subfolders: CowCell<HashMap<i64, i64>>,
     #[serde(default)]
-    pub bookmark_subfolder_parents: HashMap<i64, i64>,
+    pub bookmark_subfolder_parents: CowCell<HashMap<i64, i64>>,
     #[serde(default)]
-    pub bookmark_expiries: HashMap<i64, u64>,
+    pub bookmark_expiries: CowCell<HashMap<i64, u64>>,
     #[serde(default)]
-    pub bookmark_folder_acls: HashMap<i64, Vec<i64>>,
+    pub bookmark_folder_acls: CowCell<HashMap<i64, Vec<i64>>>,
     #[serde(default)]
-    pub access_groups: HashMap<i64, Vec<i64>>,
-    #[serde(default, with = "tuple_map_serde")]
-    pub bookmark_folder_known_by: HashMap<(i64, i64), bool>,
+    pub access_groups: CowCell<HashMap<i64, Vec<i64>>>,
+    #[serde(default, with = "cow_cell_tuple_map_serde")]
+    pub bookmark_folder_known_by: CowCell<HashMap<(i64, i64), bool>>,
     #[serde(default)]
-    pub chat_channel_acl: HashMap<String, ChatChannelAclRecord>,
+    pub chat_channel_acl: CowCell<HashMap<String, ChatChannelAclRecord>>,
     #[serde(default)]
-    pub corp_governance: HashMap<i64, CorpGovState>,
+    pub corp_governance: CowCell<HashMap<i64, CorpGovState>>,
     #[serde(default)]
-    pub employment_history: HashMap<i64, Vec<(i64, u64, Option<u64>)>>,
+    pub employment_history: CowCell<HashMap<i64, Vec<(i64, u64, Option<u64>)>>>,
     #[serde(default)]
-    pub alliance_war_state: PersistedAllianceWarState,
+    pub alliance_war_state: CowCell<PersistedAllianceWarState>,
     #[serde(default)]
-    pub war_state: PersistedWarState,
+    pub war_state: CowCell<PersistedWarState>,
     #[serde(default)]
-    pub fw_runtime: PersistedFwState,
+    pub fw_runtime: CowCell<PersistedFwState>,
     #[serde(default)]
-    pub sov_runtime: PersistedSovState,
+    pub sov_runtime: CowCell<PersistedSovState>,
     #[serde(default)]
-    pub insurgency_runtime: PersistedInsurgencyState,
+    pub insurgency_runtime: CowCell<PersistedInsurgencyState>,
     #[serde(default)]
-    pub crimewatch_states: HashMap<i64, PersistedCrimeWatchState>,
-    #[serde(default, with = "tuple_map_serde")]
-    pub crimewatch_aggressions: HashMap<(i64, i64), PersistedAggressionRecord>,
+    pub crimewatch_states: CowCell<HashMap<i64, PersistedCrimeWatchState>>,
+    #[serde(default, with = "cow_cell_tuple_map_serde")]
+    pub crimewatch_aggressions: CowCell<HashMap<(i64, i64), PersistedAggressionRecord>>,
     #[serde(default)]
-    pub combat_crimewatch_state: PersistedCombatCrimewatchState,
+    pub combat_crimewatch_state: CowCell<PersistedCombatCrimewatchState>,
     #[serde(default)]
-    pub zarzakh_gate_locks: HashMap<i64, (i64, u64)>,
-    #[serde(default, with = "crate::durable_domain_types::sorted_map_of_sets_serde")]
-    pub structure_docking_acl_denied: HashMap<i64, HashSet<i64>>,
+    pub zarzakh_gate_locks: CowCell<HashMap<i64, (i64, u64)>>,
+    #[serde(default, with = "crate::durable_domain_types::cow_cell_sorted_map_of_sets_serde")]
+    pub structure_docking_acl_denied: CowCell<HashMap<i64, HashSet<i64>>>,
     #[serde(default)]
     pub sp6_lifecycle: Sp6PersistedState,
     #[serde(default)]
     pub pve_special_sites: crate::service_domains::PveSpecialSitesState,
     #[serde(default)]
-    pub crab_beacons: crate::service_domains::CrabBeaconStore,
+    pub crab_beacons: CowCell<crate::service_domains::CrabBeaconStore>,
     #[serde(default)]
     pub abyssal_state: crate::service_domains::AbyssalRuntimeStore,
     #[serde(default)]
@@ -923,36 +923,36 @@ pub struct WorldStateSnapshot {
     #[serde(default)]
     pub dungeon_editor: crate::service_domains::DungeonEditorStore,
     #[serde(default)]
-    pub fob_observatory_state: crate::service_domains::FobObservatoryStore,
+    pub fob_observatory_state: CowCell<crate::service_domains::FobObservatoryStore>,
     #[serde(default)]
-    pub mining_and_ess_state: crate::service_domains::MiningAndEssRuntimeStore,
+    pub mining_and_ess_state: CowCell<crate::service_domains::MiningAndEssRuntimeStore>,
     #[serde(default)]
-    pub pvp_filament_state: crate::service_domains::PvpFilamentStore,
+    pub pvp_filament_state: CowCell<crate::service_domains::PvpFilamentStore>,
     #[serde(default)]
-    pub tourney_state: crate::service_domains::TourneyStore,
+    pub tourney_state: CowCell<crate::service_domains::TourneyStore>,
     #[serde(default)]
-    pub deployable_state: crate::service_domains::MobileDeployableRuntimeState,
+    pub deployable_state: CowCell<crate::service_domains::MobileDeployableRuntimeState>,
     #[serde(default)]
-    pub superweapon_runtime: crate::service_domains::PersistedSuperweaponRuntime,
+    pub superweapon_runtime: CowCell<crate::service_domains::PersistedSuperweaponRuntime>,
     #[serde(default)]
-    pub insurgency_complex_ops: crate::service_domains::InsurgencyComplexOpsState,
+    pub insurgency_complex_ops: CowCell<crate::service_domains::InsurgencyComplexOpsState>,
     #[serde(default)]
-    pub node_graph_state: crate::service_domains::NodeGraphAndProgressionStore,
+    pub node_graph_state: CowCell<crate::service_domains::NodeGraphAndProgressionStore>,
     #[serde(default)]
-    pub seasons_and_campaigns: crate::service_domains::SeasonsAndCampaignsStore,
+    pub seasons_and_campaigns: CowCell<crate::service_domains::SeasonsAndCampaignsStore>,
     #[serde(default)]
-    pub quasar_commerce: crate::service_domains::QuasarCommerceStore,
+    pub quasar_commerce: CowCell<crate::service_domains::QuasarCommerceStore>,
     #[serde(default)]
-    pub fleet_and_social_ops: crate::service_domains::FleetAndSocialOpsStore,
+    pub fleet_and_social_ops: CowCell<crate::service_domains::FleetAndSocialOpsStore>,
     #[serde(default)]
-    pub cluster_and_runtime: crate::service_domains::ClusterAndRuntimeStore,
+    pub cluster_and_runtime: CowCell<crate::service_domains::ClusterAndRuntimeStore>,
     #[serde(default, with = "crate::service_domains::entity_kv_map_serde")]
     pub entity_kv: std::collections::BTreeMap<
         crate::service_domains::EntityKvKey,
         crate::service_domains::EntityKvRow,
     >,
     #[serde(default)]
-    pub insurance_contracts: HashMap<i64, PersistedInsuranceContractRecord>,
+    pub insurance_contracts: CowCell<HashMap<i64, PersistedInsuranceContractRecord>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -1897,18 +1897,20 @@ impl WorldStateSnapshot {
                 return true;
             }
         }
-        self.mails.iter().any(|m| m.message_id == candidate)
-            || self.wallet_journal.iter().any(|e| e.entry_id == candidate)
-            || self
-                .char_lp_logs
-                .values()
-                .flatten()
-                .any(|l| l.log_id == candidate)
-            || self
-                .active_missions
-                .values()
-                .any(|m| m.spawned_npc_ball_ids.contains(&candidate))
-            || self.entity_kv.keys().any(|k| k.entity_id == candidate)
+        self.mails.contains_id(candidate)
+            || self.wallet_journal.contains_id(candidate)
+            || self.char_lp_logs.contains_log_id(candidate)
+            || self.active_missions.contains_spawned_npc_id(candidate)
+            || crate::service_domains::entity_kv::Ns::ALL.iter().any(|&ns| {
+                self.entity_kv
+                    .range(crate::service_domains::entity_kv::EntityKvKey {
+                        ns,
+                        entity_id: candidate,
+                        sub_key: String::new(),
+                    }..)
+                    .next()
+                    .is_some_and(|(k, _)| k.ns == ns && k.entity_id == candidate)
+            })
     }
 
     fn entity_id_sources(&self) -> impl Iterator<Item = i64> + '_ {

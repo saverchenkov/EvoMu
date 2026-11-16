@@ -1479,7 +1479,7 @@ where
     }
 
     fn sync_full(&self, tx: &Transaction<'_>, domain: &'static str) -> Result<bool, String> {
-        sync_entries_map(tx, domain, std::iter::once((().encode_key(), self.get())))
+        sync_entries_map(tx, domain, std::iter::once((().encode_key(), self.as_inner())))
     }
 
     fn load_domain(
@@ -1492,6 +1492,31 @@ where
             .pop()
             .map(|(_, val)| CowCell::new(val))
             .unwrap_or_default())
+    }
+}
+
+impl Persist for crate::cow_collections::CowLpLogs {
+    fn collect_diff_ops(
+        &self,
+        after: &Self,
+        domain: &'static str,
+        out: &mut Vec<DomainRowChange>,
+    ) {
+        self.as_cow_map()
+            .collect_diff_ops(after.as_cow_map(), domain, out);
+    }
+
+    fn sync_full(&self, tx: &Transaction<'_>, domain: &'static str) -> Result<bool, String> {
+        self.as_cow_map().sync_full(tx, domain)
+    }
+
+    fn load_domain(
+        conn: &Connection,
+        domain: &'static str,
+        ctx: &mut super::quarantine::LoadContext,
+    ) -> Result<Self, String> {
+        CowMap::<i64, Vec<crate::snapshot_ext::LpRewardLogEntry>>::load_domain(conn, domain, ctx)
+            .map(Self::from)
     }
 }
 
@@ -2257,7 +2282,7 @@ pub(crate) fn load_notes_lp_domain_rows(
 
     snap.owner_notes = owner_notes;
     snap.corp_lp_balances = corp_lp_balances;
-    snap.char_lp_logs = char_lp_logs;
+    snap.char_lp_logs = char_lp_logs.into();
 
     Ok(had_legacy)
 }
@@ -2436,7 +2461,7 @@ mod tests {
         assert!(ops.is_empty());
 
         let mut cell_after = cell_before.clone();
-        cell_after.get_mut().amount_u128 = u128::MAX;
+        cell_after.as_inner_mut().amount_u128 = u128::MAX;
         cell_before.collect_diff_ops(&cell_after, "test.cell", &mut ops);
         assert_eq!(ops.len(), 1);
 

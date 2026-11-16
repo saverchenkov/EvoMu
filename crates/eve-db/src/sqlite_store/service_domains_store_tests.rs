@@ -997,9 +997,9 @@ fn legacy_service_domain_state_migrates_to_domain_rows_and_drops_legacy_table() 
     }
 
     let (migrated, _fp) = load_snapshot_from_sqlite(&conn).expect("load + migrate");
-    assert_eq!(migrated.mining_and_ess_state, legacy_mining);
-    assert_eq!(migrated.fleet_and_social_ops, legacy_fleet);
-    assert_eq!(migrated.quasar_commerce, legacy_quasar);
+    assert_eq!(*migrated.mining_and_ess_state, legacy_mining);
+    assert_eq!(*migrated.fleet_and_social_ops, legacy_fleet);
+    assert_eq!(*migrated.quasar_commerce, legacy_quasar);
 
     // Retired `service_domain_state` must be dropped while `entity_kv` stays intact and
     // decomposed entries live in `domain_rows`.
@@ -1031,9 +1031,9 @@ fn legacy_service_domain_state_migrates_to_domain_rows_and_drops_legacy_table() 
     assert_eq!(migrated_waste, "1250");
 
     let (reloaded, _) = load_snapshot_from_sqlite(&conn).expect("reload post-migration");
-    assert_eq!(reloaded.mining_and_ess_state, legacy_mining);
-    assert_eq!(reloaded.fleet_and_social_ops, legacy_fleet);
-    assert_eq!(reloaded.quasar_commerce, legacy_quasar);
+    assert_eq!(*reloaded.mining_and_ess_state, legacy_mining);
+    assert_eq!(*reloaded.fleet_and_social_ops, legacy_fleet);
+    assert_eq!(*reloaded.quasar_commerce, legacy_quasar);
 
     let _ = std::fs::remove_file(&path);
 }

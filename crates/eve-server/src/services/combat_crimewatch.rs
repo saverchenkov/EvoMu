@@ -910,14 +910,14 @@ pub fn flush_combat_runtime_to_db(ctx: &ServerContext) {
     };
     let already_matches = ctx
         .db
-        .with_snapshot(|s| s.combat_crimewatch_state == persisted);
+        .with_snapshot(|s| *s.combat_crimewatch_state == persisted);
     if !already_matches {
         ctx.db.with_mut_snapshot(|s| {
             let mut guard = ctx
                 .combat_ephemeral
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
-            s.combat_crimewatch_state = persisted;
+            s.combat_crimewatch_state = persisted.into();
             guard.synced_db_epoch = 0;
         });
     }
@@ -967,7 +967,7 @@ pub fn with_mut_combat_runtime<R>(
         let out = f(&mut guard);
         let persisted = guard.to_persisted();
         ext_hash = CombatRuntimeState::ext_runtime_hash(&persisted);
-        s.combat_crimewatch_state = persisted;
+        s.combat_crimewatch_state = persisted.into();
         guard.synced_db_epoch = 0;
         out
     });
@@ -1633,7 +1633,7 @@ pub fn claim_player_bounty_on_kill(
         };
         let mut guard = ctx.combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
         guard.sync_core_from_persisted(&snap.combat_crimewatch_state);
-        snap.combat_crimewatch_state = guard.to_persisted();
+        snap.combat_crimewatch_state = guard.to_persisted().into();
         guard.synced_db_epoch = 0;
         (claimed, bal)
     });

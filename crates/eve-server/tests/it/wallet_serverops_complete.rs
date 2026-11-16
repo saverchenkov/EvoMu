@@ -226,8 +226,9 @@ async fn test_modify_order_relist_fee_and_five_minute_cooldown() {
     assert_eq!(before.0 - balance(&ctx, P1).0, fee.0, "wallet debited by exactly the relist fee");
     assert_eq!(ctx.db.with_snapshot(|s| s.market_orders[&oid].price), IskCents::from_f64_isk(45.0));
     let relist_journaled = ctx.db.with_snapshot(|s| {
-        s.wallet_journal[journal_before..]
+        s.wallet_journal
             .iter()
+            .skip(journal_before)
             .any(|j| j.character_id == P1 && j.entry_type == "MarketBrokerFee" && j.amount == IskCents(-fee.0))
     });
     assert!(relist_journaled, "relist fee journaled");

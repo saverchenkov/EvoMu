@@ -154,11 +154,11 @@ pub fn active_insurgency_pocket_dbuffs(
 }
 
 pub fn load_ops_state(snap: &WorldStateSnapshot) -> InsurgencyComplexOpsState {
-    snap.insurgency_complex_ops.clone()
+    snap.insurgency_complex_ops.as_inner().clone()
 }
 
 pub fn save_ops_state(snap: &mut WorldStateSnapshot, state: &InsurgencyComplexOpsState) {
-    snap.insurgency_complex_ops = state.clone();
+    snap.insurgency_complex_ops = state.clone().into();
 }
 
 pub fn is_battlecruiser_group(group_id: u32) -> bool {

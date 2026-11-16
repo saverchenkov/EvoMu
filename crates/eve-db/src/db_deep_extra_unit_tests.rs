@@ -440,7 +440,7 @@ fn ws_a1_service_domains_unit_behavior() {
     assert!(err_total.contains("total size"));
 
     let mut snap = WorldStateSnapshot::default();
-    snap.service_state_blobs = big_total;
+    snap.service_state_blobs = big_total.into();
     assert!(snap.validate_service_state_blobs().is_err());
 
     // 2. progression_seasons defaults & CharacterMilestoneState::accumulated_playtime_now

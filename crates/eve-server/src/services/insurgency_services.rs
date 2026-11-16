@@ -924,12 +924,13 @@ pub async fn on_insurgency_stronghold_destroyed_with_sde(
     let now = db.clock().now_unix_secs();
     let destruction_info = db.with_mut_snapshot(|snap| {
         let camp_id = match_fob_campaign_for_ball_in_snap(snap, solar_system_id, ball_id)?;
-        let camp = snap.insurgency_runtime.campaigns.get_mut(&camp_id)?;
-        let (phase, _) = get_campaign_phase_and_timer(camp, now);
-        if phase != PHASE_ACTIVE {
+        let ins_rt = &mut *snap.insurgency_runtime;
+        if ins_rt.campaign_outcomes.contains_key(&camp_id) {
             return None;
         }
-        if snap.insurgency_runtime.campaign_outcomes.contains_key(&camp_id) {
+        let camp = ins_rt.campaigns.get_mut(&camp_id)?;
+        let (phase, _) = get_campaign_phase_and_timer(camp, now);
+        if phase != PHASE_ACTIVE {
             return None;
         }
         camp.forecasting_end_unix = camp.forecasting_end_unix.min(now);

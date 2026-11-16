@@ -636,10 +636,11 @@ pub async fn activate_fw_complex_gate_in_space(
     ctx.db.with_mut_snapshot(|snap| {
         snap.item_positions
             .insert(ship_id, [pocket_pos.x, pocket_pos.y, pocket_pos.z]);
-        let occ = snap.fw_runtime.complex_occupants.entry(gate_id).or_default();
+        let fw_rt = &mut *snap.fw_runtime;
+        let occ = fw_rt.complex_occupants.entry(gate_id).or_default();
         if !someone_on_grid {
             // The capture timer only runs while a pilot holds the pocket: restart its step clock on entry.
-            snap.fw_runtime.complex_last_step_unix.insert(gate_id, now_unix);
+            fw_rt.complex_last_step_unix.insert(gate_id, now_unix);
         }
         if !occ.iter().any(|&(c, _)| c == char_id) {
             occ.push((char_id, ship_id));
@@ -938,11 +939,12 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
         let base_dur = complex_base_capture_duration_seconds(&tier);
         let delta_pct = ((dt as f64 * speed_mult) / (base_dur as f64) * 100.0).clamp(0.01, 100.0);
         let done_now = ctx.db.with_mut_snapshot(|snap| {
-            snap.fw_runtime.complex_last_step_unix.insert(gid, now_unix);
-            let Some(entry) = snap.fw_runtime.fw_complexes.get_mut(&gid) else {
+            let fw_rt = &mut *snap.fw_runtime;
+            fw_rt.complex_last_step_unix.insert(gid, now_unix);
+            let Some(entry) = fw_rt.fw_complexes.get_mut(&gid) else {
                 return false;
             };
-            let prev_cap = snap.fw_runtime.complex_capturing_faction.get(&gid).copied();
+            let prev_cap = fw_rt.complex_capturing_faction.get(&gid).copied();
             if prev_cap.is_some_and(|cf| cf != first_fac) && entry.3 > 0.0 {
                 if entry.3 > delta_pct {
                     entry.3 = (entry.3 - delta_pct).max(0.0);
@@ -950,25 +952,25 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                     let rem = (delta_pct - entry.3).clamp(0.0, 100.0);
                     entry.3 = rem;
                     if rem > 0.0 {
-                        snap.fw_runtime.complex_capturing_faction.insert(gid, first_fac);
+                        fw_rt.complex_capturing_faction.insert(gid, first_fac);
                     } else {
-                        snap.fw_runtime.complex_capturing_faction.remove(&gid);
+                        fw_rt.complex_capturing_faction.remove(&gid);
                     }
                 }
             } else {
-                snap.fw_runtime.complex_capturing_faction.insert(gid, first_fac);
+                fw_rt.complex_capturing_faction.insert(gid, first_fac);
                 entry.3 = (entry.3 + delta_pct).clamp(0.0, 100.0);
             }
             if entry.3 >= 100.0 && !entry.4 {
                 entry.4 = true;
                 let cd_key = format!("{sys_id}:{tier}");
-                snap.fw_runtime.complex_tier_cooldowns.insert(cd_key, now_unix + 1800);
-                snap.fw_runtime.complex_occupants.remove(&gid);
+                fw_rt.complex_tier_cooldowns.insert(cd_key, now_unix + 1800);
+                fw_rt.complex_occupants.remove(&gid);
                 snap.item_positions.remove(&gid);
-                snap.fw_runtime.complex_guards_cleared.remove(&gid);
-                snap.fw_runtime.complex_seconds_elapsed.remove(&gid);
-                snap.fw_runtime.complex_last_step_unix.remove(&gid);
-                snap.fw_runtime.complex_capturing_faction.remove(&gid);
+                fw_rt.complex_guards_cleared.remove(&gid);
+                fw_rt.complex_seconds_elapsed.remove(&gid);
+                fw_rt.complex_last_step_unix.remove(&gid);
+                fw_rt.complex_capturing_faction.remove(&gid);
                 true
             } else {
                 false

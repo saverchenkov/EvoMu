@@ -233,7 +233,7 @@ pub fn migrate_legacy_service_state(snap: &mut WorldStateSnapshot) {
             && snap.tourney_state.arena_systems.is_empty()
         {
             if let Ok(parsed) = serde_json::from_str::<TourneyStore>(&note.note) {
-                snap.tourney_state = parsed;
+                snap.tourney_state = parsed.into();
             }
         }
     }
@@ -244,7 +244,7 @@ pub fn migrate_legacy_service_state(snap: &mut WorldStateSnapshot) {
             && snap.deployable_state.mmju_spools.is_empty()
         {
             if let Ok(parsed) = serde_json::from_str::<MobileDeployableRuntimeState>(&note.note) {
-                snap.deployable_state = parsed;
+                snap.deployable_state = parsed.into();
             }
         }
     }
@@ -260,7 +260,7 @@ pub fn migrate_legacy_service_state(snap: &mut WorldStateSnapshot) {
             && snap.pvp_filament_state.events.is_empty()
         {
             if let Ok(parsed) = serde_json::from_str::<PvpFilamentStore>(&raw) {
-                snap.pvp_filament_state = parsed;
+                snap.pvp_filament_state = parsed.into();
             }
         }
     } else {
@@ -311,7 +311,7 @@ pub fn migrate_legacy_service_state(snap: &mut WorldStateSnapshot) {
             && snap.superweapon_runtime.warp_suppressions.is_empty()
         {
             if let Ok(parsed) = serde_json::from_str::<PersistedSuperweaponRuntime>(&raw) {
-                snap.superweapon_runtime = parsed;
+                snap.superweapon_runtime = parsed.into();
             }
         }
     }
@@ -324,7 +324,7 @@ pub fn migrate_legacy_service_state(snap: &mut WorldStateSnapshot) {
                     parsed.ice_heist_respawn_until =
                         std::mem::take(&mut snap.insurgency_complex_ops.ice_heist_respawn_until);
                 }
-                snap.insurgency_complex_ops = parsed;
+                snap.insurgency_complex_ops = parsed.into();
             }
         }
     }

@@ -97,7 +97,8 @@ fn sync_dirty_wallet_journal_and_mail_truncation_and_prefix_mutation_rewrite() {
             balance_after: IskCents(300),
             reason: "r2".into(),
         },
-    ];
+    ]
+    .into();
     snap.mails = vec![
         MailRecord {
             message_id: 10,
@@ -113,7 +114,8 @@ fn sync_dirty_wallet_journal_and_mail_truncation_and_prefix_mutation_rewrite() {
             subject: "Subj2".into(),
             body: "Body2".into(),
         },
-    ];
+    ]
+    .into();
     let mut fp = replace_sqlite_from_snapshot(&mut conn, &snap).unwrap();
 
     // Mutate prefix item[0] in both wallet_journal and mails (same len) -> triggers DELETE + re-insert
