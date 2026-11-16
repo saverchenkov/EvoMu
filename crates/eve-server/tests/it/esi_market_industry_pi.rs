@@ -4676,8 +4676,21 @@ pub(crate) mod esi_corp_role_gated_mining {
             .iter()
             .find(|p| p["type_id"] == json!(39))
             .expect("Zydrine in /markets/prices");
+        let base_price = ctx.sde.types[&39].base_price;
+        let expected_adj = (base_price
+            + eve_server::formulas::ADJUSTED_PRICE_EMA_ALPHA * (hist_avg - base_price))
+            .clamp(
+                base_price * (1.0 - eve_server::formulas::ADJUSTED_PRICE_DAILY_BAND),
+                base_price * (1.0 + eve_server::formulas::ADJUSTED_PRICE_DAILY_BAND),
+            );
+        let adj_val = trit_p["adjusted_price"].as_f64().unwrap();
         assert_eq!(trit_p["average_price"], json!(hist_avg));
-        assert_eq!(trit_p["adjusted_price"], json!(hist_avg));
+        assert!(
+            adj_val >= base_price * (1.0 - eve_server::formulas::ADJUSTED_PRICE_DAILY_BAND) - 1e-6
+                && adj_val < base_price
+                && (adj_val - expected_adj).abs() < 1e-6,
+            "Zydrine adjusted_price {adj_val} must step from SDE base_price {base_price} toward {hist_avg} (expected {expected_adj})"
+        );
 
         // 5. Install and deliver personal & corporation industry jobs via industryManager and verify isolation
         let personal_dict = PyRep::Dict(vec![
