@@ -392,6 +392,7 @@ async fn deep_disconnected_warp_and_safe_logoff_abort_transitions() {
                 remove_at_unix: now_unix + 60,
                 emergency_warp_dest: Some([dest_pos.x, dest_pos.y, dest_pos.z]),
                 last_position: [start_pos.x, start_pos.y, start_pos.z],
+                last_velocity: [0.0, 0.0, 0.0],
                 removed_from_space: false,
                 pre_warp_position: Some([start_pos.x, start_pos.y, start_pos.z]),
             },

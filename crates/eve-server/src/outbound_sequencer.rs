@@ -474,6 +474,9 @@ pub struct RpcCompletion {
     pub destiny_drain: DestinyDrain,
     /// Notifications drained for this session after the RPC.
     pub notifications: Vec<TypedNotification>,
+    /// When `true` for a non-space-attach/updates call, emit `OnItemChange` notifications prior
+    /// to `SessionChangeNotification` so docked ship swaps deliver hull items first (`#1085`).
+    pub item_change_before_session_change: bool,
 }
 
 /// Canonical outbound wire frames emitted by `OutboundSequencer` (`C-3`).
@@ -634,7 +637,7 @@ pub fn sequence(state: &mut SessionWireState, done: RpcCompletion) -> Vec<OutFra
 
 /// Full sequencing variant returning both outbound wire frames and `dropped` / `coalesced`
 /// ledger events for `FlightRecorder` attribution (`#1077 §A`).
-pub fn sequence_with_events(state: &mut SessionWireState, done: RpcCompletion) -> SequenceOutcome {
+pub fn sequence_with_events(state: &mut SessionWireState, mut done: RpcCompletion) -> SequenceOutcome {
     let mut out = Vec::with_capacity(
         2 + done.pending_tick_batches.len() + done.notifications.len(),
     );
@@ -650,6 +653,7 @@ pub fn sequence_with_events(state: &mut SessionWireState, done: RpcCompletion) -
     //    tears down the space ballpark and transitions DestinyStream -> Detached.
     let mut pending_ticks = done.pending_tick_batches;
     let mut destiny_drain = done.destiny_drain;
+    let detach_frame = matches!(&destiny_drain, DestinyDrain::Detach { .. });
     if matches!(destiny_drain, DestinyDrain::Detach { .. }) {
         if let DestinyDrain::Detach { pre_detach } = std::mem::take(&mut destiny_drain) {
             let pre_start = out.len();
@@ -677,6 +681,33 @@ pub fn sequence_with_events(state: &mut SessionWireState, done: RpcCompletion) -
         && matches!(&destiny_drain, DestinyDrain::Updates(_));
     let attach_before_call_rsp = matches!(&destiny_drain, DestinyDrain::Attach { .. });
     if !in_space_ship_switch_updates {
+        if done.item_change_before_session_change && !detach_frame {
+            // Docked ship swap (#1085): emit hull `OnItemChange` before `shipid`
+            // `SessionChangeNotification` so client inventory has the target hull before `MakeShipActive`.
+            let mut item_changes = Vec::new();
+            let mut remaining = Vec::with_capacity(done.notifications.len());
+            for notif in std::mem::take(&mut done.notifications) {
+                let is_junkyard_tombstone = notif.event == "OnItemChange"
+                    && notif.args.first().is_some_and(|item| {
+                        item.dbrow_get("locationID")
+                            .or_else(|| item.dict_get("locationID"))
+                            .and_then(|v| v.as_i64())
+                            == Some(6)
+                    });
+                if notif.event == "OnItemChange" && !is_junkyard_tombstone {
+                    item_changes.push(notif);
+                } else {
+                    remaining.push(notif);
+                }
+            }
+            done.notifications = remaining;
+            for notif in item_changes {
+                out.push(OutFrame::Notification {
+                    event: notif.event,
+                    args: notif.args,
+                });
+            }
+        }
         if let Some(sess_frame) = deferred_session_change.take() {
             out.push(OutFrame::SessionChange { frame: sess_frame });
         }
@@ -691,6 +722,26 @@ pub fn sequence_with_events(state: &mut SessionWireState, done: RpcCompletion) -
     }
 
     // 4. Buffered tick broadcasts followed by post-RPC direct destiny drain (ORD-3, #845, #1077 §A).
+    if matches!(destiny_drain, DestinyDrain::Attach { .. }) {
+        // When attaching to a ballpark, sim clock rebase notices must precede the first
+        // ballpark frame (`pending_ticks` / `SetState`) so `michelle` initializes on the rebased clock (#1080, #1085).
+        let mut clock_first = Vec::new();
+        let mut remaining = Vec::with_capacity(done.notifications.len());
+        for notif in std::mem::take(&mut done.notifications) {
+            if notif.event == "DoSimClockRebase" {
+                clock_first.push(notif);
+            } else {
+                remaining.push(notif);
+            }
+        }
+        done.notifications = remaining;
+        for notif in clock_first {
+            out.push(OutFrame::Notification {
+                event: notif.event,
+                args: notif.args,
+            });
+        }
+    }
     let step4_start = out.len();
     for tick_batch in pending_ticks {
         eval_and_push_destiny_batch(state, tick_batch, &mut out, &mut events);
@@ -923,6 +974,7 @@ mod tests {
                 pending_tick_batches: vec![pending_105],
                 destiny_drain: DestinyDrain::Updates(direct_105),
                 notifications: vec![],
+                item_change_before_session_change: false,
             },
         );
         let destiny_frames: Vec<&OutFrame> = outcome
@@ -1019,6 +1071,7 @@ mod tests {
                     args: vec![],
                     service: None,
                 }],
+                item_change_before_session_change: false,
             },
         );
         assert!(
@@ -1069,6 +1122,7 @@ mod tests {
                     args: vec![],
                     service: None,
                 }],
+                item_change_before_session_change: false,
             },
         );
         assert!(matches!(frames.first(), Some(OutFrame::SessionChange { .. })));
@@ -1100,6 +1154,7 @@ mod tests {
                     args: vec![],
                     service: None,
                 }],
+                item_change_before_session_change: false,
             },
         );
         assert_eq!(wire.destiny, DestinyStream::Detached);
@@ -1127,6 +1182,7 @@ mod tests {
                     dummy_updates("SetState", 31),
                 )),
                 notifications: vec![],
+                item_change_before_session_change: false,
             },
         );
         assert!(matches!(usr_frames.first(), Some(OutFrame::CallRsp { call_id: 3, .. })));
@@ -1190,6 +1246,7 @@ mod tests {
                                     args: vec![],
                                     service: None,
                                 }],
+                                item_change_before_session_change: false,
                             },
                         );
                         // #1083: SessionChangeNotification precedes Attach SetState, which precedes CallRsp and Notifications.
@@ -1264,6 +1321,7 @@ mod tests {
                                 pending_tick_batches: vec![tick_batch],
                                 destiny_drain: DestinyDrain::Updates(direct_batch),
                                 notifications: vec![],
+                                item_change_before_session_change: false,
                             },
                         );
                         assert!(matches!(frames.first(), Some(OutFrame::CallRsp { call_id: cid, .. }) if *cid == call_id));
@@ -1308,6 +1366,7 @@ mod tests {
                                     pre_detach: Some(pre),
                                 },
                                 notifications: vec![],
+                                item_change_before_session_change: false,
                             },
                         );
                         assert_eq!(wire.destiny, DestinyStream::Detached);
@@ -1442,6 +1501,7 @@ mod tests {
                     args: vec![PyRep::Integer(8888), PyRep::keyval([("itemID", PyRep::Integer(8888))])],
                     service: None,
                 }],
+                item_change_before_session_change: false,
             },
         );
         assert!(!outcome1
@@ -1482,6 +1542,7 @@ mod tests {
                     args: vec![PyRep::Integer(8888), PyRep::Tuple(vec![])],
                     service: None,
                 }],
+                item_change_before_session_change: false,
             },
         );
         // Only the stamp-12 DoDestinyUpdate (with AddBalls2 before OnSlimItemChange) + stamp-12 OnDamageStateChange arrive;
@@ -1577,5 +1638,141 @@ mod tests {
             1,
             "forced backstep must produce exactly 1 CRT marker for session, got {crt_matches:?}"
         );
+    }
+
+    #[test]
+    fn docked_ship_swap_emits_item_change_before_session_change_1085() {
+        // parity: notify:OnItemChange
+        // parity: notify:OnSessionChanged
+        // Positive: docked ship swap with item_change_before_session_change=true emits
+        // OnItemChange -> SessionChange -> CallRsp -> trailing notifications.
+        let mut wire = SessionWireState::new(1085, 1085);
+        let frames = sequence(
+            &mut wire,
+            RpcCompletion {
+                call_id: 10,
+                response_frame: PyRep::None,
+                session_change_frame: Some(PyRep::String("shipid_swap".into())),
+                pending_tick_batches: vec![],
+                destiny_drain: DestinyDrain::None,
+                notifications: vec![
+                    TypedNotification {
+                        event: "OnItemChange".into(),
+                        args: vec![PyRep::Integer(100_000_002)],
+                        service: None,
+                    },
+                    TypedNotification {
+                        event: "OnActiveShipModelChange".into(),
+                        args: vec![],
+                        service: None,
+                    },
+                ],
+                item_change_before_session_change: true,
+            },
+        );
+        let item_idx = frames
+            .iter()
+            .position(|f| matches!(f, OutFrame::Notification { event, .. } if event == "OnItemChange"))
+            .unwrap();
+        let sess_idx = frames
+            .iter()
+            .position(|f| matches!(f, OutFrame::SessionChange { .. }))
+            .unwrap();
+        let rsp_idx = frames
+            .iter()
+            .position(|f| matches!(f, OutFrame::CallRsp { call_id: 10, .. }))
+            .unwrap();
+        let model_idx = frames
+            .iter()
+            .position(|f| matches!(f, OutFrame::Notification { event, .. } if event == "OnActiveShipModelChange"))
+            .unwrap();
+        assert!(item_idx < sess_idx && sess_idx < rsp_idx && rsp_idx < model_idx);
+
+        // Negative: when flag is false, OnItemChange stays after CallRsp; and in-space live
+        // DestinyDrain::Updates keeps SetState -> SessionChange -> CallRsp -> OnItemChange even if set.
+        let ep = wire.enter_space(Some(30_000_142));
+        assert!(sequence_tick(&mut wire, DestinyBatch::new(ep, 40, true, dummy_updates("SetState", 40))).is_some());
+        let space_frames = sequence(
+            &mut wire,
+            RpcCompletion {
+                call_id: 11,
+                response_frame: PyRep::None,
+                session_change_frame: Some(PyRep::String("in_space_board".into())),
+                pending_tick_batches: vec![],
+                destiny_drain: DestinyDrain::Updates(DestinyBatch::new(
+                    ep,
+                    41,
+                    true,
+                    dummy_updates("SetState", 41),
+                )),
+                notifications: vec![TypedNotification {
+                    event: "OnItemChange".into(),
+                    args: vec![],
+                    service: None,
+                }],
+                item_change_before_session_change: true,
+            },
+        );
+        let d_pos = space_frames
+            .iter()
+            .position(|f| matches!(f, OutFrame::DoDestinyUpdate { has_set_state: true, .. }))
+            .unwrap();
+        let s_pos = space_frames
+            .iter()
+            .position(|f| matches!(f, OutFrame::SessionChange { .. }))
+            .unwrap();
+        let r_pos = space_frames
+            .iter()
+            .position(|f| matches!(f, OutFrame::CallRsp { call_id: 11, .. }))
+            .unwrap();
+        let i_pos = space_frames
+            .iter()
+            .position(|f| matches!(f, OutFrame::Notification { event, .. } if event == "OnItemChange"))
+            .unwrap();
+        assert!(d_pos < s_pos && s_pos < r_pos && r_pos < i_pos);
+    }
+
+    #[test]
+    fn attach_hoists_do_sim_clock_rebase_before_pending_ticks_and_set_state_1085() {
+        // parity: notify:DoSimClockRebase
+        let mut wire = SessionWireState::new(1086, 1086);
+        let ep = wire.enter_space(Some(30_000_142));
+        let frames = sequence(
+            &mut wire,
+            RpcCompletion {
+                call_id: 20,
+                response_frame: PyRep::Integer(20),
+                session_change_frame: Some(PyRep::String("undock".into())),
+                pending_tick_batches: vec![DestinyBatch::new(
+                    ep,
+                    50,
+                    false,
+                    dummy_updates("AddBalls2", 50),
+                )],
+                destiny_drain: DestinyDrain::Attach {
+                    epoch: ep,
+                    set_state: DestinyBatch::new(ep, 51, true, dummy_updates("SetState", 51)),
+                },
+                notifications: vec![
+                    TypedNotification {
+                        event: "OnCharNoLongerInStation".into(),
+                        args: vec![],
+                        service: None,
+                    },
+                    TypedNotification {
+                        event: "DoSimClockRebase".into(),
+                        args: vec![],
+                        service: None,
+                    },
+                ],
+                item_change_before_session_change: false,
+            },
+        );
+        let sess_pos = frames.iter().position(|f| matches!(f, OutFrame::SessionChange { .. })).unwrap();
+        let rebase_pos = frames.iter().position(|f| matches!(f, OutFrame::Notification { event, .. } if event == "DoSimClockRebase")).unwrap();
+        let set_state_pos = frames.iter().position(|f| matches!(f, OutFrame::DoDestinyUpdate { has_set_state: true, .. })).unwrap();
+        let rsp_pos = frames.iter().position(|f| matches!(f, OutFrame::CallRsp { call_id: 20, .. })).unwrap();
+        let trailing_pos = frames.iter().position(|f| matches!(f, OutFrame::Notification { event, .. } if event == "OnCharNoLongerInStation")).unwrap();
+        assert!(sess_pos < rebase_pos && rebase_pos < set_state_pos && set_state_pos < rsp_pos && rsp_pos < trailing_pos);
     }
 }

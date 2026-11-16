@@ -123,6 +123,7 @@ fn runtime_domain_states_sp6_and_rollback_reload() {
                 remove_at_unix: 2000,
                 emergency_warp_dest: Some([10.0, 20.0, 30.0]),
                 last_position: [1.0, 2.0, 3.0],
+                last_velocity: [0.0, 0.0, 0.0],
                 removed_from_space: false,
                 pre_warp_position: Some([0.0, 0.0, 0.0]),
             },

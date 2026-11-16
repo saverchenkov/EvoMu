@@ -88,6 +88,14 @@ fn static_position_sync_state(
     MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+#[allow(clippy::type_complexity)]
+fn ball_velocity_cache_map(
+) -> &'static std::sync::Mutex<HashMap<usize, HashMap<BallId, [f64; 3]>>> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<HashMap<usize, HashMap<BallId, [f64; 3]>>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 pub(crate) fn sync_ball_positions(
     ballpark: &Ballpark,
     cache: &RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>,
@@ -153,6 +161,22 @@ pub(crate) fn sync_ball_positions(
             meta.clear();
         }
         meta.insert(cache_key, (cur_static_epoch, cur_static_count));
+
+        let mut dyn_vel = HashMap::new();
+        if ballpark.balls.len() > cur_static_count {
+            for (&id, ball) in &ballpark.balls {
+                if !ballpark.is_static_ball(id) {
+                    dyn_vel.insert(id, [ball.velocity.x, ball.velocity.y, ball.velocity.z]);
+                }
+            }
+        }
+        let mut vel_map = ball_velocity_cache_map()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if vel_map.len() > 512 {
+            vel_map.clear();
+        }
+        vel_map.insert(cache_key, dyn_vel);
     }
 
     let mut scram = std::collections::HashSet::new();
@@ -937,6 +961,47 @@ impl SystemHandle {
     /// mid-tunnel warps, zeroes velocity, and restores `SetBallMassive { is_massive: true }`.
     pub fn force_stop_warp(&self, ball_id: BallId) -> Result<u64, String> {
         self.finish_warp_for_dock(ball_id, None)
+    }
+
+    /// Returns the last synced velocity `[vx, vy, vz]` for `ball_id`, reading `ballpark` when lock
+    /// rank permits or falling back to [`ball_velocity_cache_map`].
+    pub fn get_ball_velocity_sync(&self, ball_id: BallId) -> Option<[f64; 3]> {
+        if !eve_db::lock_rank::held_lock_ranks()
+            .iter()
+            .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
+        {
+            if let Ok(bp) = self.ballpark.try_read() {
+                return bp
+                    .balls
+                    .get(&ball_id)
+                    .map(|b| [b.velocity.x, b.velocity.y, b.velocity.z]);
+            }
+        }
+        let cache_key =
+            Arc::as_ptr(&self.ball_positions) as usize;
+        ball_velocity_cache_map()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&cache_key)
+            .and_then(|m| m.get(&ball_id).copied())
+    }
+
+    /// Returns live `(position, velocity)` for `ball_id` only if the ball is currently present in
+    /// this system's ballpark (`GH #1085`).
+    pub fn get_live_ball_kinematics_sync(&self, ball_id: BallId) -> Option<(DVec3, DVec3)> {
+        if !eve_db::lock_rank::held_lock_ranks()
+            .iter()
+            .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
+        {
+            let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
+            return bp.balls.get(&ball_id).map(|b| (b.position, b.velocity));
+        }
+        let pos = self.get_ball_position_sync(ball_id)?;
+        let vel = self
+            .get_ball_velocity_sync(ball_id)
+            .map(DVec3::from_array)
+            .unwrap_or(DVec3::ZERO);
+        Some((pos, vel))
     }
 }
 

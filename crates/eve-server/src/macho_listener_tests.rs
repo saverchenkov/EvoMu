@@ -993,11 +993,13 @@ async fn drain_pending_tick_frames_emits_service_call_for_target_fail_lock_targe
     let mut sys_rx = ctx.systems.get_or_spawn(30_000_142).subscribe();
     let mut subscribed_sys_id = Some(30_000_142);
     let mut wire_state = SessionWireState::new(session.session_id, client_id);
+    let mut deferred_ship_id = None;
     let mut wire_refs = CallReqWireRefs {
         client_id,
         sys_rx: &mut sys_rx,
         subscribed_sys_id: &mut subscribed_sys_id,
         wire_state: &mut wire_state,
+        deferred_ship_id: &mut deferred_ship_id,
     };
 
     ctx.notify(

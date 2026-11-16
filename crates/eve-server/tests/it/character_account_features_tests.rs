@@ -463,11 +463,40 @@ async fn test_feat_character_paperdoll_titles_emergency_warp_and_energy() {
     // 8. feat:character.emergency-warp-logoff
     // ------------------------------------------------------------------------
     // Put character into space (not in station).
-    ctx.db.with_mut_snapshot(|snap| {
+    let (sys_id, ship_id) = ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&char_id).unwrap();
         ch.station_id = None;
         ch.structure_id = None;
+        (ch.solar_system_id, ch.active_ship_id)
     });
+    ctx.systems
+        .get_or_spawn(sys_id)
+        .try_spawn_ball_with_meta(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 606,
+                position: glam::DVec3::new(15_000_000_000.0, 0.0, 0.0),
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 35.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, 606),
+            eve_destiny::SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: char_id,
+                char_id: Some(char_id),
+                corp_id: 1_000_009,
+                alliance_id: -1,
+                security_status: 0.0,
+                is_cloaked: false,
+                ..Default::default()
+            },
+        );
 
     let disc_entry = eve_server::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, char_id)
         .await

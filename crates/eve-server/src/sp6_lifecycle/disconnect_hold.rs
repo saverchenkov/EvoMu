@@ -303,6 +303,10 @@ pub(super) fn build_disconnected_ship_entry_sync(
         (None, None)
     };
 
+    let last_velocity = sys_handle
+        .and_then(|h| h.get_ball_velocity_sync(ship_id))
+        .unwrap_or([0.0, 0.0, 0.0]);
+
     DisconnectedShipEntry {
         char_id,
         ship_id,
@@ -312,6 +316,7 @@ pub(super) fn build_disconnected_ship_entry_sync(
         remove_at_unix,
         emergency_warp_dest,
         last_position: [current_pos.x, current_pos.y, current_pos.z],
+        last_velocity,
         removed_from_space: false,
         pre_warp_position,
     }

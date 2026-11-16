@@ -580,6 +580,14 @@ async fn session_cleanup_guard_disconnect_cleanup_and_target_painter_multiplier(
     assert!(mult > 1.10 && mult < 1.30, "expected ~1.15x with 50% TP resist, got {mult}");
 
     // 3. `cleanup_disconnected_client_session` releases bindings/locks and persists in-space ball position.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+    });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let ship_ball = Ball {
         id: ship_id,
@@ -870,7 +878,8 @@ fn bf03_headless_disconnect_session_releases_online_lock_and_logs_off_sync() {
     );
 
     // No closer registered and no Tokio reactor running -> headless/admin disconnect must still
-    // release online lock, purge notifications, and record DB hold without panicking (#851).
+    // release online lock and purge notifications, while preserving persisted ship state untouched
+    // without inventing a `(0, 0, 0)` position or registering a phantom hold when no live ball exists.
     ctx.disconnect_session(sid, "EndAllGameSessions", "Headless admin session kill");
 
     assert!(
@@ -882,8 +891,8 @@ fn bf03_headless_disconnect_session_releases_online_lock_and_logs_off_sync() {
         "headless disconnect_session must run logoff_character_sync and clear pending notifications (#881)"
     );
     assert!(
-        crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_id),
-        "headless disconnect_session must register in-space ship hold synchronously (#851)"
+        !crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_id),
+        "headless disconnect_session without live ball must not fabricate an in-space ship hold"
     );
 }
 
@@ -901,6 +910,36 @@ async fn bf03_tokio_headless_disconnect_session_spawns_hold_and_logs_off_sync() 
         ch.solar_system_id = 30_000_142;
         ch.active_ship_id
     });
+    let live_pos = glam::DVec3::new(15_000_000_000.0, 250.0, -400.0);
+    let live_vel = glam::DVec3::new(42.0, -3.5, 1.0);
+    ctx.systems
+        .get_or_spawn(30_000_142)
+        .try_spawn_ball_with_meta(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 606,
+                position: live_pos,
+                velocity: live_vel,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 35.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, 606),
+            eve_destiny::SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: char_id,
+                char_id: Some(char_id),
+                corp_id: 1_000_009,
+                alliance_id: -1,
+                security_status: 0.0,
+                is_cloaked: false,
+                ..Default::default()
+            },
+        );
     ctx.db
         .acquire_online_lock(user_id, sid, Some(char_id), false, ctx.now_unix())
         .expect("acquire online lock");

@@ -251,6 +251,7 @@ async fn timers_aggression_and_filament_preconditions_enforce_all_guards() {
                 remove_at_unix: now + 60,
                 emergency_warp_dest: None,
                 last_position: [200_000.0, 0.0, 0.0],
+                last_velocity: [0.0, 0.0, 0.0],
                 removed_from_space: false,
                 pre_warp_position: None,
             },

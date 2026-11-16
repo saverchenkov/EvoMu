@@ -649,6 +649,8 @@ pub async fn handle(
                     Ok(b) => b,
                     Err(e) => return Some(Err(e)),
                 };
+            let ready_at_ft =
+                crate::services::space_warp_jump::transition_ready_at_filetime_ticks(ctx);
             let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, ch.solar_system_id).await;
             crate::services::combat_crimewatch::schedule_highsec_criminal_concord_if_needed(
                 ctx,
@@ -663,8 +665,18 @@ pub async fn handle(
                 ("solarSystemID", PyRep::Integer(ch.solar_system_id as i64)),
                 ("shipID", PyRep::Integer(ship.item_id)),
                 ("beyonceBoundID", PyRep::Integer(beyonce_bound_id as i64)),
+                (
+                    "boundResult",
+                    PyRep::List(vec![
+                        PyRep::Integer(beyonce_bound_id as i64),
+                        PyRep::Integer(ready_at_ft),
+                    ]),
+                ),
                 ("spawnTick", PyRep::Integer(tick as i64)),
                 ("undockInvulnerabilityTicks", PyRep::Integer(30)),
+                ("sessionChangeTimerSeconds", PyRep::Integer(7)),
+                ("sessionChangeTimerFiletime", PyRep::Integer(ready_at_ft)),
+                ("sessionChangeTimer", PyRep::Integer(ready_at_ft)),
                 (
                     "undockDirection",
                     PyRep::Tuple(vec![

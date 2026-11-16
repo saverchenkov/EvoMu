@@ -295,15 +295,15 @@ pub async fn save_location_and_leave_space(
         return (false, 0);
     };
     let info = ctx.db.with_mut_snapshot(|snap| {
-        let loc = if let Some(st_id) = session.station_id {
-            crate::router::TransitionLocation::Station {
-                solar_system_id: session.solar_system_id,
-                station_id: st_id,
-            }
-        } else if let Some(str_id) = session.structure_id {
+        let loc = if let Some(str_id) = session.structure_id {
             crate::router::TransitionLocation::Structure {
                 solar_system_id: session.solar_system_id,
                 structure_id: str_id,
+            }
+        } else if let Some(st_id) = session.station_id {
+            crate::router::TransitionLocation::Station {
+                solar_system_id: session.solar_system_id,
+                station_id: st_id,
             }
         } else if let Some(sys) = session.solar_system_id {
             crate::router::TransitionLocation::Space { solar_system_id: sys }
@@ -324,7 +324,7 @@ pub async fn save_location_and_leave_space(
             (
                 ch.solar_system_id,
                 ch.active_ship_id,
-                ch.station_id.is_none() && ch.structure_id.is_none(),
+                ch.structure_id.is_none() && ch.station_id.is_none(),
             )
         })
     });

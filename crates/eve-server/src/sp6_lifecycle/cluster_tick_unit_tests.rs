@@ -163,6 +163,7 @@ fn populate_persisted_space_objects_materializes_and_prunes_expired_entities() {
                 last_position: [8_000.0, 0.0, 0.0],
                 pre_warp_position: Some([8_000.0, 0.0, 0.0]),
                 emergency_warp_dest: Some([100_000.0, 0.0, 0.0]),
+                last_velocity: [0.0, 0.0, 0.0],
                 removed_from_space: false,
             },
         );
@@ -178,6 +179,7 @@ fn populate_persisted_space_objects_materializes_and_prunes_expired_entities() {
                 last_position: [9_000.0, 0.0, 0.0],
                 pre_warp_position: Some([9_000.0, 0.0, 0.0]),
                 emergency_warp_dest: Some([50_000.0, 0.0, 0.0]),
+                last_velocity: [0.0, 0.0, 0.0],
                 removed_from_space: false,
             },
         );
@@ -1053,6 +1055,7 @@ async fn engine_supervision_catch_unwind_system_actor_recovery_and_backlog_cap_8
                 last_position: [1_000.0, 0.0, 0.0],
                 pre_warp_position: Some([1_000.0, 0.0, 0.0]),
                 emergency_warp_dest: None,
+                last_velocity: [0.0, 0.0, 0.0],
                 removed_from_space: false,
             },
         );

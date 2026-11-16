@@ -1716,80 +1716,33 @@ pub fn handle_character_logoff_or_disconnect_sync(
         }
         let ship_id = ch.active_ship_id;
         let ship_type_id = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(606);
-        let saved_pos = snap
-            .item_positions
-            .get(&ship_id)
-            .copied()
-            .unwrap_or([0.0, 0.0, 0.0]);
-        Some((ch.solar_system_id, ship_id, ship_type_id, saved_pos))
+        Some((ch.solar_system_id, ship_id, ship_type_id))
     })?;
-    let (sys_id, ship_id, ship_type_id, saved_pos) = char_info;
-    let sys_handle_opt = ctx.systems.get_or_spawn_if_runtime(sys_id);
+    let (sys_id, ship_id, ship_type_id) = char_info;
+    let sys_handle_opt = ctx.systems.get_handle(sys_id);
     let has_active_combat_timers = weap_until > now_unix
         || npc_until > now_unix
         || pvp_until > now_unix
         || crim_until > now_unix;
+    let live_kinematics = sys_handle_opt
+        .as_ref()
+        .and_then(|h| h.get_live_ball_kinematics_sync(ship_id));
     if safe_entry.is_some_and(|e| e.completed)
         && !has_active_combat_timers
-        && sys_handle_opt
-            .as_ref()
-            .is_none_or(|h| h.get_ball_position_sync(ship_id).is_none())
+        && live_kinematics.is_none()
     {
         return None;
     }
-    let (group_id, category_id, mass, radius, max_vel, inertia, warp_speed_au_s) =
-        sde_ship_physics(&ctx.sde, ship_type_id);
-
-    // Ensure the ship ball exists in the ballpark if it wasn't spawned yet (when a Tokio runtime/handle is active).
-    let current_pos = if let Some(pos) = sys_handle_opt
-        .as_ref()
-        .and_then(|h| h.get_ball_position_sync(ship_id))
-    {
-        pos
-    } else {
-        let pos = DVec3::from_array(saved_pos);
-        if let Some(ref sys_handle) = sys_handle_opt {
-            let cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type_id);
-            let (corp_id, alliance_id, sec_status) = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .get(&char_id)
-                    .map(|c| {
-                        (
-                            c.corporation_id,
-                            c.alliance_id.unwrap_or(-1),
-                            c.security_status,
-                        )
-                    })
-                    .unwrap_or((1_000_009, -1, 0.0))
-            });
-            sys_handle.try_spawn_ball_with_meta(
-                Ball {
-                    id: ship_id,
-                    type_id: ship_type_id,
-                    position: pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: max_vel,
-                    inertia,
-                    mass,
-                    radius,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                cs,
-                SlimItemMeta {
-                    group_id,
-                    category_id,
-                    owner_id: char_id,
-                    char_id: Some(char_id),
-                    corp_id,
-                    alliance_id,
-                    security_status: sec_status,
-                    is_cloaked: false, ..Default::default()
-                },
-            );
-        }
-        pos
+    let Some((current_pos, current_vel)) = live_kinematics else {
+        tracing::warn!(
+            char_id,
+            ship_id,
+            solar_system_id = sys_id,
+            "handle_character_logoff_or_disconnect_sync: no live ball kinematics in ballpark for undocked ship; preserving persisted record without fallback"
+        );
+        return None;
     };
+    let (_, _, _, _, _, _, warp_speed_au_s) = sde_ship_physics(&ctx.sde, ship_type_id);
 
     if let Some(cs) = sys_handle_opt.as_ref().and_then(|h| {
         h.ballpark
@@ -1808,7 +1761,7 @@ pub fn handle_character_logoff_or_disconnect_sync(
         rt.authorized_shipping_storage.retain(|&(_, c)| c != char_id);
     });
 
-    let entry = disconnect_hold::build_disconnected_ship_entry_sync(
+    let mut entry = disconnect_hold::build_disconnected_ship_entry_sync(
         ctx,
         sys_handle_opt.as_ref(),
         char_id,
@@ -1819,10 +1772,13 @@ pub fn handle_character_logoff_or_disconnect_sync(
         warp_speed_au_s,
         now_unix,
     );
+    entry.last_velocity = [current_vel.x, current_vel.y, current_vel.z];
 
     with_mut_sp6_state(&ctx.db, |st, snap| {
         snap.item_positions
             .insert(ship_id, [current_pos.x, current_pos.y, current_pos.z]);
+        st.item_velocities
+            .insert(ship_id, [current_vel.x, current_vel.y, current_vel.z]);
         let _ = crate::router::apply_character_transition_in_snap(
             snap,
             &ctx.sde,
@@ -1860,7 +1816,7 @@ pub fn reconnect_character_in_space_sync(
     cluster_tick::on_advance_secs(ctx, now_unix, 0);
     cluster_tick::collapse_stranded_abyssal_if_needed_sync(ctx, char_id, now_unix);
 
-    let (sys_id, ship_id, ship_type_id, pos_arr, had_live_disc, pre_warp_pos_opt, corp_id, alliance_id, sec_status) =
+    let (sys_id, ship_id, ship_type_id, pos_arr, vel_arr, had_live_disc, pre_warp_pos_opt, corp_id, alliance_id, sec_status) =
         with_mut_sp6_state(&ctx.db, |st, snap| {
             let ch = snap.characters.get(&char_id)?;
             if ch.station_id.is_some() || ch.structure_id.is_some() {
@@ -1880,6 +1836,7 @@ pub fn reconnect_character_in_space_sync(
                 .remove(&char_id)
                 .filter(|d| d.ship_id == ship_id && snap.items.contains_key(&d.ship_id));
             let pre_warp_pos_opt = disc_entry.as_ref().and_then(|d| d.pre_warp_position);
+            let disc_vel = disc_entry.as_ref().map(|d| d.last_velocity);
             let disc_pos = disc_entry.map(|d| d.last_position);
             st.safe_logoffs.remove(&char_id);
 
@@ -1952,7 +1909,11 @@ pub fn reconnect_character_in_space_sync(
                         .filter(|p| is_valid_space_pos(*p))
                 })
                 .unwrap_or_else(safe_fallback_pos);
+            let vel_arr = disc_vel
+                .or_else(|| st.item_velocities.get(&ship_id).copied())
+                .unwrap_or([0.0, 0.0, 0.0]);
             snap.item_positions.insert(ship_id, pos_arr);
+            st.item_velocities.insert(ship_id, vel_arr);
             if let Some(ship_item) = snap.items.get_mut(&ship_id) {
                 ship_item.location_id = sys_id as i64;
                 ship_item.flag = InventoryFlag::None;
@@ -1962,6 +1923,7 @@ pub fn reconnect_character_in_space_sync(
                 ship_id,
                 ship_type_id,
                 pos_arr,
+                vel_arr,
                 disc_pos.is_some(),
                 pre_warp_pos_opt,
                 corp_id,
@@ -1984,9 +1946,16 @@ pub fn reconnect_character_in_space_sync(
     // If the ship emergency-warped off grid, automatically initiate a return warp back to the pre-disconnect grid spot.
     let pre_warp_eligible =
         crate::services::space_nav_movement_guard::check_sync_pre_warp_eligibility(ctx, ship_id);
-    if let Some(existing_pos) = sys_handle.get_ball_position_sync(ship_id) {
+    if let Some(initial_pos) = sys_handle
+        .get_live_ball_kinematics_sync(ship_id)
+        .map(|(pos, _)| pos)
+    {
+        let mut existing_pos = initial_pos;
         let mut started_return_warp = false;
         if let Ok(mut bp) = sys_handle.ballpark.write() {
+            if let Some(live_pos) = bp.balls.get(&ship_id).map(|b| b.position) {
+                existing_pos = live_pos;
+            }
             bp.observer_events.remove(&ship_id);
             bp.queue_set_state(ship_id);
             if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
@@ -2062,9 +2031,15 @@ pub fn reconnect_character_in_space_sync(
 
     let cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type_id);
 
+    let raw_vel = DVec3::from_array(vel_arr);
+    let spawn_vel = if raw_vel.is_finite() {
+        raw_vel
+    } else {
+        DVec3::ZERO
+    };
     sys_handle.try_spawn_ball_with_meta(
         Ball {
-            id: ship_id, type_id: ship_type_id, position: final_pos, velocity: DVec3::ZERO,
+            id: ship_id, type_id: ship_type_id, position: final_pos, velocity: spawn_vel,
             max_velocity: max_vel, inertia, mass, radius, speed_fraction: 0.0, mode: MovementMode::Stop,
         },
         cs,

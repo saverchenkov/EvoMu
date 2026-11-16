@@ -42,6 +42,18 @@ pub const WRITE_FRAME_TIMEOUT_SECS: u64 = 30;
 pub const PREAUTH_HANDSHAKE_DEADLINE_SECS: u64 = 15;
 /// Maximum concurrent unauthenticated connections permitted per peer IP (`#853` / `B15`).
 pub const MAX_PREAUTH_CONNECTIONS_PER_IP: usize = 32;
+/// Maximum wall-clock delay before flushing a deferred dock `shipid: [None, shipID]` session change (`GH #1085`).
+pub const DEFERRED_SHIP_ID_DELAY_MS: u64 = 350;
+
+/// Pending post-dock `shipid: [None, shipID]` `SessionChangeNotification` held until station/structure
+/// hangar `invbroker` (`List`, `ListByFlags`, `GetSelfInvItem`) completes or 350 ms elapses (`GH #1085`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingDeferredShipId {
+    pub char_id: i64,
+    pub ship_id: i64,
+    pub dock_id: i64,
+    pub deadline: tokio::time::Instant,
+}
 
 fn drain_sys_rx_discarding_lag<T: Clone>(
     sys_rx: &mut tokio::sync::broadcast::Receiver<T>,
@@ -308,6 +320,7 @@ fn is_bootstrap_rpc(service: &str, method: &str, was_live: bool, in_space: bool)
             | ("stationSvc", "Undock")
             | ("structureDocking", "Undock")
             | ("beyonce", "MachoBindObject")
+            | ("beyonce", "GetFormations")
             | ("beyonce", "UpdateStateRequest")
     ) || (in_space && !was_live)
 }
@@ -606,6 +619,7 @@ pub struct CallReqWireRefs<'a> {
     pub sys_rx: &'a mut tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>,
     pub subscribed_sys_id: &'a mut Option<u32>,
     pub wire_state: &'a mut crate::outbound_sequencer::SessionWireState,
+    pub deferred_ship_id: &'a mut Option<PendingDeferredShipId>,
 }
 
 /// Full wire-level outcome of executing one `CallReq` through the socket-loop handler (`C-2`, `#926`).
@@ -912,8 +926,41 @@ pub async fn execute_call_req_wire(
         }
     }
 
-    let session_change_frame =
-        build_session_change_wire_frame(ctx, wire.client_id, &prev_session, session);
+    let is_dock_hangar_flush = rpc_result.is_ok()
+        && service == "invbroker"
+        && (*wire.deferred_ship_id).is_some_and(|pending| match method {
+            "List" | "ListByFlags" | "GetSelfInvItem" => bound_id.is_some_and(|bid| {
+                ctx.bound_objects
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&bid)
+                    .is_some_and(|entry| {
+                        entry.service == "invbroker" && entry.object_id == pending.dock_id
+                    })
+            }),
+            "MachoBindObject" => {
+                let target_id = match call_args.first() {
+                    Some(PyRep::Integer(id)) => Some(*id),
+                    Some(PyRep::Tuple(items)) => items.first().and_then(PyRep::as_i64),
+                    _ => None,
+                };
+                let sub_method = match call_args.get(1) {
+                    Some(PyRep::Tuple(call_tuple)) => call_tuple.first().and_then(|m| m.as_str()),
+                    _ => None,
+                };
+                target_id == Some(pending.dock_id)
+                    && matches!(sub_method, Some("List" | "ListByFlags" | "GetSelfInvItem"))
+            }
+            _ => false,
+        });
+    let (session_change_frame, deferred_flush_frame) = resolve_deferred_session_change_frame(
+        ctx,
+        wire.client_id,
+        &prev_session,
+        session,
+        wire.deferred_ship_id,
+        is_dock_hangar_flush,
+    );
 
     let mut pending_tick_batches = cross_sys_pre_ticks;
     let mut post_rpc_direct_batch = None;
@@ -1074,6 +1121,15 @@ pub async fn execute_call_req_wire(
         DestinyDrain::None
     };
 
+    let was_docked = prev_session.station_id.or(prev_session.structure_id).is_some();
+    let is_docked = session.station_id.or(session.structure_id).is_some();
+    let item_change_before_session_change = was_docked
+        && is_docked
+        && service == "ship"
+        && matches!(
+            method,
+            "Board" | "BoardStoredShip" | "LeaveShip" | "Eject" | "AssembleShip"
+        );
     let sequence_outcome = crate::outbound_sequencer::sequence_with_events(
         wire.wire_state,
         RpcCompletion {
@@ -1083,9 +1139,13 @@ pub async fn execute_call_req_wire(
             pending_tick_batches,
             destiny_drain,
             notifications: typed_notifications,
+            item_change_before_session_change,
         },
     );
-    let out_frames = sequence_outcome.frames;
+    let mut out_frames = sequence_outcome.frames;
+    if let Some(flush_frame) = deferred_flush_frame {
+        out_frames.push(crate::outbound_sequencer::OutFrame::SessionChange { frame: flush_frame });
+    }
     let req_elapsed_micros = call_started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
     let bootstrap = is_bootstrap_rpc(
         service,
@@ -1308,6 +1368,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     });
     session_guard.set_reader_abort(reader_task.abort_handle());
     let mut pending_dock: Option<PendingDockCall> = None;
+    let mut deferred_ship_id: Option<PendingDeferredShipId> = None;
 
     loop {
         tokio::select! {
@@ -1323,6 +1384,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         sys_rx: &mut sys_rx,
                         subscribed_sys_id: &mut subscribed_sys_id,
                         wire_state: &mut wire_state,
+                        deferred_ship_id: &mut deferred_ship_id,
                     };
                     if dispatch_call_req_to_wire(
                         &ctx,
@@ -1337,6 +1399,38 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         &pending.method,
                         &pending.call_args,
                         &pending.call_kwargs,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+            () = async {
+                if let Some(pending) = deferred_ship_id {
+                    tokio::time::sleep_until(pending.deadline).await;
+                }
+            }, if deferred_ship_id.is_some() && pending_dock.is_none() => {
+                let mut wire_refs = CallReqWireRefs {
+                    client_id,
+                    sys_rx: &mut sys_rx,
+                    subscribed_sys_id: &mut subscribed_sys_id,
+                    wire_state: &mut wire_state,
+                    deferred_ship_id: &mut deferred_ship_id,
+                };
+                if let Some(frame) = flush_deferred_ship_id_if_due(
+                    &ctx,
+                    &session,
+                    &mut wire_refs,
+                    tokio::time::Instant::now(),
+                ) {
+                    if write_out_frames(
+                        &mut writer,
+                        MACHO_PROXY_NODE_ID,
+                        client_id,
+                        session.user_id,
+                        &[frame],
                     )
                     .await
                     .is_err()
@@ -1504,15 +1598,15 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             }
                         }
 
-                        if let Some(mut sess_change_payload) = prev_session
-                            .to_session_change_pyrep(&session, vec![MACHO_PROXY_NODE_ID as i64])
-                        {
-                            enrich_session_change_scoped_roles(
-                                &ctx,
-                                &prev_session,
-                                &session,
-                                &mut sess_change_payload,
-                            );
+                        let (sess_change_frame, _) = resolve_deferred_session_change_frame(
+                            &ctx,
+                            client_id,
+                            &prev_session,
+                            &session,
+                            &mut deferred_ship_id,
+                            false,
+                        );
+                        if let Some(sess_frame) = sess_change_frame {
                             // When an in-space ship switch occurs in the same solar system (e.g. pod
                             // ejection on ship destruction `#970`), emit incremental `DoDestinyUpdate`
                             // (`RemoveBall` + `AddBalls2` from `queue_in_space_ship_handoff`) BEFORE
@@ -1595,26 +1689,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     }
                                 }
                             }
-                            let mut named_payload = HashMap::new();
-                            named_payload
-                                .insert("channel".into(), PyRep::ascii_bytes("sessionchange"));
-                            let sess_pkt = MachoPacket {
-                                packet_type: MachoPacketType::SessionChangeNotification,
-                                source: MachoAddress::Node {
-                                    node_id: MACHO_PROXY_NODE_ID,
-                                    service: None,
-                                    call_id: 0,
-                                },
-                                destination: MachoAddress::Client {
-                                    client_id,
-                                    call_id: 0,
-                                    service: None,
-                                },
-                                user_id: session.user_id,
-                                payload: sess_change_payload,
-                                named_payload,
-                            };
-                            if write_framed_pyrep(&mut writer, &sess_pkt.to_pyrep()).await.is_err() {
+                            if write_framed_pyrep(&mut writer, &sess_frame).await.is_err() {
                                 break;
                             }
                         }
@@ -2041,6 +2116,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             sys_rx: &mut sys_rx,
                             subscribed_sys_id: &mut subscribed_sys_id,
                             wire_state: &mut wire_state,
+                            deferred_ship_id: &mut deferred_ship_id,
                         };
                         if dispatch_call_req_to_wire(
                             &ctx,
@@ -2199,41 +2275,184 @@ pub(crate) fn enrich_session_change_scoped_roles(
 
 pub use eve_machonet::extract_macho_call_req;
 
+/// Filters `raw_payload` through [`eve_machonet::filter_session_change_payload`], logs dropped keys at
+/// debug level, skips emission when every key is dropped, and wraps the surviving diff in a
+/// `SessionChangeNotification` `MachoPacket` `PyRep` (`GH #1085`).
+pub fn build_filtered_session_change_packet(
+    client_id: u64,
+    user_id: Option<u64>,
+    session_id: u64,
+    raw_payload: PyRep,
+) -> Option<PyRep> {
+    let (filtered_payload, dropped) = eve_machonet::filter_session_change_payload(raw_payload);
+    if !dropped.is_empty() {
+        debug!(
+            session_id,
+            client_id,
+            dropped_keys = ?dropped,
+            "dropped non-distributed SessionChangeNotification keys: {dropped:?}"
+        );
+    }
+    let sess_change_payload = filtered_payload?;
+    let mut named_payload = HashMap::new();
+    named_payload.insert("channel".into(), PyRep::ascii_bytes("sessionchange"));
+    let sess_pkt = MachoPacket {
+        packet_type: MachoPacketType::SessionChangeNotification,
+        source: MachoAddress::Node {
+            node_id: MACHO_PROXY_NODE_ID,
+            service: None,
+            call_id: 0,
+        },
+        destination: MachoAddress::Client {
+            client_id,
+            call_id: 0,
+            service: None,
+        },
+        user_id,
+        payload: sess_change_payload,
+        named_payload,
+    };
+    Some(sess_pkt.to_pyrep())
+}
+
 fn build_session_change_wire_frame(
     ctx: &ServerContext,
     client_id: u64,
     prev_session: &SessionState,
     session: &SessionState,
 ) -> Option<PyRep> {
-    prev_session
-        .to_session_change_pyrep(session, vec![MACHO_PROXY_NODE_ID as i64])
-        .map(|mut sess_change_payload| {
-            enrich_session_change_scoped_roles(
-                ctx,
-                prev_session,
-                session,
-                &mut sess_change_payload,
-            );
-            let mut named_payload = HashMap::new();
-            named_payload.insert("channel".into(), PyRep::ascii_bytes("sessionchange"));
-            let sess_pkt = MachoPacket {
-                packet_type: MachoPacketType::SessionChangeNotification,
-                source: MachoAddress::Node {
-                    node_id: MACHO_PROXY_NODE_ID,
-                    service: None,
-                    call_id: 0,
-                },
-                destination: MachoAddress::Client {
+    let mut raw_payload = eve_machonet::SessionChange::from_diff(
+        prev_session,
+        session,
+        vec![MACHO_PROXY_NODE_ID as i64],
+    )
+    .to_pyrep()?;
+    enrich_session_change_scoped_roles(ctx, prev_session, session, &mut raw_payload);
+    build_filtered_session_change_packet(
+        client_id,
+        session.user_id,
+        session.session_id,
+        raw_payload,
+    )
+}
+
+pub(crate) fn build_deferred_ship_id_frame(
+    client_id: u64,
+    user_id: Option<u64>,
+    session_id: u64,
+    ship_id: i64,
+) -> Option<PyRep> {
+    let raw_payload = eve_machonet::SessionChange::new(
+        session_id,
+        vec![(
+            "shipid".to_string(),
+            (PyRep::None, PyRep::Integer(ship_id)),
+        )],
+        vec![MACHO_PROXY_NODE_ID as i64],
+    )
+    .to_pyrep()?;
+    build_filtered_session_change_packet(client_id, user_id, session_id, raw_payload)
+}
+
+fn resolve_deferred_session_change_frame(
+    ctx: &ServerContext,
+    client_id: u64,
+    prev_session: &SessionState,
+    session: &SessionState,
+    deferred_ship_id: &mut Option<PendingDeferredShipId>,
+    flush_now: bool,
+) -> (Option<PyRep>, Option<PyRep>) {
+    let was_in_space = prev_session.character_id.is_some()
+        && prev_session.station_id.is_none()
+        && prev_session.structure_id.is_none()
+        && prev_session.solar_system_id.is_some();
+    let is_in_space = session.character_id.is_some()
+        && session.station_id.is_none()
+        && session.structure_id.is_none()
+        && session.solar_system_id.is_some();
+    let docking_transition = was_in_space && !is_in_space;
+    let death_respawn_docking = docking_transition && session.ship_id != prev_session.ship_id;
+    let cur_dock_id = session.station_id.or(session.structure_id);
+
+    let mut effective_prev = prev_session.clone();
+    let mut effective_next = session.clone();
+    let mut deferred_flush_frame = None;
+
+    if let Some(pending) = *deferred_ship_id {
+        let still_same_docked_ship = session.character_id == Some(pending.char_id)
+            && session.ship_id == Some(pending.ship_id)
+            && cur_dock_id == Some(pending.dock_id)
+            && prev_session.character_id == Some(pending.char_id)
+            && prev_session.ship_id == Some(pending.ship_id)
+            && prev_session.station_id.or(prev_session.structure_id) == Some(pending.dock_id);
+        if still_same_docked_ship {
+            effective_prev.ship_id = None;
+            effective_next.ship_id = None;
+            if flush_now {
+                *deferred_ship_id = None;
+                deferred_flush_frame = build_deferred_ship_id_frame(
                     client_id,
-                    call_id: 0,
-                    service: None,
-                },
-                user_id: session.user_id,
-                payload: sess_change_payload,
-                named_payload,
-            };
-            sess_pkt.to_pyrep()
-        })
+                    session.user_id,
+                    session.session_id,
+                    pending.ship_id,
+                );
+            }
+        } else {
+            *deferred_ship_id = None;
+            if prev_session.character_id == Some(pending.char_id)
+                && prev_session.ship_id == Some(pending.ship_id)
+            {
+                effective_prev.ship_id = None;
+            }
+        }
+    } else if docking_transition && !death_respawn_docking {
+        if let (Some(char_id), Some(ship_id), Some(dock_id)) =
+            (session.character_id, session.ship_id, cur_dock_id)
+        {
+            effective_next.ship_id = None;
+            *deferred_ship_id = Some(PendingDeferredShipId {
+                char_id,
+                ship_id,
+                dock_id,
+                deadline: tokio::time::Instant::now()
+                    + std::time::Duration::from_millis(DEFERRED_SHIP_ID_DELAY_MS),
+            });
+        }
+    }
+
+    let sess_frame =
+        build_session_change_wire_frame(ctx, client_id, &effective_prev, &effective_next);
+    (sess_frame, deferred_flush_frame)
+}
+
+pub(crate) fn flush_deferred_ship_id_if_due(
+    ctx: &ServerContext,
+    session: &SessionState,
+    wire: &mut CallReqWireRefs<'_>,
+    now: tokio::time::Instant,
+) -> Option<crate::outbound_sequencer::OutFrame> {
+    let pending = (*wire.deferred_ship_id)?;
+    if now < pending.deadline {
+        return None;
+    }
+    *wire.deferred_ship_id = None;
+    let mut probe = session.clone();
+    if probe.character_id.is_some() {
+        ctx.sync_session(&mut probe);
+    }
+    let still_docked = probe.character_id == Some(pending.char_id)
+        && probe.ship_id == Some(pending.ship_id)
+        && probe.station_id.or(probe.structure_id) == Some(pending.dock_id);
+    if !still_docked {
+        return None;
+    }
+    build_deferred_ship_id_frame(
+        wire.client_id,
+        probe.user_id,
+        probe.session_id,
+        pending.ship_id,
+    )
+    .map(|frame| crate::outbound_sequencer::OutFrame::SessionChange { frame })
 }
 
 /// Drains any pending `TickBroadcast` destiny updates, session changes, and queued notifications
@@ -2253,11 +2472,22 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
         ctx.sync_session(session);
     }
     let mut out_frames = Vec::new();
-    let session_change_frame =
-        build_session_change_wire_frame(ctx, wire.client_id, &prev_session, session);
+    let (session_change_frame, _) = resolve_deferred_session_change_frame(
+        ctx,
+        wire.client_id,
+        &prev_session,
+        session,
+        wire.deferred_ship_id,
+        false,
+    );
     let sess_change_sent = session_change_frame.is_some();
     if let Some(frame) = session_change_frame {
         out_frames.push(crate::outbound_sequencer::OutFrame::SessionChange { frame });
+    }
+    if let Some(flush_frame) =
+        flush_deferred_ship_id_if_due(ctx, session, wire, tokio::time::Instant::now())
+    {
+        out_frames.push(flush_frame);
     }
     let is_in_space = session.character_id.is_some()
         && session.station_id.is_none()

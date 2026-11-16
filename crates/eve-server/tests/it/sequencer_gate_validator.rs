@@ -127,6 +127,7 @@ fn attach_test_session(
             call_id: 1,
             response_frame: PyRep::None,
             session_change_frame: None,
+            item_change_before_session_change: false,
             pending_tick_batches: Vec::new(),
             destiny_drain: DestinyDrain::Attach {
                 epoch,
@@ -364,6 +365,7 @@ async fn test_per_entity_materialization_gate_live_and_same_dispatch() {
             call_id: 2,
             response_frame: PyRep::String("ok".into()),
             session_change_frame: None,
+            item_change_before_session_change: false,
             pending_tick_batches: Vec::new(),
             destiny_drain: DestinyDrain::None,
             notifications: vec![
@@ -466,6 +468,7 @@ async fn test_per_entity_materialization_gate_live_and_same_dispatch() {
             call_id: 3,
             response_frame: PyRep::None,
             session_change_frame: None,
+            item_change_before_session_change: false,
             pending_tick_batches: Vec::new(),
             destiny_drain: DestinyDrain::Updates(DestinyBatch::new(
                 epoch,
@@ -520,6 +523,7 @@ async fn test_per_entity_materialization_gate_live_and_same_dispatch() {
             call_id: 4,
             response_frame: PyRep::None,
             session_change_frame: None,
+            item_change_before_session_change: false,
             pending_tick_batches: Vec::new(),
             destiny_drain: DestinyDrain::Updates(DestinyBatch::new(
                 epoch,
@@ -569,6 +573,7 @@ async fn test_per_entity_materialization_gate_live_and_same_dispatch() {
             call_id: 5,
             response_frame: PyRep::None,
             session_change_frame: None,
+            item_change_before_session_change: false,
             pending_tick_batches: Vec::new(),
             destiny_drain: DestinyDrain::Updates(DestinyBatch::new(
                 epoch,
@@ -991,6 +996,7 @@ fn test_prevented_jolt_emits_crt_marker_and_drops_destiny_frame() {
             call_id: 77,
             response_frame: PyRep::String("call_rsp_ok".into()),
             session_change_frame: None,
+            item_change_before_session_change: false,
             pending_tick_batches: Vec::new(),
             destiny_drain: DestinyDrain::Updates(DestinyBatch::new(
                 ep,

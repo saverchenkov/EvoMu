@@ -1063,6 +1063,7 @@ mod tests {
             mission_initial_npc_counts: HashMap::with_capacity(cap),
             mission_initial_npc_types: HashMap::with_capacity(cap),
             active_scanner_probes: HashMap::with_capacity(cap),
+            item_velocities: HashMap::with_capacity(cap),
             server_runtime_json: Some("{}".into()),
         };
         if scramble {
@@ -1099,6 +1100,7 @@ mod tests {
                     remove_at_unix: 1_700_001_060 + u,
                     emergency_warp_dest: Some([10.0 + k as f64, 20.0, 30.0]),
                     last_position: [1.0, 2.0, 3.0 + k as f64],
+                    last_velocity: [0.5, -1.5, 2.5 + k as f64],
                     removed_from_space: false,
                     pre_warp_position: Some([-5.0, 0.0, 5.0]),
                 },
@@ -1149,6 +1151,7 @@ mod tests {
                     planet_id: Some(40_000_001),
                 },
             );
+            st.item_velocities.insert(k + 50_000, [1.5, -2.5, 3.5 + k as f64]);
         }
         st
     }
@@ -1188,9 +1191,11 @@ mod tests {
         check(&|s| s.disconnected_ships.get_mut(&101).unwrap().emergency_warp_dest = None, "disconnected.emergency_warp_dest=None");
         check(&|s| s.disconnected_ships.get_mut(&101).unwrap().emergency_warp_dest = Some([0.0; 3]), "disconnected.emergency_warp_dest=zero");
         check(&|s| s.disconnected_ships.get_mut(&101).unwrap().last_position[1] += 1.0, "disconnected.last_position");
+        check(&|s| s.disconnected_ships.get_mut(&101).unwrap().last_velocity[0] += 1.0, "disconnected.last_velocity");
         check(&|s| s.disconnected_ships.get_mut(&101).unwrap().removed_from_space = true, "disconnected.removed_from_space");
         check(&|s| s.disconnected_ships.get_mut(&101).unwrap().pre_warp_position = None, "disconnected.pre_warp_position=None");
         check(&|s| s.disconnected_ships.get_mut(&101).unwrap().pre_warp_position = Some([9.0, 8.0, 7.0]), "disconnected.pre_warp_position=val");
+        check(&|s| s.item_velocities.get_mut(&50_101).unwrap()[0] += 1.0, "item_velocities");
 
         check(&|s| s.self_destructs.get_mut(&30_101).unwrap().ship_id += 1, "self_destructs.ship_id");
         check(&|s| s.self_destructs.get_mut(&30_101).unwrap().char_id += 1, "self_destructs.char_id");

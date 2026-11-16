@@ -138,7 +138,7 @@ pub fn emit_sim_clock_rebase_on_entry_if_needed(
             let elapsed_wall_ft = now_wall_ft.saturating_sub(anchor_wall_ft);
             let dilated_elapsed_ft =
                 ((elapsed_wall_ft as f64) * cur_factor.clamp(0.10, 1.0)).round() as i64;
-            (anchor_sim_ft, anchor_sim_ft.saturating_add(dilated_elapsed_ft))
+            (now_wall_ft, anchor_sim_ft.saturating_add(dilated_elapsed_ft))
         } else {
             let seed_elapsed = (10_000_000.0 * factor.clamp(0.10, 1.0)).round() as i64;
             let seeded = (now_wall_ft.saturating_sub(seed_elapsed), now_wall_ft);

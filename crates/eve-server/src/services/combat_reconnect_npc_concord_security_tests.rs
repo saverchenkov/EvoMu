@@ -79,6 +79,7 @@ async fn r7_tb_03_reconnect_return_warp_blocked_when_scrambled_or_bubbled() {
                 remove_at_unix: now + 600,
                 emergency_warp_dest: None,
                 last_position: [current_pos.x, current_pos.y, current_pos.z],
+                last_velocity: [0.0, 0.0, 0.0],
                 removed_from_space: false,
                 pre_warp_position: Some([orig_pos.x, orig_pos.y, orig_pos.z]),
             },

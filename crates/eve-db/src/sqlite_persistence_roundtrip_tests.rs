@@ -64,6 +64,7 @@ fn populate_all_domains(snap: &mut WorldStateSnapshot, cid: i64, alt_cid: i64, c
                 remove_at_unix: 1_700_000_888,
                 emergency_warp_dest: Some([100.0, 200.0, 300.0]),
                 last_position: [1.0, 2.0, 3.0],
+                last_velocity: [4.0, -5.0, 6.0],
                 removed_from_space: false,
                 pre_warp_position: Some([0.0, 0.0, 0.0]),
             },

@@ -214,30 +214,29 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     && !snap.characters.values().any(|c| c.active_ship_id == it.item_id)
                 }).map(|it| it.item_id);
                 
-                let capsule_id = if let Some(cid) = existing {
-                    cid
+                let (capsule_id, capsule_rec, created_capsule) = if let Some(cid) = existing {
+                    let rec = snap.items.get(&cid).cloned().expect("existing capsule record");
+                    (cid, rec, false)
                 } else {
                     snap.next_entity_id += 1;
                     let cid = snap.next_entity_id;
-                    snap.items.insert(
-                        cid,
-                        eve_db::InventoryItemRecord {
-                            item_id: cid,
-                            type_id: 670, // Capsule
-                            owner_id: char_id,
-                            location_id: loc_id,
-                            flag: if dock_opt.is_some() {
-                                InventoryFlag::Hangar
-                            } else {
-                                InventoryFlag::None
-                            },
-                            quantity: 1,
-                            singleton: true,
-                            version: 1,
-                            ..Default::default()
+                    let rec = eve_db::InventoryItemRecord {
+                        item_id: cid,
+                        type_id: 670, // Capsule
+                        owner_id: char_id,
+                        location_id: loc_id,
+                        flag: if dock_opt.is_some() {
+                            InventoryFlag::Hangar
+                        } else {
+                            InventoryFlag::None
                         },
-                    );
-                    cid
+                        quantity: 1,
+                        singleton: true,
+                        version: 1,
+                        ..Default::default()
+                    };
+                    snap.items.insert(cid, rec.clone());
+                    (cid, rec, true)
                 };
                 if dock_opt.is_none() {
                     let old_pos_arr = live_eject_pos
@@ -260,11 +259,11 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     false,
                     false,
                 );
-                Ok(capsule_id)
+                Ok((capsule_id, capsule_rec, created_capsule))
             });
 
-            let capsule_id = match res {
-                Ok(id) => id,
+            let (capsule_id, capsule_rec, created_capsule) = match res {
+                Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
 
@@ -363,6 +362,14 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, old_ship_id);
             ctx.invalidate_ship_fitting(old_ship_id);
             ctx.invalidate_ship_fitting(capsule_id);
+            if dock_opt.is_some() {
+                let cap_changes = if created_capsule {
+                    vec![(3, PyRep::Integer(0))]
+                } else {
+                    vec![(4, PyRep::Integer(capsule_rec.flag as i64))]
+                };
+                ctx.notify_item_record_change(char_id, &capsule_rec, cap_changes);
+            }
             let changes = vec![(
                 PyRep::String("shipid".to_string()),
                 PyRep::Tuple(vec![PyRep::Integer(old_ship_id), PyRep::Integer(capsule_id)]),
@@ -655,10 +662,10 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     false,
                     false,
                 );
-                Ok((target_ship_id, removed_capsule_items))
+                Ok((target_ship_id, ship, removed_capsule_items))
             });
             match res {
-                Ok((sid, removed_capsule_items)) => {
+                Ok((sid, target_ship_rec, removed_capsule_items)) => {
                     let prev_ship_id = session.ship_id;
                     let was_capsule = !removed_capsule_items.is_empty();
                     if let Some(prev) = prev_ship_id {
@@ -800,6 +807,16 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         1,
                     );
                     if prev_ship_id != Some(sid) {
+                        if session.station_id.or(session.structure_id).is_some() {
+                            ctx.notify_item_record_change(
+                                char_id,
+                                &target_ship_rec,
+                                vec![
+                                    (3, PyRep::Integer(target_ship_rec.location_id)),
+                                    (4, PyRep::Integer(target_ship_rec.flag as i64)),
+                                ],
+                            );
+                        }
                         let changes = vec![(
                             PyRep::String("shipid".to_string()),
                             PyRep::Tuple(vec![

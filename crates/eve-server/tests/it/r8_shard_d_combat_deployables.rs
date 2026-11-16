@@ -258,6 +258,7 @@ async fn test_r8_501_nested_sma_and_container_loot_rigs_orphans_and_turret_disco
                 remove_at_unix: now + 900,
                 emergency_warp_dest: Some([1.0e9, 0.0, 0.0]),
                 last_position: [0.0, 0.0, 0.0],
+                last_velocity: [0.0, 0.0, 0.0],
                 removed_from_space: false,
                 pre_warp_position: None,
             },
