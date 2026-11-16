@@ -64,6 +64,90 @@ async fn spawn_listener(ctx: Arc<ServerContext>) -> std::net::SocketAddr {
     addr
 }
 
+const CONNECT_MAX_ATTEMPTS: usize = 8;
+const CONNECT_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+const CONNECT_RETRY_BASE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(50);
+const CONNECT_RETRY_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Returns true for OS/socket connect errors that can occur transiently on loopback under heavy
+/// parallel test load (kernel SYN/listen-queue stalls, ephemeral port churn, or brief saturation).
+fn is_transient_connect_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::AddrInUse
+            | std::io::ErrorKind::AddrNotAvailable
+    )
+}
+
+/// Retries an async TCP connect operation across transient errors and per-attempt stalls.
+async fn retry_connect_with<T, F, Fut>(
+    addr: std::net::SocketAddr,
+    max_attempts: usize,
+    base_backoff: std::time::Duration,
+    max_backoff: std::time::Duration,
+    attempt_timeout: std::time::Duration,
+    mut connect_fn: F,
+) -> std::io::Result<T>
+where
+    F: FnMut(std::net::SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<T>>,
+{
+    let attempts = max_attempts.max(1);
+    let mut attempt = 1usize;
+    loop {
+        // Bound each attempt so a stalled loopback SYN cannot block for the full OS keepinit (~75s on macOS).
+        let outcome = match tokio::time::timeout(attempt_timeout, connect_fn(addr)).await {
+            Ok(res) => res,
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("connect attempt to {addr} timed out after {attempt_timeout:?}"),
+            )),
+        };
+
+        match outcome {
+            Ok(conn) => return Ok(conn),
+            Err(err) => {
+                let transient = is_transient_connect_error(&err);
+                if !transient || attempt >= attempts {
+                    return Err(std::io::Error::new(
+                        err.kind(),
+                        format!(
+                            "connect to {addr} failed after {attempt}/{attempts} attempt(s) (transient={transient}): {err}"
+                        ),
+                    ));
+                }
+                eprintln!(
+                    "[macho_listener_deep_extra_unit_tests] transient connect failure to {addr} on attempt {attempt}/{attempts}: {err}; retrying"
+                );
+                let factor = u32::try_from(attempt).unwrap_or(u32::MAX);
+                let delay = base_backoff.saturating_mul(factor).min(max_backoff);
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+            }
+        }
+    }
+}
+
+/// Connects to a local test listener with bounded retries on transient OS connect errors.
+async fn connect_with_retry(addr: std::net::SocketAddr) -> TcpStream {
+    retry_connect_with(
+        addr,
+        CONNECT_MAX_ATTEMPTS,
+        CONNECT_RETRY_BASE_BACKOFF,
+        CONNECT_RETRY_MAX_BACKOFF,
+        CONNECT_ATTEMPT_TIMEOUT,
+        TcpStream::connect,
+    )
+    .await
+    .unwrap_or_else(|err| panic!("connect_with_retry({addr}) failed: {err}"))
+}
+
 async fn read_pkt(stream: &mut TcpStream) -> Option<PyRep> {
     tokio::time::timeout(std::time::Duration::from_secs(60), read_framed_pyrep(stream))
         .await
@@ -94,7 +178,7 @@ async fn complete_placebo_challenge(s: &mut TcpStream, user: &str, pass: &str, s
 }
 
 async fn connect_login(addr: std::net::SocketAddr, username: &str, password: &str) -> (TcpStream, u64, u64) {
-    let mut s = TcpStream::connect(addr).await.unwrap();
+    let mut s = connect_with_retry(addr).await;
     let _hello = read_pkt(&mut s).await.unwrap();
     write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep()).await.unwrap();
     write_framed_pyrep(&mut s, &CryptoRequestPacket::placebo().to_pyrep()).await.unwrap();
@@ -160,14 +244,14 @@ async fn frame_codec_io_errors_truncated_body_and_tcp_reader_task_guards() {
     let addr = spawn_listener(Arc::clone(&ctx)).await;
 
     for bad_len in [0u32, (MAX_MACHO_FRAME_LEN + 1) as u32] {
-        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut s = connect_with_retry(addr).await;
         let _hello = read_pkt(&mut s).await.unwrap();
         s.write_u32_le(bad_len).await.unwrap();
         s.flush().await.unwrap();
         assert_eq!(read_pkt(&mut s).await, None);
     }
     {
-        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut s = connect_with_retry(addr).await;
         let _hello = read_pkt(&mut s).await.unwrap();
         s.write_u32_le(24).await.unwrap();
         s.write_all(&[1, 2, 3, 4]).await.unwrap();
@@ -188,7 +272,7 @@ async fn handshake_queue_check_vip_empty_sso_and_mid_handshake_gates() {
 
     // 1. QueueCheck `(None, "QC")` -> queue position 1 + fresh hello -> VipKey + empty SSO + blank lang
     {
-        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut s = connect_with_retry(addr).await;
         let _hello1 = read_pkt(&mut s).await.unwrap();
         write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep()).await.unwrap();
         write_framed_pyrep(&mut s, &HandshakeCommand::QueueCheck.to_pyrep()).await.unwrap();
@@ -205,7 +289,7 @@ async fn handshake_queue_check_vip_empty_sso_and_mid_handshake_gates() {
 
     // 2. Banned login includes `expiry` and `until` arguments on `GPSTransportClosed`
     {
-        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut s = connect_with_retry(addr).await;
         let _ = read_pkt(&mut s).await.unwrap();
         write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep()).await.unwrap();
         write_framed_pyrep(&mut s, &CryptoRequestPacket::placebo().to_pyrep()).await.unwrap();
@@ -223,7 +307,7 @@ async fn handshake_queue_check_vip_empty_sso_and_mid_handshake_gates() {
         ("midgone_user", "secret_mg", 1u8, "LoginAuthFailed"),
         ("demo", "demo-secret", 2u8, "ClusterShuttingDown"),
     ] {
-        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut s = connect_with_retry(addr).await;
         let _ = read_pkt(&mut s).await.unwrap();
         write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep()).await.unwrap();
         write_framed_pyrep(&mut s, &CryptoRequestPacket::placebo().to_pyrep()).await.unwrap();
@@ -1037,7 +1121,7 @@ async fn resolve_req_ping_list_corrupt_marshal_error_codes_and_revocation() {
 
     // 2. Corrupt marshal bytes trigger HANDSHAKE_INCOMPATIBLEPROTOCOL close frame.
     {
-        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut s = connect_with_retry(addr).await;
         let _hello = read_pkt(&mut s).await.unwrap();
         s.write_u32_le(5).await.unwrap();
         s.write_all(&[0xff, 0xee, 0xdd, 0xcc, 0xbb]).await.unwrap();
@@ -1948,4 +2032,106 @@ async fn ship_destruction_and_rapid_pod_death_respawn_suppress_self_terminal_exp
         sess_idx < resp_idx,
         "SessionChangeNotification ({sess_idx}) must precede OnPlayerPodRespawn ({resp_idx})"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connect_with_retry_recovers_from_transient_errors_and_fails_cleanly() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dummy_addr: std::net::SocketAddr = "127.0.0.1:4242".parse().unwrap();
+
+    // 1. Recovers across transient OS errors and per-attempt stalls before succeeding.
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_clone = Arc::clone(&attempts);
+    let token = retry_connect_with(
+        dummy_addr,
+        6,
+        std::time::Duration::from_millis(2),
+        std::time::Duration::from_millis(5),
+        std::time::Duration::from_millis(20),
+        move |_| {
+            let n = attempts_clone.fetch_add(1, Ordering::SeqCst);
+            async move {
+                match n {
+                    0 => Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "simulated OS ETIMEDOUT",
+                    )),
+                    1 => Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        "simulated ECONNREFUSED",
+                    )),
+                    2 => Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "simulated EAGAIN",
+                    )),
+                    3 => std::future::pending().await,
+                    _ => Ok("connected"),
+                }
+            }
+        },
+    )
+    .await
+    .expect("transient connect failures and per-attempt stall should recover");
+    assert_eq!(token, "connected");
+    assert_eq!(attempts.load(Ordering::SeqCst), 5);
+
+    // 2. Non-transient errors fail immediately without burning remaining retry attempts.
+    let non_transient_attempts = Arc::new(AtomicUsize::new(0));
+    let nt_clone = Arc::clone(&non_transient_attempts);
+    let err = retry_connect_with::<(), _, _>(
+        dummy_addr,
+        5,
+        std::time::Duration::from_millis(2),
+        std::time::Duration::from_millis(5),
+        std::time::Duration::from_millis(20),
+        move |_| {
+            nt_clone.fetch_add(1, Ordering::SeqCst);
+            async {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "blocked by policy",
+                ))
+            }
+        },
+    )
+    .await
+    .expect_err("non-transient error must fail fast");
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(non_transient_attempts.load(Ordering::SeqCst), 1);
+    assert!(err.to_string().contains("1/5 attempt(s)"));
+
+    // 3. Persistent transient errors fail cleanly once max_attempts is exhausted.
+    let exhausted_attempts = Arc::new(AtomicUsize::new(0));
+    let ex_clone = Arc::clone(&exhausted_attempts);
+    let err = retry_connect_with::<(), _, _>(
+        dummy_addr,
+        3,
+        std::time::Duration::from_millis(2),
+        std::time::Duration::from_millis(5),
+        std::time::Duration::from_millis(20),
+        move |_| {
+            ex_clone.fetch_add(1, Ordering::SeqCst);
+            async {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "persistent timeout",
+                ))
+            }
+        },
+    )
+    .await
+    .expect_err("persistent timeout must exhaust attempts");
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    assert_eq!(exhausted_attempts.load(Ordering::SeqCst), 3);
+    assert!(err.to_string().contains("3/3 attempt(s)"));
+
+    // 4. Real loopback connect_with_retry succeeds against a live TcpListener.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let real_addr = listener.local_addr().unwrap();
+    let accept_task = tokio::spawn(async move {
+        let (_srv, _) = listener.accept().await.unwrap();
+    });
+    let client = connect_with_retry(real_addr).await;
+    assert_eq!(client.peer_addr().unwrap(), real_addr);
+    accept_task.await.unwrap();
 }
