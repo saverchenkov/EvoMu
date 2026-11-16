@@ -469,6 +469,11 @@ pub fn handle_char_unbound(
 
             if c.station_id.is_none() && c.structure_id.is_none() {
                 let _ = crate::sp6_lifecycle::reconnect_character_in_space_sync(ctx, c.character_id);
+                let _ = crate::services::serverops_cluster::emit_sim_clock_rebase_on_entry_if_needed(
+                    ctx,
+                    c.character_id,
+                    eff_sys,
+                );
             }
 
             crate::quasar_gateway::isolate_side_effect(
@@ -2297,14 +2302,21 @@ pub async fn handle_gm_slash_ext(
         return Some(Ok(PyRep::Dict(entries)));
     }
     if let Some(r) = cmd.strip_prefix("/tidi") {
-        let f = match r.trim().parse::<f64>() {
-            Ok(v) if v.is_finite() && v > 0.0 && v <= 1.0 => v,
-            _ => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /tidi <factor 0.0..1.0>".into(), client_error: None })),
-        };
+        let arg = r.trim();
         let Some(sys_id) = session.solar_system_id else {
             return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Pilot not in solar system".into(), client_error: None }));
         };
-        return Some(Ok(PyRep::Real(crate::services::wallet_serverops::set_system_tidi_factor(ctx, sys_id, f))));
+        if arg.eq_ignore_ascii_case("status") || arg.is_empty() {
+            return Some(Ok(crate::services::serverops_cluster::system_tidi_status_pyrep(ctx, sys_id)));
+        }
+        if arg.eq_ignore_ascii_case("clear") || arg.eq_ignore_ascii_case("reset") {
+            return Some(Ok(PyRep::Real(crate::services::serverops_cluster::clear_manual_system_tidi_override(ctx, sys_id))));
+        }
+        let f = match arg.parse::<f64>() {
+            Ok(v) if v.is_finite() && v > 0.0 && v <= 1.0 => v,
+            _ => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /tidi <factor 0.0..1.0|status|clear>".into(), client_error: None })),
+        };
+        return Some(Ok(PyRep::Real(crate::services::serverops_cluster::set_system_tidi_factor(ctx, sys_id, f))));
     }
     if cmd == "/reinforce" || cmd.starts_with("/reinforce ") {
         let Some(sys_id) = session.solar_system_id else {
@@ -2323,9 +2335,13 @@ pub async fn handle_gm_slash_ext(
             crate::services::serverops_cluster::set_auto_cluster_tidi_enabled(ctx, false);
             return Some(Ok(PyRep::Integer(0)));
         }
+        if arg.eq_ignore_ascii_case("on") {
+            crate::services::serverops_cluster::set_latency_auto_tidi_enabled(ctx, true);
+            return Some(Ok(PyRep::Integer(1)));
+        }
         let thr = match arg.parse::<usize>() {
             Ok(v) if v > 0 => v,
-            _ => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /autotidi <threshold|off>".into(), client_error: None })),
+            _ => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /autotidi <threshold|on|off>".into(), client_error: None })),
         };
         crate::services::serverops_cluster::set_cluster_node_load_threshold(ctx, thr);
         crate::services::serverops_cluster::set_auto_cluster_tidi_enabled(ctx, true);

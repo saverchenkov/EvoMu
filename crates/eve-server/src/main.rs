@@ -123,15 +123,20 @@ async fn main() -> Result<()> {
                         continue;
                     }
                 }
+                let raw_elapsed = last_step.elapsed();
                 let elapsed = eve_server::sp6_lifecycle::clamp_physics_ticker_backlog(
-                    last_step.elapsed().as_secs(),
+                    raw_elapsed.as_secs(),
                 );
+                let cadence_lateness_ms = (raw_elapsed.as_secs_f64() * 1_000.0
+                    - eve_server::system_actor::TIDI_TARGET_WINDOW_MS)
+                    .max(0.0);
                 last_step = std::time::Instant::now();
                 if !physics_ctx.is_clock_paused() {
                     if let Err(panic_msg) = eve_server::sp6_lifecycle::catch_unwind_future(
-                        eve_server::sp6_lifecycle::step_active_systems_physics_tick(
+                        eve_server::sp6_lifecycle::step_active_systems_physics_tick_with_lateness(
                             &physics_ctx,
                             elapsed,
+                            cadence_lateness_ms,
                         ),
                     )
                     .await

@@ -390,6 +390,8 @@ pub(crate) struct SystemActorState {
     pub ball_space_entry_epochs: HashMap<BallId, u64>,
     pub fit_projections: HashMap<BallId, eve_dogma::FitProjection>,
     pub weapon_cycle_start_modules: std::collections::HashSet<(BallId, i64)>,
+    /// Active sim-clock-governed turret/launcher reload countdowns: `turret_or_module_id -> (ship_id, remaining_sim_secs)` (`#1081`).
+    pub module_reload_sim_remaining: HashMap<i64, (BallId, f64)>,
     pub last_checkpointed_balls: HashMap<BallId, LastCheckpointedBallState>,
     pub hibernated: Arc<std::sync::atomic::AtomicBool>,
     pub hibernated_since_unix: Arc<std::sync::atomic::AtomicU64>,
@@ -552,6 +554,11 @@ pub enum SystemCommand {
     PushSetState {
         observer_ball_id: BallId,
         reply: oneshot::Sender<Result<u64, String>>,
+    },
+    TrackModuleReloadSim {
+        module_id: i64,
+        ship_id: BallId,
+        remaining_sim_s: f64,
     },
     GetBallSnapshot {
         ball_id: BallId,
@@ -816,6 +823,16 @@ pub struct ClusterNodeRegistry {
     pub node_load_tidi_threshold: usize,
     pub next_dedicated_node_id: u32,
     pub auto_tidi_enabled: bool,
+    /// Per-system latency-driven TiDi autoscaler master enable (`true` by default per `#1081`).
+    pub latency_auto_tidi_enabled: bool,
+    /// Per-system latency autoscaler state machines (`#1081`).
+    pub system_tidi_autoscalers: HashMap<SolarSystemId, crate::system_actor::tidi_autoscaler::SystemTidiAutoscaler>,
+    /// Monotonic rebase generation per system incremented on each emitted `DoSimClockRebase`.
+    pub rebase_generation_by_system: HashMap<SolarSystemId, u64>,
+    /// Last `(solar_system_id, rebase_generation)` delivered to a character (`DoSimClockRebase` once per entry/change).
+    pub char_rebased_system_gen: HashMap<i64, (SolarSystemId, u64)>,
+    /// Last monotonic sim FILETIME stamp emitted on space activation/FX per system (preserved across `0.5 -> 1.0`).
+    pub last_sim_activation_ft_by_system: HashMap<SolarSystemId, i64>,
     pub scheduled_downtime_enabled: bool,
 }
 
@@ -830,6 +847,11 @@ impl Default for ClusterNodeRegistry {
             node_load_tidi_threshold: DEFAULT_NODE_LOAD_TIDI_THRESHOLD,
             next_dedicated_node_id: 100,
             auto_tidi_enabled: false,
+            latency_auto_tidi_enabled: true,
+            system_tidi_autoscalers: HashMap::new(),
+            rebase_generation_by_system: HashMap::new(),
+            char_rebased_system_gen: HashMap::new(),
+            last_sim_activation_ft_by_system: HashMap::new(),
             scheduled_downtime_enabled: true,
         }
     }

@@ -302,7 +302,7 @@ pub(crate) async fn emit_cloak_transition(ctx: &ServerContext, sys_id: u32, ship
         )
         .await;
     if cloaked {
-        let time_ft = ctx.now_client_sim_filetime_ticks();
+        let time_ft = ctx.now_system_sim_filetime_ticks(Some(sys_id));
         let module_states: Vec<(i64, i64, u32, i64, f64, f64)> = ctx.db.with_snapshot(|snap| {
             snap.items
                 .values()

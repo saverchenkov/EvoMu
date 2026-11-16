@@ -45,6 +45,8 @@ pub use space_pochven_wormholes::*;
 pub mod space_nav_travel;
 
 pub(crate) const AU_IN_METERS: f64 = 149_597_870_700.0;
+/// Stargate session-change cooldown stays fixed in wall-clock seconds regardless of TiDi.
+pub const STARGATE_SESSION_CHANGE_TIMER_SECS: u64 = 7;
 const BEYONCE_SVC: &str = "beyonce";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -70,9 +72,13 @@ pub fn check_session_change_timer_active(
     if now_unix >= timer.expires_unix {
         return None;
     }
-    if let Some((sys_id, cur_tick)) = current_tick_opt {
-        if timer.started_tick > 0 && sys_id == timer.system_id && cur_tick >= timer.started_tick.saturating_add(10) {
-            return None;
+    // Stargate jump session-change timer (7 s) is wall-clock governed and does not
+    // expire early on system tick count or stretch under time dilation.
+    if timer.reason != "stargate_jump" {
+        if let Some((sys_id, cur_tick)) = current_tick_opt {
+            if timer.started_tick > 0 && sys_id == timer.system_id && cur_tick >= timer.started_tick.saturating_add(10) {
+                return None;
+            }
         }
     }
     Some(timer.clone())
@@ -186,7 +192,12 @@ fn record_session_change_timer_with_invuln(
     reason: &str,
     server_initiated: bool,
 ) {
-    let expires_unix = now_unix.saturating_add(10);
+    let duration_secs = if reason == "stargate_jump" {
+        STARGATE_SESSION_CHANGE_TIMER_SECS
+    } else {
+        10
+    };
+    let expires_unix = now_unix.saturating_add(duration_secs);
     let location_change_invul_until = if server_initiated && reason == "jump_drive" {
         let until = now_unix.saturating_add(60);
         grant_location_change_invulnerability(ctx, char_id, until);
@@ -805,6 +816,11 @@ pub(crate) async fn handle_update_state_request(
     let Some(ship_id) = session.ship_id else {
         return Ok(PyRep::None);
     };
+    // #1081 Req 3: Emit DoSimClockRebase once on space entry (login/undock/jump) into a lagged
+    // or dilated system; never on beyonce bind and never repeatedly on normal ticks.
+    let _ = crate::services::serverops_cluster::emit_sim_clock_rebase_on_entry_if_needed(
+        ctx, char_id, sys_id,
+    );
     sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let _ = crate::services::pve_dungeon_runtime::on_dungeon_approach(
         ctx, char_id, sys_id, ship_id, None,

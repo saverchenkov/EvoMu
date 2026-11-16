@@ -571,12 +571,19 @@ pub fn register_container_lifetime(
     created_unix: u64,
     is_abandoned: bool,
 ) {
-    let lifetime_secs = if type_id == 23 {
+    let base_lifetime_secs = if type_id == 23 {
         JETCAN_DECAY_LIFETIME_SECS
     } else if ctx.sde.types.get(&type_id).is_some_and(|t| t.effect_ids.contains(&649) && t.capacity > 0.0) {
         crate::sp6_lifecycle::SECURE_CONTAINER_DECAY_SECS
     } else {
         WRECK_DECAY_LIFETIME_SECS
+    };
+    let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, solar_system_id)
+        .clamp(0.10, 1.0);
+    let lifetime_secs = if tidi < 0.995 {
+        ((base_lifetime_secs as f64) / tidi).ceil().max(1.0) as u64
+    } else {
+        base_lifetime_secs
     };
     ctx.db.with_mut_snapshot(|snap| {
         if snap.items.contains_key(&item_id) {
@@ -806,8 +813,17 @@ pub async fn handle_wrecks_killmails(
                     ])));
                 }
             } else {
-                let detonate_at = now_unix.saturating_add(SELF_DESTRUCT_COUNTDOWN_SECS);
+                let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id)
+                    .clamp(0.10, 1.0);
+                let scaled_secs = if tidi < 0.995 {
+                    ((SELF_DESTRUCT_COUNTDOWN_SECS as f64) / tidi).ceil().max(1.0) as u64
+                } else {
+                    SELF_DESTRUCT_COUNTDOWN_SECS
+                };
+                let detonate_at = now_unix.saturating_add(scaled_secs);
                 with_mut_combat_runtime(ctx, |rt| {
+                    rt.self_destruct_sim_remaining_secs
+                        .insert(ship_id, SELF_DESTRUCT_COUNTDOWN_SECS as f64);
                     rt.self_destruct_countdowns.insert(
                         ship_id,
                         SelfDestructCountdown {
@@ -833,7 +849,7 @@ pub async fn handle_wrecks_killmails(
                     ("detonated", PyRep::Bool(false)),
                     (
                         "remainingSeconds",
-                        PyRep::Integer(SELF_DESTRUCT_COUNTDOWN_SECS as i64),
+                        PyRep::Integer(scaled_secs as i64),
                     ),
                     ("detonateAtUnix", PyRep::Integer(detonate_at as i64)),
                 ])));
@@ -1000,6 +1016,7 @@ pub async fn handle_wrecks_killmails(
                     .unwrap_or(0)
             });
             let aborted_rt = with_mut_combat_runtime(ctx, |rt| {
+                rt.self_destruct_sim_remaining_secs.remove(&ship_id);
                 rt.self_destruct_countdowns.remove(&ship_id).is_some()
             });
             let aborted_sp6 = crate::sp6_lifecycle::abort_self_destruct_countdown(ctx, ship_id);

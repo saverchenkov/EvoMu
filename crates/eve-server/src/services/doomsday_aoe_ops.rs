@@ -632,12 +632,15 @@ pub async fn activate_cone_doomsday(
         .and_then(|t| t.default_attributes.get(&552).copied())
         .filter(|&s| s > 0.0)
         .unwrap_or(10_000.0);
-    let warmup_secs = (mod_type
+    let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id);
+    let base_warmup_secs = (mod_type
         .and_then(|t| t.default_attributes.get(&2262).copied())
         .filter(|&v| v > 0.0)
         .unwrap_or(10_000.0)
         / 1000.0)
         .round() as u64;
+    let warmup_secs = crate::services::doomsday_aoe_tick::scale_delay_secs_for_tidi(base_warmup_secs, tidi);
+    let eff_immob_secs = crate::services::doomsday_aoe_tick::scale_delay_secs_for_tidi(setup.immob_secs, tidi);
     let dmg_dur_ms = mod_type
         .and_then(|t| t.default_attributes.get(&2264).copied())
         .filter(|&v| v > 0.0)
@@ -672,7 +675,7 @@ pub async fn activate_cone_doomsday(
             warmup_secs,
             total_ticks,
             ticks_applied: 0,
-            immobilize_until_unix: setup.now_unix + setup.immob_secs,
+            immobilize_until_unix: setup.now_unix + eff_immob_secs,
             orig_max_velocity: setup.orig_max_velocity,
             orig_warp_scramble_strength: setup.orig_warp_scramble_strength,
             orig_disallow_assistance: setup.orig_disallow_assistance,
@@ -696,7 +699,7 @@ pub async fn activate_cone_doomsday(
         ("warmupSeconds", PyRep::Real(warmup_secs as f64)),
         ("tickCount", PyRep::Integer(total_ticks as i64)),
         ("signatureRadiusMeters", PyRep::Real(sig_radius_m)),
-        ("immobilizeSeconds", PyRep::Real(setup.immob_secs as f64)),
+        ("immobilizeSeconds", PyRep::Real(eff_immob_secs as f64)),
         ("tetherBlocked", PyRep::Bool(true)),
         ("jumpBlockSeconds", PyRep::Real(setup.no_jump_secs as f64)),
         ("fuelConsumed", PyRep::Integer(i64::from(setup.fuel_consumed))),
@@ -757,12 +760,15 @@ pub async fn activate_spatial_gtfo_doomsday(
         .and_then(|t| t.default_attributes.get(&2279).copied())
         .filter(|&r| r > 0.0)
         .unwrap_or(GTFO_SPHERE_RADIUS_M);
-    let warmup_secs = (mod_type
+    let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id);
+    let base_warmup_secs = (mod_type
         .and_then(|t| t.default_attributes.get(&2262).copied())
         .filter(|&v| v > 0.0)
         .unwrap_or(15_000.0)
         / 1000.0)
         .round() as u64;
+    let warmup_secs = crate::services::doomsday_aoe_tick::scale_delay_secs_for_tidi(base_warmup_secs, tidi);
+    let eff_immob_secs = crate::services::doomsday_aoe_tick::scale_delay_secs_for_tidi(setup.immob_secs, tidi);
 
     mutate_superweapon_runtime(&ctx.db, |rt| {
         rt.active_cycles.push(PersistedSuperweaponCycle {
@@ -779,7 +785,7 @@ pub async fn activate_spatial_gtfo_doomsday(
             warmup_secs,
             total_ticks: 1,
             ticks_applied: 0,
-            immobilize_until_unix: setup.now_unix + setup.immob_secs,
+            immobilize_until_unix: setup.now_unix + eff_immob_secs,
             orig_max_velocity: setup.orig_max_velocity,
             orig_warp_scramble_strength: setup.orig_warp_scramble_strength,
             orig_disallow_assistance: setup.orig_disallow_assistance,
@@ -805,9 +811,14 @@ pub async fn activate_spatial_gtfo_doomsday(
         ("sphereRadiusMeters", PyRep::Real(sphere_radius_m)),
         (
             "warpSuppressionSeconds",
-            PyRep::Real(GTFO_WARP_SUPPRESSION_SECS as f64),
+            PyRep::Real(
+                crate::services::doomsday_aoe_tick::scale_delay_secs_for_tidi(
+                    GTFO_WARP_SUPPRESSION_SECS,
+                    tidi,
+                ) as f64,
+            ),
         ),
-        ("immobilizeSeconds", PyRep::Real(setup.immob_secs as f64)),
+        ("immobilizeSeconds", PyRep::Real(eff_immob_secs as f64)),
         ("tetherBlocked", PyRep::Bool(true)),
         ("fuelConsumed", PyRep::Integer(i64::from(setup.fuel_consumed))),
         ("neutPulseAmountGJ", PyRep::Real(SUPERWEAPON_NEUT_PULSE_GJ)),
@@ -899,12 +910,15 @@ pub async fn activate_multipoint_reaper_doomsday(
         .and_then(|t| t.default_attributes.get(&552).copied())
         .filter(|&s| s > 0.0)
         .unwrap_or(3_500.0);
-    let warmup_secs = (mod_type
+    let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id);
+    let base_warmup_secs = (mod_type
         .and_then(|t| t.default_attributes.get(&2262).copied())
         .filter(|&v| v > 0.0)
         .unwrap_or(10_000.0)
         / 1000.0)
         .round() as u64;
+    let warmup_secs = crate::services::doomsday_aoe_tick::scale_delay_secs_for_tidi(base_warmup_secs, tidi);
+    let eff_immob_secs = crate::services::doomsday_aoe_tick::scale_delay_secs_for_tidi(setup.immob_secs, tidi);
     let dmg_dur_ms = mod_type
         .and_then(|t| t.default_attributes.get(&2264).copied())
         .filter(|&v| v > 0.0)
@@ -946,7 +960,7 @@ pub async fn activate_multipoint_reaper_doomsday(
             warmup_secs,
             total_ticks,
             ticks_applied: 0,
-            immobilize_until_unix: setup.now_unix + setup.immob_secs,
+            immobilize_until_unix: setup.now_unix + eff_immob_secs,
             orig_max_velocity: setup.orig_max_velocity,
             orig_warp_scramble_strength: setup.orig_warp_scramble_strength,
             orig_disallow_assistance: setup.orig_disallow_assistance,
@@ -972,7 +986,7 @@ pub async fn activate_multipoint_reaper_doomsday(
         ("beamRadiusMeters", PyRep::Real(beam_radius_m)),
         ("arcLengthMeters", PyRep::Real(arc_len)),
         ("signatureRadiusMeters", PyRep::Real(sig_radius_m)),
-        ("immobilizeSeconds", PyRep::Real(setup.immob_secs as f64)),
+        ("immobilizeSeconds", PyRep::Real(eff_immob_secs as f64)),
         ("tetherBlocked", PyRep::Bool(true)),
         ("fuelConsumed", PyRep::Integer(i64::from(setup.fuel_consumed))),
         ("neutPulseAmountGJ", PyRep::Real(SUPERWEAPON_NEUT_PULSE_GJ)),

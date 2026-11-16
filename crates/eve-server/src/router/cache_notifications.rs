@@ -1490,7 +1490,17 @@ impl ServerContext {
         duration_ms: i64,
         repeat: i32,
     ) -> Vec<PendingMachoNotification> {
-        let now_ticks = self.now_client_sim_filetime_ticks();
+        let sys_opt = match target {
+            NotificationTarget::SolarSystem(sid) => Some(sid),
+            NotificationTarget::Character(cid) => self.db.with_snapshot(|s| {
+                s.characters
+                    .get(&cid)
+                    .filter(|c| c.station_id.is_none() && c.structure_id.is_none())
+                    .map(|c| c.solar_system_id)
+            }),
+            _ => None,
+        };
+        let now_ticks = self.now_system_sim_filetime_ticks(sys_opt);
         let flag = if active { 1 } else { 0 };
         self.notify(
             target,
@@ -1897,7 +1907,7 @@ impl ServerContext {
         } else {
             repeat_opt.unwrap_or(1000)
         };
-        let now = self.now_client_sim_filetime_ticks();
+        let now = self.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
         let environment = PyRep::Tuple(vec![
             PyRep::Integer(module_id),
             PyRep::Integer(char_id),
@@ -1958,7 +1968,7 @@ impl ServerContext {
         charge_type_id_override: Option<u32>,
     ) {
         let effect_id = self.effect_id_for_module(module_type_id, effect_name).unwrap_or(0);
-        let now = self.now_client_sim_filetime_ticks();
+        let now = self.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
         self.emit_module_special_fx_started(
             char_id,
             ship_id,
@@ -2050,7 +2060,29 @@ impl ServerContext {
         online: bool,
     ) -> Vec<PendingMachoNotification> {
         let (new_v, old_v) = if online { (1.0, 0.0) } else { (0.0, 1.0) };
-        let now = self.now_client_sim_filetime_ticks();
+        let (ship_id_opt, char_sys_opt) = self.db.with_snapshot(|s| {
+            let ship_id = s
+                .items
+                .get(&module_id)
+                .map(|m| m.location_id)
+                .filter(|&id| id > 0)
+                .or_else(|| {
+                    s.characters
+                        .get(&char_id)
+                        .map(|c| c.active_ship_id)
+                        .filter(|&id| id > 0)
+                });
+            let char_sys = s
+                .characters
+                .get(&char_id)
+                .filter(|c| c.station_id.is_none() && c.structure_id.is_none())
+                .map(|c| c.solar_system_id);
+            (ship_id, char_sys)
+        });
+        let sys_opt = ship_id_opt
+            .and_then(|ship_id| self.systems.find_ball_system_sync(ship_id))
+            .or(char_sys_opt);
+        let now = self.now_system_sim_filetime_ticks(sys_opt);
         let entry = PyRep::Tuple(vec![
             PyRep::String("OnModuleAttributeChange".into()),
             PyRep::Integer(char_id),
@@ -2079,7 +2111,7 @@ impl ServerContext {
         old_pg: f64,
         new_pg: f64,
     ) -> Vec<PendingMachoNotification> {
-        let now = self.now_client_sim_filetime_ticks();
+        let now = self.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
         let changes = vec![
             PyRep::Tuple(vec![
                 PyRep::String("OnModuleAttributeChange".into()),
@@ -2144,7 +2176,7 @@ impl ServerContext {
         if char_id <= 0 || ship_id <= 0 || !new_cap.is_finite() || !max_cap.is_finite() {
             return Vec::new();
         }
-        let now = self.now_client_sim_filetime_ticks();
+        let now = self.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
         let prev = old_cap.filter(|v| v.is_finite()).unwrap_or(new_cap);
         let mut out = self.notify(
             NotificationTarget::Character(char_id),

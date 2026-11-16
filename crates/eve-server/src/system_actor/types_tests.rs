@@ -451,6 +451,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::ModifyCombatState { .. } => "ModifyCombatState",
             SystemCommand::FlushConditionCheckpoint { .. } => "FlushConditionCheckpoint",
             SystemCommand::ApplyFitProjection { .. } => "ApplyFitProjection",
+            SystemCommand::TrackModuleReloadSim { .. } => "TrackModuleReloadSim",
         }
     }
 

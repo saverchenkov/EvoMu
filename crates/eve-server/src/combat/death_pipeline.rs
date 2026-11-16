@@ -1022,6 +1022,7 @@ pub fn execute_death_pipeline_sync_inner(
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
         rt.insurance_contracts.remove(&victim_ship_id);
         rt.self_destruct_countdowns.remove(&victim_ship_id);
+        rt.self_destruct_sim_remaining_secs.remove(&victim_ship_id);
     });
     crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
         ctx,
@@ -1925,6 +1926,7 @@ pub fn execute_live_self_destruct_sync(
     });
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
         rt.self_destruct_countdowns.remove(&ship_id);
+        rt.self_destruct_sim_remaining_secs.remove(&ship_id);
     });
     if !still_valid {
         return Ok(None);

@@ -25,7 +25,8 @@ pub mod drone_return;
 pub use cluster_tick::{
     catch_unwind_future, clamp_physics_ticker_backlog, on_advance_secs, on_advance_secs_internal,
     on_advance_secs_with_sim_clock_rebase, populate_persisted_space_objects,
-    seed_persisted_abandoned_drones, step_active_systems_physics_tick, tick_background_cluster,
+    seed_persisted_abandoned_drones, step_active_systems_physics_tick,
+    step_active_systems_physics_tick_with_lateness, tick_background_cluster,
     tick_background_cluster_with_step, MAX_PHYSICS_BACKLOG_STEPS, SYSTEM_STEP_ASK_TIMEOUT,
 };
 pub(crate) use cluster_tick::sweep_expired_cosmic_anomalies_and_signatures;
@@ -2148,6 +2149,7 @@ pub fn abort_self_destruct_for_ship(ctx: &ServerContext, ship_id: i64) -> bool {
         st.self_destructs.remove(&ship_id).is_some()
     });
     let rt_aborted = crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        rt.self_destruct_sim_remaining_secs.remove(&ship_id);
         rt.self_destruct_countdowns.remove(&ship_id).is_some()
     });
     sp6_aborted || rt_aborted

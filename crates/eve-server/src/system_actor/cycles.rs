@@ -486,7 +486,7 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
     deactivation_hook: Option<&ModuleDeactivationHook>,
 ) -> Vec<(BallId, Option<CharacterId>)> {
     let mut unused_launches = Vec::new();
-    step_cycles_and_capacitor_with_missiles(
+    step_cycles_and_capacitor_with_missiles_and_tidi(
         ballpark,
         active_module_cycles,
         pending_anchoring_disruptors,
@@ -506,12 +506,14 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
         pending_cycle_actions,
         0.0,
         dt,
+        1.0,
+        None,
         deactivation_hook,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn step_cycles_and_capacitor_with_missiles(
+pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     pending_anchoring_disruptors: &mut Vec<PendingAnchoringDisruptor>,
@@ -531,8 +533,15 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles(
     pending_cycle_actions: &mut Vec<PendingCycleAction>,
     sim_elapsed_secs: f64,
     dt: f64,
+    tidi_factor: f64,
+    mut reload_sim_remaining: Option<&mut HashMap<i64, (BallId, f64)>>,
     deactivation_hook: Option<&ModuleDeactivationHook>,
 ) -> Vec<(BallId, Option<CharacterId>)> {
+    let tidi_factor = if tidi_factor.is_finite() {
+        tidi_factor.clamp(0.10, 1.0)
+    } else {
+        1.0
+    };
     let mut destroyed_balls = Vec::new();
     crate::services::tactical_modules::step_wubble_probes_and_debuffs(
         ballpark,
@@ -1381,9 +1390,17 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles(
                                             }
                                         }
                                         let now_unix = db_ref.clock().now_unix_secs();
-                                        let reload_until =
-                                            now_unix + (reload_time_ms / 1000.0).ceil() as u64;
+                                        let reload_sim_secs = reload_time_ms / 1000.0;
+                                        let scaled_wall_secs = if tidi_factor < 0.995 {
+                                            (reload_sim_secs / tidi_factor).ceil().max(1.0) as u64
+                                        } else {
+                                            reload_sim_secs.ceil() as u64
+                                        };
+                                        let reload_until = now_unix + scaled_wall_secs;
                                         for &tid in &cycle.linked_turrets {
+                                            if let Some(ref mut sim_map) = reload_sim_remaining {
+                                                sim_map.insert(tid, (cycle.ship_id, reload_sim_secs));
+                                            }
                                             snap.cluster_and_runtime
                                                 .module_reload_until_unix
                                                 .insert(tid, reload_until);
@@ -2049,6 +2066,149 @@ pub(crate) fn remove_all_ship_module_cycles(
     removed_cycles
 }
 
+/// Emits Destiny `OnSpecialFX { is_active: false }` stop events for every active propulsion
+/// cycle (`MicroWarpDrive` / `Afterburner`) on `ball_id` prior to ball detach during docking (`#1081`).
+pub(crate) fn emit_propulsion_stop_fx_before_detach(
+    ballpark: &mut Ballpark,
+    active_module_cycles: &[ActiveModuleCycle],
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+    ball_id: BallId,
+) {
+    let prop_fx_stops: Vec<DestinyEvent> = active_module_cycles
+        .iter()
+        .filter(|c| {
+            c.ship_id == ball_id
+                && (c.speed_boost_factor > 1.0
+                    || c.effect_name.eq_ignore_ascii_case("moduleBonusAfterburner")
+                    || c.effect_name.eq_ignore_ascii_case("moduleBonusMicrowarpdrive")
+                    || c.effect_name.to_ascii_lowercase().contains("afterburner")
+                    || c.effect_name.to_ascii_lowercase().contains("microwarpdrive"))
+        })
+        .map(|c| {
+            let guid = sde_opt
+                .as_ref()
+                .and_then(|sde| {
+                    crate::router::binding::special_fx_guid_for_module_sde(
+                        sde,
+                        c.module_type_id,
+                        0,
+                        Some(&c.effect_name),
+                    )
+                })
+                .map(|(g, _)| g)
+                .unwrap_or_else(|| {
+                    if c.effect_name.to_ascii_lowercase().contains("microwarpdrive") {
+                        "effects.MicroWarpDrive".to_string()
+                    } else {
+                        "effects.Afterburner".to_string()
+                    }
+                });
+            DestinyEvent::OnSpecialFX {
+                ball_id,
+                module_id: Some(c.module_id),
+                guid,
+                is_active: false,
+            }
+        })
+        .collect();
+    for ev in prop_fx_stops {
+        ballpark.emit_event(Some(ball_id), ev);
+    }
+}
+
+/// Advances active sim-clock-governed turret/launcher reload timers by `dt_sim` while updating
+/// persisted `module_reload_until_unix` deadlines when system TiDi `< 1.0` (`#1081`).
+pub(crate) fn step_module_reloads_sim_clock(
+    reload_sim_remaining: &mut HashMap<i64, (BallId, f64)>,
+    reload_sim_deadlines_opt: Option<&eve_db::lock_rank::RankedRwLock<HashMap<i64, (SolarSystemId, f64, f64)>, { eve_db::lock_rank::RANK_LEAF }>>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    dt_sim: f64,
+    tidi_factor: f64,
+) {
+    if reload_sim_remaining.is_empty() && db_opt.is_none() {
+        return;
+    }
+    let tidi = if tidi_factor.is_finite() {
+        tidi_factor.clamp(0.10, 1.0)
+    } else {
+        1.0
+    };
+    let mut finished = Vec::new();
+    let mut active_updates = Vec::new();
+    for (&mod_id, &mut (ship_id, ref mut rem)) in reload_sim_remaining.iter_mut() {
+        *rem -= dt_sim.max(0.0);
+        if *rem <= 1e-6 {
+            finished.push(mod_id);
+        } else {
+            active_updates.push((mod_id, ship_id, *rem));
+        }
+    }
+    for mod_id in &finished {
+        reload_sim_remaining.remove(mod_id);
+    }
+    if !finished.is_empty() || !active_updates.is_empty() {
+        if let Some(db) = db_opt.as_ref().filter(|db| !db.is_write_locked_by_current_thread()) {
+            let now_unix = db.clock().now_unix_secs();
+            let desired_updates: Vec<(i64, u64)> = active_updates
+                .iter()
+                .map(|&(mod_id, _, rem)| {
+                    (
+                        mod_id,
+                        now_unix.saturating_add((rem / tidi).ceil().max(1.0) as u64),
+                    )
+                })
+                .collect();
+            let should_write = !finished.is_empty()
+                || db.with_snapshot(|snap| {
+                    desired_updates.iter().any(|&(mod_id, new_until)| {
+                        match snap
+                            .cluster_and_runtime
+                            .module_reload_until_unix
+                            .get(&mod_id)
+                            .copied()
+                        {
+                            Some(cur) => cur != new_until && (tidi < 0.995 || cur > new_until),
+                            None => tidi < 0.995,
+                        }
+                    })
+                });
+            if should_write {
+                db.with_mut_snapshot(|snap| {
+                    for mod_id in &finished {
+                        snap.cluster_and_runtime.module_reload_until_unix.remove(mod_id);
+                    }
+                    for &(mod_id, new_until) in &desired_updates {
+                        let update = snap
+                            .cluster_and_runtime
+                            .module_reload_until_unix
+                            .get(&mod_id)
+                            .copied()
+                            .is_some_and(|cur| tidi < 0.995 || cur > new_until)
+                            || (tidi < 0.995
+                                && !snap
+                                    .cluster_and_runtime
+                                    .module_reload_until_unix
+                                    .contains_key(&mod_id));
+                        if update {
+                            snap.cluster_and_runtime
+                                .module_reload_until_unix
+                                .insert(mod_id, new_until);
+                        }
+                    }
+                });
+            }
+        }
+        if !finished.is_empty() {
+            if let Some(deadlines) = reload_sim_deadlines_opt {
+                let mut dead_guard = deadlines.write().unwrap_or_else(|e| e.into_inner());
+                for mod_id in &finished {
+                    dead_guard.remove(mod_id);
+                }
+            }
+        }
+    }
+}
+
 impl SystemHandle {
     pub fn has_active_modules_or_cloak_sync(&self, ball_id: BallId) -> bool {
         if self.active_module_ships.read().unwrap_or_else(|e| e.into_inner()).contains(&ball_id) {
@@ -2077,12 +2237,24 @@ impl SystemHandle {
             sim_elapsed_secs, pending_cycle_actions, tactical_state,
             pending_notifications_opt, notify_tx_opt, ball_space_entry_epochs,
             fit_projections, weapon_cycle_start_modules,
+            module_reload_sim_deadlines, module_reload_sim_remaining,
             pending_missile_launches, pending_missile_deploy_fx,
             active_guided_missiles, next_missile_ball_id, ..
         } = &mut *st;
-        if dt > 0.0 && dt.is_finite() {
-            *sim_elapsed_secs += dt;
+        let tidi = self.tidi_factor();
+        let dt_sim = if dt > 0.0 && dt.is_finite() {
+            dt * tidi
+        } else {
+            0.0
+        };
+        if dt_sim > 0.0 {
+            *sim_elapsed_secs += dt_sim;
+            self.sim_elapsed_secs_bits.store(
+                sim_elapsed_secs.to_bits(),
+                std::sync::atomic::Ordering::Release,
+            );
         }
+        let dt = dt_sim;
         respawn_due_asteroids(&mut bp, asteroids, asteroid_templates, sde_opt, db_opt);
         sync_player_slim_items(&mut bp, db_opt);
         if let Some(db) = db_opt.as_ref() {
@@ -2164,6 +2336,13 @@ impl SystemHandle {
             sde_opt.as_deref(), db_opt.as_ref(), mechanic_rng_opt.as_deref(), self.solar_system_id, dt, step_now_unix,
         );
         let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+        step_module_reloads_sim_clock(
+            module_reload_sim_remaining,
+            Some(module_reload_sim_deadlines.as_ref()),
+            db_opt,
+            dt,
+            tidi,
+        );
         let mut destroyed = Vec::new();
         super::missiles::step_guided_missiles_in_actor(
             &mut bp,
@@ -2176,12 +2355,13 @@ impl SystemHandle {
             &mut destroyed,
             dt,
         );
-        destroyed.extend(step_cycles_and_capacitor_with_missiles(
+        destroyed.extend(step_cycles_and_capacitor_with_missiles_and_tidi(
             &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
             sde_opt, db_opt, ball_space_entry_epochs, fit_projections, weapon_cycle_start_modules,
             pending_missile_launches,
-            mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, *sim_elapsed_secs, dt, deact_hook_guard.as_ref(),
+            mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, *sim_elapsed_secs, dt, tidi,
+            Some(module_reload_sim_remaining), deact_hook_guard.as_ref(),
         ));
         super::missiles::flush_pending_missile_launches(
             &mut bp,
@@ -2191,6 +2371,26 @@ impl SystemHandle {
             next_missile_ball_id,
             sde_opt,
         );
+        {
+            let mut dead_guard = module_reload_sim_deadlines
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            for action in pending_cycle_actions.iter() {
+                if let PendingCycleAction::AutoReloadStarted {
+                    module_ids,
+                    sim_deadline_s,
+                    ..
+                } = action
+                {
+                    for &mid in module_ids {
+                        dead_guard.insert(
+                            mid,
+                            (self.solar_system_id, *sim_elapsed_secs, *sim_deadline_s),
+                        );
+                    }
+                }
+            }
+        }
         record_player_ship_capacitor_deltas(&bp, &pre_tick_caps, pending_cycle_actions);
         flush_pending_cycle_damage_notifications_with_ballpark(
             &bp,
@@ -2253,8 +2453,8 @@ impl SystemHandle {
             mod_guard.extend(active_module_cycles.iter().map(|c| c.ship_id));
         }
         let tick = bp.current_tick;
-        let broadcast = crate::system_actor::build_tick_broadcast(self.solar_system_id, &mut bp, events);
         drop(st);
+        let broadcast = self.build_tick_broadcast_for_handle(&mut bp, events);
         drop(bp);
         crate::system_actor::flush_post_unlock_actions(&self.post_unlock_actions);
         self.record_warp_stops_from_events(&broadcast.events);

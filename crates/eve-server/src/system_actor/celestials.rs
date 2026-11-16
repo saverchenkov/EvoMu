@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use super::{
-    build_tick_broadcast, ActiveModuleCycle, ActiveNaniteRepair, AsteroidState, CharacterId,
+    ActiveModuleCycle, ActiveNaniteRepair, AsteroidState, CharacterId,
     MiningExtractionResult, SystemCommand, TickBroadcast,
 };
 use eve_db::lock_rank::{
@@ -34,6 +34,11 @@ pub struct SystemHandle {
     pub(crate) actor_state: Arc<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>,
     pub(crate) last_auto_stepped_unix: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) tidi_factor_bits: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) sim_elapsed_secs_bits: Arc<std::sync::atomic::AtomicU64>,
+    /// Highest visible / prime (`SetState`) Destiny stamp delivered in this system (`#1081`).
+    pub(crate) last_visible_stamp: Arc<std::sync::atomic::AtomicU64>,
+    /// Highest `OnSpecialFX` Destiny stamp emitted in this system so FX stamps never backstep (`#1081`).
+    pub(crate) last_fx_stamp: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) hibernated: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) hibernated_since_unix: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) idle_ticks: Arc<std::sync::atomic::AtomicU64>,
@@ -891,6 +896,22 @@ impl SystemHandle {
         bp.queue_set_state(observer_ball_id)
     }
 
+    /// Registers or clears a sim-clock-governed module reload deadline on the system actor (`#1081`).
+    pub fn try_track_module_reload_sim(
+        &self,
+        module_id: i64,
+        ship_id: BallId,
+        remaining_sim_s: f64,
+    ) {
+        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        if remaining_sim_s.is_finite() && remaining_sim_s > 0.0 {
+            st.module_reload_sim_remaining
+                .insert(module_id, (ship_id, remaining_sim_s));
+        } else {
+            st.module_reload_sim_remaining.remove(&module_id);
+        }
+    }
+
     pub fn try_handoff_in_space_observer(
         &self,
         old_ball_id: BallId,
@@ -1038,6 +1059,46 @@ impl SystemHandle {
         }
     }
 
+    /// Records an owner-visible or prime (`SetState`) Destiny stamp so subsequent `OnSpecialFX`
+    /// and activation stamps never backstep behind it while preserving scene stamp (`#1081`).
+    pub fn record_visible_or_prime_stamp(&self, stamp: u64) {
+        self.last_visible_stamp
+            .fetch_max(stamp, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// Returns the highest owner-visible / prime Destiny stamp recorded on this system (`#1081`).
+    pub fn visible_or_prime_stamp(&self) -> u64 {
+        self.last_visible_stamp
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Returns a monotonic `OnSpecialFX` Destiny stamp `>= base_stamp`, `>= owner_visible_stamp`,
+    /// and `>= prime_update_stamp` without altering `ballpark.current_tick` (`#1081`).
+    pub fn safe_fx_stamp(&self, base_stamp: u64) -> u64 {
+        let vis = self
+            .last_visible_stamp
+            .load(std::sync::atomic::Ordering::Acquire);
+        let prev_fx = self
+            .last_fx_stamp
+            .load(std::sync::atomic::Ordering::Acquire);
+        let safe = base_stamp.max(vis).max(prev_fx);
+        self.last_fx_stamp
+            .fetch_max(safe, std::sync::atomic::Ordering::AcqRel);
+        safe
+    }
+
+    /// Returns a history-safe Destiny stamp for an immediate module activation after a TiDi
+    /// transition (e.g. `0.5 -> 1.0`), preserving the current sim stamp without backstepping (`#1081`).
+    pub fn next_history_safe_activation_stamp(&self, current_tick: u64) -> u64 {
+        let vis = self
+            .last_visible_stamp
+            .load(std::sync::atomic::Ordering::Acquire);
+        let prev_fx = self
+            .last_fx_stamp
+            .load(std::sync::atomic::Ordering::Acquire);
+        current_tick.max(vis).max(prev_fx)
+    }
+
     /// Computes live simulation load in this solar system (dynamic balls + weighted active module/repair/anchoring cycles).
     pub fn active_entity_and_cycle_load(&self) -> usize {
         let dyn_balls = {
@@ -1077,6 +1138,26 @@ impl SystemHandle {
         count
     }
 
+    pub(super) fn build_tick_broadcast_for_handle(
+        &self,
+        bp: &mut Ballpark,
+        events: Vec<DestinyEvent>,
+    ) -> TickBroadcast {
+        let fx_floor = self
+            .last_visible_stamp
+            .load(std::sync::atomic::Ordering::Acquire)
+            .max(self.last_fx_stamp.load(std::sync::atomic::Ordering::Acquire))
+            .min(u64::from(u32::MAX)) as u32;
+        super::belts::build_tick_broadcast_with_fx_floor(
+            self.solar_system_id,
+            bp,
+            events,
+            fx_floor,
+            Some(&self.last_visible_stamp),
+            Some(&self.last_fx_stamp),
+        )
+    }
+
     pub fn try_step_manual(&self, dt: f64) {
         let dt_sim = if dt > 0.0 && dt.is_finite() {
             dt * self.tidi_factor()
@@ -1087,19 +1168,26 @@ impl SystemHandle {
         let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
         if dt_sim > 0.0 && dt_sim.is_finite() {
             st.sim_elapsed_secs += dt_sim;
+            self.sim_elapsed_secs_bits.store(
+                st.sim_elapsed_secs.to_bits(),
+                std::sync::atomic::Ordering::Release,
+            );
         }
         let events = bp.step(dt_sim);
         persist_landed_warps_in_db(&bp, &events, &st.db_opt, &st.ball_space_entry_epochs);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-        let broadcast = build_tick_broadcast(self.solar_system_id, &mut bp, events);
         drop(st);
+        let broadcast = self.build_tick_broadcast_for_handle(&mut bp, events);
         drop(bp);
         self.record_warp_stops_from_events(&broadcast.events);
         let _ = self.event_tx.send(broadcast);
     }
 
     pub fn sim_elapsed_secs(&self) -> f64 {
-        self.actor_state.read().unwrap_or_else(|e| e.into_inner()).sim_elapsed_secs
+        f64::from_bits(
+            self.sim_elapsed_secs_bits
+                .load(std::sync::atomic::Ordering::Acquire),
+        )
     }
 
     pub fn take_pending_cycle_actions(&self) -> Vec<super::PendingCycleAction> {

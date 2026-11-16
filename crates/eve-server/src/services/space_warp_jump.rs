@@ -1095,13 +1095,23 @@ async fn handle_cmd_stargate_jump(
     );
 
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, dest_sys_id as i64)?;
+    let _ = crate::services::serverops_cluster::emit_sim_clock_rebase_on_entry_if_needed(
+        ctx,
+        char_id,
+        dest_sys_id,
+    );
 
     Ok(PyRep::keyval([
         ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),
         ("beyonceBoundID", PyRep::Integer(new_beyonce_id as i64)),
         ("jumpCooldownMinutes", PyRep::Real(0.0)),
         ("jumpFatigueMinutes", PyRep::Real(0.0)),
-        ("sessionChangeTimerSeconds", PyRep::Integer(10)),
+        (
+            "sessionChangeTimerSeconds",
+            PyRep::Integer(
+                crate::services::space_destiny::STARGATE_SESSION_CHANGE_TIMER_SECS as i64,
+            ),
+        ),
     ]))
 }
 

@@ -1265,6 +1265,7 @@ pub fn on_advance_secs_internal(
     for cd in due_self_destructs {
         with_mut_combat_runtime(ctx, |rt| {
             rt.self_destruct_countdowns.remove(&cd.ship_id);
+            rt.self_destruct_sim_remaining_secs.remove(&cd.ship_id);
         });
         execute_due_self_destruct_sync(ctx, &cd, now_unix);
     }
@@ -2129,27 +2130,38 @@ async fn step_single_system_physics_step(
     sys_id: u32,
     handle: &crate::system_actor::SystemHandle,
 ) {
+    step_single_system_physics_step_with_lateness(ctx, sys_id, handle, 0.0).await;
+}
+
+async fn step_single_system_physics_step_with_lateness(
+    ctx: &ServerContext,
+    sys_id: u32,
+    handle: &crate::system_actor::SystemHandle,
+    cadence_lateness_ms: f64,
+) {
+    let step_start = std::time::Instant::now();
     let step_res = catch_unwind_future(async {
-        match tokio::time::timeout(SYSTEM_STEP_ASK_TIMEOUT, handle.step_manual_tick_only(1.0)).await
-        {
-            Ok(Ok(_tick)) => {}
-            Ok(Err(err)) => {
-                tracing::warn!(
-                    solar_system_id = sys_id,
-                    error = %err,
-                    "SystemActor step_manual_tick_only returned error"
-                );
-                return;
-            }
-            Err(_) => {
-                tracing::warn!(
-                    solar_system_id = sys_id,
-                    timeout_ms = SYSTEM_STEP_ASK_TIMEOUT.as_millis() as u64,
-                    "SystemActor step_manual_tick_only timed out; skipping stuck system step"
-                );
-                return;
-            }
-        }
+        let stepped_tick =
+            match tokio::time::timeout(SYSTEM_STEP_ASK_TIMEOUT, handle.step_manual_tick_only(1.0)).await
+            {
+                Ok(Ok(tick)) => tick,
+                Ok(Err(err)) => {
+                    tracing::warn!(
+                        solar_system_id = sys_id,
+                        error = %err,
+                        "SystemActor step_manual_tick_only returned error"
+                    );
+                    return;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        solar_system_id = sys_id,
+                        timeout_ms = SYSTEM_STEP_ASK_TIMEOUT.as_millis() as u64,
+                        "SystemActor step_manual_tick_only timed out; skipping stuck system step"
+                    );
+                    return;
+                }
+            };
         let _ = tokio::time::timeout(
             SYSTEM_STEP_ASK_TIMEOUT,
             crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai(ctx, sys_id),
@@ -2167,6 +2179,18 @@ async fn step_single_system_physics_step(
             let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id);
             crate::combat::npc_ai::step_system_npc_spawns_ai_sync(ctx, sys_id, tick, 1.0 * tidi);
         }
+        // NOTE (#1079 merge hook): missile flight, breacher DoTs, and self-destruct progress follow sim clock in step_combat_system.
+        let _ = crate::services::combat_crimewatch::step_combat_system(ctx, sys_id, 1.0).await;
+        let step_ms = step_start.elapsed().as_secs_f64() * 1_000.0;
+        let total_lateness_ms = cadence_lateness_ms.max(step_ms);
+        crate::services::serverops_cluster::evaluate_system_tidi_autoscaler_window(
+            ctx,
+            sys_id,
+            total_lateness_ms,
+            None,
+            ctx.now_unix() as f64,
+            stepped_tick,
+        );
     })
     .await;
     if let Err(panic_msg) = step_res {
@@ -2185,6 +2209,16 @@ async fn step_single_system_physics_step(
 /// Hibernated empty systems perform zero per-tick work, and active systems are driven
 /// concurrently under per-system supervision (`#919`, `#866`).
 pub async fn step_active_systems_physics_tick(ctx: &ServerContext, elapsed_secs: u64) {
+    step_active_systems_physics_tick_with_lateness(ctx, elapsed_secs, 0.0).await;
+}
+
+/// Variant of [`step_active_systems_physics_tick`] that feeds physics ticker cadence lateness
+/// into per-system TiDi autoscalers (`#1081`).
+pub async fn step_active_systems_physics_tick_with_lateness(
+    ctx: &ServerContext,
+    elapsed_secs: u64,
+    cadence_lateness_ms: f64,
+) {
     let now_unix = ctx.now_unix();
     let mult = ctx.time_acceleration_multiplier();
     let steps = elapsed_secs
@@ -2214,7 +2248,13 @@ pub async fn step_active_systems_physics_tick(ctx: &ServerContext, elapsed_secs:
                 if step_idx == 0 && handle.take_auto_stepped_at(now_unix) {
                     continue;
                 }
-                step_single_system_physics_step(ctx, sys_id, &handle).await;
+                step_single_system_physics_step_with_lateness(
+                    ctx,
+                    sys_id,
+                    &handle,
+                    cadence_lateness_ms,
+                )
+                .await;
             }
         }
     } else {
@@ -2226,7 +2266,13 @@ pub async fn step_active_systems_physics_tick(ctx: &ServerContext, elapsed_secs:
                     if step_idx == 0 && handle.take_auto_stepped_at(now_unix) {
                         continue;
                     }
-                    step_single_system_physics_step(&ctx_cloned, sys_id, &handle).await;
+                    step_single_system_physics_step_with_lateness(
+                        &ctx_cloned,
+                        sys_id,
+                        &handle,
+                        cadence_lateness_ms,
+                    )
+                    .await;
                 }
             });
         }

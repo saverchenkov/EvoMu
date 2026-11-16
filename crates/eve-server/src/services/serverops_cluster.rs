@@ -67,6 +67,15 @@ fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, ol
         };
         cn.sim_clock_anchoring
             .insert(solar_system_id, (now_wall_ft, new_ft, new_factor.clamp(0.10, 1.0)));
+        let gen = cn.rebase_generation_by_system.entry(solar_system_id).or_insert(0);
+        *gen = gen.saturating_add(1);
+        let prev_act = cn
+            .last_sim_activation_ft_by_system
+            .get(&solar_system_id)
+            .copied()
+            .unwrap_or(0);
+        cn.last_sim_activation_ft_by_system
+            .insert(solar_system_id, new_ft.max(prev_act));
         (old_ft, new_ft)
     };
     // parity: notify:DoSimClockRebase
@@ -79,6 +88,89 @@ fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, ol
             ]),
         },
     );
+}
+
+/// Emits `DoSimClockRebase((oldSimTime, newSimTime))` **once** directly to `char_id` on login
+/// or jump into a dilated (`< 1.0`), lagged (`lateness > 20 ms`), or anchored solar system (`#1081`).
+/// Never fires on `beyonce` bind or normal ticks, and deduplicates per `(char_id, solar_system_id, rebase_gen)`.
+pub fn emit_sim_clock_rebase_on_entry_if_needed(
+    ctx: &ServerContext,
+    char_id: i64,
+    solar_system_id: SolarSystemId,
+) -> bool {
+    if char_id <= 0 {
+        return false;
+    }
+    let factor = get_system_tidi_factor(ctx, solar_system_id);
+    let now_wall_ft = ctx.now_blueos_filetime_ticks();
+    let payload_opt = {
+        let mut cn = ctx
+            .systems
+            .cluster_nodes
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let is_lagged = cn
+            .system_tidi_autoscalers
+            .get(&solar_system_id)
+            .is_some_and(|a| {
+                a.last_lateness_ms > crate::system_actor::tidi_autoscaler::TIDI_ENGAGE_LATENESS_MS
+                    || a.pending_transition.is_some()
+            });
+        let has_anchor = cn.sim_clock_anchoring.contains_key(&solar_system_id);
+        let is_dilated = factor < 1.0 - crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA;
+        if !is_dilated && !is_lagged && !has_anchor {
+            if cn
+                .char_rebased_system_gen
+                .get(&char_id)
+                .is_some_and(|&(prev_sys, _)| prev_sys != solar_system_id)
+            {
+                cn.char_rebased_system_gen.remove(&char_id);
+            }
+            return false;
+        }
+        let gen = *cn.rebase_generation_by_system.entry(solar_system_id).or_insert(1);
+        if cn.char_rebased_system_gen.get(&char_id).copied() == Some((solar_system_id, gen)) {
+            return false;
+        }
+        let (old_ft, new_ft) = if let Some(&(anchor_wall_ft, anchor_sim_ft, cur_factor)) =
+            cn.sim_clock_anchoring.get(&solar_system_id)
+        {
+            let elapsed_wall_ft = now_wall_ft.saturating_sub(anchor_wall_ft);
+            let dilated_elapsed_ft =
+                ((elapsed_wall_ft as f64) * cur_factor.clamp(0.10, 1.0)).round() as i64;
+            (anchor_sim_ft, anchor_sim_ft.saturating_add(dilated_elapsed_ft))
+        } else {
+            let seed_elapsed = (10_000_000.0 * factor.clamp(0.10, 1.0)).round() as i64;
+            let seeded = (now_wall_ft.saturating_sub(seed_elapsed), now_wall_ft);
+            cn.sim_clock_anchoring
+                .insert(solar_system_id, (now_wall_ft, seeded.1, factor.clamp(0.10, 1.0)));
+            seeded
+        };
+        let prev_act = cn
+            .last_sim_activation_ft_by_system
+            .get(&solar_system_id)
+            .copied()
+            .unwrap_or(0);
+        cn.last_sim_activation_ft_by_system
+            .insert(solar_system_id, new_ft.max(prev_act));
+        cn.char_rebased_system_gen
+            .insert(char_id, (solar_system_id, gen));
+        Some((old_ft, new_ft))
+    };
+    let Some((old_sim_ft, new_sim_ft)) = payload_opt else {
+        return false;
+    };
+    // parity: notify:DoSimClockRebase
+    ctx.emit_typed(
+        NotificationTarget::Character(char_id),
+        crate::router::notify_registry::DoSimClockRebase {
+            times: PyRep::Tuple(vec![
+                PyRep::Integer(old_sim_ft),
+                PyRep::Integer(new_sim_ft),
+            ]),
+        },
+    );
+    true
 }
 
 fn persist_system_tidi_note(ctx: &ServerContext, solar_system_id: SolarSystemId, factor: f64) {
@@ -106,6 +198,8 @@ pub fn set_system_tidi_factor(ctx: &ServerContext, solar_system_id: u32, request
     } else {
         1.0
     };
+    let prev_effective_factor = get_system_tidi_factor(ctx, solar_system_id);
+    let now_secs = ctx.now_unix() as f64;
     {
         let mut cn = ctx
             .systems
@@ -113,16 +207,35 @@ pub fn set_system_tidi_factor(ctx: &ServerContext, solar_system_id: u32, request
             .write()
             .unwrap_or_else(|e| e.into_inner());
         cn.manual_tidi_overrides.insert(solar_system_id, factor);
+        let autoscaler_enabled = cn.latency_auto_tidi_enabled;
+        let autoscaler = cn
+            .system_tidi_autoscalers
+            .entry(solar_system_id)
+            .or_insert_with(|| {
+                crate::system_actor::tidi_autoscaler::SystemTidiAutoscaler::new(
+                    solar_system_id,
+                    autoscaler_enabled,
+                )
+            });
+        autoscaler.pin_manual(now_secs, factor);
     }
     let handle = ctx.systems.get_or_spawn(solar_system_id);
     let old_factor = handle.set_tidi_factor_raw(factor);
     persist_system_tidi_note(ctx, solar_system_id, factor);
-    emit_sim_clock_rebase(ctx, solar_system_id, old_factor, factor);
+    if (factor - prev_effective_factor).abs()
+        >= crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA
+        || (factor - old_factor).abs()
+            >= crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA
+    {
+        emit_sim_clock_rebase(ctx, solar_system_id, old_factor, factor);
+    }
     factor
 }
 
-/// Clears any manual Time Dilation override on `solar_system_id` and recomputes its worker-node load TiDi.
+/// Clears any manual Time Dilation override on `solar_system_id`, cancels pending autoscaler
+/// transitions, and forces factor `1.0` deterministically (`#1081`). Skips rebase if already `1.0`.
 pub fn clear_manual_system_tidi_override(ctx: &ServerContext, solar_system_id: u32) -> f64 {
+    let now_secs = ctx.now_unix() as f64;
     {
         let mut cn = ctx
             .systems
@@ -130,12 +243,291 @@ pub fn clear_manual_system_tidi_override(ctx: &ServerContext, solar_system_id: u
             .write()
             .unwrap_or_else(|e| e.into_inner());
         cn.manual_tidi_overrides.remove(&solar_system_id);
+        let autoscaler_enabled = cn.latency_auto_tidi_enabled;
+        let autoscaler = cn
+            .system_tidi_autoscalers
+            .entry(solar_system_id)
+            .or_insert_with(|| {
+                crate::system_actor::tidi_autoscaler::SystemTidiAutoscaler::new(
+                    solar_system_id,
+                    autoscaler_enabled,
+                )
+            });
+        autoscaler.clear_manual(now_secs);
     }
-    let updated = recompute_cluster_node_tidi(ctx);
-    updated
-        .get(&solar_system_id)
-        .copied()
-        .unwrap_or_else(|| get_system_tidi_factor(ctx, solar_system_id))
+    persist_system_tidi_note(ctx, solar_system_id, 1.0);
+    if let Some(handle) = ctx.systems.get_handle(solar_system_id) {
+        let old_factor = handle.set_tidi_factor_raw(1.0);
+        if (1.0 - old_factor).abs() >= crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA
+        {
+            emit_sim_clock_rebase(ctx, solar_system_id, old_factor, 1.0);
+        }
+    }
+    1.0
+}
+
+/// Applies an autoscaler-driven TiDi change for `solar_system_id` without setting a manual pin,
+/// emitting `DoSimClockRebase` **once** only if the factor actually changed (`#1081`).
+fn apply_system_tidi_from_autoscaler(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    new_factor: f64,
+) -> f64 {
+    let factor = crate::system_actor::tidi_autoscaler::clamp_tidi_factor(new_factor);
+    let handle = ctx.systems.get_or_spawn(solar_system_id);
+    let old_factor = handle.set_tidi_factor_raw(factor);
+    if (factor - old_factor).abs() >= crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA {
+        emit_sim_clock_rebase(ctx, solar_system_id, old_factor, factor);
+    }
+    factor
+}
+
+/// Feeds a 1-second control-window tick lateness sample (plus optional `#1077` `[PacketPerf]` latency)
+/// into the per-system TiDi autoscaler, schedules any synchronized advance-notice switch, and applies
+/// due transitions at their stamp boundary (`#1081`).
+pub fn evaluate_system_tidi_autoscaler_window(
+    ctx: &ServerContext,
+    solar_system_id: SolarSystemId,
+    lateness_ms: f64,
+    packet_perf_latency_ms: Option<f64>,
+    now_secs: f64,
+    current_stamp: u64,
+) -> crate::system_actor::tidi_autoscaler::SystemTidiSnapshot {
+    let (outcome, snap) = {
+        let mut cn = ctx
+            .systems
+            .cluster_nodes
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let enabled = cn.latency_auto_tidi_enabled;
+        let autoscaler = cn
+            .system_tidi_autoscalers
+            .entry(solar_system_id)
+            .or_insert_with(|| {
+                crate::system_actor::tidi_autoscaler::SystemTidiAutoscaler::new(
+                    solar_system_id,
+                    enabled,
+                )
+            });
+        autoscaler.enabled = enabled;
+        let out = autoscaler.observe_window(
+            now_secs,
+            current_stamp,
+            lateness_ms,
+            packet_perf_latency_ms,
+        );
+        (out, autoscaler.snapshot())
+    };
+    if let Some(applied) = outcome.applied {
+        apply_system_tidi_from_autoscaler(ctx, solar_system_id, applied.new_factor);
+    }
+    snap
+}
+
+/// Records `#1077` `[PacketPerf]` / RPC latency telemetry into the per-system autoscaler decision log
+/// without requiring cross-track edits to `ops_metrics.rs` or `flight_recorder.rs` (`#1081`).
+pub fn record_packet_perf_latency_sample(
+    ctx: &ServerContext,
+    solar_system_id: SolarSystemId,
+    latency_ms: f64,
+) {
+    let now_secs = ctx.now_unix() as f64;
+    let mut cn = ctx
+        .systems
+        .cluster_nodes
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    let enabled = cn.latency_auto_tidi_enabled;
+    let autoscaler = cn
+        .system_tidi_autoscalers
+        .entry(solar_system_id)
+        .or_insert_with(|| {
+            crate::system_actor::tidi_autoscaler::SystemTidiAutoscaler::new(
+                solar_system_id,
+                enabled,
+            )
+        });
+    autoscaler.record_packet_perf_latency(now_secs, latency_ms);
+}
+
+/// Schedules a synchronized TiDi switch with `advance_notice_secs` (~2 s) applied at a Destiny
+/// stamp boundary. Systems already at `target_factor` are skipped cleanly (`#1081`).
+pub fn schedule_system_tidi_switch(
+    ctx: &ServerContext,
+    solar_system_id: SolarSystemId,
+    target_factor: f64,
+    reason: &str,
+    now_secs: f64,
+    current_stamp: u64,
+    advance_notice_secs: f64,
+) -> Option<crate::system_actor::tidi_autoscaler::PendingTidiTransition> {
+    let mut cn = ctx
+        .systems
+        .cluster_nodes
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    let enabled = cn.latency_auto_tidi_enabled;
+    let autoscaler = cn
+        .system_tidi_autoscalers
+        .entry(solar_system_id)
+        .or_insert_with(|| {
+            crate::system_actor::tidi_autoscaler::SystemTidiAutoscaler::new(
+                solar_system_id,
+                enabled,
+            )
+        });
+    autoscaler.schedule_transition(
+        now_secs,
+        current_stamp,
+        target_factor,
+        reason,
+        advance_notice_secs,
+    )
+}
+
+/// Polls and applies a pending synchronized TiDi switch once `now_secs >= apply_at_secs` and
+/// `current_stamp >= target_stamp` (`#1081`).
+pub fn poll_pending_system_tidi_switch(
+    ctx: &ServerContext,
+    solar_system_id: SolarSystemId,
+    now_secs: f64,
+    current_stamp: u64,
+) -> Option<crate::system_actor::tidi_autoscaler::AppliedTidiTransition> {
+    let applied = {
+        let mut cn = ctx
+            .systems
+            .cluster_nodes
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let autoscaler = cn.system_tidi_autoscalers.get_mut(&solar_system_id)?;
+        autoscaler.poll_due_transition(now_secs, current_stamp)
+    };
+    if let Some(ref app) = applied {
+        apply_system_tidi_from_autoscaler(ctx, solar_system_id, app.new_factor);
+    }
+    applied
+}
+
+/// Returns a full observability snapshot for `solar_system_id`'s TiDi state (`#1081`).
+pub fn get_system_tidi_snapshot(
+    ctx: &ServerContext,
+    solar_system_id: SolarSystemId,
+) -> crate::system_actor::tidi_autoscaler::SystemTidiSnapshot {
+    let live_factor = get_system_tidi_factor(ctx, solar_system_id);
+    let cn = ctx
+        .systems
+        .cluster_nodes
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(autoscaler) = cn.system_tidi_autoscalers.get(&solar_system_id) {
+        let mut snap = autoscaler.snapshot();
+        snap.factor = live_factor;
+        snap.enabled = cn.latency_auto_tidi_enabled;
+        snap
+    } else {
+        let mut base = crate::system_actor::tidi_autoscaler::SystemTidiAutoscaler::new(
+            solar_system_id,
+            cn.latency_auto_tidi_enabled,
+        );
+        base.current_factor = live_factor;
+        base.pinned_factor = cn.manual_tidi_overrides.get(&solar_system_id).copied();
+        if base.pinned_factor.is_some() {
+            base.last_reason = crate::system_actor::tidi_autoscaler::TidiTransitionReason::ManualPin
+                .as_str()
+                .to_string();
+        }
+        base.snapshot()
+    }
+}
+
+/// Returns cluster-wide TiDi autoscaler snapshots across all tracked systems (`#1081`).
+pub fn get_cluster_tidi_snapshot(
+    ctx: &ServerContext,
+) -> crate::system_actor::tidi_autoscaler::ClusterTidiSnapshot {
+    let mut sys_ids: Vec<SolarSystemId> = ctx
+        .systems
+        .active_system_handles()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    {
+        let cn = ctx
+            .systems
+            .cluster_nodes
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        for &id in cn.system_tidi_autoscalers.keys() {
+            if !sys_ids.contains(&id) {
+                sys_ids.push(id);
+            }
+        }
+    }
+    sys_ids.sort_unstable();
+    let (autoscaler_enabled, node_load_auto_tidi_enabled) = {
+        let cn = ctx
+            .systems
+            .cluster_nodes
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        (cn.latency_auto_tidi_enabled, cn.auto_tidi_enabled)
+    };
+    let systems = sys_ids
+        .into_iter()
+        .map(|sid| get_system_tidi_snapshot(ctx, sid))
+        .collect();
+    crate::system_actor::tidi_autoscaler::ClusterTidiSnapshot {
+        autoscaler_enabled,
+        node_load_auto_tidi_enabled,
+        systems,
+    }
+}
+
+/// Formats a structured `PyRep::KeyVal` payload for `/tidi status` (`#1081`).
+pub fn system_tidi_status_pyrep(ctx: &ServerContext, solar_system_id: SolarSystemId) -> PyRep {
+    let snap = get_system_tidi_snapshot(ctx, solar_system_id);
+    let pending_rep = match &snap.pending_transition {
+        Some(p) => PyRep::keyval([
+            ("fromFactor", PyRep::Real(p.from_factor)),
+            ("toFactor", PyRep::Real(p.to_factor)),
+            ("reason", PyRep::String(p.reason.clone())),
+            ("announcedAtSecs", PyRep::Real(p.announced_at_secs)),
+            ("applyAtSecs", PyRep::Real(p.apply_at_secs)),
+            ("targetStamp", PyRep::Integer(p.target_stamp as i64)),
+            ("latenessMs", PyRep::Real(p.lateness_ms)),
+        ]),
+        None => PyRep::None,
+    };
+    let summary = format!(
+        "sys={} factor={:.2} lateness={:.1}ms reason={} pending={} auto={} pinned={}",
+        snap.solar_system_id,
+        snap.factor,
+        snap.lateness_ms,
+        snap.reason,
+        snap.pending_transition
+            .as_ref()
+            .map(|p| format!("{:.2}@{:.1}s", p.to_factor, p.apply_at_secs))
+            .unwrap_or_else(|| "none".to_string()),
+        snap.enabled,
+        snap.pinned,
+    );
+    PyRep::keyval([
+        ("solarSystemID", PyRep::Integer(snap.solar_system_id as i64)),
+        ("factor", PyRep::Real(snap.factor)),
+        ("latenessMs", PyRep::Real(snap.lateness_ms)),
+        (
+            "packetPerfLatencyMs",
+            snap.packet_perf_latency_ms.map(PyRep::Real).unwrap_or(PyRep::None),
+        ),
+        ("reason", PyRep::String(snap.reason)),
+        ("pendingTransition", pending_rep),
+        ("enabled", PyRep::Bool(snap.enabled)),
+        ("pinned", PyRep::Bool(snap.pinned)),
+        (
+            "consecutiveLowLoadWindows",
+            PyRep::Integer(snap.consecutive_low_load_windows as i64),
+        ),
+        ("summary", PyRep::String(summary)),
+    ])
 }
 
 /// Reads the live Time Dilation factor (`0.10..=1.0`, default `1.0`) for `solar_system_id`.
@@ -167,7 +559,9 @@ pub fn get_system_tidi_factor(ctx: &ServerContext, solar_system_id: u32) -> f64 
     })
 }
 
-/// Enables or disables automatic background load-induced Time Dilation (`auto_tidi_enabled`, default `false`).
+/// Enables or disables automatic Time Dilation (`auto_tidi_enabled` for node-load TiDi and
+/// `latency_auto_tidi_enabled` for the `#1081` latency autoscaler). Disabling via `/autotidi off`
+/// clears pending latency transitions cleanly.
 pub fn set_auto_cluster_tidi_enabled(ctx: &ServerContext, enabled: bool) {
     let mut cn = ctx
         .systems
@@ -175,6 +569,32 @@ pub fn set_auto_cluster_tidi_enabled(ctx: &ServerContext, enabled: bool) {
         .write()
         .unwrap_or_else(|e| e.into_inner());
     cn.auto_tidi_enabled = enabled;
+    cn.latency_auto_tidi_enabled = enabled;
+    for a in cn.system_tidi_autoscalers.values_mut() {
+        a.set_enabled(enabled);
+    }
+}
+
+/// Enables or disables only the per-system latency TiDi autoscaler (`#1081`, default `true`).
+pub fn set_latency_auto_tidi_enabled(ctx: &ServerContext, enabled: bool) {
+    let mut cn = ctx
+        .systems
+        .cluster_nodes
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    cn.latency_auto_tidi_enabled = enabled;
+    for a in cn.system_tidi_autoscalers.values_mut() {
+        a.set_enabled(enabled);
+    }
+}
+
+/// Returns whether the per-system latency TiDi autoscaler is enabled (`true` by default).
+pub fn is_latency_auto_tidi_enabled(ctx: &ServerContext) -> bool {
+    ctx.systems
+        .cluster_nodes
+        .read()
+        .map(|cn| cn.latency_auto_tidi_enabled)
+        .unwrap_or(true)
 }
 
 /// Returns whether automatic background load-induced Time Dilation is enabled.
