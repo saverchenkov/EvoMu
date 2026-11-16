@@ -1476,3 +1476,276 @@ async fn combat_probe_destination_scanning_launch_offset_and_sov_ore_exclusion_g
         }
     }
 }
+
+#[tokio::test]
+async fn reconnect_to_lost_probes_emits_on_new_probe_before_state_changed_gh1121() {
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let (ctx, mut sess) = make_ctx_and_session(char_id, sys_id);
+    ctx.db
+        .acquire_online_lock(1, sess.session_id, Some(char_id), true, ctx.now_unix_secs())
+        .expect("online lock");
+    let ship_id = sess.ship_id.unwrap();
+    let old_ship_id = 100_000_999_i64;
+    let kw = HashMap::new();
+    let now_unix = ctx.now_unix();
+    let launched_unix = now_unix.saturating_sub(120);
+
+    let mut p_inactive = make_test_probe(96_800_001, char_id, ship_id, sys_id, 30_013, launched_unix);
+    p_inactive.state = PROBE_STATE_INACTIVE;
+    p_inactive.position = [1_000.0, 2_000.0, -3_000.0];
+    p_inactive.destination = [4_000.0, 5_000.0, -6_000.0];
+
+    let mut p_other_ship = make_test_probe(96_800_002, char_id, old_ship_id, sys_id, 30_028, launched_unix);
+    p_other_ship.state = PROBE_STATE_WARPING;
+    p_other_ship.warp_end_ft = Some(ctx.now_blueos_filetime_ticks() + 50_000_000);
+    p_other_ship.position = [7_000.0, 8_000.0, 9_000.0];
+    p_other_ship.destination = [10_000.0, 11_000.0, 12_000.0];
+
+    {
+        let mut map = ctx.active_scanner_probes.write().unwrap();
+        map.insert(p_inactive.probe_id, p_inactive.clone());
+        map.insert(p_other_ship.probe_id, p_other_ship.clone());
+    }
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let before_ft = ctx.now_blueos_filetime_ticks();
+    let rep = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        None,
+        "scanMgr",
+        "ReconnectToLostProbes",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("ReconnectToLostProbes ok");
+
+    assert_eq!(rep.dict_get("reconnectedCount"), Some(&PyRep::Integer(2)));
+    assert_eq!(
+        rep.dict_get("reconnectedProbeIDs"),
+        Some(&PyRep::List(vec![
+            PyRep::Integer(p_inactive.probe_id),
+            PyRep::Integer(p_other_ship.probe_id),
+        ]))
+    );
+
+    {
+        let map = ctx.active_scanner_probes.read().unwrap();
+        for pid in [p_inactive.probe_id, p_other_ship.probe_id] {
+            let p = map.get(&pid).expect("reconnected probe retained");
+            assert_eq!(p.state, PROBE_STATE_IDLE);
+            assert_eq!(p.ship_id, ship_id);
+            assert_eq!(p.warp_end_ft, None);
+        }
+    }
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    for expected in [&p_inactive, &p_other_ship] {
+        let new_idx = notifs
+            .iter()
+            .position(|n| {
+                n.event == "OnNewProbe"
+                    && n.args
+                        .first()
+                        .and_then(|kv| kv.dict_get("probeID"))
+                        .and_then(|v| v.as_i64())
+                        == Some(expected.probe_id)
+            })
+            .expect("OnNewProbe emitted for reconnected probe");
+        let state_idx = notifs
+            .iter()
+            .position(|n| {
+                n.event == "OnProbeStateChanged"
+                    && n.args.first().and_then(|v| v.as_i64()) == Some(expected.probe_id)
+                    && n.args.get(1).and_then(|v| v.as_i64()) == Some(i64::from(PROBE_STATE_IDLE))
+            })
+            .expect("OnProbeStateChanged(Idle=1) emitted for reconnected probe");
+        assert!(
+            new_idx < state_idx,
+            "OnNewProbe must precede OnProbeStateChanged for probe {}",
+            expected.probe_id
+        );
+
+        let kv = &notifs[new_idx].args[0];
+        assert_eq!(
+            kv.dict_get("typeID").and_then(|v| v.as_i64()),
+            Some(i64::from(expected.probe_type_id))
+        );
+        assert_eq!(
+            kv.dict_get("scanRange").and_then(|v| v.as_f64()),
+            Some(expected.scan_range_m)
+        );
+        assert_eq!(
+            kv.dict_get("state").and_then(|v| v.as_i64()),
+            Some(i64::from(PROBE_STATE_IDLE))
+        );
+        let expiry_ft = kv.dict_get("expiry").and_then(|v| v.as_i64()).unwrap_or(0);
+        let expected_min_ft = before_ft + 3_470 * 10_000_000;
+        let expected_max_ft = before_ft + 3_500 * 10_000_000;
+        assert!(
+            expiry_ft >= expected_min_ft && expiry_ft <= expected_max_ft,
+            "OnNewProbe expiry must reflect remaining flight time (~3480s), got {expiry_ft}"
+        );
+        assert_eq!(
+            kv.dict_get("pos"),
+            Some(&PyRep::Tuple(vec![
+                PyRep::Real(expected.position[0]),
+                PyRep::Real(expected.position[1]),
+                PyRep::Real(expected.position[2]),
+            ]))
+        );
+        assert_eq!(
+            kv.dict_get("destination"),
+            Some(&PyRep::Tuple(vec![
+                PyRep::Real(expected.destination[0]),
+                PyRep::Real(expected.destination[1]),
+                PyRep::Real(expected.destination[2]),
+            ]))
+        );
+        let scan_bonuses = kv.dict_get("scanBonuses").expect("scanBonuses present");
+        for bonus_key in ["strength", "deviation"] {
+            let group = scan_bonuses
+                .dict_get(bonus_key)
+                .expect("scanBonuses sub-dict");
+            assert_eq!(group.dict_get("modules").and_then(|v| v.as_f64()), Some(0.0));
+            assert_eq!(group.dict_get("ship").and_then(|v| v.as_f64()), Some(0.0));
+        }
+    }
+}
+
+#[tokio::test]
+async fn reconnect_to_lost_probes_enforces_cap_filtering_expiry_and_idempotency_gh1121() {
+    let char_id = 90_000_001_i64;
+    let other_char_id = 90_000_099_i64;
+    let sys_id = 30_000_142_u32;
+    let other_sys_id = 30_000_144_u32;
+    let (ctx, mut sess) = make_ctx_and_session(char_id, sys_id);
+    ctx.db
+        .acquire_online_lock(1, sess.session_id, Some(char_id), true, ctx.now_unix_secs())
+        .expect("online lock");
+    let ship_id = sess.ship_id.unwrap();
+    let kw = HashMap::new();
+    let now_unix = ctx.now_unix();
+    let launched_unix = now_unix.saturating_sub(120);
+
+    {
+        let mut map = ctx.active_scanner_probes.write().unwrap();
+        // 6 already-active probes on current ship leave exactly 2 slots under MAX_PROBES=8.
+        for i in 0..6_i64 {
+            let pid = 96_800_101 + i;
+            map.insert(pid, make_test_probe(pid, char_id, ship_id, sys_id, 30_013, launched_unix));
+        }
+        // 3 inactive lost probes in caller's system; lowest 2 by probe_id must reconnect.
+        for pid in [96_800_110_i64, 96_800_111_i64, 96_800_112_i64] {
+            let mut p = make_test_probe(pid, char_id, ship_id, sys_id, 30_013, launched_unix);
+            p.state = PROBE_STATE_INACTIVE;
+            map.insert(pid, p);
+        }
+        // 1 overdue inactive probe: must expire instead of reconnecting or emitting OnNewProbe.
+        let mut p_expired = make_test_probe(
+            96_800_120,
+            char_id,
+            ship_id,
+            sys_id,
+            30_013,
+            now_unix.saturating_sub(4_000),
+        );
+        p_expired.state = PROBE_STATE_INACTIVE;
+        map.insert(p_expired.probe_id, p_expired);
+        // 1 inactive probe in another system + 1 inactive probe owned by another character.
+        let mut p_other_sys = make_test_probe(96_800_130, char_id, ship_id, other_sys_id, 30_013, launched_unix);
+        p_other_sys.state = PROBE_STATE_INACTIVE;
+        map.insert(p_other_sys.probe_id, p_other_sys);
+        let mut p_other_char = make_test_probe(96_800_131, other_char_id, ship_id + 1, sys_id, 30_013, launched_unix);
+        p_other_char.state = PROBE_STATE_INACTIVE;
+        map.insert(p_other_char.probe_id, p_other_char);
+    }
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = ctx.drain_notifications_for_char(other_char_id);
+
+    let bound_zero = BoundObjectEntry {
+        bound_id: 1,
+        session_id: sess.session_id,
+        user_id: 1,
+        character_id: char_id,
+        service: "scanMgr".into(),
+        object_id: 0,
+        oid_str: "scanMgr:0".into(),
+        ref_id: 1,
+    };
+    let rep = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound_zero),
+        "scanMgr",
+        "ReconnectToLostProbes",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("ReconnectToLostProbes ok");
+
+    assert_eq!(rep.dict_get("reconnectedCount"), Some(&PyRep::Integer(2)));
+    assert_eq!(
+        rep.dict_get("reconnectedProbeIDs"),
+        Some(&PyRep::List(vec![
+            PyRep::Integer(96_800_110),
+            PyRep::Integer(96_800_111),
+        ]))
+    );
+    assert_eq!(
+        rep.dict_get("expiredReturnedToCargoProbeIDs"),
+        Some(&PyRep::List(vec![PyRep::Integer(96_800_120)]))
+    );
+    assert_eq!(rep.dict_get("expiredLostProbeIDs"), Some(&PyRep::List(Vec::new())));
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let new_probe_ids: Vec<i64> = notifs
+        .iter()
+        .filter(|n| n.event == "OnNewProbe")
+        .filter_map(|n| n.args.first().and_then(|kv| kv.dict_get("probeID")).and_then(|v| v.as_i64()))
+        .collect();
+    let state_probe_ids: Vec<i64> = notifs
+        .iter()
+        .filter(|n| n.event == "OnProbeStateChanged")
+        .filter_map(|n| n.args.first().and_then(|v| v.as_i64()))
+        .collect();
+    assert_eq!(new_probe_ids, vec![96_800_110, 96_800_111]);
+    assert_eq!(state_probe_ids, vec![96_800_110, 96_800_111]);
+    assert!(ctx.drain_notifications_for_char(other_char_id).is_empty());
+
+    {
+        let map = ctx.active_scanner_probes.read().unwrap();
+        let active_count = map
+            .values()
+            .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
+            .count();
+        assert_eq!(active_count, 8, "reconnecting must never exceed MAX_PROBES=8");
+        assert_eq!(map[&96_800_112].state, PROBE_STATE_INACTIVE);
+        assert_eq!(map[&96_800_130].state, PROBE_STATE_INACTIVE);
+        assert_eq!(map[&96_800_131].state, PROBE_STATE_INACTIVE);
+        assert!(map[&96_800_120].state < 0);
+    }
+
+    // Calling ReconnectToLostProbes when all 8 slots are already occupied is a clean no-op.
+    let noop_rep = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        None,
+        "scanMgr",
+        "ReconnectToLostProbes",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("ReconnectToLostProbes no-op ok");
+    assert_eq!(noop_rep.dict_get("reconnectedCount"), Some(&PyRep::Integer(0)));
+    assert_eq!(noop_rep.dict_get("reconnectedProbeIDs"), Some(&PyRep::List(Vec::new())));
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+}

@@ -371,7 +371,7 @@ pub async fn activate_scan_probe_launcher(
         [-1_800.0, -1_800.0, 0.0],
     ];
 
-    let mut spawned_probe_positions: Vec<(i64, DVec3)> = Vec::with_capacity(allocated_probe_ids.len());
+    let mut spawned_probes: Vec<crate::router::ActiveScannerProbe> = Vec::with_capacity(allocated_probe_ids.len());
     {
         let mut probes = ctx.active_scanner_probes.write().unwrap_or_else(|e| e.into_inner());
         for rid in &reservation_ids {
@@ -380,36 +380,34 @@ pub async fn activate_scan_probe_launcher(
         for (idx, &probe_id) in allocated_probe_ids.iter().enumerate() {
             let off = formation_offsets[idx % formation_offsets.len()];
             let pos = DVec3::new(ship_pos.x + off[0], ship_pos.y + off[1], ship_pos.z + off[2]);
-            spawned_probe_positions.push((probe_id, pos));
-            probes.insert(
+            let probe = crate::router::ActiveScannerProbe {
                 probe_id,
-                crate::router::ActiveScannerProbe {
-                    probe_id,
-                    probe_type_id,
-                    owner_char_id: char_id,
-                    ship_id,
-                    launcher_module_id: module_id,
-                    solar_system_id: sys_id,
-                    position: pos.to_array(),
-                    destination: pos.to_array(),
-                    range_step,
-                    scan_range_m,
-                    base_sensor_strength,
-                    max_flight_time_s,
-                    launched_at_unix: now_unix,
-                    state: PROBE_STATE_IDLE,
-                    warp_end_ft: None,
-                },
-            );
+                probe_type_id,
+                owner_char_id: char_id,
+                ship_id,
+                launcher_module_id: module_id,
+                solar_system_id: sys_id,
+                position: pos.to_array(),
+                destination: pos.to_array(),
+                range_step,
+                scan_range_m,
+                base_sensor_strength,
+                max_flight_time_s,
+                launched_at_unix: now_unix,
+                state: PROBE_STATE_IDLE,
+                warp_end_ft: None,
+            };
+            spawned_probes.push(probe.clone());
+            probes.insert(probe_id, probe);
         }
     }
     sync_scanner_probes_to_db(ctx);
 
-    for &(probe_id, pos) in &spawned_probe_positions {
+    for p in &spawned_probes {
         let ball = Ball {
-            id: probe_id,
+            id: p.probe_id,
             type_id: probe_type_id,
-            position: pos,
+            position: DVec3::from_array(p.position),
             velocity: DVec3::ZERO,
             max_velocity: probe_max_vel,
             inertia: 1.0,
@@ -449,41 +447,10 @@ pub async fn activate_scan_probe_launcher(
         0,
     );
     let expiry_ft = ctx.now_blueos_filetime_ticks().saturating_add((max_flight_time_s.round() as i64).saturating_mul(10_000_000));
-    let scan_bonuses = PyRep::Dict(vec![
-        (
-            PyRep::String("strength".into()),
-            PyRep::Dict(vec![
-                (PyRep::String("modules".into()), PyRep::Real(0.0)),
-                (PyRep::String("ship".into()), PyRep::Real(0.0)),
-            ]),
-        ),
-        (
-            PyRep::String("deviation".into()),
-            PyRep::Dict(vec![
-                (PyRep::String("modules".into()), PyRep::Real(0.0)),
-                (PyRep::String("ship".into()), PyRep::Real(0.0)),
-            ]),
-        ),
-    ]);
-    for &(pid, ppos) in &spawned_probe_positions {
-        let pt = PyRep::Tuple(vec![PyRep::Real(ppos.x), PyRep::Real(ppos.y), PyRep::Real(ppos.z)]);
-        let probe_kv = PyRep::keyval([
-            ("probeID", PyRep::Integer(pid)), ("typeID", PyRep::Integer(probe_type_id as i64)),
-            ("scanRange", PyRep::Real(scan_range_m)), ("expiry", PyRep::Integer(expiry_ft)),
-            ("pos", pt.clone()), ("destination", pt), ("state", PyRep::Integer(PROBE_STATE_IDLE as i64)),
-            ("scanBonuses", scan_bonuses.clone()),
-        ]);
-        let _ = ctx.emit_typed(
-            crate::router::NotificationTarget::Character(char_id),
-            crate::router::notify_registry::OnNewProbe { probe: probe_kv },
-        );
-        let _ = ctx.emit_typed(
-            crate::router::NotificationTarget::Character(char_id),
-            crate::router::notify_registry::OnProbeStateChanged {
-                probe_id: pid,
-                probe_state: PROBE_STATE_IDLE as i64,
-            },
-        );
+    let scan_bonuses = default_probe_scan_bonuses();
+    for probe in &spawned_probes {
+        let probe_kv = build_probe_kv(probe, expiry_ft, &scan_bonuses);
+        emit_probe_registered(ctx, char_id, probe.probe_id, probe_kv, probe.state);
     }
     ctx.persist_server_runtime_to_db();
     Ok(PyRep::keyval([
@@ -1941,33 +1908,128 @@ async fn handle_recover_probes(
     ])))
 }
 
+fn default_probe_scan_bonuses() -> PyRep {
+    PyRep::Dict(vec![
+        (
+            PyRep::String("strength".into()),
+            PyRep::Dict(vec![
+                (PyRep::String("modules".into()), PyRep::Real(0.0)),
+                (PyRep::String("ship".into()), PyRep::Real(0.0)),
+            ]),
+        ),
+        (
+            PyRep::String("deviation".into()),
+            PyRep::Dict(vec![
+                (PyRep::String("modules".into()), PyRep::Real(0.0)),
+                (PyRep::String("ship".into()), PyRep::Real(0.0)),
+            ]),
+        ),
+    ])
+}
+
+fn build_probe_kv(probe: &crate::router::ActiveScannerProbe, expiry_ft: i64, scan_bonuses: &PyRep) -> PyRep {
+    let pos_tuple = PyRep::Tuple(vec![
+        PyRep::Real(probe.position[0]),
+        PyRep::Real(probe.position[1]),
+        PyRep::Real(probe.position[2]),
+    ]);
+    let dest_tuple = PyRep::Tuple(vec![
+        PyRep::Real(probe.destination[0]),
+        PyRep::Real(probe.destination[1]),
+        PyRep::Real(probe.destination[2]),
+    ]);
+    PyRep::keyval([
+        ("probeID", PyRep::Integer(probe.probe_id)),
+        ("typeID", PyRep::Integer(probe.probe_type_id as i64)),
+        ("scanRange", PyRep::Real(probe.scan_range_m)),
+        ("expiry", PyRep::Integer(expiry_ft)),
+        ("pos", pos_tuple),
+        ("destination", dest_tuple),
+        ("state", PyRep::Integer(i64::from(probe.state))),
+        ("scanBonuses", scan_bonuses.clone()),
+    ])
+}
+
+/// Emits `OnNewProbe` strictly before `OnProbeStateChanged` so V24.02 `scanSvc.probeTracker.AddProbe`
+/// populates `probeData` before `UpdateProbeState` processes the state transition (GH #1121).
+fn emit_probe_registered(ctx: &ServerContext, char_id: i64, probe_id: i64, probe_kv: PyRep, state: i32) {
+    let _ = ctx.emit_typed(
+        crate::router::NotificationTarget::Character(char_id),
+        crate::router::notify_registry::OnNewProbe { probe: probe_kv },
+    );
+    let _ = ctx.emit_typed(
+        crate::router::NotificationTarget::Character(char_id),
+        crate::router::notify_registry::OnProbeStateChanged {
+            probe_id,
+            probe_state: i64::from(state),
+        },
+    );
+}
+
 async fn handle_reconnect_probes(ctx: &ServerContext, session: &mut SessionState, bound_entry: Option<&BoundObjectEntry>) -> Option<Result<PyRep, BridgeRpcError>> {
     let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-    let sys_id = bound_entry.map(|b| b.object_id as u32).unwrap_or_else(|| resolve_caller_solar_system(ctx, session, char_id));
-    let (auto_returned, expired_lost) = expire_overdue_probes_for_char(ctx, char_id, ctx.now_unix()).await;
+    // Unbound or synthetic `object_id <= 0` calls fall back to the caller's active solar system.
+    let sys_id = bound_entry
+        .and_then(|b| u32::try_from(b.object_id).ok())
+        .filter(|&id| id > 0)
+        .unwrap_or_else(|| resolve_caller_solar_system(ctx, session, char_id));
+    let now_unix = ctx.now_unix();
+    let (auto_returned, expired_lost) = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
     let ship_id = session.ship_id.unwrap_or(0);
-    let mut reconnected_ids = Vec::new();
+    let mut reconnected_probes = Vec::new();
     if let Ok(mut map) = ctx.active_scanner_probes.write() {
-        for p in map.values_mut() {
-            if p.owner_char_id == char_id && p.solar_system_id == sys_id && (p.state == PROBE_STATE_INACTIVE || (ship_id != 0 && p.ship_id != ship_id && p.state > 0)) {
+        let existing_active = map
+            .values()
+            .filter(|p| {
+                p.owner_char_id == char_id
+                    && p.solar_system_id == sys_id
+                    && p.state > 0
+                    && (ship_id == 0 || p.ship_id == ship_id)
+            })
+            .count();
+        // Enforce EVE's 8-probe active deployment cap after counting probes already bound to this ship.
+        let remaining_slots = 8usize.saturating_sub(existing_active);
+        let mut candidate_ids: Vec<i64> = map
+            .values()
+            .filter(|p| {
+                p.owner_char_id == char_id
+                    && p.solar_system_id == sys_id
+                    && (p.state == PROBE_STATE_INACTIVE || (ship_id != 0 && p.ship_id != ship_id && p.state > 0))
+            })
+            .map(|p| p.probe_id)
+            .collect();
+        candidate_ids.sort_unstable();
+        candidate_ids.truncate(remaining_slots);
+        reconnected_probes.reserve(candidate_ids.len());
+        for pid in candidate_ids {
+            if let Some(p) = map.get_mut(&pid) {
                 p.state = PROBE_STATE_IDLE;
+                // Clear any stale in-flight warp timer so reconnected probes remain idle until next scan.
+                p.warp_end_ft = None;
                 if ship_id != 0 { p.ship_id = ship_id; }
-                reconnected_ids.push(p.probe_id);
+                reconnected_probes.push(p.clone());
             }
         }
     }
-    if !reconnected_ids.is_empty() {
+    if !reconnected_probes.is_empty() {
         sync_scanner_probes_to_db(ctx);
     }
-    for &pid in &reconnected_ids {
-        let _ = ctx.emit_typed(
-            crate::router::NotificationTarget::Character(char_id),
-            crate::router::notify_registry::OnProbeStateChanged {
-                probe_id: pid,
-                probe_state: PROBE_STATE_IDLE as i64,
-            },
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let scan_bonuses = default_probe_scan_bonuses();
+    for probe in &reconnected_probes {
+        let remaining_s = probe
+            .launched_at_unix
+            .saturating_add(probe.max_flight_time_s.round().max(0.0) as u64)
+            .saturating_sub(now_unix);
+        let expiry_ft = now_ft.saturating_add(
+            i64::try_from(remaining_s)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(10_000_000),
         );
+        let probe_kv = build_probe_kv(probe, expiry_ft, &scan_bonuses);
+        emit_probe_registered(ctx, char_id, probe.probe_id, probe_kv, PROBE_STATE_IDLE);
     }
+    let reconnected_ids: Vec<i64> = reconnected_probes.iter().map(|p| p.probe_id).collect();
     let count = reconnected_ids.len() as i64;
     Some(Ok(PyRep::keyval([
         ("reconnectedProbeIDs", PyRep::List(reconnected_ids.into_iter().map(PyRep::Integer).collect())),
