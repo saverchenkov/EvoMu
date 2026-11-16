@@ -2341,6 +2341,48 @@ class TestSpeedupOptimizations(unittest.TestCase):
                 )
             )
 
+    def test_oracle_filters_noammoloaded_minimap_resizeslider_and_fitting_validation_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            qdir = root / "queue"
+            qdir.mkdir()
+            mem = playtester.PlaytesterMemory(root, git_head="7e3600c29")
+            oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False)
+
+            no_ammo_tb = (
+                "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x2, ctxt='ModuleButton.OnStateChange'>\",)\n"
+                '  File "packages/hud/client/moduleButton.py", line 412, in OnStateChange\n'
+                '  File "eve/client/script/environment/spaceObject/module.py", line 118, in ActivateEffect\n'
+                "UserError: User error, msg=NoAmmoLoaded, dict={}\n"
+            )
+            self.assertIn("noammoloaded", oracle.BENIGN_USER_ERROR_MARKERS)
+            self.assertFalse(oracle._is_unhandled_tasklet_traceback("UserError: NoAmmoLoaded", no_ammo_tb))
+            self.assertTrue(oracle.is_ignorable_client_traceback("Unhandled exception in ModuleButton.OnStateChange", no_ammo_tb))
+
+            minimap_tb = (
+                '  File "packages/map/client/minimap.py", line 219, in _ResizeSlider\n'
+                "AttributeError: 'MapSlider' object has no attribute 'minimumWidth'\n"
+            )
+            self.assertTrue(oracle.is_benign_client_traceback("'MapSlider' object has no attribute 'minimumWidth'", minimap_tb))
+            self.assertTrue(oracle.is_ignorable_client_traceback("AttributeError", minimap_tb))
+
+            fitting_drag_tb = (
+                "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x3, ctxt='fittingSlotController.OnDropData'>\",)\n"
+                '  File "eve/client/script/ui/shared/fitting/fittingSlotController.py", line 310, in OnDropData\n'
+                '  File "eve/client/script/inc/invCache.py", line 915, in TryFit\n'
+                "UserError: ('CustomInfo', {'info': 'FittingValidationFailed: No available turret hardpoints'})\n"
+            )
+            self.assertFalse(oracle._is_unhandled_tasklet_traceback("Unhandled exception in OnDropData", fitting_drag_tb))
+            self.assertTrue(oracle.is_ignorable_client_traceback("Unhandled exception in OnDropData", fitting_drag_tb))
+
+            unexpected_custom_info_tb = (
+                "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x4, ctxt='market.Buy'>\",)\n"
+                '  File "eve/client/script/ui/shared/market/marketWindow.py", line 210, in ConfirmOrder\n'
+                "UserError: ('CustomInfo', {'info': 'UnexpectedInternalServerMismatch'})\n"
+            )
+            self.assertTrue(oracle._is_unhandled_tasklet_traceback("Unhandled exception in market.Buy", unexpected_custom_info_tb))
+            self.assertFalse(oracle.is_ignorable_client_traceback("Unhandled exception in market.Buy", unexpected_custom_info_tb))
+
     def test_abort_conditions_schema_string_parity(self):
         schema = json.loads((HARNESS_DIR / "playtester_planner_schema.json").read_text(encoding="utf-8"))
         abort_schema = schema["properties"]["delegated_plan"]["properties"]["abort_conditions"]

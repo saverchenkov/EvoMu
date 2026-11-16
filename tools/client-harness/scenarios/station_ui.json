@@ -1,0 +1,316 @@
+{
+  "id": "station_ui",
+  "title": "Open, Verify Populated Content, Record RPCs, and Close All 16 Station UI Windows",
+  "starting_state": {
+    "account": "demo",
+    "password": "demo-secret",
+    "char_id": 90000001,
+    "defer_char_select": false
+  },
+  "steps": [
+    {
+      "id": "open_shiphangar",
+      "action": {"type": "open_window", "target": "shiphangar"},
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 500,
+        "checks": {"window_populated": {"window": "hangar", "min_populated": 1, "require_rpc_or_data": true}}
+      },
+      "checks": {
+        "window_populated": {"window": "hangar", "min_populated": 1, "require_rpc_or_data": true},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_shiphangar",
+      "action": {"type": "close_window", "target": "hangar"},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_itemhangar",
+      "action": {"type": "open_window", "target": "itemhangar"},
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 500,
+        "checks": {"window_populated": {"window": "hangar", "min_populated": 1, "require_rpc_or_data": true}}
+      },
+      "checks": {
+        "window_populated": {"window": "hangar", "min_populated": 1, "require_rpc_or_data": true},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_itemhangar",
+      "action": {"type": "close_window", "target": "hangar"},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_fitting",
+      "action": {"type": "open_window", "target": "fitting"},
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 500,
+        "checks": {"window_populated": {"window": "fitting", "min_populated": 1, "require_rpc_or_data": true}}
+      },
+      "checks": {
+        "window_populated": {"window": "fitting", "min_populated": 1, "require_rpc_or_data": true},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_fitting",
+      "action": {"type": "close_window", "target": "fitting"},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_market",
+      "action": {"type": "open_window", "target": "market"},
+      "wait_until": {
+        "timeout_ms": 10000,
+        "poll_interval_ms": 500,
+        "checks": {"window_populated": {"window": "market", "min_populated": 1, "require_rpc_or_data": true}}
+      },
+      "checks": {
+        "window_populated": {"window": "market", "min_populated": 1, "require_rpc_or_data": true},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_market",
+      "action": {"type": "close_window", "target": "market"},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_industry",
+      "action": {"type": "open_window", "target": "industry"},
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 500,
+        "checks": {"window_populated": {"window": "industry", "min_populated": 1, "require_rpc_or_data": true}}
+      },
+      "checks": {
+        "window_populated": {"window": "industry", "min_populated": 1, "require_rpc_or_data": true},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_industry",
+      "action": {"type": "close_window", "target": "industry"},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_agency",
+      "action": {"type": "open_window", "target": "agency"},
+      "wait_until": {
+        "timeout_ms": 10000,
+        "poll_interval_ms": 500,
+        "checks": {"window_populated": {"window": "agency", "min_populated": 1, "require_rpc_or_data": true}}
+      },
+      "checks": {
+        "window_populated": {"window": "agency", "min_populated": 1, "require_rpc_or_data": true},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_agency",
+      "action": {"type": "close_window", "target": "agency"},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_charactersheet",
+      "action": {"type": "open_window", "target": "charactersheet"},
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 500,
+        "checks": {"window_populated": {"window": "character", "min_populated": 1, "require_rpc_or_data": true}}
+      },
+      "checks": {
+        "window_populated": {"window": "character", "min_populated": 1, "require_rpc_or_data": true},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_charactersheet",
+      "action": {"type": "close_window", "target": "character"},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_skills",
+      "action": {"type": "open_window", "target": "skills"},
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 500,
+        "checks": {"window_populated": {"window": "skill", "min_populated": 1, "require_rpc_or_data": true}}
+      },
+      "checks": {
+        "window_populated": {"window": "skill", "min_populated": 1, "require_rpc_or_data": true},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_skills",
+      "action": {"type": "close_window", "target": "skill"},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_wallet",
+      "action": {"type": "open_window", "target": "wallet"},
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 500,
+        "checks": {"window_populated": {"window": "wallet", "min_populated": 1, "require_rpc_or_data": true}}
+      },
+      "checks": {
+        "window_populated": {"window": "wallet", "min_populated": 1, "require_rpc_or_data": true},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_wallet",
+      "action": {"type": "close_window", "target": "wallet"},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_journal",
+      "action": {"type": "open_window", "target": "journal"},
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 500,
+        "checks": {"window_populated": {"window": "journal", "min_populated": 1, "require_rpc_or_data": true}}
+      },
+      "checks": {
+        "window_populated": {"window": "journal", "min_populated": 1, "require_rpc_or_data": true},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_journal",
+      "action": {"type": "close_window", "target": "journal"},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_corp",
+      "action": {"type": "open_window", "target": "corp"},
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 500,
+        "checks": {"window_populated": {"window": "corp", "min_populated": 1, "require_rpc_or_data": true}}
+      },
+      "checks": {
+        "window_populated": {"window": "corp", "min_populated": 1, "require_rpc_or_data": true},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_corp",
+      "action": {"type": "close_window", "target": "corp"},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_peopleandplaces",
+      "action": {"type": "open_window", "target": "peopleandplaces"},
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 500,
+        "checks": {"window_populated": {"window": "people", "min_populated": 1, "require_rpc_or_data": true}}
+      },
+      "checks": {
+        "window_populated": {"window": "people", "min_populated": 1, "require_rpc_or_data": true},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_peopleandplaces",
+      "action": {"type": "close_window", "target": "people"},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_mail",
+      "action": {"type": "open_window", "target": "mail"},
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 500,
+        "checks": {"window_populated": {"window": "mail", "min_populated": 1, "require_rpc_or_data": true}}
+      },
+      "checks": {
+        "window_populated": {"window": "mail", "min_populated": 1, "require_rpc_or_data": true},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_mail",
+      "action": {"type": "close_window", "target": "mail"},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_notifications",
+      "action": {"type": "open_window", "target": "notifications"},
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 500,
+        "checks": {"window_populated": {"window": "notif", "min_populated": 1, "require_rpc_or_data": true}}
+      },
+      "checks": {
+        "window_populated": {"window": "notif", "min_populated": 1, "require_rpc_or_data": true},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_notifications",
+      "action": {"type": "close_window", "target": "notif"},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_calendar",
+      "action": {"type": "open_window", "target": "calendar"},
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 500,
+        "checks": {"window_populated": {"window": "calendar", "min_populated": 1, "require_rpc_or_data": true}}
+      },
+      "checks": {
+        "window_populated": {"window": "calendar", "min_populated": 1, "require_rpc_or_data": true},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_calendar",
+      "action": {"type": "close_window", "target": "calendar"},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_nes",
+      "action": {"type": "open_window", "target": "nes"},
+      "wait_until": {
+        "timeout_ms": 10000,
+        "poll_interval_ms": 500,
+        "checks": {"window_populated": {"window": "store", "min_populated": 1, "require_rpc_or_data": true}}
+      },
+      "checks": {
+        "window_populated": {"window": "store", "min_populated": 1, "require_rpc_or_data": true},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_nes",
+      "action": {"type": "close_window", "target": "store"},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    }
+  ]
+}

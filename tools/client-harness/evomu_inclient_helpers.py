@@ -315,7 +315,7 @@ def _assert_ui_rendered(sm, expected_view):
             raise RuntimeError("michelle.GetBallpark() is None in inflight view")
 
 
-def _wait_for_session(sm, user, password, target_char_id, timeout_sec=120.0):
+def _wait_for_session(sm, user, password, target_char_id, timeout_sec=120.0, defer_char_select=False):
     deadline = time.time() + timeout_sec
     tried_manual_login, tried_manual_select = False, False
     chosen_char_id, avail_ids = int(target_char_id or 0), []
@@ -325,6 +325,21 @@ def _wait_for_session(sm, user, password, target_char_id, timeout_sec=120.0):
         charid = getattr(sess, "charid", None) if sess is not None else None
         if userid:
             _sync_quasar_gateway(sm, int(charid) if charid else None)
+        if defer_char_select and userid and not charid:
+            try:
+                vs = sm.GetService("viewState") if sm is not None else None
+            except Exception:
+                vs = None
+            cur = vs.GetCurrentViewInfo() if (vs is not None and hasattr(vs, "GetCurrentViewInfo")) else None
+            cname = getattr(cur, "name", None) if cur is not None else None
+            if cname == "charsel" and not getattr(vs, "isOpeningView", None):
+                uc = _get_uicore()
+                cs_layer = getattr(getattr(uc, "layer", None), "charsel", None) if uc is not None else None
+                cs_data = getattr(cs_layer, "characterSelectionData", None) if cs_layer is not None else None
+                cs_slots = getattr(cs_layer, "slots", None) if cs_layer is not None else None
+                if cs_layer is None or cs_data is not None or cs_slots:
+                    _sleep_ms(200)
+                    return 0
         sess_busy = bool(
             sess is not None
             and (getattr(sess, "mutating", 0) or getattr(sess, "changing", None) is not None)
@@ -393,7 +408,7 @@ def _wait_for_session(sm, user, password, target_char_id, timeout_sec=120.0):
                     sm.RemoteSvc("authentication").Login(user, password)
                 except Exception:
                     pass
-        if userid and not charid and not tried_manual_select:
+        if userid and not charid and not tried_manual_select and not defer_char_select:
             vs = sm.GetService("viewState")
             cur = vs.GetCurrentViewInfo()
             cname = getattr(cur, "name", None) if cur is not None else None

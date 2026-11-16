@@ -1,0 +1,644 @@
+#!/usr/bin/env python3
+"""
+Deterministic unit tests for zero-LLM scripted UI `--scenario` mode (GH #1202).
+Covers:
+  - Static scenario schema & GM/time-control rejection outside declared setup steps
+  - Loading & static validation of launch_login, station_ui, and undock_navigate scenarios
+  - Every new check type (rpc_sent, notification_received, no_client_exception, no_error_reply,
+    state_checks eq/inc/dec, charsel_listed_all_characters, window_populated, ship_mode,
+    target_distance, warp_completed, bookmark client+server checks, celestials_in_overview)
+  - Fake-hook ScenarioRunner deterministic passes (twice in a row with identical RPC name sets),
+    fail-fast abort with state/RPCs/screenshot/failed_check, zero-LLM invocation assertion,
+    destiny desync check, and fail-mutation checks for station_ui (wallet RPC error) and
+    undock_navigate (stargate jump disabled).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+HARNESS_DIR = Path(__file__).resolve().parent
+if str(HARNESS_DIR) not in sys.path:
+    sys.path.insert(0, str(HARNESS_DIR))
+
+import playtester  # noqa: E402
+
+
+EXPECTED_16_STATION_WINDOWS = (
+    "shiphangar",
+    "itemhangar",
+    "fitting",
+    "market",
+    "industry",
+    "agency",
+    "charactersheet",
+    "skills",
+    "wallet",
+    "journal",
+    "corp",
+    "peopleandplaces",
+    "mail",
+    "notifications",
+    "calendar",
+    "nes",
+)
+
+
+def _fake_scenario_args(tmp_root: Path, scenario_paths: list[Path], out_dir: Path) -> argparse.Namespace:
+    args = playtester.parse_args([
+        "--worktree", str(tmp_root),
+        "--no-github-sync",
+        "--out", str(out_dir),
+        *[arg for p in scenario_paths for arg in ("--scenario", str(p))],
+    ])
+    args.staged_app = str(tmp_root / "staged_app")
+    return args
+
+
+class TestScenarioValidation(unittest.TestCase):
+    def test_all_three_stored_scenarios_load_and_pass_static_validation(self):
+        scenarios = {}
+        for name in ("launch_login", "station_ui", "undock_navigate"):
+            path = HARNESS_DIR / "scenarios" / f"{name}.json"
+            self.assertTrue(path.exists(), f"Missing scenario file {path}")
+            loaded = playtester.load_scenario_file(path)
+            self.assertEqual(loaded["id"], name)
+            self.assertGreater(len(loaded["steps"]), 0)
+            scenarios[name] = loaded
+
+        # launch_login declares extra_characters setup in starting_state only; zero GM slash steps
+        self.assertEqual(len(scenarios["launch_login"]["declared_setup_steps"]), 1)
+        self.assertEqual(
+            scenarios["launch_login"]["declared_setup_steps"][0]["step_id"],
+            "starting_state.extra_characters",
+        )
+        # station_ui and undock_navigate have zero GM/time-control steps
+        self.assertEqual(scenarios["station_ui"]["declared_setup_steps"], [])
+        self.assertEqual(scenarios["undock_navigate"]["declared_setup_steps"], [])
+
+        opened_targets = [
+            s["action"]["target"]
+            for s in scenarios["station_ui"]["steps"]
+            if s["action"].get("type") == "open_window"
+        ]
+        self.assertEqual(opened_targets, list(EXPECTED_16_STATION_WINDOWS))
+
+    def test_rejects_gm_and_time_control_commands_outside_declared_setup_steps(self):
+        bad_cases = [
+            {"type": "slash_command", "command": "/giveisk 5000000"},
+            {"type": "run_slash", "target": "/tr 30000142"},
+            {"type": "train_skill", "target": "3300"},
+            {"type": "type_text", "target": "chat_input", "command": "/giveitem 587 1"},
+            {"type": "advance_server_time", "target": "3600"},
+            {"type": "complete_skills", "target": "all"},
+        ]
+        for bad_act in bad_cases:
+            spec = {
+                "id": "bad_gm",
+                "steps": [{"id": "cheat", "action": bad_act}],
+            }
+            with self.assertRaises(playtester.ScenarioValidationError, msg=f"Should reject {bad_act!r}"):
+                playtester.validate_scenario(spec)
+
+        # Explicitly declared setup / time_control steps ARE accepted and listed in declared_setup_steps
+        allowed_spec = {
+            "id": "declared_setup_ok",
+            "steps": [
+                {"id": "grant_isk", "setup": True, "action": {"type": "slash_command", "command": "/giveisk 1000"}},
+                {"id": "skip_time", "time_control": True, "action": {"type": "advance_server_time", "target": "120"}},
+                {"id": "open_wallet", "action": {"type": "open_window", "target": "wallet"}},
+            ],
+        }
+        validated = playtester.validate_scenario(allowed_spec)
+        self.assertEqual(
+            [s["step_id"] for s in validated["declared_setup_steps"]],
+            ["grant_isk", "skip_time"],
+        )
+
+
+class TestScenarioChecks(unittest.TestCase):
+    def test_rpc_sent_notification_and_error_exception_checks(self):
+        pre = {"session": {"charid": 90000001, "stationid": 60003760}}
+        post = {"session": {"charid": 90000001, "stationid": 60003760}}
+        fr_ok = {
+            "action_ok": True,
+            "flight_recorder": {
+                "macho_calls": [
+                    {"service": "walletMgr", "method": "GetWalletBalance", "status": "OK"},
+                    {"service": "marketProxy", "method": "GetOrders", "status": "OK"},
+                    {"service": "marketProxy", "method": "GetOrders", "status": "OK"},
+                ],
+                "scatters_observed": ["OnAccountChange", "OnOrderChanged"],
+                "log_exceptions": [],
+                "quasar_errors": [],
+                "macho_exceptions": [],
+            },
+        }
+        ok, fail_k, msg = playtester.evaluate_scenario_checks(
+            {
+                "rpc_sent": [
+                    {"name": "walletMgr.GetWalletBalance", "min_count": 1, "require_ok": True},
+                    {"name": "marketProxy.GetOrders", "min_count": 2},
+                ],
+                "notification_received": ["OnAccountChange", "OnOrderChanged"],
+                "no_client_exception": True,
+                "no_error_reply": True,
+            },
+            pre,
+            post,
+            fr_ok,
+        )
+        self.assertTrue(ok, (fail_k, msg))
+
+        ok2, fail_k2, _ = playtester.evaluate_scenario_checks(
+            {"rpc_sent": ["contractProxy.GetContracts"]},
+            pre,
+            post,
+            fr_ok,
+        )
+        self.assertFalse(ok2)
+        self.assertEqual(fail_k2, "rpc_sent")
+
+        ok3, fail_k3, _ = playtester.evaluate_scenario_checks(
+            {"notification_received": "OnMailReceived"},
+            pre,
+            post,
+            fr_ok,
+        )
+        self.assertFalse(ok3)
+        self.assertEqual(fail_k3, "notification_received")
+
+        fr_qerr = {"action_ok": True, "flight_recorder": {"macho_calls": [], "quasar_errors": [{"error": "timeout"}]}}
+        ok4, fail_k4, _ = playtester.evaluate_scenario_checks({"no_error_reply": True}, pre, post, fr_qerr)
+        self.assertFalse(ok4)
+        self.assertEqual(fail_k4, "no_error_reply")
+
+        fr_exc = {
+            "action_ok": True,
+            "flight_recorder": {
+                "macho_calls": [],
+                "log_exceptions": [{"headline": "KeyError: 'foo'", "trace": "Traceback (most recent call last):\nKeyError: 'foo'"}],
+            },
+        }
+        ok5, fail_k5, _ = playtester.evaluate_scenario_checks({"no_client_exception": True}, pre, post, fr_exc)
+        self.assertFalse(ok5)
+        self.assertEqual(fail_k5, "no_client_exception")
+
+        # Benign V24 fitting validation drag rejection does not fail no_client_exception
+        fr_benign_fit = {
+            "action_ok": True,
+            "flight_recorder": {
+                "macho_calls": [],
+                "log_exceptions": [{
+                    "headline": "Unhandled exception in <TaskletExt ctxt='fittingSlotController.OnDropData'>",
+                    "trace": (
+                        '  File "eve/client/script/ui/shared/fitting/fittingSlotController.py", line 10, in OnDropData\n'
+                        "UserError: ('CustomInfo', {'info': 'FittingValidationFailed: No slots'})\n"
+                    ),
+                }],
+            },
+        }
+        ok6, fail_k6, msg6 = playtester.evaluate_scenario_checks({"no_client_exception": True}, pre, post, fr_benign_fit)
+        self.assertTrue(ok6, (fail_k6, msg6))
+
+    def test_state_value_window_populated_charsel_and_space_navigation_checks(self):
+        pre = {
+            "session": {"solarsystemid2": 30000142, "stationid": None},
+            "wallet_state": {"isk_balance": 100000.0},
+            "inventory_state": {"hangar_item_count": 3},
+            "skills_state": {"queue_len": 1, "trained_count": 12},
+            "market_state": {"char_orders_count": 2},
+            "warp_telemetry": {"started_count": 0, "finished_count": 0, "in_warp": False},
+            "space": {
+                "ego": {"mode": 2, "speed_mps": 0.0},
+                "nearby_balls": [{"item_id": 60003760, "distance_m": 4500.0}],
+            },
+        }
+        post = {
+            "session": {"solarsystemid2": 30000142, "stationid": None},
+            "active_view": "inflight",
+            "wallet_state": {"isk_balance": 125000.0},
+            "inventory_state": {"hangar_item_count": 2},
+            "skills_state": {"queue_len": 2, "trained_count": 12},
+            "market_state": {"char_orders_count": 3},
+            "charsel_state": {"active": True, "count": 2, "names": ["Aura Capsuleer", "Aura Two"]},
+            "bookmarks_state": {"count": 1, "names": ["Scenario Planet Spot"]},
+            "warp_telemetry": {"started_count": 1, "finished_count": 1, "in_warp": False, "saw_signal": True},
+            "open_windows": [
+                {
+                    "window_id": "wallet",
+                    "name": "wallet",
+                    "cls": "WalletWindow",
+                    "caption": "Wallet",
+                    "has_loading": False,
+                    "has_error": False,
+                    "tab_count": 3,
+                    "row_count": 2,
+                    "populated_count": 5,
+                    "sample_texts": ["125,000.00 ISK"],
+                }
+            ],
+            "space": {
+                "ego": {"mode": 1, "speed_mps": 215.0},
+                "celestials_in_overview": True,
+                "nearby_balls": [
+                    {"item_id": 60003760, "distance_m": 1800.0},
+                    {"item_id": 40009077, "distance_m": 25000.0},
+                ],
+            },
+        }
+        exec_ok = {
+            "action_ok": True,
+            "warp_telemetry": {"saw_signal": True, "started_count": 1, "finished_count": 1, "in_warp": False},
+            "flight_recorder": {
+                "macho_calls": [{"service": "walletMgr", "method": "GetWalletBalance", "status": "OK"}],
+                "scatters_observed": [],
+                "log_exceptions": [],
+                "quasar_errors": [],
+                "macho_exceptions": [],
+            },
+        }
+        ok, fk, msg = playtester.evaluate_scenario_checks(
+            {
+                "charsel_listed_all_characters": ["Aura Capsuleer", "Aura Two"],
+                "window_populated": {"window": "wallet", "min_populated": 1, "contains_text": "125,000"},
+                "ship_mode": 1,
+                "target_distance": {"target_id": 60003760, "decreased": 1000.0},
+                "warp_completed": {"target_id": 40009077, "landing_distance_max_m": 150000},
+                "bookmark_present": "Scenario Planet Spot",
+                "bookmark_server_check": "Scenario Planet Spot",
+                "celestials_in_overview": True,
+                "state_checks": [
+                    {"field": "wallet_isk", "increased": 25000.0, "equals": 125000.0},
+                    {"field": "hangar_item_count", "decreased": 1},
+                    {"field": "skill_queue_len", "delta": 1},
+                    {"field": "order_count", "equals": 3},
+                ],
+            },
+            pre,
+            post,
+            exec_ok,
+            context={"server_bookmark_exists": lambda bm: bm == "Scenario Planet Spot"},
+        )
+        self.assertTrue(ok, (fk, msg))
+
+        # Empty loading window fails window_populated
+        bad_win_post = dict(post, open_windows=[{
+            "window_id": "wallet", "has_loading": True, "has_error": False, "populated_count": 0,
+        }])
+        ok_w, fk_w, _ = playtester.evaluate_scenario_checks(
+            {"window_populated": "wallet"}, pre, bad_win_post, {"action_ok": True, "flight_recorder": {}}
+        )
+        self.assertFalse(ok_w)
+        self.assertEqual(fk_w, "window_populated")
+
+        # Missing server bookmark fails bookmark_server_check
+        ok_bm, fk_bm, _ = playtester.evaluate_scenario_checks(
+            {"bookmark_server_check": "Scenario Planet Spot"},
+            pre,
+            post,
+            exec_ok,
+            context={"server_bookmark_exists": lambda _bm: False},
+        )
+        self.assertFalse(ok_bm)
+        self.assertEqual(fk_bm, "bookmark_server_check")
+
+
+class TestScenarioRunnerFakeHook(unittest.TestCase):
+    def _run_with_fake_rpc(self, scenario_files, out_dir, handler, tmp_root, extra_client_log_text=None):
+        def _fake_start_server(self_runner, reset_db=False):
+            self_runner.current_run_dir.mkdir(parents=True, exist_ok=True)
+            (self_runner.current_run_dir / "server.log").write_text(
+                "2026-11-16T00:00:00Z INFO authentication Login account=demo session=1\n",
+                encoding="utf-8",
+            )
+            return True
+
+        def _fake_start_client(self_runner):
+            clogs_dir = self_runner.current_run_dir / "client_logs"
+            clogs_dir.mkdir(parents=True, exist_ok=True)
+            log_body = extra_client_log_text or "2026-11-16 EVE Client version 24.01 started\n"
+            (clogs_dir / "eve_client.log").write_text(log_body, encoding="utf-8")
+            self_runner._last_boot_result = handler("bootstrap_session", {})
+            return True
+
+        def _fake_capture(dest_path, **_kw):
+            Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(dest_path).write_bytes(b"\x89PNG\r\n\x1a\nFAKE")
+            return {"ok": True, "path": str(dest_path)}
+
+        args = _fake_scenario_args(tmp_root, scenario_files, out_dir)
+        with mock.patch.object(playtester.AgyStreamWorkerPool, "__init__", side_effect=AssertionError("LLM pool must never run")), \
+             mock.patch.object(playtester, "invoke_agy_planner", side_effect=AssertionError("LLM planner must never run")), \
+             mock.patch.object(playtester, "invoke_agy_executor", side_effect=AssertionError("LLM executor must never run")), \
+             mock.patch.object(playtester.ScenarioRunner, "start_server", _fake_start_server), \
+             mock.patch.object(playtester.ScenarioRunner, "stop_server", return_value=None), \
+             mock.patch.object(playtester.ScenarioRunner, "start_client", _fake_start_client), \
+             mock.patch.object(playtester.ScenarioRunner, "stop_client", return_value=None), \
+             mock.patch.object(playtester.ScenarioRunner, "_provision_extra_characters", return_value=["Aura Capsuleer", "Aura Two"]), \
+             mock.patch.object(playtester, "capture_window_screenshot", side_effect=_fake_capture), \
+             mock.patch.object(playtester, "get_git_head", return_value="7e3600c29"):
+            runner = playtester.ScenarioRunner(args)
+            runner.rpc = types_rpc = mock.MagicMock()
+            types_rpc.call.side_effect = lambda cmd, params=None, timeout=20.0: handler(cmd, params or {})
+            return runner.run_scenarios()
+
+    def test_three_step_login_open_close_passes_twice_deterministically_with_zero_llm(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen_path = root / "mini_inventory.json"
+            scen_path.write_text(
+                json.dumps({
+                    "id": "mini_inventory",
+                    "starting_state": {"account": "demo", "char_id": 90000001},
+                    "steps": [
+                        {
+                            "id": "login_settled",
+                            "action": {"type": "wait", "wait_ms": 100},
+                            "checks": {"rpc_sent": ["charUnboundMgr.SelectCharacterID"], "expect_session_field": "charid==90000001"},
+                        },
+                        {
+                            "id": "open_inventory",
+                            "action": {"type": "open_window", "target": "inventory"},
+                            "checks": {"expect_window_open": "inventory", "window_populated": "inventory"},
+                        },
+                        {
+                            "id": "close_inventory",
+                            "action": {"type": "close_window", "target": "inventory"},
+                            "checks": {"expect_window_closed": "inventory"},
+                        },
+                    ],
+                }),
+                encoding="utf-8",
+            )
+
+            win_open = {"value": False}
+
+            def _handler(cmd, params):
+                if cmd == "bootstrap_session":
+                    win_open["value"] = False
+                    return {
+                        "ok": True,
+                        "state": {
+                            "client_version": "24.01",
+                            "client_build": "9990001",
+                            "session": {"charid": 90000001, "stationid": 60003760},
+                            "active_view": "hangar",
+                            "open_windows": [],
+                        },
+                        "flight_recorder": {
+                            "macho_calls": [{"service": "charUnboundMgr", "method": "SelectCharacterID", "status": "OK"}],
+                        },
+                    }
+                act = (params or {}).get("action") or {}
+                atype = act.get("type")
+                calls = []
+                if atype == "open_window":
+                    win_open["value"] = True
+                    calls = [{"service": "invbroker", "method": "List", "status": "OK"}]
+                elif atype == "close_modal_or_window" or atype == "close_window":
+                    win_open["value"] = False
+                windows = (
+                    [{"window_id": "inventory", "has_loading": False, "has_error": False, "populated_count": 3}]
+                    if win_open["value"]
+                    else []
+                )
+                return {
+                    "action_ok": True,
+                    "post_state": {
+                        "client_version": "24.01",
+                        "client_build": "9990001",
+                        "session": {"charid": 90000001, "stationid": 60003760},
+                        "active_view": "hangar",
+                        "open_windows": windows,
+                    },
+                    "flight_recorder": {"macho_calls": calls, "scatters_observed": [], "log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+                }
+
+            out1 = root / "out1"
+            out2 = root / "out2"
+            rc1 = self._run_with_fake_rpc([scen_path], out1, _handler, root)
+            rc2 = self._run_with_fake_rpc([scen_path], out2, _handler, root)
+            self.assertEqual(rc1, 0)
+            self.assertEqual(rc2, 0)
+
+            res1 = json.loads((out1 / "result.json").read_text(encoding="utf-8"))
+            res2 = json.loads((out2 / "result.json").read_text(encoding="utf-8"))
+            self.assertTrue(res1["journeys"]["mini_inventory"]["passed"])
+            self.assertEqual(res1["client_build"], "9990001")
+            self.assertEqual(res1["server_commit"], "7e3600c29")
+            self.assertEqual(res1["journeys"]["mini_inventory"]["step_rpcs"], res2["journeys"]["mini_inventory"]["step_rpcs"])
+
+    def test_failing_window_check_stops_scenario_and_captures_state_rpcs_screenshot(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen_path = root / "mini_fail.json"
+            scen_path.write_text(
+                json.dumps({
+                    "id": "mini_fail",
+                    "starting_state": {"account": "demo"},
+                    "steps": [
+                        {"id": "step_open", "action": {"type": "open_window", "target": "inventory"}, "checks": {"expect_window_open": "inventory"}},
+                        {"id": "step_close_never_runs", "action": {"type": "close_window", "target": "inventory"}},
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            executed_steps = []
+
+            def _handler(cmd, params):
+                if cmd == "bootstrap_session":
+                    return {"ok": True, "state": {"client_build": "9990001", "session": {"charid": 90000001}, "open_windows": []}, "flight_recorder": {"macho_calls": []}}
+                if cmd == "execute_action":
+                    executed_steps.append((params.get("action") or {}).get("type"))
+                return {
+                    "action_ok": True,
+                    "post_state": {"client_build": "9990001", "session": {"charid": 90000001}, "open_windows": []},
+                    "flight_recorder": {"macho_calls": [{"service": "invbroker", "method": "GetInventory", "status": "OK"}], "scatters_observed": [], "log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+                }
+
+            out = root / "out_fail"
+            rc = self._run_with_fake_rpc([scen_path], out, _handler, root)
+            self.assertNotEqual(rc, 0)
+            self.assertEqual(len(executed_steps), 1)
+            res = json.loads((out / "result.json").read_text(encoding="utf-8"))
+            j = res["journeys"]["mini_fail"]
+            self.assertFalse(j["passed"])
+            self.assertEqual(j["failure"]["step_id"], "step_open")
+            self.assertEqual(j["failure"]["failed_check"], "expect_window_open")
+            self.assertIn("invbroker.GetInventory", j["failure"]["last_rpcs"])
+            self.assertTrue(Path(j["failure"]["screenshot"]).exists())
+
+    def test_station_ui_mutation_wallet_rpc_error_fails_at_wallet_step(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen_path = HARNESS_DIR / "scenarios" / "station_ui.json"
+            open_w = {"target": None}
+            alias_to_win = {"peopleandplaces": "people", "nes": "store"}
+
+            def _handler(cmd, params):
+                if cmd == "bootstrap_session":
+                    return {"ok": True, "state": {"client_build": "9990001", "session": {"charid": 90000001, "stationid": 60003760}, "active_view": "hangar", "open_windows": []}, "flight_recorder": {"macho_calls": []}}
+                act = (params or {}).get("action") or {}
+                atype = act.get("type")
+                tgt = str(act.get("target") or "")
+                calls = []
+                macho_excs = []
+                if atype == "open_window":
+                    wname = alias_to_win.get(tgt, tgt)
+                    open_w["target"] = wname
+                    if tgt == "wallet":
+                        calls = [{"service": "walletMgr", "method": "GetWalletBalance", "status": "ERR", "error": "SimulatedWalletFailure"}]
+                        macho_excs = [{"service": "walletMgr", "method": "GetWalletBalance", "error": "SimulatedWalletFailure"}]
+                    else:
+                        calls = [{"service": f"{wname}Svc", "method": "Fetch", "status": "OK"}]
+                elif atype == "close_window":
+                    open_w["target"] = None
+                wins = (
+                    [{"window_id": open_w["target"], "has_loading": False, "has_error": False, "populated_count": 2}]
+                    if open_w["target"]
+                    else []
+                )
+                return {
+                    "action_ok": True,
+                    "post_state": {"client_build": "9990001", "session": {"charid": 90000001, "stationid": 60003760}, "active_view": "hangar", "open_windows": wins},
+                    "flight_recorder": {"macho_calls": calls, "scatters_observed": [], "log_exceptions": [], "quasar_errors": [], "macho_exceptions": macho_excs},
+                }
+
+            out = root / "out_mut_wallet"
+            rc = self._run_with_fake_rpc([scen_path], out, _handler, root)
+            self.assertNotEqual(rc, 0)
+            res = json.loads((out / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(res["journeys"]["station_ui"]["failure"]["step_id"], "open_wallet")
+            self.assertEqual(res["journeys"]["station_ui"]["failure"]["failed_check"], "no_error_reply")
+
+    def test_undock_navigate_mutation_disabled_stargate_fails_at_first_gate(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen_path = HARNESS_DIR / "scenarios" / "undock_navigate.json"
+            state = {
+                "client_build": "9990001",
+                "session": {"charid": 90000001, "stationid": 60003760, "solarsystemid2": 30000142},
+                "active_view": "hangar",
+                "bookmarks_state": {"count": 0, "names": []},
+                "autopilot_state": {"active": False, "waypoints": [], "route": []},
+                "warp_telemetry": {"started_count": 0, "finished_count": 0, "in_warp": False},
+                "space": {
+                    "ego": {"mode": 2, "speed_mps": 0.0},
+                    "selected_item": {"item_id": 60003760},
+                    "celestials_in_overview": True,
+                    "nearby_balls": [
+                        {"item_id": 60003760, "distance_m": 5000.0},
+                        {"item_id": 40009077, "distance_m": 1e11},
+                        {"item_id": 40009078, "distance_m": 2e11},
+                    ],
+                },
+            }
+
+            def _snap():
+                return json.loads(json.dumps(state))
+
+            def _handler(cmd, params):
+                if cmd == "bootstrap_session":
+                    return {"ok": True, "state": _snap(), "flight_recorder": {"macho_calls": []}}
+                act = (params or {}).get("action") or {}
+                atype = act.get("type")
+                if atype == "undock":
+                    state["session"]["stationid"] = None
+                    state["active_view"] = "inflight"
+                elif atype == "select_overview":
+                    state["space"]["selected_item"] = {"item_id": 60003760}
+                elif atype == "approach":
+                    state["space"]["ego"] = {"mode": 1, "speed_mps": 210.0}
+                    state["space"]["nearby_balls"][0]["distance_m"] = 2000.0
+                elif atype == "orbit":
+                    state["space"]["ego"] = {"mode": 4, "speed_mps": 240.0}
+                    state["space"]["nearby_balls"][0]["distance_m"] = 4800.0
+                elif atype == "keep_at_range":
+                    state["space"]["ego"] = {"mode": 1, "speed_mps": 220.0}
+                    state["space"]["nearby_balls"][0]["distance_m"] = 9000.0
+                elif atype == "align_to":
+                    state["space"]["ego"] = {"mode": 1, "speed_mps": 95.0}
+                elif atype in ("warp_to", "warp_to_location"):
+                    state["warp_telemetry"]["started_count"] += 1
+                    state["warp_telemetry"]["finished_count"] += 1
+                    state["warp_telemetry"]["in_warp"] = False
+                    state["warp_telemetry"]["saw_signal"] = True
+                    tgt = act.get("item_id")
+                    for b in state["space"]["nearby_balls"]:
+                        if b["item_id"] == tgt:
+                            b["distance_m"] = 5000.0
+                elif atype == "save_location":
+                    bm = str(act.get("target") or "Scenario Planet Spot")
+                    state["bookmarks_state"] = {"count": 1, "names": [bm]}
+                elif atype == "set_destination":
+                    state["autopilot_state"]["waypoints"] = [30001407]
+                    state["autopilot_state"]["route"] = [30000142, 30001363, 30001405, 30001407]
+                elif atype == "engage_autopilot":
+                    # Stargates disabled: autopilot turns on, but session.solarsystemid2 never leaves 30000142!
+                    state["autopilot_state"]["active"] = True
+                return {
+                    "action_ok": True,
+                    "post_state": _snap(),
+                    "warp_telemetry": dict(state["warp_telemetry"]),
+                    "flight_recorder": {"macho_calls": [{"service": "beyonce", "method": str(atype), "status": "OK"}], "scatters_observed": [], "log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+                }
+
+            # Mutate first gate wait timeout down to 400ms so test finishes instantly
+            scen_mut = root / "undock_mut_gate.json"
+            raw_scen = json.loads(scen_path.read_text(encoding="utf-8"))
+            for st in raw_scen["steps"]:
+                if st["id"] == "wait_gate_1_sobaseki":
+                    st["wait_until"]["timeout_ms"] = 400
+                    st["wait_until"]["poll_interval_ms"] = 250
+            scen_mut.write_text(json.dumps(raw_scen), encoding="utf-8")
+
+            out = root / "out_mut_gate"
+            with mock.patch.object(playtester.ScenarioRunner, "_server_bookmark_exists", return_value=True):
+                rc = self._run_with_fake_rpc([scen_mut], out, _handler, root)
+            self.assertNotEqual(rc, 0)
+            res = json.loads((out / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(res["journeys"]["undock_navigate"]["failure"]["step_id"], "wait_gate_1_sobaseki")
+
+    def test_destiny_desync_log_causes_scenario_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen_path = root / "mini_desync.json"
+            scen_path.write_text(
+                json.dumps({
+                    "id": "mini_desync",
+                    "steps": [{"id": "ok_step", "action": {"type": "wait", "wait_ms": 50}}],
+                }),
+                encoding="utf-8",
+            )
+
+            def _handler(_cmd, _params):
+                return {
+                    "ok": True,
+                    "action_ok": True,
+                    "state": {"client_build": "9990001", "session": {"charid": 90000001}},
+                    "post_state": {"client_build": "9990001", "session": {"charid": 90000001}},
+                    "flight_recorder": {"macho_calls": []},
+                }
+
+            out = root / "out_desync"
+            with mock.patch.object(
+                playtester.ScenarioRunner,
+                "_run_destiny_parity_check",
+                return_value={"stale_at_action": 2, "stale_at_history": 0},
+            ):
+                rc = self._run_with_fake_rpc([scen_path], out, _handler, root)
+            self.assertNotEqual(rc, 0)
+            res = json.loads((out / "result.json").read_text(encoding="utf-8"))
+            self.assertFalse(res["journeys"]["mini_desync"]["passed"])
+            self.assertEqual(res["journeys"]["mini_desync"]["failure"]["failed_check"], "clean_logs")
+
+
+if __name__ == "__main__":
+    unittest.main()

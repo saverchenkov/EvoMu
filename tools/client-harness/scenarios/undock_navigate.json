@@ -1,0 +1,254 @@
+{
+  "id": "undock_navigate",
+  "title": "Undock, Overview Maneuvers, Align, Warp Planet, Bookmark, Warp Away/Back, 3-Jump Autopilot & Dock",
+  "starting_state": {
+    "account": "demo",
+    "password": "demo-secret",
+    "char_id": 90000001,
+    "defer_char_select": false
+  },
+  "steps": [
+    {
+      "id": "undock",
+      "action": {"type": "undock"},
+      "wait_until": {
+        "timeout_ms": 25000,
+        "poll_interval_ms": 800,
+        "checks": {
+          "expect_session_field": "stationid==None",
+          "state_checks": [{"field": "active_view", "equals": "inflight"}]
+        }
+      },
+      "checks": {
+        "expect_session_field": "solarsystemid2==30000142",
+        "expect_ball_present": "60003760",
+        "celestials_in_overview": true,
+        "state_checks": [{"field": "active_view", "equals": "inflight"}],
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "select_overview_station",
+      "action": {"type": "select_overview", "target": "60003760", "item_id": 60003760},
+      "checks": {
+        "expect_ball_present": "60003760",
+        "state_checks": [{"field": "space.selected_item.item_id", "equals": 60003760}],
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "approach_station",
+      "action": {"type": "approach", "target": "60003760", "item_id": 60003760, "wait_ms": 3500},
+      "checks": {
+        "ship_mode": 1,
+        "target_distance": {"target_id": 60003760, "decreased": true},
+        "state_checks": [{"field": "ship_speed", "min": 1.0}],
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "orbit_station",
+      "action": {"type": "orbit", "target": "60003760", "item_id": 60003760, "distance": 5000, "wait_ms": 3500},
+      "checks": {
+        "ship_mode": 4,
+        "target_distance": {"target_id": 60003760, "changed": true},
+        "state_checks": [{"field": "ship_speed", "min": 1.0}],
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "keep_at_range_station",
+      "action": {"type": "keep_at_range", "target": "60003760", "item_id": 60003760, "distance": 25000, "wait_ms": 4000},
+      "checks": {
+        "ship_mode": 1,
+        "target_distance": {"target_id": 60003760, "increased": true},
+        "state_checks": [{"field": "ship_speed", "min": 1.0}],
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "align_planet_1",
+      "action": {"type": "align_to", "target": "40009077", "item_id": 40009077, "wait_ms": 1500},
+      "checks": {
+        "ship_mode": [0, 1],
+        "state_checks": [{"field": "ship_speed", "min": 0.1}],
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "warp_to_planet_1",
+      "action": {"type": "warp_to", "target": "40009077", "item_id": 40009077},
+      "wait_until": {
+        "timeout_ms": 90000,
+        "poll_interval_ms": 1200,
+        "checks": {
+          "warp_completed": {"target_id": 40009077, "landing_distance_max_m": 250000}
+        }
+      },
+      "checks": {
+        "warp_completed": {"target_id": 40009077, "landing_distance_max_m": 250000},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "save_location_planet_1",
+      "action": {"type": "save_location", "target": "Scenario Planet Spot"},
+      "checks": {
+        "bookmark_present": "Scenario Planet Spot",
+        "bookmark_server_check": "Scenario Planet Spot",
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "warp_to_planet_2",
+      "action": {"type": "warp_to", "target": "40009078", "item_id": 40009078},
+      "wait_until": {
+        "timeout_ms": 90000,
+        "poll_interval_ms": 1200,
+        "checks": {
+          "warp_completed": {"target_id": 40009078, "landing_distance_max_m": 250000}
+        }
+      },
+      "checks": {
+        "warp_completed": {"target_id": 40009078, "landing_distance_max_m": 250000},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "warp_back_to_saved_location",
+      "action": {"type": "warp_to_location", "target": "Scenario Planet Spot"},
+      "wait_until": {
+        "timeout_ms": 90000,
+        "poll_interval_ms": 1200,
+        "checks": {
+          "warp_completed": true
+        }
+      },
+      "checks": {
+        "warp_completed": true,
+        "bookmark_present": "Scenario Planet Spot",
+        "bookmark_server_check": "Scenario Planet Spot",
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "set_destination_todaki",
+      "action": {"type": "set_destination", "target": "30001407", "system_id": 30001407},
+      "checks": {
+        "state_checks": [
+          {"field": "autopilot_waypoints", "contains": 30001407},
+          {"field": "autopilot_route", "contains": 30001407}
+        ],
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "engage_autopilot",
+      "action": {"type": "engage_autopilot", "target": "on"},
+      "checks": {
+        "state_checks": [{"field": "autopilot_active", "equals": true}],
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "wait_gate_1_sobaseki",
+      "action": {"type": "wait", "wait_ms": 1200},
+      "wait_until": {
+        "timeout_ms": 120000,
+        "poll_interval_ms": 2000,
+        "checks": {
+          "expect_session_field": "solarsystemid2==30001363",
+          "celestials_in_overview": true
+        }
+      },
+      "checks": {
+        "expect_session_field": "solarsystemid2==30001363",
+        "celestials_in_overview": true,
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "wait_gate_2_kakakela",
+      "action": {"type": "wait", "wait_ms": 1200},
+      "wait_until": {
+        "timeout_ms": 120000,
+        "poll_interval_ms": 2000,
+        "checks": {
+          "expect_session_field": "solarsystemid2==30001405",
+          "celestials_in_overview": true
+        }
+      },
+      "checks": {
+        "expect_session_field": "solarsystemid2==30001405",
+        "celestials_in_overview": true,
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "wait_gate_3_todaki",
+      "action": {"type": "wait", "wait_ms": 1200},
+      "wait_until": {
+        "timeout_ms": 120000,
+        "poll_interval_ms": 2000,
+        "checks": {
+          "expect_session_field": "solarsystemid2==30001407",
+          "celestials_in_overview": true
+        }
+      },
+      "checks": {
+        "expect_session_field": "solarsystemid2==30001407",
+        "celestials_in_overview": true,
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "warp_to_todaki_station",
+      "action": {"type": "warp_to", "target": "60004420", "item_id": 60004420},
+      "wait_until": {
+        "timeout_ms": 90000,
+        "poll_interval_ms": 1200,
+        "checks": {
+          "warp_completed": {"target_id": 60004420, "landing_distance_max_m": 150000}
+        }
+      },
+      "checks": {
+        "warp_completed": {"target_id": 60004420, "landing_distance_max_m": 150000},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "dock_todaki_station",
+      "action": {"type": "dock", "target": "60004420", "item_id": 60004420},
+      "wait_until": {
+        "timeout_ms": 60000,
+        "poll_interval_ms": 1500,
+        "checks": {
+          "expect_session_field": "stationid==60004420",
+          "state_checks": [{"field": "active_view", "equals": "hangar"}]
+        }
+      },
+      "checks": {
+        "expect_session_field": "stationid==60004420",
+        "state_checks": [{"field": "active_view", "equals": "hangar"}],
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    }
+  ]
+}

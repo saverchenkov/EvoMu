@@ -91,6 +91,8 @@ PERSONAS_PATH = HARNESS_DIR / "playtester_personas.json"
 HOOK_SCRIPT_PATH = HARNESS_DIR / "evomu_playtester_hook.py"
 SITE_SCRIPT_PATH = HARNESS_DIR / "evomu_site.py"
 HELPERS_SCRIPT_PATH = HARNESS_DIR / "evomu_inclient_helpers.py"
+SCENARIOS_DIR = HARNESS_DIR / "scenarios"
+CLIENT_BRIDGE_DIR = REPO_ROOT / "client-bridge"
 
 DEFAULT_CACHE_ROOT = Path(
     os.environ.get("EVOMU_CLIENT_CACHE", os.path.expanduser("~/.cache/evomu"))
@@ -4260,11 +4262,22 @@ _DIRECT_NON_WIDGET_ACTIONS = frozenset({
     "dock",
     "jump_gate",
     "warp_to",
+    "align",
+    "align_to",
+    "stop",
     "approach",
     "orbit",
     "keep_at_range",
     "lock_target",
     "activate_module",
+    "select_character",
+    "select_overview",
+    "save_location",
+    "warp_to_location",
+    "warp_to_bookmark",
+    "set_destination",
+    "engage_autopilot",
+    "toggle_autopilot",
     "train_skill",
     "complete_skills",
     "advance_upwell_timer",
@@ -4844,8 +4857,20 @@ class PlaytesterBugOracle:
         "commands: [",
         "unknownslashcommand",
         "invalidslashargument",
+        "noammoloaded",
         "cannotloadnotenoughcharges",
     )
+
+    @classmethod
+    def is_ignorable_client_traceback(cls, headline: str, trace: str = "", expected_text: str = "") -> bool:
+        """Return True iff traceback is a benign client-only race or expected game-rule UserError."""
+        if cls.is_benign_client_traceback(headline, trace):
+            return True
+        combined = f"{headline or ''}\n{trace or ''}"
+        return (
+            not cls._is_unhandled_tasklet_traceback(headline, trace)
+            and cls.is_expected_user_error(combined, expected_text)
+        )
 
     @classmethod
     def is_benign_client_traceback(cls, headline: str, trace: str = "") -> bool:
@@ -4855,6 +4880,12 @@ class PlaytesterBugOracle:
             "marketbase.py" in txt
             and "in _OnResize" in txt
             and "'NoneType' object has no attribute 'max'" in txt
+        ):
+            return True
+        if (
+            "minimap.py" in txt
+            and "in _ResizeSlider" in txt
+            and "'MapSlider' object has no attribute 'minimumWidth'" in txt
         ):
             return True
         return False
@@ -4868,6 +4899,27 @@ class PlaytesterBugOracle:
         # CarbonUI drag/drop inventory moves raise benign UserError (e.g. NotEnoughCargoSpace)
         # out of BluepyTasklet::_MoveItems so the client UI can show a modal popup.
         if "bluepytasklet::_moveitems" in txt and "notenoughcargospace" in txt:
+            return False
+        # CarbonUI drag-drop/fit rejections raise UserError('CustomInfo', {'info': 'FittingValidationFailed: ...'})
+        # out of fittingSlotController/invCache fitting tasklets (GH #1223) when a slot/hardpoint rule rejects the fit.
+        if (
+            "usererror" in txt
+            and "fittingvalidationfailed" in txt
+            and (
+                "fittingslotcontroller" in txt
+                or "invcache" in txt
+                or "tryfit" in txt
+                or "ondropdata" in txt
+            )
+        ):
+            return False
+        # Pre-queued module activation on target lock fires out of ModuleButton.OnStateChange
+        # and shows a benign Information modal when no ammo is loaded or in cargo.
+        if (
+            "modulebutton.onstatechange" in txt
+            and "activateeffect" in txt
+            and "noammoloaded" in txt
+        ):
             return False
         # Vanilla V24 ModuleButton/ModuleController AutoReload raises UserError(CannotLoadNotEnoughCharges)
         # via clientDogmaLocation.LoadAmmoTypeToModule -> LoadChargesToModule when cargo has 0 spare
@@ -4984,10 +5036,7 @@ class PlaytesterBugOracle:
                 if not hl:
                     hl = self._extract_tb_headline(tr or new_tb)
                 full_tb = tr or new_tb
-                if (
-                    not self._is_unhandled_tasklet_traceback(hl, full_tb)
-                    and self.is_expected_user_error(hl, expected_text)
-                ) or self.is_benign_client_traceback(hl, full_tb):
+                if self.is_ignorable_client_traceback(hl, full_tb, expected_text):
                     continue
                 item_key = (hl[:120], sig)
                 if item_key in seen_item_keys:
@@ -5007,11 +5056,11 @@ class PlaytesterBugOracle:
         if new_tb:
             unseen_tbs = [
                 u for u in self._extract_unseen_tb_blocks(new_tb)
-                if (
-                    self._is_unhandled_tasklet_traceback(u.get("headline", ""), u.get("trace", ""))
-                    or not self.is_expected_user_error(u.get("headline", ""), expected_text)
+                if not self.is_ignorable_client_traceback(
+                    u.get("headline", ""),
+                    u.get("trace", ""),
+                    expected_text,
                 )
-                and not self.is_benign_client_traceback(u.get("headline", ""), u.get("trace", ""))
             ]
             if unseen_tbs:
                 self.last_unseen_tracebacks = unseen_tbs
@@ -6881,6 +6930,1405 @@ character_name = "Demo Pilot"
 
 
 # ---------------------------------------------------------------------------
+# Deterministic Zero-LLM Scenario Validator, Check Evaluator & Runner (#1202)
+# ---------------------------------------------------------------------------
+
+_SCENARIO_GM_ACTIONS = frozenset({"slash_command", "run_slash", "train_skill", "open_structure_cosmetics"})
+_SCENARIO_TIME_CONTROL_ACTIONS = frozenset({
+    "advance_server_time",
+    "advance_upwell_timer",
+    "complete_industry_jobs",
+    "complete_skills",
+    "clear_timers",
+})
+_SCENARIO_ALLOWED_ACTIONS = _DIRECT_NON_WIDGET_ACTIONS | frozenset({
+    "click_widget",
+    "click_xy",
+    "drag_widget",
+    "type_text",
+    "open_window",
+    "close_modal_or_window",
+    "cleanup_utility_windows",
+    "station_command",
+    "space_command",
+    "select_character",
+    "select_overview",
+    "save_location",
+    "warp_to_location",
+    "warp_to_bookmark",
+    "set_destination",
+    "engage_autopilot",
+    "toggle_autopilot",
+    "align",
+    "align_to",
+    "stop",
+})
+_TIME_CONTROL_SLASH_PREFIXES = (
+    "/advancetime",
+    "/completeskills",
+    "/upwelltimer",
+    "/completeindustry",
+    "/cleartimers",
+)
+_GM_SLASH_IN_TEXT_PREFIXES = (
+    "/give",
+    "/tr",
+    "/spawn",
+    "/set",
+    "/create",
+    "/heal",
+    "/kill",
+    "/fit",
+    "/complete",
+    "/advance",
+    "/clear",
+    "/upwell",
+)
+_SCENARIO_ERROR_LINE_RE = re.compile(
+    r"UnimplementedRPC|panicked at|Traceback \(most recent|\bEXCEPTION\b|_LogException\b|\bLogException\b|\bLogTraceback\b|SendClientStackTraceAlert|client exception report saved"
+)
+
+
+class ScenarioValidationError(ValueError):
+    """Raised when a scenario file fails schema or GM/time-control policy validation."""
+
+
+def _is_gm_or_time_control_action(action: Dict[str, Any]) -> Tuple[bool, bool, str]:
+    """Return `(is_gm, is_time_control, reason)` for a scenario step action dict."""
+    raw_type = str(action.get("type") or "").strip()
+    target = str(action.get("target") or "").strip()
+    act_type = _canonicalize_action_type(raw_type, bool(target))
+    cmd_val = _coerce_action_command(action)
+    cmd_str = str(cmd_val).strip() if isinstance(cmd_val, str) else ""
+
+    if act_type in _SCENARIO_TIME_CONTROL_ACTIONS:
+        return False, True, f"time-control action {act_type!r}"
+    if act_type in _SCENARIO_GM_ACTIONS:
+        return True, False, f"GM action {act_type!r}"
+    if act_type == "station_command" and target.lower() == "inject_and_train_skill":
+        return True, False, "GM-backed skill injection 'inject_and_train_skill'"
+
+    slash_candidates = []
+    if cmd_str.startswith("/"):
+        slash_candidates.append(cmd_str)
+    if act_type not in ("click_widget", "drag_widget", "type_text") and target.startswith("/"):
+        slash_candidates.append(target)
+    if act_type == "type_text" and cmd_str.lower().startswith(_GM_SLASH_IN_TEXT_PREFIXES):
+        slash_candidates.append(cmd_str)
+
+    for cand in slash_candidates:
+        c_low = cand.lower()
+        if any(c_low.startswith(pfx) for pfx in _TIME_CONTROL_SLASH_PREFIXES):
+            return False, True, f"slash time-control command {cand!r}"
+        return True, False, f"GM slash command {cand!r}"
+
+    return False, False, ""
+
+
+def validate_scenario(spec: Any, source_name: str = "<scenario>") -> Dict[str, Any]:
+    """Validate scenario structure and reject undeclared GM or time-control actions."""
+    if not isinstance(spec, dict):
+        raise ScenarioValidationError(f"{source_name}: scenario root must be a JSON object")
+
+    scenario_id = str(spec.get("id") or spec.get("name") or "").strip()
+    if not scenario_id:
+        raise ScenarioValidationError(f"{source_name}: scenario must define a non-empty 'id' or 'name'")
+
+    starting_state = spec.get("starting_state")
+    if starting_state is None:
+        starting_state = {}
+    if not isinstance(starting_state, dict):
+        raise ScenarioValidationError(f"{source_name}: 'starting_state' must be an object")
+
+    steps = spec.get("steps")
+    if not isinstance(steps, list) or not steps:
+        raise ScenarioValidationError(f"{source_name}: 'steps' must be a non-empty list")
+
+    declared_setup_steps: List[Dict[str, Any]] = []
+    extra_chars = starting_state.get("extra_characters") or []
+    if extra_chars:
+        if not isinstance(extra_chars, list):
+            raise ScenarioValidationError(f"{source_name}: starting_state.extra_characters must be a list")
+        declared_setup_steps.append({
+            "step_index": 0,
+            "step_id": "starting_state.extra_characters",
+            "kind": "setup",
+            "action_type": "provision_characters",
+            "detail": f"Provision {len(extra_chars)} extra character(s) via bridge before client start",
+        })
+
+    normalized_steps: List[Dict[str, Any]] = []
+    for idx, raw_step in enumerate(steps):
+        step_num = idx + 1
+        if not isinstance(raw_step, dict):
+            raise ScenarioValidationError(f"{source_name} step {step_num}: step must be an object")
+        step_id = str(raw_step.get("id") or raw_step.get("name") or f"step_{step_num}").strip()
+        action = raw_step.get("action")
+        if not isinstance(action, dict) or not str(action.get("type") or "").strip():
+            raise ScenarioValidationError(f"{source_name} step {step_num} ({step_id}): missing action.type")
+
+        raw_type = str(action.get("type") or "").strip()
+        act_type = _canonicalize_action_type(raw_type, bool(action.get("target")))
+        if act_type not in _SCENARIO_ALLOWED_ACTIONS:
+            raise ScenarioValidationError(
+                f"{source_name} step {step_num} ({step_id}): unsupported action type {raw_type!r}"
+            )
+
+        is_gm, is_tc, gm_reason = _is_gm_or_time_control_action(action)
+        is_setup_declared = bool(raw_step.get("setup", False))
+        is_tc_declared = bool(raw_step.get("time_control", False))
+        if is_gm and not is_setup_declared:
+            raise ScenarioValidationError(
+                f"{source_name} step {step_num} ({step_id}): {gm_reason} is forbidden outside setup steps"
+            )
+        if is_tc and not (is_tc_declared or is_setup_declared):
+            raise ScenarioValidationError(
+                f"{source_name} step {step_num} ({step_id}): {gm_reason} is forbidden outside time_control/setup steps"
+            )
+        if is_setup_declared or is_tc_declared or is_gm or is_tc:
+            declared_setup_steps.append({
+                "step_index": step_num,
+                "step_id": step_id,
+                "kind": "time_control" if (is_tc or is_tc_declared) else "setup",
+                "action_type": act_type,
+                "detail": str(action.get("command") or action.get("target") or act_type),
+            })
+
+        checks = raw_step.get("checks") if "checks" in raw_step else raw_step.get("assertions")
+        if checks is not None and not isinstance(checks, dict):
+            raise ScenarioValidationError(f"{source_name} step {step_num} ({step_id}): 'checks' must be an object")
+        wait_until = raw_step.get("wait_until")
+        if wait_until is not None and not isinstance(wait_until, dict):
+            raise ScenarioValidationError(f"{source_name} step {step_num} ({step_id}): 'wait_until' must be an object")
+
+        step_copy = dict(raw_step)
+        step_copy["id"] = step_id
+        step_copy["checks"] = dict(checks or {})
+        normalized_steps.append(step_copy)
+
+    return {
+        "id": scenario_id,
+        "title": str(spec.get("title") or scenario_id),
+        "starting_state": dict(starting_state),
+        "steps": normalized_steps,
+        "declared_setup_steps": declared_setup_steps,
+    }
+
+
+def load_scenario_file(path: Path) -> Dict[str, Any]:
+    """Read and validate a scenario JSON file."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ScenarioValidationError(f"Failed to parse scenario {path}: {exc}") from exc
+    validated = validate_scenario(data, source_name=str(path))
+    validated["_source_path"] = str(path)
+    return validated
+
+
+def _format_rpc_name(call: Dict[str, Any]) -> str:
+    if not isinstance(call, dict):
+        return str(call or "").strip()
+    svc = str(call.get("service") or "").strip()
+    meth = str(call.get("method") or "").strip()
+    if svc and meth:
+        return f"{svc}.{meth}"
+    return svc or meth
+
+
+def _collect_step_rpcs(exec_res: Optional[Dict[str, Any]]) -> List[str]:
+    fr = (exec_res or {}).get("flight_recorder") or {}
+    names = {_format_rpc_name(c) for c in (fr.get("macho_calls") or [])}
+    return sorted(n for n in names if n)
+
+
+def _find_ball_in_state(
+    state: Optional[Dict[str, Any]],
+    target_id: Any = None,
+) -> Optional[Dict[str, Any]]:
+    space = (state or {}).get("space") or {}
+    balls = list(space.get("nearby_balls") or [])
+    if target_id in (None, ""):
+        sel = space.get("selected_item") or {}
+        if isinstance(sel, dict) and sel.get("item_id") is not None:
+            target_id = sel.get("item_id")
+    if target_id not in (None, ""):
+        t_str = str(target_id).strip().lower()
+        for b in balls:
+            if not isinstance(b, dict):
+                continue
+            bid = b.get("item_id")
+            bname = str(b.get("name") or "").lower()
+            if (bid is not None and str(bid) == t_str) or (t_str and t_str in bname):
+                return b
+        return None
+    for b in balls:
+        if isinstance(b, dict) and (b.get("distance_m") is not None or b.get("surface_dist_m") is not None):
+            return b
+    return None
+
+
+def _ball_distance(ball: Optional[Dict[str, Any]]) -> Optional[float]:
+    if not isinstance(ball, dict):
+        return None
+    val = ball.get("surface_dist_m")
+    if val is None:
+        val = ball.get("distance_m")
+    try:
+        return float(val) if val is not None else None
+    except Exception:
+        return None
+
+
+_STATE_FIELD_ALIASES = {
+    "wallet_isk": "wallet_state.isk_balance",
+    "hangar_item_count": "inventory_state.hangar_item_count",
+    "cargo_item_count": "inventory_state.cargo_item_count",
+    "ship_hangar_count": "inventory_state.ship_hangar_count",
+    "skill_queue_len": "skills_state.queue_len",
+    "trained_skill_count": "skills_state.trained_count",
+    "order_count": "market_state.char_orders_count",
+    "bookmark_count": "bookmarks_state.count",
+    "bookmark_names": "bookmarks_state.names",
+    "charsel_active": "charsel_state.active",
+    "charsel_names": "charsel_state.names",
+    "ship_mode": "space.ego.mode",
+    "ship_speed": "space.ego.speed_mps",
+    "ship_warping": "space.ego.warping",
+    "celestials_in_overview": "space.celestials_in_overview",
+    "overview_count": "space.overview_count",
+    "autopilot_active": "autopilot_state.active",
+    "autopilot_route": "autopilot_state.route",
+    "autopilot_waypoints": "autopilot_state.waypoints",
+    "active_view": "active_view",
+}
+
+
+def _extract_state_value(
+    state: Optional[Dict[str, Any]],
+    field_path: str,
+    target_id: Any = None,
+    exec_res: Optional[Dict[str, Any]] = None,
+) -> Any:
+    st = state if isinstance(state, dict) else {}
+    f_raw = str(field_path or "").strip()
+    if f_raw == "target_distance":
+        return _ball_distance(_find_ball_in_state(st, target_id=target_id))
+    if f_raw == "ship_shown":
+        sess = st.get("session") or {}
+        return bool(sess.get("shipid")) and st.get("active_view") in ("hangar", "inflight")
+    if f_raw in ("warp_started", "warp_finished", "warp_signal_fired", "warp_finished_count"):
+        wt = (exec_res or {}).get("warp_telemetry") or st.get("warp_telemetry") or {}
+        if f_raw == "warp_signal_fired":
+            return bool(wt.get("saw_signal") or int(wt.get("warp_signal_count", 0) or 0) > 0)
+        if f_raw == "warp_started":
+            return bool(
+                wt.get("saw_signal")
+                or wt.get("saw_mode3")
+                or wt.get("saw_fx_warping")
+                or int(wt.get("started_count", 0) or 0) > 0
+            )
+        if f_raw == "warp_finished_count":
+            return int(wt.get("finished_count", 0) or 0)
+        return bool(int(wt.get("finished_count", 0) or 0) > 0 and not wt.get("in_warp", False))
+
+    resolved = _STATE_FIELD_ALIASES.get(f_raw, f_raw)
+    cur: Any = st
+    for part in resolved.split("."):
+        if isinstance(cur, dict):
+            cur = cur.get(part)
+        else:
+            return None
+    return cur
+
+
+def _evaluate_value_rule(label: str, pre_val: Any, post_val: Any, rule: Dict[str, Any]) -> Optional[str]:
+    if "equals" in rule:
+        exp = rule["equals"]
+        if isinstance(exp, (int, float)) and not isinstance(exp, bool):
+            try:
+                if post_val is None or abs(float(post_val) - float(exp)) > 1e-6:
+                    return f"{label} expected {exp!r}, got {post_val!r}"
+            except Exception:
+                if post_val != exp:
+                    return f"{label} expected {exp!r}, got {post_val!r}"
+        elif isinstance(exp, bool):
+            if bool(post_val) is not exp:
+                return f"{label} expected {exp!r}, got {post_val!r}"
+        else:
+            if str(post_val) != str(exp) and post_val != exp:
+                return f"{label} expected {exp!r}, got {post_val!r}"
+
+    if "not_equals" in rule:
+        unexp = rule["not_equals"]
+        if post_val == unexp or (unexp is not None and post_val is not None and str(post_val) == str(unexp)):
+            return f"{label} unexpectedly equaled {unexp!r}"
+
+    if "non_empty" in rule and rule["non_empty"]:
+        if not post_val:
+            return f"{label} expected non-empty value, got {post_val!r}"
+
+    if "contains" in rule:
+        needle = rule["contains"]
+        needle_l = str(needle).strip().lower()
+        if isinstance(post_val, (list, tuple, set)):
+            if not any(needle_l == str(item).strip().lower() or needle_l in str(item).lower() for item in post_val):
+                return f"{label} ({post_val!r}) does not contain {needle!r}"
+        elif isinstance(post_val, dict):
+            if needle not in post_val and needle_l not in [str(k).lower() for k in post_val.keys()]:
+                return f"{label} ({post_val!r}) does not contain key {needle!r}"
+        elif post_val is None or needle_l not in str(post_val).lower():
+            return f"{label} ({post_val!r}) does not contain {needle!r}"
+
+    if "min" in rule:
+        try:
+            if post_val is None or float(post_val) < float(rule["min"]):
+                return f"{label} expected >= {rule['min']}, got {post_val!r}"
+        except Exception:
+            return f"{label} non-numeric for min check: {post_val!r}"
+
+    if "max" in rule:
+        try:
+            if post_val is None or float(post_val) > float(rule["max"]):
+                return f"{label} expected <= {rule['max']}, got {post_val!r}"
+        except Exception:
+            return f"{label} non-numeric for max check: {post_val!r}"
+
+    if "increased" in rule:
+        inc_spec = rule["increased"]
+        try:
+            pre_f = float(pre_val)
+            post_f = float(post_val)
+        except Exception:
+            return f"{label} missing numeric pre/post values for increased check (pre={pre_val!r}, post={post_val!r})"
+        if isinstance(inc_spec, bool):
+            if inc_spec and not (post_f > pre_f):
+                return f"{label} did not increase (pre={pre_val!r}, post={post_val!r})"
+        else:
+            if (post_f - pre_f) + 1e-6 < float(inc_spec):
+                return f"{label} increased by {post_f - pre_f:.3f}, expected >= {inc_spec}"
+
+    if "decreased" in rule:
+        dec_spec = rule["decreased"]
+        try:
+            pre_f = float(pre_val)
+            post_f = float(post_val)
+        except Exception:
+            return f"{label} missing numeric pre/post values for decreased check (pre={pre_val!r}, post={post_val!r})"
+        if isinstance(dec_spec, bool):
+            if dec_spec and not (post_f < pre_f):
+                return f"{label} did not decrease (pre={pre_val!r}, post={post_val!r})"
+        else:
+            if (pre_f - post_f) + 1e-6 < float(dec_spec):
+                return f"{label} decreased by {pre_f - post_f:.3f}, expected >= {dec_spec}"
+
+    if rule.get("changed"):
+        if pre_val == post_val:
+            return f"{label} did not change (remained {post_val!r})"
+
+    if "delta" in rule:
+        exp_delta = float(rule["delta"])
+        try:
+            actual_delta = float(post_val) - float(pre_val)
+        except Exception:
+            return f"{label} missing numeric pre/post values for delta check (pre={pre_val!r}, post={post_val!r})"
+        tol = float(rule.get("tolerance", 1e-6))
+        if abs(actual_delta - exp_delta) > tol:
+            return f"{label} delta was {actual_delta}, expected {exp_delta} (pre={pre_val!r}, post={post_val!r})"
+
+    return None
+
+
+def _check_window_populated(
+    spec: Any,
+    open_windows: List[Dict[str, Any]],
+    step_rpcs: List[str],
+) -> Optional[str]:
+    cfg = {"window": spec} if isinstance(spec, str) else dict(spec or {})
+    target_w = str(cfg.get("window") or cfg.get("name") or "").strip().lower()
+    matches = []
+    for w in open_windows:
+        if not isinstance(w, dict):
+            continue
+        if not target_w:
+            matches.append(w)
+            continue
+        hay = " ".join([
+            str(w.get("window_id") or ""),
+            str(w.get("name") or ""),
+            str(w.get("cls") or ""),
+            str(w.get("caption") or ""),
+        ]).lower()
+        if target_w in hay or target_w.replace("_", "") in hay.replace("_", ""):
+            matches.append(w)
+    if not matches:
+        open_names = [str(w.get("window_id") or w.get("name") or w.get("cls") or "") for w in open_windows if isinstance(w, dict)]
+        return f"window {target_w or '<any>'!r} is not open (open_windows={open_names})"
+    win = matches[0]
+    if not cfg.get("allow_loading", False) and win.get("has_loading"):
+        return f"window {target_w or win.get('window_id')!r} still shows a loading state"
+    if not cfg.get("allow_error", False) and win.get("has_error"):
+        return f"window {target_w or win.get('window_id')!r} shows an error state (texts={win.get('sample_texts')})"
+    pop_cnt = int(win.get("populated_count", 0) or 0)
+    min_pop = int(cfg.get("min_populated", 1))
+    if pop_cnt < min_pop:
+        return f"window {target_w or win.get('window_id')!r} populated_count={pop_cnt} < {min_pop}"
+    if "min_tabs" in cfg and int(win.get("tab_count", 0) or 0) < int(cfg["min_tabs"]):
+        return f"window {target_w!r} tab_count={win.get('tab_count')} < {cfg['min_tabs']}"
+    if "min_rows" in cfg and int(win.get("row_count", 0) or 0) < int(cfg["min_rows"]):
+        return f"window {target_w!r} row_count={win.get('row_count')} < {cfg['min_rows']}"
+    if cfg.get("contains_text"):
+        want_t = str(cfg["contains_text"]).strip().lower()
+        joined = " ".join(str(x) for x in (win.get("sample_texts") or [])).lower()
+        if want_t not in joined:
+            return f"window {target_w!r} sample_texts={win.get('sample_texts')} missing {want_t!r}"
+    if cfg.get("require_rpc_or_data", True) and (len(step_rpcs) == 0 and pop_cnt == 0):
+        return f"window {target_w!r} sent 0 RPCs and had 0 populated entries"
+    return None
+
+
+def evaluate_scenario_checks(
+    checks: Optional[Dict[str, Any]],
+    pre_state: Optional[Dict[str, Any]],
+    post_state: Optional[Dict[str, Any]],
+    exec_res: Optional[Dict[str, Any]],
+    context: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, str, str]:
+    """Evaluate all scripted scenario assertions against hook flight recorder and state snapshots.
+
+    Returns `(passed, failed_check_name, failure_reason)`.
+    """
+    chk = dict(checks or {})
+    ctx = dict(context or {})
+    res = exec_res if isinstance(exec_res, dict) else {}
+    fr = dict(res.get("flight_recorder") or {})
+    pre = pre_state if isinstance(pre_state, dict) else {}
+    post = post_state if isinstance(post_state, dict) else {}
+    expected_text = str(ctx.get("expected_text") or "")
+
+    # 1. Existing scene-graph / window / modal / ball / session assertions
+    base_ok, base_msg = _evaluate_step_assertions(chk, res, post)
+    if not base_ok:
+        failed_key = "step_assertion"
+        for k in (
+            "expect_window_open",
+            "expect_window_closed",
+            "expect_modal_absent",
+            "expect_context_menu_item",
+            "expect_ball_present",
+            "expect_session_field",
+        ):
+            if k in base_msg:
+                failed_key = k
+                break
+        return False, failed_key, base_msg
+
+    # 2. No error reply (action_ok, quasar_errors, non-benign macho_exceptions/ERR calls)
+    if chk.get("no_error_reply", True):
+        if res.get("action_ok") is False:
+            return False, "no_error_reply", f"action_ok is False: {res.get('action_error') or 'unknown error'}"
+        q_errs = list(fr.get("quasar_errors") or [])
+        if q_errs:
+            return False, "no_error_reply", f"quasar_errors observed: {q_errs[:3]}"
+        m_excs = [
+            e for e in (fr.get("macho_exceptions") or [])
+            if not PlaytesterBugOracle.is_expected_user_error(e, expected_text)
+        ]
+        if m_excs:
+            return False, "no_error_reply", f"macho_exceptions observed: {m_excs[:3]}"
+        err_calls = [
+            c for c in (fr.get("macho_calls") or [])
+            if isinstance(c, dict)
+            and str(c.get("status") or "").upper() == "ERR"
+            and not PlaytesterBugOracle.is_expected_user_error(c.get("error") or c, expected_text)
+        ]
+        if err_calls:
+            return False, "no_error_reply", f"failed RPC call(s) recorded: {err_calls[:3]}"
+
+    # 3. No client Python exception
+    if chk.get("no_client_exception", True):
+        bad_excs = []
+        for le in (fr.get("log_exceptions") or []):
+            if isinstance(le, dict):
+                hl = str(le.get("headline") or "")
+                tr = str(le.get("trace") or "")
+            else:
+                hl = str(le or "")
+                tr = ""
+            if not PlaytesterBugOracle.is_ignorable_client_traceback(hl, tr, expected_text):
+                bad_excs.append(hl or tr[:120] or repr(le))
+        for u in (ctx.get("unseen_tracebacks") or []):
+            hl = str(u.get("headline") or "")
+            tr = str(u.get("trace") or "")
+            if not PlaytesterBugOracle.is_ignorable_client_traceback(hl, tr, expected_text):
+                bad_excs.append(hl or tr[:120])
+        if bad_excs:
+            return False, "no_client_exception", f"client exception(s): {bad_excs[:2]}"
+
+    step_calls = list(fr.get("macho_calls") or [])
+    startup_calls = list(ctx.get("startup_macho_calls") or [])
+    eval_calls = (step_calls + startup_calls) if chk.get("include_startup_rpcs", True) else step_calls
+    step_rpc_names = [_format_rpc_name(c) for c in step_calls]
+
+    # 4. Named RPC sent check
+    rpc_spec = chk.get("rpc_sent")
+    if rpc_spec is not None:
+        requirements: List[Tuple[str, int, bool]] = []
+        if isinstance(rpc_spec, str):
+            requirements.append((rpc_spec, 1, False))
+        elif isinstance(rpc_spec, dict):
+            for k, v in rpc_spec.items():
+                requirements.append((str(k), int(v), False))
+        elif isinstance(rpc_spec, list):
+            for item in rpc_spec:
+                if isinstance(item, dict):
+                    requirements.append((
+                        str(item.get("name") or item.get("rpc") or ""),
+                        int(item.get("min_count", 1)),
+                        bool(item.get("require_ok", False)),
+                    ))
+                else:
+                    requirements.append((str(item), 1, False))
+        for req_name, min_cnt, req_ok in requirements:
+            matches = [
+                c for c in eval_calls
+                if _format_rpc_name(c).lower() == req_name.lower()
+                and (not req_ok or str(c.get("status") or "OK").upper() == "OK")
+            ]
+            if len(matches) < min_cnt:
+                observed = sorted({_format_rpc_name(c) for c in eval_calls})
+                return (
+                    False,
+                    "rpc_sent",
+                    f"expected RPC {req_name!r} >= {min_cnt} time(s), saw {len(matches)} (observed={observed[:15]})",
+                )
+
+    if "min_rpcs" in chk:
+        req_min = int(chk["min_rpcs"])
+        if len(step_calls) < req_min:
+            return False, "min_rpcs", f"expected >= {req_min} RPC call(s), recorded {len(step_calls)} ({step_rpc_names})"
+
+    # 5. Notification scatter received check
+    notif_spec = chk.get("notification_received")
+    if notif_spec is not None:
+        req_notifs = [notif_spec] if isinstance(notif_spec, str) else [str(x) for x in notif_spec]
+        observed_scatters = [str(s or "") for s in (fr.get("scatters_observed") or [])]
+        for want_n in req_notifs:
+            wl = want_n.strip().lower()
+            if not any(wl == obs.lower() or wl in obs.lower() for obs in observed_scatters):
+                return (
+                    False,
+                    "notification_received",
+                    f"expected notification {want_n!r} not in scatters {observed_scatters}",
+                )
+
+    # 6. Charsel checks
+    charsel_spec = chk.get("charsel_listed_all_characters")
+    if charsel_spec:
+        cs = post.get("charsel_state") or {}
+        if not cs.get("active"):
+            return False, "charsel_listed_all_characters", f"character selection screen not active (charsel_state={cs!r})"
+        listed_names = [str(n or "").strip() for n in (cs.get("names") or []) if str(n or "").strip()]
+        listed_low = {n.lower() for n in listed_names}
+        if isinstance(charsel_spec, list):
+            expected_names = [str(n).strip() for n in charsel_spec]
+        else:
+            expected_names = [str(n).strip() for n in (ctx.get("expected_characters") or [])]
+        if expected_names:
+            missing = [n for n in expected_names if n.lower() not in listed_low]
+            if missing:
+                return (
+                    False,
+                    "charsel_listed_all_characters",
+                    f"charsel missing expected character(s) {missing!r} (listed={listed_names!r})",
+                )
+        elif len(listed_names) < 2:
+            return (
+                False,
+                "charsel_listed_all_characters",
+                f"expected >= 2 characters on charsel screen, saw {listed_names!r}",
+            )
+
+    # 7. Populated window check
+    if "window_populated" in chk and chk["window_populated"] is not None:
+        win_err = _check_window_populated(
+            chk["window_populated"],
+            list(post.get("open_windows") or (post.get("ui") or {}).get("open_windows") or []),
+            step_rpc_names,
+        )
+        if win_err:
+            return False, "window_populated", win_err
+
+    # 8. Ship mode / space navigation / warp / bookmark shortcuts
+    if "ship_shown" in chk:
+        shown = bool(_extract_state_value(post, "ship_shown"))
+        if shown is not bool(chk["ship_shown"]):
+            return (
+                False,
+                "ship_shown",
+                f"expected ship_shown={chk['ship_shown']!r}, active_view={post.get('active_view')!r} shipid={(post.get('session') or {}).get('shipid')!r}",
+            )
+
+    if "ship_mode" in chk:
+        actual_mode = _extract_state_value(post, "ship_mode")
+        exp_modes = chk["ship_mode"] if isinstance(chk["ship_mode"], list) else [chk["ship_mode"]]
+        if actual_mode not in exp_modes:
+            return False, "ship_mode", f"expected ego ship_mode in {exp_modes!r}, got {actual_mode!r}"
+
+    if "celestials_in_overview" in chk:
+        actual_ov = bool(_extract_state_value(post, "celestials_in_overview"))
+        if actual_ov is not bool(chk["celestials_in_overview"]):
+            return False, "celestials_in_overview", f"expected celestials_in_overview={chk['celestials_in_overview']!r}, got {actual_ov!r}"
+
+    if "target_distance" in chk and isinstance(chk["target_distance"], dict):
+        td_rule = dict(chk["target_distance"])
+        tid = td_rule.get("target_id")
+        pre_d = _extract_state_value(pre, "target_distance", target_id=tid)
+        post_d = _extract_state_value(post, "target_distance", target_id=tid)
+        err_msg = _evaluate_value_rule(f"target_distance({tid or 'selected'})", pre_d, post_d, td_rule)
+        if err_msg:
+            return False, "target_distance", err_msg
+
+    if chk.get("warp_started"):
+        pre_wt = pre.get("warp_telemetry") or {}
+        wt = res.get("warp_telemetry") or post.get("warp_telemetry") or {}
+        started = bool(
+            wt.get("saw_signal")
+            or wt.get("saw_mode3")
+            or wt.get("saw_fx_warping")
+            or int(wt.get("started_count", 0) or 0) > int(pre_wt.get("started_count", 0) or 0)
+        )
+        if not started:
+            return False, "warp_started", f"warp start signal/mode did not trigger (warp_telemetry={wt!r})"
+
+    if "warp_completed" in chk and chk["warp_completed"]:
+        wcfg = chk["warp_completed"] if isinstance(chk["warp_completed"], dict) else {}
+        pre_wt = pre.get("warp_telemetry") or {}
+        wt = post.get("warp_telemetry") or res.get("warp_telemetry") or {}
+        pre_s = int(pre_wt.get("started_count", 0) or 0)
+        post_s = int(wt.get("started_count", 0) or 0)
+        pre_f = int(pre_wt.get("finished_count", 0) or 0)
+        post_f = int(wt.get("finished_count", 0) or 0)
+        saw_start = bool(post_s > pre_s or wt.get("saw_signal") or wt.get("saw_mode3") or wt.get("saw_fx_warping"))
+        saw_end = bool(post_f > pre_f and not wt.get("in_warp", False))
+        if not (saw_start and saw_end):
+            return (
+                False,
+                "warp_completed",
+                f"warp did not start+finish (pre_started={pre_s}, post_started={post_s}, pre_finished={pre_f}, post_finished={post_f}, wt={wt!r})",
+            )
+        if "landing_distance_max_m" in wcfg:
+            tid = wcfg.get("target_id")
+            dist_val = _extract_state_value(post, "target_distance", target_id=tid)
+            max_d = float(wcfg["landing_distance_max_m"])
+            if dist_val is None or float(dist_val) > max_d:
+                return (
+                    False,
+                    "warp_completed.landing_distance_max_m",
+                    f"landing distance to {tid!r} was {dist_val!r} m, expected <= {max_d} m",
+                )
+
+    if chk.get("bookmark_present"):
+        want_bm = str(chk["bookmark_present"]).strip()
+        bm_names = [str(n or "") for n in ((post.get("bookmarks_state") or {}).get("names") or [])]
+        if not any(want_bm.lower() in n.lower() for n in bm_names):
+            return False, "bookmark_present", f"bookmark {want_bm!r} not in client bookmarks {bm_names!r}"
+
+    if chk.get("bookmark_server_check"):
+        want_bm = str(chk["bookmark_server_check"]).strip()
+        fn = ctx.get("server_bookmark_exists")
+        if callable(fn) and not fn(want_bm):
+            return False, "bookmark_server_check", f"bookmark {want_bm!r} not found in server database"
+
+    if chk.get("handshake_server_check"):
+        acct = str(chk["handshake_server_check"]).strip()
+        fn = ctx.get("server_handshake_seen")
+        if callable(fn) and not fn(acct):
+            return False, "handshake_server_check", f"server log did not record login handshake for account {acct!r}"
+
+    if chk.get("no_server_unimplemented_rpc"):
+        fn = ctx.get("check_server_unimplemented_rpc")
+        if callable(fn):
+            bad_lines = fn()
+            if bad_lines:
+                return False, "no_server_unimplemented_rpc", f"server log reported UnimplementedRPC: {bad_lines[:2]}"
+
+    # 9. Generic state_checks (list of dicts or dict of field -> rule)
+    sc_spec = chk.get("state_checks")
+    if sc_spec:
+        if isinstance(sc_spec, dict):
+            sc_items = [{"field": k, **(v if isinstance(v, dict) else {"equals": v})} for k, v in sc_spec.items()]
+        else:
+            sc_items = list(sc_spec)
+        for item in sc_items:
+            if not isinstance(item, dict):
+                continue
+            fpath = str(item.get("field") or "").strip()
+            tid = item.get("target_id")
+            pre_v = _extract_state_value(pre, fpath, target_id=tid, exec_res=res)
+            post_v = _extract_state_value(post, fpath, target_id=tid, exec_res=res)
+            err_msg = _evaluate_value_rule(fpath, pre_v, post_v, item)
+            if err_msg:
+                return False, f"state_checks.{fpath}", err_msg
+
+    return True, "", ""
+
+
+def scan_scenario_logs_for_errors(
+    server_log_path: Optional[Path],
+    client_log_paths: List[Path],
+    traceback_log_path: Optional[Path] = None,
+) -> List[str]:
+    """Scan server and client logs cleanly, honoring known benign V24 client tracebacks."""
+    errors: List[str] = []
+    if server_log_path and server_log_path.exists():
+        for ln in server_log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if _SCENARIO_ERROR_LINE_RE.search(ln) and " benign " not in ln.lower():
+                errors.append(f"[server.log] {ln.strip()[:280]}")
+
+    for clp in client_log_paths:
+        if not clp or not clp.exists():
+            continue
+        lines = clp.read_text(encoding="utf-8", errors="replace").splitlines()
+        seen_started = False
+        idx = 0
+        while idx < len(lines):
+            ln = lines[idx]
+            if "EVE Client version" in ln and "started" in ln:
+                seen_started = True
+            if "Traceback (most recent call last):" in ln:
+                block = [ln]
+                j = idx + 1
+                while j < len(lines) and (lines[j].startswith(" ") or lines[j].startswith("\t") or not block[-1].strip() or j == idx + 1):
+                    block.append(lines[j])
+                    j += 1
+                    if len(block) >= 40:
+                        break
+                tb_txt = "\n".join(block)
+                hl = block[-1] if block else ln
+                if not PlaytesterBugOracle.is_ignorable_client_traceback(hl, tb_txt):
+                    errors.append(f"[{clp.name}] {tb_txt.splitlines()[0][:240]}")
+                idx = j
+                continue
+            if _SCENARIO_ERROR_LINE_RE.search(ln) or (seen_started and "#nolog: An exception has occurred" in ln):
+                if not PlaytesterBugOracle.is_ignorable_client_traceback(ln, ln):
+                    errors.append(f"[{clp.name}] {ln.strip()[:280]}")
+            idx += 1
+
+    if traceback_log_path and traceback_log_path.exists():
+        raw_tb = traceback_log_path.read_text(encoding="utf-8", errors="replace")
+        for u in PlaytesterBugOracle._extract_unseen_tb_blocks(raw_tb):
+            if not PlaytesterBugOracle.is_ignorable_client_traceback(u.get("headline", ""), u.get("trace", "")):
+                errors.append(f"[client_tracebacks.log] {u.get('headline', '')[:240]}")
+
+    return errors
+
+
+class ScenarioRunner(PlaytesterRunner):
+    """Deterministic zero-LLM scripted UI runner executing scenario files end-to-end."""
+
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        scenario_paths: Optional[List[Path]] = None,
+        out_dir: Optional[Path] = None,
+    ):
+        super().__init__(args)
+        self.agy_pool = None
+        raw_paths = scenario_paths if scenario_paths is not None else [Path(p) for p in (getattr(args, "scenarios", None) or [])]
+        self.scenario_paths = [Path(p) for p in raw_paths]
+        self.out_dir = Path(out_dir) if out_dir is not None else (
+            Path(args.out_dir) if getattr(args, "out_dir", None) else (self.runtime_dir / f"scenario_{self.run_id}")
+        )
+        self._active_starting_state: Dict[str, Any] = {}
+        self._active_expected_characters: List[str] = []
+        self._last_boot_result: Dict[str, Any] = {}
+
+    def _scenario_auth_params(self) -> Tuple[str, str, int, bool]:
+        st = self._active_starting_state
+        user = str(st.get("account") or st.get("user") or "demo")
+        password = str(st.get("password") or "demo-secret")
+        char_id = int(st.get("char_id", 90000001) or 90000001)
+        defer_cs = bool(st.get("defer_char_select", False))
+        return user, password, char_id, defer_cs
+
+    def write_inclient_cfg(self) -> Path:
+        cfg_path = super().write_inclient_cfg()
+        user, password, char_id, defer_cs = self._scenario_auth_params()
+        payload = json.loads(cfg_path.read_text(encoding="utf-8"))
+        payload["user"] = user
+        payload["password"] = password
+        payload["char_id"] = char_id
+        payload["defer_char_select"] = defer_cs
+        cfg_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return cfg_path
+
+    def _mint_scenario_sso_token(self) -> str:
+        user, password, char_id, _ = self._scenario_auth_params()
+        try:
+            return mint_sso_jwt_via_server(self.ports["http"], user, password)
+        except Exception as exc:
+            log_warn(f"Scenario OAuth PKCE mint failed ({exc}); falling back to offline JWT")
+            return mint_sso_jwt(account_id=1, character_id=char_id)
+
+    def start_client(self) -> bool:
+        self.stop_client()
+        inclient_cfg = self.write_inclient_cfg()
+        stage_dir = stage_playtester_client(self.staged_app, inclient_cfg, self.ports["rpc"])
+        exefile = stage_dir / "bin64" / "exefile"
+        if not exefile.exists():
+            raise RuntimeError(f"exefile not found at {exefile}")
+
+        sso_token = self._mint_scenario_sso_token()
+        client_log = self.current_run_dir / "client.log"
+        log_f = client_log.open("a", encoding="utf-8")
+        client_logs_dir = self.current_run_dir / "client_logs"
+        client_logs_dir.mkdir(parents=True, exist_ok=True)
+
+        env = os.environ.copy()
+        env["EVE_PUBLIC_GATEWAY_ADDRESS"] = f"127.0.0.1:{self.ports['gateway']}"
+        env["EVOMU_HARNESS_DIR"] = str(HARNESS_DIR)
+        env["PYTHONPATH"] = str(stage_dir / "evomu_py_site")
+        env["EVOMU_INCLIENT_CFG"] = str(inclient_cfg)
+        env["EVOMU_PLAYTESTER_CFG"] = str(inclient_cfg)
+        env["EVOMU_PLAYTESTER_PORT"] = str(self.ports["rpc"])
+
+        cmd = [
+            str(exefile),
+            "/server:127.0.0.1",
+            f"/port:{self.ports['macho']}",
+            f"/fileLogDirectory:{client_logs_dir}",
+            "/localdevtools",
+            "/tools=evomu_playtester",
+        ]
+        if getattr(self.args, "silent", False):
+            cmd.append("/silent")
+        cmd.append(f"/ssoToken={sso_token}")
+        self._pre_crashmon_pids = self._crashmon_pids()
+        self.client_proc = subprocess.Popen(
+            cmd,
+            cwd=str(stage_dir),
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
+            env=env,
+            start_new_session=True,
+        )
+
+        deadline = time.time() + 210.0
+        while time.time() < deadline:
+            if self.client_proc.poll() is not None:
+                log_err(f"EVE.app exited early with code {self.client_proc.returncode}")
+                self.stop_client()
+                return False
+            if self.rpc.ping():
+                break
+            time.sleep(0.5)
+        else:
+            log_err("Timed out waiting for in-client JSON-RPC hook on port " + str(self.ports["rpc"]))
+            self.stop_client()
+            return False
+
+        _, _, _, defer_cs = self._scenario_auth_params()
+        try:
+            self._last_boot_result = self.rpc.call(
+                "bootstrap_session",
+                {"timeout_ms": 90000, "select_Wait_ms": 90000, "defer_char_select": defer_cs},
+                timeout=110.0,
+            ) or {}
+            return True
+        except Exception as exc:
+            log_err(f"Scenario bootstrap_session failed: {exc}")
+            self.stop_client()
+            return False
+
+    def _provision_extra_characters(self, extra_chars: List[Dict[str, Any]]) -> List[str]:
+        """Provision extra account characters cleanly via client-bridge before client launch."""
+        if not extra_chars:
+            return []
+        bridge_dir = str(CLIENT_BRIDGE_DIR)
+        if bridge_dir not in sys.path:
+            sys.path.insert(0, bridge_dir)
+        import evomu_bridge  # type: ignore
+
+        user, password, _, _ = self._scenario_auth_params()
+
+        class _SetupLog:
+            def info(self, msg: str) -> None:
+                log_info(f"[scenario-setup-bridge] {msg}")
+
+        class _SetupSM:
+            def __init__(self) -> None:
+                self.services: Dict[str, Any] = {}
+                self.logger = _SetupLog()
+
+            def ScatterEvent(self, *_args: Any, **_kw: Any) -> None:
+                pass
+
+        sm_tmp = _SetupSM()
+        bridge_conn = evomu_bridge.install_service_manager_hook(
+            sm_tmp,
+            host="127.0.0.1",
+            port=self.ports["bridge"],
+        )
+        names: List[str] = []
+        try:
+            sm_tmp.RemoteSvc("authentication").Login(user, password)
+            existing = sm_tmp.RemoteSvc("charUnboundMgr").GetCharactersToSelect() or []
+            for ch in existing:
+                cname = getattr(ch, "characterName", None) or (ch.get("characterName") if isinstance(ch, dict) else None)
+                if cname:
+                    names.append(str(cname))
+            existing_low = {n.lower() for n in names}
+            for spec in extra_chars:
+                cname = str(spec.get("name") or "Scenario Pilot Two").strip()
+                if cname.lower() in existing_low:
+                    continue
+                sm_tmp.RemoteSvc("charUnboundMgr").CreateCharacterWithDoll(
+                    cname,
+                    int(spec.get("bloodline_id", 1)),
+                    int(spec.get("gender", 0)),
+                    int(spec.get("ancestry_id", 11)),
+                    dict(spec.get("appearance") or {"hair": "short"}),
+                    dict(spec.get("portrait") or {"poseID": 1}),
+                    int(spec.get("school_id", 17)),
+                )
+                names.append(cname)
+                existing_low.add(cname.lower())
+        finally:
+            try:
+                bridge_conn.close()
+            except Exception:
+                pass
+        return names
+
+    def _server_bookmark_exists(self, name: str) -> bool:
+        if not self.world_db_path.exists():
+            return False
+        import sqlite3
+        try:
+            with sqlite3.connect(str(self.world_db_path)) as conn:
+                cur = conn.execute(
+                    "SELECT COUNT(*) FROM bookmarks WHERE LOWER(label) LIKE ? OR LOWER(memo) LIKE ?",
+                    (f"%{name.lower()}%", f"%{name.lower()}%"),
+                )
+                row = cur.fetchone()
+                return bool(row and int(row[0]) > 0)
+        except Exception:
+            return False
+
+    def _server_handshake_seen(self, account: str) -> bool:
+        slog = self.current_run_dir / "server.log"
+        if not slog.exists():
+            return False
+        txt = slog.read_text(encoding="utf-8", errors="replace").lower()
+        return (
+            account.lower() in txt
+            or "authentication" in txt
+            or "selectcharacterid" in txt
+            or "machonet" in txt
+        )
+
+    def _check_server_unimplemented_rpc(self) -> List[str]:
+        slog = self.current_run_dir / "server.log"
+        if not slog.exists():
+            return []
+        return [
+            ln.strip()[:240]
+            for ln in slog.read_text(encoding="utf-8", errors="replace").splitlines()
+            if "UnimplementedRPC" in ln
+        ]
+
+    @staticmethod
+    def _step_rpc_timeout(action: Dict[str, Any]) -> float:
+        atype = str(action.get("type") or "")
+        if atype == "jump_gate":
+            return 50.0
+        if atype == "dock":
+            return 38.0
+        if atype in ("warp_to", "warp_to_location", "warp_to_bookmark", "undock"):
+            return 35.0
+        if atype == "wait":
+            try:
+                req_s = min(max(float(action.get("wait_ms") or 0) / 1000.0, 0.0), 30.0)
+            except Exception:
+                req_s = 0.0
+            return max(20.0, req_s + 15.0)
+        return 20.0
+
+    def _execute_wait_until(
+        self,
+        step: Dict[str, Any],
+        step_pre_state: Dict[str, Any],
+        context: Dict[str, Any],
+        initial_res: Optional[Dict[str, Any]] = None,
+        initial_state: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        wait_until = step.get("wait_until") or {}
+        until_checks = dict(wait_until.get("checks") or {})
+        timeout_ms = int(wait_until.get("timeout_ms", 60000) or 60000)
+        poll_ms = max(250, min(5000, int(wait_until.get("poll_interval_ms", 1200) or 1200)))
+        deadline = time.time() + (timeout_ms / 1000.0)
+        init_fr = (initial_res or {}).get("flight_recorder") or {}
+        all_calls: List[Dict[str, Any]] = list(init_fr.get("macho_calls") or [])
+        all_scatters: List[Any] = list(init_fr.get("scatters_observed") or [])
+        all_log_excs: List[Any] = list(init_fr.get("log_exceptions") or [])
+        all_quasar_errs: List[Any] = list(init_fr.get("quasar_errors") or [])
+        all_macho_excs: List[Any] = list(init_fr.get("macho_exceptions") or [])
+        latest_state = dict(initial_state) if isinstance(initial_state, dict) and initial_state else dict(step_pre_state)
+        latest_res: Dict[str, Any] = dict(initial_res or {"action_ok": True, "flight_recorder": {}})
+
+        if initial_res is not None:
+            if all_log_excs or all_quasar_errs or all_macho_excs or latest_res.get("action_ok") is False:
+                return latest_res, latest_state
+            ok_init, _, _ = evaluate_scenario_checks(
+                until_checks, step_pre_state, latest_state, latest_res, context=context
+            )
+            if ok_init:
+                return latest_res, latest_state
+
+        while True:
+            tick_res = self.rpc.call(
+                "execute_action",
+                {"action": {"type": "wait", "wait_ms": poll_ms}},
+                timeout=max(20.0, (poll_ms / 1000.0) + 15.0),
+            ) or {}
+            fr = tick_res.get("flight_recorder") or {}
+            all_calls.extend(fr.get("macho_calls") or [])
+            all_scatters.extend(fr.get("scatters_observed") or [])
+            all_log_excs.extend(fr.get("log_exceptions") or [])
+            all_quasar_errs.extend(fr.get("quasar_errors") or [])
+            all_macho_excs.extend(fr.get("macho_exceptions") or [])
+            if isinstance(tick_res.get("post_state"), dict):
+                latest_state = tick_res["post_state"]
+            merged_res = dict(initial_res or tick_res)
+            if initial_res and tick_res.get("action_ok") is False:
+                merged_res["action_ok"] = False
+                merged_res["action_error"] = tick_res.get("action_error")
+            merged_res["flight_recorder"] = {
+                "macho_calls": all_calls,
+                "scatters_observed": all_scatters,
+                "log_exceptions": all_log_excs,
+                "quasar_errors": all_quasar_errs,
+                "macho_exceptions": all_macho_excs,
+            }
+            latest_res = merged_res
+            ok_until, _, _ = evaluate_scenario_checks(
+                until_checks, step_pre_state, latest_state, merged_res, context=context
+            )
+            if ok_until:
+                return latest_res, latest_state
+            if all_log_excs or all_quasar_errs or all_macho_excs or tick_res.get("action_ok") is False:
+                return latest_res, latest_state
+            if time.time() >= deadline:
+                return latest_res, latest_state
+
+    def _run_destiny_parity_check(self, client_logs: List[Path]) -> Optional[Dict[str, Any]]:
+        cls_script = REPO_ROOT / "tools" / "classify_client_log.py"
+        existing = [str(p) for p in client_log_paths_exist(client_logs)]
+        if not existing or not cls_script.exists():
+            return None
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(cls_script), "--expect", "parity", "--allow-empty", "--json"] + existing,
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if proc.stdout.strip():
+                return json.loads(proc.stdout)
+        except Exception as exc:
+            log_warn(f"classify_client_log failed: {exc}")
+        return None
+
+    def _capture_failure_screenshot(self, dest_path: Path) -> Optional[str]:
+        try:
+            pid = self.client_proc.pid if self.client_proc is not None else None
+            cap = capture_window_screenshot(
+                dest_path,
+                client_pid=pid,
+                bring_foreground=bool(getattr(self.args, "foreground", False)),
+                rpc_client=self.rpc,
+                max_dim=self.screenshot_max_dim,
+            )
+            if isinstance(cap, dict) and cap.get("ok"):
+                return str(dest_path)
+        except Exception:
+            pass
+        return None
+
+    def run_single_scenario(self, scenario: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Execute one validated scenario cleanly from a fresh world without LLM calls."""
+        sid = scenario["id"]
+        scen_dir = self.out_dir / sid
+        scen_dir.mkdir(parents=True, exist_ok=True)
+        self.current_run_dir = scen_dir
+        self._active_starting_state = dict(scenario.get("starting_state") or {})
+        self._active_expected_characters = []
+        self._last_boot_result = {}
+
+        t_scen_start = time.time()
+        step_records: List[Dict[str, Any]] = []
+        step_timings_ms: Dict[str, float] = {}
+        step_rpcs: Dict[str, List[str]] = {}
+        failure_info: Optional[Dict[str, Any]] = None
+        client_version = ""
+        client_build = _detect_system_eve_build(cache_root=DEFAULT_CACHE_ROOT)
+        destiny_cls: Optional[Dict[str, Any]] = None
+        log_errors: List[str] = []
+        client_logs: List[Path] = []
+        passed = False
+
+        try:
+            if not self.start_server(reset_db=True):
+                failure_info = {
+                    "step_index": 0,
+                    "step_id": "start_server",
+                    "failed_check": "server_start",
+                    "reason": "eve-server failed to start",
+                    "client_state": {},
+                    "last_rpcs": [],
+                    "screenshot": None,
+                }
+            else:
+                extra_chars = list(self._active_starting_state.get("extra_characters") or [])
+                if extra_chars:
+                    self._active_expected_characters = self._provision_extra_characters(extra_chars)
+
+                if not self.start_client():
+                    failure_info = {
+                        "step_index": 0,
+                        "step_id": "start_client",
+                        "failed_check": "client_start",
+                        "reason": "EVE.app client failed to launch or bootstrap_session",
+                        "client_state": {},
+                        "last_rpcs": [],
+                        "screenshot": self._capture_failure_screenshot(scen_dir / "failure_start_client.png"),
+                    }
+                else:
+                    boot_state = (self._last_boot_result.get("state") or self._last_boot_result.get("result") or {})
+                    if not isinstance(boot_state, dict) or not boot_state:
+                        obs = self.rpc.call("get_state", timeout=15.0) or {}
+                        boot_state = obs.get("state") or obs.get("result") or {}
+                    if boot_state.get("client_build"):
+                        client_build = str(boot_state["client_build"])
+                    if boot_state.get("client_version"):
+                        client_version = str(boot_state["client_version"])
+
+                    startup_fr = (self._last_boot_result.get("flight_recorder") or {})
+                    startup_calls = list(startup_fr.get("macho_calls") or [])
+                    if not startup_calls:
+                        try:
+                            fr_resp = self.rpc.call("get_flight_recorder", {"since_seq": 0}, timeout=8.0) or {}
+                            startup_calls = list(fr_resp.get("macho_calls") or [])
+                        except Exception:
+                            startup_calls = []
+
+                    pre_state = dict(boot_state)
+                    recent_rpcs: List[str] = [_format_rpc_name(c) for c in startup_calls if _format_rpc_name(c)]
+
+                    for idx, step in enumerate(scenario["steps"]):
+                        step_num = idx + 1
+                        step_id = step["id"]
+                        act = dict(step["action"])
+                        act_type = _canonicalize_action_type(str(act.get("type") or ""), bool(act.get("target")))
+                        t_step = time.time()
+                        ctx = {
+                            "expected_characters": self._active_expected_characters,
+                            "startup_macho_calls": startup_calls if idx == 0 else [],
+                            "server_bookmark_exists": self._server_bookmark_exists,
+                            "server_handshake_seen": self._server_handshake_seen,
+                            "check_server_unimplemented_rpc": self._check_server_unimplemented_rpc,
+                            "expected_text": str(act.get("expected_ui_and_state_change") or ""),
+                        }
+                        if act_type == "wait" and step.get("wait_until"):
+                            exec_res, post_state = self._execute_wait_until(step, pre_state, ctx)
+                        else:
+                            payload = dict(act)
+                            payload["type"] = act_type
+                            try:
+                                exec_res = self.rpc.call(
+                                    "execute_action",
+                                    {"action": payload},
+                                    timeout=self._step_rpc_timeout(payload),
+                                ) or {}
+                            except Exception as exc:
+                                exec_res = {"action_ok": False, "action_error": str(exc), "flight_recorder": {}}
+                            post_state = exec_res.get("post_state")
+                            if not isinstance(post_state, dict) or not post_state:
+                                try:
+                                    obs = self.rpc.call("get_state", timeout=15.0) or {}
+                                    post_state = obs.get("state") or obs.get("result") or {}
+                                except Exception:
+                                    post_state = {}
+                            if step.get("wait_until"):
+                                exec_res, post_state = self._execute_wait_until(
+                                    step, pre_state, ctx, initial_res=exec_res, initial_state=post_state
+                                )
+
+                        elapsed_ms = round((time.time() - t_step) * 1000.0, 2)
+                        rpcs_for_step = _collect_step_rpcs(exec_res)
+                        if idx == 0 and startup_calls:
+                            rpcs_for_step = sorted(set(rpcs_for_step) | {_format_rpc_name(c) for c in startup_calls if _format_rpc_name(c)})
+                        recent_rpcs.extend(rpcs_for_step)
+                        step_timings_ms[step_id] = elapsed_ms
+                        step_rpcs[step_id] = rpcs_for_step
+
+                        if not client_version and isinstance(post_state, dict) and post_state.get("client_version"):
+                            client_version = str(post_state["client_version"])
+                        if isinstance(post_state, dict) and post_state.get("client_build"):
+                            client_build = str(post_state["client_build"])
+
+                        ok_step, fail_chk, fail_msg = evaluate_scenario_checks(
+                            step.get("checks"),
+                            pre_state,
+                            post_state,
+                            exec_res,
+                            context=ctx,
+                        )
+                        step_records.append({
+                            "step_index": step_num,
+                            "step_id": step_id,
+                            "action": act,
+                            "passed": ok_step,
+                            "failed_check": fail_chk or None,
+                            "failure_reason": fail_msg or None,
+                            "elapsed_ms": elapsed_ms,
+                            "rpcs": rpcs_for_step,
+                            "setup": bool(step.get("setup", False)),
+                            "time_control": bool(step.get("time_control", False)),
+                        })
+                        if not ok_step:
+                            shot_path = self._capture_failure_screenshot(scen_dir / f"failure_step_{step_num}_{step_id}.png")
+                            failure_info = {
+                                "step_index": step_num,
+                                "step_id": step_id,
+                                "failed_check": fail_chk,
+                                "reason": fail_msg,
+                                "client_state": post_state,
+                                "last_rpcs": recent_rpcs[-30:],
+                                "screenshot": shot_path,
+                            }
+                            log_err(f"Scenario {sid} failed at step {step_num} ({step_id}) [{fail_chk}]: {fail_msg}")
+                            break
+                        pre_state = dict(post_state) if isinstance(post_state, dict) else pre_state
+        finally:
+            self.stop_client()
+            self.stop_server()
+
+        clog_main = scen_dir / "client.log"
+        if clog_main.exists():
+            client_logs.append(clog_main)
+        clogs_dir = scen_dir / "client_logs"
+        if clogs_dir.exists():
+            for p in sorted(clogs_dir.glob("*.log")):
+                if p not in client_logs:
+                    client_logs.append(p)
+        slog_path = scen_dir / "server.log"
+        tb_log_path = clogs_dir / "client_tracebacks.log"
+        destiny_cls = self._run_destiny_parity_check(client_logs)
+        if destiny_cls and int(destiny_cls.get("stale_at_action", 0) or 0) > 0:
+            log_errors.append(
+                f"[classify_client_log] destiny desync detected: stale_at_action={destiny_cls.get('stale_at_action')}"
+            )
+        log_errors.extend(scan_scenario_logs_for_errors(slog_path, client_logs, traceback_log_path=tb_log_path))
+
+        if failure_info is None and log_errors:
+            failure_info = {
+                "step_index": len(step_records),
+                "step_id": "log_hygiene",
+                "failed_check": "clean_logs",
+                "reason": log_errors[0],
+                "client_state": pre_state if "pre_state" in locals() else {},
+                "last_rpcs": recent_rpcs[-30:] if "recent_rpcs" in locals() else [],
+                "screenshot": None,
+            }
+
+        passed = (failure_info is None) and (not log_errors)
+        total_sec = round(time.time() - t_scen_start, 2)
+        if failure_info is not None:
+            (scen_dir / "failure.json").write_text(json.dumps(failure_info, indent=2), encoding="utf-8")
+
+        journey_entry = {
+            "passed": passed,
+            "title": scenario["title"],
+            "evidence": (
+                f"Scenario {sid!r} completed {len(step_records)} steps in {total_sec:.2f}s cleanly"
+                if passed
+                else f"FAILED at {failure_info.get('step_id')} ({failure_info.get('failed_check')}): {failure_info.get('reason')}"
+            ),
+            "declared_setup_steps": scenario.get("declared_setup_steps") or [],
+            "step_timings_ms": step_timings_ms,
+            "step_rpcs": step_rpcs,
+            "total_elapsed_sec": total_sec,
+            "steps": step_records,
+            "failure": failure_info,
+        }
+        meta = {
+            "client_version": client_version,
+            "client_build": client_build,
+            "server_log": str(slog_path),
+            "client_logs": [str(p) for p in client_logs],
+            "log_errors": log_errors,
+            "destiny_log_classification": destiny_cls,
+        }
+        return journey_entry, meta
+
+    def run_scenarios(self) -> int:
+        """Load, statically validate, and run all `--scenario` files, writing `<out>/result.json`."""
+        if not self.scenario_paths:
+            log_err("No --scenario files supplied")
+            return 2
+        loaded = [load_scenario_file(p) for p in self.scenario_paths]
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        server_commit = get_git_head(self.worktree_dir)
+
+        journeys: Dict[str, Any] = {}
+        all_client_logs: List[str] = []
+        all_log_errors: List[str] = []
+        last_server_log = ""
+        last_destiny_cls: Optional[Dict[str, Any]] = None
+        client_version = ""
+        client_build = ""
+
+        for scen in loaded:
+            entry, meta = self.run_single_scenario(scen)
+            journeys[scen["id"]] = entry
+            all_client_logs.extend(meta["client_logs"])
+            all_log_errors.extend(meta["log_errors"])
+            last_server_log = meta["server_log"]
+            if meta["destiny_log_classification"] is not None:
+                last_destiny_cls = meta["destiny_log_classification"]
+            if meta["client_version"]:
+                client_version = meta["client_version"]
+            if meta["client_build"]:
+                client_build = meta["client_build"]
+
+        result_payload = {
+            "journeys": journeys,
+            "client_version": client_version,
+            "client_build": client_build,
+            "server_commit": server_commit,
+            "server_log": last_server_log,
+            "client_logs": all_client_logs,
+            "log_errors": all_log_errors,
+            "destiny_log_classification": last_destiny_cls,
+        }
+        result_path = self.out_dir / "result.json"
+        result_path.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
+        all_passed = all(j.get("passed") for j in journeys.values()) and not all_log_errors
+        if all_passed:
+            log_info(f"All {len(journeys)} scenario(s) PASSED! Wrote {result_path}")
+            return 0
+        log_err(f"Scenario run FAILED! Wrote {result_path}")
+        return 1
+
+
+def client_log_paths_exist(paths: List[Path]) -> List[Path]:
+    return [p for p in paths if p and p.exists() and p.stat().st_size > 0]
+
+
+# ---------------------------------------------------------------------------
 # CLI Entrypoint & Ping / Self-Test Helpers
 # ---------------------------------------------------------------------------
 
@@ -6932,6 +8380,9 @@ def run_self_test(args: argparse.Namespace) -> int:
 
     assert HOOK_SCRIPT_PATH.exists(), f"Missing {HOOK_SCRIPT_PATH}"
     assert SITE_SCRIPT_PATH.exists(), f"Missing {SITE_SCRIPT_PATH}"
+    if SCENARIOS_DIR.exists():
+        for sp in sorted(SCENARIOS_DIR.glob("*.json")):
+            load_scenario_file(sp)
 
     jwt_tok = mint_sso_jwt()
     assert len(jwt_tok.split(".")) == 3, "JWT minting failed"
@@ -7114,6 +8565,21 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--xmpp-port", type=int, default=DEFAULT_Ports["xmpp"])
     p.add_argument("--rpc-port", type=int, default=DEFAULT_Ports["rpc"])
     p.add_argument(
+        "--scenario",
+        action="append",
+        default=[],
+        dest="scenarios",
+        metavar="FILE",
+        help="Run zero-LLM scripted UI scenario JSON file (repeatable)",
+    )
+    p.add_argument(
+        "--out",
+        default=None,
+        dest="out_dir",
+        metavar="DIR",
+        help="Output directory for --scenario runs (writes DIR/result.json and failure artifacts)",
+    )
+    p.add_argument(
         "--ping-reload",
         action="store_true",
         help="Signal a running playtester daemon to recompile and hot-reload eve-server immediately",
@@ -7135,6 +8601,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return send_ping_reload()
     if args.self_test:
         return run_self_test(args)
+    if getattr(args, "scenarios", None):
+        return ScenarioRunner(args).run_scenarios()
     runner = PlaytesterRunner(args)
     return runner.run()
 

@@ -2847,5 +2847,125 @@ class TestHookWindowCommandsAndRpcCompat(unittest.TestCase):
         self.assertEqual(wedged_sleeps, [50, 50, 50, 50])
 
 
+class TestScenarioHookExtensions(unittest.TestCase):
+    def test_notifications_drawer_open_and_close_plus_content_and_charsel_inspection(self):
+        hook = _load_hook_with_py2_stubs()
+        drawer_state = {"open": False}
+
+        class FakeLbl:
+            def __init__(self, text):
+                self.text = text
+                self.name = "lbl"
+                self.display = True
+                self.destroyed = False
+
+        class FakeScroll:
+            def GetNodes(self):
+                return [types.SimpleNamespace(label="Reward Earned"), types.SimpleNamespace(label="Skill Completed")]
+
+        class FakeNotifCenter:
+            def __init__(self):
+                self.drawer = types.SimpleNamespace(
+                    name="NotificationCenterDrawer",
+                    display=True,
+                    destroyed=False,
+                    children=[FakeScroll(), FakeLbl("Notifications")],
+                    scroll=FakeScroll(),
+                )
+
+            @property
+            def isShowingDrawer(self):
+                return drawer_state["open"]
+
+            def OpenDrawer(self):
+                drawer_state["open"] = True
+
+            def CloseDrawer(self):
+                drawer_state["open"] = False
+
+        nc = FakeNotifCenter()
+        fake_sm = types.SimpleNamespace(services={"notificationUIService": types.SimpleNamespace(notificationCenter=nc)})
+        fake_uicore = types.SimpleNamespace(
+            cmd=types.SimpleNamespace(),
+            registry=types.SimpleNamespace(GetWindows=lambda: [], GetModalWindow=lambda: None, modals=[]),
+            layer=types.SimpleNamespace(modal=None, abovemain=None, main=None),
+            desktop=types.SimpleNamespace(width=1280, height=800),
+        )
+        with mock.patch.dict(builtins.__dict__, {"sm": fake_sm}), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook, "_close_context_menus_if_outside"), \
+             mock.patch.object(hook, "_dismiss_pinned_tooltip_if_outside"):
+            open_res = hook._open_client_window(fake_sm, "notifications")
+            self.assertTrue(open_res.get("ok"), open_res)
+            self.assertTrue(drawer_state["open"])
+
+            ui_tree = hook._inspect_uicore_tree()
+            wins = ui_tree.get("open_windows") or []
+            notif_wins = [w for w in wins if "notification" in str(w.get("window_id") or "").lower()]
+            self.assertEqual(len(notif_wins), 1, wins)
+            self.assertGreaterEqual(int(notif_wins[0].get("populated_count", 0)), 1)
+            self.assertFalse(notif_wins[0].get("has_loading"))
+            self.assertFalse(notif_wins[0].get("has_error"))
+
+            snap = {
+                "open_windows": [], "modals": [], "ui": {}, "space": {},
+                "skills_state": {}, "wallet_state": {}, "active_view": "hangar",
+            }
+            with mock.patch.dict(builtins.__dict__, {"session": types.SimpleNamespace(shipid=1001, mutating=0)}), \
+                 mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+                 mock.patch.object(hook, "_install_warp_telemetry"), \
+                 mock.patch.object(hook, "_get_state_snapshot", return_value=snap):
+                close_res = hook._execute_action(fake_sm, {"type": "close_window", "target": "notifications", "wait_ms": 0})
+            self.assertTrue(close_res.get("action_ok"), close_res)
+            self.assertFalse(drawer_state["open"])
+
+    def test_defer_char_select_pauses_without_select_character_and_inspect_charsel_lists_chars(self):
+        helpers = _load_helpers_with_py2_stubs()
+        hook = _load_hook_with_py2_stubs()
+
+        char_selected_calls = []
+
+        class FakeCharSelLayer:
+            def __init__(self):
+                self.isopen = True
+                self.display = True
+                self.slots = [
+                    types.SimpleNamespace(charDetails=types.SimpleNamespace(charID=90000001, characterName="Aura Capsuleer")),
+                    types.SimpleNamespace(charDetails=types.SimpleNamespace(charID=90000002, characterName="Aura Two")),
+                ]
+
+            def SelectCharacterID(self, cid):
+                char_selected_calls.append(cid)
+
+        charsel_layer = FakeCharSelLayer()
+        fake_sm_svcs = {
+            "machoNet": object(),
+            "gameui": types.SimpleNamespace(),
+            "viewState": types.SimpleNamespace(
+                GetCurrentViewInfo=lambda: types.SimpleNamespace(name="charsel"),
+                isOpeningView=None,
+            ),
+        }
+        fake_sm = types.SimpleNamespace(
+            services=fake_sm_svcs,
+            GetService=lambda name: fake_sm_svcs.get(name),
+        )
+        fake_uicore = types.SimpleNamespace(layer=types.SimpleNamespace(charsel=charsel_layer))
+        fake_sess = types.SimpleNamespace(userid=1, charid=None, stationid=None, solarsystemid=None)
+
+        with mock.patch.dict(builtins.__dict__, {"uicore": fake_uicore, "session": fake_sess}), \
+             mock.patch.object(helpers, "_sleep_ms"):
+            cid = helpers._wait_for_session(fake_sm, "demo", "demo-secret", 90000001, timeout_sec=2.0, defer_char_select=True)
+        self.assertEqual(cid, 0)
+        self.assertEqual(char_selected_calls, [])
+
+        with mock.patch.object(hook, "_get_uicore", return_value=fake_uicore):
+            cs = hook._inspect_charsel_state(fake_sm)
+        self.assertTrue(cs["active"])
+        self.assertEqual(cs["names"], ["Aura Capsuleer", "Aura Two"])
+        self.assertEqual([c["character_id"] for c in cs["characters"]], [90000001, 90000002])
+
+
 if __name__ == "__main__":
     unittest.main()
