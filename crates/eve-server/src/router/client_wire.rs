@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 
 use crate::macho_listener::{
-    execute_call_req_wire, out_frame_to_wire_pyrep, CallReqWireRefs,
+    execute_call_req_wire, out_frame_to_wire_pyrep, CallReqWireRefs, PendingDeferredShipId,
 };
 use crate::outbound_sequencer::{OutFrame, SessionWireState};
 use crate::router::{PendingMachoNotification, ServerContext};
@@ -47,6 +47,7 @@ pub struct ClientWireSession<'c> {
     pub sys_rx: broadcast::Receiver<TickBroadcast>,
     pub subscribed_sys_id: Option<u32>,
     pub wire_state: SessionWireState,
+    pub deferred_ship_id: Option<PendingDeferredShipId>,
 }
 
 fn build_wire_state_for_session(
@@ -102,6 +103,7 @@ impl<'c> ClientWireSession<'c> {
             sys_rx,
             subscribed_sys_id,
             wire_state,
+            deferred_ship_id: None,
         }
     }
 
@@ -126,6 +128,7 @@ impl<'c> ClientWireSession<'c> {
             sys_rx: &mut self.sys_rx,
             subscribed_sys_id: &mut self.subscribed_sys_id,
             wire_state: &mut self.wire_state,
+            deferred_ship_id: &mut self.deferred_ship_id,
         };
         execute_wire_step(
             self.ctx,
@@ -141,6 +144,38 @@ impl<'c> ClientWireSession<'c> {
         .await
     }
 
+    /// Flushes a pending deferred `shipid: [None, shipID]` `SessionChangeNotification` if its 350 ms
+    /// deadline has elapsed (`GH #1085`).
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn poll_deferred_ship_id(&mut self) -> (Vec<OutFrame>, Vec<PyRep>) {
+        let mut wire_refs = CallReqWireRefs {
+            client_id: self.client_id,
+            sys_rx: &mut self.sys_rx,
+            subscribed_sys_id: &mut self.subscribed_sys_id,
+            wire_state: &mut self.wire_state,
+            deferred_ship_id: &mut self.deferred_ship_id,
+        };
+        let Some(frame) = crate::macho_listener::flush_deferred_ship_id_if_due(
+            self.ctx,
+            &self.session,
+            &mut wire_refs,
+            tokio::time::Instant::now(),
+        ) else {
+            return (Vec::new(), Vec::new());
+        };
+        let pkt = out_frame_to_wire_pyrep(
+            MACHO_PROXY_NODE_ID,
+            self.client_id,
+            self.session.user_id,
+            &frame,
+        );
+        let bytes = marshal::encode(&pkt);
+        if let Err(err) = marshal::decode(&bytes) {
+            panic!("deferred shipid frame failed marshal round-trip: {err}");
+        }
+        (vec![frame], vec![pkt])
+    }
+
     /// Drains any pending background tick `DoDestinyUpdate` frames, session changes, and queued
     /// notifications without issuing a dummy RPC (`GH #1077 §C`).
     #[cfg(any(test, feature = "testkit"))]
@@ -150,6 +185,7 @@ impl<'c> ClientWireSession<'c> {
             sys_rx: &mut self.sys_rx,
             subscribed_sys_id: &mut self.subscribed_sys_id,
             wire_state: &mut self.wire_state,
+            deferred_ship_id: &mut self.deferred_ship_id,
         };
         let (out_frames, wire_packets) =
             crate::macho_listener::drain_pending_tick_frames_for_wire_session(
@@ -187,11 +223,13 @@ pub async fn dispatch_call_on_wire(
         .get_or_spawn(subscribed_sys_id.unwrap_or(0))
         .subscribe();
     let mut wire_state = build_wire_state_for_session(ctx, session, client_id);
+    let mut deferred_ship_id = None;
     let mut wire_refs = CallReqWireRefs {
         client_id,
         sys_rx: &mut sys_rx,
         subscribed_sys_id: &mut subscribed_sys_id,
         wire_state: &mut wire_state,
+        deferred_ship_id: &mut deferred_ship_id,
     };
     let out = execute_wire_step(
         ctx,

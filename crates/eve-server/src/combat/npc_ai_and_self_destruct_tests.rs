@@ -524,6 +524,7 @@ async fn npc_ai_ball_destructions_drone_disconnected_assist_and_sleeper_interval
                 pre_warp_position: None,
                 disconnected_at_unix: now,
                 remove_at_unix: now + 300,
+                last_velocity: [0.0, 0.0, 0.0],
                 removed_from_space: false,
             },
         );

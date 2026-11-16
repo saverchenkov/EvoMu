@@ -1203,20 +1203,6 @@ async fn test_gh_1070_docked_board_from_capsule_removes_capsule_and_refreshes_in
         !board_out.session_change_packets.is_empty(),
         "SessionChangeNotification must be emitted on ship.Board"
     );
-    let sess_change_frame_idx = board_out
-        .frames
-        .iter()
-        .position(|f| format!("{:?}", f.kind).starts_with("SessionChange"))
-        .expect("SessionChange frame must be present in board_out.frames");
-    let cap_item_change_frame_idx = board_out
-        .frames
-        .iter()
-        .position(|f| format!("{:?}", f.kind).contains("OnItemChange"))
-        .expect("OnItemChange frame must be present in board_out.frames");
-    assert!(
-        sess_change_frame_idx < cap_item_change_frame_idx,
-        "SessionChange frame (idx {sess_change_frame_idx}) must precede OnItemChange frame (idx {cap_item_change_frame_idx})"
-    );
     let is_capsule_tombstone = |args: &[PyRep], old_loc: i64, cap_id: i64| -> bool {
         let Some(row) = args.first() else {
             return false;
@@ -1244,6 +1230,47 @@ async fn test_gh_1070_docked_board_from_capsule_removes_capsule_and_refreshes_in
             && find_change(9) == Some(1)
             && find_change(5).is_none()
     };
+    let is_target_hull_item_change = |args: &[PyRep], expected_ship_id: i64| -> bool {
+        args.first()
+            .and_then(|row| row.dbrow_get("itemID"))
+            .and_then(|v| v.as_i64())
+            == Some(expected_ship_id)
+    };
+    let hull_item_change_frame_idx = board_out
+        .frames
+        .iter()
+        .position(|f| {
+            matches!(
+                &f.kind,
+                eve_testkit::client_harness::ClientWireFrameKind::Notification { event, args }
+                    if event == "OnItemChange" && is_target_hull_item_change(args, ship_id)
+            )
+        })
+        .expect("Target hull OnItemChange frame must be present in board_out.frames");
+    let sess_change_frame_idx = board_out
+        .frames
+        .iter()
+        .position(|f| matches!(&f.kind, eve_testkit::client_harness::ClientWireFrameKind::SessionChange { .. }))
+        .expect("SessionChange frame must be present in board_out.frames");
+    let cap_item_change_frame_idx = board_out
+        .frames
+        .iter()
+        .position(|f| {
+            matches!(
+                &f.kind,
+                eve_testkit::client_harness::ClientWireFrameKind::Notification { event, args }
+                    if event == "OnItemChange" && is_capsule_tombstone(args, station_id, capsule_id)
+            )
+        })
+        .expect("Capsule tombstone OnItemChange frame must be present in board_out.frames");
+    assert!(
+        hull_item_change_frame_idx < sess_change_frame_idx,
+        "Target hull OnItemChange frame (idx {hull_item_change_frame_idx}) must precede SessionChange frame (idx {sess_change_frame_idx})"
+    );
+    assert!(
+        sess_change_frame_idx < cap_item_change_frame_idx,
+        "SessionChange frame (idx {sess_change_frame_idx}) must precede capsule tombstone OnItemChange frame (idx {cap_item_change_frame_idx})"
+    );
     let notifs = &board_out.notifications;
     assert!(
         notifs
@@ -1306,16 +1333,34 @@ async fn test_gh_1070_docked_board_from_capsule_removes_capsule_and_refreshes_in
         ctx.db.with_snapshot(|s| !s.items.contains_key(&struct_cap_id)),
         "Structure-docked capsule {struct_cap_id} must be removed when boarding ship {ship_id}"
     );
+    let struct_hull_item_frame_idx = struct_board_out
+        .frames
+        .iter()
+        .position(|f| {
+            matches!(
+                &f.kind,
+                eve_testkit::client_harness::ClientWireFrameKind::Notification { event, args }
+                    if event == "OnItemChange" && is_target_hull_item_change(args, ship_id)
+            )
+        })
+        .expect("Target hull OnItemChange frame on structure Board");
     let struct_sess_frame_idx = struct_board_out
         .frames
         .iter()
-        .position(|f| format!("{:?}", f.kind).starts_with("SessionChange"))
+        .position(|f| matches!(&f.kind, eve_testkit::client_harness::ClientWireFrameKind::SessionChange { .. }))
         .expect("SessionChange frame on structure Board");
     let struct_item_frame_idx = struct_board_out
         .frames
         .iter()
-        .position(|f| format!("{:?}", f.kind).contains("OnItemChange"))
-        .expect("OnItemChange frame on structure Board");
+        .position(|f| {
+            matches!(
+                &f.kind,
+                eve_testkit::client_harness::ClientWireFrameKind::Notification { event, args }
+                    if event == "OnItemChange" && is_capsule_tombstone(args, structure_id, struct_cap_id)
+            )
+        })
+        .expect("Capsule tombstone OnItemChange frame on structure Board");
+    assert!(struct_hull_item_frame_idx < struct_sess_frame_idx);
     assert!(struct_sess_frame_idx < struct_item_frame_idx);
     let struct_notifs = &struct_board_out.notifications;
     assert!(

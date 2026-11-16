@@ -446,6 +446,7 @@ impl ServerContext {
                     | ("stationSvc", "Undock")
                     | ("structureDocking", "Undock")
                     | ("beyonce", "MachoBindObject")
+                    | ("beyonce", "GetFormations")
                     | ("beyonce", "UpdateStateRequest")
             );
             tracing::warn!(
@@ -1871,12 +1872,28 @@ async fn spawn_pochven_ore_hypnosian_defenders_if_missing(ctx: &ServerContext, s
 }
 
 /// Emits a single `DoSimClockRebase` before ballpark bootstrap when logging into a solar
-/// system whose simulation clock lags behind wallclock (`#1083`).
+/// system whose simulation clock lags behind wallclock (`#1083`, `#1085`).
 fn maybe_emit_login_sim_clock_rebase(
     ctx: &ServerContext,
     char_id: i64,
     solar_system_id: u32,
 ) {
+    let already_rebased = {
+        let cn = ctx
+            .systems
+            .cluster_nodes
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let gen = cn
+            .rebase_generation_by_system
+            .get(&solar_system_id)
+            .copied()
+            .unwrap_or(1);
+        cn.char_rebased_system_gen.get(&char_id).copied() == Some((solar_system_id, gen))
+    };
+    if already_rebased {
+        return;
+    }
     let now_wall_ft = ctx.now_blueos_filetime_ticks();
     let cur_sim_ft_opt = {
         let cn = ctx

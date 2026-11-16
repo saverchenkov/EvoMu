@@ -117,6 +117,8 @@ pub struct DisconnectedShipEntry {
     pub remove_at_unix: u64,
     pub emergency_warp_dest: Option<[f64; 3]>,
     pub last_position: [f64; 3],
+    #[serde(default)]
+    pub last_velocity: [f64; 3],
     pub removed_from_space: bool,
     #[serde(default)]
     pub pre_warp_position: Option<[f64; 3]>,
@@ -226,6 +228,8 @@ pub struct Sp6PersistedState {
     pub mission_initial_npc_types: HashMap<String, Vec<u32>>,
     #[serde(default)]
     pub active_scanner_probes: HashMap<i64, PersistedScannerProbe>,
+    #[serde(default)]
+    pub item_velocities: HashMap<i64, [f64; 3]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_runtime_json: Option<String>,
 }

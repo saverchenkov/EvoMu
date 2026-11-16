@@ -20,6 +20,15 @@ pub use crate::services::space_destiny::{
 
 const BEYONCE_SVC: &str = "beyonce";
 
+/// Wall-clock transition cooldown duration (`7,000 ms`) returned in `[boundID, readyAt]` (`#1080`, `#1085`).
+pub(crate) const TRANSITION_COOLDOWN_MS: i64 = 7_000;
+
+/// Computes wall-clock `readyAt` FILETIME ticks (`now + 7,000 ms`) independent of TiDi (`#1080`, `#1085`).
+pub(crate) fn transition_ready_at_filetime_ticks(ctx: &ServerContext) -> i64 {
+    ctx.now_machonet_wallclock_filetime_ticks()
+        .saturating_add(TRANSITION_COOLDOWN_MS * 10_000)
+}
+
 /// Zarzakh solar system ID (mirrors the V24 client constant `solarSystemZarzakh`).
 pub(crate) const SOLAR_SYSTEM_ZARZAKH: u32 = 30_100_000;
 /// Zarzakh entry-gate lock duration: 6 hours (EVE wiki `Zarzakh.md`).
@@ -1100,10 +1109,18 @@ async fn handle_cmd_stargate_jump(
         char_id,
         dest_sys_id,
     );
+    let ready_at_ft = transition_ready_at_filetime_ticks(ctx);
 
     Ok(PyRep::keyval([
         ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),
         ("beyonceBoundID", PyRep::Integer(new_beyonce_id as i64)),
+        (
+            "boundResult",
+            PyRep::List(vec![
+                PyRep::Integer(new_beyonce_id as i64),
+                PyRep::Integer(ready_at_ft),
+            ]),
+        ),
         ("jumpCooldownMinutes", PyRep::Real(0.0)),
         ("jumpFatigueMinutes", PyRep::Real(0.0)),
         (
@@ -1112,6 +1129,8 @@ async fn handle_cmd_stargate_jump(
                 crate::services::space_destiny::STARGATE_SESSION_CHANGE_TIMER_SECS as i64,
             ),
         ),
+        ("sessionChangeTimerFiletime", PyRep::Integer(ready_at_ft)),
+        ("sessionChangeTimer", PyRep::Integer(ready_at_ft)),
     ]))
 }
 

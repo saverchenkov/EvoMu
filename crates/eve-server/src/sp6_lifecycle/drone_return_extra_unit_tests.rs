@@ -661,6 +661,7 @@ async fn sp6_lifecycle_wave2_mutant_killers_hp_sync_clear_filament_and_reconnect
                 pre_warp_position: Some([120_000.0, 0.0, 0.0]),
                 disconnected_at_unix: now - 100,
                 remove_at_unix: now + 300,
+                last_velocity: [0.0, 0.0, 0.0],
                 removed_from_space: true,
             },
         );
@@ -689,6 +690,7 @@ async fn sp6_lifecycle_wave2_mutant_killers_hp_sync_clear_filament_and_reconnect
                 pre_warp_position: None,
                 disconnected_at_unix: now,
                 remove_at_unix: now + 60,
+                last_velocity: [0.0, 0.0, 0.0],
                 removed_from_space: false,
             },
         );
@@ -982,6 +984,7 @@ async fn cluster_tick_downtime_probes_bounties_and_cluster_tick_sweeps() {
                 pre_warp_position: None,
                 disconnected_at_unix: now,
                 remove_at_unix: now + 300,
+                last_velocity: [0.0, 0.0, 0.0],
                 removed_from_space: false,
             },
         );

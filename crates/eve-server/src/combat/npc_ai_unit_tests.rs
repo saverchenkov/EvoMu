@@ -772,6 +772,7 @@ async fn npc_ai_chase_idle_ewar_logi_threat_and_ball_destruction_branches() {
                 remove_at_unix: now + 900,
                 emergency_warp_dest: None,
                 last_position: [0.0, 0.0, 0.0],
+                last_velocity: [0.0, 0.0, 0.0],
                 removed_from_space: false,
                 pre_warp_position: None,
             },

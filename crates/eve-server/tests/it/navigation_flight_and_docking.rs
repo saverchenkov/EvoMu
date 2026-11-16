@@ -804,7 +804,7 @@ async fn test_navigation_slash_moveme_cross_system_defers_set_state_until_beyonc
         "beyonce.GetFormations must succeed: {:?}",
         form_space_out.result
     );
-    // Under #1083, GetFormations emitted before MachoBindObject bootstraps SetState once for DEST_NULL_SYS,
+    // Under #1083/#1085, GetFormations emitted before MachoBindObject bootstraps SetState once for DEST_NULL_SYS,
     // and the subsequent beyonce.MachoBindObject must NOT replay a duplicate SetState.
     let null_ids = system_object_ids(&ctx, DEST_NULL_SYS);
     assert_valid_dest_set_state("in-space /moveme -> 1DQ1-A (GetFormations)", &form_space_out, ship_space, &null_ids);
@@ -832,7 +832,7 @@ async fn test_navigation_slash_moveme_cross_system_defers_set_state_until_beyonc
     .expect("dest null beyonce bound id");
     assert!(
         extract_set_state_dicts(&bind_dest_null).is_empty(),
-        "MachoBindObject after GetFormations must NOT replay SetState (#1083)"
+        "MachoBindObject after GetFormations must NOT replay SetState (#1083, #1085)"
     );
 
     // Case B: Docked pilot in Jita 4-4 calls `/moveme 30000144` (Perimeter).

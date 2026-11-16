@@ -424,6 +424,7 @@ fn observability_sequencer_monotonicity_and_coalesce_integration() {
             pending_tick_batches: vec![p_205],
             destiny_drain: DestinyDrain::Updates(d_205),
             notifications: vec![],
+            item_change_before_session_change: false,
         },
     );
     assert!(outcome

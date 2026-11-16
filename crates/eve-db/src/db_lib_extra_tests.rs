@@ -27,6 +27,7 @@ fn test_sp6_persisted_state_and_entries_serde_defaults_and_roundtrip() {
     )
     .expect("deserialize DisconnectedShipEntry without pre_warp_position");
     assert_eq!(disc_minimal.pre_warp_position, None);
+    assert_eq!(disc_minimal.last_velocity, [0.0, 0.0, 0.0]);
 
     // 3. Full Sp6PersistedState roundtrip with all 14 fields populated
     let mut full = Sp6PersistedState {
@@ -48,6 +49,7 @@ fn test_sp6_persisted_state_and_entries_serde_defaults_and_roundtrip() {
     full.disconnected_ships.insert(
         90_000_002,
         DisconnectedShipEntry {
+            last_velocity: [12.0, -3.5, 4.0],
             pre_warp_position: Some([10.0, 20.0, 30.0]),
             ..disc_minimal
         },
@@ -122,6 +124,7 @@ fn test_sp6_persisted_state_and_entries_serde_defaults_and_roundtrip() {
             warp_end_ft: None,
         },
     );
+    full.item_velocities.insert(100_000_001, [120.0, -45.0, 30.0]);
     full.server_runtime_json = Some("{\"active_warps\":{}}".into());
 
     let json = serde_json::to_string(&full).expect("serialize full Sp6PersistedState");

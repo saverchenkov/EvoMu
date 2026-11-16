@@ -160,30 +160,17 @@ impl ServerContext {
             session_opt.as_deref_mut(),
             char_id,
         );
-        let space_loc = session_opt
-            .as_ref()
-            .and_then(|s| {
-                if s.station_id.is_none() && s.structure_id.is_none() {
-                    s.solar_system_id.zip(s.ship_id)
-                } else {
-                    None
-                }
-            })
-            .or_else(|| {
-                self.db.with_snapshot(|snap| {
-                    snap.characters
-                        .get(&char_id)
-                        .filter(|c| c.station_id.is_none() && c.structure_id.is_none() && c.active_ship_id > 0)
-                        .map(|c| (c.solar_system_id, c.active_ship_id))
-                })
-            });
-        if let Some((sys_id, ship_id)) = space_loc {
-            if let Some(handle) = self.systems.get_handle(sys_id) {
-                if let Some(pos) = handle.get_ball_position_sync(ship_id) {
-                    self.db.with_mut_snapshot(|snap| {
-                        snap.item_positions.insert(ship_id, [pos.x, pos.y, pos.z]);
-                    });
-                }
+        if let Some(s) = session_opt.as_ref() {
+            if let Some(struct_id) = s.structure_id {
+                self.db.with_mut_snapshot(|snap| {
+                    if let Some(ch) = snap.characters.get_mut(&char_id) {
+                        ch.structure_id = Some(struct_id);
+                        ch.station_id = None;
+                        if let Some(sys) = s.solar_system_id {
+                            ch.solar_system_id = sys;
+                        }
+                    }
+                });
             }
         }
         let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect_sync(self, char_id);
@@ -193,6 +180,9 @@ impl ServerContext {
             self, char_id,
         );
         crate::services::fleet_social::revoke_xmpp_auth_token(self, char_id);
+        if let Ok(mut cn) = self.systems.cluster_nodes.write() {
+            cn.char_rebased_system_gen.remove(&char_id);
+        }
         self.clear_notifications_for_char(char_id);
     }
 

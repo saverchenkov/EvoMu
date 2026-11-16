@@ -228,7 +228,7 @@ async fn sp6_lifecycle_state_helpers_safe_logoff_conditions_and_abort_paths() {
         st.disconnected_ships.insert(victim_id, DisconnectedShipEntry {
             char_id: victim_id, ship_id: 100_000_002, ship_type_id: 587, solar_system_id: sys_id,
             disconnected_at_unix: now, remove_at_unix: now + 60, emergency_warp_dest: None,
-            last_position: [50_000.0, 0.0, 0.0], removed_from_space: false, pre_warp_position: None,
+            last_position: [50_000.0, 0.0, 0.0], removed_from_space: false, last_velocity: [0.0, 0.0, 0.0], pre_warp_position: None,
         });
     });
     record_pvp_aggression_and_renew_logoff_timer(&ctx, char_id, victim_id, now);
@@ -256,7 +256,8 @@ async fn sp6_lifecycle_disconnect_reconnect_fallback_positions_and_drone_ops() {
     });
     assert!(handle_character_logoff_or_disconnect(&ctx, char_id).await.is_none());
 
-    // 2. Disconnect with unspawned ball + active combat engagement + high-sec criminal -> spawns ball & prohibits emergency warp
+    // 2. Disconnect with unspawned ball preserves persisted position & skips hold (#1085);
+    // once a live ball exists with active combat engagement + high-sec criminal, hold is created & emergency warp is prohibited.
     with_mut_sp6_state(&ctx.db, |st, snap| {
         st.safe_logoffs.remove(&char_id);
         st.criminal_timers_until.insert(char_id, now + 900);
@@ -277,6 +278,43 @@ async fn sp6_lifecycle_disconnect_reconnect_fallback_positions_and_drone_ops() {
             max_flight_time_s: 300.0, launched_at_unix: now, state: 1, warp_end_ft: None,
         });
     }
+    assert!(
+        handle_character_logoff_or_disconnect(&ctx, char_id).await.is_none(),
+        "unspawned ball disconnect must not fabricate hold or phantom position"
+    );
+    assert!(sys_handle.get_ball_position_sync(ship_id).is_none());
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.item_positions.get(&ship_id).copied()),
+        Some([150_000_000.0, 1000.0, 2000.0])
+    );
+
+    let ship_tid = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id).unwrap_or(606));
+    sys_handle.try_spawn_ball_with_meta(
+        eve_destiny::Ball {
+            id: ship_id,
+            type_id: ship_tid,
+            position: DVec3::new(150_000_000.0, 1000.0, 2000.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 35.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        ctx.build_ship_combat_state(char_id, ship_id, ship_tid),
+        eve_destiny::SlimItemMeta {
+            group_id: 25,
+            category_id: 6,
+            owner_id: char_id,
+            char_id: Some(char_id),
+            corp_id: 1_000_009,
+            alliance_id: -1,
+            security_status: 0.0,
+            is_cloaked: false,
+            ..Default::default()
+        },
+    );
     let disc = handle_character_logoff_or_disconnect(&ctx, char_id).await.expect("disconnected entry");
     assert!(disc.emergency_warp_dest.is_none());
     assert!(disc.remove_at_unix >= now + NPC_TIMER_SECS);
@@ -343,6 +381,7 @@ async fn sp6_lifecycle_disconnect_reconnect_fallback_positions_and_drone_ops() {
             char_id, ship_id, ship_type_id: 587, solar_system_id: sys_id,
             disconnected_at_unix: now, remove_at_unix: now + 900, emergency_warp_dest: None,
             last_position: [500_000_000.0, 0.0, 0.0], removed_from_space: false,
+            last_velocity: [0.0, 0.0, 0.0],
             pre_warp_position: Some([200_000_000.0, 0.0, 0.0]),
         });
     });

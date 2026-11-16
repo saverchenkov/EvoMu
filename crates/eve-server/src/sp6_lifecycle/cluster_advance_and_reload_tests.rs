@@ -109,6 +109,7 @@ async fn cluster_advance_handles_safe_logoff_abort_scrambled_warp_bounty_concord
                 emergency_warp_dest: Some([1_000_000.0, 0.0, 0.0]),
                 disconnected_at_unix: base_now,
                 remove_at_unix: base_now + 60,
+                last_velocity: [0.0, 0.0, 0.0],
                 removed_from_space: false,
                 pre_warp_position: None,
             },
@@ -261,12 +262,14 @@ async fn reload_space_objects_and_advance_disconnected_warp_expiry_and_self_dest
             char_id: 90_000_002, ship_id: disc_expired_ship, ship_type_id: 587, solar_system_id: sys_id,
             disconnected_at_unix: now.saturating_sub(120), remove_at_unix: now,
             emergency_warp_dest: Some([50_000.0, 0.0, 0.0]), last_position: [1_000.0, 0.0, 0.0],
+            last_velocity: [0.0, 0.0, 0.0],
             removed_from_space: false, pre_warp_position: None,
         });
         st.disconnected_ships.insert(90_000_001, DisconnectedShipEntry {
             char_id: 90_000_001, ship_id: disc_warping_ship, ship_type_id: 587, solar_system_id: sys_id,
             disconnected_at_unix: now, remove_at_unix: now + 90,
             emergency_warp_dest: Some([5_500.0, 0.0, 0.0]), last_position: [4_000.0, 0.0, 0.0],
+            last_velocity: [0.0, 0.0, 0.0],
             removed_from_space: false, pre_warp_position: Some([4_000.0, 0.0, 0.0]),
         });
     });
@@ -294,6 +297,7 @@ async fn reload_space_objects_and_advance_disconnected_warp_expiry_and_self_dest
             char_id: 90_000_002, ship_id: disc_expired_ship, ship_type_id: 587, solar_system_id: sys_id,
             disconnected_at_unix: now.saturating_sub(115), remove_at_unix: now + 5,
             emergency_warp_dest: None, last_position: [1_000.0, 0.0, 0.0],
+            last_velocity: [0.0, 0.0, 0.0],
             removed_from_space: false, pre_warp_position: None,
         });
         st.self_destructs.insert(self_destruct_ship, SelfDestructPersistedEntry {
@@ -490,6 +494,7 @@ async fn cluster_advance_aborts_blocked_logoff_prunes_docked_disc_and_reload_ski
                 remove_at_unix: now + 60,
                 emergency_warp_dest: None,
                 last_position: [0.0, 0.0, 0.0],
+                last_velocity: [0.0, 0.0, 0.0],
                 removed_from_space: false,
                 pre_warp_position: None,
             },

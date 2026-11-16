@@ -6,6 +6,210 @@ use eve_proto::PyRep;
 pub use eve_proto::{ClientError, UserErrorKey, V24_PROGRAMMATIC_USER_ERROR_KEYS};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Process-wide count of non-distributed keys stripped by [`SessionChange::filtered`].
+static SESSION_CHANGE_DROPPED_KEYS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Returns the total number of dropped non-distributed session-change keys.
+pub fn session_change_dropped_keys_count() -> u64 {
+    SESSION_CHANGE_DROPPED_KEYS_TOTAL.load(Ordering::Relaxed)
+}
+
+/// Distributed session keys accepted by the V24 client (`carbon/common/script/sys/basesession.pyj`:
+/// `CoreSession.__persistvars__ + Session.__persistvars__ + Session.additionalDistributedProps`).
+pub const SESSION_CHANGE_KEYS: &[&str] = &[
+    "address",
+    "allianceid",
+    "baseID",
+    "bloodlineID",
+    "charid",
+    "constellationid",
+    "corpAccountKey",
+    "corpid",
+    "corprole",
+    "countryCode",
+    "fleetid",
+    "fleetrole",
+    "genderID",
+    "hqID",
+    "inDetention",
+    "languageID",
+    "locationid",
+    "maxSessionTime",
+    "raceID",
+    "regionid",
+    "role",
+    "rolesAtAll",
+    "rolesAtBase",
+    "rolesAtHQ",
+    "rolesAtOther",
+    "sessionType",
+    "shipid",
+    "solarsystemid",
+    "solarsystemid2",
+    "squadid",
+    "stationid",
+    "structureid",
+    "userType",
+    "userid",
+    "warfactionid",
+    "wingid",
+];
+
+/// Returns `true` when `key` is in [`SESSION_CHANGE_KEYS`].
+#[inline]
+pub fn is_distributed_session_change_key(key: &str) -> bool {
+    SESSION_CHANGE_KEYS.contains(&key)
+}
+
+/// Structured representation of a `SessionChangeNotification` attribute delta (`GH #1085`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionChange {
+    pub session_id: u64,
+    pub clueless: i64,
+    pub changes: Vec<(String, (PyRep, PyRep))>,
+    pub nodes_of_interest: Vec<i64>,
+}
+
+impl SessionChange {
+    /// Creates a [`SessionChange`] from explicit `(key, (old_val, new_val))` entries.
+    pub fn new(
+        session_id: u64,
+        changes: Vec<(String, (PyRep, PyRep))>,
+        nodes_of_interest: Vec<i64>,
+    ) -> Self {
+        Self {
+            session_id,
+            clueless: 0,
+            changes,
+            nodes_of_interest,
+        }
+    }
+
+    /// Computes a [`SessionChange`] from the diff between `prev` and `next`.
+    pub fn from_diff(
+        prev: &SessionState,
+        next: &SessionState,
+        nodes_of_interest: Vec<i64>,
+    ) -> Self {
+        let mut changes: Vec<(String, (PyRep, PyRep))> =
+            prev.compute_diff(next).into_iter().collect();
+        changes.sort_by(|a, b| a.0.cmp(&b.0));
+        Self::new(prev.session_id, changes, nodes_of_interest)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.changes.is_empty()
+    }
+
+    /// Filters attributes against [`SESSION_CHANGE_KEYS`], returning `(sent, dropped)`.
+    /// Every dropped key increments [`session_change_dropped_keys_count`].
+    pub fn filtered(&self) -> (Self, Vec<String>) {
+        let mut kept = Vec::with_capacity(self.changes.len());
+        let mut dropped = Vec::new();
+        for (key, pair) in &self.changes {
+            if is_distributed_session_change_key(key) {
+                kept.push((key.clone(), pair.clone()));
+            } else {
+                dropped.push(key.clone());
+            }
+        }
+        if !dropped.is_empty() {
+            SESSION_CHANGE_DROPPED_KEYS_TOTAL.fetch_add(dropped.len() as u64, Ordering::Relaxed);
+        }
+        (
+            Self {
+                session_id: self.session_id,
+                clueless: self.clueless,
+                changes: kept,
+                nodes_of_interest: self.nodes_of_interest.clone(),
+            },
+            dropped,
+        )
+    }
+
+    /// Encodes this [`SessionChange`] as `(sid, (clueless, changes_dict), nodesOfInterest)`,
+    /// returning `None` when [`Self::changes`] is empty.
+    pub fn to_pyrep(&self) -> Option<PyRep> {
+        if self.changes.is_empty() {
+            return None;
+        }
+        let dict_entries = self
+            .changes
+            .iter()
+            .map(|(k, (old_v, new_v))| {
+                (
+                    PyRep::ascii_bytes(k),
+                    PyRep::Tuple(vec![old_v.clone(), new_v.clone()]),
+                )
+            })
+            .collect();
+        // `SessionChangeNotification` params: `('sid', 'change', 'nodesOfInterest?')`.
+        Some(PyRep::Tuple(vec![
+            PyRep::Integer(self.session_id as i64),
+            PyRep::Tuple(vec![
+                PyRep::Integer(self.clueless),
+                PyRep::Dict(dict_entries),
+            ]),
+            PyRep::List(
+                self.nodes_of_interest
+                    .iter()
+                    .copied()
+                    .map(PyRep::Integer)
+                    .collect(),
+            ),
+        ]))
+    }
+
+    /// Parses a `(sid, (clueless, changes_dict), nodesOfInterest?)` payload into [`SessionChange`].
+    pub fn from_pyrep(payload: &PyRep) -> Option<Self> {
+        let PyRep::Tuple(outer) = payload else {
+            return None;
+        };
+        let session_id = outer.first()?.as_i64()? as u64;
+        let PyRep::Tuple(inner) = outer.get(1)? else {
+            return None;
+        };
+        let clueless = inner.first()?.as_i64()?;
+        let PyRep::Dict(entries) = inner.get(1)? else {
+            return None;
+        };
+        let mut changes = Vec::with_capacity(entries.len());
+        for (k, v) in entries {
+            let key = k.as_str()?.to_owned();
+            let PyRep::Tuple(pair) = v else {
+                return None;
+            };
+            if pair.len() != 2 {
+                return None;
+            }
+            changes.push((key, (pair[0].clone(), pair[1].clone())));
+        }
+        let nodes_of_interest = match outer.get(2) {
+            Some(PyRep::List(nodes)) | Some(PyRep::Tuple(nodes)) => {
+                nodes.iter().filter_map(|n| n.as_i64()).collect()
+            }
+            _ => Vec::new(),
+        };
+        Some(Self {
+            session_id,
+            clueless,
+            changes,
+            nodes_of_interest,
+        })
+    }
+}
+
+/// Filters a raw `SessionChangeNotification` `PyRep` payload through [`SessionChange::filtered`],
+/// returning `(filtered_payload, dropped_keys)`. Returns `(None, dropped_keys)` if all keys were dropped.
+pub fn filter_session_change_payload(payload: PyRep) -> (Option<PyRep>, Vec<String>) {
+    if let Some(sc) = SessionChange::from_pyrep(&payload) {
+        let (sent, dropped) = sc.filtered();
+        return (sent.to_pyrep(), dropped);
+    }
+    (Some(payload), Vec::new())
+}
 
 pub mod handshake;
 pub use handshake::*;
@@ -1032,22 +1236,12 @@ impl SessionState {
         changes
     }
 
-    /// Formats a session diff as the `PyRep` payload of a `SessionChangeNotification` (`(clueless=0, changes_dict)`).
+    /// Formats a session diff as the `PyRep` payload of a `SessionChangeNotification` (`(clueless=0, changes_dict)`),
+    /// filtering attributes through [`SESSION_CHANGE_KEYS`].
     pub fn to_session_change_pyrep(&self, next: &Self, nodes_of_interest: Vec<i64>) -> Option<PyRep> {
-        let diff = self.compute_diff(next);
-        if diff.is_empty() {
-            return None;
-        }
-        let dict_entries = diff
-            .into_iter()
-            .map(|(k, (old_v, new_v))| (PyRep::ascii_bytes(k), PyRep::Tuple(vec![old_v, new_v])))
-            .collect();
-        // `SessionChangeNotification` params: `('sid', 'change', 'nodesOfInterest?')`.
-        Some(PyRep::Tuple(vec![
-            PyRep::Integer(self.session_id as i64),
-            PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Dict(dict_entries)]),
-            PyRep::List(nodes_of_interest.into_iter().map(PyRep::Integer).collect()),
-        ]))
+        let sc = SessionChange::from_diff(self, next, nodes_of_interest);
+        let (sent, _dropped) = sc.filtered();
+        sent.to_pyrep()
     }
 
     /// Builds `macho.SessionInitialStateNotification` (`packet_type = 18`) establishing initial session state (`userid`, `role`, `languageID`, `address`, `userType`, `sessionID`).
@@ -1115,7 +1309,12 @@ impl SessionState {
             "userType".into(),
             (PyRep::None, PyRep::Integer(self.user_type)),
         );
-        let dict_entries = diff
+        let mut changes: Vec<(String, (PyRep, PyRep))> = diff.into_iter().collect();
+        changes.sort_by(|a, b| a.0.cmp(&b.0));
+        let (sent, _dropped) =
+            SessionChange::new(self.session_id, changes, vec![node_id as i64]).filtered();
+        let dict_entries = sent
+            .changes
             .into_iter()
             .map(|(k, (old_v, new_v))| (PyRep::ascii_bytes(k), PyRep::Tuple(vec![old_v, new_v])))
             .collect();
@@ -1275,6 +1474,53 @@ mod tests {
         assert!(s1.has_gm_role());
         s1.role = service_roles::ROLE_PLAYER_DEFAULT | service_roles::ROLE_WORLDMOD;
         assert!(s1.has_gm_role());
+    }
+
+    #[test]
+    fn session_change_filtered_drops_unknown_keys_and_skips_all_dropped() {
+        // parity: feat:serverops.session-changes
+        // parity: notify:OnSessionChanged
+        let before = session_change_dropped_keys_count();
+        let mixed = SessionChange::new(
+            42,
+            vec![
+                ("shipid".into(), (PyRep::None, PyRep::Integer(100_000_001))),
+                ("stationid2".into(), (PyRep::None, PyRep::Integer(60_003_760))),
+                ("locationid".into(), (PyRep::Integer(30_000_142), PyRep::Integer(60_003_760))),
+                ("worldspaceid".into(), (PyRep::None, PyRep::Integer(1))),
+            ],
+            vec![888_444],
+        );
+        let (sent, dropped) = mixed.filtered();
+        assert_eq!(sent.changes.len(), 2);
+        assert!(sent.changes.iter().any(|(k, _)| k == "shipid"));
+        assert!(sent.changes.iter().any(|(k, _)| k == "locationid"));
+        assert_eq!(
+            dropped,
+            vec!["stationid2".to_string(), "worldspaceid".to_string()]
+        );
+        assert!(sent.to_pyrep().is_some());
+
+        // Negative case: when every key is outside SESSION_CHANGE_KEYS, sent is empty and
+        // filter_session_change_payload returns (None, dropped) so no wire frame is emitted.
+        let all_bad = SessionChange::new(
+            42,
+            vec![
+                ("stationid2".into(), (PyRep::None, PyRep::Integer(60_003_760))),
+                ("schoolID".into(), (PyRep::None, PyRep::Integer(11))),
+            ],
+            vec![888_444],
+        );
+        let raw_bad = all_bad.to_pyrep().expect("unfiltered raw payload builds");
+        let (filtered_payload, dropped_bad) = filter_session_change_payload(raw_bad);
+        assert!(filtered_payload.is_none());
+        assert_eq!(
+            dropped_bad,
+            vec!["stationid2".to_string(), "schoolID".to_string()]
+        );
+
+        let after = session_change_dropped_keys_count();
+        assert!(after >= before + 4);
     }
 }
 

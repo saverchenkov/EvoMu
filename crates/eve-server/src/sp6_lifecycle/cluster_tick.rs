@@ -1099,35 +1099,39 @@ pub fn on_advance_secs_internal(
 
     // 2. Step disconnected emergency warps through the shared `Ballpark` (`R50-P1-1`, `BF-SP6-SYNTH-WARP-BALLPARK`)
     //    and advance NPC AI on active solar systems (`R50-P1-4`)
-    let active_systems: std::collections::BTreeMap<u32, crate::system_actor::SystemHandle> =
-        ctx.systems.active_system_handles().into_iter().collect();
+    let step_iters = if secs == 0 { 0 } else { secs.min(45) };
+    let mut active_systems: std::collections::BTreeMap<u32, crate::system_actor::SystemHandle> =
+        std::collections::BTreeMap::new();
     let mut disconnected_systems: std::collections::BTreeMap<u32, crate::system_actor::SystemHandle> =
         std::collections::BTreeMap::new();
-    for disc in &active_warping_disconnected {
-        let handle = disconnected_systems
-            .entry(disc.solar_system_id)
-            .or_insert_with(|| ctx.systems.get_or_spawn(disc.solar_system_id))
-            .clone();
-        let Some(dest_arr) = disc.emergency_warp_dest else {
-            continue;
-        };
-        if !handle.is_ball_scrambled_sync(disc.ship_id) || handle.is_ball_warping_sync(disc.ship_id) {
-            let (_gid, _cid, mass, radius, max_vel, inertia, warp_speed_au_s) =
-                sde_ship_physics(&ctx.sde, disc.ship_type_id);
-            let cur_pos = handle
-                .get_ball_position_sync(disc.ship_id)
-                .unwrap_or_else(|| DVec3::from_array(disc.last_position));
-            handle.prepare_disconnected_warp_sync(
-                disc.ship_id,
-                disc.ship_type_id,
-                radius,
-                mass,
-                inertia,
-                max_vel,
-                warp_speed_au_s,
-                cur_pos,
-                DVec3::from_array(dest_arr),
-            );
+    if step_iters > 0 {
+        active_systems = ctx.systems.active_system_handles().into_iter().collect();
+        for disc in &active_warping_disconnected {
+            let handle = disconnected_systems
+                .entry(disc.solar_system_id)
+                .or_insert_with(|| ctx.systems.get_or_spawn(disc.solar_system_id))
+                .clone();
+            let Some(dest_arr) = disc.emergency_warp_dest else {
+                continue;
+            };
+            if !handle.is_ball_scrambled_sync(disc.ship_id) || handle.is_ball_warping_sync(disc.ship_id) {
+                let (_gid, _cid, mass, radius, max_vel, inertia, warp_speed_au_s) =
+                    sde_ship_physics(&ctx.sde, disc.ship_type_id);
+                let cur_pos = handle
+                    .get_ball_position_sync(disc.ship_id)
+                    .unwrap_or_else(|| DVec3::from_array(disc.last_position));
+                handle.prepare_disconnected_warp_sync(
+                    disc.ship_id,
+                    disc.ship_type_id,
+                    radius,
+                    mass,
+                    inertia,
+                    max_vel,
+                    warp_speed_au_s,
+                    cur_pos,
+                    DVec3::from_array(dest_arr),
+                );
+            }
         }
     }
 
@@ -1137,90 +1141,87 @@ pub fn on_advance_secs_internal(
         super::disconnect_hold::finalize_expired_disconnected_ship(ctx, disc);
     }
 
-    let step_iters = if secs == 0 {
-        0
-    } else {
-        secs.min(45)
-    };
-    let dedicated_physics_active = ctx
-        .dedicated_physics_ticker_active
-        .load(std::sync::atomic::Ordering::Acquire);
-    let mut finished_warps: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    for _ in 0..step_iters {
-        if step_active_npc_ai_sync && !dedicated_physics_active {
-            for (&sys_id, handle) in &active_systems {
-                crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(ctx, sys_id);
-                let has_spawns = {
-                    ctx.npc_spawns
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .get(&sys_id)
-                        .is_some_and(|mgr| !mgr.entities.is_empty())
-                };
-                if has_spawns {
-                    let tick = handle.ballpark.try_read().map(|b| b.current_tick).unwrap_or(0);
-                    crate::combat::npc_ai::step_system_npc_spawns_ai_sync(ctx, sys_id, tick, 1.0);
-                }
-            }
-        }
-        for (&sys_id, handle) in &disconnected_systems {
-            if !dedicated_physics_active {
-                let _tick = handle.try_step_full_tick(1.0);
-            }
-            for disc in active_warping_disconnected
-                .iter()
-                .filter(|d| d.solar_system_id == sys_id)
-            {
-                if finished_warps.contains(&disc.char_id) {
-                    continue;
-                }
-                let Some(dest_arr) = disc.emergency_warp_dest else {
-                    continue;
-                };
-                let (_pos, arrived) =
-                    handle.reconcile_disconnected_warp_sync(disc.ship_id, DVec3::from_array(dest_arr));
-                if arrived {
-                    finished_warps.insert(disc.char_id);
-                }
-            }
-        }
-    }
-    if step_iters > 0 && !dedicated_physics_active {
-        for handle in disconnected_systems.values() {
-            handle.set_last_auto_stepped_unix(now_unix);
-        }
-    }
-
-    if !active_warping_disconnected.is_empty() {
-        let mut warp_updates: Vec<(i64, i64, [f64; 3], bool)> = Vec::new();
-        for disc in active_warping_disconnected {
-            let handle = ctx.systems.get_or_spawn(disc.solar_system_id);
-            let cur_pos = handle
-                .get_ball_position_sync(disc.ship_id)
-                .unwrap_or_else(|| DVec3::from_array(disc.last_position));
-            let finished = finished_warps.contains(&disc.char_id)
-                || disc.emergency_warp_dest.is_some_and(|dest_arr| {
-                    handle.is_ball_scrambled_sync(disc.ship_id)
-                        || cur_pos.distance(DVec3::from_array(dest_arr)) <= 2_500.0
-                });
-            warp_updates.push((
-                disc.char_id,
-                disc.ship_id,
-                [cur_pos.x, cur_pos.y, cur_pos.z],
-                finished,
-            ));
-        }
-        with_mut_sp6_state(&ctx.db, |st, snap| {
-            for (cid, sid, pos_arr, finished) in warp_updates {
-                snap.item_positions.insert(sid, pos_arr);
-                if let Some(d) = st.disconnected_ships.get_mut(&cid) {
-                    d.last_position = pos_arr;
-                    if finished {
-                        d.emergency_warp_dest = None;
+    if step_iters > 0 {
+        let dedicated_physics_active = ctx
+            .dedicated_physics_ticker_active
+            .load(std::sync::atomic::Ordering::Acquire);
+        let mut finished_warps: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for _ in 0..step_iters {
+            if step_active_npc_ai_sync && !dedicated_physics_active {
+                for (&sys_id, handle) in &active_systems {
+                    crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(ctx, sys_id);
+                    let has_spawns = {
+                        ctx.npc_spawns
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get(&sys_id)
+                            .is_some_and(|mgr| !mgr.entities.is_empty())
+                    };
+                    if has_spawns {
+                        let tick = handle.ballpark.try_read().map(|b| b.current_tick).unwrap_or(0);
+                        crate::combat::npc_ai::step_system_npc_spawns_ai_sync(ctx, sys_id, tick, 1.0);
                     }
                 }
             }
-        });
+            for (&sys_id, handle) in &disconnected_systems {
+                if !dedicated_physics_active {
+                    let _tick = handle.try_step_full_tick(1.0);
+                }
+                for disc in active_warping_disconnected
+                    .iter()
+                    .filter(|d| d.solar_system_id == sys_id)
+                {
+                    if finished_warps.contains(&disc.char_id) {
+                        continue;
+                    }
+                    let Some(dest_arr) = disc.emergency_warp_dest else {
+                        continue;
+                    };
+                    let (_pos, arrived) =
+                        handle.reconcile_disconnected_warp_sync(disc.ship_id, DVec3::from_array(dest_arr));
+                    if arrived {
+                        finished_warps.insert(disc.char_id);
+                    }
+                }
+            }
+        }
+        if !dedicated_physics_active {
+            for handle in disconnected_systems.values() {
+                handle.set_last_auto_stepped_unix(now_unix);
+            }
+        }
+
+        if !active_warping_disconnected.is_empty() {
+            let mut warp_updates: Vec<(i64, i64, [f64; 3], bool)> = Vec::new();
+            for disc in active_warping_disconnected {
+                let handle = ctx.systems.get_or_spawn(disc.solar_system_id);
+                let cur_pos = handle
+                    .get_ball_position_sync(disc.ship_id)
+                    .unwrap_or_else(|| DVec3::from_array(disc.last_position));
+                let finished = finished_warps.contains(&disc.char_id)
+                    || disc.emergency_warp_dest.is_some_and(|dest_arr| {
+                        handle.is_ball_scrambled_sync(disc.ship_id)
+                            || cur_pos.distance(DVec3::from_array(dest_arr)) <= 2_500.0
+                    });
+                warp_updates.push((
+                    disc.char_id,
+                    disc.ship_id,
+                    [cur_pos.x, cur_pos.y, cur_pos.z],
+                    finished,
+                ));
+            }
+            with_mut_sp6_state(&ctx.db, |st, snap| {
+                for (cid, sid, pos_arr, finished) in warp_updates {
+                    snap.item_positions.insert(sid, pos_arr);
+                    if let Some(d) = st.disconnected_ships.get_mut(&cid) {
+                        d.last_position = pos_arr;
+                        if finished {
+                            d.emergency_warp_dest = None;
+                        }
+                    }
+                }
+            });
+        }
     }
 
     let expired_disconnected =

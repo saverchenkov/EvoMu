@@ -1267,13 +1267,41 @@ async fn wave5b_b4_session_wire_bound_objects_notifications_logoff_and_warp_regr
             "charid",
             vec![PyRep::Integer(1)],
         );
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                ch.station_id = None;
-                ch.structure_id = None;
-                ch.solar_system_id = 30_000_142;
-            }
+        let ship_id = ctx.db.with_mut_snapshot(|snap| {
+            let ch = snap.characters.get_mut(&char_id).unwrap();
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = 30_000_142;
+            ch.active_ship_id
         });
+        ctx.systems
+            .get_or_spawn(30_000_142)
+            .try_spawn_ball_with_meta(
+                eve_destiny::Ball {
+                    id: ship_id,
+                    type_id: 606,
+                    position: glam::DVec3::new(15_000_000_000.0, 0.0, 0.0),
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 35.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                ctx.build_ship_combat_state(char_id, ship_id, 606),
+                eve_destiny::SlimItemMeta {
+                    group_id: 25,
+                    category_id: 6,
+                    owner_id: char_id,
+                    char_id: Some(char_id),
+                    corp_id: 1_000_009,
+                    alliance_id: -1,
+                    security_status: 0.0,
+                    is_cloaked: false,
+                    ..Default::default()
+                },
+            );
         // Even if the online lock is released BEFORE cleanup (e.g. by kick/ban/downtime),
         // `logoff_character_sync` still registers the in-space ship in `disconnected_ships` (#851)
         // and purges `pending_notifications` (#881).
