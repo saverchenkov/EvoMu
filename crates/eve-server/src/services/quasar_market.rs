@@ -797,14 +797,8 @@ pub fn publish_market_new_entry_notice(
     solar_system_id: u32,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let payload = pb::message("eve_public.market.entry.NewEntryNotice")
-        .to_any()
-        .map_err(|e| {
-            eve_proto::BridgeRpcError::user_error(format!("ProtoBuilder encode failed: {e}"))
-        })?;
-    let (_, delivered) =
-        gateway.publish_notice(NoticeScope::SolarSystem(solar_system_id), payload, now_unix)?;
-    Ok(delivered)
+    let notice = pb::message("eve_public.market.entry.NewEntryNotice");
+    gateway.publish_pb_notice_checked(NoticeScope::SolarSystem(solar_system_id), notice, now_unix)
 }
 
 #[cfg(test)]

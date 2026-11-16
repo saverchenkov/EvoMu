@@ -196,15 +196,11 @@ pub fn publish_asset_capacity_claimed_notice(
     current_remaining: u64,
     now_unix: u64,
 ) -> Result<usize, BridgeRpcError> {
-    let any = pb::message("eve_public.assetholding.asset.api.FiniteCapacityClaimedNotice")
+    let notice = pb::message("eve_public.assetholding.asset.api.FiniteCapacityClaimedNotice")
         .set("asset.uuid", super::quasar_cosmetics_drafts::id_to_uuid_bytes(asset_id))
         .set("previous_remaining", previous_remaining)
-        .set("current_remaining", current_remaining)
-        .to_any()
-        .map_err(|e| BridgeRpcError::user_error(format!("ProtoBuilder encode failed: {e}")))?;
-    let (_, delivered) =
-        gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix)?;
-    Ok(delivered)
+        .set("current_remaining", current_remaining);
+    gateway.publish_pb_notice_checked(NoticeScope::Character(character_id), notice, now_unix)
 }
 
 /// Helper for broadcasting `DeletedNotice`.
@@ -214,13 +210,9 @@ pub fn publish_asset_deleted_notice(
     asset_id: u64,
     now_unix: u64,
 ) -> Result<usize, BridgeRpcError> {
-    let any = pb::message("eve_public.assetholding.asset.api.DeletedNotice")
-        .set("asset.uuid", super::quasar_cosmetics_drafts::id_to_uuid_bytes(asset_id))
-        .to_any()
-        .map_err(|e| BridgeRpcError::user_error(format!("ProtoBuilder encode failed: {e}")))?;
-    let (_, delivered) =
-        gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix)?;
-    Ok(delivered)
+    let notice = pb::message("eve_public.assetholding.asset.api.DeletedNotice")
+        .set("asset.uuid", super::quasar_cosmetics_drafts::id_to_uuid_bytes(asset_id));
+    gateway.publish_pb_notice_checked(NoticeScope::Character(character_id), notice, now_unix)
 }
 
 #[cfg(test)]

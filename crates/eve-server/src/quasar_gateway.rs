@@ -1250,6 +1250,23 @@ impl PublicGatewayRouter {
         Ok((base_notice, delivered))
     }
 
+    /// Encodes `builder` into `GoogleAny` and publishes it via [`Self::publish_notice`], mapping
+    /// encode failures to [`eve_proto::ClientError::Internal`].
+    pub fn publish_pb_notice_checked(
+        &self,
+        scope: NoticeScope,
+        builder: eve_proto::pb::ProtoBuilder,
+        now_unix: u64,
+    ) -> Result<usize, BridgeRpcError> {
+        let payload = builder.to_any().map_err(|e| {
+            BridgeRpcError::from_client_error(eve_proto::ClientError::Internal(format!(
+                "ProtoBuilder encode failed: {e}"
+            )))
+        })?;
+        self.publish_notice(scope, payload, now_unix)
+            .map(|(_, count)| count)
+    }
+
     /// Extracts an embedded idempotency key (`eve.idempotency.Token`) from a dynamic message if present.
     fn extract_embedded_idempotency_key(&self, dyn_msg: &DynamicQuasarMessage) -> Option<Vec<u8>> {
         let desc = self.descriptors.get_message(&dyn_msg.full_name)?;

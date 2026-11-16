@@ -81,23 +81,25 @@ pub fn register_handlers(
     );
 }
 
+fn publish_notice_now(
+    gateway: &PublicGatewayRouter,
+    scope: NoticeScope,
+    builder: pb::ProtoBuilder,
+) -> Result<usize, BridgeRpcError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    gateway.publish_pb_notice_checked(scope, builder, now)
+}
+
 /// Publishes an `eve_public.debug.Notice` to the specified gateway scope.
 pub fn publish_debug_notice(
     gateway: &PublicGatewayRouter,
     scope: NoticeScope,
     uuid: &[u8],
 ) -> Result<usize, BridgeRpcError> {
-    let notice = pb::message("eve_public.debug.Notice")
-        .set("uuid", uuid)
-        .to_any()
-        .map_err(|e| BridgeRpcError::user_error(format!("ProtoBuilder encode failed: {e}")))?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    gateway
-        .publish_notice(scope, notice, now)
-        .map(|(_, count)| count)
+    publish_notice_now(gateway, scope, pb::message("eve_public.debug.Notice").set("uuid", uuid))
 }
 
 /// Publishes an `eve.debug.monolith.event.EventEmitted` notice to the specified gateway scope.
@@ -106,17 +108,12 @@ pub fn publish_monolith_event_notice(
     scope: NoticeScope,
     tracer: &[u8],
 ) -> Result<usize, BridgeRpcError> {
-    let notice = pb::message("eve.debug.monolith.event.EventEmitted")
-        .set("tracer", String::from_utf8_lossy(tracer).into_owned())
-        .to_any()
-        .map_err(|e| BridgeRpcError::user_error(format!("ProtoBuilder encode failed: {e}")))?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    gateway
-        .publish_notice(scope, notice, now)
-        .map(|(_, count)| count)
+    publish_notice_now(
+        gateway,
+        scope,
+        pb::message("eve.debug.monolith.event.EventEmitted")
+            .set("tracer", String::from_utf8_lossy(tracer).into_owned()),
+    )
 }
 
 /// Publishes an `eve.quasar.CharacterRouteEstablished` notice to the specified gateway scope.
@@ -125,17 +122,12 @@ pub fn publish_character_route_established(
     scope: NoticeScope,
     character_id: u64,
 ) -> Result<usize, BridgeRpcError> {
-    let notice = pb::message("eve.quasar.CharacterRouteEstablished")
-        .set("character.sequential", character_id as u32)
-        .to_any()
-        .map_err(|e| BridgeRpcError::user_error(format!("ProtoBuilder encode failed: {e}")))?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    gateway
-        .publish_notice(scope, notice, now)
-        .map(|(_, count)| count)
+    publish_notice_now(
+        gateway,
+        scope,
+        pb::message("eve.quasar.CharacterRouteEstablished")
+            .set("character.sequential", character_id as u32),
+    )
 }
 
 /// Publishes an `eve.raffle.ItemRaffleCreated` notice.
@@ -160,17 +152,8 @@ pub fn publish_raffle_created_notice(
         .when(nanos != 0, |m| m.set("ticket_price.nanos", nanos))
         .set("item.sequential", item_id)
         .set("station.sequential", station_id)
-        .set("is_private", is_private)
-        .to_any()
-        .map_err(|e| BridgeRpcError::user_error(format!("ProtoBuilder encode failed: {e}")))?;
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    gateway
-        .publish_notice(scope, notice, now)
-        .map(|(_, count)| count)
+        .set("is_private", is_private);
+    publish_notice_now(gateway, scope, notice)
 }
 
 /// Publishes an `eve.raffle.TicketBought` notice.
@@ -181,19 +164,14 @@ pub fn publish_raffle_ticket_bought_notice(
     ticket_number: u64,
     char_id: u64,
 ) -> Result<usize, BridgeRpcError> {
-    let notice = pb::message("eve.raffle.TicketBought")
-        .set("raffle_id", raffle_id.to_string())
-        .set("ticket_number", ticket_number.to_string())
-        .set("character.sequential", char_id as u32)
-        .to_any()
-        .map_err(|e| BridgeRpcError::user_error(format!("ProtoBuilder encode failed: {e}")))?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    gateway
-        .publish_notice(scope, notice, now)
-        .map(|(_, count)| count)
+    publish_notice_now(
+        gateway,
+        scope,
+        pb::message("eve.raffle.TicketBought")
+            .set("raffle_id", raffle_id.to_string())
+            .set("ticket_number", ticket_number.to_string())
+            .set("character.sequential", char_id as u32),
+    )
 }
 
 /// Publishes an `eve.raffle.Finished` notice.
@@ -203,18 +181,13 @@ pub fn publish_raffle_finished_notice(
     raffle_id: u64,
     winner_char_id: u64,
 ) -> Result<usize, BridgeRpcError> {
-    let notice = pb::message("eve.raffle.Finished")
-        .set("raffle_id", raffle_id.to_string())
-        .set("winner.sequential", winner_char_id as u32)
-        .to_any()
-        .map_err(|e| BridgeRpcError::user_error(format!("ProtoBuilder encode failed: {e}")))?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    gateway
-        .publish_notice(scope, notice, now)
-        .map(|(_, count)| count)
+    publish_notice_now(
+        gateway,
+        scope,
+        pb::message("eve.raffle.Finished")
+            .set("raffle_id", raffle_id.to_string())
+            .set("winner.sequential", winner_char_id as u32),
+    )
 }
 
 /// Publishes an `eve.raffle.Expired` notice.
@@ -223,17 +196,11 @@ pub fn publish_raffle_expired_notice(
     scope: NoticeScope,
     raffle_id: u64,
 ) -> Result<usize, BridgeRpcError> {
-    let notice = pb::message("eve.raffle.Expired")
-        .set("raffle_id", raffle_id.to_string())
-        .to_any()
-        .map_err(|e| BridgeRpcError::user_error(format!("ProtoBuilder encode failed: {e}")))?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    gateway
-        .publish_notice(scope, notice, now)
-        .map(|(_, count)| count)
+    publish_notice_now(
+        gateway,
+        scope,
+        pb::message("eve.raffle.Expired").set("raffle_id", raffle_id.to_string()),
+    )
 }
 
 /// Publishes an `eve.seasonalevent.challenge.ChallengeProgressed` notice.
@@ -244,20 +211,14 @@ pub fn publish_challenge_progressed_notice(
     challenge_id: u64,
     amount: u64,
 ) -> Result<usize, BridgeRpcError> {
-    let notice = pb::message("eve.seasonalevent.challenge.ChallengeProgressed")
-        .set("character.sequential", char_id as u32)
-        .set("progress.challenge.sequential", challenge_id)
-        .set("progress.amount", amount)
-        .to_any()
-        .map_err(|e| BridgeRpcError::user_error(format!("ProtoBuilder encode failed: {e}")))?;
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    gateway
-        .publish_notice(scope, notice, now)
-        .map(|(_, count)| count)
+    publish_notice_now(
+        gateway,
+        scope,
+        pb::message("eve.seasonalevent.challenge.ChallengeProgressed")
+            .set("character.sequential", char_id as u32)
+            .set("progress.challenge.sequential", challenge_id)
+            .set("progress.amount", amount),
+    )
 }
 
 /// Encodes a security status float (-10.0 to +10.0) into `sint64 units = 1` and `sint32 nanos = 2`.

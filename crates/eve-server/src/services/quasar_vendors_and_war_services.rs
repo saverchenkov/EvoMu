@@ -65,11 +65,7 @@ fn publish_proto_notice(
     builder: ProtoBuilder,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any_msg = builder
-        .to_any()
-        .map_err(|e| eve_proto::BridgeRpcError::user_error(e.to_string()))?;
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+    gateway.publish_pb_notice_checked(scope, builder, now_unix)
 }
 
 fn ts_unix(unix_secs: u64) -> GoogleTimestamp {

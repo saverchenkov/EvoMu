@@ -694,17 +694,14 @@ pub fn on_character_enter_local_chat(
 
     let is_wh = is_delayed_local_system(solar_system_id);
     let d1 = if !is_wh {
-        let join_any = pb::message("eve_public.chat.local.api.JoinNotice")
+        let join_notice = pb::message("eve_public.chat.local.api.JoinNotice")
             .set("member", chat_member_builder(char_id, corpid, aid, fid))
-            .set("solar_system.sequential", solar_system_id as u64)
-            .to_any()
-            .map_err(|e| eve_proto::BridgeRpcError::user_error(e.to_string()))?;
-        let (_, count) = gateway.publish_notice(
+            .set("solar_system.sequential", solar_system_id as u64);
+        gateway.publish_pb_notice_checked(
             NoticeScope::SolarSystem(solar_system_id),
-            join_any,
+            join_notice,
             now_unix,
-        )?;
-        count
+        )?
     } else {
         0
     };
@@ -724,12 +721,9 @@ pub fn on_character_enter_local_chat(
     for m in &members {
         list_notice = list_notice.add("members", pb::raw_message(m));
     }
-    let list_any = list_notice
-        .to_any()
-        .map_err(|e| eve_proto::BridgeRpcError::user_error(e.to_string()))?;
-    let (_, d2) = gateway.publish_notice(
+    let d2 = gateway.publish_pb_notice_checked(
         NoticeScope::Character(char_id),
-        list_any,
+        list_notice,
         now_unix,
     )?;
 
@@ -761,17 +755,14 @@ pub fn on_character_leave_local_chat(
             return Ok(0);
         }
     }
-    let leave_any = pb::message("eve_public.chat.local.api.LeaveNotice")
+    let leave_notice = pb::message("eve_public.chat.local.api.LeaveNotice")
         .set("character.sequential", char_id)
-        .set("solar_system.sequential", solar_system_id as u64)
-        .to_any()
-        .map_err(|e| eve_proto::BridgeRpcError::user_error(e.to_string()))?;
-    let (_, delivered) = gateway.publish_notice(
+        .set("solar_system.sequential", solar_system_id as u64);
+    gateway.publish_pb_notice_checked(
         NoticeScope::SolarSystem(solar_system_id),
-        leave_any,
+        leave_notice,
         now_unix,
-    )?;
-    Ok(delivered)
+    )
 }
 
 pub fn on_character_local_chat_membership_refreshed(
@@ -808,17 +799,10 @@ pub fn on_character_local_chat_membership_refreshed(
         }
     }
 
-    let notice_any = pb::message("eve_public.chat.local.api.MembershipRefreshedNotice")
+    let notice = pb::message("eve_public.chat.local.api.MembershipRefreshedNotice")
         .set("member", chat_member_builder(char_id, corpid, aid, fid))
-        .set("solar_system.sequential", sys_id as u64)
-        .to_any()
-        .map_err(|e| eve_proto::BridgeRpcError::user_error(e.to_string()))?;
-    let (_, delivered) = gateway.publish_notice(
-        NoticeScope::SolarSystem(sys_id),
-        notice_any,
-        now_unix,
-    )?;
-    Ok(delivered)
+        .set("solar_system.sequential", sys_id as u64);
+    gateway.publish_pb_notice_checked(NoticeScope::SolarSystem(sys_id), notice, now_unix)
 }
 
 #[cfg(test)]
