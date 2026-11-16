@@ -495,6 +495,21 @@ async fn tactical_modules_sync_fit_projection_on_ats_entosis_and_command_burst()
         proj2.modules.get(&ent_mod_id).map(|m| m.state),
         Some(eve_dogma::ModuleState::Active)
     );
+    let cs_after_ent = sys
+        .get_combat_state(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .expect("combat state after entosis");
+    assert_eq!(
+        cs_after_ent.max_velocity_cap,
+        Some(4_000.0),
+        "Entosis activation must declaratively set max_velocity_cap so FitProjection recompute preserves the clamp"
+    );
+    assert!(
+        cs_after_ent.warp_scramble_strength >= 100,
+        "Entosis activation must preserve warp_scramble_strength >= 100 after FitProjection"
+    );
 
     // 3. Command Burst activation must perform a single invalidate_and_push_fit step per affected ship (no redundant double push).
     let fit_burst = ctx
