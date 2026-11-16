@@ -36,6 +36,8 @@ pub struct QuasarIdentityStore {
     pub delivered_external_grants: HashSet<String>,
     #[serde(default)]
     pub user_entitlement_expiries: HashMap<u64, HashMap<String, u64>>,
+    #[serde(default)]
+    pub omega_license_last_modified: HashMap<u64, u64>,
 }
 
 const QUASAR_IDENTITY_NOTE_ID: i64 = -8_500_000_000_000;
@@ -86,6 +88,8 @@ pub(crate) fn try_activate_user_omega_license_in_snapshot(
     let base = if cur > now_unix { cur } else { now_unix };
     let next = base.saturating_add(duration_seconds);
     st.omega_subscriptions.insert(user_id, next);
+    st.omega_license_last_modified
+        .insert(user_id, now_unix.max(1));
     let ent_list = st.user_entitlements.entry(user_id).or_default();
     if !ent_list.iter().any(|e| e.eq_ignore_ascii_case("omega")) {
         ent_list.push("omega".to_string());
@@ -174,6 +178,7 @@ pub fn expire_user_omega_license(
             .unwrap_or_else(default_identity_store);
 
         st.omega_subscriptions.insert(user_id, 0);
+        st.omega_license_last_modified.insert(user_id, 1);
         if let Some(exp_map) = st.user_entitlement_expiries.get_mut(&user_id) {
             exp_map.insert("omega".to_string(), 0);
         }
@@ -281,7 +286,23 @@ pub fn with_identity_store<R>(
     f: impl FnOnce(&mut QuasarIdentityStore) -> R,
 ) -> R {
     let mut state = load_identity_store_from_db(db).unwrap_or_else(default_identity_store);
+    let prev_subs = state.omega_subscriptions.clone();
+    let prev_mods = state.omega_license_last_modified.clone();
     let out = f(&mut state);
+    for (&uid, &new_exp) in &state.omega_subscriptions {
+        if prev_subs.get(&uid).copied() != Some(new_exp)
+            && state.omega_license_last_modified.get(&uid) == prev_mods.get(&uid)
+        {
+            state.omega_license_last_modified.remove(&uid);
+        }
+    }
+    for uid in prev_subs.keys() {
+        if !state.omega_subscriptions.contains_key(uid)
+            && state.omega_license_last_modified.get(uid) == prev_mods.get(uid)
+        {
+            state.omega_license_last_modified.remove(uid);
+        }
+    }
     save_identity_store_to_db(db, &state);
     out
 }
@@ -446,8 +467,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             }
             let uid = uid_i32 as u64;
             let now = ctx.now_unix();
-            let expiry = read_identity_store(&db_lic_get, |guard| {
-                guard.omega_subscriptions.get(&uid).copied().unwrap_or(0)
+            let (expiry, persisted_last_mod) = read_identity_store(&db_lic_get, |guard| {
+                (
+                    guard.omega_subscriptions.get(&uid).copied().unwrap_or(0),
+                    guard.omega_license_last_modified.get(&uid).copied(),
+                )
             });
             let is_active = expiry > now;
             let exp_seconds = if is_active && expiry > 0 {
@@ -455,7 +479,19 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             } else {
                 1
             };
-            let last_mod = if is_active { now as i64 } else { 1 };
+            let last_mod = if !is_active {
+                1
+            } else if let Some(ts) = persisted_last_mod.filter(|&ts| ts > 0) {
+                ts as i64
+            } else {
+                let stamped = now.max(1);
+                with_identity_store(&db_lic_get, |guard| {
+                    *guard
+                        .omega_license_last_modified
+                        .entry(uid)
+                        .or_insert(stamped)
+                }) as i64
+            };
             pb::message("eve_public.user.license.api.GetResponse")
                 .set(
                     "license.expiry_date",

@@ -217,3 +217,64 @@ fn omega_user_license_notices_and_get_request_use_v2402_license_type() {
         Some(&DynamicValue::String("eve_clonestate_omega".into()))
     );
 }
+
+#[test]
+fn omega_user_license_get_request_last_modified_is_deterministic_across_clock_advance() {
+    use eve_proto::quasar::QuasarDescriptorRegistry;
+
+    let base_time = 1_700_000_000;
+    let (ctx, _clock) = test_ctx_and_clock(base_time);
+    let db = &ctx.db;
+    let router = &ctx.quasar_gateway;
+    let reg = QuasarDescriptorRegistry::open_default_or_empty();
+    register_handlers(router, Arc::clone(db));
+
+    let dummy_any = GoogleAny::default();
+    let req_msg = DynamicQuasarMessage::new("eve_public.user.license.api.GetRequest");
+    let get_bytes = |ts: u64| {
+        let auth_ctx = AuthoritativeContext::for_session_at(
+            Some(1),
+            Some(90_000_001),
+            Some(1_000_009),
+            0,
+            "tranquility",
+            vec![],
+            ts,
+        );
+        let handlers = router.handlers.read().unwrap();
+        handlers["eve_public.user.license.api.GetRequest"](&auth_ctx, &dummy_any, &req_msg)
+            .unwrap()
+            .value
+    };
+
+    let _ = activate_user_omega_license(db, &router.pending_notices, 1, 86_400, base_time);
+    let before_act = get_bytes(base_time);
+    let after_act = get_bytes(base_time + 1_800);
+    assert_eq!(before_act, after_act);
+
+    // Direct out-of-band identity-store writes must invalidate any prior last_modified
+    // timestamp once and persist the newly stamped active timestamp across clock advances.
+    with_identity_store(db, |st| {
+        st.omega_subscriptions.insert(1, base_time + 172_800);
+    });
+    assert!(read_identity_store(db, |st| {
+        !st.omega_license_last_modified.contains_key(&1)
+    }));
+    let before_direct = get_bytes(base_time + 2_000);
+    assert_ne!(before_direct, before_act);
+    let after_direct = get_bytes(base_time + 3_800);
+    assert_eq!(after_direct, before_direct);
+
+    let dec = reg
+        .decode_dynamic("eve_public.user.license.api.GetResponse", &after_direct)
+        .expect("decode GetResponse");
+    let attr = match dec.get(1) {
+        Some(DynamicValue::Message(m)) => m.as_ref(),
+        other => panic!("expected license Attributes, got {other:?}"),
+    };
+    let lm_sec = match attr.get(3) {
+        Some(DynamicValue::Message(m)) => m.get(1).cloned(),
+        other => panic!("expected last_modified, got {other:?}"),
+    };
+    assert_eq!(lm_sec, Some(DynamicValue::Int64((base_time + 2_000) as i64)));
+}
