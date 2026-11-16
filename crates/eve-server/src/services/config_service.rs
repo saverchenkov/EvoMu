@@ -216,6 +216,42 @@ pub fn handle(
                             PyRep::Bool(false),
                             PyRep::None,
                         ]);
+                    } else if (1_000_000..=1_999_999).contains(&id)
+                        || (98_000_000..=98_999_999).contains(&id)
+                    {
+                        // Unknown NPC or player corporation IDs must still carry corporation typeID (2).
+                        rows.push(vec![
+                            PyRep::Integer(id),
+                            PyRep::String(format!("Corporation {id}")),
+                            PyRep::Integer(2),
+                            PyRep::Bool(false),
+                            PyRep::None,
+                        ]);
+                    } else if (500_000..=599_999).contains(&id) {
+                        rows.push(vec![
+                            PyRep::Integer(id),
+                            PyRep::String(format!("Faction {id}")),
+                            PyRep::Integer(30),
+                            PyRep::Bool(false),
+                            PyRep::None,
+                        ]);
+                    } else if (99_000_000..=99_999_999).contains(&id) {
+                        rows.push(vec![
+                            PyRep::Integer(id),
+                            PyRep::String(format!("Alliance {id}")),
+                            PyRep::Integer(16159),
+                            PyRep::Bool(false),
+                            PyRep::None,
+                        ]);
+                    } else {
+                        // Never omit an unknown owner ID: EveOwners expects a row for every requested ID.
+                        rows.push(vec![
+                            PyRep::Integer(id),
+                            PyRep::String(format!("Unknown Owner {id}")),
+                            PyRep::Integer(1373),
+                            PyRep::None,
+                            PyRep::None,
+                        ]);
                     }
                 }
             });

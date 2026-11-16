@@ -553,3 +553,4 @@ mod shadow_client_convergence;
 mod observability_sequencer_ops;
 mod quasar_blast_radius_isolation;
 mod login_space_bootstrap_sequence;
+mod client_shape_pins;

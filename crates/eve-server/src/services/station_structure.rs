@@ -48,7 +48,36 @@ pub async fn handle(
         structure_lifecycle::sync_all_structures(ctx);
     }
     match (service, method) {
-        ("stationSvc", "GetAllianceSystems") | ("stationSvc", "GetSystemsForAlliance") => {
+        ("stationSvc", "GetAllianceSystems") => {
+            let filter_aid = args.first().and_then(|a| a.as_i64());
+            let rows = ctx.db.with_snapshot(|snap| {
+                let mut by_sys: std::collections::BTreeMap<i64, i64> = std::collections::BTreeMap::new();
+                for s in snap.system_states.values() {
+                    if let Some(aid) = s.sov_alliance_id {
+                        if filter_aid.is_none_or(|f| f == aid) {
+                            by_sys.insert(i64::from(s.solar_system_id), aid);
+                        }
+                    }
+                }
+                for st in snap.structures.values() {
+                    if let Some(aid) = snap.corporations.get(&st.owner_corp_id).and_then(|c| c.alliance_id) {
+                        if filter_aid.is_none_or(|f| f == aid) {
+                            by_sys.entry(i64::from(st.solar_system_id)).or_insert(aid);
+                        }
+                    }
+                }
+                by_sys
+                    .into_iter()
+                    .map(|(sys_id, aid)| vec![PyRep::Integer(sys_id), PyRep::Integer(aid)])
+                    .collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::rowset(
+                vec!["solarSystemID", "allianceID"],
+                rows,
+            )))
+        }
+
+        ("stationSvc", "GetSystemsForAlliance") => {
             let aid = args.first().and_then(|a| a.as_i64()).or(session.alliance_id).unwrap_or(0);
             let systems = ctx.db.with_snapshot(|snap| {
                 let member_corps: std::collections::HashSet<i64> = snap

@@ -102,13 +102,24 @@ async fn station_queries_guests_standing_check_and_undock_dock_cycle() {
     session.ship_id = Some(ship_id);
     let kw = HashMap::new();
 
-    // GetAllianceSystems returns sov system + member corp structure system
-    let PyRep::List(ally_sys) = handle(&ctx, &mut session, "stationSvc", "GetAllianceSystems", &[PyRep::Integer(ally_id)], &kw)
+    // GetAllianceSystems returns Rowset(solarSystemID, allianceID); GetSystemsForAlliance returns List<Integer>
+    let PyRep::Rowset { columns: ally_cols, rows: ally_rows } = handle(&ctx, &mut session, "stationSvc", "GetAllianceSystems", &[PyRep::Integer(ally_id)], &kw)
         .await
         .unwrap()
         .unwrap()
     else {
-        panic!("expected list");
+        panic!("expected Rowset from GetAllianceSystems");
+    };
+    assert_eq!(ally_cols, vec!["solarSystemID", "allianceID"]);
+    assert!(ally_rows.contains(&vec![PyRep::Integer(30_000_144), PyRep::Integer(ally_id)]));
+    assert!(ally_rows.contains(&vec![PyRep::Integer(jita_sys as i64), PyRep::Integer(ally_id)]));
+
+    let PyRep::List(ally_sys) = handle(&ctx, &mut session, "stationSvc", "GetSystemsForAlliance", &[PyRep::Integer(ally_id)], &kw)
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected list from GetSystemsForAlliance");
     };
     assert!(ally_sys.contains(&PyRep::Integer(30_000_144)));
     assert!(ally_sys.contains(&PyRep::Integer(jita_sys as i64)));

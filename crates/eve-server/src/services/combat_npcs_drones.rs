@@ -1068,7 +1068,6 @@ pub async fn handle_npcs_drones(
                             ("singleton", PyRep::Bool(singleton)),
                         ]),
                         change: PyRep::Dict(vec![
-                            (PyRep::Integer(5), PyRep::Integer(old_qty as i64)),
                             (PyRep::Integer(9), PyRep::Integer(old_qty as i64)),
                         ]),
                         location: PyRep::None,

@@ -194,9 +194,16 @@ async fn station_metadata_guests_standing_and_service_check() {
     let mut sess = make_session(char_id, corp_id, Some(station_id), Some(sys_id), Some(ship_id));
     sess.alliance_id = Some(alliance_id);
 
-    // GetAllianceSystems + GetStationsForOwner
+    // GetAllianceSystems + GetSystemsForAlliance + GetStationsForOwner
     let all_sys = call_station(&ctx, &mut sess, "stationSvc", "GetAllianceSystems", &[]).await.unwrap();
-    assert!(matches!(&all_sys, PyRep::List(v) if v.contains(&PyRep::Integer(sys_id as i64))));
+    assert!(matches!(
+        &all_sys,
+        PyRep::Rowset { columns, rows }
+            if columns == &vec!["solarSystemID".to_string(), "allianceID".to_string()]
+                && rows.contains(&vec![PyRep::Integer(sys_id as i64), PyRep::Integer(alliance_id)])
+    ));
+    let sys_for_ally = call_station(&ctx, &mut sess, "stationSvc", "GetSystemsForAlliance", &[]).await.unwrap();
+    assert!(matches!(&sys_for_ally, PyRep::List(v) if v.contains(&PyRep::Integer(sys_id as i64))));
     let owned_st = call_station(&ctx, &mut sess, "stationSvc", "GetStationsForOwner", &[PyRep::Integer(corp_id)]).await.unwrap();
     assert!(matches!(&owned_st, PyRep::List(v) if v.len() == 1));
 
