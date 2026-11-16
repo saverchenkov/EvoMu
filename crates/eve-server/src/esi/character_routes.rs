@@ -1031,11 +1031,11 @@ pub fn dispatch_character_routes(
                 Ok(fitting_id) => {
                     // Same notification the in-game `charFittingMgr.SaveFitting` path sends, so a
                     // logged-in client refreshes its fitting window from the shared state.
-                    ctx.notify(
+                    ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
-                        "OnFittingsUpdated",
-                        "charid",
-                        vec![eve_proto::PyRep::Integer(char_id)],
+                        crate::router::notify_registry::OnFittingsUpdated {
+                            fitting: eve_proto::PyRep::Integer(char_id),
+                        },
                     );
                     RouteExecutionResult::created_json(json!({ "fitting_id": fitting_id }))
                 }
@@ -1075,11 +1075,11 @@ pub fn dispatch_character_routes(
             });
             Some(match res {
                 Ok(()) => {
-                    ctx.notify(
+                    ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
-                        "OnFittingsUpdated",
-                        "charid",
-                        vec![eve_proto::PyRep::Integer(char_id)],
+                        crate::router::notify_registry::OnFittingsUpdated {
+                            fitting: eve_proto::PyRep::Integer(char_id),
+                        },
                     );
                     RouteExecutionResult::no_content(0)
                 }

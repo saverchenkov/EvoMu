@@ -423,11 +423,11 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &SessionState, 
     })?;
     if injected_skills > 0 {
         emit_skill_bundle_injected(ctx, char_id, injected_skills, sp_grant.round() as i64);
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnFreeSkillPointsChanged",
-            "charid",
-            vec![PyRep::Real(new_sp)],
+            crate::router::notify_registry::OnFreeSkillPointsChanged {
+                new_free_skill_points: new_sp,
+            },
         );
     }
     Ok(rep)

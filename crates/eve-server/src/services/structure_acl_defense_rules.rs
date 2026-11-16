@@ -271,11 +271,11 @@ pub fn handle_set_member_role(
 
     crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
     if notify_corp > 0 {
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Corporation(notify_corp),
-            "OnOwnerGroupsUpdated",
-            "corpid",
-            vec![PyRep::Dict(vec![(PyRep::Integer(group_id), PyRep::Integer(1))])],
+            crate::router::notify_registry::OnOwnerGroupsUpdated {
+                changed_groups: PyRep::Dict(vec![(PyRep::Integer(group_id), PyRep::Integer(1))]),
+            },
         );
     }
     Ok(PyRep::Bool(true))

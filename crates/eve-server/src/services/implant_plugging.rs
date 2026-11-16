@@ -498,11 +498,9 @@ pub fn inject_implant(
     if ship_id > 0 {
         ctx.invalidate_and_push_fit(ship_id);
     }
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnServerImplantsChanged",
-        "charid",
-        vec![],
+        crate::router::notify_registry::OnServerImplantsChanged,
     );
     ctx.push_brain_update(char_id);
     Ok(PyRep::None)
@@ -584,11 +582,9 @@ pub fn destroy_implant(
     if ship_id > 0 {
         ctx.invalidate_and_push_fit(ship_id);
     }
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnServerImplantsChanged",
-        "charid",
-        vec![],
+        crate::router::notify_registry::OnServerImplantsChanged,
     );
     ctx.push_brain_update(char_id);
     Ok(PyRep::None)
@@ -865,11 +861,9 @@ pub fn use_booster(
     if ship_id > 0 {
         ctx.invalidate_and_push_fit(ship_id);
     }
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnServerBoostersChanged",
-        "charid",
-        vec![],
+        crate::router::notify_registry::OnServerBoostersChanged,
     );
     let side_effect_reps: Vec<PyRep> = rolled_eids
         .into_iter()
@@ -1153,22 +1147,20 @@ pub fn inject_skillpoints(
     ctx.notify_item_mutation(char_id, pre_inj.as_ref(), post_inj.as_ref());
 
     if is_non_dim {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnNonDiminishingInjectionsUsed",
-            "charid",
-            vec![PyRep::Integer(1)],
+            crate::router::notify_registry::OnNonDiminishingInjectionsUsed { amount: 1 },
         );
         if rem_non_dim <= 0 {
             crate::services::notify_emitters_skills_trade_godma::emit_non_diminishing_injections_removed(ctx, char_id);
         }
     }
 
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnFreeSkillPointsChanged",
-        "charid",
-        vec![PyRep::Real(new_free_sp)],
+        crate::router::notify_registry::OnFreeSkillPointsChanged {
+            new_free_skill_points: new_free_sp,
+        },
     );
     Ok(PyRep::Real(yielded))
 }

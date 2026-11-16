@@ -1,6 +1,11 @@
 //! Stateful object binding and moniker handles (`MachoBindObject`).
 
 use crate::router::context::{BoundObjectEntry, ServerContext, NEXT_BOUND_ID};
+use crate::router::notify_registry::{
+    emit_typed_target_to_char_capped, OnChargeBeingLoadedToModule, OnGodmaShipEffect,
+    OnMachoObjectDisconnect, OnMultiEvent, OnNewSkillQueueSaved, OnSkillQueuePausedServer,
+    OnSpecialFX, TypedNotification,
+};
 use crate::router::{NotificationTarget, PendingMachoNotification};
 use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use eve_machonet::SessionState;
@@ -620,15 +625,13 @@ impl ServerContext {
         }
         let macho_client_id =
             1_000_000_000_000_u64.saturating_add(entry.session_id) as i64;
-        self.notify(
+        self.emit_typed(
             NotificationTarget::Character(entry.character_id),
-            "OnMachoObjectDisconnect",
-            "clientID",
-            vec![
-                PyRep::ascii_bytes(entry.oid_str.clone()),
-                PyRep::Integer(macho_client_id),
-                PyRep::Integer(entry.ref_id),
-            ],
+            OnMachoObjectDisconnect {
+                object_id: PyRep::ascii_bytes(entry.oid_str.clone()),
+                client_id: macho_client_id,
+                ref_id: entry.ref_id,
+            },
         );
     }
 
@@ -1544,11 +1547,9 @@ impl ServerContext {
 
     /// Emits an `OnSkillQueuePausedServer` notification to character (`feat:skills.queue-pause`).
     pub fn notify_skill_queue_paused_server(&self, char_id: i64) -> Vec<PendingMachoNotification> {
-        self.notify(
+        self.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnSkillQueuePausedServer",
-            "charid",
-            vec![],
+            OnSkillQueuePausedServer { paused: None },
         )
     }
 
@@ -1559,11 +1560,9 @@ impl ServerContext {
         char_id: i64,
         new_queue: PyRep,
     ) -> Vec<PendingMachoNotification> {
-        self.notify(
+        self.emit_typed(
             NotificationTarget::Character(char_id),
-            "OnNewSkillQueueSaved",
-            "charid",
-            vec![new_queue],
+            OnNewSkillQueueSaved { new_queue },
         )
     }
 
@@ -1719,39 +1718,28 @@ impl ServerContext {
                 PyRep::List(vec![]),
                 PyRep::Integer(effect_id),
             ]);
-            let args = vec![
-                PyRep::Integer(cycle.module_id),
-                PyRep::Integer(effect_id),
-                PyRep::Integer(now),
-                PyRep::Integer(0),
-                PyRep::Integer(0),
-                environment,
-                PyRep::Integer(now),
-                PyRep::Real(0.0),
-                PyRep::Integer(0),
-                PyRep::None,
-            ];
-            let (packet, marshaled_packet) =
-                ServerContext::build_macho_notification_packet(char_id, user_id, "OnGodmaShipEffect", "charid", args.clone());
-            let notif = PendingMachoNotification {
-                seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-                recipient_char_id: char_id,
-                event: "OnGodmaShipEffect".to_string(),
-                id_type: "charid".to_string(),
-                args,
-                packet,
-                marshaled_packet,
-                created_filetime: now,
-            };
-            {
-                let mut q_guard = pending.write().unwrap_or_else(|e| e.into_inner());
-                let q = q_guard.entry(char_id).or_default();
-                if q.len() >= 512 {
-                    q.remove(0);
-                }
-                q.push(notif.clone());
-            }
-            let _ = notify_tx.send((char_id, notif));
+            emit_typed_target_to_char_capped(
+                Some(&**pending),
+                Some(notify_tx),
+                char_id,
+                user_id,
+                OnGodmaShipEffect::DEFAULT_ID_TYPE,
+                now,
+                512,
+                OnGodmaShipEffect {
+                    item_id: cycle.module_id,
+                    effect: PyRep::Integer(effect_id),
+                    start_or_time: PyRep::Integer(now),
+                    start: Some(PyRep::Integer(0)),
+                    active: Some(PyRep::Integer(0)),
+                    environment: Some(environment),
+                    start_time: Some(PyRep::Integer(now)),
+                    duration: Some(PyRep::Real(0.0)),
+                    repeat: Some(PyRep::Integer(0)),
+                    error: Some(PyRep::None),
+                    actual_stop_time: None,
+                },
+            );
 
             let observers = step_ctx.space_observer_chars_for_ship(cycle.ship_id, char_id);
             for (fan_mod_id, fan_type_id) in fanout_types {
@@ -1763,51 +1751,33 @@ impl ServerContext {
                     fan_effect_id,
                     Some(&cycle.effect_name),
                 ) {
-                    let sfx_args = vec![
-                        PyRep::Integer(cycle.ship_id),
-                        PyRep::Integer(fan_mod_id),
-                        PyRep::Integer(fan_type_id as i64),
-                        cycle.target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                        charge_type_id
-                            .map(|tid| PyRep::Integer(i64::from(tid)))
-                            .unwrap_or(PyRep::None),
-                        PyRep::String(sfx_guid),
-                        PyRep::Bool(is_offensive),
-                        PyRep::Integer(0),
-                        PyRep::Integer(0),
-                        PyRep::Real(cycle.duration_s * 1000.0),
-                        PyRep::Integer(0),
-                        PyRep::Integer(now),
-                        PyRep::Real(0.0),
-                        PyRep::None,
-                    ];
+                    let sfx_notif = OnSpecialFX {
+                        ship_id: cycle.ship_id,
+                        module_id: Some(fan_mod_id),
+                        module_type_id: Some(i64::from(fan_type_id)),
+                        target_id: cycle.target_id,
+                        other_type_id: charge_type_id.map(i64::from),
+                        guid: sfx_guid,
+                        is_offensive,
+                        start: 0,
+                        active: 0,
+                        duration: cycle.duration_s * 1000.0,
+                        repeat: 0,
+                        start_time: now,
+                        time_from_start: 0.0,
+                        graphic_info: None,
+                    };
                     let push_sfx = |recip_cid: i64, recip_uid: Option<u64>| {
-                        let (sfx_pkt, sfx_bytes) = ServerContext::build_macho_notification_packet(
+                        emit_typed_target_to_char_capped(
+                            Some(&**pending),
+                            Some(notify_tx),
                             recip_cid,
                             recip_uid,
-                            "OnSpecialFX",
-                            "charid",
-                            sfx_args.clone(),
+                            OnSpecialFX::DEFAULT_ID_TYPE,
+                            now,
+                            512,
+                            sfx_notif.clone(),
                         );
-                        let sfx_notif = PendingMachoNotification {
-                            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-                            recipient_char_id: recip_cid,
-                            event: "OnSpecialFX".to_string(),
-                            id_type: "charid".to_string(),
-                            args: sfx_args.clone(),
-                            packet: sfx_pkt,
-                            marshaled_packet: sfx_bytes,
-                            created_filetime: now,
-                        };
-                        {
-                            let mut q_guard = pending.write().unwrap_or_else(|e| e.into_inner());
-                            let q = q_guard.entry(recip_cid).or_default();
-                            if q.len() >= 512 {
-                                q.remove(0);
-                            }
-                            q.push(sfx_notif.clone());
-                        }
-                        let _ = notify_tx.send((recip_cid, sfx_notif));
                     };
                     push_sfx(char_id, user_id);
                     for &(obs_cid, obs_uid) in &observers {
@@ -1822,37 +1792,20 @@ impl ServerContext {
                     .remove(&cycle.module_id)
             });
             if let Some((mod_ids, charge_tid, reload_ms)) = auto_reload_ev {
-                let reload_args = vec![
-                    PyRep::List(mod_ids.into_iter().map(PyRep::Integer).collect()),
-                    PyRep::Integer(charge_tid as i64),
-                    PyRep::Real(reload_ms),
-                ];
-                let (r_pkt, r_marshaled) = ServerContext::build_macho_notification_packet(
+                emit_typed_target_to_char_capped(
+                    Some(&**pending),
+                    Some(notify_tx),
                     char_id,
                     user_id,
-                    "OnChargeBeingLoadedToModule",
-                    "charid",
-                    reload_args.clone(),
+                    OnChargeBeingLoadedToModule::DEFAULT_ID_TYPE,
+                    now,
+                    512,
+                    OnChargeBeingLoadedToModule {
+                        item_ids: mod_ids,
+                        charge_type_id: i64::from(charge_tid),
+                        time_ms: reload_ms,
+                    },
                 );
-                let r_notif = PendingMachoNotification {
-                    seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-                    recipient_char_id: char_id,
-                    event: "OnChargeBeingLoadedToModule".to_string(),
-                    id_type: "charid".to_string(),
-                    args: reload_args,
-                    packet: r_pkt,
-                    marshaled_packet: r_marshaled,
-                    created_filetime: now,
-                };
-                {
-                    let mut q_guard = pending.write().unwrap_or_else(|e| e.into_inner());
-                    let q = q_guard.entry(char_id).or_default();
-                    if q.len() >= 512 {
-                        q.remove(0);
-                    }
-                    q.push(r_notif.clone());
-                }
-                let _ = notify_tx.send((char_id, r_notif));
             }
         }));
 
@@ -1865,36 +1818,26 @@ impl ServerContext {
             };
             let now = db_lock.clock().now_blueos_filetime_ticks();
             let enqueue_target_ev = |rcpt_char: i64, rcpt_user: Option<u64>, sub_ev: &str, item_id: i64| {
-                let args = vec![PyRep::List(vec![PyRep::Tuple(vec![
-                    PyRep::Tuple(vec![
-                        PyRep::String("OnTarget".into()),
-                        PyRep::String(sub_ev.into()),
-                        PyRep::Integer(item_id),
-                        PyRep::String(String::new()),
-                    ]),
-                    PyRep::Integer(0),
-                ])])];
-                let (packet, marshaled_packet) =
-                    ServerContext::build_macho_notification_packet(rcpt_char, rcpt_user, "OnMultiEvent", "charid", args.clone());
-                let notif = PendingMachoNotification {
-                    seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-                    recipient_char_id: rcpt_char,
-                    event: "OnMultiEvent".to_string(),
-                    id_type: "charid".to_string(),
-                    args,
-                    packet,
-                    marshaled_packet,
-                    created_filetime: now,
-                };
-                {
-                    let mut q_guard = pending_lock.write().unwrap_or_else(|e| e.into_inner());
-                    let q = q_guard.entry(rcpt_char).or_default();
-                    if q.len() >= 512 {
-                        q.remove(0);
-                    }
-                    q.push(notif.clone());
-                }
-                let _ = notify_tx_lock.send((rcpt_char, notif));
+                emit_typed_target_to_char_capped(
+                    Some(&*pending_lock),
+                    Some(&notify_tx_lock),
+                    rcpt_char,
+                    rcpt_user,
+                    OnMultiEvent::DEFAULT_ID_TYPE,
+                    now,
+                    512,
+                    OnMultiEvent {
+                        events: vec![PyRep::Tuple(vec![
+                            PyRep::Tuple(vec![
+                                PyRep::String("OnTarget".into()),
+                                PyRep::String(sub_ev.into()),
+                                PyRep::Integer(item_id),
+                                PyRep::String(String::new()),
+                            ]),
+                            PyRep::Integer(0),
+                        ])],
+                    },
+                );
             };
             let hook_info = db_lock.with_snapshot(|s| {
                 let locker = s.characters.get(&char_id)?;

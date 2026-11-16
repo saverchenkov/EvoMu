@@ -222,11 +222,9 @@ pub async fn handle_jettison_structure_fuel(
 
     crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
     if service_changed {
-        ctx.notify(
+        ctx.emit_typed(
             crate::router::NotificationTarget::Station(structure_id),
-            "OnStructureServiceChanged",
-            "stationid",
-            vec![PyRep::Integer(structure_id)],
+            crate::router::notify_registry::OnStructureServiceChanged { structure_id },
         );
     }
     let ball = eve_destiny::Ball {

@@ -263,8 +263,9 @@ fn mint_and_notify_distinguish_ships_stacks_missing_rewards_and_unknown_sde_type
     for note in &notes {
         assert_eq!(note.event, "OnItemChange");
         assert_eq!(note.id_type, "charid");
-        assert_eq!(note.args.len(), 2);
+        assert_eq!(note.args.len(), 3);
         assert_eq!(note.args[1], PyRep::Dict(Vec::new()));
+        assert_eq!(note.args[2], PyRep::None);
     }
 
     let kv_stack = extract_keyval(&notes[0].args[0]);

@@ -347,11 +347,21 @@ pub(super) async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
                 crate::services::sov_warzone_dynamic::init_hub_campaign_scores_in_snap(snap, target_id, sys_id);
             });
             emit_sov_structures_updated(ctx, sys_id, &[target_id]);
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::SolarSystem(sys_id),
-                "OnSovereigntyAudioEvent",
-                "solarsystemid",
-                vec![eve_proto::PyRep::Integer(target_id), eve_proto::PyRep::Integer(1)],
+                crate::router::notify_registry::OnSovereigntyAudioEvent {
+                    event_id: 1,
+                    text_params: eve_proto::PyRep::Dict(vec![
+                        (
+                            eve_proto::PyRep::String("solarSystemID".into()),
+                            eve_proto::PyRep::Integer(i64::from(sys_id)),
+                        ),
+                        (
+                            eve_proto::PyRep::String("allianceID".into()),
+                            eve_proto::PyRep::Integer(alliance_id),
+                        ),
+                    ]),
+                },
             );
         } else {
             let _ = sys_handle.remove_ball(target_id).await;

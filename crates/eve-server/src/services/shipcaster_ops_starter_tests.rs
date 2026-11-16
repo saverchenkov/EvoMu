@@ -1,4 +1,5 @@
 use super::*;
+use eve_proto::PyRep;
 use crate::services::account_services::account_services_tests::{auth_session, test_ctx};
 use crate::services::cluster_macho_misc_services::with_misc_state;
 use eve_destiny::{Ball, MovementMode};

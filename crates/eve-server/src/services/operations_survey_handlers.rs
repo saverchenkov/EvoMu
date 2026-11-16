@@ -340,11 +340,9 @@ pub fn mark_survey_completed(
         save_store_pub(snap, &store, now);
         Ok(())
     })?;
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnSurveyRewardsAvailable",
-        "charid",
-        vec![PyRep::Integer(survey_id)],
+        crate::router::notify_registry::OnSurveyRewardsAvailable { survey_id },
     );
     Ok(())
 }

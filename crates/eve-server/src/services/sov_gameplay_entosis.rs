@@ -13,7 +13,7 @@ use crate::services::sov_services::{
 };
 use eve_db::{CosmicAnomalyRecord, WorldStateSnapshot};
 use eve_destiny::{Ball, MovementMode};
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::BridgeRpcError;
 use glam::DVec3;
 use std::sync::{Arc, RwLock};
 
@@ -1039,11 +1039,12 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
     }
 
     for sys_id in spool_events {
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::SolarSystem(sys_id),
-            "OnCynoJammerChanged",
-            "solarsystemid",
-            vec![PyRep::Integer(sys_id as i64), PyRep::Integer(2)],
+            crate::router::notify_registry::OnCynoJammerChanged {
+                solar_system_id: i64::from(sys_id),
+                status: 2,
+            },
         );
     }
     for (sys_id, _, _, _, _) in strat_events {

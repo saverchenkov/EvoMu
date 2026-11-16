@@ -367,17 +367,15 @@ pub fn notify_storm_ship_dogma_updates(
         } else {
             1.10 * (storm_count as f64)
         };
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(cid),
-            "OnAttributes",
-            "charid",
-            vec![PyRep::Dict(vec![(
-                PyRep::Integer(ship_id),
-                PyRep::Dict(vec![(
+            crate::router::notify_registry::OnAttributes {
+                changes: PyRep::List(vec![PyRep::Tuple(vec![
                     PyRep::String("metaliminalStormEffectScale".into()),
+                    PyRep::keyval([("itemID", PyRep::Integer(ship_id))]),
                     PyRep::Real(strength_mult),
-                )]),
-            )])],
+                ])]),
+            },
         );
     }
 }

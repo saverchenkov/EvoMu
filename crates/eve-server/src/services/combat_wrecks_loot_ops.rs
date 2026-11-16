@@ -333,14 +333,12 @@ pub(super) async fn handle_loot_all(
         let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[char_id], &[]);
     }
 
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnWreckLootAll",
-        "charid",
-        vec![
-            PyRep::Integer(wreck_id),
-            PyRep::List(looted_ids.iter().copied().map(PyRep::Integer).collect()),
-        ],
+        crate::router::notify_registry::OnWreckLootAll {
+            inv_id: wreck_id,
+            items: looted_ids.clone(),
+        },
     );
     let looted_types: Vec<u32> = ctx.db.with_snapshot(|snap| {
         looted_ids
