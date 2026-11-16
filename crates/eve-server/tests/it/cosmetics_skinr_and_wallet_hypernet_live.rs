@@ -174,7 +174,7 @@ async fn test_live_skinr_designer_and_sequencing_studio() {
     assert_eq!(bad_rsp.status_code, STATUS_BAD_REQUEST);
 
     // 3. Initiate sequencing job #1 (natural timer completion via virtual clock advance)
-    let plex_0 = ctx.db.get_character(designer_id).unwrap().plex_balance;
+    let plex_0 = ctx.db.with_snapshot(|s| s.unified_plex_balance(designer_id));
     let mut req1 = Vec::new();
     encode_string_field(1, "Live Tempest Rifter", &mut req1);
     encode_string_field(2, "Tempest Line", &mut req1);
@@ -189,7 +189,7 @@ async fn test_live_skinr_designer_and_sequencing_studio() {
     assert_eq!(rsp1.status_code, STATUS_OK);
     let raw1 = rsp1.payload.unwrap().value;
     let hex1 = str_field(&sub_bytes(&sub_bytes(&raw1, 2), 1), 1);
-    assert!(ctx.db.get_character(designer_id).unwrap().plex_balance < plex_0);
+    assert!(ctx.db.with_snapshot(|s| s.unified_plex_balance(designer_id)) < plex_0);
 
     // Advance virtual clock beyond sequencing duration -> settles naturally into owned SKIN licenses
     ctx.advance_virtual_clock(30 * 86_400);

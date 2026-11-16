@@ -3498,19 +3498,25 @@ async fn test_c2_client_harness_wire_frames_and_wrong_shape_rejection() {
         !bind_out.destiny_batches.is_empty(),
         "binding beyonce in space via ClientHarness must emit DoDestinyUpdate(SetState)"
     );
-    assert!(matches!(
-        bind_out.frames.first().map(|f| &f.kind),
-        Some(ClientWireFrameKind::CallRsp { .. })
-    ));
-    assert!(
-        bind_out.frames.iter().any(|f| matches!(
+    let dest_idx = bind_out
+        .frames
+        .iter()
+        .position(|f| matches!(
             f.kind,
             ClientWireFrameKind::DoDestinyUpdate {
                 has_set_state: true,
                 ..
             }
-        )),
-        "DoDestinyUpdate with has_set_state=true must be present in beyonce bind frames"
+        ))
+        .expect("DoDestinyUpdate with has_set_state=true must be present in beyonce bind frames");
+    let rsp_idx = bind_out
+        .frames
+        .iter()
+        .position(|f| matches!(f.kind, ClientWireFrameKind::CallRsp { .. }))
+        .expect("CallRsp must be present in beyonce bind frames");
+    assert!(
+        dest_idx < rsp_idx,
+        "DoDestinyUpdate(SetState) ({dest_idx}) must precede CallRsp ({rsp_idx})"
     );
 
     let update_state_rep = harness

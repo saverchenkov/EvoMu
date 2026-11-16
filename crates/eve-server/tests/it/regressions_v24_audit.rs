@@ -2856,7 +2856,7 @@ async fn live_client_hotfix_1064_char_brain_and_server_brain_updated_wire_harnes
         .await;
     assert!(drop_ex.result.is_ok());
     let (v1, ship_v1) = extract_brain_update(&drop_ex.notifications);
-    assert_eq!(v1, 1);
+    assert_eq!(v1, 2);
     assert!(!has_brain_effect(&ship_v1, 3426, 48, 25.0));
 
     let restore_ex = harness
@@ -2870,7 +2870,7 @@ async fn live_client_hotfix_1064_char_brain_and_server_brain_updated_wire_harnes
         .await;
     assert!(restore_ex.result.is_ok());
     let (v2, ship_v2) = extract_brain_update(&restore_ex.notifications);
-    assert_eq!(v2, 2);
+    assert_eq!(v2, 3);
     assert!(has_brain_effect(&ship_v2, 3426, 48, 25.0));
 
     let plug_ex = harness
@@ -2884,7 +2884,7 @@ async fn live_client_hotfix_1064_char_brain_and_server_brain_updated_wire_harnes
         .await;
     assert!(plug_ex.result.is_ok());
     let (v3, ship_v3) = extract_brain_update(&plug_ex.notifications);
-    assert_eq!(v3, 3);
+    assert_eq!(v3, 4);
     assert!(has_brain_effect(&ship_v3, 13216, 48, 3.0));
 
     let destroy_ex = harness
@@ -2898,7 +2898,7 @@ async fn live_client_hotfix_1064_char_brain_and_server_brain_updated_wire_harnes
         .await;
     assert!(destroy_ex.result.is_ok());
     let (v4, ship_v4) = extract_brain_update(&destroy_ex.notifications);
-    assert_eq!(v4, 4);
+    assert_eq!(v4, 5);
     assert!(!has_brain_effect(&ship_v4, 13216, 48, 3.0));
 }
 }

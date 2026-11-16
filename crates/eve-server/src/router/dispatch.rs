@@ -991,12 +991,18 @@ impl ServerContext {
                     && session.station_id.is_none()
                     && session.structure_id.is_none()
                 {
-                    let _ = crate::services::space_destiny::handle_update_state_request(
-                        self,
-                        session,
-                        None,
-                    )
-                    .await;
+                    if let (Some(cid), Some(sys_id)) =
+                        (session.character_id, session.solar_system_id)
+                    {
+                        if !self.is_space_ballpark_bootstrapped(session.session_id, cid, sys_id) {
+                            let _ = crate::services::space_destiny::handle_update_state_request(
+                                self,
+                                session,
+                                None,
+                            )
+                            .await;
+                        }
+                    }
                 }
             }
 
@@ -1130,12 +1136,21 @@ impl ServerContext {
                         }
                     },
                 );
+                if let Some(old_cid) = prev_cid_before_select {
+                    self.clear_space_ballpark_bootstrapped(old_cid);
+                    self.clear_brain_primed_for_char(old_cid);
+                }
                 if let Some(cid) = session.character_id {
+                    self.clear_space_ballpark_bootstrapped(cid);
+                    self.clear_brain_primed_for_char(cid);
                     crate::sp6_lifecycle::clear_safe_logoff(&self.db, cid);
                     services::character_skill_ops::migrate_obsolete_skills_on_login(self, cid);
                     services::pve_special_sites::ensure_abyssal_room_balls_for_ctx(self, cid).await;
                     if let Some(sys) = session.solar_system_id {
                         services::map_service::record_solar_system_visit(self, cid, sys);
+                        if session.station_id.is_none() && session.structure_id.is_none() {
+                            maybe_emit_login_sim_clock_rebase(self, cid, sys);
+                        }
                     }
                     services::market_contracts::sweep_and_notify_expired_for_char(self, cid);
                     services::industry_pi::sync_character_pi_colonies_on_login(self, cid);
@@ -1290,6 +1305,29 @@ impl ServerContext {
             return res;
         }
         if let Some(res) = box_fut(|| services::fleet_social::handle_with_bound(self, session, bound_entry.as_ref(), effective_service, method, args, kwargs)).await {
+            if effective_service == "beyonce"
+                && method == "GetFormations"
+                && res.is_ok()
+                && session.station_id.is_none()
+                && session.structure_id.is_none()
+            {
+                if let (Some(cid), Some(sys_id), Some(ship_id)) = (
+                    session.character_id,
+                    session.solar_system_id,
+                    session.ship_id,
+                ) {
+                    if ship_id > 0
+                        && !self.is_space_ballpark_bootstrapped(session.session_id, cid, sys_id)
+                    {
+                        let _ = crate::services::space_destiny::handle_update_state_request(
+                            self,
+                            session,
+                            bound_entry.as_ref(),
+                        )
+                        .await;
+                    }
+                }
+            }
             return res;
         }
         if let Some(res) = box_fut(|| services::social_corp_fleet::handle(
@@ -1829,6 +1867,55 @@ async fn spawn_pochven_ore_hypnosian_defenders_if_missing(ctx: &ServerContext, s
     });
     if !ore_centres.is_empty() {
         spawn_pochven_ore_hypnosian_defenders(ctx, sys_id, &ore_centres).await;
+    }
+}
+
+/// Emits a single `DoSimClockRebase` before ballpark bootstrap when logging into a solar
+/// system whose simulation clock lags behind wallclock (`#1083`).
+fn maybe_emit_login_sim_clock_rebase(
+    ctx: &ServerContext,
+    char_id: i64,
+    solar_system_id: u32,
+) {
+    let now_wall_ft = ctx.now_blueos_filetime_ticks();
+    let cur_sim_ft_opt = {
+        let cn = ctx
+            .systems
+            .cluster_nodes
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        cn.sim_clock_anchoring
+            .get(&solar_system_id)
+            .copied()
+            .map(|(anchor_wall_ft, anchor_sim_ft, factor)| {
+                let elapsed = now_wall_ft.saturating_sub(anchor_wall_ft).max(0);
+                anchor_sim_ft.saturating_add(((elapsed as f64) * factor).round() as i64)
+            })
+    }
+    .or_else(|| {
+        let handle = ctx.systems.get_handle(solar_system_id)?;
+        let bp_unix = handle
+            .ballpark
+            .read()
+            .map(|bp| bp.sim_unix_secs)
+            .unwrap_or(0);
+        let now_unix = ctx.now_unix();
+        (bp_unix > 0 && bp_unix < now_unix)
+            .then(|| ((bp_unix as i64) + 11_644_473_600).saturating_mul(10_000_000))
+    });
+    if let Some(cur_sim_ft) = cur_sim_ft_opt {
+        if cur_sim_ft < now_wall_ft {
+            // parity: notify:DoSimClockRebase
+            ctx.emit_typed(
+                crate::router::NotificationTarget::Character(char_id),
+                crate::router::notify_registry::DoSimClockRebase {
+                    times: PyRep::Tuple(vec![
+                        PyRep::Integer(now_wall_ft),
+                        PyRep::Integer(cur_sim_ft),
+                    ]),
+                },
+            );
+        }
     }
 }
 

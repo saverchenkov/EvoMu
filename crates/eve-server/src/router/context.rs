@@ -116,6 +116,12 @@ pub struct ServerContext {
     pub dedicated_physics_ticker_active: Arc<AtomicBool>,
     pub(crate) unrebased_clock_offset_secs: Arc<AtomicU64>,
     pub fw_idle_last_step_unix: Arc<RankedRwLock<HashMap<i64, u64>, RANK_LEAF>>,
+    /// Tracks `(session_id, char_id) -> solar_system_id` whose initial space ballpark `SetState`
+    /// bootstrap has been emitted for the current space stay (`#1083`).
+    pub space_ballpark_bootstrapped: Arc<RankedRwLock<HashMap<(u64, i64), u32>, RANK_LEAF>>,
+    /// Tracks `(session_id, char_id)` pairs that already emitted their initial `OnServerBrainUpdated`
+    /// on first `dogmaIM.GetAllInfo` (`#1083`).
+    pub brain_primed_sessions: Arc<RankedRwLock<HashSet<(u64, i64)>, RANK_LEAF>>,
 }
 
 /// Non-owning weak handle to all shared [`ServerContext`] state (`RFC-1 E-4`, `#839`, `#919`).
@@ -185,6 +191,8 @@ pub(crate) struct ServerContextWeak {
     dedicated_physics_ticker_active: std::sync::Weak<AtomicBool>,
     unrebased_clock_offset_secs: std::sync::Weak<AtomicU64>,
     fw_idle_last_step_unix: std::sync::Weak<RankedRwLock<HashMap<i64, u64>, RANK_LEAF>>,
+    space_ballpark_bootstrapped: std::sync::Weak<RankedRwLock<HashMap<(u64, i64), u32>, RANK_LEAF>>,
+    brain_primed_sessions: std::sync::Weak<RankedRwLock<HashSet<(u64, i64)>, RANK_LEAF>>,
 }
 
 impl ServerContextWeak {
@@ -257,6 +265,8 @@ impl ServerContextWeak {
             dedicated_physics_ticker_active: self.dedicated_physics_ticker_active.upgrade()?,
             unrebased_clock_offset_secs: self.unrebased_clock_offset_secs.upgrade()?,
             fw_idle_last_step_unix: self.fw_idle_last_step_unix.upgrade()?,
+            space_ballpark_bootstrapped: self.space_ballpark_bootstrapped.upgrade()?,
+            brain_primed_sessions: self.brain_primed_sessions.upgrade()?,
         })
     }
 }
@@ -604,6 +614,8 @@ impl ServerContext {
             dedicated_physics_ticker_active: Arc::downgrade(&self.dedicated_physics_ticker_active),
             unrebased_clock_offset_secs: Arc::downgrade(&self.unrebased_clock_offset_secs),
             fw_idle_last_step_unix: Arc::downgrade(&self.fw_idle_last_step_unix),
+            space_ballpark_bootstrapped: Arc::downgrade(&self.space_ballpark_bootstrapped),
+            brain_primed_sessions: Arc::downgrade(&self.brain_primed_sessions),
         }
     }
 
@@ -758,6 +770,8 @@ impl ServerContext {
             dedicated_physics_ticker_active: Arc::new(AtomicBool::new(false)),
             unrebased_clock_offset_secs: Arc::new(AtomicU64::new(unrebased_clock_offset_secs)),
             fw_idle_last_step_unix: Arc::new(RankedRwLock::new(HashMap::new())),
+            space_ballpark_bootstrapped: Arc::new(RankedRwLock::new(HashMap::new())),
+            brain_primed_sessions: Arc::new(RankedRwLock::new(HashSet::new())),
         };
         let npc_ctx_w = ctx.downgrade();
         ctx.systems.set_npc_death_hook(Arc::new(move |sys_id, npc_id, killer_opt| {
@@ -1326,6 +1340,57 @@ impl ServerContext {
         crate::services::notify_emitters_missing2::emit_server_brain_updated(
             self, char_id, version,
         );
+    }
+
+    pub fn is_space_ballpark_bootstrapped(
+        &self,
+        session_id: u64,
+        char_id: i64,
+        solar_system_id: u32,
+    ) -> bool {
+        self.space_ballpark_bootstrapped
+            .read()
+            .map(|m| m.get(&(session_id, char_id)).copied() == Some(solar_system_id))
+            .unwrap_or(false)
+    }
+
+    pub fn mark_space_ballpark_bootstrapped(
+        &self,
+        session_id: u64,
+        char_id: i64,
+        solar_system_id: u32,
+    ) {
+        let mut m = self
+            .space_ballpark_bootstrapped
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        m.insert((session_id, char_id), solar_system_id);
+    }
+
+    pub fn clear_space_ballpark_bootstrapped(&self, char_id: i64) {
+        let mut m = self
+            .space_ballpark_bootstrapped
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        m.retain(|&(_, cid), _| cid != char_id);
+    }
+
+    /// Marks `(session_id, char_id)` as having received its initial `OnServerBrainUpdated`;
+    /// returns `true` only on the first call for that session login (`#1083`).
+    pub fn mark_brain_primed_for_session(&self, session_id: u64, char_id: i64) -> bool {
+        let mut m = self
+            .brain_primed_sessions
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        m.insert((session_id, char_id))
+    }
+
+    pub fn clear_brain_primed_for_char(&self, char_id: i64) {
+        let mut m = self
+            .brain_primed_sessions
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        m.retain(|&(_, cid)| cid != char_id);
     }
 
     fn resolve_ship_cooldown_clock(&self, ship_id: i64, module_id: i64) -> (u32, Option<u32>, f64) {

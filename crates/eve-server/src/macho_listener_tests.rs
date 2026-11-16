@@ -328,7 +328,10 @@ async fn test_macho_ping_rpc_errors_bound_oid_and_displacement() {
     assert_eq!(err_rsp.packet_type, MachoPacketType::ErrorResponse);
 
     // 4. SelectCharacterID -> MachoBindObject (OID+ header) -> Undock -> DoDestinyUpdate tick
-    async fn read_next_rpc_rsp(stream: &mut TcpStream) -> MachoPacket {
+    async fn read_next_rpc_rsp_with_notifs(
+        stream: &mut TcpStream,
+    ) -> (MachoPacket, Vec<MachoPacket>) {
+        let mut notifs = Vec::new();
         loop {
             let pkt = MachoPacket::from_pyrep(
                 &tokio::time::timeout(
@@ -345,8 +348,9 @@ async fn test_macho_ping_rpc_errors_bound_oid_and_displacement() {
                 pkt.packet_type,
                 MachoPacketType::CallRsp | MachoPacketType::ErrorResponse
             ) {
-                return pkt;
+                return (pkt, notifs);
             }
+            notifs.push(pkt);
         }
     }
 
@@ -362,7 +366,7 @@ async fn test_macho_ping_rpc_errors_bound_oid_and_displacement() {
     write_framed_pyrep(&mut s1, &sel_call.to_pyrep())
         .await
         .unwrap();
-    let sel_rsp = read_next_rpc_rsp(&mut s1).await;
+    let (sel_rsp, _) = read_next_rpc_rsp_with_notifs(&mut s1).await;
     assert_eq!(sel_rsp.packet_type, MachoPacketType::CallRsp);
 
     // Undock from station via stationSvc.Undock, then bind beyonce in space
@@ -378,7 +382,7 @@ async fn test_macho_ping_rpc_errors_bound_oid_and_displacement() {
     write_framed_pyrep(&mut s1, &undock_call.to_pyrep())
         .await
         .unwrap();
-    let undock_rsp = read_next_rpc_rsp(&mut s1).await;
+    let (undock_rsp, _) = read_next_rpc_rsp_with_notifs(&mut s1).await;
     assert_eq!(undock_rsp.packet_type, MachoPacketType::CallRsp);
 
     let bind_call = make_call_req(
@@ -393,12 +397,40 @@ async fn test_macho_ping_rpc_errors_bound_oid_and_displacement() {
     write_framed_pyrep(&mut s1, &bind_call.to_pyrep())
         .await
         .unwrap();
-    let bind_rsp = read_next_rpc_rsp(&mut s1).await;
+    let (bind_rsp, bind_notifs) = read_next_rpc_rsp_with_notifs(&mut s1).await;
     assert_eq!(bind_rsp.packet_type, MachoPacketType::CallRsp);
     assert!(bind_rsp.named_payload.contains_key("OID+"));
+    assert!(
+        bind_notifs
+            .iter()
+            .any(|p| p.packet_type == MachoPacketType::Notification),
+        "MachoBindObject must emit DoDestinyUpdate(SetState) before CallRsp (#1083)"
+    );
 
-    // Step Jita system actor to emit DoDestinyUpdate over TCP
+    // Spawn a nearby dynamic ball and step Jita system actor to emit a subsequent DoDestinyUpdate over TCP
     let jita = ctx.systems.get_or_spawn(30_000_142);
+    let active_ship_id = ctx.db.get_character(90_000_001).unwrap().active_ship_id;
+    let ship_pos = jita
+        .get_ball_snapshot(active_ship_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .1
+        .position;
+    jita.spawn_ball(eve_destiny::Ball {
+        id: 900_000_020_106,
+        type_id: 1230,
+        position: ship_pos + eve_destiny::DVec3::new(2_500.0, 0.0, 0.0),
+        velocity: eve_destiny::DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1.0e6,
+        radius: 120.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    })
+    .await
+    .unwrap();
     let _ = jita.step_manual(1.0).await.unwrap();
     let destiny_pkt = loop {
         let pkt = MachoPacket::from_pyrep(
@@ -722,7 +754,7 @@ async fn re_undock_after_advance_clock_and_dock_delivers_set_state_and_subsequen
     .await;
     assert_eq!(undock1_rsp.packet_type, MachoPacketType::CallRsp);
 
-    let (form1_rsp, _) = send_rpc_and_collect_until_rsp(
+    let (form1_rsp, form1_notifs) = send_rpc_and_collect_until_rsp(
         &mut s,
         &make_call_req(
             client_id,
@@ -736,6 +768,12 @@ async fn re_undock_after_advance_clock_and_dock_delivers_set_state_and_subsequen
     )
     .await;
     assert_eq!(form1_rsp.packet_type, MachoPacketType::CallRsp);
+    assert!(
+        form1_notifs
+            .iter()
+            .any(|p| packet_contains_ascii(&p.payload, "SetState")),
+        "1st undock GetFormations must deliver DoDestinyUpdate(SetState) before CallRsp (#1083)"
+    );
 
     let (bind1_rsp, bind1_notifs) = send_rpc_and_collect_until_rsp(
         &mut s,
@@ -752,10 +790,11 @@ async fn re_undock_after_advance_clock_and_dock_delivers_set_state_and_subsequen
     .await;
     assert_eq!(bind1_rsp.packet_type, MachoPacketType::CallRsp);
     assert!(
-        bind1_notifs
+        !bind1_notifs
             .iter()
-            .any(|p| packet_contains_ascii(&p.payload, "SetState")),
-        "1st undock MachoBindObject must deliver DoDestinyUpdate(SetState)"
+            .any(|p| packet_contains_ascii(&p.payload, "SetState")
+                || packet_contains_ascii(&p.payload, "DoDestinyUpdate")),
+        "1st undock MachoBindObject after GetFormations must NOT replay DoDestinyUpdate (#1083)"
     );
 
     // 3. Stop ship within docking perimeter, AdvanceClock(11) past 10s session-change timer, + stationSvc.Dock(60_003_760)
@@ -828,7 +867,14 @@ async fn re_undock_after_advance_clock_and_dock_delivers_set_state_and_subsequen
     // Simulate 1 Hz background physics tick firing while client transitions hangar -> inflight
     let _ = jita.step_manual(1.0).await.unwrap();
 
-    let (form2_rsp, _) = send_rpc_and_collect_until_rsp(
+    let active_ship_id = ctx
+        .db
+        .get_character(90_000_001)
+        .unwrap()
+        .active_ship_id;
+    let _ = jita.drain_observer_updates(active_ship_id).await;
+
+    let (form2_rsp, form2_notifs) = send_rpc_and_collect_until_rsp(
         &mut s,
         &make_call_req(
             client_id,
@@ -842,15 +888,12 @@ async fn re_undock_after_advance_clock_and_dock_delivers_set_state_and_subsequen
     )
     .await;
     assert_eq!(form2_rsp.packet_type, MachoPacketType::CallRsp);
-
-    // Also simulate a nested non-UpdateStateRequest call on MachoBindObject (or pre-drained queue)
-    // to verify macho_listener's post-RPC fallback still guarantees SetState delivery.
-    let active_ship_id = ctx
-        .db
-        .get_character(90_000_001)
-        .unwrap()
-        .active_ship_id;
-    let _ = jita.drain_observer_updates(active_ship_id).await;
+    assert!(
+        form2_notifs
+            .iter()
+            .any(|p| packet_contains_ascii(&p.payload, "SetState")),
+        "2nd undock GetFormations must deliver DoDestinyUpdate(SetState) even after 1Hz ticks (#802, #1083)"
+    );
 
     let (bind2_rsp, bind2_notifs) = send_rpc_and_collect_until_rsp(
         &mut s,
@@ -874,10 +917,11 @@ async fn re_undock_after_advance_clock_and_dock_delivers_set_state_and_subsequen
     .await;
     assert_eq!(bind2_rsp.packet_type, MachoPacketType::CallRsp);
     assert!(
-        bind2_notifs
+        !bind2_notifs
             .iter()
-            .any(|p| packet_contains_ascii(&p.payload, "SetState")),
-        "2nd undock MachoBindObject must deliver DoDestinyUpdate(SetState) even after 1Hz ticks and pre-drained observer queue (#802)"
+            .any(|p| packet_contains_ascii(&p.payload, "SetState")
+                || packet_contains_ascii(&p.payload, "DoDestinyUpdate")),
+        "2nd undock MachoBindObject after GetFormations must NOT replay DoDestinyUpdate (#1083)"
     );
 
     // 5. Subsequent `/spawn 1230` (dynamic ball spawn on grid + 1 Hz tick) must stream AddBalls2 over TCP
