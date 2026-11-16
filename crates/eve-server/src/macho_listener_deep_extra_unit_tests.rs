@@ -2135,3 +2135,266 @@ async fn connect_with_retry_recovers_from_transient_errors_and_fails_cleanly() {
     assert_eq!(client.peer_addr().unwrap(), real_addr);
     accept_task.await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wire_overlapping_tr_teleports_serve_delayed_crimewatch_get_client_states_without_unmacho_error_1209_1211() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(acc) = snap.accounts.get_mut("demo") {
+            acc.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+        }
+    });
+    let addr = spawn_listener(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) = connect_login(addr, "demo", "demo-secret").await;
+    let char_id = 90_000_001_i64;
+    let jita_sys = 30_000_142_i64;
+    let perimeter_sys = 30_000_144_i64;
+    let amarr_sys = 30_002_187_i64;
+    let jita_station = 60_003_760_i64;
+
+    let call = |cid: u64, svc: Option<&str>, bound_id: Option<u64>, m: &str, args: Vec<PyRep>| {
+        build_call_pkt(
+            client_id,
+            user_id,
+            cid,
+            MachoAddress::Node {
+                node_id: MACHO_PROXY_NODE_ID,
+                service: svc.map(str::to_string),
+                call_id: 0,
+            },
+            bound_id,
+            m,
+            args,
+        )
+    };
+    let decode_user_error_key = |pkt: MachoPacket| -> String {
+        assert_eq!(pkt.packet_type, MachoPacketType::ErrorResponse);
+        let PyRep::Bytes(bytes) = &as_tuple(&as_tuple(&pkt.payload)[2])[0] else {
+            panic!("expected wrapped exception bytes");
+        };
+        let PyRep::ObjectEx { header, .. } = marshal::decode(bytes).unwrap() else {
+            panic!("expected ObjectEx UserError");
+        };
+        let hdr = as_tuple(&header);
+        assert_eq!(hdr[0], PyRep::Token("eveexceptions.UserError".into()));
+        as_tuple(&hdr[1])[0].as_str().unwrap().to_string()
+    };
+
+    // 1. Select character in Jita, then run /tr me 30000144 and /tr me 60003760 back-to-back
+    //    before client ProcessSessionChange / OnSessionChanged reaches crimewatchSvc.
+    write_framed_pyrep(
+        &mut s,
+        &call(
+            1,
+            Some("charUnboundMgr"),
+            None,
+            "SelectCharacterID",
+            vec![PyRep::Integer(char_id)],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read_until_call_reply(&mut s).await.packet_type, MachoPacketType::CallRsp);
+
+    write_framed_pyrep(
+        &mut s,
+        &call(
+            2,
+            Some("slash"),
+            None,
+            "SlashCmd",
+            vec![PyRep::String(format!("/tr me {perimeter_sys}"))],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read_until_call_reply(&mut s).await.packet_type, MachoPacketType::CallRsp);
+
+    write_framed_pyrep(
+        &mut s,
+        &call(
+            3,
+            Some("slash"),
+            None,
+            "SlashCmd",
+            vec![PyRep::String(format!("/tr me {jita_station}"))],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read_until_call_reply(&mut s).await.packet_type, MachoPacketType::CallRsp);
+    assert_eq!(ctx.db.get_character(char_id).unwrap().solar_system_id, jita_sys as u32);
+
+    // 2. Client crimewatchSvc.ProcessSessionChange (#1209) + OnSessionChanged (#1211) issue
+    //    crimewatch.MachoBindObject((30000144, 5), ("GetClientStates", (), {})) over TCP.
+    let bind_get_client_states = |cid: u64, sys_id: i64| {
+        call(
+            cid,
+            Some("crimewatch"),
+            None,
+            "MachoBindObject",
+            vec![
+                PyRep::Tuple(vec![PyRep::Integer(sys_id), PyRep::Integer(5)]),
+                PyRep::Tuple(vec![
+                    PyRep::String("GetClientStates".into()),
+                    PyRep::Tuple(Vec::new()),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+        )
+    };
+    write_framed_pyrep(&mut s, &bind_get_client_states(4, perimeter_sys).to_pyrep())
+        .await
+        .unwrap();
+    let rsp_proc = read_until_call_reply(&mut s).await;
+    assert_eq!(
+        rsp_proc.packet_type,
+        MachoPacketType::CallRsp,
+        "ProcessSessionChange GetClientStates must not return UnMachoDestination (#1209)"
+    );
+    let (cw_oid_str, cw_oid) = rsp_proc
+        .named_payload
+        .get("OID+")
+        .and_then(|r| if let PyRep::Dict(d) = r { d.first() } else { None })
+        .and_then(|(k, _)| k.as_str())
+        .and_then(|oid_s| {
+            oid_s
+                .rsplit_once(':')
+                .and_then(|(_, n)| n.parse::<u64>().ok())
+                .map(|bid| (oid_s.to_string(), bid))
+        })
+        .expect("crimewatch grace OID+ header");
+    let PyRep::SubStream(rsp_proc_sub) = &as_tuple(&rsp_proc.payload)[0] else {
+        panic!("expected CallRsp SubStream");
+    };
+    assert_eq!(as_tuple(&as_tuple(rsp_proc_sub)[1]).len(), 4);
+
+    write_framed_pyrep(&mut s, &bind_get_client_states(5, perimeter_sys).to_pyrep())
+        .await
+        .unwrap();
+    let rsp_changed = read_until_call_reply(&mut s).await;
+    assert_eq!(
+        rsp_changed.packet_type,
+        MachoPacketType::CallRsp,
+        "OnSessionChanged GetClientStates must not fail with UnMachoDestination (#1211)"
+    );
+
+    // Subsequent ObjectCall on grace OID succeeds for GetClientStates cleanly.
+    write_framed_pyrep(
+        &mut s,
+        &call(6, None, Some(cw_oid), "GetClientStates", Vec::new()).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let obj_rsp = read_until_call_reply(&mut s).await;
+    assert_eq!(obj_rsp.packet_type, MachoPacketType::CallRsp);
+    let PyRep::SubStream(obj_sub) = &as_tuple(&obj_rsp.payload)[0] else {
+        panic!("expected ObjectCall CallRsp SubStream");
+    };
+    assert_eq!(as_tuple(obj_sub).len(), 4);
+
+    // 3. Security gates stay closed on wire:
+    //    - mutating crimewatch.MachoBindObject((30000144, 5), SetSafetyLevel) -> UnMachoDestination
+    //    - unvisited solar system Amarr (30002187, 5) -> UnMachoDestination
+    //    - ship.MachoBindObject((30000144, 5), GetDirtTimestamp) -> UnMachoDestination (dock-only)
+    write_framed_pyrep(
+        &mut s,
+        &call(
+            7,
+            Some("crimewatch"),
+            None,
+            "MachoBindObject",
+            vec![
+                PyRep::Tuple(vec![PyRep::Integer(perimeter_sys), PyRep::Integer(5)]),
+                PyRep::Tuple(vec![
+                    PyRep::String("SetSafetyLevel".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(0)]),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        decode_user_error_key(read_until_call_reply(&mut s).await),
+        "UnMachoDestination"
+    );
+
+    write_framed_pyrep(&mut s, &bind_get_client_states(8, amarr_sys).to_pyrep())
+        .await
+        .unwrap();
+    assert_eq!(
+        decode_user_error_key(read_until_call_reply(&mut s).await),
+        "UnMachoDestination"
+    );
+
+    let ship_id = ctx.db.get_character(char_id).unwrap().active_ship_id;
+    write_framed_pyrep(
+        &mut s,
+        &call(
+            9,
+            Some("ship"),
+            None,
+            "MachoBindObject",
+            vec![
+                PyRep::Tuple(vec![PyRep::Integer(perimeter_sys), PyRep::Integer(5)]),
+                PyRep::Tuple(vec![
+                    PyRep::String("GetDirtTimestamp".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(ship_id)]),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        decode_user_error_key(read_until_call_reply(&mut s).await),
+        "UnMachoDestination"
+    );
+
+    // 4. Client OID- release purges cw_oid immediately.
+    let mut release_pkt = call(10, None, Some(cw_oid), "GetClientStates", Vec::new());
+    release_pkt.named_payload.insert(
+        "OID-".into(),
+        PyRep::Dict(vec![(PyRep::ascii_bytes(cw_oid_str), PyRep::Integer(0))]),
+    );
+    write_framed_pyrep(&mut s, &release_pkt.to_pyrep()).await.unwrap();
+    assert_eq!(
+        decode_user_error_key(read_until_call_reply(&mut s).await),
+        "UnMachoDestination"
+    );
+
+    // 5. Out-of-band session transition via notify_rx wakeup (`ctx.sync_session(&mut session)`)
+    //    must also record Jita (30000142) before delayed crimewatch.MachoBindObject arrives.
+    ctx.execute_session_transition(
+        None,
+        crate::router::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::TransitionKind::Teleport {
+                solar_system_id: perimeter_sys as u32,
+                dock_id: None,
+                ship_id: None,
+            },
+            "out_of_band_tr",
+        ),
+    )
+    .await
+    .expect("out-of-band teleport to perimeter");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    write_framed_pyrep(&mut s, &bind_get_client_states(11, jita_sys).to_pyrep())
+        .await
+        .unwrap();
+    let oob_rsp = read_until_call_reply(&mut s).await;
+    assert_eq!(
+        oob_rsp.packet_type,
+        MachoPacketType::CallRsp,
+        "out-of-band transition notify_rx sync must retain departed jita grace"
+    );
+}

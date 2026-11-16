@@ -1055,6 +1055,7 @@ fn sync_session_from_character_with_override(
             let active_dock = session.station_id.or(session.structure_id);
             ctx.invalidate_bound_objects_for_session_transition(cid, sys_id, active_dock, reason);
         }
+        ctx.sync_transition_grace_on_session_change(&prev, session);
     }
     if sync_quasar {
         ctx.quasar_gateway.on_session_changed(session, ctx.now_unix());
