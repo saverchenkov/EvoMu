@@ -1002,10 +1002,11 @@ async fn handle_request_scans(
     let mut invalid_coords = false;
     let mut moved_balls: Vec<(i64, DVec3)> = Vec::new();
     if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
+        let mut staged_updates: Vec<(i64, Option<[f64; 3]>, Option<(i32, f64)>)> = Vec::new();
         if let Some(PyRep::Dict(entries)) = args.first() {
             for (k, v) in entries {
                 let Some(pid) = k.as_i64() else { continue };
-                let Some(probe) = probe_map.get_mut(&pid) else { continue };
+                let Some(probe) = probe_map.get(&pid) else { continue };
                 if probe.owner_char_id != char_id || probe.state <= 0 {
                     continue;
                 }
@@ -1017,6 +1018,15 @@ async fn handle_request_scans(
                         _ => None,
                     }
                 };
+                let step_from_radius = |rad: f64, denom: f64| -> Option<(i32, f64)> {
+                    if !rad.is_finite() || rad <= 0.0 {
+                        return None;
+                    }
+                    let ratio = (rad / denom).max(1.0);
+                    let step = (ratio.log2().round() as i32 + 1).clamp(1, 8);
+                    Some((step, base_au * AU_IN_METERS * 2.0_f64.powi(step - 1)))
+                };
+                let mut dest_opt: Option<[f64; 3]> = None;
                 if let Some(PyRep::Tuple(c) | PyRep::List(c)) = find_in_v("destination").or_else(|| find_in_v("pos")) {
                     if c.len() >= 3 {
                         let (x, y, z) = (
@@ -1028,8 +1038,7 @@ async fn handle_request_scans(
                             invalid_coords = true;
                             break;
                         }
-                        probe.destination = [x, y, z];
-                        moved_balls.push((pid, DVec3::from_array(probe.destination)));
+                        dest_opt = Some([x, y, z]);
                     }
                 } else if let (Some(x), Some(y), Some(z)) = (
                     find_in_v("x").and_then(|a| a.as_f64()),
@@ -1040,28 +1049,27 @@ async fn handle_request_scans(
                         invalid_coords = true;
                         break;
                     }
-                    probe.destination = [x, y, z];
-                    moved_balls.push((pid, DVec3::from_array(probe.destination)));
+                    dest_opt = Some([x, y, z]);
                 }
+                let mut range_opt: Option<(i32, f64)> = None;
                 if let Some(step) = find_in_v("rangeStep").and_then(|a| a.as_i64()) {
-                    probe.range_step = (step as i32).clamp(1, 8);
-                    probe.scan_range_m = base_au * AU_IN_METERS * 2.0_f64.powi(probe.range_step - 1);
+                    let clamped = (step as i32).clamp(1, 8);
+                    range_opt = Some((clamped, base_au * AU_IN_METERS * 2.0_f64.powi(clamped - 1)));
                 } else if let Some(rad_au) = find_in_v("scanRangeAU").and_then(|a| a.as_f64()) {
-                    if !rad_au.is_finite() || rad_au <= 0.0 {
+                    let Some(range) = step_from_radius(rad_au, base_au) else {
                         invalid_coords = true;
                         break;
-                    }
-                    let ratio = (rad_au / base_au).max(1.0);
-                    probe.range_step = (ratio.log2().round() as i32 + 1).clamp(1, 8);
-                    probe.scan_range_m = base_au * AU_IN_METERS * 2.0_f64.powi(probe.range_step - 1);
+                    };
+                    range_opt = Some(range);
                 } else if let Some(rad_m) = find_in_v("scanRange").and_then(|a| a.as_f64()) {
-                    if !rad_m.is_finite() || rad_m <= 0.0 {
+                    let Some(range) = step_from_radius(rad_m, base_au * AU_IN_METERS) else {
                         invalid_coords = true;
                         break;
-                    }
-                    let ratio = (rad_m / (base_au * AU_IN_METERS)).max(1.0);
-                    probe.range_step = (ratio.log2().round() as i32 + 1).clamp(1, 8);
-                    probe.scan_range_m = base_au * AU_IN_METERS * 2.0_f64.powi(probe.range_step - 1);
+                    };
+                    range_opt = Some(range);
+                }
+                if dest_opt.is_some() || range_opt.is_some() {
+                    staged_updates.push((pid, dest_opt, range_opt));
                 }
             }
         } else if let Some(PyRep::List(list)) = args.first() {
@@ -1073,26 +1081,37 @@ async fn handle_request_scans(
             owner_probe_ids.sort_unstable();
             for (idx, item) in list.iter().enumerate() {
                 let Some(&pid) = owner_probe_ids.get(idx) else { break };
-                let Some(probe) = probe_map.get_mut(&pid) else { continue };
+                let Some(probe) = probe_map.get(&pid) else { continue };
                 let base_au = probe_base_scan_range_au(&ctx.sde, probe.probe_type_id);
                 if let PyRep::List(coords) | PyRep::Tuple(coords) = item {
-                    if coords.len() >= 3 {
-                        let (x, y, z) = (
-                            coords[0].as_f64().unwrap_or(0.0),
-                            coords[1].as_f64().unwrap_or(0.0),
-                            coords[2].as_f64().unwrap_or(0.0),
-                        );
+                    let dest = if coords.len() >= 3 {
+                        let (Some(x), Some(y), Some(z)) = (
+                            coords[0].as_f64(),
+                            coords[1].as_f64(),
+                            coords[2].as_f64(),
+                        ) else {
+                            invalid_coords = true;
+                            break;
+                        };
                         if !x.is_finite() || !y.is_finite() || !z.is_finite() {
                             invalid_coords = true;
                             break;
                         }
-                        probe.destination = [x, y, z];
-                        moved_balls.push((pid, DVec3::from_array(probe.destination)));
-                    }
-                    if let Some(step) = coords.get(3).and_then(|a| a.as_i64()).map(|s| (s as i32).clamp(1, 8)).or(override_range_step) {
-                        probe.range_step = step;
-                        probe.scan_range_m = base_au * AU_IN_METERS * 2.0_f64.powi(step - 1);
-                    }
+                        [x, y, z]
+                    } else {
+                        invalid_coords = true;
+                        break;
+                    };
+                    let range_opt = coords
+                        .get(3)
+                        .and_then(|a| a.as_i64())
+                        .map(|s| (s as i32).clamp(1, 8))
+                        .or(override_range_step)
+                        .map(|step| (step, base_au * AU_IN_METERS * 2.0_f64.powi(step - 1)));
+                    staged_updates.push((pid, Some(dest), range_opt));
+                } else {
+                    invalid_coords = true;
+                    break;
                 }
             }
         } else if let Some(step) = override_range_step {
@@ -1101,6 +1120,20 @@ async fn handle_request_scans(
                     let base_au = probe_base_scan_range_au(&ctx.sde, p.probe_type_id);
                     p.range_step = step;
                     p.scan_range_m = base_au * AU_IN_METERS * 2.0_f64.powi(step - 1);
+                }
+            }
+        }
+        if !invalid_coords {
+            for (pid, dest_opt, range_opt) in staged_updates {
+                if let Some(probe) = probe_map.get_mut(&pid) {
+                    if let Some(dest) = dest_opt {
+                        probe.destination = dest;
+                        moved_balls.push((pid, DVec3::from_array(dest)));
+                    }
+                    if let Some((step, scan_range_m)) = range_opt {
+                        probe.range_step = step;
+                        probe.scan_range_m = scan_range_m;
+                    }
                 }
             }
         }
@@ -1453,6 +1486,7 @@ async fn handle_request_scans(
             ("targetClass", PyRep::String("CosmicSignature".into())),
             ("scanGroupID", PyRep::Integer(3)),
             ("groupID", PyRep::Integer(502)),
+            ("strengthAttributeID", PyRep::Integer(1908)),
             ("group", PyRep::String(if show_group { sig.sig_group.clone() } else { "Unknown".into() })),
             ("groupName", if show_group { PyRep::String(sig.sig_group.clone()) } else { PyRep::None }),
             ("type", PyRep::String(if show_name { sig.type_name.clone() } else { "Unidentified Signature".into() })),

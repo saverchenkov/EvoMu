@@ -968,3 +968,209 @@ async fn test_phase_5m_mn12_reprocessing_service() {
         get_dict_val(entry, "typeID").and_then(|v| v.as_i64()) == Some(36)
     }));
 }
+
+#[tokio::test]
+async fn reprocess_tax_debit_and_notenoughmoney_leaves_state() {
+    // parity: feat:mining.reprocessing-tax, feat:mining.reprocessing-yield
+    eve_testkit::attest(&["feat:mining.reprocessing-tax", "feat:mining.reprocessing-yield"]);
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let char_id = 90_000_001i64;
+    let station_id = 60_003_760i64;
+    let mut sess = setup_session(&ctx, char_id).await;
+
+    let veld_ok_id = 100_860_101i64;
+    let veld_fail_id = 100_860_102i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.standings.clear();
+            ch.balance = eve_db::IskCents(100_000_000);
+        }
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.insert(
+            3385,
+            TrainedSkillRecord {
+                type_id: 3385,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        sk.insert(
+            3389,
+            TrainedSkillRecord {
+                type_id: 3389,
+                level: 4,
+                skill_points: 90_510.0,
+            },
+        );
+        sk.insert(
+            60377,
+            TrainedSkillRecord {
+                type_id: 60377,
+                level: 4,
+                skill_points: 90_510.0,
+            },
+        );
+        snap.items.insert(
+            veld_ok_id,
+            InventoryItemRecord {
+                item_id: veld_ok_id,
+                type_id: 1230, // Veldspar
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1_050,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+
+    // 1. Positive path: exact station tax formula & wallet debit
+    let quote_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "GetQuotes",
+            &[PyRep::Integer(veld_ok_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetQuotes");
+    let PyRep::Tuple(ref quote_parts) = quote_res else {
+        panic!("expected 3-tuple from GetQuotes, got {quote_res:?}");
+    };
+    let quote_tax_rate = quote_parts[0].as_f64().expect("stationTaxRate");
+    assert!((quote_tax_rate - 0.05).abs() < 1e-6);
+
+    let trit_unit_val = ctx
+        .sde
+        .types
+        .get(&34)
+        .map(|t| t.base_price.max(4.0))
+        .unwrap_or(4.0);
+    let unit_cents = eve_db::IskCents::from_f64_isk(trit_unit_val).0;
+    let expected_gross_cents = unit_cents * 2_682_i64;
+    let expected_tax_cents = ((expected_gross_cents as f64) * 0.05).round().max(100.0) as i64;
+    let expected_tax_isk = (expected_tax_cents as f64) / 100.0;
+
+    let bal_before = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
+    let reproc_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[PyRep::Integer(veld_ok_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Reprocess Veldspar with sufficient funds");
+    let bal_after = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
+
+    assert_eq!(
+        get_dict_val(&reproc_res, "stationTaxRate").and_then(|v| v.as_f64()),
+        Some(0.05)
+    );
+    let reported_tax = get_dict_val(&reproc_res, "reprocessingTaxISK")
+        .and_then(|v| v.as_f64())
+        .expect("reprocessingTaxISK");
+    assert!((reported_tax - expected_tax_isk).abs() < 1e-6);
+    assert_eq!(
+        get_dict_val(&reproc_res, "tritaniumQuantity").and_then(|v| v.as_i64()),
+        Some(2_682)
+    );
+    assert_eq!(
+        get_dict_val(&reproc_res, "remainderQuantity").and_then(|v| v.as_i64()),
+        Some(50)
+    );
+    assert_eq!(bal_before.0 - bal_after.0, expected_tax_cents);
+
+    // 2. Negative path: NotEnoughMoney leaves wallet, hangar items, and wallet journal untouched
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = eve_db::IskCents(1);
+        }
+        snap.items.insert(
+            veld_fail_id,
+            InventoryItemRecord {
+                item_id: veld_fail_id,
+                type_id: 1230,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1_000,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+
+    let (items_before, journal_len_before) = ctx.db.with_snapshot(|s| {
+        let mut owned: Vec<(i64, u32, i32, i64)> = s
+            .items
+            .values()
+            .filter(|i| i.owner_id == char_id)
+            .map(|i| (i.item_id, i.type_id, i.quantity, i.location_id))
+            .collect();
+        owned.sort_by_key(|entry| entry.0);
+        (owned, s.wallet_journal.len())
+    });
+
+    let err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[PyRep::Integer(veld_fail_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Reprocess with 0.01 ISK must fail with NotEnoughMoney");
+    assert_eq!(err.code, "NotEnoughMoney");
+    assert!(matches!(
+        err.to_client_error("reprocessingSvc", "Reprocess"),
+        eve_proto::ClientError::User {
+            key: eve_proto::UserErrorKey::NotEnoughMoney,
+            ..
+        }
+    ));
+
+    let (bal_after_fail, items_after, journal_len_after) = ctx.db.with_snapshot(|s| {
+        let mut owned: Vec<(i64, u32, i32, i64)> = s
+            .items
+            .values()
+            .filter(|i| i.owner_id == char_id)
+            .map(|i| (i.item_id, i.type_id, i.quantity, i.location_id))
+            .collect();
+        owned.sort_by_key(|entry| entry.0);
+        (
+            s.characters.get(&char_id).unwrap().balance,
+            owned,
+            s.wallet_journal.len(),
+        )
+    });
+    assert_eq!(bal_after_fail, eve_db::IskCents(1));
+    assert_eq!(items_after, items_before);
+    assert_eq!(journal_len_after, journal_len_before);
+}

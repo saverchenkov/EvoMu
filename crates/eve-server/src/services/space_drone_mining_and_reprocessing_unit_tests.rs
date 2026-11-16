@@ -284,14 +284,14 @@ async fn reprocessing_npc_station_corp_hangar_locks_singleton_and_insufficient_f
         "OwnershipOrLocationViolation"
     );
 
-    // 3. InsufficientFunds for NPC station reprocessing tax
+    // 3. NotEnoughMoney for NPC station reprocessing tax
     assert_eq!(
         handle(&ctx, &mut sess, "reprocessingSvc", "Reprocess", &[PyRep::Integer(corp_ore_id)], None)
             .await
             .unwrap()
             .unwrap_err()
             .code,
-        "InsufficientFunds"
+        "NotEnoughMoney"
     );
 
     // 4. Fund character and run batch Reprocess ([corp_ore_id]) + single-arg GetQuotes

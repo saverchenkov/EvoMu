@@ -3428,4 +3428,209 @@ async fn test_e6_pi_extractor_expiry_and_launch_canister() {
     );
 }
 
+#[tokio::test]
+async fn broker_fee_minimum_and_modify_discount_values() {
+    // parity: feat:market.broker-fee, feat:market.modify-order, rpc:marketProxy.ModifyCharOrder
+    eve_testkit::attest(&["feat:market.broker-fee", "feat:market.modify-order"]);
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let mut s1 = setup_pilot(&ctx, 7_717, "demo", "demo-secret", 90_000_001).await;
+
+    // Reset Broker Relations (3446) = 0, Advanced Broker Relations (16597) = 0, and clear standings -> 3.0% broker rate
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.retain(|_, o| o.type_id != TRITANIUM_TYPE_ID);
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.standings.clear();
+            ch.balance = IskCents::from_isk(50_000_000);
+        }
+        let sk = snap.skills.entry(90_000_001).or_default();
+        sk.remove(&3446);
+        sk.remove(&16597);
+    });
+
+    // 1. Small order triggers 100.00 ISK minimum broker fee AND 100.00 ISK minimum relist fee
+    let min_buy = rpc(
+        &ctx,
+        &mut s1,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(TRITANIUM_TYPE_ID as i64),
+            PyRep::Real(1.0),
+            PyRep::Integer(10),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(90),
+            PyRep::Bool(false),
+        ],
+    )
+    .await
+    .expect("small buy order hits 100 ISK minimum broker fee");
+    let min_fee = min_buy
+        .dict_get("brokerFeeISK")
+        .and_then(|v| v.as_f64())
+        .expect("brokerFeeISK");
+    assert!((min_fee - 100.0).abs() < 1e-6);
+    let min_oid = min_buy.dict_get("orderID").and_then(|v| v.as_i64()).unwrap();
+
+    // Negative: cooldown rejection within 300s leaves price and balance unchanged
+    let bal_before_cd = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance);
+    let cd_err = rpc(
+        &ctx,
+        &mut s1,
+        "marketProxy",
+        "ModifyCharOrder",
+        &[PyRep::Integer(min_oid), PyRep::Real(1.10)],
+    )
+    .await
+    .expect_err("ModifyCharOrder inside cooldown must fail");
+    assert_eq!(cd_err.code, "OrderModificationCooldown");
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance),
+        bal_before_cd
+    );
+
+    ctx.advance_virtual_clock(301);
+    let min_mod = rpc(
+        &ctx,
+        &mut s1,
+        "marketProxy",
+        "ModifyCharOrder",
+        &[PyRep::Integer(min_oid), PyRep::Real(1.10)],
+    )
+    .await
+    .expect("ModifyCharOrder minimum 100 ISK relist fee");
+    assert_eq!(min_mod.dict_get("relistFeeISK"), Some(&PyRep::Real(100.0)));
+    rpc(&ctx, &mut s1, "marketProxy", "CancelCharOrder", &[PyRep::Integer(min_oid)])
+        .await
+        .expect("Cancel min order");
+
+    // 2. Exact broker fee & modify relist discount values:
+    // 1,000 * 25.40 ISK = 25,400 ISK at 3.0% (Broker Relations 0, 0 standing) => 762.00 ISK broker fee
+    let bal_pre_762 = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance);
+    let order_762 = rpc(
+        &ctx,
+        &mut s1,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(TRITANIUM_TYPE_ID as i64),
+            PyRep::Real(25.40),
+            PyRep::Integer(1_000),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(90),
+            PyRep::Bool(false),
+        ],
+    )
+    .await
+    .expect("PlaceBuyOrder 762 ISK fee");
+    let fee_762 = order_762
+        .dict_get("brokerFeeISK")
+        .and_then(|v| v.as_f64())
+        .expect("brokerFeeISK");
+    assert!((fee_762 - 762.0).abs() < 1e-6);
+    let oid_762 = order_762.dict_get("orderID").and_then(|v| v.as_i64()).unwrap();
+    let bal_post_762 = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance);
+    assert_eq!(
+        bal_pre_762.0 - bal_post_762.0,
+        IskCents::from_isk(25_400).0 + IskCents::from_isk(762).0
+    );
+
+    // Price reduction 25.40 -> 25.00 ISK (25,000 ISK total) at Advanced Broker Relations 0 (50% discount):
+    // relist fee = 25,000 * 0.03 * 0.50 = 375.00 ISK (no price increase delta fee)
+    ctx.advance_virtual_clock(301);
+    let mod_down = rpc(
+        &ctx,
+        &mut s1,
+        "marketProxy",
+        "ModifyCharOrder",
+        &[PyRep::Integer(oid_762), PyRep::Real(25.00)],
+    )
+    .await
+    .expect("ModifyCharOrder price reduction with 50% discount");
+    assert_eq!(mod_down.dict_get("relistFeeISK"), Some(&PyRep::Real(375.0)));
+
+    // Train Advanced Broker Relations (16597) = 5 -> 80% discount (0.20 factor):
+    // Modify 25.00 -> 25.00+5.00 = 30.00 (30,000 ISK):
+    // base = 30,000 * 0.03 * 0.20 = 180.00; delta = 5,000 * 0.03 = 150.00; total = 330.00 ISK
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(90_000_001).or_default().insert(
+            16597,
+            TrainedSkillRecord {
+                type_id: 16597,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+    });
+    ctx.advance_virtual_clock(301);
+    let mod_up = rpc(
+        &ctx,
+        &mut s1,
+        "marketProxy",
+        "ModifyCharOrder",
+        &[PyRep::Integer(oid_762), PyRep::Real(30.00)],
+    )
+    .await
+    .expect("ModifyCharOrder price increase with 80% discount");
+    assert_eq!(mod_up.dict_get("relistFeeISK"), Some(&PyRep::Real(330.0)));
+
+    // 3. Negative: InsufficientFunds on ModifyCharOrder & PlaceBuyOrder leaves wallet and order intact
+    ctx.advance_virtual_clock(301);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.balance = IskCents::from_isk(10);
+        }
+    });
+    let order_before_fail = ctx
+        .db
+        .with_snapshot(|s| s.market_orders.get(&oid_762).map(|o| (o.price, o.escrow)));
+    assert_eq!(
+        order_before_fail,
+        Some((IskCents::from_isk(30), IskCents(711_914)))
+    );
+    let mod_broke = rpc(
+        &ctx,
+        &mut s1,
+        "marketProxy",
+        "ModifyCharOrder",
+        &[PyRep::Integer(oid_762), PyRep::Real(31.00)],
+    )
+    .await
+    .expect_err("ModifyCharOrder with 10 ISK must fail InsufficientFunds");
+    assert_eq!(mod_broke.code, "InsufficientFunds");
+
+    let buy_broke = rpc(
+        &ctx,
+        &mut s1,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(TRITANIUM_TYPE_ID as i64),
+            PyRep::Real(1.0),
+            PyRep::Integer(10),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(90),
+            PyRep::Bool(false),
+        ],
+    )
+    .await
+    .expect_err("PlaceBuyOrder with 10 ISK (< 100 ISK min broker fee) must fail");
+    assert_eq!(buy_broke.code, "InsufficientFunds");
+
+    let (bal_after_fail, order_after_fail) = ctx.db.with_snapshot(|s| {
+        (
+            s.characters[&90_000_001].balance,
+            s.market_orders.get(&oid_762).map(|o| (o.price, o.escrow)),
+        )
+    });
+    assert_eq!(bal_after_fail, IskCents::from_isk(10));
+    assert_eq!(order_after_fail, order_before_fail);
+}
+
 }

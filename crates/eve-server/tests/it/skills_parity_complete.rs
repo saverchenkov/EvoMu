@@ -1187,3 +1187,195 @@ async fn test_social_hyperlinks_mailbox_limits_and_wormhole_delayed_local() {
 }
 
 }
+
+#[tokio::test]
+async fn queue_save_user_errors() {
+    // parity: feat:skills.queue-save, feat:skills.alpha-training-speed, feat:skills.alpha-skill-caps, feat:skills.prereq-check, notify:OnNewSkillQueueSaved
+    eve_testkit::attest(&[
+        "feat:skills.queue-save",
+        "feat:skills.alpha-training-speed",
+        "feat:skills.alpha-skill-caps",
+        "feat:skills.prereq-check",
+        "notify:OnNewSkillQueueSaved",
+    ]);
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let (mut sess, char_id) =
+        create_and_select_alpha_pilot(&ctx, 1_901, "qsave_err_u", "qsave-pass", "Queue Save Pilot").await;
+    assert_eq!(ctx.db.get_character(char_id).unwrap().clone_grade, 1);
+
+    // Ensure Science (3402) is untrained and Mining (3386) is below IV for prereq check on Astrogeology (3410).
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sk) = snap.skills.get_mut(&char_id) {
+            sk.remove(&3402);
+            sk.remove(&3386);
+            sk.remove(&3410);
+        }
+        snap.skill_queues.remove(&char_id);
+        snap.paused_skill_queues.remove(&char_id);
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Alpha vs Omega SP/min: Omega trains at 2x Alpha rate (clone_mult 1.0 vs 0.5 => half duration)
+    let queue_science_1 = PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3402), PyRep::Integer(1)])]);
+    let alpha_res = rpc(&ctx, &mut sess, "skillMgr2", "SaveNewQueue", &[queue_science_1.clone()])
+        .await
+        .expect("Alpha SaveNewQueue Science I");
+    let alpha_end_sp = alpha_res.dict_get("endSP").and_then(|v| v.as_f64()).unwrap();
+    let alpha_dur = alpha_res.dict_get("durationSeconds").and_then(|v| v.as_f64()).unwrap();
+    assert!((alpha_end_sp - 250.0).abs() < 1e-6);
+    assert!(alpha_dur > 0.0);
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs.iter().any(|n| n.event == "OnNewSkillQueueSaved"));
+
+    upgrade_to_omega_via_nes(&ctx, &mut sess, char_id, 991_077_001).await;
+    assert_eq!(ctx.db.get_character(char_id).unwrap().clone_grade, 2);
+
+    let omega_res = rpc(&ctx, &mut sess, "skillMgr2", "SaveNewQueue", &[queue_science_1.clone()])
+        .await
+        .expect("Omega SaveNewQueue Science I");
+    let omega_end_sp = omega_res.dict_get("endSP").and_then(|v| v.as_f64()).unwrap();
+    let omega_dur = omega_res.dict_get("durationSeconds").and_then(|v| v.as_f64()).unwrap();
+    assert!((omega_end_sp - 250.0).abs() < 1e-6);
+
+    let alpha_sp_per_min = alpha_end_sp / (alpha_dur / 60.0);
+    let omega_sp_per_min = omega_end_sp / (omega_dur / 60.0);
+    assert!((omega_sp_per_min - 2.0 * alpha_sp_per_min).abs() < 1e-6);
+    assert!((alpha_dur - 2.0 * omega_dur).abs() < 1e-3);
+
+    // Snapshot saved queue before testing error rejections
+    let q_before = rpc(&ctx, &mut sess, "skillMgr2", "GetSkillQueue", &[])
+        .await
+        .expect("GetSkillQueue before errors");
+
+    // 2. Negative variants: invalid type, duplicate/already queued, missing prerequisite
+    let inv_type_err = rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "SaveNewQueue",
+        &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(34), PyRep::Integer(1)])])],
+    )
+    .await
+    .expect_err("Non-skill Tritanium (34) must fail with InvalidSkillType");
+    assert_eq!(inv_type_err.code, "InvalidSkillType");
+
+    let prereq_err = rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "SaveNewQueue",
+        &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3410), PyRep::Integer(1)])])],
+    )
+    .await
+    .expect_err("Astrogeology without Mining IV must fail with SkillPrerequisiteNotMet");
+    assert_eq!(prereq_err.code, "SkillPrerequisiteNotMet");
+
+    let dup_err = rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "SaveNewQueue",
+        &[PyRep::List(vec![
+            PyRep::Tuple(vec![PyRep::Integer(3402), PyRep::Integer(1)]),
+            PyRep::Tuple(vec![PyRep::Integer(3402), PyRep::Integer(1)]),
+        ])],
+    )
+    .await
+    .expect_err("Duplicate skill level in SaveNewQueue must fail with SkillAlreadyTrained");
+    assert_eq!(dup_err.code, "SkillAlreadyTrained");
+
+    // Verify rejected SaveNewQueue calls left the valid queue untouched
+    let q_after = rpc(&ctx, &mut sess, "skillMgr2", "GetSkillQueue", &[])
+        .await
+        .expect("GetSkillQueue after errors");
+    assert_eq!(q_after, q_before);
+
+    // 3. Multi-character training without MCT + Alpha level cap & 5M SP cap errors
+    let doll = PyRep::keyval([
+        ("costume", PyRep::Integer(301)),
+        ("gender", PyRep::Integer(1)),
+        ("hair", PyRep::Integer(101)),
+        ("skin", PyRep::Integer(201)),
+    ]);
+    let portrait = PyRep::keyval([
+        ("background", PyRep::Integer(42)),
+        ("camera", PyRep::Integer(1)),
+        ("pose", PyRep::Integer(7)),
+    ]);
+    let char2_id = rpc(
+        &ctx,
+        &mut sess,
+        "charUnboundMgr",
+        "CreateCharacterWithDoll",
+        &[
+            PyRep::String("Queue Save Alt".into()),
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+            PyRep::Integer(11),
+            doll,
+            portrait,
+            PyRep::Integer(17),
+            PyRep::None,
+            PyRep::Integer(JITA_SYS as i64),
+        ],
+    )
+    .await
+    .expect("CreateCharacterWithDoll alt")
+    .as_i64()
+    .expect("char2_id");
+    let mut sess2 = login_and_select(&ctx, 1_902, "qsave_err_u", "qsave-pass", char2_id).await;
+
+    let mut kw_act = HashMap::new();
+    kw_act.insert("activate".to_string(), PyRep::Bool(true));
+    let mct_err = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "skillMgr2",
+            None,
+            "SaveNewQueue",
+            &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3402), PyRep::Integer(1)])])],
+            &kw_act,
+            None,
+        )
+        .await
+        .expect_err("Second character activating queue without MCT must fail");
+    assert_eq!(mct_err.code, "UserError");
+    assert_eq!(mct_err.message, "CantTrainMultipleCharactersWithoutMCT");
+
+    // Pause first character and demote alt to Alpha for Alpha cap checks
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.paused_skill_queues.insert(char_id);
+        if let Some(ch) = snap.characters.get_mut(&char2_id) {
+            ch.clone_grade = 1;
+        }
+    });
+    let alpha_lvl_err = rpc(
+        &ctx,
+        &mut sess2,
+        "skillMgr2",
+        "SaveNewQueue",
+        &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3402), PyRep::Integer(5)])])],
+    )
+    .await
+    .expect_err("Alpha queueing Science V must fail with AlphaCloneSkillLevelCapExceeded");
+    assert_eq!(alpha_lvl_err.code, "AlphaCloneSkillLevelCapExceeded");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char2_id) {
+            ch.skill_points = 5_000_000.0;
+        }
+    });
+    let alpha_sp_err = rpc(
+        &ctx,
+        &mut sess2,
+        "skillMgr2",
+        "SaveNewQueue",
+        &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3402), PyRep::Integer(1)])])],
+    )
+    .await
+    .expect_err("Alpha at 5M SP must fail with AlphaCloneSpCapExceeded");
+    assert_eq!(alpha_sp_err.code, "AlphaCloneSpCapExceeded");
+}

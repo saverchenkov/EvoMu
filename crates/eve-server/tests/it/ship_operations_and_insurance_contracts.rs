@@ -1328,4 +1328,241 @@ async fn test_gh_1070_docked_board_from_capsule_removes_capsule_and_refreshes_in
 
 }
 
+#[tokio::test]
+async fn insurance_payout_default_40pct_and_concord_suppression() {
+    // parity: feat:combat.insurance-payout, feat:combat.insurance-contracts, feat:combat.insurance-buy
+    eve_testkit::attest(&[
+        "feat:combat.insurance-payout",
+        "feat:combat.insurance-contracts",
+        "feat:combat.insurance-buy",
+    ]);
+
+    let ctx = new_test_ctx();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(8899);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let char_id = 90_000_001_i64;
+    let attacker_id = 90_000_002_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let rifter_type = 587_u32;
+    let base_price = eve_server::formulas::compute_ship_insurance_reference_value(&ctx.sde, rifter_type);
+    let (_, expected_40pct) = eve_server::formulas::compute_insurance_quote(base_price, 0.40);
+    assert!(expected_40pct > 0.0, "Rifter 40% default insurance payout must be > 0");
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let spawn_ship_in_space = |ship_id: i64| {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: rifter_type,
+                    owner_id: char_id,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.station_id = None;
+                ch.solar_system_id = sys_id;
+                ch.active_ship_id = ship_id;
+            }
+        });
+    };
+
+    // 1. Uninsured ship destroyed by normal attacker pays default 40% payout
+    let ship_uninsured = 920_801_i64;
+    spawn_ship_in_space(ship_uninsured);
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_uninsured,
+                type_id: rifter_type,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 0.5,
+                mass: 1_000_000.0,
+                radius: 30.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(rifter_type),
+        )
+        .await;
+    let bal_before_uninsured = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
+    let res_uninsured = eve_server::combat::death_pipeline::execute_death_pipeline_sync(
+        &ctx,
+        sys_id,
+        char_id,
+        ship_uninsured,
+        attacker_id,
+        glam::DVec3::ZERO,
+        11,
+    )
+    .expect("uninsured ship destruction");
+    assert!(
+        (res_uninsured.insurance_payout_isk - expected_40pct).abs() < 1e-2,
+        "uninsured ship must pay 40% default ({expected_40pct}), got {}",
+        res_uninsured.insurance_payout_isk
+    );
+    let bal_after_uninsured = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
+    assert_eq!(
+        bal_after_uninsured.0 - bal_before_uninsured.0,
+        eve_db::IskCents::from_f64_isk(res_uninsured.insurance_payout_isk).0,
+        "wallet must be credited by exact 40% insurance payout"
+    );
+
+    let dock_for_insurance = |sess: &mut SessionState| {
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.station_id = Some(station_id);
+            }
+        });
+        sess.station_id = Some(station_id);
+    };
+
+    // 2. Platinum insured ship (100% tier) pays full insured amount (> 40% default)
+    let ship_insured = 920_802_i64;
+    seed_item(&ctx, ship_insured, rifter_type, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    dock_for_insurance(&mut sess);
+    let ins_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "insuranceSvc",
+            None,
+            "InsureShip",
+            &[PyRep::Integer(ship_insured), PyRep::Real(1.0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("InsureShip Platinum");
+    let plat_payout = ins_res.dict_get("payoutISK").and_then(|v| v.as_f64()).unwrap();
+    assert!(plat_payout > expected_40pct, "Platinum payout {plat_payout} must exceed 40% {expected_40pct}");
+
+    spawn_ship_in_space(ship_insured);
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_insured,
+                type_id: rifter_type,
+                position: glam::DVec3::new(500.0, 0.0, 0.0),
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 0.5,
+                mass: 1_000_000.0,
+                radius: 30.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(rifter_type),
+        )
+        .await;
+    let bal_before_plat = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
+    let res_plat = eve_server::combat::death_pipeline::execute_death_pipeline_sync(
+        &ctx,
+        sys_id,
+        char_id,
+        ship_insured,
+        attacker_id,
+        glam::DVec3::new(500.0, 0.0, 0.0),
+        22,
+    )
+    .expect("Platinum insured ship destruction");
+    assert!(
+        (res_plat.insurance_payout_isk - plat_payout).abs() < 1e-2,
+        "insured ship must pay full Platinum payout ({plat_payout}), got {}",
+        res_plat.insurance_payout_isk
+    );
+    let bal_after_plat = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
+    assert_eq!(
+        bal_after_plat.0 - bal_before_plat.0,
+        eve_db::IskCents::from_f64_isk(res_plat.insurance_payout_isk).0
+    );
+
+    // 3. Negative variant: Criminal pilot destroyed by CONCORD suppresses insurance payout to 0.0
+    let ship_concord = 920_803_i64;
+    seed_item(&ctx, ship_concord, rifter_type, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    dock_for_insurance(&mut sess);
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "insuranceSvc",
+            None,
+            "InsureShip",
+            &[PyRep::Integer(ship_concord), PyRep::Real(1.0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("InsureShip before CONCORD loss");
+    spawn_ship_in_space(ship_concord);
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_concord,
+                type_id: rifter_type,
+                position: glam::DVec3::new(1_000.0, 0.0, 0.0),
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 0.5,
+                mass: 1_000_000.0,
+                radius: 30.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(rifter_type),
+        )
+        .await;
+    let now_u = ctx.now_unix();
+    ctx.crimewatch.write().unwrap().get_or_create(char_id).criminal_flag_until_unix = now_u + 900;
+    let bal_before_concord = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
+    let res_concord = eve_server::combat::death_pipeline::execute_death_pipeline_sync(
+        &ctx,
+        sys_id,
+        char_id,
+        ship_concord,
+        1_000_125,
+        glam::DVec3::new(1_000.0, 0.0, 0.0),
+        33,
+    )
+    .expect("CONCORD criminal execution");
+    assert_eq!(
+        res_concord.insurance_payout_isk, 0.0,
+        "CONCORD criminal loss must suppress insurance payout to 0.0"
+    );
+    let bal_after_concord = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
+    assert_eq!(bal_after_concord, bal_before_concord, "CONCORD loss must credit 0 ISK");
+
+    // 4. Negative variant: invalid ship ID in death pipeline returns Err cleanly
+    let err_missing = eve_server::combat::death_pipeline::execute_death_pipeline_sync(
+        &ctx,
+        sys_id,
+        char_id,
+        999_999_999,
+        attacker_id,
+        glam::DVec3::ZERO,
+        44,
+    );
+    assert!(err_missing.is_err(), "non-existent shipID must return Err");
+}
+
 

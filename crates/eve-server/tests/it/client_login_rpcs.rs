@@ -501,3 +501,137 @@ async fn test_p1_track_c_regressions_issues_23_27_31_45() {
         "Issue #45: GetBulletins for a foreign corporation must be rejected"
     );
 }
+
+#[tokio::test]
+async fn select_character_rejects_online_and_foreign_character() {
+    // parity: rpc:charUnboundMgr.SelectCharacterID, feat:character.select-character, feat:character.character-lock
+    eve_testkit::attest(&[
+        "rpc:charUnboundMgr.SelectCharacterID",
+        "feat:character.select-character",
+        "feat:character.character-lock",
+    ]);
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+
+    // 1. Two sessions authenticate as "demo": sess_a completes SelectCharacterID(90_000_001) first.
+    let mut sess_b = SessionState::new(9_202);
+    login_pilot(&ctx, &mut sess_b, "demo", "demo-secret").await;
+    assert_eq!(sess_b.character_id, None);
+
+    let mut sess_a = SessionState::new(9_201);
+    login_pilot(&ctx, &mut sess_a, "demo", "demo-secret").await;
+    let sel_ok = ctx
+        .dispatch_rpc(
+            &mut sess_a,
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(90_000_001)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("SelectCharacterID on first session must succeed");
+    assert_eq!(
+        kv_get(&sel_ok, "characterID").and_then(|v| v.as_i64()),
+        Some(90_000_001)
+    );
+    assert_eq!(sess_a.character_id, Some(90_000_001));
+    assert!(sess_a.station_id.is_some() || sess_a.solar_system_id.is_some());
+
+    // 2. Negative: sess_b attempting SelectCharacterID on already-online 90_000_001 fails:
+    //    - service handler directly enforces CharacterAlreadyOnline on non-owner active session
+    //    - full RPC dispatch rejects the displaced concurrent login session with SessionKicked
+    //    both leaving sess_b's character/system/station/ship session fields completely unmutated.
+    let direct_dup_err = eve_server::services::character_skills::character_gm_tools::handle_char_unbound(
+        &ctx,
+        &mut sess_b,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+    )
+    .expect("SelectCharacterID service handler must return Some")
+    .expect_err("Direct SelectCharacterID on already-online character must fail");
+    assert_eq!(direct_dup_err.code, "CharacterAlreadyOnline");
+    assert_eq!(sess_b.character_id, None);
+    assert_eq!(sess_b.solar_system_id, None);
+    assert_eq!(sess_b.station_id, None);
+    assert_eq!(sess_b.ship_id, None);
+
+    let dup_err = ctx
+        .dispatch_rpc(
+            &mut sess_b,
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(90_000_001)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Displaced sess_b RPC calling SelectCharacterID must fail with SessionKicked");
+    assert_eq!(dup_err.code, "SessionKicked");
+    assert_eq!(sess_b.character_id, None);
+    assert_eq!(sess_b.solar_system_id, None);
+    assert_eq!(sess_b.station_id, None);
+    assert_eq!(sess_b.ship_id, None);
+
+    // 3. Negative: "other" selecting foreign character 90_000_001 fails with CharacterSelectionDenied
+    // with zero session mutation, both before and after selecting its own character 90_000_002.
+    let mut sess_other = SessionState::new(9_203);
+    login_pilot(&ctx, &mut sess_other, "other", "other-secret").await;
+    let foreign_before = ctx
+        .dispatch_rpc(
+            &mut sess_other,
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(90_000_001)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Selecting another account's character must fail");
+    assert_eq!(foreign_before.code, "CharacterSelectionDenied");
+    assert_eq!(sess_other.character_id, None);
+    assert_eq!(sess_other.solar_system_id, None);
+
+    let own_ok = ctx
+        .dispatch_rpc(
+            &mut sess_other,
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(90_000_002)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Selecting own character 90_000_002 must succeed");
+    assert_eq!(
+        kv_get(&own_ok, "characterID").and_then(|v| v.as_i64()),
+        Some(90_000_002)
+    );
+    let snap_station = sess_other.station_id;
+    let snap_sys = sess_other.solar_system_id;
+    let snap_ship = sess_other.ship_id;
+
+    let foreign_after = ctx
+        .dispatch_rpc(
+            &mut sess_other,
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(90_000_001)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Selecting foreign character while already logged into own char must fail");
+    assert_eq!(foreign_after.code, "CharacterSelectionDenied");
+    assert_eq!(sess_other.character_id, Some(90_000_002));
+    assert_eq!(sess_other.station_id, snap_station);
+    assert_eq!(sess_other.solar_system_id, snap_sys);
+    assert_eq!(sess_other.ship_id, snap_ship);
+}

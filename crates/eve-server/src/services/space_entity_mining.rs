@@ -1097,7 +1097,7 @@ pub async fn handle(
                     if tax_cents.0 > 0 {
                         let char_balance = snap.characters.get(&char_id).map(|c| c.balance).unwrap_or(IskCents(0));
                         if char_balance < tax_cents {
-                            return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: format!("Insufficient ISK to pay reprocessing tax ({:.2} ISK required)", tax_isk), client_error: None });
+                            return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::NotEnoughMoney));
                         }
                     }
                     let old_qty = item.quantity;
