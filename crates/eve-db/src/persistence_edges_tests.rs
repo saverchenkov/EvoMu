@@ -375,7 +375,7 @@ fn try_with_snapshot_and_try_with_mut_snapshot_rollback_edges() {
 
     // SQLite failure during try_with_mut_snapshot (drop a core table and dirty that domain) rolls back
     repo.with_sqlite_conn(|conn| {
-        conn.execute("DROP TABLE d6_corp_crimewatch_kv", []).unwrap();
+        conn.execute("DROP TABLE domain_rows", []).unwrap();
     });
     let sqlite_err: Result<(), String> = repo.try_with_mut_snapshot(|s| {
         s.next_entity_id += 999;

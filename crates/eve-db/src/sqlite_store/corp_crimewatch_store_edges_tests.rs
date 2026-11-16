@@ -1,14 +1,7 @@
 use super::*;
-use crate::sqlite_store::fingerprints::FnvHasher;
+use crate::sqlite_store::fingerprints::{FnvHasher, FnvSerializer};
 use rusqlite::Connection;
 use serde::Serialize;
-
-fn init_migrations_table(conn: &Connection) {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_unix INTEGER NOT NULL);",
-    )
-    .unwrap();
-}
 
 #[derive(Serialize)]
 enum EdgeEnum {
@@ -63,45 +56,58 @@ fn fnv_serializer_covers_unit_variants_structs_unsized_seq_and_neg_zero() {
 }
 
 #[test]
-fn corp_crimewatch_migration_and_load_edge_branches() {
-    // Missing schema_migrations fails migration
-    let conn_no_mig = Connection::open_in_memory().unwrap();
-    assert!(apply_d6_corp_crimewatch_migration(&conn_no_mig).is_err());
+fn corp_crimewatch_domain_rows_load_and_sync_edge_branches() {
+    use crate::sqlite_store::quarantine::LoadContext;
+    use crate::sqlite_store::schema::apply_migrations;
 
-    // apply_d6_corp_crimewatch_migration fails if DB is read-only or schema_migrations has wrong columns
-    let tmp = std::env::temp_dir().join(format!(
-        "evomu_d6_cw_ro_{}_{:?}.sqlite",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_file(&tmp);
-    drop(Connection::open(&tmp).unwrap());
-    let ro = Connection::open_with_flags(&tmp, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-    assert!(apply_d6_corp_crimewatch_migration(&ro).is_err());
-    drop(ro);
-    let _ = std::fs::remove_file(&tmp);
-
-    let conn_bad_mig = Connection::open_in_memory().unwrap();
-    conn_bad_mig
-        .execute_batch("CREATE TABLE schema_migrations (bad INTEGER);")
-        .unwrap();
-    assert!(apply_d6_corp_crimewatch_migration(&conn_bad_mig).is_err());
-
-    // load_d6_corp_crimewatch tolerates missing table gracefully
+    // 1. Missing tables tolerate load cleanly and report had_legacy = false.
     let conn_empty = Connection::open_in_memory().unwrap();
     let mut snap = WorldStateSnapshot::default();
-    load_d6_corp_crimewatch(&conn_empty, &mut snap);
+    assert!(!load_corp_crimewatch_domain_rows(
+        &conn_empty,
+        &mut snap,
+        &mut LoadContext::new(false),
+    )
+    .unwrap());
 
-    // Unknown store_key is ignored; corrupt JSON in each of the 3 known keys is ignored without panicking
-    let mut conn = Connection::open_in_memory().unwrap();
-    init_migrations_table(&conn);
-    apply_d6_corp_crimewatch_migration(&conn).unwrap();
+    // 2. Unknown legacy key is tolerated; corrupt domain_rows / legacy / blob rows fail closed under
+    // strict LoadContext::new(false) and quarantine cleanly under LoadContext::quarantine_in_memory().
+    let conn = Connection::open_in_memory().unwrap();
+    apply_migrations(&conn).unwrap();
+    conn.execute_batch(LEGACY_D6_CORP_CRIMEWATCH_SQL).unwrap();
     conn.execute(
         "INSERT INTO d6_corp_crimewatch_kv (store_key, payload_json) VALUES ('unknown_key', '{}')",
         [],
     )
     .unwrap();
-    load_d6_corp_crimewatch(&conn, &mut snap);
+    assert!(load_corp_crimewatch_domain_rows(
+        &conn,
+        &mut snap,
+        &mut LoadContext::new(false),
+    )
+    .unwrap());
+
+    for bad_domain in [DOMAIN_CORP_GOVERNANCE, DOMAIN_CRIMEWATCH, DOMAIN_WARFARE] {
+        conn.execute(
+            "INSERT OR REPLACE INTO domain_rows (domain, key, value) VALUES (?1, 'bad_key/1', '{bad_json')",
+            [bad_domain],
+        )
+        .unwrap();
+        assert!(load_corp_crimewatch_domain_rows(
+            &conn,
+            &mut snap,
+            &mut LoadContext::new(false),
+        )
+        .is_err());
+        assert!(load_corp_crimewatch_domain_rows(
+            &conn,
+            &mut snap,
+            &mut LoadContext::quarantine_in_memory(),
+        )
+        .unwrap());
+        conn.execute("DELETE FROM domain_rows WHERE domain = ?1", [bad_domain])
+            .unwrap();
+    }
 
     for key in [KEY_CORP_GOV, KEY_CRIMEWATCH, KEY_WARFARE] {
         conn.execute(
@@ -109,144 +115,94 @@ fn corp_crimewatch_migration_and_load_edge_branches() {
             [key],
         )
         .unwrap();
-        load_d6_corp_crimewatch(&conn, &mut snap);
+        assert!(load_corp_crimewatch_domain_rows(
+            &conn,
+            &mut snap,
+            &mut LoadContext::new(false),
+        )
+        .is_err());
+        assert!(load_corp_crimewatch_domain_rows(
+            &conn,
+            &mut snap,
+            &mut LoadContext::quarantine_in_memory(),
+        )
+        .unwrap());
         conn.execute("DELETE FROM d6_corp_crimewatch_kv WHERE store_key = ?1", [key])
             .unwrap();
     }
-    let _ = &mut conn;
-}
 
-#[test]
-fn corp_crimewatch_sync_error_and_rollback_fallbacks() {
-    let mut conn = Connection::open_in_memory().unwrap();
-    init_migrations_table(&conn);
-    apply_d6_corp_crimewatch_migration(&conn).unwrap();
-
-    let mut snap = WorldStateSnapshot::default();
-    let mut fp = TableFingerprints {
-        d6_corp_crimewatch: compute_d6_corp_crimewatch_fingerprints(&snap),
-        ..TableFingerprints::default()
-    };
-    // Clean sync is a no-op returning false
-    {
-        let tx = conn.transaction().unwrap();
-        assert!(!sync_d6_corp_crimewatch(&tx, &snap, &mut fp).unwrap());
-        tx.commit().unwrap();
-    }
-
-    // Mutate all 3 domains so all 3 become dirty and trigger sync
-    snap.corp_hangar_divisions
-        .entry(98000001)
-        .or_default()
-        .insert(1, "Hangars".into());
-    snap.zarzakh_gate_locks.insert(1001, (1, 1_700_000_000));
-    snap.war_state.wars.insert(1, Default::default());
-    {
-        let tx = conn.transaction().unwrap();
-        assert!(sync_d6_corp_crimewatch(&tx, &snap, &mut fp).unwrap());
-        tx.commit().unwrap();
-    }
-
-    let mut loaded = WorldStateSnapshot::default();
-    load_d6_corp_crimewatch(&conn, &mut loaded);
-    assert_eq!(
-        loaded.corp_hangar_divisions.get(&98000001).and_then(|m| m.get(&1)).map(String::as_str),
-        Some("Hangars")
-    );
-    assert_eq!(loaded.zarzakh_gate_locks.get(&1001), Some(&(1, 1_700_000_000)));
-    assert!(loaded.war_state.wars.contains_key(&1));
-
-    // Corrupt JSON on warfare key -> rollback fails closed without partial mutation or wiping
+    // 3. Duplicate legacy `world_kv_blobs` cleanup drops only Family 4 keys and keeps other blobs intact.
     conn.execute(
-        "INSERT OR REPLACE INTO d6_corp_crimewatch_kv (store_key, payload_json) VALUES (?1, 'corrupt')",
-        [KEY_WARFARE],
+        "INSERT OR REPLACE INTO world_kv_blobs (blob_key, blob_json) VALUES ('corp_container_logs', '[]'), ('wh_polarizations', '[]'), ('killmail_details', '[]')",
+        [],
     )
     .unwrap();
-    snap.corp_hangar_divisions.clear();
-    snap.war_state.wars.insert(2, Default::default());
-    let err = rollback_d6_corp_crimewatch(&conn, &mut snap, &fp).unwrap_err();
-    assert!(err.contains("warfare_domain"));
-    assert!(snap.war_state.wars.contains_key(&2));
-    assert!(snap.corp_hangar_divisions.is_empty());
+    {
+        let tx = conn.unchecked_transaction().unwrap();
+        drop_legacy_corp_crimewatch_tables(&tx).unwrap();
+        tx.commit().unwrap();
+    }
+    let legacy_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'd6_corp_crimewatch_kv'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(legacy_exists, 0);
+    let remaining_blobs: i64 = conn
+        .query_row("SELECT COUNT(*) FROM world_kv_blobs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(remaining_blobs, 1);
 
-    // Missing row in DB triggers default rollback for crimewatch domain when baseline fp is empty
-    conn.execute(
-        "DELETE FROM d6_corp_crimewatch_kv WHERE store_key = ?1",
-        [KEY_CRIMEWATCH],
-    )
-    .unwrap();
-    let empty_fp = TableFingerprints {
-        d6_corp_crimewatch: compute_d6_corp_crimewatch_fingerprints(&WorldStateSnapshot::default()),
-        ..TableFingerprints::default()
-    };
-    snap.zarzakh_gate_locks.insert(9999, (2, 123));
-    let mut cw_only = WorldStateSnapshot::default();
-    cw_only.zarzakh_gate_locks.insert(9999, (2, 123));
-    rollback_d6_corp_crimewatch(&conn, &mut cw_only, &empty_fp).unwrap();
-    assert!(cw_only.zarzakh_gate_locks.is_empty());
-
-    // SQL error during sync on each dirty domain preserves fp unchanged
+    // 4. Sync error propagation when domain_rows is missing or blocked by trigger across all 3 domains.
     let mut conn_err = Connection::open_in_memory().unwrap();
-    init_migrations_table(&conn_err);
-    apply_d6_corp_crimewatch_migration(&conn_err).unwrap();
-    for (trigger_key, mutate_fn) in [
+    apply_migrations(&conn_err).unwrap();
+    for (trigger_domain, mutate_fn) in [
         (
-            KEY_CORP_GOV,
+            DOMAIN_CORP_GOVERNANCE,
             (|s: &mut WorldStateSnapshot| {
                 s.corp_hangar_divisions
-                    .entry(98000002)
+                    .entry(98_000_002)
                     .or_default()
                     .insert(1, "Div".into());
             }) as fn(&mut WorldStateSnapshot),
         ),
-        (KEY_CRIMEWATCH, |s: &mut WorldStateSnapshot| {
+        (DOMAIN_CRIMEWATCH, |s: &mut WorldStateSnapshot| {
             s.zarzakh_gate_locks.insert(55, (1, 999));
         }),
-        (KEY_WARFARE, |s: &mut WorldStateSnapshot| {
+        (DOMAIN_WARFARE, |s: &mut WorldStateSnapshot| {
             s.war_state.wars.insert(66, Default::default());
         }),
     ] {
         let sql = format!(
             "DROP TRIGGER IF EXISTS fail_sync;
-             CREATE TRIGGER fail_sync BEFORE INSERT ON d6_corp_crimewatch_kv
-             WHEN NEW.store_key = '{trigger_key}'
+             CREATE TRIGGER fail_sync BEFORE INSERT ON domain_rows
+             WHEN NEW.domain = '{trigger_domain}'
              BEGIN SELECT RAISE(ABORT, 'blocked'); END;"
         );
         conn_err.execute_batch(&sql).unwrap();
         let mut s = WorldStateSnapshot::default();
-        let mut s_fp = TableFingerprints {
-            d6_corp_crimewatch: compute_d6_corp_crimewatch_fingerprints(&s),
-            ..TableFingerprints::default()
-        };
-        let orig_fp = s_fp.d6_corp_crimewatch;
         mutate_fn(&mut s);
         {
             let tx = conn_err.transaction().unwrap();
-            assert!(sync_d6_corp_crimewatch(&tx, &s, &mut s_fp).is_err());
+            let err = sync_corp_crimewatch_domain_rows(&tx, &s).unwrap_err();
+            assert!(err.contains("blocked"), "unexpected err: {err}");
         }
-        assert_eq!(s_fp.d6_corp_crimewatch, orig_fp);
     }
-
-    // Clean rollback when table dropped is a harmless no-op
-    conn.execute("DROP TABLE d6_corp_crimewatch_kv", []).unwrap();
-    let clean_snap = WorldStateSnapshot::default();
-    let clean_fp = TableFingerprints {
-        d6_corp_crimewatch: compute_d6_corp_crimewatch_fingerprints(&clean_snap),
-        ..TableFingerprints::default()
-    };
-    let mut dirty_dropped = clean_snap.clone();
-    rollback_d6_corp_crimewatch(&conn, &mut dirty_dropped, &clean_fp).unwrap();
-    assert_eq!(dirty_dropped.next_entity_id, clean_snap.next_entity_id);
-    dirty_dropped.zarzakh_gate_locks.insert(77, (1, 100));
-    assert!(rollback_d6_corp_crimewatch(&conn, &mut dirty_dropped, &clean_fp).is_err());
-    assert!(dirty_dropped.zarzakh_gate_locks.contains_key(&77));
+    conn_err.execute("DROP TABLE domain_rows", []).unwrap();
+    {
+        let tx = conn_err.transaction().unwrap();
+        assert!(sync_corp_crimewatch_domain_rows(&tx, &snap).is_err());
+    }
 }
 
 #[test]
-fn rollback_d6_corp_crimewatch_fails_closed_on_missing_nonempty_row_without_partial_overwrite() {
+fn corp_crimewatch_rollback_fails_closed_without_partial_overwrite() {
+    use crate::sqlite_store::schema::apply_migrations;
+
     let mut conn = Connection::open_in_memory().unwrap();
-    init_migrations_table(&conn);
-    apply_d6_corp_crimewatch_migration(&conn).unwrap();
+    apply_migrations(&conn).unwrap();
 
     let mut base = WorldStateSnapshot::default();
     base.corp_hangar_divisions
@@ -256,29 +212,38 @@ fn rollback_d6_corp_crimewatch_fails_closed_on_missing_nonempty_row_without_part
     base.zarzakh_gate_locks.insert(1001, (1, 1_700_000_000));
     base.war_state.wars.insert(1, Default::default());
 
-    let mut fp = TableFingerprints::default();
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_d6_corp_crimewatch(&tx, &base, &mut fp).unwrap());
+        assert!(sync_corp_crimewatch_domain_rows(&tx, &base).unwrap());
         tx.commit().unwrap();
     }
 
-    // Mutate all 3 domains in memory and delete `KEY_CRIMEWATCH` (middle row) while keeping non-empty fp.
+    // Mutate all 3 domains in memory and corrupt the middle domain (`DOMAIN_CRIMEWATCH`).
     let mut dirty = base.clone();
     dirty.corp_hangar_divisions.clear();
     dirty.zarzakh_gate_locks.insert(2002, (2, 2_000));
     dirty.war_state.wars.insert(2, Default::default());
 
     conn.execute(
-        "DELETE FROM d6_corp_crimewatch_kv WHERE store_key = ?1",
-        [KEY_CRIMEWATCH],
+        "INSERT OR REPLACE INTO domain_rows (domain, key, value) VALUES (?1, 'zarzakh_gate_locks/1001', '{corrupt')",
+        [DOMAIN_CRIMEWATCH],
     )
     .unwrap();
     let failures_before = crate::persist_failures_total();
-    let err = rollback_d6_corp_crimewatch(&conn, &mut dirty, &fp).unwrap_err();
-    assert!(err.contains("crimewatch_domain"), "unexpected err: {err}");
+    let err = rollback_corp_crimewatch(&conn, &mut dirty).unwrap_err();
+    assert!(err.contains(DOMAIN_CRIMEWATCH), "unexpected err: {err}");
     assert!(crate::persist_failures_total() >= failures_before + 1);
-    // Neither the earlier `corp_gov` domain nor later `warfare` domain was mutated.
+    // Neither earlier `corp_governance` nor later `warfare` domain was mutated.
+    assert!(dirty.corp_hangar_divisions.is_empty());
+    assert!(dirty.zarzakh_gate_locks.contains_key(&2002));
+    assert!(dirty.war_state.wars.contains_key(&2));
+
+    // Dropping `domain_rows` also fails rollback closed without mutating `dirty`.
+    conn.execute("DROP TABLE domain_rows", []).unwrap();
+    let failures_before_drop = crate::persist_failures_total();
+    let drop_err = rollback_corp_crimewatch(&conn, &mut dirty).unwrap_err();
+    assert!(drop_err.contains("domain_rows"), "unexpected err: {drop_err}");
+    assert!(crate::persist_failures_total() >= failures_before_drop + 1);
     assert!(dirty.corp_hangar_divisions.is_empty());
     assert!(dirty.zarzakh_gate_locks.contains_key(&2002));
     assert!(dirty.war_state.wars.contains_key(&2));

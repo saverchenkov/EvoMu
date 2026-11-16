@@ -701,7 +701,11 @@ fn social_store_dropped_tables_corrupt_json_and_migration_error_paths() {
 
 #[test]
 fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
-    use crate::sqlite_store::corp_crimewatch_store::{load_d6_corp_crimewatch, sync_d6_corp_crimewatch};
+    use crate::sqlite_store::corp_crimewatch_store::{
+        load_corp_crimewatch_domain_rows, sync_corp_crimewatch_domain_rows,
+        LEGACY_D6_CORP_CRIMEWATCH_SQL,
+    };
+    use crate::sqlite_store::domain_rows::DOMAIN_CORP_GOVERNANCE;
     use crate::sqlite_store::industry_market_pve_store::{load_d6_batch4, sync_d6_batch4};
     use crate::sqlite_store::notes_lp_sequence_store::{load_d6, sync_d6};
     use crate::sqlite_store::schema::{load_or_init_jwt_secret, save_jwt_secret};
@@ -736,7 +740,6 @@ fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
     assert!(crate::sqlite_store::domain_rows::apply_domain_rows_migration(&c_ro).is_err());
     assert!(crate::sqlite_store::notes_lp_sequence_store::apply_d6_migration(&c_ro).is_err());
     assert!(crate::sqlite_store::social_store::apply_d6_social_migration(&c_ro).is_err());
-    assert!(crate::sqlite_store::corp_crimewatch_store::apply_d6_corp_crimewatch_migration(&c_ro).is_err());
     assert!(crate::sqlite_store::industry_market_pve_store::apply_d6_batch4_migration(&c_ro).is_err());
     assert!(crate::sqlite_store::service_domains_store::apply_service_domains_migration(&c_ro).is_err());
     // View collision on items triggers index/alter/schema failure during apply_migrations
@@ -757,19 +760,41 @@ fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
 
     // 3. Cold stores unknown keys, dropped tables on sync/load
     let mut c_cw = open_migrated_conn();
-    c_cw.execute("INSERT INTO d6_corp_crimewatch_kv (store_key, payload_json) VALUES ('unknown_k', '{}')", []).unwrap();
+    c_cw.execute_batch(LEGACY_D6_CORP_CRIMEWATCH_SQL).unwrap();
+    c_cw.execute(
+        "INSERT INTO d6_corp_crimewatch_kv (store_key, payload_json) VALUES ('unknown_k', '{}')",
+        [],
+    )
+    .unwrap();
+    c_cw.execute(
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'unknown_field/1', '{}')",
+        [DOMAIN_CORP_GOVERNANCE],
+    )
+    .unwrap();
     let mut cw_snap = WorldStateSnapshot::default();
-    load_d6_corp_crimewatch(&c_cw, &mut cw_snap);
+    let had_legacy_cw = load_corp_crimewatch_domain_rows(
+        &c_cw,
+        &mut cw_snap,
+        &mut crate::sqlite_store::quarantine::LoadContext::quarantine_in_memory(),
+    )
+    .unwrap();
+    assert!(had_legacy_cw);
     c_cw.execute("DROP TABLE d6_corp_crimewatch_kv", []).unwrap();
-    load_d6_corp_crimewatch(&c_cw, &mut cw_snap);
+    c_cw.execute("DROP TABLE domain_rows", []).unwrap();
+    let had_after_drop = load_corp_crimewatch_domain_rows(
+        &c_cw,
+        &mut cw_snap,
+        &mut crate::sqlite_store::quarantine::LoadContext::quarantine_in_memory(),
+    )
+    .unwrap();
+    assert!(!had_after_drop);
     let mut cw_pop = WorldStateSnapshot::default();
     cw_pop.wars.insert(1, WarRecord {
         war_id: 1, aggressor_corp_id: 1, defender_corp_id: 2, mutual: false, started_unix: 1, active: true,
     });
-    let mut fp_cw = TableFingerprints::default();
     {
         let tx = c_cw.transaction().unwrap();
-        assert!(sync_d6_corp_crimewatch(&tx, &cw_pop, &mut fp_cw).is_err());
+        assert!(sync_corp_crimewatch_domain_rows(&tx, &cw_pop).is_err());
     }
 
     // notes_lp_sequence_store & notes_lp domain_rows dropped tables & unknown sequence key

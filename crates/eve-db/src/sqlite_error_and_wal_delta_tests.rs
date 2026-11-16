@@ -2,7 +2,7 @@ use super::*;
 use crate::accounts::{base64url_encode_no_pad, sha256_bytes};
 use crate::durable_domain_types::sorted_set_serde;
 use crate::persistence::WorldStateWalDelta;
-use crate::sqlite_store::corp_crimewatch_store::canonical_fp;
+use crate::sqlite_store::fingerprints::canonical_fp;
 use crate::sqlite_store::fingerprints::{fnv1a_hasher, fp_sp6_lifecycle};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};

@@ -5,11 +5,13 @@
 #![forbid(unsafe_code)]
 
 use super::evedb_sqlite_cov_tests::build_populated_snapshot;
-use crate::sqlite_store::corp_crimewatch_store::load_d6_corp_crimewatch;
+use crate::sqlite_store::corp_crimewatch_store::{
+    load_corp_crimewatch_domain_rows, KEY_CRIMEWATCH, LEGACY_D6_CORP_CRIMEWATCH_SQL,
+};
 use crate::sqlite_store::domain_rows::{
     load_ledger_domain_rows, load_notes_lp_domain_rows, sync_ledger_domain_rows,
-    sync_notes_lp_domain_rows, DOMAIN_CHAR_LP_LOGS, DOMAIN_MARKET_TRANSACTIONS,
-    DOMAIN_WALLET_JOURNAL_META,
+    sync_notes_lp_domain_rows, DOMAIN_CHAR_LP_LOGS, DOMAIN_CRIMEWATCH,
+    DOMAIN_MARKET_TRANSACTIONS, DOMAIN_WALLET_JOURNAL_META,
 };
 use crate::sqlite_store::industry_market_pve_store::load_d6_batch4;
 use crate::sqlite_store::load::load_snapshot_from_sqlite;
@@ -188,9 +190,11 @@ fn sqlite_store_malformed_json_and_unknown_kv_keys_coverage() {
         [],
     )
     .expect("insert unknown world_meta key");
+    conn.execute_batch(LEGACY_D6_CORP_CRIMEWATCH_SQL)
+        .expect("create legacy d6_corp_crimewatch_kv");
     conn.execute(
-        "INSERT OR REPLACE INTO d6_corp_crimewatch_kv (store_key, payload_json) VALUES ('unknown_kv_key', '{}'), ('criminal_timers', '{bad')",
-        [],
+        "INSERT OR REPLACE INTO d6_corp_crimewatch_kv (store_key, payload_json) VALUES ('unknown_kv_key', '{}'), (?1, '{bad')",
+        [KEY_CRIMEWATCH],
     )
     .expect("insert unknown and corrupt crimewatch kv");
     conn.execute(
@@ -199,10 +203,10 @@ fn sqlite_store_malformed_json_and_unknown_kv_keys_coverage() {
     )
     .expect("insert unknown and corrupt world_kv_blobs");
     conn.execute(
-        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, '999', '{bad'), (?2, '999', '{bad'), (?3, '999', '{bad')",
-        params![DOMAIN_WALLET_JOURNAL_META, DOMAIN_MARKET_TRANSACTIONS, DOMAIN_CHAR_LP_LOGS],
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, '999', '{bad'), (?2, '999', '{bad'), (?3, '999', '{bad'), (?4, 'crimewatch_states/999', '{bad')",
+        params![DOMAIN_WALLET_JOURNAL_META, DOMAIN_MARKET_TRANSACTIONS, DOMAIN_CHAR_LP_LOGS, DOMAIN_CRIMEWATCH],
     )
-    .expect("insert corrupt ledger and notes_lp domain_rows");
+    .expect("insert corrupt ledger, notes_lp, and crimewatch domain_rows");
 
     let mut dst = WorldStateSnapshot::default();
     load_d6(&conn, &mut dst);
@@ -210,9 +214,16 @@ fn sqlite_store_malformed_json_and_unknown_kv_keys_coverage() {
         .expect("quarantine corrupt ledger domain_rows");
     let _ = load_notes_lp_domain_rows(&conn, &mut dst, &mut LoadContext::quarantine_in_memory())
         .expect("quarantine corrupt notes_lp domain_rows");
-    load_d6_corp_crimewatch(&conn, &mut dst);
+    let had_legacy_cw = load_corp_crimewatch_domain_rows(
+        &conn,
+        &mut dst,
+        &mut LoadContext::quarantine_in_memory(),
+    )
+    .expect("quarantine corrupt corp_crimewatch rows");
+    assert!(had_legacy_cw);
     load_d6_batch4(&conn, &mut dst);
     assert!(dst.killmail_details.is_empty());
+    assert!(dst.crimewatch_states.is_empty());
     assert!(dst.wallet_journal_meta.is_empty());
     assert!(dst.market_transactions.is_empty());
     assert!(dst.char_lp_logs.is_empty());
@@ -222,7 +233,6 @@ fn sqlite_store_malformed_json_and_unknown_kv_keys_coverage() {
     for tbl in [
         "world_meta",
         "domain_rows",
-        "d6_corp_crimewatch_kv",
         "world_kv_blobs",
         "char_mining_ledger",
     ] {
@@ -244,7 +254,13 @@ fn sqlite_store_malformed_json_and_unknown_kv_keys_coverage() {
         &mut LoadContext::quarantine_in_memory(),
     )
     .expect("load notes_lp with dropped domain_rows");
-    load_d6_corp_crimewatch(&drop_optional_conn, &mut empty_dst);
+    let had_optional_cw = load_corp_crimewatch_domain_rows(
+        &drop_optional_conn,
+        &mut empty_dst,
+        &mut LoadContext::quarantine_in_memory(),
+    )
+    .expect("load corp_crimewatch with dropped domain_rows");
+    assert!(!had_optional_cw);
     load_d6_batch4(&drop_optional_conn, &mut empty_dst);
 
     // Direct social error check when a social table is dropped
