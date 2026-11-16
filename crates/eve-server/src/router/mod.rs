@@ -31,7 +31,10 @@ pub use delta_projection::{
     ProjectedTarget, ResolvedNotification,
 };
 pub use dispatch::box_fut;
-pub use eve_proto::{ClientError, UserErrorKey, V24_PROGRAMMATIC_USER_ERROR_KEYS};
+pub use eve_proto::{
+    ClientError, IskCents, UserErrorArg, UserErrorKey, UserErrorPresentation,
+    UI_LABEL_SHIP_TOO_LARGE, V24_PROGRAMMATIC_USER_ERROR_KEYS,
+};
 pub use rpc_args::RpcArgs;
 pub use session_transition::*;
 

@@ -515,9 +515,10 @@ pub(crate) fn handle_unload_ammo(
                 ship_type.map(|st| crate::services::fitting_saved_apply::get_ship_hold_capacity(dest_flag as u16, st, eval_cargo_cap)).unwrap_or(0.0)
             };
             if hold_cap <= 0.0 {
-                return Err(BridgeRpcError::user_error_with_args(
+                return Err(BridgeRpcError::hold_capacity_error(
                     eve_proto::UserErrorKey::NotEnoughCargoSpace,
-                    [("volume", PyRep::Real(1.0)), ("available", PyRep::Real(0.0))],
+                    1.0,
+                    0.0,
                 ));
             }
             Some(hold_cap)
@@ -528,9 +529,10 @@ pub(crate) fn handle_unload_ammo(
                 })
             }).unwrap_or(0.0);
             if cont_cap <= 0.0 {
-                return Err(BridgeRpcError::user_error_with_args(
+                return Err(BridgeRpcError::hold_capacity_error(
                     eve_proto::UserErrorKey::NotEnoughCargoSpace,
-                    [("volume", PyRep::Real(1.0)), ("available", PyRep::Real(0.0))],
+                    1.0,
+                    0.0,
                 ));
             }
             Some(cont_cap)
@@ -569,9 +571,10 @@ pub(crate) fn handle_unload_ammo(
                 if let Some(cap) = dest_cap {
                     if cap > 0.0 && used_cargo + vol > cap + 1e-4 {
                         let available = (cap - used_cargo).max(0.0);
-                        return Err(BridgeRpcError::user_error_with_args(
+                        return Err(BridgeRpcError::hold_capacity_error(
                             eve_proto::UserErrorKey::NotEnoughCargoSpace,
-                            [("volume", PyRep::Real(vol)), ("available", PyRep::Real(available))],
+                            vol,
+                            available,
                         ));
                     }
                 }
@@ -2676,10 +2679,20 @@ pub(crate) async fn try_handle_mercden_remote_shield_repair(
     let falloff = eve_dogma::get_module_falloff(&mod_state, &ctx.sde);
     let max_range = if opt_range > 0.0 { opt_range + falloff.max(0.0) } else { 40_000.0 };
     let attacker_pos = sys.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position);
-    let target_pos = ctx.db.with_snapshot(|s| s.structures.get(&target_id).map(|st| DVec3::from_array(st.position)));
-    if let (Some(apos), Some(tpos)) = (attacker_pos, target_pos) {
-        if apos.distance(tpos) > max_range {
-            return Err(BridgeRpcError { code: "TargetOutOfRange".into(), message: format!("Target {target_id} is out of module range"), client_error: None });
+    let target_info = ctx.db.with_snapshot(|s| {
+        s.structures
+            .get(&target_id)
+            .map(|st| (st.name.clone(), DVec3::from_array(st.position)))
+    });
+    if let (Some(apos), Some((target_name, tpos))) = (attacker_pos, target_info) {
+        let dist = apos.distance(tpos);
+        if dist > max_range {
+            return Err(BridgeRpcError::target_out_of_range(
+                target_name,
+                m.type_id as i64,
+                dist,
+                format!("Target {target_id} is out of module range"),
+            ));
         }
     }
     let cap_need = mod_state.get_attribute(attr_ids::CAPACITOR_NEED, &ctx.sde);

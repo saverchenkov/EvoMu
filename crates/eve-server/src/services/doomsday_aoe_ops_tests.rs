@@ -92,9 +92,9 @@ fn setup_titan_doomsday_ctx() -> (ServerContext, SessionState, i64, i64, u32, i6
 #[test]
 fn test_validate_doomsday_target_points_and_parse_vec3() {
     let origin = DVec3::new(0.0, 0.0, 0.0);
-    assert!(validate_doomsday_target_points(origin, 100_000.0, &[DVec3::new(50_000.0, 0.0, 0.0)]).is_ok());
-    assert!(validate_doomsday_target_points(origin, 100_000.0, &[DVec3::new(150_000.0, 0.0, 0.0)]).is_err());
-    assert!(validate_doomsday_target_points(origin, 100_000.0, &[DVec3::new(f64::NAN, 0.0, 0.0)]).is_err());
+    assert!(validate_doomsday_target_points(origin, 24_550, 100_000.0, &[DVec3::new(50_000.0, 0.0, 0.0)]).is_ok());
+    assert!(validate_doomsday_target_points(origin, 24_550, 100_000.0, &[DVec3::new(150_000.0, 0.0, 0.0)]).is_err());
+    assert!(validate_doomsday_target_points(origin, 24_550, 100_000.0, &[DVec3::new(f64::NAN, 0.0, 0.0)]).is_err());
 
     let args_tuple = vec![
         PyRep::Integer(1),

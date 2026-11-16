@@ -856,7 +856,10 @@ pub async fn activate_command_burst(
         if has_wrong_group_in_slot {
             return Err(BridgeRpcError { code: "InvalidChargeGroup".into(), message: format!("Loaded charge is incompatible with {}", mod_type.name), client_error: None });
         }
-        return Err(BridgeRpcError { code: "NoChargesLoaded".into(), message: "Command Burst module requires a loaded Command Burst charge".into(), client_error: None });
+        return Err(BridgeRpcError::no_charges_loaded(
+            mod_type.type_id as i64,
+            "Command Burst module requires a loaded Command Burst charge",
+        ));
     };
     if !is_valid_charge_type(c_tid) {
         return Err(BridgeRpcError { code: "InvalidChargeGroup".into(), message: format!("Charge {c_tid} is incompatible with {}", mod_type.name), client_error: None });

@@ -86,12 +86,14 @@ pub(crate) fn ship_free_cargo_m3(
         .or_else(|| ctx.sde.types.get(&ship_item.type_id).map(|t| t.capacity))
         .unwrap_or(0.0);
     if cap <= 0.0 {
-        return Err(BridgeRpcError::user_error_with_args(
-            eve_proto::UserErrorKey::NotEnoughCargoSpace,
-            [
-                ("volume", PyRep::Real(0.0)),
-                ("available", PyRep::Real(0.0)),
-            ],
+        return Err(eve_proto::BridgeRpcError::with_client_error(
+            "NotEnoughCargoSpace",
+            format!("Active ship {ship_id} has no cargo hold capacity"),
+            eve_proto::ClientError::hold_capacity_error(
+                eve_proto::UserErrorKey::NotEnoughCargoSpace,
+                0.0,
+                0.0,
+            ),
         ));
     }
     let used: f64 = snap
@@ -659,12 +661,14 @@ pub async fn handle_mercden_component_call(
         let full_tax_qty = (total.saturating_mul(tax_pct)) / 100;
         let full_owner_qty = total.saturating_sub(full_tax_qty);
         if full_owner_qty > 0 && max_owner_units == 0 {
-            return Err(BridgeRpcError::user_error_with_args(
-                eve_proto::UserErrorKey::NotEnoughCargoSpace,
-                [
-                    ("volume", PyRep::Real(unit_vol)),
-                    ("available", PyRep::Real(free_m3.max(0.0))),
-                ],
+            return Err(eve_proto::BridgeRpcError::with_client_error(
+                "NotEnoughCargoSpace",
+                "Active ship does not have enough free cargo capacity to extract Infomorph Decryption Keys",
+                eve_proto::ClientError::hold_capacity_error(
+                    eve_proto::UserErrorKey::NotEnoughCargoSpace,
+                    unit_vol,
+                    free_m3.max(0.0),
+                ),
             ));
         }
         let extracted_total = if max_owner_units >= full_owner_qty || tax_pct >= 100 {
@@ -673,12 +677,14 @@ pub async fn handle_mercden_component_call(
             ((u64::from(max_owner_units) * 100) / u64::from(100 - tax_pct)).min(u64::from(total)) as u32
         };
         if extracted_total == 0 {
-            return Err(BridgeRpcError::user_error_with_args(
-                eve_proto::UserErrorKey::NotEnoughCargoSpace,
-                [
-                    ("volume", PyRep::Real(unit_vol)),
-                    ("available", PyRep::Real(free_m3.max(0.0))),
-                ],
+            return Err(eve_proto::BridgeRpcError::with_client_error(
+                "NotEnoughCargoSpace",
+                "Active ship does not have enough free cargo capacity to extract Infomorph Decryption Keys",
+                eve_proto::ClientError::hold_capacity_error(
+                    eve_proto::UserErrorKey::NotEnoughCargoSpace,
+                    unit_vol,
+                    free_m3.max(0.0),
+                ),
             ));
         }
         let den_mut = snap.sov_runtime.mercenary_dens.get_mut(&den_id).expect("checked");
@@ -1080,12 +1086,14 @@ pub async fn apply_mercenary_den_shield_repair(
         .flatten()
         .map(|(_, b)| b.position)
         .unwrap_or_else(|| DVec3::from_array(pos_arr));
-    if ship_ball.position.distance(den_pos) > 50_000.0 {
-        return Err(BridgeRpcError {
-            code: "TargetOutOfRange".into(),
-            message: "Mercenary Den is outside Remote Shield Booster range".into(),
-            client_error: None,
-        });
+    let den_dist = ship_ball.position.distance(den_pos);
+    if den_dist > 50_000.0 {
+        return Err(eve_proto::BridgeRpcError::target_out_of_range(
+            crate::services::inventory_fitting::resolve_target_display_name(ctx, den_id),
+            ship_ball.type_id as i64,
+            den_dist,
+            "Mercenary Den is outside Remote Shield Booster range",
+        ));
     }
 
     let now = ctx.now_unix();

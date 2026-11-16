@@ -417,7 +417,7 @@ fn map_call_req_error_body_preserves_exact_insurance_user_error_keys() {
     for expected_owner_id in [90_000_001i64, 1_000_009i64] {
         let err = eve_proto::BridgeRpcError::user_error_with_args(
             eve_proto::UserErrorKey::InsureShipFailedSingleContract,
-            [("ownerName", PyRep::Integer(expected_owner_id))],
+            [("ownerName", eve_proto::UserErrorArg::Int(expected_owner_id))],
         );
         let (key, dict) = decode_wrapped_user_error(map_call_req_error_body(
             "insuranceSvc",
@@ -471,9 +471,10 @@ fn map_call_req_error_body_preserves_exact_insurance_user_error_keys() {
         );
     }
 
-    let notify_err = eve_proto::BridgeRpcError::user_error_with_args(
-        eve_proto::UserErrorKey::CustomNotify,
-        [("notify", PyRep::String("Clone installed".into()))],
+    let notify_err = eve_proto::BridgeRpcError::custom_notify("Clone installed");
+    assert_eq!(
+        notify_err.client_presentation("jumpCloneSvc", "InstallCloneInStation"),
+        eve_proto::UserErrorPresentation::Notify
     );
     let (n_key, n_dict) = decode_wrapped_user_error(map_call_req_error_body(
         "jumpCloneSvc",
@@ -590,12 +591,14 @@ fn map_call_req_error_body_preserves_existing_rpc_error_mappings() {
     assert_eq!(dict[0].0, "reason");
     assert_eq!(dict[0].1.as_str(), Some("UnknownSlashCommand: unknown /foo"));
 
-    let cargo_err = eve_proto::BridgeRpcError::user_error_with_args(
+    let cargo_err = eve_proto::BridgeRpcError::hold_capacity_error(
         eve_proto::UserErrorKey::NotEnoughCargoSpace,
-        [
-            ("volume", PyRep::Real(40.0)),
-            ("available", PyRep::Real(12.5)),
-        ],
+        40.0,
+        12.5,
+    );
+    assert_eq!(
+        cargo_err.client_presentation("inv", "Add"),
+        eve_proto::UserErrorPresentation::Modal
     );
     let (key, dict) = decode_wrapped_user_error(map_call_req_error_body("inv", "Add", &cargo_err));
     assert_eq!(key, "NotEnoughCargoSpace");
@@ -624,4 +627,248 @@ fn map_call_req_error_body_preserves_existing_rpc_error_mappings() {
         assert_eq!(key, "DockingApproach");
         assert!(dict.is_empty(), "expected empty dict for '{code}', got {dict:?}");
     }
+}
+
+#[tokio::test]
+async fn section4_outbound_call_rsp_marshal_failure_returns_wrapped_internal_error() {
+    let proxy_node_id = MACHO_PROXY_NODE_ID;
+    let client_id = 9001u64;
+    let user_id = Some(555u64);
+    let req_dest = MachoAddress::Node {
+        node_id: proxy_node_id,
+        service: Some("beyonce".into()),
+        call_id: 0,
+    };
+
+    // 1. Reply serialization failure (recursion depth exceeded) still answers the call_id.
+    {
+        let (mut writer, mut reader) = tokio::io::duplex(64 * 1024);
+        let req_source = MachoAddress::Client {
+            client_id,
+            call_id: 77,
+            service: None,
+        };
+        let mut deeply_nested = PyRep::None;
+        for _ in 0..(eve_proto::MAX_RECURSION_DEPTH + 10) {
+            deeply_nested = PyRep::Tuple(vec![deeply_nested]);
+        }
+        let frames = [crate::outbound_sequencer::OutFrame::CallRsp {
+            call_id: 77,
+            frame: deeply_nested,
+        }];
+        write_out_frames_for_call_req(
+            &mut writer,
+            proxy_node_id,
+            client_id,
+            user_id,
+            &req_source,
+            &req_dest,
+            &frames,
+        )
+        .await
+        .unwrap();
+        drop(writer);
+
+        let wire = read_framed_pyrep(&mut reader).await.unwrap().unwrap();
+        let pkt = MachoPacket::from_pyrep(&wire).unwrap();
+        assert_eq!(pkt.packet_type, MachoPacketType::ErrorResponse);
+        assert_eq!(pkt.destination.call_id(), 77);
+        assert_eq!(pkt.user_id, user_id);
+        let msg = decode_wrapped_runtime_error(pkt.payload);
+        assert!(
+            msg.starts_with("Reply serialization failed:"),
+            "expected serialization failure message, got {msg:?}"
+        );
+        assert!(matches!(read_framed_pyrep(&mut reader).await, Ok(None)));
+    }
+
+    // 2. Oversized CallRsp exceeding MAX_MACHO_FRAME_LEN falls back to wrapped Internal error.
+    {
+        let (mut writer, mut reader) = tokio::io::duplex(64 * 1024);
+        let req_source = MachoAddress::Client {
+            client_id,
+            call_id: 78,
+            service: None,
+        };
+        let frames = [crate::outbound_sequencer::OutFrame::CallRsp {
+            call_id: 78,
+            frame: PyRep::Bytes(vec![0u8; MAX_MACHO_FRAME_LEN + 64]),
+        }];
+        write_out_frames_for_call_req(
+            &mut writer,
+            proxy_node_id,
+            client_id,
+            user_id,
+            &req_source,
+            &req_dest,
+            &frames,
+        )
+        .await
+        .unwrap();
+        drop(writer);
+
+        let wire = read_framed_pyrep(&mut reader).await.unwrap().unwrap();
+        let pkt = MachoPacket::from_pyrep(&wire).unwrap();
+        assert_eq!(pkt.packet_type, MachoPacketType::ErrorResponse);
+        assert_eq!(pkt.destination.call_id(), 78);
+        let msg = decode_wrapped_runtime_error(pkt.payload);
+        assert!(
+            msg.starts_with("Reply serialization failed:"),
+            "expected oversized reply fallback message, got {msg:?}"
+        );
+        assert!(matches!(read_framed_pyrep(&mut reader).await, Ok(None)));
+    }
+
+    // 3. Empty outbound frame slice guarantees a CallReq still receives a wrapped Internal reply.
+    {
+        let (mut writer, mut reader) = tokio::io::duplex(64 * 1024);
+        let req_source = MachoAddress::Client {
+            client_id,
+            call_id: 79,
+            service: None,
+        };
+        write_out_frames_for_call_req(
+            &mut writer,
+            proxy_node_id,
+            client_id,
+            user_id,
+            &req_source,
+            &req_dest,
+            &[],
+        )
+        .await
+        .unwrap();
+        drop(writer);
+
+        let wire = read_framed_pyrep(&mut reader).await.unwrap().unwrap();
+        let pkt = MachoPacket::from_pyrep(&wire).unwrap();
+        assert_eq!(pkt.packet_type, MachoPacketType::ErrorResponse);
+        assert_eq!(pkt.destination.call_id(), 79);
+        let msg = decode_wrapped_runtime_error(pkt.payload);
+        assert_eq!(
+            msg,
+            "Internal error: CallReq yielded no serializable reply frame"
+        );
+        assert!(matches!(read_framed_pyrep(&mut reader).await, Ok(None)));
+    }
+}
+
+#[tokio::test]
+async fn section4_inbound_undecodable_and_malformed_calls_never_hang_or_drop() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let addr = spawn_test_listener(Arc::clone(&ctx)).await;
+
+    let (mut s, client_id, user_id) = login_client(addr, "demo", "demo-secret", "DE").await;
+
+    // 1. Undecodable CallReq payload whose call_id prefix IS recoverable answers on call_id=42
+    //    without tearing down the connection.
+    let call42_pkt = MachoPacket {
+        packet_type: MachoPacketType::CallReq,
+        source: MachoAddress::Client {
+            client_id,
+            call_id: 42,
+            service: None,
+        },
+        destination: MachoAddress::Node {
+            node_id: MACHO_PROXY_NODE_ID,
+            service: Some("beyonce".into()),
+            call_id: 0,
+        },
+        user_id: Some(user_id),
+        payload: PyRep::Tuple(vec![
+            PyRep::Integer(1),
+            PyRep::String("payload_marker_1234567890".into()),
+        ]),
+        named_payload: HashMap::new(),
+    };
+    let raw42 = marshal::encode(&call42_pkt.to_pyrep());
+    let truncated42 = &raw42[..raw42.len() - 12];
+    assert!(
+        marshal::decode_with_limits(
+            truncated42,
+            MAX_MACHO_FRAME_LEN,
+            eve_proto::MAX_DECODED_NODES
+        )
+        .is_err()
+    );
+    s.write_u32_le(truncated42.len() as u32).await.unwrap();
+    s.write_all(truncated42).await.unwrap();
+    s.flush().await.unwrap();
+
+    let err42 =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(err42.packet_type, MachoPacketType::ErrorResponse);
+    assert_eq!(err42.destination.call_id(), 42);
+    assert_eq!(err42.user_id, Some(user_id));
+    let msg42 = decode_wrapped_runtime_error(err42.payload);
+    assert!(
+        msg42.starts_with("Malformed CallReq payload:"),
+        "expected wrapped payload error, got {msg42:?}"
+    );
+
+    // 2. Valid-marshal CallReq that fails MachoPacket::from_pyrep recovers call_id=44 and answers.
+    let malformed_call44 = PyRep::Object {
+        type_name: MachoPacket::class_name(MachoPacketType::CallReq).into(),
+        args: Box::new(PyRep::Tuple(vec![
+            PyRep::Integer(MachoPacketType::CallReq as i64),
+            MachoAddress::Client {
+                client_id,
+                call_id: 44,
+                service: None,
+            }
+            .to_pyrep(),
+            PyRep::Integer(999),
+            PyRep::Integer(user_id as i64),
+            PyRep::None,
+            PyRep::None,
+        ])),
+    };
+    assert!(MachoPacket::from_pyrep(&malformed_call44).is_none());
+    write_framed_pyrep(&mut s, &malformed_call44).await.unwrap();
+
+    let err44 =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(err44.packet_type, MachoPacketType::ErrorResponse);
+    assert_eq!(err44.destination.call_id(), 44);
+    let msg44 = decode_wrapped_runtime_error(err44.payload);
+    assert_eq!(msg44, "Malformed CallReq packet");
+
+    // 3. Session remains usable for subsequent requests.
+    let ping45 = MachoPacket {
+        packet_type: MachoPacketType::PingReq,
+        source: MachoAddress::Client {
+            client_id,
+            call_id: 45,
+            service: None,
+        },
+        destination: MachoAddress::Node {
+            node_id: MACHO_PROXY_NODE_ID,
+            service: None,
+            call_id: 0,
+        },
+        user_id: Some(user_id),
+        payload: PyRep::Tuple(vec![PyRep::List(Vec::new())]),
+        named_payload: HashMap::new(),
+    };
+    write_framed_pyrep(&mut s, &ping45.to_pyrep()).await.unwrap();
+    let ping45_rsp =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(ping45_rsp.packet_type, MachoPacketType::PingRsp);
+    assert_eq!(ping45_rsp.destination.call_id(), 45);
+
+    // 4. Unrecoverable corrupt frame (no recoverable CallReq header) closes with GPSTransportClosed.
+    let garbage: [u8; 5] = [0xff, 0xee, 0xdd, 0xcc, 0xbb];
+    s.write_u32_le(garbage.len() as u32).await.unwrap();
+    s.write_all(&garbage).await.unwrap();
+    s.flush().await.unwrap();
+
+    let closed_rep = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+    let closed = GPSTransportClosed::from_pyrep(&closed_rep)
+        .expect("expected GPSTransportClosed on unrecoverable frame");
+    assert_eq!(
+        closed.reason_code.as_deref(),
+        Some("HANDSHAKE_INCOMPATIBLEPROTOCOL")
+    );
+    assert!(matches!(read_framed_pyrep(&mut s).await, Ok(None)));
 }

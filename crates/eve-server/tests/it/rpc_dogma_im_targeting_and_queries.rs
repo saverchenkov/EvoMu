@@ -808,7 +808,7 @@ async fn lock_cap_base_two_raised_by_skills() {
         cap_err.to_client_error("dogmaIM", "AddTarget"),
         eve_proto::ClientError::user_with_args(
             eve_proto::UserErrorKey::TargetingAptitudeAlreadyFullyUtilized,
-            [("limit", PyRep::Integer(2))],
+            [("limit", eve_proto::UserErrorArg::Int(2))],
         )
     );
 
@@ -849,7 +849,7 @@ async fn lock_cap_base_two_raised_by_skills() {
         ship_err.to_client_error("dogmaIM", "AddTarget"),
         eve_proto::ClientError::user_with_args(
             eve_proto::UserErrorKey::TargetingSystemsAlreadyFullyUtilized,
-            [("limit", PyRep::Integer(ship_max as i64))],
+            [("limit", eve_proto::UserErrorArg::Int(ship_max as i64))],
         )
     );
 }
@@ -913,7 +913,10 @@ async fn ecm_drone_jam_restricts_relock_to_jammer() {
         jammed_err.to_client_error("dogmaIM", "AddTarget"),
         eve_proto::ClientError::user_with_args(
             eve_proto::UserErrorKey::TargetingSystemsBeingJammed,
-            [("targetname", PyRep::String("Rifter".to_string()))],
+            [(
+                "targetname",
+                eve_proto::UserErrorArg::Str("Rifter".to_string()),
+            )],
         )
     );
     assert!(

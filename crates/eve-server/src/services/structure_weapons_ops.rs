@@ -578,6 +578,7 @@ fn consume_structure_charge_in_snap(
     structure_id: i64,
     st_owner_corp: i64,
     module_id: i64,
+    module_type_id: u32,
     slot_flag: InventoryFlag,
     req_charge_group: u32,
 ) -> Result<u32, BridgeRpcError> {
@@ -621,8 +622,8 @@ fn consume_structure_charge_in_snap(
                 format!("Loaded charge does not match required charge group {req_charge_group}"),
             ));
         }
-        return Err(err(
-            "NoChargesLoaded",
+        return Err(BridgeRpcError::no_charges_loaded(
+            module_type_id as i64,
             format!("Standup weapon requires ammo of charge group {req_charge_group}"),
         ));
     };
@@ -850,6 +851,7 @@ pub async fn handle_structure_module_activate(
                 structure_id,
                 st.owner_corp_id,
                 module_id,
+                live_mod.type_id,
                 slot_flag,
                 req_charge_grp,
             )?)

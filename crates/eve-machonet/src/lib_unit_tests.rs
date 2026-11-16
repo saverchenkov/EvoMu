@@ -665,3 +665,52 @@ fn wrapped_user_error_dict_dict_key_and_named_helpers_roundtrip_all_fields() {
     );
 }
 
+#[test]
+fn recover_call_req_source_from_pyrep_handles_partial_and_malformed_calls() {
+    let src = MachoAddress::Client {
+        client_id: 9001,
+        call_id: 42,
+        service: None,
+    };
+    let malformed_full = PyRep::Object {
+        type_name: MachoPacket::class_name(MachoPacketType::CallReq).into(),
+        args: Box::new(PyRep::Tuple(vec![
+            PyRep::Integer(MachoPacketType::CallReq as i64),
+            src.to_pyrep(),
+            PyRep::None,
+        ])),
+    };
+    assert!(MachoPacket::from_pyrep(&malformed_full).is_none());
+    assert_eq!(
+        recover_call_req_source_from_pyrep(&malformed_full),
+        Some((src.clone(), 42))
+    );
+
+    let partial = PyRep::Tuple(vec![
+        PyRep::Integer(MachoPacketType::CallReq as i64),
+        src.to_pyrep(),
+    ]);
+    assert_eq!(
+        recover_call_req_source_from_pyrep(&partial),
+        Some((src.clone(), 42))
+    );
+
+    let non_call_req = PyRep::Tuple(vec![
+        PyRep::Integer(MachoPacketType::PingReq as i64),
+        src.to_pyrep(),
+    ]);
+    assert_eq!(recover_call_req_source_from_pyrep(&non_call_req), None);
+
+    let zero_call = PyRep::Tuple(vec![
+        PyRep::Integer(MachoPacketType::CallReq as i64),
+        MachoAddress::Client {
+            client_id: 9001,
+            call_id: 0,
+            service: None,
+        }
+        .to_pyrep(),
+    ]);
+    assert_eq!(recover_call_req_source_from_pyrep(&zero_call), None);
+    assert_eq!(recover_call_req_source_from_pyrep(&PyRep::Integer(999)), None);
+}
+

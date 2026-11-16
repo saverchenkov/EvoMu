@@ -789,8 +789,10 @@ pub async fn try_activate_standup_weapon(
             let max_range = launcher_cap.map_or(bomb_vel * exp_delay_s, |c| c.min(bomb_vel * exp_delay_s));
             let dist = (target_ball.position - attacker_ball.position).length();
             if dist > max_range {
-                return Some(Err(err(
-                    "TargetOutOfRange",
+                return Some(Err(BridgeRpcError::target_out_of_range(
+                    crate::services::inventory_fitting::resolve_target_display_name(ctx, tid),
+                    mod_type.type_id as i64,
+                    dist,
                     format!("Target distance {:.0} m exceeds guided bomb maximum flight range {:.0} m", dist, max_range),
                 )));
             }
@@ -913,8 +915,10 @@ pub async fn try_activate_standup_weapon(
             let max_range = optimal_range + 2.0 * falloff_range;
             let dist = (target_ball.position - attacker_ball.position).length();
             let Some(primary_falloff_mult) = standup_falloff_multiplier(dist, optimal_range, falloff_range) else {
-                return Some(Err(err(
-                    "TargetOutOfRange",
+                return Some(Err(BridgeRpcError::target_out_of_range(
+                    crate::services::inventory_fitting::resolve_target_display_name(ctx, tid),
+                    mod_type.type_id as i64,
+                    dist,
                     format!(
                         "Primary target distance {:.0} m exceeds Standup Arcing Vorton Projector optimal+2*falloff range {:.0} m",
                         dist, max_range

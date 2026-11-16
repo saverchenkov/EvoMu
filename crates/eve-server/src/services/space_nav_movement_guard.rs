@@ -319,12 +319,12 @@ fn validate_navigation_and_immobilizing_locks(
                 ..
             } => "ImmobilizingModuleActive",
             MovementIntent::WormholeJump { .. } => "CannotJumpWormholeWhileImmobilized",
-            _ => err.code.as_str(),
+            _ => return Err(err),
         };
         return Err(BridgeRpcError {
             code: code.into(),
             message: err.message,
-            client_error: None,
+            client_error: err.client_error,
         });
     }
 
@@ -580,13 +580,13 @@ impl ServerContext {
                 let is_orca = ship_type_id == 28_606 || ship_group_id == 941;
                 let is_freighter = matches!(ship_group_id, 513 | 902);
                 if is_zarzakh_gate && !is_orca && (is_restricted_capital || is_freighter) {
-                    return Err(BridgeRpcError {
-                        code: "ShipCannotUseStargate".into(),
-                        message: format!(
+                    return Err(BridgeRpcError::ship_cannot_use_stargate(
+                        ship_type_id as i64,
+                        "Subcapital ships & Orca",
+                        format!(
                             "Capital ship or freighter type {ship_type_id} (group {ship_group_id}) cannot jump stargate {gate_id}"
                         ),
-                        client_error: None,
-                    });
+                    ));
                 }
                 let is_pochven_gate = self
                     .sde

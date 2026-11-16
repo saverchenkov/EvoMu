@@ -3,7 +3,10 @@
 #![forbid(unsafe_code)]
 
 use eve_proto::PyRep;
-pub use eve_proto::{ClientError, UserErrorKey, V24_PROGRAMMATIC_USER_ERROR_KEYS};
+pub use eve_proto::{
+    ClientError, IskCents, UserErrorArg, UserErrorKey, UserErrorPresentation,
+    UI_LABEL_SHIP_TOO_LARGE, V24_PROGRAMMATIC_USER_ERROR_KEYS,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -515,6 +518,50 @@ impl MachoAddress {
             _ => None,
         }
     }
+
+    /// Returns the MachoNet `callID` carried by this address (`0` for `Broadcast` or unset).
+    pub const fn call_id(&self) -> u64 {
+        match self {
+            Self::Client { call_id, .. }
+            | Self::Node { call_id, .. }
+            | Self::Any { call_id, .. } => *call_id,
+            Self::Broadcast { .. } => 0,
+        }
+    }
+}
+
+/// Extracts `(source_address, call_id)` from either a partially decoded `CallReq` header tuple
+/// or a full undecodable `CallReq` `PyRep` when `packet_type == CallReq (6)` and `call_id > 0`
+/// (`#1086` Section 4).
+pub fn recover_call_req_source_from_pyrep(rep: &PyRep) -> Option<(MachoAddress, u64)> {
+    let tuple = match rep {
+        PyRep::Object { args, .. } => match args.as_ref() {
+            PyRep::Tuple(items) => items,
+            _ => return None,
+        },
+        PyRep::ObjectEx { header, .. } => match header.as_ref() {
+            PyRep::Tuple(items) if items.len() >= 2 => match &items[1] {
+                PyRep::Tuple(inner) => inner,
+                _ => items,
+            },
+            _ => return None,
+        },
+        PyRep::Tuple(items) => items,
+        _ => return None,
+    };
+    if tuple.len() < 2 {
+        return None;
+    }
+    let packet_type = MachoPacketType::from_i64(tuple[0].as_i64()?)?;
+    if packet_type != MachoPacketType::CallReq {
+        return None;
+    }
+    let source = MachoAddress::from_pyrep(&tuple[1])?;
+    let call_id = source.call_id();
+    if call_id == 0 || call_id > i64::MAX as u64 {
+        return None;
+    }
+    Some((source, call_id))
 }
 
 /// High-level `macho.MachoPacket` structure.

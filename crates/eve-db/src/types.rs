@@ -93,68 +93,7 @@ impl FromWalError for std::convert::Infallible {
     }
 }
 
-/// Fixed-point ISK representation in cents (`1 ISK = 100 IskCents`) to prevent `f64` precision drift.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct IskCents(pub i64);
-
-impl IskCents {
-    pub const ZERO: Self = Self(0);
-
-    pub const fn raw_cents(self) -> i64 {
-        self.0
-    }
-
-    pub const fn from_raw_cents(cents: i64) -> Self {
-        Self(cents)
-    }
-
-    pub const fn from_isk(whole_isk: i64) -> Self {
-        Self(whole_isk.saturating_mul(100))
-    }
-
-    pub fn from_f64_isk(isk: f64) -> Self {
-        if !isk.is_finite() {
-            return Self(0);
-        }
-        let scaled = (isk * 100.0).round();
-        if scaled >= (i64::MAX / 2) as f64 {
-            Self(i64::MAX / 2)
-        } else if scaled <= (i64::MIN / 2) as f64 {
-            Self(i64::MIN / 2)
-        } else {
-            Self(scaled as i64)
-        }
-    }
-
-    pub fn checked_add(self, rhs: Self) -> Option<Self> {
-        if self.0 < 0 || rhs.0 < 0 {
-            return None;
-        }
-        self.0.checked_add(rhs.0).map(Self)
-    }
-
-    pub fn checked_sub(self, rhs: Self) -> Option<Self> {
-        if rhs.0 < 0 || self.0 < rhs.0 {
-            return None;
-        }
-        self.0.checked_sub(rhs.0).map(Self)
-    }
-
-    pub fn checked_mul_qty(self, qty: i64) -> Option<Self> {
-        if self.0 < 0 || qty < 0 {
-            return None;
-        }
-        self.0.checked_mul(qty).map(Self)
-    }
-
-    pub fn to_wire_f64(self) -> f64 {
-        (self.0 as f64) / 100.0
-    }
-
-    pub fn to_f64_isk(self) -> f64 {
-        (self.0 as f64) / 100.0
-    }
-}
+pub use eve_proto::IskCents;
 
 /// Standard EVE inventory location flags (`invFlags`).
 #[repr(u16)]

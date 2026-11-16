@@ -4,29 +4,50 @@
 
 use super::*;
 
-/// Builds a `ShipJammed` RPC error carrying V24 `UserError("TargetingSystemsBeingJammed")` (`#1082`).
-pub(crate) fn ship_jammed_rpc_error(ctx: &ServerContext, target_id: i64) -> BridgeRpcError {
+/// Resolves a player-facing entity/target name from custom item names, structures,
+/// characters, or SDE item type names, falling back to `"Target"`.
+pub(crate) fn resolve_target_display_name(ctx: &ServerContext, target_id: i64) -> String {
     let custom_name = ctx
         .esi_state
         .custom_item_names
         .read()
         .ok()
         .and_then(|m| m.get(&target_id).filter(|s| !s.trim().is_empty()).cloned());
-    let target_name = custom_name
+    custom_name
         .or_else(|| {
             ctx.db.with_snapshot(|snap| {
-                snap.items
+                snap.structures
                     .get(&target_id)
-                    .and_then(|i| ctx.sde.types.get(&i.type_id).map(|t| t.name.clone()))
+                    .filter(|st| !st.name.trim().is_empty())
+                    .map(|st| st.name.clone())
+                    .or_else(|| {
+                        snap.characters
+                            .get(&target_id)
+                            .filter(|c| !c.name.trim().is_empty())
+                            .map(|c| c.name.clone())
+                    })
+                    .or_else(|| {
+                        snap.items
+                            .get(&target_id)
+                            .and_then(|i| ctx.sde.types.get(&i.type_id).map(|t| t.name.clone()))
+                    })
             })
         })
-        .unwrap_or_else(|| "Target".to_string());
+        .unwrap_or_else(|| "Target".to_string())
+}
+
+/// Builds a `ShipJammed` RPC error carrying V24 `UserError("TargetingSystemsBeingJammed")` (`#1082`).
+pub(crate) fn ship_jammed_rpc_error(ctx: &ServerContext, target_id: i64) -> BridgeRpcError {
+    let target_name = resolve_target_display_name(ctx, target_id);
     BridgeRpcError::with_client_error(
         "ShipJammed",
         "Targeting systems are jammed by ECM",
         eve_proto::ClientError::user_with_args(
             eve_proto::UserErrorKey::TargetingSystemsBeingJammed,
-            [("targetname", PyRep::String(target_name))],
+            [(
+                "targetname",
+                eve_proto::UserErrorArg::Str(target_name),
+            )],
         ),
     )
 }
@@ -46,7 +67,10 @@ pub(crate) fn target_lock_cap_rpc_error(
     BridgeRpcError::with_client_error(
         "TargetingFailed",
         format!("Max locked targets exceeded ({max_locked})"),
-        eve_proto::ClientError::user_with_args(key, [("limit", PyRep::Integer(max_locked as i64))]),
+        eve_proto::ClientError::user_with_args(
+            key,
+            [("limit", eve_proto::UserErrorArg::Int(max_locked as i64))],
+        ),
     )
 }
 

@@ -626,13 +626,17 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     ) {
                         let dist = (ship_ball.position - target_ball.position).length();
                         if dist > max_range {
-                            return Some(Err(BridgeRpcError {
-                                code: "TargetOutOfRange".into(),
-                                message: format!(
+                            return Some(Err(BridgeRpcError::target_out_of_range(
+                                crate::services::inventory_fitting::resolve_target_display_name(
+                                    ctx,
+                                    target_id,
+                                ),
+                                mod_type.type_id as i64,
+                                dist,
+                                format!(
                                     "Target {target_id} is at {dist:.1} m, exceeding module optimal range {max_range:.1} m"
                                 ),
-                                client_error: None,
-                            }));
+                            )));
                         }
                     }
                 }
@@ -709,13 +713,17 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         ) {
                             let dist = (ship_ball.position - target_ball.position).length();
                             if dist > scripted_max_range {
-                                return Some(Err(BridgeRpcError {
-                                    code: "TargetOutOfRange".into(),
-                                    message: format!(
+                                return Some(Err(BridgeRpcError::target_out_of_range(
+                                    crate::services::inventory_fitting::resolve_target_display_name(
+                                        ctx,
+                                        target_id,
+                                    ),
+                                    mod_type.type_id as i64,
+                                    dist,
+                                    format!(
                                         "Target {target_id} is at {dist:.1} m, exceeding scripted WDFG range {scripted_max_range:.1} m"
                                     ),
-                                    client_error: None,
-                                }));
+                                )));
                             }
                         }
                         // Infinite point (100 warp scramble strength) + MWD/MJD suppression, no bubble
@@ -800,13 +808,17 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                             .get_attribute(2044, &ctx.sde)
                             .max(mod_state.get_attribute(attr_ids::FALLOFF, &ctx.sde));
                         if mod_type.group_id == 65 && falloff <= 0.0 && distance_m > max_range && max_range > 0.0 {
-                            return Some(Err(BridgeRpcError {
-                                code: "TargetOutOfRange".into(),
-                                message: format!(
+                            return Some(Err(BridgeRpcError::target_out_of_range(
+                                crate::services::inventory_fitting::resolve_target_display_name(
+                                    ctx,
+                                    target_id,
+                                ),
+                                mod_type.type_id as i64,
+                                distance_m,
+                                format!(
                                     "Target {target_id} is at {distance_m:.1} m, exceeding webifier range {max_range:.1} m"
                                 ),
-                                client_error: None,
-                            }));
+                            )));
                         }
                         let att = eve_dogma::compute_falloff_attenuation(distance_m, max_range, falloff);
                         let raw_sf = mod_state.get_attribute(20, &ctx.sde);
@@ -900,13 +912,17 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     ) {
                         let dist = (ship_ball.position - target_ball.position).length();
                         if falloff <= 0.0 && dist > max_range && max_range > 0.0 {
-                            return Some(Err(BridgeRpcError {
-                                code: "TargetOutOfRange".into(),
-                                message: format!(
+                            return Some(Err(BridgeRpcError::target_out_of_range(
+                                crate::services::inventory_fitting::resolve_target_display_name(
+                                    ctx,
+                                    target_id,
+                                ),
+                                mod_type.type_id as i64,
+                                dist,
+                                format!(
                                     "Target {target_id} is at {dist:.1} m, exceeding remote assistance range {max_range:.1} m"
                                 ),
-                                client_error: None,
-                            }));
+                            )));
                         }
                     }
                     let has_cat5_overload = mod_type.effect_ids.iter().any(|&eid| {
@@ -1093,13 +1109,14 @@ pub(crate) async fn validate_passive_targeter_activation(
     let surface_offset = s_ball.radius + t_ball.radius;
     let dist = ((s_ball.position - t_ball.position).length() - surface_offset).max(0.0);
     if dist > max_range {
-        return Err(BridgeRpcError {
-            code: "TargetOutOfRange".into(),
-            message: format!(
+        return Err(BridgeRpcError::target_out_of_range(
+            crate::services::inventory_fitting::resolve_target_display_name(ctx, target_id),
+            fit.ship.type_id as i64,
+            dist,
+            format!(
                 "Target {target_id} at {dist:.0}m exceeds max targeting range {max_range:.0}m"
             ),
-            client_error: None,
-        });
+        ));
     }
     let ship_max = fit
         .ship

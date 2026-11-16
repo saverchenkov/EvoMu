@@ -215,13 +215,14 @@ pub async fn activate_salvager_or_tractor_module(
             .unwrap_or(20_000.0)
             .max(20_000.0);
         if dist > max_range {
-            return Some(Err(BridgeRpcError {
-                code: "TargetOutOfRange".into(),
-                message: format!(
+            return Some(Err(BridgeRpcError::target_out_of_range(
+                crate::services::inventory_fitting::resolve_target_display_name(ctx, wreck_id),
+                mod_type.type_id as i64,
+                dist,
+                format!(
                     "Wreck/can {wreck_id} is {dist:.1} m away (exceeds tractor beam range {max_range:.1} m)"
                 ),
-                client_error: None,
-            }));
+            )));
         }
         let now_unix = ctx.now_unix();
         let wreck_owner = ctx
@@ -322,13 +323,14 @@ pub async fn activate_salvager_or_tractor_module(
         .unwrap_or(5_000.0)
         .max(5_000.0);
     if dist > max_range {
-        return Some(Err(BridgeRpcError {
-            code: "TargetOutOfRange".into(),
-            message: format!(
+        return Some(Err(BridgeRpcError::target_out_of_range(
+            crate::services::inventory_fitting::resolve_target_display_name(ctx, wreck_id),
+            mod_type.type_id as i64,
+            dist,
+            format!(
                 "Wreck {wreck_id} is {dist:.1} m away (exceeds salvager range {max_range:.1} m)"
             ),
-            client_error: None,
-        }));
+        )));
     }
     let res = crate::combat::drones_salvage_tractor::execute_wreck_salvage_cycle_scheduled(
         ctx,

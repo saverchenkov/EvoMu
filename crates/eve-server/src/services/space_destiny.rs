@@ -1341,12 +1341,16 @@ async fn handle_call_component_from_client(
                     let projected_vol = (used_vol - in_vol).max(0.0) + out_vol;
                     if projected_vol > cargo_cap + 1e-4 {
                         let available_vol = (cargo_cap - (used_vol - in_vol).max(0.0)).max(0.0);
-                        return Err(BridgeRpcError::user_error_with_args(
-                            eve_proto::UserErrorKey::NotEnoughCargoSpace,
-                            [
-                                ("volume", PyRep::Real(out_vol)),
-                                ("available", PyRep::Real(available_vol)),
-                            ],
+                        return Err(BridgeRpcError::with_client_error(
+                            "NotEnoughCargoSpace",
+                            format!(
+                                "Item trader output volume ({projected_vol:.1} m3) exceeds ship cargo capacity ({cargo_cap:.1} m3)"
+                            ),
+                            eve_proto::ClientError::hold_capacity_error(
+                                eve_proto::UserErrorKey::NotEnoughCargoSpace,
+                                out_vol,
+                                available_vol,
+                            ),
                         ));
                     }
                 }

@@ -485,13 +485,14 @@ async fn activate_single_fighter_ability(
             fighter_ball.position.distance(target_ball.position)
         };
         if dist > max_range {
-            return Some(Err(BridgeRpcError {
-                code: "TargetOutOfRange".into(),
-                message: format!(
+            return Some(Err(BridgeRpcError::target_out_of_range(
+                crate::services::inventory_fitting::resolve_target_display_name(ctx, tid),
+                fighter.type_id as i64,
+                dist,
+                format!(
                     "Target {tid} is {dist:.1}m from fighter {fighter_ball_id} (exceeds SDE ability range {max_range:.1}m)"
                 ),
-                client_error: None,
-            }));
+            )));
         }
 
         let victim_char_opt = ctx.db.with_snapshot(|snap| {
@@ -1238,12 +1239,14 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
     {
         return Some(Err(e));
     }
-    if fb.position.distance(target_point) > 100_000.0 {
-        return Some(Err(BridgeRpcError {
-            code: "TargetOutOfRange".into(),
-            message: "Target point is out of fighter ability range".into(),
-            client_error: None,
-        }));
+    let target_dist = fb.position.distance(target_point);
+    if target_dist > 100_000.0 {
+        return Some(Err(BridgeRpcError::target_out_of_range(
+            "Target point",
+            fighter.type_id as i64,
+            target_dist,
+            "Target point is out of fighter ability range",
+        )));
     }
 
     let charge_count = slot_def.charges.as_ref().map(|c| c.charge_count).unwrap_or(1);

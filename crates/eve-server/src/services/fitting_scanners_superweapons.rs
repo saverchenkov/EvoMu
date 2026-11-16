@@ -598,11 +598,12 @@ async fn scanner_range_check(
     };
     let dist = (own.position - tgt.position).length() - own.radius - tgt.radius;
     if range_m > 0.0 && dist > range_m {
-        return Err(BridgeRpcError {
-            code: "TargetOutOfRange".into(),
-            message: format!("Target {target_id} is {dist:.0} m away; scanner range is {range_m:.0} m"),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::target_out_of_range(
+            crate::services::inventory_fitting::resolve_target_display_name(ctx, target_id),
+            mod_state.type_id as i64,
+            dist,
+            format!("Target {target_id} is {dist:.0} m away; scanner range is {range_m:.0} m"),
+        ));
     }
     Ok(())
 }

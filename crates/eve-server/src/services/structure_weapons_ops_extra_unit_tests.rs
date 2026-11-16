@@ -905,6 +905,7 @@ async fn add_target_success_charge_id_online_map_and_destroyed_guards() {
             st_id,
             corp_id,
             mod_launch,
+            launcher_tid,
             InventoryFlag::HiSlot0,
             384,
         )

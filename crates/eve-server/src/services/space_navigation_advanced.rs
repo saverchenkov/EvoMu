@@ -68,9 +68,9 @@ pub fn check_immobilizing_module_active(
 ) -> Result<(), BridgeRpcError> {
     let ids = nav_attr_ids(&ctx.sde);
 
-    let has_immobilizing_module = ctx.db.with_snapshot(|snap| {
-        snap.items.values().any(|it| {
-            it.location_id == ship_id
+    let immobilizing_mod_type_id = ctx.db.with_snapshot(|snap| {
+        snap.items.values().find_map(|it| {
+            let is_match = it.location_id == ship_id
                 && matches!(it.flag as u16, 11..=34 | 125..=132)
                 && snap.module_active_states.contains(&it.item_id)
                 && ctx
@@ -97,22 +97,38 @@ pub fn check_immobilizing_module_active(
                             _ => is_siege_immobilized,
                         }
                     })
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+            is_match.then_some(it.type_id as i64)
         })
     });
 
-    if has_immobilizing_module {
-        let key = match action {
-            "dock" => eve_proto::UserErrorKey::CantDockWhileModuleActive,
-            "jump" => eve_proto::UserErrorKey::CantJumpWhileModuleActive,
-            "warp" => eve_proto::UserErrorKey::WarpDisrupted,
-            "tether" => eve_proto::UserErrorKey::DeniedTethered,
-            _ => eve_proto::UserErrorKey::CantJumpWhileModuleActive,
+    if let Some(mod_type_id) = immobilizing_mod_type_id {
+        let (code, client_err) = match action {
+            "dock" => (
+                eve_proto::UserErrorKey::CantDockWhileModuleActive.as_str(),
+                eve_proto::ClientError::cant_dock_while_module_active(mod_type_id),
+            ),
+            "jump" => (
+                eve_proto::UserErrorKey::CantJumpWhileModuleActive.as_str(),
+                eve_proto::ClientError::cant_jump_while_module_active(mod_type_id),
+            ),
+            "warp" => (
+                eve_proto::UserErrorKey::WarpDisrupted.as_str(),
+                eve_proto::ClientError::user(eve_proto::UserErrorKey::WarpDisrupted),
+            ),
+            "tether" => (
+                eve_proto::UserErrorKey::DeniedTethered.as_str(),
+                eve_proto::ClientError::user(eve_proto::UserErrorKey::DeniedTethered),
+            ),
+            _ => (
+                eve_proto::UserErrorKey::CantJumpWhileModuleActive.as_str(),
+                eve_proto::ClientError::cant_jump_while_module_active(mod_type_id),
+            ),
         };
         return Err(BridgeRpcError::with_client_error(
-            key.as_str(),
+            code,
             format!("Cannot perform {action} while an immobilizing module (Bastion/Siege/Core) is active"),
-            eve_proto::ClientError::user(key),
+            client_err,
         ));
     }
     Ok(())
@@ -295,10 +311,9 @@ pub fn validate_npc_station_docking(
 ) -> Result<(), BridgeRpcError> {
     // Supercarriers (659) and Titans (30) cannot dock at NPC stations
     if is_npc_station && matches!(ship_group_id, 30 | 659) {
-        return Err(BridgeRpcError::with_client_error(
-            eve_proto::UserErrorKey::DockingRequestDenied.as_str(),
+        return Err(BridgeRpcError::docking_request_denied(
+            eve_proto::UI_LABEL_SHIP_TOO_LARGE,
             "Supercarriers and Titans cannot dock at NPC stations",
-            eve_proto::ClientError::user(eve_proto::UserErrorKey::DockingRequestDenied),
         ));
     }
     Ok(())

@@ -26,7 +26,10 @@ pub(crate) fn module_already_active_rpc_error(
         message,
         eve_proto::ClientError::user_with_args(
             eve_proto::UserErrorKey::EffectAlreadyActive2,
-            [("modulename", PyRep::String(mod_name))],
+            [(
+                "modulename",
+                eve_proto::UserErrorArg::Str(mod_name),
+            )],
         ),
     )
 }
@@ -1101,7 +1104,10 @@ pub(crate) async fn handle_module_cycles(
                         .map(|i| (i.item_id, i.type_id))
                 });
                 let Some((cid, charge_tid)) = charge_opt else {
-                    return Some(Err(BridgeRpcError { code: "NoChargesLoaded".into(), message: "Capacitor Booster has no Cap Booster charges loaded".into(), client_error: None }));
+                    return Some(Err(BridgeRpcError::no_charges_loaded(
+                        mod_type.type_id as i64,
+                        "Capacitor Booster has no Cap Booster charges loaded",
+                    )));
                 };
                 deferred_post_cycle.cap_booster_charge_id = Some(cid);
                 let eval_inject = fit.get_charge_effective_attribute(module_id, 67, &ctx.sde);
@@ -1364,9 +1370,7 @@ pub(crate) async fn handle_module_cycles(
                         && deferred_post_cycle.turret_charge_consumptions.len()
                             < linked_turrets.len()))
             {
-                return Some(Err(BridgeRpcError::from_client_error(
-                    eve_proto::ClientError::user(eve_proto::UserErrorKey::NoCharges),
-                )));
+                return Some(Err(BridgeRpcError::no_charges(mod_type.type_id as i64)));
             }
             let weapon_dark_mult = crate::services::pve_abyssal_hazards::dark_weather_midpocket_turret_mult(
                 ctx,
@@ -1590,8 +1594,10 @@ pub(crate) async fn handle_module_cycles(
                         let center_dist = atk_ball.position.distance(tgt_ball.position);
                         let max_launch_range = weapon_optimal_m + missile_launch_range_comp_m;
                         if weapon_optimal_m > 0.0 && center_dist > max_launch_range + 1e-6 {
-                            return Some(Err(BridgeRpcError::from_client_error(
-                                eve_proto::ClientError::user(eve_proto::UserErrorKey::TargetTooFar),
+                            return Some(Err(BridgeRpcError::target_too_far(
+                                resolve_target_display_name(ctx, tid),
+                                mod_type.type_id as i64,
+                                center_dist,
                             )));
                         }
                     }
