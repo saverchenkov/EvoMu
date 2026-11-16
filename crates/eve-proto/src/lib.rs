@@ -1037,6 +1037,17 @@ fn read_pb_bytes(input: &mut &[u8]) -> Result<Vec<u8>, ProtoError> {
     Ok(out)
 }
 
+/// Conversion trait for strongly-typed V24 client wire replies (`RFC-3 C-9`, `#933`).
+pub trait ToClient {
+    fn into_client_rep(self) -> PyRep;
+}
+
+impl ToClient for PyRep {
+    fn into_client_rep(self) -> PyRep {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests;
 #[cfg(test)] mod proto_lib_extra_tests;

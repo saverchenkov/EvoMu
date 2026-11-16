@@ -16,6 +16,7 @@ pub mod delta_projection;
 pub mod destiny_delivery_policy;
 pub mod dispatch;
 pub mod notify_registry;
+pub mod reply_registry;
 pub mod rpc_args;
 pub mod session;
 pub mod session_transition;
@@ -35,6 +36,7 @@ pub use eve_proto::{
     ClientError, IskCents, UserErrorArg, UserErrorKey, UserErrorPresentation,
     UI_LABEL_SHIP_TOO_LARGE, V24_PROGRAMMATIC_USER_ERROR_KEYS,
 };
+pub use reply_registry::{into_client_reply, ToClient};
 pub use rpc_args::RpcArgs;
 pub use session_transition::*;
 

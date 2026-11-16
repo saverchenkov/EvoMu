@@ -12,6 +12,7 @@ use eve_machonet::{service_roles, SessionState};
 use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
 use eve_server::router::ServerContext;
+use eve_testkit::client_harness::{extract_bound_id_from_wire_rep, ClientErrorResponse};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -60,34 +61,17 @@ fn player_sess(
     s
 }
 
-async fn rpc(
+async fn call_wire(
     ctx: &ServerContext,
     sess: &mut SessionState,
     service: &str,
+    bound_id: Option<u64>,
     method: &str,
     args: &[PyRep],
-) -> Result<PyRep, eve_proto::BridgeRpcError> {
-    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None)
+) -> Result<PyRep, ClientErrorResponse> {
+    common::borrow_wire_harness(ctx, sess)
+        .call(service, bound_id, method, args, &HashMap::new())
         .await
-}
-
-async fn rpc_wire(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    service: &str,
-    method: &str,
-    args: &[PyRep],
-) -> Result<PyRep, eve_proto::BridgeRpcError> {
-    ctx.dispatch_rpc(
-        sess,
-        service,
-        None,
-        method,
-        args,
-        &HashMap::new(),
-        Some("machoNet:26000"),
-    )
-    .await
 }
 
 #[tokio::test]
@@ -112,7 +96,7 @@ async fn pin_char_map_login_and_ui_empty_shapes() {
     //    Client: eve/client/script/ui/shared/neocom/charactersheet.pyj:57 (_GetHomeStationInfo),
     //    eve/client/script/ui/shared/mapView/mapView.pyj:430,595, mapViewSolarSystem.pyj:646.
     //    Linked coverage: tests/it/rpc_char_lifecycle.rs:50-175,420-430.
-    let home = rpc(&ctx, &mut sess, "charMgr", "GetHomeStationRow", &[])
+    let home = call_wire(&ctx, &mut sess, "charMgr", None, "GetHomeStationRow", &[])
         .await
         .expect("charMgr.GetHomeStationRow");
     let PyRep::KeyVal(home_kv) = home else {
@@ -136,10 +120,11 @@ async fn pin_char_map_login_and_ui_empty_shapes() {
             ch.home_station_id = 0;
         }
     });
-    let fallback_home = rpc(
+    let fallback_home = call_wire(
         &ctx,
         &mut sess,
         "charMgr",
+        None,
         "GetHomeStationRow",
         &[PyRep::Integer(90_000_002)],
     )
@@ -159,10 +144,11 @@ async fn pin_char_map_login_and_ui_empty_shapes() {
     //    Client: packages/loginrewards/client/loginCampaignService.pyj:127.
     //    Linked coverage: tests/it/login_campaign_and_milestone_claims.rs:53-68, tests/it/rpc_campaigns_and_telemetry.rs:83-89.
     let mut char_select_sess = player_sess(86_002, None, None, None, None);
-    let camp_state = rpc(
+    let camp_state = call_wire(
         &ctx,
         &mut char_select_sess,
         "loginCampaignManager",
+        None,
         "get_client_campaign_state",
         &[],
     )
@@ -177,10 +163,11 @@ async fn pin_char_map_login_and_ui_empty_shapes() {
     // 3. seasonalLoginCampaignManager.get_active_campaign -> 4-tuple of None when inactive.
     //    Client: packages/loginrewards/client/seasonalLoginCampaignService.pyj:56 (UNPACK_SEQUENCE 4).
     //    Linked coverage: tests/it/store_fastcheckout_seasonal_live.rs:501-506.
-    let seasonal = rpc(
+    let seasonal = call_wire(
         &ctx,
         &mut sess,
         "seasonalLoginCampaignManager",
+        None,
         "get_active_campaign",
         &[],
     )
@@ -192,20 +179,20 @@ async fn pin_char_map_login_and_ui_empty_shapes() {
         "inactive seasonalLoginCampaignManager.get_active_campaign must unpack as 4-tuple of None"
     );
 
-    // 4. map.GetSecurityModifiedSystems -> util.KeyVal-compatible Rowset/CRowset rows.
+    // 4. map.GetSecurityModifiedSystems -> util.KeyVal-compatible Rowset rows on wire.
     //    Client: eve/client/script/ui/login/charSelection/characterSlots.pyj:1399
     //    (_GetSecurityModifierText calls .Index('solarSystemID') and reads .security / .modifiedSecurity).
     //    Linked coverage: tests/it/client_login_rpcs.rs:277-288, tests/it/gameplay_services_and_rpcs.rs:1600.
-    let direct_mod = rpc(&ctx, &mut sess, "map", "GetSecurityModifiedSystems", &[])
-        .await
-        .expect("map.GetSecurityModifiedSystems direct");
-    assert!(
-        direct_mod.is_crowset(),
-        "direct map.GetSecurityModifiedSystems must be a CRowset, got {direct_mod:?}"
-    );
-    let wire_mod = rpc_wire(&ctx, &mut sess, "map", "GetSecurityModifiedSystems", &[])
-        .await
-        .expect("map.GetSecurityModifiedSystems wire");
+    let wire_mod = call_wire(
+        &ctx,
+        &mut sess,
+        "map",
+        None,
+        "GetSecurityModifiedSystems",
+        &[],
+    )
+    .await
+    .expect("map.GetSecurityModifiedSystems wire");
     let PyRep::Rowset {
         columns: mod_cols,
         rows: mod_rows,
@@ -230,10 +217,11 @@ async fn pin_char_map_login_and_ui_empty_shapes() {
     //    Client: eve/client/script/ui/login/charSelection/characterSelection.pyj:949 (TryEnterGame).
     //    Linked coverage: tests/it/character_account_features_tests.rs:140-160, tests/it/client_login_rpcs.rs:313-331,
     //    tests/it/space_travel_shipcaster_suite.rs:554,589.
-    let load_slot = rpc(
+    let load_slot = call_wire(
         &ctx,
         &mut char_select_sess,
         "populationCap",
+        None,
         "GetCharacterLoadSlot",
         &[PyRep::Integer(DEMO_CHAR_ID)],
     )
@@ -251,9 +239,16 @@ async fn pin_char_map_login_and_ui_empty_shapes() {
     // 6. alert.BeanCount -> 2-tuple (None, None) for unknown stack trace hash.
     //    Client: carbon/common/script/sys/alert.pyj:670,744,863 (UNPACK_SEQUENCE 2).
     //    Linked coverage: tests/it/rpc_account_air_banned.rs:159-168, tests/it/client_login_rpcs.rs:50-70.
-    let bean = rpc(&ctx, &mut sess, "alert", "BeanCount", &[PyRep::Integer(0xDEAD_BEEF)])
-        .await
-        .expect("alert.BeanCount unknown hash");
+    let bean = call_wire(
+        &ctx,
+        &mut sess,
+        "alert",
+        None,
+        "BeanCount",
+        &[PyRep::Integer(0xDEAD_BEEF)],
+    )
+    .await
+    .expect("alert.BeanCount unknown hash");
     assert_eq!(
         bean,
         PyRep::Tuple(vec![PyRep::None, PyRep::None]),
@@ -263,7 +258,7 @@ async fn pin_char_map_login_and_ui_empty_shapes() {
     // 7. ship.SafeLogoff -> empty list [] when clean in space, non-empty list when docked.
     //    Client: eve/client/script/ui/services/menuSvcExtras/menuFunctions.pyj:250 (SafeLogoff).
     //    Linked coverage: tests/it/abyssal_deadspace.rs:247-248, tests/it/character_skill_features_t12.rs:246, tests/it/combat.rs:135-143.
-    let docked_logoff = rpc(&ctx, &mut sess, "ship", "SafeLogoff", &[])
+    let docked_logoff = call_wire(&ctx, &mut sess, "ship", None, "SafeLogoff", &[])
         .await
         .expect("ship.SafeLogoff docked");
     let PyRep::List(docked_reasons) = docked_logoff else {
@@ -274,7 +269,7 @@ async fn pin_char_map_login_and_ui_empty_shapes() {
         "docked ship.SafeLogoff must return non-empty blocking condition labels"
     );
     let mut pilot = common::gm_pilot_in_space(&ctx, 86_003, 90_086_003, RIFTER_TYPE_ID, JITA_SYSTEM_ID).await;
-    let clean_logoff = rpc(&ctx, &mut pilot.sess, "ship", "SafeLogoff", &[])
+    let clean_logoff = call_wire(&ctx, &mut pilot.sess, "ship", None, "SafeLogoff", &[])
         .await
         .expect("ship.SafeLogoff clean in space");
     assert_eq!(
@@ -282,7 +277,7 @@ async fn pin_char_map_login_and_ui_empty_shapes() {
         PyRep::List(vec![]),
         "clean in-space ship.SafeLogoff must return exact empty list []"
     );
-    let aborted = rpc(&ctx, &mut pilot.sess, "ship", "AbortSafeLogoff", &[])
+    let aborted = call_wire(&ctx, &mut pilot.sess, "ship", None, "AbortSafeLogoff", &[])
         .await
         .expect("ship.AbortSafeLogoff");
     assert_eq!(aborted, PyRep::Bool(true));
@@ -317,10 +312,11 @@ async fn pin_sov_fw_insurgency_and_alliance_system_empty_shapes() {
     // 1. sovMgr.GetSovStructuresInfoForLocalSolarSystem -> empty list [] in non-sov system.
     //    Client: eve/client/script/ui/services/sovSvc.pyj:104.
     //    Linked coverage: tests/it/rpc_sov_fw_warzone.rs:332-343.
-    let sov_structs = rpc(
+    let sov_structs = call_wire(
         &ctx,
         &mut sess,
         "sovMgr",
+        None,
         "GetSovStructuresInfoForLocalSolarSystem",
         &[],
     )
@@ -334,10 +330,11 @@ async fn pin_sov_fw_insurgency_and_alliance_system_empty_shapes() {
 
     // 2. devIndexManager.GetDevelopmentIndicesForSystem -> empty dict {} for unowned/unindexed system.
     //    Client: eve/client/script/ui/services/sovSvc.pyj:338,340 & panelSov.pyj:62,94 (.get(attrID, None)).
-    let empty_dev_idx = rpc(
+    let empty_dev_idx = call_wire(
         &ctx,
         &mut sess,
         "devIndexManager",
+        None,
         "GetDevelopmentIndicesForSystem",
         &[PyRep::Integer(i64::from(JITA_SYSTEM_ID))],
     )
@@ -356,10 +353,11 @@ async fn pin_sov_fw_insurgency_and_alliance_system_empty_shapes() {
             .sov_alliance_id = Some(99_000_001);
         snap.sov_runtime.sov_npc_kills.insert(JITA_SYSTEM_ID, 2_000);
     });
-    let seeded_dev_idx = rpc(
+    let seeded_dev_idx = call_wire(
         &ctx,
         &mut sess,
         "devIndexManager",
+        None,
         "GetDevelopmentIndicesForSystem",
         &[PyRep::Integer(i64::from(JITA_SYSTEM_ID))],
     )
@@ -373,10 +371,11 @@ async fn pin_sov_fw_insurgency_and_alliance_system_empty_shapes() {
     // 3. fwWarzoneSolarsystem.GetAllWarzonesOccupationStates -> dict (supports .itervalues()), never list/None.
     //    Client: eve/client/script/ui/services/fwWarzoneSvc.pyj:105 (.itervalues()), mapViewData.pyj:109, starMapSvc.pyj:1929.
     //    Linked coverage: tests/it/rpc_sov_fw_warzone.rs:479-491, tests/it/fw_parity_complete.rs:60-120.
-    let wz_states = rpc(
+    let wz_states = call_wire(
         &ctx,
         &mut sess,
         "fwWarzoneSolarsystem",
+        None,
         "GetAllWarzonesOccupationStates",
         &[],
     )
@@ -398,10 +397,11 @@ async fn pin_sov_fw_insurgency_and_alliance_system_empty_shapes() {
         snap.fw_runtime.system_victory_points.clear();
         snap.system_states.values_mut().for_each(|st| st.fw_contested_pct = 0.0);
     });
-    let empty_wz = rpc(
+    let empty_wz = call_wire(
         &ctx,
         &mut sess,
         "fwWarzoneSolarsystem",
+        None,
         "GetAllWarzonesOccupationStates",
         &[],
     )
@@ -415,7 +415,7 @@ async fn pin_sov_fw_insurgency_and_alliance_system_empty_shapes() {
     // 4. stationSvc.GetAllianceSystems -> iterable Rowset(solarSystemID, allianceID), never List<Integer>.
     //    Client: eve/client/script/ui/shared/mapView/mapViewData.pyj:111 & starMapSvc.pyj:1932
     //    (`for x in allianceSystemCache: allianceSolarSystems[x.solarSystemID] = x.allianceID`).
-    let pop_ally = rpc(&ctx, &mut sess, "stationSvc", "GetAllianceSystems", &[])
+    let pop_ally = call_wire(&ctx, &mut sess, "stationSvc", None, "GetAllianceSystems", &[])
         .await
         .expect("stationSvc.GetAllianceSystems populated");
     let PyRep::Rowset {
@@ -440,7 +440,7 @@ async fn pin_sov_fw_insurgency_and_alliance_system_empty_shapes() {
         }
         snap.structures.clear();
     });
-    let empty_ally = rpc(&ctx, &mut sess, "stationSvc", "GetAllianceSystems", &[])
+    let empty_ally = call_wire(&ctx, &mut sess, "stationSvc", None, "GetAllianceSystems", &[])
         .await
         .expect("stationSvc.GetAllianceSystems empty");
     assert_eq!(
@@ -452,10 +452,11 @@ async fn pin_sov_fw_insurgency_and_alliance_system_empty_shapes() {
     // 5. insurgencySolarsystem.GetLocalCampaignClientSnapshot -> (systemID, None) 2-tuple, never [].
     //    Client: eve/client/script/ui/services/insurgencyCampaignSvc.pyj:68,71 (UNPACK_SEQUENCE 2).
     //    Linked coverage: tests/it/rpc_fw_insurgency_crimewatch.rs:30-95.
-    let ins_snap = rpc(
+    let ins_snap = call_wire(
         &ctx,
         &mut sess,
         "insurgencySolarsystem",
+        None,
         "GetLocalCampaignClientSnapshot",
         &[],
     )
@@ -521,10 +522,11 @@ async fn pin_config_multi_owners_and_standing_mgr_sanitation() {
             },
         );
     });
-    let owners_rep = rpc(
+    let owners_rep = call_wire(
         &ctx,
         &mut sess,
         "config",
+        None,
         "GetMultiOwnersEx",
         &[PyRep::List(vec![
             PyRep::Integer(valid_faction),
@@ -579,10 +581,11 @@ async fn pin_config_multi_owners_and_standing_mgr_sanitation() {
         "character fallback owner row must carry a non-empty ownerName"
     );
     assert_eq!(
-        rpc(
+        call_wire(
             &ctx,
             &mut sess,
             "config",
+            None,
             "GetMultiOwnersEx",
             &[PyRep::List(vec![PyRep::Integer(cargo_item_id)])],
         )
@@ -596,18 +599,26 @@ async fn pin_config_multi_owners_and_standing_mgr_sanitation() {
     );
     // Empty input & invalid non-integer negative checks.
     assert_eq!(
-        rpc(&ctx, &mut sess, "config", "GetMultiOwnersEx", &[PyRep::List(vec![])])
-            .await
-            .expect("empty GetMultiOwnersEx"),
+        call_wire(
+            &ctx,
+            &mut sess,
+            "config",
+            None,
+            "GetMultiOwnersEx",
+            &[PyRep::List(vec![])],
+        )
+        .await
+        .expect("empty GetMultiOwnersEx"),
         PyRep::tuple_set(
             vec!["ownerID", "ownerName", "typeID", "gender", "ownerNameID"],
             vec![],
         )
     );
-    let bad_owner_arg = rpc(
+    let bad_owner_arg = call_wire(
         &ctx,
         &mut sess,
         "config",
+        None,
         "GetMultiOwnersEx",
         &[PyRep::List(vec![PyRep::String("not-an-id".into())])],
     )
@@ -654,7 +665,7 @@ async fn pin_config_multi_owners_and_standing_mgr_sanitation() {
         }
     });
 
-    let char_st = rpc(&ctx, &mut sess, "standingMgr", "GetCharStandings", &[])
+    let char_st = call_wire(&ctx, &mut sess, "standingMgr", None, "GetCharStandings", &[])
         .await
         .expect("standingMgr.GetCharStandings");
     let PyRep::Rowset { columns: cs_cols, rows: cs_rows } = char_st else {
@@ -667,7 +678,7 @@ async fn pin_config_multi_owners_and_standing_mgr_sanitation() {
         assert!(!cs_ids.contains(bad), "GetCharStandings leaked invalid ownerID {bad}");
     }
 
-    let corp_st = rpc(&ctx, &mut sess, "standingMgr", "GetCorpStandings", &[])
+    let corp_st = call_wire(&ctx, &mut sess, "standingMgr", None, "GetCorpStandings", &[])
         .await
         .expect("standingMgr.GetCorpStandings");
     let PyRep::Rowset { rows: corp_rows, .. } = corp_st else {
@@ -678,7 +689,7 @@ async fn pin_config_multi_owners_and_standing_mgr_sanitation() {
         assert!(!invalid_ids.contains(&fid) && fid > 0, "GetCorpStandings leaked invalid {fid}");
     }
 
-    let npc_st = rpc(&ctx, &mut sess, "standingMgr", "GetNPCNPCStandings", &[])
+    let npc_st = call_wire(&ctx, &mut sess, "standingMgr", None, "GetNPCNPCStandings", &[])
         .await
         .expect("standingMgr.GetNPCNPCStandings");
     let PyRep::Rowset { rows: npc_rows, .. } = npc_st else {
@@ -690,9 +701,16 @@ async fn pin_config_multi_owners_and_standing_mgr_sanitation() {
         assert!(from_id > 0 && to_id > 0, "GetNPCNPCStandings leaked non-positive ID");
     }
 
-    let tx_rep = rpc(&ctx, &mut sess, "standingMgr", "GetStandingTransactions", &[])
-        .await
-        .expect("standingMgr.GetStandingTransactions");
+    let tx_rep = call_wire(
+        &ctx,
+        &mut sess,
+        "standingMgr",
+        None,
+        "GetStandingTransactions",
+        &[],
+    )
+    .await
+    .expect("standingMgr.GetStandingTransactions");
     let PyRep::Rowset { rows: tx_rows, .. } = tx_rep else {
         panic!("GetStandingTransactions must return Rowset");
     };
@@ -710,10 +728,11 @@ async fn pin_config_multi_owners_and_standing_mgr_sanitation() {
     }
 
     // Negative filter check: direct query for an invalid owner ID returns empty list/rowset.
-    let bad_comp = rpc(
+    let bad_comp = call_wire(
         &ctx,
         &mut sess,
         "standingMgr",
+        None,
         "GetStandingCompositions",
         &[PyRep::Integer(i64::from(JITA_SYSTEM_ID))],
     )
@@ -721,9 +740,16 @@ async fn pin_config_multi_owners_and_standing_mgr_sanitation() {
     .expect("standingMgr.GetStandingCompositions invalid from_id");
     assert_eq!(bad_comp, PyRep::List(vec![]));
 
-    let all_comp = rpc(&ctx, &mut sess, "standingMgr", "GetStandingCompositions", &[])
-        .await
-        .expect("standingMgr.GetStandingCompositions");
+    let all_comp = call_wire(
+        &ctx,
+        &mut sess,
+        "standingMgr",
+        None,
+        "GetStandingCompositions",
+        &[],
+    )
+    .await
+    .expect("standingMgr.GetStandingCompositions");
     let PyRep::List(comp_items) = all_comp else {
         panic!("GetStandingCompositions must return List");
     };
@@ -768,17 +794,29 @@ async fn pin_on_item_change_uses_ix_stack_size_never_ix_quantity() {
             ch.corporation_id = DEMO_CORP_ID;
         }
     });
-    let mut sess = SessionState::new(86_030);
-    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    rpc(
-        &ctx,
-        &mut sess,
-        "charUnboundMgr",
-        "SelectCharacterID",
-        &[PyRep::Integer(DEMO_CHAR_ID)],
-    )
-    .await
-    .expect("SelectCharacterID DEMO_CHAR_ID");
+    let kw = HashMap::new();
+    let mut harness = common::new_wire_harness(&ctx, 86_030);
+    harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+            &kw,
+        )
+        .await;
+    harness
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(DEMO_CHAR_ID)],
+            &kw,
+        )
+        .await;
 
     let stack_id = ctx.db.with_mut_snapshot(|snap| {
         let id = snap.next_entity_id + 10;
@@ -799,60 +837,55 @@ async fn pin_on_item_change_uses_ix_stack_size_never_ix_quantity() {
         id
     });
 
-    let bind_rep = rpc(
-        &ctx,
-        &mut sess,
-        "invbroker",
-        "MachoBindObject",
-        &[
-            PyRep::Tuple(vec![PyRep::Integer(JITA_STATION_ID), PyRep::Integer(15)]),
-            PyRep::None,
-        ],
-    )
-    .await
-    .expect("MachoBindObject invbroker");
-    let PyRep::Tuple(bind_parts) = bind_rep else {
-        panic!("expected MachoBindObject 2-tuple");
-    };
-    let mgr_bid = bind_parts[0].as_i64().expect("mgr bound id") as u64;
-    let hangar_inv = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let bind_rep = harness
+        .call_ok(
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![PyRep::Integer(JITA_STATION_ID), PyRep::Integer(15)]),
+                PyRep::None,
+            ],
+            &kw,
+        )
+        .await;
+    let mgr_bid = extract_bound_id_from_wire_rep(&bind_rep).expect("mgr bound id");
+    let hangar_inv = harness
+        .call_ok(
             "invbroker",
             Some(mgr_bid),
             "GetInventory",
             &[PyRep::Integer(10_004), PyRep::None],
-            &HashMap::new(),
-            None,
+            &kw,
         )
-        .await
-        .expect("GetInventory station hangar");
-    let hangar_bid = hangar_inv.as_i64().expect("hangar bound id") as u64;
+        .await;
+    let hangar_bid = extract_bound_id_from_wire_rep(&hangar_inv).expect("hangar bound id");
 
-    let _ = ctx.drain_notifications_for_char(DEMO_CHAR_ID);
-    let _new_stack_id = ctx
-        .dispatch_rpc(
-            &mut sess,
+    let _ = harness.drain_notifications();
+    let _ = harness.drain_frames();
+    let _new_stack_id = harness
+        .call_ok(
             "invbroker",
             Some(hangar_bid),
             "SplitStack",
             &[PyRep::Integer(stack_id), PyRep::Integer(3)],
-            &HashMap::new(),
-            None,
+            &kw,
         )
-        .await
-        .expect("SplitStack");
+        .await;
 
-    let notifs = ctx.drain_notifications_for_char(DEMO_CHAR_ID);
-    let item_changes: Vec<_> = notifs.iter().filter(|n| n.event == "OnItemChange").collect();
+    let notifs = harness.drain_notifications();
+    let item_changes: Vec<_> = notifs
+        .iter()
+        .filter(|(event, _)| event == "OnItemChange")
+        .collect();
     assert!(
         !item_changes.is_empty(),
         "SplitStack must emit OnItemChange notifications"
     );
     let mut saw_ix_stack_size = false;
-    for n in &item_changes {
-        let Some(PyRep::Dict(change_dict)) = n.args.get(1) else {
-            panic!("OnItemChange args[1] must be a change Dict, got {:?}", n.args);
+    for (_, args) in &item_changes {
+        let Some(PyRep::Dict(change_dict)) = args.get(1) else {
+            panic!("OnItemChange args[1] must be a change Dict, got {args:?}");
         };
         assert!(
             !change_dict.iter().any(|(k, _)| k.as_i64() == Some(5)),
