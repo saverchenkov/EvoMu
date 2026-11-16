@@ -367,6 +367,14 @@ pub struct StepOutput {
     pub broadcast: Option<TickBroadcast>,
 }
 
+/// Sim-clock state for an active module reload (`#1081`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ModuleReloadSimEntry {
+    pub remaining_sim_s: f64,
+    pub min_wall_until_unix: u64,
+    pub tidi_stretched: bool,
+}
+
 #[derive(Default)]
 pub(crate) struct SystemActorState {
     pub active_module_cycles: Vec<ActiveModuleCycle>,
@@ -390,8 +398,8 @@ pub(crate) struct SystemActorState {
     pub ball_space_entry_epochs: HashMap<BallId, u64>,
     pub fit_projections: HashMap<BallId, eve_dogma::FitProjection>,
     pub weapon_cycle_start_modules: std::collections::HashSet<(BallId, i64)>,
-    /// Active sim-clock-governed turret/launcher reload countdowns: `turret_or_module_id -> (ship_id, remaining_sim_secs)` (`#1081`).
-    pub module_reload_sim_remaining: HashMap<i64, (BallId, f64)>,
+    /// Active sim-clock-governed turret/launcher reload countdowns (`#1081`).
+    pub module_reload_sim_remaining: HashMap<i64, ModuleReloadSimEntry>,
     pub last_checkpointed_balls: HashMap<BallId, LastCheckpointedBallState>,
     pub hibernated: Arc<std::sync::atomic::AtomicBool>,
     pub hibernated_since_unix: Arc<std::sync::atomic::AtomicU64>,

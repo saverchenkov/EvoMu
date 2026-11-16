@@ -1922,6 +1922,24 @@ fn maybe_emit_login_sim_clock_rebase(
     });
     if let Some(cur_sim_ft) = cur_sim_ft_opt {
         if cur_sim_ft < now_wall_ft {
+            {
+                let mut cn = ctx
+                    .systems
+                    .cluster_nodes
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                let gen = *cn
+                    .rebase_generation_by_system
+                    .entry(solar_system_id)
+                    .or_insert(1);
+                if cn.char_rebased_system_gen.get(&char_id).copied()
+                    == Some((solar_system_id, gen))
+                {
+                    return;
+                }
+                cn.char_rebased_system_gen
+                    .insert(char_id, (solar_system_id, gen));
+            }
             // parity: notify:DoSimClockRebase
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),

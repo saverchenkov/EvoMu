@@ -900,13 +900,26 @@ impl SystemHandle {
     pub fn try_track_module_reload_sim(
         &self,
         module_id: i64,
-        ship_id: BallId,
+        _ship_id: BallId,
         remaining_sim_s: f64,
     ) {
+        let tidi = self.tidi_factor();
         let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
         if remaining_sim_s.is_finite() && remaining_sim_s > 0.0 {
-            st.module_reload_sim_remaining
-                .insert(module_id, (ship_id, remaining_sim_s));
+            let now_unix = st
+                .db_opt
+                .as_ref()
+                .map(|db| db.clock().now_unix_secs())
+                .unwrap_or(0);
+            st.module_reload_sim_remaining.insert(
+                module_id,
+                super::ModuleReloadSimEntry {
+                    remaining_sim_s,
+                    min_wall_until_unix: now_unix
+                        .saturating_add(remaining_sim_s.ceil().max(1.0) as u64),
+                    tidi_stretched: tidi < 0.995,
+                },
+            );
         } else {
             st.module_reload_sim_remaining.remove(&module_id);
         }

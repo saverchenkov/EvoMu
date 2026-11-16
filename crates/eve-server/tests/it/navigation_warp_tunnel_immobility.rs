@@ -643,6 +643,8 @@ async fn venture_jita_to_maurasi_gate_cloak_break_52au_warp_and_next_jump() {
         "ctx.active_warps must be cleared once warp has landed"
     );
 
+    // Wait out the fixed wall-clock stargate session-change cooldown and jump back.
+    ctx.advance_secs(eve_server::services::space_destiny::STARGATE_SESSION_CHANGE_TIMER_SECS);
     // Move within jump range of return stargate and verify subsequent gate jump succeeds
     dest_handle
         .set_ball_position(ship_id, return_gate.position + DVec3::new(1_000.0, 0.0, 0.0))
