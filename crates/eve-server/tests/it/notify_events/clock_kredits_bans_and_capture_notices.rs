@@ -135,7 +135,7 @@ async fn test_parity_notify_sim_clock_rebase_and_analysis_kredits() {
             assert_eq!(times.len(), 2, "DoSimClockRebase takes 2-tuple (oldSimTime, newSimTime)");
             let old_t = times[0].as_i64().expect("oldSimTime");
             let new_t = times[1].as_i64().expect("newSimTime");
-            assert!(old_t < new_t, "sim clock must advance forward");
+            assert!(new_t <= old_t, "TiDi DoSimClockRebase must never push client timers forward: {old_t} -> {new_t}");
         }
         other => panic!("expected 2-tuple rebaseTimes, got {other:?}"),
     }

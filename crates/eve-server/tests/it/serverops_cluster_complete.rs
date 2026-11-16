@@ -115,7 +115,10 @@ async fn test_time_dilation_scales_physics_and_module_cycles_and_emits_clock_reb
     let old_sim = pair[0].as_i64().expect("oldSimTime must be i64");
     let new_sim = pair[1].as_i64().expect("newSimTime must be i64");
     let auth_now_ft = ctx.now_blueos_filetime_ticks();
-    assert!(old_sim < new_sim, "DoSimClockRebase must advance sim clock forward (old={old_sim}, new={new_sim})");
+    assert!(
+        new_sim <= old_sim,
+        "DoSimClockRebase must never push client timers into future (old={old_sim}, new={new_sim})"
+    );
     assert!(
         (auth_now_ft - new_sim).abs() <= 10_000_000,
         "DoSimClockRebase newSimTime ({new_sim}) must match authoritative destiny sim clock ({auth_now_ft})"

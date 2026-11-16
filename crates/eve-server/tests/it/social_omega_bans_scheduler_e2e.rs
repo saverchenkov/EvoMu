@@ -226,11 +226,26 @@ async fn test_shard5_ban_simclock_shutdown_and_corruption_notifications() {
         common::slash_cmd(&ctx, &mut gm, &format!("/chatunban {PILOT_2}")).await;
         let _ = ctx.drain_notifications_for_char(PILOT_2);
 
-        // 2. Time Dilation (`DoSimClockRebase`)
+        // 2. Time Dilation (`DoSimClockRebase` only to online in-space pilots, never docked `#1149`)
         let _sys = ctx.systems.get_or_spawn(JITA_SYS);
         set_system_tidi_factor(&ctx, JITA_SYS, 0.5);
+        assert!(
+            !ctx.drain_notifications_for_char(PILOT_1)
+                .iter()
+                .any(|n| n.event == "DoSimClockRebase"),
+            "docked pilot must not receive solar-system TiDi DoSimClockRebase"
+        );
+        ctx.db.with_mut_snapshot(|s| {
+            if let Some(ch) = s.characters.get_mut(&PILOT_1) {
+                ch.solar_system_id = JITA_SYS;
+                ch.station_id = None;
+                ch.structure_id = None;
+            }
+        });
+        set_system_tidi_factor(&ctx, JITA_SYS, 0.25);
         let rebased = ctx.drain_notifications_for_char(PILOT_1);
         assert!(rebased.iter().any(|n| n.event == "DoSimClockRebase"));
+        set_system_tidi_factor(&ctx, JITA_SYS, 1.0);
 
         // 3. Cluster downtime shutdown (`OnClusterShutdownInitiated`)
         let mut p2_turnur = login(&ctx, 53_103, "other", PILOT_2).await;

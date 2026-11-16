@@ -83,7 +83,7 @@ async fn test_batch2_sim_clock_rebase_disapproval_and_cache_invalidation() {
         panic!("expected 2-tuple in DoSimClockRebase, got {:?}", rebase.args);
     };
     assert_eq!(pair.len(), 2);
-    assert!(pair[0].as_i64().expect("oldSimTime") < pair[1].as_i64().expect("newSimTime"));
+    assert!(pair[1].as_i64().expect("newSimTime") <= pair[0].as_i64().expect("oldSimTime"));
     assert!(
         ctx.drain_notifications_for_char(PILOT_B).iter().all(|n| n.event != "DoSimClockRebase"),
         "Amarr pilot must not receive Jita DoSimClockRebase"

@@ -45,7 +45,7 @@ fn default_constellation_worker_node(ctx: &ServerContext, solar_system_id: Solar
     workers[(key as usize) % pool_len]
 }
 
-fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, old_factor: f64, new_factor: f64) {
+fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, _old_factor: f64, new_factor: f64) {
     let now_wall_ft = ctx.now_machonet_wallclock_filetime_ticks();
     let (old_sim_ft, new_sim_ft) = {
         let mut cn = ctx
@@ -53,17 +53,27 @@ fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, ol
             .cluster_nodes
             .write()
             .unwrap_or_else(|e| e.into_inner());
+        // Issue #1149: V24 client `DoSimClockRebase((oldSimTime, newSimTime))` adds
+        // `newSimTime - oldSimTime` directly to `session.nextSessionChange`, `godma`, and
+        // `michelle` timestamps while client `blue.os.GetSimTime()` runs at 1.0x wallclock
+        // (`now_wall_ft`). Sending `(anchor_sim_ft, anchor_sim_ft + dilated_elapsed_ft)` sent a
+        // positive `+dilated_elapsed_ft` delta that pushed `session.nextSessionChange` minutes or
+        // hours into the future and blocked `Board Ship` (`_MakeShipActive`). Instead, align
+        // `oldSimTime` with the 1.0x advance (`anchor_sim_ft + elapsed_wall_ft`) and `newSimTime`
+        // with dilated progress (`anchor_sim_ft + dilated_elapsed_ft`) so `delta <= 0`.
         let (old_ft, new_ft) = if let Some(&(anchor_wall_ft, anchor_sim_ft, prev_factor)) =
             cn.sim_clock_anchoring.get(&solar_system_id)
         {
             let elapsed_wall_ft = now_wall_ft.saturating_sub(anchor_wall_ft).max(0);
             let factor = prev_factor.clamp(0.10, 1.0);
-            let dilated_elapsed_ft = ((elapsed_wall_ft as f64) * factor).round() as i64;
-            (anchor_sim_ft, anchor_sim_ft.saturating_add(dilated_elapsed_ft))
+            let dilated_elapsed_ft =
+                (((elapsed_wall_ft as f64) * factor).round() as i64).min(elapsed_wall_ft);
+            (
+                anchor_sim_ft.saturating_add(elapsed_wall_ft),
+                anchor_sim_ft.saturating_add(dilated_elapsed_ft),
+            )
         } else {
-            let factor = old_factor.clamp(0.10, 1.0);
-            let seed_elapsed = (10_000_000.0 * factor).round() as i64;
-            (now_wall_ft.saturating_sub(seed_elapsed), now_wall_ft)
+            (now_wall_ft, now_wall_ft)
         };
         cn.sim_clock_anchoring
             .insert(solar_system_id, (now_wall_ft, new_ft, new_factor.clamp(0.10, 1.0)));
@@ -78,16 +88,43 @@ fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, ol
             .insert(solar_system_id, new_ft.max(prev_act));
         (old_ft, new_ft)
     };
+    // Deliver solar-system TiDi rebases only to online in-space pilots (matching
+    // `emit_sim_clock_rebase_if_advanced` in `notify_emitters_tournaments_anomalies`); docked
+    // station sessions have no Ballpark, run hangar timers against `blue.os.GetSimTime()`, and
+    // receive any pending rebase via `emit_sim_clock_rebase_on_entry_if_needed` on undock.
+    let mut in_space_chars: Vec<i64> = {
+        let candidates: Vec<(i64, u64)> = ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .values()
+                .filter(|c| {
+                    c.solar_system_id == solar_system_id
+                        && c.station_id.is_none()
+                        && c.structure_id.is_none()
+                })
+                .map(|c| (c.character_id, c.user_id))
+                .collect()
+        });
+        candidates
+            .into_iter()
+            .filter(|&(cid, uid)| ctx.is_character_online(cid, uid))
+            .map(|(cid, _)| cid)
+            .collect()
+    };
+    in_space_chars.sort_unstable();
+    in_space_chars.dedup();
     // parity: notify:DoSimClockRebase
-    ctx.emit_typed(
-        NotificationTarget::SolarSystem(solar_system_id),
-        crate::router::notify_registry::DoSimClockRebase {
-            times: PyRep::Tuple(vec![
-                PyRep::Integer(old_sim_ft),
-                PyRep::Integer(new_sim_ft),
-            ]),
-        },
-    );
+    for char_id in in_space_chars {
+        ctx.emit_typed_with_id_type(
+            NotificationTarget::Character(char_id),
+            "solarsystemid2",
+            crate::router::notify_registry::DoSimClockRebase {
+                times: PyRep::Tuple(vec![
+                    PyRep::Integer(old_sim_ft),
+                    PyRep::Integer(new_sim_ft),
+                ]),
+            },
+        );
+    }
 }
 
 /// Emits `DoSimClockRebase((oldSimTime, newSimTime))` **once** directly to `char_id` on login

@@ -104,6 +104,14 @@ async fn system_tidi_factor_clamping_persistence_anchoring_and_override_clearing
     assert_eq!(get_system_tidi_factor(&ctx, unloaded_sys), 0.10);
     assert_eq!(clear_manual_system_tidi_override(&ctx, unloaded_sys), 1.0);
 
+    // Place `char_id` in space in Jita (`#1149`: space TiDi DoSimClockRebase targets in-space pilots only)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = jita;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
     // set_system_tidi_factor on active system: finite clamping, non-finite fallback, and DoSimClockRebase anchoring
     let _ = ctx.drain_notifications_for_char(char_id);
     assert_eq!(set_system_tidi_factor(&ctx, jita, 0.50), 0.50);
@@ -117,10 +125,11 @@ async fn system_tidi_factor_clamping_persistence_anchoring_and_override_clearing
         panic!("expected tuple payload");
     };
     let (old_ft1, new_ft1) = (pair1[0].as_i64().unwrap(), pair1[1].as_i64().unwrap());
-    // Seed elapsed with old_factor = 0.50 -> 5_000_000 ticks before wall clock
-    assert_eq!(new_ft1 - old_ft1, 5_000_000);
+    // First TiDi anchor starts aligned to 1.0x wallclock (`delta == 0`, never pushing timers into future)
+    assert_eq!(new_ft1, old_ft1);
 
-    // Advance wall clock by 10 seconds (100_000_000 ticks) at 0.50 TiDi -> dilated elapsed is 50_000_000 ticks
+    // Advance wall clock by 10 seconds (100_000_000 ticks) at 0.50 TiDi -> client 1.0x advanced 10s,
+    // dilated system clock advanced 5s (50_000_000 ticks), so delta is -50_000_000 ticks.
     clock.advance_secs(10);
     assert_eq!(set_system_tidi_factor(&ctx, jita, f64::INFINITY), 1.0);
     let notifs2 = ctx.drain_notifications_for_char(char_id);
@@ -132,8 +141,9 @@ async fn system_tidi_factor_clamping_persistence_anchoring_and_override_clearing
         panic!("expected tuple payload");
     };
     let (old_ft2, new_ft2) = (pair2[0].as_i64().unwrap(), pair2[1].as_i64().unwrap());
-    assert_eq!(old_ft2, new_ft1);
-    assert_eq!(new_ft2 - old_ft2, 50_000_000);
+    assert_eq!(old_ft2, new_ft1 + 100_000_000);
+    assert_eq!(new_ft2, new_ft1 + 50_000_000);
+    assert_eq!(new_ft2 - old_ft2, -50_000_000);
 
     assert_eq!(set_system_tidi_factor(&ctx, jita, f64::NEG_INFINITY), 1.0);
     assert_eq!(set_system_tidi_factor(&ctx, jita, 1.75), 1.0);
@@ -647,4 +657,98 @@ async fn downtime_shutdown_logs_off_headless_sessions_and_preserves_shutdown_not
         .iter()
         .any(|n| n.event == "OnClusterShutdownInitiated"));
     assert!(!notifs.iter().any(|n| n.event == "OnRemoteMessage"));
+}
+
+#[tokio::test]
+async fn sim_clock_rebase_never_advances_session_change_timer_and_skips_docked_pilots() {
+    let base_unix = 1_767_225_600_u64;
+    let (ctx, clock) = make_ctx(base_unix);
+    let jita = 30_000_142_u32;
+    let docked_char_id = 90_000_001_i64;
+    let space_char_id = 90_000_002_i64;
+
+    let (docked_uid, space_uid) = ctx.db.with_mut_snapshot(|snap| {
+        let d_ch = snap.characters.get_mut(&docked_char_id).unwrap();
+        d_ch.solar_system_id = jita;
+        d_ch.station_id = Some(60_003_760);
+        d_ch.structure_id = None;
+        let d_uid = d_ch.user_id;
+
+        let s_ch = snap.characters.get_mut(&space_char_id).unwrap();
+        s_ch.solar_system_id = jita;
+        s_ch.station_id = None;
+        s_ch.structure_id = None;
+        let s_uid = s_ch.user_id;
+        (d_uid, s_uid)
+    });
+    ctx.db
+        .acquire_online_lock(docked_uid, 9201, Some(docked_char_id), true, base_unix)
+        .unwrap();
+    ctx.db
+        .acquire_online_lock(space_uid, 9202, Some(space_char_id), true, base_unix)
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(docked_char_id);
+    let _ = ctx.drain_notifications_for_char(space_char_id);
+
+    // Simulate client V24 `session.nextSessionChange = blue.os.GetSimTime() + 10s` after docking.
+    let mut docked_next_session_change = ctx.now_machonet_wallclock_filetime_ticks() + 100_000_000;
+    let mut space_next_session_change = ctx.now_machonet_wallclock_filetime_ticks() + 100_000_000;
+
+    // 1. Autoscaler detects latency spike and engages TiDi after 2s advance notice.
+    let _ = evaluate_system_tidi_autoscaler_window(&ctx, jita, 520.0, None, 10.0, 10);
+    clock.advance_secs(2);
+    let eng = evaluate_system_tidi_autoscaler_window(&ctx, jita, 520.0, None, 12.0, 12);
+    assert!(eng.factor < 1.0);
+
+    // 2. 94s elapses before load clears and autoscaler relaxes back to 1.0 (as in #1149).
+    clock.advance_secs(94);
+    let _ = evaluate_system_tidi_autoscaler_window(&ctx, jita, 5.0, None, 106.0, 106);
+    clock.advance_secs(1);
+    let _ = evaluate_system_tidi_autoscaler_window(&ctx, jita, 5.0, None, 107.0, 107);
+    clock.advance_secs(2);
+    let rel = evaluate_system_tidi_autoscaler_window(&ctx, jita, 5.0, None, 109.0, 109);
+    assert!((rel.factor - 1.0).abs() < 1e-9);
+
+    let docked_rebases: Vec<_> = ctx
+        .drain_notifications_for_char(docked_char_id)
+        .into_iter()
+        .filter(|n| n.event == "DoSimClockRebase")
+        .collect();
+    assert!(
+        docked_rebases.is_empty(),
+        "docked pilot must not receive solar-system TiDi DoSimClockRebase notifications (#1149)"
+    );
+    for n in &docked_rebases {
+        if let Some(PyRep::Tuple(pair)) = n.args.first() {
+            docked_next_session_change += pair[1].as_i64().unwrap() - pair[0].as_i64().unwrap();
+        }
+    }
+
+    let space_rebases: Vec<_> = ctx
+        .drain_notifications_for_char(space_char_id)
+        .into_iter()
+        .filter(|n| n.event == "DoSimClockRebase")
+        .collect();
+    assert_eq!(space_rebases.len(), 2, "expected engage + relax DoSimClockRebase for in-space pilot");
+    for n in &space_rebases {
+        let PyRep::Tuple(pair) = &n.args[0] else {
+            panic!("expected 2-tuple in DoSimClockRebase");
+        };
+        let old_ft = pair[0].as_i64().unwrap();
+        let new_ft = pair[1].as_i64().unwrap();
+        assert!(
+            new_ft <= old_ft,
+            "DoSimClockRebase must never emit positive delta (old={old_ft}, new={new_ft})"
+        );
+        space_next_session_change += new_ft - old_ft;
+    }
+    let now_ft = ctx.now_machonet_wallclock_filetime_ticks();
+    assert!(
+        docked_next_session_change <= now_ft,
+        "docked pilot sessionChange timer must be expired after 97s, not pushed into future"
+    );
+    assert!(
+        space_next_session_change <= now_ft,
+        "in-space pilot sessionChange timer must not be pushed into future after 97s"
+    );
 }
