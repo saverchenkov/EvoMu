@@ -43,6 +43,50 @@ pub(crate) fn target_not_locked_rpc_error(message: impl Into<String>) -> BridgeR
     )
 }
 
+enum ChargeVolatility {
+    VolatileCrystal { damage: f64, chance: f64 },
+    NonVolatileCrystal,
+    Consumable,
+}
+
+fn classify_charge_volatility(
+    sde: &eve_sde::SdeRegistry,
+    c_sde: Option<&eve_sde::InvType>,
+    ch_state_opt: Option<&eve_dogma::DogmaItemState>,
+) -> ChargeVolatility {
+    let vol_dmg = ch_state_opt
+        .filter(|cs| {
+            cs.base_attributes.contains_key(&784)
+                || cs.modifiers.iter().any(|cm| cm.target_attribute_id == 784)
+        })
+        .map(|cs| cs.get_attribute(784, sde))
+        .or_else(|| c_sde.and_then(|t| t.default_attributes.get(&784).copied()))
+        .unwrap_or(0.0);
+    let vol_chance = ch_state_opt
+        .filter(|cs| {
+            cs.base_attributes.contains_key(&783)
+                || cs.modifiers.iter().any(|cm| cm.target_attribute_id == 783)
+        })
+        .map(|cs| cs.get_attribute(783, sde))
+        .or_else(|| c_sde.and_then(|t| t.default_attributes.get(&783).copied()))
+        .unwrap_or(100.0);
+    if vol_dmg > 0.0 {
+        let normalized_chance = if vol_chance > 1.0 {
+            (vol_chance / 100.0).clamp(0.0, 1.0)
+        } else {
+            vol_chance.clamp(0.0, 1.0)
+        };
+        ChargeVolatility::VolatileCrystal {
+            damage: vol_dmg,
+            chance: normalized_chance,
+        }
+    } else if c_sde.is_some_and(|t| matches!(t.group_id, 86 | 374 | 375 | 482 | 663)) {
+        ChargeVolatility::NonVolatileCrystal
+    } else {
+        ChargeVolatility::Consumable
+    }
+}
+
 pub(crate) async fn handle_module_cycles(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -1213,8 +1257,30 @@ pub(crate) async fn handle_module_cycles(
                     });
                 if let Some(ctid) = first_charge_tid {
                     active_burst_charge_tid = Some(ctid);
+                } else if let Some(plan) = deferred_post_cycle.weapon_autoload.as_mut() {
+                    if !plan.slot_allocations.is_empty() {
+                        active_burst_charge_tid = Some(plan.ammo_type_id);
+                        let c_sde = ctx.sde.types.get(&plan.ammo_type_id);
+                        match classify_charge_volatility(&ctx.sde, c_sde, None) {
+                            ChargeVolatility::VolatileCrystal { damage, chance } => {
+                                crystal_volatility_damage = damage;
+                                crystal_volatility_chance = chance;
+                                plan.consume_one_round_per_slot = false;
+                            }
+                            ChargeVolatility::NonVolatileCrystal => {
+                                crystal_volatility_damage = -1.0;
+                                plan.consume_one_round_per_slot = false;
+                            }
+                            ChargeVolatility::Consumable => {
+                                crystal_volatility_damage = 0.0;
+                                crystal_volatility_chance = -1.0;
+                                plan.consume_one_round_per_slot = true;
+                            }
+                        }
+                    }
                 }
                 if !is_non_volatile_crystal
+                    && deferred_post_cycle.weapon_autoload.is_none()
                     && (first_charge_tid.is_some() || active_burst_charge_tid.is_some())
                 {
                     ctx.db.with_snapshot(|snap| {
@@ -1232,35 +1298,25 @@ pub(crate) async fn handle_module_cycles(
                                     let ch_state_opt = fit
                                         .charge_state(tid, &ctx.sde)
                                         .filter(|cs| cs.type_id == charge_item.type_id);
-                                    let vol_dmg = ch_state_opt
-                                        .as_ref()
-                                        .filter(|cs| {
-                                            cs.base_attributes.contains_key(&784)
-                                                || cs.modifiers.iter().any(|cm| cm.target_attribute_id == 784)
-                                        })
-                                        .map(|cs| cs.get_attribute(784, &ctx.sde))
-                                        .or_else(|| c_sde.and_then(|t| t.default_attributes.get(&784).copied()))
-                                        .unwrap_or(0.0);
-                                    let vol_chance = ch_state_opt
-                                        .as_ref()
-                                        .filter(|cs| {
-                                            cs.base_attributes.contains_key(&783)
-                                                || cs.modifiers.iter().any(|cm| cm.target_attribute_id == 783)
-                                        })
-                                        .map(|cs| cs.get_attribute(783, &ctx.sde))
-                                        .or_else(|| c_sde.and_then(|t| t.default_attributes.get(&783).copied()))
-                                        .unwrap_or(100.0);
-                                    if vol_dmg > 0.0 {
-                                        crystal_volatility_damage = vol_dmg;
-                                        crystal_volatility_chance = if vol_chance > 1.0 { (vol_chance / 100.0).clamp(0.0, 1.0) } else { vol_chance.clamp(0.0, 1.0) };
-                                    } else if c_sde.is_some_and(|t| matches!(t.group_id, 86 | 374 | 375 | 482 | 663)) {
-                                        crystal_volatility_damage = -1.0;
-                                    } else {
-                                        crystal_volatility_damage = 0.0;
-                                        crystal_volatility_chance = -1.0;
-                                        deferred_post_cycle
-                                            .turret_charge_consumptions
-                                            .push((tid, charge_item.item_id));
+                                    match classify_charge_volatility(
+                                        &ctx.sde,
+                                        c_sde,
+                                        ch_state_opt.as_ref(),
+                                    ) {
+                                        ChargeVolatility::VolatileCrystal { damage, chance } => {
+                                            crystal_volatility_damage = damage;
+                                            crystal_volatility_chance = chance;
+                                        }
+                                        ChargeVolatility::NonVolatileCrystal => {
+                                            crystal_volatility_damage = -1.0;
+                                        }
+                                        ChargeVolatility::Consumable => {
+                                            crystal_volatility_damage = 0.0;
+                                            crystal_volatility_chance = -1.0;
+                                            deferred_post_cycle
+                                                .turret_charge_consumptions
+                                                .push((tid, charge_item.item_id));
+                                        }
                                     }
                                 } else if active_burst_charge_tid.is_some() && crystal_volatility_damage < 0.0 {
                                     crystal_volatility_damage = 0.0;
@@ -1269,6 +1325,42 @@ pub(crate) async fn handle_module_cycles(
                         }
                     });
                 }
+            }
+            if let Err(e) = ctx.db.with_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                let mut checked = Vec::new();
+                if let Some(ctid) = active_burst_charge_tid {
+                    ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, ctid)?;
+                    checked.push(ctid);
+                }
+                if !linked_turrets.is_empty() && mod_type.group_id != 899 {
+                    for &tid in &linked_turrets {
+                        if let Some(tf) = snap.items.get(&tid).map(|i| i.flag) {
+                            for i in snap.items.values().filter(|i| {
+                                i.location_id == ship_id
+                                    && i.flag == tf
+                                    && i.item_id != tid
+                                    && i.quantity > 0
+                                    && ctx.sde.types.get(&i.type_id).is_none_or(|t| t.group_id != 908)
+                            }) {
+                                if !checked.contains(&i.type_id) {
+                                    ctx.check_type_skill_prerequisites_in_snapshot(
+                                        snap, char_id, i.type_id,
+                                    )?;
+                                    checked.push(i.type_id);
+                                }
+                            }
+                        }
+                        if let Some(&ctid) = snap.module_active_charges.get(&tid) {
+                            if !checked.contains(&ctid) {
+                                ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, ctid)?;
+                                checked.push(ctid);
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }) {
+                return Some(Err(e));
             }
 
             let raw_cap_drain = mod_state.get_attribute(97, &ctx.sde);
@@ -1361,6 +1453,10 @@ pub(crate) async fn handle_module_cycles(
                 mod_type.group_id,
                 506..=512 | 524 | 771 | 862 | 1245
             );
+            let planned_autoload_slots = deferred_post_cycle
+                .weapon_autoload
+                .as_ref()
+                .map_or(0, |plan| plan.slot_allocations.len());
             let is_guided_missile =
                 crate::system_actor::is_guided_missile_launcher_group(i64::from(mod_type.group_id));
             let is_vorton_group = mod_type.group_id == 4060;
@@ -1368,6 +1464,7 @@ pub(crate) async fn handle_module_cycles(
                 && (active_burst_charge_tid.is_none()
                     || (!linked_turrets.is_empty()
                         && deferred_post_cycle.turret_charge_consumptions.len()
+                            + planned_autoload_slots
                             < linked_turrets.len()))
             {
                 return Some(Err(BridgeRpcError::no_charges(mod_type.type_id as i64)));

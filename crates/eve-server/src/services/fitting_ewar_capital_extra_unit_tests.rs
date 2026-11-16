@@ -1008,11 +1008,10 @@ async fn weapon_autoload_emits_tombstones_subloc_conserves_bank_and_rejects_tomb
     let _ = ctx.drain_notifications_for_char(char_id);
 
     // 1. Silent auto-load on Activate empties Cargo stack -> OnItemChange tombstone + slot prime + attr 805 + OnChargeLoadedToModule
-    prepare_ewar_and_capital_module(
-        &ctx, &sys, sys_id, char_id, ship_id, 25, turret_single, &fm_single, &ac_type, &st_single, &fit, None, false, false, false, &HashMap::new(),
+    run_prep(
+        &ctx, &sys, sys_id, char_id, ship_id, 25, turret_single, &fm_single, &ac_type, &st_single, &fit, None, false, false, false,
     )
     .await
-    .expect("Some")
     .expect("autoload succeeds");
 
     let slot0_charge_id = ctx.db.with_snapshot(|snap| {
@@ -1175,11 +1174,10 @@ async fn weapon_autoload_emits_tombstones_subloc_conserves_bank_and_rejects_tomb
     });
     let (fm_b1, st_b1) = synth_module_and_state(turret_b1, 55_901, 28, None, &[]);
     let _ = ctx.drain_notifications_for_char(char_id);
-    prepare_ewar_and_capital_module(
-        &ctx, &sys, sys_id, char_id, ship_id, 25, turret_b1, &fm_b1, &ac_type, &st_b1, &fit, None, false, false, false, &HashMap::new(),
+    run_prep(
+        &ctx, &sys, sys_id, char_id, ship_id, 25, turret_b1, &fm_b1, &ac_type, &st_b1, &fit, None, false, false, false,
     )
     .await
-    .expect("Some")
     .expect("grouped bank autoload succeeds");
 
     ctx.db.with_snapshot(|snap| {
@@ -1199,4 +1197,705 @@ async fn weapon_autoload_emits_tombstones_subloc_conserves_bank_and_rejects_tomb
     });
     let bank_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(bank_notifs.iter().any(|n| n.event == "OnAmmoInBankChanged"));
+}
+
+fn setup_gh1124_space_pilot_and_ship(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    online_primary: bool,
+) -> eve_machonet::SessionState {
+    let uid = if online_primary {
+        ctx.db.with_snapshot(|s| {
+            s.accounts
+                .values()
+                .next()
+                .expect("seed account")
+                .user_id
+        })
+    } else {
+        char_id as u64
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = uid;
+        ch.name = format!("Pilot {char_id}");
+        ch.corporation_id = 1_000_009;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+        ch.security_status = 5.0;
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    if online_primary {
+        ctx.db
+            .acquire_online_lock(uid, 1124, Some(char_id), true, ctx.now_unix())
+            .expect("online lock");
+    }
+    let mut sess = eve_machonet::SessionState::new(1124);
+    sess.user_id = Some(uid);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(1_000_009);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(sys_id);
+    sess
+}
+
+fn assert_no_reload_notifications(
+    notifs: &[crate::router::PendingMachoNotification],
+    label: &str,
+) {
+    assert!(
+        !notifs.iter().any(|n| matches!(
+            n.event.as_str(),
+            "OnItemChange"
+                | "OnGodmaPrimeItem"
+                | "OnModuleAttributeChanges"
+                | "OnChargeLoadedToModule"
+                | "OnAmmoInBankChanged"
+        )),
+        "{label}: expected zero charge/reload notifications, got {:?}",
+        notifs.iter().map(|n| n.event.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn weapon_autoload_and_active_charge_enforce_consumability_and_skill_prereqs_gh1124() {
+    use eve_proto::PyRep;
+
+    let mut ctx = new_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 97_991_001_i64;
+    let other_char_id = 97_991_002_i64;
+    let ship_id = 97_991_100_i64;
+    let target_ship_id = 97_991_101_i64;
+    let turret_auto = 97_991_201_i64;
+    let turret_preloaded = 97_991_202_i64;
+    let preloaded_t2_charge = 97_991_203_i64;
+    let foreign_cargo_ammo = 97_991_301_i64;
+    let t2_cargo_ammo = 97_991_302_i64;
+    let t1_cargo_ammo = 97_991_303_i64;
+    let foreign_hold_ammo = 97_991_304_i64;
+    let owned_hold_ammo = 97_991_305_i64;
+
+    let mut ac_type = synth_type(
+        55_911,
+        55,
+        "200mm AutoCannon I",
+        &[10],
+        &[(604, 83.0), (128, 1.0), (51, 2000.0), (54, 15_000.0), (6, 0.0)],
+    );
+    ac_type.capacity = 5.0;
+    let mut t1_ammo = synth_type(83_911, 83, "Titanium Sabot S", &[], &[(128, 1.0), (114, 10.0)]);
+    t1_ammo.category_id = 8;
+    t1_ammo.volume = 0.0025;
+    let mut t2_ammo = synth_type(
+        83_912,
+        83,
+        "Barrage S",
+        &[],
+        &[(128, 1.0), (114, 15.0), (182, 12210.0), (277, 1.0)],
+    );
+    t2_ammo.category_id = 8;
+    t2_ammo.volume = 0.0025;
+    {
+        let sde_mut = Arc::make_mut(&mut ctx.sde);
+        sde_mut.types.insert(55_911, ac_type);
+        sde_mut.types.insert(83_911, t1_ammo);
+        sde_mut.types.insert(83_912, t2_ammo);
+    }
+
+    let mut sess = setup_gh1124_space_pilot_and_ship(&ctx, char_id, ship_id, sys_id, true);
+    let _ = setup_gh1124_space_pilot_and_ship(&ctx, other_char_id, target_ship_id, sys_id, false);
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    spawn_test_ball(&sys, ship_id, 587, DVec3::ZERO, MovementMode::Stop, 500.0).await;
+    spawn_test_ball(&sys, target_ship_id, 587, DVec3::new(1_000.0, 0.0, 0.0), MovementMode::Stop, 500.0).await;
+    let _ = sys
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: target_ship_id,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            turret_auto,
+            InventoryItemRecord {
+                item_id: turret_auto,
+                type_id: 55_911,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            turret_preloaded,
+            InventoryItemRecord {
+                item_id: turret_preloaded,
+                type_id: 55_911,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot1,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            preloaded_t2_charge,
+            InventoryItemRecord {
+                item_id: preloaded_t2_charge,
+                type_id: 83_912,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot1,
+                quantity: 5,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        // Foreign-owned Cargo stack -> must be skipped by is_item_consumable_by
+        snap.items.insert(
+            foreign_cargo_ammo,
+            InventoryItemRecord {
+                item_id: foreign_cargo_ammo,
+                type_id: 83_911,
+                owner_id: other_char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 10,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.invalidate_and_push_fit(ship_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Only wrong-owner ammo in Cargo -> rejected cleanly with NoAmmoLoaded
+    let kw = HashMap::new();
+    let err_foreign = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(turret_auto), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .expect("Some")
+    .expect_err("wrong-owner ammo must not be consumable");
+    assert_eq!(err_foreign.code, "NoAmmoLoaded");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&foreign_cargo_ammo].quantity), 10);
+    assert_no_reload_notifications(&ctx.drain_notifications_for_char(char_id), "foreign-only cargo");
+
+    // 2. Owned T2 ammo without required skill 12210 -> rejected cleanly with SkillPrerequisitesNotMet
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            t2_cargo_ammo,
+            InventoryItemRecord {
+                item_id: t2_cargo_ammo,
+                type_id: 83_912,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 10,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let err_t2_skill = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(turret_auto), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .expect("Some")
+    .expect_err("untrained T2 charge must fail skill prerequisite check");
+    assert_eq!(err_t2_skill.code, "SkillPrerequisitesNotMet");
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items[&t2_cargo_ammo].quantity, 10, "untrained T2 cargo stack must remain untouched");
+        assert!(
+            !s.items.values().any(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0 && i.item_id != turret_auto),
+            "HiSlot0 must remain empty"
+        );
+    });
+    assert_no_reload_notifications(&ctx.drain_notifications_for_char(char_id), "untrained T2 autoload");
+
+    // 3. Preloaded untrained T2 charge in HiSlot1 -> rejected with SkillPrerequisitesNotMet and zero consumption
+    let err_preloaded = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(turret_preloaded), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .expect("Some")
+    .expect_err("preloaded untrained T2 charge must fail skill check");
+    assert_eq!(err_preloaded.code, "SkillPrerequisitesNotMet");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&preloaded_t2_charge].quantity), 5);
+    assert_no_reload_notifications(&ctx.drain_notifications_for_char(char_id), "untrained preloaded T2");
+
+    // 4. Trained T1 stack added with higher item_id alongside untrained T2 stack -> autoloads trained T1 stack cleanly
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            t1_cargo_ammo,
+            InventoryItemRecord {
+                item_id: t1_cargo_ammo,
+                type_id: 83_911,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 3,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(turret_auto), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .expect("Some")
+    .expect("trained T1 fallback should autoload and fire");
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items[&t2_cargo_ammo].quantity, 10, "untrained T2 stack untouched");
+        assert!(!s.items.contains_key(&t1_cargo_ammo), "trained T1 cargo stack consumed on autoload");
+        let loaded_t1 = s
+            .items
+            .values()
+            .find(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0 && i.item_id != turret_auto)
+            .expect("T1 ammo loaded into HiSlot0");
+        assert_eq!(loaded_t1.type_id, 83_911);
+        assert_eq!(loaded_t1.quantity, 2, "3 loaded then 1 round fired on Activate -> 2 remaining");
+    });
+
+    // 5. SpecializedAmmoHold: wrong-owner stack skipped, owned trained stack loaded into a fresh turret
+    let turret_hold = 97_991_204_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&t2_cargo_ammo);
+        snap.items.insert(
+            turret_hold,
+            InventoryItemRecord {
+                item_id: turret_hold,
+                type_id: 55_911,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot2,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            foreign_hold_ammo,
+            InventoryItemRecord {
+                item_id: foreign_hold_ammo,
+                type_id: 83_911,
+                owner_id: other_char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::SpecializedAmmoHold,
+                quantity: 5,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            owned_hold_ammo,
+            InventoryItemRecord {
+                item_id: owned_hold_ammo,
+                type_id: 83_911,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::SpecializedAmmoHold,
+                quantity: 2,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.invalidate_and_push_fit(ship_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(turret_hold), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .expect("Some")
+    .expect("owned SpecializedAmmoHold stack should autoload after skipping foreign stack");
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items[&foreign_hold_ammo].quantity, 5, "foreign ammo-hold stack untouched");
+        assert!(!s.items.contains_key(&owned_hold_ammo), "owned ammo-hold stack consumed");
+        let loaded = s
+            .items
+            .values()
+            .find(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot2 && i.item_id != turret_hold)
+            .expect("ammo-hold charge loaded into HiSlot2");
+        assert_eq!(loaded.quantity, 1, "2 loaded then 1 round fired -> 1 remaining");
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn weapon_autoload_defers_commit_on_partial_missile_bank_and_precondition_failures_gh1124() {
+    use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+    use eve_proto::PyRep;
+
+    let mut ctx = new_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 97_992_001_i64;
+    let target_char_id = 97_992_002_i64;
+    let ship_id = 97_992_100_i64;
+    let target_ship_id = 97_992_101_i64;
+    let far_ship_id = 97_992_102_i64;
+
+    let m_bank_1 = 97_992_201_i64;
+    let m_bank_2 = 97_992_202_i64;
+    let m_bank_3 = 97_992_203_i64;
+    let turret_id = 97_992_210_i64;
+    let cargo_missiles = 97_992_301_i64;
+    let cargo_bullets = 97_992_302_i64;
+
+    let mut launcher_type = synth_type(
+        50_901,
+        509,
+        "Light Missile Launcher I",
+        &[101],
+        &[(604, 384.0), (51, 2000.0), (6, 0.0)],
+    );
+    launcher_type.capacity = 5.0;
+    let mut ac_type = synth_type(
+        55_921,
+        55,
+        "200mm AutoCannon I",
+        &[10],
+        &[(604, 83.0), (128, 1.0), (51, 2000.0), (54, 15_000.0), (6, 25.0)],
+    );
+    ac_type.capacity = 5.0;
+    let mut missile_type = synth_type(
+        38_401,
+        384,
+        "Scourge Light Missile",
+        &[],
+        &[(37, 2000.0), (281, 5000.0), (117, 20.0)],
+    );
+    missile_type.category_id = 8;
+    missile_type.volume = 0.01;
+    let mut bullet_type = synth_type(83_921, 83, "Titanium Sabot S", &[], &[(128, 1.0), (114, 10.0)]);
+    bullet_type.category_id = 8;
+    bullet_type.volume = 0.0025;
+    {
+        let sde_mut = Arc::make_mut(&mut ctx.sde);
+        sde_mut.types.insert(50_901, launcher_type);
+        sde_mut.types.insert(55_921, ac_type);
+        sde_mut.types.insert(38_401, missile_type);
+        sde_mut.types.insert(83_921, bullet_type);
+    }
+
+    let mut sess = setup_gh1124_space_pilot_and_ship(&ctx, char_id, ship_id, sys_id, true);
+    let _ = setup_gh1124_space_pilot_and_ship(&ctx, target_char_id, target_ship_id, sys_id, false);
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    spawn_test_ball(&sys, ship_id, 587, DVec3::ZERO, MovementMode::Stop, 500.0).await;
+    spawn_test_ball(&sys, target_ship_id, 587, DVec3::new(1_000.0, 0.0, 0.0), MovementMode::Stop, 500.0).await;
+    spawn_test_ball(&sys, far_ship_id, 587, DVec3::new(500_000.0, 0.0, 0.0), MovementMode::Stop, 500.0).await;
+    for locked_tid in [target_ship_id, far_ship_id] {
+        let _ = sys
+            .add_target_lock(
+                ship_id,
+                eve_destiny::TargetLock {
+                    target_id: locked_tid,
+                    lock_time_ms: 1_000.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await;
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (mid, fl) in [
+            (m_bank_1, InventoryFlag::HiSlot0),
+            (m_bank_2, InventoryFlag::HiSlot1),
+            (m_bank_3, InventoryFlag::HiSlot2),
+        ] {
+            snap.items.insert(
+                mid,
+                InventoryItemRecord {
+                    item_id: mid,
+                    type_id: 50_901,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: fl,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.weapon_banks
+            .entry(ship_id)
+            .or_default()
+            .insert(m_bank_1, vec![m_bank_1, m_bank_2, m_bank_3]);
+        snap.items.insert(
+            cargo_missiles,
+            InventoryItemRecord {
+                item_id: cargo_missiles,
+                type_id: 38_401,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 2,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.invalidate_and_push_fit(ship_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let kw = HashMap::new();
+    let assert_clean_missile_bank_state = |expected_qty: i32, label: &str| {
+        ctx.db.with_snapshot(|s| {
+            assert_eq!(s.items[&cargo_missiles].quantity, expected_qty, "{label}: cargo_missiles mutated");
+            assert!(
+                !s.items.values().any(|i| {
+                    i.location_id == ship_id
+                        && matches!(i.flag, InventoryFlag::HiSlot0 | InventoryFlag::HiSlot1 | InventoryFlag::HiSlot2)
+                        && ![m_bank_1, m_bank_2, m_bank_3].contains(&i.item_id)
+                }),
+                "{label}: slot charges must not be partially loaded"
+            );
+            assert!(
+                !s.module_active_charges.contains_key(&m_bank_1)
+                    && !s.module_active_charges.contains_key(&m_bank_2)
+                    && !s.module_active_charges.contains_key(&m_bank_3),
+                "{label}: module_active_charges must remain empty"
+            );
+        });
+    };
+
+    // 1. Partial grouped missile bank (2 missiles for 3 launchers) -> NoCharges, zero side effects
+    let err_partial = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(m_bank_1), PyRep::String("useMissiles".into()), PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .expect("Some")
+    .expect_err("partial grouped missile bank must fail");
+    assert_eq!(err_partial.code, "NoCharges");
+    assert_clean_missile_bank_state(2, "partial missile bank");
+    assert_no_reload_notifications(&ctx.drain_notifications_for_char(char_id), "partial missile bank");
+
+    // 2. Enough missiles (10) for full 3-launcher bank, but TargetTooFar (500 km vs 10 km flight range) -> zero side effects
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.items.get_mut(&cargo_missiles) {
+            st.quantity = 10;
+        }
+    });
+    let err_range = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(m_bank_1), PyRep::String("useMissiles".into()), PyRep::Integer(far_ship_id)],
+        &kw,
+    )
+    .await
+    .expect("Some")
+    .expect_err("out-of-range missile bank must fail");
+    assert_eq!(err_range.code, "TargetTooFar");
+    assert_clean_missile_bank_state(10, "TargetTooFar");
+    assert_no_reload_notifications(&ctx.drain_notifications_for_char(char_id), "TargetTooFar");
+
+    // Replace HiSlot0..2 with single capacitor-consuming turret + cargo_bullets for cap / target-lock / safety failure checks
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&m_bank_1);
+        snap.items.remove(&m_bank_2);
+        snap.items.remove(&m_bank_3);
+        snap.items.remove(&cargo_missiles);
+        snap.weapon_banks.remove(&ship_id);
+        snap.items.insert(
+            turret_id,
+            InventoryItemRecord {
+                item_id: turret_id,
+                type_id: 55_921,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            cargo_bullets,
+            InventoryItemRecord {
+                item_id: cargo_bullets,
+                type_id: 83_921,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 10,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.invalidate_and_push_fit(ship_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let assert_clean_turret_state = |label: &str| {
+        ctx.db.with_snapshot(|s| {
+            assert_eq!(s.items[&cargo_bullets].quantity, 10, "{label}: cargo_bullets mutated");
+            assert!(
+                !s.items.values().any(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0 && i.item_id != turret_id),
+                "{label}: turret slot must remain empty"
+            );
+            assert!(
+                !s.module_active_charges.contains_key(&turret_id),
+                "{label}: module_active_charges must remain empty"
+            );
+        });
+    };
+
+    // 3. TargetNotLocked -> zero side effects
+    let unlocked_target = 97_992_999_i64;
+    let err_unlocked = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(turret_id), PyRep::String("targetAttack".into()), PyRep::Integer(unlocked_target)],
+        &kw,
+    )
+    .await
+    .expect("Some")
+    .expect_err("unlocked target must fail");
+    assert_eq!(err_unlocked.code, "TargetNotLocked");
+    assert_clean_turret_state("TargetNotLocked");
+    assert_no_reload_notifications(&ctx.drain_notifications_for_char(char_id), "TargetNotLocked");
+
+    // 4. NotEnoughCapacitor -> zero side effects
+    let _ = sys.set_capacitor(ship_id, 0.0).await;
+    let err_cap = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(turret_id), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .expect("Some")
+    .expect_err("zero capacitor must fail");
+    assert_eq!(err_cap.code, "NotEnoughCapacitor");
+    assert_clean_turret_state("NotEnoughCapacitor");
+    assert_no_reload_notifications(&ctx.drain_notifications_for_char(char_id), "NotEnoughCapacitor");
+
+    // 5. Crimewatch SafetyLevel::Green in Jita -> CantDoInCurrentSafetyLevel, zero side effects
+    let _ = sys.set_capacitor(ship_id, 500.0).await;
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Green);
+    });
+    let err_safety = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(turret_id), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .expect("Some")
+    .expect_err("Safety Green aggression in Jita must fail");
+    assert_eq!(err_safety.code, "CantDoInCurrentSafetyLevel");
+    assert_clean_turret_state("CantDoInCurrentSafetyLevel");
+    assert_no_reload_notifications(&ctx.drain_notifications_for_char(char_id), "CantDoInCurrentSafetyLevel");
+
+    // 6. SafetyLevel::Red -> autoload + first round commit cleanly after preconditions pass
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Red);
+    });
+    crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(turret_id), PyRep::String("targetAttack".into()), PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .expect("Some")
+    .expect("Safety Red activation must succeed");
+    ctx.db.with_snapshot(|s| {
+        assert!(!s.items.contains_key(&cargo_bullets), "cargo_bullets loaded into slot");
+        let slot_charge = s
+            .items
+            .values()
+            .find(|i| i.location_id == ship_id && i.flag == InventoryFlag::HiSlot0 && i.item_id != turret_id)
+            .expect("slot charge created");
+        assert_eq!(slot_charge.quantity, 9, "10 loaded then 1 round fired -> 9 remaining");
+    });
+    let ok_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(ok_notifs.iter().any(|n| n.event == "OnGodmaPrimeItem"));
+    assert!(ok_notifs.iter().any(|n| n.event == "OnModuleAttributeChanges"));
+    assert!(ok_notifs.iter().any(|n| n.event == "OnChargeLoadedToModule"));
 }
