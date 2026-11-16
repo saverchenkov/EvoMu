@@ -979,11 +979,11 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                                     .find(|c| c.active_ship_id == b.id)
                                     .map(|c| c.character_id)
                             }) {
-                                ctx.notify(
+                                ctx.emit_typed(
                                     NotificationTarget::Character(vcid),
-                                    "OnTargetClear",
-                                    "charid",
-                                    vec![],
+                                    crate::router::notify_registry::OnTargetClear {
+                                        targets_to_skip: None,
+                                    },
                                 );
                             }
                         }

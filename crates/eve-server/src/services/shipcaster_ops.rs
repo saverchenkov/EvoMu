@@ -74,11 +74,12 @@ fn build_beacon_slim_keyval(ctx: &ServerContext, pad: &LandingPadRecord) -> PyRe
 }
 
 async fn emit_beacon_slim_item_change(ctx: &ServerContext, old_pad: &LandingPadRecord, new_pad: &LandingPadRecord) {
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(new_pad.solar_system_id),
-        "OnSlimItemChange",
-        "solarsystemid",
-        vec![build_beacon_slim_keyval(ctx, old_pad), build_beacon_slim_keyval(ctx, new_pad)],
+        crate::router::notify_registry::OnSlimItemChange {
+            old_slim: build_beacon_slim_keyval(ctx, old_pad),
+            new_slim: build_beacon_slim_keyval(ctx, new_pad),
+        },
     );
     let (group_id, category_id) = ctx.sde.types.get(&new_pad.type_id).map(|t| (t.group_id, t.category_id)).unwrap_or((4547, 2));
     let sys = ctx.systems.get_or_spawn(new_pad.solar_system_id);

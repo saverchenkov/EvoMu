@@ -203,6 +203,31 @@ pub fn emit_typed_target_to_char_with_id_type<N: TypedNotification>(
     );
 }
 
+/// Builds and pushes a typed notification to a single recipient's pending queue + live broadcast
+/// with an explicit FIFO queue bound (used by lifecycle hooks retaining a 512-entry bound).
+#[allow(clippy::too_many_arguments)]
+pub fn emit_typed_target_to_char_capped<N: TypedNotification>(
+    pending_notifications: Option<&dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
+    notify_tx: Option<&broadcast::Sender<(i64, PendingMachoNotification)>>,
+    char_id: i64,
+    user_id_opt: Option<u64>,
+    id_type: &str,
+    created_filetime: i64,
+    queue_cap: usize,
+    notif: N,
+) {
+    build_and_push_typed_notification(
+        pending_notifications,
+        notify_tx,
+        char_id,
+        user_id_opt,
+        id_type,
+        created_filetime,
+        notif,
+        Some(queue_cap),
+    );
+}
+
 /// Builds one fleet-scoped typed notification and enqueues/broadcasts it to each fleet member
 /// (used by dungeon/escalation hooks outside `ServerContext`, retaining the 256-entry FIFO bound).
 pub fn emit_typed_to_fleet_members_core<N: TypedNotification>(
@@ -4013,6 +4038,81 @@ define_notifications! {
             vec![PyRep::List(vec![PyRep::Integer(100_000_010)])],
         ],
     },
+    // === RFC-3 C-8 Typed Notification Batch ===
+    OnMachoObjectDisconnect => "OnMachoObjectDisconnect" ("clientID") {
+        fields: { object_id: PyRep, client_id: i64, ref_id: i64 },
+        samples: || vec![vec![
+            PyRep::ascii_bytes("N=1000000000001:1".to_string()),
+            PyRep::Integer(1_000_000_000_001),
+            PyRep::Integer(1),
+        ]],
+    },
+    OnMultiEvent => "OnMultiEvent" ("charid") {
+        fields: { events: Vec<PyRep> },
+        samples: || vec![vec![PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Tuple(vec![
+                PyRep::String("OnTarget".into()),
+                PyRep::String("add".into()),
+                PyRep::Integer(100_000_010),
+                PyRep::String(String::new()),
+            ]),
+            PyRep::Integer(0),
+        ])])]],
+    },
+    OnNonDiminishingInjectionsUsed => "OnNonDiminishingInjectionsUsed" ("charid") {
+        fields: { amount: i64 },
+        samples: || vec![vec![PyRep::Integer(1)]],
+    },
+    OnReprocessingMaterialsChanged => "OnReprocessingMaterialsChanged" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnServerBoostersChanged => "OnServerBoostersChanged" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnServerImplantsChanged => "OnServerImplantsChanged" ("charid") {
+        samples: || vec![vec![]],
+    },
+    OnShipcasterTargetStateChanged => "OnShipcasterTargetStateChanged" ("solarsystemid") {
+        fields: { item_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1_000_000_000_001)]],
+    },
+    OnShipCosmeticChanged => "OnShipCosmeticChanged" ("solarsystemid") {
+        fields: { ship_id: i64, slot_index: i64, cosmetic: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(100_000_010),
+            PyRep::Integer(0),
+            PyRep::Integer(2),
+        ]],
+    },
+    OnShipCosmeticsChanged => "OnShipCosmeticsChanged" ("solarsystemid") {
+        fields: { ship_id: i64, cosmetics: PyRep },
+        samples: || vec![vec![
+            PyRep::Integer(100_000_010),
+            PyRep::Dict(vec![(PyRep::Integer(0), PyRep::Integer(2))]),
+        ]],
+    },
+    OnSkyhookFirstActivation => "OnSkyhookFirstActivation" ("solarsystemid") {
+        fields: { skyhook_id: i64, planet_id: i64 },
+        samples: || vec![vec![
+            PyRep::Integer(1_000_000_000_001),
+            PyRep::Integer(40_000_001),
+        ]],
+    },
+    OnSkyhookSiloDamageUpdated => "OnSkyhookSiloDamageUpdated" ("solarsystemid") {
+        fields: { shield_percentage: f64 },
+        samples: || vec![vec![PyRep::Real(0.5)]],
+    },
+    OnSurveyRewardsAvailable => "OnSurveyRewardsAvailable" ("charid") {
+        fields: { survey_id: i64 },
+        samples: || vec![vec![PyRep::Integer(2801)]],
+    },
+    OnWreckLootAll => "OnWreckLootAll" ("charid") {
+        fields: { inv_id: i64, items: Vec<i64> },
+        samples: || vec![vec![
+            PyRep::Integer(100_000_900),
+            PyRep::List(vec![PyRep::Integer(100_000_901)]),
+        ]],
+    },
 }
 
 impl OnOwnOrdersChanged {
@@ -4112,4 +4212,12 @@ define_notification_item!(OnAsteroidRevealedDetailed => "OnAsteroidRevealed" ("c
         PyRep::Integer(1230),
         PyRep::Integer(5000),
     ]],
+});
+define_notification_item!(PlanetExtractorFinished => "PlanetExtractorFinished" ("charid") {
+    fields: { planet_id: i64, pin_id: i64 },
+    samples: || vec![vec![PyRep::Integer(40_000_001), PyRep::Integer(701)]],
+});
+define_notification_item!(PlanetStorageFull => "PlanetStorageFull" ("charid") {
+    fields: { planet_id: i64, pin_id: i64 },
+    samples: || vec![vec![PyRep::Integer(40_000_001), PyRep::Integer(501)]],
 });

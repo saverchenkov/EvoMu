@@ -1207,17 +1207,15 @@ pub fn flush_deployable_side_effects(ctx: &ServerContext) {
     });
     for n in notices {
         ctx.invalidate_ship_fitting(n.ship_id);
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::Character(n.char_id),
-            "OnCloakModuleForceDeactivated",
-            "charid",
-            vec![
-                PyRep::String("CloakDeactivatedByObservatory".into()),
-                PyRep::Dict(vec![
+            crate::router::notify_registry::OnCloakModuleForceDeactivated {
+                notify_msg: "CloakDeactivatedByObservatory".into(),
+                notify_args: PyRep::Dict(vec![
                     (PyRep::String("shipID".into()), PyRep::Integer(n.ship_id)),
                     (PyRep::String("moduleID".into()), PyRep::Integer(n.module_id)),
                 ]),
-            ],
+            },
         );
     }
 }

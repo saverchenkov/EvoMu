@@ -544,11 +544,12 @@ pub async fn handle_anchor_skyhook_rpc(
         })
         .await;
     crate::services::sov_services::emit_sov_structures_updated(ctx, sys_id, &[skyhook_id]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnSkyhookFirstActivation",
-        "solarsystemid",
-        vec![PyRep::Integer(skyhook_id), PyRep::Integer(planet_id)],
+        crate::router::notify_registry::OnSkyhookFirstActivation {
+            skyhook_id,
+            planet_id,
+        },
     );
     Ok(PyRep::keyval([
         ("structureID", PyRep::Integer(skyhook_id)),
@@ -675,11 +676,11 @@ pub fn apply_skyhook_weapon_damage_typed(
             ))
         })?;
 
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
-        "OnSkyhookSiloDamageUpdated",
-        "solarsystemid",
-        vec![PyRep::Real(shield_pct)],
+        crate::router::notify_registry::OnSkyhookSiloDamageUpdated {
+            shield_percentage: shield_pct,
+        },
     );
     if newly_hackable || hackable_now {
         crate::services::sov_services::emit_skyhook_can_be_hacked(ctx, sys_id, skyhook_id);

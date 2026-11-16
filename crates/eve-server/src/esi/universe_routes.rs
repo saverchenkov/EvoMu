@@ -1178,7 +1178,10 @@ pub fn dispatch_universe_and_nav(
             });
             crate::services::nav_warp_interdiction::sync_waypoints_to_char_settings(ctx, caller_id, &updated_wps);
             crate::services::notify_emitters_character_services::emit_destination_change(ctx, caller_id, destination_id, clear_other_waypoints, add_to_beginning);
-            ctx.notify(NotificationTarget::Character(caller_id), "OnAutopilotUpdated", "charid", vec![]);
+            ctx.emit_typed(
+                NotificationTarget::Character(caller_id),
+                crate::router::notify_registry::OnAutopilotUpdated,
+            );
             RouteExecutionResult::no_content(0)
         }
 

@@ -273,18 +273,15 @@ pub fn install_macho_notify_sink(ctx: &crate::router::ServerContext) {
         let now_ft = (clk_db.clock().now_unix_secs() as i64 + 11_644_473_600) * 10_000_000;
         let mut queues = pend.write().unwrap_or_else(|e| e.into_inner());
         for (cid, uid) in recipients {
-            let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
-                cid, uid, event, id_type, args.clone(),
-            );
-            let notif = crate::router::cache_notifications::PendingMachoNotification {
-                seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-                recipient_char_id: cid,
-                event: event.to_string(),
-                id_type: id_type.to_string(),
-                args: args.clone(),
-                packet,
-                marshaled_packet,
-                created_filetime: now_ft,
+            let Some(notif) = crate::router::notify_registry::build_pending_registered_notification(
+                cid,
+                uid,
+                event,
+                id_type,
+                args.clone(),
+                now_ft,
+            ) else {
+                continue;
             };
             let q = queues.entry(cid).or_default();
             if q.len() >= 512 {
@@ -1323,8 +1320,13 @@ pub fn activate_ship_emblem_license(
         pb::message(notice_pkg).set("entitlement", pb::raw_message(&ident)),
         ctx.now_unix(),
     );
-    let act_args = vec![PyRep::Integer(i64::from(license_type_id)), PyRep::Integer(char_id)];
-    ctx.notify(NotificationTarget::Character(char_id), "OnSkinLicenseActivated", "charid", act_args);
+    ctx.emit_typed(
+        NotificationTarget::Character(char_id),
+        crate::router::notify_registry::OnSkinLicenseActivated {
+            skin_id: i64::from(license_type_id),
+            licensee_id: char_id,
+        },
+    );
     Ok(PyRep::keyval([
         ("characterID", PyRep::Integer(char_id)),
         ("skinID", PyRep::Integer(i64::from(license_type_id))),
@@ -1374,11 +1376,12 @@ pub async fn broadcast_ship_skin_cosmetic_change(
         let cosmetic_dict = ctx.db.with_snapshot(|snap| {
             enabled_cosmetics_dict_from_snapshot(snap, ship_id as u64)
         });
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::SolarSystem(sys_id),
-            "OnShipCosmeticsChanged",
-            "solarsystemid",
-            vec![PyRep::Integer(ship_id), cosmetic_dict],
+            crate::router::notify_registry::OnShipCosmeticsChanged {
+                ship_id,
+                cosmetics: cosmetic_dict,
+            },
         );
         let group_id = ctx.sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(25);
         let build_slim = |skin_rep: PyRep, mat_rep: PyRep| {
@@ -1396,14 +1399,12 @@ pub async fn broadcast_ship_skin_cosmetic_change(
                 ("skinMaterialSetID", mat_rep),
             ])
         };
-        ctx.notify(
+        ctx.emit_typed(
             NotificationTarget::SolarSystem(sys_id),
-            "OnSlimItemChange",
-            "solarsystemid",
-            vec![
-                build_slim(prev_skin_rep, to_rep(prev_mat)),
-                build_slim(new_skin_rep, to_rep(new_mat)),
-            ],
+            crate::router::notify_registry::OnSlimItemChange {
+                old_slim: build_slim(prev_skin_rep, to_rep(prev_mat)),
+                new_slim: build_slim(new_skin_rep, to_rep(new_mat)),
+            },
         );
         let handle = ctx.systems.get_or_spawn(sys_id);
         let (is_cloaked, war_faction_id, existing_name) = handle
@@ -1437,11 +1438,13 @@ pub async fn broadcast_ship_skin_cosmetic_change(
         let cosmetic_dict = ctx.db.with_snapshot(|snap| {
             enabled_cosmetics_dict_from_snapshot(snap, ship_id as u64)
         });
-        ctx.notify(
+        ctx.emit_typed_with_id_type(
             NotificationTarget::Character(char_id),
-            "OnShipCosmeticsChanged",
             "charid",
-            vec![PyRep::Integer(ship_id), cosmetic_dict],
+            crate::router::notify_registry::OnShipCosmeticsChanged {
+                ship_id,
+                cosmetics: cosmetic_dict,
+            },
         );
     }
 }

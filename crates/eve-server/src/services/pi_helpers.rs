@@ -499,20 +499,7 @@ pub fn queue_pi_notification(
     type_id: i32,
     now_unix: u64,
 ) {
-    let args = vec![PyRep::Integer(planet_id), PyRep::Integer(pin_id)];
     let now_ft = ctx.now_blueos_filetime_ticks();
-    let (packet, marshaled_packet) =
-        ServerContext::build_macho_notification_packet(recipient_char_id, None, event, "charid", args.clone());
-    let notif = crate::router::cache_notifications::PendingMachoNotification {
-        seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-        recipient_char_id,
-        event: event.to_string(),
-        id_type: "charid".to_string(),
-        args,
-        packet,
-        marshaled_packet,
-        created_filetime: now_ft,
-    };
     let notif_id = -(7_900_000_000_000 + (type_id as i64) * 100_000_000 + ((pin_id.abs() ^ (now_unix as i64)) & 0x03FF_FFFF));
     let data_str = format!("{event}:{planet_id}:{pin_id}");
     if let Ok(mut recs) = ctx.notification_records.write() {
@@ -532,12 +519,26 @@ pub fn queue_pi_notification(
             interacted: false,
         });
     }
-    if let Ok(mut queues) = ctx.pending_notifications.write() {
-        let q = queues.entry(recipient_char_id).or_default();
-        if q.len() >= crate::router::cache_notifications::MAX_PENDING_NOTIFICATIONS_PER_CHAR {
-            q.remove(0);
-        }
-        q.push(notif);
+    match event {
+        "PlanetStorageFull" => crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+            Some(&*ctx.pending_notifications),
+            None,
+            recipient_char_id,
+            None,
+            <crate::router::notify_registry::PlanetStorageFull as crate::router::notify_registry::TypedNotification>::DEFAULT_ID_TYPE,
+            now_ft,
+            crate::router::notify_registry::PlanetStorageFull { planet_id, pin_id },
+        ),
+        "PlanetExtractorFinished" => crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+            Some(&*ctx.pending_notifications),
+            None,
+            recipient_char_id,
+            None,
+            <crate::router::notify_registry::PlanetExtractorFinished as crate::router::notify_registry::TypedNotification>::DEFAULT_ID_TYPE,
+            now_ft,
+            crate::router::notify_registry::PlanetExtractorFinished { planet_id, pin_id },
+        ),
+        _ => {}
     }
 }
 

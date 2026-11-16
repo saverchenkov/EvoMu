@@ -1095,11 +1095,11 @@ pub fn handle(
                             None,
                         );
                         ctx.push_brain_update(char_id);
-                        ctx.notify(
+                        ctx.emit_typed(
                             crate::router::NotificationTarget::Character(char_id),
-                            "OnFreeSkillPointsChanged",
-                            "charid",
-                            vec![PyRep::Real(remaining_free)],
+                            crate::router::notify_registry::OnFreeSkillPointsChanged {
+                                new_free_skill_points: remaining_free,
+                            },
                         );
                         Some(Ok(PyRep::Real(new_skill_sp)))
                     }
@@ -1276,11 +1276,11 @@ pub fn handle(
                     if changed_skills {
                         ctx.push_brain_update(char_id);
                     }
-                    ctx.notify(
+                    ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
-                        "OnFreeSkillPointsChanged",
-                        "charid",
-                        vec![PyRep::Real(rem_free)],
+                        crate::router::notify_registry::OnFreeSkillPointsChanged {
+                            new_free_skill_points: rem_free,
+                        },
                     );
                     Some(Ok(PyRep::Real(sp)))
                 }

@@ -323,6 +323,174 @@ fn typed_notification_into_args_preserves_registered_arity() {
         .len(),
         1
     );
+
+    use super::notify_registry::{
+        OnGodmaShipEffect, OnMachoObjectDisconnect, OnMultiEvent, OnNonDiminishingInjectionsUsed,
+        OnReprocessingMaterialsChanged, OnServerBoostersChanged, OnServerImplantsChanged,
+        OnShipCosmeticChanged, OnShipCosmeticsChanged, OnShipcasterTargetStateChanged,
+        OnSkyhookFirstActivation, OnSkyhookSiloDamageUpdated, OnSovereigntyAudioEvent,
+        OnSurveyRewardsAvailable, OnWreckLootAll, PlanetExtractorFinished, PlanetStorageFull,
+    };
+    assert_eq!(OnMachoObjectDisconnect::DEFAULT_ID_TYPE, "clientID");
+    assert_eq!(
+        OnMachoObjectDisconnect {
+            object_id: PyRep::ascii_bytes("N=1:1".to_string()),
+            client_id: 1_000_000_000_001,
+            ref_id: 1,
+        }
+        .into_args()
+        .len(),
+        3
+    );
+    assert_eq!(OnMultiEvent::DEFAULT_ID_TYPE, "charid");
+    assert_eq!(
+        OnMultiEvent {
+            events: vec![PyRep::Tuple(vec![
+                PyRep::Tuple(vec![
+                    PyRep::String("OnTarget".into()),
+                    PyRep::String("add".into()),
+                    PyRep::Integer(100_000_010),
+                    PyRep::String(String::new()),
+                ]),
+                PyRep::Integer(0),
+            ])],
+        }
+        .into_args()
+        .len(),
+        1
+    );
+    assert_eq!(OnNonDiminishingInjectionsUsed::DEFAULT_ID_TYPE, "charid");
+    assert_eq!(
+        OnNonDiminishingInjectionsUsed { amount: 1 }.into_args(),
+        vec![PyRep::Integer(1)]
+    );
+    assert_eq!(OnReprocessingMaterialsChanged::DEFAULT_ID_TYPE, "charid");
+    assert!(OnReprocessingMaterialsChanged.into_args().is_empty());
+    assert_eq!(OnServerBoostersChanged::DEFAULT_ID_TYPE, "charid");
+    assert!(OnServerBoostersChanged.into_args().is_empty());
+    assert_eq!(OnServerImplantsChanged::DEFAULT_ID_TYPE, "charid");
+    assert!(OnServerImplantsChanged.into_args().is_empty());
+    assert_eq!(
+        OnShipcasterTargetStateChanged::DEFAULT_ID_TYPE,
+        "solarsystemid"
+    );
+    assert_eq!(
+        OnShipcasterTargetStateChanged {
+            item_id: 1_000_000_000_001,
+        }
+        .into_args(),
+        vec![PyRep::Integer(1_000_000_000_001)]
+    );
+    assert_eq!(OnShipCosmeticChanged::DEFAULT_ID_TYPE, "solarsystemid");
+    assert_eq!(
+        OnShipCosmeticChanged {
+            ship_id: 100_000_010,
+            slot_index: 0,
+            cosmetic: PyRep::Integer(2),
+        }
+        .into_args()
+        .len(),
+        3
+    );
+    assert_eq!(OnShipCosmeticsChanged::DEFAULT_ID_TYPE, "solarsystemid");
+    assert_eq!(
+        OnShipCosmeticsChanged {
+            ship_id: 100_000_010,
+            cosmetics: PyRep::Dict(vec![(PyRep::Integer(0), PyRep::Integer(2))]),
+        }
+        .into_args()
+        .len(),
+        2
+    );
+    assert_eq!(OnSkyhookFirstActivation::DEFAULT_ID_TYPE, "solarsystemid");
+    assert_eq!(
+        OnSkyhookFirstActivation {
+            skyhook_id: 1_000_000_000_001,
+            planet_id: 40_000_001,
+        }
+        .into_args(),
+        vec![
+            PyRep::Integer(1_000_000_000_001),
+            PyRep::Integer(40_000_001),
+        ]
+    );
+    assert_eq!(OnSkyhookSiloDamageUpdated::DEFAULT_ID_TYPE, "solarsystemid");
+    assert_eq!(
+        OnSkyhookSiloDamageUpdated {
+            shield_percentage: 0.75,
+        }
+        .into_args(),
+        vec![PyRep::Real(0.75)]
+    );
+    assert_eq!(OnSurveyRewardsAvailable::DEFAULT_ID_TYPE, "charid");
+    assert_eq!(
+        OnSurveyRewardsAvailable { survey_id: 2801 }.into_args(),
+        vec![PyRep::Integer(2801)]
+    );
+    assert_eq!(OnWreckLootAll::DEFAULT_ID_TYPE, "charid");
+    assert_eq!(
+        OnWreckLootAll {
+            inv_id: 100_000_900,
+            items: vec![100_000_901, 100_000_902],
+        }
+        .into_args(),
+        vec![
+            PyRep::Integer(100_000_900),
+            PyRep::List(vec![
+                PyRep::Integer(100_000_901),
+                PyRep::Integer(100_000_902),
+            ]),
+        ]
+    );
+    assert_eq!(PlanetExtractorFinished::DEFAULT_ID_TYPE, "charid");
+    assert_eq!(
+        PlanetExtractorFinished {
+            planet_id: 40_000_001,
+            pin_id: 701,
+        }
+        .into_args(),
+        vec![PyRep::Integer(40_000_001), PyRep::Integer(701)]
+    );
+    assert_eq!(PlanetStorageFull::DEFAULT_ID_TYPE, "charid");
+    assert_eq!(
+        PlanetStorageFull {
+            planet_id: 40_000_001,
+            pin_id: 501,
+        }
+        .into_args(),
+        vec![PyRep::Integer(40_000_001), PyRep::Integer(501)]
+    );
+    assert_eq!(OnSovereigntyAudioEvent::DEFAULT_ID_TYPE, "solarsystemid");
+    assert_eq!(
+        OnSovereigntyAudioEvent {
+            event_id: 1,
+            text_params: PyRep::Dict(vec![(
+                PyRep::String("solarSystemID".into()),
+                PyRep::Integer(30_000_142),
+            )]),
+        }
+        .into_args()
+        .len(),
+        2
+    );
+    assert_eq!(
+        OnGodmaShipEffect {
+            item_id: 100_000_020,
+            effect: PyRep::Integer(10),
+            start_or_time: PyRep::Integer(1_335_000_000_000_000_00),
+            start: Some(PyRep::Integer(0)),
+            active: Some(PyRep::Integer(0)),
+            environment: Some(PyRep::Tuple(Vec::new())),
+            start_time: Some(PyRep::Integer(1_335_000_000_000_000_00)),
+            duration: Some(PyRep::Real(0.0)),
+            repeat: Some(PyRep::Integer(0)),
+            error: Some(PyRep::None),
+            actual_stop_time: None,
+        }
+        .into_args()
+        .len(),
+        10
+    );
 }
 
 #[test]
@@ -473,6 +641,33 @@ fn raw_notify_ratchet_holds_and_migrated_files_stay_clean() {
         "services/character_clones_implants.rs",
         "services/campaigns_milestones_playtime.rs",
         "services/air_npe_nodegraph_pocket.rs",
+        // RFC-3 C-8 Disjoint Batch (Refs #932)
+        "esi/character_routes.rs",
+        "esi/universe_routes.rs",
+        "router/binding.rs",
+        "services/agents_mission_rewards.rs",
+        "services/character_clone_jump_rules.rs",
+        "services/character_skills.rs",
+        "services/combat_missiles_aoe.rs",
+        "services/combat_wrecks_loot_ops.rs",
+        "services/crate_loot_service.rs",
+        "services/implant_plugging.rs",
+        "services/mining_cycle.rs",
+        "services/mobile_deployables_ext.rs",
+        "services/operations_survey_handlers.rs",
+        "services/pi_helpers.rs",
+        "services/pve_special_sites_combat.rs",
+        "services/pve_special_sites_ops.rs",
+        "services/quasar_cosmetics_live.rs",
+        "services/shipcaster_ops.rs",
+        "services/shipcaster_ops_starter.rs",
+        "services/sov_gameplay_entosis.rs",
+        "services/sov_gameplay_entosis_capture.rs",
+        "services/sov_gameplay_skyhook.rs",
+        "services/space_entity_mining.rs",
+        "services/structure_acl_defense_rules.rs",
+        "services/structure_lifecycle_cargo_fuel.rs",
+        "services/structure_profile_services.rs",
     ];
     for rel in zero_raw_files {
         let count = report.per_file_raw_notify.get(rel).copied().unwrap_or(0);

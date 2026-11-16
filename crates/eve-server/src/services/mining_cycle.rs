@@ -647,20 +647,20 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
     // V24 `notifications/client/oreMinedNotificationAdapter.pyj` `OnOreMined(dataDict)`
     // reading keys `oreType`, `quantity_added`, `quantity_removed`, `hasRewards`,
     // `amountWasted`, `amountCritBonus`, `itemID`, `moduleItemID`.
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(cycle.char_id),
-        "OnOreMined",
-        "charid",
-        vec![PyRep::Dict(vec![
-            (PyRep::String("oreType".into()), PyRep::Integer(i64::from(asteroid.type_id))),
-            (PyRep::String("quantity_added".into()), PyRep::Integer(delivered)),
-            (PyRep::String("quantity_removed".into()), PyRep::Integer(mined)),
-            (PyRep::String("hasRewards".into()), PyRep::Bool(false)),
-            (PyRep::String("amountWasted".into()), PyRep::Integer(residue_units)),
-            (PyRep::String("amountCritBonus".into()), PyRep::Integer(bonus_crit_units)),
-            (PyRep::String("itemID".into()), PyRep::Integer(cycle.target_id)),
-            (PyRep::String("moduleItemID".into()), PyRep::Integer(cycle.module_id)),
-        ])],
+        crate::router::notify_registry::OnOreMined {
+            data_dict: PyRep::Dict(vec![
+                (PyRep::String("oreType".into()), PyRep::Integer(i64::from(asteroid.type_id))),
+                (PyRep::String("quantity_added".into()), PyRep::Integer(delivered)),
+                (PyRep::String("quantity_removed".into()), PyRep::Integer(mined)),
+                (PyRep::String("hasRewards".into()), PyRep::Bool(false)),
+                (PyRep::String("amountWasted".into()), PyRep::Integer(residue_units)),
+                (PyRep::String("amountCritBonus".into()), PyRep::Integer(bonus_crit_units)),
+                (PyRep::String("itemID".into()), PyRep::Integer(cycle.target_id)),
+                (PyRep::String("moduleItemID".into()), PyRep::Integer(cycle.module_id)),
+            ]),
+        },
     );
 
     let free_after = free_units - delivered;
@@ -827,45 +827,39 @@ pub(crate) fn emit_mining_godma_and_special_fx(
         PyRep::List(Vec::new()),
         PyRep::Integer(effect_id),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnGodmaShipEffect",
-        "charid",
-        vec![
-            PyRep::Integer(module_id),
-            PyRep::Integer(effect_id),
-            PyRep::Integer(now_ft),
-            PyRep::Integer(flag),
-            PyRep::Integer(flag),
-            environment,
-            PyRep::Integer(now_ft),
-            PyRep::Integer(duration_ms as i64),
-            PyRep::Integer(repeat),
-            PyRep::None,
-            actual_stop_time,
-        ],
+        crate::router::notify_registry::OnGodmaShipEffect {
+            item_id: module_id,
+            effect: PyRep::Integer(effect_id),
+            start_or_time: PyRep::Integer(now_ft),
+            start: Some(PyRep::Integer(flag)),
+            active: Some(PyRep::Integer(flag)),
+            environment: Some(environment),
+            start_time: Some(PyRep::Integer(now_ft)),
+            duration: Some(PyRep::Integer(duration_ms as i64)),
+            repeat: Some(PyRep::Integer(repeat)),
+            error: Some(PyRep::None),
+            actual_stop_time: Some(actual_stop_time),
+        },
     );
 
-    let sfx_args = vec![
-        PyRep::Integer(ship_id),
-        PyRep::Integer(module_id),
-        module_type_id
-            .map(|tid| PyRep::Integer(i64::from(tid)))
-            .unwrap_or(PyRep::None),
-        target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-        charge_type_id
-            .map(|cid| PyRep::Integer(i64::from(cid)))
-            .unwrap_or(PyRep::None),
-        PyRep::String(guid.to_string()),
-        PyRep::Bool(is_offensive),
-        PyRep::Integer(flag),
-        PyRep::Integer(flag),
-        PyRep::Real(duration_ms as f64),
-        PyRep::Integer(repeat),
-        PyRep::Integer(now_ft),
-        PyRep::Real(0.0),
-        PyRep::None,
-    ];
+    let sfx_notif = crate::router::notify_registry::OnSpecialFX {
+        ship_id,
+        module_id: Some(module_id),
+        module_type_id: module_type_id.map(i64::from),
+        target_id,
+        other_type_id: charge_type_id.map(i64::from),
+        guid: guid.to_string(),
+        is_offensive,
+        start: flag,
+        active: flag,
+        duration: duration_ms as f64,
+        repeat,
+        start_time: now_ft,
+        time_from_start: 0.0,
+        graphic_info: None,
+    };
     let space_candidates: Vec<(i64, u64)> = ctx.db.with_snapshot(|snap| {
         snap.characters
             .values()
@@ -888,12 +882,7 @@ pub(crate) fn emit_mining_godma_and_special_fx(
     sfx_recipients.sort_unstable();
     sfx_recipients.dedup();
     for cid in sfx_recipients {
-        ctx.notify(
-            NotificationTarget::Character(cid),
-            "OnSpecialFX",
-            "charid",
-            sfx_args.clone(),
-        );
+        ctx.emit_typed(NotificationTarget::Character(cid), sfx_notif.clone());
     }
 }
 

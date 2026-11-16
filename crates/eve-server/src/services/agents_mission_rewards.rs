@@ -128,11 +128,13 @@ pub fn emit_mission_item_reward_notification(
         ("categoryID", PyRep::Integer(i64::from(category_id))),
         ("singleton", PyRep::Bool(is_ship)),
     ]);
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnItemChange",
-        "charid",
-        vec![item_row, PyRep::Dict(Vec::new())],
+        crate::router::notify_registry::OnItemChange {
+            item: item_row,
+            change: PyRep::Dict(Vec::new()),
+            location: PyRep::None,
+        },
     );
 }
 

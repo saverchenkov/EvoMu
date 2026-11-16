@@ -13,7 +13,6 @@ use crate::services::pve_special_sites::{
 };
 use eve_db::lock_rank::AnyRwLock;
 use eve_db::{IskCents, WorldRepository};
-use eve_proto::PyRep;
 use eve_sde::SolarSystemId;
 use glam::DVec3;
 use std::sync::Arc;
@@ -47,36 +46,19 @@ pub fn notify_special_site_account_changes(
     }
     let now_ft = db.clock().now_blueos_filetime_ticks();
     for &(char_id, new_balance_isk) in changes {
-        let args = vec![
-            PyRep::String("cash".into()),
-            PyRep::Integer(char_id),
-            PyRep::Real(new_balance_isk),
-        ];
-        let (packet, marshaled_packet) =
-            crate::router::ServerContext::build_macho_notification_packet(
-                char_id,
-                None,
-                "OnAccountChange",
-                "charid",
-                args.clone(),
-            );
-        let notif = crate::router::cache_notifications::PendingMachoNotification {
-            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-            recipient_char_id: char_id,
-            event: "OnAccountChange".into(),
-            id_type: "charid".into(),
-            args,
-            packet,
-            marshaled_packet,
-            created_filetime: now_ft,
-        };
-        if let Ok(mut map) = pending_notifications.write() {
-            crate::router::cache_notifications::push_pending_notification_capped(
-                map.entry(char_id).or_default(),
-                notif.clone(),
-            );
-        }
-        let _ = notify_tx.send((char_id, notif));
+        crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+            Some(pending_notifications),
+            Some(notify_tx),
+            char_id,
+            None,
+            <crate::router::notify_registry::OnAccountChange as crate::router::notify_registry::TypedNotification>::DEFAULT_ID_TYPE,
+            now_ft,
+            crate::router::notify_registry::OnAccountChange {
+                account_key: "cash".into(),
+                owner_id: char_id,
+                balance: new_balance_isk,
+            },
+        );
     }
 }
 

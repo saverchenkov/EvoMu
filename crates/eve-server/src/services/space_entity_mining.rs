@@ -1283,11 +1283,9 @@ pub async fn handle(
                         );
                     });
                     // parity: notify:OnReprocessingMaterialsChanged
-                    ctx.notify(
+                    ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
-                        "OnReprocessingMaterialsChanged",
-                        "charid",
-                        vec![],
+                        crate::router::notify_registry::OnReprocessingMaterialsChanged,
                     );
                     if is_batch_call {
                         Some(Ok(PyRep::List(batch_results)))

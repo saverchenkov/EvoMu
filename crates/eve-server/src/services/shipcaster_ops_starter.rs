@@ -1,6 +1,6 @@
 use eve_db::lock_rank::{AnyRwLock, RankedMutex, RANK_LEAF};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::BridgeRpcError;
 
 use super::{
     is_capital_or_freighter_group, MAX_LINKED_LANDING_PADS_PER_FACTION,
@@ -117,32 +117,16 @@ pub(crate) fn emit_shipcaster_target_state_changed_core(
         return;
     }
     let now_ft = db.clock().now_blueos_filetime_ticks();
-    let mut queues = pws.write().unwrap_or_else(|e| e.into_inner());
     for (cid, uid) in recipients {
-        let args = vec![PyRep::Integer(item_id)];
-        let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(
+        crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+            Some(pws),
+            Some(notify_tx),
             cid,
             uid,
-            "OnShipcasterTargetStateChanged",
-            "solarsystemid",
-            args.clone(),
+            <crate::router::notify_registry::OnShipcasterTargetStateChanged as crate::router::notify_registry::TypedNotification>::DEFAULT_ID_TYPE,
+            now_ft,
+            crate::router::notify_registry::OnShipcasterTargetStateChanged { item_id },
         );
-        let note = PendingMachoNotification {
-            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-            recipient_char_id: cid,
-            event: "OnShipcasterTargetStateChanged".into(),
-            id_type: "solarsystemid".into(),
-            args,
-            packet,
-            marshaled_packet,
-            created_filetime: now_ft,
-        };
-        let q = queues.entry(cid).or_default();
-        if q.len() >= crate::router::cache_notifications::MAX_PENDING_NOTIFICATIONS_PER_CHAR {
-            q.remove(0);
-        }
-        q.push(note.clone());
-        let _ = notify_tx.send((cid, note));
     }
 }
 

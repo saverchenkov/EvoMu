@@ -802,11 +802,9 @@ pub fn handle_clone_jump(
                 dest_loc_id,
                 true,
             );
-            ctx.notify(
+            ctx.emit_typed(
                 NotificationTarget::Character(char_id),
-                "OnCloneJumpUpdate",
-                "charid",
-                vec![],
+                crate::router::notify_registry::OnCloneJumpUpdate,
             );
             ctx.push_brain_update(char_id);
             let implant_reps: Vec<PyRep> = active_implants
