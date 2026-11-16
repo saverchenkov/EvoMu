@@ -669,5 +669,433 @@ class TestEvomuSiteLocationArrivalGuard(unittest.TestCase):
         self.assertEqual(self.indicated, [slim])
 
 
+class _FakeScene(object):
+    def __init__(self):
+        self.objects = []
+        self.reflectionProbe = object()
+        self.postprocess = object()
+
+
+class _FakeCamera(object):
+    def __init__(self):
+        self.ships = []
+        self.dock_anims = []
+        self.switch_anims = []
+        self.placed = []
+
+    def SetShip(self, model, type_id):
+        self.ships.append((model, type_id))
+
+    def AnimEnterHangar(self, model, startPos=None, endPos=None, duration=None):
+        self.dock_anims.append((model, startPos, endPos, duration))
+
+    def AnimSwitchShips(self, model, startPos=None, endPos=None, duration=None):
+        self.switch_anims.append((model, startPos, endPos, duration))
+
+    def PlaceShip(self, end_pos):
+        self.placed.append(end_pos)
+
+
+class _FakeShipBehaviour(object):
+    def __init__(self, on_load=None):
+        self.on_load = on_load
+        self.load_calls = []
+        self.animate_calls = []
+        self.place_calls = []
+        self.cleaned = 0
+
+    def CleanScene(self):
+        self.cleaned += 1
+
+    def LoadShipModel(self, item_id, type_id, **_kwargs):
+        self.load_calls.append((item_id, type_id))
+        if self.on_load is not None:
+            self.on_load(item_id, type_id)
+        return ("ship_model", item_id, type_id)
+
+    def AnimateShipEntry(self, model, type_id, duration=0.0):
+        self.animate_calls.append((model, type_id, duration))
+
+    def PlaceShip(self, model, type_id):
+        self.place_calls.append((model, type_id))
+
+    def GetAnimStartPosition(self):
+        return (0.0, 0.0, 0.0)
+
+    def GetAnimEndPosition(self):
+        return (1.0, 2.0, 3.0)
+
+    def GetShipCenter(self, _ship, _type_id):
+        return (0.0, 0.0, 0.0)
+
+    def GetActiveDock(self):
+        return object()
+
+    def ShouldSwitchSkin(self, _skin_id):
+        return True
+
+    def IsInitialized(self):
+        return True
+
+    def UpdateActiveShipIDs(self, *_args):
+        return None
+
+    def ProcessSkinChange(self, *_args):
+        return None
+
+
+class TestHangarViewTeardownGuard(unittest.TestCase):
+    def setUp(self):
+        self._saved_modules = {
+            k: sys.modules.get(k)
+            for k in (
+                "eve.client.script.ui.view.hangarView",
+                "eve.client.script.ui.services.viewStateSvc",
+                "stackless",
+            )
+        }
+        evomu_site._HOOKED_CAMERA_GUARD_TARGETS = set()
+        self._setup_fake_hangar_view_module()
+
+    def tearDown(self):
+        for k, v in self._saved_modules.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+        evomu_site._HOOKED_CAMERA_GUARD_TARGETS = set()
+
+    def _setup_fake_hangar_view_module(self):
+        camera = _FakeCamera()
+        self.camera = camera
+        events = []
+        self.events = events
+
+        class _HangarView(object):
+            def __init__(self, on_load=None, on_cosmetics=None, raise_attr_err=False):
+                self.shipBehaviour = _FakeShipBehaviour(on_load=on_load)
+                self.activeHangarScene = _FakeScene()
+                self.activeHangarModel = object()
+                self.activeShipModel = None
+                self.on_cosmetics = on_cosmetics
+                self.raise_attr_err = raise_attr_err
+
+            def ClearScene(self):
+                events.append("ClearScene")
+                if self.shipBehaviour is not None:
+                    self.shipBehaviour.CleanScene()
+                    self.shipBehaviour = None
+                if self.activeHangarScene is not None:
+                    self.activeHangarScene.postprocess = None
+                self.activeHangarScene = None
+                self.activeHangarModel = None
+                self.activeShipModel = None
+
+            def RemoveAllShipsFromScene(self):
+                events.append("RemoveAllShipsFromScene")
+                del self.activeHangarScene.objects[:]
+
+            def AddModelToScene(self, model):
+                events.append("AddModelToScene")
+                self.activeHangarScene.objects.append(model)
+                self.activeShipModel = model
+                if self.on_cosmetics is not None:
+                    self.on_cosmetics(model)
+                if self.raise_attr_err == "add":
+                    raise AttributeError("unexpected_add_attr_error")
+
+            def ReplaceExistingShipModel(self, eventType, fade=True, skipAnimation=False):
+                events.append("ReplaceExistingShipModel")
+                if self.raise_attr_err == "replace":
+                    raise AttributeError("unexpected_replace_attr_error")
+                if eventType == "modular":
+                    self._ReplaceExistingShipModelModular(eventType, 1897147421, 649, skipAnimation)
+                    return
+                new_model = self.shipBehaviour.LoadShipModel(1897147421, 649)
+                self.RemoveAllShipsFromScene()
+                self.AddModelToScene(new_model)
+                camera.SetShip(new_model, 649)
+                self.shipBehaviour.AnimateShipEntry(new_model, 649, duration=7.0)
+                if eventType == 2:
+                    self.PlayDockSequence(7.0)
+                elif eventType == 1:
+                    self.PlaySwitchShipSequence(7.0)
+                else:
+                    self.PlayUpdateShipSequence(fade)
+                self._SetUpLightingRig(self.activeShipModel)
+                self.ConfigureVFXMultiEffect(eventType == 2)
+
+            def _ReplaceExistingShipModelModular(self, _eventType, itemID, typeID, _skipAnimation):
+                events.append("_ReplaceExistingShipModelModular")
+                new_model = self.shipBehaviour.LoadShipModel(itemID, typeID)
+                self.shipBehaviour.UpdateActiveShipIDs(itemID, typeID)
+                self.activeHangarScene.objects.append(new_model)
+                self.activeShipModel = new_model
+                self.shipBehaviour.PlaceShip(new_model, typeID)
+
+            def PlayDockSequence(self, duration):
+                events.append("PlayDockSequence")
+                if self.raise_attr_err == "dock_seq":
+                    raise AttributeError("unexpected_dock_seq_attr_error")
+                camera.AnimEnterHangar(
+                    self.activeShipModel,
+                    startPos=self.shipBehaviour.GetAnimStartPosition(),
+                    endPos=self.shipBehaviour.GetAnimEndPosition(),
+                    duration=duration,
+                )
+
+            def PlaySwitchShipSequence(self, duration):
+                events.append("PlaySwitchShipSequence")
+                camera.AnimSwitchShips(
+                    self.activeShipModel,
+                    startPos=self.shipBehaviour.GetAnimStartPosition(),
+                    endPos=self.shipBehaviour.GetAnimEndPosition(),
+                    duration=duration,
+                )
+
+            def PlayUpdateShipSequence(self, _fade):
+                events.append("PlayUpdateShipSequence")
+                camera.PlaceShip(self.shipBehaviour.GetAnimEndPosition())
+
+            def _SetUpLightingRig(self, ship):
+                events.append("_SetUpLightingRig")
+                if self.activeHangarModel is None:
+                    return None
+                return self.shipBehaviour.GetShipCenter(ship, 649)
+
+            def ConfigureVFXMultiEffect(self, _makeSceneBlack=False):
+                events.append("ConfigureVFXMultiEffect")
+                if self.activeHangarScene is None:
+                    return None
+                return self.shipBehaviour.GetActiveDock()
+
+            def OnActiveShipSkinChange(self, itemID, skinID, updateSkin=True, reloadSubsystems=False):
+                events.append("OnActiveShipSkinChange")
+                if self.raise_attr_err == "skin":
+                    raise AttributeError("unexpected_skin_attr_error")
+                if not self.shipBehaviour.ShouldSwitchSkin(skinID):
+                    return
+                new_model = self.shipBehaviour.LoadShipModel(itemID, 649)
+                self.activeHangarScene.objects.append(new_model)
+                self.shipBehaviour.ProcessSkinChange(new_model)
+                self.ConfigureVFXMultiEffect(False)
+
+        self.HangarView = _HangarView
+        hangar_mod = types.ModuleType("eve.client.script.ui.view.hangarView")
+        hangar_mod.HangarView = _HangarView
+        self.hangar_mod = hangar_mod
+        sys.modules["eve.client.script.ui.view.hangarView"] = hangar_mod
+
+    def _call_all_guarded_methods(self, view):
+        view.ReplaceExistingShipModel(2)
+        view._ReplaceExistingShipModelModular(2, 1897147421, 649, False)
+        view.RemoveAllShipsFromScene()
+        view.AddModelToScene(object())
+        view.PlayDockSequence(7.0)
+        view.PlaySwitchShipSequence(7.0)
+        view.PlayUpdateShipSequence(True)
+        view._SetUpLightingRig(object())
+        view.ConfigureVFXMultiEffect(True)
+        view.OnActiveShipSkinChange(1897147421, 42)
+
+    def test_pre_call_teardown_none_behaviour_or_scene_with_and_without_prior_model(self):
+        self.assertTrue(evomu_site._install_hangar_view_teardown_guard())
+
+        # Case A: Torn down before any active ship model replacement ran.
+        view_no_prior = self.HangarView()
+        view_no_prior.ClearScene()
+        self.events[:] = []
+        self._call_all_guarded_methods(view_no_prior)
+        self.assertEqual(self.events, [])
+
+        # Case B: Prior active model replacement succeeded, then ClearScene tore down both fields.
+        view_with_prior = self.HangarView()
+        view_with_prior.ReplaceExistingShipModel(2)
+        self.assertIsNotNone(view_with_prior.activeShipModel)
+        view_with_prior.ClearScene()
+        self.events[:] = []
+        self._call_all_guarded_methods(view_with_prior)
+        self.assertEqual(self.events, [])
+
+        # Case C: Only shipBehaviour is None (activeHangarScene still set).
+        view_no_behaviour = self.HangarView()
+        view_no_behaviour.activeShipModel = ("prior_model", 1897147421, 649)
+        view_no_behaviour.shipBehaviour = None
+        self.events[:] = []
+        self._call_all_guarded_methods(view_no_behaviour)
+        self.assertEqual(self.events, [])
+
+        # Case D: Only activeHangarScene is None (shipBehaviour still set).
+        view_no_scene = self.HangarView()
+        view_no_scene.activeHangarScene = None
+        self.events[:] = []
+        self._call_all_guarded_methods(view_no_scene)
+        self.assertEqual(self.events, [])
+
+    def test_mid_yield_teardown_during_load_ship_model_aborts_cleanly(self):
+        self.assertTrue(evomu_site._install_hangar_view_teardown_guard())
+
+        # First replace succeeds so a prior active ship model existed, then second replace
+        # loses the scene mid-RPC inside LoadShipModel.
+        view = self.HangarView()
+        view.ReplaceExistingShipModel(2)
+        prior_ships_len = len(self.camera.ships)
+        prior_anim_len = len(view.shipBehaviour.animate_calls)
+
+        def _clear_on_load(_item_id, _type_id):
+            view.ClearScene()
+
+        view.shipBehaviour.on_load = _clear_on_load
+        self.events[:] = []
+        view.ReplaceExistingShipModel(2)
+        self.assertEqual(len(self.camera.ships), prior_ships_len)
+        self.assertEqual(prior_anim_len, 1)
+        self.assertNotIn("AddModelToScene", self.events)
+        self.assertNotIn("PlayDockSequence", self.events)
+
+    def test_mid_yield_teardown_during_add_model_to_scene_prevents_animate_ship_entry_crash(self):
+        self.assertTrue(evomu_site._install_hangar_view_teardown_guard())
+
+        for use_prior_replace in (False, True):
+            self.events[:] = []
+            self.camera.ships[:] = []
+            view = self.HangarView()
+            if use_prior_replace:
+                view.ReplaceExistingShipModel(2)
+                self.assertEqual(len(self.camera.ships), 1)
+
+            def _clear_during_cosmetics(_model, target=view):
+                target.ClearScene()
+
+            view.on_cosmetics = _clear_during_cosmetics
+            ships_before = len(self.camera.ships)
+            view.ReplaceExistingShipModel(2)
+            # Must abort cleanly after AddModelToScene yield before SetShip/AnimateShipEntry.
+            self.assertEqual(len(self.camera.ships), ships_before)
+            self.assertIsNone(view.shipBehaviour)
+            self.assertIsNone(view.activeHangarScene)
+
+    def test_rapid_clear_scene_and_redock_aborts_stale_replace_without_blocking_new_task(self):
+        self.assertTrue(evomu_site._install_hangar_view_teardown_guard())
+
+        fake_tasklets = {"curr": "t1"}
+
+        class _FakeStackless(object):
+            @staticmethod
+            def getcurrent():
+                return fake_tasklets["curr"]
+
+        sys.modules["stackless"] = _FakeStackless()
+
+        view = self.HangarView()
+
+        def _teardown_and_redock(_item_id, _type_id):
+            # Simulates undock ClearScene + rapid redock running on tasklet t2 while t1 yielded.
+            view.ClearScene()
+            view.shipBehaviour = _FakeShipBehaviour()
+            view.activeHangarScene = _FakeScene()
+            view.activeHangarModel = object()
+            fake_tasklets["curr"] = "t2"
+            view.ReplaceExistingShipModel(2)
+            fake_tasklets["curr"] = "t1"
+
+        view.shipBehaviour.on_load = _teardown_and_redock
+        view.ReplaceExistingShipModel(2)
+        # Only t2's new ship must be passed to camera/AnimateShipEntry; stale t1 must abort.
+        self.assertEqual(len(self.camera.ships), 1)
+        self.assertEqual(len(view.shipBehaviour.animate_calls), 1)
+        self.assertEqual(view._evomu_replace_gens, {})
+
+    def test_modular_replace_and_skin_change_mid_yield_teardown(self):
+        self.assertTrue(evomu_site._install_hangar_view_teardown_guard())
+
+        view_mod = self.HangarView()
+        view_mod.shipBehaviour.on_load = lambda *_a: view_mod.ClearScene()
+        view_mod.ReplaceExistingShipModel("modular")
+        self.assertIsNone(view_mod.shipBehaviour)
+        self.assertIsNone(view_mod.activeHangarScene)
+
+        view_skin = self.HangarView()
+        view_skin.shipBehaviour.on_load = lambda *_a: view_skin.ClearScene()
+        view_skin.OnActiveShipSkinChange(1897147421, 77)
+        self.assertIsNone(view_skin.shipBehaviour)
+        self.assertIsNone(view_skin.activeHangarScene)
+
+    def test_unrelated_attribute_error_when_hangar_valid_still_propagates(self):
+        self.assertTrue(evomu_site._install_hangar_view_teardown_guard())
+
+        for mode in ("replace", "add", "dock_seq", "skin"):
+            view = self.HangarView(raise_attr_err=mode)
+            with self.assertRaises(AttributeError):
+                if mode == "skin":
+                    view.OnActiveShipSkinChange(1897147421, 77)
+                else:
+                    view.ReplaceExistingShipModel(2)
+
+    def test_open_view_and_valid_hangar_replace_flow(self):
+        # Ensure ViewStateSvc._OpenView lazily installs the HangarView guard once hangarView loads.
+        vss_mod = types.ModuleType("eve.client.script.ui.services.viewStateSvc")
+
+        class _ViewType(object):
+            Primary = 1
+            Secondary = 2
+
+        class _ViewInfo(object):
+            def GetViewType(self):
+                return _ViewType.Primary
+
+        class _ViewStateSvc(object):
+            def _OpenView(self, viewInfo, reopen=False, cameraID=None, **kwargs):
+                return "opened"
+
+        vss_mod.ViewType = _ViewType
+        vss_mod.ViewStateSvc = _ViewStateSvc
+        sys.modules["eve.client.script.ui.services.viewStateSvc"] = vss_mod
+
+        # Install viewStateSvc hook BEFORE hangarView exists, then introduce hangarView.
+        sys.modules.pop("eve.client.script.ui.view.hangarView", None)
+        evomu_site._install_camera_dock_guard()
+        self.assertNotIn("hangarView", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+
+        sys.modules["eve.client.script.ui.view.hangarView"] = self.hangar_mod
+        res = _ViewStateSvc()._OpenView(_ViewInfo())
+        self.assertEqual(res, "opened")
+        self.assertIn("hangarView", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+
+        # Valid in-hangar flow executes all steps normally across dock, switch, update, modular, and skin paths.
+        view = self.HangarView()
+        view.ReplaceExistingShipModel(2)
+        view.ReplaceExistingShipModel(1)
+        view.ReplaceExistingShipModel(0)
+        view.ReplaceExistingShipModel("modular")
+        view.OnActiveShipSkinChange(1897147421, 99)
+        self.assertEqual(len(self.camera.ships), 3)
+        self.assertEqual(len(view.shipBehaviour.animate_calls), 3)
+        self.assertEqual(len(view.shipBehaviour.place_calls), 1)
+        self.assertEqual(len(self.camera.dock_anims), 1)
+        self.assertEqual(len(self.camera.switch_anims), 1)
+        self.assertEqual(len(self.camera.placed), 1)
+        self.assertIn("_ReplaceExistingShipModelModular", self.events)
+        self.assertIn("OnActiveShipSkinChange", self.events)
+        self.assertIn("ConfigureVFXMultiEffect", self.events)
+
+        # Also verify _EvomuMetaHook installs the guard once hangarView is imported later.
+        evomu_site._HOOKED_CAMERA_GUARD_TARGETS.discard("hangarView")
+        evomu_site._EvomuMetaHook().find_module("anything")
+        self.assertIn("hangarView", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+
+    def test_direct_none_teardown_without_clear_scene_still_aborts_safely(self):
+        self.assertTrue(evomu_site._install_hangar_view_teardown_guard())
+
+        def _null_behaviour_directly(_model):
+            view.shipBehaviour = None
+            view.activeHangarScene = None
+
+        view = self.HangarView(on_cosmetics=_null_behaviour_directly)
+        view.ReplaceExistingShipModel(2)
+        self.assertEqual(len(self.camera.ships), 0)
+        self.assertIsNone(view.shipBehaviour)
+
+
 if __name__ == "__main__":
     unittest.main()

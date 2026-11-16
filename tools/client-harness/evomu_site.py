@@ -695,7 +695,7 @@ def _patch_location_arrival_module(mod):
 
 
 def _install_camera_dock_guard():
-    """Guard against V24.01 TacticalCamera NaN/1e35 overflow, secondary-view dock races (#996), and WarpLoop dock arrival teardown races (#1051)."""
+    """Guard against V24 TacticalCamera NaN/1e35 overflow, dock races (#996/#1051), and HangarView teardown races (#1154)."""
     vss_mod = sys.modules.get("eve.client.script.ui.services.viewStateSvc")
     if vss_mod is not None and "viewStateSvc" not in _HOOKED_CAMERA_GUARD_TARGETS:
         vss_cls = getattr(vss_mod, "ViewStateSvc", None)
@@ -728,6 +728,7 @@ def _install_camera_dock_guard():
                         curr_cam = scene_mgr.GetActivePrimaryCamera() if hasattr(scene_mgr, "GetActivePrimaryCamera") else None
                         if curr_cam is not None and getattr(curr_cam, "isActive", False) and hasattr(scene_mgr, "DeactivateFISCamera"):
                             scene_mgr.DeactivateFISCamera()
+                _install_hangar_view_teardown_guard()
                 return orig_open_view(self, viewInfo, reopen=reopen, cameraID=cameraID, **kwargs)
             _wrapped_open_view._evomu_camera_guard = True
             vss_cls._OpenView = _wrapped_open_view
@@ -906,6 +907,166 @@ def _install_camera_dock_guard():
                             _wrapped_inst._evomu_camera_guard = True
                             return _wrapped_inst
                         svc.on_warp_finished = _make_inst_guard(inst_fn, svc, svc_mod)
+
+    _install_hangar_view_teardown_guard()
+
+
+class _HangarViewTornDown(Exception):
+    """Internal sentinel raised when HangarView is cleared mid-yield."""
+
+
+# Guarded HangarView methods: (method_name, abort_replace_on_stale, check_after_call)
+_HANGAR_VIEW_TEARDOWN_METHODS = (
+    ("_ReplaceExistingShipModelModular", True, True),
+    ("RemoveAllShipsFromScene", True, False),
+    ("AddModelToScene", True, True),
+    ("PlayDockSequence", False, False),
+    ("PlaySwitchShipSequence", False, False),
+    ("PlayUpdateShipSequence", False, False),
+    ("_SetUpLightingRig", False, False),
+    ("ConfigureVFXMultiEffect", False, False),
+    ("OnActiveShipSkinChange", False, True),
+)
+
+
+def _current_execution_key():
+    """Identify the active Stackless tasklet or thread without importing modules."""
+    sl = sys.modules.get("stackless")
+    if sl is not None and hasattr(sl, "getcurrent"):
+        try:
+            return ("sl", id(sl.getcurrent()))
+        except Exception:
+            pass
+    th = sys.modules.get("threading")
+    if th is not None and hasattr(th, "current_thread"):
+        try:
+            return ("th", id(th.current_thread()))
+        except Exception:
+            pass
+    return 0
+
+
+def _is_hangar_view_torn_down(view):
+    if view is None:
+        return True
+    return getattr(view, "shipBehaviour", None) is None or getattr(view, "activeHangarScene", None) is None
+
+
+def _is_hangar_view_stale(view, expected_gen=None):
+    if _is_hangar_view_torn_down(view):
+        return True
+    curr_gen = getattr(view, "_evomu_hangar_gen", 0)
+    if expected_gen is not None and curr_gen != expected_gen:
+        return True
+    gens_by_key = getattr(view, "_evomu_replace_gens", None)
+    if isinstance(gens_by_key, dict):
+        stack = gens_by_key.get(_current_execution_key())
+        if stack and curr_gen != stack[-1]:
+            return True
+    return False
+
+
+def _in_active_hangar_replace(view):
+    gens_by_key = getattr(view, "_evomu_replace_gens", None)
+    return bool(isinstance(gens_by_key, dict) and gens_by_key.get(_current_execution_key()))
+
+
+def _abort_hangar_call_or_noop(view, abort_replace):
+    if abort_replace and _in_active_hangar_replace(view):
+        raise _HangarViewTornDown()
+    return None
+
+
+def _make_hangar_clear_scene_guard(orig_fn):
+    def _wrapped_clear_scene(self, *args, **kwargs):
+        try:
+            return orig_fn(self, *args, **kwargs)
+        finally:
+            self._evomu_hangar_gen = getattr(self, "_evomu_hangar_gen", 0) + 1
+
+    _wrapped_clear_scene._evomu_camera_guard = True
+    return _wrapped_clear_scene
+
+
+def _make_hangar_replace_guard(orig_fn):
+    def _wrapped_replace_existing_ship_model(self, *args, **kwargs):
+        if _is_hangar_view_torn_down(self):
+            return None
+        gens_by_key = getattr(self, "_evomu_replace_gens", None)
+        if not isinstance(gens_by_key, dict):
+            gens_by_key = {}
+            self._evomu_replace_gens = gens_by_key
+        key = _current_execution_key()
+        stack = gens_by_key.setdefault(key, [])
+        gen = getattr(self, "_evomu_hangar_gen", 0)
+        stack.append(gen)
+        try:
+            try:
+                return orig_fn(self, *args, **kwargs)
+            except _HangarViewTornDown:
+                return None
+            except AttributeError:
+                if _is_hangar_view_stale(self, expected_gen=gen):
+                    return None
+                raise
+        finally:
+            stack.pop()
+            if not stack:
+                gens_by_key.pop(key, None)
+
+    _wrapped_replace_existing_ship_model._evomu_camera_guard = True
+    return _wrapped_replace_existing_ship_model
+
+
+def _make_hangar_teardown_guard(orig_fn, abort_replace=False, check_after=False):
+    def _wrapped_hangar_method(self, *args, **kwargs):
+        if _is_hangar_view_stale(self):
+            return _abort_hangar_call_or_noop(self, abort_replace)
+        gen_before = getattr(self, "_evomu_hangar_gen", 0)
+        try:
+            result = orig_fn(self, *args, **kwargs)
+        except AttributeError:
+            if _is_hangar_view_stale(self, expected_gen=gen_before):
+                return _abort_hangar_call_or_noop(self, abort_replace)
+            raise
+        if check_after and _is_hangar_view_stale(self, expected_gen=gen_before):
+            return _abort_hangar_call_or_noop(self, abort_replace)
+        return result
+
+    _wrapped_hangar_method._evomu_camera_guard = True
+    return _wrapped_hangar_method
+
+
+def _install_hangar_view_teardown_guard():
+    """Guard HangarView ship-model calls against ClearScene/UnloadView teardown races (#1154)."""
+    if "hangarView" in _HOOKED_CAMERA_GUARD_TARGETS:
+        return False
+    hangar_mod = sys.modules.get("eve.client.script.ui.view.hangarView")
+    hangar_cls = getattr(hangar_mod, "HangarView", None) if hangar_mod is not None else None
+    if hangar_cls is None or hangar_cls is object or not (
+        isinstance(hangar_cls, type) or hasattr(hangar_cls, "__bases__")
+    ):
+        return False
+
+    orig_clear = getattr(hangar_cls, "ClearScene", None)
+    if callable(orig_clear) and not getattr(orig_clear, "_evomu_camera_guard", False):
+        hangar_cls.ClearScene = _make_hangar_clear_scene_guard(orig_clear)
+
+    orig_replace = getattr(hangar_cls, "ReplaceExistingShipModel", None)
+    if callable(orig_replace) and not getattr(orig_replace, "_evomu_camera_guard", False):
+        hangar_cls.ReplaceExistingShipModel = _make_hangar_replace_guard(orig_replace)
+
+    for method_name, abort_replace, check_after in _HANGAR_VIEW_TEARDOWN_METHODS:
+        orig_fn = getattr(hangar_cls, method_name, None)
+        if callable(orig_fn) and not getattr(orig_fn, "_evomu_camera_guard", False):
+            setattr(
+                hangar_cls,
+                method_name,
+                _make_hangar_teardown_guard(orig_fn, abort_replace=abort_replace, check_after=check_after),
+            )
+
+    _HOOKED_CAMERA_GUARD_TARGETS.add("hangarView")
+    return True
 
 
 def _maybe_schedule_driver_on_main_thread():
