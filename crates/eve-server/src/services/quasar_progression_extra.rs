@@ -21,8 +21,8 @@ use super::quasar_social_chat::ctx_queue_notice;
 use eve_db::WorldRepository;
 use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
-    DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleEmpty, QuasarMessage, WireField,
-    WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
+    DynamicQuasarMessage, DynamicValue, GoogleAny, WireField, WireMessage, WireValue,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -575,7 +575,8 @@ pub fn register_progression_extra_handlers(
             super::quasar_social_chat::ctx_queue_notice(crate::quasar_gateway::NoticeScope::Broadcast, notice.clone(), ctx.now_unix());
             super::quasar_social_chat::ctx_queue_notice(crate::quasar_gateway::NoticeScope::Character(cid), notice, ctx.now_unix());
 
-            Ok(GoogleEmpty.to_any())
+            pb::message("eve.communitytrack.api.AddProgressResponse")
+                .to_any_or_internal_err()
         }),
     );
 
@@ -602,7 +603,8 @@ pub fn register_progression_extra_handlers(
             } else {
                 mgr.activate_community_track(tid)?;
             }
-            Ok(GoogleEmpty.to_any())
+            pb::message("eve.communitytrack.api.StartResponse")
+                .to_any_or_internal_err()
         }),
     );
 
@@ -622,7 +624,8 @@ pub fn register_progression_extra_handlers(
                 }
             }
             mgr.save_to_db();
-            Ok(GoogleEmpty.to_any())
+            pb::message("eve.communitytrack.api.StopResponse")
+                .to_any_or_internal_err()
         }),
     );
 
@@ -652,7 +655,8 @@ pub fn register_progression_extra_handlers(
                 }
             }
             mgr.save_to_db();
-            Ok(GoogleEmpty.to_any())
+            pb::message("eve.communitytrack.admin.api.SetProgressResponse")
+                .to_any_or_internal_err()
         }),
     );
 
@@ -693,7 +697,8 @@ pub fn register_progression_extra_handlers(
                 notices::tale_lifecycle(true, tale_id as u64, template_id as u64, system_id as u64),
                 now,
             );
-            Ok(GoogleEmpty.to_any())
+            pb::message("eve.tale.api.StartTaleResponse")
+                .to_any_or_internal_err()
         }),
     );
 
@@ -739,7 +744,8 @@ pub fn register_progression_extra_handlers(
                     now,
                 );
             }
-            Ok(GoogleEmpty.to_any())
+            pb::message("eve.tale.api.StopTalesResponse")
+                .to_any_or_internal_err()
         }),
     );
 

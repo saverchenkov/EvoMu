@@ -663,3 +663,47 @@ fn federated_and_transfer_handlers_registration_and_exact_1000_plex_fee() {
                 .ends_with("eve.user.character.transfer.api.Completed")
     }));
 }
+
+#[test]
+fn twitch_drop_handlers_return_empty_and_pass_quasar_tap() {
+    let reg = eve_proto::quasar::QuasarDescriptorRegistry::open_default()
+        .expect("open default quasar descriptors");
+    let (ctx, _clock) = test_ctx_and_clock(1_775_000_000);
+    register_handlers(&ctx.quasar_gateway, Arc::clone(&ctx.db));
+
+    let handlers = ctx.quasar_gateway.handlers.read().unwrap();
+    let dummy_any = GoogleAny::default();
+    let admin = user_ctx(Some(1), None, true);
+    let caller = user_ctx(Some(1), Some(90_000_001), false);
+
+    let mut link_msg = DynamicQuasarMessage::new("LinkTwitch");
+    link_msg.fields.insert(1, DynamicValue::String("tw_tap_user".into()));
+    link_msg.fields.insert(2, DynamicValue::Sint64(1));
+    handlers["eve.id.federate.twitch.api.CompleteLinkingRequest"](&caller, &dummy_any, &link_msg)
+        .expect("link twitch account");
+
+    for (idx, req_name) in [
+        "eve.vendors.twitch.entitlement.api.DropReceived",
+        "eve.vendors.twitch.entitlement.api.DropEventReceived",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut drop_msg = DynamicQuasarMessage::new("TwitchDrop");
+        drop_msg.fields.insert(1, DynamicValue::String("tw_tap_user".into()));
+        drop_msg.fields.insert(2, DynamicValue::String(format!("tap_drop_{idx}")));
+        drop_msg.fields.insert(3, DynamicValue::Uint64(34));
+        drop_msg.fields.insert(4, DynamicValue::Uint64(1));
+
+        let rsp = handlers[req_name](&admin, &dummy_any, &drop_msg)
+            .unwrap_or_else(|e| panic!("{req_name} failed: {e:?}"));
+        assert_eq!(rsp.normalized_type_name(), "google.protobuf.Empty");
+        assert!(rsp.value.is_empty(), "{req_name} Empty response should carry no payload bytes");
+        let violations =
+            eve_testkit::quasar_tap::tap_exchange(&reg, req_name, 200, Some(&rsp), &[]);
+        assert!(
+            violations.is_empty(),
+            "unexpected quasar tap violations for {req_name}: {violations:#?}"
+        );
+    }
+}

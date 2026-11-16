@@ -171,12 +171,6 @@ async fn qty_of(ctx: &ServerContext, sess: &mut SessionState, loc_id: i64, type_
         .sum()
 }
 
-fn pb_id_msg(id: u64) -> Vec<u8> {
-    let mut b = Vec::new();
-    encode_varint_field(1, id, &mut b);
-    b
-}
-
 fn pb_read_varint(buf: &[u8], idx: &mut usize) -> u64 {
     let (mut val, mut shift) = (0u64, 0u32);
     while *idx < buf.len() {
@@ -346,14 +340,10 @@ async fn test_mining_goals_and_mineral_market_supply_chain_live() {
     encode_string_field(1, "Mine Veldspar Corp Project", &mut create_goal);
     encode_string_field(2, "Mine Veldspar", &mut create_goal);
     encode_varint_field(3, 5_000, &mut create_goal);
-    let mut tid_filter = Vec::new();
-    encode_bytes_field(1, &pb_id_msg(1230), &mut tid_filter);
-    let mut ast_filter = Vec::new();
-    encode_bytes_field(1, &tid_filter, &mut ast_filter);
-    let mut mine_cfg = Vec::new();
-    encode_bytes_field(1, &ast_filter, &mut mine_cfg);
-    let mut contrib_cfg = Vec::new();
-    encode_bytes_field(5, &mine_cfg, &mut contrib_cfg);
+    let contrib_cfg = eve_server::services::quasar_goal_tale_notices::encode_goal_contribution_config(
+        "MineMaterials",
+        Some(1230),
+    );
     encode_bytes_field(4, &contrib_cfg, &mut create_goal);
     let g_rsp = quasar_rpc(&ctx, &mut seller.sess, "eve_public.goal.api.CreateRequest", create_goal).await;
     assert_eq!(g_rsp.status_code, 200);

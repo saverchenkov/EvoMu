@@ -558,7 +558,10 @@ async fn test_quasar_achievements_progression_and_claims() {
     // 5. Admin AddProgress: add 10 to reach milestone 10
     let prog_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.AddProgressRequest", make_admin_progress(2, 10)).await;
     assert_eq!(prog_rsp.status_code, STATUS_OK, "AddProgressRequest failed: {}", prog_rsp.status_message);
-    assert_eq!(prog_rsp.payload.as_ref().unwrap().normalized_type_name(), "google.protobuf.Empty");
+    assert_eq!(
+        prog_rsp.payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.achievement.api.admin.AddProgressResponse"
+    );
 
     flush_pending_notices(&ctx);
     let ach_notices = drain_notices(&mut notice_rx);
@@ -588,7 +591,10 @@ async fn test_quasar_achievements_progression_and_claims() {
     // 8. Admin CompleteRequest -> completes achievement 2
     let comp_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.CompleteRequest", make_id_request(2)).await;
     assert_eq!(comp_rsp.status_code, STATUS_OK, "CompleteRequest failed: {}", comp_rsp.status_message);
-    assert_eq!(comp_rsp.payload.as_ref().unwrap().normalized_type_name(), "google.protobuf.Empty");
+    assert_eq!(
+        comp_rsp.payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.achievement.api.admin.CompleteResponse"
+    );
 
     flush_pending_notices(&ctx);
     let comp_notices = drain_notices(&mut notice_rx);

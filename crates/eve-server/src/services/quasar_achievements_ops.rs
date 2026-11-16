@@ -13,9 +13,7 @@ use super::quasar_achievements::{
 };
 use eve_db::WorldRepository;
 use eve_proto::pb;
-use eve_proto::quasar::{
-    sha256_hex, DynamicValue, GoogleEmpty, GoogleTimestamp, QuasarMessage,
-};
+use eve_proto::quasar::{sha256_hex, DynamicValue, GoogleTimestamp};
 use std::sync::Arc;
 
 fn id_to_uuid(id: u32) -> [u8; 16] {
@@ -149,7 +147,8 @@ pub fn register_achievement_admin_handlers(
             ctx.now_unix(),
         );
 
-        Ok(GoogleEmpty.to_any())
+        pb::message("eve_public.achievement.api.admin.AddProgressResponse")
+            .to_any_or_internal_err()
     });
     router.register_handler(
         "eve_public.achievement.api.admin.AddProgressRequest",
@@ -180,7 +179,8 @@ pub fn register_achievement_admin_handlers(
         let ms: Vec<u32> = (1..=ach.def.milestone_targets.len() as u32).collect();
         emit_achievement_notices(cid, aid, cat_id, ach.progress, cat_score, true, &ms, ctx.now_unix());
 
-        Ok(GoogleEmpty.to_any())
+        pb::message("eve_public.achievement.api.admin.CompleteResponse")
+            .to_any_or_internal_err()
     });
     router.register_handler(
         "eve_public.achievement.api.admin.CompleteRequest",
@@ -211,7 +211,8 @@ pub fn register_achievement_admin_handlers(
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or invalid achievement ID".into()))?;
             let _ = mgr.reset_achievement(cid, aid)?;
             mgr.save_to_db();
-            Ok(GoogleEmpty.to_any())
+            pb::message("eve_public.achievement.api.admin.ResetResponse")
+                .to_any_or_internal_err()
         }),
     );
 
@@ -225,7 +226,8 @@ pub fn register_achievement_admin_handlers(
                 mgr.reset_all(cid);
                 mgr.save_to_db();
             }
-            Ok(GoogleEmpty.to_any())
+            pb::message("eve_public.achievement.api.admin.ResetAllResponse")
+                .to_any_or_internal_err()
         }),
     );
 
@@ -255,7 +257,8 @@ pub fn register_achievement_admin_handlers(
                 ctx.now_unix(),
             );
 
-            Ok(GoogleEmpty.to_any())
+            pb::message("eve_public.achievement.category.api.admin.ResetResponse")
+                .to_any_or_internal_err()
         }),
     );
 
@@ -276,7 +279,8 @@ pub fn register_achievement_admin_handlers(
                 ver_notice,
                 ctx.now_unix(),
             );
-            Ok(GoogleEmpty.to_any())
+            pb::message("eve.achievement.definition.version.api.admin.SetDefaultVersionResponse")
+                .to_any_or_internal_err()
         }),
     );
 }

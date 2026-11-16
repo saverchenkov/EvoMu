@@ -4,8 +4,8 @@ use crate::quasar_gateway::{NoticeScope, PublicGatewayRouter};
 use eve_db::WorldRepository;
 use eve_proto::pb;
 use eve_proto::quasar::{
-    DynamicValue, GoogleAny, GoogleTimestamp, WireField, WireMessage, WireValue,
-    TYPE_GOOGLEAPIS_PREFIX,
+    DynamicValue, GoogleAny, GoogleEmpty, GoogleTimestamp, QuasarMessage, WireField, WireMessage,
+    WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -940,11 +940,9 @@ fn register_federated_and_transfer_handlers(
                         .to_any()
                         .map_err(|e| (crate::quasar_gateway::STATUS_INTERNAL_ERROR, e.to_string()))
                 } else {
-                    // Notice-only request names have no *Response descriptor in quasar_descriptors.sqlite.
-                    Ok(GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"),
-                        value: Vec::new(),
-                    })
+                    // Notice-only Twitch drop events have no *Response descriptor in
+                    // `quasar_descriptors.sqlite`; return `google.protobuf.Empty` (#933).
+                    Ok(GoogleEmpty.to_any())
                 }
             }),
         );
