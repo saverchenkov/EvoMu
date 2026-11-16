@@ -28,6 +28,297 @@ fn test_ctx() -> ServerContext {
 }
 
 #[test]
+fn transition_grace_ship_dirt_binding_lifecycle_and_security_boundaries() {
+    let ctx = test_ctx();
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(
+        1_800_000_000,
+    )));
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let sid = 777_150_u64;
+    let sys_id = 30_000_142_u32;
+    let st_id = 60_003_760_i64;
+    let other_st_id = ctx
+        .sde
+        .stations
+        .keys()
+        .copied()
+        .find(|&id| id != st_id)
+        .expect("alternate station");
+    let ship_a = 1_897_301_923_i64;
+    let foreign_ship = 1_897_301_999_i64;
+    let non_ship_item = 1_897_301_998_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_a;
+        }
+        snap.items.insert(
+            ship_a,
+            InventoryItemRecord {
+                item_id: ship_a,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: st_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            foreign_ship,
+            InventoryItemRecord {
+                item_id: foreign_ship,
+                type_id: 587,
+                owner_id: other_char,
+                location_id: st_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            non_ship_item,
+            InventoryItemRecord {
+                item_id: non_ship_item,
+                type_id: 34, // Tritanium mineral (non-ship category)
+                owner_id: char_id,
+                location_id: st_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 10,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.db
+        .acquire_online_lock(user_id, sid, Some(char_id), false, ctx.now_unix())
+        .expect("acquire online lock");
+
+    let mut sess = SessionState::new(sid);
+    sess.user_id = Some(user_id);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(1_000_009);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_a);
+
+    // Before recording dock departure, transition grace refuses station binding.
+    assert!(
+        ctx.allocate_transition_grace_ship_dirt_binding(
+            &sess,
+            st_id,
+            &[PyRep::Integer(ship_a)],
+        )
+        .is_none()
+    );
+
+    // Simulate departing `st_id` into space (`station_id: Some(st_id) -> None`).
+    ctx.update_transition_departed_dock(&sess, Some(st_id), None);
+
+    // 1. Owned ship dirt binding allocates grace-only bound ID (NOT inserted into active bound_objects).
+    let grace_bid = ctx
+        .allocate_transition_grace_ship_dirt_binding(&sess, st_id, &[PyRep::Integer(ship_a)])
+        .expect("grace bid within 30s");
+    assert!(
+        !ctx.bound_objects.read().unwrap().contains_key(&grace_bid),
+        "grace bid must stay out of active bound_objects"
+    );
+    assert_eq!(
+        ctx.verify_bound_object(&sess, grace_bid).unwrap_err().code,
+        "InvalidBoundObject"
+    );
+
+    let resolved = ctx
+        .grace_bound_object_for_inflight_transition(
+            &sess,
+            grace_bid,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+        )
+        .expect("GetDirtTimestamp grace authorized");
+    assert_eq!(resolved.service, "ship");
+    assert_eq!(resolved.object_id, st_id);
+
+    // 2. Non-GetDirtTimestamp methods and foreign/non-ship/unrelated-station targets are rejected.
+    for blocked in [
+        "Board",
+        "AssembleShip",
+        "ResetDirtTimestamp",
+        "Undock",
+        "LeaveShip",
+        "TrashItems",
+        "GetSelfInvItem",
+    ] {
+        assert!(
+            ctx.grace_bound_object_for_inflight_transition(
+                &sess,
+                grace_bid,
+                blocked,
+                &[PyRep::Integer(ship_a)],
+            )
+            .is_none(),
+            "{blocked} must be rejected on ship transition grace"
+        );
+    }
+    assert!(
+        ctx.allocate_transition_grace_ship_dirt_binding(
+            &sess,
+            st_id,
+            &[PyRep::Integer(foreign_ship)],
+        )
+        .is_none()
+    );
+    assert!(
+        ctx.allocate_transition_grace_ship_dirt_binding(
+            &sess,
+            st_id,
+            &[PyRep::Integer(non_ship_item)],
+        )
+        .is_none()
+    );
+    assert!(
+        ctx.allocate_transition_grace_ship_dirt_binding(
+            &sess,
+            other_st_id,
+            &[PyRep::Integer(ship_a)],
+        )
+        .is_none()
+    );
+    assert!(
+        ctx.grace_bound_object_for_inflight_transition(
+            &sess,
+            grace_bid,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(foreign_ship)],
+        )
+        .is_none()
+    );
+
+    // 3. Wrong session, wrong user, wrong character, and displaced online lock are rejected.
+    let mut wrong_sid = sess.clone();
+    wrong_sid.session_id = sid + 1;
+    assert!(
+        ctx.allocate_transition_grace_ship_dirt_binding(
+            &wrong_sid,
+            st_id,
+            &[PyRep::Integer(ship_a)],
+        )
+        .is_none()
+    );
+    let mut wrong_user = sess.clone();
+    wrong_user.user_id = Some(user_id + 1);
+    assert!(
+        ctx.grace_bound_object_for_inflight_transition(
+            &wrong_user,
+            grace_bid,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+        )
+        .is_none()
+    );
+    let mut wrong_char = sess.clone();
+    wrong_char.character_id = Some(other_char);
+    assert!(
+        ctx.grace_bound_object_for_inflight_transition(
+            &wrong_char,
+            grace_bid,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+        )
+        .is_none()
+    );
+    assert!(
+        ctx.grace_bound_object_for_inflight_transition(
+            &sess,
+            grace_bid,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+        )
+        .is_some()
+    );
+
+    // 4. Verify 20s validity and >30s expiry, plus dock-back clearing and session purge.
+    ctx.advance_secs(20);
+    assert!(
+        ctx.allocate_transition_grace_ship_dirt_binding(&sess, st_id, &[PyRep::Integer(ship_a)])
+            .is_some()
+    );
+    ctx.advance_secs(12);
+    assert!(
+        ctx.allocate_transition_grace_ship_dirt_binding(&sess, st_id, &[PyRep::Integer(ship_a)])
+            .is_none()
+    );
+    assert!(
+        ctx.grace_bound_object_for_inflight_transition(
+            &sess,
+            grace_bid,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+        )
+        .is_none()
+    );
+
+    ctx.update_transition_departed_dock(&sess, Some(st_id), None);
+    ctx.update_transition_departed_dock(&sess, None, Some(st_id));
+    assert!(
+        ctx.allocate_transition_grace_ship_dirt_binding(&sess, st_id, &[PyRep::Integer(ship_a)])
+            .is_none(),
+        "docking back into st_id clears departed dock grace"
+    );
+
+    ctx.update_transition_departed_dock(&sess, Some(st_id), None);
+    let active_bid = ctx
+        .allocate_transition_grace_ship_dirt_binding(&sess, st_id, &[PyRep::Integer(ship_a)])
+        .expect("fresh grace bid");
+
+    // 5. Displaced online lock immediately rejects both allocation and in-flight grace.
+    ctx.db
+        .acquire_online_lock(user_id, sid + 99, Some(char_id), true, ctx.now_unix())
+        .expect("displace lock");
+    assert!(
+        ctx.allocate_transition_grace_ship_dirt_binding(&sess, st_id, &[PyRep::Integer(ship_a)])
+            .is_none()
+    );
+    assert!(
+        ctx.grace_bound_object_for_inflight_transition(
+            &sess,
+            active_bid,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+        )
+        .is_none()
+    );
+
+    // 6. Session purge clears grace entries on fresh session.
+    let sid_clean = sid + 100;
+    ctx.db
+        .acquire_online_lock(user_id, sid_clean, Some(char_id), true, ctx.now_unix())
+        .expect("acquire fresh lock");
+    let mut sess_clean = sess.clone();
+    sess_clean.session_id = sid_clean;
+    ctx.update_transition_departed_dock(&sess_clean, Some(st_id), None);
+    let purged_bid = ctx
+        .allocate_transition_grace_ship_dirt_binding(&sess_clean, st_id, &[PyRep::Integer(ship_a)])
+        .expect("fresh session grace bid");
+    ctx.purge_transition_grace_for_session(sid_clean);
+    assert!(
+        ctx.grace_bound_object_for_inflight_transition(
+            &sess_clean,
+            purged_bid,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_a)],
+        )
+        .is_none()
+    );
+}
+
+#[test]
 fn session_closers_object_binding_verification_and_transition_invalidation_work() {
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;

@@ -25,6 +25,109 @@ fn make_entry(service: &str, object_id: i64, char_id: i64) -> BoundObjectEntry {
 }
 
 #[test]
+fn ship_binding_rejects_dogma_station_accessibility_while_dogma_im_stays_symmetric() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let other_sys_id = 30_000_144_u32;
+    let st_id = 60_003_760_i64;
+    let other_st_id = ctx
+        .sde
+        .stations
+        .values()
+        .find(|s| s.solar_system_id != sys_id && s.station_id != st_id)
+        .map(|s| s.station_id)
+        .unwrap_or(60_008_494);
+    let same_sys_other_st = ctx
+        .sde
+        .stations
+        .values()
+        .find(|s| s.solar_system_id == sys_id && s.station_id != st_id)
+        .map(|s| s.station_id)
+        .expect("second station in Jita");
+    let struct_here = 1_000_000_601_i64;
+    let ship_id = 100_000_001_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.home_station_id = st_id;
+        }
+        snap.structures.insert(
+            struct_here,
+            UpwellStructureRecord {
+                structure_id: struct_here,
+                solar_system_id: sys_id,
+                owner_corp_id: 98_999_999,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut undocked = SessionState::new(91_150);
+    undocked.user_id = Some(1);
+    undocked.character_id = Some(char_id);
+    undocked.solar_system_id = Some(sys_id);
+    undocked.ship_id = Some(ship_id);
+
+    for target in [st_id, same_sys_other_st, struct_here, other_st_id, 999_999_999] {
+        assert!(
+            !authorize_service_binding(&ctx, &undocked, char_id, "ship", target),
+            "undocked ship bind must deny {target}"
+        );
+        assert!(
+            !verify_service_binding_context(&ctx, &undocked, &make_entry("ship", target, char_id)),
+            "undocked ship verify must deny {target}"
+        );
+    }
+    for allowed in [ship_id, i64::from(sys_id)] {
+        assert!(authorize_service_binding(&ctx, &undocked, char_id, "ship", allowed));
+        assert!(verify_service_binding_context(
+            &ctx,
+            &undocked,
+            &make_entry("ship", allowed, char_id)
+        ));
+    }
+
+    for accessible in [ship_id, i64::from(sys_id), st_id, same_sys_other_st, struct_here] {
+        assert!(
+            authorize_service_binding(&ctx, &undocked, char_id, "dogmaIM", accessible),
+            "dogmaIM authorize should allow {accessible}"
+        );
+        assert!(
+            verify_service_binding_context(
+                &ctx,
+                &undocked,
+                &make_entry("dogmaIM", accessible, char_id)
+            ),
+            "dogmaIM verify should agree symmetrically for {accessible}"
+        );
+    }
+    assert!(!verify_service_binding_context(
+        &ctx,
+        &undocked,
+        &make_entry("dogmaIM", st_id, char_id + 1)
+    ));
+    assert!(!authorize_service_binding(&ctx, &undocked, char_id, "dogmaIM", other_st_id));
+    assert!(!verify_service_binding_context(
+        &ctx,
+        &undocked,
+        &make_entry("dogmaIM", other_st_id, char_id)
+    ));
+
+    let mut docked = undocked.clone();
+    docked.station_id = Some(st_id);
+    assert!(authorize_service_binding(&ctx, &docked, char_id, "ship", st_id));
+    assert!(verify_service_binding_context(
+        &ctx,
+        &docked,
+        &make_entry("ship", st_id, char_id)
+    ));
+    assert!(!authorize_service_binding(&ctx, &docked, char_id, "ship", same_sys_other_st));
+    assert!(!authorize_service_binding(&ctx, &docked, char_id, "ship", struct_here));
+    let _ = other_sys_id;
+}
+
+#[test]
 fn authorize_and_verify_binding_cover_every_service_and_edge_case() {
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;

@@ -935,3 +935,451 @@ async fn maybe_emit_login_sim_clock_rebase_stays_client_anchored_across_advancet
         "login DoSimClockRebase newSimTime drifted from client clock"
     );
 }
+
+#[tokio::test]
+async fn ship_macho_bind_dirt_timestamp_grace_survives_undock_and_slash_moveme_while_blocking_mutations()
+{
+    use eve_db::{InventoryFlag, InventoryItemRecord, VirtualServerClock, WorldRepository};
+    use std::sync::OnceLock;
+
+    static SHARED_DISPATCH_SDE: OnceLock<Arc<eve_sde::SdeRegistry>> = OnceLock::new();
+    fn test_ctx_with_sde() -> ServerContext {
+        if let Some(sde) = SHARED_DISPATCH_SDE.get() {
+            ServerContext::with_sde_and_repository(
+                Arc::clone(sde),
+                Arc::new(WorldRepository::with_demo_seed()),
+            )
+            .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED)
+        } else {
+            let ctx = ServerContext::new();
+            let _ = SHARED_DISPATCH_SDE.set(Arc::clone(&ctx.sde));
+            ctx
+        }
+    }
+
+    fn unwrap_bound_id(rep: &PyRep) -> u64 {
+        match rep {
+            PyRep::SubStruct(inner) | PyRep::SubStream(inner) => unwrap_bound_id(inner),
+            PyRep::Tuple(items) => items[0]
+                .as_str()
+                .and_then(|s| s.rsplit_once(':'))
+                .and_then(|(_, right)| right.parse::<u64>().ok())
+                .expect("numeric bound id in oid_rep"),
+            other => panic!("expected SubStruct/SubStream oid_rep, got {other:?}"),
+        }
+    }
+
+    let ctx = test_ctx_with_sde();
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let user_id = 1_u64;
+    let sid = 96_150_u64;
+    let sys_id = 30_000_142_u32;
+    let st_id = 60_003_760_i64;
+    let other_st = ctx
+        .sde
+        .stations
+        .values()
+        .find(|s| s.station_id != st_id && s.solar_system_id != 30_000_144)
+        .expect("alternate station");
+    let ship_1 = 1_897_301_923_i64;
+    let ship_2 = 1_897_147_421_i64;
+    let foreign_ship = 1_897_999_999_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = Some(st_id);
+            ch.structure_id = None;
+            ch.active_ship_id = ship_1;
+            ch.home_station_id = st_id;
+        }
+        for (item_id, owner_id) in [(ship_1, char_id), (ship_2, char_id), (foreign_ship, other_char)]
+        {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id: 587,
+                    owner_id,
+                    location_id: st_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    ctx.db
+        .acquire_online_lock(user_id, sid, Some(char_id), false, ctx.now_unix())
+        .expect("acquire online lock");
+
+    let mut sess = SessionState::new(sid);
+    sess.user_id = Some(user_id);
+    sess.role = service_roles::ROLE_GMH;
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.station_id = Some(st_id);
+    sess.ship_id = Some(ship_1);
+    let kw = HashMap::new();
+
+    // Failed piggybacked call during docked MachoBindObject must not leak bound_objects.
+    let pre_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![PyRep::Integer(st_id), PyRep::Integer(15)]),
+                PyRep::Tuple(vec![
+                    PyRep::String("GetDirtTimestamp".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(999_999_999)]),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(pre_err.code, "ItemNotFound");
+    assert!(
+        ctx.bound_objects.read().unwrap().is_empty(),
+        "failed docked MachoBindObject must not leak bound object"
+    );
+
+    // Pre-bound station ship handle (`pre_ship_bid`) plus immediate post-Undock MachoBindObject (#1150).
+    let pre_ship_bid = ctx.bind_object(&sess, "ship", st_id).expect("pre-bind docked ship");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "ship",
+        None,
+        "Undock",
+        &[],
+        &kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("ship.Undock");
+    assert!(sess.station_id.is_none());
+    assert_eq!(
+        ctx.verify_bound_object(&sess, pre_ship_bid).unwrap_err().code,
+        "InvalidBoundObject"
+    );
+
+    // Pre-bound disconnected ship handle can still read GetDirtTimestamp within 30s grace.
+    let pre_dirt = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            Some(pre_ship_bid),
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_1)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("pre-bound GetDirtTimestamp within 30s grace");
+    assert!(pre_dirt.as_i64().is_some());
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut sess,
+            "ship",
+            Some(pre_ship_bid),
+            "Board",
+            &[PyRep::Integer(ship_2)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "InvalidBoundObject"
+    );
+
+    // Fresh ship.MachoBindObject((60003760, 15), ('GetDirtTimestamp', (ship,), {})) after Undock succeeds.
+    for target_ship in [ship_1, ship_2] {
+        let rep = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "ship",
+                None,
+                "MachoBindObject",
+                &[
+                    PyRep::Tuple(vec![PyRep::Integer(st_id), PyRep::Integer(15)]),
+                    PyRep::Tuple(vec![
+                        PyRep::String("GetDirtTimestamp".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(target_ship)]),
+                        PyRep::Dict(Vec::new()),
+                    ]),
+                ],
+                &kw,
+                Some("machoNet:26000"),
+            )
+            .await
+            .expect("MachoBindObject(60003760) + GetDirtTimestamp immediately after Undock");
+        let PyRep::Tuple(items) = rep else {
+            panic!("expected (oid_rep, dirt_ts) tuple");
+        };
+        assert_eq!(items.len(), 2);
+        assert!(items[1].as_i64().is_some());
+        let grace_bid = unwrap_bound_id(&items[0]);
+        assert!(
+            !ctx.bound_objects.read().unwrap().contains_key(&grace_bid),
+            "grace MachoBindObject must never insert into active bound_objects"
+        );
+        // Subsequent ObjectCall retry on grace_bid succeeds for GetDirtTimestamp only.
+        assert!(
+            ctx.dispatch_rpc(
+                &mut sess,
+                "",
+                Some(grace_bid),
+                "GetDirtTimestamp",
+                &[PyRep::Integer(target_ship)],
+                &kw,
+                Some("machoNet:26000"),
+            )
+            .await
+            .is_ok()
+        );
+        assert_eq!(
+            ctx.dispatch_rpc(
+                &mut sess,
+                "ship",
+                Some(grace_bid),
+                "ResetDirtTimestamp",
+                &[PyRep::Integer(target_ship)],
+                &kw,
+                Some("machoNet:26000"),
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "InvalidBoundObject"
+        );
+    }
+
+    // Security negatives right after Undock: bare bind, mutations, foreign ship, unrelated station.
+    let no_call_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![PyRep::Integer(st_id), PyRep::Integer(15)]),
+                PyRep::None,
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(no_call_err.code, "BindAuthorizationDenied");
+
+    for (blocked_method, blocked_args) in [
+        ("Board", vec![PyRep::Integer(ship_2)]),
+        ("ResetDirtTimestamp", vec![PyRep::Integer(ship_1)]),
+        ("TrashItems", vec![PyRep::List(vec![PyRep::Integer(ship_2)])]),
+    ] {
+        let err = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "ship",
+                None,
+                "MachoBindObject",
+                &[
+                    PyRep::Tuple(vec![PyRep::Integer(st_id), PyRep::Integer(15)]),
+                    PyRep::Tuple(vec![
+                        PyRep::String(blocked_method.into()),
+                        PyRep::Tuple(blocked_args),
+                        PyRep::Dict(Vec::new()),
+                    ]),
+                ],
+                &kw,
+                Some("machoNet:26000"),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code, "BindAuthorizationDenied",
+            "{blocked_method} must be rejected post-Undock"
+        );
+    }
+
+    let foreign_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![PyRep::Integer(st_id), PyRep::Integer(15)]),
+                PyRep::Tuple(vec![
+                    PyRep::String("GetDirtTimestamp".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(foreign_ship)]),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(foreign_err.code, "BindAuthorizationDenied");
+
+    let unrelated_st_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![PyRep::Integer(other_st.station_id), PyRep::Integer(15)]),
+                PyRep::Tuple(vec![
+                    PyRep::String("GetDirtTimestamp".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(ship_1)]),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(unrelated_st_err.code, "BindAuthorizationDenied");
+
+    // Grace expires after >30s.
+    ctx.advance_secs(31);
+    let expired_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![PyRep::Integer(st_id), PyRep::Integer(15)]),
+                PyRep::Tuple(vec![
+                    PyRep::String("GetDirtTimestamp".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(ship_1)]),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(expired_err.code, "BindAuthorizationDenied");
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut sess,
+            "ship",
+            Some(pre_ship_bid),
+            "GetDirtTimestamp",
+            &[PyRep::Integer(ship_1)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "InvalidBoundObject"
+    );
+
+    // Part B (#1152 / #1153): `/moveme 30000144` from both home station and non-home station
+    // authorizes stale GetDirtTimestamp via transition grace while still denying Board.
+    for (dock_st, dock_sys) in [(st_id, sys_id), (other_st.station_id, other_st.solar_system_id)] {
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.solar_system_id = dock_sys;
+                ch.station_id = Some(dock_st);
+                ch.structure_id = None;
+            }
+            if let Some(ship) = snap.items.get_mut(&ship_1) {
+                ship.location_id = dock_st;
+            }
+        });
+        sess.solar_system_id = Some(dock_sys);
+        sess.station_id = Some(dock_st);
+        sess.structure_id = None;
+        ctx.invalidate_bound_objects_for_session_transition(
+            char_id,
+            dock_sys,
+            Some(dock_st),
+            "dock",
+        );
+
+        ctx.dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/moveme 30000144".into())],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("/moveme 30000144");
+        assert_eq!(sess.solar_system_id, Some(30_000_144));
+        assert!(sess.station_id.is_none());
+
+        let moveme_dirt = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "ship",
+                None,
+                "MachoBindObject",
+                &[
+                    PyRep::Tuple(vec![PyRep::Integer(dock_st), PyRep::Integer(15)]),
+                    PyRep::Tuple(vec![
+                        PyRep::String("GetDirtTimestamp".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(ship_1)]),
+                        PyRep::Dict(Vec::new()),
+                    ]),
+                ],
+                &kw,
+                Some("machoNet:26000"),
+            )
+            .await
+            .expect("MachoBindObject(departed_dock) + GetDirtTimestamp immediately after /moveme");
+        let PyRep::Tuple(items) = moveme_dirt else {
+            panic!("expected (oid_rep, dirt_ts) tuple");
+        };
+        assert!(items[1].as_i64().is_some());
+
+        let moveme_board_err = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "ship",
+                None,
+                "MachoBindObject",
+                &[
+                    PyRep::Tuple(vec![PyRep::Integer(dock_st), PyRep::Integer(15)]),
+                    PyRep::Tuple(vec![
+                        PyRep::String("Board".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(ship_2)]),
+                        PyRep::Dict(Vec::new()),
+                    ]),
+                ],
+                &kw,
+                Some("machoNet:26000"),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(moveme_board_err.code, "BindAuthorizationDenied");
+    }
+
+    assert!(
+        !ctx.bound_objects
+            .read()
+            .unwrap()
+            .values()
+            .any(|e| e.service == "ship" && (e.object_id == st_id || e.object_id == other_st.station_id)),
+        "station-scoped ship bindings must never linger in active bound_objects after transitions"
+    );
+}
