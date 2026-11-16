@@ -21,7 +21,7 @@ use eve_db::{IskCents, StandingTransactionRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const SKILL_SOCIAL: TypeId = 3355;
 const SKILL_DIPLOMACY: TypeId = 3357;
@@ -214,6 +214,608 @@ pub fn resolve_epic_arc_id_for_agent(ctx: &ServerContext, agent_id: i64) -> (u32
         _ => 1,
     };
     (arc_id, faction_id)
+}
+
+/// Maps V24 chapter-start `missionID -> chapterTitleMessageID` from `missions.fsdbinary`
+/// across all 9 active V24 Epic Arcs (`29, 40, 48, 52, 53, 55, 56, 128, 132`) so
+/// `EpicArcController._ConnectAllNodes` and `GetCurrentChapterID` resolve every chapter cleanly.
+const EPIC_ARC_CHAPTER_TITLES: &[(u32, i64)] = &[
+    // Arc 29: The Blood-Stained Stars
+    (14117, 140784), // Quality of Mercy
+    (14127, 140792), // Automaton Impediment
+    (14132, 140797), // Shadow Puppets
+    (14138, 140804), // Queens and Drones
+    (14391, 140813), // Shifting Foundations
+    (14399, 140820), // A Breach of Trust
+    (14413, 140828), // Closing In
+    // Arc 40: Penumbra
+    (14603, 141721), // Blackness Rising
+    (14616, 141720), // Blackness Rising
+    (14849, 141900), // Proof of Intent
+    (14969, 142236), // The Bottom Line
+    (14970, 142235), // The Bottom Line
+    // Arc 48: Right to Rule
+    (14623, 141388), // Interference
+    (14633, 141425), // Spiderweb Politics
+    (14843, 141922), // The Old Guard
+    (14906, 141962), // Alike Minds
+    // Arc 52: Syndication
+    (14746, 142238), // Impetus
+    (14889, 141793), // Eagle Grip
+    (14890, 142239), // Scoping the Scene
+    (14942, 142240), // Inertia
+    // Arc 53: Wildfire
+    (14851, 141611), // The Passage
+    (14934, 142043), // Songs of the Past
+    (14961, 142124), // Revelation
+    // Arc 55: Smash and Grab
+    (15018, 142536), // Chapter 1 - Probationary
+    (15055, 142648), // Chapter 2 - For Fun and Profit
+    (15059, 142727), // Chapter 3 - Internal Security
+    (15143, 143100), // Chapter 1 - Probationary
+    // Arc 56: Angel Sound
+    (15029, 142820), // Rapture
+    (15033, 142822), // Utopia
+    (15034, 142821), // Heaven
+    (15045, 142824), // Paradise
+    (15046, 142823), // Paradise
+    // Arc 128: Fractured Legacy
+    (17130, 1017644), // The Missing Pilot
+    (17131, 1017641), // Pioneering Spirit
+    (17132, 1017642), // Shattered Catalyst
+    // Arc 132: Visions of Greatness
+    (17183, 1039696), // Golgothan Fields
+    (17184, 1039706), // Caldari Prime Breakout
+    (17185, 1039708), // Intaki Liberation
+    (17186, 1039710), // Battle of Pator
+    (17187, 1040027), // Travel to the Amarr
+    (17188, 1040276), // Holographic Reenactment
+    (17189, 1040285), // Travel to the Gallente
+    (17190, 1040294), // Travel to the Minmatar
+];
+
+/// Maps V24 Epic Arc `missionID -> (epicArcID, nameID, inProgressMsgID, completedMsgID)` across
+/// all 21 arcs (`29, 40, 48, 52, 53, 55, 56, 64, 67..=77, 128, 132`) from `epicarcs.fsdbinary`
+/// and `missions.fsdbinary`.
+const EPIC_ARC_MISSION_SPECS: &[(u32, u32, i64, i64, i64)] = &[
+    // Arc 29: The Blood-Stained Stars
+    (14117, 29, 57289, 140983, 140853), (14118, 29, 57269, 141034, 141029), (14119, 29, 57287, 140857, 140984),
+    (14120, 29, 57266, 141099, 141030), (14121, 29, 57267, 141031, 141032), (14122, 29, 57262, 141013, 141014),
+    (14123, 29, 57254, 140858, 140859), (14124, 29, 57275, 140864, 140865), (14125, 29, 57265, 141098, 141097),
+    (14126, 29, 57255, 141036, 141037), (14127, 29, 57268, 140868, 141103), (14128, 29, 57234, 140869, 140870),
+    (14129, 29, 58617, 140871, 140872), (14130, 29, 58618, 141094, 141095), (14131, 29, 57256, 140873, 140874),
+    (14132, 29, 57235, 140875, 140876), (14133, 29, 57237, 140879, 140880), (14134, 29, 57236, 140877, 140878),
+    (14135, 29, 57238, 140881, 140882), (14136, 29, 57257, 140885, 140886), (14137, 29, 58619, 140883, 140884),
+    (14138, 29, 57239, 140887, 140888), (14139, 29, 57282, 140902, 140903), (14140, 29, 57252, 140895, 140896),
+    (14141, 29, 57240, 140900, 140901), (14142, 29, 57242, 140908, 140909), (14386, 29, 57295, 140904, 140905),
+    (14387, 29, 57241, 140906, 140907), (14388, 29, 57243, 140910, 140911), (14389, 29, 57244, 140912, 140913),
+    (14390, 29, 58620, 140915, 140916), (14391, 29, 57245, 140918, 140919), (14392, 29, 57258, 140920, 140921),
+    (14393, 29, 57246, 140922, 140923), (14394, 29, 57247, 140924, 140925), (14396, 29, 57248, 140928, 140929),
+    (14397, 29, 57249, 140930, 140931), (14398, 29, 57260, 140932, 140933), (14399, 29, 57250, 140934, 140935),
+    (14401, 29, 57293, 140936, 140937), (14403, 29, 57283, 140938, 140939), (14404, 29, 57284, 140940, 140941),
+    (14405, 29, 57261, 140942, 140943), (14406, 29, 57291, 140944, 140945), (14407, 29, 57292, 140946, 140947),
+    (14413, 29, 57290, 140948, 140949), (14414, 29, 57271, 140950, 140951), (14415, 29, 57270, 140952, 140953),
+    (14416, 29, 57251, 140954, 140955), (14422, 29, 57259, 140926, 140927), (14442, 29, 57253, 140956, 140957),
+    (14443, 29, 57294, 140958, 141135), (14444, 29, 57277, 140959, 141136), (14445, 29, 57278, 140960, 141137),
+    (14446, 29, 57279, 140961, 141138), (14451, 29, 57285, 140917, 141236), (14453, 29, 57272, 141126, 141127),
+    (14454, 29, 57273, 141129, 141128), (14455, 29, 57274, 141130, 141228), (14456, 29, 57276, 141133, 141134),
+    (14467, 29, 57281, 141139, 141140), (14468, 29, 57280, 141141, 141241), (14469, 29, 57296, 141142, 141243),
+    (14470, 29, 57297, 141143, 141144),
+    // Arc 40: Penumbra
+    (14490, 40, 57299, 141287, 141904), (14492, 40, 57549, 142296, 142295), (14511, 40, 57552, 141493, 141906),
+    (14548, 40, 57551, 142300, 142299), (14552, 40, 58615, 142291, 141914), (14553, 40, 57550, 142288, 141916),
+    (14558, 40, 57307, 142292, 142293), (14559, 40, 57308, 142289, 142290), (14576, 40, 57310, 141545, 141907),
+    (14597, 40, 57311, 141351, 141910), (14599, 40, 57312, 141355, 141909), (14601, 40, 57313, 141690, 141905),
+    (14602, 40, 57314, 141580, 141908), (14603, 40, 57479, 141708, 141709), (14607, 40, 57315, 141698, 141699),
+    (14610, 40, 57317, 141487, 141919), (14612, 40, 57537, 141448, 141918), (14613, 40, 57535, 141432, 141917),
+    (14616, 40, 57480, 141718, 141719), (14619, 40, 57319, 141695, 141696), (14827, 40, 57536, 141597, 141915),
+    (14833, 40, 57468, 142301, 142302), (14847, 40, 57482, 141730, 141731), (14848, 40, 57481, 141738, 141911),
+    (14849, 40, 57470, 141596, 141903), (14882, 40, 57567, 141746, 141747), (14884, 40, 57566, 141755, 141756),
+    (14885, 40, 57483, 141764, 142343), (14886, 40, 57484, 141772, 142344), (14898, 40, 57496, 141912, 141913),
+    (14900, 40, 57498, 141921, 141920), (14901, 40, 58613, 141850, 141851), (14903, 40, 58614, 141866, 141867),
+    (14969, 40, 57528, 142197, 142198), (14970, 40, 57529, 142204, 142205), (14971, 40, 57530, 142214, 142215),
+    (14972, 40, 57531, 142222, 142223), (14973, 40, 57532, 142211, 142212), (14975, 40, 57533, 142241, 142242),
+    (14976, 40, 57534, 142227, 142228),
+    // Arc 48: Right to Rule
+    (14623, 48, 57320, 141368, 141401), (14624, 48, 57463, 141372, 141376), (14627, 48, 57321, 141407, 141408),
+    (14628, 48, 57322, 141382, 141386), (14633, 48, 57478, 141677, 141424), (14645, 48, 57464, 141674, 141675),
+    (14646, 48, 57465, 141455, 141454), (14647, 48, 57466, 141463, 141464), (14648, 48, 57467, 141471, 141472),
+    (14838, 48, 58612, 141561, 141565), (14839, 48, 57485, 141569, 141570), (14842, 48, 57469, 141608, 141607),
+    (14843, 48, 57486, 141603, 142003), (14860, 48, 57500, 141638, 141637), (14861, 48, 58611, 141931, 141930),
+    (14862, 48, 57476, 141938, 141937), (14863, 48, 57477, 141947, 141946), (14864, 48, 57539, 141952, 141957),
+    (14906, 48, 57506, 142304, 142306), (14912, 48, 57502, 141972, 141973), (14913, 48, 57503, 141980, 141982),
+    (14914, 48, 57504, 142342, 142317), (14915, 48, 57505, 141992, 141997), (14916, 48, 57507, 143352, 143351),
+    // Arc 52: Syndication
+    (14746, 52, 57395, 141507, 141508), (14819, 52, 58616, 141516, 141517), (14820, 52, 57460, 141681, 141679),
+    (14821, 52, 57461, 141531, 141532), (14822, 52, 57462, 141538, 141682), (14831, 52, 57501, 141556, 141557),
+    (14888, 52, 57487, 141784, 141785), (14889, 52, 57488, 141791, 141792), (14890, 52, 57489, 141857, 141858),
+    (14891, 52, 57490, 141800, 141801), (14892, 52, 57491, 141874, 141875), (14893, 52, 57492, 141811, 141812),
+    (14894, 52, 57493, 141882, 141883), (14895, 52, 57494, 141820, 141821), (14896, 52, 57495, 141890, 141891),
+    (14899, 52, 57497, 141843, 141844), (14905, 52, 57499, 141898, 141899), (14942, 52, 57511, 142046, 142047),
+    (14943, 52, 57512, 142058, 142059), (14944, 52, 57513, 142066, 142067), (14945, 52, 57514, 142075, 142076),
+    (14946, 52, 57515, 142287, 142286), (14947, 52, 57516, 142095, 142096), (14948, 52, 57517, 142103, 142104),
+    (14950, 52, 57519, 142273, 142111), (14951, 52, 57520, 142274, 142120), (14980, 52, 57538, 142270, 142271),
+    // Arc 53: Wildfire
+    (14851, 53, 57471, 142325, 141620), (14852, 53, 57472, 142335, 142337), (14853, 53, 57473, 141640, 141641),
+    (14854, 53, 57540, 141649, 141650), (14855, 53, 57474, 141657, 141658), (14856, 53, 57475, 141668, 141669),
+    (14932, 53, 57508, 142009, 142019), (14934, 53, 57509, 142015, 142018), (14935, 53, 57510, 142028, 142313),
+    (14936, 53, 57541, 142034, 142035), (14937, 53, 57542, 142041, 142042), (14960, 53, 57543, 142138, 142139),
+    (14961, 53, 57521, 142136, 142137), (14962, 53, 57522, 142144, 142145), (14963, 53, 57523, 142151, 142152),
+    (14965, 53, 57524, 142164, 142165), (14966, 53, 57525, 142169, 142170), (14967, 53, 57526, 142183, 142184),
+    (14968, 53, 57527, 142177, 142178),
+    // Arc 55: Smash and Grab
+    (15015, 55, 57560, 142521, 142522), (15017, 55, 57561, 142527, 142528), (15018, 55, 57562, 142537, 142538),
+    (15019, 55, 57563, 142539, 142540), (15020, 55, 57564, 142545, 142546), (15021, 55, 57565, 142547, 142552),
+    (15026, 55, 57568, 142556, 142561), (15053, 55, 57586, 142664, 142669), (15055, 55, 57587, 142646, 142652),
+    (15056, 55, 57588, 143252, 143253), (15057, 55, 57597, 142690, 142702), (15059, 55, 57589, 142726, 142728),
+    (15060, 55, 57590, 142730, 142735), (15061, 55, 57591, 142745, 142750), (15062, 55, 57592, 142736, 142741),
+    (15063, 55, 57593, 142769, 142774), (15064, 55, 57594, 142777, 142782), (15065, 55, 57595, 142753, 142758),
+    (15066, 55, 57596, 142761, 142766), (15143, 55, 57607, 143097, 143101),
+    // Arc 56: Angel Sound
+    (15028, 56, 57608, 142581, 142582), (15029, 56, 57611, 142591, 142592), (15030, 56, 57569, 142840, 142841),
+    (15031, 56, 57570, 142832, 142833), (15032, 56, 57571, 142818, 142819), (15033, 56, 57572, 142597, 142598),
+    (15034, 56, 57573, 142599, 142600), (15035, 56, 57574, 142615, 142616), (15036, 56, 57575, 142704, 142705),
+    (15037, 56, 57576, 142688, 142689), (15038, 56, 57577, 142624, 142625), (15039, 56, 57578, 142632, 142633),
+    (15040, 56, 57620, 142676, 142677), (15041, 56, 57579, 142662, 142659), (15042, 56, 57580, 142641, 142642),
+    (15043, 56, 57581, 142785, 142786), (15044, 56, 57582, 142789, 142787), (15045, 56, 57583, 142796, 142795),
+    (15046, 56, 57584, 142804, 142803), (15047, 56, 57585, 142809, 142810), (15058, 56, 57609, 142715, 142716),
+    (15144, 56, 57610, 143139, 143140),
+    // Arc 64: Pilot Certification Course - Emrayur
+    (15565, 64, 58367, 144600, 144590), (15566, 64, 58359, 144592, 144591), (15568, 64, 58365, 144603, 144602),
+    (15621, 64, 58556, 144683, 144682),
+    // Arc 67: Pilot Certification Course - Chaven
+    (15622, 67, 58557, 144685, 144688), (15623, 67, 58558, 144691, 144694), (15624, 67, 58559, 144697, 144700),
+    (15625, 67, 58560, 144703, 144706),
+    // Arc 68: Pilot Certification Course - Sehmy
+    (15626, 68, 58561, 144710, 144713), (15627, 68, 58562, 144715, 144718), (15628, 68, 58563, 144722, 144725),
+    (15629, 68, 58564, 144728, 144731),
+    // Arc 69: Pilot Certification Course - Bourynes
+    (15630, 69, 58565, 144735, 144738), (15631, 69, 58566, 144741, 144744), (15632, 69, 58567, 144747, 144750),
+    (15633, 69, 58568, 144753, 144756),
+    // Arc 70: Pilot Certification Course - Duripant
+    (15634, 70, 58569, 144760, 144763), (15635, 70, 58570, 144766, 144769), (15636, 70, 58571, 144772, 144775),
+    (15637, 70, 58572, 144778, 144781),
+    // Arc 71: Pilot Certification Course - Cistuvaert
+    (15638, 71, 58573, 144785, 144788), (15639, 71, 58574, 144790, 144793), (15640, 71, 58575, 144796, 144799),
+    (15641, 71, 58576, 144802, 144805),
+    // Arc 72: Pilot Certification Course - Hulm
+    (15642, 72, 58577, 144808, 144811), (15643, 72, 58578, 144814, 144817), (15644, 72, 58579, 144820, 144823),
+    (15645, 72, 58580, 144826, 144829),
+    // Arc 73: Pilot Certification Course - Ammold
+    (15646, 73, 58581, 144833, 144836), (15647, 73, 58582, 145211, 145210), (15648, 73, 58583, 144844, 144847),
+    (15649, 73, 58584, 144850, 144853),
+    // Arc 74: Pilot Certification Course - Ryddinjorn
+    (15650, 74, 58585, 144857, 144860), (15651, 74, 58586, 144863, 144866), (15652, 74, 58587, 144869, 144872),
+    (15653, 74, 58588, 144875, 144878),
+    // Arc 75: Pilot Certification Course - Kisogo
+    (15654, 75, 58589, 144882, 144885), (15655, 75, 58590, 144888, 144891), (15656, 75, 58591, 144894, 144897),
+    (15657, 75, 58592, 144900, 144903),
+    // Arc 76: Pilot Certification Course - Amsen
+    (15658, 76, 58593, 144907, 144910), (15659, 76, 58594, 144913, 144916), (15660, 76, 58595, 144919, 144922),
+    (15661, 76, 58596, 144925, 144928),
+    // Arc 77: Pilot Certification Course - Todaki
+    (15662, 77, 58597, 144932, 144935), (15663, 77, 58598, 144938, 144941), (15664, 77, 58599, 144944, 144947),
+    (15665, 77, 58600, 144950, 144953),
+    // Arc 128: Fractured Legacy
+    (17130, 128, 1016269, 1016272, 1016271), (17131, 128, 1016439, 1016441, 1016440), (17132, 128, 1016449, 1016451, 1016450),
+    // Arc 132: Visions of Greatness
+    (17183, 132, 1039695, 1039730, 1039729), (17184, 132, 1039705, 1039746, 1039745), (17185, 132, 1039707, 1039738, 1039737),
+    (17186, 132, 1039709, 1039755, 1039754), (17187, 132, 1040026, 1040029, 1040028), (17188, 132, 1040275, 1040278, 1040277),
+    (17189, 132, 1040274, 1040287, 1040286), (17190, 132, 1040273, 1040296, 1040295),
+];
+
+fn epic_arc_mission_spec(mission_id: u32) -> Option<(u32, i64)> {
+    EPIC_ARC_MISSION_SPECS
+        .iter()
+        .find(|&&(mid, _, _, _, _)| mid == mission_id)
+        .map(|&(_, arc_id, name_id, _, _)| (arc_id, name_id))
+}
+
+fn is_v24_epic_arc_id(arc_id: u32) -> bool {
+    matches!(
+        arc_id,
+        29 | 40 | 48 | 52 | 53 | 55 | 56 | 64 | 67..=77 | 128 | 132
+    )
+}
+
+/// Coalesces legacy faction-mapped `epic_arc_id` rows (`1..=7`) written during mission
+/// completion onto the V24 `epicArcID` whenever `completed_missions` holds V24 mission IDs.
+fn resolve_entry_epic_arc_id(entry: &EpicArcStateEntry) -> u32 {
+    if is_v24_epic_arc_id(entry.epic_arc_id) {
+        return entry.epic_arc_id;
+    }
+    entry
+        .completed_missions
+        .iter()
+        .find_map(|&mid| epic_arc_mission_spec(mid).map(|(arc_id, _)| arc_id))
+        .unwrap_or(entry.epic_arc_id)
+}
+
+fn is_epic_agent(ctx: &ServerContext, agent_id: i64) -> bool {
+    ctx.sde
+        .agents
+        .get(&agent_id)
+        .is_some_and(|ag| ag.agent_type_id == 10)
+}
+
+fn active_mission_matches_arc(
+    ctx: &ServerContext,
+    entry_arc_id: u32,
+    entry_agent_id: i64,
+    mission: &eve_db::ActiveMissionRecord,
+) -> bool {
+    if let Some((spec_arc_id, _)) = epic_arc_mission_spec(mission.mission_id) {
+        return spec_arc_id == entry_arc_id;
+    }
+    if mission.agent_id == entry_agent_id {
+        return true;
+    }
+    is_epic_agent(ctx, mission.agent_id)
+        && resolve_epic_arc_id_for_agent(ctx, mission.agent_id).0 == entry_arc_id
+}
+
+fn unix_to_filetime_rep(ts_unix: u64) -> PyRep {
+    let clamped = i64::try_from(ts_unix).unwrap_or(i64::MAX);
+    let filetime = clamped
+        .saturating_add(11_644_473_600)
+        .saturating_mul(10_000_000);
+    PyRep::Integer(filetime)
+}
+
+struct EpicArcMissionFields<'a> {
+    mission_id: u32,
+    accepted_date: PyRep,
+    completed_date: PyRep,
+    epic_arc_id: u32,
+    agent_id: i64,
+    faction_id: i64,
+    chapter: u32,
+    state: &'a str,
+    on_cooldown: bool,
+    chosen_branch: &'a PyRep,
+    cooldown_until: &'a PyRep,
+}
+
+fn build_epic_arc_mission_entry(f: EpicArcMissionFields<'_>) -> (PyRep, PyRep) {
+    let name_id = if f.mission_id == 0 {
+        0
+    } else {
+        epic_arc_mission_spec(f.mission_id).map_or(i64::from(f.mission_id), |(_, nid)| nid)
+    };
+    (
+        PyRep::Integer(i64::from(f.mission_id)),
+        PyRep::keyval([
+            ("acceptedDate", f.accepted_date),
+            ("completedDate", f.completed_date),
+            ("quitDate", PyRep::None),
+            ("nameID", PyRep::Integer(name_id)),
+            ("epicArcID", PyRep::Integer(i64::from(f.epic_arc_id))),
+            ("agentID", PyRep::Integer(f.agent_id)),
+            ("factionID", PyRep::Integer(f.faction_id)),
+            ("chapter", PyRep::Integer(i64::from(f.chapter))),
+            ("state", PyRep::String(f.state.to_owned())),
+            ("onCooldown", PyRep::Bool(f.on_cooldown)),
+            ("chosenBranch", f.chosen_branch.clone()),
+            ("cooldownUntilUnix", f.cooldown_until.clone()),
+        ]),
+    )
+}
+
+fn active_epic_arc_accepted_date(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    mission_id: u32,
+    state: &str,
+    now_unix: u64,
+) -> PyRep {
+    if state == "Offered" {
+        return PyRep::None;
+    }
+    let accepted_unix = load_mission_meta(snap, char_id, mission_id)
+        .and_then(|meta| meta.accepted_at_unix)
+        .unwrap_or(now_unix);
+    unix_to_filetime_rep(accepted_unix)
+}
+
+struct EpicArcEmitCtx<'a> {
+    arc_id: u32,
+    faction_id: i64,
+    chapter: u32,
+    state: &'a str,
+    on_cooldown: bool,
+    chosen_branch: &'a PyRep,
+    cooldown_until: &'a PyRep,
+    now_unix: u64,
+}
+
+fn completed_epic_arc_mission_entry(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    mission_id: u32,
+    entry: &EpicArcStateEntry,
+    emit: &EpicArcEmitCtx<'_>,
+) -> (PyRep, PyRep) {
+    let meta = load_mission_meta(snap, char_id, mission_id);
+    let accepted_unix = meta
+        .as_ref()
+        .and_then(|mt| mt.accepted_at_unix)
+        .or(entry.completed_at_unix)
+        .unwrap_or(emit.now_unix);
+    let completed_unix = meta
+        .as_ref()
+        .and_then(|mt| mt.completed_at_unix)
+        .or(entry.completed_at_unix)
+        .unwrap_or(emit.now_unix);
+    build_epic_arc_mission_entry(EpicArcMissionFields {
+        mission_id,
+        accepted_date: unix_to_filetime_rep(accepted_unix),
+        completed_date: unix_to_filetime_rep(completed_unix),
+        epic_arc_id: emit.arc_id,
+        agent_id: entry.agent_id,
+        faction_id: emit.faction_id,
+        chapter: emit.chapter,
+        state: emit.state,
+        on_cooldown: emit.on_cooldown,
+        chosen_branch: emit.chosen_branch,
+        cooldown_until: emit.cooldown_until,
+    })
+}
+
+fn active_epic_arc_mission_entry(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    m: &eve_db::ActiveMissionRecord,
+    emit: &EpicArcEmitCtx<'_>,
+) -> (PyRep, PyRep) {
+    build_epic_arc_mission_entry(EpicArcMissionFields {
+        mission_id: m.mission_id,
+        accepted_date: active_epic_arc_accepted_date(
+            snap,
+            char_id,
+            m.mission_id,
+            &m.state,
+            emit.now_unix,
+        ),
+        completed_date: PyRep::None,
+        epic_arc_id: emit.arc_id,
+        agent_id: m.agent_id,
+        faction_id: emit.faction_id,
+        chapter: emit.chapter,
+        state: emit.state,
+        on_cooldown: emit.on_cooldown,
+        chosen_branch: emit.chosen_branch,
+        cooldown_until: emit.cooldown_until,
+    })
+}
+
+struct EpicArcStatusCollector<'a> {
+    ctx: &'a ServerContext,
+    snap: &'a eve_db::WorldStateSnapshot,
+    char_id: i64,
+    now_unix: u64,
+    active_missions: Vec<&'a eve_db::ActiveMissionRecord>,
+    handled_mission_ids: HashSet<u32>,
+    handled_active_ids: HashSet<u32>,
+    by_arc: BTreeMap<u32, Vec<(PyRep, PyRep)>>,
+}
+
+impl<'a> EpicArcStatusCollector<'a> {
+    fn new(
+        ctx: &'a ServerContext,
+        snap: &'a eve_db::WorldStateSnapshot,
+        char_id: i64,
+        now_unix: u64,
+    ) -> Self {
+        let mut active_missions: Vec<&'a eve_db::ActiveMissionRecord> = snap
+            .active_missions
+            .values()
+            .filter(|m| {
+                m.character_id == char_id && matches!(m.state.as_str(), "Offered" | "Accepted")
+            })
+            .collect();
+        active_missions.sort_by_key(|m| m.mission_id);
+        Self {
+            ctx,
+            snap,
+            char_id,
+            now_unix,
+            active_missions,
+            handled_mission_ids: HashSet::new(),
+            handled_active_ids: HashSet::new(),
+            by_arc: BTreeMap::new(),
+        }
+    }
+
+    fn push_recorded_entry(&mut self, a: &EpicArcStateEntry) {
+        let arc_id = resolve_entry_epic_arc_id(a);
+        let on_cd = a
+            .cooldown_until_unix
+            .is_some_and(|until| self.now_unix < until);
+        let arc_active: Vec<&'a eve_db::ActiveMissionRecord> = self
+            .active_missions
+            .iter()
+            .copied()
+            .filter(|m| {
+                !self.handled_active_ids.contains(&m.mission_id)
+                    && active_mission_matches_arc(self.ctx, arc_id, a.agent_id, m)
+            })
+            .collect();
+        let active_ids: HashSet<u32> = arc_active.iter().map(|m| m.mission_id).collect();
+        let is_restarted = a.completed_at_unix.is_some() && !on_cd && !arc_active.is_empty();
+        let state_str = if !arc_active.is_empty() || a.completed_at_unix.is_none() {
+            "Active"
+        } else if on_cd {
+            "Cooldown"
+        } else {
+            "Completed"
+        };
+        let effective_on_cd = on_cd && arc_active.is_empty();
+        let branch_rep = a
+            .chosen_branch
+            .clone()
+            .map(PyRep::String)
+            .unwrap_or(PyRep::None);
+        let cd_rep = if is_restarted {
+            PyRep::None
+        } else {
+            a.cooldown_until_unix
+                .map(|u| PyRep::Integer(i64::try_from(u).unwrap_or(i64::MAX)))
+                .unwrap_or(PyRep::None)
+        };
+        let emit = EpicArcEmitCtx {
+            arc_id,
+            faction_id: a.faction_id,
+            chapter: a.chapter,
+            state: state_str,
+            on_cooldown: effective_on_cd,
+            chosen_branch: &branch_rep,
+            cooldown_until: &cd_rep,
+            now_unix: self.now_unix,
+        };
+
+        let missions_dict = self.by_arc.entry(arc_id).or_default();
+        if !is_restarted {
+            for &m in &a.completed_missions {
+                if active_ids.contains(&m) || !self.handled_mission_ids.insert(m) {
+                    continue;
+                }
+                missions_dict.push(completed_epic_arc_mission_entry(
+                    self.snap,
+                    self.char_id,
+                    m,
+                    a,
+                    &emit,
+                ));
+            }
+        }
+        for m in arc_active {
+            self.handled_active_ids.insert(m.mission_id);
+            self.handled_mission_ids.insert(m.mission_id);
+            missions_dict.push(active_epic_arc_mission_entry(
+                self.snap,
+                self.char_id,
+                m,
+                &emit,
+            ));
+        }
+        if missions_dict.is_empty() {
+            let completed_date = if is_restarted {
+                PyRep::None
+            } else {
+                a.completed_at_unix
+                    .map(unix_to_filetime_rep)
+                    .unwrap_or(PyRep::None)
+            };
+            missions_dict.push(build_epic_arc_mission_entry(EpicArcMissionFields {
+                mission_id: 0,
+                accepted_date: unix_to_filetime_rep(self.now_unix),
+                completed_date,
+                epic_arc_id: arc_id,
+                agent_id: a.agent_id,
+                faction_id: a.faction_id,
+                chapter: a.chapter,
+                state: state_str,
+                on_cooldown: effective_on_cd,
+                chosen_branch: &branch_rep,
+                cooldown_until: &cd_rep,
+            }));
+        }
+    }
+
+    fn finish(mut self) -> Vec<(PyRep, PyRep)> {
+        for m in self.active_missions {
+            if self.handled_active_ids.contains(&m.mission_id)
+                || self.handled_mission_ids.contains(&m.mission_id)
+            {
+                continue;
+            }
+            let spec = epic_arc_mission_spec(m.mission_id);
+            if spec.is_none() && !is_epic_agent(self.ctx, m.agent_id) {
+                continue;
+            }
+            let (resolved_arc_id, agent_faction_id) =
+                resolve_epic_arc_id_for_agent(self.ctx, m.agent_id);
+            let arc_id = spec.map_or(resolved_arc_id, |(aid, _)| aid);
+            let faction_id = self
+                .ctx
+                .sde
+                .epic_arcs
+                .get(&arc_id)
+                .and_then(|arc| arc.faction_id)
+                .map_or(agent_faction_id, i64::from);
+            self.handled_active_ids.insert(m.mission_id);
+            self.handled_mission_ids.insert(m.mission_id);
+            let emit = EpicArcEmitCtx {
+                arc_id,
+                faction_id,
+                chapter: 1,
+                state: "Active",
+                on_cooldown: false,
+                chosen_branch: &PyRep::None,
+                cooldown_until: &PyRep::None,
+                now_unix: self.now_unix,
+            };
+            self.by_arc
+                .entry(arc_id)
+                .or_default()
+                .push(active_epic_arc_mission_entry(
+                    self.snap,
+                    self.char_id,
+                    m,
+                    &emit,
+                ));
+        }
+        self.by_arc
+            .into_iter()
+            .map(|(arc_id, missions)| (PyRep::Integer(i64::from(arc_id)), PyRep::Dict(missions)))
+            .collect()
+    }
+}
+
+fn build_epic_arc_status_dict(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    now_unix: u64,
+) -> Vec<(PyRep, PyRep)> {
+    let mut collector = EpicArcStatusCollector::new(ctx, snap, char_id, now_unix);
+    for entry in load_epic_arc_states(snap, char_id) {
+        collector.push_recorded_entry(&entry);
+    }
+    collector.finish()
+}
+
+fn mission_msg_dict<T>(entries: &[T], pick: fn(&T) -> (u32, i64)) -> PyRep {
+    PyRep::Dict(
+        entries
+            .iter()
+            .map(|entry| {
+                let (mission_id, msg_id) = pick(entry);
+                (PyRep::Integer(i64::from(mission_id)), PyRep::Integer(msg_id))
+            })
+            .collect(),
+    )
+}
+
+fn build_epic_arc_messages_rep() -> PyRep {
+    PyRep::Dict(vec![
+        (
+            PyRep::String("messages.epicMission.journalText.chapterTitle".into()),
+            mission_msg_dict(EPIC_ARC_CHAPTER_TITLES, |&(mid, msg_id)| (mid, msg_id)),
+        ),
+        (
+            PyRep::String("messages.epicMission.journalText.inProgressMessage".into()),
+            mission_msg_dict(EPIC_ARC_MISSION_SPECS, |&(mid, _, _, msg_id, _)| {
+                (mid, msg_id)
+            }),
+        ),
+        (
+            PyRep::String("messages.epicMission.journalText.completedMessage".into()),
+            mission_msg_dict(EPIC_ARC_MISSION_SPECS, |&(mid, _, _, _, msg_id)| {
+                (mid, msg_id)
+            }),
+        ),
+    ])
 }
 
 pub fn is_pirate_entity(ctx: &ServerContext, entity_id: i64) -> bool {
@@ -1315,105 +1917,22 @@ pub(super) async fn handle_extended_with_bound(
         }
 
         ("agentMgr", "GetMyEpicArcStatus") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let now_unix = ctx.now_unix();
-            let now_ft = ((now_unix.max(0) as i64) + 11_644_473_600) * 10_000_000;
-            let dict_entries = ctx.db.with_snapshot(|snap| {
-                load_epic_arc_states(snap, char_id)
-                    .into_iter()
-                    .map(|a| {
-                        let on_cd = a.cooldown_until_unix.is_some_and(|until| now_unix < until);
-                        let state_str = if a.completed_at_unix.is_some() {
-                            if on_cd { "Cooldown" } else { "Completed" }
-                        } else {
-                            "Active"
-                        };
-                        let completed_ft = a
-                            .completed_at_unix
-                            .map(|u| PyRep::Integer(((u.max(0) as i64) + 11_644_473_600) * 10_000_000))
-                            .unwrap_or(PyRep::Integer(now_ft));
-                        let branch_rep = a.chosen_branch.clone().map(PyRep::String).unwrap_or(PyRep::None);
-                        let cd_rep = a.cooldown_until_unix.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None);
-
-                        let mut missions_dict: Vec<(PyRep, PyRep)> = a
-                            .completed_missions
-                            .iter()
-                            .map(|&m| {
-                                (
-                                    PyRep::Integer(m as i64),
-                                    PyRep::keyval([
-                                        ("acceptedDate", PyRep::Integer(now_ft)),
-                                        ("completedDate", completed_ft.clone()),
-                                        ("quitDate", PyRep::None),
-                                        ("nameID", PyRep::Integer(0)),
-                                        ("epicArcID", PyRep::Integer(a.epic_arc_id as i64)),
-                                        ("agentID", PyRep::Integer(a.agent_id)),
-                                        ("factionID", PyRep::Integer(a.faction_id)),
-                                        ("chapter", PyRep::Integer(a.chapter as i64)),
-                                        ("state", PyRep::String(state_str.into())),
-                                        ("onCooldown", PyRep::Bool(on_cd)),
-                                        ("chosenBranch", branch_rep.clone()),
-                                        ("cooldownUntilUnix", cd_rep.clone()),
-                                    ]),
-                                )
-                            })
-                            .collect();
-                        if missions_dict.is_empty() {
-                            let active_mid = snap
-                                .active_missions
-                                .values()
-                                .find(|m| m.character_id == char_id && m.agent_id == a.agent_id)
-                                .map(|m| m.mission_id as i64)
-                                .unwrap_or(0);
-                            missions_dict.push((
-                                PyRep::Integer(active_mid),
-                                PyRep::keyval([
-                                    ("acceptedDate", PyRep::Integer(now_ft)),
-                                    ("completedDate", PyRep::None),
-                                    ("quitDate", PyRep::None),
-                                    ("nameID", PyRep::Integer(0)),
-                                    ("epicArcID", PyRep::Integer(a.epic_arc_id as i64)),
-                                    ("agentID", PyRep::Integer(a.agent_id)),
-                                    ("factionID", PyRep::Integer(a.faction_id)),
-                                    ("chapter", PyRep::Integer(a.chapter as i64)),
-                                    ("state", PyRep::String(state_str.into())),
-                                    ("onCooldown", PyRep::Bool(on_cd)),
-                                    ("chosenBranch", branch_rep),
-                                    ("cooldownUntilUnix", cd_rep),
-                                ]),
-                            ));
-                        }
-                        (PyRep::Integer(a.epic_arc_id as i64), PyRep::Dict(missions_dict))
-                    })
-                    .collect::<Vec<_>>()
-            });
+            let dict_entries =
+                ctx.db
+                    .with_snapshot(|snap| build_epic_arc_status_dict(ctx, snap, char_id, now_unix));
             Some(Ok(PyRep::Dict(dict_entries)))
         }
 
         ("agentMgr", "GetMessagesForEpicArcMissions") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let msgs = ctx.db.with_snapshot(|snap| {
-                load_epic_arc_states(snap, char_id)
-                    .into_iter()
-                    .map(|a| {
-                        (
-                            PyRep::Integer(a.epic_arc_id as i64),
-                            PyRep::keyval([
-                                ("epicArcID", PyRep::Integer(a.epic_arc_id as i64)),
-                                ("agentID", PyRep::Integer(a.agent_id)),
-                                (
-                                    "message",
-                                    PyRep::String(format!(
-                                        "Epic Arc {} chapter {} briefing (branch: {:?})",
-                                        a.epic_arc_id, a.chapter, a.chosen_branch
-                                    )),
-                                ),
-                            ]),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            });
-            Some(Ok(PyRep::Dict(msgs)))
+            if let Err(e) = ServerContext::require_character(session) {
+                return Some(Err(e));
+            }
+            Some(Ok(build_epic_arc_messages_rep()))
         }
 
         ("epicArcStatus", "AgentHasEpicMissionsForCharacter") => {
