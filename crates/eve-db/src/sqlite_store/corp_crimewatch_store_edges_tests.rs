@@ -132,6 +132,8 @@ fn corp_crimewatch_domain_rows_load_and_sync_edge_branches() {
     }
 
     // 3. Duplicate legacy `world_kv_blobs` cleanup drops only Family 4 keys and keeps other blobs intact.
+    conn.execute_batch(crate::sqlite_store::industry_market_pve_store::LEGACY_WORLD_KV_BLOBS_SQL)
+        .unwrap();
     conn.execute(
         "INSERT OR REPLACE INTO world_kv_blobs (blob_key, blob_json) VALUES ('corp_container_logs', '[]'), ('wh_polarizations', '[]'), ('killmail_details', '[]')",
         [],

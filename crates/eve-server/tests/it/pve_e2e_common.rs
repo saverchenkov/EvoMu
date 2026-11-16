@@ -69,11 +69,17 @@ fn reload_ctx_with_blob(ctx: &ServerContext, blob: Option<(&str, &str)>) -> Serv
     ctx.db.save_to_sqlite(&_g.0).expect("save_to_sqlite");
     if let Some((blob_key, blob_val)) = blob {
         let conn = rusqlite::Connection::open(&_g.0).expect("open sqlite for blob config");
-        let existing: Option<String> = conn.query_row("SELECT blob_json FROM world_kv_blobs WHERE blob_key = 'service_state_blobs'", [], |r| r.get(0)).ok();
-        let mut blobs: Vec<(String, String)> = existing.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        blobs.retain(|(k, _)| k != blob_key);
-        blobs.push((blob_key.to_string(), blob_val.to_string()));
-        conn.execute("INSERT OR REPLACE INTO world_kv_blobs (blob_key, blob_json) VALUES ('service_state_blobs', ?1)", rusqlite::params![serde_json::to_string(&blobs).expect("json")]).expect("update blob");
+        let row_key = format!("service_state_blobs/{blob_key}");
+        let row_val = serde_json::to_string(blob_val).expect("json");
+        conn.execute(
+            "INSERT OR REPLACE INTO domain_rows (domain, key, value) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                eve_db::sqlite_store::domain_rows::DOMAIN_SERVICE_STATE_BLOBS,
+                row_key,
+                row_val,
+            ],
+        )
+        .expect("update blob");
     }
     let db2 = Arc::new(eve_db::WorldRepository::open_sqlite(&_g.0).expect("open_sqlite reload"));
     db2.set_clock(ctx.db.clock());

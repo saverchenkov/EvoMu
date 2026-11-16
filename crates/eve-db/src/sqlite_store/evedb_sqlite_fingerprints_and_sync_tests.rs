@@ -16,8 +16,8 @@ use crate::sqlite_store::notes_lp_sequence_store::rollback_d6;
 use crate::sqlite_store::sync::{replace_sqlite_from_snapshot, sync_dirty_to_sqlite};
 use crate::types::{
     AccountRecord, AsteroidRecord, CharacterRecord, ContractRecord, CorporationRecord,
-    InventoryItemRecord, MailRecord, MarketOrderRecord, SkillQueueEntry, SystemDynamicState,
-    UpwellStructureRecord, WalletJournalEntry,
+    InventoryItemRecord, MailRecord, MarketOrderRecord, MiningLedgerRecord, SkillQueueEntry,
+    SystemDynamicState, UpwellStructureRecord, WalletJournalEntry,
 };
 use crate::IskCents;
 
@@ -148,6 +148,14 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
     base2.paused_skill_queues.insert(90_000_002);
     base2.weapon_banks.entry(100).or_default().insert(1, vec![10]);
     base2.weapon_banks.entry(200).or_default().insert(2, vec![20]);
+    base2.mining_ledger.push(MiningLedgerRecord {
+        character_id: 90_000_001,
+        solar_system_id: 30_000_142,
+        type_id: 1230,
+        quantity: 100,
+        date: "2026-01-01".into(),
+        timestamp_unix: 1,
+    });
     let mut base_acl_two = base2.clone();
     base2.structure_docking_acl_denied.entry(10).or_default().extend([1, 2]);
     base2.structure_docking_acl_denied.entry(20).or_default().extend([3, 4]);
@@ -157,19 +165,37 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
     base2.paused_skill_queues.remove(&90_000_002);
     base2.paused_skill_queues.insert(90_000_003);
     base2.weapon_banks.get_mut(&200).unwrap().insert(2, vec![21]);
+    base2.mining_ledger[0].quantity = 101;
     base2.structure_docking_acl_denied.get_mut(&20).unwrap().insert(99);
     let b4_b = compute_d6_batch4_fingerprints(&base2);
     let diff_acl_update = crate::tx_engine::ChangeSet::diff(2, &base_acl_two, &base2);
-    assert_ne!(b4_a.blobs["paused_skill_queues"], b4_b.blobs["paused_skill_queues"]);
-    assert_ne!(b4_a.blobs["weapon_banks"], b4_b.blobs["weapon_banks"]);
+    assert_ne!(b4_a.mining_ledger, b4_b.mining_ledger);
     assert!(!diff_init.domain_rows.is_empty());
-    assert_eq!(diff_acl_update.domain_rows.len(), 1);
-    assert!(matches!(
-        &diff_acl_update.domain_rows[0],
+    assert_eq!(diff_acl_update.domain_rows.len(), 4);
+    assert!(diff_acl_update.domain_rows.iter().any(|op| matches!(
+        op,
         crate::sqlite_store::domain_rows::DomainRowChange::Upsert { domain, key, .. }
             if *domain == crate::sqlite_store::domain_rows::DOMAIN_CRIMEWATCH
                 && key == "structure_docking_acl_denied/20"
-    ));
+    )));
+    assert!(diff_acl_update.domain_rows.iter().any(|op| matches!(
+        op,
+        crate::sqlite_store::domain_rows::DomainRowChange::Delete { domain, key }
+            if *domain == crate::sqlite_store::domain_rows::DOMAIN_SHIP_FITTING_AND_SKILLS
+                && key == "paused_skill_queues/90000002"
+    )));
+    assert!(diff_acl_update.domain_rows.iter().any(|op| matches!(
+        op,
+        crate::sqlite_store::domain_rows::DomainRowChange::Upsert { domain, key, .. }
+            if *domain == crate::sqlite_store::domain_rows::DOMAIN_SHIP_FITTING_AND_SKILLS
+                && key == "paused_skill_queues/90000003"
+    )));
+    assert!(diff_acl_update.domain_rows.iter().any(|op| matches!(
+        op,
+        crate::sqlite_store::domain_rows::DomainRowChange::Upsert { domain, key, .. }
+            if *domain == crate::sqlite_store::domain_rows::DOMAIN_SHIP_FITTING_AND_SKILLS
+                && key == "weapon_banks/200"
+    )));
 
     // 4. Clean no-op rollback guards across rollback_d6
     let empty_conn = open_migrated_conn();

@@ -1624,7 +1624,10 @@ pub fn load_snapshot_from_sqlite_with_options(
         super::social_store::load_social_domain_rows(conn, &mut snap, &mut ctx)?;
     let had_legacy_corp_crimewatch =
         super::corp_crimewatch_store::load_corp_crimewatch_domain_rows(conn, &mut snap, &mut ctx)?;
-    super::industry_market_pve_store::load_d6_batch4_checked(conn, &mut snap, &mut ctx)?;
+    let had_legacy_industry_market_pve =
+        super::industry_market_pve_store::load_industry_market_pve_domain_rows(
+            conn, &mut snap, &mut ctx,
+        )?;
     let had_legacy_service_domains =
         super::service_domains_store::load_service_domains_checked(conn, &mut snap, &mut ctx)?;
     ctx.flush_quarantined_rows(conn)?;
@@ -1651,6 +1654,7 @@ pub fn load_snapshot_from_sqlite_with_options(
             || had_legacy_notes_lp
             || had_legacy_social
             || had_legacy_corp_crimewatch
+            || had_legacy_industry_market_pve
             || had_legacy_service_domains
         {
             super::domain_rows::apply_domain_rows_migration(conn)?;
@@ -1669,6 +1673,9 @@ pub fn load_snapshot_from_sqlite_with_options(
         if had_legacy_corp_crimewatch {
             super::domain_rows::drop_legacy_corp_crimewatch_tables(&tx)?;
         }
+        if had_legacy_industry_market_pve {
+            super::domain_rows::drop_legacy_industry_market_pve_tables(&tx)?;
+        }
         if had_legacy_service_domains {
             super::domain_rows::drop_legacy_service_domain_tables(&tx)?;
         }
@@ -1677,6 +1684,7 @@ pub fn load_snapshot_from_sqlite_with_options(
             || had_legacy_notes_lp
             || had_legacy_social
             || had_legacy_corp_crimewatch
+            || had_legacy_industry_market_pve
             || had_legacy_service_domains
         {
             tx.commit().map_err(|e| e.to_string())?;

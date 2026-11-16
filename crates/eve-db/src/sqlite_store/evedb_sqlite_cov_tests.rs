@@ -698,8 +698,11 @@ fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
         load_corp_crimewatch_domain_rows, sync_corp_crimewatch_domain_rows,
         LEGACY_D6_CORP_CRIMEWATCH_SQL,
     };
-    use crate::sqlite_store::domain_rows::DOMAIN_CORP_GOVERNANCE;
-    use crate::sqlite_store::industry_market_pve_store::{load_d6_batch4, sync_d6_batch4};
+    use crate::sqlite_store::domain_rows::{DOMAIN_CORP_GOVERNANCE, DOMAIN_QUASAR_STATE_BLOBS};
+    use crate::sqlite_store::industry_market_pve_store::{
+        load_industry_market_pve_domain_rows, rollback_industry_market_pve,
+        sync_industry_market_pve_domain_rows, sync_mining_ledger, LEGACY_WORLD_KV_BLOBS_SQL,
+    };
     use crate::sqlite_store::notes_lp_sequence_store::{load_d6, sync_d6};
     use crate::sqlite_store::schema::{load_or_init_jwt_secret, save_jwt_secret};
 
@@ -732,7 +735,6 @@ fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
     assert!(crate::sqlite_store::auth_store::apply_auth_migration(&c_ro).is_err());
     assert!(crate::sqlite_store::domain_rows::apply_domain_rows_migration(&c_ro).is_err());
     assert!(crate::sqlite_store::notes_lp_sequence_store::apply_d6_migration(&c_ro).is_err());
-    assert!(crate::sqlite_store::industry_market_pve_store::apply_d6_batch4_migration(&c_ro).is_err());
     assert!(crate::sqlite_store::service_domains_store::apply_service_domains_migration(&c_ro).is_err());
     // View collision on items triggers index/alter/schema failure during apply_migrations
     let c_view = Connection::open_in_memory().unwrap();
@@ -831,14 +833,36 @@ fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
 
     // industry_market_pve_store unknown key + dropped tables on load/sync/rollback
     let c_b4 = open_migrated_conn();
-    c_b4.execute("INSERT INTO world_kv_blobs (blob_key, blob_json) VALUES ('unknown_blob', '[]')", []).unwrap();
+    c_b4.execute_batch(LEGACY_WORLD_KV_BLOBS_SQL).unwrap();
+    c_b4.execute(
+        "INSERT INTO world_kv_blobs (blob_key, blob_json) VALUES ('unknown_blob', '[]')",
+        [],
+    )
+    .unwrap();
+    c_b4.execute(
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'unknown_field/1', '{}')",
+        [DOMAIN_QUASAR_STATE_BLOBS],
+    )
+    .unwrap();
     let mut b4_snap = WorldStateSnapshot::default();
-    load_d6_batch4(&c_b4, &mut b4_snap);
-    for t in ["world_kv_blobs", "char_mining_ledger"] {
+    let had_legacy_b4 = load_industry_market_pve_domain_rows(
+        &c_b4,
+        &mut b4_snap,
+        &mut crate::sqlite_store::quarantine::LoadContext::quarantine_in_memory(),
+    )
+    .unwrap();
+    assert!(had_legacy_b4);
+    for t in ["domain_rows", "char_mining_ledger"] {
         let mut c2 = open_migrated_conn();
         c2.execute(&format!("DROP TABLE {t}"), []).unwrap();
         let mut s2 = WorldStateSnapshot::default();
-        load_d6_batch4(&c2, &mut s2);
+        let had_after_drop = load_industry_market_pve_domain_rows(
+            &c2,
+            &mut s2,
+            &mut crate::sqlite_store::quarantine::LoadContext::quarantine_in_memory(),
+        )
+        .unwrap();
+        assert!(!had_after_drop);
         let mut pop_b4 = WorldStateSnapshot::default();
         pop_b4.mining_ledger.push(MiningLedgerRecord {
             character_id: 1, solar_system_id: 30_000_142, type_id: 1230, quantity: 10, date: "d".into(), timestamp_unix: 1,
@@ -846,13 +870,8 @@ fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
         pop_b4.quasar_state_blobs.insert("k".into(), "v".into());
         let mut fp_b4 = TableFingerprints::default();
         assert!(
-            crate::sqlite_store::industry_market_pve_store::rollback_d6_batch4(
-                &c2,
-                &mut pop_b4,
-                &fp_b4
-            )
-            .is_err(),
-            "rollback_d6_batch4 must fail closed when {t} is missing"
+            rollback_industry_market_pve(&c2, &mut pop_b4, &fp_b4).is_err(),
+            "rollback_industry_market_pve must fail closed when {t} is missing"
         );
         assert_eq!(pop_b4.mining_ledger.len(), 1);
         assert_eq!(
@@ -860,6 +879,10 @@ fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
             Some("v")
         );
         let tx = c2.transaction().unwrap();
-        assert!(sync_d6_batch4(&tx, &pop_b4, &mut fp_b4).is_err());
+        if t == "domain_rows" {
+            assert!(sync_industry_market_pve_domain_rows(&tx, &pop_b4).is_err());
+        } else {
+            assert!(sync_mining_ledger(&tx, &pop_b4, &mut fp_b4).is_err());
+        }
     }
 }

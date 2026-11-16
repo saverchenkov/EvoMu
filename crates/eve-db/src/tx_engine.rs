@@ -235,6 +235,11 @@ impl ChangeSet {
             after,
             &mut domain_rows,
         );
+        crate::sqlite_store::domain_rows::collect_industry_market_pve_domain_row_diffs(
+            before,
+            after,
+            &mut domain_rows,
+        );
 
         let cold_domains = compute_cold_domain_diff(before, after);
         let cold_changed = cold_domains.any()
@@ -354,41 +359,9 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
     // Family 4 (`corp_crimewatch`) now persists via incremental `domain_rows` diffs.
     let d6_corp_crimewatch = false;
 
-    let d6_batch4 = before.moon_extractions != after.moon_extractions
-        || before.auto_moon_miners != after.auto_moon_miners
-        || before.observer_mining_ledger != after.observer_mining_ledger
-        || before.char_research_agents != after.char_research_agents
-        || before.planetary_colony_layouts != after.planetary_colony_layouts
-        || before.corp_customs_offices != after.corp_customs_offices
-        || before.orbital_provision_types != after.orbital_provision_types
-        || before.wallet_journal_timestamps != after.wallet_journal_timestamps
-        || before.char_wallet_transactions != after.char_wallet_transactions
-        || before.corp_wallet_journals != after.corp_wallet_journals
-        || before.corp_wallet_transactions != after.corp_wallet_transactions
-        || before.market_order_meta != after.market_order_meta
-        || before.market_history != after.market_history
-        || before.cosmic_signatures != after.cosmic_signatures
-        || before.cosmic_anomalies != after.cosmic_anomalies
-        || before.incursions != after.incursions
-        || before.last_mission_decline_times != after.last_mission_decline_times
-        || before.module_online_states != after.module_online_states
-        || before.module_active_states != after.module_active_states
-        || before.module_active_charges != after.module_active_charges
-        || before.ship_fit_inputs != after.ship_fit_inputs
-        || before.weapon_banks != after.weapon_banks
-        || before.paused_skill_queues != after.paused_skill_queues
-        || before.starbase_settings != after.starbase_settings
-        || before.killmail_details != after.killmail_details
-        || before.station_office_rental_costs != after.station_office_rental_costs
-        || before.structure_esi_timer_meta != after.structure_esi_timer_meta
-        || before.corp_project_contributors != after.corp_project_contributors
-        || before.loyalty_store_offers != after.loyalty_store_offers
-        || before.system_jump_events != after.system_jump_events
-        || before.system_kill_events != after.system_kill_events
-        || before.quasar_state_blobs != after.quasar_state_blobs
-        || before.service_state_blobs != after.service_state_blobs
-        || before.insurance_contracts != after.insurance_contracts
-        || before.mining_ledger != after.mining_ledger;
+    // Family 5 (`industry_market_pve`) migrated its 34 `world_kv_blobs` collections into
+    // `domain_rows`; only `char_mining_ledger` remains a relational cold table here.
+    let d6_batch4 = before.mining_ledger != after.mining_ledger;
 
     let service_domains = before.entity_kv != after.entity_kv;
 

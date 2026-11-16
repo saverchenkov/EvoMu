@@ -55,6 +55,16 @@ pub const DOMAIN_QUASAR_COMMERCE: &str = "service_domains.quasar_commerce";
 pub const DOMAIN_FLEET_AND_SOCIAL_OPS: &str = "service_domains.fleet_and_social_ops";
 pub const DOMAIN_CLUSTER_AND_RUNTIME: &str = "service_domains.cluster_and_runtime";
 
+/// Family 5 (`industry_market_pve`) canonical `domain_rows.domain` names (`#916`).
+pub const DOMAIN_INDUSTRY_PVE_PI: &str = "industry_market_pve.industry_pi";
+pub const DOMAIN_WALLET_AND_MARKET: &str = "industry_market_pve.wallet_market";
+pub const DOMAIN_PVE_AND_SPACE_EVENTS: &str = "industry_market_pve.pve_space_events";
+pub const DOMAIN_SHIP_FITTING_AND_SKILLS: &str = "industry_market_pve.ship_fitting_skills";
+pub const DOMAIN_CORP_STRUCTURE_AND_KILLMAILS: &str =
+    "industry_market_pve.corp_structure_killmails";
+pub const DOMAIN_QUASAR_STATE_BLOBS: &str = "industry_market_pve.quasar_state_blobs";
+pub const DOMAIN_SERVICE_STATE_BLOBS: &str = "industry_market_pve.service_state_blobs";
+
 /// Idempotent schema DDL for the generic `domain_rows` key/value table.
 pub fn apply_domain_rows_migration(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
@@ -2267,6 +2277,13 @@ pub(crate) use super::corp_crimewatch_store::{
 // re-exported here so `domain_rows` serves as the single entry point for migrated families.
 pub(crate) use super::service_domains_store::{
     drop_legacy_service_domain_tables, sync_service_domains_rows,
+};
+
+// Family 5 (`industry_market_pve`) persistence lives in `industry_market_pve_store.rs` and is
+// re-exported here so `domain_rows` serves as the single entry point for migrated families.
+pub(crate) use super::industry_market_pve_store::{
+    collect_industry_market_pve_domain_row_diffs, drop_legacy_industry_market_pve_tables,
+    sync_industry_market_pve_domain_rows,
 };
 
 #[cfg(test)]
