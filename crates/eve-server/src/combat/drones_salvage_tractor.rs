@@ -386,13 +386,14 @@ pub async fn validate_wreck_salvage_target(
                 .max(6_000.0);
             let dist = (sb.position.distance(wb.position) - sb.radius - wb.radius).max(0.0);
             if dist > max_mod_range {
-                return Err(BridgeRpcError {
-                    code: "TargetOutOfRange".into(),
-                    message: format!(
+                return Err(eve_proto::BridgeRpcError::target_out_of_range(
+                    crate::services::inventory_fitting::resolve_target_display_name(ctx, wreck_id),
+                    salvager_tid as i64,
+                    dist,
+                    format!(
                         "Wreck {wreck_id} is {dist:.1} m away (exceeds salvager module range {max_mod_range:.1} m)"
                     ),
-                    client_error: None,
-                });
+                ));
             }
         }
     } else {
@@ -408,13 +409,14 @@ pub async fn validate_wreck_salvage_target(
                 crate::services::combat_crimewatch::compute_drone_control_range(ctx, char_id, ship_id).max(60_000.0);
             let dist = sb.position.distance(wb.position);
             if dist > max_drone_range {
-                return Err(BridgeRpcError {
-                    code: "TargetOutOfRange".into(),
-                    message: format!(
+                return Err(eve_proto::BridgeRpcError::target_out_of_range(
+                    crate::services::inventory_fitting::resolve_target_display_name(ctx, wreck_id),
+                    0,
+                    dist,
+                    format!(
                         "Wreck {wreck_id} is {dist:.1} m away (exceeds salvage drone range {max_drone_range:.1} m)"
                     ),
-                    client_error: None,
-                });
+                ));
             }
         }
     }

@@ -2085,12 +2085,10 @@ pub(crate) fn ship_hold_capacity_error(
     required_vol: f64,
 ) -> BridgeRpcError {
     let available_vol = (hold_capacity - used_vol).max(0.0);
-    BridgeRpcError::user_error_with_args(
+    BridgeRpcError::hold_capacity_error(
         ship_hold_capacity_error_key(flag_u16),
-        [
-            ("volume", PyRep::Real(required_vol)),
-            ("available", PyRep::Real(available_vol)),
-        ],
+        required_vol,
+        available_vol,
     )
 }
 

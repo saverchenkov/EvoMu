@@ -18,12 +18,68 @@ use std::io::Read;
 pub use crate::dbrow::{decode_rle, encode_rle};
 pub use crate::MAX_FRAME_SIZE;
 
+#[derive(Clone, Copy)]
+struct EncodeLimits {
+    max_depth: usize,
+    max_collection_len: usize,
+    max_frame_bytes: usize,
+}
+
+fn check_collection_limit(len: usize, limits: Option<EncodeLimits>) -> Result<(), ProtoError> {
+    if let Some(lim) = limits {
+        if len > lim.max_collection_len {
+            return Err(ProtoError::CollectionTooLarge(len));
+        }
+    }
+    Ok(())
+}
+
+fn check_frame_room(
+    current_len: usize,
+    additional_bytes: usize,
+    limits: Option<EncodeLimits>,
+) -> Result<(), ProtoError> {
+    if let Some(lim) = limits {
+        let projected = current_len.saturating_add(additional_bytes);
+        if projected > lim.max_frame_bytes {
+            return Err(ProtoError::FrameTooLarge(projected));
+        }
+    }
+    Ok(())
+}
+
 pub fn encode(rep: &PyRep) -> Vec<u8> {
     let mut buf = Vec::with_capacity(64);
     buf.push(MARSHAL_HEADER_BYTE);
     buf.extend_from_slice(&0u32.to_le_bytes()); // Save count = 0
-    encode_inner(rep, &mut buf);
+    let _ = encode_inner_checked(rep, &mut buf, 0, None);
     buf
+}
+
+/// Resource-bounded [`encode`] (`#1086`): enforces `MAX_RECURSION_DEPTH`, `MAX_COLLECTION_LEN`,
+/// and `MAX_FRAME_SIZE` before allocating unbounded marshal buffers.
+pub fn try_encode(rep: &PyRep) -> Result<Vec<u8>, ProtoError> {
+    try_encode_with_limits(rep, MAX_FRAME_SIZE)
+}
+
+/// Resource-bounded [`encode`] with a caller-supplied maximum serialized frame size in bytes.
+pub fn try_encode_with_limits(rep: &PyRep, max_frame_bytes: usize) -> Result<Vec<u8>, ProtoError> {
+    if max_frame_bytes < 5 {
+        return Err(ProtoError::FrameTooLarge(5));
+    }
+    let limits = EncodeLimits {
+        max_depth: MAX_RECURSION_DEPTH,
+        max_collection_len: MAX_COLLECTION_LEN,
+        max_frame_bytes,
+    };
+    let mut buf = Vec::with_capacity(64.min(max_frame_bytes));
+    buf.push(MARSHAL_HEADER_BYTE);
+    buf.extend_from_slice(&0u32.to_le_bytes()); // Save count = 0
+    encode_inner_checked(rep, &mut buf, 0, Some(limits))?;
+    if buf.len() > max_frame_bytes {
+        return Err(ProtoError::FrameTooLarge(buf.len()));
+    }
+    Ok(buf)
 }
 
 pub fn encode_zlib(rep: &PyRep) -> Result<Vec<u8>, ProtoError> {
@@ -55,12 +111,31 @@ pub const V24_CACHED_METHOD_CALL_RESULT_CLASS: &str =
     "carbon.common.script.net.objectCaching.CachedMethodCallResult";
 pub const V24_CACHE_HINT_CLASS: &str = "carbon.common.script.net.cachedObject.CachedObject";
 
+#[cfg(test)]
 fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
+    let _ = encode_inner_checked(rep, out, 0, None);
+}
+
+fn encode_inner_checked(
+    rep: &PyRep,
+    out: &mut Vec<u8>,
+    depth: usize,
+    limits: Option<EncodeLimits>,
+) -> Result<(), ProtoError> {
+    if let Some(lim) = limits {
+        if depth > lim.max_depth {
+            return Err(ProtoError::RecursionLimitExceeded);
+        }
+        if out.len() > lim.max_frame_bytes {
+            return Err(ProtoError::FrameTooLarge(out.len()));
+        }
+    }
     match rep {
         PyRep::None => out.push(MarshalOpcode::PyNone as u8),
         PyRep::Bool(true) => out.push(MarshalOpcode::PyTrue as u8),
         PyRep::Bool(false) => out.push(MarshalOpcode::PyFalse as u8),
         PyRep::Token(t) => {
+            check_frame_room(out.len(), 5usize.saturating_add(t.len()), limits)?;
             out.push(MarshalOpcode::PyToken as u8);
             write_size_ex(out, t.len());
             out.extend_from_slice(t.as_bytes());
@@ -91,104 +166,141 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
             out.push(MarshalOpcode::PyReal as u8);
             out.extend_from_slice(&v.to_le_bytes());
         }
-        PyRep::Bytes(b) => match b.len() {
-            0 => out.push(MarshalOpcode::PyEmptyString as u8),
-            1 => {
-                out.push(MarshalOpcode::PyCharString as u8);
-                out.push(b[0]);
+        PyRep::Bytes(b) => {
+            check_frame_room(out.len(), 5usize.saturating_add(b.len()), limits)?;
+            match b.len() {
+                0 => out.push(MarshalOpcode::PyEmptyString as u8),
+                1 => {
+                    out.push(MarshalOpcode::PyCharString as u8);
+                    out.push(b[0]);
+                }
+                len if len <= 0xFF => {
+                    out.push(MarshalOpcode::PyShortString as u8);
+                    out.push(len as u8);
+                    out.extend_from_slice(b);
+                }
+                len => {
+                    out.push(MarshalOpcode::PyLongString as u8);
+                    write_size_ex(out, len);
+                    out.extend_from_slice(b);
+                }
             }
-            len if len <= 0xFF => {
-                out.push(MarshalOpcode::PyShortString as u8);
-                out.push(len as u8);
-                out.extend_from_slice(b);
-            }
-            len => {
-                out.push(MarshalOpcode::PyLongString as u8);
-                write_size_ex(out, len);
-                out.extend_from_slice(b);
-            }
-        },
+        }
         PyRep::String(s) if s.is_empty() => out.push(MarshalOpcode::PyEmptyWString as u8),
         PyRep::String(s) => {
+            check_frame_room(out.len(), 5usize.saturating_add(s.len()), limits)?;
             out.push(MarshalOpcode::PyWStringUTF8 as u8);
             write_size_ex(out, s.len());
             out.extend_from_slice(s.as_bytes());
         }
         PyRep::Buffer(b) => {
+            check_frame_room(out.len(), 5usize.saturating_add(b.len()), limits)?;
             out.push(MarshalOpcode::PyBuffer as u8);
             write_size_ex(out, b.len());
             out.extend_from_slice(b);
         }
-        PyRep::Tuple(items) => match items.len() {
-            0 => out.push(MarshalOpcode::PyEmptyTuple as u8),
-            1 => {
-                out.push(MarshalOpcode::PyOneTuple as u8);
-                encode_inner(&items[0], out);
-            }
-            2 => {
-                out.push(MarshalOpcode::PyTwoTuple as u8);
-                encode_inner(&items[0], out);
-                encode_inner(&items[1], out);
-            }
-            n => {
-                out.push(MarshalOpcode::PyTuple as u8);
-                write_size_ex(out, n);
-                for item in items {
-                    encode_inner(item, out);
+        PyRep::Tuple(items) => {
+            check_collection_limit(items.len(), limits)?;
+            match items.len() {
+                0 => out.push(MarshalOpcode::PyEmptyTuple as u8),
+                1 => {
+                    out.push(MarshalOpcode::PyOneTuple as u8);
+                    encode_inner_checked(&items[0], out, depth + 1, limits)?;
+                }
+                2 => {
+                    out.push(MarshalOpcode::PyTwoTuple as u8);
+                    encode_inner_checked(&items[0], out, depth + 1, limits)?;
+                    encode_inner_checked(&items[1], out, depth + 1, limits)?;
+                }
+                n => {
+                    out.push(MarshalOpcode::PyTuple as u8);
+                    write_size_ex(out, n);
+                    for item in items {
+                        encode_inner_checked(item, out, depth + 1, limits)?;
+                    }
                 }
             }
-        },
-        PyRep::List(items) => match items.len() {
-            0 => out.push(MarshalOpcode::PyEmptyList as u8),
-            1 => {
-                out.push(MarshalOpcode::PyOneList as u8);
-                encode_inner(&items[0], out);
-            }
-            n => {
-                out.push(MarshalOpcode::PyList as u8);
-                write_size_ex(out, n);
-                for item in items {
-                    encode_inner(item, out);
+        }
+        PyRep::List(items) => {
+            check_collection_limit(items.len(), limits)?;
+            match items.len() {
+                0 => out.push(MarshalOpcode::PyEmptyList as u8),
+                1 => {
+                    out.push(MarshalOpcode::PyOneList as u8);
+                    encode_inner_checked(&items[0], out, depth + 1, limits)?;
+                }
+                n => {
+                    out.push(MarshalOpcode::PyList as u8);
+                    write_size_ex(out, n);
+                    for item in items {
+                        encode_inner_checked(item, out, depth + 1, limits)?;
+                    }
                 }
             }
-        },
+        }
         PyRep::Dict(entries) => {
+            check_collection_limit(entries.len(), limits)?;
             out.push(MarshalOpcode::PyDict as u8);
             write_size_ex(out, entries.len());
             // EVE marshal writes VALUE first, then KEY
             for (k, v) in entries {
-                encode_inner(v, out);
-                encode_inner(k, out);
+                encode_inner_checked(v, out, depth + 1, limits)?;
+                encode_inner_checked(k, out, depth + 1, limits)?;
             }
         }
         PyRep::SubStruct(inner) => {
             out.push(MarshalOpcode::PySubStruct as u8);
-            encode_inner(inner, out);
+            encode_inner_checked(inner, out, depth + 1, limits)?;
         }
         PyRep::ChecksumedStream { checksum, body } => {
             out.push(MarshalOpcode::PyChecksumedStream as u8);
             out.extend_from_slice(&checksum.to_le_bytes());
-            encode_inner(body, out);
+            encode_inner_checked(body, out, depth + 1, limits)?;
         }
         PyRep::SubStream(inner) => {
             out.push(MarshalOpcode::PySubStream as u8);
-            let sub = encode(inner);
+            let sub = match limits {
+                Some(lim) => {
+                    if depth >= lim.max_depth {
+                        return Err(ProtoError::RecursionLimitExceeded);
+                    }
+                    let room = lim.max_frame_bytes.saturating_sub(out.len().saturating_add(5));
+                    if room < 5 {
+                        return Err(ProtoError::FrameTooLarge(out.len().saturating_add(10)));
+                    }
+                    let sub_limits = EncodeLimits {
+                        max_depth: lim.max_depth,
+                        max_collection_len: lim.max_collection_len,
+                        max_frame_bytes: room,
+                    };
+                    let mut sub_buf = Vec::with_capacity(64.min(room));
+                    sub_buf.push(MARSHAL_HEADER_BYTE);
+                    sub_buf.extend_from_slice(&0u32.to_le_bytes());
+                    encode_inner_checked(inner, &mut sub_buf, depth + 1, Some(sub_limits))?;
+                    sub_buf
+                }
+                None => encode(inner),
+            };
+            check_frame_room(out.len(), 5usize.saturating_add(sub.len()), limits)?;
             write_size_ex(out, sub.len());
             out.extend_from_slice(&sub);
         }
         PyRep::KeyVal(map) => {
+            check_collection_limit(map.len(), limits)?;
             out.push(MarshalOpcode::PyObject as u8);
-            encode_inner(&PyRep::ascii_bytes(V24_KEYVAL_CLASS), out);
+            encode_inner_checked(&PyRep::ascii_bytes(V24_KEYVAL_CLASS), out, depth + 1, limits)?;
             let mut entries: Vec<(PyRep, PyRep)> = map
                 .iter()
                 .map(|(k, v)| (PyRep::String(k.clone()), v.clone()))
                 .collect();
             entries.sort_by(|(a, _), (b, _)| a.as_str().cmp(&b.as_str()));
-            encode_inner(&PyRep::Dict(entries), out);
+            encode_inner_checked(&PyRep::Dict(entries), out, depth + 1, limits)?;
         }
         PyRep::Rowset { columns, rows } => {
+            check_collection_limit(columns.len(), limits)?;
+            check_collection_limit(rows.len(), limits)?;
             out.push(MarshalOpcode::PyObject as u8);
-            encode_inner(&PyRep::ascii_bytes(V24_ROWSET_CLASS), out);
+            encode_inner_checked(&PyRep::ascii_bytes(V24_ROWSET_CLASS), out, depth + 1, limits)?;
             let cols = PyRep::List(columns.iter().cloned().map(PyRep::String).collect());
             let row_list = PyRep::List(rows.iter().cloned().map(PyRep::List).collect());
             let dict = PyRep::Dict(vec![
@@ -199,15 +311,22 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
                 ),
                 (PyRep::String("lines".into()), row_list),
             ]);
-            encode_inner(&dict, out);
+            encode_inner_checked(&dict, out, depth + 1, limits)?;
         }
         PyRep::IndexRowset {
             key_column,
             columns,
             items,
         } => {
+            check_collection_limit(columns.len(), limits)?;
+            check_collection_limit(items.len(), limits)?;
             out.push(MarshalOpcode::PyObject as u8);
-            encode_inner(&PyRep::ascii_bytes(V24_INDEX_ROWSET_CLASS), out);
+            encode_inner_checked(
+                &PyRep::ascii_bytes(V24_INDEX_ROWSET_CLASS),
+                out,
+                depth + 1,
+                limits,
+            )?;
             let cols = PyRep::List(columns.iter().cloned().map(PyRep::String).collect());
             let items_dict = PyRep::Dict(
                 items
@@ -224,18 +343,21 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
                 (PyRep::String("idName".into()), PyRep::String(key_column.clone())),
                 (PyRep::String("items".into()), items_dict),
             ]);
-            encode_inner(&dict, out);
+            encode_inner_checked(&dict, out, depth + 1, limits)?;
         }
         PyRep::TupleSet { columns, rows } => {
+            check_collection_limit(columns.len(), limits)?;
+            check_collection_limit(rows.len(), limits)?;
             let cols = PyRep::List(columns.iter().cloned().map(PyRep::String).collect());
             let row_list = PyRep::List(rows.iter().cloned().map(PyRep::List).collect());
-            encode_inner(&PyRep::Tuple(vec![cols, row_list]), out);
+            encode_inner_checked(&PyRep::Tuple(vec![cols, row_list]), out, depth + 1, limits)?;
         }
         PyRep::PySet(items) | PyRep::Set(items) => {
+            check_collection_limit(items.len(), limits)?;
             // `set` is a builtin new-style type, so V24 `blue.marshal.Load` rejects `Op_PyObject`
             // (`0x17`, old-style classes only) and requires `Op_PyObjectEx1` (`0x22`) reduce form
             // `(Token("__builtin__.set"), (List(items),))` with empty list/dict slots.
-            encode_inner(
+            encode_inner_checked(
                 &PyRep::ObjectEx {
                     is_type_2: false,
                     header: Box::new(PyRep::Tuple(vec![
@@ -246,7 +368,9 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
                     dict: Vec::new(),
                 },
                 out,
-            );
+                depth + 1,
+                limits,
+            )?;
         }
         PyRep::DBRow {
             header,
@@ -254,12 +378,13 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
             raw_rle,
         } => {
             out.push(MarshalOpcode::PyPackedRow as u8);
-            encode_inner(header, out);
+            encode_inner_checked(header, out, depth + 1, limits)?;
             let rle_cow: std::borrow::Cow<'_, [u8]> = if !columns.is_empty() {
                 std::borrow::Cow::Owned(pack_packed_row_columns(header, columns))
             } else {
                 std::borrow::Cow::Borrowed(raw_rle.as_slice())
             };
+            check_frame_room(out.len(), 5usize.saturating_add(rle_cow.len()), limits)?;
             write_size_ex(out, rle_cow.len());
             out.extend_from_slice(&rle_cow);
             if let Some(defs) = extract_dbrow_header_col_defs(header) {
@@ -273,12 +398,13 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
                                 columns.iter().find(|(n, _)| n == col_name).map(|(_, v)| v)
                             })
                             .unwrap_or(&PyRep::None);
-                        encode_inner(val, out);
+                        encode_inner_checked(val, out, depth + 1, limits)?;
                     }
                 }
             }
         }
         PyRep::Picked(b) => {
+            check_frame_room(out.len(), 5usize.saturating_add(b.len()), limits)?;
             out.push(MarshalOpcode::PyPicked as u8);
             write_size_ex(out, b.len());
             out.extend_from_slice(b);
@@ -288,7 +414,7 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
                 // In V24.01 `carbon.common.script.sys.row.Row` is a new-style class (`class Row(object)`),
                 // so `blue.marshal.Load` rejects `Op_PyObject` (`0x17`, old-style `PyClass_Type` only)
                 // and requires `Op_PyObjectEx2` (`0x23`, `__newobj__`) with `((Row,), state)`.
-                encode_inner(
+                encode_inner_checked(
                     &PyRep::ObjectEx {
                         is_type_2: true,
                         header: Box::new(PyRep::Tuple(vec![
@@ -299,7 +425,9 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
                         dict: Vec::new(),
                     },
                     out,
-                );
+                    depth + 1,
+                    limits,
+                )?;
             } else {
                 // V24.01 has no top-level `objectCaching` module and `util.pyj` lacks `CachedObject`,
                 // so remap legacy short names if a caller passes them; all three are classic classes
@@ -314,8 +442,13 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
                 // blue reads the `PyObject` class name as a plain string (the V24 client writes
                 // `0x17 0x13 <len> carbon.common...CallReq`); a `PyToken` here makes it fail with
                 // "expected string" when unpickling.
-                encode_inner(&PyRep::Bytes(wire_type_name.as_bytes().to_vec()), out);
-                encode_inner(args, out);
+                encode_inner_checked(
+                    &PyRep::Bytes(wire_type_name.as_bytes().to_vec()),
+                    out,
+                    depth + 1,
+                    limits,
+                )?;
+                encode_inner_checked(args, out, depth + 1, limits)?;
             }
         }
         PyRep::ObjectEx {
@@ -324,23 +457,26 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
             list,
             dict,
         } => {
+            check_collection_limit(list.len(), limits)?;
+            check_collection_limit(dict.len(), limits)?;
             out.push(if *is_type_2 {
                 MarshalOpcode::PyObjectEx2 as u8
             } else {
                 MarshalOpcode::PyObjectEx1 as u8
             });
-            encode_inner(header, out);
+            encode_inner_checked(header, out, depth + 1, limits)?;
             for item in list {
-                encode_inner(item, out);
+                encode_inner_checked(item, out, depth + 1, limits)?;
             }
             out.push(MarshalOpcode::PackedTerminator as u8);
             for (k, v) in dict {
-                encode_inner(k, out);
-                encode_inner(v, out);
+                encode_inner_checked(k, out, depth + 1, limits)?;
+                encode_inner_checked(v, out, depth + 1, limits)?;
             }
             out.push(MarshalOpcode::PackedTerminator as u8);
         }
     }
+    Ok(())
 }
 
 /// RFC 1950 header check: deflate method (`CMF & 0x0F == 8`), window <= 32K and `(CMF*256+FLG) % 31 == 0`.
@@ -389,6 +525,199 @@ pub fn decode_with_limits(
         &mut remaining_budget,
         &mut remaining_inflate_budget,
     )
+}
+
+/// Best-effort bounded partial decoder for malformed or truncated `CallReq` frames (`#1086`).
+///
+/// Decodes only the outer packet header tuple elements `(packet_type, source)` without touching
+/// `destination`, `user_id`, `payload`, or `named_payload`, allowing the listener to send an
+/// internal error response on the same `call_id` rather than dropping or hanging an RPC.
+pub fn decode_partial_call_header(
+    input: &[u8],
+    max_inflate_bytes: usize,
+    max_nodes: usize,
+) -> Option<PyRep> {
+    if input.is_empty() {
+        return None;
+    }
+    let capped_inflate = max_inflate_bytes.min(MAX_FRAME_SIZE);
+    let inflated_buf: Vec<u8>;
+    let stream: &[u8] = if is_zlib_stream_header(input) {
+        let mut decoder = ZlibDecoder::new(input);
+        let mut out = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while out.len() < capped_inflate {
+            let to_read = chunk.len().min(capped_inflate - out.len());
+            match decoder.read(&mut chunk[..to_read]) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+        if out.is_empty() {
+            return None;
+        }
+        inflated_buf = out;
+        &inflated_buf
+    } else {
+        input
+    };
+
+    if stream.len() < 5 || stream[0] != MARSHAL_HEADER_BYTE {
+        return None;
+    }
+    let save_count = u32::from_le_bytes(stream[1..5].try_into().ok()?) as usize;
+    if save_count > MAX_COLLECTION_LEN {
+        return None;
+    }
+    let map_byte_len = save_count.checked_mul(4)?;
+    let (mut body_cursor, mut save_map_cursor, mut saved_slots) =
+        if stream.len() >= 5 + map_byte_len {
+            let body_end = stream.len() - map_byte_len;
+            (
+                &stream[5..body_end],
+                &stream[body_end..],
+                vec![None; save_count],
+            )
+        } else {
+            // Truncated before the trailing save map: only saved-slot-free prefixes can decode.
+            (&stream[5..], &[][..], Vec::new())
+        };
+
+    let mut remaining_budget = max_nodes.clamp(1, 1024);
+    let mut remaining_inflate_budget = capped_inflate;
+    decode_partial_packet_pair(
+        &mut body_cursor,
+        &mut save_map_cursor,
+        0,
+        &mut saved_slots,
+        &mut remaining_budget,
+        &mut remaining_inflate_budget,
+    )
+}
+
+fn peek_saved_and_opcode(
+    input: &mut &[u8],
+    save_map: &mut &[u8],
+    saved_slots: &[Option<PyRep>],
+) -> Option<u8> {
+    if input.is_empty() {
+        return None;
+    }
+    let raw = input[0];
+    *input = &input[1..];
+    if (raw & SAVE_FLAG) != 0 {
+        if save_map.len() < 4 {
+            return None;
+        }
+        let idx = u32::from_le_bytes(save_map[..4].try_into().ok()?) as usize;
+        *save_map = &save_map[4..];
+        if idx == 0 || idx > saved_slots.len() {
+            return None;
+        }
+    }
+    Some(raw & 0x3F)
+}
+
+fn read_tuple_len_for_opcode(opcode: u8, body: &mut &[u8]) -> Option<usize> {
+    if opcode == MarshalOpcode::PyEmptyTuple as u8 {
+        Some(0)
+    } else if opcode == MarshalOpcode::PyOneTuple as u8 {
+        Some(1)
+    } else if opcode == MarshalOpcode::PyTwoTuple as u8 {
+        Some(2)
+    } else if opcode == MarshalOpcode::PyTuple as u8 {
+        read_collection_len(body).ok()
+    } else {
+        None
+    }
+}
+
+fn decode_partial_packet_pair(
+    body: &mut &[u8],
+    save_map: &mut &[u8],
+    depth: usize,
+    saved_slots: &mut [Option<PyRep>],
+    remaining_budget: &mut usize,
+    remaining_inflate_budget: &mut usize,
+) -> Option<PyRep> {
+    if depth > MAX_RECURSION_DEPTH {
+        return None;
+    }
+    *remaining_budget = remaining_budget.checked_sub(1)?;
+    let opcode = peek_saved_and_opcode(body, save_map, saved_slots)?;
+    match opcode {
+        x if x == MarshalOpcode::PyObject as u8 => {
+            let type_rep = decode_inner(
+                body,
+                save_map,
+                depth + 1,
+                saved_slots,
+                remaining_budget,
+                remaining_inflate_budget,
+            )
+            .ok()?;
+            let _ = type_rep.as_str()?;
+            decode_partial_packet_pair(
+                body,
+                save_map,
+                depth + 1,
+                saved_slots,
+                remaining_budget,
+                remaining_inflate_budget,
+            )
+        }
+        x if x == MarshalOpcode::PyObjectEx1 as u8 || x == MarshalOpcode::PyObjectEx2 as u8 => {
+            *remaining_budget = remaining_budget.checked_sub(1)?;
+            let hdr_op = peek_saved_and_opcode(body, save_map, saved_slots)?;
+            let hdr_len = read_tuple_len_for_opcode(hdr_op, body)?;
+            if hdr_len < 2 {
+                return None;
+            }
+            let _ctor = decode_inner(
+                body,
+                save_map,
+                depth + 2,
+                saved_slots,
+                remaining_budget,
+                remaining_inflate_budget,
+            )
+            .ok()?;
+            decode_partial_packet_pair(
+                body,
+                save_map,
+                depth + 2,
+                saved_slots,
+                remaining_budget,
+                remaining_inflate_budget,
+            )
+        }
+        _ => {
+            let len = read_tuple_len_for_opcode(opcode, body)?;
+            if len < 2 {
+                return None;
+            }
+            let pkt_type = decode_inner(
+                body,
+                save_map,
+                depth + 1,
+                saved_slots,
+                remaining_budget,
+                remaining_inflate_budget,
+            )
+            .ok()?;
+            let source = decode_inner(
+                body,
+                save_map,
+                depth + 1,
+                saved_slots,
+                remaining_budget,
+                remaining_inflate_budget,
+            )
+            .ok()?;
+            Some(PyRep::Tuple(vec![pkt_type, source]))
+        }
+    }
 }
 
 fn decode_stream_slice(

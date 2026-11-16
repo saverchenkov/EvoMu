@@ -6,10 +6,273 @@
 #![forbid(unsafe_code)]
 
 use crate::{marshal, BridgeRpcError, PyRep};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// `cluster.MACHONETERR_WRAPPEDEXCEPTION`: `ErrorResponse.payload` is `(DumpsSanitized(exc),)`.
 pub const MACHONETERR_WRAPPEDEXCEPTION: i64 = 2;
+
+/// Fixed-point ISK representation in cents (`1 ISK = 100 IskCents`) to prevent `f64` precision drift.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct IskCents(pub i64);
+
+impl IskCents {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn raw_cents(self) -> i64 {
+        self.0
+    }
+
+    pub const fn from_raw_cents(cents: i64) -> Self {
+        Self(cents)
+    }
+
+    pub const fn from_isk(whole_isk: i64) -> Self {
+        Self(whole_isk.saturating_mul(100))
+    }
+
+    pub fn from_f64_isk(isk: f64) -> Self {
+        if !isk.is_finite() {
+            return Self(0);
+        }
+        let scaled = (isk * 100.0).round();
+        if scaled >= (i64::MAX / 2) as f64 {
+            Self(i64::MAX / 2)
+        } else if scaled <= (i64::MIN / 2) as f64 {
+            Self(i64::MIN / 2)
+        } else {
+            Self(scaled as i64)
+        }
+    }
+
+    pub fn checked_add(self, rhs: Self) -> Option<Self> {
+        if self.0 < 0 || rhs.0 < 0 {
+            return None;
+        }
+        self.0.checked_add(rhs.0).map(Self)
+    }
+
+    pub fn checked_sub(self, rhs: Self) -> Option<Self> {
+        if rhs.0 < 0 || self.0 < rhs.0 {
+            return None;
+        }
+        self.0.checked_sub(rhs.0).map(Self)
+    }
+
+    pub fn checked_mul_qty(self, qty: i64) -> Option<Self> {
+        if self.0 < 0 || qty < 0 {
+            return None;
+        }
+        self.0.checked_mul(qty).map(Self)
+    }
+
+    pub fn to_wire_f64(self) -> f64 {
+        (self.0 as f64) / 100.0
+    }
+
+    pub fn to_f64_isk(self) -> f64 {
+        (self.0 as f64) / 100.0
+    }
+}
+
+/// Canonical V24 localization label constant for supercapital/large-ship docking refusal.
+pub const UI_LABEL_SHIP_TOO_LARGE: &str = "UI/Station/StationManagment/ShipTooLarge";
+
+/// Closed registry of V24 localization labels referenced by [`UserErrorArg::Label`] across server errors.
+///
+/// Every entry here (and every `UserErrorArg::Label("...")` literal in `crates/`) is verified against
+/// V24 `res:/localizationfsd/localization_fsd_main.pickle` in `eve-testkit`.
+pub const V24_USER_ERROR_LABELS: &[&str] = &[UI_LABEL_SHIP_TOO_LARGE];
+
+/// Rounds a floating-point `UserError` argument to 6 decimal places to eliminate binary FP noise
+/// while remaining numeric for V24 `NumericPropertyHandler` formatting (`#1086`).
+pub fn round_user_error_real_6dp(value: f64) -> f64 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+    let rounded = (value * 1_000_000.0).round() / 1_000_000.0;
+    if rounded == 0.0 {
+        0.0
+    } else {
+        rounded
+    }
+}
+
+/// Typed V24 `eveexceptions.UserError` dictionary argument encoder (`#1086`).
+///
+/// Prevents untyped `PyRep` construction bugs at server call sites (such as sending raw integers for
+/// `[4, typeID]` / `[101, "UI/..."]` client tags or IEEE-754 float tails on capacity messages).
+#[derive(Debug, Clone, PartialEq)]
+pub enum UserErrorArg {
+    /// `const.UE_TYPEID` (`4`): renders as wire tuple `(4, typeID)` resolved by `cfg.FormatConvert`.
+    TypeId(i64),
+    /// `const.UE_LOC` (`101`): renders as wire tuple `(101, "UI/...")` resolved via `localization.GetByLabel`.
+    Label(&'static str),
+    /// Plain integer kwarg (e.g. `curCnt`, `maxCnt`, `limit`, `ownerName`, `{[item]x.name}` typeIDs).
+    Int(i64),
+    /// Floating-point numeric kwarg rounded to 6 decimal places.
+    Real(f64),
+    /// Text string kwarg.
+    Str(String),
+    /// Fixed-point ISK amount formatted as wire ISK float.
+    IskCents(IskCents),
+}
+
+impl UserErrorArg {
+    /// Materializes this typed argument into its V24 `eveMarshal` wire [`PyRep`].
+    pub fn to_pyrep(&self) -> PyRep {
+        match self {
+            // `cfg.__prepdict` checks `type(v) is types.TupleType` (`PyRep::Tuple`, never `PyRep::List`).
+            Self::TypeId(type_id) => {
+                PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(*type_id)])
+            }
+            Self::Label(path) => {
+                PyRep::Tuple(vec![PyRep::Integer(101), PyRep::String((*path).to_owned())])
+            }
+            Self::Int(v) => PyRep::Integer(*v),
+            Self::Real(v) => PyRep::Real(round_user_error_real_6dp(*v)),
+            Self::Str(s) => PyRep::String(s.clone()),
+            Self::IskCents(cents) => PyRep::Real(round_user_error_real_6dp(cents.to_wire_f64())),
+        }
+    }
+
+    /// Consumes this typed argument into its V24 `eveMarshal` wire [`PyRep`].
+    pub fn into_pyrep(self) -> PyRep {
+        match self {
+            Self::TypeId(type_id) => {
+                PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(type_id)])
+            }
+            Self::Label(path) => PyRep::Tuple(vec![PyRep::Integer(101), PyRep::String(path.to_owned())]),
+            Self::Int(v) => PyRep::Integer(v),
+            Self::Real(v) => PyRep::Real(round_user_error_real_6dp(v)),
+            Self::Str(s) => PyRep::String(s),
+            Self::IskCents(cents) => PyRep::Real(round_user_error_real_6dp(cents.to_wire_f64())),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+enum SerdeUserErrorArg {
+    TypeId(i64),
+    Label(String),
+    Int(i64),
+    Real(f64),
+    Str(String),
+    IskCents(IskCents),
+}
+
+impl Serialize for UserErrorArg {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let proxy = match self {
+            Self::TypeId(v) => SerdeUserErrorArg::TypeId(*v),
+            Self::Label(s) => SerdeUserErrorArg::Label((*s).to_owned()),
+            Self::Int(v) => SerdeUserErrorArg::Int(*v),
+            Self::Real(v) => SerdeUserErrorArg::Real(*v),
+            Self::Str(s) => SerdeUserErrorArg::Str(s.clone()),
+            Self::IskCents(c) => SerdeUserErrorArg::IskCents(*c),
+        };
+        proxy.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for UserErrorArg {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let proxy = SerdeUserErrorArg::deserialize(deserializer)?;
+        Ok(match proxy {
+            SerdeUserErrorArg::TypeId(v) => Self::TypeId(v),
+            SerdeUserErrorArg::Label(s) => {
+                let static_label: &'static str = V24_USER_ERROR_LABELS
+                    .iter()
+                    .copied()
+                    .find(|&known| known == s)
+                    .unwrap_or_else(|| Box::leak(s.into_boxed_str()));
+                Self::Label(static_label)
+            }
+            SerdeUserErrorArg::Int(v) => Self::Int(v),
+            SerdeUserErrorArg::Real(v) => Self::Real(v),
+            SerdeUserErrorArg::Str(s) => Self::Str(s),
+            SerdeUserErrorArg::IskCents(c) => Self::IskCents(c),
+        })
+    }
+}
+
+impl From<i64> for UserErrorArg {
+    fn from(v: i64) -> Self {
+        Self::Int(v)
+    }
+}
+
+impl From<i32> for UserErrorArg {
+    fn from(v: i32) -> Self {
+        Self::Int(i64::from(v))
+    }
+}
+
+impl From<u32> for UserErrorArg {
+    fn from(v: u32) -> Self {
+        Self::Int(i64::from(v))
+    }
+}
+
+impl From<f64> for UserErrorArg {
+    fn from(v: f64) -> Self {
+        Self::Real(v)
+    }
+}
+
+impl From<String> for UserErrorArg {
+    fn from(s: String) -> Self {
+        Self::Str(s)
+    }
+}
+
+impl From<&str> for UserErrorArg {
+    fn from(s: &str) -> Self {
+        Self::Str(s.to_owned())
+    }
+}
+
+impl From<IskCents> for UserErrorArg {
+    fn from(c: IskCents) -> Self {
+        Self::IskCents(c)
+    }
+}
+
+/// Trait implemented by `(K, UserErrorArg)` pairs and `&[(&str, UserErrorArg)]` slice elements so
+/// [`ClientError::user_with_args`] and [`BridgeRpcError::user_error_with_args`] accept both owned
+/// arrays/iterators and `&[(&str, UserErrorArg)]` slices cleanly while forbidding untyped `PyRep`.
+pub trait IntoUserErrorArg {
+    fn into_user_error_pair(self) -> (String, PyRep);
+}
+
+impl<K: Into<String>> IntoUserErrorArg for (K, UserErrorArg) {
+    fn into_user_error_pair(self) -> (String, PyRep) {
+        (self.0.into(), self.1.into_pyrep())
+    }
+}
+
+impl<'a> IntoUserErrorArg for &'a (&'a str, UserErrorArg) {
+    fn into_user_error_pair(self) -> (String, PyRep) {
+        ((*self.0).to_owned(), self.1.to_pyrep())
+    }
+}
+
+impl<'a> IntoUserErrorArg for &'a (String, UserErrorArg) {
+    fn into_user_error_pair(self) -> (String, PyRep) {
+        (self.0.clone(), self.1.to_pyrep())
+    }
+}
+
+/// Client UI presentation discipline mandated per [`UserErrorKey`] from V24 `dialogs.static` (`#1086`).
+///
+/// `Notify` corresponds to V24 `dialogType` `1` (`hint`) and `3` (`notify`), routed through
+/// `player_messaging/client/dialog_handler.pyj::message_player` as toast/hint notifications.
+/// `Modal` corresponds to `dialogType` `2` (`info`), `4` (`question`), `6` (`warning`), `7` (`error`),
+/// `8` (`fatal`), `9` (`windowhelp`), and programmatic `UserError` popups routed through `_prompt_player`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UserErrorPresentation {
+    Modal,
+    Notify,
+}
 
 /// Programmatic V24.01 `eveexceptions.UserError` keys handled directly by client `.pyj` call sites
 /// (`base_insurance.pyj`, skill checks, station checks) outside `res:/staticdata/dialogs.static`.
@@ -42,6 +305,7 @@ pub enum UserErrorKey {
 
     // --- Inventory & hold capacity (`dialogs.static` 1316..=4782) ---
     NotEnoughCargoSpace,
+    NotEnoughCargoSpaceFor1Unit,
     NotEnoughCargoSpaceOverload,
     NotEnoughDroneBaySpace,
     NotEnoughDroneBaySpaceOverload,
@@ -104,13 +368,13 @@ pub enum UserErrorKey {
     ModuleAlreadyActive,
     EffectAlreadyActive2,
     ModuleNotOnline,
+    NoCharges,
     MaxBandwidthExceeded,
     TargetNotLocked,
+    TargetTooFar,
     TargetingAptitudeAlreadyFullyUtilized,
     TargetingSystemsAlreadyFullyUtilized,
     TargetingSystemsBeingJammed,
-    TargetTooFar,
-    NoCharges,
     InvalidTargetGroup,
     ShipHasNoFighterBay,
     CannotLaunchFighterNotEnoughTubesAvailableForClass,
@@ -141,7 +405,7 @@ pub enum UserErrorKey {
 }
 
 impl UserErrorKey {
-    /// Exhaustive slice of all 94 typed [`UserErrorKey`] variants.
+    /// Exhaustive slice of all 95 typed [`UserErrorKey`] variants.
     pub const ALL: &[Self] = &[
         Self::InsureShipFailedSingleContract,
         Self::InsureShipFailedMultipleContracts,
@@ -153,6 +417,7 @@ impl UserErrorKey {
         Self::CustomNotify,
         Self::CustomQuestion,
         Self::NotEnoughCargoSpace,
+        Self::NotEnoughCargoSpaceFor1Unit,
         Self::NotEnoughCargoSpaceOverload,
         Self::NotEnoughDroneBaySpace,
         Self::NotEnoughDroneBaySpaceOverload,
@@ -207,13 +472,13 @@ impl UserErrorKey {
         Self::ModuleAlreadyActive,
         Self::EffectAlreadyActive2,
         Self::ModuleNotOnline,
+        Self::NoCharges,
         Self::MaxBandwidthExceeded,
         Self::TargetNotLocked,
+        Self::TargetTooFar,
         Self::TargetingAptitudeAlreadyFullyUtilized,
         Self::TargetingSystemsAlreadyFullyUtilized,
         Self::TargetingSystemsBeingJammed,
-        Self::TargetTooFar,
-        Self::NoCharges,
         Self::InvalidTargetGroup,
         Self::ShipHasNoFighterBay,
         Self::CannotLaunchFighterNotEnoughTubesAvailableForClass,
@@ -252,6 +517,7 @@ impl UserErrorKey {
             Self::CustomNotify => "CustomNotify",
             Self::CustomQuestion => "CustomQuestion",
             Self::NotEnoughCargoSpace => "NotEnoughCargoSpace",
+            Self::NotEnoughCargoSpaceFor1Unit => "NotEnoughCargoSpaceFor1Unit",
             Self::NotEnoughCargoSpaceOverload => "NotEnoughCargoSpaceOverload",
             Self::NotEnoughDroneBaySpace => "NotEnoughDroneBaySpace",
             Self::NotEnoughDroneBaySpaceOverload => "NotEnoughDroneBaySpaceOverload",
@@ -308,13 +574,13 @@ impl UserErrorKey {
             Self::ModuleAlreadyActive => "ModuleAlreadyActive",
             Self::EffectAlreadyActive2 => "EffectAlreadyActive2",
             Self::ModuleNotOnline => "ModuleNotOnline",
+            Self::NoCharges => "NoCharges",
             Self::MaxBandwidthExceeded => "MaxBandwidthExceeded",
             Self::TargetNotLocked => "TargetNotLocked",
+            Self::TargetTooFar => "TargetTooFar",
             Self::TargetingAptitudeAlreadyFullyUtilized => "TargetingAptitudeAlreadyFullyUtilized",
             Self::TargetingSystemsAlreadyFullyUtilized => "TargetingSystemsAlreadyFullyUtilized",
             Self::TargetingSystemsBeingJammed => "TargetingSystemsBeingJammed",
-            Self::TargetTooFar => "TargetTooFar",
-            Self::NoCharges => "NoCharges",
             Self::InvalidTargetGroup => "InvalidTargetGroup",
             Self::ShipHasNoFighterBay => "ShipHasNoFighterBay",
             Self::CannotLaunchFighterNotEnoughTubesAvailableForClass => {
@@ -364,6 +630,7 @@ impl UserErrorKey {
             Self::CustomNotify => Some(766),
             Self::CustomQuestion => Some(767),
             Self::NotEnoughCargoSpace => Some(1336),
+            Self::NotEnoughCargoSpaceFor1Unit => Some(1337),
             Self::NotEnoughCargoSpaceOverload => Some(1338),
             Self::NotEnoughDroneBaySpace => Some(1342),
             Self::NotEnoughDroneBaySpaceOverload => Some(1343),
@@ -418,13 +685,13 @@ impl UserErrorKey {
             Self::ModuleAlreadyActive => Some(1224),
             Self::EffectAlreadyActive2 => Some(3252),
             Self::ModuleNotOnline => Some(1231),
+            Self::NoCharges => Some(1291),
             Self::MaxBandwidthExceeded => Some(2396),
             Self::TargetNotLocked => Some(1627),
+            Self::TargetTooFar => Some(1632),
             Self::TargetingAptitudeAlreadyFullyUtilized => Some(1634),
             Self::TargetingSystemsAlreadyFullyUtilized => Some(1636),
             Self::TargetingSystemsBeingJammed => Some(1637),
-            Self::TargetTooFar => Some(1632),
-            Self::NoCharges => Some(1291),
             Self::InvalidTargetGroup => Some(987),
             Self::ShipHasNoFighterBay => Some(4890),
             Self::CannotLaunchFighterNotEnoughTubesAvailableForClass => Some(5112),
@@ -448,6 +715,121 @@ impl UserErrorKey {
             Self::PISkillRequiredToSurveyPlanetResources => Some(3384),
             Self::SlashError => Some(1591),
             Self::UnMachoDestination => Some(1668),
+        }
+    }
+
+    /// Expected `dialogType` enum byte in V24.01 `res:/staticdata/dialogs.static`, or `None` for
+    /// [`V24_PROGRAMMATIC_USER_ERROR_KEYS`]:
+    /// `1`=`hint`, `2`=`info`, `3`=`notify`, `4`=`question`, `5`=`audio`, `6`=`warning`, `7`=`error`,
+    /// `8`=`fatal`, `9`=`windowhelp`.
+    pub const fn v24_dialog_type(&self) -> Option<u8> {
+        match self {
+            Self::InsureShipInvalidCost
+            | Self::InsureShipFailed
+            | Self::CanOnlyDoInStation
+            | Self::SkillMissing => None,
+            Self::OwnerMaxFittings
+            | Self::CannotStoreShipActiveWeaponsTimer
+            | Self::EffectAlreadyActive2
+            | Self::InsufficientRoles
+            | Self::KillRightNotForSale
+            | Self::LinkAlreadyExists => Some(1),
+            Self::InsureShipFailedSingleContract
+            | Self::InsureShipFailedMultipleContracts
+            | Self::CustomInfo
+            | Self::NotEnoughCargoSpace
+            | Self::NotEnoughCargoSpaceFor1Unit
+            | Self::NotEnoughCargoSpaceOverload
+            | Self::NotEnoughDroneBaySpaceOverload
+            | Self::NotEnoughSpecialBaySpaceOverload
+            | Self::NotEnoughSpace
+            | Self::NoSpaceForThat
+            | Self::NoSpaceForThatOverload
+            | Self::ItemLocked
+            | Self::ItemNotFound
+            | Self::CanNotUnassembleInThisItemLoc
+            | Self::CantRepackageDamagedItem
+            | Self::MarketExceededOrderCount
+            | Self::NotEnoughMoney
+            | Self::ShipCannotUseStargate
+            | Self::DunBlacklistCannotWarp
+            | Self::CanOnlyDoInStations
+            | Self::NoActiveBeacon
+            | Self::SkillUnavailableForPurchase
+            | Self::NoCloneBayService
+            | Self::CantDockGlobalCriminalFlag
+            | Self::CantEnterWormholeGlobalCriminalFlag
+            | Self::CantWarpAwayGlobalCriminalFlag
+            | Self::ModuleAlreadyActive
+            | Self::InvalidTargetGroup
+            | Self::CrpAccessDenied
+            | Self::NoOfficeAtStation
+            | Self::FleetNotFound
+            | Self::FleetNotInFleet
+            | Self::CantbookmarkEveSystem
+            | Self::UnMachoDestination => Some(2),
+            Self::CustomNotify
+            | Self::NotEnoughDroneBaySpace
+            | Self::NotEnoughFighterBaySpace
+            | Self::NotEnoughSpecialBaySpace
+            | Self::NotEnoughChargeSpace
+            | Self::ItemNotAtStation
+            | Self::CantDoThatWithSomeoneElsesStuff
+            | Self::SlotAlreadyOccupied
+            | Self::DockingApproach
+            | Self::DockingRequestDenied
+            | Self::CantDockWhileModuleActive
+            | Self::CantJumpWhileModuleActive
+            | Self::WarpDisrupted
+            | Self::WarpScrambled
+            | Self::DeniedTethered
+            | Self::SystemCheck_JumpFailed_StandingsTooLow
+            | Self::CannotDscanInThisSystem
+            | Self::MustBeDocked
+            | Self::ShipCloaked
+            | Self::ShipInWarp
+            | Self::ShipNotBoardable
+            | Self::JumpCloneNotFound
+            | Self::AlreadyInNewbieShip
+            | Self::CannotEjectFromCapsule
+            | Self::CannotEjectActiveWeaponsTimer
+            | Self::CannotEjectInvolvedInCrime
+            | Self::CannotBoardShipInHighSecAsCriminal
+            | Self::ModuleNotOnline
+            | Self::NoCharges
+            | Self::MaxBandwidthExceeded
+            | Self::TargetNotLocked
+            | Self::TargetTooFar
+            | Self::TargetingAptitudeAlreadyFullyUtilized
+            | Self::TargetingSystemsAlreadyFullyUtilized
+            | Self::TargetingSystemsBeingJammed
+            | Self::ShipHasNoFighterBay
+            | Self::CannotLaunchFighterNotEnoughTubesAvailableForClass
+            | Self::CannotOpenFighterTubesWhileCloaked
+            | Self::CannotOpenFighterTubesWhileWarping
+            | Self::AccessDenied
+            | Self::AllianceNotFound
+            | Self::AlreadyAtWar
+            | Self::FleetHangarAccessDenied
+            | Self::DuelChallengeFailNoSesssionForTarget
+            | Self::InvalidPinType
+            | Self::InvalidSchematic
+            | Self::PISkillRequiredToSurveyPlanetResources
+            | Self::SlashError => Some(3),
+            Self::InsureShipAlreadyInsured | Self::CustomQuestion => Some(4),
+            Self::CustomError => Some(7),
+        }
+    }
+
+    /// Fixed UI presentation discipline for this [`UserErrorKey`] matching V24 `dialog_handler.pyj` (`#1086`).
+    ///
+    /// Call sites cannot override modal vs toast behavior per call: each key's presentation is
+    /// fixed by V24 `dialogs.static` (`hint`/`notify` -> [`UserErrorPresentation::Notify`], all
+    /// modal dialog types & programmatic prompts -> [`UserErrorPresentation::Modal`]).
+    pub const fn presentation(&self) -> UserErrorPresentation {
+        match self.v24_dialog_type() {
+            Some(1 | 3) => UserErrorPresentation::Notify,
+            _ => UserErrorPresentation::Modal,
         }
     }
 
@@ -482,6 +864,11 @@ impl UserErrorKey {
                 ("maximum".into(), PyRep::Real(0.0)),
                 ("used".into(), PyRep::Real(0.0)),
             ],
+            Self::NotEnoughCargoSpaceFor1Unit => vec![
+                ("type".into(), PyRep::Integer(0)),
+                ("free".into(), PyRep::Real(0.0)),
+                ("required".into(), PyRep::Real(0.0)),
+            ],
             Self::NotEnoughChargeSpace => vec![
                 ("capacity".into(), PyRep::Real(0.0)),
                 ("volume".into(), PyRep::Real(0.0)),
@@ -498,6 +885,12 @@ impl UserErrorKey {
                 ("maxCnt".into(), PyRep::Integer(0)),
             ],
             Self::SlashError => vec![("reason".into(), PyRep::ascii_bytes(""))],
+            Self::DockingRequestDenied => vec![("reason".into(), PyRep::ascii_bytes(""))],
+            Self::NoCharges => vec![("launcher".into(), PyRep::ascii_bytes(""))],
+            Self::TargetTooFar => vec![
+                ("targetname".into(), PyRep::ascii_bytes("")),
+                ("distance".into(), PyRep::Real(0.0)),
+            ],
             Self::TargetingAptitudeAlreadyFullyUtilized
             | Self::TargetingSystemsAlreadyFullyUtilized => {
                 vec![("limit".into(), PyRep::Integer(0))]
@@ -552,8 +945,10 @@ pub enum ClientError {
         key: UserErrorKey,
         args: Vec<(String, PyRep)>,
     },
-    /// Generic `eveexceptions.UserError('CustomInfo', {'info': msg})`.
+    /// Generic modal `eveexceptions.UserError('CustomInfo', {'info': msg})`.
     CustomInfo(String),
+    /// Generic toast/non-modal `eveexceptions.UserError('CustomNotify', {'notify': msg})`.
+    CustomNotify(String),
     /// Unimplemented RPC (`exceptions.RuntimeError("UnimplementedRPC: <service>.<method> is not yet implemented")`).
     Unimplemented { service: String, method: String },
     /// Internal / runtime exception (`exceptions.RuntimeError(msg)`).
@@ -571,15 +966,153 @@ impl ClientError {
         }
     }
 
-    /// Constructs a [`ClientError::User`] with explicit dictionary arguments.
+    /// Constructs a [`ClientError::User`] with typed dictionary arguments (`#1086`).
+    ///
+    /// Call sites must supply [`UserErrorArg`] values (never raw untyped [`PyRep`]).
     pub fn user_with_args(
         key: UserErrorKey,
-        args: impl IntoIterator<Item = (impl Into<String>, PyRep)>,
+        args: impl IntoIterator<Item = impl IntoUserErrorArg>,
     ) -> Self {
         Self::User {
             key,
-            args: args.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+            args: args
+                .into_iter()
+                .map(IntoUserErrorArg::into_user_error_pair)
+                .collect(),
         }
+    }
+
+    /// Returns the V24 client UI presentation mode (`Modal` vs `Notify`) enforced for this error.
+    pub const fn presentation(&self) -> UserErrorPresentation {
+        match self {
+            Self::User { key, .. } => key.presentation(),
+            Self::CustomInfo(_)
+            | Self::Unimplemented { .. }
+            | Self::Internal(_)
+            | Self::SessionMismatch(_) => UserErrorPresentation::Modal,
+            Self::CustomNotify(_) => UserErrorPresentation::Notify,
+        }
+    }
+
+    /// Constructs a typed hold/bay space capacity error (`{volume, available}` rounded to 6 dp).
+    pub fn hold_capacity_error(
+        key: UserErrorKey,
+        volume_needed_m3: f64,
+        volume_available_m3: f64,
+    ) -> Self {
+        debug_assert!(matches!(
+            key,
+            UserErrorKey::NotEnoughCargoSpace
+                | UserErrorKey::NotEnoughDroneBaySpace
+                | UserErrorKey::NotEnoughFighterBaySpace
+                | UserErrorKey::NotEnoughSpecialBaySpace
+                | UserErrorKey::NotEnoughSpace
+        ));
+        Self::user_with_args(
+            key,
+            [
+                ("volume", UserErrorArg::Real(volume_needed_m3)),
+                ("available", UserErrorArg::Real(volume_available_m3)),
+            ],
+        )
+    }
+
+    /// Constructs a typed `NotEnoughChargeSpace` (`{capacity, volume}` rounded to 6 dp).
+    pub fn not_enough_charge_space(capacity_m3: f64, volume_needed_m3: f64) -> Self {
+        Self::user_with_args(
+            UserErrorKey::NotEnoughChargeSpace,
+            [
+                ("capacity", UserErrorArg::Real(capacity_m3)),
+                ("volume", UserErrorArg::Real(volume_needed_m3)),
+            ],
+        )
+    }
+
+    /// Constructs a typed `NoSpaceForThat` (`{itemTypeName, itemVolume, volumeAvailable}`).
+    pub fn no_space_for_that(
+        item_type_id: i64,
+        item_volume_m3: f64,
+        volume_available_m3: f64,
+    ) -> Self {
+        Self::user_with_args(
+            UserErrorKey::NoSpaceForThat,
+            [
+                ("itemTypeName", UserErrorArg::Int(item_type_id)),
+                ("itemVolume", UserErrorArg::Real(item_volume_m3)),
+                ("volumeAvailable", UserErrorArg::Real(volume_available_m3)),
+            ],
+        )
+    }
+
+    /// Constructs a typed `NotEnoughCargoSpaceFor1Unit` (`{type, required, free}`).
+    pub fn not_enough_cargo_space_for_unit(type_id: i64, required_m3: f64, free_m3: f64) -> Self {
+        Self::user_with_args(
+            UserErrorKey::NotEnoughCargoSpaceFor1Unit,
+            [
+                ("type", UserErrorArg::Int(type_id)),
+                ("required", UserErrorArg::Real(required_m3)),
+                ("free", UserErrorArg::Real(free_m3)),
+            ],
+        )
+    }
+
+    /// Constructs a typed `DockingRequestDenied` error with a V24 localization label (`[101, label]`).
+    pub fn docking_request_denied(reason_label: &'static str) -> Self {
+        Self::user_with_args(
+            UserErrorKey::DockingRequestDenied,
+            [("reason", UserErrorArg::Label(reason_label))],
+        )
+    }
+
+    /// Constructs a typed `NoCharges` (`{launcher: [4, typeID]}`).
+    pub fn no_charges(launcher_type_id: i64) -> Self {
+        Self::user_with_args(
+            UserErrorKey::NoCharges,
+            [("launcher", UserErrorArg::TypeId(launcher_type_id))],
+        )
+    }
+
+    /// Constructs a typed `TargetTooFar` (`{targetname, module, distance}`).
+    pub fn target_too_far(
+        target_name: impl Into<String>,
+        module_type_id: i64,
+        distance_m: f64,
+    ) -> Self {
+        Self::user_with_args(
+            UserErrorKey::TargetTooFar,
+            [
+                ("targetname", UserErrorArg::Str(target_name.into())),
+                ("module", UserErrorArg::Int(module_type_id)),
+                ("distance", UserErrorArg::Real(distance_m)),
+            ],
+        )
+    }
+
+    /// Constructs a typed `ShipCannotUseStargate` (`{shipTypeID, whitelist}`).
+    pub fn ship_cannot_use_stargate(ship_type_id: i64, whitelist: impl Into<String>) -> Self {
+        Self::user_with_args(
+            UserErrorKey::ShipCannotUseStargate,
+            [
+                ("shipTypeID", UserErrorArg::Int(ship_type_id)),
+                ("whitelist", UserErrorArg::Str(whitelist.into())),
+            ],
+        )
+    }
+
+    /// Constructs a typed `CantDockWhileModuleActive` (`{moduleType}`).
+    pub fn cant_dock_while_module_active(module_type_id: i64) -> Self {
+        Self::user_with_args(
+            UserErrorKey::CantDockWhileModuleActive,
+            [("moduleType", UserErrorArg::Int(module_type_id))],
+        )
+    }
+
+    /// Constructs a typed `CantJumpWhileModuleActive` (`{moduleType}`).
+    pub fn cant_jump_while_module_active(module_type_id: i64) -> Self {
+        Self::user_with_args(
+            UserErrorKey::CantJumpWhileModuleActive,
+            [("moduleType", UserErrorArg::Int(module_type_id))],
+        )
     }
 
     /// Total wire mapping from [`ClientError`] to a V24 `machoNetPacket.ErrorResponse` payload
@@ -597,7 +1130,7 @@ impl ClientError {
                     .into_iter()
                     .map(|(k, v)| {
                         let wire_val = match v {
-                            PyRep::String(s) => PyRep::ascii_bytes(&s),
+                            PyRep::String(s) => text_to_wire_pyrep(&s),
                             other => other,
                         };
                         (PyRep::ascii_bytes(&k), wire_val)
@@ -608,7 +1141,12 @@ impl ClientError {
             Self::CustomInfo(info) => encode_wrapped_user_error(
                 original_command,
                 UserErrorKey::CustomInfo.as_str(),
-                vec![(PyRep::ascii_bytes("info"), PyRep::ascii_bytes(info))],
+                vec![(PyRep::ascii_bytes("info"), text_to_wire_pyrep(info))],
+            ),
+            Self::CustomNotify(notify) => encode_wrapped_user_error(
+                original_command,
+                UserErrorKey::CustomNotify.as_str(),
+                vec![(PyRep::ascii_bytes("notify"), text_to_wire_pyrep(notify))],
             ),
             Self::Unimplemented { service, method } => {
                 let msg = format!("UnimplementedRPC: {service}.{method} is not yet implemented");
@@ -618,9 +1156,17 @@ impl ClientError {
             Self::SessionMismatch(msg) => encode_wrapped_user_error(
                 original_command,
                 UserErrorKey::UnMachoDestination.as_str(),
-                vec![(PyRep::ascii_bytes("info"), PyRep::ascii_bytes(msg))],
+                vec![(PyRep::ascii_bytes("info"), text_to_wire_pyrep(msg))],
             ),
         }
+    }
+}
+
+fn text_to_wire_pyrep(text: &str) -> PyRep {
+    if text.is_ascii() {
+        PyRep::ascii_bytes(text)
+    } else {
+        PyRep::String(text.to_owned())
     }
 }
 
@@ -629,7 +1175,7 @@ fn encode_wrapped_runtime_error(original_command: i64, message: &str) -> PyRep {
         is_type_2: false,
         header: Box::new(PyRep::Tuple(vec![
             PyRep::Token("exceptions.RuntimeError".into()),
-            PyRep::Tuple(vec![PyRep::ascii_bytes(message)]),
+            PyRep::Tuple(vec![text_to_wire_pyrep(message)]),
         ])),
         list: Vec::new(),
         dict: Vec::new(),
@@ -665,6 +1211,48 @@ fn encode_wrapped_user_error(
     ])
 }
 
+fn find_numeric_arg(args: &[(String, PyRep)], name: &str) -> Option<f64> {
+    args.iter()
+        .find(|(k, _)| k == name)
+        .and_then(|(_, v)| v.as_f64().or_else(|| v.as_i64().map(|n| n as f64)))
+}
+
+fn format_capacity_message(args: &[(String, PyRep)]) -> Option<String> {
+    if let (Some(vol), Some(avail)) = (
+        find_numeric_arg(args, "volume"),
+        find_numeric_arg(args, "available"),
+    ) {
+        return Some(format!("volume={vol}, available={avail}"));
+    }
+    if let (Some(free), Some(req)) = (
+        find_numeric_arg(args, "free"),
+        find_numeric_arg(args, "required"),
+    ) {
+        return Some(format!("free={free}, required={req}"));
+    }
+    if let (Some(cap), Some(vol)) = (
+        find_numeric_arg(args, "capacity"),
+        find_numeric_arg(args, "volume"),
+    ) {
+        return Some(format!("volume={vol}, capacity={cap}"));
+    }
+    if let (Some(item_vol), Some(avail)) = (
+        find_numeric_arg(args, "itemVolume"),
+        find_numeric_arg(args, "volumeAvailable"),
+    ) {
+        return Some(format!(
+            "itemVolume={item_vol}, volumeAvailable={avail}"
+        ));
+    }
+    if let (Some(max), Some(used)) = (
+        find_numeric_arg(args, "maximum"),
+        find_numeric_arg(args, "used"),
+    ) {
+        return Some(format!("used={used}, maximum={max}"));
+    }
+    None
+}
+
 impl BridgeRpcError {
     /// Constructs a [`BridgeRpcError`] carrying `client_error` directly by value so
     /// [`Self::to_client_error`] is lossless without parsing `message` or using global state.
@@ -682,19 +1270,19 @@ impl BridgeRpcError {
                     } else {
                         code_str.clone()
                     }
-                } else if key.is_capacity_error() {
-                    let volume = args.iter().find(|(k, _)| k == "volume").and_then(|(_, v)| {
-                        v.as_f64().or_else(|| v.as_i64().map(|n| n as f64))
-                    });
-                    let available = args
-                        .iter()
-                        .find(|(k, _)| k == "available")
-                        .and_then(|(_, v)| v.as_f64().or_else(|| v.as_i64().map(|n| n as f64)));
-                    if let (Some(vol), Some(avail)) = (volume, available) {
-                        format!("volume={vol}, available={avail}")
-                    } else {
-                        code_str.clone()
-                    }
+                } else if key.is_capacity_error()
+                    || matches!(
+                        key,
+                        UserErrorKey::NotEnoughCargoSpaceFor1Unit
+                            | UserErrorKey::NotEnoughChargeSpace
+                            | UserErrorKey::NoSpaceForThat
+                            | UserErrorKey::NoSpaceForThatOverload
+                            | UserErrorKey::NotEnoughCargoSpaceOverload
+                            | UserErrorKey::NotEnoughDroneBaySpaceOverload
+                            | UserErrorKey::NotEnoughSpecialBaySpaceOverload
+                    )
+                {
+                    format_capacity_message(args).unwrap_or_else(|| code_str.clone())
                 } else if *key == UserErrorKey::MarketExceededOrderCount {
                     let cur = args
                         .iter()
@@ -720,6 +1308,7 @@ impl BridgeRpcError {
                 (code_str, msg_str)
             }
             ClientError::CustomInfo(info) => ("CustomInfo".into(), info.clone()),
+            ClientError::CustomNotify(notify) => ("CustomNotify".into(), notify.clone()),
             ClientError::Unimplemented { service, method } => (
                 "UnimplementedRPC".into(),
                 format!("{service}.{method} is not yet implemented"),
@@ -739,10 +1328,10 @@ impl BridgeRpcError {
         Self::from_client_error(ClientError::user(key))
     }
 
-    /// Constructs a [`BridgeRpcError`] backed by [`ClientError::User`] with typed kwargs.
+    /// Constructs a [`BridgeRpcError`] backed by [`ClientError::User`] with typed kwargs (`#1086`).
     pub fn user_error_with_args(
         key: UserErrorKey,
-        args: impl IntoIterator<Item = (impl Into<String>, PyRep)>,
+        args: impl IntoIterator<Item = impl IntoUserErrorArg>,
     ) -> Self {
         Self::from_client_error(ClientError::user_with_args(key, args))
     }
@@ -761,9 +1350,128 @@ impl BridgeRpcError {
         }
     }
 
-    /// Constructs a typed [`ClientError::CustomInfo`] RPC error.
+    /// Constructs a typed modal [`ClientError::CustomInfo`] RPC error.
     pub fn custom_info(info: impl Into<String>) -> Self {
         Self::from_client_error(ClientError::CustomInfo(info.into()))
+    }
+
+    /// Constructs a typed non-modal [`ClientError::CustomNotify`] RPC toast error.
+    pub fn custom_notify(notify: impl Into<String>) -> Self {
+        Self::from_client_error(ClientError::CustomNotify(notify.into()))
+    }
+
+    /// Returns the V24 client presentation discipline (`Modal` vs `Notify`) for this error.
+    pub fn client_presentation(&self, service: &str, method: &str) -> UserErrorPresentation {
+        self.to_client_error(service, method).presentation()
+    }
+
+    /// Constructs a typed hold/bay capacity error (`{volume, available}` rounded to 6 dp).
+    pub fn hold_capacity_error(
+        key: UserErrorKey,
+        volume_needed_m3: f64,
+        volume_available_m3: f64,
+    ) -> Self {
+        Self::from_client_error(ClientError::hold_capacity_error(
+            key,
+            volume_needed_m3,
+            volume_available_m3,
+        ))
+    }
+
+    /// Constructs a typed `NotEnoughChargeSpace` (`{capacity, volume}`).
+    pub fn not_enough_charge_space(capacity_m3: f64, volume_needed_m3: f64) -> Self {
+        Self::from_client_error(ClientError::not_enough_charge_space(
+            capacity_m3,
+            volume_needed_m3,
+        ))
+    }
+
+    /// Constructs a typed `NoSpaceForThat` (`{itemTypeName, itemVolume, volumeAvailable}`).
+    pub fn no_space_for_that(
+        item_type_id: i64,
+        item_volume_m3: f64,
+        volume_available_m3: f64,
+    ) -> Self {
+        Self::from_client_error(ClientError::no_space_for_that(
+            item_type_id,
+            item_volume_m3,
+            volume_available_m3,
+        ))
+    }
+
+    /// Constructs a typed `NotEnoughCargoSpaceFor1Unit` (`{type, required, free}`).
+    pub fn not_enough_cargo_space_for_unit(type_id: i64, required_m3: f64, free_m3: f64) -> Self {
+        Self::from_client_error(ClientError::not_enough_cargo_space_for_unit(
+            type_id,
+            required_m3,
+            free_m3,
+        ))
+    }
+
+    /// Constructs a typed `DockingRequestDenied` error with a `[101, label]` reason kwarg.
+    pub fn docking_request_denied(
+        reason_label: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::with_client_error(
+            "DockingRequestDenied",
+            message,
+            ClientError::docking_request_denied(reason_label),
+        )
+    }
+
+    /// Constructs a typed `ShipCannotUseStargate` (`{shipTypeID, whitelist}`).
+    pub fn ship_cannot_use_stargate(
+        ship_type_id: i64,
+        whitelist: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::with_client_error(
+            "ShipCannotUseStargate",
+            message,
+            ClientError::ship_cannot_use_stargate(ship_type_id, whitelist),
+        )
+    }
+
+    /// Constructs a typed `TargetTooFar` (`TargetOutOfRange` code) error for tactical range checks.
+    pub fn target_out_of_range(
+        target_name: impl Into<String>,
+        module_type_id: i64,
+        distance_m: f64,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::with_client_error(
+            "TargetOutOfRange",
+            message,
+            ClientError::target_too_far(target_name, module_type_id, distance_m),
+        )
+    }
+
+    /// Constructs a typed `TargetTooFar` error with `code = "TargetTooFar"`.
+    pub fn target_too_far(
+        target_name: impl Into<String>,
+        module_type_id: i64,
+        distance_m: f64,
+    ) -> Self {
+        Self::from_client_error(ClientError::target_too_far(
+            target_name,
+            module_type_id,
+            distance_m,
+        ))
+    }
+
+    /// Constructs a typed `NoCharges` (`NoChargesLoaded` code) error with `[4, launcher_type_id]`.
+    pub fn no_charges_loaded(launcher_type_id: i64, message: impl Into<String>) -> Self {
+        Self::with_client_error(
+            "NoChargesLoaded",
+            message,
+            ClientError::no_charges(launcher_type_id),
+        )
+    }
+
+    /// Constructs a typed `NoCharges` error with `code = "NoCharges"`.
+    pub fn no_charges(launcher_type_id: i64) -> Self {
+        Self::from_client_error(ClientError::no_charges(launcher_type_id))
     }
 
     /// Constructs a typed `MarketExceededOrderCount` (`MaxOpenOrdersReached`) error with
@@ -775,8 +1483,8 @@ impl BridgeRpcError {
             ClientError::user_with_args(
                 UserErrorKey::MarketExceededOrderCount,
                 [
-                    ("curCnt", PyRep::Integer(cur_cnt)),
-                    ("maxCnt", PyRep::Integer(max_cnt)),
+                    ("curCnt", UserErrorArg::Int(cur_cnt)),
+                    ("maxCnt", UserErrorArg::Int(max_cnt)),
                 ],
             ),
         )
@@ -828,17 +1536,17 @@ impl BridgeRpcError {
             }
             "SlashError" => ClientError::user_with_args(
                 UserErrorKey::SlashError,
-                [("reason", PyRep::ascii_bytes(&self.message))],
+                [("reason", UserErrorArg::Str(self.message.clone()))],
             ),
             "UnknownSlashCommand" | "InvalidSlashArgument" | "InvalidSlashArguments" => {
                 ClientError::user_with_args(
                     UserErrorKey::SlashError,
-                    [("reason", PyRep::ascii_bytes(&err_msg))],
+                    [("reason", UserErrorArg::Str(err_msg))],
                 )
             }
             _ if is_slash_rpc => ClientError::user_with_args(
                 UserErrorKey::SlashError,
-                [("reason", PyRep::ascii_bytes(&err_msg))],
+                [("reason", UserErrorArg::Str(err_msg))],
             ),
             "MaxOpenOrdersReached" => ClientError::User {
                 key: UserErrorKey::MarketExceededOrderCount,
@@ -847,7 +1555,16 @@ impl BridgeRpcError {
             "OutsideDockingPerimeter" | "DockingApproach" => {
                 ClientError::user(UserErrorKey::DockingApproach)
             }
+            "TargetOutOfRange" => ClientError::User {
+                key: UserErrorKey::TargetTooFar,
+                args: UserErrorKey::TargetTooFar.default_args(),
+            },
+            "NoChargesLoaded" => ClientError::User {
+                key: UserErrorKey::NoCharges,
+                args: UserErrorKey::NoCharges.default_args(),
+            },
             "CustomInfo" => ClientError::CustomInfo(self.message.clone()),
+            "CustomNotify" => ClientError::CustomNotify(self.message.clone()),
             _ => {
                 if let Some(key) = UserErrorKey::from_code(&self.code) {
                     ClientError::User {
@@ -866,6 +1583,34 @@ impl BridgeRpcError {
 mod tests {
     use super::*;
 
+    fn decode_wrapped_user_error(body: &PyRep) -> (String, Vec<(PyRep, PyRep)>) {
+        let PyRep::Tuple(parts) = body else {
+            panic!("expected ErrorResponse tuple");
+        };
+        assert_eq!(parts[1], PyRep::Integer(MACHONETERR_WRAPPEDEXCEPTION));
+        let PyRep::Tuple(inner) = &parts[2] else {
+            panic!("expected inner payload tuple");
+        };
+        let PyRep::Bytes(raw) = &inner[0] else {
+            panic!("expected marshaled exception bytes");
+        };
+        let PyRep::ObjectEx { header, .. } = marshal::decode(raw).unwrap() else {
+            panic!("expected ObjectEx");
+        };
+        let PyRep::Tuple(h) = *header else {
+            panic!("expected header tuple");
+        };
+        assert_eq!(h[0], PyRep::Token("eveexceptions.UserError".into()));
+        let PyRep::Tuple(u_args) = &h[1] else {
+            panic!("expected UserError args");
+        };
+        let name = u_args[0].as_str().expect("UserError name").to_owned();
+        let PyRep::Dict(entries) = &u_args[1] else {
+            panic!("expected UserError dict");
+        };
+        (name, entries.clone())
+    }
+
     #[test]
     fn all_user_error_keys_round_trip_and_produce_valid_macho_error_body() {
         for &key in UserErrorKey::ALL {
@@ -879,52 +1624,139 @@ mod tests {
             }
             let err = ClientError::user(key);
             let body = err.to_macho_error_body(6);
-            let PyRep::Tuple(parts) = body else {
+            let PyRep::Tuple(parts) = &body else {
                 panic!("expected ErrorResponse tuple");
             };
             assert_eq!(parts[0], PyRep::Integer(6));
-            assert_eq!(parts[1], PyRep::Integer(MACHONETERR_WRAPPEDEXCEPTION));
-            let PyRep::Tuple(inner) = &parts[2] else {
-                panic!("expected inner payload tuple");
-            };
-            let PyRep::Bytes(raw) = &inner[0] else {
-                panic!("expected marshaled exception bytes");
-            };
-            let PyRep::ObjectEx { header, .. } = marshal::decode(raw).unwrap() else {
-                panic!("expected ObjectEx");
-            };
-            let PyRep::Tuple(h) = *header else {
-                panic!("expected header tuple");
-            };
-            assert_eq!(h[0], PyRep::Token("eveexceptions.UserError".into()));
-            let PyRep::Tuple(u_args) = &h[1] else {
-                panic!("expected UserError args");
-            };
-            assert_eq!(u_args[0].as_str(), Some(key.as_str()));
+            let (name, _entries) = decode_wrapped_user_error(&body);
+            assert_eq!(name, key.as_str());
         }
     }
 
     #[test]
+    fn user_error_arg_encodes_v24_tuples_and_6dp_reals() {
+        assert_eq!(
+            UserErrorArg::TypeId(587).to_pyrep(),
+            PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(587)])
+        );
+        assert_eq!(
+            UserErrorArg::Label(UI_LABEL_SHIP_TOO_LARGE).to_pyrep(),
+            PyRep::Tuple(vec![
+                PyRep::Integer(101),
+                PyRep::String(UI_LABEL_SHIP_TOO_LARGE.into())
+            ])
+        );
+        assert_eq!(UserErrorArg::Int(42).to_pyrep(), PyRep::Integer(42));
+        assert_eq!(
+            UserErrorArg::Real(15.123456789).to_pyrep(),
+            PyRep::Real(15.123457)
+        );
+        assert_eq!(UserErrorArg::Real(f64::NAN).to_pyrep(), PyRep::Real(0.0));
+        assert_eq!(
+            UserErrorArg::IskCents(IskCents::from_raw_cents(12_345)).to_pyrep(),
+            PyRep::Real(123.45)
+        );
+
+        let args_slice: &[(&str, UserErrorArg)] = &[("typeID", UserErrorArg::Int(3300))];
+        let from_slice = ClientError::user_with_args(UserErrorKey::SkillMissing, args_slice);
+        let from_array = ClientError::user_with_args(
+            UserErrorKey::SkillMissing,
+            [("typeID", UserErrorArg::Int(3300))],
+        );
+        assert_eq!(from_slice, from_array);
+
+        let arg_rt: UserErrorArg =
+            serde_json::from_str(&serde_json::to_string(&UserErrorArg::TypeId(670)).unwrap())
+                .unwrap();
+        assert_eq!(arg_rt, UserErrorArg::TypeId(670));
+        let lbl_rt: UserErrorArg = serde_json::from_str(
+            &serde_json::to_string(&UserErrorArg::Label(UI_LABEL_SHIP_TOO_LARGE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(lbl_rt, UserErrorArg::Label(UI_LABEL_SHIP_TOO_LARGE));
+    }
+
+    #[test]
+    fn user_error_presentation_is_enforced_per_key_modal_vs_notify() {
+        assert_eq!(
+            UserErrorKey::CustomInfo.presentation(),
+            UserErrorPresentation::Modal
+        );
+        assert_eq!(
+            UserErrorKey::NotEnoughCargoSpace.presentation(),
+            UserErrorPresentation::Modal
+        );
+        assert_eq!(
+            UserErrorKey::ShipCannotUseStargate.presentation(),
+            UserErrorPresentation::Modal
+        );
+        assert_eq!(
+            UserErrorKey::CustomNotify.presentation(),
+            UserErrorPresentation::Notify
+        );
+        assert_eq!(
+            UserErrorKey::DockingRequestDenied.presentation(),
+            UserErrorPresentation::Notify
+        );
+        assert_eq!(
+            UserErrorKey::TargetTooFar.presentation(),
+            UserErrorPresentation::Notify
+        );
+        assert_eq!(
+            UserErrorKey::NoCharges.presentation(),
+            UserErrorPresentation::Notify
+        );
+        assert_eq!(
+            UserErrorKey::TargetNotLocked.presentation(),
+            UserErrorPresentation::Notify
+        );
+
+        let notify = BridgeRpcError::custom_notify("Toast alert");
+        assert_eq!(notify.code, "CustomNotify");
+        assert_eq!(notify.message, "Toast alert");
+        assert_eq!(
+            notify.client_presentation("svc", "m"),
+            UserErrorPresentation::Notify
+        );
+        let client_notify = notify.to_client_error("svc", "m");
+        assert_eq!(client_notify, ClientError::CustomNotify("Toast alert".into()));
+        let (wire_key, wire_dict) = decode_wrapped_user_error(&client_notify.to_macho_error_body(6));
+        assert_eq!(wire_key, "CustomNotify");
+        assert_eq!(
+            wire_dict,
+            vec![(PyRep::ascii_bytes("notify"), PyRep::ascii_bytes("Toast alert"))]
+        );
+    }
+
+    #[test]
     fn client_error_variants_map_totally_without_string_scraping() {
-        let cargo = BridgeRpcError::user_error_with_args(
+        let cargo = BridgeRpcError::hold_capacity_error(
             UserErrorKey::NotEnoughCargoSpace,
-            [
-                ("volume", PyRep::Real(80.0)),
-                ("available", PyRep::Real(15.5)),
-            ],
+            80.0,
+            15.1234567,
         );
         assert_eq!(cargo.code, "NotEnoughCargoSpace");
-        assert_eq!(cargo.message, "volume=80, available=15.5");
+        assert_eq!(cargo.message, "volume=80, available=15.123457");
         assert_eq!(
             cargo.to_client_error("invbroker", "Add"),
             ClientError::User {
                 key: UserErrorKey::NotEnoughCargoSpace,
                 args: vec![
                     ("volume".into(), PyRep::Real(80.0)),
-                    ("available".into(), PyRep::Real(15.5)),
+                    ("available".into(), PyRep::Real(15.123457)),
                 ],
             }
         );
+
+        let cargo_typed = BridgeRpcError::user_error_with_args(
+            UserErrorKey::NotEnoughCargoSpace,
+            [
+                ("volume", UserErrorArg::Real(80.0)),
+                ("available", UserErrorArg::Real(15.5)),
+            ],
+        );
+        assert_eq!(cargo_typed.code, "NotEnoughCargoSpace");
+        assert_eq!(cargo_typed.message, "volume=80, available=15.5");
 
         for cap_key in [
             UserErrorKey::NotEnoughCargoSpace,
@@ -985,6 +1817,49 @@ mod tests {
             ]
         );
 
+        let no_charges = BridgeRpcError::no_charges_loaded(2410, "Empty weapon");
+        assert_eq!(no_charges.code, "NoChargesLoaded");
+        let (nc_key, nc_dict) =
+            decode_wrapped_user_error(&no_charges.to_client_error("dogmaIM", "Activate").to_macho_error_body(6));
+        assert_eq!(nc_key, "NoCharges");
+        assert_eq!(
+            nc_dict,
+            vec![(
+                PyRep::ascii_bytes("launcher"),
+                PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(2410)]),
+            )]
+        );
+
+        let docking_denied =
+            BridgeRpcError::docking_request_denied(UI_LABEL_SHIP_TOO_LARGE, "Too big");
+        let (dd_key, dd_dict) = decode_wrapped_user_error(
+            &docking_denied
+                .to_client_error("station", "Dock")
+                .to_macho_error_body(6),
+        );
+        assert_eq!(dd_key, "DockingRequestDenied");
+        assert_eq!(
+            dd_dict,
+            vec![(
+                PyRep::ascii_bytes("reason"),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(101),
+                    PyRep::String(UI_LABEL_SHIP_TOO_LARGE.into()),
+                ]),
+            )]
+        );
+
+        let too_far = BridgeRpcError::target_out_of_range("Guristas Scout", 484, 42_500.5, "Too far");
+        assert_eq!(too_far.code, "TargetOutOfRange");
+        let (tf_key, tf_dict) = decode_wrapped_user_error(
+            &too_far
+                .to_client_error("dogmaIM", "Activate")
+                .to_macho_error_body(6),
+        );
+        assert_eq!(tf_key, "TargetTooFar");
+        assert!(tf_dict.contains(&(PyRep::ascii_bytes("targetname"), PyRep::ascii_bytes("Guristas Scout"))));
+        assert!(tf_dict.contains(&(PyRep::ascii_bytes("module"), PyRep::Integer(484))));
+        assert!(tf_dict.contains(&(PyRep::ascii_bytes("distance"), PyRep::Real(42_500.5))));
         let orders = BridgeRpcError::max_open_orders_reached(5, 5);
         assert_eq!(orders.code, "MaxOpenOrdersReached");
         assert_eq!(
@@ -1023,11 +1898,11 @@ mod tests {
     fn bridge_rpc_error_carries_client_error_by_value_across_serde_without_collisions() {
         let skill_a = BridgeRpcError::user_error_with_args(
             UserErrorKey::SkillMissing,
-            [("typeID", PyRep::Integer(3300))],
+            [("typeID", UserErrorArg::Int(3300))],
         );
         let skill_b = BridgeRpcError::user_error_with_args(
             UserErrorKey::SkillMissing,
-            [("typeID", PyRep::Integer(3436))],
+            [("typeID", UserErrorArg::Int(3436))],
         );
         let skill_empty = BridgeRpcError::from_user_key(UserErrorKey::SkillMissing);
         assert_eq!(

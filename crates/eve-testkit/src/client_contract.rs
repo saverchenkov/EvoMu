@@ -1899,6 +1899,25 @@ pub fn validate_user_error_catalogue(sde: &SdeRegistry) -> Result<usize, String>
                         entry.dialog_id
                     ));
                 }
+                if key.v24_dialog_type() != Some(entry.dialog_type) {
+                    return Err(format!(
+                        "UserErrorKey::{key:?} ({name:?}) dialog_type mismatch: expected {:?}, got {}",
+                        key.v24_dialog_type(),
+                        entry.dialog_type
+                    ));
+                }
+                let expected_pres = if matches!(entry.dialog_type, 1 | 3) {
+                    eve_proto::UserErrorPresentation::Notify
+                } else {
+                    eve_proto::UserErrorPresentation::Modal
+                };
+                if key.presentation() != expected_pres {
+                    return Err(format!(
+                        "UserErrorKey::{key:?} ({name:?}) presentation mismatch: dialog_type {} expects {expected_pres:?}, got {:?}",
+                        entry.dialog_type,
+                        key.presentation()
+                    ));
+                }
             }
             None => {
                 if !eve_proto::V24_PROGRAMMATIC_USER_ERROR_KEYS.contains(&name) {
@@ -1906,10 +1925,97 @@ pub fn validate_user_error_catalogue(sde: &SdeRegistry) -> Result<usize, String>
                         "UserErrorKey::{key:?} ({name:?}) has no dialogs.static ID and is not in V24_PROGRAMMATIC_USER_ERROR_KEYS"
                     ));
                 }
+                if key.v24_dialog_type().is_some() {
+                    return Err(format!(
+                        "Programmatic UserErrorKey::{key:?} ({name:?}) must have v24_dialog_type() == None"
+                    ));
+                }
             }
         }
     }
     Ok(eve_proto::UserErrorKey::ALL.len())
+}
+
+/// Scans `crates/` `.rs` files for literal `UserErrorArg::Label` arguments and checks every
+/// registry label in [`eve_proto::V24_USER_ERROR_LABELS`] against V24.01
+/// `res:/localizationfsd/localization_fsd_main.pickle` (`#1086`).
+pub fn validate_user_error_labels(sde: &SdeRegistry, crates_dir: &Path) -> Result<usize, String> {
+    let main_bundle = sde
+        .load_localization_main()
+        .map_err(|e| format!("failed to load V24.01 localization_fsd_main.pickle: {e}"))?;
+    let mut valid_paths: BTreeSet<String> = BTreeSet::new();
+    for entry in main_bundle.labels.values() {
+        let full = if entry.full_path.is_empty() {
+            entry.label.clone()
+        } else if entry.label.is_empty() {
+            entry.full_path.clone()
+        } else {
+            format!("{}/{}", entry.full_path.trim_end_matches('/'), entry.label)
+        };
+        valid_paths.insert(full);
+    }
+
+    let mut checked = 0usize;
+    for &label in eve_proto::V24_USER_ERROR_LABELS {
+        if !valid_paths.contains(label) {
+            return Err(format!(
+                "V24_USER_ERROR_LABELS entry {label:?} does not exist in V24.01 localization_fsd_main.pickle"
+            ));
+        }
+        checked += 1;
+    }
+
+    fn walk_rs(dir: &Path, found: &mut Vec<(PathBuf, String)>) -> Result<(), String> {
+        let entries =
+            std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("dir entry in {}: {e}", dir.display()))?;
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().and_then(|n| n.to_str()) == Some("target") {
+                    continue;
+                }
+                walk_rs(&path, found)?;
+            } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+                let src = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("read {}: {e}", path.display()))?;
+                let needle = "UserErrorArg::Label(";
+                for line in src.lines() {
+                    if line.trim_start().starts_with("//") {
+                        continue;
+                    }
+                    let mut rest = line;
+                    while let Some(idx) = rest.find(needle) {
+                        rest = &rest[idx + needle.len()..];
+                        let trimmed = rest.trim_start();
+                        if let Some(after_quote) = trimmed.strip_prefix('"') {
+                            if let Some(end_quote) = after_quote.find('"') {
+                                let literal = &after_quote[..end_quote];
+                                if !literal.is_empty() && !literal.contains('\\') {
+                                    found.push((path.clone(), literal.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let mut literal_labels = Vec::new();
+    walk_rs(crates_dir, &mut literal_labels)?;
+    for (path, label) in literal_labels {
+        if !valid_paths.contains(&label) {
+            return Err(format!(
+                "UserErrorArg::Label({label:?}) in {} does not exist in V24.01 localization_fsd_main.pickle",
+                path.display()
+            ));
+        }
+        checked += 1;
+    }
+
+    Ok(checked)
 }
 
 /// Counts non-test `BridgeRpcError::user_error(` call sites under `eve_server_src_dir`.
@@ -2391,12 +2497,17 @@ mod tests {
         let sde = SdeRegistry::with_canonical_seed();
         let checked = validate_user_error_catalogue(&sde)
             .expect("all UserErrorKey variants must match V24.01 dialogs.static or programmatic catalogue");
-        assert!(checked >= 60, "expected >= 60 catalogued UserErrorKey variants, got {checked}");
+        assert!(checked >= 95, "expected >= 95 catalogued UserErrorKey variants, got {checked}");
 
-        let server_src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let crates_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join("eve-server/src");
+            .to_path_buf();
+        let labels_checked = validate_user_error_labels(&sde, &crates_dir)
+            .expect("all V24_USER_ERROR_LABELS and UserErrorArg::Label paths must exist in localization_fsd_main.pickle");
+        assert!(labels_checked >= 1, "expected at least one validated localization label");
+
+        let server_src = crates_dir.join("eve-server/src");
         let count = check_untyped_user_error_ratchet(&server_src)
             .expect("untyped BridgeRpcError::user_error ratchet must hold");
         assert_eq!(

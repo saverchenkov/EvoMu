@@ -175,7 +175,10 @@ pub(super) fn handle_insure_ship(
                 };
                 return Err(BridgeRpcError::user_error_with_args(
                     eve_proto::UserErrorKey::InsureShipFailedSingleContract,
-                    [("ownerName", PyRep::Integer(contract_owner_id))],
+                    [(
+                        "ownerName",
+                        eve_proto::UserErrorArg::Int(contract_owner_id),
+                    )],
                 ));
             }
         }

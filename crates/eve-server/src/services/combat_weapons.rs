@@ -671,14 +671,18 @@ pub async fn handle_weapons(
             };
 
             if !is_missile_launcher && dist > optimal_range + 3.0 * falloff_range {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetOutOfRange".into(),
-                    message: format!(
+                return Some(Err(BridgeRpcError::target_out_of_range(
+                    crate::services::inventory_fitting::resolve_target_display_name(
+                        ctx,
+                        target_ball_id,
+                    ),
+                    mod_type.type_id as i64,
+                    dist,
+                    format!(
                         "Target {target_ball_id} is {dist:.1} m away (exceeds range {:.1} m)",
                         optimal_range + 3.0 * falloff_range
                     ),
-                    client_error: None,
-                }));
+                )));
             }
 
             let in_delay = ctx.is_module_in_reactivation_delay(ship_id, module_id);

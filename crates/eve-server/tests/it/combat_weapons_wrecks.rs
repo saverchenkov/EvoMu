@@ -1600,7 +1600,7 @@ pub(crate) mod gh1082_weapons_and_death {
             dup_err.to_client_error("dogmaIM", "Activate"),
             ClientError::user_with_args(
                 UserErrorKey::EffectAlreadyActive2,
-                [("modulename", PyRep::String("200mm AutoCannon I".into()))],
+                [("modulename", eve_proto::UserErrorArg::Str("200mm AutoCannon I".into()))],
             )
         );
 

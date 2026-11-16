@@ -692,12 +692,14 @@ pub async fn activate_superweapon_with_args(
             .copied()
             .unwrap_or(250_000.0)
             .max(100_000.0);
-        if (tb.position - ship_pos).length() > max_dd_range {
-            return Err(BridgeRpcError {
-                code: "TargetOutOfRange".into(),
-                message: format!("Target {tid} exceeds Doomsday range ({max_dd_range:.0}m)"),
-                client_error: None,
-            });
+        let dist = (tb.position - ship_pos).length();
+        if dist > max_dd_range {
+            return Err(BridgeRpcError::target_out_of_range(
+                crate::services::inventory_fitting::resolve_target_display_name(ctx, tid),
+                mod_type_id as i64,
+                dist,
+                format!("Target {tid} exceeds Doomsday range ({max_dd_range:.0}m)"),
+            ));
         }
         let (vic_char_opt, is_p_struct) = ctx.db.with_snapshot(|snap| {
             let vc = snap

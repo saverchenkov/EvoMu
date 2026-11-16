@@ -228,15 +228,16 @@ pub async fn write_framed_pyrep<W: AsyncWriteExt + Unpin>(
     .await
 }
 
-pub(crate) async fn write_framed_pyrep_with_timeout<W: AsyncWriteExt + Unpin>(
+async fn write_encoded_frame_with_timeout<W: AsyncWriteExt + Unpin>(
     stream: &mut W,
-    rep: &PyRep,
+    bytes: &[u8],
     write_timeout: std::time::Duration,
 ) -> Result<()> {
-    let bytes = marshal::encode(rep);
+    let frame_len = u32::try_from(bytes.len())
+        .map_err(|_| anyhow::anyhow!("machoNet frame length {} exceeds u32", bytes.len()))?;
     tokio::time::timeout(write_timeout, async {
-        stream.write_u32_le(bytes.len() as u32).await?;
-        stream.write_all(&bytes).await?;
+        stream.write_u32_le(frame_len).await?;
+        stream.write_all(bytes).await?;
         stream.flush().await?;
         Ok::<(), std::io::Error>(())
     })
@@ -248,6 +249,16 @@ pub(crate) async fn write_framed_pyrep_with_timeout<W: AsyncWriteExt + Unpin>(
         )
     })??;
     Ok(())
+}
+
+pub(crate) async fn write_framed_pyrep_with_timeout<W: AsyncWriteExt + Unpin>(
+    stream: &mut W,
+    rep: &PyRep,
+    write_timeout: std::time::Duration,
+) -> Result<()> {
+    let bytes = marshal::try_encode_with_limits(rep, MAX_MACHO_FRAME_LEN)
+        .map_err(|e| anyhow::anyhow!("Failed to marshal machoNet frame: {e}"))?;
+    write_encoded_frame_with_timeout(stream, &bytes, write_timeout).await
 }
 
 /// Materializes an [`crate::outbound_sequencer::OutFrame`] into the exact `MachoPacket` `PyRep`
@@ -307,6 +318,116 @@ async fn write_out_frames<W: AsyncWriteExt + Unpin>(
     for frame in frames {
         let wire_pyrep = out_frame_to_wire_pyrep(proxy_node_id, client_id, user_id, frame);
         write_framed_pyrep(writer, &wire_pyrep).await?;
+    }
+    Ok(())
+}
+
+// Section 4 (#1086) helpers kept self-contained for clean merge/rebase ergonomics.
+fn truncate_internal_error_message(msg: &str, max_chars: usize) -> String {
+    let mut chars = msg.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
+pub(crate) fn build_call_req_internal_error_packet(
+    req_source: &MachoAddress,
+    req_dest: Option<&MachoAddress>,
+    user_id: Option<u64>,
+    reason: &str,
+) -> MachoPacket {
+    let short_reason = truncate_internal_error_message(reason, 512);
+    let client_err = eve_proto::ClientError::Internal(short_reason);
+    let payload = client_err.to_macho_error_body(MachoPacketType::CallReq as i64);
+    MachoPacket {
+        packet_type: MachoPacketType::ErrorResponse,
+        source: match req_dest {
+            Some(dest) => reply_source_address(dest),
+            None => MachoAddress::Node {
+                node_id: MACHO_PROXY_NODE_ID,
+                service: None,
+                call_id: 0,
+            },
+        },
+        destination: req_source.clone(),
+        user_id,
+        payload,
+        named_payload: HashMap::new(),
+    }
+}
+
+async fn write_call_req_internal_error_fallback<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    req_source: &MachoAddress,
+    req_dest: Option<&MachoAddress>,
+    user_id: Option<u64>,
+    reason: &str,
+) -> Result<()> {
+    let err_pkt = build_call_req_internal_error_packet(req_source, req_dest, user_id, reason);
+    write_framed_pyrep(writer, &err_pkt.to_pyrep()).await
+}
+
+fn recover_call_req_from_corrupt_payload(
+    payload: &[u8],
+    max_frame_bytes: usize,
+    max_nodes: usize,
+) -> Option<(MachoAddress, u64)> {
+    marshal::decode_partial_call_header(payload, max_frame_bytes, max_nodes)
+        .and_then(|rep| eve_machonet::recover_call_req_source_from_pyrep(&rep))
+}
+
+pub(crate) async fn write_out_frames_for_call_req<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    proxy_node_id: u64,
+    client_id: u64,
+    user_id: Option<u64>,
+    req_source: &MachoAddress,
+    req_dest: &MachoAddress,
+    frames: &[crate::outbound_sequencer::OutFrame],
+) -> Result<()> {
+    let write_timeout = std::time::Duration::from_secs(WRITE_FRAME_TIMEOUT_SECS);
+    let mut call_reply_delivered = false;
+    for frame in frames {
+        let is_call_rsp = matches!(frame, crate::outbound_sequencer::OutFrame::CallRsp { .. });
+        let wire_pyrep = out_frame_to_wire_pyrep(proxy_node_id, client_id, user_id, frame);
+        match marshal::try_encode_with_limits(&wire_pyrep, MAX_MACHO_FRAME_LEN) {
+            Ok(bytes) => {
+                write_encoded_frame_with_timeout(writer, &bytes, write_timeout).await?;
+                if is_call_rsp {
+                    call_reply_delivered = true;
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to marshal outbound frame for CallReq call_id={}: {e}",
+                    req_source.call_id()
+                );
+                if is_call_rsp && req_source.call_id() > 0 {
+                    write_call_req_internal_error_fallback(
+                        writer,
+                        req_source,
+                        Some(req_dest),
+                        user_id,
+                        &format!("Reply serialization failed: {e}"),
+                    )
+                    .await?;
+                    call_reply_delivered = true;
+                }
+            }
+        }
+    }
+    if !call_reply_delivered && req_source.call_id() > 0 {
+        write_call_req_internal_error_fallback(
+            writer,
+            req_source,
+            Some(req_dest),
+            user_id,
+            "Internal error: CallReq yielded no serializable reply frame",
+        )
+        .await?;
     }
     Ok(())
 }
@@ -484,11 +605,13 @@ async fn dispatch_call_req_to_wire<W: AsyncWriteExt + Unpin>(
     )
     .await;
     let frame_user_id = session.user_id.or(user_id_before_call);
-    write_out_frames(
+    write_out_frames_for_call_req(
         writer,
         MACHO_PROXY_NODE_ID,
         client_id,
         frame_user_id,
+        source,
+        destination,
         &wire_out.out_frames,
     )
     .await
@@ -1757,6 +1880,30 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                 {
                     Ok(r) => r,
                     Err(e) => {
+                        if handshake.is_authenticated() {
+                            if let Some((req_source, recovered_call_id)) =
+                                recover_call_req_from_corrupt_payload(
+                                    &payload,
+                                    max_frame_bytes,
+                                    max_nodes,
+                                )
+                            {
+                                warn!("Failed to decode authenticated CallReq call_id={recovered_call_id} on machoNet session {session_id}: {e}; returning wrapped Internal error");
+                                if write_call_req_internal_error_fallback(
+                                    &mut writer,
+                                    &req_source,
+                                    None,
+                                    session.user_id,
+                                    &format!("Malformed CallReq payload: {e}"),
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                                continue;
+                            }
+                        }
                         warn!("Failed to decode marshal payload on machoNet session {session_id}: {e}");
                         let closed = GPSTransportClosed::new(
                             format!("Invalid marshal frame: {e}"),
@@ -1970,6 +2117,24 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
 
                 // Handshake is complete (`Authenticated`): only valid `MachoPacket`s are processed now.
                 let Some(pkt) = MachoPacket::from_pyrep(&pyrep) else {
+                    if let Some((req_source, recovered_call_id)) =
+                        eve_machonet::recover_call_req_source_from_pyrep(&pyrep)
+                    {
+                        warn!("Failed to parse authenticated CallReq packet call_id={recovered_call_id} on machoNet session {session_id}; returning wrapped Internal error");
+                        if write_call_req_internal_error_fallback(
+                            &mut writer,
+                            &req_source,
+                            None,
+                            session.user_id,
+                            "Malformed CallReq packet",
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
                     debug!("Ignoring non-MachoPacket frame after authentication on session {session_id}");
                     continue;
                 };
@@ -2100,6 +2265,35 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 let _ = handle.flush_peer_observer_updates(Some(plan.ship_id)).await;
                             }
                             if plan.settle_deadline > tokio::time::Instant::now() {
+                                if let Some(prev_pending) = pending_dock.take() {
+                                    let user_id_before = session.user_id;
+                                    let mut wire_refs = CallReqWireRefs {
+                                        client_id,
+                                        sys_rx: &mut sys_rx,
+                                        subscribed_sys_id: &mut subscribed_sys_id,
+                                        wire_state: &mut wire_state,
+                                        deferred_ship_id: &mut deferred_ship_id,
+                                    };
+                                    if dispatch_call_req_to_wire(
+                                        &ctx,
+                                        &mut session,
+                                        &mut wire_refs,
+                                        &mut writer,
+                                        user_id_before,
+                                        &prev_pending.source,
+                                        &prev_pending.destination,
+                                        &prev_pending.service,
+                                        prev_pending.bound_id,
+                                        &prev_pending.method,
+                                        &prev_pending.call_args,
+                                        &prev_pending.call_kwargs,
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
                                 pending_dock = Some(PendingDockCall {
                                     source: pkt.source,
                                     destination: pkt.destination,

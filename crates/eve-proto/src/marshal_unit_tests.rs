@@ -764,3 +764,117 @@ fn v24_object_caching_classic_classes_use_py_object_and_remap_legacy_names() {
     }
 }
 
+#[test]
+fn try_encode_enforces_depth_collection_and_frame_limits() {
+    let normal = PyRep::Tuple(vec![PyRep::Integer(6), PyRep::String("ok".into())]);
+    assert_eq!(try_encode(&normal).unwrap(), encode(&normal));
+
+    let mut deep = PyRep::None;
+    for _ in 0..=MAX_RECURSION_DEPTH {
+        deep = PyRep::Tuple(vec![deep]);
+    }
+    assert_eq!(try_encode(&deep), Err(ProtoError::RecursionLimitExceeded));
+
+    let mut deep_sub = PyRep::None;
+    for _ in 0..=MAX_RECURSION_DEPTH {
+        deep_sub = PyRep::SubStream(Box::new(deep_sub));
+    }
+    assert_eq!(
+        try_encode(&deep_sub),
+        Err(ProtoError::RecursionLimitExceeded)
+    );
+
+    let too_many = PyRep::List(vec![PyRep::None; MAX_COLLECTION_LEN + 1]);
+    assert_eq!(
+        try_encode(&too_many),
+        Err(ProtoError::CollectionTooLarge(MAX_COLLECTION_LEN + 1))
+    );
+
+    let big_bytes = PyRep::Bytes(vec![b'a'; 128]);
+    assert!(matches!(
+        try_encode_with_limits(&big_bytes, 64),
+        Err(ProtoError::FrameTooLarge(_))
+    ));
+
+    let big_sub = PyRep::SubStream(Box::new(PyRep::Bytes(vec![b'b'; 128])));
+    assert!(matches!(
+        try_encode_with_limits(&big_sub, 64),
+        Err(ProtoError::FrameTooLarge(_))
+    ));
+}
+
+#[test]
+fn decode_partial_call_header_recovers_source_from_corrupted_call_req_payload() {
+    let source = PyRep::Object {
+        type_name: "carbon.common.script.net.machoNetAddress.MachoAddress".into(),
+        args: Box::new(PyRep::Tuple(vec![
+            PyRep::Integer(2),
+            PyRep::Integer(101),
+            PyRep::Integer(77),
+            PyRep::None,
+        ])),
+    };
+    let dest = PyRep::Object {
+        type_name: "carbon.common.script.net.machoNetAddress.MachoAddress".into(),
+        args: Box::new(PyRep::Tuple(vec![
+            PyRep::Integer(8),
+            PyRep::ascii_bytes("stationSvc"),
+            PyRep::Integer(0),
+        ])),
+    };
+    let call_req = PyRep::Object {
+        type_name: "carbon.common.script.net.machoNetPacket.CallReq".into(),
+        args: Box::new(PyRep::Tuple(vec![
+            PyRep::Integer(6),
+            source.clone(),
+            dest,
+            PyRep::Integer(9001),
+            PyRep::Tuple(vec![PyRep::String("payload_marker_12345".into())]),
+            PyRep::Dict(Vec::new()),
+        ])),
+    };
+
+    let raw = encode(&call_req);
+    let truncated = &raw[..raw.len() - 12];
+    assert!(decode_with_limits(truncated, MAX_FRAME_SIZE, MAX_DECODED_NODES).is_err());
+    assert_eq!(
+        decode_partial_call_header(truncated, MAX_FRAME_SIZE, MAX_DECODED_NODES),
+        Some(PyRep::Tuple(vec![PyRep::Integer(6), source.clone()]))
+    );
+
+    let mut bad_opcode = raw.clone();
+    // Corrupt the trailing empty Dict opcode (`raw.len() - 2`) with an invalid marshal opcode.
+    let tail = bad_opcode.len() - 2;
+    bad_opcode[tail] = 0x3E;
+    assert!(decode_with_limits(&bad_opcode, MAX_FRAME_SIZE, MAX_DECODED_NODES).is_err());
+    assert_eq!(
+        decode_partial_call_header(&bad_opcode, MAX_FRAME_SIZE, MAX_DECODED_NODES),
+        Some(PyRep::Tuple(vec![PyRep::Integer(6), source.clone()]))
+    );
+
+    let zlib_bad = {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(&bad_opcode).unwrap();
+        enc.finish().unwrap()
+    };
+    assert!(decode_with_limits(&zlib_bad, MAX_FRAME_SIZE, MAX_DECODED_NODES).is_err());
+    assert_eq!(
+        decode_partial_call_header(&zlib_bad, MAX_FRAME_SIZE, MAX_DECODED_NODES),
+        Some(PyRep::Tuple(vec![PyRep::Integer(6), source]))
+    );
+
+    assert_eq!(
+        decode_partial_call_header(b"not_marshal", MAX_FRAME_SIZE, MAX_DECODED_NODES),
+        None
+    );
+    let mut bad_save = vec![MARSHAL_HEADER_BYTE];
+    bad_save.extend_from_slice(&((MAX_COLLECTION_LEN as u32) + 1).to_le_bytes());
+    assert_eq!(
+        decode_partial_call_header(&bad_save, MAX_FRAME_SIZE, MAX_DECODED_NODES),
+        None
+    );
+}
+

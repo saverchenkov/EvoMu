@@ -287,12 +287,16 @@ pub async fn activate_interdiction_sphere_launcher(
                 let max_fit = ((free_m3 + 1e-9) / probe_vol).floor().max(0.0) as i32;
                 if max_fit < excess {
                     let req_vol = (excess as f64) * probe_vol;
-                    return Err(BridgeRpcError::user_error_with_args(
-                        eve_proto::UserErrorKey::NotEnoughCargoSpace,
-                        [
-                            ("volume", PyRep::Real(req_vol)),
-                            ("available", PyRep::Real(free_m3.max(0.0))),
-                        ],
+                    return Err(BridgeRpcError::with_client_error(
+                        "NotEnoughCargoSpace",
+                        format!(
+                            "Not enough cargo space to return {excess} excess probe(s) (free: {free_m3:.2} m3)"
+                        ),
+                        eve_proto::ClientError::hold_capacity_error(
+                            eve_proto::UserErrorKey::NotEnoughCargoSpace,
+                            req_vol,
+                            free_m3.max(0.0),
+                        ),
                     ));
                 }
                 if let Some(ci) = snap.items.get_mut(&charge_item_id) {

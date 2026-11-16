@@ -481,15 +481,19 @@ pub async fn handle_legacy_and_ess(
 
             let dist = attacker_ball.position.distance(target_ball.position);
             if dist > optimal_range + 3.0 * falloff_range {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetOutOfRange".into(),
-                    message: format!(
+                return Some(Err(BridgeRpcError::target_out_of_range(
+                    crate::services::inventory_fitting::resolve_target_display_name(
+                        ctx,
+                        target_ball_id,
+                    ),
+                    weapon_type.type_id as i64,
+                    dist,
+                    format!(
                         "Target {target_id} is {:.1} m away (exceeds weapon range {:.1} m)",
                         dist,
                         optimal_range + 3.0 * falloff_range
                     ),
-                    client_error: None,
-                }));
+                )));
             }
 
             // Pre-check weapon rate-of-fire cycle ticks (SDE attr 51 `speed` in ms) BEFORE consuming ammo

@@ -922,12 +922,14 @@ pub(crate) fn handle_load_ammo(
             {
                 let available_vol =
                     (cargo_cap - (current_cargo_used - removed_from_cargo_vol)).max(0.0);
-                return Err(BridgeRpcError::user_error_with_args(
-                    eve_proto::UserErrorKey::NotEnoughCargoSpace,
-                    [
-                        ("volume", PyRep::Real(unloaded_to_cargo_vol)),
-                        ("available", PyRep::Real(available_vol)),
-                    ],
+                return Err(BridgeRpcError::with_client_error(
+                    "NotEnoughCargoSpace",
+                    format!("Not enough cargo space on ship {ship_id} to unload existing charges ({unloaded_to_cargo_vol:.1} m³ needed)"),
+                    eve_proto::ClientError::hold_capacity_error(
+                        eve_proto::UserErrorKey::NotEnoughCargoSpace,
+                        unloaded_to_cargo_vol,
+                        available_vol,
+                    ),
                 ));
             }
         }

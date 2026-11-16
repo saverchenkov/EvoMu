@@ -937,11 +937,12 @@ async fn handle_cmd_unanchor(
         .unwrap_or(glam::DVec3::ZERO);
     let dist = ship_pos.distance(target_ball.position);
     if dist > 5_000.0 {
-        return Err(BridgeRpcError {
-            code: "TargetOutOfRange".into(),
-            message: format!("Target {target_id} is {dist:.1} m away (max interaction distance 5,000 m)"),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::target_out_of_range(
+            crate::services::inventory_fitting::resolve_target_display_name(ctx, target_id),
+            0,
+            dist,
+            format!("Target {target_id} is {dist:.1} m away (max interaction distance 5,000 m)"),
+        ));
     }
 
     let caller_corp_id = session.corporation_id;
@@ -1317,11 +1318,12 @@ async fn handle_open_shipping_unit_storage(
 
     let dist = ship_pos.distance(unit_ball.position);
     if dist > 5_000.0 {
-        return Err(BridgeRpcError {
-            code: "TargetOutOfRange".into(),
-            message: format!("Shipping unit is {dist:.1} m away (max interaction distance 5,000 m)"),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::target_out_of_range(
+            crate::services::inventory_fitting::resolve_target_display_name(ctx, unit_id),
+            0,
+            dist,
+            format!("Shipping unit is {dist:.1} m away (max interaction distance 5,000 m)"),
+        ));
     }
 
     let unit_type = ctx.sde.types.get(&unit_ball.type_id);

@@ -923,12 +923,16 @@ pub async fn handle_skyhook_component_call(
                 let max_units = ((free_m3 + 1e-9) / unit_vol).floor() as u64;
                 if max_units == 0 {
                     let req_vol = (req_qty_opt.unwrap_or(1) as f64) * unit_vol;
-                    return Err(BridgeRpcError::user_error_with_args(
-                        eve_proto::UserErrorKey::NotEnoughCargoSpace,
-                        [
-                            ("volume", PyRep::Real(req_vol)),
-                            ("available", PyRep::Real(free_m3.max(0.0))),
-                        ],
+                    return Err(BridgeRpcError::with_client_error(
+                        "NotEnoughCargoSpace",
+                        format!(
+                            "Active ship {ship_id} does not have enough free cargo capacity to extract Skyhook reagents"
+                        ),
+                        eve_proto::ClientError::hold_capacity_error(
+                            eve_proto::UserErrorKey::NotEnoughCargoSpace,
+                            req_vol,
+                            free_m3.max(0.0),
+                        ),
                     ));
                 }
                 let take = req_qty_opt.unwrap_or(entry.1).min(entry.1).min(max_units);

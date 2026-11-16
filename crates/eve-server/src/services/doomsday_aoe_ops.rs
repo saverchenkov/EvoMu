@@ -127,6 +127,7 @@ struct TitanDoomsdaySetup {
 
 fn validate_doomsday_target_points(
     ship_pos: DVec3,
+    mod_type_id: i64,
     max_range_m: f64,
     points: &[DVec3],
 ) -> Result<(), BridgeRpcError> {
@@ -138,12 +139,14 @@ fn validate_doomsday_target_points(
                 client_error: None,
             });
         }
-        if (*pt - ship_pos).length() > max_range_m {
-            return Err(BridgeRpcError {
-                code: "TargetOutOfRange".into(),
-                message: format!("Doomsday target point exceeds max range ({max_range_m} m)"),
-                client_error: None,
-            });
+        let dist = (*pt - ship_pos).length();
+        if dist > max_range_m {
+            return Err(BridgeRpcError::target_out_of_range(
+                "Target point",
+                mod_type_id,
+                dist,
+                format!("Doomsday target point exceeds max range ({max_range_m} m)"),
+            ));
         }
     }
     Ok(())
@@ -378,7 +381,12 @@ where
         .filter(|&r| r > 0.0)
         .unwrap_or(150_000.0);
     let resolved_targets = build_targets(ship_pos, &all_balls)?;
-    validate_doomsday_target_points(ship_pos, max_range_m, &resolved_targets)?;
+    validate_doomsday_target_points(
+        ship_pos,
+        mod_type.map(|t| t.type_id as i64).unwrap_or(0),
+        max_range_m,
+        &resolved_targets,
+    )?;
 
     let immob_secs = (mod_type
         .and_then(|t| t.default_attributes.get(&2428).copied())
