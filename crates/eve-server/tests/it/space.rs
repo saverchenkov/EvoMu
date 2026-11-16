@@ -621,8 +621,8 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
         .drain_observer_updates(ship_id)
         .await
         .expect("drain movement observer updates");
-    // SetSpeedFraction, GotoDirection, FollowBall, Orbit, Stop, WarpTo + OnSpecialFX('effects.Warping') + SetBallMassive(false) + SetSpeedFraction(1.0)
-    assert_eq!(evs.len(), 9);
+    // SetSpeedFraction, GotoDirection, (FollowBall + SetSpeedFraction), Orbit, (SetSpeedFraction + Stop + SetBallVelocity), WarpTo + OnSpecialFX('effects.Warping') + SetBallMassive(false) + SetSpeedFraction(1.0)
+    assert_eq!(evs.len(), 12);
     let encoded_updates = eve_proto::marshal::encode(&pyrep_updates);
     let decoded_updates =
         eve_proto::marshal::decode(&encoded_updates).expect("marshal roundtrip on movement updates");
@@ -672,9 +672,13 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
     );
 
     let (a3, args3) = extract_action(3);
-    assert_eq!(a3, "Orbit");
+    assert_eq!(a3, "SetSpeedFraction");
+    assert_eq!(args3, &[PyRep::Integer(ship_id), PyRep::Real(0.75)]);
+
+    let (a4, args4) = extract_action(4);
+    assert_eq!(a4, "Orbit");
     assert_eq!(
-        args3,
+        args4,
         &[
             PyRep::Integer(ship_id),
             PyRep::Integer(60_003_760),
@@ -682,23 +686,32 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
         ]
     );
 
-    let (a4, args4) = extract_action(4);
-    assert_eq!(a4, "Stop");
-    assert_eq!(args4, &[PyRep::Integer(ship_id)]);
-
     let (a5, args5) = extract_action(5);
-    assert_eq!(a5, "WarpTo");
-    assert_eq!(args5[0], PyRep::Integer(ship_id));
-    assert_eq!(args5.len(), 6);
-    assert_eq!(args5[5], PyRep::Integer(5000));
+    assert_eq!(a5, "SetSpeedFraction");
+    assert_eq!(args5, &[PyRep::Integer(ship_id), PyRep::Real(0.0)]);
+
+    let (a6, args6) = extract_action(6);
+    assert_eq!(a6, "Stop");
+    assert_eq!(args6, &[PyRep::Integer(ship_id)]);
+
+    let (a7, args7) = extract_action(7);
+    assert_eq!(a7, "SetBallVelocity");
+    assert_eq!(args7[0], PyRep::Integer(ship_id));
+    assert_eq!(args7.len(), 4);
+
+    let (a8, args8) = extract_action(8);
+    assert_eq!(a8, "WarpTo");
+    assert_eq!(args8[0], PyRep::Integer(ship_id));
+    assert_eq!(args8.len(), 6);
+    assert_eq!(args8[5], PyRep::Integer(5000));
 
     // Warp tunnel visual goes out as OnSpecialFX('effects.Warping'); OnActivatingWarp is raised by
     // the client's own destiny tick and must never appear on the wire.
-    let (a6, args6) = extract_action(6);
-    assert_eq!(a6, "OnSpecialFX");
-    assert_eq!(args6[0], PyRep::Integer(ship_id));
-    assert!(args6.iter().any(|a| a.as_str() == Some("effects.Warping")));
-    assert!((0..7).all(|i| extract_action(i).0 != "OnActivatingWarp"));
+    let (a9, args9) = extract_action(9);
+    assert_eq!(a9, "OnSpecialFX");
+    assert_eq!(args9[0], PyRep::Integer(ship_id));
+    assert!(args9.iter().any(|a| a.as_str() == Some("effects.Warping")));
+    assert!((0..10).all(|i| extract_action(i).0 != "OnActivatingWarp"));
 
     // 6. Step Jita ticks until ship completes warp at Perimeter Stargate (50001249), verifying 1-second tick advancement and per-tick DoDestinyUpdate stamps
     let mut prev_tick = jita_handle
@@ -722,9 +735,17 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
     }
     let _ = jita_handle.drain_observer_updates(ship_id).await;
     let tb1 = jita_handle.step_manual(1.0).await.expect("step_manual t1");
-    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_id), "CmdStop", &[], &kw, None)
-        .await
-        .expect("CmdStop at t1");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_id),
+        "CmdGotoDirection",
+        &[PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CmdGotoDirection at t1");
     let (_t1, _ev1, py1) = jita_handle.drain_observer_updates(ship_id).await.unwrap();
     let tb2 = jita_handle.step_manual(1.0).await.expect("step_manual t2");
     assert_eq!(tb2.tick, tb1.tick + 1);

@@ -65,6 +65,8 @@ impl Ballpark {
             self.sim_unix_secs = self.sim_unix_secs.saturating_add(dt.round().max(0.0) as u64);
         }
         let current_tick = self.current_tick;
+        self.same_tick_owner_goto_tick
+            .retain(|_, tick| *tick >= current_tick);
         self.flush_due_scheduled_observer_events();
 
         let dynamic_ids: Vec<BallId> = self
@@ -989,6 +991,10 @@ impl Ballpark {
                     let ev = if obs_before != obs_after {
                         DestinyEvent::AddBalls { balls: entered }
                     } else {
+                        for b in &entered {
+                            self.last_acquired_tick_by_ball
+                                .insert(b.id, self.current_tick);
+                        }
                         DestinyEvent::AddBalls2 { balls: entered }
                     };
                     self.observer_events.entry(obs_id).or_default().push(ev);
@@ -1701,6 +1707,8 @@ impl Ballpark {
             self.ball_grid_ids.get(&ball_id),
             self.balls.get(&ball_id).cloned(),
         ) {
+            self.last_acquired_tick_by_ball
+                .insert(ball_id, self.current_tick);
             self.queue_event_for_grid_observers(
                 gid,
                 Some(ball_id),

@@ -1450,3 +1450,206 @@ fn remove_ball_and_batch_prune_special_fx_meta() {
     );
 }
 
+#[test]
+fn same_tick_goto_stop_goto_preserves_chronological_order_and_owner_echo() {
+    let mut bp = Ballpark::new(30_000_142);
+    bp.add_ball(make_ship(601, DVec3::ZERO));
+    bp.add_ball(make_ship(602, DVec3::new(500.0, 0.0, 0.0)));
+    let _ = bp.drain_all_observer_events();
+
+    bp.set_speed_fraction(601, 1.0);
+    bp.set_mode(601, MovementMode::GotoDirection { direction: DVec3::Y })
+        .unwrap();
+    bp.set_mode(601, MovementMode::Stop).unwrap();
+    bp.set_speed_fraction(601, 1.0);
+    bp.set_mode(601, MovementMode::GotoDirection { direction: DVec3::Z })
+        .unwrap();
+
+    let owner_evs = bp.drain_observer_events(601);
+    let obs_evs = bp.drain_observer_events(602);
+    let owner_dirs: Vec<[f64; 3]> = owner_evs
+        .iter()
+        .filter_map(|e| match e {
+            DestinyEvent::GotoDirection { direction, .. } => Some(*direction),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        owner_dirs,
+        vec![[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        "Stop in the same tick resets owner GotoDirection gating so post-Stop steer reaches owner"
+    );
+    let obs_dirs: Vec<[f64; 3]> = obs_evs
+        .iter()
+        .filter_map(|e| match e {
+            DestinyEvent::GotoDirection { direction, .. } => Some(*direction),
+            _ => None,
+        })
+        .collect();
+    let stop_idx = obs_evs
+        .iter()
+        .position(|e| matches!(e, DestinyEvent::Stop { ball_id: 601 }))
+        .expect("observer receives Stop between two GotoDirection commands");
+    let last_goto_idx = obs_evs
+        .iter()
+        .rposition(|e| matches!(e, DestinyEvent::GotoDirection { ball_id: 601, .. }))
+        .expect("observer receives post-Stop GotoDirection");
+    assert_eq!(
+        obs_dirs,
+        vec![[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        "observer must not coalesce post-Stop GotoDirection over pre-Stop GotoDirection"
+    );
+    assert!(
+        last_goto_idx > stop_idx,
+        "post-Stop GotoDirection must remain ordered after Stop for observer"
+    );
+}
+
+#[test]
+fn last_acquired_tick_by_ball_tracks_uncloaked_spawn_decloak_add_balls2_and_remove() {
+    let mut bp = Ballpark::new(30_000_142);
+    bp.add_ball(make_ship(701, DVec3::ZERO));
+    assert_eq!(bp.last_acquired_tick_by_ball.get(&701), Some(&1));
+
+    bp.step(1.0);
+    assert_eq!(bp.current_tick, 2);
+
+    // Pre-cloaked dynamic ball must not record AddBalls2 freshness while hidden.
+    bp.combat_states.insert(
+        702,
+        crate::CombatState {
+            is_cloaked: true,
+            ..Default::default()
+        },
+    );
+    assert!(bp.add_ball(make_ship(702, DVec3::new(1_000.0, 0.0, 0.0))));
+    assert_eq!(bp.last_acquired_tick_by_ball.get(&702), None);
+    let _ = bp.drain_all_observer_events();
+
+    // Decloaking emits AddBalls2 to same-grid observers and records live acquisition tick.
+    bp.combat_states.get_mut(&702).unwrap().is_cloaked = false;
+    bp.step(1.0);
+    let decloak_tick = bp.current_tick;
+    let obs_evs = bp.drain_observer_events(701);
+    assert!(
+        obs_evs.iter().any(
+            |e| matches!(e, DestinyEvent::AddBalls2 { balls } if balls.iter().any(|b| b.id == 702))
+        ),
+        "decloaking ball must emit AddBalls2 to grid observer: {obs_evs:?}"
+    );
+    assert_eq!(bp.last_acquired_tick_by_ball.get(&702), Some(&decloak_tick));
+
+    // Removal cleans up tracked acquisition tick.
+    assert!(bp.remove_ball(702).is_some());
+    assert_eq!(bp.last_acquired_tick_by_ball.get(&702), None);
+}
+
+#[test]
+fn goto_coalescing_stops_at_cloak_and_terminal_explosion_barriers() {
+    let mut bp = Ballpark::new(30_000_142);
+    bp.add_ball(make_ship(801, DVec3::ZERO));
+    bp.add_ball(make_ship(802, DVec3::new(500.0, 0.0, 0.0)));
+    let _ = bp.drain_all_observer_events();
+    let gid = bp.bubble_id_for_ball(801).unwrap();
+
+    bp.set_speed_fraction(801, 1.0);
+    bp.set_mode(801, MovementMode::GotoDirection { direction: DVec3::Y })
+        .unwrap();
+    bp.queue_event_for_grid_observers(
+        gid,
+        Some(801),
+        &DestinyEvent::CloakBall {
+            ball_id: 801,
+            cloaked: 1,
+        },
+    );
+    bp.set_mode(801, MovementMode::GotoDirection { direction: DVec3::Z })
+        .unwrap();
+
+    let obs_cloak_evs = bp.drain_observer_events(802);
+    let cloak_idx = obs_cloak_evs
+        .iter()
+        .position(|e| matches!(e, DestinyEvent::CloakBall { ball_id: 801, .. }))
+        .expect("observer receives CloakBall barrier");
+    let obs_cloak_dirs: Vec<[f64; 3]> = obs_cloak_evs
+        .iter()
+        .filter_map(|e| match e {
+            DestinyEvent::GotoDirection { direction, .. } => Some(*direction),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(obs_cloak_dirs, vec![[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+    assert!(
+        obs_cloak_evs
+            .iter()
+            .rposition(|e| matches!(e, DestinyEvent::GotoDirection { .. }))
+            .unwrap()
+            > cloak_idx
+    );
+
+    bp.step(1.0);
+    let _ = bp.drain_all_observer_events();
+    bp.set_mode(801, MovementMode::GotoDirection { direction: DVec3::X })
+        .unwrap();
+    bp.queue_event_for_grid_observers(
+        gid,
+        Some(801),
+        &DestinyEvent::TerminalExplosion {
+            ball_id: 801,
+            destruction_effect_id: None,
+        },
+    );
+    bp.set_mode(
+        801,
+        MovementMode::GotoDirection {
+            direction: DVec3::NEG_Y,
+        },
+    )
+    .unwrap();
+
+    let obs_exp_evs = bp.drain_observer_events(802);
+    let exp_idx = obs_exp_evs
+        .iter()
+        .position(|e| matches!(e, DestinyEvent::TerminalExplosion { ball_id: 801, .. }))
+        .expect("observer receives TerminalExplosion barrier");
+    let obs_exp_dirs: Vec<[f64; 3]> = obs_exp_evs
+        .iter()
+        .filter_map(|e| match e {
+            DestinyEvent::GotoDirection { direction, .. } => Some(*direction),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(obs_exp_dirs, vec![[1.0, 0.0, 0.0], [0.0, -1.0, 0.0]]);
+    assert!(
+        obs_exp_evs
+            .iter()
+            .rposition(|e| matches!(e, DestinyEvent::GotoDirection { .. }))
+            .unwrap()
+            > exp_idx
+    );
+}
+
+#[test]
+fn duplicate_stop_clears_emergency_warp_without_emitting_redundant_stop() {
+    let mut bp = Ballpark::new(30_000_142);
+    bp.add_ball(make_ship(901, DVec3::ZERO));
+    bp.add_ball(make_ship(902, DVec3::new(500.0, 0.0, 0.0)));
+    let _ = bp.drain_all_observer_events();
+
+    bp.combat_states.entry(901).or_default().is_emergency_warping = true;
+    bp.set_mode(901, MovementMode::Stop).unwrap();
+
+    assert!(
+        !bp.combat_states[&901].is_emergency_warping,
+        "set_mode(Stop) while already stopped must still clear is_emergency_warping"
+    );
+    assert!(
+        bp.drain_observer_events(901).is_empty(),
+        "already-stopped set_mode(Stop) must not emit redundant Stop/SetSpeedFraction events to owner"
+    );
+    assert!(
+        bp.drain_observer_events(902).is_empty(),
+        "already-stopped set_mode(Stop) must not emit redundant Stop/SetSpeedFraction events to observer"
+    );
+}
+

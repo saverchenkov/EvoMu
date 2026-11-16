@@ -53,6 +53,9 @@ pub const BUBBLE_TRANSITION_THRESHOLD_METERS: f64 = 10_000_000.0;
 /// Proximity decloak distance in meters (`2,000m` surface-to-surface).
 pub const DECLOAK_DISTANCE_METERS: f64 = 2_000.0;
 
+/// Cosine similarity threshold (`cos >= 0.9998`, ~1.15 deg) for coalescing near-duplicate `CmdGotoDirection`.
+pub const DESTINY_GOTO_DUPLICATE_COSINE_THRESHOLD: f64 = 0.9998;
+
 /// Explicit phase inside a `MovementMode::Warp` trajectory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WarpPhase {
@@ -1406,6 +1409,12 @@ pub struct Ballpark {
     /// Optional V24 `OnSpecialFX` 14-arg wire metadata keyed by `(ball_id, module_id, guid)`.
     #[serde(skip, default)]
     pub special_fx_meta: BTreeMap<(BallId, Option<i64>, String), SpecialFxWireMeta>,
+    /// Tracks the latest `current_tick` at which each ball already received its direct owner `GotoDirection` echo (`#1078`).
+    #[serde(skip, default)]
+    pub(crate) same_tick_owner_goto_tick: BTreeMap<BallId, u64>,
+    /// Live scene tick at which each dynamic ball was last acquired via `add_ball` or `AddBalls2` grid entry/decloak (`#1078`).
+    #[serde(skip, default)]
+    pub last_acquired_tick_by_ball: BTreeMap<BallId, u64>,
 }
 
 /// Converts Unix epoch seconds to Windows FILETIME (`100ns` ticks since 1601-01-01 UTC).
