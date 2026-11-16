@@ -809,6 +809,7 @@ fn community_track_and_tale_mutations_pass_quasar_tap_response_pairing() {
     let track_id_msg = seq_id_msg(1, 702);
     let tale_id_msg = seq_id_msg(1, 888);
 
+    let _ = crate::services::quasar_social_chat::drain_local_notices();
     for (req_name, expected_rsp, req_msg) in [
         (
             "eve.communitytrack.api.StartRequest",
@@ -845,6 +846,38 @@ fn community_track_and_tale_mutations_pass_quasar_tap_response_pairing() {
             .unwrap_or_else(|e| panic!("{req_name} failed: {e:?}"));
         assert_eq!(rsp.normalized_type_name(), expected_rsp);
         assert!(rsp.value.is_empty(), "{expected_rsp} should carry empty wire payload");
+        let emitted: Vec<GoogleAny> = crate::services::quasar_social_chat::drain_local_notices()
+            .into_iter()
+            .map(|(_, any, _)| any)
+            .collect();
+        let violations =
+            eve_testkit::quasar_tap::tap_exchange(&reg, req_name, 200, Some(&rsp), &emitted);
+        assert!(
+            violations.is_empty(),
+            "unexpected quasar tap violations for {req_name}: {violations:#?}"
+        );
+    }
+
+    for (req_name, expected_rsp, req_msg) in [
+        (
+            "eve_public.communitytrack.api.GetRequest",
+            "eve_public.communitytrack.api.GetResponse",
+            &track_id_msg,
+        ),
+        (
+            "eve.communitytrack.api.GetRequest",
+            "eve.communitytrack.api.GetResponse",
+            &track_id_msg,
+        ),
+        (
+            "eve.seasonalevent.challenge.GetChallengesForCharacterRequest",
+            "eve.seasonalevent.challenge.GetChallengesForCharacterResponse",
+            &DynamicQuasarMessage::new("Req"),
+        ),
+    ] {
+        let rsp = handlers[req_name](&gm_ctx, &dummy_any, req_msg)
+            .unwrap_or_else(|e| panic!("{req_name} failed: {e:?}"));
+        assert_eq!(rsp.normalized_type_name(), expected_rsp);
         let violations =
             eve_testkit::quasar_tap::tap_exchange(&reg, req_name, 200, Some(&rsp), &[]);
         assert!(

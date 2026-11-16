@@ -1295,9 +1295,9 @@ fn goal_mutations_notices_capacity_contribs_and_community_tales_wire_payloads() 
     let pub_def = wm_field_bytes(&pub_attrs, 1).unwrap();
     assert_eq!(wm_field_varint(&pub_def, 1), Some(555));
     assert_eq!(wm_field_varint(&pub_attrs, 2), Some(40));
-    assert_eq!(wm_field_varint(&pub_attrs, 3), Some(120));
-    assert_eq!(wm_field_str(&pub_attrs, 4).as_deref(), Some("ZeroTplTrack"));
-    assert_eq!(wm_field_varint(&pub_attrs, 5), Some(0)); // active == false -> 0
+    assert!(!wm_has_field(&pub_attrs, 3));
+    assert!(!wm_has_field(&pub_attrs, 4));
+    assert!(!wm_has_field(&pub_attrs, 5));
 
     let int_tr = call_gw(
         &router,
@@ -1307,10 +1307,11 @@ fn goal_mutations_notices_capacity_contribs_and_community_tales_wire_payloads() 
     )
     .unwrap();
     let int_attrs = wm_field_bytes(&int_tr.value, 1).unwrap();
-    assert_eq!(wm_field_varint(&int_attrs, 1), Some(555));
-    assert_eq!(wm_field_str(&int_attrs, 2).as_deref(), Some("ZeroTplTrack"));
-    assert_eq!(wm_field_varint(&int_attrs, 3), Some(120));
-    assert_eq!(wm_field_varint(&int_attrs, 4), Some(40));
+    let int_def = wm_field_bytes(&int_attrs, 1).unwrap();
+    assert_eq!(wm_field_varint(&int_def, 1), Some(555));
+    assert_eq!(wm_field_varint(&int_attrs, 2), Some(40));
+    assert!(!wm_has_field(&int_attrs, 3));
+    assert!(!wm_has_field(&int_attrs, 4));
 
     // Activate 555 and stop 2 tales of template 770 -> adds +2 and stops 0 tales emits nothing
     call_gw(&router, "eve.communitytrack.api.StartRequest", &gm_ctx, &seq_msg(1, DynamicValue::Uint32(555))).unwrap();
@@ -1327,7 +1328,13 @@ fn goal_mutations_notices_capacity_contribs_and_community_tales_wire_payloads() 
     assert_eq!(mgr.get_community_track(555).unwrap().current_progress, 42);
     let stop_notices = crate::services::quasar_social_chat::drain_local_notices();
     assert_eq!(stop_notices.iter().filter(|(_, a, _)| a.type_url.ends_with("StoppedNotice")).count(), 2);
-    assert!(stop_notices.iter().any(|(_, a, _)| a.type_url.ends_with("ProgressedNotice")));
+    let track_prog = stop_notices
+        .iter()
+        .find(|(_, a, _)| a.type_url.ends_with("eve.communitytrack.api.Progressed"))
+        .expect("eve.communitytrack.api.Progressed notice emitted");
+    let prog_id = wm_field_bytes(&track_prog.1.value, 1).unwrap();
+    assert_eq!(wm_field_varint(&prog_id, 1), Some(555));
+    assert_eq!(wm_field_varint(&track_prog.1.value, 2), Some(42));
     // Stopping unmatched template leaves notices empty
     call_gw(&router, "eve.tale.api.StopTalesRequest", &gm_ctx, &seq_msg(1, DynamicValue::Uint32(999_111))).unwrap();
     assert!(crate::services::quasar_social_chat::drain_local_notices().is_empty());
@@ -1354,7 +1361,8 @@ fn goal_mutations_notices_capacity_contribs_and_community_tales_wire_payloads() 
     .expect("admin can query another character challenges");
     for chal_bytes in wm_all_bytes(&admin_other_chal.value, 1) {
         assert!(wm_field_varint(&chal_bytes, 1).is_some());
-        assert!(wm_field_varint(&chal_bytes, 2).is_some());
+        assert!(!wm_has_field(&chal_bytes, 2));
+        assert!(!wm_has_field(&chal_bytes, 3));
     }
 
     // Separate router with mgr.db == None + corp_state == Some to cover no-DB branches on Close/Delete/StartTale/SeasonalChallenges

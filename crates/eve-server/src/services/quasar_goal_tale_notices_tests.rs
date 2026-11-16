@@ -10,7 +10,7 @@ use crate::services::quasar_progression_extra::CommunityTrackState;
 use eve_db::WorldRepository;
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::pb;
-use eve_proto::quasar::{QuasarDescriptorRegistry, WireMessage};
+use eve_proto::quasar::{QuasarDescriptorRegistry, WireMessage, TYPE_GOOGLEAPIS_PREFIX};
 use eve_sde::SdeRegistry;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
@@ -918,14 +918,28 @@ fn tale_matching_archetypes_and_inactive_tracks() {
     assert_eq!(res[0].track_id, 82);
     assert_eq!(res[0].current_progress, 50); // clamped to target_progress
 
-    let mut noticed_urls = Vec::new();
+    let reg = QuasarDescriptorRegistry::open_default().expect("open default descriptor DB");
+    let mut noticed = Vec::new();
     while let Ok(env) = rx.try_recv() {
         if let Some(p) = env.payload {
-            noticed_urls.push(p.type_url);
+            noticed.push(p);
         }
     }
-    assert!(noticed_urls.iter().any(|u| u.ends_with("eve_public.communitytrack.api.ProgressedNotice")));
-    assert!(noticed_urls.iter().any(|u| u.ends_with("eve_public.test.FlushedNotice")));
+    let prog = noticed
+        .iter()
+        .find(|p| p.type_url.ends_with("eve.communitytrack.api.Progressed"))
+        .expect("eve.communitytrack.api.Progressed notice emitted");
+    let dec = reg
+        .decode_dynamic("eve.communitytrack.api.Progressed", &prog.value)
+        .expect("decode eve.communitytrack.api.Progressed");
+    assert_eq!(reg.encode_dynamic(&dec).unwrap(), prog.value);
+    let id_msg = match dec.get(1) {
+        Some(eve_proto::quasar::DynamicValue::Message(m)) => m,
+        other => panic!("expected Identifier submessage, got {other:?}"),
+    };
+    assert_eq!(id_msg.get(1), Some(&eve_proto::quasar::DynamicValue::Uint32(82)));
+    assert_eq!(dec.get(2), Some(&eve_proto::quasar::DynamicValue::Uint32(50)));
+    assert!(noticed.iter().any(|p| p.type_url.ends_with("eve_public.test.FlushedNotice")));
 }
 
 #[test]

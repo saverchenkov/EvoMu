@@ -581,7 +581,7 @@ async fn test_milestones_and_community_tracks() {
     while stream_rx.try_recv().is_ok() {}
     ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(30_000_142, "Data", 999_999, 1, ctx.now_unix(), &ctx.quasar_gateway);
     assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(0)]), "mismatched Data site must not advance CombatAnomaly tale 488");
-    assert!(stream_rx.try_recv().is_err(), "mismatched site must not emit ProgressedNotice");
+    assert!(stream_rx.try_recv().is_err(), "mismatched site must not emit eve.communitytrack.api.Progressed");
 
     // Non-admin pilot undocks in 30_000_142 and destroys live PvE anomaly waves via dogmaIM.Activate -> advances track (1, 0) -> (1, 1)
     assert_eq!(sess.role & eve_machonet::service_roles::ROLE_ADMIN, 0, "player session must not hold ROLE_ADMIN");
@@ -620,14 +620,17 @@ async fn test_milestones_and_community_tracks() {
     assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(1)]));
     let mut progressed_tids = Vec::new();
     while let Ok(env) = stream_rx.try_recv() {
-        if let Some(p) = env.payload.as_ref().filter(|p| p.normalized_type_name() == "eve_public.communitytrack.api.ProgressedNotice") {
+        if let Some(p) = env.payload.as_ref().filter(|p| p.normalized_type_name() == "eve.communitytrack.api.Progressed") {
             let wm = eve_proto::quasar::WireMessage::decode(&p.value).unwrap();
-            if let Some(id) = wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()) {
-                progressed_tids.push(id);
+            if let Some(id_bytes) = wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()) {
+                let id_wm = eve_proto::quasar::WireMessage::decode(id_bytes).unwrap();
+                if let Some(id) = id_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()) {
+                    progressed_tids.push(id);
+                }
             }
         }
     }
-    assert_eq!(progressed_tids, vec![tid as u64], "live PvE clear must publish ProgressedNotice directly to subscribed gateway stream");
+    assert_eq!(progressed_tids, vec![tid as u64], "live PvE clear must publish eve.communitytrack.api.Progressed directly to subscribed gateway stream");
 
     // Verify clamping at SDE goal 100 and StopRequest/StartRequest lifecycle
     for delta in [43_u64, 105_u64] {

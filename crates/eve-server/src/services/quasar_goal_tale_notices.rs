@@ -14,10 +14,7 @@
 
 use crate::quasar_gateway::NoticeScope;
 use eve_proto::pb;
-use eve_proto::quasar::{
-    DynamicValue, GoogleAny, GoogleTimestamp, WireField, WireMessage, WireValue,
-    TYPE_GOOGLEAPIS_PREFIX,
-};
+use eve_proto::quasar::{DynamicValue, GoogleAny, GoogleTimestamp, WireMessage, WireValue};
 
 /// Prefix of the 16-byte goal UUID used for goals backed by the corporation project ledger.
 pub const CORP_GOAL_UUID_PREFIX: &[u8; 8] = b"CORPGOAL";
@@ -628,7 +625,18 @@ pub fn tale_matches_completed_encounter(
     }
 }
 
-/// Publishes `eve_public.communitytrack.api.ProgressedNotice` directly to subscribed Quasar gateway clients
+/// Builds an `eve.communitytrack.api.Progressed` notice for `track_id` and `current_progress`.
+pub fn community_track_progressed(track_id: u32, current_progress: u64) -> Option<GoogleAny> {
+    let progress = u32::try_from(current_progress).unwrap_or(u32::MAX);
+    crate::quasar_gateway::pb_to_any_or_log(
+        "quasar_goal_tale_notices.community_track_progressed",
+        pb::message("eve.communitytrack.api.Progressed")
+            .set("id.sequential", track_id)
+            .set("progress", progress),
+    )
+}
+
+/// Publishes `eve.communitytrack.api.Progressed` directly to subscribed Quasar gateway clients
 /// and flushes any thread-local queued notices so worker threads never strand notices in TLS.
 pub fn publish_community_track_progressed_notices(
     gateway: &crate::quasar_gateway::PublicGatewayRouter,
@@ -636,25 +644,14 @@ pub fn publish_community_track_progressed_notices(
     now_unix: u64,
 ) {
     for tr in tracks {
-        // Synthetic gateway notice `eve_public.communitytrack.api.ProgressedNotice` is absent
-        // from V24.01 `quasar_descriptors.sqlite` (only `eve.communitytrack.api.Progressed` exists).
-        let not_bytes = WireMessage {
-            fields: vec![WireField {
-                field_number: 1,
-                value: WireValue::Varint(tr.track_id as u64),
-            }],
+        if let Some(notice) = community_track_progressed(tr.track_id, tr.current_progress) {
+            let _ = gateway.publish_notice_isolated(
+                NoticeScope::Broadcast,
+                "quasar_goal_tale_notices.community_track_progressed",
+                notice,
+                now_unix,
+            );
         }
-        .encode();
-        let notice = GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.ProgressedNotice"),
-            value: not_bytes,
-        };
-        let _ = gateway.publish_notice_isolated(
-            NoticeScope::Broadcast,
-            "quasar_goal_tale_notices.community_track_progressed",
-            notice,
-            now_unix,
-        );
     }
     for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
         let _ = gateway.publish_notice_isolated(

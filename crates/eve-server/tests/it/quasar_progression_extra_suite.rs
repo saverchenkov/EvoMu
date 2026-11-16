@@ -224,7 +224,15 @@ async fn quasar_community_progression_tales_and_goals() {
 
     let notifs = drain_notices(&mut stream_rx);
     assert!(!notifs.is_empty(), "Track notice should be emitted");
-    assert_eq!(notifs[0].payload.as_ref().unwrap().normalized_type_name(), "eve_public.communitytrack.api.ProgressedNotice");
+    let prog_payload = notifs[0].payload.as_ref().unwrap();
+    assert_eq!(prog_payload.normalized_type_name(), "eve.communitytrack.api.Progressed");
+    let prog_wm = WireMessage::decode(&prog_payload.value).expect("decode Progressed notice");
+    let prog_id = WireMessage::decode(
+        prog_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap(),
+    )
+    .expect("decode Progressed id");
+    assert_eq!(prog_id.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()), Some(tid as u64));
+    assert_eq!(prog_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(25));
 
     // Starting Vanguard Nemesis tale 488 emits StartedNotice only (does not advance track); stopping advances track once (+1 -> 26)
     let start_rsp = quasar_rpc(&ctx, &mut sess, "eve.tale.api.StartTaleRequest", make_tale_start(488, 30_000_142)).await;
@@ -242,9 +250,9 @@ async fn quasar_community_progression_tales_and_goals() {
     let stop_rsp = quasar_rpc(&ctx, &mut sess, "eve.tale.api.StopTalesRequest", make_sequential_id_request(488)).await;
     assert_eq!(stop_rsp.status_code, STATUS_OK);
     let tale_stop_notifs = drain_notices(&mut stream_rx);
-    assert_eq!(tale_stop_notifs.len(), 2, "ProgressedNotice + StoppedNotice should be emitted on StopTalesRequest");
+    assert_eq!(tale_stop_notifs.len(), 2, "eve.communitytrack.api.Progressed + StoppedNotice should be emitted on StopTalesRequest");
     assert!(tale_stop_notifs.iter().any(|n| n.payload.as_ref().unwrap().normalized_type_name() == "eve_public.tale.api.StoppedNotice"));
-    assert!(tale_stop_notifs.iter().any(|n| n.payload.as_ref().unwrap().normalized_type_name() == "eve_public.communitytrack.api.ProgressedNotice"));
+    assert!(tale_stop_notifs.iter().any(|n| n.payload.as_ref().unwrap().normalized_type_name() == "eve.communitytrack.api.Progressed"));
     assert_eq!(ctx.quasar_gateway.progression.extra.get_community_track(tid).unwrap().current_progress, 26);
     {
         let mut tracks = ctx.quasar_gateway.progression.extra.community_tracks.write().unwrap();
@@ -259,7 +267,7 @@ async fn quasar_community_progression_tales_and_goals() {
     assert_eq!(ctx.quasar_gateway.progression.extra.get_community_track(tid).unwrap().current_progress, 27, "Incursion site clear must increment community track once (+1), not double-count");
     let inc_notifs = drain_notices(&mut stream_rx);
     assert_eq!(inc_notifs.len(), 1);
-    assert_eq!(inc_notifs[0].payload.as_ref().unwrap().normalized_type_name(), "eve_public.communitytrack.api.ProgressedNotice");
+    assert_eq!(inc_notifs[0].payload.as_ref().unwrap().normalized_type_name(), "eve.communitytrack.api.Progressed");
     let count_after_stop = quasar_rpc(
         &ctx,
         &mut sess,
@@ -664,14 +672,23 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
     let r_ch = call_req(&ctx_reloaded, &session, "eve.seasonalevent.challenge.GetChallengesForCharacterRequest", make_sequential_id_request(90_000_106), true);
     assert_eq!(r_ch.status_code, STATUS_OK, "GetChallengesForCharacterRequest after reload failed");
     let ch_wm = WireMessage::decode(&r_ch.payload.as_ref().unwrap().value).expect("decode challenges");
-    let ch297_cur = ch_wm.fields.iter().filter(|f| f.field_number == 1).find_map(|f| {
-        let b = f.value.as_bytes()?;
-        let m = WireMessage::decode(b).ok()?;
-        if m.fields.iter().find(|x| x.field_number == 1)?.value.as_varint()? == 297 {
-            m.fields.iter().find(|x| x.field_number == 3)?.value.as_varint()
-        } else {
-            None
-        }
+    let has_ch297 = ch_wm.fields.iter().filter(|f| f.field_number == 1).any(|f| {
+        let Some(b) = f.value.as_bytes() else { return false; };
+        let Ok(m) = WireMessage::decode(b) else { return false; };
+        assert!(m.fields.iter().all(|x| x.field_number == 1), "challenge Identifier must only encode field 1 (sequential)");
+        m.fields.iter().find(|x| x.field_number == 1).and_then(|x| x.value.as_varint()) == Some(297)
+    });
+    assert!(has_ch297, "Seasonal challenge 297 must be returned after SQLite reload");
+    let ch297_cur = ctx_reloaded.db.with_snapshot(|snap| {
+        eve_server::services::season_manager::get_character_challenges_for_quasar(
+            snap,
+            Some(ctx_reloaded.sde.as_ref()),
+            ctx_reloaded.now_blueos_filetime_ticks(),
+            90_000_106,
+        )
+        .into_iter()
+        .find(|c| c.challenge_id == 297)
+        .map(|c| c.progress)
     });
     assert_eq!(ch297_cur, Some(3), "Seasonal challenge 297 progress 3 must persist across SQLite reload");
 }

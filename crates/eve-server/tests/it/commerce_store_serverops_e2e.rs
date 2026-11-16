@@ -451,11 +451,11 @@ async fn freelance_project_delete_and_hypernet_relay_lifecycle() {
     let remaining_trit = ctx.db.with_snapshot(|s| s.items.get(&998_100).map(|i| i.quantity));
     assert_eq!(remaining_trit, Some(60), "delivering 40 Tritanium must consume 40 from hangar stack");
 
-    assert_eq!(qrpc(&ctx, &mut member, "eve_public.freelance.project.api.DeleteRequest", commit_req.clone()).await.status_code, STATUS_FORBIDDEN);
-    assert_eq!(qrpc(&ctx, &mut dir, "eve_public.freelance.project.api.DeleteRequest", commit_req).await.status_code, STATUS_OK);
+    assert_eq!(qrpc(&ctx, &mut member, "eve_public.freelance.project.api.CloseRequest", commit_req.clone()).await.status_code, STATUS_FORBIDDEN);
+    assert_eq!(qrpc(&ctx, &mut dir, "eve_public.freelance.project.api.CloseRequest", commit_req).await.status_code, STATUS_OK);
 
     let notices = drain_notices(&mut rx);
-    assert!(notices.iter().any(|n| n == "eve_public.freelance.project.api.DeletedNotice"));
+    assert!(notices.iter().any(|n| n == "eve_public.freelance.project.api.ClosedNotice"));
 
     let hc_needed = compute_required_hypercores(8_000_000.0, 8).expect("compute hypercores");
     assert!(hc_needed >= 1);
