@@ -445,6 +445,7 @@ impl DeltaStateCache {
             None
         };
         let plex_vault_changed = changes_touch_account_plex_vault(changes);
+        let paused_queues_changed = changes_touch_paused_skill_queues(changes);
         let plex_baseline_snapshot = if before.is_none() && plex_vault_changed {
             Some(
                 self.plex_vault
@@ -467,7 +468,7 @@ impl DeltaStateCache {
 
         let mut out = projector.project_to_vec(&input);
 
-        if before.is_none() && changes.cold_domains.d6_batch4 {
+        if before.is_none() && paused_queues_changed {
             let mut paused_guard = self
                 .paused_skill_queues
                 .lock()
@@ -503,7 +504,7 @@ impl DeltaStateCache {
                 plex_guard.insert(user_id, plex);
             }
         }
-        if before.is_some() && changes.cold_domains.d6_batch4 {
+        if before.is_some() && paused_queues_changed {
             let mut paused_guard = self
                 .paused_skill_queues
                 .lock()
@@ -993,14 +994,38 @@ fn changed_account_plex_vault_users(changes: &ChangeSet) -> BTreeSet<u64> {
     user_ids
 }
 
-fn changes_touch_account_plex_vault(changes: &ChangeSet) -> bool {
+fn changes_touch_domain_row(
+    changes: &ChangeSet,
+    target_domain: &'static str,
+    key_prefix: Option<&str>,
+) -> bool {
     changes.domain_rows.iter().any(|row| {
-        let domain = match row {
-            eve_db::sqlite_store::DomainRowChange::Upsert { domain, .. }
-            | eve_db::sqlite_store::DomainRowChange::Delete { domain, .. } => *domain,
+        let (domain, key) = match row {
+            eve_db::sqlite_store::DomainRowChange::Upsert { domain, key, .. } => {
+                (*domain, key.as_str())
+            }
+            eve_db::sqlite_store::DomainRowChange::Delete { domain, key } => {
+                (*domain, key.as_str())
+            }
         };
-        domain == eve_db::sqlite_store::DOMAIN_ACCOUNT_PLEX_VAULT
+        domain == target_domain && key_prefix.is_none_or(|prefix| key.starts_with(prefix))
     })
+}
+
+fn changes_touch_account_plex_vault(changes: &ChangeSet) -> bool {
+    changes_touch_domain_row(
+        changes,
+        eve_db::sqlite_store::DOMAIN_ACCOUNT_PLEX_VAULT,
+        None,
+    )
+}
+
+fn changes_touch_paused_skill_queues(changes: &ChangeSet) -> bool {
+    changes_touch_domain_row(
+        changes,
+        eve_db::sqlite_store::DOMAIN_SHIP_FITTING_AND_SKILLS,
+        Some("paused_skill_queues/"),
+    )
 }
 
 fn skill_rank_from_sde(sde: &SdeRegistry, type_id: TypeId) -> f64 {
@@ -1179,7 +1204,7 @@ fn project_skill_changes(input: &DeltaProjectionInput<'_>, sink: &mut dyn DeltaS
     }
 
     // 4. Newly paused queues (when `before` snapshot is supplied).
-    if input.changes.cold_domains.d6_batch4 {
+    if changes_touch_paused_skill_queues(input.changes) {
         if let Some(before) = input.before {
             let mut newly_paused: Vec<i64> = input
                 .after

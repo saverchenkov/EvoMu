@@ -461,7 +461,7 @@ fn delta_state_cache_projects_corp_wallets_and_paused_queues_without_before_snap
     let cache = DeltaStateCache::new();
     db.with_snapshot(|snap| cache.seed_from_snapshot(snap));
 
-    let (_before, after, changes) = capture_diff(&db, 1, |snap| {
+    let (before, after, changes) = capture_diff(&db, 1, |snap| {
         snap.corporations
             .get_mut(&corp_id)
             .expect("corp must exist")
@@ -485,6 +485,56 @@ fn delta_state_cache_projects_corp_wallets_and_paused_queues_without_before_snap
                 ]
     }));
     assert!(notifs.iter().any(|n| {
+        n.event == "OnSkillQueuePausedServer"
+            && n.target == ProjectedTarget::Character(pilot_id)
+            && n.args.is_empty()
+    }));
+
+    // Verify `before: Some(...)` path also projects `OnSkillQueuePausedServer`, and `DeltaStateCache`
+    // clears paused queue tracking when unpaused with `before: Some(...)` so re-pausing without
+    // a `before` snapshot emits `OnSkillQueuePausedServer` again.
+    let direct_notifs = projector.project_to_vec(&DeltaProjectionInput::new(
+        Some(&before),
+        &after,
+        &changes,
+        &sde,
+        1_700_000_000,
+    ));
+    assert!(direct_notifs.iter().any(|n| {
+        n.event == "OnSkillQueuePausedServer"
+            && n.target == ProjectedTarget::Character(pilot_id)
+            && n.args.is_empty()
+    }));
+
+    let (before_unpause, after_unpause, unpause_changes) = capture_diff(&db, 2, |snap| {
+        snap.paused_skill_queues.remove(&pilot_id);
+    });
+    assert!(cache
+        .project_with_cache(
+            &projector,
+            Some(&before_unpause),
+            &after_unpause,
+            &unpause_changes,
+            &sde,
+            1_700_000_001,
+            &[],
+        )
+        .iter()
+        .all(|n| n.event != "OnSkillQueuePausedServer"));
+
+    let (_before_repause, after_repause, repause_changes) = capture_diff(&db, 3, |snap| {
+        snap.paused_skill_queues.insert(pilot_id);
+    });
+    let repause_notifs = cache.project_with_cache(
+        &projector,
+        None,
+        &after_repause,
+        &repause_changes,
+        &sde,
+        1_700_000_002,
+        &[],
+    );
+    assert!(repause_notifs.iter().any(|n| {
         n.event == "OnSkillQueuePausedServer"
             && n.target == ProjectedTarget::Character(pilot_id)
             && n.args.is_empty()
@@ -945,7 +995,7 @@ fn account_plex_vault_domain_rows_and_negative_no_op_mutations_behave_cleanly() 
             .is_empty()
     );
 
-    // 3. Negative: ship_fit_inputs mutation (#861, sets d6_batch4) emits 0 spurious inventory/skill/wallet deltas.
+    // 3. Negative: ship_fit_inputs mutation (#861, DOMAIN_SHIP_FITTING_AND_SKILLS) emits 0 spurious inventory/skill/wallet deltas.
     let (b_fit, a_fit, c_fit) = capture_diff(&db, 3, |snap| {
         snap.ship_fit_inputs.insert(
             ship_id,
@@ -956,7 +1006,15 @@ fn account_plex_vault_domain_rows_and_negative_no_op_mutations_behave_cleanly() 
             },
         );
     });
-    assert!(c_fit.cold_domains.d6_batch4);
+    assert!(!c_fit.cold_domains.d6_batch4);
+    assert!(c_fit.domain_rows.iter().any(|row| {
+        matches!(
+            row,
+            eve_db::sqlite_store::DomainRowChange::Upsert { domain, key, .. }
+                if *domain == eve_db::sqlite_store::DOMAIN_SHIP_FITTING_AND_SKILLS
+                    && key == &format!("ship_fit_inputs/{ship_id}")
+        )
+    }));
     assert!(
         projector
             .project_to_vec(&DeltaProjectionInput::new(
