@@ -25,6 +25,25 @@ pub const DOMAIN_OWNER_NOTES: &str = "notes_lp.owner_notes";
 pub const DOMAIN_CORP_LP_BALANCES: &str = "notes_lp.corp_lp_balances";
 pub const DOMAIN_CHAR_LP_LOGS: &str = "notes_lp.char_lp_logs";
 
+/// Family 6 (`service_domains`) canonical `domain_rows.domain` names (`#916`).
+pub const DOMAIN_PVE_SPECIAL_SITES: &str = "service_domains.pve_special_sites";
+pub const DOMAIN_CRAB_BEACONS: &str = "service_domains.crab_beacons";
+pub const DOMAIN_ABYSSAL_STATE: &str = "service_domains.abyssal_state";
+pub const DOMAIN_DUNGEON_RUNTIME: &str = "service_domains.dungeon_runtime";
+pub const DOMAIN_DUNGEON_EDITOR: &str = "service_domains.dungeon_editor";
+pub const DOMAIN_FOB_OBSERVATORY_STATE: &str = "service_domains.fob_observatory_state";
+pub const DOMAIN_MINING_AND_ESS_STATE: &str = "service_domains.mining_and_ess_state";
+pub const DOMAIN_PVP_FILAMENT_STATE: &str = "service_domains.pvp_filament_state";
+pub const DOMAIN_TOURNEY_STATE: &str = "service_domains.tourney_state";
+pub const DOMAIN_DEPLOYABLE_STATE: &str = "service_domains.deployable_state";
+pub const DOMAIN_SUPERWEAPON_RUNTIME: &str = "service_domains.superweapon_runtime";
+pub const DOMAIN_INSURGENCY_COMPLEX_OPS: &str = "service_domains.insurgency_complex_ops";
+pub const DOMAIN_NODE_GRAPH_STATE: &str = "service_domains.node_graph_state";
+pub const DOMAIN_SEASONS_AND_CAMPAIGNS: &str = "service_domains.seasons_and_campaigns";
+pub const DOMAIN_QUASAR_COMMERCE: &str = "service_domains.quasar_commerce";
+pub const DOMAIN_FLEET_AND_SOCIAL_OPS: &str = "service_domains.fleet_and_social_ops";
+pub const DOMAIN_CLUSTER_AND_RUNTIME: &str = "service_domains.cluster_and_runtime";
+
 /// Idempotent schema DDL for the generic `domain_rows` key/value table.
 pub fn apply_domain_rows_migration(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
@@ -92,7 +111,7 @@ macro_rules! impl_int_key_codec {
     };
 }
 
-impl_int_key_codec!(i32, u32, i64, u64, i128, u128);
+impl_int_key_codec!(i32, u32, i64, u64, i128, u128, usize);
 
 impl KeyCodec for () {
     #[inline]
@@ -1459,7 +1478,7 @@ where
 // Family 1 (`ledger`) Helpers & Legacy Blob-Table -> `domain_rows` Migration
 // ============================================================================
 
-fn table_exists(conn: &Connection, name: &str) -> Result<bool, String> {
+pub(crate) fn table_exists(conn: &Connection, name: &str) -> Result<bool, String> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
         params![name],
@@ -1834,6 +1853,12 @@ pub(crate) fn sync_notes_lp_domain_rows(
     dirty |= snap.char_lp_logs.sync_full(tx, DOMAIN_CHAR_LP_LOGS)?;
     Ok(dirty)
 }
+
+// Family 6 (`service_domains`) persistence lives in `service_domains_store.rs` and is
+// re-exported here so `domain_rows` serves as the single entry point for migrated families.
+pub(crate) use super::service_domains_store::{
+    drop_legacy_service_domain_tables, sync_service_domains_rows,
+};
 
 #[cfg(test)]
 mod tests {

@@ -1383,7 +1383,8 @@ pub fn load_snapshot_from_sqlite_with_options(
     super::social_store::load_d6_social_into_snapshot_with_ctx(conn, &mut snap, &mut ctx)?;
     super::corp_crimewatch_store::load_d6_corp_crimewatch_checked(conn, &mut snap, &mut ctx)?;
     super::industry_market_pve_store::load_d6_batch4_checked(conn, &mut snap, &mut ctx)?;
-    super::service_domains_store::load_service_domains_checked(conn, &mut snap, &mut ctx)?;
+    let had_legacy_service_domains =
+        super::service_domains_store::load_service_domains_checked(conn, &mut snap, &mut ctx)?;
     ctx.flush_quarantined_rows(conn)?;
 
     let can_sync_migrations =
@@ -1400,7 +1401,7 @@ pub fn load_snapshot_from_sqlite_with_options(
         st.solar_system_id = sid;
     }
     let fp = if let Some(mut fp) = pre_migration_fp.take() {
-        if had_legacy_ledger || had_legacy_notes_lp {
+        if had_legacy_ledger || had_legacy_notes_lp || had_legacy_service_domains {
             super::domain_rows::apply_domain_rows_migration(conn)?;
         }
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
@@ -1411,7 +1412,10 @@ pub fn load_snapshot_from_sqlite_with_options(
         if had_legacy_notes_lp {
             super::domain_rows::drop_legacy_notes_lp_tables(&tx)?;
         }
-        if delta.dirty || had_legacy_ledger || had_legacy_notes_lp {
+        if had_legacy_service_domains {
+            super::domain_rows::drop_legacy_service_domain_tables(&tx)?;
+        }
+        if delta.dirty || had_legacy_ledger || had_legacy_notes_lp || had_legacy_service_domains {
             tx.commit().map_err(|e| e.to_string())?;
         }
         fp
