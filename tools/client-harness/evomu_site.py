@@ -11,6 +11,7 @@ as `__builtin__.sm` and `machoNet` are running.
 import __builtin__
 import math
 import os
+import re
 import sys
 import time
 import traceback
@@ -28,7 +29,22 @@ _DRIVER_SCHEDULED = False
 _META_HOOK_INSTALLED = False
 _RECENT_EXCEPTIONS = []
 _EXC_SEQ = 0
+_EXC_LINE_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning|Exit|Interrupt|Iteration|Failure)(?:\s*:.*)?$"
+)
 _CAMERA_MAX_SAFE_COORD = 1e16
+
+
+def _is_exc_noise_line(ln):
+    if not ln:
+        return True
+    if ln == "EXCEPTION END" or ln == "Traceback (most recent call last):":
+        return True
+    if ln.startswith(("EXCEPTION #", "Common path prefix =", "Reported from", "Local variables", "Thread Locals")):
+        return True
+    if "evomu_site.py" in ln or "logmodule/__init__.py" in ln:
+        return True
+    return False
 
 
 def _log_exc_line(msg):
@@ -36,16 +52,20 @@ def _log_exc_line(msg):
     _EXC_SEQ += 1
     try:
         lines = [ln.strip() for ln in str(msg).splitlines() if ln.strip()]
-        headline = lines[-1] if lines else "Client Python exception"
-        for ln in reversed(lines):
-            if "Error:" in ln or "Exception:" in ln:
+        non_noise = [ln for ln in lines if not _is_exc_noise_line(ln)]
+        headline = non_noise[-1] if non_noise else "Client Python exception"
+        for ln in reversed(non_noise):
+            if _EXC_LINE_RE.match(ln) or "Error:" in ln or "Exception:" in ln:
                 headline = ln
                 break
+        msg_txt = str(msg)
+        if len(msg_txt) > 4000:
+            msg_txt = msg_txt[:1400] + "\n... [truncated] ...\n" + msg_txt[-2500:]
         _RECENT_EXCEPTIONS.append({
             "seq": _EXC_SEQ,
             "ts": round(time.time(), 3),
             "headline": headline[:200],
-            "trace": str(msg)[:1200],
+            "trace": msg_txt,
         })
         if len(_RECENT_EXCEPTIONS) > 40:
             del _RECENT_EXCEPTIONS[:-30]
@@ -94,9 +114,12 @@ def _wrap_log_target(target, label):
             continue
         def _make_wrapper(orig, attr_name):
             def _wrapped(*args, **kwargs):
-                if attr_name == "LogTraceback" and kwargs.get("severity") in (1, 2) and sys.exc_info()[0] is None:
+                if attr_name == "LogTraceback" and (
+                    kwargs.get("severity") == 1
+                    or (kwargs.get("severity") in (1, 2) and sys.exc_info()[0] is None)
+                ):
                     return orig(*args, **kwargs)
-                tb = traceback.format_exc()
+                tb = "None\n" if attr_name == "LogTraceback" else traceback.format_exc()
                 inner_tb = ""
                 try:
                     if args and isinstance(args[0], tuple) and len(args[0]) >= 3 and args[0][2] is not None:
@@ -415,9 +438,86 @@ def _install_flatbuffer_cdn_http_guard():
         pass
 
 
-def _install_fsd_typelist_preload_hook():
+def _get_bdl_cached_data(cls):
+    for attr in ("__binary__", "_BuiltDataLoader__binary__", "_BuiltDataLoader__data"):
+        val = getattr(cls, attr, None)
+        if val is not None:
+            return val
+    return None
+
+
+def _set_bdl_cached_data(cls, data):
+    if data is None:
+        return
+    if hasattr(cls, "__binary__") or (
+        not hasattr(cls, "_BuiltDataLoader__binary__") and not hasattr(cls, "_BuiltDataLoader__data")
+    ):
+        try:
+            setattr(cls, "__binary__", data)
+            return
+        except Exception:
+            pass
+    if hasattr(cls, "_BuiltDataLoader__binary__"):
+        try:
+            setattr(cls, "_BuiltDataLoader__binary__", data)
+            return
+        except Exception:
+            pass
+    try:
+        setattr(cls, "_BuiltDataLoader__data", data)
+    except Exception:
+        pass
+
+
+def _call_cls_method_zero_or_false(fn):
+    try:
+        return fn()
+    except TypeError:
+        try:
+            return fn(False)
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _invoke_bdl_load_binary(cls, bdl_mod=None):
+    load_bin = getattr(cls, "_BuiltDataLoader__LoadBinary", None)
+    if not callable(load_bin):
+        return _get_bdl_cached_data(cls)
+    data = _call_cls_method_zero_or_false(load_bin)
+    if data is None and bdl_mod is not None:
+        use_res_fn = getattr(bdl_mod, "UseResFileServer", None)
+        disable_fn = getattr(bdl_mod, "DisableUseResFileServer", None)
+        enable_fn = getattr(bdl_mod, "EnableUseResFileServer", None)
+        try:
+            was_enabled = bool(callable(use_res_fn) and use_res_fn())
+        except Exception:
+            was_enabled = False
+        if was_enabled and callable(disable_fn):
+            try:
+                disable_fn()
+                data = _call_cls_method_zero_or_false(load_bin)
+            finally:
+                if callable(enable_fn):
+                    try:
+                        enable_fn()
+                    except Exception:
+                        pass
+    if data is not None:
+        _set_bdl_cached_data(cls, data)
+    return _get_bdl_cached_data(cls)
+
+
+def _install_fsd_typelist_preload_hook(preload_typelist=True):
     """Ensure BuiltDataLoader.GetData never returns None when asynchronous loading
-    has not finished yet, and eagerly pre-load evetypes.storages.TypeListLoader (#796, #797)."""
+    has not finished yet, and eagerly pre-load evetypes.data.TypeListLoader (#796, #797).
+
+    In V24.01, TypeListLoader lives in `evetypes.data`, `BuiltDataLoader.__LoadBinary(cls)`
+    takes no extra boolean argument, and loaded data is stored in `_BuiltDataLoader__binary__`.
+    Pass `preload_typelist=False` from `sys.meta_path` `find_module` to avoid doing ResFile
+    I/O or yielding while holding Python's import lock.
+    """
     global _HOOKED_TYPELIST_PRELOAD
     if _HOOKED_TYPELIST_PRELOAD:
         return
@@ -428,33 +528,45 @@ def _install_fsd_typelist_preload_hook():
             orig_get_data = getattr(bdl_cls, "GetData", None)
             if callable(orig_get_data):
                 def _evomu_safe_get_data(cls):
-                    data = orig_get_data.im_func(cls) if hasattr(orig_get_data, "im_func") else orig_get_data()
+                    orig_fn = getattr(orig_get_data, "im_func", None) or getattr(orig_get_data, "__func__", None)
+                    try:
+                        data = orig_fn(cls) if callable(orig_fn) else orig_get_data()
+                    except Exception:
+                        data = None
                     if data is None:
-                        load_bin = getattr(cls, "_BuiltDataLoader__LoadBinary", None)
-                        if callable(load_bin):
-                            try:
-                                load_bin(False)
-                            except Exception:
-                                pass
-                            data = getattr(cls, "_BuiltDataLoader__data", None)
+                        data = _invoke_bdl_load_binary(cls, bdl_mod=bdl_mod)
                     return data
                 try:
                     bdl_cls.GetData = classmethod(_evomu_safe_get_data)
                     bdl_cls._evomu_getdata_patched = True
                 except Exception:
                     pass
-    et_storages = sys.modules.get("evetypes.storages")
-    if et_storages is not None:
-        tll = getattr(et_storages, "TypeListLoader", None)
-        if tll is not None:
-            try:
-                if getattr(tll, "_BuiltDataLoader__data", None) is None:
-                    load_bin = getattr(tll, "_BuiltDataLoader__LoadBinary", None)
-                    if callable(load_bin):
-                        load_bin(False)
+    if not preload_typelist:
+        return
+    if "evetypes.data" not in sys.modules and "blue" in sys.modules:
+        try:
+            __import__("evetypes.data", fromlist=["TypeListLoader"])
+        except Exception:
+            pass
+    for mod_name in ("evetypes.data", "evetypes", "evetypes.storages"):
+        et_mod = sys.modules.get(mod_name)
+        if et_mod is None:
+            continue
+        tll = getattr(et_mod, "TypeListLoader", None)
+        if tll is None:
+            continue
+        try:
+            if _get_bdl_cached_data(tll) is None:
+                get_data_fn = getattr(tll, "GetData", None)
+                if callable(get_data_fn):
+                    get_data_fn()
+            if _get_bdl_cached_data(tll) is None:
+                _invoke_bdl_load_binary(tll, bdl_mod=bdl_mod)
+            if _get_bdl_cached_data(tll) is not None:
                 _HOOKED_TYPELIST_PRELOAD = True
-            except Exception:
-                pass
+                break
+        except Exception:
+            pass
 
 
 def _is_finite_safe_vec3(vec, limit=_CAMERA_MAX_SAFE_COORD):
@@ -1226,7 +1338,7 @@ def _maybe_schedule_driver_on_main_thread():
     except Exception:
         return
     _install_flatbuffer_cdn_http_guard()
-    _install_fsd_typelist_preload_hook()
+    _install_fsd_typelist_preload_hook(preload_typelist=False)
     _install_camera_dock_guard()
     _DRIVER_SCHEDULED = True
     try:
@@ -1246,7 +1358,7 @@ class _EvomuMetaHook(object):
         _install_xmpp_plaintext_guard()
         _install_xmpp_port_guard()
         _install_flatbuffer_cdn_http_guard()
-        _install_fsd_typelist_preload_hook()
+        _install_fsd_typelist_preload_hook(preload_typelist=False)
         _install_camera_dock_guard()
         _maybe_schedule_driver_on_main_thread()
         return None

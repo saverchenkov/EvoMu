@@ -579,10 +579,12 @@ def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0):
 
         deadline = time.time() + float(timeout_sec)
         settled = False
+        saw_warping = False
         while time.time() < deadline:
             if _is_warp_settled():
                 settled = True
                 break
+            saw_warping = True
             _sleep_sim_ms(100)
         sess = getattr(__builtin__, "session", None)
         if getattr(sess, "stationid", None) is None and getattr(sess, "structureid", None) is None:
@@ -598,9 +600,13 @@ def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0):
                     if _is_warp_settled():
                         break
                     _sleep_sim_ms(100)
-        if not _WARP_SIGNAL_STATE["hooked"]:
+        if not _WARP_SIGNAL_STATE["hooked"] or saw_warping:
+            # CCP's WarpLoop sleeps blue.synchro.SleepSim(500) per iteration and emits
+            # OnSpecialFX(..., "effects.Warping", 0) only after waking from that sleep.
+            # Wait >500ms sim time after warp clears so a follow-up CmdWarpToStuff cannot
+            # have its new Warping activation stopped mid-SleepSim (Warp.py:597).
             _sleep_sim_ms(600)
-        elif _WARP_SIGNAL_STATE["in_warp"]:
+        if _WARP_SIGNAL_STATE["in_warp"]:
             _WARP_SIGNAL_STATE["in_warp"] = False
     except Exception:
         pass
@@ -615,7 +621,7 @@ def _warp_full(sm, b_obj, tid, stuff_type="item", distance=0.0):
             b_obj.CmdWarpToStuff(stuff_type, tid, float(distance))
         except Exception as exc:
             msg = str(exc)
-            if "WarpDistanceTooShort" in msg:
+            if "WarpDistanceTooShort" in msg or "WarpTooShort" in msg:
                 break
             if "ShipInWarp" in msg or "ShipAlreadyInWarp" in msg:
                 sm.RemoteSvc("timeControl").AdvanceClock(120)
@@ -652,7 +658,7 @@ def _warp_animated(sm, b_obj, tid, stuff_type="item", distance=0.0, max_ticks=45
             break
         except Exception as exc:
             msg = str(exc)
-            if "WarpDistanceTooShort" in msg:
+            if "WarpDistanceTooShort" in msg or "WarpTooShort" in msg:
                 return {"skipped": True}
             if "ShipInWarp" in msg or "ShipAlreadyInWarp" in msg:
                 sm.RemoteSvc("timeControl").AdvanceClock(120)
@@ -752,7 +758,11 @@ def _warp_animated(sm, b_obj, tid, stuff_type="item", distance=0.0, max_ticks=45
 def _undock_ship(sm):
     _wait_view_settled(sm)
     sess = getattr(__builtin__, "session", None)
-    if getattr(sess, "solarsystemid", None) and not getattr(sess, "stationid", None):
+    if (
+        getattr(sess, "solarsystemid", None)
+        and not getattr(sess, "stationid", None)
+        and not getattr(sess, "structureid", None)
+    ):
         _ensure_view(sm, "inflight")
         _ensure_warp_signal_tracker(sm)
         return
@@ -768,6 +778,7 @@ def _undock_ship(sm):
         if (
             getattr(sess, "solarsystemid", None)
             and not getattr(sess, "stationid", None)
+            and not getattr(sess, "structureid", None)
             and not getattr(sess, "mutating", 0)
             and getattr(sess, "changing", None) is None
         ):
@@ -799,7 +810,7 @@ def _dock_station(sm, station_id=60003760):
     while time.time() < deadline:
         sess = getattr(__builtin__, "session", None)
         if (
-            getattr(sess, "stationid", None) == station_id
+            (getattr(sess, "stationid", None) == station_id or getattr(sess, "structureid", None) == station_id)
             and not getattr(sess, "mutating", 0)
             and getattr(sess, "changing", None) is None
         ):
