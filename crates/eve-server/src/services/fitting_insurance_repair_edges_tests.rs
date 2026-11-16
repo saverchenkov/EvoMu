@@ -722,3 +722,85 @@ async fn repair_all_npc_station_and_upwell_structure_paths() {
         "InsufficientFunds"
     );
 }
+
+#[test]
+fn insure_ship_ignores_one_unit_and_cross_region_mineral_outliers() {
+    let ctx = test_ctx();
+    let station_ok = find_station_with_service(&ctx.sde, 21, true);
+    let char_id = 90_000_001;
+    let ship_id = 100_701_001;
+    let free_corvette_id = 100_701_002;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587, // Rifter (base_price = 400_000)
+                owner_id: char_id,
+                location_id: station_ok,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            free_corvette_id,
+            InventoryItemRecord {
+                item_id: free_corvette_id,
+                type_id: 588, // Reaper (base_price = 0)
+                owner_id: char_id,
+                location_id: station_ok,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_isk(1_000_000_000);
+        }
+        // Inject 1-unit 1B ISK outlier trades across 10 regions on the same UTC date for Tritanium/Isogen/Zydrine,
+        // plus an outlier directly on the free corvette (588) and Rifter (587)
+        for region_offset in 0..10_u32 {
+            for tid in [34_u32, 37_u32, 39_u32, 587_u32, 588_u32] {
+                snap.market_history.insert(
+                    (10_000_001 + region_offset, tid),
+                    vec![eve_db::MarketHistoryDayRecord {
+                        date: "2026-11-16".into(),
+                        lowest: 1_000_000_000.0,
+                        highest: 1_000_000_000.0,
+                        average: 1_000_000_000.0,
+                        volume: 1,
+                        order_count: 1,
+                        open_price: Some(1_000_000_000.0),
+                        close_price: Some(1_000_000_000.0),
+                    }],
+                );
+            }
+        }
+    });
+
+    let mut sess = make_session(char_id, 98_000_001, Some(ship_id), Some(station_ok));
+    let kw = HashMap::new();
+    let res = handle_insure_ship(&ctx, &mut sess, &[PyRep::Integer(ship_id), PyRep::Real(1.0)], &kw)
+        .expect("Platinum insurance on Rifter succeeds at baseline price");
+
+    let cost_isk = res.dict_get("costISK").and_then(|v| v.as_f64()).unwrap();
+    let payout_isk = res.dict_get("payoutISK").and_then(|v| v.as_f64()).unwrap();
+    let base_ref = crate::formulas::compute_ship_insurance_reference_value(&ctx.sde, 587);
+    assert!((cost_isk - base_ref * 0.30).abs() < 1e-6);
+    assert!((payout_isk - base_ref).abs() < 1e-6);
+    assert!(payout_isk - cost_isk < base_ref);
+
+    // Free rookie corvette (588, base_price == 0.0) stays at 0.0 payout and cannot be insured
+    let err = handle_insure_ship(
+        &ctx,
+        &mut sess,
+        &[PyRep::Integer(free_corvette_id), PyRep::Real(1.0)],
+        &kw,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "InsureShipInvalidCost");
+}

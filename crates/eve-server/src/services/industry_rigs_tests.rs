@@ -245,12 +245,22 @@ fn facility_modifiers_and_adjusted_prices_resolve_correctly() {
             ],
         );
         let prices = collect_live_market_adjusted_prices(snap);
+        let prices_with_sde = collect_live_market_adjusted_prices_with_sde(&ctx.sde, snap);
         assert!((prices[&34] - 5.5).abs() < 1e-9);
         assert!((prices[&35] - 12.0).abs() < 1e-9);
-        let expected_36 = (100.0 * 27.0 + 200.0) / 28.0;
+        let alpha = crate::formulas::ADJUSTED_PRICE_EMA_ALPHA;
+        let band = crate::formulas::ADJUSTED_PRICE_DAILY_BAND;
+        let d1 = (32.0 + alpha * (100.0 - 32.0)).clamp(32.0 * (1.0 - band), 32.0 * (1.0 + band));
+        let expected_36 = (d1 + alpha * (300.0 - d1)).clamp(d1 * (1.0 - band), d1 * (1.0 + band));
         assert!((prices[&36] - expected_36).abs() < 1e-9);
+        assert!((prices_with_sde[&36] - expected_36).abs() < 1e-9);
         assert!(
             (compute_market_adjusted_price_from_snap(snap, 36).unwrap() - expected_36).abs() < 1e-9
+        );
+        assert!(
+            (compute_market_adjusted_price_from_snap_with_sde(&ctx.sde, snap, 36).unwrap() - expected_36)
+                .abs()
+                < 1e-9
         );
         assert!(compute_market_adjusted_price_from_snap(snap, 999888).is_none());
         assert!((resolve_material_adjusted_price(&ctx, Some(snap), 34) - 5.5).abs() < 1e-9);
@@ -513,12 +523,24 @@ fn ship_insurance_reference_value_with_prices_scales_by_live_material_basket() {
         &HashMap::from([(34, 2.0)]),
         587,
     );
-    let doubled_val = compute_ship_insurance_reference_value_with_prices(
+    let capped_up_val = compute_ship_insurance_reference_value_with_prices(
         &ctx.sde,
         &HashMap::from([(34, 4.0)]),
         587,
     );
-    assert!((doubled_val - base_val * 2.0).abs() < 1e-3);
+    assert!((capped_up_val - base_val * crate::formulas::INSURANCE_REF_MAX_MULT).abs() < 1e-3);
+    let extreme_up_val = compute_ship_insurance_reference_value_with_prices(
+        &ctx.sde,
+        &HashMap::from([(34, 1_000_000_000.0)]),
+        587,
+    );
+    assert!((extreme_up_val - base_val * crate::formulas::INSURANCE_REF_MAX_MULT).abs() < 1e-3);
+    let floored_val = compute_ship_insurance_reference_value_with_prices(
+        &ctx.sde,
+        &HashMap::from([(34, 0.01)]),
+        587,
+    );
+    assert!((floored_val - base_val * crate::formulas::INSURANCE_REF_MIN_MULT).abs() < 1e-3);
 }
 
 #[test]
@@ -831,6 +853,178 @@ fn w3_mutant_killers_rig_security_boundaries_activity_products_and_hull_bonuses(
                 .is_none()
         );
     });
+}
+
+#[test]
+fn adjusted_price_single_day_one_unit_outlier_stays_anchored_to_sde_base_price() {
+    let ctx = make_test_context();
+    let _adj_lock = SDE_ADJ_PRICE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    clear_sde_adjusted_prices();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_history.clear();
+        for tid in [34_u32, 37_u32, 39_u32] {
+            snap.market_history.insert(
+                (10_000_002, tid),
+                vec![MarketHistoryDayRecord {
+                    date: "2026-11-16".into(),
+                    lowest: 1_000_000_000.0,
+                    highest: 1_000_000_000.0,
+                    average: 1_000_000_000.0,
+                    volume: 1,
+                    order_count: 1,
+                    open_price: Some(1_000_000_000.0),
+                    close_price: Some(1_000_000_000.0),
+                }],
+            );
+        }
+
+        let prices = collect_live_market_adjusted_prices(snap);
+        let prices_sde = collect_live_market_adjusted_prices_with_sde(&ctx.sde, snap);
+        for (tid, expected_base) in [(34_u32, 2.0), (37_u32, 128.0), (39_u32, 2048.0)] {
+            assert!(
+                (prices[&tid] - expected_base).abs() < 1e-9,
+                "1-unit outlier on type {tid} must remain anchored at SDE base_price {expected_base}, got {}",
+                prices[&tid]
+            );
+            assert!((prices_sde[&tid] - expected_base).abs() < 1e-9);
+            assert!(
+                (compute_market_adjusted_price_from_snap(snap, tid).unwrap() - expected_base).abs()
+                    < 1e-9
+            );
+        }
+
+        // Even with high daily volume on a single UTC day, adjustment is bounded by the daily band (±20%)
+        snap.market_history.insert(
+            (10_000_002, 37),
+            vec![MarketHistoryDayRecord {
+                date: "2026-11-16".into(),
+                lowest: 1_000_000_000.0,
+                highest: 1_000_000_000.0,
+                average: 1_000_000_000.0,
+                volume: 100_000,
+                order_count: 1,
+                open_price: Some(1_000_000_000.0),
+                close_price: Some(1_000_000_000.0),
+            }],
+        );
+        let clamped_37 = compute_market_adjusted_price_from_snap_with_sde(&ctx.sde, snap, 37)
+            .expect("adjusted price for Isogen");
+        assert!(
+            clamped_37 <= 128.0 * (1.0 + crate::formulas::ADJUSTED_PRICE_DAILY_BAND) + 1e-9,
+            "single-day spike must stay clamped within daily band around base_price, got {clamped_37}"
+        );
+    });
+
+    clear_sde_adjusted_prices();
+}
+
+#[test]
+fn adjusted_price_twenty_eight_regions_same_utc_day_collapse_to_single_step() {
+    let ctx = make_test_context();
+    let _adj_lock = SDE_ADJ_PRICE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    clear_sde_adjusted_prices();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_history.clear();
+
+        // 1. 28 regions each trading 1 unit of Zydrine (39, base_price = 2048) on the same UTC date:
+        //    total cluster volume = 28 < min daily volume (50), so it must produce 0% deviation.
+        for i in 0..28_u32 {
+            snap.market_history.insert(
+                (10_000_001 + i, 39),
+                vec![MarketHistoryDayRecord {
+                    date: "2026-11-16".into(),
+                    lowest: 1_000_000_000.0,
+                    highest: 1_000_000_000.0,
+                    average: 1_000_000_000.0,
+                    volume: 1,
+                    order_count: 1,
+                    open_price: Some(1_000_000_000.0),
+                    close_price: Some(1_000_000_000.0),
+                }],
+            );
+        }
+
+        // 2. 28 regions each trading high volume of Tritanium (34, base_price = 2.0) on the SAME UTC date:
+        //    must collapse into 1 UTC day (<= 1.20 * base_price), NEVER 28 EMA steps (never 2^27 or 1.20^28).
+        for i in 0..28_u32 {
+            snap.market_history.insert(
+                (10_000_001 + i, 34),
+                vec![MarketHistoryDayRecord {
+                    date: "2026-11-16".into(),
+                    lowest: 1_000_000.0,
+                    highest: 1_000_000.0,
+                    average: 1_000_000.0,
+                    volume: 10_000,
+                    order_count: 1,
+                    open_price: Some(1_000_000.0),
+                    close_price: Some(1_000_000.0),
+                }],
+            );
+        }
+
+        // 3. 2 regions on the same UTC date for Pyerite (35, base_price = 8.0) verify exact volume-weighted average:
+        //    reg1: 10_000 @ 8.0, reg2: 10_000 @ 16.0 => cluster daily_avg = 12.0 => 1 EMA step.
+        snap.market_history.insert(
+            (10_000_002, 35),
+            vec![MarketHistoryDayRecord {
+                date: "2026-11-16".into(),
+                lowest: 8.0,
+                highest: 8.0,
+                average: 8.0,
+                volume: 10_000,
+                order_count: 5,
+                open_price: Some(8.0),
+                close_price: Some(8.0),
+            }],
+        );
+        snap.market_history.insert(
+            (10_000_043, 35),
+            vec![MarketHistoryDayRecord {
+                date: "2026-11-16".into(),
+                lowest: 16.0,
+                highest: 16.0,
+                average: 16.0,
+                volume: 10_000,
+                order_count: 5,
+                open_price: Some(16.0),
+                close_price: Some(16.0),
+            }],
+        );
+
+        let prices = collect_live_market_adjusted_prices(snap);
+        assert!(
+            (prices[&39] - 2048.0).abs() < 1e-9,
+            "28x1-unit trades on same UTC date must stay anchored at 2048.0, got {}",
+            prices[&39]
+        );
+        let max_trit_1d = 2.0 * (1.0 + crate::formulas::ADJUSTED_PRICE_DAILY_BAND);
+        assert!(
+            prices[&34] <= max_trit_1d + 1e-9 && prices[&34] >= 2.0,
+            "28 regions on same UTC date must collapse to 1 step <= {max_trit_1d}, got {}",
+            prices[&34]
+        );
+        let expected_35 = 8.0 + crate::formulas::ADJUSTED_PRICE_EMA_ALPHA * (12.0 - 8.0);
+        assert!(
+            (prices[&35] - expected_35).abs() < 1e-9,
+            "expected cluster-wide volume-weighted 1-day step {expected_35}, got {}",
+            prices[&35]
+        );
+
+        // Verify insurance reference value for Rifter (587) stays bounded even with those 28-region spikes
+        let rifter_ref = compute_ship_insurance_reference_value_with_prices(&ctx.sde, &prices, 587);
+        assert!(
+            rifter_ref <= 400_000.0 * crate::formulas::INSURANCE_REF_MAX_MULT + 1e-9,
+            "Rifter insurance ref_val must stay bounded, got {rifter_ref}"
+        );
+    });
+
+    clear_sde_adjusted_prices();
 }
 
 #[cfg(test)]

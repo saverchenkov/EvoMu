@@ -183,13 +183,21 @@ pub(super) fn handle_insure_ship(
             }
         }
         let live_prices =
-            crate::services::industry_pi::industry_rigs::collect_live_market_adjusted_prices(snap);
+            crate::services::industry_pi::industry_rigs::collect_live_market_adjusted_prices_with_sde(
+                &ctx.sde,
+                snap,
+            );
         let ref_val =
             crate::services::industry_pi::industry_rigs::compute_ship_insurance_reference_value_with_prices(
                 &ctx.sde,
                 &live_prices,
                 ship.type_id,
             );
+        if !ref_val.is_finite() || ref_val <= 0.0 {
+            return Err(BridgeRpcError::from_user_key(
+                eve_proto::UserErrorKey::InsureShipInvalidCost,
+            ));
+        }
         let levels = crate::formulas::compute_insurance_levels(ref_val);
         let standard_fractions = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
 

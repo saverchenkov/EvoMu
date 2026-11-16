@@ -542,6 +542,57 @@ pub fn compute_insurance_levels(reference_value: f64) -> [(&'static str, f64, f6
     ]
 }
 
+/// Rolling window length (in UTC calendar days) for market adjusted price EMA calculation.
+pub const ADJUSTED_PRICE_EMA_WINDOW_DAYS: usize = 28;
+/// Standard 28-day EMA smoothing factor (`2 / (N + 1)`).
+pub const ADJUSTED_PRICE_EMA_ALPHA: f64 = 2.0 / (ADJUSTED_PRICE_EMA_WINDOW_DAYS as f64 + 1.0);
+/// Maximum per-UTC-day fractional change allowed in rolling adjusted market price (`±20%`).
+pub const ADJUSTED_PRICE_DAILY_BAND: f64 = 0.20;
+/// Minimum daily baseline ISK notional (`daily_vol * sde_base_price`) before moving away from SDE `base_price`.
+pub const ADJUSTED_PRICE_MIN_DAILY_NOTIONAL_ISK: f64 = 10_000.0;
+/// Minimum absolute cluster-wide daily trade unit count before a UTC day can move adjusted price.
+pub const ADJUSTED_PRICE_MIN_DAILY_UNITS: u128 = 50;
+/// Lower bound multiplier on per-material live adjusted price contribution in ship insurance valuation.
+pub const INSURANCE_MATERIAL_MIN_MULT: f64 = 0.50;
+/// Upper bound multiplier on per-material live adjusted price contribution in ship insurance valuation.
+pub const INSURANCE_MATERIAL_MAX_MULT: f64 = 1.20;
+/// Lower bound multiplier on ship insurance reference value relative to hull SDE `base_price`.
+pub const INSURANCE_REF_MIN_MULT: f64 = 0.50;
+/// Upper bound multiplier on ship insurance reference value relative to hull SDE `base_price`
+/// so Platinum net payout (`0.70 * ref_val <= 0.84 * base_price`) stays bounded below hull baseline replacement cost.
+pub const INSURANCE_REF_MAX_MULT: f64 = 1.20;
+
+/// Returns the minimum cluster-wide UTC daily trade volume required before a day's trades
+/// may shift an item's adjusted market price away from its SDE `base_price` baseline.
+#[inline]
+pub fn min_adjusted_price_daily_volume(sde_base_price: Option<f64>) -> u128 {
+    match sde_base_price {
+        Some(base) if base.is_finite() && base > 0.0 => {
+            let notional_units = (ADJUSTED_PRICE_MIN_DAILY_NOTIONAL_ISK / base)
+                .ceil()
+                .min(u128::MAX as f64) as u128;
+            notional_units.max(ADJUSTED_PRICE_MIN_DAILY_UNITS)
+        }
+        _ => ADJUSTED_PRICE_MIN_DAILY_UNITS,
+    }
+}
+
+/// Bounds a live ship insurance reference value strictly around the hull's SDE `base_price`
+/// (`[0.50x, 1.20x]`, or `0.0` when `base_hull_price <= 0.0` for free/unpriced hulls).
+#[inline]
+pub fn clamp_ship_insurance_reference_value(base_hull_price: f64, candidate: f64) -> f64 {
+    if !base_hull_price.is_finite() || base_hull_price <= 0.0 {
+        return 0.0;
+    }
+    if !candidate.is_finite() || candidate <= 0.0 {
+        return base_hull_price;
+    }
+    candidate.clamp(
+        base_hull_price * INSURANCE_REF_MIN_MULT,
+        base_hull_price * INSURANCE_REF_MAX_MULT,
+    )
+}
+
 /// #75-#82: Checked Manufacturing Material Efficiency (ME `0..10`) calculation returning
 /// `None` if bonuses are non-finite or the ceiled total exceeds `u64::MAX`.
 /// $$M_{\text{req}} = \max\left(\text{runs}, \left\lceil \text{runs} \cdot M_{\text{base}} \cdot \left(1 - \frac{\text{ME}}{100}\right) \cdot (1 - f_{\text{structure}}) \right\rceil\right)$$
