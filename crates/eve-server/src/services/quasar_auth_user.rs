@@ -40,6 +40,31 @@ pub struct QuasarIdentityStore {
 
 const QUASAR_IDENTITY_NOTE_ID: i64 = -8_500_000_000_000;
 const QUASAR_IDENTITY_NOTE_OWNER_ID: i64 = -85;
+pub(crate) const USER_LICENSE_TYPE_OMEGA: &str = "eve_clonestate_omega";
+
+fn encode_omega_license_notice(
+    type_name: &str,
+    expiry_seconds: i64,
+    last_modified_seconds: i64,
+) -> Result<GoogleAny, pb::PbError> {
+    pb::message(type_name)
+        .set("identifier.license_type", USER_LICENSE_TYPE_OMEGA)
+        .set(
+            "license.expiry_date",
+            GoogleTimestamp {
+                seconds: expiry_seconds,
+                nanos: 0,
+            },
+        )
+        .set(
+            "license.last_modified",
+            GoogleTimestamp {
+                seconds: last_modified_seconds,
+                nanos: 0,
+            },
+        )
+        .to_any()
+}
 
 fn default_identity_store() -> QuasarIdentityStore {
     QuasarIdentityStore::default()
@@ -90,16 +115,11 @@ pub(crate) fn try_activate_user_omega_license_in_snapshot(
         }
     }
 
-    let notice = match pb::message("eve_public.user.license.api.ActivatedNotice")
-        .set("identifier.license_type", "omega")
-        .set(
-            "license.expiry_date",
-            GoogleTimestamp {
-                seconds: next as i64,
-                nanos: 0,
-            },
-        )
-        .to_any()
+    let notice = match encode_omega_license_notice(
+        "eve_public.user.license.api.ActivatedNotice",
+        next as i64,
+        now_unix.max(1) as i64,
+    )
     {
         Ok(msg) => Some(msg),
         Err(e) => {
@@ -201,16 +221,7 @@ pub fn expire_user_omega_license(
         }
     });
 
-    match pb::message("eve_public.user.license.api.ExpiredNotice")
-        .set("identifier.license_type", "omega")
-        .set(
-            "license.expiry_date",
-            GoogleTimestamp {
-                seconds: 0,
-                nanos: 0,
-            },
-        )
-        .to_any()
+    match encode_omega_license_notice("eve_public.user.license.api.ExpiredNotice", 0, 1)
     {
         Ok(notice) => {
             router_notices
@@ -407,13 +418,32 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     let db_lic_get = Arc::clone(&db);
     router.register_handler(
         "eve_public.user.license.api.GetRequest",
-        Arc::new(move |ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
             let Some(uid_i32) = ctx.effective_user_id() else {
                 return Err((
                     crate::quasar_gateway::STATUS_UNAUTHORIZED,
                     "Authenticated user required".to_string(),
                 ));
             };
+            let requested_type = dyn_msg.get(1).and_then(|v| match v {
+                DynamicValue::Message(m) => m.get(1).and_then(|inner| match inner {
+                    DynamicValue::String(s) => Some(s.trim().to_string()),
+                    _ => None,
+                }),
+                DynamicValue::String(s) => Some(s.trim().to_string()),
+                _ => None,
+            });
+            if let Some(ref lt) = requested_type {
+                if !lt.is_empty()
+                    && !lt.eq_ignore_ascii_case(USER_LICENSE_TYPE_OMEGA)
+                    && !lt.eq_ignore_ascii_case("omega")
+                {
+                    return Err((
+                        crate::quasar_gateway::STATUS_NOT_FOUND,
+                        format!("User license '{lt}' not found"),
+                    ));
+                }
+            }
             let uid = uid_i32 as u64;
             let now = ctx.now_unix();
             let expiry = read_identity_store(&db_lic_get, |guard| {
@@ -425,11 +455,19 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             } else {
                 1
             };
+            let last_mod = if is_active { now as i64 } else { 1 };
             pb::message("eve_public.user.license.api.GetResponse")
                 .set(
                     "license.expiry_date",
                     GoogleTimestamp {
                         seconds: exp_seconds as i64,
+                        nanos: 0,
+                    },
+                )
+                .set(
+                    "license.last_modified",
+                    GoogleTimestamp {
+                        seconds: last_mod,
                         nanos: 0,
                     },
                 )

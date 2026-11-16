@@ -889,6 +889,262 @@ fn store_catalog_wire_fields_schedule_token_isolation_and_omega_purchase_edges()
     });
 }
 
+#[test]
+fn v2402_omega_upsell_offer_and_product_proto_attributes() {
+    use eve_proto::pb::enum_name;
+    use eve_proto::quasar::{DynamicQuasarMessage, DynamicValue};
+
+    let router = new_router();
+    let reg = QuasarDescriptorRegistry::open_default_or_empty();
+    let now = 1_700_000_900u64;
+    let player = make_sess(Some(10), Some(90_000_010), 0);
+
+    fn dyn_list(msg: &DynamicQuasarMessage, field: u32) -> Vec<&DynamicValue> {
+        match msg.get(field) {
+            Some(DynamicValue::Repeated(vs)) => vs.iter().collect(),
+            Some(v) => vec![v],
+            None => Vec::new(),
+        }
+    }
+    fn as_msg(val: Option<&DynamicValue>) -> &DynamicQuasarMessage {
+        match val {
+            Some(DynamicValue::Message(m)) => m.as_ref(),
+            other => panic!("expected submessage, got {other:?}"),
+        }
+    }
+
+    // 1. Offer 1001 GetRequest populates V24.02 required attributes (pricing, products, categories, schedule, tags)
+    let off_req = pb::message("eve_public.store.offer.api.GetRequest")
+        .set("offer.store_offer", "1001")
+        .must_encode();
+    let off_rsp = call(
+        &router,
+        &player,
+        "eve_public.store.offer.api.GetRequest",
+        off_req,
+        now,
+    );
+    assert_eq!(off_rsp.status_code, STATUS_OK);
+    let off_any = off_rsp.payload.expect("offer GetResponse payload");
+    let off_dec = reg
+        .decode_dynamic(&off_any.type_url, &off_any.value)
+        .expect("decode offer GetResponse");
+    let attr = as_msg(off_dec.get(1));
+    assert_eq!(
+        attr.get(1),
+        Some(&DynamicValue::String("30 Days Omega Clone State".into()))
+    );
+    let tags: Vec<&str> = dyn_list(attr, 2)
+        .into_iter()
+        .filter_map(|v| match v {
+            DynamicValue::String(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(tags.contains(&"UpsellStarterPack"));
+    assert!(tags.contains(&"omega"));
+    assert_eq!(attr.get(3), Some(&DynamicValue::Bool(false)));
+    assert_eq!(attr.get(4), Some(&DynamicValue::Bool(false)));
+    assert_eq!(attr.get(5), Some(&DynamicValue::Bool(true)));
+    assert_eq!(attr.get(7), Some(&DynamicValue::Bool(true)));
+
+    for price_fnum in [12u32, 13u32] {
+        let price = as_msg(attr.get(price_fnum));
+        let cur = as_msg(price.get(4));
+        assert_eq!(cur.get(1), Some(&DynamicValue::String("USD".into())));
+        assert_eq!(cur.get(2), Some(&DynamicValue::Int64(1_999)));
+        let plex = as_msg(price.get(6));
+        assert_eq!(plex.get(1), Some(&DynamicValue::Sint64(50_000)));
+    }
+
+    let sched = as_msg(attr.get(10));
+    assert_eq!(
+        as_msg(sched.get(1)).get(1),
+        Some(&DynamicValue::Int64(2_592_000))
+    );
+    assert_eq!(
+        as_msg(sched.get(2)).get(1),
+        Some(&DynamicValue::String("1001".into()))
+    );
+    assert_eq!(
+        as_msg(as_msg(sched.get(3)).get(4)).get(2),
+        Some(&DynamicValue::Int64(1_999))
+    );
+    assert_eq!(
+        as_msg(as_msg(sched.get(4)).get(4)).get(2),
+        Some(&DynamicValue::Int64(1_999))
+    );
+
+    let cats = dyn_list(attr, 14);
+    assert_eq!(cats.len(), 1);
+    let c0 = as_msg(Some(cats[0]));
+    assert_eq!(c0.get(1), Some(&DynamicValue::Uint32(1)));
+    assert_eq!(c0.get(2), Some(&DynamicValue::Enum(2)));
+
+    let prods = dyn_list(attr, 15);
+    assert_eq!(prods.len(), 1);
+    let p0 = as_msg(Some(prods[0]));
+    assert_eq!(as_msg(p0.get(1)).get(1), Some(&DynamicValue::Uint32(101)));
+    assert_eq!(as_msg(p0.get(1)).get(2), Some(&DynamicValue::Enum(2)));
+    assert_eq!(p0.get(2), Some(&DynamicValue::Int32(1)));
+
+    // 2. Product 101 emits attributes.license (duration = 30d, type = eve_clonestate_omega), not attributes.item
+    let p101_req = pb::message("eve_public.store.product.api.GetRequest")
+        .set("product.sequential", 101u32)
+        .set("product.catalog", enum_name("CATALOG_REAL_MONEY"))
+        .must_encode();
+    let p101_rsp = call(
+        &router,
+        &player,
+        "eve_public.store.product.api.GetRequest",
+        p101_req,
+        now,
+    );
+    assert_eq!(p101_rsp.status_code, STATUS_OK);
+    let p101_any = p101_rsp.payload.expect("product 101 payload");
+    let p101_dec = reg
+        .decode_dynamic(&p101_any.type_url, &p101_any.value)
+        .expect("decode product 101");
+    let p101_attr = as_msg(p101_dec.get(1));
+    assert!(p101_attr.get(2).is_none());
+    let lic = as_msg(p101_attr.get(6));
+    assert_eq!(
+        as_msg(lic.get(1)).get(1),
+        Some(&DynamicValue::Int64(2_592_000))
+    );
+    assert_eq!(
+        lic.get(2),
+        Some(&DynamicValue::String("eve_clonestate_omega".into()))
+    );
+
+    // 3. Item product 102 (type_id=34599) and SP claim product 105 (type_id=0) emit attributes.item, not license
+    for (pid, expected_tid) in [(102u32, 34_599u64), (105u32, 0u64)] {
+        let preq = pb::message("eve_public.store.product.api.GetRequest")
+            .set("product.sequential", pid)
+            .must_encode();
+        let prsp = call(
+            &router,
+            &player,
+            "eve_public.store.product.api.GetRequest",
+            preq,
+            now,
+        );
+        assert_eq!(prsp.status_code, STATUS_OK);
+        let pany = prsp.payload.unwrap();
+        let pdec = reg.decode_dynamic(&pany.type_url, &pany.value).unwrap();
+        let pattr = as_msg(pdec.get(1));
+        assert!(pattr.get(6).is_none());
+        let item = as_msg(pattr.get(2));
+        assert_eq!(
+            as_msg(item.get(1)).get(1),
+            Some(&DynamicValue::Uint64(expected_tid))
+        );
+    }
+
+    // 4. GetAllRequest honors catalog filter + unknown offer/product return 404
+    router.db.with_mut_snapshot(|snap| {
+        let mut cat = read_store_catalog(snap);
+        if !cat.offers.iter().any(|o| o.id == 9001) {
+            cat.offers.push(StoreOffer {
+                id: 9001,
+                name: "PLEX SKIN Test".into(),
+                description: "PLEX only".into(),
+                category_id: 2,
+                price_plex: 55,
+                product_ids: vec![102],
+                targeted: false,
+                price_cents: None,
+                currency: None,
+            });
+            save_store_catalog(snap, &cat);
+        }
+    });
+    let all_rm = pb::message("eve_public.store.offer.api.GetAllRequest")
+        .set("catalog", enum_name("CATALOG_REAL_MONEY"))
+        .must_encode();
+    let all_rm_rsp = call(
+        &router,
+        &player,
+        "eve_public.store.offer.api.GetAllRequest",
+        all_rm,
+        now,
+    );
+    assert_eq!(all_rm_rsp.status_code, STATUS_OK);
+    let all_rm_dec = reg
+        .decode_dynamic(
+            &all_rm_rsp.payload.as_ref().unwrap().type_url,
+            &all_rm_rsp.payload.as_ref().unwrap().value,
+        )
+        .unwrap();
+    let rm_ids: Vec<String> = dyn_list(&all_rm_dec, 1)
+        .into_iter()
+        .filter_map(|v| match as_msg(Some(v)).get(1) {
+            Some(DynamicValue::String(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(rm_ids.contains(&"1001".to_string()));
+    assert!(!rm_ids.contains(&"1005".to_string()));
+    assert!(!rm_ids.contains(&"9001".to_string()));
+
+    let all_nes = pb::message("eve_public.store.offer.api.GetAllRequest")
+        .set("catalog", enum_name("CATALOG_NES"))
+        .must_encode();
+    let all_nes_rsp = call(
+        &router,
+        &player,
+        "eve_public.store.offer.api.GetAllRequest",
+        all_nes,
+        now,
+    );
+    assert_eq!(all_nes_rsp.status_code, STATUS_OK);
+    let all_nes_dec = reg
+        .decode_dynamic(
+            &all_nes_rsp.payload.as_ref().unwrap().type_url,
+            &all_nes_rsp.payload.as_ref().unwrap().value,
+        )
+        .unwrap();
+    let nes_ids: Vec<String> = dyn_list(&all_nes_dec, 1)
+        .into_iter()
+        .filter_map(|v| match as_msg(Some(v)).get(1) {
+            Some(DynamicValue::String(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(nes_ids.contains(&"1001".to_string()));
+    assert!(nes_ids.contains(&"1005".to_string()));
+    assert!(nes_ids.contains(&"9001".to_string()));
+
+    let miss_off = pb::message("eve_public.store.offer.api.GetRequest")
+        .set("offer.store_offer", "999999")
+        .must_encode();
+    assert_eq!(
+        call(
+            &router,
+            &player,
+            "eve_public.store.offer.api.GetRequest",
+            miss_off,
+            now
+        )
+        .status_code,
+        STATUS_NOT_FOUND
+    );
+    let miss_prod = pb::message("eve_public.store.product.api.GetRequest")
+        .set("product.sequential", 999_999u32)
+        .must_encode();
+    assert_eq!(
+        call(
+            &router,
+            &player,
+            "eve_public.store.product.api.GetRequest",
+            miss_prod,
+            now
+        )
+        .status_code,
+        STATUS_NOT_FOUND
+    );
+}
+
 
 #[cfg(test)]
 #[path = "quasar_payment_store_extra_unit_tests.rs"]

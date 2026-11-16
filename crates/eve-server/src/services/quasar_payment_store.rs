@@ -7,12 +7,187 @@ use crate::quasar_gateway::{
 use eve_db::WorldRepository;
 use eve_proto::pb::{self, enum_name};
 use eve_proto::quasar::{
-    DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp, TYPE_GOOGLEAPIS_PREFIX,
+    DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleDuration, GoogleTimestamp,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::services::quasar_payment_store_types::{
+    offer_matches_catalog, paginate_slice, parse_catalog_field, parse_page_request,
+};
 pub use crate::services::quasar_payment_store_types::*;
+
+const OMEGA_LICENSE_TYPE: &str = "eve_clonestate_omega";
+
+fn is_omega_license_product(product: &StoreProduct) -> bool {
+    if product.type_id != 0 {
+        return false;
+    }
+    if product.id == 101 {
+        return true;
+    }
+    let lower = product.name.to_ascii_lowercase();
+    lower.contains("omega") && !lower.contains("skill point") && !lower.contains(" sp")
+}
+
+fn primary_offer_catalog_name(offer: &StoreOffer) -> &'static str {
+    if matches!(offer.price_cents, Some(c) if c > 0) {
+        "CATALOG_REAL_MONEY"
+    } else {
+        "CATALOG_NES"
+    }
+}
+
+fn build_store_price(
+    mut p: pb::ProtoBuilder,
+    price_plex: i64,
+    price_cents: Option<u64>,
+    currency: Option<&str>,
+) -> pb::ProtoBuilder {
+    p = if let Some(cents) = price_cents.filter(|&c| c > 0) {
+        let cur = currency
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("USD");
+        let cents_i64 = i64::try_from(cents).unwrap_or(i64::MAX);
+        p.set("currency_price.code", cur)
+            .set("currency_price.amount_in_cents", cents_i64)
+    } else {
+        p.set("no_currency_price", true)
+    };
+    if price_plex > 0 || price_cents.is_none() {
+        p.set("plex_price.total_in_cents", price_plex * 100)
+    } else {
+        p.set("no_plex_price", true)
+    }
+}
+
+/// Encodes `eve_public.store.product.api.GetResponse` with `license` attributes for Omega
+/// clone-state products (`type_id == 0`) or `item` attributes for inventory/cosmetic products.
+fn encode_product_get_response(product: &StoreProduct) -> Result<GoogleAny, pb::PbError> {
+    let mut msg = pb::message("eve_public.store.product.api.GetResponse")
+        .set("attributes.name", &product.name);
+    if is_omega_license_product(product) {
+        let days = i64::from(product.quantity.max(1)) * 30;
+        msg = msg
+            .set(
+                "attributes.license.duration",
+                GoogleDuration {
+                    seconds: days * 86_400,
+                    nanos: 0,
+                },
+            )
+            .set("attributes.license.type", OMEGA_LICENSE_TYPE);
+    } else {
+        msg = msg
+            .set("attributes.item.type.sequential", u64::from(product.type_id))
+            .set("attributes.item.soulbound", false);
+    }
+    msg.to_any()
+}
+
+/// Encodes `eve_public.store.offer.api.GetResponse` with pricing (`offer_price` + `base_price`),
+/// category/product identifiers, and subscription `schedule` when the offer grants Omega time.
+fn encode_offer_get_response(
+    cat: &StoreCatalog,
+    offer: &StoreOffer,
+    tags: &[String],
+) -> Result<GoogleAny, pb::PbError> {
+    let catalog_name = primary_offer_catalog_name(offer);
+    let total_omega_days: i64 = offer
+        .product_ids
+        .iter()
+        .filter_map(|pid| cat.products.iter().find(|p| p.id == *pid))
+        .filter(|p| is_omega_license_product(p))
+        .map(|p| i64::from(p.quantity.max(1)) * 30)
+        .sum();
+    let is_omega_sub = total_omega_days > 0
+        || offer.category_id == 1
+        || tags.iter().any(|t| {
+            t.eq_ignore_ascii_case("omega") || t.eq_ignore_ascii_case("UpsellStarterPack")
+        });
+
+    let mut msg = pb::message("eve_public.store.offer.api.GetResponse")
+        .set("attributes.name", &offer.name)
+        .set("attributes.single_purchase", false)
+        .set("attributes.targeted", offer.targeted)
+        .set("attributes.no_enddate", true)
+        .set("attributes.can_purchase", true)
+        .set_with("attributes.offer_price", |p| {
+            build_store_price(p, offer.price_plex, offer.price_cents, offer.currency.as_deref())
+        })
+        .set_with("attributes.base_price", |p| {
+            build_store_price(p, offer.price_plex, offer.price_cents, offer.currency.as_deref())
+        })
+        .add_with("attributes.categories", |c| {
+            c.set("sequential", offer.category_id)
+                .set("catalog", enum_name(catalog_name))
+        });
+
+    for &pid in &offer.product_ids {
+        let qty = cat
+            .products
+            .iter()
+            .find(|p| p.id == pid)
+            .filter(|p| !is_omega_license_product(p) && p.type_id > 0 && p.quantity > 1)
+            .map_or(1i32, |p| p.quantity as i32);
+        msg = msg.add_with("attributes.products", |prod| {
+            prod.set("product.sequential", pid)
+                .set("product.catalog", enum_name(catalog_name))
+                .set("quantity", qty)
+        });
+    }
+
+    if is_omega_sub {
+        let billing_days = if total_omega_days > 0 { total_omega_days } else { 30 };
+        let months = (billing_days / 30).max(1);
+        let monthly_plex = if offer.price_plex > 0 {
+            (offer.price_plex / months).max(1)
+        } else {
+            0
+        };
+        let monthly_cents = offer.price_cents.map(|c| c / (months as u64));
+        msg = msg.set_with("attributes.schedule", |s| {
+            s.set(
+                "billing_cycle_duration",
+                GoogleDuration {
+                    seconds: billing_days * 86_400,
+                    nanos: 0,
+                },
+            )
+            .set("scheduled_offer.store_offer", offer.id.to_string())
+            .set_with("billing_price", |p| {
+                build_store_price(p, offer.price_plex, offer.price_cents, offer.currency.as_deref())
+            })
+            .set_with("monthly_price", |p| {
+                build_store_price(p, monthly_plex, monthly_cents, offer.currency.as_deref())
+            })
+        });
+    } else {
+        msg = msg.set("attributes.no_schedule", true);
+    }
+
+    for t in tags {
+        msg = msg.add("attributes.tags", t);
+    }
+    msg.to_any()
+}
+
+fn encode_offer_id_list_response(
+    type_name: &str,
+    offers: &[&StoreOffer],
+    next_tok: Option<String>,
+) -> Result<GoogleAny, pb::PbError> {
+    let mut msg = pb::message(type_name);
+    for off in offers {
+        msg = msg.add_with("offers", |o| o.set("store_offer", off.id.to_string()));
+    }
+    if let Some(tok) = next_tok {
+        msg = msg.set("next_page.token", tok);
+    }
+    msg.to_any()
+}
 
 fn parse_raw_varints(raw: &[u8]) -> HashMap<u32, u64> {
     let mut map = HashMap::new();
@@ -323,11 +498,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 .find(|p| p.id == prod_id)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Product not found".to_string()))?;
 
-            pb::message("eve_public.store.product.api.GetResponse")
-                .set("attributes.name", &product.name)
-                .set("attributes.item.type.sequential", u64::from(product.type_id))
-                .set("attributes.item.soulbound", false)
-                .to_any()
+            encode_product_get_response(product)
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
@@ -336,13 +507,22 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     let db_off_all = Arc::clone(&db);
     router.register_handler(
         "eve_public.store.offer.api.GetAllRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |_ctx, _any, dyn_msg| {
+            let catalog = parse_catalog_field(dyn_msg, 1);
+            let (page_size, offset) = parse_page_request(dyn_msg, 2, usize::MAX);
             let cat = db_off_all.with_snapshot(read_store_catalog);
-            let mut msg = pb::message("eve_public.store.offer.api.GetAllResponse");
-            for off in cat.offers.iter().filter(|o| !o.targeted) {
-                msg = msg.add_with("offers", |o| o.set("store_offer", off.id.to_string()));
-            }
-            msg.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
+            let matching: Vec<&StoreOffer> = cat
+                .offers
+                .iter()
+                .filter(|o| !o.targeted && offer_matches_catalog(o, catalog))
+                .collect();
+            let (slice, next_tok) = paginate_slice(&matching, offset, page_size);
+            encode_offer_id_list_response(
+                "eve_public.store.offer.api.GetAllResponse",
+                slice,
+                next_tok,
+            )
+            .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -375,22 +555,9 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 .find(|o| o.id == offer_id)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Offer not found".to_string()))?;
 
-            let mut msg = pb::message("eve_public.store.offer.api.GetResponse")
-                .set("attributes.name", &offer.name)
-                .set("attributes.no_enddate", true)
-                .set("attributes.can_purchase", true)
-                .set("attributes.no_schedule", true)
-                .set(
-                    "attributes.offer_price.plex_price.total_in_cents",
-                    offer.price_plex * 100,
-                )
-                .add_with("attributes.categories", |c| c.set("sequential", offer.category_id));
-            if let Some(tags) = offer_tags.get(&offer.id) {
-                for t in tags {
-                    msg = msg.add("attributes.tags", t);
-                }
-            }
-            msg.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
+            let tags = offer_tags.get(&offer.id).map(Vec::as_slice).unwrap_or(&[]);
+            encode_offer_get_response(&cat, offer, tags)
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -398,13 +565,22 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     let db_off_tgt = Arc::clone(&db);
     router.register_handler(
         "eve_public.store.offer.api.GetAllTargetedRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |_ctx, _any, dyn_msg| {
+            let catalog = parse_catalog_field(dyn_msg, 1);
+            let (page_size, offset) = parse_page_request(dyn_msg, 2, usize::MAX);
             let cat = db_off_tgt.with_snapshot(read_store_catalog);
-            let mut msg = pb::message("eve_public.store.offer.api.GetAllTargetedResponse");
-            for off in cat.offers.iter().filter(|o| o.targeted) {
-                msg = msg.add_with("offers", |o| o.set("store_offer", off.id.to_string()));
-            }
-            msg.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
+            let matching: Vec<&StoreOffer> = cat
+                .offers
+                .iter()
+                .filter(|o| o.targeted && offer_matches_catalog(o, catalog))
+                .collect();
+            let (slice, next_tok) = paginate_slice(&matching, offset, page_size);
+            encode_offer_id_list_response(
+                "eve_public.store.offer.api.GetAllTargetedResponse",
+                slice,
+                next_tok,
+            )
+            .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 

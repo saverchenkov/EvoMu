@@ -6,7 +6,9 @@ use crate::quasar_gateway::{
 };
 use eve_db::WorldRepository;
 use eve_proto::pb;
-use eve_proto::quasar::{DynamicValue, GoogleAny, GoogleTimestamp, TYPE_GOOGLEAPIS_PREFIX};
+use eve_proto::quasar::{
+    DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp, TYPE_GOOGLEAPIS_PREFIX,
+};
 use std::sync::{Arc, RwLock};
 
 fn try_encode_plex_balance_changed_notice(
@@ -323,12 +325,14 @@ pub fn publish_schedule_set_notice(
     }
 }
 
-pub fn encode_targeted_offer_list_response(
-    offers: &[StoreOffer],
-    uid: u64,
-    dyn_msg: &eve_proto::quasar::DynamicQuasarMessage,
-) -> Vec<u8> {
-    let (page_size, offset) = match dyn_msg.get(1) {
+/// Extracts `eve_public.Page` `(size, offset)` from nested field `field_num`, falling back to
+/// `(default_size, 0)` when omitted or invalid.
+pub(crate) fn parse_page_request(
+    dyn_msg: &DynamicQuasarMessage,
+    field_num: u32,
+    default_size: usize,
+) -> (usize, usize) {
+    match dyn_msg.get(field_num) {
         Some(DynamicValue::Message(page)) => {
             let sz = page
                 .get(1)
@@ -338,7 +342,7 @@ pub fn encode_targeted_offer_list_response(
                     DynamicValue::Uint64(u) if *u > 0 => Some(*u as usize),
                     _ => None,
                 })
-                .unwrap_or(50);
+                .unwrap_or(default_size);
             let off = page
                 .get(2)
                 .and_then(|v| match v {
@@ -348,15 +352,56 @@ pub fn encode_targeted_offer_list_response(
                 .unwrap_or(0);
             (sz, off)
         }
-        _ => (50, 0),
-    };
-    let targeted: Vec<&StoreOffer> = offers.iter().filter(|o| o.targeted).collect();
-    let end = offset.saturating_add(page_size).min(targeted.len());
-    let slice = if offset < targeted.len() {
-        &targeted[offset..end]
+        _ => (default_size, 0),
+    }
+}
+
+/// Returns `(page_slice, next_page_token)` for `items` starting at `offset` with max `page_size`.
+pub(crate) fn paginate_slice<T>(
+    items: &[T],
+    offset: usize,
+    page_size: usize,
+) -> (&[T], Option<String>) {
+    let end = offset.saturating_add(page_size).min(items.len());
+    let slice = if offset < items.len() {
+        &items[offset..end]
     } else {
         &[]
     };
+    let next_tok = (end < items.len()).then(|| end.to_string());
+    (slice, next_tok)
+}
+
+/// Parses an `eve_public.store.Catalog` enum field (0 when omitted or invalid).
+pub(crate) fn parse_catalog_field(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> u32 {
+    match dyn_msg.get(field_num) {
+        Some(DynamicValue::Enum(v)) if *v >= 0 => *v as u32,
+        Some(DynamicValue::Int32(v)) if *v >= 0 => *v as u32,
+        Some(DynamicValue::Int64(v)) if *v >= 0 => *v as u32,
+        Some(DynamicValue::Uint32(v)) => *v,
+        Some(DynamicValue::Uint64(v)) => *v as u32,
+        _ => 0,
+    }
+}
+
+/// Matches an offer against `eve_public.store.Catalog` (`0=UNSPECIFIED`, `1=NES`, `2=REAL_MONEY`).
+pub(crate) fn offer_matches_catalog(offer: &StoreOffer, catalog: u32) -> bool {
+    match catalog {
+        0 => true,
+        1 => offer.price_plex > 0 || offer.price_cents.is_none(),
+        2 => matches!(offer.price_cents, Some(c) if c > 0),
+        _ => false,
+    }
+}
+
+pub fn encode_targeted_offer_list_response(
+    offers: &[StoreOffer],
+    uid: u64,
+    dyn_msg: &DynamicQuasarMessage,
+) -> Vec<u8> {
+    let (page_size, offset) = parse_page_request(dyn_msg, 1, 50);
+    let targeted: Vec<&StoreOffer> = offers.iter().filter(|o| o.targeted).collect();
+    let (slice, next_tok) = paginate_slice(&targeted, offset, page_size);
     let mut out = pb::message("eve_public.store.targetaudience.offer.api.ListResponse");
     for off in slice {
         out = out.add_with("offer_ids", |entry| {
@@ -365,8 +410,8 @@ pub fn encode_targeted_offer_list_response(
                 .set("catalogue_entry.name", off.id.to_string())
         });
     }
-    if end < targeted.len() {
-        out = out.set("next_page.token", end.to_string());
+    if let Some(tok) = next_tok {
+        out = out.set("next_page.token", tok);
     }
     out.encode().unwrap_or_else(|e| {
         tracing::warn!("failed to encode targetaudience ListResponse: {e}");
@@ -472,37 +517,85 @@ pub fn save_store_catalog(snap: &mut eve_db::WorldStateSnapshot, catalog: &Store
     snap.quasar_commerce.nes_store_catalog = Some(catalog.clone());
 }
 
+fn ensure_offer_tag(
+    tags_map: &mut std::collections::HashMap<u32, Vec<String>>,
+    offer_id: u32,
+    tag: &str,
+) {
+    let entry = tags_map.entry(offer_id).or_default();
+    if !entry.iter().any(|existing| existing.eq_ignore_ascii_case(tag)) {
+        entry.push(tag.to_string());
+    }
+}
+
+fn ensure_default_store_offer_metadata(
+    snap: &mut eve_db::WorldStateSnapshot,
+    cat: &mut StoreCatalog,
+) {
+    if !cat.products.iter().any(|p| p.id == 105) {
+        cat.products.push(StoreProduct {
+            id: 105,
+            name: "15,000 Free Skill Points".into(),
+            description: "Omega weekly 15,000 free Skill Points".into(),
+            type_id: 0,
+            quantity: 15_000,
+        });
+    }
+    if !cat.offers.iter().any(|o| o.id == 1005) {
+        cat.offers.push(StoreOffer {
+            id: 1005,
+            name: "Omega Weekly 15,000 Free SP".into(),
+            description: "Claim 15,000 free Skill Points once per week with active Omega".into(),
+            category_id: 3,
+            price_plex: 0,
+            product_ids: vec![105],
+            targeted: false,
+            price_cents: None,
+            currency: None,
+        });
+    }
+    ensure_offer_tag(
+        &mut snap.quasar_commerce.nes_store_offer_tags,
+        1005,
+        "omega-weekly-free-sp",
+    );
+
+    if let Some(omega_offer) = cat.offers.iter_mut().find(|o| o.id == 1001) {
+        if omega_offer.price_cents.is_none() {
+            omega_offer.price_cents = Some(1_999);
+        }
+        if omega_offer
+            .currency
+            .as_deref()
+            .is_none_or(|c| c.trim().is_empty())
+        {
+            omega_offer.currency = Some("USD".into());
+        }
+        if omega_offer.product_ids.is_empty() {
+            omega_offer.product_ids = vec![101];
+        }
+        if !cat.products.iter().any(|p| p.id == 101) {
+            cat.products.push(StoreProduct {
+                id: 101,
+                name: "30 Days Omega Clone State".into(),
+                description: "30 Days Omega clone subscription".into(),
+                type_id: 0,
+                quantity: 1,
+            });
+        }
+        for tag in ["UpsellStarterPack", "omega"] {
+            ensure_offer_tag(&mut snap.quasar_commerce.nes_store_offer_tags, 1001, tag);
+        }
+    }
+}
+
 pub fn ensure_store_catalog_seeded(
     snap: &mut eve_db::WorldStateSnapshot,
     sde: &eve_sde::SdeRegistry,
 ) {
-    if let Some(ref mut cat) = snap.quasar_commerce.nes_store_catalog {
-        if !cat.products.iter().any(|p| p.id == 105) {
-            cat.products.push(StoreProduct {
-                id: 105,
-                name: "15,000 Free Skill Points".into(),
-                description: "Omega weekly 15,000 free Skill Points".into(),
-                type_id: 0,
-                quantity: 15_000,
-            });
-        }
-        if !cat.offers.iter().any(|o| o.id == 1005) {
-            cat.offers.push(StoreOffer {
-                id: 1005,
-                name: "Omega Weekly 15,000 Free SP".into(),
-                description: "Claim 15,000 free Skill Points once per week with active Omega".into(),
-                category_id: 3,
-                price_plex: 0,
-                product_ids: vec![105],
-                targeted: false,
-                price_cents: None,
-                currency: None,
-            });
-        }
-        snap.quasar_commerce
-            .nes_store_offer_tags
-            .entry(1005)
-            .or_insert_with(|| vec!["omega-weekly-free-sp".into()]);
+    if let Some(mut cat) = snap.quasar_commerce.nes_store_catalog.take() {
+        ensure_default_store_offer_metadata(snap, &mut cat);
+        snap.quasar_commerce.nes_store_catalog = Some(cat);
         return;
     }
     let type_name = |tid: u32, fallback: &str| {
@@ -572,12 +665,9 @@ pub fn ensure_store_catalog_seeded(
             });
         }
     }
-    let catalog = StoreCatalog { categories, products, offers };
+    let mut catalog = StoreCatalog { categories, products, offers };
+    ensure_default_store_offer_metadata(snap, &mut catalog);
     save_store_catalog(snap, &catalog);
-    snap.quasar_commerce
-        .nes_store_offer_tags
-        .entry(1005)
-        .or_insert_with(|| vec!["omega-weekly-free-sp".into()]);
 }
 
 /// NES store catalog (categories, products, offers) persisted in `WorldStateSnapshot.quasar_commerce`.
@@ -875,6 +965,7 @@ pub fn register_plex_vault_extra_handlers(
     router.register_handler(
         "eve_public.store.offer.api.GetAllByTagRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
+            let catalog = parse_catalog_field(dyn_msg, 1);
             let tag = match dyn_msg.get(2) {
                 Some(DynamicValue::String(s)) => s.trim().to_string(),
                 _ => String::new(),
@@ -882,6 +973,7 @@ pub fn register_plex_vault_extra_handlers(
             if tag.is_empty() {
                 return Err((STATUS_BAD_REQUEST, "Store offer tag is required".into()));
             }
+            let (page_size, offset) = parse_page_request(dyn_msg, 3, usize::MAX);
             let matching_ids = db_tag_all.with_snapshot(|snap| {
                 let cat = read_store_catalog(snap);
                 let tags_map = read_store_offer_tags(snap);
@@ -889,6 +981,7 @@ pub fn register_plex_vault_extra_handlers(
                     .into_iter()
                     .filter(|o| {
                         !o.targeted
+                            && offer_matches_catalog(o, catalog)
                             && tags_map
                                 .get(&o.id)
                                 .is_some_and(|ts| ts.iter().any(|t| t.eq_ignore_ascii_case(&tag)))
@@ -896,9 +989,13 @@ pub fn register_plex_vault_extra_handlers(
                     .map(|o| o.id)
                     .collect::<Vec<_>>()
             });
+            let (slice, next_tok) = paginate_slice(&matching_ids, offset, page_size);
             let mut out = pb::message("eve_public.store.offer.api.GetAllByTagResponse");
-            for oid in matching_ids {
+            for oid in slice {
                 out = out.add_with("offers", |off| off.set("store_offer", oid.to_string()));
+            }
+            if let Some(tok) = next_tok {
+                out = out.set("next_page.token", tok);
             }
             out.to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
