@@ -105,6 +105,7 @@ fn drain_pending_tick_batches_for_sys(
                             evs,
                             updates_pyrep.clone(),
                             &[ship_id],
+                            SelfDestinyWireContext::NonDock,
                         ) {
                             pending_tick_batches.push(batch);
                         }
@@ -650,24 +651,70 @@ async fn dispatch_call_req_to_wire<W: AsyncWriteExt + Unpin>(
     .await
 }
 
-fn is_suppressed_self_terminal_explosion(entry: &PyRep, suppressed_ship_ids: &[i64]) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelfDestinyWireContext {
+    /// Live space ticks, sub-warp/warp RPCs, and cross-system leave-space drains.
+    /// Suppresses self `TerminalPlayDestructionEffect` (`#1039`) and self stop
+    /// `OnSpecialFX("effects.Warping", 0)` (`#1147`) so V24 `Warp.WarpLoop` exits cleanly once
+    /// `ball.mode != DSTBALL_WARP` without `Warping.Stop()` clearing `self.shipModel` early.
+    NonDock,
+    /// Docking warp-stop settle / pre-dock flush (`#1051`), which preserves stop
+    /// `OnSpecialFX("effects.Warping", 0)` alongside `Stop` in the atomic dock-settle batch.
+    DockSettle,
+}
+
+fn destiny_entry_action<'a>(entry: &'a PyRep) -> Option<(&'a str, &'a [PyRep])> {
     let PyRep::Tuple(outer) = entry else {
-        return false;
+        return None;
     };
     if outer.len() != 2 {
-        return false;
+        return None;
     }
     let PyRep::Tuple(action) = &outer[1] else {
-        return false;
+        return None;
     };
-    if action.len() != 2 || action[0].as_str() != Some("TerminalPlayDestructionEffect") {
-        return false;
+    if action.len() != 2 {
+        return None;
     }
+    let name = action[0].as_str()?;
     let args = match &action[1] {
-        PyRep::Tuple(items) | PyRep::List(items) => items,
-        _ => return false,
+        PyRep::Tuple(items) | PyRep::List(items) => items.as_slice(),
+        _ => return None,
     };
-    matches!(args.first(), Some(PyRep::Integer(ball_id)) if suppressed_ship_ids.contains(ball_id))
+    Some((name, args))
+}
+
+fn is_suppressed_self_terminal_explosion(entry: &PyRep, suppressed_ship_ids: &[i64]) -> bool {
+    let Some((name, args)) = destiny_entry_action(entry) else {
+        return false;
+    };
+    name == "TerminalPlayDestructionEffect"
+        && matches!(args.first(), Some(PyRep::Integer(ball_id)) if suppressed_ship_ids.contains(ball_id))
+}
+
+fn is_suppressed_self_non_dock_warp_stop_fx(entry: &PyRep, suppressed_ship_ids: &[i64]) -> bool {
+    let Some((name, args)) = destiny_entry_action(entry) else {
+        return false;
+    };
+    name == "OnSpecialFX"
+        && matches!(args.first(), Some(PyRep::Integer(ball_id)) if suppressed_ship_ids.contains(ball_id))
+        && args.get(5).and_then(PyRep::as_str) == Some("effects.Warping")
+        && matches!(args.get(7), Some(PyRep::Integer(0) | PyRep::Bool(false)))
+}
+
+fn filter_destiny_updates_pyrep(
+    updates_pyrep: PyRep,
+    predicate: impl Fn(&PyRep) -> bool,
+) -> PyRep {
+    match updates_pyrep {
+        PyRep::List(items) => {
+            if !items.iter().any(&predicate) {
+                return PyRep::List(items);
+            }
+            PyRep::List(items.into_iter().filter(|entry| !predicate(entry)).collect())
+        }
+        other => other,
+    }
 }
 
 /// Suppresses `TerminalPlayDestructionEffect` targeting the observer's own ship (`#1039`).
@@ -676,6 +723,7 @@ fn is_suppressed_self_terminal_explosion(entry: &PyRep, suppressed_ship_ids: &[i
 /// causes V24 `ShipOrbitCamera.OnBallRemoved` to activate `ExplosionCamera` during 1-arg
 /// `RemoveBall` or during `OnPrimaryViewChanged -> RemoveBallpark -> Release -> RemoveBalls`
 /// after a rapid ship -> pod -> station `DeathRespawn`, crashing `GetBallPosition(None)`.
+#[cfg(test)]
 pub(crate) fn strip_self_terminal_explosions(
     updates_pyrep: PyRep,
     suppressed_ship_ids: &[i64],
@@ -683,25 +731,30 @@ pub(crate) fn strip_self_terminal_explosions(
     if suppressed_ship_ids.is_empty() {
         return updates_pyrep;
     }
-    match updates_pyrep {
-        PyRep::List(items) => {
-            if !items
-                .iter()
-                .any(|entry| is_suppressed_self_terminal_explosion(entry, suppressed_ship_ids))
-            {
-                return PyRep::List(items);
-            }
-            PyRep::List(
-                items
-                    .into_iter()
-                    .filter(|entry| {
-                        !is_suppressed_self_terminal_explosion(entry, suppressed_ship_ids)
-                    })
-                    .collect(),
-            )
-        }
-        other => other,
+    filter_destiny_updates_pyrep(updates_pyrep, |entry| {
+        is_suppressed_self_terminal_explosion(entry, suppressed_ship_ids)
+    })
+}
+
+/// Suppresses `OnSpecialFX("effects.Warping", start=0)` targeting the observer's own ship on
+/// non-dock Destiny batches (`#1147`).
+///
+/// V24 `Warping.Prepare` (`Warp.py:43-48`) redirects non-ego ships to `effects.WarpOut` and only
+/// spawns `WarpLoop` for ego (`shipID == session.shipid`); ego `WarpLoop` self-terminates
+/// `'effects.Warping'` at `Warp.py:654` once `ball.mode != DSTBALL_WARP`. Receiving server stop
+/// `OnSpecialFX("effects.Warping", 0)` while `ball.mode` is still `DSTBALL_WARP` clears
+/// `self.shipModel = None` in `Warping.Stop()`, throwing `AttributeError` at `Warp.py:597`.
+#[cfg(test)]
+pub(crate) fn strip_self_non_dock_warp_stop_fx(
+    updates_pyrep: PyRep,
+    suppressed_ship_ids: &[i64],
+) -> PyRep {
+    if suppressed_ship_ids.is_empty() {
+        return updates_pyrep;
     }
+    filter_destiny_updates_pyrep(updates_pyrep, |entry| {
+        is_suppressed_self_non_dock_warp_stop_fx(entry, suppressed_ship_ids)
+    })
 }
 
 fn build_destiny_batch(
@@ -710,13 +763,22 @@ fn build_destiny_batch(
     stamp: u64,
     events: &[eve_destiny::DestinyEvent],
     updates_pyrep: PyRep,
-    suppressed_explosion_ship_ids: &[i64],
+    suppressed_ship_ids: &[i64],
+    wire_ctx: SelfDestinyWireContext,
 ) -> Option<crate::outbound_sequencer::DestinyBatch> {
     if events.is_empty() {
         return None;
     }
-    let updates_pyrep =
-        strip_self_terminal_explosions(updates_pyrep, suppressed_explosion_ship_ids);
+    let updates_pyrep = if suppressed_ship_ids.is_empty() {
+        updates_pyrep
+    } else {
+        let suppress_warp_stop_fx = wire_ctx == SelfDestinyWireContext::NonDock;
+        filter_destiny_updates_pyrep(updates_pyrep, |entry| {
+            is_suppressed_self_terminal_explosion(entry, suppressed_ship_ids)
+                || (suppress_warp_stop_fx
+                    && is_suppressed_self_non_dock_warp_stop_fx(entry, suppressed_ship_ids))
+        })
+    };
     let has_set_state = events
         .iter()
         .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. }));
@@ -929,6 +991,7 @@ pub async fn execute_call_req_wire(
                     if let Ok((tick, obs_evs, updates_pyrep)) =
                         old_handle.drain_observer_updates(old_ship_id).await
                     {
+                        old_handle.record_warp_stops_from_events(&obs_evs);
                         cross_sys_pre_destiny = build_destiny_batch(
                             ctx,
                             ep,
@@ -936,6 +999,7 @@ pub async fn execute_call_req_wire(
                             &obs_evs,
                             updates_pyrep,
                             &[old_ship_id],
+                            SelfDestinyWireContext::NonDock,
                         );
                     }
                 } else {
@@ -1100,6 +1164,7 @@ pub async fn execute_call_req_wire(
                     &obs_evs,
                     updates_pyrep,
                     &[ship_id],
+                    SelfDestinyWireContext::DockSettle,
                 );
             }
         }
@@ -1177,6 +1242,7 @@ pub async fn execute_call_req_wire(
             if let Ok((mut tick, mut obs_evs, mut updates_pyrep)) =
                 sys_handle.drain_observer_updates(ship_id).await
             {
+                sys_handle.record_warp_stops_from_events(&obs_evs);
                 let mut has_set_state = obs_evs
                     .iter()
                     .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. }));
@@ -1206,6 +1272,7 @@ pub async fn execute_call_req_wire(
                     if let Ok((retry_tick, retry_evs, retry_pyrep)) =
                         sys_handle.drain_observer_updates(ship_id).await
                     {
+                        sys_handle.record_warp_stops_from_events(&retry_evs);
                         tick = retry_tick;
                         obs_evs = retry_evs;
                         updates_pyrep = retry_pyrep;
@@ -1227,6 +1294,7 @@ pub async fn execute_call_req_wire(
                         &obs_evs,
                         updates_pyrep,
                         &suppressed_ids,
+                        SelfDestinyWireContext::NonDock,
                     );
                 }
             }
@@ -1654,8 +1722,9 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     let sys_handle = ctx.systems.get_or_spawn(sys_id);
                                     let _ = sys_handle.push_set_state(ship_id).await;
                                     if let Ok((tick, obs_evs, updates_pyrep)) = sys_handle.drain_observer_updates(ship_id).await {
+                                        sys_handle.record_warp_stops_from_events(&obs_evs);
                                         let ep = wire_state.current_epoch();
-                                        if let Some(batch) = build_destiny_batch(&ctx, ep, tick, &obs_evs, updates_pyrep, &[ship_id]) {
+                                        if let Some(batch) = build_destiny_batch(&ctx, ep, tick, &obs_evs, updates_pyrep, &[ship_id], SelfDestinyWireContext::NonDock) {
                                             if emit_tick_batch_with_observability(
                                                 &ctx,
                                                 &mut wire_state,
@@ -1692,7 +1761,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                         .map(Vec::as_slice)
                                         .unwrap_or(&tick_msg.events);
                                     let ep = wire_state.current_epoch();
-                                    if let Some(batch) = build_destiny_batch(&ctx, ep, tick_msg.tick, evs, updates_pyrep.clone(), &[ship_id]) {
+                                    if let Some(batch) = build_destiny_batch(&ctx, ep, tick_msg.tick, evs, updates_pyrep.clone(), &[ship_id], SelfDestinyWireContext::NonDock) {
                                         if emit_tick_batch_with_observability(
                                             &ctx,
                                             &mut wire_state,
@@ -1810,6 +1879,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     if let Ok((mut tick, mut events, mut updates_pyrep)) =
                                         sys_handle.drain_observer_updates(new_ship_id).await
                                     {
+                                        sys_handle.record_warp_stops_from_events(&events);
                                         let has_set_state = events.iter().any(|e| {
                                             matches!(e, eve_destiny::DestinyEvent::SetState { .. })
                                         });
@@ -1838,6 +1908,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                                 if let Ok((t2, ev2, up2)) =
                                                     sys_handle.drain_observer_updates(new_ship_id).await
                                                 {
+                                                    sys_handle.record_warp_stops_from_events(&ev2);
                                                     tick = t2;
                                                     events = ev2;
                                                     updates_pyrep = up2;
@@ -1854,6 +1925,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                             &events,
                                             updates_pyrep,
                                             &suppressed_ids,
+                                            SelfDestinyWireContext::NonDock,
                                         ) {
                                             if emit_tick_batch_with_observability(
                                                 &ctx,
@@ -2333,6 +2405,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                         &events,
                                         updates_pyrep,
                                         &[plan.ship_id],
+                                        SelfDestinyWireContext::DockSettle,
                                     ) {
                                         if emit_tick_batch_with_observability(
                                             &ctx,
