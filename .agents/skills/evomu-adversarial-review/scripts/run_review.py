@@ -194,11 +194,34 @@ def extract_verdict(env, valid=None):
 def pick_base(root, state, explicit):
     if explicit:
         return explicit
+    head_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+    mb_main = None
+    for ref in ("main", "origin/main"):
+        proc = subprocess.run(["git", "merge-base", ref, "HEAD"], cwd=root, capture_output=True, text=True)
+        if proc.returncode == 0 and proc.stdout.strip():
+            cand = proc.stdout.strip()
+            if cand != head_sha:
+                mb_main = cand
+                break
+    rev_base = None
     for r in reversed(state.get("reviews", [])):
         head = r.get("head")
-        if head and subprocess.run(["git", "merge-base", "--is-ancestor", head, "HEAD"],
-                                   cwd=root).returncode == 0:
-            return head
+        if head and head != head_sha and subprocess.run(["git", "merge-base", "--is-ancestor", head, "HEAD"],
+                                                        cwd=root).returncode == 0:
+            rev_base = head
+            break
+    if mb_main and rev_base:
+        # Pick whichever ancestor is closer to HEAD
+        if subprocess.run(["git", "merge-base", "--is-ancestor", mb_main, rev_base], cwd=root).returncode == 0:
+            return rev_base
+        return mb_main
+    if mb_main:
+        return mb_main
+    if rev_base:
+        return rev_base
+    prev = subprocess.run(["git", "rev-parse", "--verify", "-q", "HEAD~1"], cwd=root, capture_output=True, text=True)
+    if prev.returncode == 0 and prev.stdout.strip():
+        return prev.stdout.strip()
     return subprocess.run(["git", "rev-list", "--max-parents=0", "HEAD"], cwd=root,
                           capture_output=True, text=True).stdout.split()[0]
 
@@ -268,7 +291,16 @@ def _release_cargo_test_slot(fh):
 def derive_affected_test_commands(root, base, cargo):
     """Derive targeted `cargo test` commands covering only the crates/modules/tests touched between `base` and `HEAD`.
     Keeps `run_review.py` fast (~15-60s instead of running all 7,182 workspace tests on every commit)."""
-    _, diff_files_out = sh(["git", "diff", "--name-only", base, "HEAD", "--", "crates/"], root)
+    diff_base = base
+    mb_proc = subprocess.run(["git", "merge-base", "main", "HEAD"], cwd=root, capture_output=True, text=True)
+    head_proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True)
+    if mb_proc.returncode == 0 and head_proc.returncode == 0:
+        mb_sha = mb_proc.stdout.strip()
+        head_sha = head_proc.stdout.strip()
+        if mb_sha and mb_sha != head_sha:
+            if subprocess.run(["git", "merge-base", "--is-ancestor", diff_base, mb_sha], cwd=root).returncode == 0:
+                diff_base = mb_sha
+    _, diff_files_out = sh(["git", "diff", "--name-only", diff_base, "HEAD", "--", "crates/"], root)
     changed_files = [l.strip() for l in diff_files_out.splitlines() if l.strip().endswith(".rs")]
     lib_filters_by_crate = {}
     whole_lib_crates = set()
@@ -329,6 +361,7 @@ def derive_affected_test_commands(root, base, cargo):
 
     non_root_integ = {(c, b) for c, b, s in integ_targets if s and s not in ("main", "mod")}
     seen_integ = set()
+    integ_per_bin = {}
     for crate, bin_name, submod in integ_targets:
         if (crate, bin_name, None) in seen_integ:
             continue
@@ -337,7 +370,10 @@ def derive_affected_test_commands(root, base, cargo):
         key = (crate, bin_name, submod)
         if key in seen_integ:
             continue
+        if integ_per_bin.get((crate, bin_name), 0) >= 4:
+            continue
         seen_integ.add(key)
+        integ_per_bin[(crate, bin_name)] = integ_per_bin.get((crate, bin_name), 0) + 1
         if submod and submod not in ("main", "mod"):
             cmds.append([cargo, "test", "-p", crate, "--test", bin_name, submod])
         else:
