@@ -4,9 +4,15 @@
 
 use super::evedb_sqlite_cov_tests::build_populated_snapshot;
 use super::evedb_sqlite_load_errors_and_schema_tests::open_migrated_conn;
-use crate::sqlite_store::compute_fingerprints;
+use crate::sqlite_store::domain_rows::{
+    DOMAIN_SOCIAL_BOOKMARKS, DOMAIN_SOCIAL_CHAT_CALENDAR, DOMAIN_SOCIAL_CONTACTS_NOTES,
+    DOMAIN_SOCIAL_MAIL,
+};
 use crate::sqlite_store::load::{load_snapshot_from_sqlite, load_snapshot_from_sqlite_with_options};
-use crate::sqlite_store::social_store::{load_d6_social_into_snapshot, sync_d6_social};
+use crate::sqlite_store::quarantine::LoadContext;
+use crate::sqlite_store::social_store::{
+    load_social_domain_rows, sync_social_domain_rows, LEGACY_D6_SOCIAL_SQL,
+};
 use crate::types::WorldStateSnapshot;
 use rusqlite::params;
 
@@ -47,7 +53,22 @@ fn load_rejects_wrong_sqlite_column_types_across_relational_tables() {
         "INSERT INTO idempotency_keys (character_id, idem_key) VALUES ('bad_int', 'k')",
         "INSERT INTO licensed_skins (character_id, skins_json) VALUES (1, X'FF')",
         "INSERT INTO applied_ship_skins (ship_id, skin_id) VALUES (1, 'bad_int')",
-        // social_store tables:
+        "INSERT INTO domain_rows (domain, key, value) VALUES ('social.mail', 'read_mails/bad|1', 'true')",
+        "INSERT INTO domain_rows (domain, key, value) VALUES ('social.contacts_notes', 'char_notes/1|2', X'FF')",
+    ];
+
+    for sql in bad_rows {
+        let conn = open_migrated_conn();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        conn.execute(sql, [])
+            .unwrap_or_else(|e| panic!("insert bad row `{sql}`: {e}"));
+        assert!(
+            load_snapshot_from_sqlite(&conn).is_err(),
+            "expected Err for bad row `{sql}`"
+        );
+    }
+
+    let legacy_social_bad_rows = [
         "INSERT INTO read_mails (character_id, mail_id) VALUES ('bad_int', 1)",
         "INSERT INTO deleted_mails (character_id, mail_id) VALUES ('bad_int', 1)",
         "INSERT INTO trashed_mails (character_id, mail_id) VALUES ('bad_int', 1)",
@@ -69,14 +90,14 @@ fn load_rejects_wrong_sqlite_column_types_across_relational_tables() {
         "INSERT INTO char_notes (character_id, item_id, note) VALUES ('bad_int', 1, 'note')",
     ];
 
-    for sql in bad_rows {
+    for sql in legacy_social_bad_rows {
         let conn = open_migrated_conn();
-        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        conn.execute_batch(LEGACY_D6_SOCIAL_SQL).unwrap();
         conn.execute(sql, [])
-            .unwrap_or_else(|e| panic!("insert bad row `{sql}`: {e}"));
+            .unwrap_or_else(|e| panic!("insert legacy bad row `{sql}`: {e}"));
         assert!(
             load_snapshot_from_sqlite(&conn).is_err(),
-            "expected Err for bad row `{sql}`"
+            "expected Err for legacy social bad row `{sql}`"
         );
     }
 
@@ -231,19 +252,49 @@ fn social_store_sync_and_load_reject_every_dropped_table() {
     snap.alliance_contact_labels
         .insert(99_000_001, vec![(1, "A".into())]);
     snap.char_notes.insert((cid, 90_000_002), "note".into());
-    for tbl in social_tables {
-        let mut conn = open_migrated_conn();
-        conn.execute(&format!("DROP TABLE {tbl}"), []).unwrap();
-        let mut dst = WorldStateSnapshot::default();
+
+    // Dropping `domain_rows` rejects social sync cleanly while allowing empty read fallback.
+    let mut no_dr = open_migrated_conn();
+    no_dr.execute("DROP TABLE domain_rows", []).unwrap();
+    let mut dst = WorldStateSnapshot::default();
+    assert!(!load_social_domain_rows(&no_dr, &mut dst, &mut LoadContext::new(false)).unwrap());
+    {
+        let tx = no_dr.transaction().unwrap();
         assert!(
-            load_d6_social_into_snapshot(&conn, &mut dst).is_err(),
-            "expected load_d6_social Err when {tbl} is dropped"
+            sync_social_domain_rows(&tx, &snap).is_err(),
+            "expected sync_social_domain_rows Err when domain_rows is dropped"
         );
-        let mut fp = compute_fingerprints(&WorldStateSnapshot::default());
-        let tx = conn.transaction().unwrap();
+    }
+
+    // Corrupt rows across all 4 `social.*` namespaces fail strict load cleanly.
+    for (domain, key) in [
+        (DOMAIN_SOCIAL_MAIL, "mailing_lists/1"),
+        (DOMAIN_SOCIAL_BOOKMARKS, "bookmark_folders/1"),
+        (DOMAIN_SOCIAL_CHAT_CALENDAR, "chat_channels/ch1"),
+        (DOMAIN_SOCIAL_CONTACTS_NOTES, "char_notes/1|2"),
+    ] {
+        let conn = open_migrated_conn();
+        conn.execute(
+            "INSERT INTO domain_rows (domain, key, value) VALUES (?1, ?2, '{bad')",
+            params![domain, key],
+        )
+        .unwrap();
+        let mut s = WorldStateSnapshot::default();
         assert!(
-            sync_d6_social(&tx, &snap, &mut fp).is_err(),
-            "expected sync_d6_social Err when {tbl} is dropped"
+            load_social_domain_rows(&conn, &mut s, &mut LoadContext::new(false)).is_err(),
+            "expected load_social_domain_rows Err for {domain}/{key}"
+        );
+    }
+
+    // Legacy 19 tables tolerate individual missing tables cleanly without failing migration.
+    for tbl in social_tables {
+        let conn = open_migrated_conn();
+        conn.execute_batch(LEGACY_D6_SOCIAL_SQL).unwrap();
+        conn.execute(&format!("DROP TABLE {tbl}"), []).unwrap();
+        let mut s = WorldStateSnapshot::default();
+        assert!(
+            load_social_domain_rows(&conn, &mut s, &mut LoadContext::new(false)).unwrap(),
+            "remaining legacy tables should still report had_legacy=true when {tbl} is absent"
         );
     }
 }

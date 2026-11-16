@@ -517,19 +517,20 @@ fn social_store_and_sync_ext_cover_all_collections_and_deletions() {
     let mut fp = TableFingerprints::default();
     {
         let tx = conn.transaction().unwrap();
-        assert!(social_store::sync_d6_social(&tx, &snap, &mut fp).unwrap());
+        assert!(social_store::sync_social_domain_rows(&tx, &snap).unwrap());
         assert!(sync_ext::sync_extension_tables(&tx, &snap, &mut fp).unwrap());
         tx.commit().unwrap();
     }
     {
         let tx = conn.transaction().unwrap();
-        assert!(!social_store::sync_d6_social(&tx, &snap, &mut fp).unwrap());
+        assert!(!social_store::sync_social_domain_rows(&tx, &snap).unwrap());
         assert!(!sync_ext::sync_extension_tables(&tx, &snap, &mut fp).unwrap());
         tx.commit().unwrap();
     }
 
     snap.char_notes.clear();
-    social_store::load_d6_social_into_snapshot(&conn, &mut snap).unwrap();
+    let mut ctx = crate::sqlite_store::quarantine::LoadContext::new(false);
+    assert!(!social_store::load_social_domain_rows(&conn, &mut snap, &mut ctx).unwrap());
     assert_eq!(snap.char_notes.get(&(90_000_001, 90_000_002)), Some(&"Trusted".to_string()));
 
     snap.character_last_jump_unix.clear();

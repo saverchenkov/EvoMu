@@ -2,8 +2,8 @@
 
 use crate::snapshot_ext::{decode_owner_note_entity_id, LpRewardLogEntry};
 use crate::sqlite_store::domain_rows::{
-    DOMAIN_CHAR_LP_LOGS, DOMAIN_MARKET_TRANSACTIONS, DOMAIN_OWNER_NOTES,
-    DOMAIN_WALLET_JOURNAL_META,
+    DOMAIN_CHAR_LP_LOGS, DOMAIN_MARKET_TRANSACTIONS, DOMAIN_OWNER_NOTES, DOMAIN_SOCIAL_BOOKMARKS,
+    DOMAIN_SOCIAL_CHAT_CALENDAR, DOMAIN_SOCIAL_MAIL, DOMAIN_WALLET_JOURNAL_META,
 };
 use crate::sqlite_store::fingerprints::{compute_fingerprints, TableFingerprints};
 use crate::sqlite_store::quarantine::{
@@ -123,6 +123,42 @@ pub fn query_cross_table_entity_high_water(conn: &Connection) -> Result<i64, Str
             }
         }
     }
+    if let Ok(mut stmt) = conn.prepare_cached(
+        "SELECT domain, key FROM domain_rows WHERE domain IN (?1, ?2, ?3)",
+    ) {
+        if let Ok(mut rows) = stmt.query(rusqlite::params![
+            DOMAIN_SOCIAL_MAIL,
+            DOMAIN_SOCIAL_BOOKMARKS,
+            DOMAIN_SOCIAL_CHAT_CALENDAR,
+        ]) {
+            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                let domain_str: String = r.get(0).map_err(|e| e.to_string())?;
+                let key_str: String = r.get(1).map_err(|e| e.to_string())?;
+                let Some((field, suffix)) = key_str.split_once('/') else {
+                    continue;
+                };
+                let is_id_field = match domain_str.as_str() {
+                    DOMAIN_SOCIAL_MAIL => field == "mailing_lists",
+                    DOMAIN_SOCIAL_CHAT_CALENDAR => field == "calendar_events",
+                    DOMAIN_SOCIAL_BOOKMARKS => matches!(
+                        field,
+                        "bookmark_folders"
+                            | "bookmark_subfolders"
+                            | "bookmark_expiries"
+                            | "access_groups"
+                    ),
+                    _ => false,
+                };
+                if is_id_field {
+                    if let Ok(val) = suffix.parse::<i64>() {
+                        if val > hwm && val < 900_000_000 {
+                            hwm = val;
+                        }
+                    }
+                }
+            }
+        }
+    }
     Ok(hwm)
 }
 
@@ -192,6 +228,30 @@ pub fn sqlite_entity_id_exists(conn: &Connection, candidate: i64) -> Result<bool
                     return Ok(true);
                 }
             }
+        }
+    }
+    if let Ok(mut stmt) = conn.prepare_cached(
+        "SELECT 1 FROM domain_rows
+         WHERE (domain = ?1 AND key = ?2)
+            OR (domain = ?3 AND key = ?4)
+            OR (domain = ?5 AND key IN (?6, ?7, ?8, ?9))
+         LIMIT 1",
+    ) {
+        let mut rows = stmt
+            .query(rusqlite::params![
+                DOMAIN_SOCIAL_MAIL,
+                format!("mailing_lists/{candidate}"),
+                DOMAIN_SOCIAL_CHAT_CALENDAR,
+                format!("calendar_events/{candidate}"),
+                DOMAIN_SOCIAL_BOOKMARKS,
+                format!("bookmark_folders/{candidate}"),
+                format!("bookmark_subfolders/{candidate}"),
+                format!("bookmark_expiries/{candidate}"),
+                format!("access_groups/{candidate}"),
+            ])
+            .map_err(|e| e.to_string())?;
+        if rows.next().map_err(|e| e.to_string())?.is_some() {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -1560,7 +1620,8 @@ pub fn load_snapshot_from_sqlite_with_options(
     let had_legacy_notes_lp =
         super::domain_rows::load_notes_lp_domain_rows(conn, &mut snap, &mut ctx)?;
     super::notes_lp_sequence_store::load_d6_checked(conn, &mut snap, &mut ctx)?;
-    super::social_store::load_d6_social_into_snapshot_with_ctx(conn, &mut snap, &mut ctx)?;
+    let had_legacy_social =
+        super::social_store::load_social_domain_rows(conn, &mut snap, &mut ctx)?;
     let had_legacy_corp_crimewatch =
         super::corp_crimewatch_store::load_corp_crimewatch_domain_rows(conn, &mut snap, &mut ctx)?;
     super::industry_market_pve_store::load_d6_batch4_checked(conn, &mut snap, &mut ctx)?;
@@ -1588,6 +1649,7 @@ pub fn load_snapshot_from_sqlite_with_options(
     let fp = if let Some(mut fp) = pre_migration_fp.take() {
         if had_legacy_ledger
             || had_legacy_notes_lp
+            || had_legacy_social
             || had_legacy_corp_crimewatch
             || had_legacy_service_domains
         {
@@ -1601,6 +1663,9 @@ pub fn load_snapshot_from_sqlite_with_options(
         if had_legacy_notes_lp {
             super::domain_rows::drop_legacy_notes_lp_tables(&tx)?;
         }
+        if had_legacy_social {
+            super::domain_rows::drop_legacy_social_tables(&tx)?;
+        }
         if had_legacy_corp_crimewatch {
             super::domain_rows::drop_legacy_corp_crimewatch_tables(&tx)?;
         }
@@ -1610,6 +1675,7 @@ pub fn load_snapshot_from_sqlite_with_options(
         if delta.dirty
             || had_legacy_ledger
             || had_legacy_notes_lp
+            || had_legacy_social
             || had_legacy_corp_crimewatch
             || had_legacy_service_domains
         {
