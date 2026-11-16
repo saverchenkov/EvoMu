@@ -984,38 +984,10 @@ impl SystemRegistry {
                                     return;
                                 }
                                 let mut ast_ball = ball;
-                                ast_ball.mode = eve_destiny::MovementMode::Rigid;
-                                let (group_id, category_id, name) = sde_opt
-                                    .as_ref()
-                                    .and_then(|s| s.types.get(&ast_ball.type_id))
-                                    .map(|t| {
-                                        (
-                                            t.group_id,
-                                            t.category_id,
-                                            (!t.name.is_empty()).then(|| t.name.clone()),
-                                        )
-                                    })
-                                    .unwrap_or((25, 25, None));
-                                ballpark.add_static_ball_with_meta(
-                                    ast_ball.clone(),
-                                    SlimItemMeta {
-                                        group_id,
-                                        category_id,
-                                        owner_id: 1,
-                                        char_id: None,
-                                        corp_id: -1,
-                                        alliance_id: -1,
-                                        security_status: 0.0,
-                                        is_cloaked: false,
-                                        name,
-                                        ..Default::default()
-                                    },
-                                );
-                                ballpark.queue_event_for_all_grid_observers(
-                                    Some(ball_id),
-                                    &DestinyEvent::AddBalls2 {
-                                        balls: vec![ast_ball.clone()],
-                                    },
+                                SystemHandle::spawn_asteroid_ball_in_ballpark(
+                                    &mut ballpark,
+                                    &sde_opt,
+                                    &mut ast_ball,
                                 );
                                 if let Some(db) = &db_opt {
                                     if db.get_asteroid(ball_id).is_none() {

@@ -675,3 +675,161 @@ async fn test_ch5_gm_spawn_attr_fit_kill_location_online_and_qa_tools() {
         assert!(audit_log.contains(expected), "Audit log must contain {expected}");
     }
 }
+
+#[tokio::test]
+async fn test_ch5_gm_spawn_veldspar_1230_in_space_delivers_add_balls2() {
+    // parity: feat:admin.gm-spawn, feat:navigation.destiny-updates, plan:CH-5, rpc:slash.SlashCmd
+    eve_testkit::attest(&["feat:admin.gm-spawn", "feat:navigation.destiny-updates", "plan:CH-5"]);
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut gm_sess = SessionState::new(944);
+    common::login_pilot(&ctx, &mut gm_sess, "demo", "demo-secret").await;
+    gm_sess.role = eve_db::service_roles::ROLE_ADMIN | eve_db::service_roles::ROLE_GMS;
+    let gm_char_id = 90_000_002;
+    let gm_ship_id = 990_000_003;
+    let sys_id = 30_000_142_u32;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut gm_ch = snap.characters[&90_000_001].clone();
+        gm_ch.character_id = gm_char_id;
+        gm_ch.user_id = gm_sess.user_id.unwrap();
+        gm_ch.name = "GM Asteroid Operator".into();
+        gm_ch.station_id = None;
+        gm_ch.solar_system_id = sys_id;
+        gm_ch.active_ship_id = gm_ship_id;
+        snap.characters.insert(gm_char_id, gm_ch);
+        snap.items.insert(
+            gm_ship_id,
+            InventoryItemRecord {
+                item_id: gm_ship_id,
+                type_id: 601,
+                owner_id: gm_char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+    ctx.dispatch_rpc(
+        &mut gm_sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(gm_char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID GM");
+    gm_sess.station_id = None;
+    gm_sess.solar_system_id = Some(sys_id);
+    gm_sess.ship_id = Some(gm_ship_id);
+
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let origin = glam::DVec3::new(5_000.0, 0.0, 0.0);
+    handle
+        .spawn_ball(eve_destiny::Ball {
+            id: gm_ship_id,
+            type_id: 601,
+            position: origin,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .expect("spawn gm observer ship");
+    let _ = handle.drain_observer_updates(gm_ship_id).await.unwrap();
+
+    let spawn_rep = ctx
+        .dispatch_rpc(
+            &mut gm_sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/spawn 1230".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/spawn 1230 RPC must succeed");
+    let PyRep::KeyVal(spawn_kv) = spawn_rep else {
+        panic!("Expected KeyVal from /spawn 1230");
+    };
+    let ast_id = spawn_kv.get("spawnedID").and_then(|v| v.as_i64()).expect("spawnedID");
+    assert_eq!(spawn_kv.get("itemID").and_then(|v| v.as_i64()), Some(ast_id));
+    assert_eq!(spawn_kv.get("typeID").and_then(|v| v.as_i64()), Some(1230));
+    assert_eq!(spawn_kv.get("solarSystemID").and_then(|v| v.as_i64()), Some(i64::from(sys_id)));
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&ast_id].type_id, 1230);
+        assert_eq!(snap.items[&ast_id].owner_id, 1);
+        assert!(snap.asteroids.contains_key(&ast_id));
+    });
+
+    {
+        let bp = handle.ballpark.read().unwrap();
+        let ship_grid = bp.ball_grid_ids.get(&gm_ship_id).copied().expect("ship grid");
+        let ast_grid = bp.ball_grid_ids.get(&ast_id).copied().expect("asteroid grid");
+        assert_eq!(ast_grid, ship_grid);
+        assert!(bp.grids[&ast_grid].members.contains(&ast_id));
+        let meta = bp.ball_slim_meta.get(&ast_id).expect("asteroid slim meta");
+        assert_eq!(meta.group_id, 462);
+        assert_eq!(meta.category_id, 25);
+        assert_eq!(meta.owner_id, 1);
+        assert!(bp.balls[&ast_id].radius >= 200.0);
+        assert_eq!(bp.balls[&ast_id].mode, eve_destiny::MovementMode::Rigid);
+    }
+
+    let (_tick, obs_evs, _wire) = handle.drain_observer_updates(gm_ship_id).await.unwrap();
+    assert!(
+        obs_evs.iter().any(|ev| {
+            matches!(
+                ev,
+                eve_destiny::DestinyEvent::AddBalls2 { balls }
+                    if balls.iter().any(|b| b.id == ast_id && b.type_id == 1230)
+            )
+        }),
+        "in-space observer must receive AddBalls2 for /spawn 1230: {obs_evs:?}"
+    );
+
+    let unspawn_rep = ctx
+        .dispatch_rpc(
+            &mut gm_sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/unspawn {ast_id}"))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/unspawn asteroid");
+    let PyRep::KeyVal(unspawn_kv) = unspawn_rep else {
+        panic!("Expected KeyVal from /unspawn");
+    };
+    assert_eq!(unspawn_kv.get("removedFromDb").and_then(|v| v.as_bool()), Some(true));
+    let (_tick2, rem_evs, _) = handle.drain_observer_updates(gm_ship_id).await.unwrap();
+    assert!(
+        rem_evs.iter().any(|ev| {
+            matches!(
+                ev,
+                eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == ast_id
+            ) || matches!(
+                ev,
+                eve_destiny::DestinyEvent::RemoveBalls { ball_ids } if ball_ids.contains(&ast_id)
+            )
+        }),
+        "/unspawn must emit RemoveBall/RemoveBalls to observer: {rem_evs:?}"
+    );
+}

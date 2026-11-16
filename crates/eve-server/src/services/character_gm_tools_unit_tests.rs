@@ -1304,3 +1304,245 @@ async fn fit_rejects_non_fittable_types_without_mutating_inventory() {
         .expect("/fit me 3657 5 into explicit Cargo flag must succeed");
     assert_eq!(cargo_rep.dict_get("flagID"), Some(&PyRep::Integer(5)));
 }
+
+#[tokio::test]
+async fn spawn_1230_veldspar_queues_grid_scoped_add_balls2_wire_and_slim_item() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
+    let far_ship_id = 1_855_099_i64;
+
+    let mut sess = gm_session(char_id, ship_id);
+    sess.station_id = None;
+    sess.solar_system_id = Some(sys_id);
+
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let origin = glam::DVec3::new(10_000.0, 2_000.0, -5_000.0);
+    handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: origin,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    handle
+        .spawn_ball(eve_destiny::Ball {
+            id: far_ship_id,
+            type_id: 587,
+            position: glam::DVec3::new(100_000_000.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    let _ = handle.drain_observer_updates(ship_id).await.unwrap();
+    let _ = handle.drain_observer_updates(far_ship_id).await.unwrap();
+
+    let spawn_rep = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/spawn 1230")
+        .await
+        .expect("slash handled")
+        .expect("/spawn 1230 must succeed");
+    let ast_id = spawn_rep
+        .dict_get("spawnedID")
+        .and_then(|v| v.as_i64())
+        .expect("spawnedID");
+    assert_eq!(spawn_rep.dict_get("itemID"), Some(&PyRep::Integer(ast_id)));
+    assert_eq!(spawn_rep.dict_get("typeID"), Some(&PyRep::Integer(1230)));
+    assert_eq!(spawn_rep.dict_get("quantity"), Some(&PyRep::Integer(1)));
+    assert_eq!(
+        spawn_rep.dict_get("solarSystemID"),
+        Some(&PyRep::Integer(i64::from(sys_id)))
+    );
+
+    let ship_grid = {
+        let bp = handle.ballpark.read().unwrap();
+        let ship_grid = bp.ball_grid_ids.get(&ship_id).copied().expect("ship grid");
+        let ast_grid = bp
+            .ball_grid_ids
+            .get(&ast_id)
+            .copied()
+            .expect("asteroid must be indexed in ball_grid_ids");
+        assert_eq!(ast_grid, ship_grid, "asteroid must join observer ship grid");
+        assert!(
+            bp.grids[&ast_grid].members.contains(&ast_id),
+            "asteroid must belong to GridBubble.members"
+        );
+        let ast_ball = &bp.balls[&ast_id];
+        assert_eq!(ast_ball.type_id, 1230);
+        assert_eq!(ast_ball.mode, eve_destiny::MovementMode::Rigid);
+        assert!(ast_ball.radius >= 200.0, "asteroid radius must be >= 200m");
+        assert!(bp.is_static_ball(ast_id));
+        assert!(
+            (ast_ball.position - origin - glam::DVec3::new(1_500.0, 0.0, 0.0)).length() < 1e-6,
+            "asteroid must spawn 1500m ahead of observer ship origin"
+        );
+        ship_grid
+    };
+
+    let (_tick, events, wire_rep) = handle.drain_observer_updates(ship_id).await.unwrap();
+    assert!(
+        events.iter().any(|ev| {
+            matches!(
+                ev,
+                eve_destiny::DestinyEvent::AddBalls2 { balls }
+                    if balls.iter().any(|b| b.id == ast_id && b.type_id == 1230)
+            )
+        }),
+        "same-grid observer must receive AddBalls2 for /spawn 1230: {events:?}"
+    );
+
+    let mut verified_wire_slim = false;
+    if let PyRep::List(updates) = &wire_rep {
+        for entry in updates {
+            if let PyRep::Tuple(outer) = entry {
+                if let Some(PyRep::Tuple(action)) = outer.get(1) {
+                    if action.first() == Some(&PyRep::String("AddBalls2".into())) {
+                        if let Some(PyRep::Tuple(args)) = action.get(1) {
+                            if let Some(PyRep::Tuple(payload)) = args.first() {
+                                if let (
+                                    Some(PyRep::Bytes(state_bytes)),
+                                    Some(PyRep::List(extra_list)),
+                                ) = (payload.first(), payload.get(1))
+                                {
+                                    assert!(!state_bytes.is_empty());
+                                    for item in extra_list {
+                                        if let PyRep::Tuple(pair) = item {
+                                            if let Some(slim) = pair.first() {
+                                                if slim.dict_get("itemID")
+                                                    == Some(&PyRep::Integer(ast_id))
+                                                {
+                                                    assert_eq!(
+                                                        slim.dict_get("typeID"),
+                                                        Some(&PyRep::Integer(1230))
+                                                    );
+                                                    assert_eq!(
+                                                        slim.dict_get("groupID"),
+                                                        Some(&PyRep::Integer(462))
+                                                    );
+                                                    assert_eq!(
+                                                        slim.dict_get("categoryID"),
+                                                        Some(&PyRep::Integer(25))
+                                                    );
+                                                    assert_eq!(
+                                                        slim.dict_get("ownerID"),
+                                                        Some(&PyRep::Integer(1))
+                                                    );
+                                                    assert_eq!(
+                                                        slim.dict_get("charID"),
+                                                        Some(&PyRep::None)
+                                                    );
+                                                    assert_eq!(
+                                                        slim.dict_get("corpID"),
+                                                        Some(&PyRep::None)
+                                                    );
+                                                    assert_eq!(
+                                                        slim.dict_get("allianceID"),
+                                                        Some(&PyRep::None)
+                                                    );
+                                                    let wire_radius = slim
+                                                        .dict_get("radius")
+                                                        .and_then(|v| v.as_f64())
+                                                        .unwrap_or(0.0);
+                                                    assert!(wire_radius >= 200.0);
+                                                    verified_wire_slim = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        verified_wire_slim,
+        "wire AddBalls2 must carry valid Veldspar SlimItem: {wire_rep:?}"
+    );
+
+    let (_far_tick, far_events, _) = handle.drain_observer_updates(far_ship_id).await.unwrap();
+    assert!(
+        far_events.iter().all(|ev| !matches!(
+            ev,
+            eve_destiny::DestinyEvent::AddBalls2 { balls } if balls.iter().any(|b| b.id == ast_id)
+        )),
+        "off-grid observer 100k km away must not receive local asteroid AddBalls2: {far_events:?}"
+    );
+
+    let unspawn = handle_gm_slash_ext(&ctx, &mut sess, char_id, &format!("/unspawn {ast_id}"))
+        .await
+        .expect("slash handled")
+        .expect("/unspawn asteroid ok");
+    assert_eq!(unspawn.dict_get("removedFromDb"), Some(&PyRep::Bool(true)));
+
+    let (_tick2, rem_events, _) = handle.drain_observer_updates(ship_id).await.unwrap();
+    assert!(
+        rem_events.iter().any(|ev| {
+            matches!(
+                ev,
+                eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == ast_id
+            ) || matches!(
+                ev,
+                eve_destiny::DestinyEvent::RemoveBalls { ball_ids } if ball_ids.contains(&ast_id)
+            )
+        }),
+        "/unspawn must emit RemoveBall/RemoveBalls to owning grid observer: {rem_events:?}"
+    );
+    let bp = handle.ballpark.read().unwrap();
+    assert!(!bp.ball_grid_ids.contains_key(&ast_id));
+    assert!(!bp.grids[&ship_grid].members.contains(&ast_id));
+}
+
+#[tokio::test]
+async fn spawn_1230_fails_loudly_and_rolls_back_db_when_actor_command_fails() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = 0;
+        }
+    });
+    let mut sess = gm_session(char_id, 0);
+    sess.station_id = None;
+    sess.ship_id = None;
+    sess.solar_system_id = Some(sys_id);
+
+    let (pre_items, pre_asteroids) =
+        ctx.db.with_snapshot(|s| (s.items.len(), s.asteroids.len()));
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    handle
+        .panic_next_command_for_test
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let err = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/spawn 1230")
+        .await
+        .expect("slash handled")
+        .expect_err("failed actor spawn must return SpawnFailed rather than ok=true");
+    assert_eq!(err.code, "SpawnFailed");
+
+    let (post_items, post_asteroids) =
+        ctx.db.with_snapshot(|s| (s.items.len(), s.asteroids.len()));
+    assert_eq!(post_items, pre_items, "failed /spawn must roll back snap.items");
+    assert_eq!(
+        post_asteroids, pre_asteroids,
+        "failed /spawn must roll back snap.asteroids"
+    );
+}

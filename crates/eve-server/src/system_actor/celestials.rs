@@ -14,7 +14,7 @@ use eve_destiny::{
     TargetLock,
 };
 use eve_proto::PyRep;
-use eve_sde::SolarSystemId;
+use eve_sde::{SdeRegistry, SolarSystemId};
 use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -812,14 +812,16 @@ impl SystemHandle {
         }
     }
 
-    pub fn try_spawn_asteroid(&self, asteroid: AsteroidState, ball: Ball) {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-        let ball_id = ball.id;
-        let mut ast_ball = ball;
-        ast_ball.mode = eve_destiny::MovementMode::Rigid;
-        let (group_id, category_id, name) = st
-            .sde_opt
+    /// Inserts a rigid asteroid ball and neutral `SlimItemMeta` into `bp`, assigns grid bubble
+    /// membership (`grids` and `ball_grid_ids`), and queues `AddBalls2` for grid observers.
+    pub(super) fn spawn_asteroid_ball_in_ballpark(
+        bp: &mut Ballpark,
+        sde_opt: &Option<Arc<SdeRegistry>>,
+        ast_ball: &mut Ball,
+    ) {
+        let ball_id = ast_ball.id;
+        ast_ball.mode = MovementMode::Rigid;
+        let (group_id, category_id, name) = sde_opt
             .as_ref()
             .and_then(|s| s.types.get(&ast_ball.type_id))
             .map(|t| {
@@ -845,12 +847,41 @@ impl SystemHandle {
                 ..Default::default()
             },
         );
-        bp.queue_event_for_all_grid_observers(
-            Some(ball_id),
-            &eve_destiny::DestinyEvent::AddBalls2 {
-                balls: vec![ast_ball.clone()],
-            },
-        );
+        // Keep static spawned asteroids indexed in `grids`/`ball_grid_ids` like `add_ball`
+        // so grid-scoped `AddBalls2` and subsequent `RemoveBalls` target the owning bubble.
+        let grid_id = bp.find_or_create_grid_for_position(ast_ball.position);
+        if let Some(grid) = bp.grids.get_mut(&grid_id) {
+            grid.members.insert(ball_id);
+        }
+        bp.ball_grid_ids.insert(ball_id, grid_id);
+        let observer_ids: Vec<BallId> = bp
+            .grids
+            .get(&grid_id)
+            .map(|grid| {
+                grid.members
+                    .iter()
+                    .copied()
+                    .filter(|&obs_id| obs_id != ball_id && bp.is_registered_observer(obs_id))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let add_ev = DestinyEvent::AddBalls2 {
+            balls: vec![ast_ball.clone()],
+        };
+        for obs_id in observer_ids {
+            bp.observer_events
+                .entry(obs_id)
+                .or_default()
+                .push(add_ev.clone());
+        }
+    }
+
+    pub fn try_spawn_asteroid(&self, asteroid: AsteroidState, ball: Ball) {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        let ball_id = ball.id;
+        let mut ast_ball = ball;
+        Self::spawn_asteroid_ball_in_ballpark(&mut bp, &st.sde_opt, &mut ast_ball);
         st.asteroid_templates
             .insert(ball_id, (asteroid.clone(), ast_ball));
         st.asteroids.insert(ball_id, asteroid);
