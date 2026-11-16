@@ -509,6 +509,18 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
 /// (`wormholeAge`, `wormholeSize`) when present.
 pub fn slim_item_dict_with_park(park: Option<&Ballpark>, ball: &Ball, meta: &SlimItemMeta) -> PyRep {
     let mut rep = slim_item_dict(ball, meta);
+    if meta.group_id == 10 {
+        if let PyRep::Dict(entries) = &mut rep {
+            let activation_state = park
+                .and_then(|p| p.stargate_activation_states.get(&ball.id))
+                .map(|s| s.activation_state)
+                .unwrap_or(crate::STARGATE_ACTIVATION_STATE_OPEN);
+            entries.push((
+                PyRep::String("activationState".into()),
+                PyRep::Integer(activation_state),
+            ));
+        }
+    }
     let stages = park
         .and_then(|p| p.ball_wormhole_stages.get(&ball.id).copied())
         .or_else(|| (meta.group_id == 988).then_some((0, 1.0)));
@@ -975,6 +987,41 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
                 ]),
             ])
         }
+        DestinyEvent::OnSpecialFXTimed {
+            ball_id,
+            module_id,
+            target_id,
+            guid,
+            start,
+            is_active,
+            duration_ms,
+            repeat,
+            graphic_info,
+        } => PyRep::Tuple(vec![
+            PyRep::String("OnSpecialFX".into()),
+            PyRep::Tuple(vec![
+                PyRep::Integer(*ball_id),
+                module_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                PyRep::None,
+                target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                PyRep::None,
+                PyRep::String(guid.clone()),
+                PyRep::Bool(false),
+                PyRep::Integer(i64::from(*start)),
+                PyRep::Integer(i64::from(*is_active)),
+                duration_ms
+                    .filter(|d| d.is_finite())
+                    .map(PyRep::Real)
+                    .unwrap_or(PyRep::Integer(-1)),
+                repeat.map(PyRep::Integer).unwrap_or(PyRep::None),
+                PyRep::None,
+                PyRep::Integer(0),
+                graphic_info
+                    .as_ref()
+                    .map(|ids| PyRep::List(ids.iter().copied().map(PyRep::Integer).collect()))
+                    .unwrap_or(PyRep::None),
+            ]),
+        ]),
         DestinyEvent::CloakBall { ball_id, cloaked } => PyRep::Tuple(vec![
             // evemu_Crucible `Destiny.xmlp:670-681` (`SetBallCloak`): `(entityID, bool cloaked)`.
             PyRep::String("CloakBall".into()),

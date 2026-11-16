@@ -173,6 +173,88 @@ pub fn emit_sim_clock_rebase_on_entry_if_needed(
     true
 }
 
+/// Preserves and advances a character's continuous jump clock across TiDi transitions and emits
+/// `DoSimClockRebase((oldSimTime, newSimTime))` to `char_id` when jumping into a dilated system
+/// or across differing TiDi factors (`#1080`), while synchronizing `#1081` entry-rebase deduplication.
+pub fn sync_jump_clock_and_emit_rebase_if_needed(
+    ctx: &ServerContext,
+    char_id: i64,
+    from_sys: SolarSystemId,
+    to_sys: SolarSystemId,
+    from_tidi: f64,
+    to_tidi: f64,
+) -> Option<(i64, i64)> {
+    let now_wall_ft = ctx.now_machonet_wallclock_filetime_ticks();
+    let old_factor = if from_tidi.is_finite() { from_tidi.clamp(0.10, 1.0) } else { 1.0 };
+    let new_factor = if to_tidi.is_finite() { to_tidi.clamp(0.10, 1.0) } else { 1.0 };
+    let should_emit = new_factor < 1.0 || (old_factor - new_factor).abs() > 1e-6;
+    let (old_sim_ft, new_sim_ft) = {
+        let mut cn = ctx
+            .systems
+            .cluster_nodes
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let (prev_wall_ft, prev_sim_ft, prev_factor) = cn
+            .character_jump_clocks
+            .get(&char_id)
+            .copied()
+            .or_else(|| cn.sim_clock_anchoring.get(&from_sys).copied())
+            .unwrap_or((now_wall_ft, now_wall_ft, old_factor));
+        let elapsed_wall_ft = now_wall_ft.saturating_sub(prev_wall_ft);
+        let eff_prev = prev_factor.clamp(0.10, 1.0);
+        let dilated_elapsed_ft = ((elapsed_wall_ft as f64) * eff_prev).round() as i64;
+        let cur_sim_ft = prev_sim_ft.saturating_add(dilated_elapsed_ft);
+        // Jumping out of a dilated system advances the preserved jump clock by elapsed wall time;
+        // staying in or entering dilation keeps monotonic continuity from the previous anchor.
+        let target_sim_ft = if eff_prev < 1.0 {
+            prev_sim_ft.saturating_add(elapsed_wall_ft).max(cur_sim_ft)
+        } else {
+            cur_sim_ft
+        };
+        cn.character_jump_clocks
+            .insert(char_id, (now_wall_ft, target_sim_ft, new_factor));
+        if new_factor < 1.0 - crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA {
+            cn.sim_clock_anchoring
+                .entry(to_sys)
+                .or_insert((now_wall_ft, target_sim_ft, new_factor));
+        }
+        if should_emit {
+            let rebase_new = target_sim_ft.max(cur_sim_ft);
+            let gen = *cn.rebase_generation_by_system.entry(to_sys).or_insert(1);
+            cn.char_rebased_system_gen.insert(char_id, (to_sys, gen));
+            let prev_act = cn
+                .last_sim_activation_ft_by_system
+                .get(&to_sys)
+                .copied()
+                .unwrap_or(0);
+            cn.last_sim_activation_ft_by_system
+                .insert(to_sys, rebase_new.max(prev_act));
+        } else if cn
+            .char_rebased_system_gen
+            .get(&char_id)
+            .is_some_and(|&(prev_sys, _)| prev_sys != to_sys)
+        {
+            cn.char_rebased_system_gen.remove(&char_id);
+        }
+        (cur_sim_ft, target_sim_ft)
+    };
+    if should_emit {
+        let rebase_new = new_sim_ft.max(old_sim_ft);
+        ctx.emit_typed(
+            NotificationTarget::Character(char_id),
+            crate::router::notify_registry::DoSimClockRebase {
+                times: PyRep::Tuple(vec![
+                    PyRep::Integer(old_sim_ft),
+                    PyRep::Integer(rebase_new),
+                ]),
+            },
+        );
+        Some((old_sim_ft, rebase_new))
+    } else {
+        None
+    }
+}
+
 fn persist_system_tidi_note(ctx: &ServerContext, solar_system_id: SolarSystemId, factor: f64) {
     let now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {

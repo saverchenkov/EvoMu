@@ -75,7 +75,7 @@ async fn test_zarzakh_gate_toll_and_journal() {
     let _ = t_handle.spawn_ball(ball.clone()).await;
     let turnur_beyonce = ctx.bind_object(&mut sess, "beyonce", turnur_sys as i64).unwrap();
 
-    // 0. Out of range jump: pilot at 50,000m fails with OutsideStargateJumpRange and NO toll debited (R-B7-05)
+    // 0. Out of range jump: pilot at 50,000m fails with NotCloseEnoughToJump and NO toll debited (R-B7-05)
     let balance_before = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
     let mut far_ball = ball.clone();
     far_ball.position = gate_pos + glam::DVec3::new(50_000.0, 0.0, 0.0);
@@ -92,7 +92,7 @@ async fn test_zarzakh_gate_toll_and_journal() {
         )
         .await
         .expect_err("Out of range gate jump fails");
-    assert_eq!(range_err.code, "OutsideStargateJumpRange");
+    assert_eq!(range_err.code, "NotCloseEnoughToJump");
     let balance_after_fail = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
     assert_eq!(balance_after_fail, balance_before, "Wallet balance must be untouched when jump fails range check");
     let _ = t_handle.spawn_ball(ball.clone()).await;

@@ -77,11 +77,14 @@ impl IskCents {
 /// Canonical V24 localization label constant for supercapital/large-ship docking refusal.
 pub const UI_LABEL_SHIP_TOO_LARGE: &str = "UI/Station/StationManagment/ShipTooLarge";
 
+/// Canonical V24 localization label constant for closed-stargate jump refusal (`#1080`).
+pub const UI_LABEL_GATE_CLOSED: &str = "UI/GateIcons/GateClosed";
+
 /// Closed registry of V24 localization labels referenced by [`UserErrorArg::Label`] across server errors.
 ///
 /// Every entry here (and every `UserErrorArg::Label("...")` literal in `crates/`) is verified against
 /// V24 `res:/localizationfsd/localization_fsd_main.pickle` in `eve-testkit`.
-pub const V24_USER_ERROR_LABELS: &[&str] = &[UI_LABEL_SHIP_TOO_LARGE];
+pub const V24_USER_ERROR_LABELS: &[&str] = &[UI_LABEL_SHIP_TOO_LARGE, UI_LABEL_GATE_CLOSED];
 
 /// Rounds a floating-point `UserError` argument to 6 decimal places to eliminate binary FP noise
 /// while remaining numeric for V24 `NumericPropertyHandler` formatting (`#1086`).
@@ -338,6 +341,7 @@ pub enum UserErrorKey {
     WarpScrambled,
     DeniedTethered,
     ShipCannotUseStargate,
+    NotCloseEnoughToJump,
     SystemCheck_JumpFailed_StandingsTooLow,
     CannotDscanInThisSystem,
     DunBlacklistCannotWarp,
@@ -446,6 +450,7 @@ impl UserErrorKey {
         Self::WarpScrambled,
         Self::DeniedTethered,
         Self::ShipCannotUseStargate,
+        Self::NotCloseEnoughToJump,
         Self::SystemCheck_JumpFailed_StandingsTooLow,
         Self::CannotDscanInThisSystem,
         Self::DunBlacklistCannotWarp,
@@ -546,6 +551,7 @@ impl UserErrorKey {
             Self::WarpScrambled => "WarpScrambled",
             Self::DeniedTethered => "DeniedTethered",
             Self::ShipCannotUseStargate => "ShipCannotUseStargate",
+            Self::NotCloseEnoughToJump => "NotCloseEnoughToJump",
             Self::SystemCheck_JumpFailed_StandingsTooLow => {
                 "SystemCheck_JumpFailed_StandingsTooLow"
             }
@@ -659,6 +665,7 @@ impl UserErrorKey {
             Self::WarpScrambled => Some(1682),
             Self::DeniedTethered => Some(4899),
             Self::ShipCannotUseStargate => Some(7882),
+            Self::NotCloseEnoughToJump => Some(1329),
             Self::SystemCheck_JumpFailed_StandingsTooLow => Some(7433),
             Self::CannotDscanInThisSystem => Some(7864),
             Self::DunBlacklistCannotWarp => Some(2100),
@@ -783,6 +790,7 @@ impl UserErrorKey {
             | Self::WarpDisrupted
             | Self::WarpScrambled
             | Self::DeniedTethered
+            | Self::NotCloseEnoughToJump
             | Self::SystemCheck_JumpFailed_StandingsTooLow
             | Self::CannotDscanInThisSystem
             | Self::MustBeDocked
@@ -908,6 +916,7 @@ impl UserErrorKey {
             Self::CustomNotify => vec![("notify".into(), PyRep::ascii_bytes(self.as_str()))],
             Self::CustomError => vec![("error".into(), PyRep::ascii_bytes(self.as_str()))],
             Self::CustomQuestion => vec![("question".into(), PyRep::ascii_bytes(self.as_str()))],
+            Self::NotCloseEnoughToJump => vec![("maxdist".into(), PyRep::Integer(2_500))],
             _ => Vec::new(),
         }
     }
@@ -1474,6 +1483,48 @@ impl BridgeRpcError {
         Self::from_client_error(ClientError::no_charges(launcher_type_id))
     }
 
+    /// Constructs a typed `CustomInfo` RPC error with an explicit typed `info` argument
+    /// (for example `UserErrorArg::Label(UI_LABEL_GATE_CLOSED)` -> `(101, "UI/GateIcons/GateClosed")`).
+    pub fn custom_info_args(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        info: UserErrorArg,
+    ) -> Self {
+        Self::with_client_error(
+            code,
+            message,
+            ClientError::user_with_args(UserErrorKey::CustomInfo, [("info", info)]),
+        )
+    }
+
+    /// Constructs the V24 closed-stargate error:
+    /// `eveexceptions.UserError("CustomInfo", {"info": (101, "UI/GateIcons/GateClosed")})`.
+    pub fn gate_closed(gate_id: i64) -> Self {
+        Self::custom_info_args(
+            "GateClosed",
+            format!("Stargate {gate_id} is closed"),
+            UserErrorArg::Label(UI_LABEL_GATE_CLOSED),
+        )
+    }
+
+    /// Constructs the V24 stargate jump range error (`NotCloseEnoughToJump`, `dialogs.static` 1329).
+    pub fn not_close_enough_to_jump(
+        surface_dist_m: f64,
+        center_dist_m: f64,
+        max_center_dist_m: f64,
+        perimeter_m: f64,
+    ) -> Self {
+        Self::with_client_error(
+            "NotCloseEnoughToJump",
+            format!(
+                "Ship is {surface_dist_m:.1} m from stargate surface (must be within {perimeter_m:.0} m; center dist {center_dist_m:.1} m, max {max_center_dist_m:.1} m)"
+            ),
+            ClientError::user_with_args(
+                UserErrorKey::NotCloseEnoughToJump,
+                [("maxdist", UserErrorArg::Int(perimeter_m.round() as i64))],
+            ),
+        )
+    }
     /// Constructs a typed `MarketExceededOrderCount` (`MaxOpenOrdersReached`) error with
     /// integer `curCnt` and `maxCnt` kwargs.
     pub fn max_open_orders_reached(cur_cnt: i64, max_cnt: i64) -> Self {
@@ -1847,6 +1898,48 @@ mod tests {
                     PyRep::String(UI_LABEL_SHIP_TOO_LARGE.into()),
                 ]),
             )]
+        );
+
+        let closed_gate = BridgeRpcError::gate_closed(50001234);
+        assert_eq!(
+            closed_gate.client_presentation("beyonce", "CmdStargateJump"),
+            UserErrorPresentation::Modal
+        );
+        let (gc_key, gc_dict) = decode_wrapped_user_error(
+            &closed_gate
+                .to_client_error("beyonce", "CmdStargateJump")
+                .to_macho_error_body(6),
+        );
+        assert_eq!(gc_key, "CustomInfo");
+        assert_eq!(
+            gc_dict,
+            vec![(
+                PyRep::ascii_bytes("info"),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(101),
+                    PyRep::String(UI_LABEL_GATE_CLOSED.into()),
+                ]),
+            )]
+        );
+
+        assert_eq!(
+            UserErrorKey::NotCloseEnoughToJump.presentation(),
+            UserErrorPresentation::Notify
+        );
+        let not_close = BridgeRpcError::not_close_enough_to_jump(2_600.0, 16_691.0, 16_591.0, 2_500.0);
+        assert_eq!(
+            not_close.client_presentation("beyonce", "CmdStargateJump"),
+            UserErrorPresentation::Notify
+        );
+        let (ncj_key, ncj_dict) = decode_wrapped_user_error(
+            &not_close
+                .to_client_error("beyonce", "CmdStargateJump")
+                .to_macho_error_body(6),
+        );
+        assert_eq!(ncj_key, "NotCloseEnoughToJump");
+        assert_eq!(
+            ncj_dict,
+            vec![(PyRep::ascii_bytes("maxdist"), PyRep::Integer(2_500))]
         );
 
         let too_far = BridgeRpcError::target_out_of_range("Guristas Scout", 484, 42_500.5, "Too far");

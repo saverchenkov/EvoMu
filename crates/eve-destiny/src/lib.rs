@@ -969,6 +969,18 @@ pub enum DestinyEvent {
         guid: String,
         is_active: bool,
     },
+    /// Timed / targeted `OnSpecialFX` notification (e.g. stargate `effects.GateActivity`, `effects.JumpOut`, `effects.JumpIn`).
+    OnSpecialFXTimed {
+        ball_id: BallId,
+        module_id: Option<i64>,
+        target_id: Option<BallId>,
+        guid: String,
+        start: bool,
+        is_active: bool,
+        duration_ms: Option<f64>,
+        repeat: Option<i64>,
+        graphic_info: Option<Vec<i64>>,
+    },
     CloakBall {
         ball_id: BallId,
         cloaked: u8,
@@ -1342,6 +1354,35 @@ pub struct SpecialFxWireMeta {
     pub repeat: Option<i64>,
 }
 
+/// Stargate activation state (`CLOSED = 0`, `ACTIVATING = 1`, `OPEN = 2`; `#1080`).
+pub const STARGATE_ACTIVATION_STATE_CLOSED: i64 = 0;
+pub const STARGATE_ACTIVATION_STATE_ACTIVATING: i64 = 1;
+pub const STARGATE_ACTIVATION_STATE_OPEN: i64 = 2;
+
+/// Authoritative stargate `ACTIVATING -> OPEN` transition length (`3,000 ms`, `#1080`).
+pub const STARGATE_ACTIVATION_TRANSITION_MS: u64 = 3_000;
+
+/// Per-stargate activation state tracked on `Ballpark` (`#1080`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StargateActivationState {
+    pub activation_state: i64,
+    /// Remaining transition milliseconds when advanced via `Ballpark::step(dt)`.
+    pub transition_remaining_ms: u64,
+    /// Optional epoch-millisecond deadline (`> now_ms` while `ACTIVATING`, `0` when settled).
+    #[serde(default)]
+    pub activation_transition_at_ms: u64,
+}
+
+impl Default for StargateActivationState {
+    fn default() -> Self {
+        Self {
+            activation_state: STARGATE_ACTIVATION_STATE_OPEN,
+            transition_remaining_ms: 0,
+            activation_transition_at_ms: 0,
+        }
+    }
+}
+
 /// Represents a solar system's active space simulation instance (`Destiny.Ballpark`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ballpark {
@@ -1395,6 +1436,8 @@ pub struct Ballpark {
     pub ball_interactive_overrides: BTreeMap<BallId, bool>,
     #[serde(default)]
     pub ball_wormhole_stages: BTreeMap<BallId, (i64, f64)>,
+    #[serde(default)]
+    pub stargate_activation_states: BTreeMap<BallId, StargateActivationState>,
     #[serde(skip, default)]
     pub active_wubble_multipliers: BTreeMap<BallId, f64>,
     #[serde(default)]

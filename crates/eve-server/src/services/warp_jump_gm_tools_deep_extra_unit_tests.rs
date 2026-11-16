@@ -322,7 +322,7 @@ async fn space_stargate_jump_pochven_zarzakh_dock_and_undock() {
     assert_eq!(handle_warp_jump(&ctx, &mut sess, None, "beyonce", "CmdStargateJump", &[], &kw).await.unwrap().unwrap_err().code, "InvalidArgument");
     assert_eq!(handle_warp_jump(&ctx, &mut sess, None, "beyonce", "CmdStargateJump", &[PyRep::Integer(99_999_999), PyRep::Integer(dest_sys as i64)], &kw).await.unwrap().unwrap_err().code, "UnknownStargate");
     spawn_ship(&ctx, jita_sys, freighter_id, 996_002, 513, c1, DVec3::new(gate_pos[0] + 50_000.0, gate_pos[1], gate_pos[2]), 500.0, false, false).await;
-    assert_eq!(handle_warp_jump(&ctx, &mut sess, None, "beyonce", "CmdStargateJump", &[PyRep::Integer(gate_id), PyRep::Integer(dest_sys as i64)], &kw).await.unwrap().unwrap_err().code, "OutsideStargateJumpRange");
+    assert_eq!(handle_warp_jump(&ctx, &mut sess, None, "beyonce", "CmdStargateJump", &[PyRep::Integer(gate_id), PyRep::Integer(dest_sys as i64)], &kw).await.unwrap().unwrap_err().code, "NotCloseEnoughToJump");
 
     spawn_ship(&ctx, jita_sys, freighter_id, 996_002, 513, c1, DVec3::from_array(gate_pos), 500.0, false, false).await;
     assert!(handle_warp_jump(&ctx, &mut sess, None, "beyonce", "CmdStargateJump", &[PyRep::Integer(gate_id), PyRep::Integer(dest_sys as i64)], &kw).await.unwrap().is_ok());

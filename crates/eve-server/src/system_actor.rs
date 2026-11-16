@@ -66,6 +66,28 @@ pub fn next_downtime_unix_secs(now_unix: u64, interval_secs: u64, downtime_utc_s
     now_unix.saturating_add(delta)
 }
 
+/// Returns MachoNet wall-clock 100ns FILETIME ticks (subtracting un-rebased `/advancetime` lead) (`#1080`).
+pub(crate) fn machonet_wallclock_filetime_ticks(
+    clock: &dyn eve_db::ServerClock,
+    unrebased_clock_offset_secs: &std::sync::atomic::AtomicU64,
+) -> i64 {
+    let unrebased_secs = unrebased_clock_offset_secs.load(std::sync::atomic::Ordering::Acquire);
+    let unrebased_ticks = i64::try_from(unrebased_secs)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(10_000_000);
+    clock
+        .now_blueos_filetime_ticks()
+        .saturating_sub(unrebased_ticks)
+}
+
+/// Returns wall-clock milliseconds derived from [`machonet_wallclock_filetime_ticks`] (`#1080`).
+pub(crate) fn machonet_wallclock_ms(
+    clock: &dyn eve_db::ServerClock,
+    unrebased_clock_offset_secs: &std::sync::atomic::AtomicU64,
+) -> u64 {
+    (machonet_wallclock_filetime_ticks(clock, unrebased_clock_offset_secs) / 10_000).max(0) as u64
+}
+
 pub struct SystemRegistry {
     pub(crate) systems: RankedRwLock<HashMap<SolarSystemId, SystemHandle>, RANK_SYSTEM_REGISTRY>,
     sde: Option<Arc<SdeRegistry>>,
@@ -90,6 +112,11 @@ pub struct SystemRegistry {
     pending_notifications_opt: Option<Arc<RankedRwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>, RANK_LEAF>>>,
     notify_tx_opt: Option<broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
     pub cluster_nodes: RankedRwLock<ClusterNodeRegistry, RANK_SERVICE_STATE>,
+    /// When true, stargates whose destination solar system is not yet loaded start as `CLOSED (0)`
+    /// (`#1080`) and transition `CLOSED -> ACTIVATING -> OPEN` once destination loads.
+    lazy_stargate_activation: Arc<std::sync::atomic::AtomicBool>,
+    /// Shared `/advancetime` un-rebased clock offset in seconds so gate activation deadlines match MachoNet wallclock (`#1080`).
+    unrebased_clock_offset_secs: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Default for SystemRegistry {
@@ -119,7 +146,133 @@ impl SystemRegistry {
             pending_notifications_opt: None,
             notify_tx_opt: None,
             cluster_nodes: RankedRwLock::new(ClusterNodeRegistry::default()),
+            lazy_stargate_activation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            unrebased_clock_offset_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Returns whether lazy stargate activation (`CLOSED -> ACTIVATING -> OPEN`) is enabled (`#1080`).
+    pub fn lazy_stargate_activation(&self) -> bool {
+        self.lazy_stargate_activation
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Enables or disables lazy stargate activation (`#1080`), updating already-loaded systems' gates.
+    pub fn set_lazy_stargate_activation(&self, enabled: bool) {
+        self.lazy_stargate_activation
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        let handles = self.active_system_handles();
+        let loaded_systems: std::collections::HashSet<SolarSystemId> = handles
+            .iter()
+            .filter_map(|&(sys_id, ref h)| (!h.cmd_tx.is_closed()).then_some(sys_id))
+            .collect();
+        for &(_, ref handle) in &handles {
+            if let Ok(mut bp) = handle.ballpark.write() {
+                let gate_targets: Vec<(BallId, SolarSystemId)> = bp
+                    .ball_slim_meta
+                    .iter()
+                    .filter_map(|(&bid, meta)| {
+                        (meta.group_id == 10)
+                            .then_some(meta.jump_target.map(|(_, dest_sys)| (bid, dest_sys)))
+                            .flatten()
+                    })
+                    .collect();
+                for (gate_id, dest_sys) in gate_targets {
+                    let target_state = if !enabled || loaded_systems.contains(&dest_sys) {
+                        eve_destiny::STARGATE_ACTIVATION_STATE_OPEN
+                    } else {
+                        eve_destiny::STARGATE_ACTIVATION_STATE_CLOSED
+                    };
+                    bp.set_stargate_activation_state(gate_id, target_state, 0, 0);
+                }
+            }
+        }
+    }
+
+    /// Returns `true` if a live `SystemActor` for `solar_system_id` is currently loaded (`#1080`).
+    pub fn is_system_loaded(&self, solar_system_id: SolarSystemId) -> bool {
+        let is_live = |guard: &HashMap<SolarSystemId, SystemHandle>| {
+            guard
+                .get(&solar_system_id)
+                .is_some_and(|h| !h.cmd_tx.is_closed())
+        };
+        if held_lock_ranks().iter().any(|&r| r >= RANK_SYSTEM_REGISTRY) {
+            let guard = self.systems.read_unranked().unwrap_or_else(|e| e.into_inner());
+            is_live(&guard)
+        } else {
+            let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
+            is_live(&guard)
+        }
+    }
+
+    /// Refreshes stargate activation states across currently loaded systems when `loaded_sys_id` loads (`#1080`).
+    pub(crate) fn on_system_loaded_refresh_stargates(
+        &self,
+        loaded_sys_id: SolarSystemId,
+        now_ms: u64,
+    ) {
+        if !self.lazy_stargate_activation()
+            || held_lock_ranks()
+                .iter()
+                .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
+        {
+            return;
+        }
+        let handles = self.active_system_handles();
+        for (sys_id, handle) in handles {
+            if sys_id == loaded_sys_id {
+                continue;
+            }
+            if let Ok(mut bp) = handle.ballpark.write() {
+                let matching_gates: Vec<BallId> = bp
+                    .ball_slim_meta
+                    .iter()
+                    .filter_map(|(&bid, meta)| {
+                        (meta.group_id == 10
+                            && meta.jump_target.is_some_and(|(_, dest)| dest == loaded_sys_id))
+                        .then_some(bid)
+                    })
+                    .collect();
+                for gate_id in matching_gates {
+                    bp.activate_stargate_transition(
+                        gate_id,
+                        eve_destiny::STARGATE_ACTIVATION_TRANSITION_MS,
+                        (now_ms > 0).then_some(now_ms),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Lazily loads `dest_sys_id` if needed and begins transitioning the pointing gate from
+    /// `CLOSED` -> `ACTIVATING` (`STARGATE_ACTIVATION_TRANSITION_MS`) (`#1080`).
+    pub fn ensure_stargate_destination_loaded_for_intent(
+        &self,
+        source_sys_id: SolarSystemId,
+        gate_id: BallId,
+        now_ms: u64,
+    ) -> Option<SolarSystemId> {
+        let sde = self.sde.as_ref()?;
+        let jump = sde.jumps.get(&gate_id)?;
+        if jump.from_solar_system_id != source_sys_id {
+            return None;
+        }
+        let dest_sys_id = jump.to_solar_system_id;
+        if !self.lazy_stargate_activation() {
+            return Some(dest_sys_id);
+        }
+        let was_loaded = self.is_system_loaded(dest_sys_id);
+        let _dest_handle = self.get_or_spawn(dest_sys_id);
+        if let Some(src_handle) = self.get_handle(source_sys_id) {
+            if !was_loaded {
+                src_handle.activate_stargate_transition(
+                    gate_id,
+                    eve_destiny::STARGATE_ACTIVATION_TRANSITION_MS,
+                    (now_ms > 0).then_some(now_ms),
+                );
+            }
+        }
+        Some(dest_sys_id)
     }
 
     pub fn with_sde(sde: Arc<SdeRegistry>) -> Self {
@@ -192,6 +345,15 @@ impl SystemRegistry {
     /// Shares `rng` as this registry's game-mechanic RNG (seeded test RNG).
     pub fn with_mechanic_rng(mut self, rng: Arc<crate::rng::MechanicRng>) -> Self {
         self.mechanic_rng = rng;
+        self
+    }
+
+    /// Shares the server's `/advancetime` un-rebased clock offset atomic with [`SystemRegistry`] (`#1080`).
+    pub fn with_unrebased_clock_offset_secs(
+        mut self,
+        unrebased_clock_offset_secs: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Self {
+        self.unrebased_clock_offset_secs = unrebased_clock_offset_secs;
         self
     }
 
@@ -498,6 +660,24 @@ impl SystemRegistry {
         if let Some(sde) = &sde_opt {
             populate_system_celestials(&mut initial_ballpark, solar_system_id, sde);
         }
+        let lazy_gates = self.lazy_stargate_activation();
+        let gate_dests: Vec<(BallId, SolarSystemId)> = initial_ballpark
+            .ball_slim_meta
+            .iter()
+            .filter_map(|(&bid, meta)| {
+                (meta.group_id == 10)
+                    .then_some(meta.jump_target.map(|(_, dest_sys)| (bid, dest_sys)))
+                    .flatten()
+            })
+            .collect();
+        for (gate_id, dest_sys) in gate_dests {
+            let state = if !lazy_gates || self.is_system_loaded(dest_sys) {
+                eve_destiny::STARGATE_ACTIVATION_STATE_OPEN
+            } else {
+                eve_destiny::STARGATE_ACTIVATION_STATE_CLOSED
+            };
+            initial_ballpark.init_stargate_activation_state(gate_id, state);
+        }
         let db_read_safe = db_opt.as_ref().is_some_and(|db| {
             !db.is_write_locked_by_current_thread()
                 && !held_lock_ranks().iter().any(|&r| r >= eve_db::lock_rank::RANK_WORLD_INNER)
@@ -624,6 +804,7 @@ impl SystemRegistry {
         let last_visible_stamp_actor = last_visible_stamp.clone();
         let last_fx_stamp = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let last_fx_stamp_actor = last_fx_stamp.clone();
+        let unrebased_clock_offset_secs_actor = Arc::clone(&self.unrebased_clock_offset_secs);
         let command_panics = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let command_panics_actor = command_panics.clone();
         #[cfg(test)]
@@ -2204,6 +2385,13 @@ impl SystemRegistry {
                                 if now_unix > ballpark.sim_unix_secs {
                                     ballpark.sim_unix_secs = now_unix;
                                 }
+                                let now_ms = machonet_wallclock_ms(
+                                    db.clock().as_ref(),
+                                    &unrebased_clock_offset_secs_actor,
+                                );
+                                if now_ms > 0 {
+                                    let _ = ballpark.settle_stargate_activation_transitions(0.0, Some(now_ms));
+                                }
                             }
                             let pre_tick_caps = cycles::snapshot_player_ship_capacitors(&ballpark, db_opt.as_ref());
                             let pre_missile_positions =
@@ -2587,7 +2775,7 @@ impl SystemRegistry {
             guard.insert(solar_system_id, handle.clone());
             handle.clone()
         };
-        if held_lock_ranks().iter().any(|&r| r >= RANK_SYSTEM_REGISTRY) {
+        let inserted_handle = if held_lock_ranks().iter().any(|&r| r >= RANK_SYSTEM_REGISTRY) {
             match self.systems.try_write_unranked() {
                 Ok(mut guard) => insert_handle(&mut guard),
                 Err(std::sync::TryLockError::Poisoned(e)) => insert_handle(&mut e.into_inner()),
@@ -2596,7 +2784,18 @@ impl SystemRegistry {
         } else {
             let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
             insert_handle(&mut guard)
+        };
+        if lazy_gates && !held_lock_ranks().iter().any(|&r| r >= RANK_SYSTEM_REGISTRY) {
+            let now_ms = self
+                .db
+                .as_ref()
+                .map(|db| {
+                    machonet_wallclock_ms(db.clock().as_ref(), &self.unrebased_clock_offset_secs)
+                })
+                .unwrap_or(0);
+            self.on_system_loaded_refresh_stargates(solar_system_id, now_ms);
         }
+        inserted_handle
     }
 }
 

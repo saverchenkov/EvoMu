@@ -1146,6 +1146,11 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
         .await
         .map(|tick| PyRep::Integer(tick as i64))
         .map_err(map_destiny_nav_err)?;
+    let _ = ctx.systems.ensure_stargate_destination_loaded_for_intent(
+        sys_id,
+        target_id,
+        ctx.now_machonet_wallclock_ms(),
+    );
     cancel_pending_warp_align_if_needed(ctx, ship_id, &current_ball.mode);
     let _ = crate::services::pve_dungeon_runtime::on_dungeon_approach(
         ctx,
@@ -1256,6 +1261,13 @@ pub(crate) async fn handle_cmd_align_to(
         .await
         .map(|tick| PyRep::Integer(tick as i64))
         .map_err(map_destiny_nav_err)?;
+    if target_id > 0 {
+        let _ = ctx.systems.ensure_stargate_destination_loaded_for_intent(
+            sys_id,
+            target_id,
+            ctx.now_machonet_wallclock_ms(),
+        );
+    }
     let _ = handle.set_speed_fraction(ship_id, 1.0).await;
     cancel_pending_warp_align_if_needed(ctx, ship_id, &current_ball.mode);
     let _ = crate::services::pve_dungeon_runtime::on_dungeon_approach(

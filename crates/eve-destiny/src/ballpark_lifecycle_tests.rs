@@ -595,3 +595,84 @@ fn grid_axes_cloak_errors_warp_locks_and_mjd_filters() {
     assert_eq!(limited, vec![12, 15]);
 }
 
+#[test]
+fn stargate_activation_lifecycle_closed_activating_open() {
+    // parity: feat:navigation.stargate-jump
+    let mut park = Ballpark::new(30_000_142);
+    let mut gate = make_ship(500_001, 16, DVec3::new(10_000.0, 0.0, 0.0));
+    gate.mode = MovementMode::Rigid;
+    gate.max_velocity = 0.0;
+    park.add_static_ball(gate, 0);
+
+    // Bootstrap CLOSED without spurious OnSlimItemChange event.
+    park.init_stargate_activation_state(500_001, crate::STARGATE_ACTIVATION_STATE_CLOSED);
+    let _ = park.step(0.0);
+    assert_eq!(
+        park.stargate_activation_state(500_001).map(|s| s.activation_state),
+        Some(crate::STARGATE_ACTIVATION_STATE_CLOSED)
+    );
+    assert!(!park.is_stargate_open(500_001));
+
+    // Begin ACTIVATING transition (3,000 ms); duplicate transition calls are idempotent no-ops.
+    assert!(park.activate_stargate_transition(
+        500_001,
+        crate::STARGATE_ACTIVATION_TRANSITION_MS,
+        Some(10_000),
+    ));
+    assert!(!park.activate_stargate_transition(
+        500_001,
+        crate::STARGATE_ACTIVATION_TRANSITION_MS,
+        Some(10_500),
+    ));
+    let activating = park.stargate_activation_state(500_001).unwrap();
+    assert_eq!(activating.activation_state, crate::STARGATE_ACTIVATION_STATE_ACTIVATING);
+    assert_eq!(activating.transition_remaining_ms, crate::STARGATE_ACTIVATION_TRANSITION_MS);
+    assert_eq!(
+        activating.activation_transition_at_ms,
+        10_000 + crate::STARGATE_ACTIVATION_TRANSITION_MS
+    );
+
+    // Two 1s steps remain ACTIVATING (2,000 ms elapsed < 3,000 ms).
+    let ev1 = park.step(1.0);
+    assert!(ev1.contains(&DestinyEvent::OnSlimItemChange { ball_id: 500_001 }));
+    let ev2 = park.step(1.0);
+    assert!(
+        !ev2.contains(&DestinyEvent::OnSlimItemChange { ball_id: 500_001 }),
+        "still ACTIVATING after 2s; OnSlimItemChange must not fire early"
+    );
+    assert_eq!(
+        park.stargate_activation_state(500_001).map(|s| s.activation_state),
+        Some(crate::STARGATE_ACTIVATION_STATE_ACTIVATING)
+    );
+
+    // Third 1s step completes the 3,000 ms transition -> OPEN with zero transition deadline.
+    let ev3 = park.step(1.0);
+    assert!(ev3.contains(&DestinyEvent::OnSlimItemChange { ball_id: 500_001 }));
+    let open = park.stargate_activation_state(500_001).unwrap();
+    assert_eq!(open.activation_state, crate::STARGATE_ACTIVATION_STATE_OPEN);
+    assert_eq!(open.transition_remaining_ms, 0);
+    assert_eq!(open.activation_transition_at_ms, 0);
+    assert!(park.is_stargate_open(500_001));
+
+    // Wall-clock deadline path also opens an ACTIVATING gate immediately once now_ms >= deadline.
+    let mut gate2 = make_ship(500_002, 16, DVec3::new(20_000.0, 0.0, 0.0));
+    gate2.mode = MovementMode::Rigid;
+    gate2.max_velocity = 0.0;
+    park.add_static_ball(gate2, 0);
+    park.init_stargate_activation_state(500_002, crate::STARGATE_ACTIVATION_STATE_CLOSED);
+    assert!(park.activate_stargate_transition(
+        500_002,
+        crate::STARGATE_ACTIVATION_TRANSITION_MS,
+        Some(20_000),
+    ));
+    assert!(park
+        .settle_stargate_activation_transitions(0.0, Some(21_500))
+        .is_empty());
+    let opened = park.settle_stargate_activation_transitions(
+        0.0,
+        Some(20_000 + crate::STARGATE_ACTIVATION_TRANSITION_MS),
+    );
+    assert_eq!(opened, vec![500_002]);
+    assert!(park.is_stargate_open(500_002));
+}
+
