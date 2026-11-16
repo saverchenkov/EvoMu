@@ -117,24 +117,88 @@ async fn gm_soak_logi_ring_heals_cycles_specialfx_and_dbuffs() {
         "expected remote armor repair heal: before={damaged_armor}, after={healed_armor}"
     );
 
+    {
+        let bp = sys.ballpark.read().expect("ballpark read for specialfx");
+        for &nid in &npc_ids {
+            for (guid, expected_tid) in [
+                ("effects.ShieldTransfer", 3_596_u32),
+                ("effects.RemoteArmourRepair", 11_357_u32),
+            ] {
+                let ev = bp
+                    .pending_events
+                    .iter()
+                    .find(|ev| {
+                        matches!(
+                            ev,
+                            DestinyEvent::OnSpecialFX {
+                                ball_id,
+                                module_id: Some(mod_id),
+                                guid: ev_guid,
+                                is_active: true,
+                            } if *ball_id == nid
+                                && *mod_id != pilot.ship_id
+                                && *mod_id != nid
+                                && ev_guid == guid
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "expected active Destiny OnSpecialFX {guid} from npc {nid}: {:?}",
+                            bp.pending_events
+                        )
+                    });
+                let DestinyEvent::OnSpecialFX {
+                    module_id: Some(mod_id),
+                    ..
+                } = ev
+                else {
+                    unreachable!();
+                };
+                let meta = bp
+                    .special_fx_meta
+                    .get(&(nid, Some(*mod_id), guid.to_string()))
+                    .unwrap_or_else(|| {
+                        panic!("expected special_fx_meta for ({nid}, {mod_id}, {guid})")
+                    });
+                assert_eq!(meta.target_id, Some(pilot.ship_id));
+                assert_eq!(meta.module_type_id, Some(expected_tid));
+                assert!(!meta.is_offensive);
+                assert_eq!(meta.duration_ms, Some(2_000.0));
+                assert_eq!(meta.repeat, Some(0));
+
+                let encoded =
+                    eve_destiny::wire::encode_destiny_event(bp.current_tick as u32, ev, Some(&bp));
+                let PyRep::Tuple(stamp_and_action) = &encoded else {
+                    panic!("expected (stamp, action) OnSpecialFX tuple: {encoded:?}");
+                };
+                assert_eq!(stamp_and_action.len(), 2);
+                let PyRep::Tuple(outer) = &stamp_and_action[1] else {
+                    panic!("expected outer OnSpecialFX action tuple: {:?}", stamp_and_action[1]);
+                };
+                assert_eq!(outer[0].as_str(), Some("OnSpecialFX"));
+                let PyRep::Tuple(args) = &outer[1] else {
+                    panic!("expected 14-arg OnSpecialFX tuple: {:?}", outer[1]);
+                };
+                assert_eq!(args.len(), 14);
+                assert_eq!(args[0].as_i64(), Some(nid));
+                assert_eq!(args[1].as_i64(), Some(*mod_id));
+                assert_ne!(args[1].as_i64(), Some(pilot.ship_id));
+                assert_eq!(args[2].as_i64(), Some(i64::from(expected_tid)));
+                assert_eq!(args[3].as_i64(), Some(pilot.ship_id));
+                assert_eq!(args[5].as_str(), Some(guid));
+                assert_eq!(args[6].as_bool(), Some(false));
+                assert_eq!(args[7].as_i64(), Some(1));
+                assert_eq!(args[8].as_i64(), Some(1));
+                assert_eq!(args[9].as_f64(), Some(2_000.0));
+                assert_eq!(args[10].as_i64(), Some(0));
+            }
+        }
+    }
+
     let notifs = ctx.drain_notifications_for_char(pilot.char_id);
     assert!(
-        notifs.iter().any(|n| {
-            n.event == "OnSpecialFX"
-                && n.args
-                    .iter()
-                    .any(|a| a.as_str() == Some("effects.ShieldTransfer"))
-        }),
-        "expected effects.ShieldTransfer OnSpecialFX notification: {notifs:?}"
-    );
-    assert!(
-        notifs.iter().any(|n| {
-            n.event == "OnSpecialFX"
-                && n.args
-                    .iter()
-                    .any(|a| a.as_str() == Some("effects.RemoteArmourRepair"))
-        }),
-        "expected effects.RemoteArmourRepair OnSpecialFX notification: {notifs:?}"
+        !notifs.iter().any(|n| n.event == "OnSpecialFX"),
+        "expected no duplicate MachoNet OnSpecialFX notification when Destiny handles it: {notifs:?}"
     );
     assert!(
         notifs.iter().any(|n| {
@@ -178,7 +242,29 @@ async fn gm_soak_logi_ring_heals_cycles_specialfx_and_dbuffs() {
         let bp = sys.ballpark.read().expect("ballpark read after stop");
         for &nid in &npc_ids {
             assert!(!bp.balls.contains_key(&nid), "logi npc {nid} should despawn on stop");
+            for guid in ["effects.ShieldTransfer", "effects.RemoteArmourRepair"] {
+                assert!(
+                    bp.pending_events.iter().any(|ev| matches!(
+                        ev,
+                        DestinyEvent::OnSpecialFX {
+                            ball_id,
+                            module_id: Some(mod_id),
+                            guid: ev_guid,
+                            is_active: false,
+                        } if *ball_id == nid && *mod_id != pilot.ship_id && ev_guid == guid
+                    )),
+                    "expected stop Destiny OnSpecialFX {guid} for npc {nid}: {:?}",
+                    bp.pending_events
+                );
+            }
         }
+        assert!(
+            !bp.special_fx_meta
+                .keys()
+                .any(|(bid, _, _)| npc_ids.contains(bid)),
+            "expected special_fx_meta pruned on stop: {:?}",
+            bp.special_fx_meta
+        );
         assert!(
             bp.pending_events.iter().any(|ev| matches!(
                 ev,
@@ -190,6 +276,10 @@ async fn gm_soak_logi_ring_heals_cycles_specialfx_and_dbuffs() {
         );
     }
     let stop_notifs = ctx.drain_notifications_for_char(pilot.char_id);
+    assert!(
+        !stop_notifs.iter().any(|n| n.event == "OnSpecialFX"),
+        "expected no duplicate MachoNet OnSpecialFX notification on stop: {stop_notifs:?}"
+    );
     assert!(
         stop_notifs.iter().any(|n| {
             n.event == "OnDbuffUpdated" && n.args == vec![PyRep::Integer(pilot.ship_id)]

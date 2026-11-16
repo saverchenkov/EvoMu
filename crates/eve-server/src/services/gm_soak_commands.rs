@@ -16,7 +16,9 @@ use crate::services::mobile_deployables::{
 use crate::services::mobile_deployables_ext::{GROUP_MOBILE_SCAN_INHIBITOR, GROUP_MOBILE_SIPHON};
 use eve_db::snapshot_ext::SkillHistoryEntry;
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
-use eve_destiny::{unix_to_filetime, Ball, DestinyEvent, MovementMode, SlimItemMeta};
+use eve_destiny::{
+    unix_to_filetime, Ball, DestinyEvent, MovementMode, SlimItemMeta, SpecialFxWireMeta,
+};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
@@ -31,6 +33,12 @@ const SOAK_LOGI_ARMOR_REP_PER_CYCLE: f64 = 450.0;
 const SOAK_LOGI_CYCLE_INTERVAL_TICKS: u64 = 2;
 const SOAK_LOGI_DBUFF_TTL_SECS: u64 = 30;
 const GM_LOGI_SOAK_DBUFF_SOURCE_ID: i64 = -1_088_001;
+const DEFAULT_LOGI_SOAK_SHIELD_MOD_TYPE_ID: u32 = 3_596;
+const DEFAULT_LOGI_SOAK_ARMOR_MOD_TYPE_ID: u32 = 11_357;
+const SOAK_LOGI_FX_SLOTS: [(&str, u8); 2] = [
+    ("effects.ShieldTransfer", 0),
+    ("effects.RemoteArmourRepair", 1),
+];
 const DEADWARP_DISTANCE_AU: f64 = 2.0;
 const DEADWARP_ARRIVAL_TOLERANCE_M: f64 = 150_000.0;
 const DEFAULT_SESSION_LEDGER_LIMIT: usize = 50;
@@ -171,6 +179,91 @@ pub(crate) fn pick_logi_npc_type_id(sde: &eve_sde::SdeRegistry) -> u32 {
     29_768
 }
 
+/// Resolves a published V24 repair module type ID for the given `/soak logi` FX GUID.
+pub(crate) fn pick_logi_soak_module_type_id(sde: &eve_sde::SdeRegistry, guid: &str) -> u32 {
+    let (preferred, fallback_group, default_tid) = match guid {
+        "effects.ShieldTransfer" => (
+            [3_596_u32, 3_586, 3_606],
+            41_u32,
+            DEFAULT_LOGI_SOAK_SHIELD_MOD_TYPE_ID,
+        ),
+        "effects.RemoteArmourRepair" => (
+            [11_357_u32, 11_355, 11_359],
+            325_u32,
+            DEFAULT_LOGI_SOAK_ARMOR_MOD_TYPE_ID,
+        ),
+        _ => return DEFAULT_LOGI_SOAK_SHIELD_MOD_TYPE_ID,
+    };
+    for candidate in preferred {
+        if sde.types.contains_key(&candidate) {
+            return candidate;
+        }
+    }
+    if let Some((&tid, _)) = sde
+        .types
+        .iter()
+        .filter(|(_, t)| t.group_id == fallback_group && t.published)
+        .min_by_key(|(&tid, _)| tid)
+    {
+        return tid;
+    }
+    default_tid
+}
+
+/// Derives a deterministic synthetic module ID for an NPC logi FX slot and alternating cycle parity.
+pub(crate) fn logi_soak_synthetic_module_id(npc_id: i64, slot: u8, parity: u8) -> i64 {
+    let encoded = (npc_id.unsigned_abs() % 100_000_000_000)
+        .saturating_mul(4)
+        .saturating_add(u64::from(slot & 1).saturating_mul(2))
+        .saturating_add(u64::from(parity & 1))
+        .saturating_add(2_000_000);
+    -(encoded as i64)
+}
+
+/// Resolves both `/soak logi` remote-repair module type IDs ordered by [`SOAK_LOGI_FX_SLOTS`].
+fn logi_soak_fx_module_type_ids(sde: &eve_sde::SdeRegistry) -> [u32; 2] {
+    [
+        pick_logi_soak_module_type_id(sde, "effects.ShieldTransfer"),
+        pick_logi_soak_module_type_id(sde, "effects.RemoteArmourRepair"),
+    ]
+}
+
+/// Registers `special_fx_meta` and emits `DestinyEvent::OnSpecialFX` for all FX slots on one NPC.
+fn emit_logi_soak_fx_for_npc(
+    bp: &mut eve_destiny::Ballpark,
+    mod_type_ids: [u32; 2],
+    npc_id: i64,
+    target_ship_id: i64,
+    duration_ms: f64,
+    parity: u8,
+    is_active: bool,
+) {
+    for (guid, slot) in SOAK_LOGI_FX_SLOTS {
+        let mod_id = logi_soak_synthetic_module_id(npc_id, slot, parity);
+        let mod_type_id = mod_type_ids[usize::from(slot)];
+        bp.special_fx_meta.insert(
+            (npc_id, Some(mod_id), guid.to_string()),
+            SpecialFxWireMeta {
+                module_type_id: Some(mod_type_id),
+                target_id: Some(target_ship_id),
+                other_type_id: None,
+                is_offensive: false,
+                duration_ms: Some(duration_ms),
+                repeat: Some(0),
+            },
+        );
+        bp.emit_event(
+            Some(npc_id),
+            DestinyEvent::OnSpecialFX {
+                ball_id: npc_id,
+                module_id: Some(mod_id),
+                guid: guid.to_string(),
+                is_active,
+            },
+        );
+    }
+}
+
 fn require_caller_ship_in_space(
     ctx: &ServerContext,
     session: &SessionState,
@@ -292,6 +385,28 @@ async fn stop_logi_soak_in_system(
 ) -> Option<GmLogiSoakState> {
     let prev = with_mut_combat_runtime(ctx, |rt| rt.gm_logi_soaks.remove(&solar_system_id))?;
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    if prev.cycle_count > 0 && !prev.npc_ids.is_empty() {
+        let mod_type_ids = logi_soak_fx_module_type_ids(&ctx.sde);
+        let fx_duration_ms = (prev.cycle_interval_ticks as f64) * 1_000.0;
+        let active_parity = ((prev.cycle_count - 1) % 2) as u8;
+        if let Ok(mut bp) = sys_handle.ballpark.write() {
+            for &npc_id in &prev.npc_ids {
+                if bp.balls.contains_key(&npc_id) {
+                    emit_logi_soak_fx_for_npc(
+                        &mut bp,
+                        mod_type_ids,
+                        npc_id,
+                        prev.target_ship_id,
+                        fx_duration_ms,
+                        active_parity,
+                        false,
+                    );
+                }
+            }
+        }
+        // Flush stop FX while special_fx_meta and cruiser balls are still live (`#1088`).
+        let _ = sys_handle.flush_peer_observer_updates(None).await;
+    }
     for &npc_id in &prev.npc_ids {
         let _ = sys_handle.remove_ball(npc_id).await;
     }
@@ -1900,10 +2015,10 @@ fn step_logi_soak_for_system(ctx: &ServerContext, solar_system_id: u32) {
         return;
     }
 
-    let eligible_npcs: Vec<(i64, u32)> = live_npcs
+    let eligible_npcs: Vec<i64> = live_npcs
         .iter()
         .filter(|(_, _, pos)| pos.distance(target_pos) <= SOAK_LOGI_REP_RANGE_M)
-        .map(|&(nid, tid, _)| (nid, tid))
+        .map(|&(nid, _, _)| nid)
         .collect();
     if eligible_npcs.is_empty() {
         return;
@@ -1924,7 +2039,7 @@ fn step_logi_soak_for_system(ctx: &ServerContext, solar_system_id: u32) {
         let Ok(mut bp) = sys_handle.ballpark.write() else {
             return;
         };
-        for &(nid, _) in &eligible_npcs {
+        for &nid in &eligible_npcs {
             if let Some(b) = bp.balls.get(&nid) {
                 if matches!(b.mode, MovementMode::Stop) {
                     let _ = bp.set_mode(
@@ -1966,45 +2081,21 @@ fn step_logi_soak_for_system(ctx: &ServerContext, solar_system_id: u32) {
             );
         }
 
-        for &(nid, _) in &eligible_npcs {
-            for guid in ["effects.ShieldTransfer", "effects.RemoteArmourRepair"] {
-                bp.emit_event(
-                    Some(nid),
-                    DestinyEvent::OnSpecialFX {
-                        ball_id: nid,
-                        module_id: Some(soak.target_ship_id),
-                        guid: guid.to_string(),
-                        is_active: true,
-                    },
-                );
-            }
-        }
-        bp.update_dbuffs(soak.target_ship_id, wire_dbuffs);
-    }
-
-    let now_ft = ctx.now_blueos_filetime_ticks();
-    for &(nid, ntid) in &eligible_npcs {
-        for guid in ["effects.ShieldTransfer", "effects.RemoteArmourRepair"] {
-            ctx.emit_typed(
-                NotificationTarget::Character(soak.target_char_id),
-                crate::router::notify_registry::OnSpecialFX {
-                    ship_id: nid,
-                    module_id: Some(nid),
-                    module_type_id: Some(i64::from(ntid)),
-                    target_id: Some(soak.target_ship_id),
-                    other_type_id: None,
-                    guid: guid.to_string(),
-                    is_offensive: false,
-                    start: 1,
-                    active: 1,
-                    duration: (SOAK_LOGI_CYCLE_INTERVAL_TICKS as f64) * 1_000.0,
-                    repeat: 1,
-                    start_time: now_ft,
-                    time_from_start: 0.0,
-                    graphic_info: None,
-                },
+        let mod_type_ids = logi_soak_fx_module_type_ids(&ctx.sde);
+        let fx_duration_ms = (soak.cycle_interval_ticks as f64) * 1_000.0;
+        let fx_parity = (soak.cycle_count % 2) as u8;
+        for &nid in &eligible_npcs {
+            emit_logi_soak_fx_for_npc(
+                &mut bp,
+                mod_type_ids,
+                nid,
+                soak.target_ship_id,
+                fx_duration_ms,
+                fx_parity,
+                true,
             );
         }
+        bp.update_dbuffs(soak.target_ship_id, wire_dbuffs);
     }
 
     {
