@@ -177,8 +177,60 @@ fn achievement_cdn_uses_dynamic_esi_port_and_matches_achv_flatbuffer_crc() {
     let clean_dyn = DynamicQuasarMessage::new("eve_public.achievement.definition.api.cdn.GetLatestRequest");
     let clean_rsp = handlers["eve_public.achievement.definition.api.cdn.GetLatestRequest"](&auth, &clean_any, &clean_dyn)
         .expect("clean client GetLatestRequest must succeed");
+    // Live V24.02 client sending matching current_version (and no_local = false) gets 200 OK
+    // with authoritative checkpoint.version so FlatbufferContentProvider skips re-download (#1128).
+    let matched_bytes = pb::message("eve_public.achievement.definition.api.cdn.GetLatestRequest")
+        .set("current_version.major", 24u32)
+        .set("current_version.minor", 1u32)
+        .set("current_version.patch", mgr.sde_achievement_count as u32)
+        .must_encode();
+    let matched_any = eve_proto::quasar::GoogleAny {
+        type_url: any.type_url.clone(),
+        value: matched_bytes,
+    };
+    let matched_dyn = ctx
+        .quasar_gateway
+        .descriptors
+        .decode_dynamic_or_wire(
+            "eve_public.achievement.definition.api.cdn.GetLatestRequest",
+            &matched_any.value,
+        )
+        .expect("decode matched GetLatestRequest");
+    let matched_rsp = handlers["eve_public.achievement.definition.api.cdn.GetLatestRequest"](
+        &auth,
+        &matched_any,
+        &matched_dyn,
+    )
+    .expect("matched current_version GetLatestRequest must succeed");
+    // Stale client sending an older current_version receives authoritative 24.1.<count>, not echo.
+    let stale_bytes = pb::message("eve_public.achievement.definition.api.cdn.GetLatestRequest")
+        .set("current_version.major", 24u32)
+        .set("current_version.minor", 0u32)
+        .set("current_version.patch", 1u32)
+        .add("current_version.prerelease_tags", "rc1")
+        .must_encode();
+    let stale_any = eve_proto::quasar::GoogleAny {
+        type_url: any.type_url.clone(),
+        value: stale_bytes,
+    };
+    let stale_dyn = ctx
+        .quasar_gateway
+        .descriptors
+        .decode_dynamic_or_wire(
+            "eve_public.achievement.definition.api.cdn.GetLatestRequest",
+            &stale_any.value,
+        )
+        .expect("decode stale GetLatestRequest");
+    let stale_rsp = handlers["eve_public.achievement.definition.api.cdn.GetLatestRequest"](
+        &auth,
+        &stale_any,
+        &stale_dyn,
+    )
+    .expect("stale current_version GetLatestRequest must succeed");
     drop(handlers);
     assert_eq!(clean_rsp.value, rsp_any.value);
+    assert_eq!(matched_rsp.value, rsp_any.value);
+    assert_eq!(stale_rsp.value, rsp_any.value);
     assert_eq!(
         rsp_any.normalized_type_name(),
         "eve_public.achievement.definition.api.cdn.GetLatestResponse"
@@ -187,6 +239,26 @@ fn achievement_cdn_uses_dynamic_esi_port_and_matches_achv_flatbuffer_crc() {
     let wm = eve_proto::quasar::WireMessage::decode(&rsp_any.value).expect("decode response");
     let cp_bytes = wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).expect("checkpoint");
     let cp_wm = eve_proto::quasar::WireMessage::decode(cp_bytes).expect("decode checkpoint");
+    let ver_bytes = cp_wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 2)
+        .and_then(|f| f.value.as_bytes())
+        .expect("checkpoint.version");
+    let ver_wm = eve_proto::quasar::WireMessage::decode(ver_bytes).expect("decode version");
+    assert_eq!(
+        ver_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()),
+        Some(24)
+    );
+    assert_eq!(
+        ver_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()),
+        Some(1)
+    );
+    assert_eq!(
+        ver_wm.fields.iter().find(|f| f.field_number == 3).and_then(|f| f.value.as_varint()),
+        Some(mgr.sde_achievement_count as u64)
+    );
+    assert!(ver_wm.fields.iter().all(|f| f.field_number <= 3));
     let url = cp_wm
         .fields
         .iter()

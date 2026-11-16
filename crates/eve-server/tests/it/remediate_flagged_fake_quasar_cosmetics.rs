@@ -19,7 +19,7 @@ use eve_proto::quasar::{
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::{
     STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_OK,
-    STATUS_PRECONDITION_FAILED, STATUS_SERVICE_UNAVAILABLE,
+    STATUS_PRECONDITION_FAILED,
 };
 use eve_server::quasar_grpc::{frame_grpc_message, handle_quasar_grpc_connection};
 use eve_server::router::ServerContext;
@@ -1483,7 +1483,7 @@ async fn air_achievements_grpc_and_sqlite_reload() {
         gm_client.open_notice_stream().await;
         let mut plr_client = GrpcClient::connect(Arc::clone(&ctx), "ach_plr", "plr-pass", player_cid, 0x32).await;
 
-        // 1. CDN definition manifest checks (`no_local = true` -> Checkpoint, client semver w/o CDN -> 503)
+        // 1. CDN definition manifest checks (`no_local = true` and stale `current_version` -> authoritative Checkpoint)
         let mut cdn_req = Vec::new();
         encode_varint_field(2, 1, &mut cdn_req);
         let (_, cdn_dyn) = gm_client
@@ -1491,6 +1491,14 @@ async fn air_achievements_grpc_and_sqlite_reload() {
             .await;
         let cdn_url = cdn_dyn.get(1).and_then(dyn_msg).and_then(|c| c.get(1)).and_then(dyn_str).unwrap_or("");
         assert!(cdn_url.contains("/achievements/v24.1."), "unexpected achievement CDN url: {cdn_url}");
+        let cdn_patch = cdn_dyn
+            .get(1)
+            .and_then(dyn_msg)
+            .and_then(|c| c.get(2))
+            .and_then(dyn_msg)
+            .and_then(|v| v.get(3))
+            .and_then(dyn_u64);
+        assert!(cdn_patch.unwrap_or(0) > 1, "unexpected authoritative patch version: {cdn_patch:?}");
 
         let mut local_cdn_req = Vec::new();
         let mut ver_spec = Vec::new();
@@ -1498,12 +1506,26 @@ async fn air_achievements_grpc_and_sqlite_reload() {
         encode_varint_field(2, 1, &mut ver_spec);
         encode_varint_field(3, 1, &mut ver_spec);
         encode_bytes_field(1, &ver_spec, &mut local_cdn_req);
+        let (_, local_cdn_dyn) = gm_client
+            .send_ok_dyn("eve_public.achievement.definition.api.cdn.GetLatestRequest", local_cdn_req)
+            .await;
+        let local_url = local_cdn_dyn
+            .get(1)
+            .and_then(dyn_msg)
+            .and_then(|c| c.get(1))
+            .and_then(dyn_str)
+            .unwrap_or("");
+        assert_eq!(local_url, cdn_url);
         assert_eq!(
-            gm_client
-                .send_raw("eve_public.achievement.definition.api.cdn.GetLatestRequest", local_cdn_req)
-                .await
-                .status_code,
-            STATUS_SERVICE_UNAVAILABLE
+            local_cdn_dyn
+                .get(1)
+                .and_then(dyn_msg)
+                .and_then(|c| c.get(2))
+                .and_then(dyn_msg)
+                .and_then(|v| v.get(3))
+                .and_then(dyn_u64),
+            cdn_patch,
+            "stale current_version must receive authoritative checkpoint.version, not echo 24.1.1"
         );
 
         // 2. Non-GM player calling admin.AddProgressRequest must fail with 403

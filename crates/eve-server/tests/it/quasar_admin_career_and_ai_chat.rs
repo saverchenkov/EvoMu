@@ -9,7 +9,6 @@ use eve_proto::quasar::{
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::{
     STATUS_BAD_REQUEST, STATUS_NOT_FOUND, STATUS_OK, STATUS_PRECONDITION_FAILED,
-    STATUS_SERVICE_UNAVAILABLE,
 };
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
@@ -230,12 +229,13 @@ async fn test_quasar_achievements_admin_notices_and_queries() {
         .expect("decode GetCharacterScoreResponse");
     assert!(matches!(dyn_sc.get(1), Some(DynamicValue::Uint32(0))));
 
-    // 6. CDN GetLatestRequest (no_local_version_available -> Checkpoint; current_version -> SERVICE_UNAVAILABLE)
+    // 6. CDN GetLatestRequest (no_local_version_available and current_version -> 200 OK authoritative Checkpoint)
     let mut cdn_req = Vec::new();
     encode_varint_field(2, 1, &mut cdn_req);
     let cdn_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.definition.api.cdn.GetLatestRequest", cdn_req, b"a-13").await;
     assert_eq!(cdn_rsp.status_code, STATUS_OK);
-    let wm_cdn = WireMessage::decode(&cdn_rsp.payload.expect("GetLatestResponse payload").value).expect("decode GetLatestResponse");
+    let cdn_payload = cdn_rsp.payload.expect("GetLatestResponse payload").value;
+    let wm_cdn = WireMessage::decode(&cdn_payload).expect("decode GetLatestResponse");
     let cp_wm = WireMessage::decode(
         wm_cdn
             .fields
@@ -259,8 +259,10 @@ async fn test_quasar_achievements_admin_notices_and_queries() {
     encode_varint_field(1, 24, &mut ver_msg);
     let mut cdn_ver_req = Vec::new();
     encode_bytes_field(1, &ver_msg, &mut cdn_ver_req);
-    let cdn_unavail = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.definition.api.cdn.GetLatestRequest", cdn_ver_req, b"a-14").await;
-    assert_eq!(cdn_unavail.status_code, STATUS_SERVICE_UNAVAILABLE);
+    let cdn_ver_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.definition.api.cdn.GetLatestRequest", cdn_ver_req, b"a-14").await;
+    assert_eq!(cdn_ver_rsp.status_code, STATUS_OK);
+    let cdn_ver_payload = cdn_ver_rsp.payload.expect("current_version GetLatestResponse payload").value;
+    assert_eq!(cdn_ver_payload, cdn_payload, "stale current_version must receive authoritative checkpoint");
 
     // 7. Reward GetUnclaimedRequest & ClaimRequest
     let uncl_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.GetUnclaimedRequest", Vec::new(), b"a-15").await;
