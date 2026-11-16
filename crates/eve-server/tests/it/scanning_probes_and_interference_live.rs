@@ -361,7 +361,7 @@ async fn test_live_probe_launch_warp_scan_and_state_transitions() {
     assert!(matches!(&stopped[0], PyRep::List(l) if l.len() == 8));
     assert!(matches!(&stopped[1], PyRep::List(l) if !l.is_empty()));
 
-    // 5. Dock + Undock disconnects probes; ReconnectToLostProbes emits OnProbeStateChanged(Idle=1)
+    // 5. Dock + Undock disconnects probes; ReconnectToLostProbes emits OnNewProbe before OnProbeStateChanged(Idle=1)
     let station_id = ctx
         .sde
         .stations
@@ -394,6 +394,36 @@ async fn test_live_probe_launch_warp_scan_and_state_transitions() {
     let _ = drain(&ctx, &mut p);
     ok(&ctx, &mut p, "scanMgr", "ReconnectToLostProbes", &[]).await;
     let recon = drain(&ctx, &mut p);
+    let recon_new_probes: Vec<(usize, i64, &PyRep)> = recon
+        .iter()
+        .enumerate()
+        .filter(|(_, (ev, _))| ev == "OnNewProbe")
+        .map(|(idx, (_, a))| {
+            assert_eq!(a.len(), 1, "OnNewProbe takes 1 KeyVal arg");
+            let kv = &a[0];
+            let pid = kv.dict_get("probeID").and_then(|v| v.as_i64()).expect("probeID");
+            (idx, pid, kv)
+        })
+        .collect();
+    assert_eq!(
+        recon_new_probes.len(),
+        8,
+        "ReconnectToLostProbes emits OnNewProbe for all 8 lost probes"
+    );
+    for &(new_idx, pid, kv) in &recon_new_probes {
+        assert_eq!(kv.dict_get("state").and_then(|v| v.as_i64()), Some(1));
+        let scan_bonuses = kv.dict_get("scanBonuses").expect("OnNewProbe must include scanBonuses");
+        assert!(scan_bonuses.dict_get("strength").is_some(), "scanBonuses must include strength");
+        assert!(scan_bonuses.dict_get("deviation").is_some(), "scanBonuses must include deviation");
+        let state_idx = recon
+            .iter()
+            .position(|(ev, a)| ev == "OnProbeStateChanged" && a.as_slice() == [int(pid), int(1)])
+            .expect("ReconnectToLostProbes emits OnProbeStateChanged(Idle=1) for probe");
+        assert!(
+            new_idx < state_idx,
+            "OnNewProbe must precede OnProbeStateChanged(Idle=1) for probe {pid}"
+        );
+    }
     assert_eq!(
         recon
             .iter()
