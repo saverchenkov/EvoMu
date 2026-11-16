@@ -1802,7 +1802,11 @@ pub async fn handle_gm_slash_ext(
         };
     }
 
-    if cmd == "/load" || cmd.starts_with("/load ") {
+    if cmd == "/load"
+        || cmd
+            .strip_prefix("/load")
+            .is_some_and(|r| r.starts_with(char::is_whitespace))
+    {
         let tokens = parse_slash_tokens(cmd.strip_prefix("/load").unwrap_or(""));
         if tokens.is_empty() {
             return Some(Err(BridgeRpcError {
@@ -1951,13 +1955,21 @@ pub async fn handle_gm_slash_ext(
                     inv_row,
                     vec![(3, PyRep::Integer(0)), (4, PyRep::Integer(0))],
                 );
-                Some(Ok(PyRep::keyval([
-                    ("command", PyRep::String(cmd.to_string())),
-                    ("itemID", PyRep::Integer(rec.item_id)),
-                    ("typeID", PyRep::Integer(type_id as i64)),
-                    ("quantity", PyRep::Integer(qty as i64)),
-                    ("locationID", PyRep::Integer(rec.location_id)),
-                    ("flagID", PyRep::Integer(rec.flag as i64)),
+                // V24.02 `menu_implant.PlugEmIn`, `dna.Load`, and `svc_invtools.SpawnRandom`
+                // index `slash.SlashCmd('/load ...')[0]` as the spawned `itemID`, while chat
+                // and `svc_slash.JobHandler` format non-`None` replies via `'slash result: %s' % res`.
+                // Returning a `PyRep::List` (rather than a 2-tuple) satisfies `res[0]` without
+                // triggering Python `TypeError` tuple unpacking in `%s` formatting.
+                Some(Ok(PyRep::List(vec![
+                    PyRep::Integer(rec.item_id),
+                    PyRep::keyval([
+                        ("command", PyRep::String(cmd.to_string())),
+                        ("itemID", PyRep::Integer(rec.item_id)),
+                        ("typeID", PyRep::Integer(type_id as i64)),
+                        ("quantity", PyRep::Integer(qty as i64)),
+                        ("locationID", PyRep::Integer(rec.location_id)),
+                        ("flagID", PyRep::Integer(rec.flag as i64)),
+                    ]),
                 ])))
             }
             Err(e) => Some(Err(e)),

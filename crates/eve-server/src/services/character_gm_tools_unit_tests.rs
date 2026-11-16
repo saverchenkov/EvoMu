@@ -512,6 +512,18 @@ async fn gm_slash_commands_and_qa_rpcs_execute_and_enforce_roles() {
         .unwrap()
         .expect("/load \"me\" 34 250 must succeed");
     let loaded_id_1 = load_quoted.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    assert!(
+        matches!(
+            &load_quoted,
+            PyRep::List(items)
+                if items.first() == Some(&PyRep::Integer(loaded_id_1))
+                    && items
+                        .get(1)
+                        .and_then(|kv| kv.dict_get("itemID"))
+                        == Some(&PyRep::Integer(loaded_id_1))
+        ),
+        "/load must return [itemID, KeyVal] so PlugEmIn/dna.Load [0] indexing and '%s' formatting both succeed: {load_quoted:?}"
+    );
     assert_eq!(load_quoted.dict_get("typeID"), Some(&PyRep::Integer(34)));
     assert_eq!(load_quoted.dict_get("quantity"), Some(&PyRep::Integer(250)));
     assert_eq!(load_quoted.dict_get("locationID"), Some(&PyRep::Integer(cur_ship_id)));
@@ -535,6 +547,30 @@ async fn gm_slash_commands_and_qa_rpcs_execute_and_enforce_roles() {
         .expect("/load me 2048 (default qty 1) must succeed");
     assert_eq!(load_default_qty.dict_get("quantity"), Some(&PyRep::Integer(1)));
     assert_eq!(load_default_qty.dict_get("typeID"), Some(&PyRep::Integer(2048)));
+
+    // V24 menu_implant.PlugEmIn runs `/load me 20499` and reads res[0]
+    let load_implant = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/load me 20499")
+        .await
+        .unwrap()
+        .expect("/load me 20499 must succeed");
+    let implant_id = load_implant.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    assert!(
+        matches!(
+            &load_implant,
+            PyRep::List(items)
+                if items.first() == Some(&PyRep::Integer(implant_id))
+                    && items
+                        .get(1)
+                        .and_then(|kv| kv.dict_get("typeID"))
+                        == Some(&PyRep::Integer(20499))
+        ),
+        "/load me 20499 must return integer itemID at [0] inside a list: {load_implant:?}"
+    );
+    assert_eq!(load_implant.dict_get("typeID"), Some(&PyRep::Integer(20499)));
+    let loaded_implant_rec = ctx.db.get_item(implant_id).expect("loaded implant persisted in db");
+    assert_eq!(loaded_implant_rec.type_id, 20499);
+    assert_eq!(loaded_implant_rec.quantity, 1);
+    assert_eq!(loaded_implant_rec.flag, InventoryFlag::Cargo);
 
     let load_shorthand = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/load 34 15")
         .await

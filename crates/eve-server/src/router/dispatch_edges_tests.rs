@@ -162,6 +162,19 @@ async fn slash_qa_and_gm_role_boundary_checks() {
         qa_list.message, "Commands: []",
         "ROLE_QA should see QA commands in slash list, got: {qa_list:?}"
     );
+    let qa_help_denied = ctx
+        .dispatch_rpc(
+            &mut qa,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/help".into())],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(qa_help_denied.code, "InsufficientRole");
 
     let mut gm = demo_session(&ctx, 22, service_roles::ROLE_PLAYER | service_roles::ROLE_GML);
     let gm_help = ctx
@@ -175,10 +188,28 @@ async fn slash_qa_and_gm_role_boundary_checks() {
             None,
         )
         .await
+        .expect("ROLE_GML /help must succeed");
+    assert!(
+        gm_help
+            .as_str()
+            .is_some_and(|s| s.contains("Available slash commands")),
+        "ROLE_GML /help must return command summary string, got: {gm_help:?}"
+    );
+    let gm_unknown = ctx
+        .dispatch_rpc(
+            &mut gm,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/nonexistent_gm_cmd".into())],
+            &kw,
+            None,
+        )
+        .await
         .unwrap_err();
     assert_eq!(
-        gm_help.code, "UnknownSlashCommand",
-        "ROLE_GML must pass role gate into slash dispatcher, got: {gm_help:?}"
+        gm_unknown.code, "UnknownSlashCommand",
+        "ROLE_GML must pass role gate into slash dispatcher, got: {gm_unknown:?}"
     );
 
     let qa_gm_denied = ctx
