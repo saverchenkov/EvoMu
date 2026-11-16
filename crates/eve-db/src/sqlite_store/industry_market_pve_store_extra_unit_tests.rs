@@ -1,14 +1,23 @@
 //! Deep branch-coverage and mutation-killing unit tests for `sqlite_store::industry_market_pve_store`.
 
+use super::domain_rows::{
+    apply_domain_row_changes, table_exists, validate_domain_row_changes, DomainRowChange,
+    DOMAIN_CORP_STRUCTURE_AND_KILLMAILS, DOMAIN_INDUSTRY_PVE_PI, DOMAIN_PVE_AND_SPACE_EVENTS,
+    DOMAIN_SERVICE_STATE_BLOBS, DOMAIN_SHIP_FITTING_AND_SKILLS, DOMAIN_WALLET_AND_MARKET,
+};
 use super::fingerprints::TableFingerprints;
 use super::industry_market_pve_store::{
-    apply_d6_batch4_migration, compute_d6_batch4_fingerprints, load_d6_batch4,
-    rollback_d6_batch4, sync_d6_batch4, D6_BATCH4_SCHEMA_VERSION,
+    compute_d6_batch4_fingerprints, load_industry_market_pve, load_industry_market_pve_domain_rows,
+    rollback_industry_market_pve, sync_industry_market_pve_domain_rows, sync_mining_ledger,
+    LEGACY_WORLD_KV_BLOBS_SQL,
 };
+use super::load::load_snapshot_from_sqlite;
+use super::quarantine::LoadContext;
 use super::schema::apply_migrations;
+use super::sync::replace_sqlite_from_snapshot;
 use crate::snapshot_ext::*;
 use crate::types::*;
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 
 fn populate_all_27_batch4_blobs_and_mining_ledger() -> WorldStateSnapshot {
@@ -324,124 +333,93 @@ fn populate_all_27_batch4_blobs_and_mining_ledger() -> WorldStateSnapshot {
     snap
 }
 
+fn assert_all_34_industry_market_pve_fields_eq(lhs: &WorldStateSnapshot, rhs: &WorldStateSnapshot) {
+    assert_eq!(lhs.moon_extractions, rhs.moon_extractions);
+    assert_eq!(lhs.auto_moon_miners, rhs.auto_moon_miners);
+    assert_eq!(lhs.observer_mining_ledger, rhs.observer_mining_ledger);
+    assert_eq!(lhs.char_research_agents, rhs.char_research_agents);
+    assert_eq!(lhs.planetary_colony_layouts, rhs.planetary_colony_layouts);
+    assert_eq!(lhs.corp_customs_offices, rhs.corp_customs_offices);
+    assert_eq!(lhs.orbital_provision_types, rhs.orbital_provision_types);
+    assert_eq!(lhs.wallet_journal_timestamps, rhs.wallet_journal_timestamps);
+    assert_eq!(lhs.char_wallet_transactions, rhs.char_wallet_transactions);
+    assert_eq!(lhs.corp_wallet_journals, rhs.corp_wallet_journals);
+    assert_eq!(lhs.corp_wallet_transactions, rhs.corp_wallet_transactions);
+    assert_eq!(lhs.market_order_meta, rhs.market_order_meta);
+    assert_eq!(lhs.market_history, rhs.market_history);
+    assert_eq!(lhs.cosmic_signatures, rhs.cosmic_signatures);
+    assert_eq!(lhs.cosmic_anomalies, rhs.cosmic_anomalies);
+    assert_eq!(lhs.incursions, rhs.incursions);
+    assert_eq!(lhs.last_mission_decline_times, rhs.last_mission_decline_times);
+    assert_eq!(lhs.module_online_states, rhs.module_online_states);
+    assert_eq!(lhs.module_active_states, rhs.module_active_states);
+    assert_eq!(lhs.module_active_charges, rhs.module_active_charges);
+    assert_eq!(lhs.ship_fit_inputs, rhs.ship_fit_inputs);
+    assert_eq!(lhs.weapon_banks, rhs.weapon_banks);
+    assert_eq!(lhs.paused_skill_queues, rhs.paused_skill_queues);
+    assert_eq!(lhs.starbase_settings, rhs.starbase_settings);
+    assert_eq!(lhs.killmail_details, rhs.killmail_details);
+    assert_eq!(lhs.station_office_rental_costs, rhs.station_office_rental_costs);
+    assert_eq!(lhs.structure_esi_timer_meta, rhs.structure_esi_timer_meta);
+    assert_eq!(lhs.corp_project_contributors, rhs.corp_project_contributors);
+    assert_eq!(lhs.loyalty_store_offers, rhs.loyalty_store_offers);
+    assert_eq!(lhs.system_jump_events, rhs.system_jump_events);
+    assert_eq!(lhs.system_kill_events, rhs.system_kill_events);
+    assert_eq!(lhs.quasar_state_blobs, rhs.quasar_state_blobs);
+    assert_eq!(lhs.service_state_blobs, rhs.service_state_blobs);
+    assert_eq!(lhs.insurance_contracts, rhs.insurance_contracts);
+}
+
 #[test]
-fn all_27_batch4_blobs_and_mining_ledger_roundtrip_and_rollback() {
-    assert_eq!(D6_BATCH4_SCHEMA_VERSION, 5);
+fn all_34_industry_market_pve_collections_and_mining_ledger_roundtrip_and_rollback() {
     let mut conn = Connection::open_in_memory().unwrap();
     apply_migrations(&conn).unwrap();
-    apply_d6_batch4_migration(&conn).unwrap();
 
     let empty = WorldStateSnapshot::default();
     let empty_fp = compute_d6_batch4_fingerprints(&empty);
-    assert_eq!(empty_fp.blobs.len(), 34);
 
     let full = populate_all_27_batch4_blobs_and_mining_ledger();
     let full_fp = compute_d6_batch4_fingerprints(&full);
-    assert_eq!(full_fp.blobs.len(), 34);
     assert_ne!(full_fp.mining_ledger, empty_fp.mining_ledger);
-    for (key, empty_hash) in &empty_fp.blobs {
-        assert_ne!(
-            full_fp.blobs.get(key),
-            Some(empty_hash),
-            "blob key '{key}' hash did not change when populated"
-        );
-    }
 
     let mut fp = TableFingerprints::default();
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_d6_batch4(&tx, &full, &mut fp).unwrap());
+        assert!(sync_industry_market_pve_domain_rows(&tx, &full).unwrap());
+        assert!(sync_mining_ledger(&tx, &full, &mut fp).unwrap());
         tx.commit().unwrap();
     }
     // Second sync with identical snapshot is a no-op
     {
         let tx = conn.transaction().unwrap();
-        assert!(!sync_d6_batch4(&tx, &full, &mut fp).unwrap());
+        assert!(!sync_industry_market_pve_domain_rows(&tx, &full).unwrap());
+        assert!(!sync_mining_ledger(&tx, &full, &mut fp).unwrap());
         tx.commit().unwrap();
     }
 
-    // Corrupt world_kv_blobs with an unknown key and invalid JSON for one check, then reload
-    conn.execute(
-        "INSERT INTO world_kv_blobs (blob_key, blob_json) VALUES ('unknown_future_blob', '[]')",
-        [],
-    )
-    .unwrap();
-
     let mut loaded = WorldStateSnapshot::default();
-    load_d6_batch4(&conn, &mut loaded);
-    assert_eq!(loaded.moon_extractions, full.moon_extractions);
-    assert_eq!(loaded.auto_moon_miners, full.auto_moon_miners);
-    assert_eq!(loaded.observer_mining_ledger, full.observer_mining_ledger);
-    assert_eq!(loaded.char_research_agents, full.char_research_agents);
-    assert_eq!(loaded.planetary_colony_layouts, full.planetary_colony_layouts);
-    assert_eq!(loaded.corp_customs_offices, full.corp_customs_offices);
-    assert_eq!(loaded.orbital_provision_types, full.orbital_provision_types);
-    assert_eq!(loaded.wallet_journal_timestamps, full.wallet_journal_timestamps);
-    assert_eq!(loaded.char_wallet_transactions, full.char_wallet_transactions);
-    assert_eq!(loaded.corp_wallet_journals, full.corp_wallet_journals);
-    assert_eq!(loaded.corp_wallet_transactions, full.corp_wallet_transactions);
-    assert_eq!(loaded.market_order_meta, full.market_order_meta);
-    assert_eq!(loaded.market_history, full.market_history);
-    assert_eq!(loaded.cosmic_signatures, full.cosmic_signatures);
-    assert_eq!(loaded.cosmic_anomalies, full.cosmic_anomalies);
-    assert_eq!(loaded.incursions, full.incursions);
-    assert_eq!(loaded.last_mission_decline_times, full.last_mission_decline_times);
-    assert_eq!(loaded.module_online_states, full.module_online_states);
-    assert_eq!(loaded.module_active_states, full.module_active_states);
-    assert_eq!(loaded.module_active_charges, full.module_active_charges);
-    assert_eq!(loaded.ship_fit_inputs, full.ship_fit_inputs);
-    assert_eq!(loaded.weapon_banks, full.weapon_banks);
-    assert_eq!(loaded.paused_skill_queues, full.paused_skill_queues);
-    assert_eq!(loaded.starbase_settings, full.starbase_settings);
-    assert_eq!(loaded.quasar_state_blobs, full.quasar_state_blobs);
-    assert_eq!(loaded.service_state_blobs, full.service_state_blobs);
-    assert_eq!(loaded.insurance_contracts, full.insurance_contracts);
+    load_industry_market_pve(&conn, &mut loaded);
+    assert_all_34_industry_market_pve_fields_eq(&loaded, &full);
 
-    // Wipe a dirty snapshot and verify rollback_d6_batch4 restores all blobs + mining_ledger
+    // Wipe a dirty snapshot and verify rollback_industry_market_pve restores all 34 fields + mining_ledger
     let mut dirty = WorldStateSnapshot::default();
-    rollback_d6_batch4(&conn, &mut dirty, &fp).unwrap();
-    assert_eq!(dirty.moon_extractions, full.moon_extractions);
-    assert_eq!(dirty.auto_moon_miners, full.auto_moon_miners);
-    assert_eq!(dirty.observer_mining_ledger, full.observer_mining_ledger);
+    rollback_industry_market_pve(&conn, &mut dirty, &fp).unwrap();
+    assert_all_34_industry_market_pve_fields_eq(&dirty, &full);
     assert_eq!(dirty.mining_ledger, full.mining_ledger);
-    assert_eq!(dirty.char_research_agents, full.char_research_agents);
-    assert_eq!(dirty.planetary_colony_layouts, full.planetary_colony_layouts);
-    assert_eq!(dirty.corp_customs_offices, full.corp_customs_offices);
-    assert_eq!(dirty.orbital_provision_types, full.orbital_provision_types);
-    assert_eq!(dirty.wallet_journal_timestamps, full.wallet_journal_timestamps);
-    assert_eq!(dirty.char_wallet_transactions, full.char_wallet_transactions);
-    assert_eq!(dirty.corp_wallet_journals, full.corp_wallet_journals);
-    assert_eq!(dirty.corp_wallet_transactions, full.corp_wallet_transactions);
-    assert_eq!(dirty.market_order_meta, full.market_order_meta);
-    assert_eq!(dirty.market_history, full.market_history);
-    assert_eq!(dirty.cosmic_signatures, full.cosmic_signatures);
-    assert_eq!(dirty.cosmic_anomalies, full.cosmic_anomalies);
-    assert_eq!(dirty.incursions, full.incursions);
-    assert_eq!(dirty.last_mission_decline_times, full.last_mission_decline_times);
-    assert_eq!(dirty.module_online_states, full.module_online_states);
-    assert_eq!(dirty.module_active_states, full.module_active_states);
-    assert_eq!(dirty.module_active_charges, full.module_active_charges);
-    assert_eq!(dirty.ship_fit_inputs, full.ship_fit_inputs);
-    assert_eq!(dirty.weapon_banks, full.weapon_banks);
-    assert_eq!(dirty.paused_skill_queues, full.paused_skill_queues);
-    assert_eq!(dirty.starbase_settings, full.starbase_settings);
-    assert_eq!(dirty.quasar_state_blobs, full.quasar_state_blobs);
-    assert_eq!(dirty.service_state_blobs, full.service_state_blobs);
-    assert_eq!(dirty.insurance_contracts, full.insurance_contracts);
     let _ = (HashMap::<i64, i64>::new(), HashSet::<i64>::new());
 }
 
 #[test]
-fn rollback_d6_batch4_fails_closed_without_wiping_or_partial_overwrite() {
+fn rollback_industry_market_pve_fails_closed_without_wiping_or_partial_overwrite() {
     let mut conn = Connection::open_in_memory().unwrap();
     apply_migrations(&conn).unwrap();
-    apply_d6_batch4_migration(&conn).unwrap();
 
     let full = populate_all_27_batch4_blobs_and_mining_ledger();
     let mut fp = TableFingerprints::default();
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_d6_batch4(&tx, &full, &mut fp).unwrap());
+        assert!(sync_industry_market_pve_domain_rows(&tx, &full).unwrap());
+        assert!(sync_mining_ledger(&tx, &full, &mut fp).unwrap());
         tx.commit().unwrap();
     }
 
@@ -458,45 +436,340 @@ fn rollback_d6_batch4_fails_closed_without_wiping_or_partial_overwrite() {
         timestamp_unix: 1_700_009_000,
     });
 
-    // 1. Corrupt `insurance_contracts` JSON (last blob key): must fail closed and NOT overwrite
+    // 1. Corrupt `insurance_contracts` row in `domain_rows`: must fail closed and NOT overwrite
     // earlier `moon_extractions` or replace `mining_ledger` with a partial reload.
     conn.execute(
-        "UPDATE world_kv_blobs SET blob_json = '{corrupt' WHERE blob_key = 'insurance_contracts'",
-        [],
+        "UPDATE domain_rows SET value = '{corrupt' WHERE domain = ?1 AND key LIKE 'insurance_contracts/%'",
+        [DOMAIN_CORP_STRUCTURE_AND_KILLMAILS],
     )
     .unwrap();
     let failures_before = crate::persist_failures_total();
-    let err = rollback_d6_batch4(&conn, &mut dirty, &fp).unwrap_err();
-    assert!(err.contains("insurance_contracts"), "unexpected err: {err}");
+    let err = rollback_industry_market_pve(&conn, &mut dirty, &fp).unwrap_err();
+    assert!(err.contains(DOMAIN_CORP_STRUCTURE_AND_KILLMAILS), "unexpected err: {err}");
     assert!(crate::persist_failures_total() >= failures_before + 1);
     assert!(dirty.moon_extractions.is_empty());
     assert!(dirty.insurance_contracts.is_empty());
     assert_eq!(dirty.mining_ledger.len(), 1);
     assert_eq!(dirty.mining_ledger[0].character_id, 90_000_999);
 
-    // 2. Delete a non-empty baseline blob row while dirty: must treat missing committed row as
-    // failure rather than silently resetting to empty.
+    // 2. Restore valid rows, then seed an unknown key in `domain_rows`: strict rollback fails closed.
     {
         let tx = conn.transaction().unwrap();
-        // Restore valid insurance_contracts row, then remove `moon_extractions` from SQLite.
-        let mut repair_fp = TableFingerprints::default();
-        assert!(sync_d6_batch4(&tx, &full, &mut repair_fp).unwrap());
+        assert!(sync_industry_market_pve_domain_rows(&tx, &full).unwrap());
         tx.commit().unwrap();
     }
     conn.execute(
-        "DELETE FROM world_kv_blobs WHERE blob_key = 'moon_extractions'",
-        [],
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'unknown_future_field/1', '{}')",
+        [DOMAIN_INDUSTRY_PVE_PI],
     )
     .unwrap();
-    let err_missing = rollback_d6_batch4(&conn, &mut dirty, &fp).unwrap_err();
-    assert!(err_missing.contains("moon_extractions"), "unexpected err: {err_missing}");
+    let err_unknown = rollback_industry_market_pve(&conn, &mut dirty, &fp).unwrap_err();
+    assert!(err_unknown.contains("unknown_future_field"), "unexpected err: {err_unknown}");
     assert!(dirty.moon_extractions.is_empty());
     assert!(dirty.insurance_contracts.is_empty());
     assert_eq!(dirty.mining_ledger[0].character_id, 90_000_999);
 
-    // 3. Dropped `char_mining_ledger` table fails closed when `mining_ledger` is dirty.
+    // 3. Dropped `char_mining_ledger` fails closed when dirty, and dropped `domain_rows` fails closed.
+    conn.execute(
+        "DELETE FROM domain_rows WHERE domain = ?1 AND key = 'unknown_future_field/1'",
+        [DOMAIN_INDUSTRY_PVE_PI],
+    )
+    .unwrap();
     conn.execute("DROP TABLE char_mining_ledger", []).unwrap();
-    let err_ledger = rollback_d6_batch4(&conn, &mut dirty, &fp).unwrap_err();
-    assert!(!err_ledger.is_empty());
+    let err_ledger = rollback_industry_market_pve(&conn, &mut dirty, &fp).unwrap_err();
+    assert!(err_ledger.contains("char_mining_ledger"), "unexpected err: {err_ledger}");
+    assert!(dirty.moon_extractions.is_empty());
     assert_eq!(dirty.mining_ledger[0].character_id, 90_000_999);
+
+    conn.execute("DROP TABLE domain_rows", []).unwrap();
+    let err_domain_rows = rollback_industry_market_pve(&conn, &mut dirty, &fp).unwrap_err();
+    assert!(err_domain_rows.contains("domain_rows"), "unexpected err: {err_domain_rows}");
+}
+
+#[test]
+fn industry_market_pve_tx_single_row_granularity_zero_cold_clones_and_rejects_non_finite() {
+    use crate::persistence::{
+        reset_thread_cold_fp_clones_for_test, thread_cold_fp_clones_for_test, WorldRepository,
+    };
+    use crate::tx_engine::{ChangeSet, TxError, TxSqlExecutor};
+
+    let tmp_path = std::env::temp_dir().join(format!(
+        "evomu_imp_tx_granularity_{}_{:?}.sqlite",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&tmp_path);
+    let repo = WorldRepository::open_sqlite(&tmp_path).expect("open_sqlite");
+
+    let seed = populate_all_27_batch4_blobs_and_mining_ledger();
+    let rental_station_id = *seed.station_office_rental_costs.keys().next().unwrap();
+    let orig_cost = seed.station_office_rental_costs[&rental_station_id];
+
+    let seed_res: Result<(), TxError> = repo.tx("seed_industry_market_pve", |wtx| {
+        *wtx.snap = seed.clone();
+        Ok(())
+    });
+    seed_res.expect("seed tx");
+
+    // Mutating a single Family 5 map entry executes with 0 cold fingerprint clones.
+    reset_thread_cold_fp_clones_for_test();
+    let update_res: Result<(), TxError> = repo.tx("update_one_rental_cost", |wtx| {
+        wtx.snap
+            .station_office_rental_costs
+            .insert(rental_station_id, orig_cost + 5_000.0);
+        Ok(())
+    });
+    update_res.expect("update tx");
+    assert_eq!(
+        thread_cold_fp_clones_for_test(),
+        0,
+        "migrated industry_market_pve mutation must trigger 0 cold fingerprint clones"
+    );
+
+    // Direct `ChangeSet::diff` + `apply_domain_row_changes` writes strictly 1 SQLite row.
+    let before_snap = repo.with_snapshot(Clone::clone);
+    let mut after_snap = before_snap.clone();
+    after_snap
+        .station_office_rental_costs
+        .insert(rental_station_id, orig_cost + 12_345.0);
+    let changes = ChangeSet::diff(2, &before_snap, &after_snap);
+    assert_eq!(changes.domain_rows.len(), 1);
+    assert!(!changes.cold_domains.d6_batch4);
+    assert!(matches!(
+        &changes.domain_rows[0],
+        DomainRowChange::Upsert { domain, key, .. }
+            if *domain == DOMAIN_CORP_STRUCTURE_AND_KILLMAILS
+                && key == &format!("station_office_rental_costs/{rental_station_id}")
+    ));
+
+    let mut mem_conn = Connection::open_in_memory().expect("open mem");
+    apply_migrations(&mem_conn).expect("migrate mem");
+    replace_sqlite_from_snapshot(&mut mem_conn, &before_snap).expect("seed mem");
+    let before_changes = mem_conn.total_changes();
+    {
+        let sql_tx = mem_conn.transaction().expect("begin tx");
+        let mut exec = TxSqlExecutor::new(&sql_tx, crate::tx_engine::TxFaultPlan::None);
+        apply_domain_row_changes(&mut exec, &changes.domain_rows).expect("apply 1 row");
+        sql_tx.commit().expect("commit 1 row");
+    }
+    assert_eq!(
+        mem_conn.total_changes() - before_changes,
+        1,
+        "mutating 1 Family 5 entry must touch strictly 1 SQLite row"
+    );
+
+    // Non-finite floats (NaN / Inf) fail validation before BEGIN IMMEDIATE without mutating snapshot.
+    for bad_float in [f64::NAN, f64::INFINITY] {
+        let mut bad_after = before_snap.clone();
+        bad_after
+            .station_office_rental_costs
+            .insert(rental_station_id, bad_float);
+        let bad_changes = ChangeSet::diff(3, &before_snap, &bad_after);
+        let check_err = validate_domain_row_changes(&bad_changes.domain_rows, 1024 * 1024)
+            .expect_err("non-finite must fail preflight validation");
+        assert!(matches!(check_err, TxError::NonFinite { .. }), "{check_err}");
+        let msg = check_err.to_string();
+        assert!(msg.contains(DOMAIN_CORP_STRUCTURE_AND_KILLMAILS), "{msg}");
+        assert!(
+            msg.contains(&format!("station_office_rental_costs/{rental_station_id}")),
+            "{msg}"
+        );
+
+        let tx_err: Result<(), TxError> = repo.tx("reject_bad_float", |wtx| {
+            wtx.snap
+                .station_office_rental_costs
+                .insert(rental_station_id, bad_float);
+            Ok(())
+        });
+        assert!(matches!(tx_err, Err(TxError::NonFinite { .. })));
+    }
+    assert_eq!(
+        repo.with_snapshot(|s| s.station_office_rental_costs[&rental_station_id]),
+        orig_cost + 5_000.0
+    );
+
+    drop(repo);
+    let _ = std::fs::remove_file(&tmp_path);
+}
+
+#[test]
+fn legacy_world_kv_blobs_migrates_preserving_newer_domain_rows_and_drops_table() {
+    fn map_vec_json<K: serde::Serialize, V: serde::Serialize>(m: &HashMap<K, V>) -> String {
+        let entries: Vec<(&K, &V)> = m.iter().collect();
+        serde_json::to_string(&entries).unwrap()
+    }
+
+    let conn = Connection::open_in_memory().expect("open");
+    apply_migrations(&conn).expect("migrate");
+    conn.execute_batch(LEGACY_WORLD_KV_BLOBS_SQL)
+        .expect("create legacy world_kv_blobs");
+
+    let legacy = populate_all_27_batch4_blobs_and_mining_ledger();
+
+    let wb_entries: Vec<(i64, Vec<(i64, &Vec<i64>)>)> = legacy
+        .weapon_banks
+        .iter()
+        .map(|(&k1, inner)| (k1, inner.iter().map(|(&k2, v)| (k2, v)).collect()))
+        .collect();
+    let set_json = |s: &HashSet<i64>| -> String {
+        serde_json::to_string(&s.iter().copied().collect::<Vec<i64>>()).unwrap()
+    };
+
+    let rows: Vec<(&str, String)> = vec![
+        ("moon_extractions", map_vec_json(&legacy.moon_extractions)),
+        ("auto_moon_miners", map_vec_json(&legacy.auto_moon_miners)),
+        ("observer_mining_ledger", map_vec_json(&legacy.observer_mining_ledger)),
+        ("char_research_agents", map_vec_json(&legacy.char_research_agents)),
+        ("planetary_colony_layouts", map_vec_json(&legacy.planetary_colony_layouts)),
+        ("corp_customs_offices", map_vec_json(&legacy.corp_customs_offices)),
+        ("orbital_provision_types", map_vec_json(&legacy.orbital_provision_types)),
+        ("wallet_journal_timestamps", map_vec_json(&legacy.wallet_journal_timestamps)),
+        ("char_wallet_transactions", map_vec_json(&legacy.char_wallet_transactions)),
+        ("corp_wallet_journals", map_vec_json(&legacy.corp_wallet_journals)),
+        ("corp_wallet_transactions", map_vec_json(&legacy.corp_wallet_transactions)),
+        ("market_order_meta", map_vec_json(&legacy.market_order_meta)),
+        ("market_history", map_vec_json(&legacy.market_history)),
+        ("cosmic_signatures", map_vec_json(&legacy.cosmic_signatures)),
+        ("cosmic_anomalies", map_vec_json(&legacy.cosmic_anomalies)),
+        ("incursions", map_vec_json(&legacy.incursions)),
+        ("last_mission_decline_times", map_vec_json(&legacy.last_mission_decline_times)),
+        ("module_online_states", map_vec_json(&legacy.module_online_states)),
+        ("module_active_states", set_json(&legacy.module_active_states)),
+        ("module_active_charges", map_vec_json(&legacy.module_active_charges)),
+        ("ship_fit_inputs", map_vec_json(&legacy.ship_fit_inputs)),
+        ("weapon_banks", serde_json::to_string(&wb_entries).unwrap()),
+        ("paused_skill_queues", set_json(&legacy.paused_skill_queues)),
+        ("starbase_settings", map_vec_json(&legacy.starbase_settings)),
+        ("killmail_details", map_vec_json(&legacy.killmail_details)),
+        ("station_office_rental_costs", map_vec_json(&legacy.station_office_rental_costs)),
+        ("structure_esi_timer_meta", map_vec_json(&legacy.structure_esi_timer_meta)),
+        ("corp_project_contributors", map_vec_json(&legacy.corp_project_contributors)),
+        ("loyalty_store_offers", map_vec_json(&legacy.loyalty_store_offers)),
+        ("system_jump_events", serde_json::to_string(&legacy.system_jump_events).unwrap()),
+        ("system_kill_events", serde_json::to_string(&legacy.system_kill_events).unwrap()),
+        ("quasar_state_blobs", map_vec_json(&legacy.quasar_state_blobs)),
+        ("service_state_blobs", map_vec_json(&legacy.service_state_blobs)),
+        ("insurance_contracts", map_vec_json(&legacy.insurance_contracts)),
+        // Include retired Family 4 duplicates + an unknown key to ensure clean tolerance.
+        ("corp_container_logs", "[]".into()),
+        ("wh_polarizations", "[]".into()),
+        ("future_unknown_legacy_blob", "[]".into()),
+    ];
+    for (k, v) in rows {
+        conn.execute(
+            "INSERT INTO world_kv_blobs (blob_key, blob_json) VALUES (?1, ?2)",
+            params![k, v],
+        )
+        .expect("seed legacy world_kv_blobs");
+    }
+
+    // Pre-seed newer `domain_rows` overrides so migration overlays cleanly without clobbering.
+    let existing_service_key = legacy.service_state_blobs.keys().next().unwrap().clone();
+    conn.execute(
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, ?2, ?3)",
+        params![
+            DOMAIN_SERVICE_STATE_BLOBS,
+            format!("service_state_blobs/{existing_service_key}"),
+            serde_json::to_string("newer-domain-value").unwrap()
+        ],
+    )
+    .expect("seed newer service_state_blobs row");
+
+    let newer_jump = vec![SystemJumpEvent {
+        solar_system_id: 30_000_142,
+        character_id: 90_000_777,
+        timestamp_unix: 1_799_999_999,
+    }];
+    conn.execute(
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'system_jump_events', ?2)",
+        params![
+            DOMAIN_PVE_AND_SPACE_EVENTS,
+            serde_json::to_string(&newer_jump).unwrap()
+        ],
+    )
+    .expect("seed newer system_jump_events row");
+
+    conn.execute(
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'paused_skill_queues/90999001', 'true')",
+        params![DOMAIN_SHIP_FITTING_AND_SKILLS],
+    )
+    .expect("seed newer paused_skill_queues row");
+
+    let (migrated, _fp) = load_snapshot_from_sqlite(&conn).expect("load + migrate");
+    assert!(
+        !table_exists(&conn, "world_kv_blobs").unwrap(),
+        "retired world_kv_blobs table must be dropped after migration"
+    );
+
+    // Newer domain_rows win; non-conflicting legacy entries migrate intact.
+    assert_eq!(
+        migrated.service_state_blobs.get(&existing_service_key).map(String::as_str),
+        Some("newer-domain-value")
+    );
+    assert_eq!(migrated.system_jump_events, newer_jump);
+    assert!(migrated.paused_skill_queues.contains(&90_999_001));
+    assert!(
+        legacy
+            .paused_skill_queues
+            .iter()
+            .all(|id| migrated.paused_skill_queues.contains(id))
+    );
+    assert_eq!(migrated.moon_extractions, legacy.moon_extractions);
+    assert_eq!(migrated.weapon_banks, legacy.weapon_banks);
+    assert_eq!(migrated.insurance_contracts, legacy.insurance_contracts);
+    assert_eq!(migrated.quasar_state_blobs, legacy.quasar_state_blobs);
+
+    // Reloading post-migration reads cleanly straight from `domain_rows`.
+    let (reloaded, _) = load_snapshot_from_sqlite(&conn).expect("reload post-migration");
+    assert_all_34_industry_market_pve_fields_eq(&reloaded, &migrated);
+}
+
+#[test]
+fn industry_market_pve_strict_load_fails_closed_and_quarantine_preserves_valid_rows() {
+    let conn = Connection::open_in_memory().expect("open");
+    apply_migrations(&conn).expect("migrate");
+
+    // 1. Valid row + corrupt JSON + unknown key in `domain_rows`.
+    conn.execute(
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'wallet_journal_timestamps/1001', '1700000100'), (?1, 'wallet_journal_timestamps/bad', '{corrupt'), (?1, 'unknown_field/1', '{}')",
+        [DOMAIN_WALLET_AND_MARKET],
+    )
+    .expect("seed domain_rows");
+
+    let mut strict_snap = WorldStateSnapshot::default();
+    strict_snap.wallet_journal_timestamps.insert(777, 888);
+    assert!(
+        load_industry_market_pve_domain_rows(&conn, &mut strict_snap, &mut LoadContext::new(false))
+            .is_err(),
+        "strict load must fail closed without mutating snapshot"
+    );
+    assert_eq!(strict_snap.wallet_journal_timestamps.get(&777), Some(&888));
+    assert!(!strict_snap.wallet_journal_timestamps.contains_key(&1001));
+
+    let mut q_ctx = LoadContext::quarantine_in_memory();
+    assert!(!load_industry_market_pve_domain_rows(&conn, &mut strict_snap, &mut q_ctx).unwrap());
+    assert_eq!(strict_snap.wallet_journal_timestamps.get(&1001), Some(&1_700_000_100));
+    assert_eq!(q_ctx.quarantined.len(), 2);
+
+    // 2. Corrupt legacy `world_kv_blobs` row fails closed under strict mode and quarantines under quarantine mode.
+    conn.execute_batch(LEGACY_WORLD_KV_BLOBS_SQL).unwrap();
+    conn.execute(
+        "INSERT INTO world_kv_blobs (blob_key, blob_json) VALUES ('moon_extractions', '{corrupt')",
+        [],
+    )
+    .unwrap();
+    let mut legacy_strict = WorldStateSnapshot::default();
+    assert!(load_industry_market_pve_domain_rows(
+        &conn,
+        &mut legacy_strict,
+        &mut LoadContext::new(false),
+    )
+    .is_err());
+
+    let mut q_legacy = LoadContext::quarantine_in_memory();
+    assert!(
+        load_industry_market_pve_domain_rows(&conn, &mut legacy_strict, &mut q_legacy).unwrap()
+    );
+    assert_eq!(legacy_strict.wallet_journal_timestamps.get(&1001), Some(&1_700_000_100));
+    assert_eq!(q_legacy.quarantined.len(), 3);
 }

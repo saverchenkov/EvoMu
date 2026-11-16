@@ -312,15 +312,32 @@ fn legacy_service_blobs_and_sentinel_owner_notes_migrate_cleanly() {
     assert!(reloaded.tourney_state.matches.contains_key(&1));
     assert!(reloaded.deployable_state.deployables.contains_key(&5001));
 
-    let blob_json: String = conn
+    let legacy_blobs_exists: i64 = conn
         .query_row(
-            "SELECT blob_json FROM world_kv_blobs WHERE blob_key = 'service_state_blobs'",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'world_kv_blobs'",
             [],
             |r| r.get(0),
         )
-        .expect("blobs row");
-    assert!(!blob_json.contains("incursions_state"));
-    assert!(blob_json.contains("__server_now_unix"));
+        .expect("check dropped world_kv_blobs");
+    assert_eq!(legacy_blobs_exists, 0);
+
+    let incursions_blob_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM domain_rows WHERE domain = ?1 AND key = 'service_state_blobs/incursions_state'",
+            [crate::sqlite_store::domain_rows::DOMAIN_SERVICE_STATE_BLOBS],
+            |r| r.get(0),
+        )
+        .expect("check removed incursions_state row");
+    assert_eq!(incursions_blob_count, 0);
+
+    let server_now_val: String = conn
+        .query_row(
+            "SELECT value FROM domain_rows WHERE domain = ?1 AND key = 'service_state_blobs/__server_now_unix'",
+            [crate::sqlite_store::domain_rows::DOMAIN_SERVICE_STATE_BLOBS],
+            |r| r.get(0),
+        )
+        .expect("check preserved __server_now_unix row");
+    assert!(!server_now_val.is_empty());
 
     let _ = std::fs::remove_file(&path);
 }

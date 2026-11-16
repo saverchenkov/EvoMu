@@ -668,7 +668,7 @@ fn w5a_p2_0a_service_state_blob_write_time_enforcement_and_non_fatal_sync() {
     );
     assert!(
         !reopened.with_snapshot(|s| s.service_state_blobs.contains_key("raw_oversized_bypass")),
-        "oversized service_state_blobs must be skipped during SQLite sync and not persisted to world_kv_blobs (#902)"
+        "oversized service_state_blobs must be skipped during SQLite sync and not persisted to domain_rows (#902)"
     );
     drop(reopened);
     let _ = std::fs::remove_file(&db_path);
@@ -1165,7 +1165,7 @@ fn issue_857_rollback_is_failsafe_across_all_abort_modes_and_partial_loads() {
     dirty_snap.mining_ledger.clear();
     dirty_snap.entity_kv.clear();
     assert!(
-        sqlite_store::industry_market_pve_store::rollback_d6_batch4(
+        sqlite_store::industry_market_pve_store::rollback_industry_market_pve(
             &mem_conn,
             &mut dirty_snap,
             &mem_fp,

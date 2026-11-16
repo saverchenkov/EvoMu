@@ -1,508 +1,656 @@
-//! SQLite persistence for `D-6` Batch 4 (`feat:lifecycle.industry-pi-durable`,
-//! `feat:lifecycle.market-wallet-history-durable`, `feat:lifecycle.pve-progress-durable`,
-//! `feat:lifecycle.abyssal-restart`, `feat:lifecycle.ship-and-item-config-durable`,
-//! `feat:lifecycle.account-progress-durable`).
+//! Industry, moon mining, PI, market/wallet, PvE, ship fitting, skill, starbase,
+//! killmail, structure, corp-project, loyalty-store, space-event, service/quasar blob,
+//! insurance, and mining-ledger SQLite persistence (`#916` Family 5).
+//!
+//! All 34 former `world_kv_blobs` collections now persist as normalized per-entry rows in
+//! `domain_rows` across seven `industry_market_pve.*` namespaces, with one-shot startup migration
+//! from legacy `world_kv_blobs`, checked finite-float JSON serialization, zero-cold-clone
+//! incremental `ChangeSet` diffs, and fail-closed reload/rollback. `char_mining_ledger`
+//! (`snap.mining_ledger`) remains in its dedicated relational SQLite table.
 
-use crate::sqlite_store::fingerprints::{fp_json, FnvHasher, TableFingerprints};
-use crate::types::WorldStateSnapshot;
+use crate::service_domains::{
+    record_service_state_blob_limit_violation, validate_service_state_blobs,
+};
+use crate::sqlite_store::domain_rows::{
+    decode_map_entry, decode_set_entry, diff_map_with, diff_scalar, diff_set_with,
+    fetch_domain_row_entries, from_checked_domain_json, table_exists, DomainRowChange,
+    DomainSyncState, DOMAIN_CORP_STRUCTURE_AND_KILLMAILS, DOMAIN_INDUSTRY_PVE_PI,
+    DOMAIN_PVE_AND_SPACE_EVENTS, DOMAIN_QUASAR_STATE_BLOBS, DOMAIN_SERVICE_STATE_BLOBS,
+    DOMAIN_SHIP_FITTING_AND_SKILLS, DOMAIN_WALLET_AND_MARKET,
+};
+use crate::sqlite_store::fingerprints::{fp_json, TableFingerprints};
+use crate::sqlite_store::quarantine::LoadContext;
+use crate::types::{
+    AutoMoonMinerRecord, CharacterResearchAgentRecord, CorpProjectContributorEntry,
+    CorpWalletJournalRecord, CosmicAnomalyRecord, CosmicSignatureRecord, CustomsOfficeRecord,
+    IncursionRecord, KillmailDetailRecord, LoyaltyStoreOfferRecord, MarketHistoryDayRecord,
+    MarketOrderMeta, MiningLedgerRecord, MoonExtractionRecord, ObserverMiningRecord,
+    PersistedInsuranceContractRecord, PlanetaryColonyLayoutRecord, ShipFitInputsRecord,
+    StarbaseDetailSettings, StructureEsiTimerMeta, SystemJumpEvent, SystemKillEvent,
+    WalletTransactionRecord, WorldStateSnapshot,
+};
+use eve_sde::{SolarSystemId, TypeId};
 use rusqlite::{params, Connection, Transaction};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::de::DeserializeOwned;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
-pub const D6_BATCH4_SCHEMA_VERSION: i64 = 5;
-
-const D6_BATCH4_SCHEMA_SQL: &str = r#"
+/// Legacy `0005_d6_industry_market_pve_ship_account` table schema retained strictly for pre-`#916`
+/// database migration and edge-case tests.
+#[cfg(test)]
+pub(crate) const LEGACY_WORLD_KV_BLOBS_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS world_kv_blobs (
     blob_key TEXT PRIMARY KEY,
     blob_json TEXT NOT NULL
 );
 "#;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Tracks the digest of the remaining Family 5 relational table (`char_mining_ledger`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct D6Batch4Fingerprints {
-    pub blobs: HashMap<&'static str, u64>,
     pub mining_ledger: u64,
 }
 
-pub fn apply_d6_batch4_migration(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(D6_BATCH4_SCHEMA_SQL)
-        .map_err(|e| e.to_string())?;
-    let now_unix = crate::clock::host_wall_unix_secs_and_nanos().0 as i64;
-    conn.execute(
-        "INSERT OR IGNORE INTO schema_migrations (version, name, applied_unix) VALUES (?1, ?2, ?3)",
-        params![
-            D6_BATCH4_SCHEMA_VERSION,
-            "0005_d6_industry_market_pve_ship_account",
-            now_unix
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-fn fp_str_map(map: &HashMap<String, String>) -> u64 {
-    use std::hash::Hasher;
-    let mut xor = 0u64;
-    let mut sum = 0u64;
-    for (k, v) in map {
-        let mut eh = std::collections::hash_map::DefaultHasher::new();
-        eh.write_usize(k.len());
-        eh.write(k.as_bytes());
-        eh.write_usize(v.len());
-        eh.write(v.as_bytes());
-        let entry_fp = eh.finish();
-        xor ^= entry_fp;
-        sum = sum.wrapping_add(entry_fp.rotate_left(13));
+/// Computes fingerprints for the remaining relational Family 5 state (`char_mining_ledger`).
+pub fn compute_d6_batch4_fingerprints(snap: &WorldStateSnapshot) -> D6Batch4Fingerprints {
+    D6Batch4Fingerprints {
+        mining_ledger: fp_json(&snap.mining_ledger),
     }
-    let mut out = FnvHasher::new();
-    out.write_u64(map.len() as u64);
-    out.write_u64(xor);
-    out.write_u64(sum);
-    out.finish()
 }
 
-fn fp_map<K: Serialize, V: Serialize>(map: &HashMap<K, V>) -> u64 {
-    super::fingerprints::canonical_fp(map)
+macro_rules! for_each_industry_market_pve_domain {
+    ($cb:ident) => {
+        $cb!(
+            industry_pi {
+                const_name: DOMAIN_INDUSTRY_PVE_PI,
+                maps: [
+                    moon_extractions: i64 => MoonExtractionRecord,
+                    auto_moon_miners: i64 => AutoMoonMinerRecord,
+                    observer_mining_ledger: i64 => Vec<ObserverMiningRecord>,
+                    char_research_agents: i64 => Vec<CharacterResearchAgentRecord>,
+                    planetary_colony_layouts: (i64, i64) => PlanetaryColonyLayoutRecord,
+                    corp_customs_offices: i64 => Vec<CustomsOfficeRecord>,
+                    orbital_provision_types: i64 => i64,
+                ],
+                sets: [],
+                scalars: [],
+            },
+            wallet_market {
+                const_name: DOMAIN_WALLET_AND_MARKET,
+                maps: [
+                    wallet_journal_timestamps: i64 => u64,
+                    char_wallet_transactions: i64 => Vec<WalletTransactionRecord>,
+                    corp_wallet_journals: (i64, i64) => Vec<CorpWalletJournalRecord>,
+                    corp_wallet_transactions: (i64, i64) => Vec<WalletTransactionRecord>,
+                    market_order_meta: i64 => MarketOrderMeta,
+                    market_history: (u32, TypeId) => Vec<MarketHistoryDayRecord>,
+                ],
+                sets: [],
+                scalars: [],
+            },
+            pve_space_events {
+                const_name: DOMAIN_PVE_AND_SPACE_EVENTS,
+                maps: [
+                    cosmic_signatures: SolarSystemId => Vec<CosmicSignatureRecord>,
+                    cosmic_anomalies: SolarSystemId => Vec<CosmicAnomalyRecord>,
+                    incursions: u32 => IncursionRecord,
+                    last_mission_decline_times: i64 => u64,
+                ],
+                sets: [],
+                scalars: [
+                    system_jump_events: Vec<SystemJumpEvent>,
+                    system_kill_events: Vec<SystemKillEvent>,
+                ],
+            },
+            ship_fitting_skills {
+                const_name: DOMAIN_SHIP_FITTING_AND_SKILLS,
+                maps: [
+                    module_online_states: i64 => bool,
+                    module_active_charges: i64 => u32,
+                    ship_fit_inputs: i64 => ShipFitInputsRecord,
+                    weapon_banks: i64 => HashMap<i64, Vec<i64>>,
+                ],
+                sets: [
+                    module_active_states: i64,
+                    paused_skill_queues: i64,
+                ],
+                scalars: [],
+            },
+            corp_structure_killmails {
+                const_name: DOMAIN_CORP_STRUCTURE_AND_KILLMAILS,
+                maps: [
+                    starbase_settings: i64 => StarbaseDetailSettings,
+                    killmail_details: i64 => KillmailDetailRecord,
+                    station_office_rental_costs: i64 => f64,
+                    structure_esi_timer_meta: i64 => StructureEsiTimerMeta,
+                    corp_project_contributors: i64 => Vec<CorpProjectContributorEntry>,
+                    loyalty_store_offers: i64 => Vec<LoyaltyStoreOfferRecord>,
+                    insurance_contracts: i64 => PersistedInsuranceContractRecord,
+                ],
+                sets: [],
+                scalars: [],
+            },
+            quasar_state_blobs {
+                const_name: DOMAIN_QUASAR_STATE_BLOBS,
+                maps: [
+                    quasar_state_blobs: String => String,
+                ],
+                sets: [],
+                scalars: [],
+            },
+        );
+    };
 }
 
-fn fp_set<T: Serialize>(set: &HashSet<T>) -> u64 {
-    let mut xor = 0u64;
-    let mut sum = 0u64;
-    for v in set {
-        let eh = fp_json(v);
-        xor ^= eh;
-        sum = sum.wrapping_add(eh.rotate_left(13));
-    }
-    let mut out = FnvHasher::new();
-    out.write_u64(set.len() as u64);
-    out.write_u64(xor);
-    out.write_u64(sum);
-    out.finish()
+macro_rules! define_staged_industry_market_pve {
+    (
+        $(
+            $dom_name:ident {
+                const_name: $domain_const:ident,
+                maps: [ $( $map_f:ident : $mk:ty => $mv:ty ),* $(,)? ],
+                sets: [ $( $set_f:ident : $sk:ty ),* $(,)? ],
+                scalars: [ $( $scalar_f:ident : $sv:ty ),* $(,)? ],
+            }
+        ),* $(,)?
+    ) => {
+        #[derive(Default)]
+        struct StagedIndustryMarketPve {
+            $(
+                $( $map_f: HashMap<$mk, $mv>, )*
+                $( $set_f: HashSet<$sk>, )*
+                $( $scalar_f: $sv, )*
+            )*
+            service_state_blobs: HashMap<String, String>,
+        }
+
+        impl StagedIndustryMarketPve {
+            fn apply_to(self, snap: &mut WorldStateSnapshot) {
+                $(
+                    $( snap.$map_f = self.$map_f; )*
+                    $( snap.$set_f = self.$set_f; )*
+                    $( snap.$scalar_f = self.$scalar_f; )*
+                )*
+                snap.service_state_blobs = self.service_state_blobs;
+            }
+        }
+    };
 }
 
-fn fp_nested_map<K1: Serialize, K2: Serialize, V: Serialize>(
-    map: &HashMap<K1, HashMap<K2, V>>,
-) -> u64 {
-    super::fingerprints::canonical_fp(map)
-}
+for_each_industry_market_pve_domain!(define_staged_industry_market_pve);
 
-fn map_to_json<K: Serialize, V: Serialize>(map: &HashMap<K, V>) -> Result<String, String> {
-    let entries: Vec<(&K, &V)> = map.iter().collect();
-    super::fingerprints::to_checked_json_string(&entries)
-}
-
-fn map_from_json<K: DeserializeOwned + Eq + Hash, V: DeserializeOwned>(
+fn map_from_legacy_json<K: DeserializeOwned + Eq + Hash, V: DeserializeOwned>(
     s: &str,
 ) -> Result<HashMap<K, V>, String> {
     let entries: Vec<(K, V)> = serde_json::from_str(s).map_err(|e| e.to_string())?;
     Ok(entries.into_iter().collect())
 }
 
-fn nested_map_to_json<K1: Serialize + Copy, K2: Serialize + Copy, V: Serialize>(
-    map: &HashMap<K1, HashMap<K2, V>>,
-) -> Result<String, String> {
-    let entries: Vec<(K1, Vec<(K2, &V)>)> = map
-        .iter()
-        .map(|(&k1, inner)| (k1, inner.iter().map(|(&k2, v)| (k2, v)).collect()))
-        .collect();
-    super::fingerprints::to_checked_json_string(&entries)
-}
-
-fn nested_map_from_json<
+fn nested_map_from_legacy_json<
     K1: DeserializeOwned + Eq + Hash,
     K2: DeserializeOwned + Eq + Hash,
     V: DeserializeOwned,
 >(
     s: &str,
 ) -> Result<HashMap<K1, HashMap<K2, V>>, String> {
-    let entries: Vec<(K1, Vec<(K2, V)>)> = serde_json::from_str(s).map_err(|e| e.to_string())?;
-    Ok(
-        entries
-            .into_iter()
-            .map(|(k1, inner)| (k1, inner.into_iter().collect()))
-            .collect(),
-    )
+    let outer: Vec<(K1, Vec<(K2, V)>)> = serde_json::from_str(s).map_err(|e| e.to_string())?;
+    Ok(outer
+        .into_iter()
+        .map(|(k1, inner)| (k1, inner.into_iter().collect()))
+        .collect())
 }
 
-fn compute_blob_hashes(snap: &WorldStateSnapshot) -> HashMap<&'static str, u64> {
-    let mut m = HashMap::with_capacity(24);
-    m.insert("moon_extractions", fp_map(&snap.moon_extractions));
-    m.insert("auto_moon_miners", fp_map(&snap.auto_moon_miners));
-    m.insert("observer_mining_ledger", fp_map(&snap.observer_mining_ledger));
-    m.insert("char_research_agents", fp_map(&snap.char_research_agents));
-    m.insert("planetary_colony_layouts", fp_map(&snap.planetary_colony_layouts));
-    m.insert("corp_customs_offices", fp_map(&snap.corp_customs_offices));
-    m.insert("orbital_provision_types", fp_map(&snap.orbital_provision_types));
-    m.insert("wallet_journal_timestamps", fp_map(&snap.wallet_journal_timestamps));
-    m.insert("char_wallet_transactions", fp_map(&snap.char_wallet_transactions));
-    m.insert("corp_wallet_journals", fp_map(&snap.corp_wallet_journals));
-    m.insert("corp_wallet_transactions", fp_map(&snap.corp_wallet_transactions));
-    m.insert("market_order_meta", fp_map(&snap.market_order_meta));
-    m.insert("market_history", fp_map(&snap.market_history));
-    m.insert("cosmic_signatures", fp_map(&snap.cosmic_signatures));
-    m.insert("cosmic_anomalies", fp_map(&snap.cosmic_anomalies));
-    m.insert("incursions", fp_map(&snap.incursions));
-    m.insert("last_mission_decline_times", fp_map(&snap.last_mission_decline_times));
-    m.insert("module_online_states", fp_map(&snap.module_online_states));
-    m.insert("module_active_states", fp_set(&snap.module_active_states));
-    m.insert("module_active_charges", fp_map(&snap.module_active_charges));
-    m.insert("ship_fit_inputs", fp_map(&snap.ship_fit_inputs));
-    m.insert("weapon_banks", fp_nested_map(&snap.weapon_banks));
-    m.insert("paused_skill_queues", fp_set(&snap.paused_skill_queues));
-    m.insert("starbase_settings", fp_map(&snap.starbase_settings));
-    m.insert("killmail_details", fp_map(&snap.killmail_details));
-    m.insert("station_office_rental_costs", fp_map(&snap.station_office_rental_costs));
-    m.insert("structure_esi_timer_meta", fp_map(&snap.structure_esi_timer_meta));
-    m.insert("corp_project_contributors", fp_map(&snap.corp_project_contributors));
-    m.insert("loyalty_store_offers", fp_map(&snap.loyalty_store_offers));
-    m.insert("system_jump_events", fp_json(&snap.system_jump_events));
-    m.insert("system_kill_events", fp_json(&snap.system_kill_events));
-    m.insert("quasar_state_blobs", fp_str_map(&snap.quasar_state_blobs));
-    m.insert("service_state_blobs", fp_str_map(&snap.service_state_blobs));
-    m.insert("insurance_contracts", fp_map(&snap.insurance_contracts));
-    m
+fn set_from_legacy_json<T: DeserializeOwned + Eq + Hash>(s: &str) -> Result<HashSet<T>, String> {
+    let items: Vec<T> = serde_json::from_str(s).map_err(|e| e.to_string())?;
+    Ok(items.into_iter().collect())
 }
 
-fn serialize_blob(snap: &WorldStateSnapshot, key: &str) -> Result<String, String> {
+fn decode_legacy_blob(
+    staged: &mut StagedIndustryMarketPve,
+    key: &str,
+    js: &str,
+) -> Result<bool, String> {
     match key {
-        "moon_extractions" => map_to_json(&snap.moon_extractions),
-        "auto_moon_miners" => map_to_json(&snap.auto_moon_miners),
-        "observer_mining_ledger" => map_to_json(&snap.observer_mining_ledger),
-        "char_research_agents" => map_to_json(&snap.char_research_agents),
-        "planetary_colony_layouts" => map_to_json(&snap.planetary_colony_layouts),
-        "corp_customs_offices" => map_to_json(&snap.corp_customs_offices),
-        "orbital_provision_types" => map_to_json(&snap.orbital_provision_types),
-        "wallet_journal_timestamps" => map_to_json(&snap.wallet_journal_timestamps),
-        "char_wallet_transactions" => map_to_json(&snap.char_wallet_transactions),
-        "corp_wallet_journals" => map_to_json(&snap.corp_wallet_journals),
-        "corp_wallet_transactions" => map_to_json(&snap.corp_wallet_transactions),
-        "market_order_meta" => map_to_json(&snap.market_order_meta),
-        "market_history" => map_to_json(&snap.market_history),
-        "cosmic_signatures" => map_to_json(&snap.cosmic_signatures),
-        "cosmic_anomalies" => map_to_json(&snap.cosmic_anomalies),
-        "incursions" => map_to_json(&snap.incursions),
-        "last_mission_decline_times" => map_to_json(&snap.last_mission_decline_times),
-        "module_online_states" => map_to_json(&snap.module_online_states),
-        "module_active_states" => {
-            let mut sorted: Vec<i64> = snap.module_active_states.iter().copied().collect();
-            sorted.sort_unstable();
-            super::fingerprints::to_checked_json_string(&sorted)
+        "moon_extractions" => staged.moon_extractions = map_from_legacy_json(js)?,
+        "auto_moon_miners" => staged.auto_moon_miners = map_from_legacy_json(js)?,
+        "observer_mining_ledger" => staged.observer_mining_ledger = map_from_legacy_json(js)?,
+        "char_research_agents" => staged.char_research_agents = map_from_legacy_json(js)?,
+        "planetary_colony_layouts" => staged.planetary_colony_layouts = map_from_legacy_json(js)?,
+        "corp_customs_offices" => staged.corp_customs_offices = map_from_legacy_json(js)?,
+        "orbital_provision_types" => staged.orbital_provision_types = map_from_legacy_json(js)?,
+        "wallet_journal_timestamps" => staged.wallet_journal_timestamps = map_from_legacy_json(js)?,
+        "char_wallet_transactions" => staged.char_wallet_transactions = map_from_legacy_json(js)?,
+        "corp_wallet_journals" => staged.corp_wallet_journals = map_from_legacy_json(js)?,
+        "corp_wallet_transactions" => staged.corp_wallet_transactions = map_from_legacy_json(js)?,
+        "market_order_meta" => staged.market_order_meta = map_from_legacy_json(js)?,
+        "market_history" => staged.market_history = map_from_legacy_json(js)?,
+        "cosmic_signatures" => staged.cosmic_signatures = map_from_legacy_json(js)?,
+        "cosmic_anomalies" => staged.cosmic_anomalies = map_from_legacy_json(js)?,
+        "incursions" => staged.incursions = map_from_legacy_json(js)?,
+        "last_mission_decline_times" => {
+            staged.last_mission_decline_times = map_from_legacy_json(js)?
         }
-        "module_active_charges" => map_to_json(&snap.module_active_charges),
-        "ship_fit_inputs" => map_to_json(&snap.ship_fit_inputs),
-        "weapon_banks" => nested_map_to_json(&snap.weapon_banks),
-        "paused_skill_queues" => {
-            let mut sorted: Vec<i64> = snap.paused_skill_queues.iter().copied().collect();
-            sorted.sort_unstable();
-            super::fingerprints::to_checked_json_string(&sorted)
+        "module_online_states" => staged.module_online_states = map_from_legacy_json(js)?,
+        "module_active_states" => staged.module_active_states = set_from_legacy_json(js)?,
+        "module_active_charges" => staged.module_active_charges = map_from_legacy_json(js)?,
+        "ship_fit_inputs" => staged.ship_fit_inputs = map_from_legacy_json(js)?,
+        "weapon_banks" => staged.weapon_banks = nested_map_from_legacy_json(js)?,
+        "paused_skill_queues" => staged.paused_skill_queues = set_from_legacy_json(js)?,
+        "starbase_settings" => staged.starbase_settings = map_from_legacy_json(js)?,
+        "killmail_details" => staged.killmail_details = map_from_legacy_json(js)?,
+        "station_office_rental_costs" => {
+            staged.station_office_rental_costs = map_from_legacy_json(js)?
         }
-        "starbase_settings" => map_to_json(&snap.starbase_settings),
-        "killmail_details" => map_to_json(&snap.killmail_details),
-        "station_office_rental_costs" => map_to_json(&snap.station_office_rental_costs),
-        "structure_esi_timer_meta" => map_to_json(&snap.structure_esi_timer_meta),
-        "corp_project_contributors" => map_to_json(&snap.corp_project_contributors),
-        "loyalty_store_offers" => map_to_json(&snap.loyalty_store_offers),
+        "structure_esi_timer_meta" => staged.structure_esi_timer_meta = map_from_legacy_json(js)?,
+        "corp_project_contributors" => {
+            staged.corp_project_contributors = map_from_legacy_json(js)?
+        }
+        "loyalty_store_offers" => staged.loyalty_store_offers = map_from_legacy_json(js)?,
         "system_jump_events" => {
-            super::fingerprints::to_checked_json_string(&snap.system_jump_events)
+            staged.system_jump_events = serde_json::from_str(js).map_err(|e| e.to_string())?
         }
         "system_kill_events" => {
-            super::fingerprints::to_checked_json_string(&snap.system_kill_events)
+            staged.system_kill_events = serde_json::from_str(js).map_err(|e| e.to_string())?
         }
-        "quasar_state_blobs" => map_to_json(&snap.quasar_state_blobs),
-        "service_state_blobs" => map_to_json(&snap.service_state_blobs),
-        "insurance_contracts" => map_to_json(&snap.insurance_contracts),
-        _ => Ok("[]".into()),
+        "quasar_state_blobs" => staged.quasar_state_blobs = map_from_legacy_json(js)?,
+        "service_state_blobs" => staged.service_state_blobs = map_from_legacy_json(js)?,
+        "insurance_contracts" => staged.insurance_contracts = map_from_legacy_json(js)?,
+        _ => return Ok(false),
     }
+    Ok(true)
 }
 
-fn apply_blob_json_checked(snap: &mut WorldStateSnapshot, key: &str, js: &str) -> Result<(), String> {
-    match key {
-        "moon_extractions" => snap.moon_extractions = map_from_json(js)?,
-        "auto_moon_miners" => snap.auto_moon_miners = map_from_json(js)?,
-        "observer_mining_ledger" => snap.observer_mining_ledger = map_from_json(js)?,
-        "char_research_agents" => snap.char_research_agents = map_from_json(js)?,
-        "planetary_colony_layouts" => snap.planetary_colony_layouts = map_from_json(js)?,
-        "corp_customs_offices" => snap.corp_customs_offices = map_from_json(js)?,
-        "orbital_provision_types" => snap.orbital_provision_types = map_from_json(js)?,
-        "wallet_journal_timestamps" => snap.wallet_journal_timestamps = map_from_json(js)?,
-        "char_wallet_transactions" => snap.char_wallet_transactions = map_from_json(js)?,
-        "corp_wallet_journals" => snap.corp_wallet_journals = map_from_json(js)?,
-        "corp_wallet_transactions" => snap.corp_wallet_transactions = map_from_json(js)?,
-        "market_order_meta" => snap.market_order_meta = map_from_json(js)?,
-        "market_history" => snap.market_history = map_from_json(js)?,
-        "cosmic_signatures" => snap.cosmic_signatures = map_from_json(js)?,
-        "cosmic_anomalies" => snap.cosmic_anomalies = map_from_json(js)?,
-        "incursions" => snap.incursions = map_from_json(js)?,
-        "last_mission_decline_times" => snap.last_mission_decline_times = map_from_json(js)?,
-        "module_online_states" => snap.module_online_states = map_from_json(js)?,
-        "module_active_states" => {
-            snap.module_active_states = serde_json::from_str(js).map_err(|e| e.to_string())?;
-        }
-        "module_active_charges" => snap.module_active_charges = map_from_json(js)?,
-        "ship_fit_inputs" => snap.ship_fit_inputs = map_from_json(js)?,
-        "weapon_banks" => snap.weapon_banks = nested_map_from_json(js)?,
-        "paused_skill_queues" => {
-            snap.paused_skill_queues = serde_json::from_str(js).map_err(|e| e.to_string())?;
-        }
-        "starbase_settings" => snap.starbase_settings = map_from_json(js)?,
-        "killmail_details" => snap.killmail_details = map_from_json(js)?,
-        "station_office_rental_costs" => snap.station_office_rental_costs = map_from_json(js)?,
-        "structure_esi_timer_meta" => snap.structure_esi_timer_meta = map_from_json(js)?,
-        "corp_project_contributors" => snap.corp_project_contributors = map_from_json(js)?,
-        "loyalty_store_offers" => snap.loyalty_store_offers = map_from_json(js)?,
-        "system_jump_events" => {
-            snap.system_jump_events = serde_json::from_str(js).map_err(|e| e.to_string())?;
-        }
-        "system_kill_events" => {
-            snap.system_kill_events = serde_json::from_str(js).map_err(|e| e.to_string())?;
-        }
-        "quasar_state_blobs" => snap.quasar_state_blobs = map_from_json(js)?,
-        "service_state_blobs" => snap.service_state_blobs = map_from_json(js)?,
-        "insurance_contracts" => snap.insurance_contracts = map_from_json(js)?,
-        _ => {}
-    }
-    Ok(())
-}
-
-pub fn compute_d6_batch4_fingerprints(snap: &WorldStateSnapshot) -> D6Batch4Fingerprints {
-    D6Batch4Fingerprints {
-        blobs: compute_blob_hashes(snap),
-        mining_ledger: fp_json(&snap.mining_ledger),
-    }
-}
-
-pub fn load_d6_batch4_checked(
+fn decode_legacy_world_kv_blobs(
     conn: &Connection,
-    snap: &mut WorldStateSnapshot,
-    ctx: &mut super::quarantine::LoadContext,
-) -> Result<(), String> {
-    let mut staged = WorldStateSnapshot::default();
-    let mut seen_keys = HashSet::new();
-    if let Ok(mut stmt) =
-        conn.prepare("SELECT rowid, blob_key, blob_json FROM world_kv_blobs")
-    {
-        if let Ok(mut rows) = stmt.query([]) {
-            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
-                let rowid = r.get::<_, i64>(0).ok();
-                let key = super::quarantine::row_col_string(r, 1);
-                let payload = super::quarantine::row_col_string(r, 2);
-                match r
-                    .get::<_, String>(2)
-                    .map_err(|e| e.to_string())
-                    .and_then(|js| apply_blob_json_checked(&mut staged, &key, &js))
-                {
-                    Ok(()) => {
-                        seen_keys.insert(key);
-                    }
-                    Err(err) => {
-                        ctx.record_bad_row(
-                            "world_kv_blobs",
-                            "world_kv_blobs",
-                            key,
-                            payload,
-                            err,
-                            rowid,
-                        )?;
-                    }
-                }
+    staged: &mut StagedIndustryMarketPve,
+    ctx: &mut LoadContext,
+) -> Result<bool, String> {
+    if !table_exists(conn, "world_kv_blobs")? {
+        return Ok(false);
+    }
+    let mut stmt = conn
+        .prepare("SELECT rowid, blob_key, blob_json FROM world_kv_blobs ORDER BY rowid ASC")
+        .map_err(|e| format!("legacy world_kv_blobs prepare: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| format!("legacy world_kv_blobs query: {e}"))?;
+    for row in rows {
+        let (rowid, key, js) = row.map_err(|e| format!("legacy world_kv_blobs row: {e}"))?;
+        // Already owned/drained by Family 4 (`corp_crimewatch_store`).
+        if matches!(key.as_str(), "corp_container_logs" | "wh_polarizations") {
+            continue;
+        }
+        match decode_legacy_blob(staged, &key, &js) {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!("ignoring unknown legacy world_kv_blobs key '{key}'");
+            }
+            Err(err) => {
+                ctx.record_bad_row(
+                    "world_kv_blobs",
+                    "world_kv_blobs",
+                    &key,
+                    &js,
+                    err,
+                    Some(rowid),
+                )?;
             }
         }
     }
-    macro_rules! commit_staged_blobs {
-        ($($key:literal => $field:ident),* $(,)?) => {
+    Ok(true)
+}
+
+fn load_domain_rows_into_staged(
+    conn: &Connection,
+    staged: &mut StagedIndustryMarketPve,
+    ctx: &mut LoadContext,
+) -> Result<(), String> {
+    macro_rules! load_all {
+        (
             $(
-                if seen_keys.contains($key) {
-                    snap.$field = staged.$field;
+                $dom_name:ident {
+                    const_name: $domain_const:ident,
+                    maps: [ $( $map_f:ident : $mk:ty => $mv:ty ),* $(,)? ],
+                    sets: [ $( $set_f:ident : $sk:ty ),* $(,)? ],
+                    scalars: [ $( $scalar_f:ident : $sv:ty ),* $(,)? ],
+                }
+            ),* $(,)?
+        ) => {
+            $(
+                for (rowid, raw_key, raw_val) in fetch_domain_row_entries(conn, $domain_const)? {
+                    let decode_res: Result<(), String> = (|| {
+                        #[allow(clippy::match_single_binding)]
+                        match raw_key.as_str() {
+                            $(
+                                stringify!($scalar_f) => {
+                                    staged.$scalar_f = from_checked_domain_json(&raw_val)?;
+                                    return Ok(());
+                                }
+                            )*
+                            _ => {}
+                        }
+                        let (field, subkey) = raw_key.split_once('/').ok_or_else(|| {
+                            format!("malformed domain_rows key '{raw_key}' for {}", $domain_const)
+                        })?;
+                        match field {
+                            $(
+                                stringify!($map_f) => {
+                                    let (k, v) = decode_map_entry::<$mk, $mv>(subkey, &raw_val)?;
+                                    staged.$map_f.insert(k, v);
+                                    Ok(())
+                                }
+                            )*
+                            $(
+                                stringify!($set_f) => {
+                                    let k = decode_set_entry::<$sk>(subkey, &raw_val)?;
+                                    staged.$set_f.insert(k);
+                                    Ok(())
+                                }
+                            )*
+                            _ => Err(format!(
+                                "unknown domain_rows key '{raw_key}' for {}",
+                                $domain_const
+                            )),
+                        }
+                    })();
+                    if let Err(err) = decode_res {
+                        ctx.record_bad_row(
+                            "domain_rows",
+                            $domain_const,
+                            &raw_key,
+                            &raw_val,
+                            err,
+                            Some(rowid),
+                        )?;
+                    }
                 }
             )*
         };
     }
-    commit_staged_blobs!(
-        "moon_extractions" => moon_extractions,
-        "auto_moon_miners" => auto_moon_miners,
-        "observer_mining_ledger" => observer_mining_ledger,
-        "char_research_agents" => char_research_agents,
-        "planetary_colony_layouts" => planetary_colony_layouts,
-        "corp_customs_offices" => corp_customs_offices,
-        "orbital_provision_types" => orbital_provision_types,
-        "wallet_journal_timestamps" => wallet_journal_timestamps,
-        "char_wallet_transactions" => char_wallet_transactions,
-        "corp_wallet_journals" => corp_wallet_journals,
-        "corp_wallet_transactions" => corp_wallet_transactions,
-        "market_order_meta" => market_order_meta,
-        "market_history" => market_history,
-        "cosmic_signatures" => cosmic_signatures,
-        "cosmic_anomalies" => cosmic_anomalies,
-        "incursions" => incursions,
-        "last_mission_decline_times" => last_mission_decline_times,
-        "module_online_states" => module_online_states,
-        "module_active_states" => module_active_states,
-        "module_active_charges" => module_active_charges,
-        "ship_fit_inputs" => ship_fit_inputs,
-        "weapon_banks" => weapon_banks,
-        "paused_skill_queues" => paused_skill_queues,
-        "starbase_settings" => starbase_settings,
-        "killmail_details" => killmail_details,
-        "station_office_rental_costs" => station_office_rental_costs,
-        "structure_esi_timer_meta" => structure_esi_timer_meta,
-        "corp_project_contributors" => corp_project_contributors,
-        "loyalty_store_offers" => loyalty_store_offers,
-        "system_jump_events" => system_jump_events,
-        "system_kill_events" => system_kill_events,
-        "quasar_state_blobs" => quasar_state_blobs,
-        "service_state_blobs" => service_state_blobs,
-        "insurance_contracts" => insurance_contracts,
-    );
-    Ok(())
-}
 
-pub fn load_d6_batch4(conn: &Connection, snap: &mut WorldStateSnapshot) {
-    let _ = load_d6_batch4_checked(
-        conn,
-        snap,
-        &mut super::quarantine::LoadContext::quarantine_in_memory(),
-    );
-}
+    for_each_industry_market_pve_domain!(load_all);
 
-pub fn sync_d6_batch4(
-    tx: &Transaction<'_>,
-    snap: &WorldStateSnapshot,
-    fp: &mut TableFingerprints,
-) -> Result<bool, String> {
-    let mut changed = false;
-    let new_hashes = compute_blob_hashes(snap);
-    for (key, new_h) in new_hashes {
-        if fp.d6_batch4.blobs.get(key) != Some(&new_h) {
-            if key == "service_state_blobs" {
-                if let Err(msg) =
-                    crate::service_domains::validate_service_state_blobs(&snap.service_state_blobs)
-                {
-                    crate::service_domains::record_service_state_blob_limit_violation(&msg);
-                    continue;
+    for (rowid, raw_key, raw_val) in fetch_domain_row_entries(conn, DOMAIN_SERVICE_STATE_BLOBS)? {
+        let decode_res: Result<(), String> = (|| {
+            let (field, subkey) = raw_key.split_once('/').ok_or_else(|| {
+                format!(
+                    "malformed domain_rows key '{raw_key}' for {DOMAIN_SERVICE_STATE_BLOBS}"
+                )
+            })?;
+            match field {
+                "service_state_blobs" => {
+                    let (k, v) = decode_map_entry::<String, String>(subkey, &raw_val)?;
+                    staged.service_state_blobs.insert(k, v);
+                    Ok(())
                 }
+                _ => Err(format!(
+                    "unknown domain_rows key '{raw_key}' for {DOMAIN_SERVICE_STATE_BLOBS}"
+                )),
             }
-            changed = true;
-            let js = serialize_blob(snap, key)?;
-            tx.execute(
-                "INSERT OR REPLACE INTO world_kv_blobs (blob_key, blob_json) VALUES (?1, ?2)",
-                params![key, js],
-            )
-            .map_err(|e| e.to_string())?;
-            fp.d6_batch4.blobs.insert(key, new_h);
+        })();
+        if let Err(err) = decode_res {
+            ctx.record_bad_row(
+                "domain_rows",
+                DOMAIN_SERVICE_STATE_BLOBS,
+                &raw_key,
+                &raw_val,
+                err,
+                Some(rowid),
+            )?;
         }
     }
 
-    let ml_h = fp_json(&snap.mining_ledger);
-    if fp.d6_batch4.mining_ledger != ml_h {
-        changed = true;
-        tx.execute("DELETE FROM char_mining_ledger", [])
-            .map_err(|e| e.to_string())?;
-        for entry in &snap.mining_ledger {
-            tx.execute(
-                "INSERT INTO char_mining_ledger (character_id, solar_system_id, type_id, quantity, date, timestamp_unix) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    entry.character_id,
-                    entry.solar_system_id as i64,
-                    entry.type_id as i64,
-                    entry.quantity,
-                    entry.date,
-                    entry.timestamp_unix as i64,
-                ],
-            )
-            .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn load_staged_industry_market_pve(
+    conn: &Connection,
+    ctx: &mut LoadContext,
+) -> Result<(StagedIndustryMarketPve, bool), String> {
+    let mut staged = StagedIndustryMarketPve::default();
+    let had_legacy = decode_legacy_world_kv_blobs(conn, &mut staged, ctx)?;
+    load_domain_rows_into_staged(conn, &mut staged, ctx)?;
+    Ok((staged, had_legacy))
+}
+
+/// Loads all 34 Family 5 (`industry_market_pve`) collections from `domain_rows` (overlaying any
+/// unmigrated legacy `world_kv_blobs` entries so newer `domain_rows` wins) into `snap`.
+///
+/// Returns `Ok(true)` if the retired `world_kv_blobs` table existed and should be dropped once
+/// migrated rows commit. Fails closed without mutating `snap` when `ctx.quarantine_unreadable` is
+/// `false`.
+pub fn load_industry_market_pve_domain_rows(
+    conn: &Connection,
+    snap: &mut WorldStateSnapshot,
+    ctx: &mut LoadContext,
+) -> Result<bool, String> {
+    let (staged, had_legacy) = load_staged_industry_market_pve(conn, ctx)?;
+    staged.apply_to(snap);
+    Ok(had_legacy)
+}
+
+/// Convenience loader using an in-memory quarantine context (skips corrupt rows cleanly).
+pub fn load_industry_market_pve(conn: &Connection, snap: &mut WorldStateSnapshot) {
+    let _ =
+        load_industry_market_pve_domain_rows(conn, snap, &mut LoadContext::quarantine_in_memory());
+}
+
+/// Drops the retired legacy `world_kv_blobs` table after migration to `domain_rows`.
+pub(crate) fn drop_legacy_industry_market_pve_tables(tx: &Transaction<'_>) -> Result<(), String> {
+    tx.execute("DROP TABLE IF EXISTS world_kv_blobs", [])
+        .map_err(|e| format!("drop legacy world_kv_blobs table: {e}"))?;
+    Ok(())
+}
+
+/// Collects per-entry `domain_rows` diffs across all 34 Family 5 collections without cloning
+/// unrelated maps or triggering cold-domain full syncs.
+pub(crate) fn collect_industry_market_pve_domain_row_diffs(
+    before: &WorldStateSnapshot,
+    after: &WorldStateSnapshot,
+    out: &mut Vec<DomainRowChange>,
+) {
+    macro_rules! collect_all {
+        (
+            $(
+                $dom_name:ident {
+                    const_name: $domain_const:ident,
+                    maps: [ $( $map_f:ident : $mk:ty => $mv:ty ),* $(,)? ],
+                    sets: [ $( $set_f:ident : $sk:ty ),* $(,)? ],
+                    scalars: [ $( $scalar_f:ident : $sv:ty ),* $(,)? ],
+                }
+            ),* $(,)?
+        ) => {
+            $(
+                $(
+                    diff_map_with(
+                        $domain_const,
+                        stringify!($map_f),
+                        before.$map_f.len(),
+                        after.$map_f.iter(),
+                        |k| before.$map_f.get(k),
+                        before.$map_f.keys(),
+                        |k| after.$map_f.contains_key(k),
+                        out,
+                    );
+                )*
+                $(
+                    diff_set_with(
+                        $domain_const,
+                        stringify!($set_f),
+                        before.$set_f.len(),
+                        after.$set_f.iter(),
+                        |k| before.$set_f.contains(k),
+                        before.$set_f.iter(),
+                        |k| after.$set_f.contains(k),
+                        out,
+                    );
+                )*
+                $(
+                    {
+                        let def: $sv = Default::default();
+                        diff_scalar(
+                            $domain_const,
+                            stringify!($scalar_f),
+                            &before.$scalar_f,
+                            &after.$scalar_f,
+                            &def,
+                            out,
+                        );
+                    }
+                )*
+            )*
+        };
+    }
+
+    for_each_industry_market_pve_domain!(collect_all);
+
+    if before.service_state_blobs != after.service_state_blobs {
+        if let Err(msg) = validate_service_state_blobs(&after.service_state_blobs) {
+            record_service_state_blob_limit_violation(&msg);
+        } else {
+            diff_map_with(
+                DOMAIN_SERVICE_STATE_BLOBS,
+                "service_state_blobs",
+                before.service_state_blobs.len(),
+                after.service_state_blobs.iter(),
+                |k| before.service_state_blobs.get(k),
+                before.service_state_blobs.keys(),
+                |k| after.service_state_blobs.contains_key(k),
+                out,
+            );
         }
-        fp.d6_batch4.mining_ledger = ml_h;
+    }
+}
+
+/// Synchronizes all 34 Family 5 collections into `domain_rows` cleanly within `tx`.
+pub fn sync_industry_market_pve_domain_rows(
+    tx: &Transaction<'_>,
+    snap: &WorldStateSnapshot,
+) -> Result<bool, String> {
+    let mut changed = false;
+
+    macro_rules! sync_all {
+        (
+            $(
+                $dom_name:ident {
+                    const_name: $domain_const:ident,
+                    maps: [ $( $map_f:ident : $mk:ty => $mv:ty ),* $(,)? ],
+                    sets: [ $( $set_f:ident : $sk:ty ),* $(,)? ],
+                    scalars: [ $( $scalar_f:ident : $sv:ty ),* $(,)? ],
+                }
+            ),* $(,)?
+        ) => {
+            $(
+                {
+                    let mut state = DomainSyncState::load(tx, $domain_const)?;
+                    $(
+                        state.push_map(stringify!($map_f), snap.$map_f.iter())?;
+                    )*
+                    $(
+                        state.push_set(stringify!($set_f), snap.$set_f.iter())?;
+                    )*
+                    $(
+                        {
+                            let def: $sv = Default::default();
+                            state.push_scalar(stringify!($scalar_f), &snap.$scalar_f, &def)?;
+                        }
+                    )*
+                    changed |= state.finish(tx)?;
+                }
+            )*
+        };
+    }
+
+    for_each_industry_market_pve_domain!(sync_all);
+
+    if let Err(msg) = validate_service_state_blobs(&snap.service_state_blobs) {
+        record_service_state_blob_limit_violation(&msg);
+    } else {
+        let mut state = DomainSyncState::load(tx, DOMAIN_SERVICE_STATE_BLOBS)?;
+        state.push_map("service_state_blobs", snap.service_state_blobs.iter())?;
+        changed |= state.finish(tx)?;
     }
 
     Ok(changed)
 }
 
-fn reload_d6_batch4_blobs_strict(
-    conn: &Connection,
-    dirty_blobs: &HashSet<&'static str>,
-    expected_blobs: &HashMap<&'static str, u64>,
-) -> Result<WorldStateSnapshot, String> {
-    let mut fresh = WorldStateSnapshot::default();
-    let mut seen_keys = HashSet::with_capacity(dirty_blobs.len());
-    let mut stmt = conn
-        .prepare("SELECT blob_key, blob_json FROM world_kv_blobs")
-        .map_err(|e| format!("rollback world_kv_blobs prepare failed: {e}"))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("rollback world_kv_blobs query failed: {e}"))?;
-    while let Some(r) = rows
-        .next()
-        .map_err(|e| format!("rollback world_kv_blobs row failed: {e}"))?
-    {
-        let key: String = r
-            .get(0)
-            .map_err(|e| format!("rollback world_kv_blobs blob_key: {e}"))?;
-        let js: String = r
-            .get(1)
-            .map_err(|e| format!("rollback world_kv_blobs blob_json ({key}): {e}"))?;
-        if dirty_blobs.contains(key.as_str()) {
-            apply_blob_json_checked(&mut fresh, &key, &js)
-                .map_err(|e| format!("rollback world_kv_blobs parse '{key}' failed: {e}"))?;
-            seen_keys.insert(key);
-        }
+/// Synchronizes the remaining relational Family 5 table (`char_mining_ledger`) when dirty.
+pub fn sync_mining_ledger(
+    tx: &Transaction<'_>,
+    snap: &WorldStateSnapshot,
+    fp: &mut TableFingerprints,
+) -> Result<bool, String> {
+    let ml_h = fp_json(&snap.mining_ledger);
+    if fp.d6_batch4.mining_ledger == ml_h {
+        return Ok(false);
     }
-    let empty_hashes = compute_blob_hashes(&WorldStateSnapshot::default());
-    for &k in dirty_blobs {
-        if !seen_keys.contains(k) {
-            let expected_empty = empty_hashes.get(k).copied().unwrap_or(0);
-            if expected_blobs.get(k).is_some_and(|&h| h != expected_empty) {
-                return Err(format!(
-                    "rollback world_kv_blobs missing row for non-empty dirty key '{k}'"
-                ));
-            }
-        }
+    tx.execute("DELETE FROM char_mining_ledger", [])
+        .map_err(|e| e.to_string())?;
+    for entry in &snap.mining_ledger {
+        tx.execute(
+            "INSERT INTO char_mining_ledger (character_id, solar_system_id, type_id, quantity, date, timestamp_unix) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                entry.character_id,
+                entry.solar_system_id as i64,
+                entry.type_id as i64,
+                entry.quantity,
+                entry.date,
+                entry.timestamp_unix as i64,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
     }
-    Ok(fresh)
+    fp.d6_batch4.mining_ledger = ml_h;
+    Ok(true)
 }
 
 fn reload_mining_ledger_strict(
     conn: &Connection,
     expected_fp: u64,
-) -> Result<Vec<crate::types::MiningLedgerRecord>, String> {
+) -> Result<Vec<MiningLedgerRecord>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT character_id, solar_system_id, type_id, quantity, date, timestamp_unix FROM char_mining_ledger ORDER BY id ASC",
         )
         .map_err(|e| format!("rollback char_mining_ledger prepare failed: {e}"))?;
-    let mut rows = stmt
-        .query([])
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0),
+                r.get::<_, i64>(1),
+                r.get::<_, i64>(2),
+                r.get::<_, i64>(3),
+                r.get::<_, String>(4),
+                r.get::<_, i64>(5),
+            ))
+        })
         .map_err(|e| format!("rollback char_mining_ledger query failed: {e}"))?;
     let mut out = Vec::new();
-    while let Some(r) = rows
-        .next()
-        .map_err(|e| format!("rollback char_mining_ledger row failed: {e}"))?
-    {
-        out.push(crate::types::MiningLedgerRecord {
-            character_id: r
-                .get(0)
+    for row in rows {
+        let (character_id, solar_system_id, type_id, quantity, date, timestamp_unix) =
+            row.map_err(|e| format!("rollback char_mining_ledger row failed: {e}"))?;
+        out.push(MiningLedgerRecord {
+            character_id: character_id
                 .map_err(|e| format!("rollback char_mining_ledger character_id: {e}"))?,
-            solar_system_id: r
-                .get::<_, i64>(1)
+            solar_system_id: solar_system_id
                 .map_err(|e| format!("rollback char_mining_ledger solar_system_id: {e}"))?
                 as u32,
-            type_id: r
-                .get::<_, i64>(2)
-                .map_err(|e| format!("rollback char_mining_ledger type_id: {e}"))?
+            type_id: type_id.map_err(|e| format!("rollback char_mining_ledger type_id: {e}"))?
                 as u32,
-            quantity: r
-                .get(3)
+            quantity: quantity
                 .map_err(|e| format!("rollback char_mining_ledger quantity: {e}"))?,
-            date: r
-                .get(4)
-                .map_err(|e| format!("rollback char_mining_ledger date: {e}"))?,
-            timestamp_unix: r
-                .get::<_, i64>(5)
+            date: date.map_err(|e| format!("rollback char_mining_ledger date: {e}"))?,
+            timestamp_unix: timestamp_unix
                 .map_err(|e| format!("rollback char_mining_ledger timestamp_unix: {e}"))?
                 as u64,
         });
     }
-    let empty_fp = fp_json(&Vec::<crate::types::MiningLedgerRecord>::new());
+    let empty_fp = fp_json(&Vec::<MiningLedgerRecord>::new());
     if out.is_empty() && expected_fp != 0 && expected_fp != empty_fp {
         return Err(
             "rollback char_mining_ledger returned empty table for non-empty baseline".into(),
@@ -516,100 +664,48 @@ fn reload_mining_ledger_strict(
     Ok(out)
 }
 
-/// Restores dirty `D-6` Batch 4 domains from SQLite into temporaries, only mutating `snap`
-/// after every required query and JSON parse succeeds.
-pub fn rollback_d6_batch4(
+fn rollback_industry_market_pve_inner(
     conn: &Connection,
     snap: &mut WorldStateSnapshot,
     fp: &TableFingerprints,
 ) -> Result<(), String> {
-    let cur = compute_d6_batch4_fingerprints(snap);
-    if cur == fp.d6_batch4 {
-        return Ok(());
-    }
-    let dirty_blobs: HashSet<&'static str> = cur
-        .blobs
-        .iter()
-        .filter_map(|(&k, &cur_h)| (fp.d6_batch4.blobs.get(k) != Some(&cur_h)).then_some(k))
-        .collect();
-    let dirty_mining = cur.mining_ledger != fp.d6_batch4.mining_ledger;
-
-    let staged_res = (|| -> Result<_, String> {
-        let fresh_blobs = if !dirty_blobs.is_empty() {
-            Some(reload_d6_batch4_blobs_strict(
-                conn,
-                &dirty_blobs,
-                &fp.d6_batch4.blobs,
-            )?)
-        } else {
-            None
-        };
-        let fresh_mining = if dirty_mining {
-            Some(reload_mining_ledger_strict(conn, fp.d6_batch4.mining_ledger)?)
-        } else {
-            None
-        };
-        Ok((fresh_blobs, fresh_mining))
-    })();
-
-    let (fresh_blobs, fresh_mining) = match staged_res {
-        Ok(staged) => staged,
-        Err(err) => {
-            crate::persistence::record_persist_failure();
-            tracing::error!("rollback_d6_batch4 failed closed without mutating snapshot: {err}");
-            return Err(err);
-        }
-    };
-
-    if let Some(fresh) = fresh_blobs {
-        macro_rules! assign_if_dirty {
-            ($($key:literal => $field:ident),* $(,)?) => {
-                $(
-                    if dirty_blobs.contains($key) {
-                        snap.$field = fresh.$field;
-                    }
-                )*
-            };
-        }
-        assign_if_dirty!(
-            "moon_extractions" => moon_extractions,
-            "auto_moon_miners" => auto_moon_miners,
-            "observer_mining_ledger" => observer_mining_ledger,
-            "char_research_agents" => char_research_agents,
-            "planetary_colony_layouts" => planetary_colony_layouts,
-            "corp_customs_offices" => corp_customs_offices,
-            "orbital_provision_types" => orbital_provision_types,
-            "wallet_journal_timestamps" => wallet_journal_timestamps,
-            "char_wallet_transactions" => char_wallet_transactions,
-            "corp_wallet_journals" => corp_wallet_journals,
-            "corp_wallet_transactions" => corp_wallet_transactions,
-            "market_order_meta" => market_order_meta,
-            "market_history" => market_history,
-            "cosmic_signatures" => cosmic_signatures,
-            "cosmic_anomalies" => cosmic_anomalies,
-            "incursions" => incursions,
-            "last_mission_decline_times" => last_mission_decline_times,
-            "module_online_states" => module_online_states,
-            "module_active_states" => module_active_states,
-            "module_active_charges" => module_active_charges,
-            "ship_fit_inputs" => ship_fit_inputs,
-            "weapon_banks" => weapon_banks,
-            "paused_skill_queues" => paused_skill_queues,
-            "starbase_settings" => starbase_settings,
-            "killmail_details" => killmail_details,
-            "station_office_rental_costs" => station_office_rental_costs,
-            "structure_esi_timer_meta" => structure_esi_timer_meta,
-            "corp_project_contributors" => corp_project_contributors,
-            "loyalty_store_offers" => loyalty_store_offers,
-            "system_jump_events" => system_jump_events,
-            "system_kill_events" => system_kill_events,
-            "quasar_state_blobs" => quasar_state_blobs,
-            "service_state_blobs" => service_state_blobs,
-            "insurance_contracts" => insurance_contracts,
+    if !table_exists(conn, "domain_rows")? {
+        return Err(
+            "cannot rollback industry_market_pve: table 'domain_rows' does not exist".into(),
         );
     }
-    if let Some(mining_ledger) = fresh_mining {
-        snap.mining_ledger = mining_ledger;
+    if !table_exists(conn, "char_mining_ledger")? {
+        return Err(
+            "cannot rollback industry_market_pve: table 'char_mining_ledger' does not exist".into(),
+        );
+    }
+
+    let mut ctx = LoadContext::new(false);
+    let (staged, _had_legacy) = load_staged_industry_market_pve(conn, &mut ctx)?;
+    let staged_ledger = if fp_json(&snap.mining_ledger) != fp.d6_batch4.mining_ledger {
+        Some(reload_mining_ledger_strict(conn, fp.d6_batch4.mining_ledger)?)
+    } else {
+        None
+    };
+
+    staged.apply_to(snap);
+    if let Some(ledger) = staged_ledger {
+        snap.mining_ledger = ledger;
+    }
+    Ok(())
+}
+
+/// Fail-closed reload of all 34 Family 5 collections (`domain_rows`) and `char_mining_ledger` from
+/// SQLite into `snap`, leaving `snap` untouched on any schema, decode, or digest error.
+pub fn rollback_industry_market_pve(
+    conn: &Connection,
+    snap: &mut WorldStateSnapshot,
+    fp: &TableFingerprints,
+) -> Result<(), String> {
+    if let Err(err) = rollback_industry_market_pve_inner(conn, snap, fp) {
+        crate::persistence::record_persist_failure();
+        tracing::error!("rollback_industry_market_pve failed closed without mutating snapshot: {err}");
+        return Err(err);
     }
     Ok(())
 }

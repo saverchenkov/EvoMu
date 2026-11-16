@@ -481,7 +481,6 @@ pub fn apply_migrations(conn: &Connection) -> Result<(), String> {
     super::auth_store::apply_auth_migration(conn)?;
     super::domain_rows::apply_domain_rows_migration(conn)?;
     super::notes_lp_sequence_store::apply_d6_migration(conn)?;
-    super::industry_market_pve_store::apply_d6_batch4_migration(conn)?;
     super::service_domains_store::apply_service_domains_migration(conn)?;
     super::system_checkpoint::apply_system_checkpoint_migration(conn)?;
     Ok(())

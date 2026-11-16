@@ -583,6 +583,8 @@ fn corp_crimewatch_legacy_kv_and_blob_migration_preserves_newer_domain_rows_and_
     let stale_pol_json =
         serde_json::to_string(&vec![((90_000_001_i64, 31_000_001_i64), 1111_u64)])
             .expect("stale polarizations");
+    conn.execute_batch(crate::sqlite_store::industry_market_pve_store::LEGACY_WORLD_KV_BLOBS_SQL)
+        .expect("create legacy world_kv_blobs");
     conn.execute(
         "INSERT INTO world_kv_blobs (blob_key, blob_json) VALUES ('corp_container_logs', ?1), ('wh_polarizations', ?2)",
         params![stale_logs_json, stale_pol_json],
@@ -622,14 +624,14 @@ fn corp_crimewatch_legacy_kv_and_blob_migration_preserves_newer_domain_rows_and_
         )
         .expect("check dropped legacy table");
     assert_eq!(legacy_exists, 0);
-    let dup_blobs: i64 = conn
+    let legacy_blobs_exists: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM world_kv_blobs WHERE blob_key IN ('corp_container_logs', 'wh_polarizations')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'world_kv_blobs'",
             [],
             |r| r.get(0),
         )
-        .expect("check cleaned world_kv_blobs");
-    assert_eq!(dup_blobs, 0);
+        .expect("check dropped legacy world_kv_blobs");
+    assert_eq!(legacy_blobs_exists, 0);
 
     // Newer `domain_rows` values win over legacy rows, while non-conflicting legacy rows migrate cleanly.
     assert_eq!(migrated.corp_member_limits.get(&98_000_001), Some(&500));

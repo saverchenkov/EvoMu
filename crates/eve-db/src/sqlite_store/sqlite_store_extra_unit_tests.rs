@@ -385,16 +385,18 @@ fn industry_market_pve_store_sync_load_and_rollback_all_blobs() {
     let mut fp = TableFingerprints::default();
     {
         let tx = conn.transaction().unwrap();
-        assert!(industry_market_pve_store::sync_d6_batch4(&tx, &snap, &mut fp).unwrap());
+        assert!(domain_rows::sync_industry_market_pve_domain_rows(&tx, &snap).unwrap());
+        assert!(industry_market_pve_store::sync_mining_ledger(&tx, &snap, &mut fp).unwrap());
         tx.commit().unwrap();
     }
     {
         let tx = conn.transaction().unwrap();
-        assert!(!industry_market_pve_store::sync_d6_batch4(&tx, &snap, &mut fp).unwrap());
+        assert!(!domain_rows::sync_industry_market_pve_domain_rows(&tx, &snap).unwrap());
+        assert!(!industry_market_pve_store::sync_mining_ledger(&tx, &snap, &mut fp).unwrap());
         tx.commit().unwrap();
     }
 
-    industry_market_pve_store::rollback_d6_batch4(&conn, &mut snap, &fp).unwrap();
+    industry_market_pve_store::rollback_industry_market_pve(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.mining_ledger.len(), 1);
 
     snap.module_online_states.clear();
@@ -402,7 +404,7 @@ fn industry_market_pve_store_sync_load_and_rollback_all_blobs() {
     snap.weapon_banks.clear();
     snap.paused_skill_queues.clear();
     snap.mining_ledger.clear();
-    industry_market_pve_store::rollback_d6_batch4(&conn, &mut snap, &fp).unwrap();
+    industry_market_pve_store::rollback_industry_market_pve(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.module_online_states.get(&100_000_005), Some(&true));
     assert!(snap.module_active_states.contains(&100_000_005));
     assert_eq!(snap.weapon_banks[&100_000_001][&100_000_005], vec![100_000_006]);

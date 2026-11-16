@@ -10,11 +10,14 @@ use crate::sqlite_store::corp_crimewatch_store::{
 };
 use crate::sqlite_store::domain_rows::{
     load_ledger_domain_rows, load_notes_lp_domain_rows, sync_ledger_domain_rows,
-    sync_notes_lp_domain_rows, DOMAIN_CHAR_LP_LOGS, DOMAIN_CRIMEWATCH,
-    DOMAIN_MARKET_TRANSACTIONS, DOMAIN_SOCIAL_BOOKMARKS, DOMAIN_SOCIAL_CHAT_CALENDAR,
-    DOMAIN_SOCIAL_CONTACTS_NOTES, DOMAIN_SOCIAL_MAIL, DOMAIN_WALLET_JOURNAL_META,
+    sync_notes_lp_domain_rows, DOMAIN_CHAR_LP_LOGS, DOMAIN_CORP_STRUCTURE_AND_KILLMAILS,
+    DOMAIN_CRIMEWATCH, DOMAIN_MARKET_TRANSACTIONS, DOMAIN_SOCIAL_BOOKMARKS,
+    DOMAIN_SOCIAL_CHAT_CALENDAR, DOMAIN_SOCIAL_CONTACTS_NOTES, DOMAIN_SOCIAL_MAIL,
+    DOMAIN_WALLET_JOURNAL_META,
 };
-use crate::sqlite_store::industry_market_pve_store::load_d6_batch4;
+use crate::sqlite_store::industry_market_pve_store::{
+    load_industry_market_pve_domain_rows, LEGACY_WORLD_KV_BLOBS_SQL,
+};
 use crate::sqlite_store::load::load_snapshot_from_sqlite;
 use crate::sqlite_store::quarantine::LoadContext;
 use crate::sqlite_store::notes_lp_sequence_store::{load_d6, sync_d6};
@@ -214,16 +217,18 @@ fn sqlite_store_malformed_json_and_unknown_kv_keys_coverage() {
         [KEY_CRIMEWATCH],
     )
     .expect("insert unknown and corrupt crimewatch kv");
+    conn.execute_batch(LEGACY_WORLD_KV_BLOBS_SQL)
+        .expect("create legacy world_kv_blobs");
     conn.execute(
         "INSERT OR REPLACE INTO world_kv_blobs (blob_key, blob_json) VALUES ('unknown_blob_key', '{}'), ('killmail_details', '{bad')",
         [],
     )
     .expect("insert unknown and corrupt world_kv_blobs");
     conn.execute(
-        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, '999', '{bad'), (?2, '999', '{bad'), (?3, '999', '{bad'), (?4, 'crimewatch_states/999', '{bad')",
-        params![DOMAIN_WALLET_JOURNAL_META, DOMAIN_MARKET_TRANSACTIONS, DOMAIN_CHAR_LP_LOGS, DOMAIN_CRIMEWATCH],
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, '999', '{bad'), (?2, '999', '{bad'), (?3, '999', '{bad'), (?4, 'crimewatch_states/999', '{bad'), (?5, 'killmail_details/999', '{bad')",
+        params![DOMAIN_WALLET_JOURNAL_META, DOMAIN_MARKET_TRANSACTIONS, DOMAIN_CHAR_LP_LOGS, DOMAIN_CRIMEWATCH, DOMAIN_CORP_STRUCTURE_AND_KILLMAILS],
     )
-    .expect("insert corrupt ledger, notes_lp, and crimewatch domain_rows");
+    .expect("insert corrupt ledger, notes_lp, crimewatch, and industry_market_pve domain_rows");
 
     let mut dst = WorldStateSnapshot::default();
     load_d6(&conn, &mut dst);
@@ -238,7 +243,13 @@ fn sqlite_store_malformed_json_and_unknown_kv_keys_coverage() {
     )
     .expect("quarantine corrupt corp_crimewatch rows");
     assert!(had_legacy_cw);
-    load_d6_batch4(&conn, &mut dst);
+    let had_legacy_imp = load_industry_market_pve_domain_rows(
+        &conn,
+        &mut dst,
+        &mut LoadContext::quarantine_in_memory(),
+    )
+    .expect("quarantine corrupt industry_market_pve rows");
+    assert!(had_legacy_imp);
     assert!(dst.killmail_details.is_empty());
     assert!(dst.crimewatch_states.is_empty());
     assert!(dst.wallet_journal_meta.is_empty());
@@ -250,7 +261,6 @@ fn sqlite_store_malformed_json_and_unknown_kv_keys_coverage() {
     for tbl in [
         "world_meta",
         "domain_rows",
-        "world_kv_blobs",
         "char_mining_ledger",
     ] {
         drop_optional_conn
@@ -285,7 +295,13 @@ fn sqlite_store_malformed_json_and_unknown_kv_keys_coverage() {
     )
     .expect("load social with dropped domain_rows");
     assert!(!had_optional_social);
-    load_d6_batch4(&drop_optional_conn, &mut empty_dst);
+    let had_optional_imp = load_industry_market_pve_domain_rows(
+        &drop_optional_conn,
+        &mut empty_dst,
+        &mut LoadContext::quarantine_in_memory(),
+    )
+    .expect("load industry_market_pve with dropped domain_rows");
+    assert!(!had_optional_imp);
 
     // Direct social error & quarantine check on legacy mail_labels table
     conn.execute_batch(LEGACY_D6_SOCIAL_SQL)
