@@ -1374,12 +1374,181 @@ async fn ship_macho_bind_dirt_timestamp_grace_survives_undock_and_slash_moveme_w
         assert_eq!(moveme_board_err.code, "BindAuthorizationDenied");
     }
 
+    // Part C (#1163): `/moveme 30000142` while docked in an Upwell structure (`station_id = None`,
+    // `structure_id = Some(struct_id)`) records departed-dock grace for stale `GetDirtTimestamp`
+    // and pre-bound `invbroker.GetSelfInvItem`, clears `structure_id` + ship `flag`, and blocks `Board`/`List`.
+    let struct_id = 1_001_896_944_936_i64;
+    let struct_sys = 30_000_144_u32;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: struct_sys,
+                name: "1DQ1-A Keepstar".into(),
+                position: [12_000_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = struct_sys;
+            ch.station_id = None;
+            ch.structure_id = Some(struct_id);
+            ch.active_ship_id = ship_1;
+        }
+        for id in [ship_1, ship_2] {
+            if let Some(ship) = snap.items.get_mut(&id) {
+                ship.location_id = struct_id;
+                ship.flag = InventoryFlag::Hangar;
+            }
+        }
+    });
+    sess.solar_system_id = Some(struct_sys);
+    sess.station_id = None;
+    sess.structure_id = Some(struct_id);
+    sess.ship_id = Some(ship_1);
+    ctx.invalidate_bound_objects_for_session_transition(
+        char_id,
+        struct_sys,
+        Some(struct_id),
+        "dock",
+    );
+
+    let pre_struct_inv_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(struct_id), PyRep::None],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("bind structure invbroker while docked");
+    let PyRep::Tuple(inv_bind_items) = pre_struct_inv_rep else {
+        panic!("expected (oid_rep, res) tuple from invbroker.MachoBindObject");
+    };
+    let pre_struct_inv_bid = unwrap_bound_id(&inv_bind_items[0]);
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "slash",
+        None,
+        "SlashCmd",
+        &[PyRep::String("/moveme 30000142".into())],
+        &kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("/moveme 30000142 from docked Upwell structure");
+    assert_eq!(sess.solar_system_id, Some(30_000_142));
+    assert!(sess.station_id.is_none());
+    assert!(sess.structure_id.is_none());
+    assert_eq!(
+        ctx.verify_bound_object(&sess, pre_struct_inv_bid)
+            .unwrap_err()
+            .code,
+        "InvalidBoundObject"
+    );
+
+    assert!(
+        ctx.dispatch_rpc(
+            &mut sess,
+            "machoNet",
+            Some(pre_struct_inv_bid),
+            "GetSelfInvItem",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .is_ok(),
+        "pre-bound structure GetSelfInvItem() must succeed within 30s grace"
+    );
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut sess,
+            "machoNet",
+            Some(pre_struct_inv_bid),
+            "List",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "InvalidBoundObject"
+    );
+
+    let struct_moveme_dirt = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![PyRep::Integer(struct_id), PyRep::Integer(65)]),
+                PyRep::Tuple(vec![
+                    PyRep::String("GetDirtTimestamp".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(ship_1)]),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("MachoBindObject(departed_structure) + GetDirtTimestamp immediately after /moveme");
+    let PyRep::Tuple(items) = struct_moveme_dirt else {
+        panic!("expected (oid_rep, dirt_ts) tuple");
+    };
+    assert!(items[1].as_i64().is_some());
+
+    let struct_moveme_board_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![PyRep::Integer(struct_id), PyRep::Integer(65)]),
+                PyRep::Tuple(vec![
+                    PyRep::String("Board".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(ship_2)]),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(struct_moveme_board_err.code, "BindAuthorizationDenied");
+
     assert!(
         !ctx.bound_objects
             .read()
             .unwrap()
             .values()
-            .any(|e| e.service == "ship" && (e.object_id == st_id || e.object_id == other_st.station_id)),
-        "station-scoped ship bindings must never linger in active bound_objects after transitions"
+            .any(|e| {
+                e.service == "ship"
+                    && (e.object_id == st_id
+                        || e.object_id == other_st.station_id
+                        || e.object_id == struct_id)
+            }),
+        "station-scoped or structure-scoped ship bindings must never linger in active bound_objects after transitions"
     );
 }
