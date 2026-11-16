@@ -4334,8 +4334,8 @@ async fn closed_gate_jump_does_not_load_destination() {
 }
 
 #[tokio::test]
-async fn gate_fx_durations_source_short_destination_long() {
-    // parity: feat:navigation.stargate-jump, destiny:OnSpecialFX, destiny:AddBalls2
+async fn gate_fx_v24_controller_events_and_cloak_isolation() {
+    // parity: feat:navigation.stargate-jump, destiny:OnSpecialFX, destiny:OnClientControllerEvent, destiny:AddBalls2
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let gate = pick_non_special_roundtrip_gate(&ctx);
@@ -4402,27 +4402,22 @@ async fn gate_fx_durations_source_short_destination_long() {
     let (dest_tick, dest_events, _) = dest_h.drain_observer_updates(dest_watcher_id).await.unwrap();
     let (_, pilot_dest_events, _) = dest_h.drain_observer_updates(ship_id).await.unwrap();
 
-    let src_gate_activity_ms = src_events.iter().find_map(|ev| match ev {
-        eve_destiny::DestinyEvent::OnSpecialFXTimed {
-            ball_id,
-            guid,
-            duration_ms,
-            ..
-        } if *ball_id == gate.stargate_id && guid == "effects.GateActivity" => *duration_ms,
-        _ => None,
-    });
-    assert_eq!(
-        src_gate_activity_ms,
-        Some(1.0),
-        "source grid must receive short 1.0 ms GateActivity FX, got {src_events:?}"
+    assert!(
+        !src_events.iter().any(|ev| matches!(
+            ev,
+            eve_destiny::DestinyEvent::OnSpecialFXTimed { guid, .. } if guid == "effects.GateActivity"
+        )),
+        "source grid must not emit broken V24 effects.GateActivity (#1080), got {src_events:?}"
     );
     assert!(src_events.iter().any(|ev| matches!(
         ev,
         eve_destiny::DestinyEvent::OnClientControllerEvent {
             ball_id,
+            target_id: Some(target),
             event_name,
-            ..
-        } if *ball_id == gate.stargate_id && event_name == "GateActivate"
+            value: 1,
+            delay: None,
+        } if *ball_id == gate.stargate_id && *target == ship_id && event_name == "GateActivate"
     )));
     assert!(src_events.iter().any(|ev| matches!(
         ev,
@@ -4434,23 +4429,33 @@ async fn gate_fx_durations_source_short_destination_long() {
         } if *ball_id == ship_id && guid == "effects.JumpOut" && info == &vec![gate.to_solar_system_id as i64]
     )));
 
-    let dest_gate_activity_ms = dest_events.iter().find_map(|ev| match ev {
-        eve_destiny::DestinyEvent::OnSpecialFXTimed {
-            ball_id,
-            guid,
-            duration_ms,
-            ..
-        } if *ball_id == gate.destination_stargate_id && guid == "effects.GateActivity" => {
-            *duration_ms
-        }
-        _ => None,
-    });
-    assert_eq!(
-        dest_gate_activity_ms,
-        Some(5_000.0),
-        "destination grid must receive long 5000.0 ms GateActivity FX, got {dest_events:?}"
+    assert!(
+        !dest_events.iter().any(|ev| matches!(
+            ev,
+            eve_destiny::DestinyEvent::OnSpecialFXTimed { guid, .. } if guid == "effects.GateActivity"
+        )),
+        "destination grid must not emit broken V24 effects.GateActivity (#1080), got {dest_events:?}"
     );
-    assert!(src_gate_activity_ms.unwrap() < dest_gate_activity_ms.unwrap());
+    assert!(
+        dest_events.iter().any(|ev| matches!(
+            ev,
+            eve_destiny::DestinyEvent::OnClientControllerEvent {
+                ball_id,
+                target_id: Some(target),
+                event_name,
+                value: 1,
+                delay: None,
+            } if *ball_id == gate.destination_stargate_id && *target == ship_id && event_name == "Arrival"
+        )),
+        "destination grid must receive V24 Arrival controller event on destination stargate, got {dest_events:?}"
+    );
+    assert!(
+        !pilot_dest_events.iter().any(|ev| matches!(
+            ev,
+            eve_destiny::DestinyEvent::OnSpecialFXTimed { guid, .. } if guid == "effects.GateActivity"
+        )),
+        "pilot destination queue must not contain effects.GateActivity (#1080): {pilot_dest_events:?}"
+    );
 
     // #871 + #1084: while arriving pilot holds gate cloak, destination grid watcher must NOT
     // receive AddBalls2(ship_id) or ship-targeted OnSpecialFX(ship_id).

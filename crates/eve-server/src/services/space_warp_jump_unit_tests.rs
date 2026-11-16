@@ -2160,3 +2160,281 @@ async fn stargate_jump_negative_paths_and_outbound_tidi_rebase_order() {
     assert!(rebase_idx < set_state_idx, "DoSimClockRebase must precede SetState");
     assert!(set_state_idx < warp_fin_idx, "non-clock notifications must follow SetState");
 }
+
+async fn run_stargate_jump_fx_probe(
+    gate_id: i64,
+    ship_id: i64,
+    sess_id: u64,
+) -> (
+    u32,
+    i64,
+    u32,
+    PyRep,
+    Vec<eve_destiny::DestinyEvent>,
+    Vec<eve_destiny::DestinyEvent>,
+    Vec<eve_destiny::DestinyEvent>,
+) {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let kw = HashMap::new();
+    let jump = ctx
+        .sde
+        .jumps
+        .get(&gate_id)
+        .cloned()
+        .unwrap_or_else(|| panic!("SDE missing jump for gate {gate_id}"));
+    let gate_type_id = ctx
+        .sde
+        .stargate_meta
+        .get(&gate_id)
+        .map(|(tid, _)| *tid)
+        .unwrap_or_else(|| panic!("SDE missing stargate_meta for gate {gate_id}"));
+
+    let src_handle = ctx.systems.get_or_spawn(jump.from_solar_system_id);
+    let dest_handle = ctx.systems.get_or_spawn(jump.to_solar_system_id);
+    let (_, src_gate_ball) = src_handle
+        .get_ball_snapshot(gate_id)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("missing source gate ball {gate_id}"));
+    let dest_gate_pos = ctx
+        .sde
+        .jumps
+        .get(&jump.destination_stargate_id)
+        .map(|j| j.position)
+        .unwrap_or_else(|| panic!("missing destination gate jump {}", jump.destination_stargate_id));
+
+    spawn_ship_in_space(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        jump.from_solar_system_id,
+        jump.position + DVec3::new(src_gate_ball.radius + 500.0, 0.0, 0.0),
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = jump.from_solar_system_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    let (_, ship_snap) = src_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+
+    let src_watcher_id = ship_id + 10_000;
+    let dest_watcher_id = ship_id + 20_000;
+    src_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: src_watcher_id,
+            position: jump.position + DVec3::new(src_gate_ball.radius + 1_500.0, 0.0, 0.0),
+            ..ship_snap.clone()
+        })
+        .await
+        .unwrap();
+    dest_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: dest_watcher_id,
+            position: dest_gate_pos + DVec3::new(15_000.0, 0.0, 0.0),
+            ..ship_snap
+        })
+        .await
+        .unwrap();
+    src_handle.push_set_state(src_watcher_id).await.unwrap();
+    dest_handle.push_set_state(dest_watcher_id).await.unwrap();
+    let _ = src_handle.drain_observer_updates(src_watcher_id).await.unwrap();
+    let _ = dest_handle.drain_observer_updates(dest_watcher_id).await.unwrap();
+
+    let mut sess = SessionState::new(sess_id);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(jump.from_solar_system_id);
+    sess.address = format!("tcp:127.0.0.1:{}", 46000 + (sess_id % 1000));
+
+    let reply = handle(
+        &ctx,
+        &mut sess,
+        None,
+        "beyonce",
+        "CmdStargateJump",
+        &[PyRep::Integer(gate_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("CmdStargateJump should succeed");
+
+    let (_, src_evs, _) = src_handle.drain_observer_updates(src_watcher_id).await.unwrap();
+    let (_, dest_evs, _) = dest_handle.drain_observer_updates(dest_watcher_id).await.unwrap();
+    let (_, pilot_dest_evs, _) = dest_handle.drain_observer_updates(ship_id).await.unwrap();
+    (
+        gate_type_id,
+        jump.destination_stargate_id,
+        jump.to_solar_system_id,
+        reply,
+        src_evs,
+        dest_evs,
+        pilot_dest_evs,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stargate_jump_never_emits_gate_activity_across_standard_and_damaged_gates() {
+    // parity: feat:navigation.stargate-jump, destiny:OnSpecialFX, destiny:OnClientControllerEvent, destiny:SetState
+    // Standard Maurasi -> Perimeter stargate (`type_id=16`) and damaged Maurasi -> Jita gate (`type_id=93250`).
+    for (gate_id, expected_gate_type_id, ship_id, sess_id) in [
+        (50_016_474_i64, 16_u32, 895_451_i64, 98_051_u64),
+        (50_000_802_i64, 93_250_u32, 895_452_i64, 98_052_u64),
+    ] {
+        let (
+            gate_type_id,
+            dest_gate_id,
+            to_solar_system_id,
+            reply,
+            src_evs,
+            dest_evs,
+            pilot_dest_evs,
+        ) = run_stargate_jump_fx_probe(gate_id, ship_id, sess_id).await;
+        assert_eq!(gate_type_id, expected_gate_type_id);
+        assert_eq!(
+            reply.dict_get("solarSystemID"),
+            Some(&PyRep::Integer(to_solar_system_id as i64))
+        );
+
+        for (label, evs) in [
+            ("source watcher", &src_evs),
+            ("destination watcher", &dest_evs),
+            ("pilot destination", &pilot_dest_evs),
+        ] {
+            let gate_activity_count = evs
+                .iter()
+                .filter(|ev| {
+                    matches!(
+                        ev,
+                        eve_destiny::DestinyEvent::OnSpecialFXTimed { guid, .. }
+                            if guid == "effects.GateActivity"
+                    )
+                })
+                .count();
+            assert_eq!(
+                gate_activity_count, 0,
+                "{label} for gate {gate_id} (type {expected_gate_type_id}) emitted broken GateActivity: {evs:?}"
+            );
+        }
+
+        let src_gate_activate: Vec<&str> = src_evs
+            .iter()
+            .filter_map(|ev| match ev {
+                eve_destiny::DestinyEvent::OnClientControllerEvent {
+                    ball_id,
+                    target_id: Some(target),
+                    event_name,
+                    value: 1,
+                    delay: None,
+                } if *ball_id == gate_id && *target == ship_id => Some(event_name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(src_gate_activate, vec!["GateActivate"]);
+
+        let src_jump_out_dests: Vec<Vec<i64>> = src_evs
+            .iter()
+            .filter_map(|ev| match ev {
+                eve_destiny::DestinyEvent::OnSpecialFXTimed {
+                    ball_id,
+                    target_id: Some(target),
+                    guid,
+                    graphic_info: Some(info),
+                    ..
+                } if *ball_id == ship_id && *target == gate_id && guid == "effects.JumpOut" => {
+                    Some(info.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(src_jump_out_dests, vec![vec![to_solar_system_id as i64]]);
+
+        let dest_arrival: Vec<&str> = dest_evs
+            .iter()
+            .filter_map(|ev| match ev {
+                eve_destiny::DestinyEvent::OnClientControllerEvent {
+                    ball_id,
+                    target_id: Some(target),
+                    event_name,
+                    value: 1,
+                    delay: None,
+                } if *ball_id == dest_gate_id && *target == ship_id => {
+                    Some(event_name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dest_arrival, vec!["Arrival"]);
+        assert_eq!(
+            dest_evs
+                .iter()
+                .filter(|ev| matches!(
+                    ev,
+                    eve_destiny::DestinyEvent::AddBalls2 { balls }
+                        if balls.iter().any(|b| b.id == ship_id)
+                ))
+                .count(),
+            0,
+            "destination watcher must not receive AddBalls2 while ship is gate-cloaked: {dest_evs:?}"
+        );
+        assert_eq!(
+            dest_evs
+                .iter()
+                .filter(|ev| matches!(
+                    ev,
+                    eve_destiny::DestinyEvent::OnSpecialFXTimed { ball_id, .. } if *ball_id == ship_id
+                ))
+                .count(),
+            0,
+            "destination watcher must not receive ship FX while ship is gate-cloaked: {dest_evs:?}"
+        );
+
+        assert_eq!(
+            pilot_dest_evs.len(),
+            3,
+            "unexpected pilot destination queue: {pilot_dest_evs:?}"
+        );
+        assert_eq!(
+            match &pilot_dest_evs[0] {
+                eve_destiny::DestinyEvent::SetState { observer_ball_id } => Some(*observer_ball_id),
+                _ => None,
+            },
+            Some(ship_id)
+        );
+        let pilot_arrival: Vec<&str> = pilot_dest_evs
+            .iter()
+            .filter_map(|ev| match ev {
+                eve_destiny::DestinyEvent::OnClientControllerEvent {
+                    ball_id,
+                    target_id: Some(target),
+                    event_name,
+                    value: 1,
+                    delay: None,
+                } if *ball_id == dest_gate_id && *target == ship_id => {
+                    Some(event_name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pilot_arrival, vec!["Arrival"]);
+        let pilot_jump_in_ms: Vec<Option<f64>> = pilot_dest_evs
+            .iter()
+            .filter_map(|ev| match ev {
+                eve_destiny::DestinyEvent::OnSpecialFXTimed {
+                    ball_id,
+                    guid,
+                    duration_ms,
+                    ..
+                } if *ball_id == ship_id && guid == "effects.JumpIn" => Some(*duration_ms),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pilot_jump_in_ms, vec![Some(5_000.0)]);
+    }
+}

@@ -933,22 +933,6 @@ async fn handle_cmd_stargate_jump(
         .emit_destiny_event(
             ship_id,
             eve_destiny::DestinyEvent::OnSpecialFXTimed {
-                ball_id: gate_id,
-                module_id: None,
-                target_id: None,
-                guid: "effects.GateActivity".into(),
-                start: true,
-                is_active: false,
-                duration_ms: Some(1.0),
-                repeat: None,
-                graphic_info: None,
-            },
-        )
-        .await;
-    let _ = old_handle
-        .emit_destiny_event(
-            ship_id,
-            eve_destiny::DestinyEvent::OnSpecialFXTimed {
                 ball_id: ship_id,
                 module_id: None,
                 target_id: Some(gate_id),
@@ -1102,21 +1086,19 @@ async fn handle_cmd_stargate_jump(
     let spawn_tick = new_handle.spawn_ball_with_meta(new_ball, combat_state, slim_meta).await.unwrap_or(0);
     // Destination grid watchers already have the destination stargate materialized and must not
     // receive `AddBalls2` or `OnSpecialFX(ship_id)` while the arriving ship holds gate cloak (#871/#1084).
-    // Emit the long 5000 ms gate arrival activity FX on the stargate to all grid observers, and
-    // deliver ship-bound `effects.JumpIn` solely to the pilot's observer queue (`SetState` prepends index 0).
+    // Notify destination gate grid observers via V24 `OnClientControllerEvent("Arrival")` on the
+    // stargate (avoiding `effects.GateActivity`, whose V24 `Jump.py` handler invokes removed
+    // `gateBall.Activate()`/`JumpArrival()` methods `#1080`), and deliver ship-bound `effects.JumpIn`
+    // solely to the pilot's observer queue (`SetState` prepends index 0).
     let _ = new_handle
         .emit_destiny_event(
             ship_id,
-            eve_destiny::DestinyEvent::OnSpecialFXTimed {
+            eve_destiny::DestinyEvent::OnClientControllerEvent {
                 ball_id: jump.destination_stargate_id,
-                module_id: None,
-                target_id: None,
-                guid: "effects.GateActivity".into(),
-                start: true,
-                is_active: false,
-                duration_ms: Some(5_000.0),
-                repeat: None,
-                graphic_info: None,
+                target_id: Some(ship_id),
+                event_name: "Arrival".into(),
+                value: 1,
+                delay: None,
             },
         )
         .await;

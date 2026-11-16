@@ -836,17 +836,51 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
         "RemoveBall wire action must be 1-arg (entityID,) per Destiny.xmlp:339-348"
     );
 
-    // Jumping ship in Perimeter (30000144) must have received SetState with all 34 Perimeter static balls + 1 player ship ball
+    // Jumping ship in Perimeter (30000144) must have received SetState (index 0) with all 34 Perimeter
+    // static balls + 1 player ship ball, followed by destination gate Arrival + JumpIn FX and NO GateActivity (#1080, #1151).
     let perim_handle = ctx.systems.get_or_spawn(30_000_144);
+    let dest_gate_id = ctx.sde.jumps[&50_001_249].destination_stargate_id;
     let (_t, perim_evs, perim_updates) = perim_handle
         .drain_observer_updates(ship_id)
         .await
         .expect("drain Perimeter SetState after jump");
-    assert_eq!(perim_evs.len(), 1);
+    assert_eq!(perim_evs.len(), 3, "unexpected Perimeter jump-in events: {perim_evs:?}");
     assert!(matches!(
         perim_evs[0],
         DestinyEvent::SetState { observer_ball_id } if observer_ball_id == ship_id
     ));
+    assert!(
+        !perim_evs.iter().any(|ev| matches!(
+            ev,
+            DestinyEvent::OnSpecialFXTimed { guid, .. } if guid == "effects.GateActivity"
+        )),
+        "destination jump-in must never emit deprecated effects.GateActivity (#1080): {perim_evs:?}"
+    );
+    assert!(
+        perim_evs.iter().any(|ev| matches!(
+            ev,
+            DestinyEvent::OnClientControllerEvent {
+                ball_id,
+                target_id: Some(target),
+                event_name,
+                value: 1,
+                delay: None,
+            } if *ball_id == dest_gate_id && *target == ship_id && event_name == "Arrival"
+        )),
+        "expected destination gate Arrival controller event for gate {dest_gate_id}, got {perim_evs:?}"
+    );
+    assert!(
+        perim_evs.iter().any(|ev| matches!(
+            ev,
+            DestinyEvent::OnSpecialFXTimed {
+                ball_id,
+                guid,
+                duration_ms: Some(d),
+                ..
+            } if *ball_id == ship_id && guid == "effects.JumpIn" && (*d - 5_000.0).abs() < f64::EPSILON
+        )),
+        "expected 5000.0 ms effects.JumpIn for jumping ship {ship_id}, got {perim_evs:?}"
+    );
     let PyRep::List(perim_list) = &perim_updates else {
         panic!("Expected DoDestinyUpdate list in Perimeter");
     };
