@@ -411,31 +411,34 @@ async fn emit_tick_batch_with_observability<W: AsyncWriteExt + Unpin>(
     batch: crate::outbound_sequencer::DestinyBatch,
     reason: &str,
 ) -> Result<()> {
-    let (frame_opt, events) = crate::outbound_sequencer::sequence_tick_with_events(wire_state, batch);
-    if !events.is_empty() {
-        record_sequencer_events(ctx, session.session_id, &events, None, false);
-    }
-    if let Some(frame) = frame_opt {
-        record_out_frame_observability(
-            ctx,
-            session.session_id,
-            MACHO_PROXY_NODE_ID,
-            client_id,
-            session.user_id,
-            wire_state.last_client_tick,
-            &frame,
-            None,
-            false,
-            reason,
-        );
-        write_out_frames(
-            writer,
-            MACHO_PROXY_NODE_ID,
-            client_id,
-            session.user_id,
-            &[frame],
-        )
-        .await?;
+    for sub_batch in crate::outbound_sequencer::normalize_server_destiny_batch(wire_state, batch) {
+        let (frame_opt, events) =
+            crate::outbound_sequencer::sequence_tick_with_events(wire_state, sub_batch);
+        if !events.is_empty() {
+            record_sequencer_events(ctx, session.session_id, &events, None, false);
+        }
+        if let Some(frame) = frame_opt {
+            record_out_frame_observability(
+                ctx,
+                session.session_id,
+                MACHO_PROXY_NODE_ID,
+                client_id,
+                session.user_id,
+                wire_state.last_client_tick,
+                &frame,
+                None,
+                false,
+                reason,
+            );
+            write_out_frames(
+                writer,
+                MACHO_PROXY_NODE_ID,
+                client_id,
+                session.user_id,
+                &[frame],
+            )
+            .await?;
+        }
     }
     Ok(())
 }
@@ -1130,7 +1133,7 @@ pub async fn execute_call_req_wire(
             method,
             "Board" | "BoardStoredShip" | "LeaveShip" | "Eject" | "AssembleShip"
         );
-    let sequence_outcome = crate::outbound_sequencer::sequence_with_events(
+    let sequence_outcome = crate::outbound_sequencer::sequence_server_rpc_with_events(
         wire.wire_state,
         RpcCompletion {
             call_id: 0,
@@ -2515,13 +2518,27 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
             );
             if effective_was_live {
                 for batch in pending_batches {
-                    let (frame_opt, tick_events) =
-                        crate::outbound_sequencer::sequence_tick_with_events(wire.wire_state, batch);
-                    if !tick_events.is_empty() {
-                        record_sequencer_events(ctx, session.session_id, &tick_events, None, false);
-                    }
-                    if let Some(frame) = frame_opt {
-                        out_frames.push(frame);
+                    for sub_batch in crate::outbound_sequencer::normalize_server_destiny_batch(
+                        wire.wire_state,
+                        batch,
+                    ) {
+                        let (frame_opt, tick_events) =
+                            crate::outbound_sequencer::sequence_tick_with_events(
+                                wire.wire_state,
+                                sub_batch,
+                            );
+                        if !tick_events.is_empty() {
+                            record_sequencer_events(
+                                ctx,
+                                session.session_id,
+                                &tick_events,
+                                None,
+                                false,
+                            );
+                        }
+                        if let Some(frame) = frame_opt {
+                            out_frames.push(frame);
+                        }
                     }
                 }
             }

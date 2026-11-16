@@ -77,6 +77,7 @@ pub struct SessionWireState {
     pub materialized: HashSet<BallId>,
     flight_recorder: Option<Arc<FlightRecorder>>,
     guard: SequencerGuardState,
+    synthetic_remove_floor: Option<(u32, u32)>,
 }
 
 impl SessionWireState {
@@ -92,6 +93,7 @@ impl SessionWireState {
             materialized: HashSet::new(),
             flight_recorder: None,
             guard: SequencerGuardState::default(),
+            synthetic_remove_floor: None,
         }
     }
 
@@ -206,6 +208,7 @@ impl SessionWireState {
         self.solar_system_id = solar_system_id;
         self.materialized.clear();
         self.guard.reset_epoch_state();
+        self.synthetic_remove_floor = None;
         self.destiny = DestinyStream::AwaitingSetState { epoch: ep };
         ep
     }
@@ -228,6 +231,7 @@ impl SessionWireState {
         self.in_space = false;
         self.materialized.clear();
         self.guard.reset_epoch_state();
+        self.synthetic_remove_floor = None;
         self.destiny = DestinyStream::Detached;
     }
 
@@ -445,11 +449,70 @@ pub enum DestinyDrain {
     None,
     /// Ballpark attach or re-attach with a `SetState` batch.
     Attach { epoch: u32, set_state: DestinyBatch },
+    /// Ballpark attach followed by deferred follow-up batches (e.g. same-tick `RemoveBall*` split to `stamp + 1`).
+    AttachSequence {
+        epoch: u32,
+        set_state: DestinyBatch,
+        followups: Vec<DestinyBatch>,
+    },
     /// Incremental post-RPC destiny updates in the current space epoch.
     Updates(DestinyBatch),
+    /// Multi-frame incremental post-RPC destiny updates ordered by stamp.
+    UpdatesSequence(Vec<DestinyBatch>),
     /// Space -> station/structure transition: optional pre-detach updates (e.g. `OnDockingAccepted`)
     /// emitted before `SessionChangeNotification` detaches the ballpark.
     Detach { pre_detach: Option<DestinyBatch> },
+    /// Multi-frame pre-detach updates emitted before `SessionChangeNotification` detaches the ballpark.
+    DetachSequence(Vec<DestinyBatch>),
+}
+
+impl DestinyDrain {
+    fn is_detach(&self) -> bool {
+        matches!(self, Self::Detach { .. } | Self::DetachSequence(_))
+    }
+
+    fn is_updates(&self) -> bool {
+        matches!(self, Self::Updates(_) | Self::UpdatesSequence(_))
+    }
+
+    fn is_attach(&self) -> bool {
+        matches!(self, Self::Attach { .. } | Self::AttachSequence { .. })
+    }
+
+    fn from_updates_batches(mut batches: Vec<DestinyBatch>) -> Self {
+        match batches.len() {
+            0 => Self::None,
+            1 => Self::Updates(batches.swap_remove(0)),
+            _ => Self::UpdatesSequence(batches),
+        }
+    }
+
+    fn from_attach_batches(epoch: u32, mut batches: Vec<DestinyBatch>) -> Self {
+        if batches.is_empty() {
+            Self::None
+        } else {
+            let set_state = batches.remove(0);
+            if batches.is_empty() {
+                Self::Attach { epoch, set_state }
+            } else {
+                Self::AttachSequence {
+                    epoch,
+                    set_state,
+                    followups: batches,
+                }
+            }
+        }
+    }
+
+    fn from_detach_batches(mut batches: Vec<DestinyBatch>) -> Self {
+        match batches.len() {
+            0 => Self::Detach { pre_detach: None },
+            1 => Self::Detach {
+                pre_detach: Some(batches.swap_remove(0)),
+            },
+            _ => Self::DetachSequence(batches),
+        }
+    }
 }
 
 /// A typed notification queued for delivery after the RPC response (`C-3`).
@@ -653,19 +716,27 @@ pub fn sequence_with_events(state: &mut SessionWireState, mut done: RpcCompletio
     //    tears down the space ballpark and transitions DestinyStream -> Detached.
     let mut pending_ticks = done.pending_tick_batches;
     let mut destiny_drain = done.destiny_drain;
-    let detach_frame = matches!(&destiny_drain, DestinyDrain::Detach { .. });
-    if matches!(destiny_drain, DestinyDrain::Detach { .. }) {
-        if let DestinyDrain::Detach { pre_detach } = std::mem::take(&mut destiny_drain) {
-            let pre_start = out.len();
-            for tick_batch in pending_ticks.drain(..) {
-                eval_and_push_destiny_batch(state, tick_batch, &mut out, &mut events);
-            }
-            if let Some(batch) = pre_detach {
-                eval_and_push_destiny_batch(state, batch, &mut out, &mut events);
-            }
-            finalize_pending_destiny_frames(state, &mut out, pre_start, &mut events);
-            state.leave_space();
+    let detach_frame = destiny_drain.is_detach();
+    if detach_frame {
+        let pre_start = out.len();
+        for tick_batch in pending_ticks.drain(..) {
+            eval_and_push_destiny_batch(state, tick_batch, &mut out, &mut events);
         }
+        match std::mem::take(&mut destiny_drain) {
+            DestinyDrain::Detach { pre_detach } => {
+                if let Some(batch) = pre_detach {
+                    eval_and_push_destiny_batch(state, batch, &mut out, &mut events);
+                }
+            }
+            DestinyDrain::DetachSequence(batches) => {
+                for batch in batches {
+                    eval_and_push_destiny_batch(state, batch, &mut out, &mut events);
+                }
+            }
+            _ => {}
+        }
+        finalize_pending_destiny_frames(state, &mut out, pre_start, &mut events);
+        state.leave_space();
     }
 
     // 2. SessionChangeNotification precedes CallRsp (#883, #928) so MachoNet's TransportReader
@@ -678,8 +749,8 @@ pub fn sequence_with_events(state: &mut SessionWireState, mut done: RpcCompletio
     let mut deferred_session_change = done.session_change_frame;
     let in_space_ship_switch_updates = deferred_session_change.is_some()
         && state.destiny.is_live()
-        && matches!(&destiny_drain, DestinyDrain::Updates(_));
-    let attach_before_call_rsp = matches!(&destiny_drain, DestinyDrain::Attach { .. });
+        && destiny_drain.is_updates();
+    let attach_before_call_rsp = destiny_drain.is_attach();
     if !in_space_ship_switch_updates {
         if done.item_change_before_session_change && !detach_frame {
             // Docked ship swap (#1085): emit hull `OnItemChange` before `shipid`
@@ -722,7 +793,7 @@ pub fn sequence_with_events(state: &mut SessionWireState, mut done: RpcCompletio
     }
 
     // 4. Buffered tick broadcasts followed by post-RPC direct destiny drain (ORD-3, #845, #1077 §A).
-    if matches!(destiny_drain, DestinyDrain::Attach { .. }) {
+    if destiny_drain.is_attach() {
         // When attaching to a ballpark, sim clock rebase notices must precede the first
         // ballpark frame (`pending_ticks` / `SetState`) so `michelle` initializes on the rebased clock (#1080, #1085).
         let mut clock_first = Vec::new();
@@ -753,14 +824,37 @@ pub fn sequence_with_events(state: &mut SessionWireState, mut done: RpcCompletio
                 state.in_space = true;
                 state.materialized.clear();
                 state.guard.reset_epoch_state();
+                state.synthetic_remove_floor = None;
                 state.destiny = DestinyStream::AwaitingSetState { epoch };
             }
             eval_and_push_destiny_batch(state, set_state, &mut out, &mut events);
         }
+        DestinyDrain::AttachSequence {
+            epoch,
+            set_state,
+            followups,
+        } => {
+            if matches!(state.destiny, DestinyStream::Detached) {
+                state.in_space = true;
+                state.materialized.clear();
+                state.guard.reset_epoch_state();
+                state.synthetic_remove_floor = None;
+                state.destiny = DestinyStream::AwaitingSetState { epoch };
+            }
+            eval_and_push_destiny_batch(state, set_state, &mut out, &mut events);
+            for batch in followups {
+                eval_and_push_destiny_batch(state, batch, &mut out, &mut events);
+            }
+        }
         DestinyDrain::Updates(batch) => {
             eval_and_push_destiny_batch(state, batch, &mut out, &mut events);
         }
-        DestinyDrain::None | DestinyDrain::Detach { .. } => {}
+        DestinyDrain::UpdatesSequence(batches) => {
+            for batch in batches {
+                eval_and_push_destiny_batch(state, batch, &mut out, &mut events);
+            }
+        }
+        DestinyDrain::None | DestinyDrain::Detach { .. } | DestinyDrain::DetachSequence(_) => {}
     }
     finalize_pending_destiny_frames(state, &mut out, step4_start, &mut events);
 
@@ -795,6 +889,532 @@ pub fn sequence_with_events(state: &mut SessionWireState, mut done: RpcCompletio
         frames: out,
         events,
     }
+}
+
+struct PendingNormalizeChunk {
+    has_set_state: bool,
+    wait_for_bubble: bool,
+    entries: Vec<PyRep>,
+}
+
+impl PendingNormalizeChunk {
+    fn followup() -> Self {
+        Self {
+            has_set_state: false,
+            wait_for_bubble: false,
+            entries: Vec::new(),
+        }
+    }
+}
+
+struct ServerDestinyNormalizer {
+    stream: DestinyStream,
+    sim_materialized: HashSet<BallId>,
+    active_add_stamps: std::collections::HashMap<BallId, u32>,
+    synthetic_remove_floor: Option<(u32, u32)>,
+}
+
+impl ServerDestinyNormalizer {
+    fn from_state(state: &SessionWireState) -> Self {
+        Self {
+            stream: state.destiny,
+            sim_materialized: state.materialized.clone(),
+            active_add_stamps: state.guard.last_addballs_stamp.clone(),
+            synthetic_remove_floor: state.synthetic_remove_floor,
+        }
+    }
+
+    fn normalize_batch(
+        &mut self,
+        mut batch: DestinyBatch,
+        allow_attach_from_detached: bool,
+    ) -> Vec<DestinyBatch> {
+        if batch.is_empty() {
+            return Vec::new();
+        }
+        if allow_attach_from_detached && matches!(self.stream, DestinyStream::Detached) {
+            self.stream = DestinyStream::AwaitingSetState { epoch: batch.epoch };
+            self.sim_materialized.clear();
+            self.active_add_stamps.clear();
+            self.synthetic_remove_floor = None;
+        }
+
+        let original_stamp = batch.stamp;
+        let mut clamped = false;
+        match self.stream {
+            DestinyStream::Detached => return vec![batch],
+            DestinyStream::AwaitingSetState { epoch } => {
+                if batch.epoch != epoch || !batch.has_set_state {
+                    return vec![batch];
+                }
+            }
+            DestinyStream::Live {
+                epoch,
+                set_state_stamp,
+                last_stamp,
+            } => {
+                if batch.epoch != epoch {
+                    return vec![batch];
+                }
+                if let Some((source_stamp, floor_stamp)) = self.synthetic_remove_floor {
+                    if original_stamp >= floor_stamp {
+                        self.synthetic_remove_floor = None;
+                    } else if original_stamp >= source_stamp {
+                        restamp_batch_entries(&mut batch, floor_stamp);
+                        clamped = true;
+                    }
+                }
+                if !batch.has_set_state
+                    && (batch.stamp < set_state_stamp || batch.stamp < last_stamp)
+                {
+                    return vec![batch];
+                }
+            }
+        }
+
+        let entries = match batch.updates {
+            PyRep::List(items) | PyRep::Tuple(items) => items,
+            other => {
+                batch.updates = other;
+                return vec![batch];
+            }
+        };
+
+        let initial_stamp = batch.stamp;
+        let mut pending: std::collections::BTreeMap<u32, PendingNormalizeChunk> =
+            std::collections::BTreeMap::new();
+        pending.insert(
+            initial_stamp,
+            PendingNormalizeChunk {
+                has_set_state: batch.has_set_state,
+                wait_for_bubble: batch.wait_for_bubble,
+                entries,
+            },
+        );
+
+        let mut emitted = Vec::new();
+        let mut max_deferred_stamp: Option<u32> = None;
+
+        while let Some((cur_stamp, mut chunk)) = pending.pop_first() {
+            let mut deferred_seen: HashSet<(u32, BallId)> = HashSet::new();
+            let mut idx = 0usize;
+            while idx < chunk.entries.len() {
+                let parsed = {
+                    let entry = &chunk.entries[idx];
+                    crate::sequencer_invariants::parse_destiny_entry(entry).map(
+                        |(st, act, args)| {
+                            (st, act.to_string(), args.cloned())
+                        },
+                    )
+                };
+                let Some((entry_stamp, action, args_opt)) = parsed else {
+                    idx += 1;
+                    continue;
+                };
+                let eff_stamp = entry_stamp.unwrap_or(cur_stamp);
+
+                if action == "SetState" {
+                    self.active_add_stamps.clear();
+                    self.sim_materialized.clear();
+                    if let Some(ref args) = args_opt {
+                        let mut added = Vec::new();
+                        crate::sequencer_invariants::extract_set_state_entities(args, &mut added);
+                        for id in added {
+                            self.sim_materialized.insert(id);
+                        }
+                    }
+                    idx += 1;
+                    continue;
+                }
+
+                if matches!(action.as_str(), "AddBalls2" | "AddBalls" | "AddBall") {
+                    if let Some(ref args) = args_opt {
+                        let mut added = Vec::new();
+                        crate::sequencer_invariants::extract_add_balls_entities(
+                            &action,
+                            args,
+                            &mut added,
+                        );
+                        for id in added {
+                            self.active_add_stamps.insert(id, eff_stamp);
+                            self.sim_materialized.insert(id);
+                        }
+                    }
+                    idx += 1;
+                    continue;
+                }
+
+                if matches!(action.as_str(), "RemoveBalls" | "RemoveBall") {
+                    let Some(ref args) = args_opt else {
+                        idx += 1;
+                        continue;
+                    };
+                    let mut removed = Vec::new();
+                    crate::sequencer_invariants::extract_remove_balls_entities(args, &mut removed);
+                    let mut stay_ids = Vec::new();
+                    let mut defer_pairs: Vec<(BallId, u32)> = Vec::new();
+                    for id in removed {
+                        if let Some(&add_stamp) = self.active_add_stamps.get(&id) {
+                            if eff_stamp <= add_stamp {
+                                let target = add_stamp
+                                    .saturating_add(1)
+                                    .max(cur_stamp.saturating_add(1));
+                                defer_pairs.push((id, target));
+                                continue;
+                            }
+                        }
+                        stay_ids.push(id);
+                    }
+                    if defer_pairs.is_empty() {
+                        for id in &stay_ids {
+                            self.sim_materialized.remove(id);
+                        }
+                        idx += 1;
+                        continue;
+                    }
+
+                    let later_adds = collect_later_added_ids(&chunk.entries[(idx + 1)..]);
+                    let has_readd_conflict =
+                        defer_pairs.iter().any(|(id, _)| later_adds.contains(id));
+
+                    if has_readd_conflict {
+                        let mut tail = chunk.entries.split_off(idx);
+                        let tail_added = collect_later_added_ids(&tail);
+                        let mut kept = Vec::with_capacity(chunk.entries.len());
+                        let mut promoted = Vec::new();
+                        for kept_entry in chunk.entries.drain(..) {
+                            let promote =
+                                crate::sequencer_invariants::extract_dependent_destiny_target_from_entry(
+                                    &kept_entry,
+                                )
+                                .is_some_and(|(_, target)| {
+                                    !self.sim_materialized.contains(&target)
+                                        && tail_added.contains(&target)
+                                });
+                            if promote {
+                                promoted.push(kept_entry);
+                            } else {
+                                kept.push(kept_entry);
+                            }
+                        }
+                        chunk.entries = kept;
+                        promoted.extend(tail);
+                        tail = promoted;
+
+                        let split_target = defer_pairs
+                            .iter()
+                            .map(|&(_, ts)| ts)
+                            .max()
+                            .unwrap_or_else(|| cur_stamp.saturating_add(1));
+                        max_deferred_stamp = Some(
+                            max_deferred_stamp.map_or(split_target, |prev| prev.max(split_target)),
+                        );
+                        for e in &mut tail {
+                            restamp_entry_stamp(e, split_target);
+                        }
+                        pending
+                            .entry(split_target)
+                            .or_insert_with(PendingNormalizeChunk::followup)
+                            .entries
+                            .extend(tail);
+                        break;
+                    }
+
+                    for id in &stay_ids {
+                        self.sim_materialized.remove(id);
+                    }
+                    let mut grouped: std::collections::BTreeMap<u32, Vec<BallId>> =
+                        std::collections::BTreeMap::new();
+                    for (id, target) in defer_pairs {
+                        if deferred_seen.insert((target, id)) {
+                            grouped.entry(target).or_default().push(id);
+                        }
+                    }
+
+                    if stay_ids.is_empty() && grouped.len() == 1 {
+                        let (&target_stamp, ids) = grouped.iter().next().unwrap();
+                        let mut removed_entry = chunk.entries.remove(idx);
+                        max_deferred_stamp = Some(
+                            max_deferred_stamp.map_or(target_stamp, |prev| prev.max(target_stamp)),
+                        );
+                        if ids.is_empty() {
+                            continue;
+                        }
+                        restamp_entry_stamp(&mut removed_entry, target_stamp);
+                        pending
+                            .entry(target_stamp)
+                            .or_insert_with(PendingNormalizeChunk::followup)
+                            .entries
+                            .push(removed_entry);
+                        continue;
+                    }
+
+                    if stay_ids.is_empty() {
+                        chunk.entries.remove(idx);
+                    } else {
+                        chunk.entries[idx] = make_remove_balls_entry(cur_stamp, &stay_ids);
+                        idx += 1;
+                    }
+
+                    let single_remove_action = action == "RemoveBall";
+                    for (target_stamp, ids) in grouped {
+                        if ids.is_empty() {
+                            continue;
+                        }
+                        max_deferred_stamp = Some(
+                            max_deferred_stamp.map_or(target_stamp, |prev| prev.max(target_stamp)),
+                        );
+                        let deferred_entry = if single_remove_action && ids.len() == 1 {
+                            make_remove_ball_entry(target_stamp, ids[0])
+                        } else {
+                            make_remove_balls_entry(target_stamp, &ids)
+                        };
+                        pending
+                            .entry(target_stamp)
+                            .or_insert_with(PendingNormalizeChunk::followup)
+                            .entries
+                            .push(deferred_entry);
+                    }
+                    continue;
+                }
+
+                idx += 1;
+            }
+
+            if !chunk.entries.is_empty() {
+                match self.stream {
+                    DestinyStream::AwaitingSetState { epoch } => {
+                        self.stream = DestinyStream::Live {
+                            epoch,
+                            set_state_stamp: cur_stamp,
+                            last_stamp: cur_stamp,
+                        };
+                    }
+                    DestinyStream::Live {
+                        epoch,
+                        set_state_stamp,
+                        last_stamp,
+                    } => {
+                        let new_set_state = if chunk.has_set_state {
+                            cur_stamp
+                        } else {
+                            set_state_stamp
+                        };
+                        self.stream = DestinyStream::Live {
+                            epoch,
+                            set_state_stamp: new_set_state,
+                            last_stamp: if chunk.has_set_state {
+                                last_stamp.max(cur_stamp)
+                            } else {
+                                cur_stamp
+                            },
+                        };
+                    }
+                    DestinyStream::Detached => {}
+                }
+                emitted.push(DestinyBatch {
+                    epoch: batch.epoch,
+                    stamp: cur_stamp,
+                    has_set_state: chunk.has_set_state,
+                    updates: PyRep::List(chunk.entries),
+                    wait_for_bubble: chunk.wait_for_bubble,
+                });
+            }
+        }
+
+        if let Some(floor) = max_deferred_stamp {
+            let new_src = match self.synthetic_remove_floor {
+                Some((prev_src, _)) => prev_src.min(original_stamp),
+                None => original_stamp,
+            };
+            let new_floor = match self.synthetic_remove_floor {
+                Some((_, prev_floor)) => prev_floor.max(floor),
+                None => floor,
+            };
+            self.synthetic_remove_floor = Some((new_src, new_floor));
+        } else if clamped && emitted.is_empty() {
+            // Preserve floor if nothing emitted.
+        }
+
+        emitted
+    }
+}
+
+fn restamp_set_state_args(args: &mut PyRep, new_stamp: u32) {
+    match args {
+        PyRep::KeyVal(map) => {
+            if let Some(v) = map.get_mut("stamp") {
+                if v.as_i64().is_some() {
+                    *v = PyRep::Integer(i64::from(new_stamp));
+                }
+            }
+        }
+        PyRep::Dict(entries) => {
+            for (k, v) in entries.iter_mut() {
+                if k.as_str() == Some("stamp") && v.as_i64().is_some() {
+                    *v = PyRep::Integer(i64::from(new_stamp));
+                }
+            }
+        }
+        PyRep::Tuple(items) | PyRep::List(items) => {
+            for item in items {
+                restamp_set_state_args(item, new_stamp);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn restamp_entry_stamp(entry: &mut PyRep, new_stamp: u32) {
+    let outer = match entry {
+        PyRep::Tuple(items) | PyRep::List(items) if items.len() >= 2 => items,
+        _ => return,
+    };
+    if outer[0].as_i64().is_some() {
+        outer[0] = PyRep::Integer(i64::from(new_stamp));
+    }
+    if let PyRep::Tuple(action_pair) | PyRep::List(action_pair) = &mut outer[1] {
+        if action_pair.first().and_then(PyRep::as_str) == Some("SetState") {
+            if let Some(args) = action_pair.get_mut(1) {
+                restamp_set_state_args(args, new_stamp);
+            }
+        }
+    }
+}
+
+fn restamp_batch_entries(batch: &mut DestinyBatch, new_stamp: u32) {
+    let prev_stamp = batch.stamp;
+    batch.stamp = new_stamp;
+    if let PyRep::List(items) | PyRep::Tuple(items) = &mut batch.updates {
+        for entry in items {
+            let matches_batch = crate::sequencer_invariants::parse_destiny_entry(entry)
+                .is_some_and(|(st, _, _)| st.is_none_or(|s| s == prev_stamp || s < new_stamp));
+            if matches_batch {
+                restamp_entry_stamp(entry, new_stamp);
+            }
+        }
+    }
+}
+
+fn collect_later_added_ids(entries: &[PyRep]) -> HashSet<BallId> {
+    let mut ids = HashSet::new();
+    let mut tmp = Vec::new();
+    for entry in entries {
+        let Some((_, action, Some(args))) = crate::sequencer_invariants::parse_destiny_entry(entry)
+        else {
+            continue;
+        };
+        tmp.clear();
+        if action == "SetState" {
+            crate::sequencer_invariants::extract_set_state_entities(args, &mut tmp);
+        } else if matches!(action, "AddBalls2" | "AddBalls" | "AddBall") {
+            crate::sequencer_invariants::extract_add_balls_entities(action, args, &mut tmp);
+        }
+        ids.extend(tmp.iter().copied());
+    }
+    ids
+}
+
+fn make_remove_ball_entry(stamp: u32, ball_id: BallId) -> PyRep {
+    PyRep::Tuple(vec![
+        PyRep::Integer(i64::from(stamp)),
+        PyRep::Tuple(vec![
+            PyRep::String("RemoveBall".into()),
+            PyRep::Tuple(vec![PyRep::Integer(ball_id)]),
+        ]),
+    ])
+}
+
+fn make_remove_balls_entry(stamp: u32, ball_ids: &[BallId]) -> PyRep {
+    PyRep::Tuple(vec![
+        PyRep::Integer(i64::from(stamp)),
+        PyRep::Tuple(vec![
+            PyRep::String("RemoveBalls".into()),
+            PyRep::Tuple(vec![PyRep::List(
+                ball_ids.iter().map(|&id| PyRep::Integer(id)).collect(),
+            )]),
+        ]),
+    ])
+}
+
+/// Normalizes a server-generated tick `DestinyBatch` for live emission, deferring any
+/// `RemoveBall` / `RemoveBalls` whose `stamp <= last_addballs_stamp` into `stamp + 1`
+/// and clamping subsequent same-server-tick updates cleanly up to the deferred stamp floor.
+pub fn normalize_server_destiny_batch(
+    state: &mut SessionWireState,
+    batch: DestinyBatch,
+) -> Vec<DestinyBatch> {
+    let mut norm = ServerDestinyNormalizer::from_state(state);
+    let out = norm.normalize_batch(batch, false);
+    if !out.is_empty() {
+        state.synthetic_remove_floor = norm.synthetic_remove_floor;
+    }
+    out
+}
+
+/// Normalizes a server-generated `RpcCompletion`'s destiny batches (`pending_tick_batches` +
+/// `destiny_drain`) so `INV_REMOVE_AFTER_ADDBALLS` and stamp monotonicity hold across same-tick
+/// lifecycle sequences, then runs [`sequence_with_events`].
+pub fn sequence_server_rpc_with_events(
+    state: &mut SessionWireState,
+    mut done: RpcCompletion,
+) -> SequenceOutcome {
+    let mut norm = ServerDestinyNormalizer::from_state(state);
+
+    let mut normalized_ticks = Vec::with_capacity(done.pending_tick_batches.len());
+    for tick_batch in std::mem::take(&mut done.pending_tick_batches) {
+        normalized_ticks.extend(norm.normalize_batch(tick_batch, false));
+    }
+    done.pending_tick_batches = normalized_ticks;
+
+    let is_detach = done.destiny_drain.is_detach();
+    done.destiny_drain = match std::mem::take(&mut done.destiny_drain) {
+        DestinyDrain::None => DestinyDrain::None,
+        DestinyDrain::Updates(batch) => {
+            DestinyDrain::from_updates_batches(norm.normalize_batch(batch, false))
+        }
+        DestinyDrain::UpdatesSequence(batches) => {
+            let mut out = Vec::new();
+            for b in batches {
+                out.extend(norm.normalize_batch(b, false));
+            }
+            DestinyDrain::from_updates_batches(out)
+        }
+        DestinyDrain::Attach { epoch, set_state } => {
+            DestinyDrain::from_attach_batches(epoch, norm.normalize_batch(set_state, true))
+        }
+        DestinyDrain::AttachSequence {
+            epoch,
+            set_state,
+            followups,
+        } => {
+            let mut out = norm.normalize_batch(set_state, true);
+            for b in followups {
+                out.extend(norm.normalize_batch(b, false));
+            }
+            DestinyDrain::from_attach_batches(epoch, out)
+        }
+        DestinyDrain::Detach { pre_detach } => {
+            let out = match pre_detach {
+                Some(b) => norm.normalize_batch(b, false),
+                None => Vec::new(),
+            };
+            DestinyDrain::from_detach_batches(out)
+        }
+        DestinyDrain::DetachSequence(batches) => {
+            let mut out = Vec::new();
+            for b in batches {
+                out.extend(norm.normalize_batch(b, false));
+            }
+            DestinyDrain::from_detach_batches(out)
+        }
+    };
+
+    if !is_detach {
+        state.synthetic_remove_floor = norm.synthetic_remove_floor;
+    }
+
+    sequence_with_events(state, done)
 }
 
 /// Sequences a standalone 1 Hz tick broadcast batch against `SessionWireState` (`ORD-3`, `#845`, `#1077 §A`).
@@ -1460,11 +2080,15 @@ mod tests {
         }
     }
 
-    fn named_update(stamp: u32, action: &str, args: Vec<PyRep>) -> PyRep {
-        PyRep::List(vec![PyRep::Tuple(vec![
+    fn named_entry(stamp: u32, action: &str, args: Vec<PyRep>) -> PyRep {
+        PyRep::Tuple(vec![
             PyRep::Integer(i64::from(stamp)),
             PyRep::Tuple(vec![PyRep::String(action.into()), PyRep::Tuple(args)]),
-        ])])
+        ])
+    }
+
+    fn named_update(stamp: u32, action: &str, args: Vec<PyRep>) -> PyRep {
+        PyRep::List(vec![named_entry(stamp, action, args)])
     }
 
     #[test]
@@ -1774,5 +2398,172 @@ mod tests {
         let rsp_pos = frames.iter().position(|f| matches!(f, OutFrame::CallRsp { call_id: 20, .. })).unwrap();
         let trailing_pos = frames.iter().position(|f| matches!(f, OutFrame::Notification { event, .. } if event == "OnCharNoLongerInStation")).unwrap();
         assert!(sess_pos < rebase_pos && rebase_pos < set_state_pos && set_state_pos < rsp_pos && rsp_pos < trailing_pos);
+    }
+
+    #[test]
+    fn server_normalizer_splits_same_tick_add_then_remove_preserving_strict_invariants() {
+        let mut wire = SessionWireState::new(98_113_501, 9101);
+        let ep = wire.enter_space(Some(30_000_142));
+
+        let init = DestinyBatch::new(
+            ep,
+            10,
+            true,
+            named_update(10, "SetState", vec![PyRep::keyval([("ego", PyRep::Integer(1))])]),
+        );
+        assert!(sequence_tick(&mut wire, init).is_some());
+
+        // Same-stamp AddBalls2(202) + OnDamageStateChange(202) + RemoveBall(202) at stamp 11.
+        let batch = DestinyBatch::new(
+            ep,
+            11,
+            false,
+            PyRep::List(vec![
+                named_entry(11, "AddBalls2", vec![PyRep::Integer(202)]),
+                named_entry(11, "OnDamageStateChange", vec![PyRep::Integer(202), PyRep::Integer(0)]),
+                named_entry(11, "RemoveBall", vec![PyRep::Integer(202)]),
+            ]),
+        );
+        let split = normalize_server_destiny_batch(&mut wire, batch);
+        assert_eq!(split.len(), 2, "same-tick Add+Remove must split into S and S+1");
+        assert_eq!(split[0].stamp, 11);
+        assert_eq!(split[1].stamp, 12);
+
+        let mut frames = Vec::new();
+        for b in split {
+            let (frame_opt, _) = sequence_tick_with_events(&mut wire, b);
+            if let Some(f) = frame_opt {
+                frames.push(f);
+            }
+        }
+        assert_eq!(frames.len(), 2);
+        assert!(!wire.materialized.contains(&202));
+        assert_eq!(wire.sequencer_counters().invariant_violations, 0);
+
+        // Next update still arriving at server tick 11 must clamp up to 12 instead of dropping as a jolt.
+        let same_tick_followup = DestinyBatch::new(
+            ep,
+            11,
+            false,
+            named_update(11, "AddBalls2", vec![PyRep::Integer(303)]),
+        );
+        let followup_batches = normalize_server_destiny_batch(&mut wire, same_tick_followup);
+        assert_eq!(followup_batches.len(), 1);
+        assert_eq!(followup_batches[0].stamp, 12);
+        let f_followup = sequence_tick(&mut wire, followup_batches.into_iter().next().unwrap())
+            .expect("clamped same-server-tick followup must not drop as jolt");
+        match f_followup {
+            OutFrame::DoDestinyUpdate { stamp, .. } => assert_eq!(stamp, 12),
+            other => panic!("expected DoDestinyUpdate, got {other:?}"),
+        }
+        assert_eq!(wire.sequencer_counters().prevented_jolts, 0);
+
+        // Genuine regression below source tick 11 (< 11) must still trigger prevented_jolt drop.
+        let genuine_backstep = DestinyBatch::new(
+            ep,
+            10,
+            false,
+            named_update(10, "Stop", vec![PyRep::Integer(303)]),
+        );
+        for b in normalize_server_destiny_batch(&mut wire, genuine_backstep) {
+            assert!(sequence_tick(&mut wire, b).is_none());
+        }
+        assert_eq!(wire.sequencer_counters().prevented_jolts, 1);
+    }
+
+    #[test]
+    fn server_normalizer_partitions_remove_balls_and_handles_readd_and_detach() {
+        let mut wire = SessionWireState::new(98_113_502, 9102);
+        let ep = wire.enter_space(Some(30_000_142));
+
+        // Attach batch containing SetState(ego=1) + AddBalls2(202) + RemoveBall(202) at stamp 1.
+        let attach_outcome = sequence_server_rpc_with_events(
+            &mut wire,
+            RpcCompletion {
+                call_id: 1,
+                response_frame: PyRep::Integer(1),
+                session_change_frame: None,
+                pending_tick_batches: vec![],
+                destiny_drain: DestinyDrain::Attach {
+                    epoch: ep,
+                    set_state: DestinyBatch::new(
+                        ep,
+                        1,
+                        true,
+                        PyRep::List(vec![
+                            named_entry(1, "SetState", vec![PyRep::keyval([("ego", PyRep::Integer(1))])]),
+                            named_entry(1, "AddBalls2", vec![PyRep::Integer(202)]),
+                            named_entry(1, "RemoveBall", vec![PyRep::Integer(202)]),
+                        ]),
+                    ),
+                },
+                notifications: vec![],
+                item_change_before_session_change: false,
+            },
+        );
+        let stamps: Vec<u32> = attach_outcome
+            .frames
+            .iter()
+            .filter_map(|f| match f {
+                OutFrame::DoDestinyUpdate { stamp, .. } => Some(*stamp),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stamps, vec![1, 2]);
+        assert!(!wire.materialized.contains(&202));
+
+        // At stamp 10, materialize 555 cleanly.
+        assert!(sequence_tick(
+            &mut wire,
+            DestinyBatch::new(ep, 10, false, named_update(10, "AddBalls2", vec![PyRep::Integer(555)])),
+        )
+        .is_some());
+
+        // At stamp 12, partial RemoveBalls([555, 666]) after AddBalls2(666) must keep 555 at 12
+        // and defer only 666 to 13, while Add->Remove->Add for 777 preserves causal re-add at 13.
+        let outcome = sequence_server_rpc_with_events(
+            &mut wire,
+            RpcCompletion {
+                call_id: 2,
+                response_frame: PyRep::Integer(2),
+                session_change_frame: None,
+                pending_tick_batches: vec![DestinyBatch::new(
+                    ep,
+                    12,
+                    false,
+                    PyRep::List(vec![
+                        named_entry(12, "AddBalls2", vec![PyRep::Integer(666)]),
+                        make_remove_balls_entry(12, &[555, 666]),
+                        named_entry(12, "AddBalls2", vec![PyRep::Integer(777)]),
+                        make_remove_ball_entry(12, 777),
+                        named_entry(12, "AddBalls2", vec![PyRep::Integer(777)]),
+                    ]),
+                )],
+                destiny_drain: DestinyDrain::Detach {
+                    pre_detach: Some(DestinyBatch::new(
+                        ep,
+                        12,
+                        false,
+                        PyRep::List(vec![
+                            named_entry(12, "AddBalls2", vec![PyRep::Integer(888)]),
+                            make_remove_ball_entry(12, 888),
+                        ]),
+                    )),
+                },
+                notifications: vec![],
+                item_change_before_session_change: false,
+            },
+        );
+        let destiny_stamps: Vec<u32> = outcome
+            .frames
+            .iter()
+            .filter_map(|f| match f {
+                OutFrame::DoDestinyUpdate { stamp, .. } => Some(*stamp),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(destiny_stamps, vec![12, 13, 14]);
+        assert!(matches!(wire.destiny, DestinyStream::Detached));
+        assert_eq!(wire.sequencer_counters().invariant_violations, 0);
     }
 }
