@@ -559,3 +559,4 @@ mod login_space_bootstrap_sequence;
 mod client_shape_pins;
 mod sequencer_gate_validator;
 mod session_ordering_persistence;
+mod ops_observability_1087;

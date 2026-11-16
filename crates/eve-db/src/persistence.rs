@@ -257,8 +257,21 @@ impl WorldStateWalDelta {
             };
         }
 
+        let hot_persisted_dirty = old.next_entity_id != new.next_entity_id
+            || old.wal_seq != new.wal_seq
+            || old.service_state_blobs != new.service_state_blobs
+            || old.characters != new.characters
+            || old.skills != new.skills
+            || old.skill_queues != new.skill_queues
+            || old.items != new.items
+            || old.market_orders != new.market_orders
+            || old.wallet_journal != new.wallet_journal
+            || old.contracts != new.contracts
+            || old.system_states != new.system_states
+            || old.committed_idempotency_keys != new.committed_idempotency_keys;
+
         let mut delta = Self {
-            dirty: old != new,
+            dirty: hot_persisted_dirty,
             seq: new.wal_seq,
             next_entity_id: new.next_entity_id,
             ..Default::default()
@@ -540,6 +553,8 @@ impl WorldRepository {
     ) -> Self {
         let floor = entity_block.max(working.next_entity_id).max(200_000_000);
         let initial_seq = working.wal_seq;
+        let entity_ids = std::sync::Arc::new(EntityIdAllocator::new(floor, entity_block));
+        entity_ids.replace_referenced_ids(working.collect_referenced_entity_ids());
         let published = std::sync::Arc::new(working.clone());
         Self {
             instance_id: Self::next_instance_id(),
@@ -550,7 +565,7 @@ impl WorldRepository {
                 fp,
                 seq: initial_seq,
             }),
-            entity_ids: std::sync::Arc::new(EntityIdAllocator::new(floor, entity_block)),
+            entity_ids,
             sqlite_path,
             auth_runtime: RankedRwLock::new(auth_runtime),
             clock: RankedRwLock::new(std::sync::Arc::new(
@@ -591,6 +606,12 @@ impl WorldRepository {
     /// Returns the total number of non-empty transactions committed by [`Self::tx`].
     pub fn tx_commit_count(&self) -> u64 {
         self.tx_commit_count.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Returns the number of uncompacted WAL delta records pending snapshot checkpoint.
+    pub fn pending_wal_records_count(&self) -> usize {
+        self.pending_wal_records
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Registers a post-commit listener invoked inside the writer critical section in commit order.
@@ -1103,6 +1124,8 @@ impl WorldRepository {
             .map_err(|e| e.to_string())?;
         self.entity_ids
             .reset_from_load(snap.next_entity_id, snap.next_entity_id);
+        self.entity_ids
+            .replace_referenced_ids(snap.collect_referenced_entity_ids());
         writer.seq = snap.wal_seq;
         writer.working = snap;
         *self.published.write().unwrap_or_else(|e| e.into_inner()) =
@@ -1247,7 +1270,8 @@ impl WorldRepository {
             clock_offset_secs.is_some() || unrebased_clock_offset_secs.is_some();
         let ephemeral_changed =
             before.transient_item_attributes != writer.working.transient_item_attributes
-                || before.sessions != writer.working.sessions;
+                || before.sessions != writer.working.sessions
+                || before.transient_items != writer.working.transient_items;
 
         if did_mutate || has_clock_offset {
             let mut staged_cold_fp = None;
@@ -1375,6 +1399,11 @@ impl WorldRepository {
                         if changes.cold_domains.crimewatch_changed {
                             self.bump_combat_state_epoch();
                         }
+                        if !changes.characters.is_empty() || changes.cold_domains.part1_cold {
+                            let _ = self
+                                .entity_ids
+                                .commit_counter_sync(&writer.conn, writer.working.next_entity_id);
+                        }
                     } else if ephemeral_changed {
                         *self.published.write().unwrap_or_else(|e| e.into_inner()) =
                             std::sync::Arc::new(writer.working.clone());
@@ -1482,6 +1511,20 @@ impl WorldRepository {
     /// same-thread deadlocks from synchronous callbacks such as `SystemHandle::try_remove_ball`.
     pub fn is_write_locked_by_current_thread(&self) -> bool {
         DB_WRITE_LOCK_DEPTH.with(|d| d.get() > 0)
+    }
+
+    /// Synchronously commits the current entity ID counter and block high-water mark to SQLite
+    /// `world_meta` (`#1087`).
+    pub fn commit_entity_counter_sync(&self) -> Result<i64, String> {
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let floor = writer
+            .working
+            .next_entity_id
+            .max(self.entity_ids.current())
+            .max(200_000_000);
+        let committed = self.entity_ids.commit_counter_sync(&writer.conn, floor)?;
+        writer.working.next_entity_id = writer.working.next_entity_id.max(committed);
+        Ok(committed)
     }
 
     /// Thin wrapper over [`Self::tx`] preserving [`FromWalError`] compatibility for existing

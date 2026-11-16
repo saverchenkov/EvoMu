@@ -149,10 +149,8 @@ impl WorldRepository {
                 ));
             }
 
-            guard.next_entity_id += 1;
-            let char_id = guard.next_entity_id;
-            guard.next_entity_id += 1;
-            let ship_id = guard.next_entity_id;
+            let char_id = guard.alloc_entity_id();
+            let ship_id = guard.alloc_entity_id();
 
             let (sys_id, station_id, const_id, reg_id) = if let Some(target_sys_id) = qa_starter_system_id {
                 if let Some(target_sys) = sde.solar_systems.get(&target_sys_id) {
@@ -955,8 +953,7 @@ pub fn respawn_character_at_home_station_in_snap(
         cap.version += 1;
         (cid, cap.clone())
     } else {
-        guard.next_entity_id += 1;
-        let cid = guard.next_entity_id;
+        let cid = guard.alloc_entity_id();
         let cap = InventoryItemRecord {
             item_id: cid,
             type_id: 670, // Capsule

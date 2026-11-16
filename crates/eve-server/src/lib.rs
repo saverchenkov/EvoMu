@@ -28,6 +28,9 @@ pub mod starter_characters;
 pub mod static_data;
 pub mod system_actor;
 pub mod world_seeder;
+pub mod lifecycle;
+pub mod ops_telemetry;
+pub mod warn_limiter;
 
 pub use services::inventory_fitting::{dna_to_fitting, fitting_to_dna, saved_fitting_to_dna};
 

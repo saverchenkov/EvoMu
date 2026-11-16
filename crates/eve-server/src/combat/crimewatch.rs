@@ -663,10 +663,7 @@ impl CrimeWatchDirector {
             let crim_pos = ship_ball.position;
 
             // 1. Spawn real CONCORD Police Battleship in the ballpark (completely invulnerable to damage)
-            let concord_ball_id = ctx.db.with_mut_snapshot(|snap| {
-                snap.next_entity_id += 1;
-                snap.next_entity_id
-            });
+            let concord_ball_id = ctx.db.with_mut_snapshot(|snap| snap.alloc_entity_id());
             let concord_pos = crim_pos + DVec3::new(200.0, 0.0, 200.0);
             let (c_mass, c_radius, c_max_vel, c_inertia) = ctx
                 .sde
@@ -827,10 +824,7 @@ impl CrimeWatchDirector {
                 if let Some(existing_id) = existing_kr {
                     existing_id
                 } else {
-                    let kr_id = ctx.db.with_mut_snapshot(|snap| {
-                        snap.next_entity_id += 1;
-                        snap.next_entity_id
-                    });
+                    let kr_id = ctx.db.with_mut_snapshot(|snap| snap.alloc_entity_id());
                     crate::services::combat_crimewatch::create_kill_right(
                         ctx,
                         kr_id,

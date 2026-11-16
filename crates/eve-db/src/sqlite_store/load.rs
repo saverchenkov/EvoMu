@@ -1,5 +1,10 @@
 //! Relational SQLite world state loader.
 
+use crate::snapshot_ext::{decode_owner_note_entity_id, LpRewardLogEntry};
+use crate::sqlite_store::domain_rows::{
+    DOMAIN_CHAR_LP_LOGS, DOMAIN_MARKET_TRANSACTIONS, DOMAIN_OWNER_NOTES,
+    DOMAIN_WALLET_JOURNAL_META,
+};
 use crate::sqlite_store::fingerprints::{compute_fingerprints, TableFingerprints};
 use crate::sqlite_store::quarantine::{
     default_quarantine_unreadable, row_col_string, row_composite_key_string, row_payload_summary,
@@ -17,10 +22,185 @@ pub fn load_snapshot_from_sqlite(
     load_snapshot_from_sqlite_with_options(conn, default_quarantine_unreadable())
 }
 
+const ENTITY_ID_SQLITE_TABLES: &[(&str, &str)] = &[
+    ("characters", "character_id"),
+    ("items", "item_id"),
+    ("structures", "structure_id"),
+    ("saved_fittings", "fitting_id"),
+    ("market_orders", "order_id"),
+    ("wallet_journal", "entry_id"),
+    ("contracts", "contract_id"),
+    ("industry_jobs", "job_id"),
+    ("bookmarks", "bookmark_id"),
+    ("mail", "message_id"),
+    ("mail_timestamps", "mail_id"),
+    ("fleets", "fleet_id"),
+    ("corps", "corporation_id"),
+    ("alliances", "alliance_id"),
+    ("wars", "war_id"),
+    ("corp_projects", "project_id"),
+    ("killmails", "kill_id"),
+    ("kill_rights", "kill_right_id"),
+    ("asteroids", "asteroid_id"),
+    ("bookmark_meta", "bookmark_id"),
+    ("bookmark_folders", "folder_id"),
+    ("mailing_lists", "list_id"),
+    ("calendar_events", "event_id"),
+    ("access_groups", "group_id"),
+    ("item_custom_names", "item_id"),
+    ("item_positions", "item_id"),
+    ("applied_ship_skins", "ship_id"),
+    ("entity_kv", "entity_id"),
+    ("structure_vulnerability_windows", "structure_id"),
+];
+
+/// Queries the cross-table entity high-water mark (`< 900_000_000`) directly across SQLite
+/// ID-bearing tables (`#1087`).
+pub fn query_cross_table_entity_high_water(conn: &Connection) -> Result<i64, String> {
+    let mut hwm = 200_000_000_i64;
+    for &(table, col) in ENTITY_ID_SQLITE_TABLES {
+        let sql = format!(
+            "SELECT COALESCE(MAX({col}), 0) FROM {table} WHERE {col} > 0 AND {col} < 900000000"
+        );
+        if let Ok(mut stmt) = conn.prepare_cached(&sql) {
+            if let Ok(val) = stmt.query_row([], |r| r.get::<_, i64>(0)) {
+                if val > hwm {
+                    hwm = val;
+                }
+            }
+        }
+    }
+    if let Ok(mut stmt) = conn.prepare_cached(
+        "SELECT key FROM domain_rows WHERE domain IN (?1, ?2)",
+    ) {
+        if let Ok(mut rows) = stmt.query(rusqlite::params![
+            DOMAIN_MARKET_TRANSACTIONS,
+            DOMAIN_WALLET_JOURNAL_META
+        ]) {
+            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                let key_str: String = r.get(0).map_err(|e| e.to_string())?;
+                if let Ok(val) = key_str.parse::<i64>() {
+                    if val > hwm && val < 900_000_000 {
+                        hwm = val;
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(mut stmt) = conn.prepare_cached(
+        "SELECT key, value FROM domain_rows WHERE domain = ?1",
+    ) {
+        if let Ok(mut rows) = stmt.query(rusqlite::params![DOMAIN_OWNER_NOTES]) {
+            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                let key_str: String = r.get(0).map_err(|e| e.to_string())?;
+                let val_str: String = r.get(1).map_err(|e| e.to_string())?;
+                let entity_id = serde_json::from_str::<OwnerNoteRecord>(&val_str)
+                    .ok()
+                    .as_ref()
+                    .and_then(decode_owner_note_entity_id)
+                    .or_else(|| key_str.parse::<i64>().ok().filter(|&id| id > 0));
+                if let Some(val) = entity_id {
+                    if val > hwm && val < 900_000_000 {
+                        hwm = val;
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(mut stmt) = conn.prepare_cached(
+        "SELECT value FROM domain_rows WHERE domain = ?1",
+    ) {
+        if let Ok(mut rows) = stmt.query(rusqlite::params![DOMAIN_CHAR_LP_LOGS]) {
+            while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+                let val_str: String = r.get(0).map_err(|e| e.to_string())?;
+                if let Ok(entries) = serde_json::from_str::<Vec<LpRewardLogEntry>>(&val_str) {
+                    for entry in entries {
+                        if entry.log_id > hwm && entry.log_id < 900_000_000 {
+                            hwm = entry.log_id;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(hwm)
+}
+
+/// Returns `true` if `candidate` exists in any relational SQLite ID-bearing table (`#1087`).
+pub fn sqlite_entity_id_exists(conn: &Connection, candidate: i64) -> Result<bool, String> {
+    if candidate <= 0 {
+        return Ok(false);
+    }
+    for &(table, col) in ENTITY_ID_SQLITE_TABLES {
+        let sql = format!("SELECT 1 FROM {table} WHERE {col} = ?1 LIMIT 1");
+        if let Ok(mut stmt) = conn.prepare_cached(&sql) {
+            let mut rows = stmt
+                .query(rusqlite::params![candidate])
+                .map_err(|e| e.to_string())?;
+            if rows.next().map_err(|e| e.to_string())?.is_some() {
+                return Ok(true);
+            }
+        }
+    }
+    let cand_key = candidate.to_string();
+    if let Ok(mut stmt) = conn.prepare_cached(
+        "SELECT 1 FROM domain_rows WHERE domain IN (?1, ?2, ?3) AND key = ?4 LIMIT 1",
+    ) {
+        let mut rows = stmt
+            .query(rusqlite::params![
+                DOMAIN_MARKET_TRANSACTIONS,
+                DOMAIN_WALLET_JOURNAL_META,
+                DOMAIN_OWNER_NOTES,
+                cand_key
+            ])
+            .map_err(|e| e.to_string())?;
+        if rows.next().map_err(|e| e.to_string())?.is_some() {
+            return Ok(true);
+        }
+    }
+    if let Ok(mut stmt) = conn.prepare_cached(
+        "SELECT 1 FROM domain_rows WHERE domain = ?1 AND key = ?2 LIMIT 1",
+    ) {
+        if let Some(notif_key) = (-7_900_000_000_000_i64).checked_sub(candidate) {
+            let mut rows = stmt
+                .query(rusqlite::params![DOMAIN_OWNER_NOTES, notif_key.to_string()])
+                .map_err(|e| e.to_string())?;
+            if rows.next().map_err(|e| e.to_string())?.is_some() {
+                return Ok(true);
+            }
+        }
+        if let Some(report_key) = 780_000_000_i64.checked_add(candidate) {
+            let mut rows = stmt
+                .query(rusqlite::params![DOMAIN_OWNER_NOTES, report_key.to_string()])
+                .map_err(|e| e.to_string())?;
+            if rows.next().map_err(|e| e.to_string())?.is_some() {
+                return Ok(true);
+            }
+        }
+    }
+    if let Ok(mut stmt) = conn.prepare_cached(
+        "SELECT value FROM domain_rows WHERE domain = ?1 AND value LIKE ?2",
+    ) {
+        let pattern = format!("%{candidate}%");
+        let mut rows = stmt
+            .query(rusqlite::params![DOMAIN_CHAR_LP_LOGS, pattern])
+            .map_err(|e| e.to_string())?;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            let val_str: String = r.get(0).map_err(|e| e.to_string())?;
+            if let Ok(entries) = serde_json::from_str::<Vec<LpRewardLogEntry>>(&val_str) {
+                if entries.iter().any(|l| l.log_id == candidate) {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Loads the persisted `next_entity_block` high-water mark from `world_meta` (falling back to
-/// `next_entity_id` and the minimum `200_000_000` floor).
+/// `next_entity_id`, the cross-table SQLite high-water mark, and the minimum `200_000_000` floor).
 pub fn load_entity_block_from_sqlite(conn: &Connection) -> Result<i64, String> {
-    let mut block = 200_000_000_i64;
+    let mut block = query_cross_table_entity_high_water(conn)?;
     let mut stmt = conn
         .prepare("SELECT meta_key, meta_value FROM world_meta WHERE meta_key IN ('next_entity_block', 'next_entity_id')")
         .map_err(|e| e.to_string())?;
@@ -1397,6 +1577,10 @@ pub fn load_snapshot_from_sqlite_with_options(
     snap.fold_legacy_plex_balances();
     snap.migrate_legacy_service_state();
     snap.reconcile_id_counters();
+    let sql_hwm = query_cross_table_entity_high_water(conn)?;
+    if sql_hwm > snap.next_entity_id {
+        snap.next_entity_id = sql_hwm;
+    }
     snap.backfill_fw_system_occupations();
     for (&sid, st) in &mut snap.system_states {
         st.solar_system_id = sid;

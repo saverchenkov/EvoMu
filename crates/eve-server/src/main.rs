@@ -52,6 +52,22 @@ async fn main() -> Result<()> {
         .with(ring_layer)
         .init();
 
+    let boot_start = std::time::Instant::now();
+    let lifecycle_logger = std::sync::Arc::clone(eve_server::lifecycle::global_lifecycle_logger());
+    eve_server::lifecycle::install_panic_observer(lifecycle_logger);
+
+    let res = run_server(boot_start).await;
+    if let Err(ref err) = res {
+        error!(error = %err, "Server exited with error");
+        let _ = eve_server::lifecycle::record_global_lifecycle_event(
+            "error_exit",
+            Some(err.to_string()),
+        );
+    }
+    res
+}
+
+async fn run_server(boot_start: std::time::Instant) -> Result<()> {
     let mut cfg = eve_server::config::ServerConfig::load_default_or_env()
         .map_err(|e| anyhow::anyhow!(e))?;
     if let Some(cli_xmpp_port) = eve_server::config::ServerConfig::parse_cli_xmpp_port(std::env::args().skip(1))
@@ -99,6 +115,12 @@ async fn main() -> Result<()> {
 
     // Pre-spawn Jita (30000142) solar system actor inside the ServerContext registry
     let _jita = ctx.systems.get_or_spawn(30000142);
+    eve_server::lifecycle::set_open_sessions(ctx.db.online_session_count() as usize);
+    eve_server::lifecycle::set_pending_wal_records(ctx.db.pending_wal_records_count() as u64);
+    eve_server::ops_telemetry::log_startup_presence_summary(
+        &ctx,
+        boot_start.elapsed().as_millis() as u64,
+    );
 
     // Dedicated 1 Hz Destiny physics & NPC AI loop, isolated from mining and SQLite timers
     // so warp decelerations complete strictly in real time.
@@ -113,6 +135,7 @@ async fn main() -> Result<()> {
             physics_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             physics_ticker.tick().await;
             let mut panic_count = 0u64;
+            let mut tick_seq = 0u64;
             loop {
                 tokio::select! {
                     _ = physics_ticker.tick() => {}
@@ -124,6 +147,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 let raw_elapsed = last_step.elapsed();
+                let lateness_ms = (raw_elapsed.as_millis() as i64).saturating_sub(1_000);
                 let elapsed = eve_server::sp6_lifecycle::clamp_physics_ticker_backlog(
                     raw_elapsed.as_secs(),
                 );
@@ -131,6 +155,7 @@ async fn main() -> Result<()> {
                     - eve_server::system_actor::TIDI_TARGET_WINDOW_MS)
                     .max(0.0);
                 last_step = std::time::Instant::now();
+                let tick_work_start = std::time::Instant::now();
                 if !physics_ctx.is_clock_paused() {
                     if let Err(panic_msg) = eve_server::sp6_lifecycle::catch_unwind_future(
                         eve_server::sp6_lifecycle::step_active_systems_physics_tick_with_lateness(
@@ -149,6 +174,22 @@ async fn main() -> Result<()> {
                         );
                     }
                 }
+                tick_seq = tick_seq.saturating_add(1);
+                eve_server::lifecycle::set_open_sessions(
+                    physics_ctx.db.online_session_count() as usize,
+                );
+                eve_server::lifecycle::set_pending_wal_records(
+                    physics_ctx.db.pending_wal_records_count() as u64,
+                );
+                eve_server::ops_telemetry::record_tick_summary(
+                    eve_server::ops_telemetry::TickSummary {
+                        tick_seq,
+                        timestamp_unix: physics_ctx.now_unix(),
+                        duration_ms: tick_work_start.elapsed().as_millis() as u64,
+                        lateness_ms,
+                        active_systems: physics_ctx.systems.active_system_handles().len(),
+                    },
+                );
             }
         })
     };
@@ -304,8 +345,9 @@ async fn main() -> Result<()> {
 
     loop {
         tokio::select! {
-            _ = wait_for_shutdown_signal() => {
-                info!("Shutdown signal received; stopping listeners");
+            sig_reason = wait_for_shutdown_signal() => {
+                info!(signal = sig_reason, "Shutdown signal received; stopping listeners");
+                let _ = eve_server::lifecycle::record_global_lifecycle_event(sig_reason, None);
                 break;
             }
             _ = shutdown_rx.changed() => {
@@ -401,12 +443,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn wait_for_shutdown_signal() {
+async fn wait_for_shutdown_signal() -> &'static str {
     #[cfg(unix)]
     {
         let sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
+            _ = tokio::signal::ctrl_c() => "sigint",
             _ = async {
                 match sigterm {
                     Ok(mut s) => {
@@ -414,12 +456,13 @@ async fn wait_for_shutdown_signal() {
                     }
                     Err(_) => std::future::pending::<()>().await,
                 }
-            } => {}
+            } => "sigterm",
         }
     }
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+        "sigint"
     }
 }
 
@@ -525,6 +568,7 @@ async fn run_clean_shutdown(
             info!(flushed, "Clean shutdown complete");
         }
     }
+    let _ = eve_server::lifecycle::record_global_lifecycle_event("clean_exit", None);
 }
 
 /// Reads a length-prefixed frame with strict `MAX_FRAME_SIZE` validation BEFORE allocating memory.
@@ -652,8 +696,9 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                             .map(|cid| ctx.drain_notifications_for_char(cid))
                             .unwrap_or_default();
                         let prev_session = session.clone();
-                        let result = ctx
-                            .dispatch_rpc(
+                        let result = eve_server::router::dispatch::with_active_rpc_call_id(
+                            req_id,
+                            ctx.dispatch_rpc(
                                 &mut session,
                                 &service,
                                 bound_id,
@@ -661,8 +706,9 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                                 &args,
                                 &kwargs,
                                 caller_trace.as_deref(),
-                            )
-                            .await;
+                            ),
+                        )
+                        .await;
                         if session.solar_system_id != prev_session.solar_system_id {
                             if let Some(new_sys) = session.solar_system_id {
                                 let handle = ctx.systems.get_or_spawn(new_sys);

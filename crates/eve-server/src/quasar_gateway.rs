@@ -1235,6 +1235,26 @@ impl PublicGatewayRouter {
     ) -> Result<(EvePublicNotice, usize), BridgeRpcError> {
         let seq = self.next_notice_seq.fetch_add(1, Ordering::Relaxed);
         self.sync_meta_to_db();
+        if !payload.type_url.is_empty() {
+            let norm_notice_type = QuasarDescriptorRegistry::normalize_type_name(&payload.type_url);
+            if !norm_notice_type.is_empty()
+                && !norm_notice_type.starts_with("google.protobuf.")
+                && self.descriptors.get_message(&norm_notice_type).is_none()
+            {
+                let dec = crate::warn_limiter::check_global_warn(
+                    crate::warn_limiter::WarnCategory::UnknownQuasarNoticeType,
+                    norm_notice_type.to_string(),
+                );
+                if dec.should_log {
+                    tracing::warn!(
+                        notice_type = %norm_notice_type,
+                        count = dec.count,
+                        suppressed = dec.suppressed_for_key,
+                        "Unknown Quasar notice type published"
+                    );
+                }
+            }
+        }
         let mut uuid = [0u8; 16];
         uuid[0..8].copy_from_slice(&now_unix.to_be_bytes());
         uuid[8..16].copy_from_slice(&seq.to_be_bytes());
@@ -1482,6 +1502,18 @@ impl PublicGatewayRouter {
         let has_descriptor = self.descriptors.get_message(&norm_type).is_some();
         let has_handler = self.handlers.read().unwrap_or_else(|e| e.into_inner()).contains_key(&norm_type);
         if !has_descriptor && !has_handler {
+            let dec = crate::warn_limiter::check_global_warn(
+                crate::warn_limiter::WarnCategory::NotInCatalog,
+                format!("quasar_msg:{norm_type}"),
+            );
+            if dec.should_log {
+                tracing::warn!(
+                    msg_type = %norm_type,
+                    count = dec.count,
+                    suppressed = dec.suppressed_for_key,
+                    "NOT_IN_CATALOG: Unknown Quasar protobuf message type"
+                );
+            }
             return build_response(STATUS_NOT_FOUND, format!("Unknown Quasar protobuf message type '{norm_type}'"), None);
         }
 
@@ -1498,10 +1530,38 @@ impl PublicGatewayRouter {
             // Descriptor-schema mismatches on routed messages fall back to raw wire decoding, but a payload
             // that is not even well-formed protobuf wire (e.g. truncated length-delimited field) is rejected.
             Err(e) if has_handler && WireMessage::decode(&payload_any.value).is_err() => {
+                let dec = crate::warn_limiter::check_global_warn(
+                    crate::warn_limiter::WarnCategory::MarshalOddity,
+                    format!("quasar_wire:{norm_type}"),
+                );
+                if dec.should_log {
+                    tracing::warn!(
+                        msg_type = %norm_type,
+                        error = %e,
+                        count = dec.count,
+                        suppressed = dec.suppressed_for_key,
+                        "Malformed Quasar protobuf wire payload"
+                    );
+                }
                 return build_response(STATUS_BAD_REQUEST, format!("Invalid protobuf wire payload for '{norm_type}': {e}"), None);
             }
             Err(_) if has_handler => crate::services::quasar_char_skill_services::decode_wire_dynamic(&norm_type, &payload_any.value),
-            Err(e) => return build_response(STATUS_BAD_REQUEST, format!("Invalid protobuf wire payload for '{norm_type}': {e}"), None),
+            Err(e) => {
+                let dec = crate::warn_limiter::check_global_warn(
+                    crate::warn_limiter::WarnCategory::MarshalOddity,
+                    format!("quasar_wire:{norm_type}"),
+                );
+                if dec.should_log {
+                    tracing::warn!(
+                        msg_type = %norm_type,
+                        error = %e,
+                        count = dec.count,
+                        suppressed = dec.suppressed_for_key,
+                        "Malformed Quasar protobuf wire payload"
+                    );
+                }
+                return build_response(STATUS_BAD_REQUEST, format!("Invalid protobuf wire payload for '{norm_type}': {e}"), None);
+            }
         };
 
         // 5. Bounded idempotency key deduplication (with TTL + max-entry eviction)

@@ -646,6 +646,7 @@ pub struct WorldStateSnapshot {
     pub jump_clones: HashMap<i64, Vec<JumpCloneRecord>>,
     pub active_implants: HashMap<i64, Vec<TypeId>>,
     pub items: CowMap<i64, InventoryItemRecord>,
+    #[serde(skip, default)] pub transient_items: CowMap<i64, InventoryItemRecord>,
     #[serde(skip, default)] pub transient_item_attributes: HashMap<i64, HashMap<AttributeId, f64>>,
     pub saved_fittings: HashMap<i64, SavedFittingRecord>,
     pub market_orders: CowMap<i64, MarketOrderRecord>,
@@ -1779,8 +1780,7 @@ impl WorldStateSnapshot {
         balance_after: IskCents,
         reason: impl Into<String>,
     ) -> i64 {
-        self.next_entity_id += 1;
-        let entry_id = self.next_entity_id;
+        let entry_id = self.alloc_entity_id();
         self.wallet_journal.push(WalletJournalEntry {
             entry_id,
             character_id,
@@ -1847,10 +1847,135 @@ impl WorldStateSnapshot {
         true
     }
 
+    /// Returns `true` if `candidate` is already referenced in any ID-bearing collection on this
+    /// snapshot (`#1087`).
+    pub fn is_entity_id_referenced(&self, candidate: i64) -> bool {
+        if candidate <= 0 {
+            return false;
+        }
+        if self.characters.contains_key(&candidate)
+            || self.items.contains_key(&candidate)
+            || self.transient_items.contains_key(&candidate)
+            || self.structures.contains_key(&candidate)
+            || self.saved_fittings.contains_key(&candidate)
+            || self.market_orders.contains_key(&candidate)
+            || self.contracts.contains_key(&candidate)
+            || self.industry_jobs.contains_key(&candidate)
+            || self.bookmarks.contains_key(&candidate)
+            || self.bookmark_folders.contains_key(&candidate)
+            || self.mailing_lists.contains_key(&candidate)
+            || self.calendar_events.contains_key(&candidate)
+            || self.fleets.contains_key(&candidate)
+            || self.wars.contains_key(&candidate)
+            || self.corp_projects.contains_key(&candidate)
+            || self.killmails.contains_key(&candidate)
+            || self.kill_rights.contains_key(&candidate)
+            || self.market_transactions.contains_key(&candidate)
+            || self.wallet_journal_meta.contains_key(&candidate)
+            || self.asteroids.contains_key(&candidate)
+            || self.corporations.contains_key(&candidate)
+            || self.alliances.contains_key(&candidate)
+            || self.access_groups.contains_key(&candidate)
+            || self.mail_timestamps.contains_key(&candidate)
+            || self.structure_vulnerability_windows.contains_key(&candidate)
+            || self.bookmark_expiries.contains_key(&candidate)
+            || self.bookmark_subfolders.contains_key(&candidate)
+            || self.item_positions.contains_key(&candidate)
+            || self.item_custom_names.contains_key(&candidate)
+            || self.applied_ship_skins.contains_key(&candidate)
+            || self.owner_notes.contains_key(&candidate)
+        {
+            return true;
+        }
+        if let Some(notif_key) = (-7_900_000_000_000_i64).checked_sub(candidate) {
+            if self.owner_notes.contains_key(&notif_key) {
+                return true;
+            }
+        }
+        if let Some(report_key) = 780_000_000_i64.checked_add(candidate) {
+            if self.owner_notes.contains_key(&report_key) {
+                return true;
+            }
+        }
+        self.mails.iter().any(|m| m.message_id == candidate)
+            || self.wallet_journal.iter().any(|e| e.entry_id == candidate)
+            || self
+                .char_lp_logs
+                .values()
+                .flatten()
+                .any(|l| l.log_id == candidate)
+            || self
+                .active_missions
+                .values()
+                .any(|m| m.spawned_npc_ball_ids.contains(&candidate))
+            || self.entity_kv.keys().any(|k| k.entity_id == candidate)
+    }
+
+    fn entity_id_sources(&self) -> impl Iterator<Item = i64> + '_ {
+        self.characters
+            .keys()
+            .copied()
+            .chain(self.items.keys().copied())
+            .chain(self.transient_items.keys().copied())
+            .chain(self.structures.keys().copied())
+            .chain(self.saved_fittings.keys().copied())
+            .chain(self.market_orders.keys().copied())
+            .chain(self.wallet_journal.iter().map(|e| e.entry_id))
+            .chain(self.contracts.keys().copied())
+            .chain(self.industry_jobs.keys().copied())
+            .chain(self.bookmarks.keys().copied())
+            .chain(self.bookmark_folders.keys().copied())
+            .chain(self.mailing_lists.keys().copied())
+            .chain(self.calendar_events.keys().copied())
+            .chain(self.mails.iter().map(|m| m.message_id))
+            .chain(self.fleets.keys().copied())
+            .chain(self.wars.keys().copied())
+            .chain(self.corp_projects.keys().copied())
+            .chain(self.killmails.keys().copied())
+            .chain(self.kill_rights.keys().copied())
+            .chain(self.market_transactions.keys().copied())
+            .chain(self.wallet_journal_meta.keys().copied())
+            .chain(self.asteroids.keys().copied())
+            .chain(self.corporations.keys().copied())
+            .chain(self.alliances.keys().copied())
+            .chain(self.access_groups.keys().copied())
+            .chain(self.mail_timestamps.keys().copied())
+            .chain(self.structure_vulnerability_windows.keys().copied())
+            .chain(self.bookmark_expiries.keys().copied())
+            .chain(self.bookmark_subfolders.keys().copied())
+            .chain(self.item_positions.keys().copied())
+            .chain(self.item_custom_names.keys().copied())
+            .chain(self.applied_ship_skins.keys().copied())
+            .chain(self.entity_kv.keys().map(|k| k.entity_id))
+            .chain(self.char_lp_logs.values().flatten().map(|l| l.log_id))
+            .chain(
+                self.active_missions
+                    .values()
+                    .flat_map(|m| m.spawned_npc_ball_ids.iter().copied()),
+            )
+            .chain(self.owner_notes.values().filter_map(decode_owner_note_entity_id))
+    }
+
+    /// Collects all positive entity IDs referenced across all ID-bearing tables in this snapshot (`#1087`).
+    pub fn collect_referenced_entity_ids(&self) -> HashSet<i64> {
+        let mut ids: HashSet<i64> = self.entity_id_sources().filter(|&id| id > 0).collect();
+        // Also retain raw note_id when positive (even for -78 sentinel records).
+        for n in self.owner_notes.values() {
+            if n.note_id > 0 {
+                ids.insert(n.note_id);
+            }
+        }
+        ids
+    }
+
     /// Allocates a strictly monotonic dynamic entity/ball ID from `self.next_entity_id`
-    /// persisted in `world_meta` (`feat:invariant.ids-monotonic-across-restart`).
+    /// persisted in `world_meta`, skipping any candidate still referenced in any ID-bearing table
+    /// (`feat:invariant.ids-monotonic-across-restart`, `#1087`).
     pub fn alloc_entity_id(&mut self) -> i64 {
-        let next = self.next_entity_id.max(200_000_000).saturating_add(1);
+        let mut next = self.next_entity_id.max(200_000_000).saturating_add(1);
+        while self.is_entity_id_referenced(next) {
+            next = next.saturating_add(1);
+        }
         self.next_entity_id = next;
         next
     }
@@ -1921,31 +2046,10 @@ impl WorldStateSnapshot {
     }
 
     /// Reconciles all ID counters on load so every counter is at least the maximum ID present across
-    /// all persisted entity tables (`feat:invariant.ids-monotonic-across-restart`).
+    /// all persisted entity tables (`feat:invariant.ids-monotonic-across-restart`, `#1087`).
     pub fn reconcile_id_counters(&mut self) {
         let max_entity = self
-            .characters
-            .keys()
-            .copied()
-            .chain(self.items.keys().copied())
-            .chain(self.saved_fittings.keys().copied())
-            .chain(self.market_orders.keys().copied())
-            .chain(self.wallet_journal.iter().map(|e| e.entry_id))
-            .chain(self.contracts.keys().copied())
-            .chain(self.industry_jobs.keys().copied())
-            .chain(self.bookmarks.keys().copied())
-            .chain(self.bookmark_folders.keys().copied())
-            .chain(self.mailing_lists.keys().copied())
-            .chain(self.calendar_events.keys().copied())
-            .chain(self.mails.iter().map(|m| m.message_id))
-            .chain(self.fleets.keys().copied())
-            .chain(self.wars.keys().copied())
-            .chain(self.corp_projects.keys().copied())
-            .chain(self.killmails.keys().copied())
-            .chain(self.kill_rights.keys().copied())
-            .chain(self.market_transactions.keys().copied())
-            .chain(self.char_lp_logs.values().flatten().map(|l| l.log_id))
-            .chain(self.active_missions.values().flat_map(|m| m.spawned_npc_ball_ids.iter().copied()))
+            .entity_id_sources()
             .filter(|&id| id > 0 && id < 900_000_000)
             .max()
             .unwrap_or(200_000_000);
@@ -2083,6 +2187,140 @@ impl WorldStateSnapshot {
         entity_id: i64,
     ) -> usize {
         crate::service_domains::cascade_delete_entity_kv(self, scope, entity_id)
+    }
+
+    /// Inserts an item into the non-persisted transient item namespace (`#1087`).
+    ///
+    /// Items stored here are excluded from JSON snapshots, `ChangeSet::diff`, WAL deltas,
+    /// and SQLite persistence unless explicitly materialized via [`Self::materialize_transient_item`].
+    #[inline]
+    pub fn insert_transient_item(&mut self, item: InventoryItemRecord) -> Option<InventoryItemRecord> {
+        self.transient_items.insert(item.item_id, item)
+    }
+
+    /// Returns `true` if `item_id` is currently stored in the transient item namespace (`#1087`).
+    #[inline]
+    pub fn is_transient_item(&self, item_id: i64) -> bool {
+        self.transient_items.contains_key(&item_id)
+    }
+
+    /// Looks up an item across persistent `items` and non-persisted `transient_items` (`#1087`).
+    #[inline]
+    pub fn get_any_item(&self, item_id: i64) -> Option<&InventoryItemRecord> {
+        self.items
+            .get(&item_id)
+            .or_else(|| self.transient_items.get(&item_id))
+    }
+
+    /// Mutably looks up an item across persistent `items` and non-persisted `transient_items` (`#1087`).
+    #[inline]
+    pub fn get_any_item_mut(&mut self, item_id: i64) -> Option<&mut InventoryItemRecord> {
+        if self.items.contains_key(&item_id) {
+            self.items.get_mut(&item_id)
+        } else {
+            self.transient_items.get_mut(&item_id)
+        }
+    }
+
+    /// Materializes a transient item into a persistent row in `self.items` (`#1087`).
+    ///
+    /// Intended for the death/loot pipeline when surviving NPC or scene items become persistent drops.
+    /// Returns `None` if `item_id` was not present in `self.transient_items` (or if already in `self.items`,
+    /// returns `self.items.get_mut(&item_id)`).
+    pub fn materialize_transient_item(&mut self, item_id: i64) -> Option<&mut InventoryItemRecord> {
+        if let Some(mut item) = self.transient_items.remove(&item_id) {
+            item.version = item.version.saturating_add(1);
+            self.items.insert(item_id, item);
+            return self.items.get_mut(&item_id);
+        }
+        self.items.get_mut(&item_id)
+    }
+
+    fn persistent_location_in_system(&self, mut loc_id: i64, solar_system_id: SolarSystemId) -> bool {
+        let sys_loc = i64::from(solar_system_id);
+        for _ in 0..16 {
+            if loc_id == sys_loc {
+                return true;
+            }
+            if self
+                .structures
+                .get(&loc_id)
+                .is_some_and(|st| st.solar_system_id == solar_system_id)
+            {
+                return true;
+            }
+            if let Some(parent_item) = self.items.get(&loc_id) {
+                if parent_item.location_id == loc_id {
+                    break;
+                }
+                loc_id = parent_item.location_id;
+            } else {
+                break;
+            }
+        }
+        false
+    }
+
+    /// Reclaims all transient items located in `solar_system_id` (direct, parented by a
+    /// persistent item/structure in `solar_system_id`, and their transient descendants)
+    /// when a system scene unloads (`#1087`).
+    pub fn reclaim_transient_items_in_system(&mut self, solar_system_id: SolarSystemId) -> usize {
+        if self.transient_items.is_empty() {
+            return 0;
+        }
+        let sys_loc = i64::from(solar_system_id);
+        let mut by_parent: HashMap<i64, Vec<i64>> = HashMap::new();
+        let mut non_transient_parents: Vec<(i64, i64)> = Vec::new();
+        for (&iid, item) in self.transient_items.iter() {
+            if item.location_id == sys_loc {
+                non_transient_parents.push((iid, sys_loc));
+            } else {
+                by_parent.entry(item.location_id).or_default().push(iid);
+                if !self.transient_items.contains_key(&item.location_id) {
+                    non_transient_parents.push((iid, item.location_id));
+                }
+            }
+        }
+        let mut queue: Vec<i64> = non_transient_parents
+            .into_iter()
+            .filter_map(|(iid, parent_id)| {
+                (parent_id == sys_loc
+                    || self.persistent_location_in_system(parent_id, solar_system_id))
+                .then_some(iid)
+            })
+            .collect();
+        let mut to_remove: HashSet<i64> = HashSet::with_capacity(queue.len());
+        while let Some(iid) = queue.pop() {
+            if !to_remove.insert(iid) {
+                continue;
+            }
+            if let Some(children) = by_parent.remove(&iid) {
+                queue.extend(children);
+            }
+        }
+        for &iid in &to_remove {
+            self.transient_items.remove(&iid);
+            self.transient_item_attributes.remove(&iid);
+            self.item_positions.remove(&iid);
+        }
+        to_remove.len()
+    }
+}
+
+/// Decodes an entity ID stored inside an [`OwnerNoteRecord`], reversing `-79` notification
+/// and `-78` combat report sentinel encodings (`#1087`).
+#[inline]
+pub fn decode_owner_note_entity_id(note: &OwnerNoteRecord) -> Option<i64> {
+    if note.character_id == -79 && note.note_id < -7_900_000_000_000 {
+        note.note_id
+            .checked_neg()
+            .and_then(|neg| neg.checked_sub(7_900_000_000_000))
+    } else if note.character_id == -78 && note.note_id > 780_000_000 {
+        note.note_id.checked_sub(780_000_000)
+    } else if note.note_id > 0 {
+        Some(note.note_id)
+    } else {
+        None
     }
 }
 

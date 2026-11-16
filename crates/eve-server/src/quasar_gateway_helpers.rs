@@ -230,6 +230,26 @@ impl PublicGatewayRouter {
                         _ => {}
                     }
                 }
+                for nt in &notice_types {
+                    let norm = eve_proto::quasar::QuasarDescriptorRegistry::normalize_type_name(nt);
+                    if !norm.is_empty()
+                        && !norm.starts_with("google.protobuf.")
+                        && self.descriptors.get_message(norm).is_none()
+                    {
+                        let dec = crate::warn_limiter::check_global_warn(
+                            crate::warn_limiter::WarnCategory::UnknownQuasarNoticeType,
+                            norm.to_string(),
+                        );
+                        if dec.should_log {
+                            tracing::warn!(
+                                notice_type = %norm,
+                                count = dec.count,
+                                suppressed = dec.suppressed_for_key,
+                                "Unknown Quasar notice type subscribed"
+                            );
+                        }
+                    }
+                }
                 let rx = self.subscribe_session(session, notice_types, now_unix);
                 self.stream_receivers.write().unwrap_or_else(|e| e.into_inner()).insert(session.session_id, rx);
                 let app_uuid = Self::default_app_instance_uuid(session.session_id);
