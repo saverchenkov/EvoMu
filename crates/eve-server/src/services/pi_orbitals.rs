@@ -50,14 +50,14 @@ pub fn pi_commodity_tier_base_cost(sde: &eve_sde::SdeRegistry, type_id: TypeId) 
 }
 
 #[derive(Debug, Clone, Copy)]
-struct PreparedPocoTax {
+pub(crate) struct PreparedPocoTax {
     tax_isk: f64,
     tax_cents: IskCents,
     player_share: IskCents,
     orbital_tid: TypeId,
 }
 
-fn prepare_poco_commodity_tax(
+pub(crate) fn prepare_poco_commodity_tax(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
@@ -109,7 +109,7 @@ fn prepare_poco_commodity_tax(
     })
 }
 
-fn commit_poco_commodity_tax(
+pub(crate) fn commit_poco_commodity_tax(
     snap: &mut eve_db::WorldStateSnapshot,
     char_id: i64,
     planet_id: i64,

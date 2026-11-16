@@ -1523,6 +1523,11 @@ async fn invbroker_misc_crystal_damage_fit_fitting_edge_cases_and_pi_errors() {
     assert_eq!(
         handle_containers_ships_and_fitting(&ctx, &mut sess, None, "invbroker", "ImportExportWithPlanet", &[PyRep::Integer(pin_id), PyRep::Dict(vec![(PyRep::Integer(997_006), PyRep::Integer(1))]), PyRep::None], &kw)
             .await.unwrap().unwrap_err().code,
+        "InvalidCommodity"
+    );
+    assert_eq!(
+        handle_containers_ships_and_fitting(&ctx, &mut sess, None, "invbroker", "ImportExportWithPlanet", &[PyRep::Integer(pin_id), PyRep::Dict(vec![(PyRep::Integer(3645), PyRep::Integer(1))]), PyRep::None], &kw)
+            .await.unwrap().unwrap_err().code,
         "ItemNotFound"
     );
     assert_eq!(

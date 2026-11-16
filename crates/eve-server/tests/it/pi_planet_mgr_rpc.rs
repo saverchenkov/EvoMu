@@ -2036,4 +2036,627 @@ pub(crate) mod planet_bpc_laundering_1177 {
             });
         }
     }
+
+    fn seed_orbital_for_1177(snap: &mut eve_db::WorldStateSnapshot, orbital_id: i64) {
+        snap.structures.insert(
+            orbital_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: orbital_id,
+                type_id: 2233,
+                owner_corp_id: POCO_CORP_ID,
+                solar_system_id: JITA_SOLAR_SYSTEM_ID,
+                name: format!("Orbital:{JITA_PLANET_ID}"),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        save_orbital_settings(
+            snap,
+            JITA_PLANET_ID,
+            &OrbitalCustomsSettings {
+                planet_id: JITA_PLANET_ID,
+                owner_corp_id: POCO_CORP_ID,
+                corporation_tax_rate: 0.05,
+                alliance_tax_rate: 0.05,
+                standing_neutral_tax_rate: 0.10,
+                ..Default::default()
+            },
+        );
+    }
+
+    async fn call_import_export(
+        ctx: &ServerContext,
+        sess: &mut SessionState,
+        orbital_id: i64,
+        lp_pin_id: i64,
+        import_entries: Vec<(i64, i64)>,
+        export_entries: Vec<(i64, i64)>,
+    ) -> Result<PyRep, BridgeRpcError> {
+        let import_rep = PyRep::Dict(
+            import_entries
+                .into_iter()
+                .map(|(k, v)| (PyRep::Integer(k), PyRep::Integer(v)))
+                .collect(),
+        );
+        let export_rep = PyRep::Dict(
+            export_entries
+                .into_iter()
+                .map(|(k, v)| (PyRep::Integer(k), PyRep::Integer(v)))
+                .collect(),
+        );
+        ctx.dispatch_rpc(
+            sess,
+            "invbroker",
+            None,
+            "ImportExportWithPlanet",
+            &[
+                PyRep::Integer(orbital_id),
+                PyRep::Integer(lp_pin_id),
+                import_rep,
+                export_rep,
+            ],
+            &HashMap::new(),
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_1177_import_export_with_planet_rejects_bpc_non_pi_and_corrupted_state() {
+        let ctx = ServerContext::new();
+        common::pin_clock(&ctx);
+        let char_id = 90_000_001_i64;
+        let orbital_id = 10_000_777_001_i64;
+        let (mut sess, ship_id, lp_pin_id, _storage_pin_id) =
+            setup_colony_for_1177(&ctx, 2904, char_id).await;
+
+        let (bpc_id, ship_item_id, mutated_mod_id, clean_water_id, bal_before, corp_before, journal_before) =
+            ctx.db.with_mut_snapshot(|snap| {
+                seed_orbital_for_1177(snap, orbital_id);
+
+                let insert_item = |snap: &mut eve_db::WorldStateSnapshot, mut rec: InventoryItemRecord| -> i64 {
+                    snap.next_entity_id += 1;
+                    let iid = snap.next_entity_id;
+                    rec.item_id = iid;
+                    rec.owner_id = char_id;
+                    rec.version = 1;
+                    snap.items.insert(iid, rec);
+                    iid
+                };
+
+                let bpc_id = insert_item(
+                    snap,
+                    InventoryItemRecord {
+                        type_id: BPC_TYPE_ID,
+                        location_id: orbital_id,
+                        flag: InventoryFlag::Hangar,
+                        quantity: 1,
+                        singleton: true,
+                        is_blueprint_copy: true,
+                        blueprint_runs_remaining: Some(1),
+                        ..Default::default()
+                    },
+                );
+                let ship_item_id = insert_item(
+                    snap,
+                    InventoryItemRecord {
+                        type_id: SHIP_TYPE_ID,
+                        location_id: orbital_id,
+                        flag: InventoryFlag::Hangar,
+                        quantity: 1,
+                        singleton: true,
+                        ..Default::default()
+                    },
+                );
+                let mut mutated_attrs = HashMap::new();
+                mutated_attrs.insert(9, 1337.0);
+                let mutated_mod_id = insert_item(
+                    snap,
+                    InventoryItemRecord {
+                        type_id: MODULE_TYPE_ID,
+                        location_id: ship_id,
+                        flag: InventoryFlag::Cargo,
+                        quantity: 1,
+                        singleton: true,
+                        dynamic_attributes: mutated_attrs,
+                        source_mutaplasmid_id: Some(MUTAPLASMID_TYPE_ID),
+                        ..Default::default()
+                    },
+                );
+                let clean_water_id = insert_item(
+                    snap,
+                    InventoryItemRecord {
+                        type_id: WATER_P1_TYPE,
+                        location_id: orbital_id,
+                        flag: InventoryFlag::Hangar,
+                        quantity: 10,
+                        singleton: false,
+                        ..Default::default()
+                    },
+                );
+                (
+                    bpc_id,
+                    ship_item_id,
+                    mutated_mod_id,
+                    clean_water_id,
+                    snap.characters[&char_id].balance,
+                    snap.corporations[&POCO_CORP_ID].division_balance(1),
+                    snap.wallet_journal.len(),
+                )
+            });
+
+        // 1) Reject BPC (ByItemId, ByTypeId, and mixed with valid PI), ship, mutated module, and non-PI export.
+        for (label, imports, exports) in [
+            ("bpc by item id", vec![(bpc_id, 1)], vec![]),
+            ("bpc by type id", vec![(BPC_TYPE_ID as i64, 1)], vec![]),
+            (
+                "mixed valid + bpc",
+                vec![(clean_water_id, 5), (bpc_id, 1)],
+                vec![],
+            ),
+            ("non-pi ship", vec![(ship_item_id, 1)], vec![]),
+            ("mutated module by item", vec![(mutated_mod_id, 1)], vec![]),
+            ("non-pi module by type", vec![(MODULE_TYPE_ID as i64, 1)], vec![]),
+            ("non-pi export", vec![], vec![(BPC_TYPE_ID as i64, 1)]),
+        ] {
+            let err = call_import_export(&ctx, &mut sess, orbital_id, lp_pin_id, imports, exports)
+                .await
+                .expect_err(label);
+            assert_eq!(err.code, "InvalidCommodity", "{label}: {err:?}");
+        }
+
+        // Remove clean_water_id temporarily so ByTypeId tests hit only the corrupted WATER_P1_TYPE stack.
+        ctx.db.with_mut_snapshot(|snap| {
+            let bpc = snap.items.get(&bpc_id).expect("BPC intact");
+            assert!(bpc.is_blueprint_copy);
+            assert_eq!(bpc.blueprint_runs_remaining, Some(1));
+            assert!(bpc.singleton);
+            assert_eq!(snap.items[&clean_water_id].quantity, 10, "mixed valid item untouched");
+            snap.items.remove(&clean_water_id);
+        });
+
+        // 2) Reject corrupted state on valid PI commodity type WATER_P1_TYPE (cat 43).
+        let state_variants = [
+            "singleton",
+            "blueprint_copy",
+            "blueprint_runs",
+            "dynamic_attributes",
+            "source_mutaplasmid",
+            "courier_cargo",
+        ];
+        for variant in state_variants {
+            let bad_water_id = ctx.db.with_mut_snapshot(|snap| {
+                snap.next_entity_id += 1;
+                let iid = snap.next_entity_id;
+                let mut rec = InventoryItemRecord {
+                    item_id: iid,
+                    type_id: WATER_P1_TYPE,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: if variant == "singleton" { 1 } else { 5 },
+                    singleton: variant == "singleton",
+                    is_blueprint_copy: variant == "blueprint_copy",
+                    blueprint_runs_remaining: (variant == "blueprint_runs").then_some(1),
+                    source_mutaplasmid_id: (variant == "source_mutaplasmid")
+                        .then_some(MUTAPLASMID_TYPE_ID),
+                    version: 1,
+                    ..Default::default()
+                };
+                if variant == "dynamic_attributes" {
+                    rec.dynamic_attributes.insert(9, 42.0);
+                }
+                if variant == "courier_cargo" {
+                    snap.item_custom_names
+                        .insert(iid, "courier_cargo:999001".to_string());
+                }
+                snap.items.insert(iid, rec);
+                iid
+            });
+
+            for (mode, key) in [("ByItemId", bad_water_id), ("ByTypeId", WATER_P1_TYPE as i64)] {
+                let err = call_import_export(
+                    &ctx,
+                    &mut sess,
+                    orbital_id,
+                    lp_pin_id,
+                    vec![(key, 1)],
+                    vec![],
+                )
+                .await
+                .expect_err(&format!("expected failure for {variant} {mode}"));
+                assert_eq!(
+                    err.code, "InvalidCommodityItemState",
+                    "{variant} {mode}: {err:?}"
+                );
+            }
+
+            ctx.db.with_mut_snapshot(|snap| {
+                let intact = snap.items.remove(&bad_water_id).expect("corrupted item untouched");
+                assert_eq!(
+                    intact.quantity,
+                    if variant == "singleton" { 1 } else { 5 }
+                );
+                snap.item_custom_names.remove(&bad_water_id);
+            });
+        }
+
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.characters[&char_id].balance, bal_before);
+            assert_eq!(snap.corporations[&POCO_CORP_ID].division_balance(1), corp_before);
+            assert_eq!(snap.wallet_journal.len(), journal_before);
+            let net = load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+            let lp = net.pins.iter().find(|p| p.pin_id == lp_pin_id).unwrap();
+            assert!(lp.contents.is_empty(), "launchpad must stay empty on rejected imports");
+        });
+    }
+
+    #[tokio::test]
+    async fn test_1177_import_export_with_planet_locks_asset_safety_and_atomic_rollback() {
+        let ctx = ServerContext::new();
+        common::pin_clock(&ctx);
+        let char_id = 90_000_001_i64;
+        let orbital_id = 10_000_777_002_i64;
+        let (mut sess, ship_id, lp_pin_id, _storage_pin_id) =
+            setup_colony_for_1177(&ctx, 2905, char_id).await;
+
+        let (bal_before, corp_before) = ctx.db.with_mut_snapshot(|snap| {
+            seed_orbital_for_1177(snap, orbital_id);
+            (
+                snap.characters[&char_id].balance,
+                snap.corporations[&POCO_CORP_ID].division_balance(1),
+            )
+        });
+
+        // 1) Locked stack (InventoryFlag::Locked), ALSC item lock, ancestor ship ALSC lock,
+        //    active Asset Safety wrap, and active Contract lock — rejected for BOTH ByItemId and ByTypeId.
+        for lock_kind in [
+            "flag_locked",
+            "alsc_item",
+            "alsc_ancestor_ship",
+            "asset_safety_wrap",
+            "contract_outstanding",
+        ] {
+            let item_id = ctx.db.with_mut_snapshot(|snap| {
+                let iid = seed_cargo(snap, WATER_P1_TYPE, char_id, ship_id, 25);
+                if lock_kind == "flag_locked" {
+                    snap.items.get_mut(&iid).unwrap().flag = InventoryFlag::Locked;
+                }
+                match lock_kind {
+                    "alsc_item" => {
+                        snap.owner_notes.insert(
+                            -8_400_000_000_000,
+                            eve_db::OwnerNoteRecord {
+                                note_id: -8_400_000_000_000,
+                                character_id: 0,
+                                item_id: 0,
+                                label: "S:CONTAINER_SHIP_RUNTIME_STATE".into(),
+                                note: serde_json::json!({ "alsc_locked_items": [iid] }).to_string(),
+                                timestamp_unix: 100,
+                            },
+                        );
+                    }
+                    "alsc_ancestor_ship" => {
+                        snap.owner_notes.insert(
+                            -8_400_000_000_000,
+                            eve_db::OwnerNoteRecord {
+                                note_id: -8_400_000_000_000,
+                                character_id: 0,
+                                item_id: 0,
+                                label: "S:CONTAINER_SHIP_RUNTIME_STATE".into(),
+                                note: serde_json::json!({ "alsc_locked_items": [ship_id] })
+                                    .to_string(),
+                                timestamp_unix: 100,
+                            },
+                        );
+                    }
+                    "asset_safety_wrap" => {
+                        let wrap_id = 77_000_117_i64;
+                        snap.item_custom_names.insert(
+                            -7_700_001,
+                            serde_json::json!({
+                                "asset_safety_wraps": {
+                                    wrap_id.to_string(): {
+                                        "wrap_id": wrap_id,
+                                        "owner_id": char_id,
+                                        "item_ids": [iid],
+                                        "retrieval_fee_paid": false
+                                    }
+                                }
+                            })
+                            .to_string(),
+                        );
+                    }
+                    "contract_outstanding" => {
+                        let cid = 88_000_117_i64;
+                        snap.contracts.insert(
+                            cid,
+                            eve_db::ContractRecord {
+                                contract_id: cid,
+                                issuer_id: char_id,
+                                contract_type: "ItemExchange".into(),
+                                status: "Outstanding".into(),
+                                item_ids: vec![iid],
+                                ..Default::default()
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+                iid
+            });
+
+            // Note: InventoryFlag::Locked in ship Cargo fails is_in_poco_or_ship_import_location on ByTypeId
+            // (which returns ItemNotFound), whereas ByItemId returns ItemLocked explicitly; all other
+            // lock mechanisms sit in Cargo/Hangar and return ItemLocked for BOTH ByItemId and ByTypeId.
+            let err_by_item = call_import_export(
+                &ctx,
+                &mut sess,
+                orbital_id,
+                lp_pin_id,
+                vec![(item_id, 10)],
+                vec![],
+            )
+            .await
+            .expect_err("locked ByItemId must fail");
+            assert_eq!(err_by_item.code, "ItemLocked", "{lock_kind} ByItemId");
+
+            let err_by_type = call_import_export(
+                &ctx,
+                &mut sess,
+                orbital_id,
+                lp_pin_id,
+                vec![(WATER_P1_TYPE as i64, 10)],
+                vec![],
+            )
+            .await
+            .expect_err("locked ByTypeId must fail");
+            if lock_kind == "flag_locked" {
+                assert_eq!(err_by_type.code, "ItemNotFound", "{lock_kind} ByTypeId");
+            } else {
+                assert_eq!(err_by_type.code, "ItemLocked", "{lock_kind} ByTypeId");
+            }
+
+            ctx.db.with_mut_snapshot(|snap| {
+                assert_eq!(snap.items.remove(&item_id).map(|it| it.quantity), Some(25));
+                snap.owner_notes.remove(&-8_400_000_000_000);
+                snap.item_custom_names.remove(&-7_700_001);
+                snap.contracts.remove(&88_000_117_i64);
+                let net = load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+                assert!(
+                    net.pins.iter().find(|p| p.pin_id == lp_pin_id).unwrap().contents.is_empty(),
+                    "{lock_kind}: zero pin minting"
+                );
+            });
+        }
+
+        // 2) Atomic rollback: ByTypeId InsufficientFunds & multi-entry partial failure must NOT
+        //    consume earlier items, mint pin commodities, or charge partial taxes.
+        let (p0_id, water_id) = ctx.db.with_mut_snapshot(|snap| {
+            let p0_id = seed_cargo(snap, AQUEOUS_LIQUIDS_P0_TYPE, char_id, ship_id, 100);
+            let water_id = seed_cargo(snap, WATER_P1_TYPE, char_id, ship_id, 50);
+            snap.characters.get_mut(&char_id).unwrap().balance = IskCents(1);
+            (p0_id, water_id)
+        });
+
+        let err_funds = call_import_export(
+            &ctx,
+            &mut sess,
+            orbital_id,
+            lp_pin_id,
+            vec![
+                (AQUEOUS_LIQUIDS_P0_TYPE as i64, 100),
+                (WATER_P1_TYPE as i64, 50),
+            ],
+            vec![],
+        )
+        .await
+        .expect_err("insufficient funds for POCO tax must fail");
+        assert_eq!(err_funds.code, "InsufficientFunds");
+
+        ctx.db.with_mut_snapshot(|snap| {
+            assert_eq!(snap.characters[&char_id].balance, IskCents(1));
+            assert_eq!(snap.corporations[&POCO_CORP_ID].division_balance(1), corp_before);
+            assert_eq!(snap.items[&p0_id].quantity, 100);
+            assert_eq!(snap.items[&water_id].quantity, 50);
+            snap.characters.get_mut(&char_id).unwrap().balance = bal_before;
+        });
+
+        // Multi-entry ByTypeId failure on 2nd entry rolls back 1st entry consumption & wallet.
+        let err_partial = call_import_export(
+            &ctx,
+            &mut sess,
+            orbital_id,
+            lp_pin_id,
+            vec![
+                (AQUEOUS_LIQUIDS_P0_TYPE as i64, 50),
+                (WATER_P1_TYPE as i64, 999),
+            ],
+            vec![],
+        )
+        .await
+        .expect_err("partial ByTypeId failure must fail atomically");
+        assert_eq!(err_partial.code, "InsufficientCommodityQuantity");
+
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.characters[&char_id].balance, bal_before);
+            assert_eq!(snap.corporations[&POCO_CORP_ID].division_balance(1), corp_before);
+            assert_eq!(snap.items[&p0_id].quantity, 100);
+            assert_eq!(snap.items[&water_id].quantity, 50);
+            let net = load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+            assert!(
+                net.pins.iter().find(|p| p.pin_id == lp_pin_id).unwrap().contents.is_empty(),
+                "failed ByTypeId import must not mint pin commodities"
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn test_1177_import_export_with_planet_valid_p0_p4_and_clean_export_merge() {
+        let ctx = ServerContext::new();
+        common::pin_clock(&ctx);
+        let char_id = 90_000_001_i64;
+        let orbital_id = 10_000_777_003_i64;
+        let (mut sess, ship_id, lp_pin_id, _storage_pin_id) =
+            setup_colony_for_1177(&ctx, 2906, char_id).await;
+
+        let corrupted_hangar_water_id = ctx.db.with_mut_snapshot(|snap| {
+            seed_orbital_for_1177(snap, orbital_id);
+
+            // Seed all P0..P4 valid commodities across ship holds & POCO hangar, plus one
+            // corrupted WATER_P1_TYPE stack in POCO hangar that must NEVER absorb exports.
+            for (idx, &(tid, qty, from_poco)) in [
+                (AQUEOUS_LIQUIDS_P0_TYPE, 80_i32, false),
+                (WATER_P1_TYPE, 40_i32, false),
+                (ENRICHED_URANIUM_P2_TYPE, 20_i32, true),
+                (CONDENSATES_P3_TYPE, 10_i32, true),
+                (BROADCAST_NODE_P4_TYPE, 4_i32, false),
+            ]
+            .iter()
+            .enumerate()
+            {
+                snap.next_entity_id += 1;
+                let iid = snap.next_entity_id;
+                let (loc_id, flag) = if from_poco {
+                    (orbital_id, InventoryFlag::Hangar)
+                } else if idx % 2 == 1 {
+                    (ship_id, InventoryFlag::SpecializedPlanetaryCommoditiesHold)
+                } else {
+                    (ship_id, InventoryFlag::Cargo)
+                };
+                snap.items.insert(
+                    iid,
+                    InventoryItemRecord {
+                        item_id: iid,
+                        type_id: tid,
+                        owner_id: char_id,
+                        location_id: loc_id,
+                        flag,
+                        quantity: qty,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+            }
+
+            snap.next_entity_id += 1;
+            let bad_hangar_id = snap.next_entity_id;
+            snap.items.insert(
+                bad_hangar_id,
+                InventoryItemRecord {
+                    item_id: bad_hangar_id,
+                    type_id: WATER_P1_TYPE,
+                    owner_id: char_id,
+                    location_id: orbital_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    blueprint_runs_remaining: Some(1),
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            bad_hangar_id
+        });
+
+        let (bal_before, corp_before) = ctx.db.with_snapshot(|snap| {
+            (
+                snap.characters[&char_id].balance,
+                snap.corporations[&POCO_CORP_ID].division_balance(1),
+            )
+        });
+
+        // Step 1: Import P0..P4 into launchpad in one atomic call.
+        call_import_export(
+            &ctx,
+            &mut sess,
+            orbital_id,
+            lp_pin_id,
+            vec![
+                (AQUEOUS_LIQUIDS_P0_TYPE as i64, 80),
+                (WATER_P1_TYPE as i64, 40),
+                (ENRICHED_URANIUM_P2_TYPE as i64, 20),
+                (CONDENSATES_P3_TYPE as i64, 10),
+                (BROADCAST_NODE_P4_TYPE as i64, 4),
+            ],
+            vec![],
+        )
+        .await
+        .expect("P0..P4 ImportExportWithPlanet import");
+
+        let (bal_mid, corp_mid) = ctx.db.with_snapshot(|snap| {
+            let bal = snap.characters[&char_id].balance;
+            let corp = snap.corporations[&POCO_CORP_ID].division_balance(1);
+            assert!(bal.0 < bal_before.0, "import POCO tax charged");
+            assert!(corp.0 > corp_before.0, "import POCO tax credited to corp");
+            let net = load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+            let lp = net.pins.iter().find(|p| p.pin_id == lp_pin_id).unwrap();
+            assert_eq!(lp.contents.get(&AQUEOUS_LIQUIDS_P0_TYPE).copied(), Some(80));
+            assert_eq!(lp.contents.get(&WATER_P1_TYPE).copied(), Some(40));
+            assert_eq!(lp.contents.get(&ENRICHED_URANIUM_P2_TYPE).copied(), Some(20));
+            assert_eq!(lp.contents.get(&CONDENSATES_P3_TYPE).copied(), Some(10));
+            assert_eq!(lp.contents.get(&BROADCAST_NODE_P4_TYPE).copied(), Some(4));
+            // Confirm corrupted hangar stack was NOT consumed by ByTypeId WATER_P1_TYPE import!
+            assert!(snap.items.contains_key(&corrupted_hangar_water_id));
+            (bal, corp)
+        });
+
+        // Step 2: Export 12 Water -> must NOT merge into corrupted_hangar_water_id, creates clean stack.
+        call_import_export(
+            &ctx,
+            &mut sess,
+            orbital_id,
+            lp_pin_id,
+            vec![],
+            vec![(WATER_P1_TYPE as i64, 12)],
+        )
+        .await
+        .expect("first export of WATER_P1_TYPE");
+
+        // Step 3: Export 8 more Water + simultaneous export of P4 (1) -> merges into clean stack (20).
+        call_import_export(
+            &ctx,
+            &mut sess,
+            orbital_id,
+            lp_pin_id,
+            vec![],
+            vec![
+                (WATER_P1_TYPE as i64, 8),
+                (BROADCAST_NODE_P4_TYPE as i64, 1),
+            ],
+        )
+        .await
+        .expect("second export merges into clean stack");
+
+        ctx.db.with_snapshot(|snap| {
+            let bal_after = snap.characters[&char_id].balance;
+            let corp_after = snap.corporations[&POCO_CORP_ID].division_balance(1);
+            assert!(bal_after.0 < bal_mid.0, "export POCO tax charged");
+            assert!(corp_after.0 > corp_mid.0, "export POCO tax credited");
+
+            let bad_stack = &snap.items[&corrupted_hangar_water_id];
+            assert_eq!(bad_stack.quantity, 1);
+            assert!(bad_stack.singleton);
+            assert_eq!(bad_stack.blueprint_runs_remaining, Some(1));
+
+            let clean_water: Vec<&InventoryItemRecord> = snap
+                .items
+                .values()
+                .filter(|it| {
+                    it.item_id != corrupted_hangar_water_id
+                        && it.owner_id == char_id
+                        && it.location_id == orbital_id
+                        && it.flag == InventoryFlag::Hangar
+                        && it.type_id == WATER_P1_TYPE
+                })
+                .collect();
+            assert_eq!(clean_water.len(), 1, "exports merge into one clean stack");
+            assert_eq!(clean_water[0].quantity, 20);
+            assert!(!clean_water[0].singleton);
+            assert!(!clean_water[0].is_blueprint_copy);
+            assert_eq!(clean_water[0].blueprint_runs_remaining, None);
+            assert!(clean_water[0].dynamic_attributes.is_empty());
+            assert_eq!(clean_water[0].source_mutaplasmid_id, None);
+        });
+    }
 }

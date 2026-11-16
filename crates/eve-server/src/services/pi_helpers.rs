@@ -1235,15 +1235,6 @@ pub fn plan_pi_import_consumptions(
             }
             continue;
         }
-        if it.blueprint_runs_remaining.is_some() {
-            if first_invalid_state_err.is_none() {
-                first_invalid_state_err = Some(format!(
-                    "Cannot consume blueprint-run item {}",
-                    it.item_id
-                ));
-            }
-            continue;
-        }
         matching_item_ids.push(it.item_id);
     }
 

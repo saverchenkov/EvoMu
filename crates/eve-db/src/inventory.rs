@@ -390,6 +390,7 @@ impl WorldRepository {
             }
             if src.singleton
                 || src.is_blueprint_copy
+                || src.blueprint_runs_remaining.is_some()
                 || !src.dynamic_attributes.is_empty()
                 || src.source_mutaplasmid_id.is_some()
             {
@@ -409,6 +410,7 @@ impl WorldRepository {
             }
             if tgt.singleton
                 || tgt.is_blueprint_copy
+                || tgt.blueprint_runs_remaining.is_some()
                 || !tgt.dynamic_attributes.is_empty()
                 || tgt.source_mutaplasmid_id.is_some()
             {
@@ -487,6 +489,7 @@ impl WorldRepository {
                 }
                 if item_ref.singleton
                     || item_ref.is_blueprint_copy
+                    || item_ref.blueprint_runs_remaining.is_some()
                     || !item_ref.dynamic_attributes.is_empty()
                     || item_ref.source_mutaplasmid_id.is_some()
                 {
@@ -609,15 +612,18 @@ impl WorldRepository {
             DbError::ValidationError(format!("Quantity {quantity} exceeds i32::MAX"))
         })?;
         self.try_with_mut_snapshot(|guard| {
-            // Check if existing non-singleton item stack exists at location/flag (ignoring courier cargo stacks)
-            let existing_id = guard.items.values().find(|it| {
-                it.owner_id == owner_id
-                    && it.location_id == location_id
-                    && it.flag == flag
-                    && it.type_id == type_id
-                    && !it.singleton
-                    && !guard.item_custom_names.get(&it.item_id).map_or(false, |tag| tag.starts_with("courier_cargo:"))
-            }).map(|it| it.item_id);
+            // Check if existing clean stackable item exists at location/flag (ignoring singletons, BPCs, mutated, and courier cargo stacks)
+            let existing_id = guard
+                .items
+                .values()
+                .find(|it| {
+                    it.owner_id == owner_id
+                        && it.location_id == location_id
+                        && it.flag == flag
+                        && it.type_id == type_id
+                        && guard.is_clean_stackable_item(it)
+                })
+                .map(|it| it.item_id);
             if let Some(existing_id) = existing_id {
                 let updated = {
                     let existing = guard.items.get_mut(&existing_id).unwrap();
@@ -1163,6 +1169,20 @@ impl WorldStateSnapshot {
         true
     }
 
+    /// Returns `true` if `item` is an unpackaged, non-blueprint-copy, unmodified,
+    /// non-courier stack eligible for merging or commodity stacking.
+    pub fn is_clean_stackable_item(&self, item: &InventoryItemRecord) -> bool {
+        !item.singleton
+            && !item.is_blueprint_copy
+            && item.blueprint_runs_remaining.is_none()
+            && item.dynamic_attributes.is_empty()
+            && item.source_mutaplasmid_id.is_none()
+            && !self
+                .item_custom_names
+                .get(&item.item_id)
+                .is_some_and(|tag| tag.starts_with("courier_cargo:"))
+    }
+
     pub fn validate_item_for_consumption(
         &self,
         item: &InventoryItemRecord,
@@ -1252,7 +1272,9 @@ impl WorldStateSnapshot {
                 item.item_id
             )));
         }
-        if opts.reject_blueprint_copy && item.is_blueprint_copy {
+        if opts.reject_blueprint_copy
+            && (item.is_blueprint_copy || item.blueprint_runs_remaining.is_some())
+        {
             return Err(DbError::ValidationError(format!(
                 "Cannot consume blueprint copy item {}",
                 item.item_id
@@ -1508,6 +1530,7 @@ impl WorldStateSnapshot {
         if (spec.reject_singleton || is_partial)
             && (item.singleton
                 || item.is_blueprint_copy
+                || item.blueprint_runs_remaining.is_some()
                 || !item.dynamic_attributes.is_empty()
                 || item.source_mutaplasmid_id.is_some())
         {
@@ -1522,18 +1545,8 @@ impl WorldStateSnapshot {
         }
 
         let dest_owner = spec.new_owner_id.unwrap_or(item.owner_id);
-        let is_courier_cargo = self
-            .item_custom_names
-            .get(&item_id)
-            .is_some_and(|tag| tag.starts_with("courier_cargo:"));
 
-        if spec.merge_at_destination
-            && !item.singleton
-            && !item.is_blueprint_copy
-            && item.dynamic_attributes.is_empty()
-            && item.source_mutaplasmid_id.is_none()
-            && !is_courier_cargo
-        {
+        if spec.merge_at_destination && self.is_clean_stackable_item(&item) {
             let mut candidates: Vec<&InventoryItemRecord> = self
                 .items
                 .values()
@@ -1543,14 +1556,7 @@ impl WorldStateSnapshot {
                         && cand.location_id == spec.new_location_id
                         && cand.flag == spec.new_flag
                         && cand.type_id == item.type_id
-                        && !cand.singleton
-                        && !cand.is_blueprint_copy
-                        && cand.dynamic_attributes.is_empty()
-                        && cand.source_mutaplasmid_id.is_none()
-                        && !self
-                            .item_custom_names
-                            .get(&cand.item_id)
-                            .is_some_and(|tag| tag.starts_with("courier_cargo:"))
+                        && self.is_clean_stackable_item(cand)
                 })
                 .collect();
             candidates.sort_by_key(|c| c.item_id);
