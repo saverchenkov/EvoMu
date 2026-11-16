@@ -693,7 +693,27 @@ impl ServerContext {
         let _ = self.quasar_gateway.on_session_changed(session, now_unix);
 
         let bound_entry = if let Some(bid) = bound_id {
-            Some(self.verify_bound_object(session, bid)?)
+            match self.verify_bound_object(session, bid) {
+                Ok(entry) => Some(entry),
+                Err(err) if err.code == "InvalidBoundObject" => {
+                    if let Some(grace_entry) =
+                        self.grace_bound_object_for_inflight_invbroker(session, bid, method)
+                    {
+                        tracing::debug!(
+                            session_id = session.session_id,
+                            char_id = ?session.character_id,
+                            bound_id = bid,
+                            object_id = grace_entry.object_id,
+                            method,
+                            "Dispatching in-flight invbroker metadata call via transition disconnect grace (#1146)"
+                        );
+                        Some(grace_entry)
+                    } else {
+                        return Err(err);
+                    }
+                }
+                Err(err) => return Err(err),
+            }
         } else {
             None
         };

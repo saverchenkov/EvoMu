@@ -958,6 +958,238 @@ async fn bf03_tokio_headless_disconnect_session_spawns_hold_and_logs_off_sync() 
     );
 }
 
+#[test]
+fn transition_grace_retains_inflight_invbroker_metadata_and_enforces_expiry_and_purges() {
+    let ctx = test_ctx();
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(
+        1_800_000_000,
+    )));
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let other_char = 90_000_002_i64;
+    let sid = 777_146_u64;
+    let sys_from = 30_000_144_u32;
+    let sys_to = 30_000_142_u32;
+    let ship_a = 1_897_301_923_i64;
+    let ship_b = 1_897_147_421_i64;
+    let ship_c = 1_897_147_422_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_from;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_b;
+        }
+        for (item_id, type_id) in [(ship_a, 587_u32), (ship_b, 606_u32), (ship_c, 587_u32)] {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id: char_id,
+                    location_id: i64::from(sys_from),
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    ctx.db
+        .acquire_online_lock(user_id, sid, Some(char_id), false, ctx.now_unix())
+        .expect("acquire online lock");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let mut sess = SessionState::new(sid);
+    sess.user_id = Some(user_id);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(1_000_009);
+    sess.solar_system_id = Some(sys_from);
+    sess.ship_id = Some(ship_b);
+
+    let b_prev_ship = ctx
+        .bind_object(&sess, "invbroker", ship_a)
+        .expect("bind prior ship invbroker in sys_from");
+    let prev_oid = ctx
+        .verify_bound_object(&sess, b_prev_ship)
+        .expect("verify b_prev_ship")
+        .oid_str;
+    let b_active_ship = ctx
+        .bind_object(&sess, "invbroker", ship_b)
+        .expect("bind active ship invbroker");
+    let b_beyonce = ctx
+        .bind_object(&sess, "beyonce", i64::from(sys_from))
+        .expect("bind beyonce");
+
+    // Cross-system /moveme invalidates remote ship_a and beyonce while preserving active ship_b.
+    sess.solar_system_id = Some(sys_to);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_to;
+        }
+        if let Some(sb) = snap.items.get_mut(&ship_b) {
+            sb.location_id = i64::from(sys_to);
+        }
+    });
+    ctx.invalidate_bound_objects_for_session_transition(char_id, sys_to, None, "slash_teleport");
+
+    assert_eq!(
+        ctx.verify_bound_object(&sess, b_prev_ship).unwrap_err().code,
+        "InvalidBoundObject"
+    );
+    assert_eq!(
+        ctx.verify_bound_object(&sess, b_beyonce).unwrap_err().code,
+        "InvalidBoundObject"
+    );
+    assert!(ctx.verify_bound_object(&sess, b_active_ship).is_ok());
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs.iter().any(|n| {
+        n.event == "OnMachoObjectDisconnect"
+            && n.args.first() == Some(&PyRep::ascii_bytes(prev_oid.clone()))
+    }));
+
+    // In-flight read-only metadata calls on invalidated invbroker stay authorized inside 30s grace.
+    let grace_self = ctx
+        .grace_bound_object_for_inflight_invbroker(&sess, b_prev_ship, "GetSelfInvItem")
+        .expect("GetSelfInvItem grace within 30s");
+    assert_eq!(grace_self.object_id, ship_a);
+    assert!(
+        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_prev_ship, "GetAvailableTurretSlots")
+            .is_some()
+    );
+    assert!(ctx.has_transition_grace_invbroker_binding(&sess, b_prev_ship, ship_a));
+
+    // Mutating / container listing / non-invbroker bindings must NEVER enter grace.
+    for blocked in ["List", "ListByFlags", "Add", "MultiAdd", "Remove"] {
+        assert!(
+            ctx.grace_bound_object_for_inflight_invbroker(&sess, b_prev_ship, blocked)
+                .is_none(),
+            "{blocked} must remain rejected"
+        );
+    }
+    assert!(
+        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_beyonce, "GetSelfInvItem")
+            .is_none()
+    );
+    assert!(!ctx.has_transition_grace_invbroker_binding(&sess, b_prev_ship, ship_b));
+
+    // Wrong session, wrong user, or wrong character is rejected.
+    let mut wrong_sid = sess.clone();
+    wrong_sid.session_id = sid + 1;
+    assert!(
+        ctx.grace_bound_object_for_inflight_invbroker(&wrong_sid, b_prev_ship, "GetSelfInvItem")
+            .is_none()
+    );
+    let mut wrong_user = sess.clone();
+    wrong_user.user_id = Some(user_id + 99);
+    assert!(
+        ctx.grace_bound_object_for_inflight_invbroker(&wrong_user, b_prev_ship, "GetSelfInvItem")
+            .is_none()
+    );
+    let mut wrong_char = sess.clone();
+    wrong_char.character_id = Some(other_char);
+    assert!(
+        ctx.grace_bound_object_for_inflight_invbroker(&wrong_char, b_prev_ship, "GetSelfInvItem")
+            .is_none()
+    );
+
+    // Grace remains valid at 20s and expires after 31s.
+    ctx.advance_secs(20);
+    assert!(
+        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_prev_ship, "GetSelfInvItem")
+            .is_some()
+    );
+    ctx.advance_secs(11);
+    assert!(
+        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_prev_ship, "GetSelfInvItem")
+            .is_none()
+    );
+
+    // Explicit client release, logout transition, release_session_bindings, and
+    // release_user_bindings each purge grace entries immediately.
+    sess.solar_system_id = Some(sys_from);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_from;
+        }
+    });
+    let b_c1 = ctx.bind_object(&sess, "invbroker", ship_c).expect("bind ship_c");
+    let c1_oid = ctx.verify_bound_object(&sess, b_c1).unwrap().oid_str;
+    ctx.invalidate_bound_objects_for_session_transition(char_id, sys_to, None, "slash_teleport");
+    assert!(
+        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_c1, "GetSelfInvItem")
+            .is_some()
+    );
+    ctx.release_bound_objects_from_pyrep(sid, &PyRep::List(vec![PyRep::ascii_bytes(c1_oid)]));
+    assert!(
+        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_c1, "GetSelfInvItem")
+            .is_none()
+    );
+
+    let b_c2 = ctx.bind_object(&sess, "invbroker", ship_c).expect("bind ship_c #2");
+    ctx.invalidate_bound_objects_for_session_transition(char_id, sys_to, None, "slash_teleport");
+    assert!(
+        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_c2, "GetSelfInvItem")
+            .is_some()
+    );
+    ctx.invalidate_bound_objects_for_session_transition(char_id, sys_to, None, "logout");
+    assert!(
+        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_c2, "GetSelfInvItem")
+            .is_none()
+    );
+
+    let b_c3 = ctx.bind_object(&sess, "invbroker", ship_c).expect("bind ship_c #3");
+    ctx.invalidate_bound_objects_for_session_transition(char_id, sys_to, None, "slash_teleport");
+    ctx.release_session_bindings(sid);
+    assert!(
+        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_c3, "GetSelfInvItem")
+            .is_none()
+    );
+
+    let b_c4 = ctx.bind_object(&sess, "invbroker", ship_c).expect("bind ship_c #4");
+    ctx.invalidate_bound_objects_for_session_transition(char_id, sys_to, None, "slash_teleport");
+    ctx.release_user_bindings(user_id);
+    assert!(
+        ctx.grace_bound_object_for_inflight_invbroker(&sess, b_c4, "GetSelfInvItem")
+            .is_none()
+    );
+
+    // Per-session cap (256) evicts oldest grace entries cleanly across batches.
+    let mut batch1 = Vec::new();
+    for _ in 0..150 {
+        batch1.push(ctx.bind_object(&sess, "invbroker", ship_c).expect("batch1 bind"));
+    }
+    ctx.invalidate_bound_objects_for_session_transition(char_id, sys_to, None, "slash_teleport");
+    ctx.advance_secs(1);
+    let mut batch2 = Vec::new();
+    for _ in 0..150 {
+        batch2.push(ctx.bind_object(&sess, "invbroker", ship_c).expect("batch2 bind"));
+    }
+    ctx.invalidate_bound_objects_for_session_transition(char_id, sys_to, None, "slash_teleport");
+    assert!(
+        ctx.grace_bound_object_for_inflight_invbroker(&sess, batch1[0], "GetSelfInvItem")
+            .is_none(),
+        "oldest grace entries above 256 per-session cap must be evicted"
+    );
+    assert!(
+        ctx.grace_bound_object_for_inflight_invbroker(&sess, batch2[149], "GetSelfInvItem")
+            .is_some(),
+        "newest grace entries within 256 per-session cap must remain"
+    );
+
+    // Online-session displacement immediately blocks grace access even before 30s expires.
+    ctx.db
+        .acquire_online_lock(user_id, sid + 50, Some(char_id), true, ctx.now_unix())
+        .expect("displace online lock");
+    assert!(
+        ctx.grace_bound_object_for_inflight_invbroker(&sess, batch2[149], "GetSelfInvItem")
+            .is_none(),
+        "displaced session must lose transition grace immediately"
+    );
+}
+
 #[cfg(test)]
 #[path = "binding_auth_unit_tests.rs"]
 mod binding_auth_unit_tests;
