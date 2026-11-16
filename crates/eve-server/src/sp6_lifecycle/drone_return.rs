@@ -516,8 +516,16 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
             continue;
         }
 
+        let yield_mult = ctx.mining_yield_multiplier();
+        let effective_yield_units = if m.yield_units == 0 {
+            0
+        } else {
+            (((m.yield_units as f64) * yield_mult)
+                .floor()
+                .clamp(1.0, (u64::MAX / 2) as f64)) as u64
+        };
         let ore_vol = ctx.sde.types.get(&m.ore_type_id).map(|t| t.volume).unwrap_or(0.1).max(0.001);
-        let needed_vol = ore_vol * (m.yield_units as f64);
+        let needed_vol = ore_vol * (effective_yield_units as f64);
         let (hold_cap, used_vol) = ctx.db.with_snapshot(|snap| {
             let stid = snap.items.get(&m.ship_id).map(|s| s.type_id).unwrap_or(0);
             let st = ctx.sde.types.get(&stid);
@@ -550,7 +558,7 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
         }
 
         let eff_waste = if m.waste_prob > 1.0 { m.waste_prob / 100.0 } else { m.waste_prob };
-        let extraction = match sys.mine_asteroid(m.asteroid_id, m.yield_units, eff_waste).await {
+        let extraction = match sys.mine_asteroid(m.asteroid_id, effective_yield_units, eff_waste).await {
             Ok(e) => e,
             Err(_) => {
                 with_mut_combat_runtime(ctx, |rt| {

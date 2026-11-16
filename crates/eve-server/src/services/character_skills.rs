@@ -2,7 +2,9 @@
 
 #![forbid(unsafe_code)]
 
-use crate::formulas::{skill_training_time_seconds, sp_for_skill_level};
+use crate::formulas::{
+    skill_training_time_seconds_with_multiplier, sp_for_skill_level, sp_per_minute_with_multiplier,
+};
 use crate::router::ServerContext;
 use eve_db::{SkillHistoryEntry, SkillQueueEntry, TrainedSkillRecord};
 use eve_machonet::SessionState;
@@ -32,7 +34,8 @@ pub use super::jump_clone_names::{
     alpha_skill_cap_for_character, effective_character_attributes, lookup_effective_attr_from_tuple,
 };
 pub(crate) use super::jump_clone_names::{
-    is_valid_doll_or_portrait_payload, serialize_doll_pyrep, skill_queue_rowset,
+    effective_skill_queue_entry_duration_seconds, is_valid_doll_or_portrait_payload,
+    serialize_doll_pyrep, skill_queue_entry_duration_with_attrs, skill_queue_rowset,
 };
 
 /// Offline / login skill queue catch-up (`feat:skills.skill-catch-up`):
@@ -42,6 +45,7 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
     let now_unix = ctx.now_unix();
     let now_ft = ctx.now_blueos_filetime_ticks();
     let sde = ctx.sde.clone();
+    let train_mult = ctx.skill_training_multiplier();
 
     let (ship_to_invalidate, completed_events, paused_by_lapse) =
         ctx.db.with_mut_snapshot(|snap| {
@@ -151,7 +155,8 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
                 let p_val = lookup_effective_attr_from_tuple(eff_attrs, p_attr_id);
                 let s_val = lookup_effective_attr_from_tuple(eff_attrs, s_attr_id);
                 let clone_mult = if !is_alpha { 1.0 } else { 0.5 };
-                let sp_min = crate::formulas::sp_per_minute(p_val, s_val, clone_mult).max(1e-6);
+                let sp_min =
+                    sp_per_minute_with_multiplier(p_val, s_val, clone_mult, train_mult).max(1e-6);
                 let sp_sec = sp_min / 60.0;
 
                 let needed_sp = (q.end_sp - q.start_sp).max(0.0);
@@ -449,8 +454,16 @@ pub fn handle(
                 let head = q.first()?;
                 let base_unix = head.started_at_unix.unwrap_or_else(|| ctx.now_unix());
                 let elapsed = ctx.now_unix().saturating_sub(base_unix) as f64;
-                let head_rem = (head.duration_seconds - elapsed).max(0.0);
-                let tail_secs: f64 = q.iter().skip(1).map(|e| e.duration_seconds.max(0.0)).sum();
+                let head_dur =
+                    effective_skill_queue_entry_duration_seconds(ctx, snap, char_id, head);
+                let head_rem = (head_dur - elapsed).max(0.0);
+                let tail_secs: f64 = q
+                    .iter()
+                    .skip(1)
+                    .map(|e| {
+                        effective_skill_queue_entry_duration_seconds(ctx, snap, char_id, e).max(0.0)
+                    })
+                    .sum();
                 let client_base_unix = base_unix.saturating_sub(unrebased_offset);
                 let base_ft = (client_base_unix as i64 * 10_000_000) + 116_444_736_000_000_000;
                 let end_ticks = base_ft + ((elapsed + head_rem + tail_secs) * 10_000_000.0) as i64;
@@ -789,7 +802,14 @@ pub fn handle(
                     let primary_attr = lookup_effective_attr_from_tuple(eff_attrs, primary_attr_id);
                     let secondary_attr = lookup_effective_attr_from_tuple(eff_attrs, secondary_attr_id);
                     let clone_mult = if ch.clone_grade == 2 { 1.0 } else { 0.5 };
-                    let duration_sec = skill_training_time_seconds(start_sp, end_sp, primary_attr, secondary_attr, clone_mult);
+                    let duration_sec = skill_training_time_seconds_with_multiplier(
+                        start_sp,
+                        end_sp,
+                        primary_attr,
+                        secondary_attr,
+                        clone_mult,
+                        ctx.skill_training_multiplier(),
+                    );
                     let is_first = snap.skill_queues.get(&char_id).map(|q| q.is_empty()).unwrap_or(true);
                     let started_at = if activate && is_first { Some(now) } else { None };
                     snap.skill_queues.entry(char_id).or_default().push(SkillQueueEntry {
@@ -1002,6 +1022,12 @@ pub fn handle(
                             skill_points: new_skill_sp,
                         },
                     );
+                    let train_mult = ctx.skill_training_multiplier();
+                    let eff_attrs = if (train_mult - 1.0).abs() > 1e-9 {
+                        Some(effective_character_attributes(&ctx.sde, snap, char_id))
+                    } else {
+                        None
+                    };
                     if let Some(queue) = snap.skill_queues.get_mut(&char_id) {
                         queue.retain_mut(|q| {
                             if q.type_id != skill_type_id {
@@ -1013,8 +1039,20 @@ pub fn handle(
                                 if new_skill_sp > q.start_sp {
                                     let old_needed = (q.end_sp - q.start_sp).max(1.0);
                                     q.start_sp = new_skill_sp;
-                                    q.duration_seconds *=
-                                        ((q.end_sp - q.start_sp).max(0.0)) / old_needed;
+                                    q.duration_seconds = if let Some(attrs) = eff_attrs {
+                                        skill_queue_entry_duration_with_attrs(
+                                            ctx,
+                                            q.type_id,
+                                            q.start_sp,
+                                            q.end_sp,
+                                            ch_snap.clone_grade,
+                                            attrs,
+                                            q.duration_seconds,
+                                        )
+                                    } else {
+                                        q.duration_seconds
+                                            * (((q.end_sp - q.start_sp).max(0.0)) / old_needed)
+                                    };
                                 }
                                 true
                             }
@@ -1112,6 +1150,12 @@ pub fn handle(
                     }
                     remaining_budget = remaining_budget.min(alpha_room);
                 }
+                let train_mult = ctx.skill_training_multiplier();
+                let eff_attrs = if (train_mult - 1.0).abs() > 1e-9 {
+                    Some(effective_character_attributes(&ctx.sde, snap, char_id))
+                } else {
+                    None
+                };
                 let queue = snap.skill_queues.entry(char_id).or_default().clone();
                 let mut remaining_queue = Vec::new();
                 let mut history_to_append = Vec::new();
@@ -1150,7 +1194,19 @@ pub fn handle(
                         remaining_budget = 0.0;
                         total_applied += applied;
                         q.start_sp += applied;
-                        q.duration_seconds *= ((q.end_sp - q.start_sp).max(0.0)) / needed;
+                        q.duration_seconds = if let Some(attrs) = eff_attrs {
+                            skill_queue_entry_duration_with_attrs(
+                                ctx,
+                                q.type_id,
+                                q.start_sp,
+                                q.end_sp,
+                                ch_snap.clone_grade,
+                                attrs,
+                                q.duration_seconds,
+                            )
+                        } else {
+                            q.duration_seconds * (((q.end_sp - q.start_sp).max(0.0)) / needed)
+                        };
                         let current_lvl = skills_map.get(&q.type_id).map(|s| s.level).unwrap_or(0);
                         let rank = ctx
                             .sde

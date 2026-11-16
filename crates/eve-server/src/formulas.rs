@@ -32,6 +32,27 @@ pub fn sp_per_minute(primary_attr: f64, secondary_attr: f64, clone_multiplier: f
     (primary_attr + 0.5 * secondary_attr) * clone_multiplier
 }
 
+/// Normalizes a runtime rate multiplier, falling back to `1.0` when non-finite or non-positive.
+#[inline]
+pub fn sanitize_rate_multiplier(multiplier: f64) -> f64 {
+    if multiplier.is_finite() && multiplier > 0.0 {
+        multiplier
+    } else {
+        1.0
+    }
+}
+
+/// #2b: SP per minute scaled by `skill_training_multiplier` (`#1123`).
+pub fn sp_per_minute_with_multiplier(
+    primary_attr: f64,
+    secondary_attr: f64,
+    clone_multiplier: f64,
+    skill_training_multiplier: f64,
+) -> f64 {
+    sp_per_minute(primary_attr, secondary_attr, clone_multiplier)
+        * sanitize_rate_multiplier(skill_training_multiplier)
+}
+
 /// #3: Training time in seconds from `current_sp` to `target_sp`:
 pub fn skill_training_time_seconds(
     current_sp: f64,
@@ -40,7 +61,32 @@ pub fn skill_training_time_seconds(
     secondary_attr: f64,
     clone_multiplier: f64,
 ) -> f64 {
-    let sp_min = sp_per_minute(primary_attr, secondary_attr, clone_multiplier).max(1e-6);
+    skill_training_time_seconds_with_multiplier(
+        current_sp,
+        target_sp,
+        primary_attr,
+        secondary_attr,
+        clone_multiplier,
+        1.0,
+    )
+}
+
+/// #3b: Training time in seconds scaled by `skill_training_multiplier` (`#1123`).
+pub fn skill_training_time_seconds_with_multiplier(
+    current_sp: f64,
+    target_sp: f64,
+    primary_attr: f64,
+    secondary_attr: f64,
+    clone_multiplier: f64,
+    skill_training_multiplier: f64,
+) -> f64 {
+    let sp_min = sp_per_minute_with_multiplier(
+        primary_attr,
+        secondary_attr,
+        clone_multiplier,
+        skill_training_multiplier,
+    )
+    .max(1e-6);
     ((target_sp - current_sp).max(0.0) / sp_min) * 60.0
 }
 
@@ -739,6 +785,24 @@ mod tests {
         assert_eq!(concord_response_delay_sec(1.0), 6.0);
         assert_eq!(clamp_upwell_structure_damage(20_000.0, 5_000.0, 1.0), 5_000.0);
         assert!(compute_living_world_fair_price(230_000.0, 250_000.0, 1.0) >= 287_500.0);
+    }
+
+    #[test]
+    fn test_skill_training_multiplier_formulas() {
+        assert_eq!(sanitize_rate_multiplier(2.5), 2.5);
+        assert_eq!(sanitize_rate_multiplier(0.0), 1.0);
+        assert_eq!(sanitize_rate_multiplier(-3.0), 1.0);
+        assert_eq!(sanitize_rate_multiplier(f64::NAN), 1.0);
+        assert_eq!(sanitize_rate_multiplier(f64::INFINITY), 1.0);
+
+        assert!((sp_per_minute_with_multiplier(20.0, 20.0, 1.0, 100.0) - 3_000.0).abs() < 1e-9);
+        assert!((sp_per_minute_with_multiplier(20.0, 20.0, 0.5, 10.0) - 150.0).abs() < 1e-9);
+
+        let base_t = skill_training_time_seconds(0.0, 3_000.0, 20.0, 20.0, 1.0);
+        let fast_t =
+            skill_training_time_seconds_with_multiplier(0.0, 3_000.0, 20.0, 20.0, 1.0, 100.0);
+        assert!((base_t - 6_000.0).abs() < 1e-9);
+        assert!((fast_t - 60.0).abs() < 1e-9);
     }
 }
 

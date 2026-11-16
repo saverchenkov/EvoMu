@@ -680,7 +680,7 @@ pub(crate) async fn handle_mine(
             asteroid_id,
             ast_state.type_id,
         );
-    let effective_yield_m3 = base_yield_m3 * phase_eff;
+    let effective_yield_m3 = base_yield_m3 * phase_eff * ctx.mining_yield_multiplier();
     let requested_units = if effective_yield_m3 <= 0.0 {
         0
     } else {

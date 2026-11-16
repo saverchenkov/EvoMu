@@ -85,7 +85,16 @@ The first start creates the world database `data/evomu_world.sqlite` and stocks 
 | 26005 | Quasar gRPC gateway |
 | 5222 | Chat |
 
-Ports and paths are set in [`evomu.toml`](./evomu.toml).
+Ports, paths, and optional gameplay rate multipliers are set in [`evomu.toml`](./evomu.toml).
+
+#### Gameplay rate multipliers
+
+| Key | Env override | Default | Effect |
+| :--- | :--- | :--- | :--- |
+| `skill_training_multiplier` | `EVOMU_SKILL_TRAINING_MULTIPLIER` | `1.0` | Multiplies SP/min and divides training duration across queues, catch-up, ticks, and ESI/UI displays |
+| `mining_yield_multiplier` | `EVOMU_MINING_YIELD_MULTIPLIER` | `1.0` | Multiplies ore, ice, and gas yield per module or mining-drone cycle (clamped to asteroid/hold capacity) |
+
+Both keys must be finite numbers `> 0.0` and may be set under `[rates]`, under `[feature_flags]`, or at the top level of [`evomu.toml`](./evomu.toml) (conflicting values across sections are rejected; environment variables override TOML values).
 
 ### Connect the client
 

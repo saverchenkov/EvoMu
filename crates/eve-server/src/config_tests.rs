@@ -306,3 +306,154 @@ fn static_data_override_cli_and_env_flags() {
     assert!(!ServerConfig::env_allow_stale_static_data());
     std::env::remove_var("EVOMU_ALLOW_STALE_STATIC_DATA");
 }
+
+#[test]
+fn rate_multipliers_parse_defaults_aliases_env_overrides_and_validation() {
+    let _lock = crate::lock_test_env_write();
+    let _guard = EnvVarGuard::capture(&[
+        "EVOMU_CONFIG_PATH",
+        "EVOMU_SKILL_TRAINING_MULTIPLIER",
+        "EVOMU_MINING_YIELD_MULTIPLIER",
+        "EVOMU_STORAGE_BACKEND",
+    ]);
+
+    let def = ServerConfig::default();
+    assert_eq!(def.skill_training_multiplier(), 1.0);
+    assert_eq!(def.mining_yield_multiplier(), 1.0);
+
+    let empty_cfg = ServerConfig::from_toml_str("").expect("empty config");
+    assert_eq!(empty_cfg.skill_training_multiplier(), 1.0);
+    assert_eq!(empty_cfg.mining_yield_multiplier(), 1.0);
+
+    let repo_cfg = ServerConfig::from_toml_str(include_str!("../../../evomu.toml"))
+        .expect("repo evomu.toml parses");
+    assert_eq!(repo_cfg.skill_training_multiplier(), 1.0);
+    assert_eq!(repo_cfg.mining_yield_multiplier(), 1.0);
+
+    // Top-level keys accept integers and floats.
+    let top = ServerConfig::from_toml_str(
+        "skill_training_multiplier = 100.0\nmining_yield_multiplier = 5\n",
+    )
+    .expect("top-level rates");
+    assert_eq!(top.skill_training_multiplier(), 100.0);
+    assert_eq!(top.mining_yield_multiplier(), 5.0);
+
+    // [rates] alias section parses cleanly and roundtrips via toml::to_string.
+    let rates = ServerConfig::from_toml_str(
+        "[rates]\nskill_training_multiplier = 25.0\nmining_yield_multiplier = 2.5\n",
+    )
+    .expect("[rates] section");
+    assert_eq!(rates.skill_training_multiplier(), 25.0);
+    assert_eq!(rates.mining_yield_multiplier(), 2.5);
+    let rendered = toml::to_string(&rates).expect("serialize ServerConfig");
+    let reparsed = ServerConfig::from_toml_str(&rendered).expect("roundtrip ServerConfig");
+    assert_eq!(rates, reparsed);
+
+    // [feature_flags] alias keys work identically.
+    let ff = ServerConfig::from_toml_str(
+        "[feature_flags]\nskill_training_multiplier = 10\nmining_yield_multiplier = 3.5\n",
+    )
+    .expect("[feature_flags] rates");
+    assert_eq!(ff.skill_training_multiplier(), 10.0);
+    assert_eq!(ff.mining_yield_multiplier(), 3.5);
+
+    // Matching explicit aliases are accepted; conflicting values across sections are rejected.
+    let matching = ServerConfig::from_toml_str(
+        "skill_training_multiplier = 10\n[rates]\nskill_training_multiplier = 10.0\n",
+    )
+    .expect("matching aliases succeed");
+    assert_eq!(matching.skill_training_multiplier(), 10.0);
+
+    let conflict = ServerConfig::from_toml_str(
+        "skill_training_multiplier = 5.0\n[rates]\nskill_training_multiplier = 10.0\n",
+    )
+    .unwrap_err();
+    assert!(conflict.contains("Conflicting skill_training_multiplier"));
+
+    let ff_conflict = ServerConfig::from_toml_str(
+        "[rates]\nmining_yield_multiplier = 2.0\n[feature_flags]\nmining_yield_multiplier = 4.0\n",
+    )
+    .unwrap_err();
+    assert!(ff_conflict.contains("Conflicting mining_yield_multiplier"));
+
+    // Unknown keys inside [rates] fail fast instead of silently falling back to 1.0.
+    assert!(ServerConfig::from_toml_str("[rates]\nskill_multiplier = 5.0\n").is_err());
+
+    // Invalid (<= 0, non-finite, non-numeric) TOML values fail validation across every alias.
+    for bad_val in ["0", "0.0", "-1.0", "nan", "inf", "-inf", "\"fast\""] {
+        assert!(
+            ServerConfig::from_toml_str(&format!("skill_training_multiplier = {bad_val}\n"))
+                .is_err(),
+            "top-level skill_training_multiplier={bad_val} must fail"
+        );
+        assert!(
+            ServerConfig::from_toml_str(&format!("[rates]\nmining_yield_multiplier = {bad_val}\n"))
+                .is_err(),
+            "[rates].mining_yield_multiplier={bad_val} must fail"
+        );
+        assert!(
+            ServerConfig::from_toml_str(&format!(
+                "[feature_flags]\nskill_training_multiplier = {bad_val}\n"
+            ))
+            .is_err(),
+            "[feature_flags].skill_training_multiplier={bad_val} must fail"
+        );
+    }
+
+    // Programmatic invalid rate values are caught before initializing ServerContext.
+    let mut manual_bad = ServerConfig::default();
+    manual_bad.storage.backend = "memory".into();
+    manual_bad.feature_flags.mining_yield_multiplier = 0.0;
+    assert!(manual_bad.validate_rates().is_err());
+    assert!(crate::router::ServerContext::from_config(&manual_bad).is_err());
+
+    // Valid rates propagate from ServerConfig -> ServerContext.
+    let ctx_cfg = ServerConfig::from_toml_str(
+        "world_db_path = \"ephemeral\"\n[storage]\nbackend = \"memory\"\n[rates]\nskill_training_multiplier = 100.0\nmining_yield_multiplier = 5.0\n",
+    )
+    .expect("memory ServerConfig with rates");
+    let ctx = crate::router::ServerContext::from_config(&ctx_cfg).expect("ServerContext from_config");
+    assert_eq!(ctx.skill_training_multiplier(), 100.0);
+    assert_eq!(ctx.mining_yield_multiplier(), 5.0);
+
+    // Env overrides override evomu.toml and reject invalid values; empty strings keep TOML values.
+    let tmp_dir = std::env::temp_dir().join(format!("evomu_rates_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let cfg_path = tmp_dir.join("rates.toml");
+    std::fs::write(
+        &cfg_path,
+        "[storage]\nbackend = \"memory\"\n[rates]\nskill_training_multiplier = 4.0\nmining_yield_multiplier = 2.0\n",
+    )
+    .unwrap();
+    std::env::set_var("EVOMU_CONFIG_PATH", &cfg_path);
+    std::env::set_var("EVOMU_SKILL_TRAINING_MULTIPLIER", "");
+    std::env::set_var("EVOMU_MINING_YIELD_MULTIPLIER", "   ");
+    let kept = ServerConfig::load_default_or_env().expect("empty rate env keeps TOML");
+    assert_eq!(kept.skill_training_multiplier(), 4.0);
+    assert_eq!(kept.mining_yield_multiplier(), 2.0);
+
+    std::env::set_var("EVOMU_SKILL_TRAINING_MULTIPLIER", "100");
+    std::env::set_var("EVOMU_MINING_YIELD_MULTIPLIER", "7.5");
+    let overridden = ServerConfig::load_default_or_env().expect("valid rate env overrides");
+    assert_eq!(overridden.skill_training_multiplier(), 100.0);
+    assert_eq!(overridden.mining_yield_multiplier(), 7.5);
+
+    for bad_env in ["0", "-2.0", "NaN", "inf", "abc"] {
+        std::env::set_var("EVOMU_SKILL_TRAINING_MULTIPLIER", bad_env);
+        assert!(
+            ServerConfig::load_default_or_env().is_err(),
+            "EVOMU_SKILL_TRAINING_MULTIPLIER={bad_env} must fail"
+        );
+        std::env::remove_var("EVOMU_SKILL_TRAINING_MULTIPLIER");
+
+        std::env::set_var("EVOMU_MINING_YIELD_MULTIPLIER", bad_env);
+        assert!(
+            ServerConfig::load_default_or_env().is_err(),
+            "EVOMU_MINING_YIELD_MULTIPLIER={bad_env} must fail"
+        );
+        std::env::remove_var("EVOMU_MINING_YIELD_MULTIPLIER");
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

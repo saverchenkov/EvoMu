@@ -482,6 +482,28 @@ impl ServerContext {
             .clone()
     }
 
+    /// Returns the active global skill training speed multiplier (`1.0` = vanilla, `#1123`).
+    #[inline]
+    pub fn skill_training_multiplier(&self) -> f64 {
+        let raw = self
+            .feature_flags
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .skill_training_multiplier;
+        crate::formulas::sanitize_rate_multiplier(raw)
+    }
+
+    /// Returns the active global mining yield multiplier (`1.0` = vanilla, `#1123`).
+    #[inline]
+    pub fn mining_yield_multiplier(&self) -> f64 {
+        let raw = self
+            .feature_flags
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .mining_yield_multiplier;
+        crate::formulas::sanitize_rate_multiplier(raw)
+    }
+
     /// Returns `true` when `--gm` mode is enabled, unlocking loopback-only `/ops` endpoints (`#1077 §A`).
     pub fn is_gm_ops_enabled(&self) -> bool {
         self.feature_flags
@@ -982,6 +1004,7 @@ impl ServerContext {
         sde: Arc<SdeRegistry>,
         quasar_descriptors: Arc<eve_proto::quasar::QuasarDescriptorRegistry>,
     ) -> Result<Self, String> {
+        cfg.validate_rates()?;
         let backend = cfg.validate_storage_backend()?;
         let db = match backend {
             "sqlite" => {
@@ -1849,6 +1872,7 @@ impl ServerContext {
             return;
         }
         let sde = self.sde.clone();
+        let train_mult = self.skill_training_multiplier();
         let now_ft = self.now_blueos_filetime_ticks();
         let now_unix = self.now_unix();
         let (invalidated_ships, completed_events, paused_chars, partial_sp_events) = self.db.with_mut_snapshot(|snap| {
@@ -1934,7 +1958,14 @@ impl ServerContext {
                     let p_val = crate::services::character_skills::lookup_effective_attr_from_tuple(eff_attrs, p_attr_id);
                     let s_val = crate::services::character_skills::lookup_effective_attr_from_tuple(eff_attrs, s_attr_id);
                     let clone_mult = if !is_alpha { 1.0 } else { 0.5 };
-                    let sp_sec = crate::formulas::sp_per_minute(p_val, s_val, clone_mult).max(1e-6) / 60.0;
+                    let sp_sec = crate::formulas::sp_per_minute_with_multiplier(
+                        p_val,
+                        s_val,
+                        clone_mult,
+                        train_mult,
+                    )
+                    .max(1e-6)
+                        / 60.0;
 
                     let needed_sp = (q.end_sp - q.start_sp).max(0.0);
                     let time_for_needed = (needed_sp / sp_sec).max(0.0);

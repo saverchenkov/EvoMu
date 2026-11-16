@@ -717,3 +717,111 @@ async fn issue_784_788_reprocess_from_docked_ship_ore_hold_emits_item_and_accoun
             .all(|i| i.flag == InventoryFlag::Hangar));
     });
 }
+
+#[tokio::test]
+async fn direct_module_harvest_respects_mining_yield_multiplier() {
+    let mut ctx = test_ctx();
+    ctx.feature_flags
+        .write()
+        .unwrap()
+        .mining_yield_multiplier = 5.0;
+    let (sys_id, char_id, corp_id) = (30_000_142, 90_000_001, 98_000_001);
+    let (ship_id, laser_id, ast_id) = (1_090_000_001, 1_090_000_002, 1_090_000_010);
+
+    upsert_type(
+        &mut ctx.sde,
+        994_001,
+        25,
+        6,
+        "Test Venture",
+        5_000.0,
+        50.0,
+        1,
+        &[(1556, 5_000.0)],
+    );
+    upsert_type(
+        &mut ctx.sde,
+        994_002,
+        54,
+        7,
+        "Miner I",
+        5.0,
+        0.0,
+        1,
+        &[(77, 40.0), (54, 15_000.0), (3154, 0.0)],
+    );
+    upsert_type(
+        &mut ctx.sde,
+        994_003,
+        462,
+        25,
+        "Veldspar",
+        0.1,
+        0.0,
+        100,
+        &[],
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            make_item(ship_id, 994_001, char_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            laser_id,
+            make_item(laser_id, 994_002, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.asteroids.insert(
+            ast_id,
+            AsteroidRecord {
+                asteroid_id: ast_id,
+                type_id: 994_003,
+                solar_system_id: sys_id,
+                belt_id: 500,
+                quantity: 3_000,
+                initial_quantity: 3_000,
+                position: (1_000.0, 0.0, 0.0),
+                radius: 50.0,
+            },
+        );
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            make_ship_ball(ship_id, 994_001, DVec3::ZERO, MovementMode::Stop),
+            CombatState::default(),
+        )
+        .await;
+
+    let mut sess = make_session(char_id, corp_id, Some(sys_id), Some(ship_id));
+    let ore_res = handle(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Mine",
+        &[PyRep::Integer(ast_id), PyRep::Integer(laser_id)],
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    // 40.0 m3 * 5.0x = 200.0 m3 = 2,000 Veldspar units (vs 400 at 1.0x).
+    assert_eq!(kv_field(&ore_res, "minedUnits").and_then(|v| v.as_i64()), Some(2_000));
+    assert_eq!(kv_field(&ore_res, "depleted").and_then(|v| v.as_i64()), Some(0));
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.asteroids[&ast_id].quantity, 1_000);
+        let ore_units: i32 = snap
+            .items
+            .values()
+            .filter(|i| {
+                i.location_id == ship_id
+                    && i.flag == InventoryFlag::SpecializedOreHold
+                    && i.type_id == 994_003
+            })
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(ore_units, 2_000);
+    });
+}

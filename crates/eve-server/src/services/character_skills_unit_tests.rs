@@ -536,3 +536,223 @@ fn apply_free_skill_points_and_alpha_cap_enforcement_work() {
         "AlphaCloneSpCapExceeded"
     );
 }
+
+#[test]
+fn skill_training_multiplier_scales_queue_save_display_catch_up_tick_free_sp_and_char_select() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let st_id = 60_003_760_i64;
+    let skill_tid = 3300_u32; // Gunnery (rank 1, no prerequisites)
+    let mut sess = char_session(char_id, st_id);
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+            ch.free_skill_points = 5_000.0;
+        }
+        snap.skills.entry(char_id).or_default().insert(
+            skill_tid,
+            TrainedSkillRecord {
+                type_id: skill_tid,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
+        snap.skill_queues.remove(&char_id);
+        snap.paused_skill_queues.remove(&char_id);
+    });
+
+    // 1. Save a 3-level queue at default 1.0x and inspect rowset, GetEndOfTraining, and char_selection.
+    handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "SaveSkillQueue",
+        &[PyRep::List(vec![
+            PyRep::Tuple(vec![PyRep::Integer(i64::from(skill_tid)), PyRep::Integer(1)]),
+            PyRep::Tuple(vec![PyRep::Integer(i64::from(skill_tid)), PyRep::Integer(2)]),
+            PyRep::Tuple(vec![PyRep::Integer(i64::from(skill_tid)), PyRep::Integer(3)]),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+
+    let PyRep::List(q_1x) = handle(&ctx, &mut sess, "skillMgr2", "GetSkillQueue", &[], &kw)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected List from GetSkillQueue");
+    };
+    assert_eq!(q_1x.len(), 3);
+    let dur0_1x = q_1x[0].dict_get("durationSeconds").unwrap().as_f64().unwrap();
+    let dur1_1x = q_1x[1].dict_get("durationSeconds").unwrap().as_f64().unwrap();
+    let dur2_1x = q_1x[2].dict_get("durationSeconds").unwrap().as_f64().unwrap();
+    assert!(dur0_1x > 100.0);
+    let eot_1x = handle(&ctx, &mut sess, "skillMgr2", "GetEndOfTraining", &[], &kw)
+        .unwrap()
+        .unwrap()
+        .as_i64()
+        .unwrap();
+    let head_start_ft = q_1x[0]
+        .dict_get("trainingStartTime")
+        .unwrap()
+        .as_i64()
+        .unwrap();
+
+    // 2. Raise skill_training_multiplier to 100.0 WITHOUT rewriting the pre-existing DB queue:
+    //    rowset durations, GetEndOfTraining, and character selection must all scale dynamically 100x.
+    ctx.feature_flags
+        .write()
+        .unwrap()
+        .skill_training_multiplier = 100.0;
+
+    let PyRep::List(q_100x) = handle(&ctx, &mut sess, "skillMgr2", "GetSkillQueue", &[], &kw)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected List from GetSkillQueue");
+    };
+    let dur0_100x = q_100x[0].dict_get("durationSeconds").unwrap().as_f64().unwrap();
+    let dur1_100x = q_100x[1].dict_get("durationSeconds").unwrap().as_f64().unwrap();
+    let dur2_100x = q_100x[2].dict_get("durationSeconds").unwrap().as_f64().unwrap();
+    assert!((dur0_100x - dur0_1x / 100.0).abs() < 1e-3);
+    assert!((dur1_100x - dur1_1x / 100.0).abs() < 1e-3);
+    assert!((dur2_100x - dur2_1x / 100.0).abs() < 1e-3);
+
+    let eot_100x = handle(&ctx, &mut sess, "skillMgr2", "GetEndOfTraining", &[], &kw)
+        .unwrap()
+        .unwrap()
+        .as_i64()
+        .unwrap();
+    let total_1x_secs = (eot_1x - head_start_ft) as f64 / 10_000_000.0;
+    let total_100x_secs = (eot_100x - head_start_ft) as f64 / 10_000_000.0;
+    assert!((total_100x_secs - total_1x_secs / 100.0).abs() < 2.0);
+
+    let PyRep::Tuple(sel_parts) =
+        crate::services::char_selection::get_character_selection_data(&ctx, &sess).unwrap()
+    else {
+        panic!("expected tuple from get_character_selection_data");
+    };
+    let PyRep::List(sel_rows) = &sel_parts[2] else {
+        panic!("expected List from get_character_selection_data");
+    };
+    let sel_row = sel_rows
+        .iter()
+        .find(|r| r.dict_get("characterID") == Some(&PyRep::Integer(char_id)))
+        .unwrap();
+    let sel_q_start = sel_row.dict_get("trainingStartTime").unwrap().as_i64().unwrap();
+    let sel_q_end = sel_row.dict_get("queueEndTime").unwrap().as_i64().unwrap();
+    let sel_total_secs = (sel_q_end - sel_q_start) as f64 / 10_000_000.0;
+    assert!((sel_total_secs - total_1x_secs / 100.0).abs() < 2.0);
+
+    // 3. Backdate start timestamp by only ~1/100th of 1.0x level-1 time: catch_up_skill_queue
+    //    must complete level 1 at 100.0x rate (which would barely scratch level 1 at 1.0x).
+    let now = ctx.now_unix();
+    let elapsed_for_lvl1 = (dur0_100x.ceil() as u64) + 1;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(head) = snap.skill_queues.get_mut(&char_id).and_then(|q| q.first_mut()) {
+            head.started_at_unix = Some(now.saturating_sub(elapsed_for_lvl1));
+        }
+    });
+    catch_up_skill_queue(&ctx, char_id);
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            snap.skills[&char_id][&skill_tid].level >= 1,
+            "100x catch-up must finish level 1 within accelerated duration"
+        );
+        let q = &snap.skill_queues[&char_id];
+        assert!(q.first().is_some_and(|e| e.target_level >= 2));
+    });
+
+    // 4. Newly saved queue at 100.0x persists accelerated duration_seconds, and ApplyFreeSkillPoints
+    //    keeps remaining duration scaled by 100.0x (never reverting to 1.0x).
+    let lvl2_sp = crate::formulas::sp_for_skill_level(1.0, 2);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            skill_tid,
+            TrainedSkillRecord {
+                type_id: skill_tid,
+                level: 2,
+                skill_points: lvl2_sp,
+            },
+        );
+        snap.skill_queues.remove(&char_id);
+    });
+    handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "SaveSkillQueue",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(i64::from(skill_tid)),
+            PyRep::Integer(3),
+        ])])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let stored_lvl3_100x = ctx
+        .db
+        .with_snapshot(|s| s.skill_queues[&char_id][0].duration_seconds);
+    assert!((stored_lvl3_100x - dur2_1x / 100.0).abs() < 1e-2);
+
+    handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "ApplyFreeSkillPoints",
+        &[PyRep::Integer(i64::from(skill_tid)), PyRep::Integer(500)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let (after_free_sp, after_free_dur) = ctx.db.with_snapshot(|s| {
+        let e = &s.skill_queues[&char_id][0];
+        (e.start_sp, e.duration_seconds)
+    });
+    assert!((after_free_sp - (lvl2_sp + 500.0)).abs() < 1e-6);
+    assert!(
+        after_free_dur < stored_lvl3_100x && after_free_dur < dur2_1x / 50.0,
+        "ApplyFreeSkillPoints must keep 100x remaining duration, got {after_free_dur}"
+    );
+
+    // 5. Background tick advance_skill_queues advances SP at 100.0x rate, and CharStartTrainingSkill
+    //    stores 100.0x duration_seconds directly.
+    ctx.advance_skill_queues(5.0);
+    let after_tick_sp = ctx
+        .db
+        .with_snapshot(|s| s.skill_queues[&char_id][0].start_sp);
+    let sp_gained_in_5s = after_tick_sp - after_free_sp;
+    assert!(
+        sp_gained_in_5s > 100.0,
+        "expected >= 100 SP gained in 5s at 100x (vanilla 5s <= 5 SP), got {sp_gained_in_5s}"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skill_queues.remove(&char_id);
+        snap.skills.entry(char_id).or_default().insert(
+            skill_tid,
+            TrainedSkillRecord {
+                type_id: skill_tid,
+                level: 2,
+                skill_points: lvl2_sp,
+            },
+        );
+    });
+    super::character_skills_helpers::handle_skill_tail(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "CharStartTrainingSkill",
+        &[PyRep::Integer(i64::from(skill_tid))],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let started_dur = ctx
+        .db
+        .with_snapshot(|s| s.skill_queues[&char_id][0].duration_seconds);
+    assert!((started_dur - dur2_1x / 100.0).abs() < 1e-2);
+}

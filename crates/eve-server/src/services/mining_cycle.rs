@@ -521,7 +521,7 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
     if phase_eff <= 0.0 {
         return Err(err(MiningStopReason::AsteroidDepleted, "Phased asteroid has collapsed".into()));
     }
-    let amount_m3 = eff(attr::MINING_AMOUNT) * phase_eff;
+    let amount_m3 = eff(attr::MINING_AMOUNT) * phase_eff * ctx.mining_yield_multiplier();
     let unit_volume = ore.volume.max(1e-6);
     let (flag, capacity) = destination_hold(ctx, &fit, ore);
     let used: f64 = ctx.db.with_snapshot(|s| {
