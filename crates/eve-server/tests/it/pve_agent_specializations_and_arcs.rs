@@ -597,7 +597,47 @@ async fn test_pve_research_locator_and_epic_arcs() {
 
     let msgs_rep = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetMessagesForEpicArcMissions", &[], &kw, None).await.expect("GetMessages");
     let PyRep::Dict(msgs) = msgs_rep else { panic!() };
-    assert!(msgs.iter().any(|(k, _)| k.as_i64() == Some(arc_id as i64)), "Arc briefing message must exist");
+    let find_msg_dict = |key: &str| -> &[(PyRep, PyRep)] {
+        let (_, PyRep::Dict(entries)) = msgs
+            .iter()
+            .find(|(k, _)| k.as_str() == Some(key))
+            .unwrap_or_else(|| panic!("{key} dict must exist (#1114)"))
+        else {
+            panic!("{key} value must be a Dict");
+        };
+        assert!(!entries.is_empty(), "{key} dict must not be empty (#1114)");
+        entries
+    };
+    let chapter_titles = find_msg_dict("messages.epicMission.journalText.chapterTitle");
+    let in_progress = find_msg_dict("messages.epicMission.journalText.inProgressMessage");
+    let completed = find_msg_dict("messages.epicMission.journalText.completedMessage");
+    assert_eq!(chapter_titles.len(), 43, "V24 chapterTitle map must cover all 43 chapter entries");
+    assert_eq!(in_progress.len(), 275, "V24 inProgressMessage map must cover all 275 missions");
+    assert_eq!(completed.len(), 275, "V24 completedMessage map must cover all 275 missions");
+    for (label, entries) in [
+        ("chapterTitle", chapter_titles),
+        ("inProgressMessage", in_progress),
+        ("completedMessage", completed),
+    ] {
+        for (k, v) in entries {
+            let mid = k.as_i64().unwrap_or_else(|| panic!("{label} missionID must be integer"));
+            let msg_id = v.as_i64().unwrap_or_else(|| panic!("{label} messageID must be integer"));
+            assert!(mid > 0 && msg_id > 0, "{label} entries must be positive: ({mid}, {msg_id})");
+        }
+    }
+    let lookup_msg = |entries: &[(PyRep, PyRep)], mid: i64| {
+        entries.iter().find(|(k, _)| k.as_i64() == Some(mid)).and_then(|(_, v)| v.as_i64())
+    };
+    for (mid, exp_ch, exp_prog, exp_comp) in [
+        (14117_i64, 140784_i64, 140983_i64, 140853_i64),
+        (14849, 141900, 141596, 141903),
+        (17130, 1017644, 1016272, 1016271),
+        (17188, 1040276, 1040278, 1040277),
+    ] {
+        assert_eq!(lookup_msg(chapter_titles, mid), Some(exp_ch), "mission {mid} chapterTitle mismatch (#1114)");
+        assert_eq!(lookup_msg(in_progress, mid), Some(exp_prog), "mission {mid} inProgressMessage mismatch (#1114)");
+        assert_eq!(lookup_msg(completed, mid), Some(exp_comp), "mission {mid} completedMessage mismatch (#1114)");
+    }
 
     // Complete epic arc with 90-day cooldown (7,776,000s)
     ctx.db.with_mut_snapshot(|snap| {

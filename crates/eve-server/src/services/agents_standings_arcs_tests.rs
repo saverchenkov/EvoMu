@@ -612,6 +612,505 @@ fn synthesized_npc_faction_standings_sign_count_and_bounds_kill_unary_mutants() 
     assert!(SYNTHESIZED_NPC_FACTION_STANDINGS.contains(&(500_027, 500_026, -10.0)));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn epic_arc_messages_cover_all_v24_arcs_and_chapters_for_unstarted_character() {
+    let ctx = make_test_context();
+    let mut session = char_session(90_000_001, 98_000_001);
+
+    let rep = handle_extended(
+        &ctx,
+        &mut session,
+        "agentMgr",
+        "GetMessagesForEpicArcMissions",
+        &[],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let PyRep::Dict(top) = rep else {
+        panic!("GetMessagesForEpicArcMissions must return Dict");
+    };
+    let (_, PyRep::Dict(chapter_titles)) = top
+        .iter()
+        .find(|(k, _)| k.as_str() == Some("messages.epicMission.journalText.chapterTitle"))
+        .expect("chapterTitle key must be present")
+    else {
+        panic!("chapterTitle must map missionID -> messageID");
+    };
+    let (_, PyRep::Dict(in_progress)) = top
+        .iter()
+        .find(|(k, _)| k.as_str() == Some("messages.epicMission.journalText.inProgressMessage"))
+        .expect("inProgressMessage key must be present")
+    else {
+        panic!("inProgressMessage must map missionID -> messageID");
+    };
+    let (_, PyRep::Dict(completed)) = top
+        .iter()
+        .find(|(k, _)| k.as_str() == Some("messages.epicMission.journalText.completedMessage"))
+        .expect("completedMessage key must be present")
+    else {
+        panic!("completedMessage must map missionID -> messageID");
+    };
+
+    let assert_unique_positive_map = |entries: &[(PyRep, PyRep)], label: &str| {
+        let mut seen = std::collections::HashSet::new();
+        for (k, v) in entries {
+            let mid = k.as_i64().expect("missionID key must be integer");
+            let msg_id = v.as_i64().expect("messageID value must be integer");
+            assert!(mid > 0 && msg_id > 0, "{label} invalid entry ({mid}, {msg_id})");
+            assert!(seen.insert(mid), "duplicate missionID {mid} in {label}");
+        }
+    };
+    assert_eq!(chapter_titles.len(), EPIC_ARC_CHAPTER_TITLES.len());
+    assert_eq!(in_progress.len(), EPIC_ARC_MISSION_SPECS.len());
+    assert_eq!(completed.len(), EPIC_ARC_MISSION_SPECS.len());
+    assert_unique_positive_map(chapter_titles, "chapterTitle");
+    assert_unique_positive_map(in_progress, "inProgressMessage");
+    assert_unique_positive_map(completed, "completedMessage");
+
+    let lookup_msg = |entries: &[(PyRep, PyRep)], mid: i64| {
+        entries
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(mid))
+            .and_then(|(_, v)| v.as_i64())
+    };
+
+    // Exact V24 chapter-start mission -> chapterTitle messageIDs across all 9 active Epic Arcs
+    for (expected_mid, expected_chapter_msg) in [
+        (14117_i64, 140784_i64),
+        (14849, 141900),
+        (14623, 141388),
+        (14746, 142238),
+        (14851, 141611),
+        (15018, 142536),
+        (15143, 143100),
+        (15029, 142820),
+        (17130, 1017644),
+        (17188, 1040276),
+    ] {
+        assert_eq!(
+            lookup_msg(chapter_titles, expected_mid),
+            Some(expected_chapter_msg),
+            "mission {expected_mid} chapterTitle mismatch"
+        );
+    }
+
+    // Exact inProgressMessage / completedMessage IDs across main Epic Arcs and NPE certification arcs
+    for (mid, expected_prog, expected_comp) in [
+        (14117_i64, 140983_i64, 140853_i64),
+        (14849, 141596, 141903),
+        (14623, 141368, 141401),
+        (14746, 141507, 141508),
+        (14851, 142325, 141620),
+        (15015, 142521, 142522),
+        (15030, 142840, 142841),
+        (15565, 144600, 144590),
+        (15665, 144950, 144953),
+        (17130, 1016272, 1016271),
+        (17188, 1040278, 1040277),
+    ] {
+        assert_eq!(
+            lookup_msg(in_progress, mid),
+            Some(expected_prog),
+            "mission {mid} inProgressMessage mismatch"
+        );
+        assert_eq!(
+            lookup_msg(completed, mid),
+            Some(expected_comp),
+            "mission {mid} completedMessage mismatch"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_my_epic_arc_status_handles_unstarted_offered_accepted_mid_arc_and_completed() {
+    let ctx = make_test_context();
+    let char_id = 90_000_001_i64;
+    let mut session = char_session(char_id, 98_000_001);
+
+    // 1. Unstarted state returns an empty dict cleanly.
+    let unstarted = handle_extended(&ctx, &mut session, "agentMgr", "GetMyEpicArcStatus", &[], &HashMap::new())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unstarted, PyRep::Dict(Vec::new()));
+
+    // 2. Offered initial Epic Arc mission (before EpicArcStateEntry exists).
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.insert(
+            (char_id, 14117),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: 14117,
+                agent_id: 3_019_001,
+                state: "Offered".into(),
+                solar_system_id: 30_000_142,
+                current_room_id: 0,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+    });
+    let offered = handle_extended(&ctx, &mut session, "agentMgr", "GetMyEpicArcStatus", &[], &HashMap::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let PyRep::Dict(offered_arcs) = offered else { panic!() };
+    let (_, PyRep::Dict(offered_missions)) = offered_arcs
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(29))
+        .expect("Arc 29 must appear when mission 14117 is Offered")
+    else {
+        panic!();
+    };
+    let m14117 = &offered_missions
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(14117))
+        .expect("Mission 14117 present")
+        .1;
+    assert_eq!(m14117.dict_get("acceptedDate"), Some(&PyRep::None));
+    assert_eq!(m14117.dict_get("completedDate"), Some(&PyRep::None));
+    assert_eq!(m14117.dict_get("nameID").and_then(|v| v.as_i64()), Some(57289));
+    assert_eq!(m14117.dict_get("state").and_then(|v| v.as_str()), Some("Active"));
+
+    // 3. Accepted initial Epic Arc mission populates acceptedDate.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.get_mut(&(char_id, 14117)).unwrap().state = "Accepted".into();
+        save_mission_meta(
+            snap,
+            char_id,
+            &MissionTimingAndCargoMeta {
+                mission_id: 14117,
+                agent_id: 3_019_001,
+                accepted_at_unix: Some(1_775_400_100),
+                ..Default::default()
+            },
+        );
+    });
+    let accepted = handle_extended(&ctx, &mut session, "agentMgr", "GetMyEpicArcStatus", &[], &HashMap::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let PyRep::Dict(accepted_arcs) = accepted else { panic!() };
+    let (_, PyRep::Dict(accepted_missions)) = accepted_arcs.iter().find(|(k, _)| k.as_i64() == Some(29)).unwrap() else {
+        panic!();
+    };
+    let m14117_acc = &accepted_missions[0].1;
+    assert!(matches!(m14117_acc.dict_get("acceptedDate"), Some(PyRep::Integer(_))));
+    assert_eq!(m14117_acc.dict_get("completedDate"), Some(&PyRep::None));
+    assert_eq!(m14117_acc.dict_get("nameID").and_then(|v| v.as_i64()), Some(57289));
+
+    // 4. Mid-arc: mission 14117 completed and mission 14118 offered via a different chapter agent.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.remove(&(char_id, 14117));
+        snap.active_missions.insert(
+            (char_id, 14118),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: 14118,
+                agent_id: 3_019_002,
+                state: "Offered".into(),
+                solar_system_id: 30_000_142,
+                current_room_id: 0,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+        save_epic_arc_states(
+            snap,
+            char_id,
+            &[EpicArcStateEntry {
+                epic_arc_id: 29,
+                agent_id: 3_019_001,
+                faction_id: 500_021,
+                chapter: 1,
+                completed_missions: vec![14117],
+                chosen_branch: None,
+                completed_at_unix: None,
+                cooldown_until_unix: None,
+            }],
+        );
+    });
+    let mid_arc = handle_extended(&ctx, &mut session, "agentMgr", "GetMyEpicArcStatus", &[], &HashMap::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let PyRep::Dict(mid_arcs) = mid_arc else { panic!() };
+    let (_, PyRep::Dict(mid_missions)) = mid_arcs.iter().find(|(k, _)| k.as_i64() == Some(29)).unwrap() else {
+        panic!();
+    };
+    assert_eq!(mid_missions.len(), 2);
+    let mid_done = &mid_missions.iter().find(|(k, _)| k.as_i64() == Some(14117)).unwrap().1;
+    let mid_next = &mid_missions.iter().find(|(k, _)| k.as_i64() == Some(14118)).unwrap().1;
+    assert!(matches!(mid_done.dict_get("completedDate"), Some(PyRep::Integer(_))));
+    assert_eq!(mid_next.dict_get("acceptedDate"), Some(&PyRep::None));
+    assert_eq!(mid_next.dict_get("completedDate"), Some(&PyRep::None));
+    assert_eq!(mid_next.dict_get("nameID").and_then(|v| v.as_i64()), Some(57269));
+
+    // 5. Completed / on cooldown state.
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.remove(&(char_id, 14118));
+        save_epic_arc_states(
+            snap,
+            char_id,
+            &[EpicArcStateEntry {
+                epic_arc_id: 29,
+                agent_id: 3_019_001,
+                faction_id: 500_021,
+                chapter: 7,
+                completed_missions: vec![14117, 14118],
+                chosen_branch: None,
+                completed_at_unix: Some(now),
+                cooldown_until_unix: Some(now + 7_776_000),
+            }],
+        );
+    });
+    let completed = handle_extended(&ctx, &mut session, "agentMgr", "GetMyEpicArcStatus", &[], &HashMap::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let PyRep::Dict(comp_arcs) = completed else { panic!() };
+    let (_, PyRep::Dict(comp_missions)) = comp_arcs.iter().find(|(k, _)| k.as_i64() == Some(29)).unwrap() else {
+        panic!();
+    };
+    assert_eq!(comp_missions.len(), 2);
+    assert_eq!(comp_missions[0].1.dict_get("state").and_then(|v| v.as_str()), Some("Cooldown"));
+    assert_eq!(comp_missions[0].1.dict_get("onCooldown"), Some(&PyRep::Bool(true)));
+    assert!(matches!(comp_missions[0].1.dict_get("completedDate"), Some(PyRep::Integer(_))));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_my_epic_arc_status_isolates_regular_missions_coalesces_legacy_ids_and_restarts() {
+    let mut ctx = make_test_context();
+    let mut sde = (*ctx.sde).clone();
+    sde.npc_corporations.insert(
+        1_000_009,
+        NpcCorporationInfo {
+            corporation_id: 1_000_009,
+            name: "Caldari Provisions".into(),
+            ticker_name: "CP".into(),
+            faction_id: Some(500_001),
+            solar_system_id: Some(30_000_142),
+            station_id: Some(60_003_760),
+            tax_rate: 0.10,
+            ceo_id: None,
+        },
+    );
+    sde.npc_corporations.insert(
+        1_000_130,
+        NpcCorporationInfo {
+            corporation_id: 1_000_130,
+            name: "Sisters of EVE".into(),
+            ticker_name: "SOE".into(),
+            faction_id: Some(500_021),
+            solar_system_id: Some(30_000_142),
+            station_id: Some(60_003_760),
+            tax_rate: 0.10,
+            ceo_id: None,
+        },
+    );
+    sde.agents.insert(
+        3_018_921,
+        AgentInfo {
+            agent_id: 3_018_921,
+            name: "Regular Caldari Agent".into(),
+            corporation_id: 1_000_009,
+            division_id: 24,
+            level: 2,
+            station_id: Some(60_003_760),
+            solar_system_id: Some(30_000_142),
+            agent_type_id: 2,
+            is_locator: false,
+            research_skills: vec![],
+        },
+    );
+    sde.agents.insert(
+        3_019_500,
+        AgentInfo {
+            agent_id: 3_019_500,
+            name: "Caldari Epic Agent".into(),
+            corporation_id: 1_000_009,
+            division_id: 24,
+            level: 4,
+            station_id: Some(60_003_760),
+            solar_system_id: Some(30_000_142),
+            agent_type_id: 10,
+            is_locator: false,
+            research_skills: vec![],
+        },
+    );
+    sde.agents.insert(
+        3_019_001,
+        AgentInfo {
+            agent_id: 3_019_001,
+            name: "Sister Alitura".into(),
+            corporation_id: 1_000_130,
+            division_id: 24,
+            level: 1,
+            station_id: Some(60_003_760),
+            solar_system_id: Some(30_000_142),
+            agent_type_id: 10,
+            is_locator: false,
+            research_skills: vec![],
+        },
+    );
+    ctx.sde = Arc::new(sde);
+
+    let char_id = 90_000_001_i64;
+    let mut session = char_session(char_id, 98_000_001);
+
+    // 1. Regular mission from a Caldari non-epic agent must NOT leak into Caldari epic arc state.
+    ctx.db.with_mut_snapshot(|snap| {
+        save_epic_arc_states(
+            snap,
+            char_id,
+            &[EpicArcStateEntry {
+                epic_arc_id: 2,
+                agent_id: 3_019_500,
+                faction_id: 500_001,
+                chapter: 1,
+                completed_missions: Vec::new(),
+                chosen_branch: Some("CaldariBranch".into()),
+                completed_at_unix: None,
+                cooldown_until_unix: None,
+            }],
+        );
+        snap.active_missions.insert(
+            (char_id, 88_001),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: 88_001,
+                agent_id: 3_018_921,
+                state: "Accepted".into(),
+                solar_system_id: 30_000_142,
+                current_room_id: 0,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+    });
+    let isolated = handle_extended(&ctx, &mut session, "agentMgr", "GetMyEpicArcStatus", &[], &HashMap::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let PyRep::Dict(isolated_arcs) = isolated else { panic!() };
+    assert_eq!(isolated_arcs.len(), 1);
+    let (_, PyRep::Dict(arc2_missions)) = isolated_arcs.iter().find(|(k, _)| k.as_i64() == Some(2)).unwrap() else {
+        panic!();
+    };
+    assert_eq!(arc2_missions.len(), 1);
+    assert_eq!(arc2_missions[0].0.as_i64(), Some(0));
+    assert_eq!(arc2_missions[0].1.dict_get("nameID").and_then(|v| v.as_i64()), Some(0));
+    assert_eq!(arc2_missions[0].1.dict_get("chosenBranch").and_then(|v| v.as_str()), Some("CaldariBranch"));
+    assert_eq!(arc2_missions[0].1.dict_get("completedDate"), Some(&PyRep::None));
+
+    // 2. Legacy faction-mapped `epic_arc_id: 1` with V24 mission 14117 coalesces into Arc 29 alongside active 14118.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.remove(&(char_id, 88_001));
+        save_epic_arc_states(
+            snap,
+            char_id,
+            &[EpicArcStateEntry {
+                epic_arc_id: 1,
+                agent_id: 3_019_001,
+                faction_id: 500_021,
+                chapter: 1,
+                completed_missions: vec![14117],
+                chosen_branch: None,
+                completed_at_unix: None,
+                cooldown_until_unix: None,
+            }],
+        );
+        snap.active_missions.insert(
+            (char_id, 14118),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: 14118,
+                agent_id: 3_019_002,
+                state: "Offered".into(),
+                solar_system_id: 30_000_142,
+                current_room_id: 0,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+    });
+    let coalesced = handle_extended(&ctx, &mut session, "agentMgr", "GetMyEpicArcStatus", &[], &HashMap::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let PyRep::Dict(coal_arcs) = coalesced else { panic!() };
+    assert_eq!(coal_arcs.len(), 1, "legacy id 1 must coalesce into V24 arc 29");
+    let (_, PyRep::Dict(coal_missions)) = coal_arcs.iter().find(|(k, _)| k.as_i64() == Some(29)).unwrap() else {
+        panic!();
+    };
+    assert_eq!(coal_missions.len(), 2);
+    assert!(matches!(
+        coal_missions.iter().find(|(k, _)| k.as_i64() == Some(14117)).unwrap().1.dict_get("completedDate"),
+        Some(PyRep::Integer(_))
+    ));
+    assert_eq!(
+        coal_missions.iter().find(|(k, _)| k.as_i64() == Some(14118)).unwrap().1.dict_get("completedDate"),
+        Some(&PyRep::None)
+    );
+
+    // 3. Restarting an arc after cooldown expires resets stale completion timestamps in favor of active mission.
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.remove(&(char_id, 14118));
+        save_epic_arc_states(
+            snap,
+            char_id,
+            &[EpicArcStateEntry {
+                epic_arc_id: 29,
+                agent_id: 3_019_001,
+                faction_id: 500_021,
+                chapter: 7,
+                completed_missions: vec![14117, 14118],
+                chosen_branch: None,
+                completed_at_unix: Some(now.saturating_sub(8_000_000)),
+                cooldown_until_unix: Some(now.saturating_sub(100)),
+            }],
+        );
+        snap.active_missions.insert(
+            (char_id, 14117),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: 14117,
+                agent_id: 3_019_001,
+                state: "Accepted".into(),
+                solar_system_id: 30_000_142,
+                current_room_id: 0,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+    });
+    let restarted = handle_extended(&ctx, &mut session, "agentMgr", "GetMyEpicArcStatus", &[], &HashMap::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let PyRep::Dict(rest_arcs) = restarted else { panic!() };
+    let (_, PyRep::Dict(rest_missions)) = rest_arcs.iter().find(|(k, _)| k.as_i64() == Some(29)).unwrap() else {
+        panic!();
+    };
+    assert_eq!(rest_missions.len(), 1, "stale completed missions from prior run must not shadow restarted run");
+    assert_eq!(rest_missions[0].0.as_i64(), Some(14117));
+    assert_eq!(rest_missions[0].1.dict_get("state").and_then(|v| v.as_str()), Some("Active"));
+    assert_eq!(rest_missions[0].1.dict_get("onCooldown"), Some(&PyRep::Bool(false)));
+    assert_eq!(rest_missions[0].1.dict_get("cooldownUntilUnix"), Some(&PyRep::None));
+    assert_eq!(rest_missions[0].1.dict_get("completedDate"), Some(&PyRep::None));
+    assert!(matches!(rest_missions[0].1.dict_get("acceptedDate"), Some(PyRep::Integer(_))));
+}
+
 #[cfg(test)]
 #[path = "agents_standings_arcs_extra_unit_tests.rs"]
 mod agents_standings_arcs_extra_unit_tests;
