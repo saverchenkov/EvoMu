@@ -3,6 +3,13 @@
 use crate::router::context::{BoundObjectEntry, ServerContext};
 use eve_machonet::SessionState;
 
+fn is_direct_location_or_ship(session: &SessionState, object_id: i64) -> bool {
+    session.ship_id == Some(object_id)
+        || session.station_id == Some(object_id)
+        || session.structure_id == Some(object_id)
+        || session.solar_system_id.map(i64::from) == Some(object_id)
+}
+
 /// Verifies whether `session` (with active character `char_id`) is authorized
 /// to bind `service` to `object_id`.
 pub(super) fn authorize_service_binding(
@@ -20,11 +27,9 @@ pub(super) fn authorize_service_binding(
         "beyonce" | "scanMgr" | "entity" => {
             session.solar_system_id.map(i64::from) == Some(object_id)
         }
-        "dogmaIM" | "ship" => {
-            session.ship_id == Some(object_id)
-                || session.station_id == Some(object_id)
-                || session.structure_id == Some(object_id)
-                || session.solar_system_id.map(i64::from) == Some(object_id)
+        "ship" => is_direct_location_or_ship(session, object_id),
+        "dogmaIM" => {
+            is_direct_location_or_ship(session, object_id)
                 || crate::router::client_compat::is_dogma_station_or_structure_accessible(
                     ctx, session, char_id, object_id,
                 )
@@ -114,11 +119,16 @@ pub(super) fn verify_service_binding_context(
         "beyonce" | "scanMgr" | "entity" => {
             session.solar_system_id.map(i64::from) == Some(entry.object_id)
         }
-        "dogmaIM" | "ship" => {
-            session.ship_id == Some(entry.object_id)
-                || session.station_id == Some(entry.object_id)
-                || session.structure_id == Some(entry.object_id)
-                || session.solar_system_id.map(i64::from) == Some(entry.object_id)
+        "ship" => is_direct_location_or_ship(session, entry.object_id),
+        "dogmaIM" => {
+            is_direct_location_or_ship(session, entry.object_id)
+                || (Some(entry.character_id) == session.character_id
+                    && crate::router::client_compat::is_dogma_station_or_structure_accessible(
+                        ctx,
+                        session,
+                        entry.character_id,
+                        entry.object_id,
+                    ))
         }
         "skillMgr2" | "charMgr" | "jumpCloneSvc" => {
             Some(entry.object_id) == session.character_id

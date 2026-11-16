@@ -1601,9 +1601,11 @@ impl BridgeRpcError {
             "FakeItemNotFound" | "CharacterNotAtStation" => {
                 ClientError::Internal(self.code.clone())
             }
-            "InvalidBoundObject" | "BoundObjectNotOwned" | "UnMachoDestination" => {
-                ClientError::SessionMismatch(err_msg)
-            }
+            "InvalidBoundObject"
+            | "BoundObjectNotOwned"
+            | "BoundObjectOwnershipViolation"
+            | "BindAuthorizationDenied"
+            | "UnMachoDestination" => ClientError::SessionMismatch(err_msg),
             "SlashError" => ClientError::user_with_args(
                 UserErrorKey::SlashError,
                 [("reason", UserErrorArg::Str(self.message.clone()))],
@@ -2173,6 +2175,33 @@ mod tests {
                 decode_wrapped_user_error(&client_err.to_macho_error_body(6));
             assert_eq!(decoded_key, expected_wire);
             assert!(decoded_dict.is_empty());
+        }
+    }
+
+    #[test]
+    fn bound_ownership_and_auth_denied_encode_as_unmacho_destination() {
+        for code in ["BoundObjectOwnershipViolation", "BindAuthorizationDenied"] {
+            let err = BridgeRpcError {
+                code: code.into(),
+                message: "stale station ship moniker".into(),
+                client_error: None,
+            };
+            assert_eq!(err.code, code);
+            let client_err = err.to_client_error("ship", "MachoBindObject");
+            assert_eq!(
+                client_err,
+                ClientError::SessionMismatch(format!("{code}: stale station ship moniker"))
+            );
+            assert_eq!(client_err.presentation(), UserErrorPresentation::Modal);
+            let (decoded_key, decoded_dict) =
+                decode_wrapped_user_error(&client_err.to_macho_error_body(6));
+            assert_eq!(decoded_key, "UnMachoDestination");
+            assert_ne!(decoded_key, "CustomInfo");
+            assert_eq!(decoded_dict[0].0.as_str(), Some("info"));
+            assert_eq!(
+                decoded_dict[0].1.as_str(),
+                Some(format!("{code}: stale station ship moniker").as_str())
+            );
         }
     }
 }

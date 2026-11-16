@@ -206,6 +206,37 @@ where
 }
 
 impl ServerContext {
+    fn parse_macho_bind_piggyback(
+        arg: Option<&PyRep>,
+    ) -> Result<Option<(&str, Vec<PyRep>, HashMap<String, PyRep>)>, BridgeRpcError> {
+        let Some(PyRep::Tuple(call_tuple)) = arg else {
+            return Ok(None);
+        };
+        if call_tuple.is_empty() {
+            return Ok(None);
+        }
+        let sub_method = call_tuple.first().and_then(|m| m.as_str()).ok_or_else(|| {
+            BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: "Piggybacked call in MachoBindObject requires string method name".into(),
+                client_error: None,
+            }
+        })?;
+        let sub_args: Vec<PyRep> = match call_tuple.get(1) {
+            Some(PyRep::Tuple(items)) | Some(PyRep::List(items)) => items.clone(),
+            _ => Vec::new(),
+        };
+        let mut sub_kwargs = HashMap::new();
+        if let Some(PyRep::Dict(entries)) = call_tuple.get(2) {
+            for (k, v) in entries {
+                if let Some(ks) = k.as_str() {
+                    sub_kwargs.insert(ks.to_owned(), v.clone());
+                }
+            }
+        }
+        Ok(Some((sub_method, sub_args, sub_kwargs)))
+    }
+
     /// Dispatches an incoming RPC call `(service, bound_id, method, args, kwargs)` across the 12
     /// modular domain handlers, enforcing authentication and ownership checks.
     #[allow(clippy::too_many_arguments)]
@@ -221,6 +252,7 @@ impl ServerContext {
     ) -> Result<PyRep, BridgeRpcError> {
         ensure_dispatch_tx_hooks_installed();
 
+        let pre_sync_char_id = session.character_id;
         let pre_sync_loc = (
             session.solar_system_id,
             session.station_id,
@@ -241,6 +273,15 @@ impl ServerContext {
                     "session_location_change",
                 );
             }
+        }
+        if pre_sync_char_id.is_some() && session.character_id != pre_sync_char_id {
+            self.purge_transition_grace_for_session(session.session_id);
+        } else if pre_sync_char_id == session.character_id && session.character_id.is_some() {
+            self.update_transition_departed_dock(
+                session,
+                pre_sync_loc.1.or(pre_sync_loc.2),
+                post_sync_loc.1.or(post_sync_loc.2),
+            );
         }
         let pre_seq = session
             .character_id
@@ -485,12 +526,22 @@ impl ServerContext {
         );
 
         if !tx_poisoned {
+            if initial_active_char_id.is_some() && session.character_id != initial_active_char_id {
+                self.purge_transition_grace_for_session(session.session_id);
+            }
             if let Some(cid) = session.character_id {
                 let post_rpc_loc = (
                     session.solar_system_id,
                     session.station_id,
                     session.structure_id,
                 );
+                if res.is_ok() && session.character_id == initial_active_char_id {
+                    self.update_transition_departed_dock(
+                        session,
+                        post_sync_loc.1.or(post_sync_loc.2),
+                        post_rpc_loc.1.or(post_rpc_loc.2),
+                    );
+                }
                 if res.is_ok() && post_sync_loc.0.is_some() && post_rpc_loc != post_sync_loc {
                     if let Some(sys_id) = session.solar_system_id {
                         self.invalidate_bound_objects_for_session_transition(
@@ -697,15 +748,16 @@ impl ServerContext {
                 Ok(entry) => Some(entry),
                 Err(err) if err.code == "InvalidBoundObject" => {
                     if let Some(grace_entry) =
-                        self.grace_bound_object_for_inflight_invbroker(session, bid, method)
+                        self.grace_bound_object_for_inflight_transition(session, bid, method, args)
                     {
                         tracing::debug!(
                             session_id = session.session_id,
                             char_id = ?session.character_id,
                             bound_id = bid,
                             object_id = grace_entry.object_id,
+                            service = %grace_entry.service,
                             method,
-                            "Dispatching in-flight invbroker metadata call via transition disconnect grace (#1146)"
+                            "Dispatching in-flight read-only metadata call via transition disconnect grace (#1146, #1150)"
                         );
                         Some(grace_entry)
                     } else {
@@ -975,7 +1027,33 @@ impl ServerContext {
                     })
                 }
             };
-            let bid = self.bind_object(session, effective_service, obj_id)?;
+            let parsed_piggyback = Self::parse_macho_bind_piggyback(args.get(1));
+            let (bid, bound_in_map) = match self.bind_object(session, effective_service, obj_id) {
+                Ok(bid) => (bid, true),
+                Err(err)
+                    if err.code == "BindAuthorizationDenied" && effective_service == "ship" =>
+                {
+                    match &parsed_piggyback {
+                        Ok(Some((sub_method, sub_args, _)))
+                            if *sub_method == "GetDirtTimestamp" =>
+                        {
+                            if let Some(grace_bid) = self
+                                .allocate_transition_grace_ship_dirt_binding(
+                                    session,
+                                    obj_id,
+                                    sub_args,
+                                )
+                            {
+                                (grace_bid, false)
+                            } else {
+                                return Err(err);
+                            }
+                        }
+                        _ => return Err(err),
+                    }
+                }
+                Err(err) => return Err(err),
+            };
             if effective_service == "beyonce" {
                 let requested_sys = u32::try_from(obj_id)
                     .ok()
@@ -1027,30 +1105,10 @@ impl ServerContext {
                 }
             }
 
-            let call_result = match args.get(1) {
-                Some(PyRep::Tuple(call_tuple)) if !call_tuple.is_empty() => {
-                    let sub_method =
-                        call_tuple.first().and_then(|m| m.as_str()).ok_or_else(|| {
-                            BridgeRpcError {
-                            code: "InvalidArgument".into(),
-                            message:
-                                "Piggybacked call in MachoBindObject requires string method name"
-                                    .into(),
-                            client_error: None,
-                        }
-                        })?;
-                    let sub_args: Vec<PyRep> = match call_tuple.get(1) {
-                        Some(PyRep::Tuple(items)) | Some(PyRep::List(items)) => items.clone(),
-                        _ => Vec::new(),
-                    };
-                    let mut sub_kwargs = HashMap::new();
-                    if let Some(PyRep::Dict(entries)) = call_tuple.get(2) {
-                        for (k, v) in entries {
-                            if let Some(ks) = k.as_str() {
-                                sub_kwargs.insert(ks.to_owned(), v.clone());
-                            }
-                        }
-                    }
+            let call_result = match parsed_piggyback {
+                Err(err) => Err(err),
+                Ok(None) => Ok(PyRep::None),
+                Ok(Some((sub_method, sub_args, sub_kwargs))) => {
                     dispatch_rpc_boxed(
                         self,
                         session,
@@ -1061,9 +1119,19 @@ impl ServerContext {
                         &sub_kwargs,
                         caller_trace,
                     )
-                    .await?
+                    .await
                 }
-                _ => PyRep::None,
+            };
+            let call_result = match call_result {
+                Ok(rep) => rep,
+                Err(err) => {
+                    if bound_in_map {
+                        self.remove_bound_object_without_notify(session.session_id, bid);
+                    } else {
+                        self.purge_transition_grace_entry(session.session_id, bid);
+                    }
+                    return Err(err);
+                }
             };
 
             // `ObjectCall.GetObjectID` (`carbon/common/script/net/ObjectCallGPCS.pyj`) marshals

@@ -567,6 +567,24 @@ fn map_call_req_error_body_preserves_existing_rpc_error_mappings() {
     assert_eq!(key, "UnMachoDestination");
     assert_eq!(dict[0].1.as_str(), Some("InvalidBoundObject: bad oid"));
 
+    for code in ["BoundObjectOwnershipViolation", "BindAuthorizationDenied"] {
+        let stale_err = eve_proto::BridgeRpcError {
+            code: code.into(),
+            message: "stale bound handle".into(),
+            client_error: None,
+        };
+        let (key, dict) = decode_wrapped_user_error(map_call_req_error_body(
+            "ship",
+            "MachoBindObject",
+            &stale_err,
+        ));
+        assert_eq!(key, "UnMachoDestination");
+        assert_eq!(
+            dict[0].1.as_str(),
+            Some(format!("{code}: stale bound handle").as_str())
+        );
+    }
+
     let slash_err = eve_proto::BridgeRpcError {
         code: "SlashError".into(),
         message: "bad syntax".into(),
