@@ -564,8 +564,9 @@ fn title_definitions_flatbuffer_schema_clean_client_and_dynamic_esi_port() {
     );
 
     // Also verify eve.cosmetic.character.title.definition.api.GetLatestRequest enum Language (2 = DE).
-    let mut eve_req = Vec::new();
-    eve_proto::quasar::encode_varint_field(1, 2, &mut eve_req);
+    let eve_req = pb::message("eve.cosmetic.character.title.definition.api.GetLatestRequest")
+        .set("language", pb::enum_name("DE"))
+        .must_encode();
     let eve_rsp = call(
         &router,
         &player,
