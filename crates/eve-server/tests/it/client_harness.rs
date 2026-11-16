@@ -82,11 +82,20 @@ async fn serve_harness_bridge_client(
                     ctx.advance_secs(secs);
                     if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
                         let sys_h = ctx.systems.get_or_spawn(sys_id);
-                        if let Ok(Some((_, ball))) = sys_h.get_ball_snapshot(ship_id).await {
-                            if matches!(ball.mode, eve_destiny::MovementMode::Warp { .. }) {
-                                for _ in 0..secs.min(60) {
-                                    let _ = sys_h.tick().await;
-                                }
+                        let is_warping = matches!(
+                            sys_h.get_ball_snapshot(ship_id).await,
+                            Ok(Some((_, ball))) if matches!(ball.mode, eve_destiny::MovementMode::Warp { .. })
+                        );
+                        let has_invuln_timer = matches!(
+                            sys_h.get_combat_state(ship_id).await,
+                            Ok(Some(cs))
+                                if cs.warp_exit_invulnerable_remaining_ticks > 0
+                                    || cs.undock_invulnerable_remaining_ticks > 0
+                                    || cs.gate_cloak_remaining_ticks > 0
+                        );
+                        if is_warping || has_invuln_timer {
+                            for _ in 0..secs.min(60) {
+                                let _ = sys_h.tick().await;
                             }
                         }
                     }
