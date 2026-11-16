@@ -1526,6 +1526,7 @@ async fn system_step_hook_and_npc_death_hook_use_live_server_context_839() {
         dt_sim: 1.0,
         landed_warps: Vec::new(),
         destroyed_balls: vec![(npc_ball_id, Some(char_id))],
+        destroyed_lease: None,
         lock_completed_events: Vec::new(),
         target_lost_events: Vec::new(),
         cycle_actions: Vec::new(),
@@ -2456,5 +2457,611 @@ async fn physics_tick_subsec_accumulation_overrun_lateness_and_isolation_1207_12
     assert!(
         (h_jita.sim_elapsed_secs() - (jita_sim_0 + 2.0)).abs() < 1e-6,
         "healthy sys_jita must advance another 1.0s cleanly"
+    );
+}
+
+#[cfg(test)]
+fn seed_combat_ship_1168(
+    ctx: &ServerContext,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    type_id: u32,
+    pos: glam::DVec3,
+) {
+    ctx.db.with_mut_snapshot(|snap| {
+        if !snap.characters.contains_key(&char_id) {
+            let mut ch = snap
+                .characters
+                .get(&90_000_001)
+                .cloned()
+                .expect("demo seed character 90_000_001 exists");
+            ch.character_id = char_id;
+            ch.user_id = char_id as u64;
+            ch.name = format!("Pilot-{char_id}");
+            snap.characters.insert(char_id, ch);
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: std::collections::HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.item_positions.insert(ship_id, [pos.x, pos.y, pos.z]);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let cs = ctx.build_ship_combat_state(char_id, ship_id, type_id);
+    let slim = ctx.build_ship_slim_meta(char_id, type_id);
+    sys_handle.try_spawn_ball_with_meta(
+        eve_destiny::Ball {
+            id: ship_id,
+            type_id,
+            position: pos,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.0,
+            mass: 1_100_000.0,
+            radius: 40.0,
+            speed_fraction: 1.0,
+            mode: eve_destiny::MovementMode::Stop,
+        },
+        cs,
+        slim,
+    );
+}
+
+#[cfg(test)]
+fn make_lethal_cycle_1168(
+    attacker_ship_id: i64,
+    attacker_char_id: i64,
+    module_id: i64,
+    target_ship_id: i64,
+    elapsed_s: f64,
+    duration_s: f64,
+    linked_turrets: Vec<i64>,
+) -> crate::system_actor::ActiveModuleCycle {
+    crate::system_actor::ActiveModuleCycle {
+        ship_id: attacker_ship_id,
+        module_id,
+        module_type_id: 486,
+        owner_char_id: Some(attacker_char_id),
+        effect_name: "projectileFired".to_string(),
+        target_id: Some(target_ship_id),
+        repeat: 0,
+        duration_s,
+        elapsed_s,
+        linked_turrets,
+        damage_vector: eve_destiny::DamageVector::new(100_000.0, 0.0, 0.0, 0.0),
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+fn count_system_wrecks_for_type_1168(ctx: &ServerContext, sys_id: u32, ship_type_id: u32) -> usize {
+    let wreck_tid = ctx.sde.resolve_wreck_type_id(ship_type_id, None).unwrap_or(26_557);
+    ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|it| it.type_id == wreck_tid && it.location_id == sys_id as i64)
+            .count()
+    })
+}
+
+#[cfg(test)]
+fn assert_victim_death_committed_1168(
+    ctx: &ServerContext,
+    handle: &crate::system_actor::SystemHandle,
+    sys_id: u32,
+    victim_char_id: i64,
+    victim_ship_id: i64,
+    ship_type_id: u32,
+) {
+    assert!(
+        !handle.ballpark.read().unwrap().balls.contains_key(&victim_ship_id),
+        "victim ship ball {victim_ship_id} must be removed from ballpark"
+    );
+    let capsule_id = ctx.db.with_snapshot(|snap| {
+        assert!(
+            !snap.items.contains_key(&victim_ship_id),
+            "victim ship item {victim_ship_id} must be removed from DB"
+        );
+        let ch = snap
+            .characters
+            .get(&victim_char_id)
+            .expect("victim character exists");
+        assert_ne!(
+            ch.active_ship_id, victim_ship_id,
+            "victim character {victim_char_id} must no longer reference destroyed ship"
+        );
+        let cap = snap
+            .items
+            .get(&ch.active_ship_id)
+            .expect("victim capsule item must exist in DB");
+        assert_eq!(cap.type_id, 670, "victim must transition to Capsule (670)");
+        assert_eq!(cap.location_id, sys_id as i64);
+
+        let kms = snap
+            .killmails
+            .values()
+            .filter(|km| {
+                km.victim_character_id == victim_char_id
+                    && km.ship_type_id == ship_type_id
+                    && km.solar_system_id == sys_id
+            })
+            .count();
+        assert_eq!(
+            kms, 1,
+            "victim {victim_char_id} must have exactly one killmail"
+        );
+        ch.active_ship_id
+    });
+    assert!(
+        handle
+            .ballpark
+            .read()
+            .unwrap()
+            .balls
+            .get(&capsule_id)
+            .is_some_and(|b| b.type_id == 670),
+        "victim capsule {capsule_id} must exist in ballpark"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn destroyed_balls_survive_step_timeout_and_apply_outside_ask_timeout_1168() {
+    use std::time::Duration;
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let sys_id = 30_000_142_u32;
+    let attacker_char = 90_100_000_i64;
+    let attacker_ship = 950_000_001_i64;
+    let victim_1_char = 90_100_001_i64;
+    let victim_1_ship = 950_000_002_i64;
+    let ship_type_id = 587_u32;
+
+    seed_combat_ship_1168(
+        &ctx,
+        sys_id,
+        attacker_char,
+        attacker_ship,
+        ship_type_id,
+        glam::DVec3::ZERO,
+    );
+    seed_combat_ship_1168(
+        &ctx,
+        sys_id,
+        victim_1_char,
+        victim_1_ship,
+        ship_type_id,
+        glam::DVec3::new(1_000.0, 0.0, 0.0),
+    );
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let wrecks_0 = count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id);
+
+    // Part A: hold WorldRepository::writer past SYSTEM_STEP_ASK_TIMEOUT (2 s) so SystemActor blocks
+    // after destroying victim_1_ship (`cycles.rs:1245`), causing ask_step_tick_only to time out.
+    handle
+        .add_module_cycle(make_lethal_cycle_1168(
+            attacker_ship,
+            attacker_char,
+            950_000_101,
+            victim_1_ship,
+            4.0,
+            5.0,
+            vec![950_000_101],
+        ))
+        .await
+        .unwrap();
+
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let db_hold_a = Arc::clone(&ctx.db);
+    let writer_thread = std::thread::spawn(move || {
+        db_hold_a.with_mut_snapshot(|_| {
+            let _ = locked_tx.send(());
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+        });
+    });
+    locked_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("writer thread acquired lock");
+
+    let t0 = std::time::Instant::now();
+    step_active_systems_physics_tick(&ctx, 1).await;
+    let timeout_elapsed = t0.elapsed();
+    assert!(
+        timeout_elapsed >= SYSTEM_STEP_ASK_TIMEOUT.saturating_sub(Duration::from_millis(100)),
+        "tick must hit SYSTEM_STEP_ASK_TIMEOUT while writer is held (got {:?})",
+        timeout_elapsed
+    );
+
+    let _ = release_tx.send(());
+    writer_thread.join().expect("writer thread joined cleanly");
+    // Synchronize on the actor mailbox so the timed-out step finishes and drops its unsent reply lease.
+    let _ = handle.list_balls().await.unwrap();
+
+    assert!(
+        !handle.ballpark.read().unwrap().balls.contains_key(&victim_1_ship),
+        "victim ship must already be removed from ballpark when actor step timed out"
+    );
+    assert_eq!(
+        handle.pending_destroyed_balls.pending_and_in_flight_counts(),
+        (1, 0),
+        "timed-out destroyed_balls entry must be rolled back into pending outbox"
+    );
+    assert_eq!(
+        count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id),
+        wrecks_0,
+        "wreck must not exist before retained outbox drains"
+    );
+
+    // Run next tick with writer free: outbox drains and commits wreck, killmail, and capsule.
+    step_active_systems_physics_tick(&ctx, 1).await;
+    assert_victim_death_committed_1168(&ctx, &handle, sys_id, victim_1_char, victim_1_ship, ship_type_id);
+    assert_eq!(
+        count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id),
+        wrecks_0 + 1
+    );
+    assert_eq!(
+        handle.pending_destroyed_balls.pending_and_in_flight_counts(),
+        (0, 0)
+    );
+    assert!(!handle.pending_destroyed_balls.is_non_empty());
+
+    // Part B: hold WorldRepository::writer > 2 s right as StepOutput is returned so `apply_step_output`
+    // waits outside SYSTEM_STEP_ASK_TIMEOUT and commits without dropping or timing out.
+    let victim_2_char = 90_100_002_i64;
+    let victim_2_ship = 950_000_012_i64;
+    seed_combat_ship_1168(
+        &ctx,
+        sys_id,
+        victim_2_char,
+        victim_2_ship,
+        ship_type_id,
+        glam::DVec3::new(1_500.0, 0.0, 0.0),
+    );
+    handle
+        .add_module_cycle(make_lethal_cycle_1168(
+            attacker_ship,
+            attacker_char,
+            950_000_102,
+            victim_2_ship,
+            4.0,
+            5.0,
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+
+    let writer_released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer_released_flag = Arc::clone(&writer_released);
+    let db_hold_b = Arc::clone(&ctx.db);
+    *handle.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+        let (locked_b_tx, locked_b_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            db_hold_b.with_mut_snapshot(|_| {
+                let _ = locked_b_tx.send(());
+                std::thread::sleep(Duration::from_millis(2_250));
+                writer_released_flag.store(true, std::sync::atomic::Ordering::Release);
+            });
+        });
+        let _ = locked_b_rx.recv_timeout(Duration::from_secs(5));
+    }));
+
+    let t1 = std::time::Instant::now();
+    step_active_systems_physics_tick(&ctx, 1).await;
+    let apply_elapsed = t1.elapsed();
+    assert!(
+        apply_elapsed >= Duration::from_millis(2_200),
+        "apply_step_output must wait past SYSTEM_STEP_ASK_TIMEOUT on writer without cancelling (got {:?})",
+        apply_elapsed
+    );
+    assert!(
+        writer_released.load(std::sync::atomic::Ordering::Acquire),
+        "writer lock must have been held and released during apply_step_output"
+    );
+    assert_victim_death_committed_1168(&ctx, &handle, sys_id, victim_2_char, victim_2_ship, ship_type_id);
+    assert_eq!(
+        count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id),
+        wrecks_0 + 2
+    );
+    assert_eq!(
+        handle.pending_destroyed_balls.pending_and_in_flight_counts(),
+        (0, 0)
+    );
+    // An extra follow-up tick must produce zero duplicate wrecks or killmails.
+    step_active_systems_physics_tick(&ctx, 1).await;
+    assert_eq!(
+        count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id),
+        wrecks_0 + 2
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn destroyed_balls_recover_across_dropped_reply_receiver_and_post_destruction_panic_1168() {
+    use std::time::Duration;
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let sys_id = 30_000_142_u32;
+    let attacker_char = 90_100_010_i64;
+    let attacker_ship = 951_000_001_i64;
+    let victim_a_char = 90_100_011_i64;
+    let victim_a_ship = 951_000_002_i64;
+    let victim_b_char = 90_100_003_i64;
+    let victim_b_ship = 951_000_003_i64;
+    let ship_type_id = 587_u32;
+
+    seed_combat_ship_1168(
+        &ctx,
+        sys_id,
+        attacker_char,
+        attacker_ship,
+        ship_type_id,
+        glam::DVec3::ZERO,
+    );
+    seed_combat_ship_1168(
+        &ctx,
+        sys_id,
+        victim_a_char,
+        victim_a_ship,
+        ship_type_id,
+        glam::DVec3::new(1_000.0, 0.0, 0.0),
+    );
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let wrecks_0 = count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id);
+
+    // Part A: drop step oneshot::Receiver before SystemActor sends StepOutput.
+    handle
+        .add_module_cycle(make_lethal_cycle_1168(
+            attacker_ship,
+            attacker_char,
+            951_000_101,
+            victim_a_ship,
+            4.0,
+            5.0,
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+
+    let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+    let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
+    *handle.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+        let _ = arrived_tx.send(());
+        let _ = proceed_rx.recv_timeout(Duration::from_secs(5));
+    }));
+
+    let rx = handle.start_step_manual_tick_only(1.0).await.unwrap();
+    arrived_rx.await.unwrap();
+    drop(rx);
+    let _ = proceed_tx.send(());
+    let _ = handle.list_balls().await.unwrap();
+
+    assert!(
+        !handle.ballpark.read().unwrap().balls.contains_key(&victim_a_ship),
+        "victim A ship ball must already be removed before reply send"
+    );
+    assert_eq!(
+        handle.pending_destroyed_balls.pending_and_in_flight_counts(),
+        (1, 0),
+        "dropped oneshot::Receiver must restore victim A into pending outbox"
+    );
+    assert_eq!(
+        count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id),
+        wrecks_0
+    );
+
+    // Next step drains & commits cleanly with no duplicates.
+    step_active_systems_physics_tick(&ctx, 1).await;
+    assert_victim_death_committed_1168(&ctx, &handle, sys_id, victim_a_char, victim_a_ship, ship_type_id);
+    assert_eq!(
+        count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id),
+        wrecks_0 + 1
+    );
+    assert_eq!(
+        handle.pending_destroyed_balls.pending_and_in_flight_counts(),
+        (0, 0)
+    );
+
+    // Part B: inject a post-destruction SystemActor panic after ball destruction & checkout.
+    seed_combat_ship_1168(
+        &ctx,
+        sys_id,
+        victim_b_char,
+        victim_b_ship,
+        ship_type_id,
+        glam::DVec3::new(1_200.0, 0.0, 0.0),
+    );
+    handle
+        .add_module_cycle(make_lethal_cycle_1168(
+            attacker_ship,
+            attacker_char,
+            951_000_102,
+            victim_b_ship,
+            4.0,
+            5.0,
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+
+    handle
+        .panic_after_destruction_for_test
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    step_active_systems_physics_tick(&ctx, 1).await;
+    let _ = handle.list_balls().await.unwrap();
+
+    assert!(
+        handle
+            .command_panics
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= 1,
+        "post-destruction command panic must be observed by SystemActor supervisor loop"
+    );
+    assert!(
+        !handle.ballpark.read().unwrap().balls.contains_key(&victim_b_ship),
+        "victim B ship ball must have been removed prior to injected panic"
+    );
+    assert_eq!(
+        handle.pending_destroyed_balls.pending_and_in_flight_counts(),
+        (1, 0),
+        "post-destruction panic must unwind lease back into pending outbox"
+    );
+
+    step_active_systems_physics_tick(&ctx, 1).await;
+    step_active_systems_physics_tick(&ctx, 1).await;
+    assert_victim_death_committed_1168(&ctx, &handle, sys_id, victim_b_char, victim_b_ship, ship_type_id);
+    assert_eq!(
+        count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id),
+        wrecks_0 + 2
+    );
+    assert_eq!(
+        handle.pending_destroyed_balls.pending_and_in_flight_counts(),
+        (0, 0)
+    );
+    assert_eq!(handle.pending_destroyed_balls.totals(), (2, 2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn seeded_multi_ship_combat_terminal_destruction_matches_committed_deaths_1168() {
+    use std::time::Duration;
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let sys_id = 30_000_142_u32;
+    let attacker_a_char = 90_200_091_i64;
+    let attacker_a_ship = 952_000_001_i64;
+    let attacker_b_char = 90_200_092_i64;
+    let attacker_b_ship = 952_000_002_i64;
+    let ship_type_id = 587_u32;
+
+    seed_combat_ship_1168(
+        &ctx,
+        sys_id,
+        attacker_a_char,
+        attacker_a_ship,
+        ship_type_id,
+        glam::DVec3::ZERO,
+    );
+    seed_combat_ship_1168(
+        &ctx,
+        sys_id,
+        attacker_b_char,
+        attacker_b_ship,
+        ship_type_id,
+        glam::DVec3::new(500.0, 0.0, 0.0),
+    );
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let wrecks_0 = count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id);
+    let kms_0 = ctx.db.with_snapshot(|s| s.killmails.len());
+
+    // Deterministic seeded schedule across 6 victim ships under mixed timeouts, dropped receivers, and panics.
+    let mut rng = 0x1168_CAFE_BABE_u64;
+    let mut victims = Vec::new();
+    for i in 0..6_i64 {
+        rng = rng
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let victim_char = 90_200_001 + i;
+        let victim_ship = 952_000_100 + i;
+        let offset = 1_000.0 + ((rng >> 48) as f64) * 0.1;
+        seed_combat_ship_1168(
+            &ctx,
+            sys_id,
+            victim_char,
+            victim_ship,
+            ship_type_id,
+            glam::DVec3::new(offset, (i as f64) * 200.0, 0.0),
+        );
+        let (atk_ship, atk_char, turrets) = if i % 2 == 0 {
+            (attacker_a_ship, attacker_a_char, Vec::new())
+        } else {
+            (attacker_b_ship, attacker_b_char, vec![952_000_500 + i])
+        };
+        let elapsed_s = match i {
+            0 | 1 => 4.0,
+            2 | 3 => 3.0,
+            _ => 2.0,
+        };
+        handle
+            .add_module_cycle(make_lethal_cycle_1168(
+                atk_ship,
+                atk_char,
+                952_000_500 + i,
+                victim_ship,
+                elapsed_s,
+                5.0,
+                turrets,
+            ))
+            .await
+            .unwrap();
+        victims.push((victim_char, victim_ship));
+    }
+
+    // Tick 1 (victims 0 & 1 die): drop reply receiver before reply send.
+    let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+    let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
+    *handle.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+        let _ = arrived_tx.send(());
+        let _ = proceed_rx.recv_timeout(Duration::from_secs(5));
+    }));
+    let rx1 = handle.start_step_manual_tick_only(1.0).await.unwrap();
+    arrived_rx.await.unwrap();
+    drop(rx1);
+    let _ = proceed_tx.send(());
+    let _ = handle.list_balls().await.unwrap();
+
+    // Tick 2 (victims 2 & 3 die while retained victims 0 & 1 await drain): inject post-destruction panic.
+    handle
+        .panic_after_destruction_for_test
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    step_active_systems_physics_tick(&ctx, 1).await;
+    let _ = handle.list_balls().await.unwrap();
+
+    // Tick 3 (victims 4 & 5 die while victims 0..4 await drain): drain via clean physics ticks.
+    for _ in 0..3 {
+        step_active_systems_physics_tick(&ctx, 1).await;
+    }
+
+    let (recorded, acked) = handle.pending_destroyed_balls.totals();
+    assert_eq!(
+        recorded,
+        victims.len() as u64,
+        "all 6 ships removed via destroy_ball_with_terminal_explosion must enter durable outbox once"
+    );
+    assert_eq!(
+        acked, recorded,
+        "total committed on_ball_destroyed_sync completions must equal total terminal explosions"
+    );
+    assert_eq!(
+        handle.pending_destroyed_balls.pending_and_in_flight_counts(),
+        (0, 0)
+    );
+    assert!(!handle.pending_destroyed_balls.is_non_empty());
+
+    for &(victim_char, victim_ship) in &victims {
+        assert_victim_death_committed_1168(&ctx, &handle, sys_id, victim_char, victim_ship, ship_type_id);
+    }
+    assert_eq!(
+        count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id),
+        wrecks_0 + victims.len()
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.killmails.len()),
+        kms_0 + victims.len()
     );
 }

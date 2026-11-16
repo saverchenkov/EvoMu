@@ -256,6 +256,7 @@ pub(crate) fn apply_resolved_weapon_damage(
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     pending_cycle_actions: &mut Vec<PendingCycleAction>,
     destroyed_balls: &mut Vec<(BallId, Option<CharacterId>)>,
+    pending_destroyed_outbox: Option<&PendingDestroyedOutbox>,
 ) {
     if effective_damage.total() <= 0.0 {
         return;
@@ -338,10 +339,14 @@ pub(crate) fn apply_resolved_weapon_damage(
         }
         if is_destroyed {
             destroyed_balls.push((target_id, attacker_char_id));
+            if let Some(outbox) = pending_destroyed_outbox {
+                outbox.record_one(target_id, attacker_char_id);
+            }
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_weapon_cycle_damage(
     cycle: &ActiveModuleCycle,
     ballpark: &mut Ballpark,
@@ -350,6 +355,7 @@ pub(crate) fn apply_weapon_cycle_damage(
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     pending_cycle_actions: &mut Vec<PendingCycleAction>,
     destroyed_balls: &mut Vec<(BallId, Option<CharacterId>)>,
+    pending_destroyed_outbox: Option<&PendingDestroyedOutbox>,
 ) {
     let Some(target_id) = cycle.target_id else {
         return;
@@ -451,6 +457,7 @@ pub(crate) fn apply_weapon_cycle_damage(
         db_opt,
         pending_cycle_actions,
         destroyed_balls,
+        pending_destroyed_outbox,
     );
 }
 
@@ -544,6 +551,7 @@ pub(crate) fn step_cycles_and_capacitor_with_epochs(
         1.0,
         None,
         deactivation_hook,
+        None,
     )
 }
 
@@ -571,6 +579,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
     tidi_factor: f64,
     mut reload_sim_remaining: Option<&mut HashMap<i64, ModuleReloadSimEntry>>,
     deactivation_hook: Option<&ModuleDeactivationHook>,
+    pending_destroyed_outbox: Option<&PendingDestroyedOutbox>,
 ) -> Vec<(BallId, Option<CharacterId>)> {
     let tidi_factor = if tidi_factor.is_finite() {
         tidi_factor.clamp(0.10, 1.0)
@@ -1055,6 +1064,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                         db_opt,
                         pending_cycle_actions,
                         &mut destroyed_balls,
+                        pending_destroyed_outbox,
                     );
                 }
                 let src_cap_info = ballpark
@@ -1748,6 +1758,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                             db_opt,
                             pending_cycle_actions,
                             &mut destroyed_balls,
+                            pending_destroyed_outbox,
                         );
                     }
                     if matches!(mod_grp, 72 | 80 | 353 | 650) {
@@ -1877,9 +1888,13 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
         let mut finished = active_module_cycles.remove(idx);
         let is_lance = matches!(finished.effect_name.as_str(), "superWeaponLanceWarmup" | "superWeaponLanceBeam");
         if is_lance && finished.elapsed_s >= finished.duration_s {
+            let prev_len = destroyed_balls.len();
             crate::services::tactical_modules::fire_lance_warmup_in_ballpark(
                 ballpark, &finished, sde_opt, db_opt, tactical_state, pending_cycle_actions, &mut destroyed_balls,
             );
+            if let Some(outbox) = pending_destroyed_outbox {
+                outbox.record_batch(&destroyed_balls[prev_len..]);
+            }
             if finished.repeat > 0 {
                 finished.effect_name = "superWeaponLanceBeam".into();
                 finished.repeat -= 1;
@@ -2322,7 +2337,7 @@ impl SystemHandle {
             fit_projections, weapon_cycle_start_modules,
             module_reload_sim_deadlines, module_reload_sim_remaining,
             pending_missile_launches, pending_missile_deploy_fx,
-            active_guided_missiles, next_missile_ball_id, ..
+            active_guided_missiles, next_missile_ball_id, pending_destroyed_balls, ..
         } = &mut *st;
         let tidi = self.tidi_factor();
         let dt_sim = if dt > 0.0 && dt.is_finite() {
@@ -2427,6 +2442,7 @@ impl SystemHandle {
             tidi,
         );
         let mut destroyed = Vec::new();
+        let pending_destroyed = pending_destroyed_balls.clone();
         super::missiles::step_guided_missiles_in_actor(
             &mut bp,
             active_guided_missiles,
@@ -2436,6 +2452,7 @@ impl SystemHandle {
             db_opt,
             pending_cycle_actions,
             &mut destroyed,
+            Some(&pending_destroyed),
             dt,
         );
         destroyed.extend(step_cycles_and_capacitor_with_missiles_and_tidi(
@@ -2444,7 +2461,7 @@ impl SystemHandle {
             sde_opt, db_opt, ball_space_entry_epochs, fit_projections, weapon_cycle_start_modules,
             pending_missile_launches,
             mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, *sim_elapsed_secs, dt, tidi,
-            Some(module_reload_sim_remaining), deact_hook_guard.as_ref(),
+            Some(module_reload_sim_remaining), deact_hook_guard.as_ref(), Some(&pending_destroyed),
         ));
         super::missiles::flush_pending_missile_launches(
             &mut bp,
@@ -2483,11 +2500,17 @@ impl SystemHandle {
             notify_tx_opt.as_ref(),
             pending_cycle_actions,
         );
-        destroyed.extend(sup_dead.into_iter().chain(pg_dead).map(|bid| (bid, None)));
+        for bid in sup_dead.into_iter().chain(pg_dead) {
+            destroyed.push((bid, None));
+            pending_destroyed.record_one(bid, None);
+        }
         let zk_dead = crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_in_ballpark(
             &mut bp, sde_opt.as_deref(), self.solar_system_id,
         );
-        destroyed.extend(zk_dead.into_iter().map(|bid| (bid, None)));
+        for bid in zk_dead {
+            destroyed.push((bid, None));
+            pending_destroyed.record_one(bid, None);
+        }
         let dead_ids: Vec<BallId> = destroyed.iter().map(|&(bid, _)| bid).collect();
         teardown_attacker_locks_and_cycles_for_destroyed_balls(
             &mut bp,
@@ -2500,8 +2523,7 @@ impl SystemHandle {
             deact_hook_guard.as_ref(),
             &dead_ids,
         );
-        let mut death_futs = Vec::new();
-        for &(target_ball_id, owner_char_id) in &destroyed {
+        for &(target_ball_id, _) in &destroyed {
             crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
                 &mut bp,
                 db_opt,
@@ -2511,12 +2533,16 @@ impl SystemHandle {
             if let Some(db) = db_opt.as_ref() {
                 crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(&mut bp, db, self.solar_system_id, target_ball_id);
             }
+        }
+        let (drained_destroyed, destroyed_lease) = pending_destroyed.checkout_for_step();
+        let mut death_futs = Vec::new();
+        for &(target_ball_id, owner_char_id) in &drained_destroyed {
             if let Some(fut) = on_ball_destroyed_by_damage(self.solar_system_id, target_ball_id, owner_char_id, hook_guard.as_ref()) {
                 death_futs.push(fut);
             }
         }
         let step_hook_guard = self.system_step_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let step_fut = step_hook_guard.map(|hook| hook(self.solar_system_id, dt, destroyed));
+        let step_fut = step_hook_guard.map(|hook| hook(self.solar_system_id, dt, drained_destroyed));
         if let Some(db) = db_opt {
             crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
                 db,
@@ -2542,9 +2568,29 @@ impl SystemHandle {
         crate::system_actor::flush_post_unlock_actions(&self.post_unlock_actions);
         self.record_warp_stops_from_events(&broadcast.events);
         let _ = self.event_tx.send(broadcast);
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            for fut in death_futs { let _ = handle.spawn(fut); }
-            if let Some(fut) = step_fut { let _ = handle.spawn(fut); }
+        if death_futs.is_empty() {
+            if let Some(lease) = destroyed_lease {
+                lease.ack();
+            }
+            if let Some(fut) = step_fut {
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    let _ = handle.spawn(fut);
+                }
+            }
+        } else if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let _ = handle.spawn(async move {
+                for fut in death_futs {
+                    fut.await;
+                }
+                if let Some(lease) = destroyed_lease {
+                    lease.ack();
+                }
+            });
+            if let Some(fut) = step_fut {
+                let _ = handle.spawn(fut);
+            }
+        } else if let Some(lease) = destroyed_lease {
+            lease.ack();
         }
         tick
     }

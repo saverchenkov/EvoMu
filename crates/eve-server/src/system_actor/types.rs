@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
+use eve_db::lock_rank::{RankedMutex, RankedRwLock, RANK_LEAF};
 use eve_destiny::{
     Ball, BallId, CombatState, DamageVector, DestinyEvent, MovementMode, SlimItemMeta,
     TargetLock,
@@ -12,6 +12,7 @@ use eve_sde::{SdeRegistry, SolarSystemId};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -352,6 +353,200 @@ pub struct LastCheckpointedBallState {
     pub position: [f64; 3],
 }
 
+#[derive(Default)]
+struct PendingDestroyedJournalInner {
+    pending: Vec<(BallId, Option<CharacterId>)>,
+    in_flight: HashMap<u64, Vec<(BallId, Option<CharacterId>)>>,
+    next_delivery_id: u64,
+    #[cfg(test)]
+    recorded_total: u64,
+    #[cfg(test)]
+    acked_total: u64,
+}
+
+/// Durable actor-side outbox for destroyed balls awaiting downstream commit acknowledgement.
+#[derive(Clone)]
+pub(crate) struct PendingDestroyedOutbox {
+    journal: Arc<RankedMutex<PendingDestroyedJournalInner, RANK_LEAF>>,
+    non_empty: Arc<AtomicBool>,
+}
+
+impl Default for PendingDestroyedOutbox {
+    fn default() -> Self {
+        Self {
+            journal: Arc::new(RankedMutex::new(PendingDestroyedJournalInner::default())),
+            non_empty: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl std::fmt::Debug for PendingDestroyedOutbox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingDestroyedOutbox")
+            .field("non_empty", &self.is_non_empty())
+            .finish()
+    }
+}
+
+impl PendingDestroyedOutbox {
+    fn refresh_non_empty(inner: &PendingDestroyedJournalInner, non_empty: &AtomicBool) {
+        non_empty.store(
+            !inner.pending.is_empty() || !inner.in_flight.is_empty(),
+            Ordering::Release,
+        );
+    }
+
+    fn push_unique_into(
+        pending: &mut Vec<(BallId, Option<CharacterId>)>,
+        in_flight: &HashMap<u64, Vec<(BallId, Option<CharacterId>)>>,
+        entry: (BallId, Option<CharacterId>),
+    ) -> bool {
+        let already_tracked = pending.iter().any(|&(bid, _)| bid == entry.0)
+            || in_flight
+                .values()
+                .flatten()
+                .any(|&(bid, _)| bid == entry.0);
+        if !already_tracked {
+            pending.push(entry);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn record_entries(
+        &self,
+        entries: impl IntoIterator<Item = (BallId, Option<CharacterId>)>,
+    ) {
+        let mut guard = self.journal.lock().unwrap_or_else(|e| e.into_inner());
+        for entry in entries {
+            let inserted = {
+                let PendingDestroyedJournalInner {
+                    pending,
+                    in_flight,
+                    ..
+                } = &mut *guard;
+                Self::push_unique_into(pending, in_flight, entry)
+            };
+            #[cfg(test)]
+            if inserted {
+                guard.recorded_total = guard.recorded_total.saturating_add(1);
+            }
+            #[cfg(not(test))]
+            let _ = inserted;
+        }
+        Self::refresh_non_empty(&guard, &self.non_empty);
+    }
+
+    /// Returns true when any destroyed ball is pending checkout or awaiting delivery ack.
+    /// Lock-free so hibernation/eviction checks can query it under arbitrary lock ranks.
+    pub(crate) fn is_non_empty(&self) -> bool {
+        self.non_empty.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn record_one(&self, ball_id: BallId, attacker_char_id: Option<CharacterId>) {
+        self.record_entries(std::iter::once((ball_id, attacker_char_id)));
+    }
+
+    pub(crate) fn record_batch(&self, entries: &[(BallId, Option<CharacterId>)]) {
+        if entries.is_empty() {
+            return;
+        }
+        self.record_entries(entries.iter().copied());
+    }
+
+    /// Drains currently pending destroyed balls into an in-flight lease that rolls back on Drop
+    /// unless [`PendingDestroyedDeliveryGuard::ack`] is called after downstream persistence succeeds.
+    pub(crate) fn checkout_for_step(
+        &self,
+    ) -> (
+        Vec<(BallId, Option<CharacterId>)>,
+        Option<Arc<PendingDestroyedDeliveryGuard>>,
+    ) {
+        let mut guard = self.journal.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.pending.is_empty() {
+            Self::refresh_non_empty(&guard, &self.non_empty);
+            return (Vec::new(), None);
+        }
+        let batch = std::mem::take(&mut guard.pending);
+        guard.next_delivery_id = guard.next_delivery_id.wrapping_add(1);
+        let delivery_id = guard.next_delivery_id;
+        guard.in_flight.insert(delivery_id, batch.clone());
+        Self::refresh_non_empty(&guard, &self.non_empty);
+        drop(guard);
+        let lease = Arc::new(PendingDestroyedDeliveryGuard {
+            outbox: self.clone(),
+            delivery_id,
+            acked: AtomicBool::new(false),
+        });
+        (batch, Some(lease))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_and_in_flight_counts(&self) -> (usize, usize) {
+        let guard = self.journal.lock().unwrap_or_else(|e| e.into_inner());
+        let in_flight_items: usize = guard.in_flight.values().map(Vec::len).sum();
+        (guard.pending.len(), in_flight_items)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn totals(&self) -> (u64, u64) {
+        let guard = self.journal.lock().unwrap_or_else(|e| e.into_inner());
+        (guard.recorded_total, guard.acked_total)
+    }
+}
+
+/// RAII lease tying an emitted [`StepOutput`] batch to downstream commit completion.
+/// Dropping without [`Self::ack`] returns the batch to the front of [`PendingDestroyedOutbox`].
+pub(crate) struct PendingDestroyedDeliveryGuard {
+    outbox: PendingDestroyedOutbox,
+    delivery_id: u64,
+    acked: AtomicBool,
+}
+
+impl std::fmt::Debug for PendingDestroyedDeliveryGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingDestroyedDeliveryGuard")
+            .field("delivery_id", &self.delivery_id)
+            .field("acked", &self.acked.load(Ordering::Acquire))
+            .finish()
+    }
+}
+
+impl PendingDestroyedDeliveryGuard {
+    pub(crate) fn ack(&self) {
+        if !self.acked.swap(true, Ordering::AcqRel) {
+            let mut guard = self.outbox.journal.lock().unwrap_or_else(|e| e.into_inner());
+            let removed = guard.in_flight.remove(&self.delivery_id);
+            #[cfg(test)]
+            if let Some(batch) = removed {
+                guard.acked_total = guard.acked_total.saturating_add(batch.len() as u64);
+            }
+            #[cfg(not(test))]
+            let _ = removed;
+            PendingDestroyedOutbox::refresh_non_empty(&guard, &self.outbox.non_empty);
+        }
+    }
+}
+
+impl Drop for PendingDestroyedDeliveryGuard {
+    fn drop(&mut self) {
+        if self.acked.load(Ordering::Acquire) {
+            return;
+        }
+        let mut guard = self.outbox.journal.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(batch) = guard.in_flight.remove(&self.delivery_id) {
+            let existing = std::mem::take(&mut guard.pending);
+            let mut restored = Vec::with_capacity(batch.len().saturating_add(existing.len()));
+            for entry in batch.into_iter().chain(existing) {
+                PendingDestroyedOutbox::push_unique_into(&mut restored, &guard.in_flight, entry);
+            }
+            guard.pending = restored;
+        }
+        PendingDestroyedOutbox::refresh_non_empty(&guard, &self.outbox.non_empty);
+    }
+}
+
 /// Structured actor outbox produced by a single [`SystemActor`] step (`RFC-1 E-4`, `#919`).
 #[derive(Debug, Clone, Default)]
 pub struct StepOutput {
@@ -360,6 +555,7 @@ pub struct StepOutput {
     pub dt_sim: f64,
     pub landed_warps: Vec<(BallId, [f64; 3])>,
     pub destroyed_balls: Vec<(BallId, Option<CharacterId>)>,
+    pub(crate) destroyed_lease: Option<Arc<PendingDestroyedDeliveryGuard>>,
     pub lock_completed_events: Vec<(CharacterId, BallId)>,
     pub target_lost_events: Vec<(CharacterId, BallId)>,
     pub cycle_actions: Vec<PendingCycleAction>,
@@ -409,6 +605,7 @@ pub(crate) struct SystemActorState {
     pub pending_missile_deploy_fx: Vec<PendingMissileDeployFx>,
     pub active_guided_missiles: Vec<ActiveGuidedMissile>,
     pub next_missile_ball_id: i64,
+    pub(crate) pending_destroyed_balls: PendingDestroyedOutbox,
 }
 
 /// Atomic snapshot of a ball removed from a solar system (`#842`, `#917` E-2).

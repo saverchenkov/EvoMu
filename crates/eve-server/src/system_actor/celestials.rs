@@ -45,10 +45,16 @@ pub struct SystemHandle {
     pub(crate) idle_ticks: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) dynamic_ball_count: Arc<std::sync::atomic::AtomicUsize>,
     pub command_panics: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) pending_destroyed_balls: super::PendingDestroyedOutbox,
     #[cfg(test)]
     pub(crate) panic_next_command_for_test: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     pub(crate) panic_on_command_countdown_for_test: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    pub(crate) panic_after_destruction_for_test: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    pub(crate) before_step_reply_hook_for_test:
+        Arc<RankedMutex<Option<Box<dyn FnOnce() + Send>>, RANK_LEAF>>,
     pub(crate) npc_death_hook: Arc<RankedRwLock<Option<super::NpcDeathHook>, RANK_LEAF>>,
     pub(crate) module_deactivation_hook: Arc<RankedRwLock<Option<super::ModuleDeactivationHook>, RANK_LEAF>>,
     pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<super::TargetLockCompletedHook>, RANK_LEAF>>,
@@ -1805,6 +1811,11 @@ impl SystemHandle {
             )
             .await;
         }
+        // Acknowledge delivery lease only after both `npc_death_hook` and `system_step_hook`
+        // (`on_ball_destroyed_sync`) finish committing downstream artifacts.
+        if let Some(ref lease) = output.destroyed_lease {
+            lease.ack();
+        }
     }
 
     /// Steps this system by `dt` seconds and returns the full [`super::StepOutput`] after driver commit (`#919` E-4).
@@ -1832,15 +1843,26 @@ impl SystemHandle {
         }))
     }
 
-    pub(crate) async fn step_manual_tick_only(&self, dt: f64) -> Result<u64, String> {
+    pub(crate) async fn start_step_manual_tick_only(
+        &self,
+        dt: f64,
+    ) -> Result<oneshot::Receiver<super::StepOutput>, String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_sender()
             .send(SystemCommand::StepManualTickOnly { dt, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
-        let output = rx
-            .await
-            .map_err(|_| "Solar system reply dropped".to_string())?;
+        Ok(rx)
+    }
+
+    pub(crate) async fn ask_step_tick_only(&self, dt: f64) -> Result<super::StepOutput, String> {
+        let rx = self.start_step_manual_tick_only(dt).await?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub(crate) async fn step_manual_tick_only(&self, dt: f64) -> Result<u64, String> {
+        let output = self.ask_step_tick_only(dt).await?;
         self.apply_step_output(&output).await;
         Ok(output.tick)
     }
