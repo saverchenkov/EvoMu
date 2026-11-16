@@ -314,3 +314,237 @@ async fn test_live_support_fighter_ewar_scales_with_surviving_squadron() {
     assert!((ewar(&neut) - 210.0).abs() < 1e-6);
     assert!((cap0 - cap1 - 210.0).abs() < 1.0, "3-unit Cenobite must neut 210 GJ, got {}", cap0 - cap1);
 }
+
+#[tokio::test]
+async fn launch_drones_state_change_tuple_values_and_detach_rules() {
+    // parity: rpc:ship.LaunchDrones, rpc:entity.CmdAbandonDrone, rpc:entity.CmdReconnectToDrones
+    // parity: notify:OnDroneStateChange, feat:drones.launch-drones, feat:drones.abandon-scoop
+    // parity: feat:drones.reconnect-drones, feat:drones.drone-bandwidth
+    eve_testkit::attest(&[
+        "rpc:ship.LaunchDrones",
+        "rpc:entity.CmdAbandonDrone",
+        "rpc:entity.CmdReconnectToDrones",
+        "notify:OnDroneStateChange",
+        "feat:drones.launch-drones",
+        "feat:drones.abandon-scoop",
+        "feat:drones.reconnect-drones",
+        "feat:drones.drone-bandwidth",
+    ]);
+
+    const HOBGOBLIN_I: u32 = 2454;
+    const OGRE_I: u32 = 2444;
+    const DRONE_BAY: i64 = InventoryFlag::DroneBay as i64;
+
+    let ctx = paused_ctx();
+    let mut vexor = common::gm_pilot_in_space(&ctx, 101, 91_200_001, VEXOR, NULLSEC).await;
+    ok(
+        &ctx,
+        &mut vexor,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/giveskill 3436 5".into())],
+    )
+    .await;
+    ctx.invalidate_ship_fitting(vexor.ship_id);
+
+    let hob_stack = common::stock_ship_bay(&ctx, &mut vexor, HOBGOBLIN_I, 5, DRONE_BAY).await;
+    let ogre_stack = common::stock_ship_bay(&ctx, &mut vexor, OGRE_I, 3, DRONE_BAY).await;
+    let _ = drain(&ctx, &mut vexor);
+
+    // 1. Launch 2x Hobgoblin I (5 Mbit/s each = 10 Mbit/s) and assert exact 7-tuple OnDroneStateChange values
+    let launch_rep = ok(
+        &ctx,
+        &mut vexor,
+        "ship",
+        "LaunchDrones",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(hob_stack),
+            PyRep::Integer(2),
+        ])])],
+    )
+    .await;
+    let hob_reply_ids: Vec<i64> = match &launch_rep {
+        PyRep::Dict(entries) => {
+            assert_eq!(entries.len(), 1, "LaunchDrones must return 1 entry: {launch_rep:?}");
+            assert_eq!(entries[0].0, PyRep::Integer(hob_stack));
+            match &entries[0].1 {
+                PyRep::List(vals) => vals
+                    .iter()
+                    .map(|v| v.as_i64().expect("launched drone entry must be integer ball ID"))
+                    .collect(),
+                other => panic!("expected List of launched drone IDs for hob_stack, got {other:?}"),
+            }
+        }
+        other => panic!("expected Dict from V24 LaunchDrones, got {other:?}"),
+    };
+    assert_eq!(hob_reply_ids.len(), 2, "LaunchDrones must return 2 drone IDs: {hob_reply_ids:?}");
+
+    let notes = drain(&ctx, &mut vexor);
+    let state_changes: Vec<Vec<PyRep>> = notes
+        .into_iter()
+        .filter_map(|(ev, args)| (ev == "OnDroneStateChange").then_some(args))
+        .collect();
+    assert_eq!(state_changes.len(), 2, "Launching 2 drones must emit 2 OnDroneStateChange notifications");
+
+    let mut launched_ids = Vec::with_capacity(2);
+    for args in &state_changes {
+        assert_eq!(args.len(), 7, "OnDroneStateChange must have 7 fields: {args:?}");
+        let drone_id = args[0].as_i64().unwrap_or(0);
+        assert!(drone_id > 0, "launched droneID must be positive");
+        assert_eq!(args[1], PyRep::Integer(vexor.char_id), "ownerID must match charID");
+        assert_eq!(args[2], PyRep::Integer(vexor.ship_id), "controllerID must match shipID");
+        assert_eq!(args[3], PyRep::Integer(0), "initial activityState must be 0 (idle)");
+        assert_eq!(args[4], PyRep::Integer(i64::from(HOBGOBLIN_I)), "typeID must match Hobgoblin I");
+        assert_eq!(args[5], PyRep::Integer(vexor.char_id), "controllerOwnerID must match charID");
+        assert_eq!(args[6], PyRep::None, "idle drone targetID must be None");
+        launched_ids.push(drone_id);
+    }
+    let d1 = launched_ids[0];
+    assert_ne!(launched_ids[0], launched_ids[1], "each launched drone gets a unique ball ID");
+    assert_eq!(hob_reply_ids, launched_ids, "LaunchDrones returned IDs must match OnDroneStateChange IDs");
+
+    // 2. Negative variant: launching 3x Ogre I (25 Mbit/s each = 75 Mbit/s) over 10 Mbit/s partially
+    // launches 2x Ogre I (60/75 Mbit/s, 4 <= 5 active drones) with ('MaxBandwidthExceeded',) per-item marker,
+    // and launching 1 more Ogre I (60 + 25 = 85 > 75 Mbit/s) fails top-level with MaxBandwidthExceeded.
+    let partial_bw_rep = ok(
+        &ctx,
+        &mut vexor,
+        "ship",
+        "LaunchDrones",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(ogre_stack),
+            PyRep::Integer(3),
+        ])])],
+    )
+    .await;
+    match &partial_bw_rep {
+        PyRep::Dict(entries) => {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].0, PyRep::Integer(ogre_stack));
+            match &entries[0].1 {
+                PyRep::List(vals) => {
+                    assert_eq!(vals.len(), 3, "expected 2 launched Ogres + 1 error marker: {vals:?}");
+                    assert!(vals[0].as_i64().unwrap_or(0) > 0);
+                    assert!(vals[1].as_i64().unwrap_or(0) > 0);
+                    assert_eq!(
+                        vals[2],
+                        PyRep::Tuple(vec![PyRep::String("MaxBandwidthExceeded".to_string())])
+                    );
+                }
+                other => panic!("expected List for ogre_stack partial launch, got {other:?}"),
+            }
+        }
+        other => panic!("expected Dict for V24 partial LaunchDrones, got {other:?}"),
+    }
+
+    let bw_err = call(
+        &ctx,
+        &mut vexor,
+        "ship",
+        "LaunchDrones",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(ogre_stack),
+            PyRep::Integer(1),
+        ])])],
+    )
+    .await
+    .expect_err("60 + 25 = 85 Mbit/s total on 75 Mbit/s Vexor must fail with MaxBandwidthExceeded");
+    assert_eq!(bw_err.code, "MaxBandwidthExceeded");
+
+    // 3. Detach rule: CmdAbandonDrone sets owner=0, controller=0, emits OnDroneControlLost, and frees bandwidth
+    let _ = drain(&ctx, &mut vexor);
+    let ab_res = ok(
+        &ctx,
+        &mut vexor,
+        "entity",
+        "CmdAbandonDrone",
+        &[PyRep::List(vec![PyRep::Integer(d1)])],
+    )
+    .await;
+    assert_eq!(ab_res, PyRep::Dict(Vec::new()));
+    let ab_notes = drain(&ctx, &mut vexor);
+    assert!(
+        ab_notes
+            .iter()
+            .any(|(ev, args)| ev == "OnDroneControlLost" && args == &vec![PyRep::Integer(d1)]),
+        "CmdAbandonDrone must emit OnDroneControlLost({d1}): {ab_notes:?}"
+    );
+    eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        let st = rt.active_drones_in_space.get(&d1).expect("abandoned drone still in space");
+        assert!(st.is_abandoned);
+        assert_eq!(st.owner_char_id, 0);
+        assert_eq!(st.parent_ship_id, 0);
+    });
+
+    // 4. Reconnect to abandoned drone and scoop it back into DroneBay
+    let reconn = ok(
+        &ctx,
+        &mut vexor,
+        "entity",
+        "CmdReconnectToDrones",
+        &[PyRep::List(vec![PyRep::Integer(d1)])],
+    )
+    .await;
+    assert_eq!(reconn, PyRep::Dict(Vec::new()));
+    eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        let st = rt.active_drones_in_space.get(&d1).expect("reconnected drone active");
+        assert!(!st.is_abandoned);
+        assert_eq!(st.owner_char_id, vexor.char_id);
+        assert_eq!(st.parent_ship_id, vexor.ship_id);
+    });
+
+    let scoop = ok(
+        &ctx,
+        &mut vexor,
+        "ship",
+        "ScoopToDroneBay",
+        &[PyRep::Integer(d1)],
+    )
+    .await;
+    assert!(
+        scoop.dict_get("scoopedDroneItemID").and_then(|v| v.as_i64()).unwrap_or(0) > 0,
+        "ScoopToDroneBay must return scoopedDroneItemID: {scoop:?}"
+    );
+    let hobs_in_bay: i32 = ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .filter(|i| {
+                i.location_id == vexor.ship_id
+                    && i.flag == InventoryFlag::DroneBay
+                    && i.type_id == HOBGOBLIN_I
+            })
+            .map(|i| i.quantity)
+            .sum()
+    });
+    assert_eq!(hobs_in_bay, 4, "4 Hobgoblin I must be in DroneBay after launching 2 and scooping 1");
+
+    // 5. Negative variant: foreign pilot cannot steal another pilot's controlled drone via reconnect or scoop
+    let mut outsider = common::gm_pilot_in_space(&ctx, 102, 91_200_002, VEXOR, NULLSEC).await;
+    let d2 = launched_ids[1];
+    let alien_reconn = ok(
+        &ctx,
+        &mut outsider,
+        "entity",
+        "CmdReconnectToDrones",
+        &[PyRep::List(vec![PyRep::Integer(d2)])],
+    )
+    .await;
+    assert_eq!(alien_reconn, PyRep::Dict(Vec::new()));
+    eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        let st = rt.active_drones_in_space.get(&d2).expect("d2 still active");
+        assert!(!st.is_abandoned);
+        assert_eq!(st.owner_char_id, vexor.char_id);
+        assert_eq!(st.parent_ship_id, vexor.ship_id);
+    });
+
+    let scoop_err = call(
+        &ctx,
+        &mut outsider,
+        "ship",
+        "ScoopToDroneBay",
+        &[PyRep::Integer(d2)],
+    )
+    .await
+    .expect_err("foreign pilot scoop of controlled drone must fail with DroneOwnedByOther");
+    assert_eq!(scoop_err.code, "DroneOwnedByOther");
+}

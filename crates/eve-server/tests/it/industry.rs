@@ -252,7 +252,7 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
         "S-1: Reprocessing 200 Plagioclase at 0.50 yield must deposit 70 Mexallon (36)"
     );
 
-    // 5. SetSessionCheck (client_local -> UnimplementedRPC) and InsufficientFunds rejection when pilot wallet balance cannot cover station reprocessing tax:
+    // 5. SetSessionCheck (client_local -> UnimplementedRPC) and NotEnoughMoney rejection when pilot wallet balance cannot cover station reprocessing tax:
     // ore stack and wallet balance must remain unchanged.
     let session_check = ctx
         .dispatch_rpc(&mut sess, "reprocessingSvc", None, "SetSessionCheck", &[], &kw, None)
@@ -295,8 +295,8 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
         .await;
     assert_eq!(
         insuff_err.unwrap_err().code,
-        "InsufficientFunds",
-        "Reprocess must reject with InsufficientFunds when pilot balance cannot cover station tax"
+        "NotEnoughMoney",
+        "Reprocess must reject with NotEnoughMoney when pilot balance cannot cover station tax"
     );
     assert_eq!(
         ctx.db.get_item(100_990_002).map(|i| i.quantity),

@@ -1198,3 +1198,259 @@ async fn test_gh1034_mining_anomaly_not_duplicated_in_signal_tracker_or_probe_sc
     }
     assert!(scanned_ids.contains(&"SIG-OK-1034"));
 }
+
+#[tokio::test]
+async fn request_scans_started_stopped_payloads() {
+    // parity: notify:OnSystemScanStarted, notify:OnSystemScanStopped
+    // parity: feat:scanning.probe-launch, feat:scanning.probe-scan-math, feat:scanning.signatures
+    eve_testkit::attest(&[
+        "notify:OnSystemScanStarted",
+        "notify:OnSystemScanStopped",
+        "feat:scanning.probe-launch",
+        "feat:scanning.probe-scan-math",
+        "feat:scanning.signatures",
+    ]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let (char_id, sys_id, ship_id, launcher_id) =
+        (90_000_001_i64, 30_000_142_u32, 610_107_701_i64, 610_107_710_i64);
+    let mut sess = setup_pilot_in_space(&ctx, 71077, char_id, sys_id, ship_id, 606).await;
+
+    let sig_pos = [300_000.0, 0.0, 0.0];
+    let now_u = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        let sk = snap.skills.entry(char_id).or_default();
+        for tid in [3412_u32, 3402, 25810, 25811] {
+            sk.insert(
+                tid,
+                TrainedSkillRecord {
+                    type_id: tid,
+                    level: 5,
+                    skill_points: 512_000.0,
+                },
+            );
+        }
+        snap.items.insert(
+            launcher_id,
+            make_item(launcher_id, 17938, char_id, ship_id, InventoryFlag::HiSlot0, 1, true),
+        );
+        snap.module_online_states.insert(launcher_id, true);
+        snap.items.insert(
+            610_107_711,
+            make_item(610_107_711, 30013, char_id, ship_id, InventoryFlag::HiSlot0, 8, false),
+        );
+        let sigs = snap.cosmic_signatures.entry(sys_id).or_default();
+        sigs.clear();
+        sigs.push(CosmicSignatureRecord {
+            signature_id: "E21-SIG-1".into(),
+            solar_system_id: sys_id,
+            sig_group: "Relic Site".into(),
+            type_name: "Ruined Serpentis Monument".into(),
+            signal_strength: 0.0,
+            position: sig_pos,
+            wormhole_type_id: None,
+            destination_system_id: None,
+            created_unix: now_u,
+            lifetime_seconds: 86_400,
+            max_mass_kg: 0.0,
+            remaining_mass_kg: 0.0,
+            max_jump_mass_kg: 0.0,
+            collapsed: false,
+        });
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    // Launch 8 probes and verify 8-probe cap on overflow launch
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("initial 8-probe launch");
+    let launched_count = ctx
+        .active_scanner_probes
+        .read()
+        .unwrap()
+        .values()
+        .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
+        .count();
+    assert_eq!(launched_count, 8, "first launch must deploy 8 active probes");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            610_107_712,
+            make_item(610_107_712, 30013, char_id, ship_id, InventoryFlag::HiSlot0, 8, false),
+        );
+    });
+    let cap_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("9th+ probe launch must reject with MaxProbesLaunched");
+    assert_eq!(cap_err.code, "MaxProbesLaunched");
+    let count_after_cap = ctx
+        .active_scanner_probes
+        .read()
+        .unwrap()
+        .values()
+        .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
+        .count();
+    assert_eq!(count_after_cap, 8, "8-probe cap rejection must not change active probe count");
+
+    // RequestScans -> verify OnSystemScanStarted, OnSystemScanStopped, scanGroupID=3, groupID=502, strengthAttributeID=1908
+    let _ = ctx
+        .dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[], &kw, None)
+        .await
+        .expect("GetSystemScanMgr");
+    let _ = sess.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let coords_step1 = PyRep::List(
+        (0..8)
+            .map(|_| {
+                PyRep::List(vec![
+                    PyRep::Real(sig_pos[0]),
+                    PyRep::Real(sig_pos[1]),
+                    PyRep::Real(sig_pos[2]),
+                    PyRep::Integer(1),
+                ])
+            })
+            .collect(),
+    );
+    let mut harness = common::wrap_wire_harness(&ctx, sess);
+    let scan_ret = harness
+        .call_ok("scanMgr", None, "RequestScans", &[coords_step1], &kw)
+        .await;
+    let PyRep::List(ret_rows) = scan_ret else {
+        panic!("expected RequestScans row list, got {scan_ret:?}");
+    };
+    let ret_row = ret_rows
+        .iter()
+        .find(|r| r.dict_get("signatureID").and_then(|v| v.as_str()) == Some("E21-SIG-1"))
+        .expect("RequestScans return row for E21-SIG-1");
+    assert_eq!(ret_row.dict_get("scanGroupID").and_then(|v| v.as_i64()), Some(3));
+    assert_eq!(ret_row.dict_get("groupID").and_then(|v| v.as_i64()), Some(502));
+    assert_eq!(ret_row.dict_get("strengthAttributeID").and_then(|v| v.as_i64()), Some(1908));
+
+    let started_notes = harness.drain_notifications();
+    let (_, started_args) = started_notes
+        .iter()
+        .find(|(ev, _)| ev == "OnSystemScanStarted")
+        .expect("OnSystemScanStarted notification");
+    let start_time = started_args.first().and_then(|v| v.as_i64()).unwrap_or(0);
+    let duration_ms = started_args.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+    let started_probes_len = match started_args.get(2) {
+        Some(PyRep::Dict(entries)) => {
+            assert!(
+                entries
+                    .iter()
+                    .all(|(_, v)| v.dict_get("state") == Some(&PyRep::Integer(4))),
+                "wire-normalized OnSystemScanStarted entries must carry state=4: {entries:?}"
+            );
+            entries.len()
+        }
+        Some(PyRep::List(l)) => l.len(),
+        _ => 0,
+    };
+    assert!(start_time > 0, "OnSystemScanStarted start_time must be > 0");
+    assert!(duration_ms >= 1_500 && duration_ms <= 20_000, "scan duration_ms out of bounds: {duration_ms}");
+    assert_eq!(started_probes_len, 8, "OnSystemScanStarted must carry 8 probe IDs");
+
+    ctx.advance_secs(25);
+    eve_server::services::space_probe_scanning::tick_probe_warp_end(&ctx);
+    let _ = harness
+        .call_ok("scanMgr", None, "GetFullState", &[], &kw)
+        .await;
+
+    let stopped_notes = harness.drain_notifications();
+    let (_, stopped_args) = stopped_notes
+        .iter()
+        .find(|(ev, _)| ev == "OnSystemScanStopped")
+        .expect("OnSystemScanStopped notification");
+    let stopped_probes_len = match stopped_args.first() {
+        Some(PyRep::List(l)) => l.len(),
+        _ => 0,
+    };
+    assert_eq!(stopped_probes_len, 8, "OnSystemScanStopped must list all 8 probes");
+    let PyRep::List(ref stopped_results) = stopped_args[1] else {
+        panic!("OnSystemScanStopped args[1] must be result list");
+    };
+    let stopped_row = stopped_results
+        .iter()
+        .find(|r| r.dict_get("signatureID").and_then(|v| v.as_str()) == Some("E21-SIG-1"))
+        .expect("OnSystemScanStopped row for E21-SIG-1");
+    assert_eq!(stopped_row.dict_get("scanGroupID").and_then(|v| v.as_i64()), Some(3));
+    assert_eq!(stopped_row.dict_get("groupID").and_then(|v| v.as_i64()), Some(502));
+    assert_eq!(stopped_row.dict_get("strengthAttributeID").and_then(|v| v.as_i64()), Some(1908));
+    assert!(
+        stopped_row.dict_get("signalStrength").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0,
+        "OnSystemScanStopped must report positive signalStrength"
+    );
+    let absent_len = match stopped_args.get(2) {
+        Some(PyRep::List(l)) => l.len(),
+        _ => usize::MAX,
+    };
+    assert_eq!(absent_len, 0, "absent_targets must be empty list");
+
+    let snapshot_probes = || -> Vec<(i64, [u64; 3], i32, u64)> {
+        let mut rows: Vec<_> = ctx
+            .active_scanner_probes
+            .read()
+            .unwrap()
+            .values()
+            .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
+            .map(|p| {
+                (
+                    p.probe_id,
+                    [
+                        p.destination[0].to_bits(),
+                        p.destination[1].to_bits(),
+                        p.destination[2].to_bits(),
+                    ],
+                    p.range_step,
+                    p.scan_range_m.to_bits(),
+                )
+            })
+            .collect();
+        rows.sort_by_key(|r| r.0);
+        rows
+    };
+    let probes_before_bad_coords = snapshot_probes();
+    assert_eq!(probes_before_bad_coords.len(), 8);
+
+    // Negative variant: mixed valid + malformed coordinates fail atomically with InvalidProbeCoordinates
+    let bad_coords = PyRep::List(vec![
+        PyRep::List(vec![
+            PyRep::Real(1.0),
+            PyRep::Real(2.0),
+            PyRep::Real(3.0),
+            PyRep::Integer(3),
+        ]),
+        PyRep::List(vec![PyRep::Real(0.0)]),
+    ]);
+    let bad_err = harness
+        .call("scanMgr", None, "RequestScans", &[bad_coords], &kw)
+        .await
+        .expect_err("malformed probe coordinates must fail");
+    assert_eq!(bad_err.code, "InvalidProbeCoordinates");
+    assert_eq!(
+        snapshot_probes(),
+        probes_before_bad_coords,
+        "failed RequestScans must not partially mutate earlier probes"
+    );
+}
