@@ -497,3 +497,86 @@ fn get_or_rebuild_ship_fitting_cache_drones_structure_and_auto_offline() {
     ctx.invalidate_ship_fitting(struct_id);
     assert!(!ctx.ship_fittings.read().unwrap().contains_key(&struct_id));
 }
+
+#[tokio::test]
+async fn now_system_sim_filetime_ticks_stays_client_anchored_with_tidi_and_advancetime() {
+    use crate::services::serverops_cluster::{
+        clear_manual_system_tidi_override, emit_sim_clock_rebase_on_entry_if_needed,
+        set_system_tidi_factor,
+    };
+
+    let base = 1_750_000_000_u64;
+    let ctx = edge_ctx(base);
+    let char_id = 90_000_001_i64;
+    let sys_a = 30_000_142_u32;
+    let sys_b = 30_000_144_u32;
+    let user_id = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    ctx.db
+        .acquire_online_lock(user_id, 9_101, Some(char_id), true, base)
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_a;
+        }
+    });
+    let _ = ctx.systems.get_or_spawn(sys_a);
+    let _ = ctx.systems.get_or_spawn(sys_b);
+
+    let max_skew_ticks: i64 = 5 * 10_000_000;
+    let day_ticks: i64 = 86_400 * 10_000_000;
+    let jump_secs = 1_119_223_u64; // ~12.95 days (matches live #1143/#1144 skew)
+
+    // Order A: `/advancetime` first, then TiDi tighten -> relax leaves `sim_clock_anchoring` at 1.0x.
+    ctx.advance_secs_without_sim_clock_rebase(jump_secs);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    set_system_tidi_factor(&ctx, sys_a, 0.50);
+    clear_manual_system_tidi_override(&ctx, sys_a);
+    let _ = emit_sim_clock_rebase_on_entry_if_needed(&ctx, char_id, sys_a);
+
+    let client_ft = ctx.now_machonet_wallclock_filetime_ticks();
+    assert!(
+        ctx.now_blueos_filetime_ticks() - client_ft > 12 * day_ticks,
+        "server virtual clock must lead client clock by ~12.95 days"
+    );
+    let sim_a_1 = ctx.now_system_sim_filetime_ticks(Some(sys_a));
+    let sim_a_2 = ctx.now_system_sim_filetime_ticks(Some(sys_a));
+    assert!(
+        (sim_a_1 - client_ft).abs() < max_skew_ticks && sim_a_1 - client_ft < day_ticks,
+        "anchored sim clock in sys_a drifted from client clock: delta_ms={}",
+        (sim_a_1 - client_ft) / 10_000
+    );
+    assert!(sim_a_2 > sim_a_1, "sim activation timestamps must stay monotonic");
+    let rebases: Vec<_> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "DoSimClockRebase")
+        .collect();
+    assert!(!rebases.is_empty(), "expected DoSimClockRebase notifications for sys_a");
+    for n in rebases {
+        if let Some(eve_proto::PyRep::Tuple(times)) = n.args.first() {
+            for t in times {
+                let ts = t.as_i64().expect("DoSimClockRebase FILETIME");
+                assert!(
+                    (ts - client_ft).abs() < max_skew_ticks && ts - client_ft < day_ticks,
+                    "DoSimClockRebase timestamp drifted >24h into client future"
+                );
+            }
+        }
+    }
+
+    // Order B: TiDi anchored first on sys_b, then additional `/advancetime` jump afterwards.
+    set_system_tidi_factor(&ctx, sys_b, 0.50);
+    clear_manual_system_tidi_override(&ctx, sys_b);
+    ctx.advance_secs_without_sim_clock_rebase(jump_secs);
+    let client_ft_after = ctx.now_machonet_wallclock_filetime_ticks();
+    let sim_b_1 = ctx.now_system_sim_filetime_ticks(Some(sys_b));
+    let sim_b_2 = ctx.now_system_sim_filetime_ticks(Some(sys_b));
+    assert!(
+        (sim_b_1 - client_ft_after).abs() < max_skew_ticks && sim_b_1 - client_ft_after < day_ticks,
+        "pre-anchored sys_b drifted across /advancetime: delta_ms={}",
+        (sim_b_1 - client_ft_after) / 10_000
+    );
+    assert!(sim_b_2 > sim_b_1);
+}

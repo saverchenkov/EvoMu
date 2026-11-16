@@ -1171,6 +1171,228 @@ async fn test_mining_yield_multiplier_scales_cycle_yield_and_caps_cleanly() {
     assert_eq!(outcomes2[0].asteroid_remaining, 0);
 }
 
+#[tokio::test]
+async fn gh1144_mining_deactivate_after_tidi_anchoring_and_advancetime_avoids_24h_sleep_overflow() {
+    use crate::services::serverops_cluster::{
+        emit_sim_clock_rebase_on_entry_if_needed, evaluate_system_tidi_autoscaler_window,
+    };
+
+    let seed_mining_ctx = || async {
+        let ctx = make_ctx();
+        let char_id = 90_000_001_i64;
+        let ship_id = 890_001_i64;
+        let mod_id = 890_002_i64;
+        let ast_id = 890_003_i64;
+        let sys_id = 30_000_142_u32;
+
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.solar_system_id = sys_id;
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.active_ship_id = ship_id;
+            }
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: 32880,
+                    owner_id: char_id,
+                    location_id: i64::from(sys_id),
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                mod_id,
+                InventoryItemRecord {
+                    item_id: mod_id,
+                    type_id: 483, // Miner I (`miningLaser`)
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(mod_id, true);
+            snap.skills.entry(char_id).or_default().insert(
+                3386,
+                TrainedSkillRecord {
+                    type_id: 3386,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+            snap.asteroids.insert(
+                ast_id,
+                AsteroidRecord {
+                    asteroid_id: ast_id,
+                    solar_system_id: sys_id,
+                    belt_id: 0,
+                    type_id: 1230,
+                    quantity: 5_000,
+                    initial_quantity: 5_000,
+                    position: (2_000.0, 0.0, 0.0),
+                    radius: 100.0,
+                },
+            );
+        });
+
+        let sys = ctx.systems.get_or_spawn(sys_id);
+        let _ = sys
+            .spawn_ball(Ball {
+                id: ast_id,
+                type_id: 1230,
+                position: DVec3::new(1_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 1e9,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+        let _ = sys
+            .spawn_ball(Ball {
+                id: ship_id,
+                type_id: 32880,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1e6,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+        let _ = sys
+            .set_combat_state(
+                ship_id,
+                CombatState {
+                    shield_hp: 500.0,
+                    max_shield_hp: 500.0,
+                    armor_hp: 500.0,
+                    max_armor_hp: 500.0,
+                    structure_hp: 500.0,
+                    max_structure_hp: 500.0,
+                    capacitor: 250.0,
+                    max_capacitor: 250.0,
+                    signature_radius: 40.0,
+                    ..Default::default()
+                },
+            )
+            .await;
+        let _ = sys
+            .add_target_lock(
+                ship_id,
+                TargetLock {
+                    target_id: ast_id,
+                    lock_time_ms: 1_000.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: Some(20_000.0),
+                },
+            )
+            .await;
+        let mut fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+        if let Some(m) = fit.modules.get_mut(&mod_id) {
+            m.state = eve_dogma::ModuleState::Online;
+        }
+        ctx.store_ship_fitting(ship_id, fit);
+        (ctx, char_id, ship_id, mod_id, ast_id, sys_id)
+    };
+
+    let day_ticks: i64 = 86_400 * 10_000_000;
+    let max_skew_ticks: i64 = 5 * 10_000_000;
+    let advancetime_secs = 1_119_223_u64; // ~12.95 days as observed in #1143 / #1144
+
+    // Case 1: `/advancetime` (~12.95d) followed by TiDi autoscaler tighten -> relax + entry rebase.
+    let (ctx, char_id, ship_id, mod_id, ast_id, sys_id) = seed_mining_ctx().await;
+    ctx.advance_secs_without_sim_clock_rebase(advancetime_secs);
+    let _ = evaluate_system_tidi_autoscaler_window(&ctx, sys_id, 520.0, Some(38.5), 10.0, 10);
+    let _ = evaluate_system_tidi_autoscaler_window(&ctx, sys_id, 520.0, None, 12.0, 12);
+    let _ = evaluate_system_tidi_autoscaler_window(&ctx, sys_id, 5.0, None, 17.0, 17);
+    let _ = evaluate_system_tidi_autoscaler_window(&ctx, sys_id, 5.0, None, 18.0, 18);
+    let _ = evaluate_system_tidi_autoscaler_window(&ctx, sys_id, 5.0, None, 20.0, 20);
+    let _ = emit_sim_clock_rebase_on_entry_if_needed(&ctx, char_id, sys_id);
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    activate(&ctx, char_id, ship_id, sys_id, mod_id, ast_id)
+        .await
+        .expect("activate after /advancetime + TiDi autoscaler");
+    let _ = deactivate(&ctx, char_id, Some(ship_id), mod_id)
+        .await
+        .expect("active mining cycle")
+        .expect("deactivate mining laser");
+
+    let client_sim_ft = crate::router::host_wall_blueos_filetime_ticks();
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let mut saw_stop_actual_time = false;
+    for n in notifs.iter().filter(|n| n.event == "OnGodmaShipEffect") {
+        let t_ft = n.args[2].as_i64().expect("OnGodmaShipEffect t");
+        let start_ft = n.args[6].as_i64().expect("OnGodmaShipEffect startTime");
+        assert!((t_ft - client_sim_ft).abs() < max_skew_ticks && t_ft - client_sim_ft < day_ticks);
+        assert!(
+            (start_ft - client_sim_ft).abs() < max_skew_ticks
+                && start_ft - client_sim_ft < day_ticks
+        );
+        if let Some(stop_ft) = n.args.get(10).and_then(eve_proto::PyRep::as_i64) {
+            saw_stop_actual_time = true;
+            assert!(
+                (stop_ft - client_sim_ft).abs() < max_skew_ticks
+                    && stop_ft - client_sim_ft < day_ticks,
+                "actualStopTime would trigger >24h SleepSim overflow in godma.ActualStopEffect: delta_ms={}",
+                (stop_ft - client_sim_ft) / 10_000
+            );
+        }
+    }
+    assert!(saw_stop_actual_time, "expected deactivate OnGodmaShipEffect with actualStopTime");
+    for n in notifs.iter().filter(|n| n.event == "OnSpecialFX") {
+        let fx_start = n.args[11].as_i64().expect("OnSpecialFX startTime");
+        assert!(
+            (fx_start - client_sim_ft).abs() < max_skew_ticks && fx_start - client_sim_ft < day_ticks
+        );
+    }
+
+    // Case 2: TiDi autoscaler engages BEFORE `/advancetime` (~12.95d) runs.
+    let (ctx2, char_id2, ship_id2, mod_id2, ast_id2, sys_id2) = seed_mining_ctx().await;
+    let _ = evaluate_system_tidi_autoscaler_window(&ctx2, sys_id2, 520.0, Some(38.5), 10.0, 10);
+    let _ = evaluate_system_tidi_autoscaler_window(&ctx2, sys_id2, 520.0, None, 12.0, 12);
+    ctx2.advance_secs_without_sim_clock_rebase(advancetime_secs);
+
+    let _ = ctx2.drain_notifications_for_char(char_id2);
+    activate(&ctx2, char_id2, ship_id2, sys_id2, mod_id2, ast_id2)
+        .await
+        .expect("activate with pre-existing TiDi anchor + /advancetime");
+    let _ = deactivate(&ctx2, char_id2, Some(ship_id2), mod_id2)
+        .await
+        .expect("active mining cycle")
+        .expect("deactivate mining laser");
+    let client_sim_ft2 = crate::router::host_wall_blueos_filetime_ticks();
+    let stop_notifs2: Vec<_> = ctx2
+        .drain_notifications_for_char(char_id2)
+        .into_iter()
+        .filter(|n| n.event == "OnGodmaShipEffect")
+        .collect();
+    assert_eq!(stop_notifs2.len(), 2);
+    for n in stop_notifs2 {
+        if let Some(stop_ft) = n.args.get(10).and_then(eve_proto::PyRep::as_i64) {
+            assert!(
+                (stop_ft - client_sim_ft2).abs() < max_skew_ticks
+                    && stop_ft - client_sim_ft2 < day_ticks,
+                "actualStopTime drifted when TiDi anchor preceded /advancetime: delta_ms={}",
+                (stop_ft - client_sim_ft2) / 10_000
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "mining_cycle_extra_unit_tests.rs"]
 mod extra_unit_tests;

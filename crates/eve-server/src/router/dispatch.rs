@@ -1894,7 +1894,7 @@ fn maybe_emit_login_sim_clock_rebase(
     if already_rebased {
         return;
     }
-    let now_wall_ft = ctx.now_blueos_filetime_ticks();
+    let now_wall_ft = ctx.now_machonet_wallclock_filetime_ticks();
     let cur_sim_ft_opt = {
         let cn = ctx
             .systems
@@ -1916,8 +1916,10 @@ fn maybe_emit_login_sim_clock_rebase(
             .read()
             .map(|bp| bp.sim_unix_secs)
             .unwrap_or(0);
-        let now_unix = ctx.now_unix();
-        (bp_unix > 0 && bp_unix < now_unix)
+        let client_now_unix = ctx
+            .now_unix()
+            .saturating_sub(ctx.unrebased_clock_offset_secs());
+        (bp_unix > 0 && bp_unix < client_now_unix)
             .then(|| ((bp_unix as i64) + 11_644_473_600).saturating_mul(10_000_000))
     });
     if let Some(cur_sim_ft) = cur_sim_ft_opt {
