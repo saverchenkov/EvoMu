@@ -788,3 +788,559 @@ async fn drone_link_augmentor_omnidirectional_tracking_and_bonused_tractor_beam_
     .unwrap()
     .is_ok());
 }
+
+fn set_test_hull_bandwidth(ctx: &mut ServerContext, ship_type_id: u32, bandwidth: f64) {
+    let mut sde = (*ctx.sde).clone();
+    if let Some(hull) = sde.types.get_mut(&ship_type_id) {
+        hull.default_attributes.insert(1271, bandwidth);
+    }
+    ctx.sde = Arc::new(sde);
+}
+
+fn extract_v24_launch_entry(rep: &PyRep, source_item_id: i64) -> &[PyRep] {
+    let PyRep::Dict(entries) = rep else {
+        panic!("expected PyRep::Dict from V24 LaunchDrones, got {rep:?}");
+    };
+    entries
+        .iter()
+        .find_map(|(k, v)| {
+            if k.as_i64() == Some(source_item_id) {
+                if let PyRep::List(seq) = v {
+                    return Some(seq.as_slice());
+                }
+            }
+            None
+        })
+        .unwrap_or_else(|| panic!("missing source item {source_item_id} in {entries:?}"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v24_launch_drones_partial_stack_respects_active_cap_and_returns_per_item_error_tuple() {
+    let (mut ctx, mut session, char_id, ship_id, _sys_id) = make_drone_test_ctx();
+    ctx.db
+        .acquire_online_lock(1, session.session_id, Some(char_id), true, ctx.now_unix_secs())
+        .expect("online lock");
+    set_test_hull_bandwidth(&mut ctx, 587, 25.0);
+    ctx.invalidate_ship_fitting(ship_id);
+    let kwargs = HashMap::new();
+
+    // 8-unit stack of 5 Mbit/s Hobgoblin IIs in drone bay with Drones V (max 5) and 25 Mbit/s bandwidth.
+    let stack_id = 710_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            stack_id,
+            make_fighter_item(stack_id, 2_456, char_id, ship_id, InventoryFlag::DroneBay, 8),
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let res = handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "ship",
+        "LaunchDrones",
+        &[
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(stack_id),
+                PyRep::Integer(8),
+            ])]),
+            PyRep::None,
+            PyRep::Bool(false),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("partial launch of 5/8 drones must succeed");
+
+    let seq = extract_v24_launch_entry(&res, stack_id);
+    assert_eq!(seq.len(), 6, "expected 5 launched IDs + 1 error tuple, got {seq:?}");
+    let launched_ids: Vec<i64> = seq[..5].iter().filter_map(|v| v.as_i64()).collect();
+    assert_eq!(launched_ids.len(), 5, "first 5 elements must be integer drone IDs");
+    assert_eq!(
+        seq[5],
+        PyRep::Tuple(vec![PyRep::String("NoDroneManagementAbilitiesLeft".into())]),
+        "remaining unlaunched stack units must emit NoDroneManagementAbilitiesLeft tuple"
+    );
+
+    let active_ids: std::collections::HashSet<i64> = with_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space
+            .values()
+            .filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned)
+            .map(|d| d.ball_id)
+            .collect()
+    });
+    assert_eq!(active_ids.len(), 5);
+    for id in &launched_ids {
+        assert!(active_ids.contains(id), "launched drone {id} must be active in space");
+    }
+
+    let rem_qty = ctx.db.with_snapshot(|s| s.items.get(&stack_id).map(|i| i.quantity));
+    assert_eq!(rem_qty, Some(3), "3 unlaunched drones must remain in the drone bay stack");
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let item_change_count = notifs.iter().filter(|n| n.event == "OnItemChange").count();
+    let drone_state_count = notifs.iter().filter(|n| n.event == "OnDroneStateChange").count();
+    assert_eq!(item_change_count, 6, "expected 1 bay stack decrement + 5 launched item OnItemChanges");
+    assert_eq!(drone_state_count, 5, "expected 5 OnDroneStateChange notifications");
+
+    // Subsequent launch when already at 5/5 active cap must fail with top-level NoDroneManagementAbilitiesLeft.
+    let err_full = handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "ship",
+        "LaunchDrones",
+        &[
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(stack_id),
+                PyRep::Integer(3),
+            ])]),
+            PyRep::None,
+            PyRep::Bool(false),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_full.code, "NoDroneManagementAbilitiesLeft");
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items.get(&stack_id).map(|i| i.quantity)),
+        Some(3)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v24_launch_drones_partial_stack_bandwidth_cap_and_zero_capacity_errors() {
+    let (mut ctx, mut session, char_id, ship_id, _sys_id) = make_drone_test_ctx();
+    ctx.db
+        .acquire_online_lock(1, session.session_id, Some(char_id), true, ctx.now_unix_secs())
+        .expect("online lock");
+    set_test_hull_bandwidth(&mut ctx, 587, 25.0);
+    ctx.invalidate_ship_fitting(ship_id);
+    let kwargs = HashMap::new();
+
+    // 4-unit stack of 10 Mbit/s drones on 25 Mbit/s hull -> 2 launch (20 Mbit/s), 2 remain, MaxBandwidthExceeded tuple.
+    let med_stack_id = 710_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            med_stack_id,
+            make_fighter_item(med_stack_id, 3_186, char_id, ship_id, InventoryFlag::DroneBay, 4),
+        );
+    });
+
+    let res = handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "ship",
+        "LaunchDrones",
+        &[
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(med_stack_id),
+                PyRep::Integer(4),
+            ])]),
+            PyRep::None,
+            PyRep::Bool(false),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("bandwidth-capped partial launch of 2/4 drones must succeed");
+
+    let seq = extract_v24_launch_entry(&res, med_stack_id);
+    assert_eq!(seq.len(), 3, "expected 2 launched IDs + 1 MaxBandwidthExceeded tuple, got {seq:?}");
+    assert!(seq[0].as_i64().is_some() && seq[1].as_i64().is_some());
+    assert_eq!(
+        seq[2],
+        PyRep::Tuple(vec![PyRep::String("MaxBandwidthExceeded".into())]),
+        "remaining drones exceeding bandwidth must emit MaxBandwidthExceeded tuple"
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items.get(&med_stack_id).map(|i| i.quantity)),
+        Some(2)
+    );
+
+    // Trying to launch from the remaining 10 Mbit/s stack with only 5 Mbit/s free launches 0 -> top-level Err.
+    let err_bw = handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "ship",
+        "LaunchDrones",
+        &[
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(med_stack_id),
+                PyRep::Integer(2),
+            ])]),
+            PyRep::None,
+            PyRep::Bool(false),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_bw.code, "MaxBandwidthExceeded");
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items.get(&med_stack_id).map(|i| i.quantity)),
+        Some(2)
+    );
+
+    // With Drones skill 0 (max_drones_allowed == 0), V24 launch returns top-level NoDroneManagementAbilities.
+    let (ctx_no_skill, mut sess_no_skill, char2, ship2, _) = make_drone_test_ctx();
+    seed_pilot_skill(&ctx_no_skill, char2, 3_436, 0);
+    ctx_no_skill.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            710_003,
+            make_fighter_item(710_003, 2_456, char2, ship2, InventoryFlag::DroneBay, 3),
+        );
+    });
+    let err_no_skill = handle_npcs_drones(
+        &ctx_no_skill,
+        &mut sess_no_skill,
+        "ship",
+        "LaunchDrones",
+        &[
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(710_003),
+                PyRep::Integer(3),
+            ])]),
+            PyRep::None,
+            PyRep::Bool(false),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_no_skill.code, "NoDroneManagementAbilities");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v24_launch_drones_multi_item_partial_and_per_item_errors() {
+    let (mut ctx, mut session, char_id, ship_id, _sys_id) = make_drone_test_ctx();
+    ctx.db
+        .acquire_online_lock(1, session.session_id, Some(char_id), true, ctx.now_unix_secs())
+        .expect("online lock");
+    set_test_hull_bandwidth(&mut ctx, 587, 25.0);
+    ctx.invalidate_ship_fitting(ship_id);
+    let kwargs = HashMap::new();
+
+    let stack_a = 710_010_i64; // 3x 5 Mbit/s -> all 3 launch (15 Mbit/s, 3 slots)
+    let heavy_b = 710_011_i64; // 1x 25 Mbit/s -> 0 launch (MaxBandwidthExceeded)
+    let stack_c = 710_012_i64; // 4x 5 Mbit/s -> 2 launch (25 Mbit/s, 5 slots), 2 stay (NoDroneManagementAbilitiesLeft)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            stack_a,
+            make_fighter_item(stack_a, 2_456, char_id, ship_id, InventoryFlag::DroneBay, 3),
+        );
+        snap.items.insert(
+            heavy_b,
+            make_fighter_item(heavy_b, 2_444, char_id, ship_id, InventoryFlag::DroneBay, 1),
+        );
+        snap.items.insert(
+            stack_c,
+            make_fighter_item(stack_c, 2_456, char_id, ship_id, InventoryFlag::DroneBay, 4),
+        );
+    });
+
+    let res = handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "ship",
+        "LaunchDrones",
+        &[
+            PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Integer(stack_a), PyRep::Integer(3)]),
+                PyRep::Tuple(vec![PyRep::Integer(heavy_b), PyRep::Integer(1)]),
+                PyRep::Tuple(vec![PyRep::Integer(stack_c), PyRep::Integer(4)]),
+            ]),
+            PyRep::None,
+            PyRep::Bool(false),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("multi-item V24 launch must partially succeed");
+
+    let seq_a = extract_v24_launch_entry(&res, stack_a);
+    assert_eq!(seq_a.len(), 3);
+    assert!(seq_a.iter().all(|v| v.as_i64().is_some()));
+
+    let seq_b = extract_v24_launch_entry(&res, heavy_b);
+    assert_eq!(seq_b, &[PyRep::Tuple(vec![PyRep::String("MaxBandwidthExceeded".into())])]);
+
+    let seq_c = extract_v24_launch_entry(&res, stack_c);
+    assert_eq!(seq_c.len(), 3);
+    assert!(seq_c[0].as_i64().is_some() && seq_c[1].as_i64().is_some());
+    assert_eq!(
+        seq_c[2],
+        PyRep::Tuple(vec![PyRep::String("NoDroneManagementAbilitiesLeft".into())])
+    );
+
+    let (active_count, active_bw) = with_combat_runtime(&ctx, |rt| {
+        let active: Vec<_> = rt
+            .active_drones_in_space
+            .values()
+            .filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned)
+            .collect();
+        (active.len(), active.iter().map(|d| d.bandwidth_used).sum::<f64>())
+    });
+    assert_eq!(active_count, 5);
+    assert!((active_bw - 25.0).abs() < 1e-6);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items.get(&heavy_b).map(|i| (i.flag, i.quantity))),
+        Some((InventoryFlag::DroneBay, 1))
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items.get(&stack_c).map(|i| (i.flag, i.quantity))),
+        Some((InventoryFlag::DroneBay, 2))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v24_launch_drones_partial_with_existing_space_drones_and_boundary_inputs() {
+    let kwargs = HashMap::new();
+
+    // 1. Existing 3/5 drones in space (15/25 Mbit/s) + launch 4 -> launches 2, leaves 2, emits 3 OnItemChange & 2 OnDroneStateChange.
+    let (mut ctx, mut session, char_id, ship_id, _sys_id) = make_drone_test_ctx();
+    ctx.db
+        .acquire_online_lock(1, session.session_id, Some(char_id), true, ctx.now_unix_secs())
+        .expect("online lock");
+    set_test_hull_bandwidth(&mut ctx, 587, 25.0);
+    ctx.invalidate_ship_fitting(ship_id);
+    let seed_stack = 710_020_i64;
+    let stack_rem = 710_021_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            seed_stack,
+            make_fighter_item(seed_stack, 2_456, char_id, ship_id, InventoryFlag::DroneBay, 3),
+        );
+        snap.items.insert(
+            stack_rem,
+            make_fighter_item(stack_rem, 2_456, char_id, ship_id, InventoryFlag::DroneBay, 4),
+        );
+    });
+    let _ = handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "ship",
+        "LaunchDrones",
+        &[
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(seed_stack),
+                PyRep::Integer(3),
+            ])]),
+            PyRep::None,
+            PyRep::Bool(false),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("seed 3/5 drones must launch");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let res = handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "ship",
+        "LaunchDrones",
+        &[
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(stack_rem),
+                PyRep::Integer(4),
+            ])]),
+            PyRep::None,
+            PyRep::Bool(false),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("partial launch of remaining 2/5 slots must succeed");
+    let seq = extract_v24_launch_entry(&res, stack_rem);
+    assert_eq!(seq.len(), 3, "expected 2 launched IDs + 1 error tuple, got {seq:?}");
+    assert!(seq[0].as_i64().is_some() && seq[1].as_i64().is_some());
+    assert_eq!(
+        seq[2],
+        PyRep::Tuple(vec![PyRep::String("NoDroneManagementAbilitiesLeft".into())])
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items.get(&stack_rem).map(|i| (i.flag, i.quantity))),
+        Some((InventoryFlag::DroneBay, 2))
+    );
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(notifs.iter().filter(|n| n.event == "OnItemChange").count(), 3);
+    assert_eq!(notifs.iter().filter(|n| n.event == "OnDroneStateChange").count(), 2);
+
+    // 2. Existing 10/25 Mbit/s bandwidth used (1x 10 Mbit/s) + launch 4x 10 Mbit/s -> launches 1, leaves 3, MaxBandwidthExceeded.
+    let (mut ctx_bw, mut sess_bw, char_bw, ship_bw, _) = make_drone_test_ctx();
+    set_test_hull_bandwidth(&mut ctx_bw, 587, 25.0);
+    ctx_bw.invalidate_ship_fitting(ship_bw);
+    let med_seed = 710_030_i64;
+    let med_stack = 710_031_i64;
+    ctx_bw.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            med_seed,
+            make_fighter_item(med_seed, 3_186, char_bw, ship_bw, InventoryFlag::DroneBay, 1),
+        );
+        snap.items.insert(
+            med_stack,
+            make_fighter_item(med_stack, 3_186, char_bw, ship_bw, InventoryFlag::DroneBay, 4),
+        );
+    });
+    let _ = handle_npcs_drones(
+        &ctx_bw,
+        &mut sess_bw,
+        "ship",
+        "LaunchDrones",
+        &[
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(med_seed),
+                PyRep::Integer(1),
+            ])]),
+            PyRep::None,
+            PyRep::Bool(false),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("initial 10 Mbit/s drone must launch");
+    let res_bw = handle_npcs_drones(
+        &ctx_bw,
+        &mut sess_bw,
+        "ship",
+        "LaunchDrones",
+        &[
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(med_stack),
+                PyRep::Integer(4),
+            ])]),
+            PyRep::None,
+            PyRep::Bool(false),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("partial launch of 1 more 10 Mbit/s drone must succeed");
+    let seq_bw = extract_v24_launch_entry(&res_bw, med_stack);
+    assert_eq!(seq_bw.len(), 2, "expected 1 launched ID + MaxBandwidthExceeded, got {seq_bw:?}");
+    assert!(seq_bw[0].as_i64().is_some());
+    assert_eq!(
+        seq_bw[1],
+        PyRep::Tuple(vec![PyRep::String("MaxBandwidthExceeded".into())])
+    );
+    assert_eq!(
+        ctx_bw.db.with_snapshot(|s| s.items.get(&med_stack).map(|i| i.quantity)),
+        Some(3)
+    );
+
+    // 3. Requesting more than stack quantity (8 requested from 3-unit stack) on empty 5-cap ship launches all 3 cleanly with NO error tuple,
+    //    empty V24 LaunchDrones([], None, False) returns empty Dict, and legacy list [d1, d2] at 4/5 slots still rejects all-or-nothing.
+    let (mut ctx_edge, mut sess_edge, char_e, ship_e, _) = make_drone_test_ctx();
+    set_test_hull_bandwidth(&mut ctx_edge, 587, 25.0);
+    ctx_edge.invalidate_ship_fitting(ship_e);
+    let over_req_stack = 710_040_i64;
+    let single_d1 = 710_041_i64;
+    let legacy_a = 710_042_i64;
+    let legacy_b = 710_043_i64;
+    ctx_edge.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            over_req_stack,
+            make_fighter_item(over_req_stack, 2_456, char_e, ship_e, InventoryFlag::DroneBay, 3),
+        );
+        snap.items.insert(
+            single_d1,
+            make_fighter_item(single_d1, 2_456, char_e, ship_e, InventoryFlag::DroneBay, 1),
+        );
+        snap.items.insert(
+            legacy_a,
+            make_fighter_item(legacy_a, 2_456, char_e, ship_e, InventoryFlag::DroneBay, 1),
+        );
+        snap.items.insert(
+            legacy_b,
+            make_fighter_item(legacy_b, 2_456, char_e, ship_e, InventoryFlag::DroneBay, 1),
+        );
+    });
+    let empty_rep = handle_npcs_drones(
+        &ctx_edge,
+        &mut sess_edge,
+        "ship",
+        "LaunchDrones",
+        &[PyRep::List(vec![]), PyRep::None, PyRep::Bool(false)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("empty V24 LaunchDrones must succeed with empty dict");
+    assert_eq!(empty_rep, PyRep::Dict(vec![]));
+
+    let res_over_req = handle_npcs_drones(
+        &ctx_edge,
+        &mut sess_edge,
+        "ship",
+        "LaunchDrones",
+        &[
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(over_req_stack),
+                PyRep::Integer(8),
+            ])]),
+            PyRep::None,
+            PyRep::Bool(false),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("requesting 8 from a 3-unit stack must launch all 3");
+    let seq_over_req = extract_v24_launch_entry(&res_over_req, over_req_stack);
+    assert_eq!(seq_over_req.len(), 3, "expected 3 IDs and no error tuple: {seq_over_req:?}");
+    assert!(seq_over_req.iter().all(|v| v.as_i64().is_some()));
+
+    let _ = handle_npcs_drones(
+        &ctx_edge,
+        &mut sess_edge,
+        "ship",
+        "LaunchDrones",
+        &[
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(single_d1),
+                PyRep::Integer(1),
+            ])]),
+            PyRep::None,
+            PyRep::Bool(false),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("4th drone must launch cleanly");
+
+    let err_legacy = handle_npcs_drones(
+        &ctx_edge,
+        &mut sess_edge,
+        "ship",
+        "LaunchDrones",
+        &[PyRep::List(vec![
+            PyRep::Integer(legacy_a),
+            PyRep::Integer(legacy_b),
+        ])],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_legacy.code, "NoDroneManagementAbilitiesLeft");
+    assert_eq!(
+        ctx_edge.db.with_snapshot(|s| s.items.get(&legacy_a).map(|i| i.flag)),
+        Some(InventoryFlag::DroneBay)
+    );
+    assert_eq!(
+        ctx_edge.db.with_snapshot(|s| s.items.get(&legacy_b).map(|i| i.flag)),
+        Some(InventoryFlag::DroneBay)
+    );
+}
