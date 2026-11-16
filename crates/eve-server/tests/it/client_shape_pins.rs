@@ -493,15 +493,34 @@ async fn pin_config_multi_owners_and_standing_mgr_sanitation() {
         Some(JITA_STATION_ID),
     );
 
-    // 1. config.GetMultiOwnersEx -> unknown IDs return generic owner rows (never omitted),
-    //    and NPC-corp range IDs return corporation typeID (2).
-    //    Client: eve/common/script/sys/eveCfg.pyj:717,763 (LoadEveOwners / GetOwnersRowDescriptor;
-    //    EveOwners.__getattr__ calls evetypes.GetGroupID(self.typeID)).
+    // 1. config.GetMultiOwnersEx -> true owner-range fallbacks resolve to their V24 owner
+    //    typeIDs (2 corp, 30 faction, 16159 alliance, 1373 character), while inventory items
+    //    and non-owner `preInv64Items` IDs (100M..2.1B) are omitted so V24 `idCheckers.IsCharacter`
+    //    catches `KeyError` -> `False` and never routes `ShowInfo` into `charMgr.GetPublicInfo3`.
+    //    Client: eve/common/script/sys/eveCfg.pyj (LoadEveOwners / EveOwners),
+    //    eve/common/script/sys/idCheckers.pyj (IsEvePlayerCharacter).
     let unknown_npc_corp = 1_999_123_i64;
     let unknown_faction = 599_123_i64;
     let unknown_alliance = 99_999_123_i64;
-    let unknown_generic = 888_777_666_i64;
+    let unknown_gen2_char = 90_999_123_i64;
+    let cargo_item_id = 1_896_953_512_i64;
+    let unknown_preinv64_id = 888_777_666_i64;
     let valid_faction = 500_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cargo_item_id,
+            InventoryItemRecord {
+                item_id: cargo_item_id,
+                type_id: 222,
+                owner_id: DEMO_CHAR_ID,
+                location_id: 1_896_964_019,
+                flag: InventoryFlag::Cargo,
+                quantity: 1100,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
     let owners_rep = rpc(
         &ctx,
         &mut sess,
@@ -512,7 +531,10 @@ async fn pin_config_multi_owners_and_standing_mgr_sanitation() {
             PyRep::Integer(unknown_npc_corp),
             PyRep::Integer(unknown_faction),
             PyRep::Integer(unknown_alliance),
-            PyRep::Integer(unknown_generic),
+            PyRep::Integer(unknown_gen2_char),
+            PyRep::Integer(cargo_item_id),
+            PyRep::Integer(unknown_preinv64_id),
+            PyRep::Integer(JITA_STATION_ID),
         ])],
     )
     .await
@@ -528,7 +550,11 @@ async fn pin_config_multi_owners_and_standing_mgr_sanitation() {
         columns,
         vec!["ownerID", "ownerName", "typeID", "gender", "ownerNameID"]
     );
-    assert_eq!(owner_rows.len(), 5, "GetMultiOwnersEx must never drop unknown IDs");
+    assert_eq!(
+        owner_rows.len(),
+        5,
+        "GetMultiOwnersEx must resolve only true owner ranges and omit items/non-owners: {owner_rows:?}"
+    );
     assert_eq!(owner_rows[0].first(), Some(&PyRep::Integer(valid_faction)));
     assert_eq!(owner_rows[0].get(2), Some(&PyRep::Integer(30)));
     assert_eq!(owner_rows[0].get(3), Some(&PyRep::Bool(false)));
@@ -541,7 +567,7 @@ async fn pin_config_multi_owners_and_standing_mgr_sanitation() {
     assert_eq!(owner_rows[3].first(), Some(&PyRep::Integer(unknown_alliance)));
     assert_eq!(owner_rows[3].get(2), Some(&PyRep::Integer(16159)));
     assert_eq!(owner_rows[3].get(3), Some(&PyRep::Bool(false)));
-    assert_eq!(owner_rows[4].first(), Some(&PyRep::Integer(unknown_generic)));
+    assert_eq!(owner_rows[4].first(), Some(&PyRep::Integer(unknown_gen2_char)));
     assert_eq!(owner_rows[4].get(2), Some(&PyRep::Integer(1373)));
     assert_eq!(owner_rows[4].get(3), Some(&PyRep::None));
     assert_eq!(owner_rows[4].get(4), Some(&PyRep::None));
@@ -550,7 +576,23 @@ async fn pin_config_multi_owners_and_standing_mgr_sanitation() {
             .get(1)
             .and_then(PyRep::as_str)
             .is_some_and(|s| !s.is_empty()),
-        "generic fallback owner row must carry a non-empty ownerName"
+        "character fallback owner row must carry a non-empty ownerName"
+    );
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "config",
+            "GetMultiOwnersEx",
+            &[PyRep::List(vec![PyRep::Integer(cargo_item_id)])],
+        )
+        .await
+        .expect("cargo item GetMultiOwnersEx"),
+        PyRep::tuple_set(
+            vec!["ownerID", "ownerName", "typeID", "gender", "ownerNameID"],
+            vec![],
+        ),
+        "cargo inventory item must be omitted from GetMultiOwnersEx so ShowInfo never treats it as a Character"
     );
     // Empty input & invalid non-integer negative checks.
     assert_eq!(
