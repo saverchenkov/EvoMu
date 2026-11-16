@@ -1522,3 +1522,175 @@ async fn ranked_cmd_sender_panics_when_lock_held_and_sync_registry_wrappers_resp
     }
     assert!(eve_db::lock_rank::held_lock_ranks().is_empty());
 }
+
+#[tokio::test]
+async fn add_target_lock_immediately_clears_tethered_balls_leaf_cache() {
+    let ctx = test_ctx();
+    let sys = ctx.systems.get_or_spawn(30_000_142);
+    let ship_id = 9_190_701;
+    let target_id = 9_190_702;
+
+    let mut ship_cs = make_combat_state(100.0, 100.0, 100.0, 100.0);
+    ship_cs.is_tethered = true;
+    sys.spawn_ball_with_combat(make_ball(ship_id, 587, DVec3::ZERO), ship_cs)
+        .await
+        .unwrap();
+    sys.spawn_ball_with_combat(
+        make_ball(target_id, 587, DVec3::new(5_000.0, 0.0, 0.0)),
+        make_combat_state(100.0, 100.0, 100.0, 100.0),
+    )
+    .await
+    .unwrap();
+    assert!(sys.is_ball_tethered_sync(ship_id));
+
+    sys.add_target_lock(
+        ship_id,
+        TargetLock {
+            target_id,
+            lock_time_ms: 1_000.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(50_000.0),
+        },
+    )
+    .await
+    .unwrap();
+
+    // `HF1167-P1-01`: `is_ball_tethered_sync` must immediately see false without waiting for Step.
+    assert!(!sys.is_ball_tethered_sync(ship_id));
+    let _bp_write = sys.ballpark.write().unwrap();
+    assert!(!sys.is_ball_tethered_sync(ship_id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn try_repair_combat_state_sync_emits_damage_event_persists_db_and_falls_back_on_full_mailbox() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let ship_id = 9_190_801_i64;
+    let ship2_id = 9_190_802_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        for sid in [ship_id, ship2_id] {
+            snap.items.insert(
+                sid,
+                make_item(sid, 587, 1, sys_id as i64, InventoryFlag::None, 1),
+            );
+            snap.sp6_lifecycle.ship_combat_hp.insert(
+                sid,
+                eve_db::PersistedCombatHp {
+                    shield_hp: 400.0,
+                    armor_hp: 460.0,
+                    hull_hp: 450.0,
+                },
+            );
+        }
+    });
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    for sid in [ship_id, ship2_id] {
+        sys.spawn_ball_with_combat(
+            make_ball(sid, 587, DVec3::ZERO),
+            CombatState {
+                max_shield_hp: 500.0,
+                shield_hp: 400.0,
+                max_armor_hp: 500.0,
+                armor_hp: 460.0,
+                max_structure_hp: 500.0,
+                structure_hp: 450.0,
+                max_capacitor: 100.0,
+                capacitor: 100.0,
+                ..CombatState::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    // 1. Uncontended `Ok(mut bp)` emits `OnDamageStateChange` and persists updated DB HP without
+    //    holding any lock rank across the DB write (`HF1167-P1-02b`).
+    let _ = sys.push_set_state(ship_id).await.unwrap();
+    let _ = sys.drain_observer_updates(ship_id).await.unwrap();
+    assert_eq!(
+        sys.try_repair_combat_state_sync(ship_id, 50.0, 40.0, 0.0),
+        crate::system_actor::TryRepairCombatOutcome::Applied
+    );
+    assert!(eve_db::lock_rank::held_lock_ranks().is_empty());
+
+    let (_tick, events, _pyrep) = sys.drain_observer_updates(ship_id).await.unwrap();
+    assert!(
+        events.iter().any(|ev| matches!(
+            ev,
+            DestinyEvent::OnDamageStateChange {
+                ball_id,
+                shield_ratio,
+                armor_ratio,
+                structure_ratio,
+            } if *ball_id == ship_id
+                && (*shield_ratio - 0.8).abs() < 1e-6
+                && (*armor_ratio - 1.0).abs() < 1e-6
+                && (*structure_ratio - 1.0).abs() < 1e-6
+        )),
+        "expected OnDamageStateChange for repaired ship, got {events:?}"
+    );
+    let persisted = ctx.db.with_snapshot(|snap| snap.sp6_lifecycle.ship_combat_hp.get(&ship_id).copied());
+    assert_eq!(
+        persisted,
+        Some(eve_db::PersistedCombatHp {
+            shield_hp: 400.0,
+            armor_hp: 500.0,
+            hull_hp: 500.0,
+        })
+    );
+
+    // 2. Contended `ballpark.write()` + full 256-slot actor mailbox returns `NeedsAsyncFallback`
+    //    and subsequent `repair_combat_state(...).await` applies + persists DB cleanly.
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let sys_bg = sys.clone();
+    let bg = std::thread::spawn(move || {
+        let _bp = sys_bg.ballpark.write().unwrap();
+        held_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    held_rx.recv().unwrap();
+
+    // Keep the actor blocked on `ballpark.write()` via one `SetSpeedFraction` command, then fill
+    // the remaining 256-slot mpsc buffer so `try_send` hits `Full`.
+    let mut dummy_replies = Vec::new();
+    for _ in 0..300 {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        match sys.cmd_sender().try_send(SystemCommand::SetSpeedFraction {
+            ball_id: ship2_id,
+            fraction: 0.25,
+            reply: tx,
+        }) {
+            Ok(()) => dummy_replies.push(rx),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => break,
+            Err(err) => panic!("unexpected try_send error: {err:?}"),
+        }
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        sys.try_repair_combat_state_sync(ship2_id, 50.0, 40.0, 0.0),
+        crate::system_actor::TryRepairCombatOutcome::NeedsAsyncFallback
+    );
+
+    release_tx.send(()).unwrap();
+    bg.join().unwrap();
+
+    let updated = sys
+        .repair_combat_state(ship2_id, 50.0, 40.0, 0.0)
+        .await
+        .unwrap()
+        .expect("ship2 should exist");
+    assert!((updated.structure_hp - 500.0).abs() < 1e-6);
+    assert!((updated.armor_hp - 500.0).abs() < 1e-6);
+    assert!((updated.shield_hp - 400.0).abs() < 1e-6);
+    let persisted2 = ctx.db.with_snapshot(|snap| snap.sp6_lifecycle.ship_combat_hp.get(&ship2_id).copied());
+    assert_eq!(
+        persisted2,
+        Some(eve_db::PersistedCombatHp {
+            shield_hp: 400.0,
+            armor_hp: 500.0,
+            hull_hp: 500.0,
+        })
+    );
+}

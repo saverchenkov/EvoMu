@@ -1023,6 +1023,79 @@ pub fn clear_ship_combat_damage_in_snap(snap: &mut eve_db::WorldStateSnapshot, s
     }
 }
 
+/// Subtracts only the priced `(hull, armor, shield)` repair deltas from persisted ship damage
+/// records (`item.dynamic_attributes` and `snap.sp6_lifecycle.ship_combat_hp`), leaving any
+/// unpriced or unsampled persisted deficit intact (`#1167`). Clears the full damage record once
+/// no persisted deficit remains.
+pub fn subtract_ship_combat_damage_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    ship_id: i64,
+    paid_hull_armor_shield: (f64, f64, f64),
+    base_max_hull_armor_shield: (f64, f64, f64),
+    live_sampled: bool,
+) {
+    if live_sampled {
+        clear_ship_combat_damage_in_snap(snap, ship_id);
+        return;
+    }
+    let h_paid = paid_hull_armor_shield.0.max(0.0);
+    let a_paid = paid_hull_armor_shield.1.max(0.0);
+    let s_paid = paid_hull_armor_shield.2.max(0.0);
+    let max_h = base_max_hull_armor_shield.0.max(0.0);
+    let max_a = base_max_hull_armor_shield.1.max(0.0);
+    let max_s = base_max_hull_armor_shield.2.max(0.0);
+    let (rem_h, rem_a) = snap
+        .items
+        .get(&ship_id)
+        .map(|it| {
+            let cur_h = it
+                .dynamic_attributes
+                .get(&eve_sde::attr_ids::DAMAGE)
+                .copied()
+                .unwrap_or(0.0)
+                .max(0.0);
+            let cur_a = it
+                .dynamic_attributes
+                .get(&eve_sde::attr_ids::ARMOR_DAMAGE)
+                .copied()
+                .unwrap_or(0.0)
+                .max(0.0);
+            ((cur_h - h_paid).max(0.0), (cur_a - a_paid).max(0.0))
+        })
+        .unwrap_or((0.0, 0.0));
+    sync_ship_item_damage_attrs_in_snap(snap, ship_id, rem_a, rem_h);
+
+    let add_capped = |cur: f64, delta: f64, base_max: f64| -> f64 {
+        let cur = cur.max(0.0);
+        if base_max > 0.0 && cur <= base_max {
+            (cur + delta).min(base_max)
+        } else {
+            cur + delta
+        }
+    };
+
+    let mut clear_all = rem_h <= 1e-6 && rem_a <= 1e-6;
+    if let Some(hp) = snap.sp6_lifecycle.ship_combat_hp.get_mut(&ship_id) {
+        hp.hull_hp = add_capped(hp.hull_hp, h_paid, max_h);
+        hp.armor_hp = add_capped(hp.armor_hp, a_paid, max_a);
+        hp.shield_hp = add_capped(hp.shield_hp, s_paid, max_s);
+        let layer_fully_clear = |cur: f64, paid: f64, base_max: f64| -> bool {
+            if base_max <= 0.0 {
+                paid > 0.0 || cur <= 1e-6
+            } else {
+                cur + 1e-6 >= base_max && cur <= base_max + 1e-6
+            }
+        };
+        clear_all = clear_all
+            && layer_fully_clear(hp.hull_hp, h_paid, max_h)
+            && layer_fully_clear(hp.armor_hp, a_paid, max_a)
+            && layer_fully_clear(hp.shield_hp, s_paid, max_s);
+    }
+    if clear_all {
+        clear_ship_combat_damage_in_snap(snap, ship_id);
+    }
+}
+
 /// Unified ship HP & damage view reconciled across `Ballpark::combat_states`,
 /// `snap.sp6_lifecycle.ship_combat_hp`, and `item.dynamic_attributes` (`#585`).
 #[derive(Debug, Clone, Copy)]

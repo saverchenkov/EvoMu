@@ -4,7 +4,7 @@
 
 use super::{
     ActiveModuleCycle, ActiveNaniteRepair, AsteroidState, CharacterId,
-    MiningExtractionResult, SystemCommand, TickBroadcast,
+    MiningExtractionResult, SystemCommand, TickBroadcast, TryRepairCombatOutcome,
 };
 use eve_db::lock_rank::{
     assert_no_locks_held, RankedMutex, RankedRwLock, RANK_ACTOR_STATE, RANK_BALLPARK, RANK_LEAF,
@@ -158,9 +158,13 @@ impl SystemHandle {
     }
 
     /// Non-blockingly restores up to the priced `(hull_heal, armor_heal, shield_heal)` HP deltas
-    /// on `ball_id`'s `CombatState`: tries `ballpark.try_write()` directly, and if write-contended
-    /// falls back to queuing a `ModifyCombatState` command onto the system actor mailbox (`#1167`).
+    /// on `ball_id`'s `CombatState`: tries `ballpark.try_write()` directly (emitting
+    /// `OnDamageStateChange` and persisting the updated `CombatState` after releasing `ballpark`),
+    /// and if write-contended falls back to queuing [`SystemCommand::RepairCombatState`] onto the
+    /// system actor mailbox (`#1167`).
     ///
+    /// Returns [`TryRepairCombatOutcome::NeedsAsyncFallback`] if the mailbox is full (or locks are
+    /// held) so callers outside DB locks can `.await` [`Self::repair_combat_state`].
     /// Restoring exact priced deltas rather than snapping to `max_*_hp` ensures unsampled live
     /// damage (when pre-sampling hit `WouldBlock` or concurrent damage landed mid-RPC) is never
     /// repaired for free (`#1167`).
@@ -170,43 +174,66 @@ impl SystemHandle {
         hull_heal: f64,
         armor_heal: f64,
         shield_heal: f64,
-    ) -> bool {
+    ) -> TryRepairCombatOutcome {
         let hull_delta = hull_heal.max(0.0);
         let armor_delta = armor_heal.max(0.0);
         let shield_delta = shield_heal.max(0.0);
         if hull_delta <= 0.0 && armor_delta <= 0.0 && shield_delta <= 0.0 {
-            return true;
+            return TryRepairCombatOutcome::Applied;
         }
-        let apply_heal = move |cs: &mut CombatState| {
-            cs.shield_hp = (cs.shield_hp + shield_delta).min(cs.max_shield_hp);
-            cs.armor_hp = (cs.armor_hp + armor_delta).min(cs.max_armor_hp);
-            cs.structure_hp = (cs.structure_hp + hull_delta).min(cs.max_structure_hp);
-        };
-        match self.ballpark.try_write() {
+        let updated_opt = match self.ballpark.try_write() {
             Ok(mut bp) => {
-                if let Some(cs) = bp.combat_states.get_mut(&ball_id) {
-                    apply_heal(cs);
-                    return true;
+                let res = super::apply_repair_combat_state_in_ballpark(
+                    &mut bp,
+                    ball_id,
+                    hull_delta,
+                    armor_delta,
+                    shield_delta,
+                );
+                if res.is_none() {
+                    return TryRepairCombatOutcome::NotPresent;
                 }
-                false
+                res
             }
             Err(std::sync::TryLockError::WouldBlock) => {
-                if self.get_ball_position_sync(ball_id).is_none()
-                    || !eve_db::lock_rank::held_lock_ranks().is_empty()
-                {
-                    return false;
+                if self.get_ball_position_sync(ball_id).is_none() {
+                    return TryRepairCombatOutcome::NotPresent;
+                }
+                if !eve_db::lock_rank::held_lock_ranks().is_empty() {
+                    return TryRepairCombatOutcome::NeedsAsyncFallback;
                 }
                 let (tx, _rx) = oneshot::channel();
-                self.cmd_sender()
-                    .try_send(SystemCommand::ModifyCombatState {
-                        ball_id,
-                        f: Box::new(apply_heal),
-                        reply: tx,
-                    })
-                    .is_ok()
+                return match self.cmd_sender().try_send(SystemCommand::RepairCombatState {
+                    ball_id,
+                    hull_heal: hull_delta,
+                    armor_heal: armor_delta,
+                    shield_heal: shield_delta,
+                    reply: tx,
+                }) {
+                    Ok(()) => TryRepairCombatOutcome::QueuedAsync,
+                    Err(_) => TryRepairCombatOutcome::NeedsAsyncFallback,
+                };
             }
-            Err(std::sync::TryLockError::Poisoned(_)) => false,
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return TryRepairCombatOutcome::NotPresent;
+            }
+        };
+        if let Some(updated) = updated_opt {
+            let db_opt = self
+                .actor_state
+                .read()
+                .ok()
+                .and_then(|st| st.db_opt.clone());
+            if let Some(db) = db_opt {
+                crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
+                    &db,
+                    self.solar_system_id,
+                    std::iter::once((ball_id, &updated)),
+                );
+            }
+            return TryRepairCombatOutcome::Applied;
         }
+        TryRepairCombatOutcome::NotPresent
     }
 
     pub fn try_set_ball_position(&self, ball_id: BallId, position: DVec3) {
@@ -1125,6 +1152,7 @@ impl SystemHandle {
         };
         f(cs);
         bp.recompute_ball_attributes(ball_id);
+        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         true
     }
 
@@ -1911,6 +1939,36 @@ impl SystemHandle {
             .send(SystemCommand::ModifyCombatState {
                 ball_id,
                 f: Box::new(f),
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    /// Asynchronously restores up to `(hull_heal, armor_heal, shield_heal)` HP deltas on
+    /// `ball_id` via `SystemActor`, emitting `OnDamageStateChange` and persisting the updated
+    /// `CombatState` (`#1167`).
+    pub async fn repair_combat_state(
+        &self,
+        ball_id: BallId,
+        hull_heal: f64,
+        armor_heal: f64,
+        shield_heal: f64,
+    ) -> Result<Option<CombatState>, String> {
+        let hull_delta = hull_heal.max(0.0);
+        let armor_delta = armor_heal.max(0.0);
+        let shield_delta = shield_heal.max(0.0);
+        if hull_delta <= 0.0 && armor_delta <= 0.0 && shield_delta <= 0.0 {
+            return Ok(None);
+        }
+        let (tx, rx) = oneshot::channel();
+        self.cmd_sender()
+            .send(SystemCommand::RepairCombatState {
+                ball_id,
+                hull_heal: hull_delta,
+                armor_heal: armor_delta,
+                shield_heal: shield_delta,
                 reply: tx,
             })
             .await

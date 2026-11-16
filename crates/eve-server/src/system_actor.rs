@@ -1748,15 +1748,22 @@ impl SystemRegistry {
                                     let _ = reply.send(Err("Target is tethered and invulnerable to target locks".into()));
                                     return;
                                 }
+                                let mut tether_cleared = false;
                                 if let Some(cs) = ballpark.combat_states.get_mut(&source_id) {
                                     cs.undock_invulnerable_remaining_ticks = 0;
-                                    cs.is_tethered = false;
+                                    if cs.is_tethered {
+                                        cs.is_tethered = false;
+                                        tether_cleared = true;
+                                    }
                                 }
                                 let res = if ballpark.add_target_lock(source_id, lock) {
                                     Ok(())
                                 } else {
                                     Err("Targeting systems cannot acquire lock while cloaked or during sensor recalibration delay, or target is untargetable".to_string())
                                 };
+                                if tether_cleared {
+                                    sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
+                                }
                                 let _ = reply.send(res);
                             }
                             cmd @ (SystemCommand::RemoveTargetLock { .. }
@@ -1913,6 +1920,36 @@ impl SystemRegistry {
                                 );
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let updated = ballpark.combat_states.get(&ball_id).cloned();
+                                if let (Some(db), Some(ref ucs)) = (&db_opt, &updated) {
+                                    crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
+                                        db,
+                                        solar_system_id,
+                                        std::iter::once((ball_id, ucs)),
+                                    );
+                                }
+                                let _ = reply.send(updated);
+                            }
+                            SystemCommand::RepairCombatState {
+                                ball_id,
+                                hull_heal,
+                                armor_heal,
+                                shield_heal,
+                                reply,
+                            } => {
+                                let updated = apply_repair_combat_state_in_ballpark(
+                                    &mut ballpark,
+                                    ball_id,
+                                    hull_heal,
+                                    armor_heal,
+                                    shield_heal,
+                                );
+                                if updated.is_some() {
+                                    sync_ball_positions(
+                                        &ballpark,
+                                        &ball_positions_actor,
+                                        &scrambled_balls_actor,
+                                    );
+                                }
                                 if let (Some(db), Some(ref ucs)) = (&db_opt, &updated) {
                                     crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
                                         db,
@@ -2998,6 +3035,45 @@ pub(crate) fn apply_fit_projection_in_actor(
         }
     }
     true
+}
+
+pub(crate) fn apply_repair_combat_state_in_ballpark(
+    bp: &mut Ballpark,
+    ball_id: BallId,
+    hull_heal: f64,
+    armor_heal: f64,
+    shield_heal: f64,
+) -> Option<eve_destiny::CombatState> {
+    let grid_id = bp.ball_grid_ids.get(&ball_id).copied();
+    let cs = bp.combat_states.get_mut(&ball_id)?;
+    let prev_s = cs.shield_hp;
+    let prev_a = cs.armor_hp;
+    let prev_h = cs.structure_hp;
+    cs.shield_hp = (cs.shield_hp + shield_heal.max(0.0)).min(cs.max_shield_hp);
+    cs.armor_hp = (cs.armor_hp + armor_heal.max(0.0)).min(cs.max_armor_hp);
+    cs.structure_hp = (cs.structure_hp + hull_heal.max(0.0)).min(cs.max_structure_hp);
+    let hp_changed = (cs.shield_hp - prev_s).abs() > 1e-6
+        || (cs.armor_hp - prev_a).abs() > 1e-6
+        || (cs.structure_hp - prev_h).abs() > 1e-6;
+    let cloned = cs.clone();
+    if hp_changed {
+        let ratio = |cur: f64, max: f64| {
+            if max > 0.0 {
+                (cur / max).clamp(0.0, 1.0)
+            } else {
+                1.0
+            }
+        };
+        bp.emit_damage_and_destruction_events(
+            ball_id,
+            grid_id,
+            ratio(cloned.shield_hp, cloned.max_shield_hp),
+            ratio(cloned.armor_hp, cloned.max_armor_hp),
+            ratio(cloned.structure_hp, cloned.max_structure_hp),
+            false,
+        );
+    }
+    Some(cloned)
 }
 
 pub(crate) fn flush_post_unlock_actions(

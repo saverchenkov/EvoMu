@@ -27,13 +27,13 @@ fn call_quotes(
     handle_repair_get_quotes(ctx, session, args)
 }
 
-fn call_repair(
+async fn call_repair(
     ctx: &ServerContext,
     session: &SessionState,
     is_structure: bool,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    handle_repair_items_in_location(ctx, session, is_structure, args)
+    handle_repair_items_in_location(ctx, session, is_structure, args).await
 }
 
 #[tokio::test]
@@ -43,19 +43,21 @@ async fn station_service_unavailable_auth_and_argument_validation_branches() {
     // Unauthenticated session fails
     let anon = SessionState::default();
     assert!(call_quotes(&ctx, &anon, &[]).is_err());
-    assert!(call_repair(&ctx, &anon, false, &[]).is_err());
+    assert!(call_repair(&ctx, &anon, false, &[]).await.is_err());
 
     // Not in station or structure -> NotInStation / NotInStructure
     sess.station_id = None;
     sess.structure_id = None;
     assert_eq!(
         call_repair(&ctx, &sess, false, &[PyRep::Integer(ship_id)])
+            .await
             .unwrap_err()
             .code,
         "NotInStation"
     );
     assert_eq!(
         call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)])
+            .await
             .unwrap_err()
             .code,
         "NotInStructure"
@@ -72,6 +74,7 @@ async fn station_service_unavailable_auth_and_argument_validation_branches() {
     );
     assert_eq!(
         call_repair(&ctx, &sess, false, &[PyRep::Integer(ship_id)])
+            .await
             .unwrap_err()
             .code,
         "StationServiceUnavailable"
@@ -96,6 +99,7 @@ async fn station_service_unavailable_auth_and_argument_validation_branches() {
     assert!(call_quotes(&ctx, &sess, &[]).is_ok());
     assert_eq!(
         call_repair(&ctx, &sess, false, &[PyRep::List(vec![])])
+            .await
             .unwrap_err()
             .code,
         "InvalidArgument"
@@ -110,6 +114,7 @@ async fn station_service_unavailable_auth_and_argument_validation_branches() {
                 false,
                 &[PyRep::Integer(ship_id), PyRep::Real(bad_budget)],
             )
+            .await
             .unwrap_err()
             .code,
             "InvalidArgument"
@@ -126,6 +131,7 @@ async fn station_service_unavailable_auth_and_argument_validation_branches() {
     }
     assert_eq!(
         call_repair(&ctx, &sess, false, &[PyRep::Integer(999_888_777)])
+            .await
             .unwrap_err()
             .code,
         "ItemNotFound"
@@ -139,6 +145,7 @@ async fn station_service_unavailable_auth_and_argument_validation_branches() {
             false,
             &[PyRep::Integer(ship_id), PyRep::Real(0.0)],
         )
+        .await
         .unwrap_err()
         .code,
         "InsufficientFunds"
@@ -150,6 +157,7 @@ async fn station_service_unavailable_auth_and_argument_validation_branches() {
     });
     assert_eq!(
         call_repair(&ctx, &sess, false, &[PyRep::Integer(ship_id)])
+            .await
             .unwrap_err()
             .code,
         "InsufficientFunds"
@@ -286,6 +294,7 @@ async fn ownership_corp_hangar_divisions_and_container_location_checks() {
         );
         assert_eq!(
             call_repair(&ctx, &sess, false, &[PyRep::Integer(id)])
+                .await
                 .unwrap_err()
                 .code,
             "ItemNotAtLocation"
@@ -299,6 +308,7 @@ async fn ownership_corp_hangar_divisions_and_container_location_checks() {
     );
     assert_eq!(
         call_repair(&ctx, &sess, false, &[PyRep::Integer(cargo_mod_item)])
+            .await
             .unwrap_err()
             .code,
         "ItemInsideContainer"
@@ -355,6 +365,7 @@ async fn upwell_structure_states_tether_repair_and_tax_wallet_credit() {
     // 1. Anchoring state -> StructureNotOperational
     assert_eq!(
         call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)])
+            .await
             .unwrap_err()
             .code,
         "StructureNotOperational"
@@ -366,6 +377,7 @@ async fn upwell_structure_states_tether_repair_and_tax_wallet_credit() {
     });
     assert_eq!(
         call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)])
+            .await
             .unwrap_err()
             .code,
         "QuantumCoreRequired"
@@ -450,13 +462,14 @@ async fn upwell_structure_states_tether_repair_and_tax_wallet_credit() {
     );
     assert_eq!(
         call_repair(&ctx, &sess, true, &[PyRep::Integer(hangar_item)])
+            .await
             .unwrap_err()
             .code,
         "NotDockedInStructure"
     );
 
     // Active ship IS repaired while tethered, tax is charged and credited to corp division 1, and ballpark HP restored!
-    let rep = call_repair(&ctx, &sess, true, &[PyRep::Tuple(vec![PyRep::Integer(ship_id)])]).unwrap();
+    let rep = call_repair(&ctx, &sess, true, &[PyRep::Tuple(vec![PyRep::Integer(ship_id)])]).await.unwrap();
     assert_eq!(
         rep.dict_get("locationID").and_then(|v| v.as_i64()),
         Some(struct_id)
@@ -565,7 +578,7 @@ async fn live_ballpark_and_cached_module_damage_plus_auth_and_tether_tiebreakers
     }
     let quotes = call_quotes(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(mod_id), PyRep::Integer(corp_nested_id)]).unwrap();
     assert!(matches!(quotes, PyRep::Dict(ref rows) if !rows.is_empty()));
-    let rep = call_repair(&ctx, &sess, false, &[PyRep::List(vec![PyRep::Integer(ship_id), PyRep::Integer(mod_id)])]).unwrap();
+    let rep = call_repair(&ctx, &sess, false, &[PyRep::List(vec![PyRep::Integer(ship_id), PyRep::Integer(mod_id)])]).await.unwrap();
     assert!(rep.dict_get("totalCostISK").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
     assert_eq!(ctx.ship_fittings.read().unwrap()[&ship_id].modules[&mod_id].damage_hp, 0.0);
 
@@ -576,7 +589,7 @@ async fn live_ballpark_and_cached_module_damage_plus_auth_and_tether_tiebreakers
     }
     sess.station_id = None;
     sess.structure_id = Some(1_000_999_888_777);
-    assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).unwrap_err().code, "StructureNotFound");
+    assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).await.unwrap_err().code, "StructureNotFound");
 
     let now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
@@ -658,14 +671,14 @@ async fn live_ballpark_and_cached_module_damage_plus_auth_and_tether_tiebreakers
         );
     });
     sess.structure_id = Some(struct_abandoned);
-    assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).unwrap_err().code, "StructureAbandoned");
+    assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).await.unwrap_err().code, "StructureAbandoned");
 
     // Non-owner without ACL gets StructureRepairAccessDenied (`L167-177`)
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.get_mut(&struct_far).unwrap().owner_corp_id = corp_b;
     });
     sess.structure_id = Some(struct_far);
-    assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).unwrap_err().code, "StructureRepairAccessDenied");
+    assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).await.unwrap_err().code, "StructureRepairAccessDenied");
 
     // Restore ownership and test tethered resolution picks nearest valid operational citadel
     ctx.db.with_mut_snapshot(|snap| {
@@ -678,7 +691,7 @@ async fn live_ballpark_and_cached_module_damage_plus_auth_and_tether_tiebreakers
         cs.is_tethered = true;
         cs.armor_hp = 50.0;
     }
-    let tethered_rep = call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).unwrap();
+    let tethered_rep = call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).await.unwrap();
     assert_eq!(tethered_rep.dict_get("locationID").and_then(|v| v.as_i64()), Some(struct_near));
 
     // CharacterNotFound on repair (`L685-687`)
@@ -687,7 +700,7 @@ async fn live_ballpark_and_cached_module_damage_plus_auth_and_tether_tiebreakers
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.remove(&char_id);
     });
-    assert_eq!(call_repair(&ctx, &sess, false, &[PyRep::Integer(ship_id)]).unwrap_err().code, "CharacterNotFound");
+    assert_eq!(call_repair(&ctx, &sess, false, &[PyRep::Integer(ship_id)]).await.unwrap_err().code, "CharacterNotFound");
 }
 
 #[tokio::test]
@@ -805,14 +818,14 @@ async fn live_ballpark_repair_not_operational_and_arithmetic_overflow_branches()
     // Live ballpark hull/armor/shield damage calculation & restoration (`L23-34`, `L43-46`, `L765`)
     let q_live = call_quotes(&ctx, &sess, &[PyRep::Integer(ship_id)]).unwrap();
     assert!(q_live.dict_get(&ship_id.to_string()).is_some() || !matches!(q_live, PyRep::None));
-    assert!(call_repair(&ctx, &sess, false, &[PyRep::Integer(ship_id)]).is_ok());
+    assert!(call_repair(&ctx, &sess, false, &[PyRep::Integer(ship_id)]).await.is_ok());
 
     // Parent container flag CorpSAG2 permission check (`L224`)
-    assert!(call_repair(&ctx, &sess, false, &[PyRep::Integer(corp_mod_id)]).is_err());
+    assert!(call_repair(&ctx, &sess, false, &[PyRep::Integer(corp_mod_id)]).await.is_err());
 
     // StructureNotOperational (`L157-162` guard via `is_operational`)
     sess.structure_id = Some(struct_not_op);
-    assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).unwrap_err().code, "StructureNotOperational");
+    assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).await.unwrap_err().code, "StructureNotOperational");
 
     // Structure location resolved via session.station_id >= 1e12 (`L260-261`) + corp wallet overflow (`L708-712`)
     sess.structure_id = None;
@@ -825,7 +838,7 @@ async fn live_ballpark_repair_not_operational_and_arithmetic_overflow_branches()
         snap.items.get_mut(&ship_id).unwrap().location_id = struct_id;
         snap.corporations.get_mut(&corp_id).unwrap().set_division_balance(1, IskCents(i64::MAX - 1));
     });
-    assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).unwrap_err().code, "ArithmeticOverflow");
+    assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).await.unwrap_err().code, "ArithmeticOverflow");
 
     // ArithmeticOverflow in Upwell item_cents (`L653-655`) & station item_base (`L639-641`)
     ctx.db.with_mut_snapshot(|snap| {
@@ -836,13 +849,13 @@ async fn live_ballpark_repair_not_operational_and_arithmetic_overflow_branches()
             .dynamic_attributes
             .insert(eve_sde::attr_ids::DAMAGE, 1e18);
     });
-    assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).unwrap_err().code, "ArithmeticOverflow");
+    assert_eq!(call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).await.unwrap_err().code, "ArithmeticOverflow");
     sess.station_id = Some(station_id);
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&ship_id).unwrap().location_id = station_id;
         snap.characters.get_mut(&char_id).unwrap().balance = IskCents(i64::MAX);
     });
-    assert_eq!(call_repair(&ctx, &sess, false, &[PyRep::Integer(ship_id)]).unwrap_err().code, "ArithmeticOverflow");
+    assert_eq!(call_repair(&ctx, &sess, false, &[PyRep::Integer(ship_id)]).await.unwrap_err().code, "ArithmeticOverflow");
 
     // Two items each slightly over half of i64::MAX base cost overflows base_total_cents (`L644-648`)
     // For type 23_915: base_price = 100_000 * 7.5e-6 = 0.75 ISK/HP = 75 cents/HP.
@@ -855,6 +868,7 @@ async fn live_ballpark_repair_not_operational_and_arithmetic_overflow_branches()
     });
     assert_eq!(
         call_repair(&ctx, &sess, false, &[PyRep::List(vec![PyRep::Integer(ship_id), PyRep::Integer(ship2_id)])])
+            .await
             .unwrap_err()
             .code,
         "ArithmeticOverflow"
@@ -869,6 +883,7 @@ async fn live_ballpark_repair_not_operational_and_arithmetic_overflow_branches()
     });
     assert_eq!(
         call_repair(&ctx, &sess, true, &[PyRep::List(vec![PyRep::Integer(ship_id), PyRep::Integer(ship2_id)])])
+            .await
             .unwrap_err()
             .code,
         "ArithmeticOverflow"
@@ -1053,6 +1068,7 @@ async fn mutants_cov_ship_combat_damage_tether_acl_and_structure_tax() {
     });
     assert_eq!(
         call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_with_shield)])
+            .await
             .unwrap_err()
             .code,
         "NotInStructure"
@@ -1078,7 +1094,7 @@ async fn mutants_cov_ship_combat_damage_tether_acl_and_structure_tax() {
     let q_tax = call_quotes(&ctx, &sess, &[PyRep::Integer(ship_with_shield)]).unwrap();
     assert!((quote_row_val(&q_tax, ship_with_shield, "totalRepairCost") - 3.00).abs() < 0.02);
 
-    let rep_tax = call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_with_shield)]).unwrap();
+    let rep_tax = call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_with_shield)]).await.unwrap();
     assert_eq!(
         rep_tax.dict_get("locationID").and_then(|v| v.as_i64()),
         Some(taxed_struct)
@@ -1208,8 +1224,8 @@ async fn tethered_repair_completes_without_blocking_while_ballpark_write_locked(
 
     let ctx_rep = ctx.clone();
     let sess_rep = sess.clone();
-    let repair_task = tokio::task::spawn_blocking(move || {
-        call_repair(&ctx_rep, &sess_rep, true, &[PyRep::Integer(ship_id)])
+    let repair_task = tokio::spawn(async move {
+        call_repair(&ctx_rep, &sess_rep, true, &[PyRep::Integer(ship_id)]).await
     });
 
     // Must complete while `ballpark.write()` is still held by `bg`.
@@ -1244,7 +1260,7 @@ async fn tethered_repair_completes_without_blocking_while_ballpark_write_locked(
     assert!((cs.shield_hp - 400.0).abs() < 1e-6);
 
     // Subsequent uncontended repair samples and restores the live shield damage cleanly.
-    let rep_live = call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).unwrap();
+    let rep_live = call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]).await.unwrap();
     assert!(
         rep_live
             .dict_get("totalCostISK")
@@ -1272,16 +1288,20 @@ async fn tethered_repair_and_goto_point_100_iterations_complete_without_deadlock
     let ctx_rep = ctx.clone();
     let sess_rep = sess.clone();
     let b_rep = std::sync::Arc::clone(&barrier);
+    let rt_rep = tokio::runtime::Handle::current();
     let repair_task = tokio::task::spawn_blocking(move || {
         b_rep.wait();
-        for _ in 0..100 {
-            let res = call_repair(&ctx_rep, &sess_rep, true, &[PyRep::Integer(ship_id)])
-                .expect("concurrent tethered repair must succeed");
-            assert_eq!(
-                res.dict_get("locationID").and_then(|v| v.as_i64()),
-                Some(struct_id)
-            );
-        }
+        rt_rep.block_on(async move {
+            for _ in 0..100 {
+                let res = call_repair(&ctx_rep, &sess_rep, true, &[PyRep::Integer(ship_id)])
+                    .await
+                    .expect("concurrent tethered repair must succeed");
+                assert_eq!(
+                    res.dict_get("locationID").and_then(|v| v.as_i64()),
+                    Some(struct_id)
+                );
+            }
+        });
     });
 
     let rt_handle = tokio::runtime::Handle::current();
@@ -1347,4 +1367,287 @@ async fn read_unified_ship_damage_state_skips_ballpark_inside_mut_snapshot() {
             .shield_damage
     });
     assert!((shield_dmg_after - 100.0).abs() < 1e-6);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn add_target_lock_immediately_denies_tether_repair_while_ballpark_write_locked() {
+    let (ctx, sess, _char_id, ship_id, sys_id, _struct_id) =
+        setup_tethered_ship_repair_fixture(20.0, 30.0).await;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let target_id = 910_777_001_i64;
+    sys.spawn_ball_with_combat(
+        Ball {
+            id: target_id,
+            type_id: 587,
+            position: DVec3::new(5_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState::default(),
+    )
+    .await
+    .unwrap();
+
+    sys.add_target_lock(
+        ship_id,
+        eve_destiny::TargetLock {
+            target_id,
+            lock_time_ms: 1_000.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(50_000.0),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!sys.is_ball_tethered_sync(ship_id));
+
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let sys_bg = sys.clone();
+    let bg = std::thread::spawn(move || {
+        let _bp = sys_bg.ballpark.write().unwrap();
+        held_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    held_rx.recv().unwrap();
+
+    let ctx_rep = ctx.clone();
+    let sess_rep = sess.clone();
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        call_repair(&ctx_rep, &sess_rep, true, &[PyRep::Integer(ship_id)]),
+    )
+    .await
+    .expect("tether denial must not block on ballpark.write()")
+    .unwrap_err();
+    assert_eq!(err.code, "NotInStructure");
+
+    release_tx.send(()).unwrap();
+    bg.join().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn would_block_unsampled_persisted_repair_preserves_unpaid_extender_hp_and_emits_damage_event() {
+    let (ctx, sess, _char_id, ship_id, sys_id, _struct_id) =
+        setup_tethered_ship_repair_fixture(20.0, 30.0).await;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+
+    // Partial persisted delta subtraction preserves remaining unpaid damage rather than wiping to zero.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&ship_id) {
+            it.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 50.0);
+            it.dynamic_attributes.insert(eve_sde::attr_ids::ARMOR_DAMAGE, 30.0);
+        }
+        snap.sp6_lifecycle.ship_combat_hp.insert(
+            ship_id,
+            eve_db::PersistedCombatHp {
+                hull_hp: 450.0,
+                armor_hp: 470.0,
+                shield_hp: 900.0,
+            },
+        );
+        crate::sp6_lifecycle::subtract_ship_combat_damage_in_snap(
+            snap,
+            ship_id,
+            (20.0, 10.0, 0.0),
+            (500.0, 500.0, 500.0),
+            false,
+        );
+        let it = &snap.items[&ship_id];
+        assert!((it.dynamic_attributes[&eve_sde::attr_ids::DAMAGE] - 30.0).abs() < 1e-6);
+        assert!((it.dynamic_attributes[&eve_sde::attr_ids::ARMOR_DAMAGE] - 20.0).abs() < 1e-6);
+        assert_eq!(
+            snap.sp6_lifecycle.ship_combat_hp.get(&ship_id).copied(),
+            Some(eve_db::PersistedCombatHp {
+                hull_hp: 470.0,
+                armor_hp: 480.0,
+                shield_hp: 900.0,
+            })
+        );
+        // Reset cleanly for end-to-end WouldBlock test with a Shield Extender (1500 max shield, 900 current).
+        it.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE);
+        if let Some(m) = snap.items.get_mut(&ship_id) {
+            m.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 20.0);
+            m.dynamic_attributes.insert(eve_sde::attr_ids::ARMOR_DAMAGE, 30.0);
+        }
+        snap.sp6_lifecycle.ship_combat_hp.insert(
+            ship_id,
+            eve_db::PersistedCombatHp {
+                hull_hp: 480.0,
+                armor_hp: 470.0,
+                shield_hp: 900.0,
+            },
+        );
+    });
+    assert!(sys.try_update_combat_state(ship_id, |cs| {
+        cs.max_shield_hp = 1_500.0;
+        cs.shield_hp = 900.0;
+    }));
+
+    // Hold `ballpark.write()` so `handle_repair_items_in_location` hits `WouldBlock` on pre-sampling.
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let sys_bg = sys.clone();
+    let bg = std::thread::spawn(move || {
+        let _bp = sys_bg.ballpark.write().unwrap();
+        held_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    held_rx.recv().unwrap();
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)]),
+    )
+    .await
+    .expect("WouldBlock repair timed out")
+    .expect("WouldBlock repair failed");
+
+    // Inside DB right after tx, paid hull/armor damage is subtracted while unpaid extender shield_hp=900 persists.
+    ctx.db.with_snapshot(|snap| {
+        let it = &snap.items[&ship_id];
+        assert!(!it.dynamic_attributes.contains_key(&eve_sde::attr_ids::DAMAGE));
+        assert!(!it.dynamic_attributes.contains_key(&eve_sde::attr_ids::ARMOR_DAMAGE));
+        assert_eq!(
+            snap.sp6_lifecycle.ship_combat_hp.get(&ship_id).copied(),
+            Some(eve_db::PersistedCombatHp {
+                hull_hp: 500.0,
+                armor_hp: 500.0,
+                shield_hp: 900.0,
+            })
+        );
+    });
+
+    release_tx.send(()).unwrap();
+    bg.join().unwrap();
+
+    // Once actor drains `QueuedAsync` command, live hull & armor are restored while unpaid 900/1500 shield stays untouched.
+    let cs_mid = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((cs_mid.structure_hp - 500.0).abs() < 1e-6);
+    assert!((cs_mid.armor_hp - 500.0).abs() < 1e-6);
+    assert!((cs_mid.shield_hp - 900.0).abs() < 1e-6);
+
+    // Now test uncontended `Ok(mut bp)` repair emits `DestinyEvent::OnDamageStateChange` and clears DB damage.
+    let _ = sys.push_set_state(ship_id).await.unwrap();
+    let _ = sys.drain_observer_updates(ship_id).await.unwrap();
+    assert!(sys.try_update_combat_state(ship_id, |cs| {
+        cs.max_shield_hp = 500.0;
+        cs.shield_hp = 350.0;
+        cs.armor_hp = 425.0;
+        cs.structure_hp = 475.0;
+    }));
+    call_repair(&ctx, &sess, true, &[PyRep::Integer(ship_id)])
+        .await
+        .expect("uncontended live repair should succeed");
+
+    let (_tick, events, _pyrep) = sys.drain_observer_updates(ship_id).await.unwrap();
+    assert!(
+        events.iter().any(|ev| matches!(
+            ev,
+            eve_destiny::DestinyEvent::OnDamageStateChange {
+                ball_id,
+                shield_ratio,
+                armor_ratio,
+                structure_ratio,
+            } if *ball_id == ship_id
+                && (*shield_ratio - 1.0).abs() < 1e-6
+                && (*armor_ratio - 1.0).abs() < 1e-6
+                && (*structure_ratio - 1.0).abs() < 1e-6
+        )),
+        "expected OnDamageStateChange after uncontended repair, got {events:?}"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.sp6_lifecycle.ship_combat_hp.get(&ship_id).copied(),
+            Some(eve_db::PersistedCombatHp {
+                shield_hp: 500.0,
+                armor_hp: 500.0,
+                hull_hp: 500.0,
+            })
+        );
+        let it = &snap.items[&ship_id];
+        assert!(!it.dynamic_attributes.contains_key(&eve_sde::attr_ids::DAMAGE));
+        assert!(!it.dynamic_attributes.contains_key(&eve_sde::attr_ids::ARMOR_DAMAGE));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tethered_repair_completes_via_async_fallback_when_ballpark_contended_and_mailbox_full() {
+    let (ctx, sess, _char_id, ship_id, sys_id, struct_id) =
+        setup_tethered_ship_repair_fixture(20.0, 30.0).await;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let sys_bg = sys.clone();
+    let bg = std::thread::spawn(move || {
+        let _bp = sys_bg.ballpark.write().unwrap();
+        held_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    held_rx.recv().unwrap();
+
+    // Block the actor on `ballpark.write()` with an initial command and saturate its 256-slot mpsc buffer.
+    let mut dummy_replies = Vec::new();
+    for _ in 0..300 {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        match sys.cmd_sender().try_send(crate::system_actor::SystemCommand::SetSpeedFraction {
+            ball_id: ship_id,
+            fraction: 0.5,
+            reply: tx,
+        }) {
+            Ok(()) => dummy_replies.push(rx),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => break,
+            Err(err) => panic!("unexpected try_send error: {err:?}"),
+        }
+        std::thread::yield_now();
+    }
+
+    let ctx_rep = ctx.clone();
+    let sess_rep = sess.clone();
+    let repair_task = tokio::spawn(async move {
+        call_repair(&ctx_rep, &sess_rep, true, &[PyRep::Integer(ship_id)]).await
+    });
+
+    // Wait for DB transaction to commit cleanly while `ballpark.write()` and mailbox saturation are held,
+    // proving the RPC moved past DB locks into the async mailbox `.await` fallback without deadlocking.
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let db_committed = ctx.db.with_snapshot(|snap| {
+                !snap.items[&ship_id]
+                    .dynamic_attributes
+                    .contains_key(&eve_sde::attr_ids::DAMAGE)
+            });
+            if db_committed {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("DB transaction should commit even with ballpark locked and mailbox full");
+
+    // Release `ballpark.write()` so the actor drains and services the awaited `RepairCombatState`.
+    release_tx.send(()).unwrap();
+    bg.join().unwrap();
+
+    let rep = tokio::time::timeout(std::time::Duration::from_secs(3), repair_task)
+        .await
+        .expect("async fallback repair task timed out")
+        .expect("repair task panicked")
+        .expect("async fallback repair should succeed");
+    assert_eq!(
+        rep.dict_get("locationID").and_then(|v| v.as_i64()),
+        Some(struct_id)
+    );
+
+    let cs = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((cs.structure_hp - 500.0).abs() < 1e-6);
+    assert!((cs.armor_hp - 500.0).abs() < 1e-6);
 }

@@ -452,6 +452,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::FlushConditionCheckpoint { .. } => "FlushConditionCheckpoint",
             SystemCommand::ApplyFitProjection { .. } => "ApplyFitProjection",
             SystemCommand::TrackModuleReloadSim { .. } => "TrackModuleReloadSim",
+            SystemCommand::RepairCombatState { .. } => "RepairCombatState",
         }
     }
 
@@ -549,10 +550,18 @@ fn system_command_all_variants_construct_and_match() {
         SystemCommand::StopNonWarpModuleCycles { ship_id: 1, reply: oneshot::channel().0 },
         SystemCommand::FlushPeerObserverUpdates { exclude_ball_id: None, reply: oneshot::channel().0 },
         SystemCommand::FlushConditionCheckpoint { reply: oneshot::channel().0 },
+        SystemCommand::RepairCombatState {
+            ball_id: 1,
+            hull_heal: 10.0,
+            armor_heal: 10.0,
+            shield_heal: 10.0,
+            reply: oneshot::channel().0,
+        },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 70);
+    assert_eq!(tags.len(), 71);
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[68], "FlushPeerObserverUpdates");
     assert_eq!(tags[69], "FlushConditionCheckpoint");
+    assert_eq!(tags[70], "RepairCombatState");
 }

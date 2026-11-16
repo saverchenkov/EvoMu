@@ -1079,12 +1079,15 @@ pub(crate) async fn handle_ships_and_services(
         | ("repairSvc", "RepairItemsInStructure") => {
             let in_struct = method == "RepairItemsInStructure"
                 || session.structure_id.is_some();
-            Some(crate::services::sov_services::handle_repair_items_in_location(
-                ctx,
-                session,
-                in_struct,
-                args,
-            ))
+            Some(
+                crate::services::sov_services::handle_repair_items_in_location(
+                    ctx,
+                    session,
+                    in_struct,
+                    args,
+                )
+                .await,
+            )
         }
         ("repairSvc", "RepairAll") => {
             Some(fitting_insurance_repair::handle_repair_all(ctx, session, args))
