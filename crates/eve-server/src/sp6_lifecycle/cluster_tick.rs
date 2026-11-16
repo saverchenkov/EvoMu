@@ -2182,16 +2182,25 @@ async fn step_single_system_physics_step_with_lateness(
         }
         // NOTE (#1079 merge hook): missile flight, breacher DoTs, and self-destruct progress follow sim clock in step_combat_system.
         let _ = crate::services::combat_crimewatch::step_combat_system(ctx, sys_id, 1.0).await;
-        let step_ms = step_start.elapsed().as_secs_f64() * 1_000.0;
-        let total_lateness_ms = cadence_lateness_ms.max(step_ms);
-        crate::services::serverops_cluster::evaluate_system_tidi_autoscaler_window(
-            ctx,
-            sys_id,
-            total_lateness_ms,
-            None,
-            ctx.now_unix() as f64,
-            stepped_tick,
-        );
+        let ticker_active = ctx
+            .dedicated_physics_ticker_active
+            .load(std::sync::atomic::Ordering::Acquire);
+        if ticker_active || cadence_lateness_ms > 0.0 {
+            let step_ms = if ticker_active {
+                step_start.elapsed().as_secs_f64() * 1_000.0
+            } else {
+                0.0
+            };
+            let total_lateness_ms = cadence_lateness_ms.max(step_ms);
+            crate::services::serverops_cluster::evaluate_system_tidi_autoscaler_window(
+                ctx,
+                sys_id,
+                total_lateness_ms,
+                None,
+                ctx.now_unix() as f64,
+                stepped_tick,
+            );
+        }
     })
     .await;
     if let Err(panic_msg) = step_res {

@@ -534,7 +534,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
     sim_elapsed_secs: f64,
     dt: f64,
     tidi_factor: f64,
-    mut reload_sim_remaining: Option<&mut HashMap<i64, (BallId, f64)>>,
+    mut reload_sim_remaining: Option<&mut HashMap<i64, ModuleReloadSimEntry>>,
     deactivation_hook: Option<&ModuleDeactivationHook>,
 ) -> Vec<(BallId, Option<CharacterId>)> {
     let tidi_factor = if tidi_factor.is_finite() {
@@ -1399,7 +1399,16 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                                         let reload_until = now_unix + scaled_wall_secs;
                                         for &tid in &cycle.linked_turrets {
                                             if let Some(ref mut sim_map) = reload_sim_remaining {
-                                                sim_map.insert(tid, (cycle.ship_id, reload_sim_secs));
+                                                sim_map.insert(
+                                                    tid,
+                                                    ModuleReloadSimEntry {
+                                                        remaining_sim_s: reload_sim_secs,
+                                                        min_wall_until_unix: now_unix.saturating_add(
+                                                            reload_sim_secs.ceil().max(1.0) as u64,
+                                                        ),
+                                                        tidi_stretched: tidi_factor < 0.995,
+                                                    },
+                                                );
                                             }
                                             snap.cluster_and_runtime
                                                 .module_reload_until_unix
@@ -2119,7 +2128,7 @@ pub(crate) fn emit_propulsion_stop_fx_before_detach(
 /// Advances active sim-clock-governed turret/launcher reload timers by `dt_sim` while updating
 /// persisted `module_reload_until_unix` deadlines when system TiDi `< 1.0` (`#1081`).
 pub(crate) fn step_module_reloads_sim_clock(
-    reload_sim_remaining: &mut HashMap<i64, (BallId, f64)>,
+    reload_sim_remaining: &mut HashMap<i64, ModuleReloadSimEntry>,
     reload_sim_deadlines_opt: Option<&eve_db::lock_rank::RankedRwLock<HashMap<i64, (SolarSystemId, f64, f64)>, { eve_db::lock_rank::RANK_LEAF }>>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     dt_sim: f64,
@@ -2135,12 +2144,21 @@ pub(crate) fn step_module_reloads_sim_clock(
     };
     let mut finished = Vec::new();
     let mut active_updates = Vec::new();
-    for (&mod_id, &mut (ship_id, ref mut rem)) in reload_sim_remaining.iter_mut() {
-        *rem -= dt_sim.max(0.0);
-        if *rem <= 1e-6 {
+    for (&mod_id, entry) in reload_sim_remaining.iter_mut() {
+        entry.remaining_sim_s -= dt_sim.max(0.0);
+        if entry.remaining_sim_s <= 1e-6 {
             finished.push(mod_id);
         } else {
-            active_updates.push((mod_id, ship_id, *rem));
+            let was_stretched = entry.tidi_stretched;
+            if tidi < 0.995 {
+                entry.tidi_stretched = true;
+            }
+            active_updates.push((
+                mod_id,
+                entry.remaining_sim_s,
+                entry.min_wall_until_unix,
+                was_stretched,
+            ));
         }
     }
     for mod_id in &finished {
@@ -2149,26 +2167,38 @@ pub(crate) fn step_module_reloads_sim_clock(
     if !finished.is_empty() || !active_updates.is_empty() {
         if let Some(db) = db_opt.as_ref().filter(|db| !db.is_write_locked_by_current_thread()) {
             let now_unix = db.clock().now_unix_secs();
-            let desired_updates: Vec<(i64, u64)> = active_updates
+            // Do not truncate un-dilated deadlines downward when fractional sim ticks outpace integer
+            // wall clock; only relax entries that were previously stretched under TiDi.
+            let desired_updates: Vec<(i64, u64, bool)> = active_updates
                 .iter()
-                .map(|&(mod_id, _, rem)| {
-                    (
-                        mod_id,
-                        now_unix.saturating_add((rem / tidi).ceil().max(1.0) as u64),
-                    )
+                .filter_map(|&(mod_id, rem, min_wall_until, was_stretched)| {
+                    if tidi < 0.995 {
+                        Some((
+                            mod_id,
+                            now_unix.saturating_add((rem / tidi).ceil().max(1.0) as u64),
+                            true,
+                        ))
+                    } else if was_stretched {
+                        let relaxed = now_unix
+                            .saturating_add(rem.ceil().max(1.0) as u64)
+                            .max(min_wall_until);
+                        Some((mod_id, relaxed, false))
+                    } else {
+                        None
+                    }
                 })
                 .collect();
             let should_write = !finished.is_empty()
                 || db.with_snapshot(|snap| {
-                    desired_updates.iter().any(|&(mod_id, new_until)| {
+                    desired_updates.iter().any(|&(mod_id, new_until, is_dilated)| {
                         match snap
                             .cluster_and_runtime
                             .module_reload_until_unix
                             .get(&mod_id)
                             .copied()
                         {
-                            Some(cur) => cur != new_until && (tidi < 0.995 || cur > new_until),
-                            None => tidi < 0.995,
+                            Some(cur) => cur != new_until && (is_dilated || cur > new_until),
+                            None => is_dilated,
                         }
                     })
                 });
@@ -2177,14 +2207,14 @@ pub(crate) fn step_module_reloads_sim_clock(
                     for mod_id in &finished {
                         snap.cluster_and_runtime.module_reload_until_unix.remove(mod_id);
                     }
-                    for &(mod_id, new_until) in &desired_updates {
+                    for &(mod_id, new_until, is_dilated) in &desired_updates {
                         let update = snap
                             .cluster_and_runtime
                             .module_reload_until_unix
                             .get(&mod_id)
                             .copied()
-                            .is_some_and(|cur| tidi < 0.995 || cur > new_until)
-                            || (tidi < 0.995
+                            .is_some_and(|cur| is_dilated || cur > new_until)
+                            || (is_dilated
                                 && !snap
                                     .cluster_and_runtime
                                     .module_reload_until_unix
@@ -2196,6 +2226,13 @@ pub(crate) fn step_module_reloads_sim_clock(
                         }
                     }
                 });
+            }
+            if tidi >= 0.995 {
+                for &(mod_id, _, _) in &desired_updates {
+                    if let Some(entry) = reload_sim_remaining.get_mut(&mod_id) {
+                        entry.tidi_stretched = false;
+                    }
+                }
             }
         }
         if !finished.is_empty() {

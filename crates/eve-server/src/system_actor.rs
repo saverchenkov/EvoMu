@@ -1332,11 +1332,31 @@ impl SystemRegistry {
                             }
                             SystemCommand::TrackModuleReloadSim {
                                 module_id,
-                                ship_id,
+                                ship_id: _,
                                 remaining_sim_s,
                             } => {
                                 if remaining_sim_s.is_finite() && remaining_sim_s > 0.0 {
-                                    module_reload_sim_remaining.insert(module_id, (ship_id, remaining_sim_s));
+                                    let now_unix = db_opt
+                                        .as_ref()
+                                        .map(|db| db.clock().now_unix_secs())
+                                        .unwrap_or(0);
+                                    let raw_tidi = f64::from_bits(
+                                        tidi_factor_bits_actor.load(std::sync::atomic::Ordering::Relaxed),
+                                    );
+                                    let tidi = if raw_tidi.is_finite() {
+                                        raw_tidi.clamp(0.10, 1.0)
+                                    } else {
+                                        1.0
+                                    };
+                                    module_reload_sim_remaining.insert(
+                                        module_id,
+                                        ModuleReloadSimEntry {
+                                            remaining_sim_s,
+                                            min_wall_until_unix: now_unix
+                                                .saturating_add(remaining_sim_s.ceil().max(1.0) as u64),
+                                            tidi_stretched: tidi < 0.995,
+                                        },
+                                    );
                                 } else {
                                     module_reload_sim_remaining.remove(&module_id);
                                 }

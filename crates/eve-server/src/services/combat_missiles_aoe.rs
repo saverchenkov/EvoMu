@@ -364,14 +364,22 @@ pub async fn step_missiles_and_breachers(
         .clamp(0.10, 1.0);
     let rt_self_destructs: Vec<SelfDestructCountdown> = with_mut_combat_runtime(ctx, |rt| {
         let mut out = Vec::new();
-        for cd in rt.self_destruct_countdowns.values_mut() {
+        let ship_ids: Vec<i64> = rt.self_destruct_countdowns.keys().copied().collect();
+        for ship_id in ship_ids {
+            let Some(cd) = rt.self_destruct_countdowns.get_mut(&ship_id) else {
+                continue;
+            };
             if cd.solar_system_id != solar_system_id {
                 continue;
             }
-            if dt > 0.0 {
+            // Respect deadlines already due (e.g., wall-clock completion or direct test override)
+            // instead of pushing `detonate_at_unix` forward into the future.
+            if cd.detonate_at_unix <= now_unix {
+                rt.self_destruct_sim_remaining_secs.remove(&ship_id);
+            } else if dt > 0.0 {
                 let rem = rt
                     .self_destruct_sim_remaining_secs
-                    .entry(cd.ship_id)
+                    .entry(ship_id)
                     .or_insert_with(|| {
                         ((cd.detonate_at_unix.saturating_sub(now_unix) as f64) * tidi)
                             .min(crate::services::combat_crimewatch::SELF_DESTRUCT_COUNTDOWN_SECS as f64)
@@ -379,6 +387,7 @@ pub async fn step_missiles_and_breachers(
                 *rem -= dt;
                 if *rem <= 1e-6 {
                     cd.detonate_at_unix = now_unix;
+                    rt.self_destruct_sim_remaining_secs.remove(&ship_id);
                 } else {
                     cd.detonate_at_unix =
                         now_unix.saturating_add((*rem / tidi).ceil().max(1.0) as u64);

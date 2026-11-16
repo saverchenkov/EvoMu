@@ -523,6 +523,7 @@ async fn test_login_campaigns_seasonal_and_milestones() {
 #[tokio::test]
 async fn test_season_challenge_isk_award_trust_and_claim_guards() {
     let ctx = new_ctx();
+    common::pin_clock(&ctx);
     let mut sess = setup_pilot(&ctx, PILOT_1).await;
 
     let defs = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde);
