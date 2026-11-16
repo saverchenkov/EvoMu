@@ -88,6 +88,8 @@ impl Ballpark {
             registered_observers: None,
             static_epoch: 0,
             special_fx_meta: BTreeMap::new(),
+            same_tick_owner_goto_tick: BTreeMap::new(),
+            last_acquired_tick_by_ball: BTreeMap::new(),
         }
     }
 
@@ -435,6 +437,86 @@ impl Ballpark {
         }
     }
 
+    /// Queues or coalesces a `GotoDirection` event for grid observers (`#1078`):
+    /// - The ship's owner (`obs_id == ball_id`) receives it only when `emit_to_owner` is `true`
+    ///   (at most once per tick, keeping the first heading).
+    /// - Other observers replace any un-drained `GotoDirection` for `ball_id` in the current
+    ///   queue with the latest heading, or append if none is pending.
+    pub(crate) fn queue_or_coalesce_goto_for_grid_observers(
+        &mut self,
+        grid_id: u64,
+        ball_id: BallId,
+        event: &DestinyEvent,
+        emit_to_owner: bool,
+    ) {
+        let Some(grid) = self.grids.get(&grid_id) else {
+            return;
+        };
+        let observer_events = &mut self.observer_events;
+        let registered_observers = &self.registered_observers;
+        for &obs_id in &grid.members {
+            if !registered_observers
+                .as_ref()
+                .is_none_or(|set| set.contains(&obs_id))
+            {
+                continue;
+            }
+            if obs_id == ball_id {
+                if emit_to_owner {
+                    observer_events
+                        .entry(obs_id)
+                        .or_default()
+                        .push(event.clone());
+                }
+                continue;
+            }
+            let queue = observer_events.entry(obs_id).or_default();
+            let mut replaced = false;
+            for ev in queue.iter_mut().rev() {
+                match ev {
+                    DestinyEvent::GotoDirection { ball_id: id, .. } if *id == ball_id => {
+                        *ev = event.clone();
+                        replaced = true;
+                        break;
+                    }
+                    DestinyEvent::Stop { ball_id: id }
+                    | DestinyEvent::Follow { ball_id: id, .. }
+                    | DestinyEvent::Orbit { ball_id: id, .. }
+                    | DestinyEvent::WarpTo { ball_id: id, .. }
+                    | DestinyEvent::GotoPoint { ball_id: id, .. }
+                    | DestinyEvent::SetSpeedFraction { ball_id: id, .. }
+                    | DestinyEvent::SetBallPosition { ball_id: id, .. }
+                    | DestinyEvent::SetBallVelocity { ball_id: id, .. }
+                    | DestinyEvent::RemoveBall { ball_id: id }
+                    | DestinyEvent::CloakBall { ball_id: id, .. }
+                    | DestinyEvent::TerminalExplosion { ball_id: id, .. }
+                        if *id == ball_id =>
+                    {
+                        break;
+                    }
+                    DestinyEvent::RemoveBalls { ball_ids } if ball_ids.contains(&ball_id) => {
+                        break;
+                    }
+                    DestinyEvent::AddBall { ball } if ball.id == ball_id => {
+                        break;
+                    }
+                    DestinyEvent::AddBalls { balls } | DestinyEvent::AddBalls2 { balls }
+                        if balls.iter().any(|b| b.id == ball_id) =>
+                    {
+                        break;
+                    }
+                    DestinyEvent::SetState { .. } => {
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if !replaced {
+                queue.push(event.clone());
+            }
+        }
+    }
+
     /// Queues `event` for every active observer across all currently populated [`GridBubble`]s
     /// (used when system-wide `Rigid` static balls such as belt asteroids or structures are
     /// dynamically spawned, respawned, or removed while pilots are in space).
@@ -468,6 +550,8 @@ impl Ballpark {
             cs.is_cloaked
         };
         if !is_cloaked {
+            self.last_acquired_tick_by_ball
+                .insert(ball_id, self.current_tick);
             self.pending_events
                 .push(DestinyEvent::AddBall { ball: ball.clone() });
         }
@@ -720,6 +804,8 @@ impl Ballpark {
         self.target_locks.retain(|_, locks| !locks.is_empty());
         self.observer_events.remove(&ball_id);
         self.pending_handoff_observers.remove(&ball_id);
+        self.same_tick_owner_goto_tick.remove(&ball_id);
+        self.last_acquired_tick_by_ball.remove(&ball_id);
         self.scheduled_observer_events
             .retain(|(_, obs_id, _)| *obs_id != ball_id);
         Some((removed, old_grid_id, was_static))

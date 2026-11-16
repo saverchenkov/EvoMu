@@ -1116,6 +1116,366 @@ async fn test_navigation_align_to_and_vector_steering() {
     }
 }
 
+#[tokio::test]
+async fn stop_emits_speed_fraction_stop_velocity_seed_to_owner_and_observer() {
+    // parity: destiny:Stop, feat:navigation.stop-ship, feat:navigation.destiny-updates
+    eve_testkit::attest(&[
+        "destiny:Stop",
+        "feat:navigation.stop-ship",
+        "feat:navigation.destiny-updates",
+    ]);
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
+    common::pin_clock(&ctx);
+    let mut sess = setup_pilot(&ctx, 2191, DEMO_PILOT).await;
+    let ship_id = sess.ship_id.expect("active ship");
+    let undock_rep = rpc(&ctx, &mut sess, "stationSvc", "Undock", &[])
+        .await
+        .expect("Undock");
+    let PyRep::KeyVal(ukv) = undock_rep else {
+        panic!("Expected KeyVal from Undock");
+    };
+    let bid = ukv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+    let sys_h = ctx.systems.get_or_spawn(JITA_SYS);
+    let (_, ship_ball) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+
+    let observer_id = 100_978_001i64;
+    sys_h
+        .spawn_ball(eve_destiny::Ball {
+            id: observer_id,
+            type_id: 587,
+            position: ship_ball.position + DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    step_n(&sys_h, 1).await;
+    let _ = sys_h.drain_observer_updates(ship_id).await;
+    let _ = sys_h.drain_observer_updates(observer_id).await;
+
+    let (_, pre_stop_snap) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let expected_vel = pre_stop_snap.velocity;
+    assert!(
+        expected_vel.length() > 1.0,
+        "ship must have non-zero velocity before CmdStop: {expected_vel:?}"
+    );
+
+    let stop_tick = rpc_bound(&ctx, &mut sess, bid, "CmdStop", &[])
+        .await
+        .expect("CmdStop while moving")
+        .as_i64()
+        .expect("stamp integer");
+
+    let (_, owner_evs, owner_py) = sys_h.drain_observer_updates(ship_id).await.unwrap();
+    let (_, obs_evs, obs_py) = sys_h.drain_observer_updates(observer_id).await.unwrap();
+
+    for (label, py) in [("owner", owner_py), ("observer", obs_py)] {
+        let PyRep::List(entries) = py else {
+            panic!("{label}: expected DoDestinyUpdate list");
+        };
+        assert_eq!(entries.len(), 3, "{label}: expected 3 stop actions, got {entries:?}");
+        let mut names = Vec::new();
+        let mut stamps = Vec::new();
+        for entry in &entries {
+            let PyRep::Tuple(outer) = entry else {
+                panic!("{label}: expected tuple entry");
+            };
+            stamps.push(outer[0].as_i64().unwrap());
+            let PyRep::Tuple(action) = &outer[1] else {
+                panic!("{label}: expected action tuple");
+            };
+            names.push(action[0].as_str().unwrap().to_string());
+        }
+        assert!(
+            stamps.iter().all(|s| *s == stop_tick),
+            "{label}: all stop events must share stamp {stop_tick}, got {stamps:?}"
+        );
+        assert_eq!(
+            names,
+            vec!["SetSpeedFraction", "Stop", "SetBallVelocity"],
+            "{label}: wrong stop action sequence"
+        );
+        let PyRep::Tuple(vel_outer) = &entries[2] else { panic!() };
+        let PyRep::Tuple(vel_action) = &vel_outer[1] else { panic!() };
+        let PyRep::Tuple(vel_args) = &vel_action[1] else { panic!() };
+        assert_eq!(vel_args[0].as_i64(), Some(ship_id));
+        let vx = match vel_args[1] { PyRep::Real(v) => v, _ => panic!() };
+        let vy = match vel_args[2] { PyRep::Real(v) => v, _ => panic!() };
+        let vz = match vel_args[3] { PyRep::Real(v) => v, _ => panic!() };
+        assert!((DVec3::new(vx, vy, vz) - expected_vel).length() < 1e-6);
+    }
+    assert_eq!(owner_evs.len(), 3);
+    assert_eq!(obs_evs.len(), 3);
+
+    // Repeating CmdStop while already stopped emits nothing to owner or observer.
+    rpc_bound(&ctx, &mut sess, bid, "CmdStop", &[])
+        .await
+        .expect("idle CmdStop");
+    let (_, owner_idle, _) = sys_h.drain_observer_updates(ship_id).await.unwrap();
+    let (_, obs_idle, _) = sys_h.drain_observer_updates(observer_id).await.unwrap();
+    assert!(owner_idle.is_empty(), "idle CmdStop must emit nothing to owner: {owner_idle:?}");
+    assert!(obs_idle.is_empty(), "idle CmdStop must emit nothing to observer: {obs_idle:?}");
+}
+
+#[tokio::test]
+async fn duplicate_goto_direction_is_not_rebroadcast() {
+    // parity: destiny:GotoDirection, feat:navigation.destiny-updates
+    eve_testkit::attest(&["destiny:GotoDirection", "feat:navigation.destiny-updates"]);
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
+    common::pin_clock(&ctx);
+    let mut sess = setup_pilot(&ctx, 2192, DEMO_PILOT).await;
+    let ship_id = sess.ship_id.expect("active ship");
+    let undock_rep = rpc(&ctx, &mut sess, "stationSvc", "Undock", &[])
+        .await
+        .expect("Undock");
+    let PyRep::KeyVal(ukv) = undock_rep else {
+        panic!("Expected KeyVal");
+    };
+    let bid = ukv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+    let sys_h = ctx.systems.get_or_spawn(JITA_SYS);
+    let (_, ship_ball) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let observer_id = 100_978_002i64;
+    sys_h
+        .spawn_ball(eve_destiny::Ball {
+            id: observer_id,
+            type_id: 587,
+            position: ship_ball.position + DVec3::new(900.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    let _ = sys_h.drain_observer_updates(ship_id).await;
+    let _ = sys_h.drain_observer_updates(observer_id).await;
+
+    rpc_bound(
+        &ctx,
+        &mut sess,
+        bid,
+        "CmdGotoDirection",
+        &[PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+    )
+    .await
+    .expect("first CmdGotoDirection");
+    let (_, owner_first, _) = sys_h.drain_observer_updates(ship_id).await.unwrap();
+    let (_, obs_first, _) = sys_h.drain_observer_updates(observer_id).await.unwrap();
+    assert_eq!(owner_first.len(), 1);
+    assert_eq!(obs_first.len(), 1);
+
+    rpc_bound(
+        &ctx,
+        &mut sess,
+        bid,
+        "CmdGotoDirection",
+        &[PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+    )
+    .await
+    .expect("duplicate CmdGotoDirection");
+    let (_, owner_dup, _) = sys_h.drain_observer_updates(ship_id).await.unwrap();
+    let (_, obs_dup, _) = sys_h.drain_observer_updates(observer_id).await.unwrap();
+    assert!(owner_dup.is_empty(), "exact duplicate steer must not re-emit to owner");
+    assert!(obs_dup.is_empty(), "exact duplicate steer must not re-emit to observer");
+}
+
+#[tokio::test]
+async fn near_duplicate_steer_is_coalesced() {
+    // parity: destiny:GotoDirection, feat:navigation.destiny-updates
+    eve_testkit::attest(&["destiny:GotoDirection", "feat:navigation.destiny-updates"]);
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
+    common::pin_clock(&ctx);
+    let mut sess = setup_pilot(&ctx, 2193, DEMO_PILOT).await;
+    let ship_id = sess.ship_id.expect("active ship");
+    let undock_rep = rpc(&ctx, &mut sess, "stationSvc", "Undock", &[])
+        .await
+        .expect("Undock");
+    let PyRep::KeyVal(ukv) = undock_rep else {
+        panic!("Expected KeyVal");
+    };
+    let bid = ukv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+    let sys_h = ctx.systems.get_or_spawn(JITA_SYS);
+    let (_, ship_ball) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let observer_id = 100_978_003i64;
+    sys_h
+        .spawn_ball(eve_destiny::Ball {
+            id: observer_id,
+            type_id: 587,
+            position: ship_ball.position + DVec3::new(900.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+
+    rpc_bound(
+        &ctx,
+        &mut sess,
+        bid,
+        "CmdGotoDirection",
+        &[PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+    )
+    .await
+    .expect("initial steer");
+    let _ = sys_h.drain_observer_updates(ship_id).await;
+    let _ = sys_h.drain_observer_updates(observer_id).await;
+
+    // Cosine similarity ~ 0.99996 >= 0.9998 (~0.5 deg) -> coalesced away
+    let near = DVec3::new(0.99996, 0.0089, 0.0).normalize();
+    rpc_bound(
+        &ctx,
+        &mut sess,
+        bid,
+        "CmdGotoDirection",
+        &[PyRep::Real(near.x), PyRep::Real(near.y), PyRep::Real(near.z)],
+    )
+    .await
+    .expect("near-duplicate steer");
+    let (_, owner_near, _) = sys_h.drain_observer_updates(ship_id).await.unwrap();
+    let (_, obs_near, _) = sys_h.drain_observer_updates(observer_id).await.unwrap();
+    assert!(owner_near.is_empty(), "near-duplicate steer must not emit to owner");
+    assert!(obs_near.is_empty(), "near-duplicate steer must not emit to observer");
+
+    // Distinct heading (~8 deg, cos ~ 0.990 < 0.9998) on the next tick -> emitted to both
+    step_n(&sys_h, 1).await;
+    let distinct = DVec3::new(0.99, 0.141, 0.0).normalize();
+    rpc_bound(
+        &ctx,
+        &mut sess,
+        bid,
+        "CmdGotoDirection",
+        &[PyRep::Real(distinct.x), PyRep::Real(distinct.y), PyRep::Real(distinct.z)],
+    )
+    .await
+    .expect("distinct steer");
+    let (_, owner_distinct, _) = sys_h.drain_observer_updates(ship_id).await.unwrap();
+    let (_, obs_distinct, _) = sys_h.drain_observer_updates(observer_id).await.unwrap();
+    assert_eq!(owner_distinct.len(), 1);
+    assert_eq!(obs_distinct.len(), 1);
+    for (label, evs) in [("owner", &owner_distinct), ("observer", &obs_distinct)] {
+        match &evs[0] {
+            eve_destiny::DestinyEvent::GotoDirection { ball_id, direction } => {
+                assert_eq!(*ball_id, ship_id, "{label}: unexpected ball_id");
+                assert!((direction[0] - distinct.x).abs() < 1e-9, "{label}: dir x mismatch");
+                assert!((direction[1] - distinct.y).abs() < 1e-9, "{label}: dir y mismatch");
+                assert!((direction[2] - distinct.z).abs() < 1e-9, "{label}: dir z mismatch");
+            }
+            other => panic!("{label}: expected GotoDirection, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn approach_emits_followball_and_speed_on_one_stamp() {
+    // parity: destiny:FollowBall, feat:navigation.approach, feat:navigation.destiny-updates
+    eve_testkit::attest(&[
+        "destiny:FollowBall",
+        "feat:navigation.approach",
+        "feat:navigation.destiny-updates",
+    ]);
+    let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
+    common::pin_clock(&ctx);
+    let mut sess = setup_pilot(&ctx, 2194, DEMO_PILOT).await;
+    let ship_id = sess.ship_id.expect("active ship");
+    let undock_rep = rpc(&ctx, &mut sess, "stationSvc", "Undock", &[])
+        .await
+        .expect("Undock");
+    let PyRep::KeyVal(ukv) = undock_rep else {
+        panic!("Expected KeyVal");
+    };
+    let bid = ukv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+    let sys_h = ctx.systems.get_or_spawn(JITA_SYS);
+    let (_, ship_ball) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let observer_id = 100_978_004i64;
+    sys_h
+        .spawn_ball(eve_destiny::Ball {
+            id: observer_id,
+            type_id: 587,
+            position: ship_ball.position + DVec3::new(900.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    rpc_bound(&ctx, &mut sess, bid, "CmdStop", &[])
+        .await
+        .expect("Stop before Approach");
+    let _ = sys_h.drain_observer_updates(ship_id).await;
+    let _ = sys_h.drain_observer_updates(observer_id).await;
+
+    let approach_stamp = rpc_bound(
+        &ctx,
+        &mut sess,
+        bid,
+        "CmdFollowBall",
+        &[PyRep::Integer(JITA_44_STATION), PyRep::Real(2_500.0)],
+    )
+    .await
+    .expect("CmdFollowBall")
+    .as_i64()
+    .expect("stamp integer");
+
+    for (label, target_ball) in [("owner", ship_id), ("observer", observer_id)] {
+        let (_, _, py) = sys_h.drain_observer_updates(target_ball).await.unwrap();
+        let PyRep::List(entries) = py else {
+            panic!("{label}: expected update list");
+        };
+        assert_eq!(entries.len(), 2, "{label}: expected FollowBall + SetSpeedFraction, got {entries:?}");
+        let mut names = Vec::new();
+        for entry in &entries {
+            let PyRep::Tuple(outer) = entry else { panic!() };
+            assert_eq!(outer[0].as_i64(), Some(approach_stamp));
+            let PyRep::Tuple(action) = &outer[1] else { panic!() };
+            let action_name = action[0].as_str().unwrap().to_string();
+            let PyRep::Tuple(act_args) = &action[1] else { panic!() };
+            match action_name.as_str() {
+                "FollowBall" => {
+                    assert_eq!(act_args[0].as_i64(), Some(ship_id), "{label}: FollowBall ball_id");
+                    assert_eq!(act_args[1].as_i64(), Some(JITA_44_STATION), "{label}: FollowBall target_id");
+                    assert!((act_args[2].as_f64().unwrap() - 2_500.0).abs() < 1e-6, "{label}: FollowBall range");
+                }
+                "SetSpeedFraction" => {
+                    assert_eq!(act_args[0].as_i64(), Some(ship_id), "{label}: SetSpeedFraction ball_id");
+                    assert!((act_args[1].as_f64().unwrap() - 1.0).abs() < 1e-6, "{label}: SetSpeedFraction fraction");
+                }
+                _ => panic!("{label}: unexpected action {action_name}"),
+            }
+            names.push(action_name);
+        }
+        assert_eq!(names, vec!["FollowBall", "SetSpeedFraction"]);
+    }
+
+    // Self-targeting CmdFollowBall must be rejected with InvalidTarget without emitting updates.
+    let self_err = rpc_bound(
+        &ctx,
+        &mut sess,
+        bid,
+        "CmdFollowBall",
+        &[PyRep::Integer(ship_id), PyRep::Real(2_500.0)],
+    )
+    .await
+    .expect_err("self-target CmdFollowBall must fail");
+    assert_eq!(self_err.code, "InvalidTarget");
+}
+
 
 #[allow(unused_imports)]
 pub mod navigation_waypoints_and_wormholes {

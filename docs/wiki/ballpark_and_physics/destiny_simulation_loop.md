@@ -412,6 +412,51 @@ flowchart TD
 
 ---
 
+## Destiny Delivery Policy (V24 Stamp & Coalescing Contract, `#1078`)
+
+Authoritative policy constants and pure validation/coalescing rules live in [`destiny_delivery_policy.rs`](../../../crates/eve-server/src/router/destiny_delivery_policy.rs) and are enforced across [`ballpark_navigation.rs`](../../../crates/eve-destiny/src/ballpark_navigation.rs) and [`space_nav_travel.rs`](../../../crates/eve-server/src/services/space_nav_travel.rs).
+
+### Measured V24 Client Timing Constants (`code.ccp`)
+
+| Policy Constant | Value | V24 Client Citation (`code.ccp`) & Semantics |
+| :--- | :--- | :--- |
+| `DESTINY_STAMP_INTERVAL_SECS` | `1` s | `const.simulationTimeStep` in `eve/client/script/remote/michelle.pyj::Park.__init__` (`1 Hz` tick interval). |
+| `OWNER_DIRECT_ECHO_LEAD_TICKS` | `1` tick | Maximum lead (`0..=1`) for direct owner RPC command echoes above owner's visible simulation stamp. |
+| `HELD_FUTURE_HOLD_THRESHOLD_TICKS` | `3` ticks | `michelle.pyj::Park.DoPreTick` & `destiny/net/client/_ticker.pyj::do_pre_tick`: future updates are held in `history` while `0 < eventStamp - currentTime < 3`. |
+| `HELD_FUTURE_MAX_LEAD_TICKS` | `2` ticks | Maximum future lead (`1..=2`) held smoothly in client history until `currentTime` advances. |
+| `POST_HELD_LEAD_TICKS` | `3` ticks | Lead `>= 3` ticks bypasses hold and triggers immediate `SynchroniseToSimulationTime` fast-forward (`_parent_Evolve()`). |
+| `OWNER_CRITICAL_MOVEMENT_MAX_LEAD_TICKS` | `2` ticks | Hard cap on owner critical movement / ship-prime updates above owner visible stamp (`HELD_FUTURE_MAX_LEAD_TICKS`). |
+| `CLIENT_STATE_HISTORY_MAX_LEN` | `10` states | `michelle.pyj::Park.StoreState` prunes `self.states` when `len > 10` (`states[:1] + states[3:3] + states[-5:]`, retaining 6 snapshots). |
+| `OWNER_SUBWARP_CORRECTION_CADENCE_TICKS` / `OBSERVER_SUBWARP_CORRECTION_CADENCE_TICKS` | `0` / `0` | Event-driven dead reckoning (`0` periodic correction spam during steady sub-warp flight). |
+| `OWNER_WARP_CORRECTION_CADENCE_TICKS` / `OBSERVER_WARP_CORRECTION_CADENCE_TICKS` | `0` / `0` | Event-driven warp tunnel (`0` periodic correction spam during active warp). |
+| `OBSERVER_MOVEMENT_MAX_LAG_TICKS` | `1` tick | Observer movement updates must arrive within `[owner_cmd_stamp, owner_cmd_stamp + 1]`. |
+| `GOTO_DIRECTION_DUPLICATE_COSINE_THRESHOLD` | `0.9998` | Cosine similarity `>= 0.9998` (~1.15°) treats repeated `CmdGotoDirection` headings as identical and suppresses emission. |
+
+### Update Classes & Restamp / Coalesce Policy
+
+| `UpdateClass` | Wire Actions | Forward Restamp Below `last_sent` | Same-Stamp Merge | Max Owner Lead |
+| :--- | :--- | :--- | :--- | :--- |
+| `StateReset` | `SetState` | No (resets baseline) | No | `0` |
+| `BootstrapAcquire` | `AddBalls`, `AddBalls2`, `AddBall` | No | Yes | `0` |
+| `OwnerPilotCommand` | `GotoDirection`, `GotoPoint`, `FollowBall`, `Orbit`, `Stop`, `SetSpeedFraction`, `WarpTo` | Yes | Yes (same-tick steer: owner keeps first, observers keep latest) | `1` |
+| `OwnerMissileLifecycle` | Owner missile `AddBalls2` / `RemoveBalls` | Yes | Yes | `1` |
+| `ObserverMissileLifecycle` | Observer missile `AddBalls2` / `RemoveBalls` | Yes | Yes | Uncapped |
+| `CriticalMovementOrShipPrime` | `SetBallPosition`, `SetBallVelocity`, `SetMaxSpeed`, `SetBallMassive`, `CloakBall` | Yes | Yes | `2` |
+| `CombatNoncritical` | `OnDamageStateChange`, `OnSpecialFX`, `OnSlimItemChange`, etc. | Yes | Yes | Uncapped |
+| `DestructionTeardown` | `RemoveBall`, `RemoveBalls`, `TerminalPlayDestructionEffect` | Yes | Yes | Uncapped |
+
+### Owner Echo, Monotonicity, Freshness & Grid Handoff Rules
+
+1. **Duplicate `CmdGotoDirection` suppression:** When already in `MovementMode::GotoDirection` with `speed_fraction > 0` and cosine similarity `>= 0.9998`, emit **no** update to owner or observers.
+2. **Same-tick distinct `CmdGotoDirection` coalescing:** When two distinct headings execute in the same tick, the **owner** receives exactly ONE `GotoDirection` (the first) with no deferred echo queued for a later tick; **observers** receive the latest heading (replacing any un-drained `GotoDirection` in that tick).
+3. **`CmdStop` atomicity & idle no-op:** Stopping while moving (or cancelling `WarpPhase::Aligning`) emits `[SetSpeedFraction(0.0), Stop, SetBallVelocity(pre_stop_velocity)]` on **one** stamp to both owner and observers. Calling `CmdStop` while already in `MovementMode::Stop` with `speed_fraction <= 0.0` emits nothing.
+4. **Approach (`CmdFollowBall`) atomicity:** Emits `[FollowBall, SetSpeedFraction]` on **one** stamp (defaulting `speed_fraction` to `1.0` if `<= 0.0`).
+5. **Per-session monotonicity & merge:** Outbound `DoDestinyUpdate` stamps are non-decreasing (`stamp >= last_sent_stamp`); stale below-`last_sent_stamp` batches are rejected with a recorded [`StampRejectionReason`](../../../crates/eve-server/src/router/destiny_delivery_policy.rs), and equal-stamp non-`SetState` updates within one dispatch merge into a single frame while `SetState` resets stay unmerged at action index `0`.
+6. **Fresh `AddBalls2` acquisition freshness:** New entities acquire via `AddBalls2` on the live scene tick (`current_tick`) and never replay older sub-warp movement (`stamp < acquired_stamp`) for that entity.
+7. **Single-stamp warp grid hand-off:** Transitioning into a destination grid emits destination `AddBalls` / `AddBalls2` and departure `RemoveBalls` on **one** stamp while keeping system-wide static scenery intact across the hand-off.
+
+---
+
 ## Verification, Tests & Parity References
 
 The Destiny physics engine is backed by comprehensive unit and integration test suites:
@@ -431,23 +476,28 @@ The Destiny physics engine is backed by comprehensive unit and integration test 
 | [`test_warp_to_and_warp_special_fx_emitted_on_warp`](../../../crates/eve-server/tests/it/destiny_events_emission.rs#L129)<br/>📁 [`destiny_events_emission.rs`](../../../crates/eve-server/tests/it/destiny_events_emission.rs) | Verifies `WarpTo` coordinate encoding, `effects.Warping` `OnSpecialFX` emission, and landing termination. |
 | [`test_goto_point_emitted_by_cmd_goto_point`](../../../crates/eve-server/tests/it/destiny_events_emission.rs#L189)<br/>📁 [`destiny_events_emission.rs`](../../../crates/eve-server/tests/it/destiny_events_emission.rs) | Validates `CmdGotoPoint` translation and network update dispatch. |
 | [`test_destiny_binary_mode_missile_mushroom_troll_formation`](../../../crates/eve-server/tests/it/destiny_binary_stream.rs#L39)<br/>📁 [`destiny_binary_stream.rs`](../../../crates/eve-server/tests/it/destiny_binary_stream.rs) | Full binary serialization and deserialization round-trip tests for all 13 `DSTBALL_*` modes, ensuring 100% wire parity. |
+| [`same_tick_goto_keeps_first_owner_echo_observers_get_latest`](../../../crates/eve-server/tests/it/destiny_stamp_monotonicity.rs)<br/>📁 [`destiny_stamp_monotonicity.rs`](../../../crates/eve-server/tests/it/destiny_stamp_monotonicity.rs) | Verifies same-tick `CmdGotoDirection` coalescing, per-session stamp monotonicity, fresh `AddBalls2` freshness, owner lead caps, observer 1-tick delivery, and single-stamp warp grid handoff (`#1077` E5–E6 / `#1078`). |
+| [`stop_emits_speed_fraction_stop_velocity_seed_to_owner_and_observer`](../../../crates/eve-server/tests/it/navigation_flight_and_docking.rs)<br/>📁 [`navigation_flight_and_docking.rs`](../../../crates/eve-server/tests/it/navigation_flight_and_docking.rs) | Verifies `CmdStop` `[SetSpeedFraction, Stop, SetBallVelocity]`, idle `CmdStop` silence, near-duplicate `CmdGotoDirection` coalescing, and single-stamp Approach (`#1077` E3–E4 / `#1078`). |
 
 ### Parity Audit Tag Matrix
 
 | Parity / Feature Tag | Target System | Authoritative Implementation |
 | :--- | :--- | :--- |
-| `feat:navigation.destiny-updates` | Network Destiny Updates | [`wire.rs`](../../../crates/eve-destiny/src/wire.rs#L990-L1050) |
-| `feat:navigation.bubbles-grid` | 8,000 km Spatial Grids | [`ballpark.rs`](../../../crates/eve-destiny/src/ballpark.rs#L140-L190) |
+| `feat:navigation.destiny-updates` | Network Destiny Updates & Delivery Policy | [`destiny_delivery_policy.rs`](../../../crates/eve-server/src/router/destiny_delivery_policy.rs), [`wire.rs`](../../../crates/eve-destiny/src/wire.rs#L990-L1050) |
+| `feat:navigation.bubbles-grid` | 8,000 km Spatial Grids & Single-Stamp Warp Handoff | [`ballpark.rs`](../../../crates/eve-destiny/src/ballpark.rs#L140-L190), [`physics.rs`](../../../crates/eve-destiny/src/physics.rs#L960-L1005) |
 | `feat:navigation.celestials-balls` | Immobile Static Celestials | [`ballpark.rs`](../../../crates/eve-destiny/src/ballpark.rs#L55-L68) |
 | `feat:navigation.warp-pipeline` | 5-Phase FTL Warp Engine | [`physics.rs`](../../../crates/eve-destiny/src/physics.rs#L1211-L1342) |
 | `feat:navigation.warp-bubbles` | Interdiction Drag & Stop Geometry | [`lib.rs`](../../../crates/eve-destiny/src/lib.rs#L833-L887) |
 | `feat:navigation.collision-bounce` | Elastic Collision Deflection | [`physics.rs`](../../../crates/eve-destiny/src/physics.rs#L217-L352) |
 | `feat:navigation.proximity-decloak`| 2,000m Proximity Decloak | [`physics.rs`](../../../crates/eve-destiny/src/physics.rs#L503-L532) |
 | `feat:navigation.orbit` | Centripetal Orbit Kinematics | [`physics.rs`](../../../crates/eve-destiny/src/physics.rs#L1097-L1126) |
-| `feat:navigation.approach` | Deceleration Envelope Approach | [`physics.rs`](../../../crates/eve-destiny/src/physics.rs#L1066-L1096) |
-| `feat:navigation.stop-ship` | Inertial Velocity Damping | [`physics.rs`](../../../crates/eve-destiny/src/physics.rs#L1198-L1209) |
+| `feat:navigation.approach` | Deceleration Envelope Approach (`FollowBall` + `SetSpeedFraction`) | [`ballpark_navigation.rs`](../../../crates/eve-destiny/src/ballpark_navigation.rs), [`physics.rs`](../../../crates/eve-destiny/src/physics.rs#L1066-L1096) |
+| `feat:navigation.stop-ship` | Inertial Velocity Damping (`SetSpeedFraction` + `Stop` + `SetBallVelocity`) | [`ballpark_navigation.rs`](../../../crates/eve-destiny/src/ballpark_navigation.rs), [`physics.rs`](../../../crates/eve-destiny/src/physics.rs#L1198-L1209) |
 | `destiny:SetState` | Full Viewport State Sync | [`wire.rs`](../../../crates/eve-destiny/src/wire.rs#L680-L770) |
 | `destiny:AddBalls2` | Dynamic Entity Grid Entry | [`wire.rs`](../../../crates/eve-destiny/src/wire.rs#L849-L863) |
+| `destiny:GotoDirection` | Directional Vector Steering | [`wire.rs`](../../../crates/eve-destiny/src/wire.rs#L775-L787) |
+| `destiny:FollowBall` | Target Approach Mode | [`wire.rs`](../../../crates/eve-destiny/src/wire.rs#L788-L799) |
+| `destiny:Stop` | Ship Engine Cutoff | [`wire.rs`](../../../crates/eve-destiny/src/wire.rs#L816-L819) |
 | `destiny:WarpTo` | FTL Vector Broadcast | [`wire.rs`](../../../crates/eve-destiny/src/wire.rs#L942-L956) |
 
 ---

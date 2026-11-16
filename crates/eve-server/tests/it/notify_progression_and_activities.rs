@@ -2214,11 +2214,23 @@ async fn batch10_destiny_clock_esi_map_industry_energy_and_discovery() {
         "DoDestinyUpdates"
     ));
 
-    // Positive: undocked pilot in space receives DoDestinyUpdates([(stamp, ("Stop", (ship_id,)))])
+    // Positive: moving undocked pilot in space receives DoDestinyUpdates with [SetSpeedFraction, Stop, SetBallVelocity] on one stamp
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&PILOT_A).unwrap().station_id = None;
     });
     sess.station_id = None;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_oid),
+        "CmdGotoDirection",
+        &[PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+        &empty_kw,
+        None,
+    )
+    .await
+    .unwrap();
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_oid), "CmdStop", &[], &empty_kw, None)
         .await
         .unwrap();
@@ -2227,17 +2239,26 @@ async fn batch10_destiny_clock_esi_map_industry_energy_and_discovery() {
     assert_eq!(du_args.len(), 1);
     match &du_args[0] {
         PyRep::List(updates) => {
-            assert!(!updates.is_empty());
-            match &updates[0] {
-                PyRep::Tuple(pair) => {
-                    assert_eq!(pair.len(), 2);
-                    match &pair[1] {
-                        PyRep::Tuple(cmd) => assert_eq!(cmd[0], PyRep::String("Stop".into())),
-                        other => panic!("expected (\"Stop\", payload), got {other:?}"),
+            assert_eq!(updates.len(), 3);
+            let mut stamps = Vec::new();
+            let mut names = Vec::new();
+            for item in updates {
+                match item {
+                    PyRep::Tuple(pair) => {
+                        assert_eq!(pair.len(), 2);
+                        stamps.push(pair[0].as_i64().expect("stamp integer"));
+                        match &pair[1] {
+                            PyRep::Tuple(cmd) => {
+                                names.push(cmd[0].as_str().expect("action string").to_string());
+                            }
+                            other => panic!("expected (action, payload), got {other:?}"),
+                        }
                     }
+                    other => panic!("expected (stamp, cmd) tuple, got {other:?}"),
                 }
-                other => panic!("expected (stamp, cmd) tuple, got {other:?}"),
             }
+            assert!(stamps.windows(2).all(|w| w[0] == w[1]), "all stop updates share one stamp: {stamps:?}");
+            assert_eq!(names, vec!["SetSpeedFraction", "Stop", "SetBallVelocity"]);
         }
         other => panic!("expected List of updates, got {other:?}"),
     }

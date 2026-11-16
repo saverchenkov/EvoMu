@@ -583,14 +583,75 @@ async fn cmd_stop_omits_duplicate_do_destiny_updates_on_live_tcp_session_only() 
         .iter()
         .any(|e| matches!(e, eve_destiny::DestinyEvent::Stop { ball_id } if *ball_id == ship_id)));
 
-    // 2. Direct in-memory RPC session (`session.address.is_empty()`): keeps `DoDestinyUpdates` for headless tests.
+    // 2. Direct in-memory RPC session (`session.address.is_empty()`):
+    //    - Repeating `CmdStop` while already stopped emits nothing (`#1078`).
     let mut direct_sess = make_session(char_id, 98_000_001, Some(sys_id), Some(ship_id));
     direct_sess.user_id = Some(uid);
     handle_cmd_stop(&ctx, &direct_sess, Some(&bound))
         .await
-        .expect("CmdStop on direct session");
+        .expect("idle CmdStop on direct session");
+    let idle_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !idle_notifs.iter().any(|n| n.event == "DoDestinyUpdates"),
+        "CmdStop while already stopped must emit no DoDestinyUpdates: {idle_notifs:?}"
+    );
+    let (_, idle_obs_evs, _) = sys_h.drain_observer_updates(ship_id).await.unwrap();
+    assert!(
+        idle_obs_evs.is_empty(),
+        "CmdStop while already stopped must emit no observer events: {idle_obs_evs:?}"
+    );
+
+    //    - Moving ship calling `CmdStop` on direct session emits `[SetSpeedFraction, Stop, SetBallVelocity]`.
+    let _ = sys_h.set_speed_fraction(ship_id, 1.0).await;
+    let _ = sys_h
+        .set_movement_mode(
+            ship_id,
+            MovementMode::GotoDirection {
+                direction: DVec3::X,
+            },
+        )
+        .await;
+    let _ = sys_h.drain_observer_updates(ship_id).await;
+    handle_cmd_stop(&ctx, &direct_sess, Some(&bound))
+        .await
+        .expect("CmdStop on direct session while moving");
     let direct_notifs = ctx.drain_notifications_for_char(char_id);
-    assert!(direct_notifs.iter().any(|n| n.event == "DoDestinyUpdates"));
+    let stop_notif = direct_notifs
+        .iter()
+        .find(|n| n.event == "DoDestinyUpdates")
+        .expect("direct session while moving emits DoDestinyUpdates");
+    let Some(PyRep::List(entries)) = stop_notif.args.first() else {
+        panic!("DoDestinyUpdates args[0] must be List: {:?}", stop_notif.args);
+    };
+    assert_eq!(
+        entries.len(),
+        3,
+        "expected [SetSpeedFraction, Stop, SetBallVelocity], got {entries:?}"
+    );
+    let mut actions = Vec::new();
+    let mut stamps = Vec::new();
+    for entry in entries {
+        let PyRep::Tuple(outer) = entry else {
+            panic!("expected (stamp, action) tuple, got {entry:?}");
+        };
+        stamps.push(outer[0].as_i64().expect("integer stamp"));
+        let PyRep::Tuple(act) = &outer[1] else {
+            panic!("expected (name, args) tuple, got {:?}", outer[1]);
+        };
+        actions.push(act[0].as_str().expect("action string").to_string());
+        let PyRep::Tuple(act_args) = &act[1] else {
+            panic!("expected args tuple, got {:?}", act[1]);
+        };
+        assert_eq!(act_args[0].as_i64(), Some(ship_id));
+        if act[0].as_str() == Some("SetSpeedFraction") {
+            assert_eq!(act_args[1].as_f64(), Some(0.0));
+        }
+    }
+    assert_eq!(actions, vec!["SetSpeedFraction", "Stop", "SetBallVelocity"]);
+    assert!(
+        stamps.windows(2).all(|w| w[0] == w[1]),
+        "stop triple must share one stamp: {stamps:?}"
+    );
 }
 
 #[tokio::test]

@@ -102,6 +102,7 @@ impl Ballpark {
         if was_aligning_warp {
             self.emit_warp_cancelled_events(ball_id);
         }
+        self.same_tick_owner_goto_tick.remove(&ball_id);
         self.emit_event(
             Some(ball_id),
             DestinyEvent::GotoPoint {
@@ -231,8 +232,40 @@ impl Ballpark {
             self.finish_gate_decloak(ball_id);
         }
 
-        let mut emitted_event: Option<DestinyEvent> = None;
+        if !cancelling_align_warp {
+            let cur_ball = &self.balls[&ball_id];
+            if let MovementMode::GotoDirection { direction: new_dir } = &mode {
+                if cur_ball.speed_fraction > 0.0 {
+                    if let MovementMode::GotoDirection { direction: cur_dir } = &cur_ball.mode {
+                        let c_len_sq = cur_dir.length_squared();
+                        let n_len_sq = new_dir.length_squared();
+                        if c_len_sq.is_finite()
+                            && n_len_sq.is_finite()
+                            && c_len_sq > 1e-18
+                            && n_len_sq > 1e-18
+                        {
+                            let cos_sim =
+                                (*cur_dir / c_len_sq.sqrt()).dot(*new_dir / n_len_sq.sqrt());
+                            if cos_sim >= crate::DESTINY_GOTO_DUPLICATE_COSINE_THRESHOLD {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            } else if matches!(mode, MovementMode::Stop)
+                && matches!(cur_ball.mode, MovementMode::Stop)
+                && cur_ball.speed_fraction <= 0.0
+            {
+                return Ok(());
+            }
+        }
+
+        let mut goto_event: Option<(DestinyEvent, bool)> = None;
+        let mut mode_events: Vec<DestinyEvent> = Vec::new();
         let mut extra_events: Vec<DestinyEvent> = Vec::new();
+        let current_tick = self.current_tick;
+        let already_echoed_goto_this_tick =
+            self.same_tick_owner_goto_tick.get(&ball_id) == Some(&current_tick);
         let ball = self.balls.get_mut(&ball_id).unwrap();
         if cancelling_align_warp {
             clamp_ball_subwarp_velocity(ball);
@@ -243,17 +276,26 @@ impl Ballpark {
                     ball_id,
                     direction: direction.to_array(),
                 };
-                self.pending_events.push(ev.clone());
-                emitted_event = Some(ev);
+                let emit_to_owner = !already_echoed_goto_this_tick;
+                if emit_to_owner {
+                    self.pending_events.push(ev.clone());
+                }
+                goto_event = Some((ev, emit_to_owner));
             }
             MovementMode::Follow { target_id, range } => {
+                if ball.speed_fraction <= 0.0 {
+                    ball.speed_fraction = 1.0;
+                }
                 let ev = DestinyEvent::Follow {
                     ball_id,
                     target_id: *target_id,
                     range: *range,
                 };
-                self.pending_events.push(ev.clone());
-                emitted_event = Some(ev);
+                mode_events.push(ev);
+                extra_events.push(DestinyEvent::SetSpeedFraction {
+                    ball_id,
+                    fraction: ball.speed_fraction,
+                });
             }
             MovementMode::Orbit { target_id, range } => {
                 let ev = DestinyEvent::Orbit {
@@ -261,14 +303,20 @@ impl Ballpark {
                     target_id: *target_id,
                     range: *range,
                 };
-                self.pending_events.push(ev.clone());
-                emitted_event = Some(ev);
+                mode_events.push(ev);
             }
             MovementMode::Stop => {
+                let pre_stop_velocity = ball.velocity;
                 ball.speed_fraction = 0.0;
-                let ev = DestinyEvent::Stop { ball_id };
-                self.pending_events.push(ev.clone());
-                emitted_event = Some(ev);
+                mode_events.push(DestinyEvent::SetSpeedFraction {
+                    ball_id,
+                    fraction: 0.0,
+                });
+                mode_events.push(DestinyEvent::Stop { ball_id });
+                mode_events.push(DestinyEvent::SetBallVelocity {
+                    ball_id,
+                    velocity: pre_stop_velocity.to_array(),
+                });
             }
             MovementMode::Warp {
                 destination,
@@ -281,8 +329,7 @@ impl Ballpark {
                     destination: destination.to_array(),
                     warp_speed_au_s: *warp_speed_au_s,
                 };
-                self.pending_events.push(ev.clone());
-                emitted_event = Some(ev);
+                mode_events.push(ev);
 
                 let ev_act = DestinyEvent::OnActivatingWarp { ball_id };
                 let ev_sfx = DestinyEvent::OnSpecialFX {
@@ -307,10 +354,23 @@ impl Ballpark {
             _ => {}
         }
         ball.mode = mode;
+        if let Some((_, emit_to_owner)) = &goto_event {
+            if *emit_to_owner {
+                self.same_tick_owner_goto_tick.insert(ball_id, current_tick);
+            }
+        } else {
+            self.same_tick_owner_goto_tick.remove(&ball_id);
+        }
         if cancelling_align_warp {
             self.emit_warp_cancelled_events(ball_id);
         }
-        if let Some(ev) = emitted_event {
+        if let Some((ev, emit_to_owner)) = goto_event {
+            if let Some(&gid) = self.ball_grid_ids.get(&ball_id) {
+                self.queue_or_coalesce_goto_for_grid_observers(gid, ball_id, &ev, emit_to_owner);
+            }
+        }
+        for ev in mode_events {
+            self.pending_events.push(ev.clone());
             if let Some(&gid) = self.ball_grid_ids.get(&ball_id) {
                 self.queue_event_for_grid_observers(gid, None, &ev);
             }
@@ -386,6 +446,7 @@ impl Ballpark {
         if was_warping {
             self.emit_warp_cancelled_events(ball_id);
         }
+        self.same_tick_owner_goto_tick.remove(&ball_id);
         self.emit_event(Some(ball_id), DestinyEvent::Stop { ball_id });
         self.emit_event(
             Some(ball_id),

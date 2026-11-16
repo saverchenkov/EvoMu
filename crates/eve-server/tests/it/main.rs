@@ -49,6 +49,7 @@ mod corp_skills_inventory_r4_regressions;
 mod cosmetics_ui_complete;
 mod destiny_binary_stream;
 mod destiny_events_emission;
+mod destiny_stamp_monotonicity;
 mod dogma_capital_heat_crystals;
 mod dogma_combat;
 mod dogma_combat_ewar;

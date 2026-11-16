@@ -833,7 +833,7 @@ pub(crate) async fn handle_cmd_goto_direction(
     let dir = raw_dir.normalize_or_zero();
     let direction = if dir.length_squared() > 1e-6 { dir } else { DVec3::X };
     let handle = ctx.systems.get_or_spawn(sys_id);
-    let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
+    let Some((snap_tick, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
         client_error: None,
@@ -847,6 +847,15 @@ pub(crate) async fn handle_cmd_goto_direction(
     crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
     ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
     ensure_not_mjd_spooling(&handle, ship_id).await?;
+    if current_ball.speed_fraction > 0.0 {
+        if let MovementMode::GotoDirection { direction: cur_dir } = &current_ball.mode {
+            if crate::router::destiny_delivery_policy::directions_within_duplicate_threshold(
+                *cur_dir, direction,
+            ) {
+                return Ok(PyRep::Integer(snap_tick as i64));
+            }
+        }
+    }
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     if current_ball.speed_fraction <= 0.0 {
@@ -886,7 +895,7 @@ pub(crate) async fn handle_cmd_stop(
     };
     let handle = ctx.systems.get_or_spawn(sys_id);
     ensure_not_mjd_spooling(&handle, ship_id).await?;
-    let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
+    let Some((snap_tick, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
         client_error: None,
@@ -899,24 +908,59 @@ pub(crate) async fn handle_cmd_stop(
     };
     crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
+    let cancelling_align_warp = matches!(
+        current_ball.mode,
+        MovementMode::Warp {
+            phase: eve_destiny::WarpPhase::Aligning,
+            ..
+        }
+    );
+    if !cancelling_align_warp
+        && matches!(current_ball.mode, MovementMode::Stop)
+        && current_ball.speed_fraction <= 0.0
+    {
+        return Ok(PyRep::Integer(snap_tick as i64));
+    }
     let tick = handle
         .set_movement_mode(ship_id, MovementMode::Stop)
         .await
         .map_err(map_destiny_nav_err)?;
     cancel_pending_warp_align_if_needed(ctx, ship_id, &current_ball.mode);
-    // Live TCP sessions (`!session.address.is_empty()`) receive the authoritative `Stop` action
+    // Live TCP sessions (`!session.address.is_empty()`) receive `[SetSpeedFraction, Stop, SetBallVelocity]`
     // via `macho_listener` / `main` draining `observer_events` into a single `DoDestinyUpdate`.
     if session.address.is_empty() {
+        let pre_stop_vel = current_ball.velocity;
         crate::services::notify_emitters_space_dungeons::emit_destiny_updates(
             ctx,
             char_id,
-            vec![PyRep::Tuple(vec![
-                PyRep::Integer(tick as i64),
+            vec![
                 PyRep::Tuple(vec![
-                    PyRep::String("Stop".into()),
-                    PyRep::Tuple(vec![PyRep::Integer(ship_id)]),
+                    PyRep::Integer(tick as i64),
+                    PyRep::Tuple(vec![
+                        PyRep::String("SetSpeedFraction".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(ship_id), PyRep::Real(0.0)]),
+                    ]),
                 ]),
-            ])],
+                PyRep::Tuple(vec![
+                    PyRep::Integer(tick as i64),
+                    PyRep::Tuple(vec![
+                        PyRep::String("Stop".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(ship_id)]),
+                    ]),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(tick as i64),
+                    PyRep::Tuple(vec![
+                        PyRep::String("SetBallVelocity".into()),
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(ship_id),
+                            PyRep::Real(pre_stop_vel.x),
+                            PyRep::Real(pre_stop_vel.y),
+                            PyRep::Real(pre_stop_vel.z),
+                        ]),
+                    ]),
+                ]),
+            ],
         );
     }
     let res = PyRep::Integer(tick as i64);
@@ -1094,7 +1138,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
     ensure_not_mjd_spooling(&handle, ship_id).await?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
-    if current_ball.speed_fraction <= 0.0 {
+    if !matches!(mode, MovementMode::Follow { .. }) && current_ball.speed_fraction <= 0.0 {
         let _ = handle.set_speed_fraction(ship_id, 1.0).await;
     }
     let res = handle
