@@ -179,6 +179,7 @@ fn typed_notification_into_args_preserves_registered_arity() {
         OnHeatAdded, OnHeatRemoved, OnMultiModuleRepairStarted, OnMultipleItemChange,
         OnNewMoonProbe, OnRepairDone, OnShipInsured, OnSpecialFX, OnStanceActive,
         OnSystemWideEffectAdd, OnSystemWideEffectRemove, OnTargetClear,
+        OnUpdateSystemWideEffectsInfo,
     };
     assert_eq!(OnAsteroidRevealed::DEFAULT_ID_TYPE, "character");
     assert_eq!(OnAsteroidRevealed { asteroid_id: 100_000_900 }.into_args().len(), 1);
@@ -301,6 +302,18 @@ fn typed_notification_into_args_preserves_registered_arity() {
         2
     );
     assert_eq!(OnSystemWideEffectRemove { source_item_id: 30_000_142 }.into_args().len(), 1);
+    assert_eq!(OnUpdateSystemWideEffectsInfo::DEFAULT_ID_TYPE, "charid");
+    assert_eq!(
+        OnUpdateSystemWideEffectsInfo {
+            system_wide_effects_on_ship: PyRep::Dict(vec![(
+                PyRep::Tuple(vec![PyRep::Integer(30_000_142), PyRep::Integer(30_844)]),
+                PyRep::Set(vec![PyRep::Integer(6_753)]),
+            )]),
+        }
+        .into_args()
+        .len(),
+        1
+    );
     assert_eq!(OnTargetClear { targets_to_skip: None }.into_args().len(), 0);
     assert_eq!(
         OnTargetClear {

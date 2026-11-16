@@ -671,6 +671,12 @@ async fn passive_targeter_remote_rep_projected_assist_and_deferred_charges_branc
     });
     let ph_type = synth_type(43554, 1815, "Amarr Phenomena Generator", &[6753], &[]);
     emit_committed_ewar_and_system_wide_notifications(&ctx, sys_id, char_id, ship_id, mod_id, 43554, &ph_type, None, false, None, None);
+    assert!(
+        !ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "OnSystemWideEffectStart"),
+        "Phenomena Generator must never emit OnSystemWideEffectStart"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

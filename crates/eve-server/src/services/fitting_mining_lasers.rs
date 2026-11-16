@@ -335,6 +335,10 @@ pub(crate) async fn handle_mining_and_deactivate(
                 .and_then(|tid| ctx.sde.types.get(&tid))
                 .is_some_and(|t| t.group_id == 1815)
             {
+                let mut sync_ship_ids =
+                    super::fitting_scanners_superweapons::clear_ship_dbuffs_by_source_module(
+                        ctx, module_id,
+                    );
                 if let Some(sys_id) = session.solar_system_id {
                     let sys = ctx.systems.get_or_spawn(sys_id);
                     let balls = sys.list_balls().await.unwrap_or_default();
@@ -361,6 +365,22 @@ pub(crate) async fn handle_mining_and_deactivate(
                             }
                         }
                     });
+                    sync_ship_ids.extend(dyn_ship_ids);
+                    sync_ship_ids.sort_unstable();
+                    sync_ship_ids.dedup();
+                    super::fitting_scanners_superweapons::sync_ship_dbuffs_and_destiny(
+                        ctx,
+                        &sys,
+                        &sync_ship_ids,
+                        ctx.now_unix_secs(),
+                    )
+                    .await;
+                } else if !sync_ship_ids.is_empty() {
+                    super::fitting_scanners_superweapons::sync_ship_dbuffs_and_destiny_sync(
+                        ctx,
+                        &sync_ship_ids,
+                        ctx.now_unix_secs(),
+                    );
                 }
             }
 

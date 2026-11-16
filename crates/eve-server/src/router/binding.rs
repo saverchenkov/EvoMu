@@ -1193,6 +1193,41 @@ impl ServerContext {
                 cycle.ship_id,
                 cycle.module_id,
             );
+            if sde
+                .types
+                .get(&cycle.module_type_id)
+                .is_some_and(|t| t.group_id == 1815)
+            {
+                let cleared =
+                    crate::services::inventory_fitting::clear_ship_dbuffs_by_source_module(
+                        &step_ctx,
+                        cycle.module_id,
+                    );
+                if !cleared.is_empty() {
+                    let sync_now = step_ctx.now_unix_secs();
+                    if eve_db::lock_rank::held_lock_ranks().is_empty() {
+                        crate::services::inventory_fitting::sync_ship_dbuffs_and_destiny_sync(
+                            &step_ctx,
+                            &cleared,
+                            sync_now,
+                        );
+                    } else {
+                        for &sid in &cleared {
+                            step_ctx.invalidate_ship_fitting_cache_only(sid);
+                        }
+                        let ctx_w_dbuff = ctx_w.clone();
+                        step_ctx.systems.enqueue_post_unlock_action(Box::new(move || {
+                            if let Some(c) = ctx_w_dbuff.upgrade() {
+                                crate::services::inventory_fitting::sync_ship_dbuffs_and_destiny_sync(
+                                    &c,
+                                    &cleared,
+                                    sync_now,
+                                );
+                            }
+                        }));
+                    }
+                }
+            }
 
             let effect_id = effect_id_for_module_sde(sde, cycle.module_type_id, Some(&cycle.effect_name)).unwrap_or(0);
             let now = crate::router::host_wall_blueos_filetime_ticks();

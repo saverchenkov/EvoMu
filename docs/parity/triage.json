@@ -2747,10 +2747,6 @@
     "disposition": "client_local",
     "evidence": "projectdiscovery/client/projects/exoplanets/ui/category.pyj:57 CategorySelectionManager.OnCategorySelectedChange(): sm.ScatterEvent('OnUpdateExcludedCategories', ...) \u2014 client-only local UI scatter (2 site(s)); no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
   },
-  "notify:OnUpdateSystemWideEffectsInfo": {
-    "disposition": "client_local",
-    "evidence": "eve/client/script/environment/godma.pyj:2861 StateManager.ProcessAllInfo(): sm.ScatterEvent('OnUpdateSystemWideEffectsInfo', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnUpdateSystemWideEffectsInfo' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
-  },
   "notify:OnUpdateWindowPosition": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/sidePanelsLayer.pyj:103 SidePanels.UpdateWindowPositions(): sm.ScatterEvent('OnUpdateWindowPosition', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnUpdateWindowPosition' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."

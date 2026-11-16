@@ -983,6 +983,20 @@ pub fn emit_on_session_changed(
         "charid",
         args,
     );
+    if diff.keys().any(|k| {
+        matches!(
+            k.as_str(),
+            "shipid" | "solarsystemid" | "solarsystemid2" | "stationid" | "structureid"
+        )
+    }) {
+        let in_space = snap_session.station_id.is_none() && snap_session.structure_id.is_none();
+        crate::services::notify_emitters_tournaments_anomalies::emit_update_system_wide_effects_info(
+            ctx,
+            char_id,
+            snap_session.solar_system_id,
+            in_space,
+        );
+    }
 }
 
 /// Applies `CharacterRecord` (or clears character state on logout) to `SessionState`,
@@ -2352,7 +2366,71 @@ mod tests {
         let snap_s = sess.clone();
         emit_on_session_changed(&ctx, Some(&mut sess), &snap_s, char_id, &non_empty_diff);
         assert_eq!(sess.drain_notifications().len(), 1);
-        assert_eq!(ctx.drain_notifications(char_id).len(), 1);
+        let char_notifs = ctx.drain_notifications(char_id);
+        let char_events: Vec<&str> = char_notifs.iter().map(|n| n.event.as_str()).collect();
+        assert_eq!(char_events, vec!["OnSessionChanged", "OnUpdateSystemWideEffectsInfo"]);
+
+        // Transitioning into space in Jita emits empty `OnUpdateSystemWideEffectsInfo` so stale
+        // system-wide effect icons from prior systems never linger (`#1122`).
+        let sys_diff = HashMap::from([(
+            "solarsystemid".to_string(),
+            (PyRep::None, PyRep::Integer(30_000_142)),
+        )]);
+        let mut space_jita = sess.clone();
+        space_jita.solar_system_id = Some(30_000_142);
+        space_jita.station_id = None;
+        space_jita.structure_id = None;
+        emit_on_session_changed(&ctx, None, &space_jita, char_id, &sys_diff);
+        let jita_notifs = ctx.drain_notifications(char_id);
+        let sw_jita = jita_notifs
+            .iter()
+            .find(|n| n.event == "OnUpdateSystemWideEffectsInfo")
+            .expect("OnUpdateSystemWideEffectsInfo on solar system jump");
+        assert_eq!(sw_jita.args, vec![PyRep::Dict(Vec::new())]);
+
+        // Transitioning into a wormhole with a valid `infoBubbles` phenomenon populates
+        // `OnUpdateSystemWideEffectsInfo`, and docking clears it back to `{}`.
+        if let Some((&wh_sys_id, _)) = ctx
+            .sde
+            .solar_systems
+            .iter()
+            .find(|(&sid, _)| eve_dogma::resolve_system_wormhole_phenomenon(&ctx.sde, sid, None).is_some())
+        {
+            let mut space_wh = space_jita.clone();
+            space_wh.solar_system_id = Some(wh_sys_id);
+            let wh_diff = HashMap::from([(
+                "solarsystemid".to_string(),
+                (PyRep::Integer(30_000_142), PyRep::Integer(i64::from(wh_sys_id))),
+            )]);
+            emit_on_session_changed(&ctx, None, &space_wh, char_id, &wh_diff);
+            let wh_notifs = ctx.drain_notifications(char_id);
+            let sw_wh = wh_notifs
+                .iter()
+                .find(|n| n.event == "OnUpdateSystemWideEffectsInfo")
+                .expect("OnUpdateSystemWideEffectsInfo in wormhole");
+            assert!(
+                matches!(sw_wh.args.first(), Some(PyRep::Dict(entries)) if !entries.is_empty()),
+                "wormhole transition must populate systemWideEffectsOnShip: {:?}",
+                sw_wh.args
+            );
+
+            let dock_diff = HashMap::from([
+                ("stationid".to_string(), (PyRep::None, PyRep::Integer(jita_station))),
+                (
+                    "solarsystemid".to_string(),
+                    (PyRep::Integer(i64::from(wh_sys_id)), PyRep::None),
+                ),
+            ]);
+            let mut docked_sess = space_wh;
+            docked_sess.station_id = Some(jita_station);
+            emit_on_session_changed(&ctx, None, &docked_sess, char_id, &dock_diff);
+            let dock_notifs = ctx.drain_notifications(char_id);
+            let sw_dock = dock_notifs
+                .iter()
+                .find(|n| n.event == "OnUpdateSystemWideEffectsInfo")
+                .expect("OnUpdateSystemWideEffectsInfo on dock");
+            assert_eq!(sw_dock.args, vec![PyRep::Dict(Vec::new())]);
+        }
 
         // 4. `execute_session_transition_sync` with `preserve_session_ship = true` preserves `session.ship_id`.
         sess.ship_id = Some(888_888);

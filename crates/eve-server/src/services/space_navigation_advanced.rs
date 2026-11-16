@@ -339,6 +339,23 @@ pub fn deactivate_ship_modules_on_leave_space(ctx: &ServerContext, char_id: i64,
     }
     if !active_mods.is_empty() {
         for mid in active_mods {
+            let is_phenomena = ctx.db.with_snapshot(|snap| {
+                snap.items
+                    .get(&mid)
+                    .and_then(|it| ctx.sde.types.get(&it.type_id))
+                    .is_some_and(|t| t.group_id == 1815)
+            });
+            if is_phenomena {
+                let cleared =
+                    crate::services::inventory_fitting::clear_ship_dbuffs_by_source_module(ctx, mid);
+                if !cleared.is_empty() {
+                    crate::services::inventory_fitting::sync_ship_dbuffs_and_destiny_sync(
+                        ctx,
+                        &cleared,
+                        ctx.now_unix_secs(),
+                    );
+                }
+            }
             let _ = crate::services::notify_emitters_space_dungeons::flush_module_ewar_end(
                 ctx,
                 char_id,

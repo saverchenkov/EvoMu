@@ -7,7 +7,7 @@ use super::{
     MiningExtractionResult, SystemCommand, TickBroadcast,
 };
 use eve_db::lock_rank::{
-    assert_no_locks_held, RankedRwLock, RANK_ACTOR_STATE, RANK_BALLPARK, RANK_LEAF,
+    assert_no_locks_held, RankedMutex, RankedRwLock, RANK_ACTOR_STATE, RANK_BALLPARK, RANK_LEAF,
 };
 use eve_destiny::{
     Ball, BallId, Ballpark, CombatState, DamageVector, DestinyEvent, MovementMode, SlimItemMeta,
@@ -45,6 +45,7 @@ pub struct SystemHandle {
     pub(crate) module_deactivation_hook: Arc<RankedRwLock<Option<super::ModuleDeactivationHook>, RANK_LEAF>>,
     pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<super::TargetLockCompletedHook>, RANK_LEAF>>,
     pub(crate) system_step_hook: Arc<RankedRwLock<Option<super::SystemStepHook>, RANK_LEAF>>,
+    pub(crate) post_unlock_actions: Arc<RankedMutex<Vec<super::PostUnlockHookAction>, RANK_LEAF>>,
 }
 
 impl SystemHandle {
@@ -1232,6 +1233,26 @@ impl SystemHandle {
             return false;
         }
         rx.await.unwrap_or(false)
+    }
+
+    /// Synchronously applies `event` for `ball_id` or falls back to non-blocking actor dispatch
+    /// if `ballpark` is currently write-locked (for synchronous hooks inside `step_system_tick`).
+    pub fn try_emit_destiny_event(&self, ball_id: BallId, event: DestinyEvent) -> bool {
+        if let Ok(mut bp) = self.ballpark.try_write() {
+            return crate::system_actor::cycles_tackle::apply_destiny_event_in_actor(
+                &mut bp,
+                ball_id,
+                event,
+            );
+        }
+        let (tx, _rx) = oneshot::channel();
+        self.cmd_sender()
+            .try_send(SystemCommand::EmitDestinyEvent {
+                ball_id,
+                event,
+                reply: tx,
+            })
+            .is_ok()
     }
 
     /// Queues `event` directly into `observer_ball_id`'s observer queue (returns `false` if absent).

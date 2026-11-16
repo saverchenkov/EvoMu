@@ -108,19 +108,34 @@ fn ewar_jamming_type_and_notifications_cover_all_ewar_groups() {
     let _ = ctx.db.acquire_online_lock(96_101, 1, Some(char_id), true, 100);
     let _ = ctx.db.acquire_online_lock(96_102, 2, Some(target_owner), true, 100);
 
-    let phenomena = synth_mod_type(43554, 1815, "Amarr Phenomena Generator", vec![6753]);
+    let phenomena = synth_mod_type(43658, 1815, "Amarr Phenomena Generator", vec![6753]);
     emit_committed_ewar_and_system_wide_notifications(
         &ctx,
         30_000_142,
         char_id,
         ship_id,
         module_id,
-        43554,
+        43658,
         &phenomena,
         None,
         false,
         None,
         None,
+    );
+    let phenom_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !phenom_notifs.iter().any(|n| n.event == "OnSystemWideEffectStart"),
+        "Phenomena Generators (43658) must never emit OnSystemWideEffectStart (no infoBubbles entry): {phenom_notifs:?}"
+    );
+    assert!(
+        !crate::services::notify_emitters_tournaments_anomalies::emit_system_wide_effect_start(
+            &ctx, 30_000_142, Some(char_id), 6753, module_id, 43658,
+        )
+    );
+    assert!(
+        crate::services::notify_emitters_tournaments_anomalies::emit_system_wide_effect_start(
+            &ctx, 30_000_142, Some(char_id), 6753, 30_000_142, 30_844,
+        )
     );
 
     emit_committed_ewar_and_system_wide_notifications(
@@ -936,6 +951,314 @@ async fn combat_charge_depletion_corp_wallet_balance_and_role_authority_invarian
         .and_then(|v| v.as_i64())
         .expect("GetCorporation must include integer memberLimit");
     assert!(member_limit >= 1, "memberLimit must be positive, got {member_limit}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn phenomena_generator_uses_destiny_dbuffs_and_clears_across_lifecycle_transitions() {
+    use crate::services::inventory_fitting::fitting_scanners_superweapons::{
+        clear_ship_dbuffs_by_source_module, get_aggregated_ship_dbuffs,
+        purge_expired_ship_dbuffs_all, sync_ship_dbuffs_and_destiny_sync,
+    };
+    use crate::services::notify_emitters_tournaments_anomalies::{
+        build_system_wide_effects_on_ship_dict, emit_system_wide_effect_start,
+        is_info_bubble_system_wide_effect_type,
+    };
+
+    // 1. Validate `infoBubbles` guard: all 4 Phenomena Generators + weather beacons are rejected;
+    //    real V24 system-wide effect types across all groups are accepted.
+    for tid in [43658u32, 43660, 43662, 43664, 43554, 47378, 47379, 587, 448] {
+        assert!(
+            !is_info_bubble_system_wide_effect_type(tid),
+            "type {tid} must not emit OnSystemWideEffectStart / systemWideEffectsOnShip"
+        );
+    }
+    for tid in [3069u32, 3493, 3494, 30844, 30860, 30884, 52247, 54215, 54330, 54838, 56057, 56967, 56997, 74002, 87294, 90144] {
+        assert!(
+            is_info_bubble_system_wide_effect_type(tid),
+            "V24 infoBubbles system-wide effect type {tid} must be accepted"
+        );
+    }
+
+    let mut sde = (*shared_sde()).clone();
+    let mut phen_t = synth_mod_type(43658, 1815, "Amarr Phenomena Generator", vec![6753]);
+    for (aid, val) in [(73u16, 300_000.0), (2468, 39.0), (2469, -15.0), (2470, 51.0), (2471, 20.0)] {
+        phen_t.default_attributes.insert(aid, val);
+    }
+    sde.types.insert(43658, phen_t.clone());
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), Arc::new(WorldRepository::with_demo_seed()));
+    ctx.wire_module_deactivation_hook();
+    ctx.clock().set_wall_now_for_tests(1_700_000_000);
+
+    let sys_id = 30_000_142u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let char_id = 96_200_001i64;
+    let uid = 96_201u64;
+    let ship_id = 96_200_101i64;
+    let module_id = 96_200_201i64;
+    let heron_id = 96_200_102i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters.values().next().cloned().expect("seed char");
+        snap.accounts.insert(
+            format!("user_{uid}"),
+            AccountRecord {
+                user_id: uid,
+                username: format!("user_{uid}"),
+                password_token: String::new(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        let mut ch = base_ch;
+        ch.character_id = char_id;
+        ch.user_id = uid;
+        ch.name = "PhenomPilot".into();
+        ch.corporation_id = 1_000_009;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        for (sid, tid) in [(ship_id, 11567u32), (heron_id, 605u32)] {
+            snap.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: i64::from(sys_id),
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.items.insert(
+            module_id,
+            InventoryItemRecord {
+                item_id: module_id,
+                type_id: 43658,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_active_states.insert(module_id);
+    });
+    let _ = ctx.db.acquire_online_lock(uid, 962, Some(char_id), true, ctx.now_unix_secs());
+    let ball = eve_destiny::Ball {
+        id: ship_id,
+        type_id: 11567,
+        position: eve_destiny::DVec3::ZERO,
+        velocity: eve_destiny::DVec3::ZERO,
+        max_velocity: 100.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 50.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    };
+    let meta = eve_destiny::SlimItemMeta {
+        group_id: 30,
+        category_id: 6,
+        owner_id: char_id,
+        ..Default::default()
+    };
+    let _ = sys.spawn_ball_with_meta(ball, eve_destiny::CombatState::default(), meta).await;
+    let _ = sys.push_set_state(ship_id).await;
+    let _ = sys.drain_observer_updates(ship_id).await;
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let fit = eve_dogma::ShipFittingEngine::from_sde(ship_id, 11567, &ctx.sde);
+    let fm = eve_dogma::FittedModule {
+        item_id: module_id,
+        type_id: 43658,
+        flag_id: InventoryFlag::HiSlot0 as u16,
+        state: eve_dogma::ModuleState::Online,
+        charge_type_id: None,
+        charge_quantity: 0,
+        damage_hp: 0.0,
+        max_hp: 40.0,
+        dynamic_attribute_overrides: HashMap::new(),
+    };
+    let mod_st = eve_dogma::DogmaItemState::from_sde(char_id, 43658, &ctx.sde);
+
+    // 2. Commit Phenomena activation -> emits `DestinyEvent::OnDbuffUpdated`, NOT `OnSystemWideEffectStart`.
+    let deferred = DeferredPostCycleEffects {
+        phenomena_debuffs: Some((vec![ship_id], vec![(39, -15.0), (51, 20.0)], 300)),
+        ..Default::default()
+    };
+    commit_post_cycle_activation_effects(
+        &ctx, &sys, char_id, ship_id, module_id, &fm, &phen_t, &mod_st, None, deferred,
+    )
+    .await
+    .expect("commit phenomena debuffs");
+    emit_committed_ewar_and_system_wide_notifications(
+        &ctx, sys_id, char_id, ship_id, module_id, 43658, &phen_t, None, false, None, None,
+    );
+    assert!(
+        !ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "OnSystemWideEffectStart")
+    );
+    let (_, evs, wire_updates) = sys.drain_observer_updates(ship_id).await.expect("observer drain");
+    assert!(
+        evs.iter().any(|ev| matches!(
+            ev,
+            eve_destiny::DestinyEvent::OnDbuffUpdated { ball_id, dbuffs }
+                if *ball_id == ship_id
+                    && dbuffs.iter().any(|&(id, val, _)| id == 39 && (val + 15.0).abs() < 1e-9)
+                    && dbuffs.iter().any(|&(id, val, _)| id == 51 && (val - 20.0).abs() < 1e-9)
+        )),
+        "expected Destiny OnDbuffUpdated with Phenomena dbuffs 39 and 51, got {evs:?}"
+    );
+    assert!(!matches!(wire_updates, eve_proto::PyRep::None));
+
+    // 3. `purge_expired_ship_dbuffs_all` after duration clears `ship_dbuffs` and emits empty `OnDbuffUpdated`.
+    ctx.clock().advance_secs(301);
+    purge_expired_ship_dbuffs_all(&ctx, ctx.now_unix_secs());
+    assert!(get_aggregated_ship_dbuffs(&ctx, ship_id, ctx.now_unix_secs()).is_empty());
+    let (_, exp_evs, _) = sys.drain_observer_updates(ship_id).await.expect("expiry drain");
+    assert!(exp_evs.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::OnDbuffUpdated { ball_id, dbuffs }
+            if *ball_id == ship_id && dbuffs.is_empty()
+    )));
+
+    // 4. Auto-deactivation cycle expiration (`try_step_full_tick`) clears Phenomena dbuffs & emits Destiny clear.
+    let now2 = ctx.now_unix_secs();
+    commit_post_cycle_activation_effects(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        module_id,
+        &fm,
+        &phen_t,
+        &mod_st,
+        None,
+        DeferredPostCycleEffects {
+            phenomena_debuffs: Some((vec![ship_id], vec![(39, -15.0)], 300)),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("recommit phenomena");
+    let _ = sys.drain_observer_updates(ship_id).await;
+    sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
+        module_id,
+        ship_id,
+        owner_char_id: Some(char_id),
+        module_type_id: 43658,
+        effect_name: "moduleTitanEffectGenerator".into(),
+        duration_s: 1.0,
+        elapsed_s: 0.9,
+        repeat: 0,
+        ..Default::default()
+    })
+    .await
+    .expect("insert cycle");
+    sys.try_step_full_tick(0.2);
+    assert!(get_aggregated_ship_dbuffs(&ctx, ship_id, now2).is_empty());
+    let (_, hook_evs, _) = sys.drain_observer_updates(ship_id).await.expect("hook drain");
+    assert!(hook_evs.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::OnDbuffUpdated { ball_id, dbuffs }
+            if *ball_id == ship_id && dbuffs.is_empty()
+    )));
+
+    // 5. Leave-space cleanup (`deactivate_ship_modules_on_leave_space`) clears Phenomena dbuffs & emits Destiny clear.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.insert(module_id);
+    });
+    commit_post_cycle_activation_effects(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        module_id,
+        &fm,
+        &phen_t,
+        &mod_st,
+        None,
+        DeferredPostCycleEffects {
+            phenomena_debuffs: Some((vec![ship_id], vec![(39, -15.0)], 300)),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("recommit before leave space");
+    let _ = sys.drain_observer_updates(ship_id).await;
+    crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space(
+        &ctx,
+        char_id,
+        ship_id,
+    );
+    assert!(get_aggregated_ship_dbuffs(&ctx, ship_id, ctx.now_unix_secs()).is_empty());
+    let (_, leave_evs, _) = sys.drain_observer_updates(ship_id).await.expect("leave drain");
+    assert!(leave_evs.iter().any(|ev| matches!(
+        ev,
+        eve_destiny::DestinyEvent::OnDbuffUpdated { ball_id, dbuffs }
+            if *ball_id == ship_id && dbuffs.is_empty()
+    )));
+
+    // 6. Boarding another ship (e.g. Heron 605 in Jita) emits empty `OnUpdateSystemWideEffectsInfo`
+    //    and `dogmaIM.GetAllInfo` reports an empty `systemWideEffectsOnShip` dict.
+    let mut sess = eve_machonet::SessionState::new(962);
+    sess.user_id = Some(uid);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(1_000_009);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.execute_session_transition_sync(
+        Some(&mut sess),
+        crate::router::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::TransitionKind::BoardShip { ship_id: heron_id },
+            "board_heron_jita",
+        ),
+    )
+    .expect("board Heron");
+    let board_notifs = ctx.drain_notifications_for_char(char_id);
+    let sw_board = board_notifs
+        .iter()
+        .find(|n| n.event == "OnUpdateSystemWideEffectsInfo")
+        .expect("OnUpdateSystemWideEffectsInfo on BoardShip");
+    assert_eq!(sw_board.args, vec![eve_proto::PyRep::Dict(Vec::new())]);
+    let all_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "GetAllInfo",
+            &[
+                eve_proto::PyRep::Bool(false),
+                eve_proto::PyRep::Bool(false),
+                eve_proto::PyRep::Bool(false),
+            ],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("GetAllInfo");
+    assert_eq!(
+        all_info.dict_get("systemWideEffectsOnShip"),
+        Some(&eve_proto::PyRep::Dict(Vec::new()))
+    );
+
+    let _ = clear_ship_dbuffs_by_source_module(&ctx, module_id);
+    sync_ship_dbuffs_and_destiny_sync(&ctx, &[ship_id], ctx.now_unix_secs());
+    assert!(fit.ship.item_id == ship_id);
+    assert_eq!(build_system_wide_effects_on_ship_dict(&ctx, Some(sys_id), true), eve_proto::PyRep::Dict(Vec::new()));
+    assert!(!emit_system_wide_effect_start(&ctx, sys_id, Some(char_id), 6753, module_id, 43658));
 }
 
 #[cfg(test)]

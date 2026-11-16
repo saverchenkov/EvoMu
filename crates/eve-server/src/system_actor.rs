@@ -76,6 +76,7 @@ pub struct SystemRegistry {
     pub(crate) module_deactivation_hook: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
     pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
     pub(crate) system_step_hook: Arc<RankedRwLock<Option<SystemStepHook>, RANK_LEAF>>,
+    pub(crate) post_unlock_actions: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
     /// PvE special-site balls (system, ball id) already spawned once into this registry's ballparks.
     /// Runtime-only (lives and dies with the ballparks), so no sentinel ball is needed in space.
     special_site_spawned_balls: RankedMutex<std::collections::HashSet<(SolarSystemId, i64)>, RANK_LEAF>,
@@ -108,6 +109,7 @@ impl SystemRegistry {
             module_deactivation_hook: Arc::new(RankedRwLock::new(None)),
             target_lock_completed_hook: Arc::new(RankedRwLock::new(None)),
             system_step_hook: Arc::new(RankedRwLock::new(None)),
+            post_unlock_actions: Arc::new(RankedMutex::new(Vec::new())),
             special_site_spawned_balls: RankedMutex::new(std::collections::HashSet::new()),
             hydrated_wh_ore_anomalies: RankedMutex::new(std::collections::HashSet::new()),
             tactical_state: Arc::new(RankedRwLock::new(Default::default())),
@@ -176,6 +178,13 @@ impl SystemRegistry {
 
     pub fn set_system_step_hook(&self, hook: SystemStepHook) {
         *self.system_step_hook.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    pub(crate) fn enqueue_post_unlock_action(&self, action: PostUnlockHookAction) {
+        self.post_unlock_actions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(action);
     }
 
     /// Shares `rng` as this registry's game-mechanic RNG (seeded test RNG).
@@ -482,6 +491,7 @@ impl SystemRegistry {
         let module_deactivation_hook_actor = module_deactivation_hook.clone();
         let target_lock_completed_hook = self.target_lock_completed_hook.clone();
         let target_lock_completed_hook_actor = target_lock_completed_hook.clone();
+        let post_unlock_actions_actor = self.post_unlock_actions.clone();
         let mut initial_ballpark = Ballpark::new(solar_system_id);
         if let Some(sde) = &sde_opt {
             populate_system_celestials(&mut initial_ballpark, solar_system_id, sde);
@@ -2440,6 +2450,7 @@ impl SystemRegistry {
                         "SystemActor caught panic while handling command; continuing actor loop"
                     );
                 }
+                flush_post_unlock_actions(&post_unlock_actions_actor);
             }
         });
 
@@ -2467,6 +2478,7 @@ impl SystemRegistry {
             module_deactivation_hook: Arc::clone(&self.module_deactivation_hook),
             target_lock_completed_hook: Arc::clone(&self.target_lock_completed_hook),
             system_step_hook: Arc::clone(&self.system_step_hook),
+            post_unlock_actions: Arc::clone(&self.post_unlock_actions),
         };
         if let Some(ref db) = self.db {
             register_db_system_ballpark(db, solar_system_id, &handle);
@@ -2663,6 +2675,26 @@ pub(crate) fn apply_fit_projection_in_actor(
         }
     }
     true
+}
+
+pub(crate) fn flush_post_unlock_actions(
+    actions: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
+) {
+    if !held_lock_ranks().is_empty() {
+        return;
+    }
+    loop {
+        let batch = {
+            let mut guard = actions.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.is_empty() {
+                break;
+            }
+            std::mem::take(&mut *guard)
+        };
+        for action in batch {
+            action();
+        }
+    }
 }
 
 impl SystemHandle {

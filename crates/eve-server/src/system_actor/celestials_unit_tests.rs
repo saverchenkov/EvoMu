@@ -704,6 +704,7 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
         module_deactivation_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         target_lock_completed_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
     };
 
     assert!(dead.spawn_ball(make_ball(1, 606, DVec3::ZERO)).await.is_err());
@@ -888,6 +889,7 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
         module_deactivation_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         target_lock_completed_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
     };
     assert!(drop_h.spawn_ball(make_ball(1, 606, DVec3::ZERO)).await.is_err());
     assert!(drop_h.set_ball_max_velocity(1, 100.0).await.is_err());
@@ -1358,6 +1360,7 @@ async fn system_handle_stopped_actor_returns_error_or_false_on_all_commands() {
         module_deactivation_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         target_lock_completed_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
+        post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
     };
 
     assert!(handle.spawn_ball(make_ball(1, 587, DVec3::ZERO)).await.is_err());
