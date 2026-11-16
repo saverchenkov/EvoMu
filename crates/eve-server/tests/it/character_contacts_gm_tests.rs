@@ -779,10 +779,15 @@ async fn test_ch5_gm_spawn_veldspar_1230_in_space_delivers_add_balls2() {
 
     {
         let bp = handle.ballpark.read().unwrap();
-        let ship_grid = bp.ball_grid_ids.get(&gm_ship_id).copied().expect("ship grid");
-        let ast_grid = bp.ball_grid_ids.get(&ast_id).copied().expect("asteroid grid");
-        assert_eq!(ast_grid, ship_grid);
-        assert!(bp.grids[&ast_grid].members.contains(&ast_id));
+        assert!(bp.is_static_ball(ast_id), "spawned asteroid must be static");
+        assert!(
+            !bp.ball_grid_ids.contains_key(&ast_id),
+            "static spawned asteroid must stay out of ball_grid_ids"
+        );
+        assert!(
+            !bp.grids.values().any(|g| g.members.contains(&ast_id)),
+            "static spawned asteroid must stay out of dynamic GridBubble.members"
+        );
         let meta = bp.ball_slim_meta.get(&ast_id).expect("asteroid slim meta");
         assert_eq!(meta.group_id, 462);
         assert_eq!(meta.category_id, 25);

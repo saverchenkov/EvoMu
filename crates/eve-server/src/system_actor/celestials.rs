@@ -46,6 +46,8 @@ pub struct SystemHandle {
     pub command_panics: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(test)]
     pub(crate) panic_next_command_for_test: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    pub(crate) panic_on_command_countdown_for_test: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) npc_death_hook: Arc<RankedRwLock<Option<super::NpcDeathHook>, RANK_LEAF>>,
     pub(crate) module_deactivation_hook: Arc<RankedRwLock<Option<super::ModuleDeactivationHook>, RANK_LEAF>>,
     pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<super::TargetLockCompletedHook>, RANK_LEAF>>,
@@ -812,8 +814,8 @@ impl SystemHandle {
         }
     }
 
-    /// Inserts a rigid asteroid ball and neutral `SlimItemMeta` into `bp`, assigns grid bubble
-    /// membership (`grids` and `ball_grid_ids`), and queues `AddBalls2` for grid observers.
+    /// Inserts a rigid static asteroid ball and neutral `SlimItemMeta` into `bp` without adding it
+    /// to dynamic `grids`/`ball_grid_ids`, and broadcasts `AddBalls2` to all grid observers.
     pub(super) fn spawn_asteroid_ball_in_ballpark(
         bp: &mut Ballpark,
         sde_opt: &Option<Arc<SdeRegistry>>,
@@ -847,33 +849,14 @@ impl SystemHandle {
                 ..Default::default()
             },
         );
-        // Keep static spawned asteroids indexed in `grids`/`ball_grid_ids` like `add_ball`
-        // so grid-scoped `AddBalls2` and subsequent `RemoveBalls` target the owning bubble.
-        let grid_id = bp.find_or_create_grid_for_position(ast_ball.position);
-        if let Some(grid) = bp.grids.get_mut(&grid_id) {
-            grid.members.insert(ball_id);
-        }
-        bp.ball_grid_ids.insert(ball_id, grid_id);
-        let observer_ids: Vec<BallId> = bp
-            .grids
-            .get(&grid_id)
-            .map(|grid| {
-                grid.members
-                    .iter()
-                    .copied()
-                    .filter(|&obs_id| obs_id != ball_id && bp.is_registered_observer(obs_id))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let add_ev = DestinyEvent::AddBalls2 {
-            balls: vec![ast_ball.clone()],
-        };
-        for obs_id in observer_ids {
-            bp.observer_events
-                .entry(obs_id)
-                .or_default()
-                .push(add_ev.clone());
-        }
+        // Keep spawned asteroids static outside dynamic `grids`/`ball_grid_ids` (matching
+        // `belts.rs`) so empty dynamic grids contract/delete and `remove_ball` emits `RemoveBall`.
+        bp.queue_event_for_all_grid_observers(
+            Some(ball_id),
+            &DestinyEvent::AddBalls2 {
+                balls: vec![ast_ball.clone()],
+            },
+        );
     }
 
     pub fn try_spawn_asteroid(&self, asteroid: AsteroidState, ball: Ball) {

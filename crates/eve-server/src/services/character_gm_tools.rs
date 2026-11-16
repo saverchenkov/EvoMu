@@ -935,10 +935,23 @@ pub(crate) async fn execute_gm_heal(
     ]))
 }
 
-/// Rolls back partially spawned `/spawn` DB and ballpark records when an actor spawn fails.
+/// Clears runtime NPC AI and combat state for `entity_id` in `sys_id`.
+fn remove_npc_runtime_state(ctx: &ServerContext, sys_id: u32, entity_id: i64) {
+    if let Ok(mut map) = ctx.npc_spawns.write() {
+        if let Some(mgr) = map.get_mut(&sys_id) {
+            mgr.entities.remove(&entity_id);
+        }
+    }
+    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        rt.npc_entities.remove(&entity_id);
+    });
+}
+
+/// Rolls back partially spawned `/spawn` DB, runtime NPC, and ballpark records when an actor spawn fails.
 async fn rollback_spawned_entities(
     ctx: &ServerContext,
     handle: &crate::system_actor::SystemHandle,
+    sys_id: u32,
     failed_id: i64,
     prior_ids: &[i64],
 ) {
@@ -948,6 +961,9 @@ async fn rollback_spawned_entities(
             snap.asteroids.remove(&id);
         }
     });
+    for &id in std::iter::once(&failed_id).chain(prior_ids.iter()) {
+        remove_npc_runtime_state(ctx, sys_id, id);
+    }
     for &id in prior_ids {
         let _ = handle.remove_ball(id).await;
     }
@@ -1198,7 +1214,7 @@ pub async fn handle_gm_slash_ext(
                 res.map(|_| ())
             };
             if let Err(err) = spawn_res {
-                rollback_spawned_entities(ctx, &handle, entity_id, &spawned_ids).await;
+                rollback_spawned_entities(ctx, &handle, sys_id, entity_id, &spawned_ids).await;
                 return Some(Err(BridgeRpcError {
                     code: "SpawnFailed".into(),
                     message: err,
@@ -1237,14 +1253,7 @@ pub async fn handle_gm_slash_ext(
         });
         let handle = ctx.systems.get_or_spawn(sys_id);
         let removed_ball = handle.remove_ball(target_id).await.is_some();
-        if let Ok(mut map) = ctx.npc_spawns.write() {
-            if let Some(mgr) = map.get_mut(&sys_id) {
-                mgr.entities.remove(&target_id);
-            }
-        }
-        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-            rt.npc_entities.remove(&target_id);
-        });
+        remove_npc_runtime_state(ctx, sys_id, target_id);
         if removed_ball {
             crate::services::pve_incursion_sites::mark_incursion_boss_destroyed(ctx, sys_id, target_id);
             crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_core(&ctx.systems, &ctx.db, sys_id, target_id).await;

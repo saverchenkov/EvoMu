@@ -1306,7 +1306,7 @@ async fn fit_rejects_non_fittable_types_without_mutating_inventory() {
 }
 
 #[tokio::test]
-async fn spawn_1230_veldspar_queues_grid_scoped_add_balls2_wire_and_slim_item() {
+async fn spawn_1230_veldspar_queues_static_add_balls2_wire_and_slim_item() {
     let ctx = test_ctx();
     let char_id = 90_000_001_i64;
     let sys_id = 30_000_142_u32;
@@ -1371,21 +1371,21 @@ async fn spawn_1230_veldspar_queues_grid_scoped_add_balls2_wire_and_slim_item() 
     let ship_grid = {
         let bp = handle.ballpark.read().unwrap();
         let ship_grid = bp.ball_grid_ids.get(&ship_id).copied().expect("ship grid");
-        let ast_grid = bp
-            .ball_grid_ids
-            .get(&ast_id)
-            .copied()
-            .expect("asteroid must be indexed in ball_grid_ids");
-        assert_eq!(ast_grid, ship_grid, "asteroid must join observer ship grid");
+        let far_grid = bp.ball_grid_ids.get(&far_ship_id).copied().expect("far grid");
+        assert_ne!(ship_grid, far_grid, "observers must occupy distinct system grids");
+        assert!(bp.is_static_ball(ast_id), "spawned asteroid must be static");
         assert!(
-            bp.grids[&ast_grid].members.contains(&ast_id),
-            "asteroid must belong to GridBubble.members"
+            !bp.ball_grid_ids.contains_key(&ast_id),
+            "static spawned asteroid must not be inserted into ball_grid_ids"
+        );
+        assert!(
+            !bp.grids.values().any(|g| g.members.contains(&ast_id)),
+            "static spawned asteroid must not be inserted into GridBubble.members"
         );
         let ast_ball = &bp.balls[&ast_id];
         assert_eq!(ast_ball.type_id, 1230);
         assert_eq!(ast_ball.mode, eve_destiny::MovementMode::Rigid);
         assert!(ast_ball.radius >= 200.0, "asteroid radius must be >= 200m");
-        assert!(bp.is_static_ball(ast_id));
         assert!(
             (ast_ball.position - origin - glam::DVec3::new(1_500.0, 0.0, 0.0)).length() < 1e-6,
             "asteroid must spawn 1500m ahead of observer ship origin"
@@ -1478,11 +1478,14 @@ async fn spawn_1230_veldspar_queues_grid_scoped_add_balls2_wire_and_slim_item() 
 
     let (_far_tick, far_events, _) = handle.drain_observer_updates(far_ship_id).await.unwrap();
     assert!(
-        far_events.iter().all(|ev| !matches!(
-            ev,
-            eve_destiny::DestinyEvent::AddBalls2 { balls } if balls.iter().any(|b| b.id == ast_id)
-        )),
-        "off-grid observer 100k km away must not receive local asteroid AddBalls2: {far_events:?}"
+        far_events.iter().any(|ev| {
+            matches!(
+                ev,
+                eve_destiny::DestinyEvent::AddBalls2 { balls }
+                    if balls.iter().any(|b| b.id == ast_id && b.type_id == 1230)
+            )
+        }),
+        "same-system observer in separate grid must receive static AddBalls2 fan-out: {far_events:?}"
     );
 
     let unspawn = handle_gm_slash_ext(&ctx, &mut sess, char_id, &format!("/unspawn {ast_id}"))
@@ -1494,19 +1497,32 @@ async fn spawn_1230_veldspar_queues_grid_scoped_add_balls2_wire_and_slim_item() 
     let (_tick2, rem_events, _) = handle.drain_observer_updates(ship_id).await.unwrap();
     assert!(
         rem_events.iter().any(|ev| {
-            matches!(
-                ev,
-                eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == ast_id
-            ) || matches!(
-                ev,
-                eve_destiny::DestinyEvent::RemoveBalls { ball_ids } if ball_ids.contains(&ast_id)
-            )
+            matches!(ev, eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == ast_id)
         }),
-        "/unspawn must emit RemoveBall/RemoveBalls to owning grid observer: {rem_events:?}"
+        "/unspawn must emit RemoveBall to ship observer: {rem_events:?}"
     );
+    let (_far_tick2, far_rem_events, _) = handle.drain_observer_updates(far_ship_id).await.unwrap();
+    assert!(
+        far_rem_events.iter().any(|ev| {
+            matches!(ev, eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == ast_id)
+        }),
+        "/unspawn must emit RemoveBall to all system grid observers: {far_rem_events:?}"
+    );
+
+    // Spawning another static asteroid near `ship_id` must allow `ship_grid` to delete cleanly
+    // via `contract_or_delete_grid` once dynamic `ship_id` is removed.
+    let spawn_rep2 = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/spawn 1230")
+        .await
+        .expect("slash handled")
+        .expect("second /spawn 1230 ok");
+    let ast2_id = spawn_rep2.dict_get("spawnedID").and_then(|v| v.as_i64()).unwrap();
+    assert!(handle.remove_ball(ship_id).await.is_some());
     let bp = handle.ballpark.read().unwrap();
-    assert!(!bp.ball_grid_ids.contains_key(&ast_id));
-    assert!(!bp.grids[&ship_grid].members.contains(&ast_id));
+    assert!(bp.balls.contains_key(&ast2_id));
+    assert!(
+        !bp.grids.contains_key(&ship_grid),
+        "empty dynamic grid must delete via contract_or_delete_grid even near static asteroid"
+    );
 }
 
 #[tokio::test]
@@ -1544,5 +1560,74 @@ async fn spawn_1230_fails_loudly_and_rolls_back_db_when_actor_command_fails() {
     assert_eq!(
         post_asteroids, pre_asteroids,
         "failed /spawn must roll back snap.asteroids"
+    );
+}
+
+#[tokio::test]
+async fn spawn_multi_npc_rollback_cleans_db_ballpark_and_npc_runtime_state() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let npc_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 11 && t.published)
+        .or_else(|| ctx.sde.types.values().find(|t| t.category_id == 11))
+        .map(|t| t.type_id)
+        .expect("SDE must contain at least one category 11 NPC type");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = 0;
+        }
+    });
+    let mut sess = gm_session(char_id, 0);
+    sess.station_id = None;
+    sess.ship_id = None;
+    sess.solar_system_id = Some(sys_id);
+
+    let (pre_items, pre_next_id) =
+        ctx.db.with_snapshot(|s| (s.items.len(), s.next_entity_id));
+    let first_npc_id = pre_next_id + 1;
+    let second_npc_id = pre_next_id + 2;
+
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    // Allow NPC #1 to spawn and register in npc_spawns/combat_runtime, then panic NPC #2.
+    handle
+        .panic_on_command_countdown_for_test
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+
+    let err = handle_gm_slash_ext(&ctx, &mut sess, char_id, &format!("/spawn {npc_tid} 2"))
+        .await
+        .expect("slash handled")
+        .expect_err("mid-batch NPC spawn failure must return SpawnFailed");
+    assert_eq!(err.code, "SpawnFailed");
+
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items.len(), pre_items, "failed multi-NPC /spawn must roll back snap.items");
+        assert!(!s.items.contains_key(&first_npc_id));
+        assert!(!s.items.contains_key(&second_npc_id));
+    });
+    {
+        let bp = handle.ballpark.read().unwrap();
+        assert!(!bp.balls.contains_key(&first_npc_id));
+        assert!(!bp.balls.contains_key(&second_npc_id));
+    }
+    assert!(
+        ctx.npc_spawns
+            .read()
+            .unwrap()
+            .get(&sys_id)
+            .is_none_or(|m| !m.entities.contains_key(&first_npc_id) && !m.entities.contains_key(&second_npc_id)),
+        "rollback must clean ctx.npc_spawns for prior and failed NPCs"
+    );
+    assert!(
+        crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+            !rt.npc_entities.contains_key(&first_npc_id)
+                && !rt.npc_entities.contains_key(&second_npc_id)
+        }),
+        "rollback must clean combat_runtime.npc_entities for prior and failed NPCs"
     );
 }
