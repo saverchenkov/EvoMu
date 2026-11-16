@@ -1097,5 +1097,312 @@ class TestHangarViewTeardownGuard(unittest.TestCase):
         self.assertIsNone(view.shipBehaviour)
 
 
+class TestHangarViewUndockMovemeGuard(unittest.TestCase):
+    _SENTINEL = object()
+
+    def setUp(self):
+        self._saved_modules = {
+            k: sys.modules.get(k)
+            for k in (
+                "eve.client.script.ui.view.hangarView",
+                "eve.client.script.ui.view.transitions",
+                "eve.client.script.ui.services.viewStateSvc",
+            )
+        }
+        self._saved_session = getattr(builtins, "session", self._SENTINEL)
+        self._saved_sm = getattr(builtins, "sm", self._SENTINEL)
+        evomu_site._HOOKED_CAMERA_GUARD_TARGETS = set()
+
+    def tearDown(self):
+        for k, v in self._saved_modules.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+        if self._saved_session is self._SENTINEL:
+            if hasattr(builtins, "session"):
+                delattr(builtins, "session")
+        else:
+            builtins.session = self._saved_session
+        if self._saved_sm is self._SENTINEL:
+            if hasattr(builtins, "sm"):
+                delattr(builtins, "sm")
+        else:
+            builtins.sm = self._saved_sm
+        evomu_site._HOOKED_CAMERA_GUARD_TARGETS = set()
+
+    def _build_env(self, on_fade_sleep=None, on_inv_lookup=None, docked_error=None):
+        events = []
+
+        class _FakeSession(object):
+            def __init__(self):
+                self.charid = 90000001
+                self.solarsystemid = 30004759
+                self.stationid = None
+                self.structureid = 1001896944936
+                self.shipid = 1897362930
+
+        sess = _FakeSession()
+        builtins.session = sess
+
+        class _FakeSceneManager(object):
+            def FadeIn(self, duration=0.5):
+                events.append(("sceneManager.FadeIn", duration))
+
+            def FadeOut(self, duration=0.5, sleep=True):
+                events.append(("sceneManager.FadeOut", duration, sleep))
+
+        class _FakeServiceManager(object):
+            def IsServiceRunning(self, name):
+                return name == "sceneManager"
+
+            def GetService(self, name):
+                if name == "sceneManager":
+                    return _FakeSceneManager()
+                raise KeyError(name)
+
+        builtins.sm = _FakeServiceManager()
+
+        class _FakeInvCache(object):
+            def GetInventory(self, _container_id):
+                if on_inv_lookup is not None:
+                    on_inv_lookup(sess)
+                if sess.stationid is None and sess.structureid is None:
+                    raise RuntimeError("CharacterNotAtStation")
+                return [{"itemID": sess.shipid, "typeID": 587}]
+
+        class _FadeLayer(object):
+            def __init__(self):
+                self.closed = False
+
+            def Close(self):
+                self.closed = True
+                events.append("fadeLayer.Close")
+
+        vss_mod = types.ModuleType("eve.client.script.ui.services.viewStateSvc")
+
+        class _ViewType(object):
+            Primary = 1
+            Secondary = 2
+
+        class _Transition(object):
+            def StartTransition(self, fromView, toView):
+                events.append("Transition.StartTransition")
+
+            def EndTransition(self, fromView, toView):
+                events.append("Transition.EndTransition")
+
+        vss_mod.ViewType = _ViewType
+        vss_mod.Transition = _Transition
+
+        hangar_mod = types.ModuleType("eve.client.script.ui.view.hangarView")
+        trans_mod = types.ModuleType("eve.client.script.ui.view.transitions")
+        trans_mod.Transition = _Transition
+
+        class _FakeFadeToBlackLiteTransition(_Transition):
+            def StartTransition(self, fromView, toView):
+                _Transition.StartTransition(self, fromView, toView)
+                self.fadeLayer = _FadeLayer()
+                events.append("FadeToBlackLiteTransition.StartTransition.sleep")
+                if on_fade_sleep is not None:
+                    on_fade_sleep(sess)
+
+            def EndTransition(self, fromView, toView):
+                events.append("FadeToBlackLiteTransition.EndTransition.sleep")
+                self.fadeLayer.Close()
+                del self.fadeLayer
+                _Transition.EndTransition(self, fromView, toView)
+
+        class _FakeHangarToHangarTransition(_FakeFadeToBlackLiteTransition):
+            def __init__(self, hangar_view):
+                self.hangarView = hangar_view
+
+            def StartTransition(self, fromView, toView):
+                _FakeFadeToBlackLiteTransition.StartTransition(self, fromView, toView)
+                self.hangarView.ClearScene()
+                self.hangarView.SetUpModels()
+
+            def EndTransition(self, fromView, toView):
+                self.hangarView.OnHangarToHangar()
+                _FakeFadeToBlackLiteTransition.EndTransition(self, fromView, toView)
+
+        trans_mod.FadeToBlackLiteTransition = _FakeFadeToBlackLiteTransition
+        trans_mod.HangarToHangarTransition = _FakeHangarToHangarTransition
+
+        class _FakeViewStateSvc(object):
+            def __init__(self, hangar_view, transition):
+                self.isOpeningView = None
+                self.primaryInfo = None
+                self.activeViewInfo = None
+                self.hangar_view = hangar_view
+                self.transition = transition
+
+            def _OpenView(self, viewInfo, reopen=False, cameraID=None, **kwargs):
+                events.append(("_OpenView", getattr(viewInfo, "name", None)))
+                if getattr(viewInfo, "name", None) == "hangar":
+                    self.hangar_view.LoadView()
+                    self.hangar_view.ShowView()
+                    self.hangar_view.LoadCamera(cameraID=cameraID, reopen=reopen)
+                self.primaryInfo = viewInfo
+                self.activeViewInfo = viewInfo
+
+            def ActivateView(self, name, **kwargs):
+                events.append(("ActivateView.begin", name))
+                self.isOpeningView = name
+                try:
+                    info = types.SimpleNamespace(name=name, GetViewType=lambda: _ViewType.Primary)
+                    if name == "hangar":
+                        self.transition.StartTransition(self.hangar_view, self.hangar_view)
+                        self._OpenView(info)
+                        self.transition.EndTransition(self.hangar_view, self.hangar_view)
+                    else:
+                        self._OpenView(info)
+                finally:
+                    self.isOpeningView = None
+                    events.append(("ActivateView.end", name))
+
+        vss_mod.ViewStateSvc = _FakeViewStateSvc
+
+        class _FakeHangarView(object):
+            def __init__(self, view_svc):
+                self.invCache = _FakeInvCache()
+                self.view_svc = view_svc
+                self.shipBehaviour = object()
+                self.activeHangarScene = object()
+
+            def ClearScene(self):
+                events.append("HangarView.ClearScene")
+                self.shipBehaviour = None
+                self.activeHangarScene = None
+
+            def GetShipItemFromHangar(self, shipID):
+                events.append(("HangarView.GetShipItemFromHangar", shipID))
+                items = self.invCache.GetInventory(10004)
+                return items[0] if items else None
+
+            def SetUpModels(self):
+                events.append("HangarView.SetUpModels")
+                if docked_error is not None:
+                    raise docked_error
+                item = self.GetShipItemFromHangar(sess.shipid)
+                self.shipBehaviour = object()
+                self.activeHangarScene = object()
+                self.LoadAndSetupScene(item["typeID"], item["itemID"])
+
+            def LoadAndSetupScene(self, shipTypeID, itemID=None, isANewHangar=False):
+                events.append(("HangarView.LoadAndSetupScene", shipTypeID, itemID))
+
+            def LoadView(self, change=None, **kwargs):
+                events.append("HangarView.LoadView")
+                self.SetUpModels()
+
+            def ShowView(self):
+                events.append("HangarView.ShowView")
+                if not sess.stationid and not sess.structureid:
+                    return
+
+            def LoadCamera(self, cameraID=None, reopen=False):
+                events.append("HangarView.LoadCamera")
+
+            def ReloadView(self):
+                events.append("HangarView.ReloadView")
+                self.view_svc.ActivateView("hangar")
+
+            def ProcessActiveShipChanged(self, shipID, oldShipID):
+                events.append(("HangarView.ProcessActiveShipChanged", shipID, oldShipID))
+                self.GetShipItemFromHangar(shipID)
+                self.ReloadView()
+
+            def OnHangarToHangar(self):
+                events.append("HangarView.OnHangarToHangar")
+
+        hangar_mod.HangarView = _FakeHangarView
+        sys.modules["eve.client.script.ui.services.viewStateSvc"] = vss_mod
+        sys.modules["eve.client.script.ui.view.hangarView"] = hangar_mod
+        sys.modules["eve.client.script.ui.view.transitions"] = trans_mod
+
+        evomu_site._install_camera_dock_guard()
+        view_svc = _FakeViewStateSvc(None, None)
+        hangar_view = _FakeHangarView(view_svc)
+        transition = _FakeHangarToHangarTransition(hangar_view)
+        view_svc.hangar_view = hangar_view
+        view_svc.transition = transition
+        return sess, view_svc, hangar_view, transition, events
+
+    def test_structure_moveme_mid_hangar_to_hangar_fade_avoids_character_not_at_station(self):
+        def _moveme_during_fade(sess):
+            sess.structureid = None
+            sess.solarsystemid = 30000142
+
+        sess, view_svc, hangar_view, transition, events = self._build_env(on_fade_sleep=_moveme_during_fade)
+        # While still docked in Upwell structure, active ship refresh triggers ReloadView().
+        hangar_view.ProcessActiveShipChanged(sess.shipid, sess.shipid - 1)
+        # Once ActivateView('hangar') clears isOpeningView, ChangePrimaryView('inflight') completes.
+        self.assertIsNone(view_svc.isOpeningView)
+        view_svc.ActivateView("inflight")
+
+        self.assertIn("HangarView.ClearScene", events)
+        self.assertIn("fadeLayer.Close", events)
+        self.assertIn(("sceneManager.FadeOut", 0.0, False), events)
+        self.assertIn("Transition.EndTransition", events)
+        self.assertFalse(hasattr(transition, "fadeLayer"))
+        self.assertNotIn("HangarView.SetUpModels", events)
+        self.assertNotIn("HangarView.LoadView", events)
+        self.assertNotIn("HangarView.LoadCamera", events)
+        self.assertNotIn("HangarView.OnHangarToHangar", events)
+        self.assertNotIn("FadeToBlackLiteTransition.EndTransition.sleep", events)
+        self.assertEqual(view_svc.primaryInfo.name, "inflight")
+
+    def test_hangar_view_methods_and_transition_noop_when_already_undocked(self):
+        sess, view_svc, hangar_view, transition, events = self._build_env()
+        sess.structureid = None
+        sess.stationid = None
+        sess.solarsystemid = 30000142
+
+        self.assertIsNone(hangar_view.GetShipItemFromHangar(sess.shipid))
+        self.assertIsNone(hangar_view.SetUpModels())
+        self.assertIsNone(hangar_view.LoadAndSetupScene(587, sess.shipid))
+        self.assertIsNone(hangar_view.LoadView())
+        self.assertIsNone(hangar_view.LoadCamera())
+        self.assertIsNone(hangar_view.ReloadView())
+        self.assertIsNone(hangar_view.ProcessActiveShipChanged(sess.shipid, sess.shipid - 1))
+
+        view_svc.ActivateView("hangar")
+        self.assertIn("HangarView.ClearScene", events)
+        self.assertNotIn("FadeToBlackLiteTransition.StartTransition.sleep", events)
+        self.assertNotIn("HangarView.SetUpModels", events)
+        self.assertNotIn("HangarView.OnHangarToHangar", events)
+        self.assertFalse(hasattr(transition, "fadeLayer"))
+
+    def test_mid_yield_character_not_at_station_absorbed_when_undocked_and_docked_works_normally(self):
+        # Case A: session loses structureid inside invCache.GetInventory mid-SetUpModels.
+        def _moveme_mid_inv(sess):
+            sess.structureid = None
+            sess.solarsystemid = 30000142
+
+        _sess, _view_svc, hangar_view, _transition, events = self._build_env(on_inv_lookup=_moveme_mid_inv)
+        self.assertIsNone(hangar_view.SetUpModels())
+        self.assertIn("HangarView.SetUpModels", events)
+
+        # Case B: while actually docked at an Upwell structure, HangarToHangar flow runs normally.
+        evomu_site._HOOKED_CAMERA_GUARD_TARGETS = set()
+        sess_b, _view_svc_b, hangar_view_b, transition_b, events_b = self._build_env()
+        hangar_view_b.ProcessActiveShipChanged(sess_b.shipid, sess_b.shipid - 1)
+        self.assertIn("HangarView.SetUpModels", events_b)
+        self.assertIn(("HangarView.LoadAndSetupScene", 587, sess_b.shipid), events_b)
+        self.assertIn("HangarView.LoadView", events_b)
+        self.assertIn("HangarView.LoadCamera", events_b)
+        self.assertIn("HangarView.OnHangarToHangar", events_b)
+        self.assertIn("FadeToBlackLiteTransition.EndTransition.sleep", events_b)
+        self.assertFalse(hasattr(transition_b, "fadeLayer"))
+
+        # Case C: genuine errors while still docked must still propagate cleanly.
+        evomu_site._HOOKED_CAMERA_GUARD_TARGETS = set()
+        _sess_c, _view_svc_c, hangar_view_c, _tr_c, _ev_c = self._build_env(docked_error=RuntimeError("boom"))
+        with self.assertRaises(RuntimeError) as ctx:
+            hangar_view_c.SetUpModels()
+        self.assertIn("boom", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

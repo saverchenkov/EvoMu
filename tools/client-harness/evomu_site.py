@@ -729,9 +729,18 @@ def _install_camera_dock_guard():
                         if curr_cam is not None and getattr(curr_cam, "isActive", False) and hasattr(scene_mgr, "DeactivateFISCamera"):
                             scene_mgr.DeactivateFISCamera()
                 _install_hangar_view_teardown_guard()
+                _install_hangar_transition_guard()
                 return orig_open_view(self, viewInfo, reopen=reopen, cameraID=cameraID, **kwargs)
             _wrapped_open_view._evomu_camera_guard = True
             vss_cls._OpenView = _wrapped_open_view
+        orig_activate_view = getattr(vss_cls, "ActivateView", None) if vss_cls is not None else None
+        if orig_activate_view is not None and not getattr(orig_activate_view, "_evomu_camera_guard", False):
+            def _wrapped_activate_view(self, *args, **kwargs):
+                _install_hangar_view_teardown_guard()
+                _install_hangar_transition_guard()
+                return orig_activate_view(self, *args, **kwargs)
+            _wrapped_activate_view._evomu_camera_guard = True
+            vss_cls.ActivateView = _wrapped_activate_view
         _HOOKED_CAMERA_GUARD_TARGETS.add("viewStateSvc")
 
     base_cam_mod = sys.modules.get("eve.client.script.ui.camera.baseCamera")
@@ -909,10 +918,23 @@ def _install_camera_dock_guard():
                         svc.on_warp_finished = _make_inst_guard(inst_fn, svc, svc_mod)
 
     _install_hangar_view_teardown_guard()
+    _install_hangar_transition_guard()
 
 
 class _HangarViewTornDown(Exception):
     """Internal sentinel raised when HangarView is cleared mid-yield."""
+
+
+# Guarded HangarView methods that require an active station/structure dock (#1163).
+_HANGAR_VIEW_UNDOCK_METHODS = (
+    "GetShipItemFromHangar",
+    "SetUpModels",
+    "LoadAndSetupScene",
+    "LoadView",
+    "LoadCamera",
+    "ReloadView",
+    "ProcessActiveShipChanged",
+)
 
 
 # Guarded HangarView methods: (method_name, abort_replace_on_stale, check_after_call)
@@ -1037,6 +1059,121 @@ def _make_hangar_teardown_guard(orig_fn, abort_replace=False, check_after=False)
     return _wrapped_hangar_method
 
 
+def _is_hangar_session_undocked():
+    """Return True when EVE session is loaded and neither docked at station nor structure."""
+    sess = getattr(__builtin__, "session", None)
+    if sess is None:
+        return False
+    return getattr(sess, "stationid", None) is None and getattr(sess, "structureid", None) is None
+
+
+def _make_hangar_undock_guard(orig_fn):
+    """Guard HangarView methods against undocking mid-reload / /moveme (#1163)."""
+    def _wrapped_hangar_undock_method(self, *args, **kwargs):
+        if _is_hangar_session_undocked():
+            return None
+        try:
+            return orig_fn(self, *args, **kwargs)
+        except Exception:
+            if _is_hangar_session_undocked():
+                return None
+            raise
+
+    _wrapped_hangar_undock_method._evomu_camera_guard = True
+    return _wrapped_hangar_undock_method
+
+
+def _close_transition_fade_layer(transition):
+    """Dismiss HangarToHangar fade overlay cleanly when undocked mid-transition (#1163)."""
+    fade_layer = getattr(transition, "fadeLayer", None)
+    if fade_layer is not None:
+        close_fn = getattr(fade_layer, "Close", None)
+        if callable(close_fn):
+            close_fn()
+        try:
+            delattr(transition, "fadeLayer")
+        except AttributeError:
+            pass
+    sm = getattr(__builtin__, "sm", None)
+    if sm is not None and hasattr(sm, "IsServiceRunning") and sm.IsServiceRunning("sceneManager"):
+        scene_mgr = sm.GetService("sceneManager")
+        fade_out = getattr(scene_mgr, "FadeOut", None)
+        if callable(fade_out):
+            try:
+                fade_out(duration=0.0, sleep=False)
+            except TypeError:
+                fade_out(0.0)
+
+
+def _call_base_transition_method(base_transition_cls, method_name, transition, from_view, to_view):
+    """Invoke a base `Transition` hook safely under both Python 2.7 and Python 3."""
+    if base_transition_cls is None or not isinstance(transition, base_transition_cls):
+        return None
+    fn = getattr(base_transition_cls, method_name, None)
+    if callable(fn):
+        return fn(transition, from_view, to_view)
+    return None
+
+
+def _install_hangar_transition_guard():
+    """Guard HangarToHangarTransition against mid-fade undock / /moveme (#1163)."""
+    if "hangarTransition" in _HOOKED_CAMERA_GUARD_TARGETS:
+        return False
+    trans_mod = sys.modules.get("eve.client.script.ui.view.transitions")
+    trans_cls = getattr(trans_mod, "HangarToHangarTransition", None) if trans_mod is not None else None
+    if trans_cls is None or trans_cls is object or not (
+        isinstance(trans_cls, type) or hasattr(trans_cls, "__bases__")
+    ):
+        return False
+
+    vss_mod = sys.modules.get("eve.client.script.ui.services.viewStateSvc")
+    base_transition_cls = (
+        getattr(trans_mod, "Transition", None)
+        or (getattr(vss_mod, "Transition", None) if vss_mod is not None else None)
+    )
+
+    orig_start = getattr(trans_cls, "StartTransition", None)
+    if callable(orig_start) and not getattr(orig_start, "_evomu_camera_guard", False):
+        def _wrapped_start_transition(self, fromView, toView):
+            _install_hangar_view_teardown_guard()
+            if _is_hangar_session_undocked():
+                self._evomu_aborted_undocked = True
+                hangar_view = getattr(self, "hangarView", None)
+                clear_fn = getattr(hangar_view, "ClearScene", None) if hangar_view is not None else None
+                if callable(clear_fn):
+                    clear_fn()
+                _call_base_transition_method(base_transition_cls, "StartTransition", self, fromView, toView)
+                return None
+            self._evomu_aborted_undocked = False
+            try:
+                return orig_start(self, fromView, toView)
+            except Exception:
+                if _is_hangar_session_undocked():
+                    self._evomu_aborted_undocked = True
+                    return None
+                raise
+            finally:
+                if _is_hangar_session_undocked():
+                    self._evomu_aborted_undocked = True
+
+        _wrapped_start_transition._evomu_camera_guard = True
+        trans_cls.StartTransition = _wrapped_start_transition
+
+    orig_end = getattr(trans_cls, "EndTransition", None)
+    if callable(orig_end) and not getattr(orig_end, "_evomu_camera_guard", False):
+        def _wrapped_end_transition(self, fromView, toView):
+            if getattr(self, "_evomu_aborted_undocked", False) or _is_hangar_session_undocked():
+                _close_transition_fade_layer(self)
+                return _call_base_transition_method(base_transition_cls, "EndTransition", self, fromView, toView)
+            return orig_end(self, fromView, toView)
+
+        _wrapped_end_transition._evomu_camera_guard = True
+        trans_cls.EndTransition = _wrapped_end_transition
+
+    _HOOKED_CAMERA_GUARD_TARGETS.add("hangarTransition")
+    return True
+
+
 def _install_hangar_view_teardown_guard():
     """Guard HangarView ship-model calls against ClearScene/UnloadView teardown races (#1154)."""
     if "hangarView" in _HOOKED_CAMERA_GUARD_TARGETS:
@@ -1064,6 +1201,11 @@ def _install_hangar_view_teardown_guard():
                 method_name,
                 _make_hangar_teardown_guard(orig_fn, abort_replace=abort_replace, check_after=check_after),
             )
+
+    for method_name in _HANGAR_VIEW_UNDOCK_METHODS:
+        orig_fn = getattr(hangar_cls, method_name, None)
+        if callable(orig_fn) and not getattr(orig_fn, "_evomu_camera_guard", False):
+            setattr(hangar_cls, method_name, _make_hangar_undock_guard(orig_fn))
 
     _HOOKED_CAMERA_GUARD_TARGETS.add("hangarView")
     return True

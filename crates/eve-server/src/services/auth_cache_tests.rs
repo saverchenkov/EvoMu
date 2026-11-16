@@ -2009,3 +2009,231 @@ async fn gm_giveskill_sets_syncs_removes_targets_and_prunes_queue_gh1137_1138() 
         assert_eq!(err.code, "InvalidSlashArgument", "for {bad}");
     }
 }
+
+#[tokio::test]
+async fn slash_moveme_from_docked_upwell_structure_undocks_ship_notifies_and_releases_control() {
+    let mut ctx = test_ctx();
+    let uid = 1_u64;
+    let cid = 90_000_001_i64;
+    let peer_cid = 90_000_002_i64;
+    let struct_id = 1_001_896_944_936_i64;
+    let ship_id = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&cid).map(|c| c.active_ship_id))
+        .unwrap_or(0);
+    assert!(ship_id > 0);
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_000_144,
+                name: "1DQ1-A Keepstar".into(),
+                position: [12_000_000.0, -3_000_000.0, 4_000_000.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 500_000.0,
+                armor_hp: 500_000.0,
+                hull_hp: 500_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.solar_system_id = 30_000_144;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = 30_000_144;
+            ship.flag = InventoryFlag::None;
+        }
+        let mut peer = snap.characters[&cid].clone();
+        peer.character_id = peer_cid;
+        peer.user_id = 2;
+        peer.solar_system_id = 30_000_144;
+        peer.station_id = None;
+        peer.structure_id = Some(struct_id);
+        snap.characters.insert(peer_cid, peer);
+    });
+    let _ = ctx
+        .db
+        .dock_character(cid, struct_id, true)
+        .expect("dock cid in Upwell structure");
+
+    let mut sess = auth_session(uid, cid, 98_000_001, 30_000_144);
+    sess.station_id = None;
+    sess.structure_id = Some(struct_id);
+    sess.ship_id = Some(ship_id);
+    sess.role = service_roles::ROLE_GMH;
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, sess.session_id.max(1), Some(cid), true, ctx.now_unix());
+    let _ = ctx
+        .db
+        .acquire_online_lock(2, sess.session_id.max(1) + 1, Some(peer_cid), true, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(cid);
+    let _ = ctx.drain_notifications_for_char(peer_cid);
+
+    let res = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/moveme 30000142".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("/moveme 30000142 from docked Upwell structure");
+    assert_eq!(keyval_i64(&res, "solarSystemID"), Some(30_000_142));
+    assert_eq!(sess.solar_system_id, Some(30_000_142));
+    assert_eq!(sess.station_id, None);
+    assert_eq!(sess.structure_id, None);
+    assert_eq!(sess.ship_id, Some(ship_id));
+
+    ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&cid];
+        assert_eq!(ch.solar_system_id, 30_000_142);
+        assert_eq!(ch.station_id, None);
+        assert_eq!(ch.structure_id, None);
+        let ship = &snap.items[&ship_id];
+        assert_eq!(ship.location_id, 30_000_142);
+        assert_eq!(ship.flag, InventoryFlag::None);
+    });
+
+    let notifs = ctx.drain_notifications_for_char(cid);
+    let item_change = notifs
+        .iter()
+        .find(|n| n.event == "OnItemChange")
+        .expect("/moveme from docked structure must emit OnItemChange");
+    assert_eq!(item_change.id_type, "charid");
+    assert_eq!(item_change.args.len(), 2);
+    let change_dict = item_change.args[1]
+        .as_dict()
+        .expect("OnItemChange change dict");
+    assert!(
+        change_dict
+            .iter()
+            .any(|(k, v)| k == &PyRep::Integer(3) && v == &PyRep::Integer(struct_id)),
+        "OnItemChange must record previous structure locationID {struct_id}: {change_dict:?}"
+    );
+    assert!(
+        change_dict.iter().any(|(k, v)| {
+            k == &PyRep::Integer(4) && v == &PyRep::Integer(InventoryFlag::Hangar as i64)
+        }),
+        "OnItemChange must record previous Hangar flagID: {change_dict:?}"
+    );
+
+    let peer_notifs = ctx.drain_notifications_for_char(peer_cid);
+    let left_notif = peer_notifs
+        .iter()
+        .find(|n| n.event == "OnCharacterLeftStructure")
+        .expect("peer docked in structure must receive OnCharacterLeftStructure");
+    assert_eq!(left_notif.id_type, "stationid");
+    assert_eq!(left_notif.args, vec![PyRep::Integer(cid)]);
+
+    // Part 2: If pilot was controlling the Upwell structure while docked, `/moveme` must release
+    // structure control cleanly and move the restored ship (never the structure) to space.
+    let _ = ctx.systems.get_or_spawn(30_000_142).remove_ball(ship_id).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.solar_system_id = 30_000_144;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+            ch.corporation_id = 98_000_001;
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = 30_000_144;
+            ship.flag = InventoryFlag::None;
+        }
+        if let Some(corp) = snap.corporations.get_mut(&98_000_001) {
+            corp.ceo_id = cid;
+            corp.members.insert(cid);
+        }
+    });
+    let _ = ctx
+        .db
+        .dock_character(cid, struct_id, true)
+        .expect("re-dock in Upwell structure");
+    sess.solar_system_id = Some(30_000_144);
+    sess.station_id = None;
+    sess.structure_id = Some(struct_id);
+    sess.ship_id = Some(ship_id);
+    sess.corporation_id = Some(98_000_001);
+    sess.corp_role = 1;
+
+    if !ctx.sde.types.contains_key(&35_832) {
+        let reg = std::sync::Arc::make_mut(&mut ctx.sde);
+        let mut st_type = reg.types.values().next().cloned().expect("base SDE type");
+        st_type.type_id = 35_832;
+        st_type.group_id = 1657;
+        st_type.category_id = 65;
+        st_type.name = "Astrahus".into();
+        st_type.radius = 5_000.0;
+        st_type.mass = 1.0e11;
+        reg.types.insert(35_832, st_type);
+    }
+
+    let _ = crate::services::structure_control_ops::handle_take_control(
+        &ctx,
+        &mut sess,
+        &[PyRep::Integer(struct_id)],
+    )
+    .await
+    .expect("take structure control while docked");
+    assert_eq!(sess.ship_id, Some(struct_id));
+
+    let _ = ctx.drain_notifications_for_char(cid);
+    let _ = ctx.drain_notifications_for_char(peer_cid);
+    let _ = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/moveme 30000142".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("/moveme 30000142 while controlling structure");
+
+    assert_eq!(sess.solar_system_id, Some(30_000_142));
+    assert_eq!(sess.structure_id, None);
+    assert_eq!(sess.station_id, None);
+    assert_eq!(sess.ship_id, Some(ship_id));
+    assert_eq!(
+        crate::services::structure_control_ops::handle_get_structure_pilot(
+            &ctx,
+            &auth_session(2, peer_cid, 98_000_001, 30_000_144),
+            &[PyRep::Integer(struct_id)],
+        )
+        .expect("get structure pilot"),
+        PyRep::None
+    );
+    let jita_handle = ctx.systems.get_or_spawn(30_000_142);
+    assert!(
+        jita_handle
+            .get_ball_snapshot(ship_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "restored pilot ship ball must spawn in destination system"
+    );
+    assert!(
+        jita_handle
+            .get_ball_snapshot(struct_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "Upwell structure ball must never be teleported into destination system"
+    );
+}
