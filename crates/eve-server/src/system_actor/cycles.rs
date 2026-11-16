@@ -2922,6 +2922,33 @@ pub(crate) fn teardown_attacker_locks_and_cycles_for_destroyed_balls(
     }
 }
 
+/// Returns `(telemetry_kind, ship_id)` when `notif` is a periodic ship-capacitor update
+/// whose stale queued snapshots can be superseded or evicted ahead of state notifications.
+fn capacitor_telemetry_key(n: &crate::router::PendingMachoNotification) -> Option<(&'static str, i64)> {
+    if n.event == "OnCapacitorChange" {
+        return n
+            .args
+            .first()
+            .and_then(eve_proto::PyRep::as_i64)
+            .map(|sid| ("OnCapacitorChange", sid));
+    }
+    if n.event == "OnModuleAttributeChanges" {
+        if let [eve_proto::PyRep::List(entries)] = n.args.as_slice() {
+            if let [eve_proto::PyRep::Tuple(t)] = entries.as_slice() {
+                if t.len() >= 6
+                    && t[0].as_str() == Some("OnModuleAttributeChange")
+                    && t[3].as_i64() == Some(18)
+                {
+                    return t[2]
+                        .as_i64()
+                        .map(|sid| ("OnModuleAttributeChanges:18", sid));
+                }
+            }
+        }
+    }
+    None
+}
+
 fn enqueue_cycle_char_notification(
     db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
     pending: &dyn AnyRwLock<
@@ -2957,8 +2984,20 @@ fn enqueue_cycle_char_notification(
     {
         let mut q_guard = pending.write().unwrap_or_else(|e| e.into_inner());
         let q = q_guard.entry(cid).or_default();
+        if let Some(key) = capacitor_telemetry_key(&notif) {
+            // Keep only the latest unread capacitor telemetry per ship so passive regen ticks
+            // do not fill the character queue and evict discrete state notifications (#1156).
+            q.retain(|existing| capacitor_telemetry_key(existing) != Some(key));
+        }
         if q.len() >= crate::router::MAX_PENDING_NOTIFICATIONS_PER_CHAR {
-            q.remove(0);
+            if let Some(evict_idx) = q
+                .iter()
+                .position(|existing| capacitor_telemetry_key(existing).is_some())
+            {
+                q.remove(evict_idx);
+            } else {
+                q.remove(0);
+            }
         }
         q.push(notif.clone());
     }

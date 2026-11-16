@@ -56,6 +56,37 @@ fn reload_fast_sqlite_ctx(ctx: &ServerContext, path: &std::path::Path) -> std::s
     std::sync::Arc::new(crate::sovereignty_equinox_gameplay::open_sqlite_raw(path))
 }
 
+async fn spawn_hurricane_with_combat_at(
+    ctx: &ServerContext,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    position: DVec3,
+) {
+    let sh = ctx.systems.get_or_spawn(sys_id);
+    if sh.get_ball_snapshot(ship_id).await.ok().flatten().is_none() {
+        let _ = sh
+            .spawn_ball_with_combat(
+                eve_destiny::Ball {
+                    id: ship_id,
+                    type_id: HURRICANE_TYPE,
+                    position,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 200.0,
+                    inertia: 3.0,
+                    mass: 1.5e7,
+                    radius: 200.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                ctx.build_ship_combat_state(char_id, ship_id, HURRICANE_TYPE),
+            )
+            .await;
+    } else {
+        sh.set_ball_position(ship_id, position).await;
+    }
+}
+
 // parity: feat:sovereignty.sov-adm
 // parity: feat:sovereignty.sov-dev-indices
 // parity: feat:sovereignty.sov-entosis
@@ -117,25 +148,18 @@ async fn test_e2e_sov_adm_dev_indices_entosis_counter_and_command_nodes() {
             },
         );
     });
+    for (ship_id, prev_sys) in [
+        (def.ship_id, def.sess.solar_system_id),
+        (atk.ship_id, atk.sess.solar_system_id),
+    ] {
+        if let Some(prev) = prev_sys.filter(|&p| p != sys_id) {
+            let _ = ctx.systems.get_or_spawn(prev).remove_ball(ship_id).await;
+        }
+    }
     def.sess.solar_system_id = Some(sys_id);
     atk.sess.solar_system_id = Some(sys_id);
-    let sys_h = ctx.systems.get_or_spawn(sys_id);
-    for (sid_ship, x) in [(def.ship_id, 100_000.0), (atk.ship_id, 105_000.0)] {
-        let _ = sys_h
-            .spawn_ball(eve_destiny::Ball {
-                id: sid_ship,
-                type_id: HURRICANE_TYPE,
-                position: DVec3::new(x, 0.0, 0.0),
-                velocity: DVec3::ZERO,
-                max_velocity: 200.0,
-                inertia: 3.0,
-                mass: 1.5e7,
-                radius: 200.0,
-                speed_fraction: 0.0,
-                mode: eve_destiny::MovementMode::Stop,
-            })
-            .await;
-    }
+    spawn_hurricane_with_combat_at(&ctx, sys_id, def.char_id, def.ship_id, DVec3::new(100_000.0, 0.0, 0.0)).await;
+    spawn_hurricane_with_combat_at(&ctx, sys_id, atk.char_id, atk.ship_id, DVec3::new(105_000.0, 0.0, 0.0)).await;
 
     let hub_item = ctx.db.with_snapshot(|s| {
         s.items
@@ -302,8 +326,9 @@ async fn test_e2e_sov_adm_dev_indices_entosis_counter_and_command_nodes() {
     };
     let _ = ctx.drain_notifications_for_char(def.char_id);
     let _ = ctx.drain_notifications_for_char(atk.char_id);
+    let mut atk_cur_sys = sys_id;
     for _ in 0..20 {
-        if ctx.db.with_snapshot(|s| s.system_states[&sys_id].sov_alliance_id) == Some(atk_alliance) {
+        if ctx.db.with_snapshot(|s| s.system_states[&sys_id].sov_alliance_id).is_none() {
             break;
         }
         let next_node = ctx.db.with_snapshot(|s| {
@@ -317,6 +342,10 @@ async fn test_e2e_sov_adm_dev_indices_entosis_counter_and_command_nodes() {
             tick_background_cluster(&ctx).await;
             continue;
         };
+        if nsys != atk_cur_sys {
+            let _ = ctx.systems.get_or_spawn(atk_cur_sys).remove_ball(atk.ship_id).await;
+            atk_cur_sys = nsys;
+        }
         ctx.db.with_mut_snapshot(|s| {
             let ch = s.characters.get_mut(&atk.char_id).unwrap();
             ch.solar_system_id = nsys;
@@ -329,24 +358,14 @@ async fn test_e2e_sov_adm_dev_indices_entosis_counter_and_command_nodes() {
         atk.sess.station_id = None;
         let nsh = ctx.systems.get_or_spawn(nsys);
         let npos = nsh.get_ball_snapshot(nid).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO);
-        if nsh.get_ball_snapshot(atk.ship_id).await.unwrap().is_none() {
-            let _ = nsh
-                .spawn_ball(eve_destiny::Ball {
-                    id: atk.ship_id,
-                    type_id: HURRICANE_TYPE,
-                    position: npos + DVec3::new(3_000.0, 0.0, 0.0),
-                    velocity: DVec3::ZERO,
-                    max_velocity: 200.0,
-                    inertia: 3.0,
-                    mass: 1.5e7,
-                    radius: 200.0,
-                    speed_fraction: 0.0,
-                    mode: eve_destiny::MovementMode::Stop,
-                })
-                .await;
-        } else {
-            nsh.set_ball_position(atk.ship_id, npos + DVec3::new(3_000.0, 0.0, 0.0)).await;
-        }
+        spawn_hurricane_with_combat_at(
+            &ctx,
+            nsys,
+            atk.char_id,
+            atk.ship_id,
+            npos + DVec3::new(3_000.0, 0.0, 0.0),
+        )
+        .await;
         advance_avoiding_downtime(0);
         call_rpc(
             &ctx,
@@ -395,21 +414,11 @@ async fn test_e2e_sov_adm_dev_indices_entosis_counter_and_command_nodes() {
         );
         hid
     });
+    if atk_cur_sys != sys_id {
+        let _ = ctx.systems.get_or_spawn(atk_cur_sys).remove_ball(atk.ship_id).await;
+    }
     atk.sess.solar_system_id = Some(sys_id);
-    let _ = sys_h
-        .spawn_ball(eve_destiny::Ball {
-            id: atk.ship_id,
-            type_id: HURRICANE_TYPE,
-            position: DVec3::new(150_000.0, 0.0, 0.0),
-            velocity: DVec3::ZERO,
-            max_velocity: 200.0,
-            inertia: 3.0,
-            mass: 1.5e7,
-            radius: 200.0,
-            speed_fraction: 0.0,
-            mode: eve_destiny::MovementMode::Stop,
-        })
-        .await;
+    spawn_hurricane_with_combat_at(&ctx, sys_id, atk.char_id, atk.ship_id, DVec3::new(150_000.0, 0.0, 0.0)).await;
     call_rpc(
         &ctx,
         &mut atk.sess,
