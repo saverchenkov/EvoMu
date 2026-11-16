@@ -18,6 +18,14 @@ free_fast_checkout_plex = true
 starter_plex_balance = 50000
 allow_local_dev_gateway_jwt = true
 
+# Optional gameplay rate multipliers (must be finite and > 0.0; default = 1.0).
+# May also be set at top-level, under [feature_flags], or via env overrides
+# EVOMU_SKILL_TRAINING_MULTIPLIER and EVOMU_MINING_YIELD_MULTIPLIER (env overrides TOML).
+# Specifying conflicting differing values across sections in evomu.toml is rejected.
+[rates]
+skill_training_multiplier = 1.0
+mining_yield_multiplier = 1.0
+
 # Example operator-provisioned accounts (passwords are hashed at rest with Argon2id):
 # [[admin_accounts]]
 # username = "gm_admin"

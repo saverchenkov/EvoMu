@@ -910,3 +910,105 @@ fn fittings_post_and_delete_cover_all_validation_errors_and_ownership_checks() {
         403
     );
 }
+
+fn parse_iso_utc_unix(ts: &str) -> u64 {
+    let trimmed = ts.trim_end_matches('Z');
+    let (date, time) = trimmed.split_once('T').expect("ISO-8601 timestamp");
+    let mut d = date.split('-').map(|s| s.parse::<i64>().unwrap());
+    let (y, m, day) = (d.next().unwrap(), d.next().unwrap(), d.next().unwrap());
+    let mut t = time.split(':').map(|s| s.parse::<i64>().unwrap());
+    let (hh, mm, ss) = (t.next().unwrap(), t.next().unwrap(), t.next().unwrap());
+    // Howard Hinnant civil-from-days inverse for UTC -> unix seconds.
+    let y_adj = y - i64::from(m <= 2);
+    let era = y_adj.div_euclid(400);
+    let yoe = y_adj.rem_euclid(400);
+    let m_adj = m + if m > 2 { -3 } else { 9 };
+    let doy = (153 * m_adj + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    (days * 86_400 + hh * 3_600 + mm * 60 + ss) as u64
+}
+
+#[test]
+fn esi_skillqueue_reflects_skill_training_multiplier() {
+    let (ctx, _token, char_id, _corp_id, _planet_id) = seed_full_esi_context();
+    let empty_q = HashMap::new();
+    let p = params(&[("character_id", &char_id.to_string())]);
+    let skill_tid = 3300_u32;
+    let now = ctx.now_unix();
+    let lvl4_sp = crate::formulas::sp_for_skill_level(1.0, 4);
+    let lvl5_sp = crate::formulas::sp_for_skill_level(1.0, 5);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+        }
+        let eff_attrs =
+            crate::services::character_skills::effective_character_attributes(&ctx.sde, snap, char_id);
+        let p_val = crate::services::character_skills::lookup_effective_attr_from_tuple(
+            eff_attrs,
+            eve_sde::attr_ids::PERCEPTION as u32,
+        );
+        let s_val = crate::services::character_skills::lookup_effective_attr_from_tuple(
+            eff_attrs,
+            eve_sde::attr_ids::WILLPOWER as u32,
+        );
+        let dur_1x =
+            crate::formulas::skill_training_time_seconds(lvl4_sp, lvl5_sp, p_val, s_val, 1.0);
+        snap.paused_skill_queues.remove(&char_id);
+        snap.skill_queues.insert(
+            char_id,
+            vec![SkillQueueEntry {
+                type_id: skill_tid,
+                target_level: 5,
+                start_sp: lvl4_sp,
+                end_sp: lvl5_sp,
+                duration_seconds: dur_1x,
+                started_at_unix: Some(now),
+            }],
+        );
+    });
+
+    let res_1x = dispatch_character_routes(
+        &ctx,
+        "GET",
+        "/characters/{character_id}/skillqueue",
+        &p,
+        &empty_q,
+        None,
+        1,
+        b"",
+    )
+    .unwrap();
+    let entry_1x = body(&res_1x).as_array().unwrap().first().unwrap();
+    let start_1x = parse_iso_utc_unix(entry_1x["start_date"].as_str().unwrap());
+    let finish_1x = parse_iso_utc_unix(entry_1x["finish_date"].as_str().unwrap());
+    let span_1x = finish_1x.saturating_sub(start_1x);
+
+    ctx.feature_flags
+        .write()
+        .unwrap()
+        .skill_training_multiplier = 100.0;
+
+    let res_100x = dispatch_character_routes(
+        &ctx,
+        "GET",
+        "/characters/{character_id}/skillqueue",
+        &p,
+        &empty_q,
+        None,
+        1,
+        b"",
+    )
+    .unwrap();
+    let entry_100x = body(&res_100x).as_array().unwrap().first().unwrap();
+    let start_100x = parse_iso_utc_unix(entry_100x["start_date"].as_str().unwrap());
+    let finish_100x = parse_iso_utc_unix(entry_100x["finish_date"].as_str().unwrap());
+    let span_100x = finish_100x.saturating_sub(start_100x);
+
+    assert!(span_1x > 100_000);
+    assert!(
+        span_100x > 0 && ((span_100x * 100) as i64 - span_1x as i64).abs() <= 200,
+        "expected 100x ESI skillqueue span ~1/100th of 1x span (1x={span_1x}s, 100x={span_100x}s)"
+    );
+}

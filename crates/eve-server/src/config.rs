@@ -55,7 +55,7 @@ pub struct StarterCharacterConfig {
     pub initial_balance_plex: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FeatureFlagsConfig {
     #[serde(default = "default_true")]
     pub enable_quasar_gateway: bool,
@@ -79,6 +79,18 @@ pub struct FeatureFlagsConfig {
     pub allow_local_dev_gateway_jwt: bool,
     #[serde(default)]
     pub gm_mode: bool,
+    /// Global multiplier applied to skill training speed (SP/min) and inverse duration (`#1123`).
+    #[serde(
+        default = "default_rate_multiplier",
+        deserialize_with = "deserialize_rate_f64"
+    )]
+    pub skill_training_multiplier: f64,
+    /// Global multiplier applied to player mining yield per cycle (`#1123`).
+    #[serde(
+        default = "default_rate_multiplier",
+        deserialize_with = "deserialize_rate_f64"
+    )]
+    pub mining_yield_multiplier: f64,
 }
 
 fn default_true() -> bool {
@@ -87,6 +99,145 @@ fn default_true() -> bool {
 
 fn default_info_gathering_interval_secs() -> u64 {
     300
+}
+
+fn default_rate_multiplier() -> f64 {
+    1.0
+}
+
+fn deserialize_rate_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct RateF64Visitor;
+
+    impl<'de> serde::de::Visitor<'de> for RateF64Visitor {
+        type Value = f64;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a finite positive number")
+        }
+
+        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(v as f64)
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(v as f64)
+        }
+
+        fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E> {
+            Ok(v)
+        }
+    }
+
+    deserializer.deserialize_any(RateF64Visitor)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RateValue(f64);
+
+impl<'de> serde::Deserialize<'de> for RateValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserialize_rate_f64(deserializer).map(Self)
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawConfigRateAliases {
+    #[serde(default)]
+    skill_training_multiplier: Option<RateValue>,
+    #[serde(default)]
+    mining_yield_multiplier: Option<RateValue>,
+    #[serde(default)]
+    rates: RawRatesSection,
+    #[serde(default)]
+    feature_flags: RawFeatureFlagsRates,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRatesSection {
+    #[serde(default)]
+    skill_training_multiplier: Option<RateValue>,
+    #[serde(default)]
+    mining_yield_multiplier: Option<RateValue>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawFeatureFlagsRates {
+    #[serde(default)]
+    skill_training_multiplier: Option<RateValue>,
+    #[serde(default)]
+    mining_yield_multiplier: Option<RateValue>,
+}
+
+fn validate_rate_multiplier(label: &str, value: f64) -> Result<f64, String> {
+    if !value.is_finite() || value <= 0.0 {
+        return Err(format!("{label} must be finite and > 0.0 (got {value})"));
+    }
+    Ok(value)
+}
+
+fn resolve_rate_multiplier(
+    field_name: &str,
+    top_level: Option<f64>,
+    rates_section: Option<f64>,
+    feature_flags: Option<f64>,
+) -> Result<f64, String> {
+    let candidates = [
+        ("top-level", top_level),
+        ("[rates]", rates_section),
+        ("[feature_flags]", feature_flags),
+    ];
+    let mut resolved: Vec<(&str, f64)> = Vec::new();
+    for (section, maybe_val) in candidates {
+        if let Some(v) = maybe_val {
+            let label = if section == "top-level" {
+                format!("{field_name} in evomu.toml")
+            } else {
+                format!("{section}.{field_name} in evomu.toml")
+            };
+            validate_rate_multiplier(&label, v)?;
+            resolved.push((section, v));
+        }
+    }
+    let Some((_, first)) = resolved.first().copied() else {
+        return Ok(default_rate_multiplier());
+    };
+    for (_, val) in resolved.iter().skip(1) {
+        let tol = 1e-12 * first.abs().max(val.abs()).max(1.0);
+        if (first - *val).abs() > tol {
+            let summary = resolved
+                .iter()
+                .map(|(sec, v)| format!("{sec}={v}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "Conflicting {field_name} values in evomu.toml ({summary}); specify it in only one of top-level, [rates], or [feature_flags]"
+            ));
+        }
+    }
+    Ok(first)
+}
+
+fn parse_rate_env(var_name: &str) -> Result<Option<f64>, String> {
+    let Ok(raw) = std::env::var(var_name) else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let parsed = trimmed
+        .parse::<f64>()
+        .map_err(|e| format!("Invalid {var_name} '{trimmed}': {e}"))?;
+    validate_rate_multiplier(var_name, parsed)
+        .map_err(|e| format!("Invalid {var_name} '{trimmed}': {e}"))?;
+    Ok(Some(parsed))
 }
 
 impl Default for FeatureFlagsConfig {
@@ -103,6 +254,8 @@ impl Default for FeatureFlagsConfig {
             starter_plex_balance: 0,
             allow_local_dev_gateway_jwt: false,
             gm_mode: false,
+            skill_training_multiplier: default_rate_multiplier(),
+            mining_yield_multiplier: default_rate_multiplier(),
         }
     }
 }
@@ -126,7 +279,7 @@ impl Default for StorageConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerConfig {
     #[serde(default = "default_bind_address")]
     pub bind_address: String,
@@ -247,9 +400,49 @@ impl ServerConfig {
         }
     }
 
+    /// Validates configured rate multipliers (`#1123`).
+    pub fn validate_rates(&self) -> Result<(), String> {
+        validate_rate_multiplier(
+            "feature_flags.skill_training_multiplier",
+            self.feature_flags.skill_training_multiplier,
+        )?;
+        validate_rate_multiplier(
+            "feature_flags.mining_yield_multiplier",
+            self.feature_flags.mining_yield_multiplier,
+        )?;
+        Ok(())
+    }
+
+    /// Returns the configured global skill training speed multiplier (`1.0` = vanilla).
+    #[inline]
+    pub fn skill_training_multiplier(&self) -> f64 {
+        self.feature_flags.skill_training_multiplier
+    }
+
+    /// Returns the configured global mining yield multiplier (`1.0` = vanilla).
+    #[inline]
+    pub fn mining_yield_multiplier(&self) -> f64 {
+        self.feature_flags.mining_yield_multiplier
+    }
+
     /// Parses a `ServerConfig` from a TOML string (`D-5`).
     pub fn from_toml_str(toml_str: &str) -> Result<Self, String> {
-        let cfg: Self = toml::from_str(toml_str).map_err(|e| format!("Invalid evomu.toml: {e}"))?;
+        let mut cfg: Self =
+            toml::from_str(toml_str).map_err(|e| format!("Invalid evomu.toml: {e}"))?;
+        let raw_rates: RawConfigRateAliases =
+            toml::from_str(toml_str).map_err(|e| format!("Invalid evomu.toml: {e}"))?;
+        cfg.feature_flags.skill_training_multiplier = resolve_rate_multiplier(
+            "skill_training_multiplier",
+            raw_rates.skill_training_multiplier.map(|r| r.0),
+            raw_rates.rates.skill_training_multiplier.map(|r| r.0),
+            raw_rates.feature_flags.skill_training_multiplier.map(|r| r.0),
+        )?;
+        cfg.feature_flags.mining_yield_multiplier = resolve_rate_multiplier(
+            "mining_yield_multiplier",
+            raw_rates.mining_yield_multiplier.map(|r| r.0),
+            raw_rates.rates.mining_yield_multiplier.map(|r| r.0),
+            raw_rates.feature_flags.mining_yield_multiplier.map(|r| r.0),
+        )?;
         if cfg.bind_address.trim().is_empty() {
             return Err("bind_address in evomu.toml must not be empty".into());
         }
@@ -300,7 +493,7 @@ impl ServerConfig {
     }
 
     /// Loads `EVOMU_CONFIG_PATH` (or `evomu.toml` if present) and applies any environment variable
-    /// overrides (`EVOMU_SDE_PATH`, `EVOMU_DB_PATH`, `EVOMU_SNAPSHOT_PATH`, `EVOMU_STORAGE_BACKEND`, `EVOMU_ACCOUNTS`, `EVOMU_GM_ACCOUNT`).
+    /// overrides (`EVOMU_SDE_PATH`, `EVOMU_DB_PATH`, `EVOMU_SNAPSHOT_PATH`, `EVOMU_STORAGE_BACKEND`, `EVOMU_ACCOUNTS`, `EVOMU_GM_ACCOUNT`, `EVOMU_SKILL_TRAINING_MULTIPLIER`, `EVOMU_MINING_YIELD_MULTIPLIER`).
     pub fn load_default_or_env() -> Result<Self, String> {
         #[cfg(test)]
         let _env_read_guard = crate::lock_test_env_read();
@@ -392,6 +585,12 @@ impl ServerConfig {
             if let Some(enabled) = parse_bool_flag(&dev_jwt_str) {
                 cfg.feature_flags.allow_local_dev_gateway_jwt = enabled;
             }
+        }
+        if let Some(mult) = parse_rate_env("EVOMU_SKILL_TRAINING_MULTIPLIER")? {
+            cfg.feature_flags.skill_training_multiplier = mult;
+        }
+        if let Some(mult) = parse_rate_env("EVOMU_MINING_YIELD_MULTIPLIER")? {
+            cfg.feature_flags.mining_yield_multiplier = mult;
         }
         Ok(cfg)
     }

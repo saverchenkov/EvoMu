@@ -1004,6 +1004,173 @@ async fn gh1024_mining_and_godma_effect_timestamps_stay_anchored_across_advancet
     assert!((info_wt - client_sim_ft).abs() < max_skew_ticks);
 }
 
+#[tokio::test]
+async fn test_mining_yield_multiplier_scales_cycle_yield_and_caps_cleanly() {
+    let ctx = make_ctx();
+    let char_id = 90_000_001;
+    let ship_id = 880_001;
+    let mod_id = 880_002;
+    let ast_id = 880_003;
+    let sys_id = 30_000_142;
+
+    ctx.feature_flags
+        .write()
+        .unwrap()
+        .mining_yield_multiplier = 5.0;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 32880,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 483, // Miner I: 60.0 m3/cycle -> 300.0 m3 (3,000 Veldspar units) at 5.0x
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mod_id, true);
+        snap.skills.entry(char_id).or_default().insert(
+            3386,
+            eve_db::TrainedSkillRecord {
+                type_id: 3386,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        snap.asteroids.insert(
+            ast_id,
+            AsteroidRecord {
+                asteroid_id: ast_id,
+                solar_system_id: sys_id,
+                belt_id: 0,
+                type_id: 1230, // Veldspar: 0.1 m3/unit
+                quantity: 5_000,
+                initial_quantity: 5_000,
+                position: (2_000.0, 0.0, 0.0),
+                radius: 100.0,
+            },
+        );
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .spawn_ball(Ball {
+            id: ast_id,
+            type_id: 1230,
+            position: DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e9,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    let _ = sys
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 32880,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 200.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    let _ = sys
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                shield_hp: 500.0,
+                max_shield_hp: 500.0,
+                armor_hp: 500.0,
+                max_armor_hp: 500.0,
+                structure_hp: 500.0,
+                max_structure_hp: 500.0,
+                capacitor: 250.0,
+                max_capacitor: 250.0,
+                signature_radius: 40.0,
+                ..Default::default()
+            },
+        )
+        .await;
+    let _ = sys
+        .add_target_lock(
+            ship_id,
+            TargetLock {
+                target_id: ast_id,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(20_000.0),
+            },
+        )
+        .await;
+
+    let mut fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    if let Some(m) = fit.modules.get_mut(&mod_id) {
+        m.state = eve_dogma::ModuleState::Online;
+    }
+    ctx.store_ship_fitting(ship_id, fit);
+
+    activate(&ctx, char_id, ship_id, sys_id, mod_id, ast_id)
+        .await
+        .expect("activate should succeed");
+
+    ctx.mining_cycles
+        .write()
+        .unwrap()
+        .get_mut(&mod_id)
+        .unwrap()
+        .cycle_start_ms = now_ms(&ctx).saturating_sub(60_000);
+
+    let outcomes = process_mining_cycles(&ctx).await;
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].units_removed, 3_000);
+    assert_eq!(outcomes[0].units_delivered, 3_000);
+    assert_eq!(outcomes[0].asteroid_remaining, 2_000);
+
+    // Second cycle clamps cleanly to remaining 2,000 asteroid units instead of over-delivering.
+    ctx.mining_cycles
+        .write()
+        .unwrap()
+        .get_mut(&mod_id)
+        .unwrap()
+        .cycle_start_ms = now_ms(&ctx).saturating_sub(60_000);
+    let outcomes2 = process_mining_cycles(&ctx).await;
+    assert_eq!(outcomes2.len(), 1);
+    assert_eq!(outcomes2[0].units_removed, 2_000);
+    assert_eq!(outcomes2[0].units_delivered, 2_000);
+    assert_eq!(outcomes2[0].asteroid_remaining, 0);
+}
+
 #[cfg(test)]
 #[path = "mining_cycle_extra_unit_tests.rs"]
 mod extra_unit_tests;

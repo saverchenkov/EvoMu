@@ -95,12 +95,24 @@ pub fn get_character_selection_data(
             let (skill_type, to_level, start_t, end_t, finish_sp, trained_sp) = match queue_head {
                 Some(e) => {
                     let start = e.started_at_unix.unwrap_or(now_unix);
-                    let end = start + e.duration_seconds.max(0.0) as u64;
+                    let eff_dur = super::jump_clone_names::effective_skill_queue_entry_duration_seconds(
+                        ctx,
+                        snap,
+                        c.character_id,
+                        e,
+                    )
+                    .max(0.0);
+                    let end_ft = unix_to_filetime(start)
+                        + if eff_dur > 0.0 && eff_dur < 1.0 {
+                            ((eff_dur * 10_000_000.0).round() as i64).max(1)
+                        } else {
+                            (eff_dur as i64) * 10_000_000
+                        };
                     (
                         PyRep::Integer(i64::from(e.type_id)),
                         PyRep::Integer(i64::from(e.target_level)),
                         PyRep::Integer(unix_to_filetime(start)),
-                        PyRep::Integer(unix_to_filetime(end)),
+                        PyRep::Integer(end_ft),
                         PyRep::Real(e.end_sp),
                         PyRep::Real(e.start_sp),
                     )
@@ -112,8 +124,25 @@ pub fn get_character_selection_data(
                 .flatten()
                 .map(|q| {
                     let start = q[0].started_at_unix.unwrap_or(now_unix);
-                    let total: f64 = q.iter().map(|e| e.duration_seconds.max(0.0)).sum();
-                    PyRep::Integer(unix_to_filetime(start + total as u64))
+                    let total: f64 = q
+                        .iter()
+                        .map(|e| {
+                            super::jump_clone_names::effective_skill_queue_entry_duration_seconds(
+                                ctx,
+                                snap,
+                                c.character_id,
+                                e,
+                            )
+                            .max(0.0)
+                        })
+                        .sum();
+                    let end_ft = unix_to_filetime(start)
+                        + if total > 0.0 && total < 1.0 {
+                            ((total * 10_000_000.0).round() as i64).max(1)
+                        } else {
+                            (total as i64) * 10_000_000
+                        };
+                    PyRep::Integer(end_ft)
                 });
             let unread = snap
                 .mails

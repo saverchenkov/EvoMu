@@ -4,9 +4,11 @@
 
 use super::{
     alpha_skill_cap_for_character, catch_up_skill_queue, effective_character_attributes,
-    lookup_effective_attr_from_tuple,
+    lookup_effective_attr_from_tuple, skill_queue_entry_duration_with_attrs,
 };
-use crate::formulas::{skill_injector_sp_yield, skill_training_time_seconds, sp_for_skill_level};
+use crate::formulas::{
+    skill_injector_sp_yield, skill_training_time_seconds_with_multiplier, sp_for_skill_level,
+};
 use crate::router::notify_registry::{OnFreeSkillPointsChanged, OnSkillQueuePausedServer};
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::implant_plugging::{
@@ -315,6 +317,12 @@ fn handle_apply_free_skill_points_to_queue(
             remaining_budget = remaining_budget.min(alpha_room);
         }
 
+        let train_mult = ctx.skill_training_multiplier();
+        let eff_attrs = if (train_mult - 1.0).abs() > 1e-9 {
+            Some(effective_character_attributes(&ctx.sde, snap, char_id))
+        } else {
+            None
+        };
         let queue = snap.skill_queues.entry(char_id).or_default().clone();
         let mut remaining_queue = Vec::new();
         let mut history_to_append = Vec::new();
@@ -356,7 +364,19 @@ fn handle_apply_free_skill_points_to_queue(
                 remaining_budget = 0.0;
                 total_applied += applied;
                 q.start_sp += applied;
-                q.duration_seconds *= ((q.end_sp - q.start_sp).max(0.0)) / needed;
+                q.duration_seconds = if let Some(attrs) = eff_attrs {
+                    skill_queue_entry_duration_with_attrs(
+                        ctx,
+                        q.type_id,
+                        q.start_sp,
+                        q.end_sp,
+                        ch_snap.clone_grade,
+                        attrs,
+                        q.duration_seconds,
+                    )
+                } else {
+                    q.duration_seconds * (((q.end_sp - q.start_sp).max(0.0)) / needed)
+                };
                 let rank = skill_rank(ctx, q.type_id);
                 let current_lvl = skills_map.get(&q.type_id).map(|s| s.level).unwrap_or(0);
                 let mut achieved_lvl = current_lvl;
@@ -584,6 +604,12 @@ fn handle_apply_free_skill_points_to_skills(
                     skill_points: new_skill_sp,
                 },
             );
+            let train_mult = ctx.skill_training_multiplier();
+            let eff_attrs = if (train_mult - 1.0).abs() > 1e-9 {
+                Some(effective_character_attributes(&ctx.sde, snap, char_id))
+            } else {
+                None
+            };
             if let Some(queue) = snap.skill_queues.get_mut(&char_id) {
                 queue.retain_mut(|q| {
                     if q.type_id != tid {
@@ -595,7 +621,20 @@ fn handle_apply_free_skill_points_to_skills(
                         if new_skill_sp > q.start_sp {
                             let old_needed = (q.end_sp - q.start_sp).max(1.0);
                             q.start_sp = new_skill_sp;
-                            q.duration_seconds *= ((q.end_sp - q.start_sp).max(0.0)) / old_needed;
+                            q.duration_seconds = if let Some(attrs) = eff_attrs {
+                                skill_queue_entry_duration_with_attrs(
+                                    ctx,
+                                    q.type_id,
+                                    q.start_sp,
+                                    q.end_sp,
+                                    ch_snap.clone_grade,
+                                    attrs,
+                                    q.duration_seconds,
+                                )
+                            } else {
+                                q.duration_seconds
+                                    * (((q.end_sp - q.start_sp).max(0.0)) / old_needed)
+                            };
                         }
                         true
                     }
@@ -724,8 +763,14 @@ fn handle_char_start_training_skill(
         let clone_mult = if ch.clone_grade >= 2 { 1.0 } else { 0.5 };
         let start_sp = existing.skill_points;
         let end_sp = sp_for_skill_level(rank, target_level);
-        let duration_seconds =
-            skill_training_time_seconds(start_sp, end_sp, prim_val, sec_val, clone_mult);
+        let duration_seconds = skill_training_time_seconds_with_multiplier(
+            start_sp,
+            end_sp,
+            prim_val,
+            sec_val,
+            clone_mult,
+            ctx.skill_training_multiplier(),
+        );
 
         let mut queue = snap.skill_queues.remove(&char_id).unwrap_or_default();
         queue.retain(|q| !(q.type_id == skill_tid && q.target_level == target_level));

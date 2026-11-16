@@ -601,7 +601,24 @@ pub(crate) fn extract_skills(
             extracted_new_sp.insert(tid, (new_lvl, rem_sp, rank));
             removed_skills.push((tid, new_lvl));
         }
+        let extracted_hist_sp: std::collections::HashMap<u32, f64> = requested
+            .iter()
+            .map(|&(tid, _)| (tid, skills_map.get(&tid).map(|s| s.skill_points).unwrap_or(0.0)))
+            .collect();
 
+        let train_mult = ctx.skill_training_multiplier();
+        let clone_grade = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.clone_grade)
+            .unwrap_or(2);
+        let eff_attrs = if (train_mult - 1.0).abs() > 1e-9 {
+            Some(super::character_skills::effective_character_attributes(
+                &ctx.sde, snap, char_id,
+            ))
+        } else {
+            None
+        };
         if let Some(queue) = snap.skill_queues.get_mut(&char_id) {
             let mut valid_next_lvl: std::collections::HashMap<u32, u8> = projected_levels.clone();
             queue.retain_mut(|q| {
@@ -645,7 +662,19 @@ pub(crate) fn extract_skills(
                     };
                     let old_needed = (q.end_sp - q.start_sp).max(1.0);
                     q.start_sp = new_start_sp;
-                    q.duration_seconds *= ((q.end_sp - q.start_sp).max(0.0)) / old_needed;
+                    q.duration_seconds = if let Some(attrs) = eff_attrs {
+                        skill_queue_entry_duration_with_attrs(
+                            ctx,
+                            q.type_id,
+                            q.start_sp,
+                            q.end_sp,
+                            clone_grade,
+                            attrs,
+                            q.duration_seconds,
+                        )
+                    } else {
+                        q.duration_seconds * (((q.end_sp - q.start_sp).max(0.0)) / old_needed)
+                    };
                     if q.started_at_unix.is_some() {
                         q.started_at_unix = Some(ctx.now_unix());
                     }
@@ -663,7 +692,7 @@ pub(crate) fn extract_skills(
         let now_ft = ctx.now_blueos_filetime_ticks();
         let hist = snap.skill_history.entry(char_id).or_default();
         for &(tid, _take) in &requested {
-            let cur_sp = skills_map.get(&tid).map(|s| s.skill_points).unwrap_or(0.0);
+            let cur_sp = extracted_hist_sp.get(&tid).copied().unwrap_or(0.0);
             let cur_lvl = projected_levels.get(&tid).copied().unwrap_or(0);
             hist.push(eve_db::SkillHistoryEntry {
                 log_date_ft: now_ft,
@@ -1003,6 +1032,87 @@ pub fn lookup_effective_attr_from_tuple(attrs: (f64, f64, f64, f64, f64), attr_i
     }
 }
 
+/// Computes a queued skill's remaining duration at the active `skill_training_multiplier` (`#1123`).
+///
+/// Preserves positive stored durations at vanilla `1.0x` so pre-seeded/test queues do not drift,
+/// while recomputing dynamically when `skill_training_multiplier != 1.0` so pre-existing queued
+/// entries reflect configured rate multipliers across queue displays, catch-up, and ticks.
+pub(crate) fn skill_queue_entry_duration_with_attrs(
+    ctx: &ServerContext,
+    type_id: u32,
+    start_sp: f64,
+    end_sp: f64,
+    clone_grade: u32,
+    eff_attrs: (f64, f64, f64, f64, f64),
+    stored_duration_seconds: f64,
+) -> f64 {
+    let train_mult = ctx.skill_training_multiplier();
+    if (train_mult - 1.0).abs() <= 1e-9 && stored_duration_seconds > 0.0 {
+        return stored_duration_seconds;
+    }
+    if end_sp <= start_sp || end_sp <= 0.0 {
+        return 0.0;
+    }
+    let Some(skill_type) = ctx.sde.types.get(&type_id) else {
+        return if stored_duration_seconds > 0.0 {
+            stored_duration_seconds / train_mult
+        } else {
+            0.0
+        };
+    };
+    let p_attr_id = skill_type
+        .default_attributes
+        .get(&eve_sde::attr_ids::PRIMARY_ATTRIBUTE)
+        .copied()
+        .map(|v| v as u32)
+        .unwrap_or(eve_sde::attr_ids::PERCEPTION as u32);
+    let s_attr_id = skill_type
+        .default_attributes
+        .get(&eve_sde::attr_ids::SECONDARY_ATTRIBUTE)
+        .copied()
+        .map(|v| v as u32)
+        .unwrap_or(eve_sde::attr_ids::WILLPOWER as u32);
+    let p_val = super::character_skills::lookup_effective_attr_from_tuple(eff_attrs, p_attr_id);
+    let s_val = super::character_skills::lookup_effective_attr_from_tuple(eff_attrs, s_attr_id);
+    let clone_mult = if clone_grade >= 2 { 1.0 } else { 0.5 };
+    crate::formulas::skill_training_time_seconds_with_multiplier(
+        start_sp,
+        end_sp,
+        p_val,
+        s_val,
+        clone_mult,
+        train_mult,
+    )
+}
+
+/// Computes the effective remaining duration of `entry` under `ctx.skill_training_multiplier()` (`#1123`).
+pub(crate) fn effective_skill_queue_entry_duration_seconds(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    entry: &eve_db::SkillQueueEntry,
+) -> f64 {
+    let train_mult = ctx.skill_training_multiplier();
+    if (train_mult - 1.0).abs() <= 1e-9 && entry.duration_seconds > 0.0 {
+        return entry.duration_seconds;
+    }
+    let eff_attrs = super::character_skills::effective_character_attributes(&ctx.sde, snap, char_id);
+    let clone_grade = snap
+        .characters
+        .get(&char_id)
+        .map(|c| c.clone_grade)
+        .unwrap_or(2);
+    skill_queue_entry_duration_with_attrs(
+        ctx,
+        entry.type_id,
+        entry.start_sp,
+        entry.end_sp,
+        clone_grade,
+        eff_attrs,
+        entry.duration_seconds,
+    )
+}
+
 /// Skill queue list of `utillib.KeyVal` entries as returned by `skillMgr2.GetSkillQueue`,
 /// `skillMgr2.GetSkillQueueAndFreePoints`, and `OnNewSkillQueueSaved` (`#658`).
 ///
@@ -1029,9 +1139,15 @@ pub(crate) fn skill_queue_rowset(ctx: &ServerContext, char_id: i64) -> PyRep {
                 q.iter()
                     .enumerate()
                     .map(|(idx, e)| {
+                        let eff_dur =
+                            effective_skill_queue_entry_duration_seconds(ctx, snap, char_id, e);
                         let (start_rep, end_rep) = match cur_ft {
                             Some(start_ft) => {
-                                let dur_ft = (e.duration_seconds.max(1.0) * 10_000_000.0) as i64;
+                                let dur_ft = if eff_dur > 0.0 && eff_dur < 1.0 {
+                                    ((eff_dur * 10_000_000.0).round() as i64).max(1)
+                                } else {
+                                    (eff_dur.max(1.0) * 10_000_000.0) as i64
+                                };
                                 let end_ft = start_ft + dur_ft;
                                 cur_ft = Some(end_ft);
                                 (PyRep::Integer(start_ft), PyRep::Integer(end_ft))
@@ -1043,7 +1159,7 @@ pub(crate) fn skill_queue_rowset(ctx: &ServerContext, char_id: i64) -> PyRep {
                             ("trainingToLevel", PyRep::Integer(e.target_level as i64)),
                             ("trainingStartSP", PyRep::Real(e.start_sp)),
                             ("trainingDestinationSP", PyRep::Real(e.end_sp)),
-                            ("durationSeconds", PyRep::Real(e.duration_seconds)),
+                            ("durationSeconds", PyRep::Real(eff_dur)),
                             ("queuePosition", PyRep::Integer(idx as i64)),
                             ("trainingStartTime", start_rep),
                             ("trainingEndTime", end_rep),

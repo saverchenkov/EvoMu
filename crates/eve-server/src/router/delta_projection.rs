@@ -1045,7 +1045,11 @@ fn build_skill_queue_list(queue: &[SkillQueueEntry], paused: bool, now_unix: u64
         .map(|(idx, e)| {
             let (start_rep, end_rep) = match cur_ft {
                 Some(start_ft) => {
-                    let dur_ft = (e.duration_seconds.max(1.0) * 10_000_000.0) as i64;
+                    let dur_ft = if e.duration_seconds > 0.0 && e.duration_seconds < 1.0 {
+                        ((e.duration_seconds * 10_000_000.0).round() as i64).max(1)
+                    } else {
+                        (e.duration_seconds.max(1.0) * 10_000_000.0) as i64
+                    };
                     let end_ft = start_ft + dur_ft;
                     cur_ft = Some(end_ft);
                     (PyRep::Integer(start_ft), PyRep::Integer(end_ft))

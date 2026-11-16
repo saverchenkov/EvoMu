@@ -6,8 +6,10 @@ use crate::esi::sample_routes::{
     asset_location_flag_str, fitting_flag_str, format_iso8601_utc, paginate_slice,
     parse_fitting_flag, parse_path_i64, RouteExecutionResult,
 };
-use crate::formulas::{skill_training_time_seconds, sp_for_skill_level};
+use crate::formulas::sp_for_skill_level;
 use crate::router::ServerContext;
+use crate::services::character_skills::effective_character_attributes;
+use crate::services::jump_clone_names::skill_queue_entry_duration_with_attrs;
 use eve_db::{InventoryFlag, SavedFittingRecord, SsoTokenClaims};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -651,7 +653,7 @@ pub fn dispatch_character_routes(
                     );
                 };
                 let is_paused = snap.paused_skill_queues.contains(&char_id);
-                let clone_mult = if ch.clone_grade >= 2 { 1.0 } else { 0.5 };
+                let eff_attrs = effective_character_attributes(&ctx.sde, snap, char_id);
                 let mut out = Vec::new();
                 if let Some(queue) = snap.skill_queues.get(&char_id) {
                     let queue_anchor = queue
@@ -684,27 +686,15 @@ pub fn dispatch_character_routes(
                         });
                         if !is_paused {
                             let start_unix = cursor_unix;
-                            let dur = if entry.duration_seconds > 0.0 {
-                                entry.duration_seconds
-                            } else {
-                                let primary_attr_id = skill_type
-                                    .and_then(|t| t.default_attributes.get(&180).copied())
-                                    .map(|v| v as u32)
-                                    .unwrap_or(164);
-                                let secondary_attr_id = skill_type
-                                    .and_then(|t| t.default_attributes.get(&181).copied())
-                                    .map(|v| v as u32)
-                                    .unwrap_or(165);
-                                let primary = ch.neural.get_attribute_by_id(primary_attr_id);
-                                let secondary = ch.neural.get_attribute_by_id(secondary_attr_id);
-                                skill_training_time_seconds(
-                                    entry.start_sp,
-                                    level_end_sp as f64,
-                                    primary,
-                                    secondary,
-                                    clone_mult,
-                                )
-                            };
+                            let dur = skill_queue_entry_duration_with_attrs(
+                                ctx,
+                                entry.type_id,
+                                entry.start_sp,
+                                level_end_sp as f64,
+                                ch.clone_grade,
+                                eff_attrs,
+                                entry.duration_seconds,
+                            );
                             let finish_unix =
                                 start_unix.saturating_add((dur.round() as u64).max(1));
                             item["start_date"] = json!(format_iso8601_utc(start_unix));
