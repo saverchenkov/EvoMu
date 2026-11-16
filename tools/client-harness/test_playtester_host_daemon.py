@@ -5,9 +5,16 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
-import tomllib
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ImportError:
+        tomllib = None  # type: ignore[assignment]
 import types
 import unittest
 from pathlib import Path
@@ -1186,6 +1193,7 @@ class TestStaleControlFileCleanup(unittest.TestCase):
             runner.stop_client = lambda: None
             runner.stop_server = lambda: None
             runner.maybe_recover_corrupted_viewstate = lambda snap: None
+            runner.agy_pool = None
 
             executed = []
             runner.execute_step = lambda step_num, last_fr, last_burst: (
@@ -1193,9 +1201,13 @@ class TestStaleControlFileCleanup(unittest.TestCase):
             )
 
             with mock.patch.object(playtester, "DEFAULT_CONTROL_FILE", ctrl), \
-                 mock.patch.object(playtester, "DEFAULT_PID_FILE", pidf):
+                 mock.patch.object(playtester, "DEFAULT_PID_FILE", pidf), \
+                 mock.patch.object(playtester, "AgyStreamWorkerPool") as m_pool_cls:
                 rc = runner.run()
 
+            m_pool_cls.assert_called_once()
+            m_pool_cls.return_value.prewarm_all.assert_called_once()
+            m_pool_cls.return_value.shutdown.assert_called_once()
             self.assertEqual(rc, 0)
             self.assertEqual(executed, [1, 2])
             self.assertFalse(runner.stop_requested)
@@ -2301,6 +2313,98 @@ class TestSpeedupOptimizations(unittest.TestCase):
             )
             self.assertEqual(len(q2), 1)
 
+    def test_autoreload_cannot_load_not_enough_charges_is_benign_while_item_not_found_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            qdir = root / "queue"
+            qdir.mkdir()
+            mem = playtester.PlaytesterMemory(root, git_head="9c1e2fca2")
+            oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False)
+            benign_tb = (
+                'logmodule.LogException args=("Unhandled exception in <TaskletExt object at 0x1, ctxt=\'ModuleController.AutoReload\'>",)\n'
+                '  File "packages/hud/client/moduleController.py", line 878, in AutoReload\n'
+                '  File "eve/client/script/dogma/clientDogmaLocation.py", line 1184, in LoadAmmoTypeToModule\n'
+                '  File "eve/client/script/dogma/clientDogmaLocation.py", line 1193, in LoadChargesToModule\n'
+                'UserError: User error, msg=CannotLoadNotEnoughCharges, dict=None\n'
+            )
+            self.assertFalse(
+                oracle._is_unhandled_tasklet_traceback(
+                    "UserError: User error, msg=CannotLoadNotEnoughCharges, dict=None",
+                    benign_tb,
+                )
+            )
+            item_not_found_tb = benign_tb.replace("CannotLoadNotEnoughCharges", "ItemNotFound")
+            self.assertTrue(
+                oracle._is_unhandled_tasklet_traceback(
+                    "UserError: User error, msg=ItemNotFound, dict={}",
+                    item_not_found_tb,
+                )
+            )
+
+    def test_abort_conditions_schema_string_parity(self):
+        schema = json.loads((HARNESS_DIR / "playtester_planner_schema.json").read_text(encoding="utf-8"))
+        abort_schema = schema["properties"]["delegated_plan"]["properties"]["abort_conditions"]
+        self.assertEqual(abort_schema["type"], "string")
+
+        fb = playtester._heuristic_fallback_planner_decision()
+        self.assertIsInstance(fb["delegated_plan"]["abort_conditions"], str)
+        self.assertTrue(fb["delegated_plan"]["abort_conditions"])
+
+        with tempfile.TemporaryDirectory() as td:
+            mem = playtester.PlaytesterMemory(Path(td), git_head="deadbeef")
+            pp = playtester.build_planner_prompt(
+                1, Path(td) / "screen.png", [], {"active_view": "hangar"}, {}, mem, "deadbeef",
+                use_compact_json_contract=True,
+            )
+        self.assertIn('"abort_conditions": "Error modal"', pp)
+        self.assertNotIn('"abort_conditions": ["Error modal"]', pp)
+
+
+
+def _parse_simple_toml(text: str) -> dict:
+    """Minimal TOML subset parser for Python < 3.11 where stdlib tomllib is absent."""
+    root = {}
+    cur = root
+
+    def _parse_val(raw: str):
+        v = raw.strip()
+        if v == "true":
+            return True
+        if v == "false":
+            return False
+        if v.startswith('"') and v.endswith('"'):
+            return json.loads(v)
+        if v.startswith("'") and v.endswith("'"):
+            return v[1:-1]
+        if re.fullmatch(r"-?\d+", v):
+            return int(v)
+        if re.fullmatch(r"-?\d+\.\d+", v):
+            return float(v)
+        return v
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[[") and line.endswith("]]"):
+            key = line[2:-2].strip()
+            arr = root.setdefault(key, [])
+            item = {}
+            arr.append(item)
+            cur = item
+        elif line.startswith("[") and line.endswith("]"):
+            parts = [p.strip() for p in line[1:-1].split(".")]
+            target = root
+            for p in parts:
+                nxt = target.setdefault(p, {})
+                if isinstance(nxt, list):
+                    nxt = nxt[-1]
+                target = nxt
+            cur = target
+        elif "=" in line:
+            k, v = line.split("=", 1)
+            cur[k.strip()] = _parse_val(v)
+    return root
 
 
 class TestPlaytester1199AcceptanceCriteria(unittest.TestCase):
@@ -2339,7 +2443,8 @@ class TestPlaytester1199AcceptanceCriteria(unittest.TestCase):
             args = playtester.parse_args(["--worktree", str(wt), "--no-hybrid"])
             runner = playtester.PlaytesterRunner(args)
             cfg_path = runner.write_server_config()
-            parsed = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+            cfg_text = cfg_path.read_text(encoding="utf-8")
+            parsed = tomllib.loads(cfg_text) if tomllib is not None else _parse_simple_toml(cfg_text)
 
         unknown_top = set(parsed.keys()) - struct_fields["ServerConfig"]
         self.assertEqual(unknown_top, set(), f"Unknown ServerConfig keys: {unknown_top}")
@@ -2403,6 +2508,143 @@ class TestPlaytester1199AcceptanceCriteria(unittest.TestCase):
                 self.assertTrue((stage_dir / "bin64" / "exefile").exists())
                 self.assertTrue((stage_dir / "evomu_py_site" / "sitecustomize.py").exists())
                 self.assertTrue((stage_dir / "tools" / "startup" / "evomu_playtester.py").exists())
+
+
+class TestPlaytester1200OriginMainCutover(unittest.TestCase):
+    @staticmethod
+    def _git(repo: Path, *args: str) -> str:
+        res = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return res.stdout
+
+    def _init_fake_origin_and_worktree(self, root: Path):
+        origin = root / "origin.git"
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True, capture_output=True)
+        seed = root / "seed"
+        subprocess.run(["git", "clone", str(origin), str(seed)], check=True, capture_output=True)
+        self._git(seed, "config", "user.email", "test@evomu.local")
+        self._git(seed, "config", "user.name", "EvoMu Test")
+
+        (seed / ".gitignore").write_text(".playtester/\n.evomu-bugs/\n", encoding="utf-8")
+        (seed / "AGENTS.md").write_text("rules v1\n", encoding="utf-8")
+        (seed / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+        (seed / "crates" / "eve-server" / "src").mkdir(parents=True)
+        (seed / "crates" / "eve-server" / "src" / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+        (seed / "tools" / "client-harness").mkdir(parents=True)
+        (seed / "tools" / "client-harness" / "playtester.py").write_text("# v1\n", encoding="utf-8")
+        (seed / "docs").mkdir()
+        (seed / "docs" / "obsolete.md").write_text("obsolete\n", encoding="utf-8")
+        self._git(seed, "add", ".")
+        self._git(seed, "commit", "-m", "c1")
+        self._git(seed, "push", "origin", "main")
+        c1 = self._git(seed, "rev-parse", "HEAD").strip()
+
+        wt = root / "wt"
+        subprocess.run(["git", "clone", str(origin), str(wt)], check=True, capture_output=True)
+        self._git(wt, "config", "user.email", "test@evomu.local")
+        self._git(wt, "config", "user.name", "EvoMu Test")
+        return origin, seed, wt, c1
+
+    def test_check_origin_main_update_cuts_over_all_tracked_files_and_preserves_runtime_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, seed, wt, c1 = self._init_fake_origin_and_worktree(Path(td))
+
+            # Simulate stale tracked modifications outside crates/ + staged runtime file in .playtester/
+            (wt / "AGENTS.md").write_text("stale local AGENTS\n", encoding="utf-8")
+            (wt / "tools" / "client-harness" / "playtester.py").write_text("# stale harness\n", encoding="utf-8")
+            (wt / ".playtester").mkdir()
+            pending_file = wt / ".playtester" / "pending_verifications.json"
+            memory_file = wt / ".playtester" / "memory.json"
+            pending_file.write_text('{"items":[{"issue":1200}]}', encoding="utf-8")
+            memory_file.write_text('{"total_steps":42}', encoding="utf-8")
+            self._git(wt, "add", "-f", ".playtester/pending_verifications.json")
+
+            # Advance fake origin/main across crates/, tools/, AGENTS.md, .agents/, and delete docs/obsolete.md
+            (seed / "crates" / "eve-server" / "src" / "main.rs").write_text("fn main() { println!(\"v2\"); }\n", encoding="utf-8")
+            (seed / "AGENTS.md").write_text("rules v2\n", encoding="utf-8")
+            (seed / "tools" / "client-harness" / "playtester.py").write_text("# v2\n", encoding="utf-8")
+            (seed / "tools" / "client-harness" / "curate_memory.py").write_text("# new module\n", encoding="utf-8")
+            (seed / ".agents").mkdir()
+            (seed / ".agents" / "review.py").write_text("# review gate v2\n", encoding="utf-8")
+            (seed / "docs" / "obsolete.md").unlink()
+            self._git(seed, "add", "-A")
+            self._git(seed, "commit", "-m", "c2")
+            self._git(seed, "push", "origin", "main")
+            c2 = self._git(seed, "rev-parse", "HEAD").strip()
+
+            self.assertEqual(self._git(wt, "rev-parse", "HEAD").strip(), c1)
+            new_sha = playtester.check_origin_main_update(wt)
+            self.assertEqual(new_sha, c2[:9])
+
+            # No tracked file differs from origin/main after cut-over
+            self.assertEqual(self._git(wt, "diff", "origin/main", "--stat"), "")
+            self.assertEqual(self._git(wt, "status", "--porcelain"), "")
+            self.assertEqual((wt / "AGENTS.md").read_text(encoding="utf-8"), "rules v2\n")
+            self.assertEqual((wt / "tools" / "client-harness" / "playtester.py").read_text(encoding="utf-8"), "# v2\n")
+            self.assertEqual((wt / "tools" / "client-harness" / "curate_memory.py").read_text(encoding="utf-8"), "# new module\n")
+            self.assertEqual((wt / ".agents" / "review.py").read_text(encoding="utf-8"), "# review gate v2\n")
+            self.assertFalse((wt / "docs" / "obsolete.md").exists())
+
+            # Runtime .playtester/ state is preserved and untracked/ignored
+            self.assertEqual(pending_file.read_text(encoding="utf-8"), '{"items":[{"issue":1200}]}')
+            self.assertEqual(memory_file.read_text(encoding="utf-8"), '{"total_steps":42}')
+
+            # Second call when already synced is a clean no-op
+            self.assertIsNone(playtester.check_origin_main_update(wt))
+
+            # Strictly-ahead local branch is not reset backwards
+            (wt / "tools" / "client-harness" / "local_ahead.py").write_text("# ahead\n", encoding="utf-8")
+            self._git(wt, "add", "tools/client-harness/local_ahead.py")
+            self._git(wt, "commit", "-m", "local ahead")
+            self.assertIsNone(playtester.check_origin_main_update(wt))
+            self.assertTrue((wt / "tools" / "client-harness" / "local_ahead.py").exists())
+
+    def test_hot_reload_server_boundary_heals_prior_reset_soft_index_drift(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, seed, wt, _ = self._init_fake_origin_and_worktree(Path(td))
+            (seed / "AGENTS.md").write_text("rules v2\n", encoding="utf-8")
+            (seed / "tools" / "client-harness" / "playtester.py").write_text("# v2\n", encoding="utf-8")
+            self._git(seed, "add", "-A")
+            self._git(seed, "commit", "-m", "c2")
+            self._git(seed, "push", "origin", "main")
+
+            # Simulate legacy `reset --soft` drift where HEAD == origin/main but files outside crates/ stayed at v1
+            self._git(wt, "fetch", "origin", "main")
+            self._git(wt, "reset", "--soft", "origin/main")
+            self.assertNotEqual(self._git(wt, "diff", "origin/main", "--stat"), "")
+
+            runner = playtester.PlaytesterRunner.__new__(playtester.PlaytesterRunner)
+            runner.args = types.SimpleNamespace(no_git_checkout=False)
+            runner.worktree_dir = wt
+            runner.current_run_dir = wt / ".playtester" / "run"
+            runner.current_run_dir.mkdir(parents=True)
+            runner.reload_requested = True
+            runner._server_bin_mtime = lambda: 123.0
+            runner.stop_client = lambda: None
+            runner.stop_server = lambda: None
+            runner.start_server = lambda reset_db=False: True
+            runner.start_client = lambda: True
+            runner.reset_batch_state = lambda: None
+            runner.oracle = types.SimpleNamespace(reset_log_offsets=lambda *a: None)
+            runner.memory = types.SimpleNamespace(
+                data={"server_reloads": 0, "long_term_notes": []},
+                normalize_coverage_frontier=lambda **kw: {"buggy_decayed": 0},
+                save=lambda: None,
+            )
+
+            with mock.patch.object(playtester, "compile_eve_server", return_value=(True, wt / "eve-server", "")), \
+                 mock.patch.object(playtester, "DEFAULT_CONTROL_FILE", Path(td) / "missing.control"):
+                ok = runner.hot_reload_server_boundary()
+
+            self.assertTrue(ok)
+            self.assertEqual(self._git(wt, "diff", "origin/main", "--stat"), "")
+            self.assertEqual(self._git(wt, "status", "--porcelain"), "")
+            self.assertEqual((wt / "AGENTS.md").read_text(encoding="utf-8"), "rules v2\n")
+            self.assertEqual((wt / "tools" / "client-harness" / "playtester.py").read_text(encoding="utf-8"), "# v2\n")
 
 
 

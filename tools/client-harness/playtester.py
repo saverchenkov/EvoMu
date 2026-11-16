@@ -38,7 +38,7 @@ macOS V24.01 EVE.app (exefile) client + Rust eve-server:
        * `tools/client-harness/playtester.py --ping-reload`
        * `kill -USR1 $(cat /tmp/evomu_playtester.pid)`
        * `echo RELOAD > /tmp/evomu_playtester.control`
-   - Obeys the workspace Cargo concurrency cap (`<= 2` active `cargo` processes, `-j 2`).
+   - Uses `-j 4` + `sccache` for `eve-server` builds (playtester is exempt from coder cargo slot caps per `AGENTS.md`).
 
 5. Zero-Tolerance Crash & Visual/Protocol Oracle:
    - Automatically detects Python tracebacks (`client_tracebacks.log`), modal error dialogs,
@@ -297,7 +297,8 @@ def _extract_agy_transcript_traces(
                 if tname and tname != "finish":
                     targs = tc.get("args") or {}
                     if isinstance(targs, dict) and "Path" in targs:
-                        tool_summaries.append(f"{tname}({Path(str(targs['Path']).strip('\"')).name})")
+                        tpath_name = Path(str(targs["Path"]).strip('"')).name
+                        tool_summaries.append(f"{tname}({tpath_name})")
                     else:
                         tool_summaries.append(tname)
     except Exception:
@@ -1377,15 +1378,49 @@ def get_git_head(repo_dir: Path) -> str:
         return "unknown"
 
 
-def check_origin_main_update(repo_dir: Path) -> Optional[str]:
-    """Fetch origin/main, advance HEAD + crates/ to origin/main (preserving tools/client-harness/*), and return new short SHA."""
+def _cutover_worktree_to_origin_main(repo_dir: Path) -> bool:
+    """Reset ALL tracked files & index to `origin/main` while preserving runtime dirs."""
+    # Unstage any runtime directories first so `git reset --hard` cannot remove staged-only runtime files.
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "reset", "-q", "--", ".playtester", ".evomu-bugs"],
+        capture_output=True,
+        timeout=10,
+    )
+    res = subprocess.run(
+        ["git", "-C", str(repo_dir), "reset", "--hard", "origin/main"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if res.returncode != 0:
+        err = (res.stderr or res.stdout or "").strip()
+        log_warn(f"git reset --hard origin/main failed in {repo_dir}: {err}")
+        return False
+    return True
+
+
+def sync_worktree_to_origin_main(
+    repo_dir: Path,
+    *,
+    fetch: bool = True,
+    heal_drift: bool = False,
+) -> Optional[str]:
+    """
+    Fetch `origin/main` (when `fetch=True`) and cut ALL tracked files over to
+    `origin/main` when `origin/main` is not an ancestor of `HEAD` (or when
+    `heal_drift=True` with `HEAD == origin/main` and tracked files/index differ
+    from `origin/main`). Preserves untracked/ignored runtime dirs (`.playtester/`).
+    """
     try:
-        subprocess.run(
-            ["git", "-C", str(repo_dir), "fetch", "origin", "main"],
-            capture_output=True,
-            text=True,
-            timeout=25,
-        )
+        if fetch:
+            fetch_res = subprocess.run(
+                ["git", "-C", str(repo_dir), "fetch", "origin", "main"],
+                capture_output=True,
+                text=True,
+                timeout=25,
+            )
+            if fetch_res.returncode != 0 and fetch_res.stderr:
+                log_warn(f"git fetch origin/main warning in {repo_dir}: {fetch_res.stderr.strip()}")
         head = subprocess.run(
             ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
             capture_output=True,
@@ -1398,7 +1433,10 @@ def check_origin_main_update(repo_dir: Path) -> Optional[str]:
             text=True,
             timeout=5,
         ).stdout.strip()
-        if head and origin and head != origin:
+        if not origin:
+            return None
+        needs_cutover = False
+        if head and head != origin:
             # Only hot-reload if origin/main is NOT already an ancestor of HEAD
             anc = subprocess.run(
                 ["git", "-C", str(repo_dir), "merge-base", "--is-ancestor", origin, head],
@@ -1406,21 +1444,35 @@ def check_origin_main_update(repo_dir: Path) -> Optional[str]:
                 timeout=5,
             )
             if anc.returncode != 0:
-                log_info(f"Advancing worktree HEAD from {head[:9]} to origin/main ({origin[:9]}) (preserving tools/client-harness/*)...")
-                subprocess.run(
-                    ["git", "-C", str(repo_dir), "reset", "--soft", "origin/main"],
-                    capture_output=True,
-                    timeout=10,
-                )
-                subprocess.run(
-                    ["git", "-C", str(repo_dir), "checkout", "origin/main", "--", "crates", "Cargo.toml", "Cargo.lock"],
-                    capture_output=True,
-                    timeout=15,
-                )
+                needs_cutover = True
+        elif heal_drift and head == origin:
+            wt_diff = subprocess.run(
+                ["git", "-C", str(repo_dir), "diff", "--quiet", "origin/main"],
+                capture_output=True,
+                timeout=10,
+            )
+            idx_diff = subprocess.run(
+                ["git", "-C", str(repo_dir), "diff", "--cached", "--quiet", "origin/main"],
+                capture_output=True,
+                timeout=10,
+            )
+            if wt_diff.returncode != 0 or idx_diff.returncode != 0:
+                needs_cutover = True
+        if needs_cutover:
+            log_info(
+                f"Cutting over worktree {repo_dir} from {head[:9] if head else 'unknown'} "
+                f"to origin/main ({origin[:9]})..."
+            )
+            if _cutover_worktree_to_origin_main(repo_dir):
                 return origin[:9]
     except Exception as exc:
         log_warn(f"git fetch origin/main check failed: {exc}")
     return None
+
+
+def check_origin_main_update(repo_dir: Path) -> Optional[str]:
+    """Fetch origin/main, cut ALL tracked files over to origin/main, and return new short SHA."""
+    return sync_worktree_to_origin_main(repo_dir, fetch=True, heal_drift=False)
 
 
 def compile_eve_server(worktree_dir: Path) -> Tuple[bool, Path, str]:
@@ -2873,7 +2925,7 @@ Exact top-level JSON structure:
       {"step_number": 2, "exec_mode": "llm", "action_type_hint": "click_widget", "target_or_command_hint": "...", "instruction": "..."}
     ],
     "success_criteria": "<condition>",
-    "abort_conditions": ["Error modal"]
+    "abort_conditions": "Error modal"
   },
   "memory_update": {"working_memory": ["..."], "long_term_note_to_append": "", "mark_tested_features": [], "mark_buggy_features": [], "new_frontier_features": []},
   "bug_report": {"should_file": false}
@@ -2966,7 +3018,7 @@ Omit null/false action fields (`command`, `dest_x`, `dest_y`, `right_click`, `do
         {
             "goal": delegated_plan.get("plan_goal") or delegated_plan.get("goal") or "",
             "success_criteria": delegated_plan.get("success_criteria") or "",
-            "abort_conditions": delegated_plan.get("abort_conditions") or [],
+            "abort_conditions": delegated_plan.get("abort_conditions") or "",
         }
         if use_compact_json_contract
         else delegated_plan
@@ -3021,7 +3073,7 @@ You are executing **Batch Step {batch_step_idx} of {max_steps}** of the delegate
 {json.dumps(current_planned_step, separators=_sep, indent=_ind)}
 ```
 - **Success Criteria:** `{delegated_plan.get('success_criteria', '')}`
-- **Abort Conditions:** {json.dumps(delegated_plan.get('abort_conditions') or [])}
+- **Abort Conditions:** {json.dumps(delegated_plan.get('abort_conditions') or '')}
 
 ### Previous Batch Step ({batch_step_idx - 1}/{max_steps}) & Flight-Recorder Outcome
 - **Previous Batch Action:**
@@ -4109,7 +4161,7 @@ def _heuristic_fallback_planner_decision() -> Dict[str, Any]:
                 }
             ],
             "success_criteria": "Skills window opens without error",
-            "abort_conditions": ["Error modal appears"],
+            "abort_conditions": "Error modal appears",
         },
         "memory_update": {
             "working_memory": ["Used heuristic fallback plan due to Planner CLI timeout."],
@@ -4792,6 +4844,7 @@ class PlaytesterBugOracle:
         "commands: [",
         "unknownslashcommand",
         "invalidslashargument",
+        "cannotloadnotenoughcharges",
     )
 
     @classmethod
@@ -4815,6 +4868,15 @@ class PlaytesterBugOracle:
         # CarbonUI drag/drop inventory moves raise benign UserError (e.g. NotEnoughCargoSpace)
         # out of BluepyTasklet::_MoveItems so the client UI can show a modal popup.
         if "bluepytasklet::_moveitems" in txt and "notenoughcargospace" in txt:
+            return False
+        # Vanilla V24 ModuleButton/ModuleController AutoReload raises UserError(CannotLoadNotEnoughCharges)
+        # via clientDogmaLocation.LoadAmmoTypeToModule -> LoadChargesToModule when cargo has 0 spare
+        # charges; logmodule routes that UserError to the in-game notification toast.
+        if (
+            "autoreload" in txt
+            and "loadammotypetomodule" in txt
+            and "cannotloadnotenoughcharges" in txt
+        ):
             return False
         return True
 
@@ -5924,21 +5986,7 @@ character_name = "Demo Pilot"
             pass
 
         if not self.args.no_git_checkout:
-            subprocess.run(
-                ["git", "-C", str(self.worktree_dir), "fetch", "origin", "main"],
-                capture_output=True,
-                timeout=30,
-            )
-            subprocess.run(
-                ["git", "-C", str(self.worktree_dir), "reset", "--soft", "origin/main"],
-                capture_output=True,
-                timeout=15,
-            )
-            subprocess.run(
-                ["git", "-C", str(self.worktree_dir), "checkout", "origin/main", "--", "crates", "Cargo.toml", "Cargo.lock"],
-                capture_output=True,
-                timeout=30,
-            )
+            sync_worktree_to_origin_main(self.worktree_dir, fetch=True, heal_drift=True)
 
         ok, _, err_tail = compile_eve_server(self.worktree_dir)
         if not ok:
@@ -6880,7 +6928,7 @@ def run_self_test(args: argparse.Namespace) -> int:
     personas = json.loads(PERSONAS_PATH.read_text(encoding="utf-8"))
     assert len(personas.get("personas", [])) >= 7, "Expected >= 7 personas"
     for p_item in personas.get("personas", []):
-        assert int(p_item.get("rotate_after_steps", 0)) >= 25, f"Persona {p_item.get('id')} rotate_after_steps < 25"
+        assert int(p_item.get("rotate_after_steps", 0)) >= 45, f"Persona {p_item.get('id')} rotate_after_steps < 45"
 
     assert HOOK_SCRIPT_PATH.exists(), f"Missing {HOOK_SCRIPT_PATH}"
     assert SITE_SCRIPT_PATH.exists(), f"Missing {SITE_SCRIPT_PATH}"
