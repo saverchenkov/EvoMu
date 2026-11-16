@@ -276,19 +276,13 @@ fn remove_soak_dbuffs_and_notify(
 
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
     if let Ok(mut bp) = sys_handle.ballpark.write() {
-        bp.update_dbuffs(ship_id, remaining_wire.clone());
+        bp.update_dbuffs(ship_id, remaining_wire);
     }
     ctx.invalidate_ship_fitting(ship_id);
     ctx.push_fit_projection(char_id, ship_id);
-    let remaining_id_reps: Vec<PyRep> = remaining_wire
-        .iter()
-        .map(|&(id, _, _)| PyRep::Integer(id))
-        .collect();
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        "OnDbuffUpdated",
-        "charid",
-        vec![PyRep::Integer(ship_id), PyRep::List(remaining_id_reps)],
+        crate::router::notify_registry::OnDbuffUpdated { ship_id },
     );
 }
 
@@ -2036,18 +2030,11 @@ fn step_logi_soak_for_system(ctx: &ServerContext, solar_system_id: u32) {
 
     ctx.invalidate_ship_fitting(soak.target_ship_id);
     ctx.push_fit_projection(soak.target_char_id, soak.target_ship_id);
-    let dbuff_id_reps: Vec<PyRep> = SOAK_LOGI_COMMAND_BURST_DBUFFS
-        .iter()
-        .map(|&(id, _)| PyRep::Integer(i64::from(id)))
-        .collect();
-    ctx.notify(
+    ctx.emit_typed(
         NotificationTarget::Character(soak.target_char_id),
-        "OnDbuffUpdated",
-        "charid",
-        vec![
-            PyRep::Integer(soak.target_ship_id),
-            PyRep::List(dbuff_id_reps),
-        ],
+        crate::router::notify_registry::OnDbuffUpdated {
+            ship_id: soak.target_ship_id,
+        },
     );
 
     soak.npc_ids = live_ids;

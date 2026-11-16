@@ -8,7 +8,7 @@ use crate::common::{
     SessionBorrowWireTransport,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord, MobileDeployableRecord, SkillQueueEntry};
-use eve_destiny::{Ball, DVec3, MovementMode, SlimItemMeta};
+use eve_destiny::{Ball, DVec3, DestinyEvent, MovementMode, SlimItemMeta};
 use eve_machonet::service_roles::ROLE_LOGIN;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -74,10 +74,31 @@ async fn gm_soak_logi_ring_heals_cycles_specialfx_and_dbuffs() {
         }
     }
 
+    let mut saw_destiny_dbuffs = false;
     for _ in 0..4 {
         ctx.advance_secs(1);
         step_active_systems_physics_tick(&ctx, 1).await;
+        if let Ok(bp) = sys.ballpark.read() {
+            for ev in &bp.pending_events {
+                if let DestinyEvent::OnDbuffUpdated { ball_id, dbuffs } = ev {
+                    if *ball_id == pilot.ship_id
+                        && dbuffs
+                            .iter()
+                            .any(|&(id, val, _)| id == 10 && (val - 15.0).abs() < 1e-9)
+                        && dbuffs
+                            .iter()
+                            .any(|&(id, val, _)| id == 13 && (val - 15.0).abs() < 1e-9)
+                    {
+                        saw_destiny_dbuffs = true;
+                    }
+                }
+            }
+        }
     }
+    assert!(
+        saw_destiny_dbuffs,
+        "expected Destiny OnDbuffUpdated with command burst dbuffs 10 and 13"
+    );
 
     let (healed_shield, healed_armor) = {
         let bp = sys.ballpark.read().expect("ballpark read");
@@ -117,11 +138,10 @@ async fn gm_soak_logi_ring_heals_cycles_specialfx_and_dbuffs() {
     );
     assert!(
         notifs.iter().any(|n| {
-            n.event == "OnDbuffUpdated"
-                && n.args.first().and_then(PyRep::as_i64) == Some(pilot.ship_id)
-                && matches!(n.args.get(1), Some(PyRep::List(ids)) if ids.iter().any(|v| v.as_i64() == Some(10)) && ids.iter().any(|v| v.as_i64() == Some(13)))
+            n.event == "OnDbuffUpdated" && n.args == vec![PyRep::Integer(pilot.ship_id)]
         }),
-        "expected command burst OnDbuffUpdated notification: {notifs:?}"
+        "expected typed OnDbuffUpdated notification for ship {}: {notifs:?}",
+        pilot.ship_id
     );
 
     let status = slash_cmd(&ctx, &mut pilot.sess, "/soak logi status").await;
@@ -159,7 +179,23 @@ async fn gm_soak_logi_ring_heals_cycles_specialfx_and_dbuffs() {
         for &nid in &npc_ids {
             assert!(!bp.balls.contains_key(&nid), "logi npc {nid} should despawn on stop");
         }
+        assert!(
+            bp.pending_events.iter().any(|ev| matches!(
+                ev,
+                DestinyEvent::OnDbuffUpdated { ball_id, dbuffs }
+                    if *ball_id == pilot.ship_id && dbuffs.is_empty()
+            )),
+            "expected Destiny OnDbuffUpdated clear on /soak logi stop: {:?}",
+            bp.pending_events
+        );
     }
+    let stop_notifs = ctx.drain_notifications_for_char(pilot.char_id);
+    assert!(
+        stop_notifs.iter().any(|n| {
+            n.event == "OnDbuffUpdated" && n.args == vec![PyRep::Integer(pilot.ship_id)]
+        }),
+        "expected typed OnDbuffUpdated notification on /soak logi stop: {stop_notifs:?}"
+    );
     let after_stop = slash_cmd(&ctx, &mut pilot.sess, "/soak status").await;
     assert_eq!(
         after_stop.dict_get("active").and_then(PyRep::as_bool),
