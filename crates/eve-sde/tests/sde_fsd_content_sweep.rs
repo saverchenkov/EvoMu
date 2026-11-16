@@ -173,8 +173,8 @@ fn test_t2_sde_fsdbinary_dogma_and_content_raw_client_verification() {
         assert_eq!(inv.default_attributes.len(), attrs.len(), "attrs of {tid}");
         for (aid, &client_value) in &attrs {
             let server_value = inv.default_attributes[aid];
-            // `attributes_json` goes through serde_json's default (not correctly rounded) float
-            // parser, which can land one ulp away from the client's f64; allow exactly that.
+            // Historically `attributes_json` could differ by 1 ULP on 5 values; #1119 eliminated
+            // all 5 drifts so every loaded server attribute float must match the client f64 bit-for-bit.
             let ulps = (server_value.to_bits() as i64 - client_value.to_bits() as i64).abs();
             assert!(ulps <= 1, "type {tid} attr {aid}: {server_value} vs {client_value}");
             ulp_off += usize::from(ulps == 1);
@@ -188,7 +188,7 @@ fn test_t2_sde_fsdbinary_dogma_and_content_raw_client_verification() {
     }
     assert_eq!(with_default, 8_835);
     assert_eq!(attr_total, 658_458);
-    assert_eq!(ulp_off, 5, "float drift must stay at the known 5 values");
+    assert_eq!(ulp_off, 0, "float drift must remain eliminated (0 values, down from 5 pre-#1119)");
     let without: Vec<_> = sde
         .types
         .values()
