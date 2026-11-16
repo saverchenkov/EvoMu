@@ -283,7 +283,7 @@ impl DBRowDescriptor {
     pub fn market_order_header() -> Self {
         Self::new([
             ("price", DbColumnType::R8),
-            ("volRemaining", DbColumnType::R8),
+            ("volRemaining", DbColumnType::I4),
             ("typeID", DbColumnType::I4),
             ("orderID", DbColumnType::I8),
             ("volEntered", DbColumnType::I4),

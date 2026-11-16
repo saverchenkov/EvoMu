@@ -1205,3 +1205,336 @@ async fn test_ranged_buy_orders_corp_divisions_multisell_multibuy_expiry_and_his
         "Orders closed more than 90 days ago must be pruned from GetMarketOrderHistory"
     );
 }
+
+#[tokio::test]
+async fn get_orders_dbrow_descriptor_types() {
+    // parity: feat:market.get-orders, feat:serverops.packed-rows, rpc:marketProxy.GetOrders
+    eve_testkit::attest(&["feat:market.get-orders", "feat:serverops.packed-rows"]);
+    use eve_proto::{marshal, DBRowDescriptor, DbColumnType};
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let mut s1 = setup_pilot(&ctx, 1104, "demo", "demo-secret", 90_000_001).await;
+    let mut s2 = setup_pilot(&ctx, 1105, "other", "other-secret", 90_000_002).await;
+
+    let sell_item_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.clear();
+        for cid in [90_000_001_i64, 90_000_002_i64] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.balance = IskCents::from_isk(100_000_000);
+                ch.station_id = Some(JITA_STATION_ID);
+                ch.solar_system_id = 30_000_142;
+            }
+        }
+        snap.next_entity_id += 1;
+        let iid = snap.next_entity_id;
+        snap.items.insert(
+            iid,
+            InventoryItemRecord {
+                item_id: iid,
+                type_id: TRITANIUM_TYPE_ID,
+                owner_id: 90_000_001,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 500,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        iid
+    });
+    s2.station_id = Some(JITA_STATION_ID);
+    s2.solar_system_id = Some(30_000_142);
+    s2.region_id = Some(10_000_002);
+
+    // Place a 500-unit sell order @ 20.0 ISK (duration 90) and partially fill 125 units so volRemaining (375) != volEntered (500).
+    let sell_res = rpc(
+        &ctx,
+        &mut s1,
+        "marketProxy",
+        "PlaceMultiSellOrder",
+        &[
+            PyRep::List(vec![PyRep::keyval([
+                ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                ("typeID", PyRep::Integer(TRITANIUM_TYPE_ID as i64)),
+                ("itemID", PyRep::Integer(sell_item_id)),
+                ("price", PyRep::Real(20.0)),
+                ("quantity", PyRep::Integer(500)),
+            ])]),
+            PyRep::Bool(false),
+            PyRep::Integer(90),
+            PyRep::Real(0.0),
+        ],
+    )
+    .await
+    .expect("PlaceMultiSellOrder");
+    let PyRep::KeyVal(sell_kv) = sell_res else {
+        panic!("Expected KeyVal from PlaceMultiSellOrder");
+    };
+    let sell_oid = sell_kv
+        .get("orderID")
+        .and_then(|v| v.as_i64())
+        .expect("sell orderID");
+
+    rpc(
+        &ctx,
+        &mut s2,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(TRITANIUM_TYPE_ID as i64),
+            PyRep::Real(20.0),
+            PyRep::Integer(125),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(0),
+            PyRep::Bool(false),
+        ],
+    )
+    .await
+    .expect("Immediate partial fill against sell order");
+
+    // Place a resting 200-unit buy order @ 10.0 ISK (minVolume 10, range -1, duration 30).
+    let buy_res = rpc(
+        &ctx,
+        &mut s1,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(TRITANIUM_TYPE_ID as i64),
+            PyRep::Real(10.0),
+            PyRep::Integer(200),
+            PyRep::Integer(-1),
+            PyRep::Integer(10),
+            PyRep::Integer(30),
+            PyRep::Bool(false),
+        ],
+    )
+    .await
+    .expect("Place resting buy order");
+    let PyRep::KeyVal(buy_kv) = buy_res else {
+        panic!("Expected KeyVal from PlaceBuyOrder");
+    };
+    let buy_oid = buy_kv
+        .get("orderID")
+        .and_then(|v| v.as_i64())
+        .expect("buy orderID");
+
+    let expected_cols = [
+        ("price", DbColumnType::R8, 5_i64),
+        ("volRemaining", DbColumnType::I4, 3_i64),
+        ("typeID", DbColumnType::I4, 3_i64),
+        ("orderID", DbColumnType::I8, 20_i64),
+        ("volEntered", DbColumnType::I4, 3_i64),
+        ("minVolume", DbColumnType::I4, 3_i64),
+        ("bid", DbColumnType::Bool, 11_i64),
+        ("stationID", DbColumnType::I8, 20_i64),
+        ("regionID", DbColumnType::I4, 3_i64),
+        ("range", DbColumnType::I2, 2_i64),
+        ("issueDate", DbColumnType::FileTime, 64_i64),
+        ("duration", DbColumnType::I2, 2_i64),
+        ("solarSystemID", DbColumnType::I4, 3_i64),
+        ("constellationID", DbColumnType::I4, 3_i64),
+        ("jumps", DbColumnType::I4, 3_i64),
+    ];
+    let expected_raw_defs: Vec<(String, i64)> = expected_cols
+        .iter()
+        .map(|(n, _, code)| ((*n).to_string(), *code))
+        .collect();
+    let expected_typed_cols: Vec<(String, DbColumnType)> = expected_cols
+        .iter()
+        .map(|(n, ty, _)| ((*n).to_string(), *ty))
+        .collect();
+
+    let extract_crowset_descriptor = |crowset: &PyRep| -> DBRowDescriptor {
+        let PyRep::ObjectEx { header, .. } = crowset else {
+            panic!("expected CRowset ObjectEx, got {crowset:?}");
+        };
+        let PyRep::Tuple(hdr_parts) = header.as_ref() else {
+            panic!("expected Tuple header on CRowset");
+        };
+        let hdr_rep = hdr_parts
+            .get(1)
+            .and_then(|d| d.dict_get("header"))
+            .expect("CRowset header dict must contain 'header'");
+        DBRowDescriptor::from_pyrep(hdr_rep).expect("valid DBRowDescriptor in CRowset header")
+    };
+
+    // Query GetOrders and verify marshal round-trip + all 15 DBRowDescriptor column types & values.
+    let orders_rep = rpc(
+        &ctx,
+        &mut s1,
+        "marketProxy",
+        "GetOrders",
+        &[PyRep::Integer(TRITANIUM_TYPE_ID as i64)],
+    )
+    .await
+    .expect("GetOrders for Tritanium");
+    let wire = marshal::encode(&orders_rep);
+    let decoded = marshal::decode(&wire).expect("GetOrders marshal round-trip");
+    assert_eq!(decoded, orders_rep);
+
+    let PyRep::Tuple(books) = decoded else {
+        panic!("Expected (sells, buys) Tuple from GetOrders");
+    };
+    assert_eq!(books.len(), 2);
+
+    let expected_filetime = (common::TEST_CLOCK_BASE_UNIX as i64 + 11_644_473_600) * 10_000_000;
+    let jita_constellation_id = ctx.sde.solar_systems[&30_000_142].constellation_id as i64;
+
+    for (idx, book) in books.iter().enumerate() {
+        assert!(book.is_crowset(), "GetOrders book {idx} must be CRowset");
+        let desc = extract_crowset_descriptor(book);
+        assert_eq!(desc.columns.len(), 15);
+        assert_eq!(desc.columns, expected_typed_cols);
+        assert_eq!(desc.raw_defs(), expected_raw_defs);
+    }
+
+    let sell_rows = books[0].crowset_rows().expect("sell crowset rows");
+    assert_eq!(sell_rows.len(), 1);
+    let sell_row = &sell_rows[0];
+    let PyRep::DBRow {
+        header: sell_row_hdr,
+        columns: sell_cols,
+        ..
+    } = sell_row
+    else {
+        panic!("Expected PyRep::DBRow in sell CRowset");
+    };
+    assert_eq!(
+        DBRowDescriptor::from_pyrep(sell_row_hdr)
+            .expect("sell row descriptor")
+            .raw_defs(),
+        expected_raw_defs
+    );
+    assert_eq!(sell_cols.len(), 15);
+    assert_eq!(sell_row.dbrow_get("price"), Some(&PyRep::Real(20.0)));
+    assert_eq!(sell_row.dbrow_get("volRemaining"), Some(&PyRep::Integer(375)));
+    assert_eq!(
+        sell_row.dbrow_get("typeID"),
+        Some(&PyRep::Integer(TRITANIUM_TYPE_ID as i64))
+    );
+    assert_eq!(sell_row.dbrow_get("orderID"), Some(&PyRep::Integer(sell_oid)));
+    assert_eq!(sell_row.dbrow_get("volEntered"), Some(&PyRep::Integer(500)));
+    assert_eq!(sell_row.dbrow_get("minVolume"), Some(&PyRep::Integer(1)));
+    assert_eq!(sell_row.dbrow_get("bid"), Some(&PyRep::Bool(false)));
+    assert_eq!(
+        sell_row.dbrow_get("stationID"),
+        Some(&PyRep::Integer(JITA_STATION_ID))
+    );
+    assert_eq!(sell_row.dbrow_get("regionID"), Some(&PyRep::Integer(10_000_002)));
+    assert_eq!(sell_row.dbrow_get("range"), Some(&PyRep::Integer(32_767)));
+    assert_eq!(
+        sell_row.dbrow_get("issueDate"),
+        Some(&PyRep::Integer(expected_filetime))
+    );
+    assert_eq!(sell_row.dbrow_get("duration"), Some(&PyRep::Integer(90)));
+    assert_eq!(
+        sell_row.dbrow_get("solarSystemID"),
+        Some(&PyRep::Integer(30_000_142))
+    );
+    assert_eq!(
+        sell_row.dbrow_get("constellationID"),
+        Some(&PyRep::Integer(jita_constellation_id))
+    );
+    assert_eq!(sell_row.dbrow_get("jumps"), Some(&PyRep::Integer(0)));
+
+    let buy_rows = books[1].crowset_rows().expect("buy crowset rows");
+    assert_eq!(buy_rows.len(), 1);
+    let buy_row = &buy_rows[0];
+    let PyRep::DBRow {
+        header: buy_row_hdr,
+        columns: buy_cols,
+        ..
+    } = buy_row
+    else {
+        panic!("Expected PyRep::DBRow in buy CRowset");
+    };
+    assert_eq!(
+        DBRowDescriptor::from_pyrep(buy_row_hdr)
+            .expect("buy row descriptor")
+            .raw_defs(),
+        expected_raw_defs
+    );
+    assert_eq!(buy_cols.len(), 15);
+    assert_eq!(buy_row.dbrow_get("price"), Some(&PyRep::Real(10.0)));
+    assert_eq!(buy_row.dbrow_get("volRemaining"), Some(&PyRep::Integer(200)));
+    assert_eq!(
+        buy_row.dbrow_get("typeID"),
+        Some(&PyRep::Integer(TRITANIUM_TYPE_ID as i64))
+    );
+    assert_eq!(buy_row.dbrow_get("orderID"), Some(&PyRep::Integer(buy_oid)));
+    assert_eq!(buy_row.dbrow_get("volEntered"), Some(&PyRep::Integer(200)));
+    assert_eq!(buy_row.dbrow_get("minVolume"), Some(&PyRep::Integer(10)));
+    assert_eq!(buy_row.dbrow_get("bid"), Some(&PyRep::Bool(true)));
+    assert_eq!(
+        buy_row.dbrow_get("stationID"),
+        Some(&PyRep::Integer(JITA_STATION_ID))
+    );
+    assert_eq!(buy_row.dbrow_get("regionID"), Some(&PyRep::Integer(10_000_002)));
+    assert_eq!(buy_row.dbrow_get("range"), Some(&PyRep::Integer(-1)));
+    assert_eq!(
+        buy_row.dbrow_get("issueDate"),
+        Some(&PyRep::Integer(expected_filetime))
+    );
+    assert_eq!(buy_row.dbrow_get("duration"), Some(&PyRep::Integer(30)));
+    assert_eq!(
+        buy_row.dbrow_get("solarSystemID"),
+        Some(&PyRep::Integer(30_000_142))
+    );
+    assert_eq!(
+        buy_row.dbrow_get("constellationID"),
+        Some(&PyRep::Integer(jita_constellation_id))
+    );
+    assert_eq!(buy_row.dbrow_get("jumps"), Some(&PyRep::Integer(0)));
+
+    // Negative variants:
+    // 1. Unknown/empty typeID still returns valid empty 15-column CRowsets preserving all descriptor types across marshal round-trip.
+    let empty_orders = rpc(
+        &ctx,
+        &mut s1,
+        "marketProxy",
+        "GetOrders",
+        &[PyRep::Integer(999_999_999)],
+    )
+    .await
+    .expect("GetOrders for non-existent typeID returns empty CRowsets");
+    let empty_wire = marshal::encode(&empty_orders);
+    let empty_decoded = marshal::decode(&empty_wire).expect("empty GetOrders marshal round-trip");
+    assert_eq!(empty_decoded, empty_orders);
+    let PyRep::Tuple(empty_books) = empty_decoded else {
+        panic!("Expected Tuple for empty GetOrders");
+    };
+    assert_eq!(empty_books.len(), 2);
+    for book in &empty_books {
+        assert!(book.is_crowset());
+        assert!(book.crowset_rows().expect("rows").is_empty());
+        assert_eq!(extract_crowset_descriptor(book).raw_defs(), expected_raw_defs);
+    }
+
+    // 2. Missing typeID argument returns InvalidMarketOrder without panicking.
+    let missing_type_err = rpc(&ctx, &mut s1, "marketProxy", "GetOrders", &[])
+        .await
+        .unwrap_err();
+    assert_eq!(missing_type_err.code, "InvalidMarketOrder");
+
+    // 3. Session without an active region returns NoRegion without panicking.
+    //    Remove the DB character record so dispatch_rpc::sync_session cannot re-populate region_id.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.remove(&90_000_001);
+    });
+    s1.region_id = None;
+    let no_region_err = rpc(
+        &ctx,
+        &mut s1,
+        "marketProxy",
+        "GetOrders",
+        &[PyRep::Integer(TRITANIUM_TYPE_ID as i64)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(no_region_err.code, "NoRegion");
+}

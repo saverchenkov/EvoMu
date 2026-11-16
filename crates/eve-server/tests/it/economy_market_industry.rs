@@ -768,7 +768,7 @@ pub(crate) mod market_orders_limit_escrow_queries {
             })
             .expect("Placed buy order must appear in GetOrders buy rowset");
         assert_eq!(buy_row_cols.get(0).map(|(_, v)| v), Some(&PyRep::Real(0.50)));
-        assert_eq!(buy_row_cols.get(1).map(|(_, v)| v), Some(&PyRep::Real(5_000.0)));
+        assert_eq!(buy_row_cols.get(1).map(|(_, v)| v), Some(&PyRep::Integer(5_000)));
         assert_eq!(
             buy_row_cols.get(2).map(|(_, v)| v),
             Some(&PyRep::Integer(TRITANIUM_TYPE_ID as i64))
@@ -911,7 +911,7 @@ pub(crate) mod market_orders_limit_escrow_queries {
             })
             .expect("Placed sell order must appear in GetOrders sell rowset");
         assert_eq!(sell_row_cols.get(0).map(|(_, v)| v), Some(&PyRep::Real(25.0)));
-        assert_eq!(sell_row_cols.get(1).map(|(_, v)| v), Some(&PyRep::Real(2_000.0)));
+        assert_eq!(sell_row_cols.get(1).map(|(_, v)| v), Some(&PyRep::Integer(2_000)));
         assert_eq!(sell_row_cols.get(7).map(|(_, v)| v), Some(&PyRep::Integer(JITA_STATION_ID)));
         assert_eq!(sell_row_cols.get(9).map(|(_, v)| v), Some(&PyRep::Integer(32767)));
         assert!(sell_row_cols.get(10).and_then(|(_, c)| c.as_i64()).unwrap_or(0) > 0);
