@@ -8,7 +8,8 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::attr_ids;
 use glam::DVec3;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 
 use super::{
     check_session_change_timer_active, compute_pilot_warp_speed_au_s, record_session_change_timer,
@@ -839,17 +840,29 @@ async fn handle_cmd_stargate_jump(
         .await
         .ok()
         .flatten()
-        .map(|(_, b)| b.radius)
-        .filter(|&r| r > 0.0);
-    let gate_radius = gate_ball_radius.unwrap_or_else(|| {
-        ctx.sde
-            .types
-            .get(&16)
-            .map(|t| t.radius)
-            .filter(|&r| r > 0.0)
-            .unwrap_or(14_051.0)
-    });
-    let warp_perimeter = evaluate_stargate_jump_perimeter(&current_ball, jump.position, gate_radius);
+        .map(|(_, b)| b.radius);
+    let gate_type_id = ctx
+        .sde
+        .stargate_type_and_name(gate_id)
+        .map(|(tid, _)| tid)
+        .or(Some(16));
+    let gate_celestial_radius = ctx
+        .sde
+        .celestials_in_system_slice(old_sys)
+        .iter()
+        .find(|c| c.celestial_id == gate_id)
+        .map(|c| c.radius);
+    let (gate_radius, _) = resolve_physical_radius(
+        ctx,
+        gate_type_id,
+        Some(gate_id),
+        PhysicalRadiusInput {
+            item_radius: gate_ball_radius.filter(|&r| r.is_finite() && r > 0.0).or(gate_celestial_radius),
+            ..Default::default()
+        },
+    );
+    let effective_ship = resolve_ship_ball_for_perimeter(ctx, &current_ball);
+    let warp_perimeter = evaluate_stargate_jump_perimeter(&effective_ship, jump.position, gate_radius);
     let allow_arriving_warp = matches!(warp_perimeter, Ok(true));
 
     // Pochven Triglavian Clade Home Systems & Zarzakh Horizon Siege checked after unified movement validation.
@@ -1210,6 +1223,137 @@ async fn handle_cmd_stargate_jump(
 }
 
 const SURFACE_PERIMETER_METERS: f64 = 2_500.0;
+const DOGMA_ATTR_RADIUS: eve_sde::AttributeId = 162;
+pub const DEFAULT_PHYSICAL_RADIUS_METERS: f64 = 15_000.0;
+
+/// Provenance of a resolved entity physical radius in meters (`#1088`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RadiusSource {
+    ItemPhysicalRadius,
+    TypePhysicalRadius,
+    ItemRadius,
+    TypeRadius,
+    InteractionRadius,
+    FallbackDefault,
+}
+
+impl RadiusSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ItemPhysicalRadius => "item.physicalRadius",
+            Self::TypePhysicalRadius => "type.physicalRadius",
+            Self::ItemRadius => "item.radius",
+            Self::TypeRadius => "type.radius",
+            Self::InteractionRadius => "interactionRadius",
+            Self::FallbackDefault => "default_15000m",
+        }
+    }
+}
+
+/// Ordered candidate radii evaluated by [`physical_radius`] (`#1088`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PhysicalRadiusInput {
+    pub item_physical_radius: Option<f64>,
+    pub type_physical_radius: Option<f64>,
+    pub item_radius: Option<f64>,
+    pub type_radius: Option<f64>,
+    pub interaction_radius: Option<f64>,
+}
+
+/// Resolves an entity's physical radius in meters using the priority chain:
+/// `item.physicalRadius -> type.physicalRadius -> item.radius -> type.radius -> interactionRadius -> 15_000.0`.
+pub fn physical_radius(input: &PhysicalRadiusInput) -> (f64, RadiusSource) {
+    let valid = |opt: Option<f64>| opt.filter(|&r| r.is_finite() && r > 0.0);
+    if let Some(r) = valid(input.item_physical_radius) {
+        return (r, RadiusSource::ItemPhysicalRadius);
+    }
+    if let Some(r) = valid(input.type_physical_radius) {
+        return (r, RadiusSource::TypePhysicalRadius);
+    }
+    if let Some(r) = valid(input.item_radius) {
+        return (r, RadiusSource::ItemRadius);
+    }
+    if let Some(r) = valid(input.type_radius) {
+        return (r, RadiusSource::TypeRadius);
+    }
+    if let Some(r) = valid(input.interaction_radius) {
+        return (r, RadiusSource::InteractionRadius);
+    }
+    (DEFAULT_PHYSICAL_RADIUS_METERS, RadiusSource::FallbackDefault)
+}
+
+static LOGGED_FALLBACK_RADIUS_TYPES: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+
+fn log_fallback_radius_once(
+    type_id: Option<u32>,
+    item_id: Option<i64>,
+    source: RadiusSource,
+) -> bool {
+    let key = type_id.unwrap_or(0);
+    let inserted = LOGGED_FALLBACK_RADIUS_TYPES
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key);
+    if inserted {
+        tracing::warn!(
+            target: "eve_server::physical_radius",
+            type_id = ?type_id,
+            item_id = ?item_id,
+            source = source.as_str(),
+            fallback_m = DEFAULT_PHYSICAL_RADIUS_METERS,
+            "physical_radius hit 15,000 m fallback for type without item/type/interaction radius"
+        );
+    }
+    inserted
+}
+
+/// Resolves physical radius using SDE type metadata + live item/ball inputs, logging once per
+/// `type_id` whenever the final `15,000 m` default fallback is reached.
+///
+/// Lock-free on `ctx.db` so callers inside DB snapshot closures never nest DB locks.
+pub(crate) fn resolve_physical_radius(
+    ctx: &ServerContext,
+    type_id: Option<u32>,
+    item_id: Option<i64>,
+    input: PhysicalRadiusInput,
+) -> (f64, RadiusSource) {
+    let type_rec = type_id.and_then(|tid| ctx.sde.types.get(&tid));
+    let sde_type_radius = type_rec.and_then(|t| {
+        if t.radius.is_finite() && t.radius > 0.0 {
+            Some(t.radius)
+        } else {
+            t.default_attributes
+                .get(&DOGMA_ATTR_RADIUS)
+                .copied()
+                .filter(|&r| r.is_finite() && r > 0.0)
+        }
+    });
+    let (radius, source) = physical_radius(&PhysicalRadiusInput {
+        type_radius: input.type_radius.or(sde_type_radius),
+        ..input
+    });
+    if source == RadiusSource::FallbackDefault {
+        log_fallback_radius_once(type_id, item_id, source);
+    }
+    (radius, source)
+}
+
+/// Ensures a ship `Ball` used in surface-perimeter checks has a positive resolved radius (`#1072`, `#1088`).
+pub(crate) fn resolve_ship_ball_for_perimeter(
+    ctx: &ServerContext,
+    ball: &eve_destiny::Ball,
+) -> eve_destiny::Ball {
+    if ball.radius.is_finite() && ball.radius > 0.0 {
+        return ball.clone();
+    }
+    let tid = (ball.type_id > 0).then_some(ball.type_id);
+    let (ship_r, _) =
+        resolve_physical_radius(ctx, tid, Some(ball.id), PhysicalRadiusInput::default());
+    let mut updated = ball.clone();
+    updated.radius = ship_r;
+    updated
+}
 
 /// Returns the maximum center-to-center distance (`target_radius + ball.radius + 2,500 m`)
 /// corresponding to a `2,500 m` ball-to-ball surface perimeter.
@@ -1473,7 +1617,7 @@ async fn handle_dock(
         });
     }
 
-    let (target_pos, sde_target_radius) = if is_structure {
+    let (target_pos, target_type_id) = if is_structure {
         let st_opt = ctx
             .db
             .with_snapshot(|snap| snap.structures.get(&dock_id).cloned());
@@ -1540,14 +1684,7 @@ async fn handle_dock(
                 client_error: None,
             });
         }
-        let r = ctx
-            .sde
-            .types
-            .get(&st.type_id)
-            .map(|t| t.radius)
-            .filter(|&r| r > 0.0)
-            .unwrap_or(0.0);
-        (DVec3::from_array(st.position), r)
+        (DVec3::from_array(st.position), Some(st.type_id))
     } else {
         crate::services::space_navigation_advanced::validate_npc_station_docking(ship_group_id, true)?;
         let st_opt = ctx
@@ -1566,25 +1703,26 @@ async fn handle_dock(
             });
         };
         crate::services::station_structure_handlers::validate_npc_station_docking_gate(ctx, char_id, dock_id)?;
-        let r = ctx
-            .sde
-            .types
-            .get(&st.station_type_id)
-            .map(|t| t.radius)
-            .filter(|&r| r > 0.0)
-            .unwrap_or(0.0);
-        (st.position, r)
+        (st.position, Some(st.station_type_id))
     };
 
-    let target_radius = handle
+    let ball_radius = handle
         .get_ball_snapshot(dock_id)
         .await
         .ok()
         .flatten()
-        .map(|(_, b)| b.radius)
-        .filter(|&r| r > 0.0)
-        .unwrap_or(sde_target_radius);
-    let arrived_at_warp_dest = evaluate_dock_perimeter(&ball, target_pos, target_radius)?;
+        .map(|(_, b)| b.radius);
+    let (target_radius, _) = resolve_physical_radius(
+        ctx,
+        target_type_id,
+        Some(dock_id),
+        PhysicalRadiusInput {
+            item_radius: ball_radius,
+            ..Default::default()
+        },
+    );
+    let effective_ball = resolve_ship_ball_for_perimeter(ctx, &ball);
+    let arrived_at_warp_dest = evaluate_dock_perimeter(&effective_ball, target_pos, target_radius)?;
     if is_structure && handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
         return Err(BridgeRpcError {
             code: "ShipWarpScrambled".into(),
@@ -1738,21 +1876,14 @@ fn resolve_dock_target_for_settle(
     service: &str,
     method: &str,
     target_id: i64,
-) -> Option<(DVec3, f64, bool)> {
+) -> Option<(DVec3, Option<u32>, bool)> {
     let station_target = || {
         let st = ctx.sde.stations.get(&target_id)?;
         if st.solar_system_id != sys_id {
             return None;
         }
         let pos = DVec3::new(st.position.x, st.position.y, st.position.z);
-        let radius = ctx
-            .sde
-            .types
-            .get(&st.station_type_id)
-            .map(|t| t.radius)
-            .filter(|&r| r > 0.0)
-            .unwrap_or(5_000.0);
-        Some((pos, radius, false))
+        Some((pos, Some(st.station_type_id), false))
     };
     let structure_target = || {
         ctx.db.with_snapshot(|snap| {
@@ -1761,14 +1892,7 @@ fn resolve_dock_target_for_settle(
                 return None;
             }
             let pos = DVec3::from_array(st.position);
-            let radius = ctx
-                .sde
-                .types
-                .get(&st.type_id)
-                .map(|t| t.radius)
-                .filter(|&r| r > 0.0)
-                .unwrap_or(15_000.0);
-            Some((pos, radius, true))
+            Some((pos, Some(st.type_id), true))
         })
     };
     match (service, method) {
@@ -1852,18 +1976,26 @@ pub(crate) async fn prepare_dock_warp_settle(
         {
             return None;
         }
-        let (target_pos, sde_radius, is_structure) =
+        let (target_pos, target_type_id, is_structure) =
             resolve_dock_target_for_settle(ctx, sys_id, service, method, target_id)?;
-        let target_radius = handle
+        let target_ball_radius = handle
             .get_ball_snapshot(target_id)
             .await
             .ok()
             .flatten()
-            .map(|(_, b)| b.radius)
-            .filter(|&r| r > 0.0)
-            .unwrap_or(sde_radius);
+            .map(|(_, b)| b.radius);
+        let (target_radius, _) = resolve_physical_radius(
+            ctx,
+            target_type_id,
+            Some(target_id),
+            PhysicalRadiusInput {
+                item_radius: target_ball_radius,
+                ..Default::default()
+            },
+        );
+        let effective_ball = resolve_ship_ball_for_perimeter(ctx, &ball);
         let arrived_at_warp_dest =
-            evaluate_dock_perimeter(&ball, target_pos, target_radius).ok()?;
+            evaluate_dock_perimeter(&effective_ball, target_pos, target_radius).ok()?;
         if crate::services::combat_crimewatch::check_crimewatch_action_restriction(
             ctx, char_id, ship_id, sys_id, "dock", now_unix,
         )

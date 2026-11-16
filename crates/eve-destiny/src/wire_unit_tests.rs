@@ -1541,3 +1541,45 @@ fn stargate_slim_activation_state_and_timed_special_fx_wire_encoding() {
     assert_eq!(args[10], PyRep::Integer(0));
     assert_eq!(args[13], PyRep::List(vec![PyRep::Integer(30_000_144)]));
 }
+
+#[test]
+fn slim_item_dict_emits_finite_dun_rotation_when_present() {
+    let gate_ball = sample_ball(50_001_249, MovementMode::Rigid);
+    let gate_meta = SlimItemMeta {
+        group_id: 10,
+        category_id: 2,
+        jump_target: Some((50_001_251, 30_000_144)),
+        dun_rotation: Some([-133.1, -12.1, 0.0]),
+        ..SlimItemMeta::default()
+    };
+    let PyRep::Dict(entries) = slim_item_dict(&gate_ball, &gate_meta) else {
+        panic!("expected PyRep::Dict");
+    };
+    let rot_val = entries
+        .iter()
+        .find(|(k, _)| matches!(k, PyRep::String(s) if s == "dunRotation"))
+        .map(|(_, v)| v.clone());
+    assert_eq!(
+        rot_val,
+        Some(PyRep::Tuple(vec![
+            PyRep::Real(-133.1),
+            PyRep::Real(-12.1),
+            PyRep::Real(0.0),
+        ]))
+    );
+
+    // Non-finite values must not leak into wire SlimItem.
+    let nan_meta = SlimItemMeta {
+        dun_rotation: Some([f64::NAN, 0.0, 0.0]),
+        ..gate_meta
+    };
+    let PyRep::Dict(nan_entries) = slim_item_dict(&gate_ball, &nan_meta) else {
+        panic!("expected PyRep::Dict");
+    };
+    assert!(
+        !nan_entries
+            .iter()
+            .any(|(k, _)| matches!(k, PyRep::String(s) if s == "dunRotation")),
+        "non-finite dunRotation must be omitted"
+    );
+}

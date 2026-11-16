@@ -923,3 +923,42 @@ fn build_tick_broadcast_evicts_dead_queues_and_matches_direct_encode() {
     );
     assert!(bp.observer_events.contains_key(&201));
 }
+
+#[test]
+fn jita_to_perimeter_gate_points_toward_perimeter_within_one_degree() {
+    let ctx = crate::router::ServerContext::new();
+    let jita_id = 30_000_142_u32;
+    let perimeter_id = 30_000_144_u32;
+
+    let mut bp = Ballpark::new(jita_id);
+    populate_system_celestials(&mut bp, jita_id, &ctx.sde);
+
+    let (gate_id, gate_meta) = bp
+        .ball_slim_meta
+        .iter()
+        .find(|(_, m)| {
+            m.group_id == 10
+                && matches!(m.jump_target, Some((_, dest_sys)) if dest_sys == perimeter_id)
+        })
+        .map(|(&id, m)| (id, m.clone()))
+        .expect("Jita must contain stargate to Perimeter");
+
+    let dun_rot = gate_meta
+        .dun_rotation
+        .unwrap_or_else(|| panic!("stargate {gate_id} must compute dun_rotation toward Perimeter"));
+    let fwd = stargate_forward_vector_from_dun_rotation(dun_rot);
+
+    let jita_pos = DVec3::from_array(ctx.sde.solar_systems[&jita_id].galactic_pos_ly);
+    let perimeter_pos = DVec3::from_array(ctx.sde.solar_systems[&perimeter_id].galactic_pos_ly);
+    let expected_dir = (perimeter_pos - jita_pos).normalize();
+
+    let dot = fwd.dot(expected_dir).clamp(-1.0, 1.0);
+    let angle_deg = dot.acos().to_degrees();
+    assert!(
+        angle_deg < 1.0,
+        "Jita->Perimeter gate {gate_id} forward {fwd:?} deviated {angle_deg:.6} deg from {expected_dir:?}"
+    );
+
+    // Degenerate zero-delta orientation degrades safely to None rather than NaN.
+    assert_eq!(compute_stargate_dun_rotation(jita_id, jita_id, &ctx.sde), None);
+}

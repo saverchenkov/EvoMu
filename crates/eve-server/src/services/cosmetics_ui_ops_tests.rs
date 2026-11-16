@@ -1055,6 +1055,60 @@ async fn duplicate_skin_license_names_resolve_deterministically() {
     assert_eq!(ctx.db.with_snapshot(|s| s.applied_ship_skins.get(&dominix_ship_id).copied()), Some(2_174));
 }
 
+#[tokio::test]
+async fn rookie_help_boot_seed_provides_valid_overview_preset_link_and_get_stored_preset_tuple() {
+    let ctx = test_ctx();
+    let motd = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.chat_channels
+                .get(ROOKIE_HELP_CHANNEL_ID)
+                .map(|ch| ch.motd.clone())
+        })
+        .expect("rookie_help channel seeded at boot");
+    let marker = "overviewPreset:";
+    let start = motd.find(marker).expect("MOTD must contain overviewPreset link") + marker.len();
+    let end = motd[start..].find('"').expect("closing href quote") + start;
+    let link_target = &motd[start..end];
+    let (hash_str, sq_str) = link_target
+        .split_once("//")
+        .expect("overviewPreset link uses <hash>//<sqID> format");
+    let sq_id: i64 = sq_str.parse().expect("numeric sqID in MOTD link");
+    assert!(!hash_str.is_empty());
+
+    // Any logged-in character can fetch the curated preset via V24's (hash, sqID) 2-tuple or sqID
+    let mut sess = auth_session(2, 90_000_002, 98_000_002, 30_000_142);
+    let kw = HashMap::new();
+    let by_tuple = handle(
+        &ctx,
+        &mut sess,
+        "overviewPresetMgr",
+        "GetStoredPreset",
+        &[PyRep::Tuple(vec![
+            PyRep::String(hash_str.to_string()),
+            PyRep::Integer(sq_id),
+        ])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let by_id = handle(
+        &ctx,
+        &mut sess,
+        "overviewPresetMgr",
+        "GetStoredPreset",
+        &[PyRep::Integer(sq_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(by_tuple, by_id);
+    let yaml_str = by_tuple.as_str().expect("preset YAML string");
+    assert!(yaml_str.contains("Rookie_Combat") && yaml_str.contains("tabSetup"));
+}
+
 #[cfg(test)]
 #[path = "cosmetics_ui_ops_extra_unit_tests.rs"]
 mod cosmetics_ui_ops_extra_unit_tests;

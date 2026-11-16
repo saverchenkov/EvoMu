@@ -22,8 +22,9 @@ pub(crate) use fleet_social_calendar_ops::*;
 pub(crate) mod fleet_social_chat;
 pub use fleet_social_chat::{
     ensure_xmpp_auth_token, mint_or_rotate_xmpp_auth_token, revoke_xmpp_auth_token,
-    xmpp_authenticate_sasl_plain, xmpp_can_join_room, xmpp_iq_reply, xmpp_iq_reply_with_auth,
-    xmpp_iq_reply_with_auth_mut, xmpp_iq_reply_with_ctx, XmppStreamAuth,
+    xmpp_authenticate_sasl_plain, xmpp_can_join_room, xmpp_escape_xml, xmpp_iq_reply,
+    xmpp_iq_reply_with_auth, xmpp_iq_reply_with_auth_mut, xmpp_iq_reply_with_ctx,
+    xmpp_room_motd, XmppStreamAuth,
 };
 #[path = "fleet_social_corp_gov.rs"]
 mod fleet_social_corp_gov;

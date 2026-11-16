@@ -479,6 +479,7 @@ struct PrecomputedCandidate {
 
 pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
     crate::services::mobile_deployables_ext::step_system_deployables_sync(ctx, solar_system_id);
+    crate::services::gm_soak_commands::step_gm_soak_and_deadwarp_for_system(ctx, solar_system_id);
     let (mut npcs_in_sys, has_scram, prev_npc_scram_targets, is_debugged) = {
         let guard = ctx.combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
         let npcs: Vec<_> = guard
@@ -910,6 +911,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         }
 
         if npc.archetype == "TransmissionRelay"
+            || npc.archetype == "GmLogiSoak"
             || npc.type_id == 41_589
             || npc_ball.mode_is_warp
         {

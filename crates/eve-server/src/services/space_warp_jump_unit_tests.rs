@@ -2438,3 +2438,132 @@ async fn stargate_jump_never_emits_gate_activity_across_standard_and_damaged_gat
         assert_eq!(pilot_jump_in_ms, vec![Some(5_000.0)]);
     }
 }
+
+#[tokio::test]
+async fn physical_radius_resolution_chain_provenance_and_keepstar_titan_dock_check() {
+    // 1. Pure 6-step resolution chain order:
+    //    item.physicalRadius -> type.physicalRadius -> item.radius -> type.radius -> interactionRadius -> 15_000.0
+    assert_eq!(
+        physical_radius(&PhysicalRadiusInput {
+            item_physical_radius: Some(111.0),
+            type_physical_radius: Some(222.0),
+            item_radius: Some(333.0),
+            type_radius: Some(444.0),
+            interaction_radius: Some(555.0),
+        }),
+        (111.0, RadiusSource::ItemPhysicalRadius)
+    );
+    assert_eq!(
+        physical_radius(&PhysicalRadiusInput {
+            item_physical_radius: Some(0.0), // invalid non-positive skipped cleanly
+            type_physical_radius: Some(222.0),
+            item_radius: Some(333.0),
+            type_radius: Some(444.0),
+            interaction_radius: Some(555.0),
+        }),
+        (222.0, RadiusSource::TypePhysicalRadius)
+    );
+    assert_eq!(
+        physical_radius(&PhysicalRadiusInput {
+            item_physical_radius: Some(f64::NAN), // non-finite skipped cleanly
+            type_physical_radius: None,
+            item_radius: Some(333.0),
+            type_radius: Some(444.0),
+            interaction_radius: Some(555.0),
+        }),
+        (333.0, RadiusSource::ItemRadius)
+    );
+    assert_eq!(
+        physical_radius(&PhysicalRadiusInput {
+            type_radius: Some(444.0),
+            interaction_radius: Some(555.0),
+            ..Default::default()
+        }),
+        (444.0, RadiusSource::TypeRadius)
+    );
+    assert_eq!(
+        physical_radius(&PhysicalRadiusInput {
+            interaction_radius: Some(555.0),
+            ..Default::default()
+        }),
+        (555.0, RadiusSource::InteractionRadius)
+    );
+    assert_eq!(
+        physical_radius(&PhysicalRadiusInput::default()),
+        (DEFAULT_PHYSICAL_RADIUS_METERS, RadiusSource::FallbackDefault)
+    );
+
+    // 2. Once-per-type_id warning gate for fallback default
+    let synthetic_unknown_type = 9_991_088_u32;
+    assert!(log_fallback_radius_once(Some(synthetic_unknown_type), Some(1), RadiusSource::FallbackDefault));
+    assert!(!log_fallback_radius_once(Some(synthetic_unknown_type), Some(2), RadiusSource::FallbackDefault));
+
+    // 3. Real SDE resolution across Station, Stargate, Keepstar (35834), and Titan (11567 Avatar)
+    let ctx = ServerContext::new();
+    let jita_station_id = 60_003_760_i64;
+    let st = ctx.sde.stations.get(&jita_station_id).expect("Jita 4-4 station");
+    let (sta_r, sta_src) = resolve_physical_radius(
+        &ctx,
+        Some(st.station_type_id),
+        Some(jita_station_id),
+        PhysicalRadiusInput::default(),
+    );
+    assert_eq!(sta_src, RadiusSource::TypeRadius);
+    assert!(sta_r > 10_000.0, "station radius resolved via SDE type: {sta_r}");
+
+    let (gate_tid, _) = ctx
+        .sde
+        .stargate_type_and_name(50_001_249)
+        .expect("Jita->Perimeter stargate");
+    let (gate_r, gate_src) = resolve_physical_radius(
+        &ctx,
+        Some(gate_tid),
+        Some(50_001_249),
+        PhysicalRadiusInput::default(),
+    );
+    assert_eq!(gate_src, RadiusSource::TypeRadius);
+    assert!((gate_r - ctx.sde.types[&gate_tid].radius).abs() < 1e-6);
+
+    let (keepstar_r, keepstar_src) = resolve_physical_radius(
+        &ctx,
+        Some(35_834),
+        Some(1_000_000_999_001),
+        PhysicalRadiusInput::default(),
+    );
+    assert_eq!(keepstar_src, RadiusSource::TypeRadius);
+    assert!((keepstar_r - 150_000.0).abs() < 1e-6);
+
+    let (titan_r, titan_src) = resolve_physical_radius(
+        &ctx,
+        Some(11_567),
+        Some(1_000_000_999_002),
+        PhysicalRadiusInput::default(),
+    );
+    assert_eq!(titan_src, RadiusSource::TypeRadius);
+    assert!((titan_r - 6_800.0).abs() < 1e-6);
+
+    // Zero-radius Titan ship ball (e.g. legacy/uninitialized ball) resolves Titan physical radius
+    // so Keepstar surface-perimeter dock check at 725 m surface distance (157,525 m center) succeeds (#1072).
+    let keepstar_pos = DVec3::new(100_000_000.0, 0.0, 0.0);
+    let mut zero_radius_titan = eve_destiny::Ball {
+        id: 1_000_000_999_002,
+        type_id: 11_567,
+        position: keepstar_pos + DVec3::new(keepstar_r + titan_r + 725.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 60.0,
+        inertia: 5.0,
+        mass: 2_400_000_000.0,
+        radius: 0.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let resolved_titan = resolve_ship_ball_for_perimeter(&ctx, &zero_radius_titan);
+    assert!((resolved_titan.radius - 6_800.0).abs() < 1e-6);
+    assert_eq!(
+        evaluate_dock_perimeter(&resolved_titan, keepstar_pos, keepstar_r).unwrap(),
+        false
+    );
+    // Without resolution (0.0 ship radius), 157,525 m > 150,000 + 2,500 would falsely fail:
+    zero_radius_titan.radius = 0.0;
+    assert!(evaluate_dock_perimeter(&zero_radius_titan, keepstar_pos, keepstar_r).is_err());
+}

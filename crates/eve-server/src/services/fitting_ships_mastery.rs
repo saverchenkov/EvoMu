@@ -547,7 +547,11 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             client_error: None,
                         }));
                     }
-                    let dist = cb.surface_distance(&tb);
+                    let cb_eff =
+                        crate::services::space_warp_jump::resolve_ship_ball_for_perimeter(ctx, &cb);
+                    let tb_eff =
+                        crate::services::space_warp_jump::resolve_ship_ball_for_perimeter(ctx, &tb);
+                    let dist = cb_eff.surface_distance(&tb_eff);
                     if dist > 2_500.0 {
                         return Some(Err(BridgeRpcError {
                             code: "ShipOutOfBoardingRange".into(),

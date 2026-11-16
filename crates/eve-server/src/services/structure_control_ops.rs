@@ -165,7 +165,7 @@ async fn engage_structure_control(
     char_id: i64,
     board_mode: bool,
 ) -> Result<u32, BridgeRpcError> {
-    let (sys_id, is_flex, struct_pos, struct_radius) = ctx.db.with_snapshot(|snap| {
+    let (sys_id, struct_type_id, is_flex, struct_pos) = ctx.db.with_snapshot(|snap| {
         let st = snap
             .structures
             .get(&structure_id)
@@ -184,13 +184,7 @@ async fn engage_structure_control(
         }
         let prof = structure_profile(ctx, st.type_id);
         let is_flex = prof.as_ref().is_some_and(|p| p.hull_class == HullClass::Flex);
-        let radius = ctx
-            .sde
-            .types
-            .get(&st.type_id)
-            .map(|t| t.radius.max(1_000.0))
-            .unwrap_or(5_000.0);
-        Ok((st.solar_system_id, is_flex, DVec3::from_array(st.position), radius))
+        Ok((st.solar_system_id, st.type_id, is_flex, DVec3::from_array(st.position)))
     })?;
 
     if is_flex {
@@ -203,24 +197,48 @@ async fn engage_structure_control(
                 format!("Must be in solar system {sys_id} to control FLEX structure {structure_id}"),
             ));
         }
-        let ship_pos = ctx
-            .systems
-            .get_or_spawn(sys_id)
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let struct_ball_radius = sys_handle
+            .get_ball_snapshot(structure_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, b)| b.radius);
+        let (struct_radius, _) = crate::services::space_warp_jump::resolve_physical_radius(
+            ctx,
+            Some(struct_type_id),
+            Some(structure_id),
+            crate::services::space_warp_jump::PhysicalRadiusInput {
+                item_radius: struct_ball_radius,
+                ..Default::default()
+            },
+        );
+        let (ship_pos, ship_radius) = if let Some((_, sb)) = sys_handle
             .get_ball_snapshot(ship_id)
             .await
             .map_err(|e| err("DestinyQueryFailed", e))?
-            .map(|(_, b)| b.position)
-            .or_else(|| {
-                ctx.db
-                    .with_snapshot(|snap| snap.item_positions.get(&ship_id).copied().map(DVec3::from_array))
-            })
-            .ok_or_else(|| {
-                err(
-                    "OutOfBoardingRange",
-                    format!("Ship {ship_id} has no live position in solar system {sys_id}"),
-                )
-            })?;
-        let max_range = struct_radius + FLEX_BOARDING_PROXIMITY_M;
+        {
+            let eff = crate::services::space_warp_jump::resolve_ship_ball_for_perimeter(ctx, &sb);
+            (eff.position, eff.radius)
+        } else if let Some((pos, ship_tid)) = ctx.db.with_snapshot(|snap| {
+            let pos = snap.item_positions.get(&ship_id).copied().map(DVec3::from_array)?;
+            let tid = snap.items.get(&ship_id).map(|i| i.type_id);
+            Some((pos, tid))
+        }) {
+            let (sr, _) = crate::services::space_warp_jump::resolve_physical_radius(
+                ctx,
+                ship_tid,
+                Some(ship_id),
+                crate::services::space_warp_jump::PhysicalRadiusInput::default(),
+            );
+            (pos, sr)
+        } else {
+            return Err(err(
+                "OutOfBoardingRange",
+                format!("Ship {ship_id} has no live position in solar system {sys_id}"),
+            ));
+        };
+        let max_range = struct_radius + ship_radius + FLEX_BOARDING_PROXIMITY_M;
         if ship_pos.distance(struct_pos) > max_range {
             return Err(err(
                 "OutOfBoardingRange",

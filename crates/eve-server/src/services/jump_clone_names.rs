@@ -209,7 +209,7 @@ pub(crate) fn emit_server_skills_changed(
         let empty_skills = std::collections::HashMap::new();
         let skills = match snap.skills.get(&char_id) {
             Some(s) => s,
-            None if event == Some("ExpertSystemExpired") => &empty_skills,
+            None if matches!(event, Some("ExpertSystemExpired" | "SkillReset")) => &empty_skills,
             None => return Vec::new(),
         };
         skill_type_ids
@@ -217,7 +217,9 @@ pub(crate) fn emit_server_skills_changed(
             .filter_map(|&tid| {
                 let (lvl, sp) = match skills.get(&tid) {
                     Some(rec) => (rec.level as i64, rec.skill_points),
-                    None if event == Some("ExpertSystemExpired") => (0_i64, 0.0_f64),
+                    None if matches!(event, Some("ExpertSystemExpired" | "SkillReset")) => {
+                        (0_i64, 0.0_f64)
+                    }
                     None => return None,
                 };
                 let rank = ctx

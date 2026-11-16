@@ -437,6 +437,18 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
             }
         });
     entries.push(("name", PyRep::String(slim_name)));
+    if let Some([yaw_deg, pitch_deg, roll_deg]) = meta.dun_rotation {
+        if yaw_deg.is_finite() && pitch_deg.is_finite() && roll_deg.is_finite() {
+            entries.push((
+                "dunRotation",
+                PyRep::Tuple(vec![
+                    PyRep::Real(yaw_deg),
+                    PyRep::Real(pitch_deg),
+                    PyRep::Real(roll_deg),
+                ]),
+            ));
+        }
+    }
     if meta.group_id == 10 {
         // DERIVED: V24.01 `StargateSetup` indexes corruption/suppression 2-tuples directly,
         // and `SetupStargateBanners` calls `GetFactionIconTexturePath(ownerID)` which crashes

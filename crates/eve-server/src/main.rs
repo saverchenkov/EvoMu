@@ -1303,12 +1303,31 @@ fn xmpp_stanza_reply_with_ctx_and_auth(
                 }
                 let is_unavailable = xmpp_extract_attr(chunk, "type")
                     .is_some_and(|t| t.eq_ignore_ascii_case("unavailable"));
-                let p_reply = if is_unavailable {
+                let mut reply = if is_unavailable {
                     format!("<presence from='{room_jid}' to='{to_jid}' type='unavailable'{id_attr}><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='none'/><status code='110'/></x></presence>")
                 } else {
                     format!("<presence from='{room_jid}' to='{to_jid}'{id_attr}><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='participant'/><status code='110'/></x></presence>")
                 };
-                return Some(p_reply);
+                if !is_unavailable {
+                    if let Some(c) = ctx {
+                        if let Some(motd) =
+                            eve_server::services::fleet_social::xmpp_room_motd(c, room_jid)
+                        {
+                            let bare_room = room_jid.split('/').next().unwrap_or(room_jid).trim();
+                            let esc_from = eve_server::services::fleet_social::xmpp_escape_xml(
+                                &format!("{bare_room}/admin"),
+                            );
+                            let esc_to =
+                                eve_server::services::fleet_social::xmpp_escape_xml(to_jid);
+                            let esc_motd =
+                                eve_server::services::fleet_social::xmpp_escape_xml(&motd);
+                            reply.push_str(&format!(
+                                "<message from='{esc_from}' to='{esc_to}' type='groupchat'><subject>{esc_motd}</subject></message>"
+                            ));
+                        }
+                    }
+                }
+                return Some(reply);
             }
             None
         }

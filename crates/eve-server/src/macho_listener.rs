@@ -567,6 +567,7 @@ async fn emit_tick_batch_with_observability<W: AsyncWriteExt + Unpin>(
     for sub_batch in crate::outbound_sequencer::normalize_server_destiny_batch(wire_state, batch) {
         let (frame_opt, events) =
             crate::outbound_sequencer::sequence_tick_with_events(wire_state, sub_batch);
+        ctx.flight_recorder.record_wire_state(wire_state);
         if !events.is_empty() {
             record_sequencer_events(ctx, session.session_id, &events, None, false);
         }
@@ -1322,6 +1323,7 @@ pub async fn execute_call_req_wire(
             item_change_before_session_change,
         },
     );
+    ctx.flight_recorder.record_wire_state(wire.wire_state);
     let mut out_frames = sequence_outcome.frames;
     if let Some(flush_frame) = deferred_flush_frame {
         out_frames.push(crate::outbound_sequencer::OutFrame::SessionChange { frame: flush_frame });
@@ -1451,6 +1453,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     let mut notify_rx = ctx.notify_tx.subscribe();
     let mut wire_state = crate::outbound_sequencer::SessionWireState::new(session_id, client_id)
         .with_flight_recorder(Arc::clone(&ctx.flight_recorder));
+    ctx.flight_recorder.record_wire_state(&wire_state);
 
     let (mut reader, mut writer) = stream.into_split();
     let is_authenticated_flag = Arc::new(AtomicBool::new(false));
@@ -1770,6 +1773,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 }
                             }
                             wire_state.leave_space();
+                            ctx.flight_recorder.record_wire_state(&wire_state);
                             if sys_changed {
                                 if let Some(new_sys) = session.solar_system_id {
                                     sys_rx = ctx.systems.get_or_spawn(new_sys).subscribe();
@@ -2473,6 +2477,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     }
 
     reader_task.abort();
+    ctx.flight_recorder.remove_wire_state(session_id);
     ctx.cleanup_disconnected_client_session(&mut session).await;
     crate::lifecycle::set_open_sessions(ctx.db.online_session_count() as usize);
 
@@ -2925,6 +2930,7 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
             }
         }
     }
+    ctx.flight_recorder.record_wire_state(wire.wire_state);
     let mut notifs = Vec::new();
     if let Some(cid) = session.character_id {
         for n in ctx.drain_notifications_for_char(cid) {

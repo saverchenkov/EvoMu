@@ -1139,6 +1139,8 @@ pub struct SlimItemMeta {
     #[serde(default)] pub source_ship_id: Option<i64>,
     /// Launcher module item IDs associated with this missile volley (`V24 missile.pyj`).
     #[serde(default)] pub launch_modules: Vec<i64>,
+    /// Static orientation `[yaw_deg, pitch_deg, roll_deg]` in degrees (`dunRotation` on `foo.SlimItem`).
+    #[serde(default)] pub dun_rotation: Option<[f64; 3]>,
 }
 
 impl Default for SlimItemMeta {
@@ -1161,6 +1163,7 @@ impl Default for SlimItemMeta {
             dest_system_owner_id: None,
             source_ship_id: None,
             launch_modules: Vec::new(),
+            dun_rotation: None,
         }
     }
 }

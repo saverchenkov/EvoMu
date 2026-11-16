@@ -204,7 +204,7 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
     if ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states.get(&char_id).is_some_and(|st| st.is_weapon_timer_active(now_unix)) {
         return Err(err("WeaponsTimerActive", "Cannot jump through structure stargate while weapons timer is active"));
     }
-    let (st_pos, st_radius, dest_sys_id, dest_st_pos) = ctx.db.with_snapshot(|snap| {
+    let (st_pos, st_type_id, dest_sys_id, dest_st_pos) = ctx.db.with_snapshot(|snap| {
         let st = snap.structures.get(&structure_id).cloned().ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
         if st.solar_system_id != sys_id
             || matches!(st.state.as_str(), "Destroyed" | "Anchoring" | "AnchorVulnerable" | "NoCore" | "Onlining" | "Abandoned")
@@ -248,8 +248,7 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
                 return Err(err("ShipNotAllowedThroughAnsiblex", "Ship exceeds Ansiblex mass limit of 1.48 Mt"));
             }
         }
-        let rad = ctx.sde.types.get(&st.type_id).map(|t| t.radius).unwrap_or(500.0);
-        Ok((glam::DVec3::from_array(st.position), rad, dest_st.solar_system_id, glam::DVec3::from_array(dest_st.position)))
+        Ok((glam::DVec3::from_array(st.position), st.type_id, dest_st.solar_system_id, glam::DVec3::from_array(dest_st.position)))
     })?;
     ctx.validate_ship_movement(
         char_id,
@@ -273,8 +272,25 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
     if ship_ball.mass > ANSIBLEX_MAX_MASS_KG {
         return Err(err("ShipNotAllowedThroughAnsiblex", "Ship exceeds Ansiblex mass limit of 1.48 Mt"));
     }
-    if ship_ball.position.distance(st_pos) > st_radius + 5_000.0 {
-        return Err(err("OutsideJumpBridgeRange", format!("Ship is {:.1} m from gate (must be within {:.1} m)", ship_ball.position.distance(st_pos), st_radius + 5000.0)));
+    let st_ball_radius = old_handle
+        .get_ball_snapshot(structure_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, b)| b.radius);
+    let (st_radius, _) = crate::services::space_warp_jump::resolve_physical_radius(
+        ctx,
+        Some(st_type_id),
+        Some(structure_id),
+        crate::services::space_warp_jump::PhysicalRadiusInput {
+            item_radius: st_ball_radius,
+            ..Default::default()
+        },
+    );
+    let effective_ship =
+        crate::services::space_warp_jump::resolve_ship_ball_for_perimeter(ctx, &ship_ball);
+    if effective_ship.position.distance(st_pos) > st_radius + effective_ship.radius + 5_000.0 {
+        return Err(err("OutsideJumpBridgeRange", format!("Ship is {:.1} m from gate (must be within {:.1} m)", effective_ship.position.distance(st_pos), st_radius + effective_ship.radius + 5000.0)));
     }
     if let Some(active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, Some((sys_id, cur_tick))) {
         return Err(err("SessionChangeInProgress", format!("Cannot jump through structure stargate while 10s timer from '{}' is active", active.reason)));
