@@ -190,7 +190,8 @@ pub fn purge_expired_skins_for_char(snap: &mut WorldStateSnapshot, char_id: i64,
     if let Some(lics) = snap.licensed_skins.get_mut(&char_id) {
         lics.retain(|id| !removed_ids.contains(id));
     }
-    let char_ships: Vec<(i64, u32)> = snap.items.values().filter(|i| i.owner_id == char_id).map(|i| (i.item_id, i.type_id)).collect();
+    let mut char_ships: Vec<(i64, u32)> = snap.items.values().filter(|i| i.owner_id == char_id).map(|i| (i.item_id, i.type_id)).collect();
+    char_ships.sort_unstable_by_key(|&(item_id, _)| item_id);
     let mut cleared_ships: Vec<(u32, i64, u32)> = Vec::new();
     for (sid, stype) in char_ships {
         if let Some(applied_id) = snap.applied_ship_skins.get(&sid).copied() {
@@ -229,6 +230,111 @@ pub fn notify_skins_removed(ctx: &ServerContext, char_id: i64, _session: &mut Se
             },
         );
     }
+}
+
+/// Resolves `ApplySkinToShip`'s SKIN argument into deterministic, ship-compatible
+/// `(target_skin_id, resolved_skin_id, design_name)` candidates sorted by `target_skin_id`.
+///
+/// Category-91 SKIN license types in SDE share duplicate names across distinct `skin_id`s
+/// (and some unmapped duplicate `type_id`s), so string lookups must inspect every matching
+/// candidate in deterministic order rather than taking an arbitrary `HashMap` entry.
+fn resolve_apply_skin_candidates(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_type_id: u32,
+    skin_arg: Option<&PyRep>,
+) -> Result<Vec<(u32, u32, String)>, BridgeRpcError> {
+    let raw_candidates: Vec<(u32, u32, String)> = match skin_arg {
+        Some(PyRep::Integer(id)) => {
+            let Ok(sid) = u32::try_from(*id) else {
+                return Err(err("SkinNotLicensed", format!("Invalid SKIN ID {id}")));
+            };
+            if let Some(lic) = ctx.sde.skin_licenses.get(&sid) {
+                let name = ctx
+                    .sde
+                    .types
+                    .get(&sid)
+                    .map(|t| t.name.clone())
+                    .unwrap_or_else(|| format!("SKIN {sid}"));
+                vec![(sid, lic.skin_id, name)]
+            } else if let Some(skin) = ctx.sde.skins.get(&sid) {
+                vec![(sid, sid, skin.internal_name.clone())]
+            } else {
+                return Err(err("SkinNotLicensed", format!("SKIN ID {sid} is not a valid SDE SKIN")));
+            }
+        }
+        Some(PyRep::String(name)) => {
+            let mut matching_types: Vec<_> = ctx
+                .sde
+                .types
+                .values()
+                .filter(|t| t.category_id == 91 && t.name.eq_ignore_ascii_case(name))
+                .collect();
+            matching_types.sort_unstable_by_key(|t| t.type_id);
+            if matching_types.is_empty() {
+                return Err(err(
+                    "SkinNotLicensed",
+                    format!("Character {char_id} has not activated a license for SKIN '{name}'"),
+                ));
+            }
+            let mapped: Vec<(u32, u32, String)> = matching_types
+                .iter()
+                .filter_map(|st| {
+                    let lic = ctx.sde.skin_licenses.get(&st.type_id)?;
+                    ctx.sde.skins.get(&lic.skin_id)?;
+                    Some((st.type_id, lic.skin_id, st.name.clone()))
+                })
+                .collect();
+            if mapped.is_empty() {
+                let first = matching_types[0];
+                if let Some(lic) = ctx.sde.skin_licenses.get(&first.type_id) {
+                    return Err(err(
+                        "SkinNotLicensed",
+                        format!("Resolved SKIN ID {} not found in SDE skins", lic.skin_id),
+                    ));
+                }
+                return Err(err(
+                    "SkinNotLicensed",
+                    format!("Type {} is not mapped to any SDE SKIN", first.type_id),
+                ));
+            }
+            mapped
+        }
+        _ => {
+            return Err(err(
+                "SkinNotLicensed",
+                "ApplySkinToShip requires a valid SKIN ID or design name",
+            ));
+        }
+    };
+
+    let mut valid_skins = Vec::with_capacity(raw_candidates.len());
+    for (target_id, resolved_id, design_name) in raw_candidates {
+        let Some(skin_info) = ctx.sde.skins.get(&resolved_id) else {
+            return Err(err(
+                "SkinNotLicensed",
+                format!("Resolved SKIN ID {resolved_id} not found in SDE skins"),
+            ));
+        };
+        valid_skins.push((target_id, resolved_id, design_name, skin_info));
+    }
+
+    let compatible: Vec<(u32, u32, String)> = valid_skins
+        .iter()
+        .filter(|entry| entry.3.types.contains(&ship_type_id))
+        .map(|entry| (entry.0, entry.1, entry.2.clone()))
+        .collect();
+    if compatible.is_empty() {
+        let (_, resolved_skin_id, _, skin_info) = &valid_skins[0];
+        return Err(err(
+            "InvalidShipTypeForSkin",
+            format!(
+                "SKIN '{}' (id {resolved_skin_id}) cannot be applied to ship type {ship_type_id}",
+                skin_info.internal_name
+            ),
+        ));
+    }
+    Ok(compatible)
 }
 
 pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &str, method: &str, args: &[PyRep], _kwargs: &HashMap<String, PyRep>) -> Option<Result<PyRep, BridgeRpcError>> {
@@ -281,7 +387,8 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
             let license_item_id = snap
                 .items
                 .values()
-                .find(|i| i.type_id == requested_skin_id && i.quantity >= 1 && snap.is_item_consumable_by(i, char_id, current_dock, current_ship))
+                .filter(|i| i.type_id == requested_skin_id && i.quantity >= 1 && snap.is_item_consumable_by(i, char_id, current_dock, current_ship))
+                .min_by_key(|i| i.item_id)
                 .map(|i| i.item_id);
             let Some(item_id) = license_item_id else {
                 return Err(err(
@@ -388,41 +495,10 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
                 Err(e) => Some(Err(e)),
             };
         }
-        let (target_skin_id, resolved_skin_id, design_name) = match args.get(1) {
-            Some(PyRep::Integer(id)) => {
-                let Ok(sid) = u32::try_from(*id) else {
-                    return Some(Err(err("SkinNotLicensed", format!("Invalid SKIN ID {id}"))));
-                };
-                if let Some(lic) = ctx.sde.skin_licenses.get(&sid) {
-                    let name = ctx.sde.types.get(&sid).map(|t| t.name.clone()).unwrap_or_else(|| format!("SKIN {sid}"));
-                    (sid, lic.skin_id, name)
-                } else if let Some(skin) = ctx.sde.skins.get(&sid) {
-                    (sid, sid, skin.internal_name.clone())
-                } else {
-                    return Some(Err(err("SkinNotLicensed", format!("SKIN ID {sid} is not a valid SDE SKIN"))));
-                }
-            }
-            Some(PyRep::String(name)) => {
-                let found = ctx.sde.types.values().find(|t| t.category_id == 91 && t.name.eq_ignore_ascii_case(name));
-                let Some(st) = found else {
-                    return Some(Err(err("SkinNotLicensed", format!("Character {char_id} has not activated a license for SKIN '{name}'"))));
-                };
-                let Some(lic) = ctx.sde.skin_licenses.get(&st.type_id) else {
-                    return Some(Err(err("SkinNotLicensed", format!("Type {} is not mapped to any SDE SKIN", st.type_id))));
-                };
-                (st.type_id, lic.skin_id, st.name.clone())
-            }
-            _ => return Some(Err(err("SkinNotLicensed", "ApplySkinToShip requires a valid SKIN ID or design name"))),
+        let candidates = match resolve_apply_skin_candidates(ctx, char_id, ship_type_id, args.get(1)) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
         };
-        let Some(skin_info) = ctx.sde.skins.get(&resolved_skin_id) else {
-            return Some(Err(err("SkinNotLicensed", format!("Resolved SKIN ID {resolved_skin_id} not found in SDE skins"))));
-        };
-        if !skin_info.types.contains(&ship_type_id) {
-            return Some(Err(err(
-                "InvalidShipTypeForSkin",
-                format!("SKIN '{}' (id {resolved_skin_id}) cannot be applied to ship type {ship_type_id}", skin_info.internal_name),
-            )));
-        }
         let res = ctx.db.try_with_mut_snapshot(|snap| {
             let expired = purge_expired_skins_for_char(snap, char_id, now_unix);
             let active_ship = explicit_ship_id.unwrap_or_else(|| snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0));
@@ -433,15 +509,22 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
             if ship_item.type_id != ship_type_id {
                 return Err(err("ShipTypeMismatch", format!("Active ship {active_ship} has type {}, cannot apply skin for type {ship_type_id}", ship_item.type_id)));
             }
-            let is_licensed = snap.licensed_skins.get(&char_id).map(|list| list.contains(&target_skin_id) || list.contains(&resolved_skin_id)).unwrap_or(false);
-            if !is_licensed {
-                return Err(err("SkinNotLicensed", format!("Character {char_id} has not activated a license for SKIN '{design_name}' ({target_skin_id})")));
-            }
+            let licensed = snap.licensed_skins.get(&char_id);
+            let matched = candidates.iter().find(|entry| {
+                licensed.is_some_and(|list| list.contains(&entry.0) || list.contains(&entry.1))
+            });
+            let Some((_, resolved_skin_id, design_name)) = matched.cloned() else {
+                let (fallback_id, _, fallback_name) = &candidates[0];
+                return Err(err(
+                    "SkinNotLicensed",
+                    format!("Character {char_id} has not activated a license for SKIN '{fallback_name}' ({fallback_id})"),
+                ));
+            };
             let prev = snap.applied_ship_skins.insert(active_ship, resolved_skin_id);
-            Ok((active_ship, resolved_skin_id, prev, expired))
+            Ok((active_ship, resolved_skin_id, design_name, prev, expired))
         });
         return match res {
-            Ok((active_ship, skin_id, prev_skin, expired)) => {
+            Ok((active_ship, skin_id, design_name, prev_skin, expired)) => {
                 notify_skins_removed(ctx, char_id, session, &expired);
                 push_typed_session_notification(
                     session,
@@ -754,9 +837,10 @@ fn handle_get_link(
         let rec = match first {
             PyRep::Integer(id) => map.get(id).cloned(),
             PyRep::String(s) => map
-                .values()
-                .find(|r| r.hash == *s || r.name == *s)
-                .cloned(),
+                .iter()
+                .filter(|(_, r)| r.hash == *s || r.name == *s)
+                .min_by_key(|entry| *entry.0)
+                .map(|(_, r)| r.clone()),
             _ => None,
         };
         let rec = rec.ok_or_else(|| err("StoredLinkNotFound", "Stored link not found"))?;

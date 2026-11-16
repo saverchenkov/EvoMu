@@ -126,10 +126,10 @@ fn skin_activation_expiry_boundaries_and_multi_ship_purge() {
         snap.applied_ship_skins.insert(ship_b, 701);
 
         let removed = purge_expired_skins_for_char(snap, cid, 5_000);
-        assert!(removed.contains(&(701, ship_a, 587)));
-        assert!(removed.contains(&(701, ship_b, 588)));
-        assert!(removed.contains(&(702, 0, 0)));
-        assert!(!removed.iter().any(|&(sk, _, _)| sk == 703));
+        assert_eq!(
+            removed,
+            vec![(701, ship_a, 587), (701, ship_b, 588), (702, 0, 0)]
+        );
         assert_eq!(snap.licensed_skins.get(&cid), Some(&vec![703, 50_703]));
         assert!(!snap.applied_ship_skins.contains_key(&ship_a));
         assert!(!snap.applied_ship_skins.contains_key(&ship_b));
@@ -154,21 +154,23 @@ async fn activate_and_apply_skin_validation_and_stack_consumption() {
         .sde
         .skin_licenses
         .iter()
-        .find_map(|(&ltid, lic)| {
+        .filter_map(|(&ltid, lic)| {
             let st = ctx.sde.types.get(&ltid).filter(|t| t.category_id == 91)?;
             let sk = ctx.sde.skins.get(&lic.skin_id).filter(|s| !s.types.is_empty())?;
             Some((st.type_id, st.name.clone(), sk.skin_id, sk.types[0]))
         })
+        .min_by_key(|entry| entry.0)
         .unwrap();
     let wrong_ship_tid = ctx
         .sde
         .types
         .values()
-        .find(|t| {
+        .filter(|t| {
             t.category_id == 6
                 && t.type_id != ship_tid
                 && !ctx.sde.skins[&skin_id].types.contains(&t.type_id)
         })
+        .min_by_key(|t| t.type_id)
         .unwrap()
         .type_id;
 
@@ -603,11 +605,12 @@ async fn cosmetics_ui_active_ship_cargo_activation_and_admin_dispatch_mutants() 
         .sde
         .skin_licenses
         .iter()
-        .find_map(|(&ltid, lic)| {
+        .filter_map(|(&ltid, lic)| {
             let st = ctx.sde.types.get(&ltid).filter(|t| t.category_id == 91)?;
             let sk = ctx.sde.skins.get(&lic.skin_id).filter(|s| !s.types.is_empty())?;
             Some((st.type_id, sk.skin_id, sk.types[0]))
         })
+        .min_by_key(|entry| entry.0)
         .expect("SDE should have a valid skin license");
 
     let ship_id = ctx.db.with_snapshot(|snap| snap.characters[&cid].active_ship_id);
@@ -708,5 +711,152 @@ async fn cosmetics_ui_active_ship_cargo_activation_and_admin_dispatch_mutants() 
         )
         .await,
         PyRep::String("ui.val".into())
+    );
+}
+
+#[tokio::test]
+async fn duplicate_skin_tengu_license_stack_and_link_determinism() {
+    let ctx = test_ctx();
+    let cid = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let ship_id = 100_000_001_i64;
+    let mut sess = auth_session(1, cid, 98_000_001, 30_000_142);
+    sess.station_id = Some(station_id);
+    sess.ship_id = Some(ship_id);
+
+    // Tengu Ultra Jungle duplicate pair: 48543 (skin 5342) & 48544 (skin 5343) for Tengu (29984).
+    assert_eq!(
+        ctx.sde.types.get(&48_543).map(|t| t.name.as_str()),
+        Some("Tengu Ultra Jungle")
+    );
+    assert_eq!(
+        ctx.sde.types.get(&48_544).map(|t| t.name.as_str()),
+        Some("Tengu Ultra Jungle")
+    );
+    assert_eq!(
+        ctx.sde.skin_licenses.get(&48_543).map(|l| l.skin_id),
+        Some(5_342)
+    );
+    assert_eq!(
+        ctx.sde.skin_licenses.get(&48_544).map(|l| l.skin_id),
+        Some(5_343)
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.owner_id = cid;
+            sh.type_id = 29_984;
+            sh.location_id = station_id;
+        }
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.active_ship_id = ship_id;
+            ch.station_id = Some(station_id);
+        }
+        // Two single-unit stacks of 48544: ActivateSkinLicense must consume lowest item_id first.
+        snap.items.insert(
+            946_020,
+            InventoryItemRecord {
+                item_id: 946_020,
+                type_id: 48_544,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            946_010,
+            InventoryItemRecord {
+                item_id: 946_010,
+                type_id: 48_544,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let mut ext = load_cosmetics_ui_state(snap);
+        ext.shared_settings.insert(
+            20,
+            crate::services::cosmetics_ui_ops::StoredLinkRecord {
+                owner_char_id: cid,
+                name: "dup_name".into(),
+                data: PyRep::String("second-link".into()),
+                hash: "dup_hash".into(),
+                setting_type: "t".into(),
+            },
+        );
+        ext.shared_settings.insert(
+            10,
+            crate::services::cosmetics_ui_ops::StoredLinkRecord {
+                owner_char_id: cid,
+                name: "dup_name".into(),
+                data: PyRep::String("first-link".into()),
+                hash: "dup_hash".into(),
+                setting_type: "t".into(),
+            },
+        );
+        save_cosmetics_ui_state(snap, &ext);
+    });
+
+    // Activate higher duplicate type_id (48544 -> skin 5343) and verify lowest stack item_id (946010) was consumed.
+    let act_res = call_ok(
+        &ctx,
+        &mut sess,
+        "shipCosmeticsMgr",
+        "ActivateSkinLicense",
+        &[PyRep::Integer(48_544), PyRep::Integer(29_984)],
+    )
+    .await;
+    assert_eq!(act_res.dict_get("skinID"), Some(&PyRep::Integer(5_343)));
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&946_010));
+        assert!(snap.items.contains_key(&946_020));
+    });
+
+    // Apply by ambiguous design name succeeds and selects licensed skin 5343.
+    let apply_res = call_ok(
+        &ctx,
+        &mut sess,
+        "shipCosmeticsMgr",
+        "ApplySkinToShip",
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::String("tengu ultra jungle".into()),
+        ],
+    )
+    .await;
+    assert_eq!(apply_res.dict_get("skinID"), Some(&PyRep::Integer(5_343)));
+    assert_eq!(
+        apply_res.dict_get("designName"),
+        Some(&PyRep::String("Tengu Ultra Jungle".into()))
+    );
+
+    // Duplicate hash/name link lookup picks lowest link ID (10 -> "first-link").
+    assert_eq!(
+        call_ok(
+            &ctx,
+            &mut sess,
+            "sharedSettingsMgr",
+            "GetStoredSharedSetting",
+            &[PyRep::String("dup_hash".into())],
+        )
+        .await,
+        PyRep::String("first-link".into())
+    );
+    assert_eq!(
+        call_ok(
+            &ctx,
+            &mut sess,
+            "sharedSettingsMgr",
+            "GetStoredSharedSetting",
+            &[PyRep::String("dup_name".into())],
+        )
+        .await,
+        PyRep::String("first-link".into())
     );
 }
