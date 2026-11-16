@@ -688,7 +688,11 @@ pub(crate) fn validate_container_and_bay_move(
         let Some(moving_item) = snap.items.get(&item_id) else {
             return Ok(None);
         };
-        if moving_item.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(item_id) {
+        if moving_item.flag == InventoryFlag::Locked
+            || snap.is_item_or_ancestor_locked_or_impounded(item_id)
+            || (snap.items.contains_key(&new_loc)
+                && snap.is_item_or_ancestor_locked_or_impounded(new_loc))
+        {
             return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked by contract or job"), client_error: None });
         }
         let moving_type = ctx.sde.types.get(&moving_item.type_id);
@@ -1220,6 +1224,9 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 if !is_container_group(grp, item.type_id) {
                     return Err(BridgeRpcError { code: "NotAContainer".into(), message: format!("Item {item_id} (group {grp}) is not a cargo container"), client_error: None });
                 }
+                if item.flag == InventoryFlag::Locked || snap.is_item_or_ancestor_locked_or_impounded(item_id) {
+                    return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked by contract or job"), client_error: None });
+                }
                 if !item.singleton && item.quantity > 1 {
                     if let Some(orig) = snap.items.get_mut(&item_id) {
                         orig.quantity -= 1;
@@ -1581,7 +1588,7 @@ pub(crate) async fn validate_ship_module_unfit_auth(
             });
         }
         if src_item.flag == InventoryFlag::Locked
-            || snap.is_item_locked_in_contract_or_job(src_item.item_id)
+            || snap.is_item_or_ancestor_locked_or_impounded(src_item.item_id)
         {
             return Err(BridgeRpcError {
                 code: "ItemLocked".into(),

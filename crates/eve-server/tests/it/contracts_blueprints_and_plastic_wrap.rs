@@ -483,3 +483,248 @@ async fn test_courier_plastic_wrap_break_and_repackage_forfeits_collateral() {
         assert_eq!(issuer_bal_after - issuer_bal_before_repackage, 1_600_000_00, "Issuer receives 1.5M collateral + 100k reward");
     });
 }
+
+#[tokio::test]
+async fn test_contracts_fitted_ship_and_non_empty_container_lifecycle_and_locks() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let mut sess1 = select_pilot(&ctx, 77_101, "demo", "demo-secret", PILOT_1).await;
+    let mut sess2 = select_pilot(&ctx, 77_102, "other", "other-secret", PILOT_2).await;
+
+    let (ship_id, mod_id, charge_id, cont_id, cont_item_id) = ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&PILOT_1).expect("PILOT_1").balance = IskCents::from_f64_isk(50_000_000.0);
+        s.characters.get_mut(&PILOT_2).expect("PILOT_2").balance = IskCents::from_f64_isk(50_000_000.0);
+        s.next_entity_id += 5;
+        let base = s.next_entity_id;
+        let ship_id = base - 4;
+        let mod_id = base - 3;
+        let charge_id = base - 2;
+        let cont_id = base - 1;
+        let cont_item_id = base;
+        s.items.insert(ship_id, InventoryItemRecord {
+            item_id: ship_id,
+            type_id: MWD_TYPE_ID as u32,
+            owner_id: PILOT_1,
+            location_id: JITA_STATION,
+            flag: InventoryFlag::Hangar,
+            quantity: 1,
+            singleton: true,
+            version: 1,
+            ..Default::default()
+        });
+        s.items.insert(mod_id, InventoryItemRecord {
+            item_id: mod_id,
+            type_id: SHIELD_EXTENDER_TYPE_ID as u32,
+            owner_id: PILOT_1,
+            location_id: ship_id,
+            flag: InventoryFlag::MedSlot0,
+            quantity: 1,
+            singleton: true,
+            version: 1,
+            ..Default::default()
+        });
+        s.items.insert(charge_id, InventoryItemRecord {
+            item_id: charge_id,
+            type_id: TRITANIUM_TYPE_ID as u32,
+            owner_id: PILOT_1,
+            location_id: ship_id,
+            flag: InventoryFlag::Cargo,
+            quantity: 10,
+            singleton: false,
+            version: 1,
+            ..Default::default()
+        });
+        s.items.insert(cont_id, InventoryItemRecord {
+            item_id: cont_id,
+            type_id: 17_366,
+            owner_id: PILOT_1,
+            location_id: JITA_STATION,
+            flag: InventoryFlag::Hangar,
+            quantity: 1,
+            singleton: true,
+            version: 1,
+            ..Default::default()
+        });
+        s.items.insert(cont_item_id, InventoryItemRecord {
+            item_id: cont_item_id,
+            type_id: TRITANIUM_TYPE_ID as u32,
+            owner_id: PILOT_1,
+            location_id: cont_id,
+            flag: InventoryFlag::Hangar,
+            quantity: 5,
+            singleton: false,
+            version: 1,
+            ..Default::default()
+        });
+        (ship_id, mod_id, charge_id, cont_id, cont_item_id)
+    });
+
+    let confirm_kw = HashMap::from([("confirm".to_string(), PyRep::Bool(true))]);
+    let empty_kw = HashMap::new();
+
+    // Courier still rejects fitted ship or non-empty container
+    let courier_err = rpc_kw(
+        &ctx,
+        &mut sess1,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::String("Courier".into())),
+            ("availability", PyRep::String("Public".into())),
+            ("assigneeID", PyRep::Integer(0)),
+            ("expireTime", PyRep::Integer(1440)),
+            ("numDays", PyRep::Integer(1)),
+            ("startStationID", PyRep::Integer(JITA_STATION)),
+            ("endStationID", PyRep::Integer(JITA_STATION)),
+            ("price", PyRep::Real(0.0)),
+            ("reward", PyRep::Real(10_000.0)),
+            ("collateral", PyRep::Real(50_000.0)),
+            ("title", PyRep::String("Courier Reject".into())),
+            ("itemList", PyRep::List(vec![PyRep::Integer(ship_id)])),
+        ])],
+        &confirm_kw,
+    )
+    .await
+    .expect_err("Courier contract on fitted ship must fail");
+    assert_eq!(courier_err.code, "CannotContractNonEmptyContainer");
+
+    // ItemExchange accepts fitted non-active ship and non-empty container together
+    let create_rep = rpc_kw(
+        &ctx,
+        &mut sess1,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::String("ItemExchange".into())),
+            ("availability", PyRep::String("Public".into())),
+            ("assigneeID", PyRep::Integer(0)),
+            ("expireTime", PyRep::Integer(1440)),
+            ("numDays", PyRep::Integer(1)),
+            ("startStationID", PyRep::Integer(JITA_STATION)),
+            ("endStationID", PyRep::Integer(JITA_STATION)),
+            ("price", PyRep::Real(500_000.0)),
+            ("reward", PyRep::Real(0.0)),
+            ("collateral", PyRep::Real(0.0)),
+            ("title", PyRep::String("Fitted Ship + Container".into())),
+            (
+                "itemList",
+                PyRep::List(vec![PyRep::Integer(ship_id), PyRep::Integer(cont_id)]),
+            ),
+        ])],
+        &confirm_kw,
+    )
+    .await
+    .expect("CreateContract ItemExchange with fitted ship + container");
+    let cid = contract_id_from_create_rep(&create_rep);
+
+    let contract_rep = rpc(&ctx, &mut sess2, "contractProxy", "GetContract", &[PyRep::Integer(cid)])
+        .await
+        .expect("GetContract");
+    let PyRep::List(items) = field(&contract_rep, "items") else {
+        panic!("expected items list in GetContract");
+    };
+    assert!(items.iter().any(|r| field(r, "itemID") == PyRep::Integer(ship_id) && field(r, "parentID") == PyRep::Integer(0)));
+    assert!(items.iter().any(|r| {
+        field(r, "itemID") == PyRep::Integer(mod_id)
+            && field(r, "parentID") == PyRep::Integer(ship_id)
+            && field(r, "flagID") == PyRep::Integer(i64::from(InventoryFlag::MedSlot0 as u16))
+            && field(r, "inCrate") == PyRep::Bool(true)
+    }));
+    assert!(items.iter().any(|r| field(r, "itemID") == PyRep::Integer(cont_item_id) && field(r, "parentID") == PyRep::Integer(cont_id)));
+
+    // Tampering with escrowed ship or nested items while Outstanding is blocked with ItemLocked
+    let trash_err = rpc(
+        &ctx,
+        &mut sess1,
+        "invbroker",
+        "TrashItems",
+        &[PyRep::List(vec![PyRep::Integer(cont_item_id)])],
+    )
+    .await
+    .expect_err("TrashItems on item inside escrowed container must fail");
+    assert_eq!(trash_err.code, "ItemLocked");
+
+    let unfit_err = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "invbroker",
+            None,
+            "Add",
+            &[
+                PyRep::Integer(mod_id),
+                PyRep::Integer(JITA_STATION),
+                PyRep::Integer(i64::from(InventoryFlag::Hangar as u16)),
+            ],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect_err("Unfitting module from escrowed ship must fail");
+    assert_eq!(unfit_err.code, "ItemLocked");
+
+    let clear_err = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "invbroker",
+            None,
+            "ClearCharges",
+            &[PyRep::Integer(ship_id)],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect_err("ClearCharges on escrowed ship must fail");
+    assert_eq!(clear_err.code, "ItemLocked");
+
+    let move_cargo_err = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "invbroker",
+            None,
+            "Add",
+            &[
+                PyRep::Integer(charge_id),
+                PyRep::Integer(JITA_STATION),
+                PyRep::Integer(i64::from(InventoryFlag::Hangar as u16)),
+            ],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect_err("Moving cargo out of escrowed ship must fail");
+    assert_eq!(move_cargo_err.code, "ItemLocked");
+
+    // Acceptor completes contract -> receives ship, container, and all nested items intact
+    accept_contract_report_only(&ctx, &mut sess2, cid)
+        .await
+        .expect("AcceptContract fitted ship + container");
+
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.contracts[&cid].status, "Completed");
+        assert_eq!(s.items[&ship_id].owner_id, PILOT_2);
+        assert_eq!(s.items[&ship_id].location_id, JITA_STATION);
+        assert_eq!(s.items[&ship_id].flag, InventoryFlag::Hangar);
+        assert_eq!(s.items[&mod_id].owner_id, PILOT_2);
+        assert_eq!(s.items[&mod_id].location_id, ship_id);
+        assert_eq!(s.items[&mod_id].flag, InventoryFlag::MedSlot0);
+        assert_eq!(s.items[&charge_id].owner_id, PILOT_2);
+        assert_eq!(s.items[&charge_id].location_id, ship_id);
+        assert_eq!(s.items[&charge_id].flag, InventoryFlag::Cargo);
+        assert_eq!(s.items[&cont_id].owner_id, PILOT_2);
+        assert_eq!(s.items[&cont_id].location_id, JITA_STATION);
+        assert_eq!(s.items[&cont_id].flag, InventoryFlag::Hangar);
+        assert_eq!(s.items[&cont_item_id].owner_id, PILOT_2);
+        assert_eq!(s.items[&cont_item_id].location_id, cont_id);
+    });
+
+    // Locks are released after settlement: new owner can trash container cargo
+    rpc(
+        &ctx,
+        &mut sess2,
+        "invbroker",
+        "TrashItems",
+        &[PyRep::List(vec![PyRep::Integer(cont_item_id)])],
+    )
+    .await
+    .expect("New owner can trash contained item after contract settlement");
+}

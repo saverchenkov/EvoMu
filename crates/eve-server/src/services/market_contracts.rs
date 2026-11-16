@@ -1605,7 +1605,10 @@ pub fn handle(
                 if c.status != "Outstanding" { return Err(rpc_err("InvalidContractState", "Auction is already settled or not Outstanding")); }
                 let caller_corp = session.corporation_id.or_else(|| snap.characters.get(&char_id).map(|ch| ch.corporation_id)).unwrap_or(0);
                 let is_corp_issuer = c.for_corp && c.issuer_corp_id != 0 && caller_corp == c.issuer_corp_id;
-                if c.issuer_id != char_id && !is_corp_issuer && c.current_bidder_id != Some(char_id) {
+                let is_corp_winner = caller_corp != 0
+                    && c.current_bidder_id == Some(caller_corp)
+                    && snap.corporations.contains_key(&caller_corp);
+                if c.issuer_id != char_id && !is_corp_issuer && c.current_bidder_id != Some(char_id) && !is_corp_winner {
                     return Err(rpc_err("ContractOwnershipViolation", "Not issuer or winning bidder"));
                 }
                 if c.expiration_unix == 0 || now_unix < c.expiration_unix { return Err(rpc_err("AuctionNotExpired", "Auction has not yet expired")); }
@@ -1616,20 +1619,30 @@ pub fn handle(
                     c.issuer_id
                 };
                 let winner = c.current_bidder_id.filter(|_| has_winner).unwrap_or(issuer_entity_id);
-                let target_flag = if !has_winner && c.for_corp && c.issuer_corp_id != 0 {
+                let target_flag = if has_winner && snap.corporations.contains_key(&winner) {
+                    InventoryFlag::CorpDeliveries
+                } else if !has_winner && c.for_corp && c.issuer_corp_id != 0 {
                     InventoryFlag::CorpSAG1
                 } else {
                     InventoryFlag::Hangar
                 };
-                let mut transferred_ids = Vec::new();
-                for iid in &c.item_ids {
-                    if let Some(it) = snap.items.get_mut(iid) {
-                        if it.owner_id != winner {
-                            transferred_ids.push(*iid);
-                        }
-                        it.owner_id = winner; it.location_id = c.start_station_id; it.flag = target_flag; it.version += 1;
-                    }
-                }
+                let finish_delta = super::contracts_service::ContractNotifyDelta::capture(
+                    snap,
+                    char_id,
+                    cid,
+                    &[char_id, c.issuer_id, c.issuer_corp_id, c.current_bidder_id.unwrap_or(0), winner],
+                    &[c.start_station_id],
+                    &c.item_ids,
+                );
+                let transferred_ids = snap.settle_contract_escrow_items(
+                    cid,
+                    &c.item_ids,
+                    winner,
+                    c.start_station_id,
+                    Some(target_flag),
+                    false,
+                );
+                snap.kv_mut(eve_db::Ns::ContractBidDiv).clear_entity(cid);
                 if let Some(dep_raw) = snap.fleet_and_social_ops.contract_deposits.remove(&cid) {
                     snap.credit_contract_issuer(&c, IskCents(dep_raw));
                 }
@@ -1644,14 +1657,22 @@ pub fn handle(
                     }
                 }
                 if let Some(cm) = snap.contracts.get_mut(&cid) { cm.acceptor_id = Some(winner); cm.status = "Finished".to_string(); }
-                Ok(transferred_ids)
+                let notify_delta = finish_delta.finish(snap);
+                Ok((transferred_ids, notify_delta))
             });
-            if let Ok(ref transferred_ids) = res {
-                if !transferred_ids.is_empty() {
-                    crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, transferred_ids);
+            match res {
+                Ok((transferred_ids, notify_delta)) => {
+                    notify_delta.emit(ctx);
+                    if !transferred_ids.is_empty() {
+                        crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &transferred_ids);
+                        for tid in transferred_ids {
+                            ctx.invalidate_ship_fitting_cache_only(tid);
+                        }
+                    }
+                    Some(Ok(PyRep::Bool(true)))
                 }
+                Err(e) => Some(Err(e)),
             }
-            Some(res.map(|_| PyRep::Bool(true)))
         }
         ("contractProxy", "GetCourierContractFromItemID") => {
             let (_, _char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };

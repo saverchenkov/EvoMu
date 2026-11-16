@@ -193,7 +193,7 @@ pub(crate) fn validate_and_apply_fitting(
                     client_error: None,
                 });
             }
-            if sh.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(ship_id) {
+            if sh.flag == InventoryFlag::Locked || snap.is_item_or_ancestor_locked_or_impounded(ship_id) {
                 return Err(BridgeRpcError {
                     code: "ItemLocked".into(),
                     message: format!("Target ship {ship_id} is locked in an active contract or container"),

@@ -688,7 +688,7 @@ async fn handle_multi_add_auto_fit(
                 client_error: None,
             })?;
             fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(snap, item)?;
-            if snap.is_item_locked_in_contract_or_job(item_id) {
+            if snap.is_item_or_ancestor_locked_or_impounded(item_id) {
                 return Err(BridgeRpcError {
                     code: "ItemLocked".into(),
                     message: format!("Item {item_id} is locked by an active contract or job"),

@@ -374,7 +374,7 @@ pub(crate) async fn handle_ships_and_services(
                         && target_item.flag != InventoryFlag::Locked);
                 if target_item.flag == InventoryFlag::Locked
                     || !target_reachable
-                    || snap.is_item_locked_in_contract_or_job(target_item_id)
+                    || snap.is_item_or_ancestor_locked_or_impounded(target_item_id)
                 {
                     return Err(BridgeRpcError {
                         code: "TargetItemLockedOrUnreachable".into(),
@@ -680,6 +680,13 @@ pub(crate) async fn handle_ships_and_services(
                     if snap.items.get(&item.location_id).is_some_and(|p| fitting_containers_ships::is_container_group(ctx.sde.types.get(&p.type_id).map(|t| t.group_id).unwrap_or(0), p.type_id)) {
                         return Err(BridgeRpcError { code: "ItemInsideContainer".into(), message: format!("Item {item_id} is inside a container and must be moved to item hangar before repackaging"), client_error: None });
                     }
+                    if snap.is_item_or_ancestor_locked_or_impounded(item_id) {
+                        return Err(BridgeRpcError {
+                            code: "ItemLocked".into(),
+                            message: format!("Item {item_id} is locked in an active contract or industry job"),
+                            client_error: None,
+                        });
+                    }
                     if item.location_id != station_id {
                         return Err(BridgeRpcError {
                             code: "OwnershipOrLocationViolation".into(),
@@ -691,13 +698,6 @@ pub(crate) async fn handle_ships_and_services(
                         return Err(BridgeRpcError {
                             code: "ItemLocked".into(),
                             message: format!("Item {item_id} must be in your station Hangar (current flag: {:?}) to repackage", item.flag),
-                            client_error: None,
-                        });
-                    }
-                    if snap.is_item_locked_in_contract_or_job(item_id) {
-                        return Err(BridgeRpcError {
-                            code: "ItemLocked".into(),
-                            message: format!("Item {item_id} is locked in an active contract or industry job"),
                             client_error: None,
                         });
                     }
@@ -919,21 +919,21 @@ pub(crate) async fn handle_ships_and_services(
                         client_error: None,
                     });
                 }
+                if item.flag == InventoryFlag::Locked
+                    || snap.is_item_or_ancestor_locked_or_impounded(item_id)
+                {
+                    return Err(BridgeRpcError {
+                        code: "ItemLocked".into(),
+                        message: format!("Item {item_id} is locked"),
+                        client_error: None,
+                    });
+                }
                 if item.location_id != station_id || snap.items.contains_key(&station_id) {
                     return Err(BridgeRpcError {
                         code: "OwnershipOrLocationViolation".into(),
                         message: format!(
                             "Ship item {item_id} must be owned by character {char_id} at station {station_id}"
                         ),
-                        client_error: None,
-                    });
-                }
-                if item.flag == InventoryFlag::Locked
-                    || snap.is_item_locked_in_contract_or_job(item_id)
-                {
-                    return Err(BridgeRpcError {
-                        code: "ItemLocked".into(),
-                        message: format!("Item {item_id} is locked"),
                         client_error: None,
                     });
                 }

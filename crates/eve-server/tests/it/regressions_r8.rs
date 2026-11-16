@@ -770,7 +770,38 @@ pub(crate) async fn run_fitting_and_combat_regressions(
         repack_non_empty.unwrap_err().code,
         "CannotRepackageNonEmptyItem"
     );
-    let contract_non_empty = ctx
+    // Courier contracts still reject fitted/non-empty ships, while ItemExchange allows
+    // fitted non-active ships, serializes their fitted modules via parentID/flagID, and locks them.
+    let courier_non_empty = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "contractProxy",
+            None,
+            "CreateContract",
+            &[
+                PyRep::Integer(3), // Courier
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(1440),
+                PyRep::Integer(1),
+                PyRep::Integer(60_003_760),
+                PyRep::Integer(60_003_760),
+                PyRep::Real(0.0),
+                PyRep::Real(10_000.0),
+                PyRep::Real(100_000.0),
+                PyRep::String("".into()),
+                PyRep::String("".into()),
+                PyRep::List(vec![PyRep::Integer(100_009_910)]),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        courier_non_empty.unwrap_err().code,
+        "CannotContractNonEmptyContainer"
+    );
+    let fitted_contract_rep = ctx
         .dispatch_rpc(
             &mut s2,
             "contractProxy",
@@ -794,11 +825,83 @@ pub(crate) async fn run_fitting_and_combat_regressions(
             &kw,
             None,
         )
-        .await;
-    assert_eq!(
-        contract_non_empty.unwrap_err().code,
-        "CannotContractNonEmptyContainer"
-    );
+        .await
+        .expect("ItemExchange contract for fitted spare Rifter 100_009_910");
+    let fitted_cid = match fitted_contract_rep {
+        PyRep::List(ids) => ids[0].as_i64().expect("contractID"),
+        PyRep::KeyVal(kv) => kv.get("contractID").and_then(|v| v.as_i64()).expect("contractID"),
+        other => panic!("Expected CreateContract reply, got {other:?}"),
+    };
+    let lock_repack = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "repackagingSvc",
+            None,
+            "RepackageItems",
+            &[PyRep::Integer(100_009_910)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(lock_repack.code, "ItemLocked");
+    let lock_unfit = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "invbroker",
+            None,
+            "Add",
+            &[
+                PyRep::Integer(100_009_911),
+                PyRep::Integer(60_003_760),
+                PyRep::Integer(eve_db::InventoryFlag::Hangar as u16 as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(lock_unfit.code, "ItemLocked");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            100_009_912,
+            eve_db::InventoryItemRecord {
+                item_id: 100_009_912,
+                type_id: 3297,
+                owner_id: 90_000_002,
+                location_id: 60_003_760,
+                flag: eve_db::InventoryFlag::Locked,
+                quantity: 2,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let lock_asm = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "invbroker",
+            None,
+            "AssembleCargoContainer",
+            &[PyRep::Integer(100_009_912)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(lock_asm.code, "ItemLocked");
+    ctx.dispatch_rpc(
+        &mut s2,
+        "contractProxy",
+        None,
+        "DeleteContract",
+        &[PyRep::Integer(fitted_cid)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Delete fitted ship test contract before unfitting");
 
     // Unfitting 100_009_911 back to Hangar allows 100_009_910 to be repackaged
     ctx.db.with_mut_snapshot(|snap| {

@@ -84,14 +84,14 @@ pub fn notify_contract(ctx: &ServerContext, char_id: i64, event: &str, cid: i64)
     }
 }
 
-struct ContractResolvedNotifications {
+pub(crate) struct ContractResolvedNotifications {
     fallback_char: i64,
     item_diffs: Vec<(Option<InventoryItemRecord>, Option<InventoryItemRecord>)>,
     wallet_diffs: Vec<(bool, i64, u8, IskCents)>,
 }
 
 impl ContractResolvedNotifications {
-    fn emit(self, ctx: &ServerContext) {
+    pub(crate) fn emit(self, ctx: &ServerContext) {
         for (pre, post) in self.item_diffs {
             ctx.notify_item_mutation(self.fallback_char, pre.as_ref(), post.as_ref());
         }
@@ -101,7 +101,7 @@ impl ContractResolvedNotifications {
     }
 }
 
-struct ContractNotifyDelta {
+pub(crate) struct ContractNotifyDelta {
     fallback_char: i64,
     pre_next_entity_id: i64,
     items_before: HashMap<i64, InventoryItemRecord>,
@@ -109,7 +109,7 @@ struct ContractNotifyDelta {
 }
 
 impl ContractNotifyDelta {
-    fn capture(
+    pub(crate) fn capture(
         snap: &eve_db::WorldStateSnapshot,
         fallback_char: i64,
         contract_id: i64,
@@ -118,6 +118,7 @@ impl ContractNotifyDelta {
         extra_item_ids: &[i64],
     ) -> Self {
         let mut items_before = HashMap::new();
+        let mut root_ids: Vec<i64> = extra_item_ids.to_vec();
         for &iid in extra_item_ids {
             if let Some(it) = snap.items.get(&iid) {
                 items_before.insert(iid, it.clone());
@@ -126,6 +127,14 @@ impl ContractNotifyDelta {
         for (&iid, it) in &snap.items {
             if (contract_id > 0 && it.location_id == contract_id) || station_ids.contains(&it.location_id) {
                 items_before.insert(iid, it.clone());
+                if contract_id > 0 && it.location_id == contract_id {
+                    root_ids.push(iid);
+                }
+            }
+        }
+        for child_id in snap.collect_item_descendants_many(&root_ids) {
+            if let Some(it) = snap.items.get(&child_id) {
+                items_before.insert(child_id, it.clone());
             }
         }
         let mut wallets_before = Vec::new();
@@ -164,7 +173,7 @@ impl ContractNotifyDelta {
             || a.type_id != b.type_id
     }
 
-    fn finish(self, snap: &eve_db::WorldStateSnapshot) -> ContractResolvedNotifications {
+    pub(crate) fn finish(self, snap: &eve_db::WorldStateSnapshot) -> ContractResolvedNotifications {
         let mut item_diffs = Vec::new();
         for (iid, pre) in &self.items_before {
             match snap.items.get(iid) {
@@ -347,7 +356,11 @@ pub(crate) struct ContractItemReply {
 }
 
 impl ContractItemReply {
-    pub(crate) fn offered(it: &eve_db::InventoryItemRecord) -> Self {
+    pub(crate) fn offered_with_parent(
+        it: &eve_db::InventoryItemRecord,
+        parent_id: i64,
+        flag_id: i64,
+    ) -> Self {
         let me = it.dynamic_attributes.get(&1112).copied().unwrap_or(0.0) as i64;
         let te = it.dynamic_attributes.get(&1113).copied().unwrap_or(0.0) as i64;
         let dmg = it.dynamic_attributes.get(&3).copied().unwrap_or(0.0);
@@ -362,8 +375,8 @@ impl ContractItemReply {
             type_id: i64::from(it.type_id),
             quantity: i64::from(it.quantity).max(1),
             in_crate: true,
-            parent_id: 0,
-            flag_id: 0,
+            parent_id,
+            flag_id,
             singleton: it.singleton,
             copy: it.is_blueprint_copy,
             material_efficiency: me,
@@ -373,6 +386,14 @@ impl ContractItemReply {
             source_mutaplasmid_id: it.source_mutaplasmid_id,
             dynamic_attributes: dyn_entries,
         }
+    }
+
+    pub(crate) fn offered(it: &eve_db::InventoryItemRecord) -> Self {
+        Self::offered_with_parent(it, 0, 0)
+    }
+
+    pub(crate) fn offered_child(it: &eve_db::InventoryItemRecord) -> Self {
+        Self::offered_with_parent(it, it.location_id, i64::from(it.flag as u16))
     }
 
     pub(crate) fn requested(type_id: u32, quantity: i32) -> Self {
@@ -513,11 +534,22 @@ impl ContractReply {
         snap: &eve_db::WorldStateSnapshot,
         sde: &eve_sde::SdeRegistry,
     ) -> Self {
-        let mut items: Vec<ContractItemReply> = c
-            .item_ids
-            .iter()
-            .filter_map(|&id| snap.items.get(&id).map(ContractItemReply::offered))
-            .collect();
+        let mut seen_item_ids = std::collections::HashSet::new();
+        let mut items = Vec::new();
+        for &id in &c.item_ids {
+            if seen_item_ids.insert(id) {
+                if let Some(it) = snap.items.get(&id) {
+                    items.push(ContractItemReply::offered(it));
+                }
+            }
+        }
+        for child_id in snap.collect_item_descendants_many(&c.item_ids) {
+            if seen_item_ids.insert(child_id) {
+                if let Some(it) = snap.items.get(&child_id) {
+                    items.push(ContractItemReply::offered_child(it));
+                }
+            }
+        }
         for &(tid, qty) in &c.requested_items {
             if tid > 0 {
                 items.push(ContractItemReply::requested(tid, qty));
@@ -1136,6 +1168,18 @@ pub fn handle(
                 }
             }
 
+            if !item_ids_req.is_empty() {
+                let mut seen_item_ids = std::collections::HashSet::with_capacity(item_ids_req.len());
+                for &iid in &item_ids_req {
+                    if !seen_item_ids.insert(iid) {
+                        return Some(Err(rpc_err(
+                            "InvalidContractParameters",
+                            format!("Duplicate item {iid} in contract item list"),
+                        )));
+                    }
+                }
+            }
+
             if !primary_isk.is_finite()
                 || primary_isk < 0.0
                 || !secondary_isk.is_finite()
@@ -1282,10 +1326,10 @@ pub fn handle(
                             "Cannot escrow the currently boarded active ship into a contract",
                         ));
                     }
-                    let has_contained = snap.items.values().any(|other| {
-                        other.item_id != iid && other.location_id == iid && other.quantity > 0
-                    });
-                    if has_contained {
+                    let descendants = snap.collect_item_descendants(iid);
+                    if contract_type == "Courier"
+                        && (!descendants.is_empty() || snap.is_container_non_empty(iid))
+                    {
                         return Err(rpc_err(
                             "CannotContractNonEmptyContainer",
                             format!("Cannot escrow item {iid} while it contains items"),
@@ -1332,7 +1376,6 @@ pub fn handle(
                         || already_locked
                         || snap.is_item_or_ancestor_locked_or_impounded(iid)
                         || snap.is_war_hq_structure(iid)
-                        || snap.is_container_non_empty(iid)
                         || !snap.has_structure_acl_access(start_station_id, char_id)
                     {
                         return Err(rpc_err(
@@ -1365,6 +1408,63 @@ pub fn handle(
                             "ContractItemFlagInvalid",
                             format!("Contract item {iid} must be in personal hangar (flag {:?} is not contractable)", item_snap.flag),
                         ));
+                    }
+                    for &child_id in &descendants {
+                        if snap.is_character_boarded_or_saved_ship(char_id, active_ship, child_id) {
+                            return Err(rpc_err(
+                                "CannotContractActiveShip",
+                                "Cannot escrow the currently boarded active ship into a contract",
+                            ));
+                        }
+                        if cs_state.alsc_locked_items.contains(&child_id) {
+                            return Err(rpc_err(
+                                "ContractItemLocked",
+                                format!("Contained item {child_id} is locked inside an Audit Log Secure Container"),
+                            ));
+                        }
+                        if snap
+                            .item_custom_names
+                            .get(&child_id)
+                            .is_some_and(|name| name.starts_with("courier_cargo:"))
+                        {
+                            return Err(rpc_err(
+                                "ItemCannotBeContracted",
+                                "Courier mission items cannot be placed in contracts",
+                            ));
+                        }
+                        let Some(child_snap) = snap.items.get(&child_id) else {
+                            return Err(rpc_err(
+                                "ContractItemNotFound",
+                                format!("Contained contract item {child_id} not found"),
+                            ));
+                        };
+                        if is_item_in_asset_safety_wrap(&ext, child_id, child_snap.location_id, child_snap.type_id) {
+                            return Err(rpc_err(
+                                "ItemCannotBeContracted",
+                                format!("Contained item {child_id} is an Asset Safety wrap or sealed inside one"),
+                            ));
+                        }
+                        let valid_child_owner = if for_corp {
+                            issuer_corp_id != 0 && child_snap.owner_id == issuer_corp_id
+                        } else {
+                            child_snap.owner_id == char_id
+                        };
+                        if !valid_child_owner {
+                            return Err(rpc_err(
+                                "ContractItemOwnershipOrLocationInvalid",
+                                format!("Contained item {child_id} must be owned by issuer"),
+                            ));
+                        }
+                        if child_snap.flag == InventoryFlag::Locked
+                            || snap.is_item_locked_in_contract_or_job(child_id)
+                            || snap.is_item_or_ancestor_locked_or_impounded(child_id)
+                            || snap.is_war_hq_structure(child_id)
+                        {
+                            return Err(rpc_err(
+                                "ContractItemLocked",
+                                format!("Contained item {child_id} is locked or ineligible for contracting"),
+                            ));
+                        }
                     }
                     let orig_flag = item_snap.flag;
                     if let Some(item) = snap.items.get_mut(&iid) {
@@ -1410,7 +1510,16 @@ pub fn handle(
             match res {
                 Ok((cid, notify_delta)) => {
                     notify_delta.emit(ctx);
-                    let escrowed_ids = ctx.db.with_snapshot(|s| s.contracts.get(&cid).map(|c| c.item_ids.clone()).unwrap_or_default());
+                    let escrowed_ids = ctx.db.with_snapshot(|s| {
+                        s.contracts
+                            .get(&cid)
+                            .map(|c| {
+                                let mut ids = c.item_ids.clone();
+                                ids.extend(s.collect_item_descendants_many(&c.item_ids));
+                                ids
+                            })
+                            .unwrap_or_default()
+                    });
                     for iid in escrowed_ids {
                         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, iid);
                     }
@@ -1645,20 +1754,14 @@ pub fn handle(
                             .map_err(|e| rpc_err("ContractTransferFailed", e.to_string()))?;
                     }
 
-                    let mut transferred_ids = Vec::new();
-                    for iid in &c.item_ids {
-                        let _ = pop_escrowed_item_orig_flag(snap, cid, *iid);
-                        if let Some(item) = snap.items.get_mut(iid) {
-                            if item.owner_id != acceptor_entity_id {
-                                transferred_ids.push(*iid);
-                            }
-                            item.owner_id = acceptor_entity_id;
-                            item.location_id = c.start_station_id;
-                            item.flag = acceptor_flag;
-                            item.version += 1;
-                        }
-                        snap.sp6_lifecycle.self_destructs.remove(iid);
-                    }
+                    let transferred_ids = snap.settle_contract_escrow_items(
+                        cid,
+                        &c.item_ids,
+                        acceptor_entity_id,
+                        c.start_station_id,
+                        Some(acceptor_flag),
+                        false,
+                    );
                     if let Some(c_mut) = snap.contracts.get_mut(&cid) {
                         c_mut.acceptor_id = Some(acceptor_entity_id);
                         c_mut.status = "Completed".into();
@@ -1700,6 +1803,9 @@ pub fn handle(
                     notify_delta.emit(ctx);
                     if !transferred_ids.is_empty() {
                         crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &transferred_ids);
+                        for &tid in &transferred_ids {
+                            ctx.invalidate_ship_fitting_cache_only(tid);
+                        }
                     }
                     notify_contract(ctx, issuer_id, "OnContractAccepted", cid);
                     if new_status == "Completed" {
@@ -1924,20 +2030,15 @@ pub fn handle(
                         snap.append_journal(c.issuer_id, "ContractAuctionSold", effective_bid, bal_after, format!("Auction contract {cid} bought out by {bidder_entity_id}"));
                     }
                     let win_flag = if bid_for_corp { InventoryFlag::CorpDeliveries } else { InventoryFlag::Hangar };
-                    let mut transferred_ids = Vec::new();
-                    for iid in &c.item_ids {
-                        let _ = pop_escrowed_item_orig_flag(snap, cid, *iid);
-                        if let Some(item) = snap.items.get_mut(iid) {
-                            if item.owner_id != bidder_entity_id {
-                                transferred_ids.push(*iid);
-                            }
-                            item.owner_id = bidder_entity_id;
-                            item.location_id = c.start_station_id;
-                            item.flag = win_flag;
-                            item.version += 1;
-                        }
-                        snap.sp6_lifecycle.self_destructs.remove(iid);
-                    }
+                    let transferred_ids = snap.settle_contract_escrow_items(
+                        cid,
+                        &c.item_ids,
+                        bidder_entity_id,
+                        c.start_station_id,
+                        Some(win_flag),
+                        false,
+                    );
+                    snap.kv_mut(eve_db::Ns::ContractBidDiv).clear_entity(cid);
                     new_status = "Completed";
                     if let Some(c_mut) = snap.contracts.get_mut(&cid) {
                         c_mut.current_bid = effective_bid;
@@ -1965,6 +2066,9 @@ pub fn handle(
                     notify_delta.emit(ctx);
                     if !transferred_ids.is_empty() {
                         crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &transferred_ids);
+                        for &tid in &transferred_ids {
+                            ctx.invalidate_ship_fitting_cache_only(tid);
+                        }
                     }
                     if let Some(prev_bidder) = prev_bidder_opt {
                         if prev_bidder != char_id { notify_contract(ctx, prev_bidder, "OnContractOutbid", cid); }
@@ -2290,15 +2394,14 @@ pub fn handle(
                     if let Some(dep_raw) = snap.fleet_and_social_ops.contract_deposits.remove(&cid) {
                         snap.credit_contract_issuer(&c, IskCents(dep_raw));
                     }
-                    for iid in &c.item_ids {
-                        let orig_flag = pop_escrowed_item_orig_flag(snap, cid, *iid);
-                        if let Some(item) = snap.items.get_mut(iid) {
-                            item.owner_id = issuer_entity_id;
-                            item.location_id = c.start_station_id;
-                            item.flag = orig_flag;
-                            item.version += 1;
-                        }
-                    }
+                    let _ = snap.settle_contract_escrow_items(
+                        cid,
+                        &c.item_ids,
+                        issuer_entity_id,
+                        c.start_station_id,
+                        None,
+                        false,
+                    );
                     if let Some(c_mut) = snap.contracts.get_mut(&cid) { c_mut.status = "Rejected".into(); }
                     return Ok(("Rejected", c.issuer_id, resolve_delta.finish(snap)));
                 }
@@ -2316,36 +2419,23 @@ pub fn handle(
                     if c.status == "Outstanding" && c.contract_type == "Auction" && c.current_bidder_id.is_some() {
                         return Err(rpc_err("CannotDeleteAuctionWithBids", format!("Auction contract {cid} already has active bids and cannot be deleted")));
                     }
-                    if c.status == "Outstanding" {
+                    let root_ids: &[i64] = if c.status == "Outstanding" {
                         snap.credit_contract_issuer(&c, c.reward);
                         if let Some(dep_raw) = snap.fleet_and_social_ops.contract_deposits.remove(&cid) {
                             snap.credit_contract_issuer(&c, IskCents(dep_raw));
                         }
-                        for iid in &c.item_ids {
-                            let orig_flag = pop_escrowed_item_orig_flag(snap, cid, *iid);
-                            if let Some(item) = snap.items.get_mut(iid) {
-                                item.owner_id = issuer_entity_id;
-                                item.location_id = c.start_station_id;
-                                item.flag = orig_flag;
-                                item.version += 1;
-                            }
-                        }
-                    }
-                    let extra_ids: Vec<i64> = snap
-                        .items
-                        .values()
-                        .filter(|item| item.location_id == cid)
-                        .map(|item| item.item_id)
-                        .collect();
-                    for iid in extra_ids {
-                        let orig_flag = pop_escrowed_item_orig_flag(snap, cid, iid);
-                        if let Some(item) = snap.items.get_mut(&iid) {
-                            item.owner_id = issuer_entity_id;
-                            item.location_id = c.start_station_id;
-                            item.flag = orig_flag;
-                            item.version += 1;
-                        }
-                    }
+                        &c.item_ids
+                    } else {
+                        &[]
+                    };
+                    let _ = snap.settle_contract_escrow_items(
+                        cid,
+                        root_ids,
+                        issuer_entity_id,
+                        c.start_station_id,
+                        None,
+                        true,
+                    );
                     if let Some(c_mut) = snap.contracts.get_mut(&cid) { c_mut.status = "Deleted".into(); }
                     return Ok(("Deleted", c.issuer_id, resolve_delta.finish(snap)));
                 }
@@ -2429,7 +2519,9 @@ pub fn handle(
                                 }
                             }).unwrap_or(true);
                             let item_type_ok = filter_item_type.map(|tid| {
-                                    c.item_ids.iter().any(|iid| snap.items.get(iid).map(|it| it.type_id == tid).unwrap_or(false))
+                                    let descendants = snap.collect_item_descendants_many(&c.item_ids);
+                                    c.item_ids.iter().chain(descendants.iter())
+                                        .any(|iid| snap.items.get(iid).is_some_and(|it| it.type_id == tid))
                                         || c.requested_items.iter().any(|&(rtid, _)| rtid == tid)
                                 }).unwrap_or(true);
                             c.status == "Outstanding"
@@ -2739,6 +2831,11 @@ pub fn sweep_expired_contracts_and_notify(ctx: &ServerContext, now_unix: u64) ->
             for item in snap.items.values().filter(|it| it.location_id == cid) {
                 if !tracked_item_ids.contains(&item.item_id) {
                     tracked_item_ids.push(item.item_id);
+                }
+            }
+            for child_id in snap.collect_item_descendants_many(&tracked_item_ids) {
+                if !tracked_item_ids.contains(&child_id) {
+                    tracked_item_ids.push(child_id);
                 }
             }
             let pre_items: Vec<(i64, i64, i64, i64)> = tracked_item_ids

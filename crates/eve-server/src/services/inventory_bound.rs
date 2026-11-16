@@ -827,6 +827,20 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
             client_error: None,
         });
     }
+    if orig_item.flag == InventoryFlag::Locked
+        || snap.is_item_or_ancestor_locked_or_impounded(orig_item.item_id)
+        || (snap.items.contains_key(&new_loc)
+            && snap.is_item_or_ancestor_locked_or_impounded(new_loc))
+    {
+        return Err(BridgeRpcError {
+            code: "ItemLocked".into(),
+            message: format!(
+                "Item {} or destination {} is locked by contract, job, or container",
+                orig_item.item_id, new_loc
+            ),
+            client_error: None,
+        });
+    }
     let live_corp_id = snap
         .characters
         .get(&char_id)
