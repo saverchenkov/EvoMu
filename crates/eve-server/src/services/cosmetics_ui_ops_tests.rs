@@ -22,16 +22,17 @@ async fn skin_licenses_expiry_apply_and_gm_tools() {
     sess.ship_id = Some(ship_id);
     let kw = HashMap::new();
 
-    // Find a valid category 91 SKIN license and its compatible ship type
+    // Find a valid category 91 SKIN license and its compatible ship type deterministically
     let (lic_tid, skin_id, ship_tid) = ctx
         .sde
         .skin_licenses
         .iter()
-        .find_map(|(&ltid, lic)| {
+        .filter_map(|(&ltid, lic)| {
             let st = ctx.sde.types.get(&ltid).filter(|t| t.category_id == 91)?;
             let sk = ctx.sde.skins.get(&lic.skin_id).filter(|s| !s.types.is_empty())?;
             Some((st.type_id, sk.skin_id, sk.types[0]))
         })
+        .min_by_key(|entry| entry.0)
         .unwrap();
 
     // Test record_skin_license_activation & purge_expired_skins_for_char directly
@@ -427,16 +428,17 @@ async fn cosmetics_ui_ops_validation_errors_and_fallbacks() {
     let non_matching_method = "Foo";
     assert!(handle(&ctx, &mut sess, non_matching_svc, non_matching_method, &[], &kw).await.is_none());
 
-    // Find valid SKIN license & compatible ship type
+    // Find valid SKIN license & compatible ship type deterministically
     let (lic_tid, skin_id, ship_tid) = ctx
         .sde
         .skin_licenses
         .iter()
-        .find_map(|(&ltid, lic)| {
+        .filter_map(|(&ltid, lic)| {
             let st = ctx.sde.types.get(&ltid).filter(|t| t.category_id == 91)?;
             let sk = ctx.sde.skins.get(&lic.skin_id).filter(|s| !s.types.is_empty())?;
             Some((st.type_id, sk.skin_id, sk.types[0]))
         })
+        .min_by_key(|entry| entry.0)
         .unwrap();
     let lic_name = ctx.sde.types[&lic_tid].name.clone();
 
@@ -789,10 +791,12 @@ async fn cosmetics_ui_ops_validation_errors_and_fallbacks() {
     let cid = sess.character_id.unwrap();
     let ship_id = ctx.db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.active_ship_id).unwrap_or(0));
     let ship_tid = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id).unwrap_or(588));
-    let (sk1, sk2) = {
-        let mut it = ctx.sde.skins.keys().copied();
-        (it.next().unwrap_or(1), it.next().unwrap_or(2))
-    };
+    let mut skin_ids: Vec<u32> = ctx.sde.skins.keys().copied().collect();
+    skin_ids.sort_unstable();
+    let (sk1, sk2) = (
+        skin_ids.first().copied().unwrap_or(1),
+        skin_ids.get(1).copied().unwrap_or(2),
+    );
     let past = ctx.now_unix().saturating_sub(100);
     ctx.db.with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
@@ -839,6 +843,216 @@ async fn cosmetics_ui_ops_validation_errors_and_fallbacks() {
     .unwrap()
     .unwrap();
     assert_eq!(upd_rep, PyRep::None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duplicate_skin_license_names_resolve_deterministically() {
+    let ctx = test_ctx();
+    let cid = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let brutix_ship_id = 100_000_001_i64;
+    let dominix_ship_id = 100_000_099_i64;
+    let mut sess = auth_session(1, cid, 98_000_001, 30_000_142);
+    sess.station_id = Some(station_id);
+    sess.ship_id = Some(brutix_ship_id);
+    let kw = HashMap::new();
+
+    // Verify SDE duplicate-name pairs exist as expected:
+    // - "Brutix Serpentis SKIN": 39584 (skin 19) & 42177 (skin 3102) for Brutix (16229)
+    // - "Dominix Golden Serenity Only SKIN (30 Days)": 36874 (unmapped) & 36891 (skin 2174) for Dominix (645)
+    assert_eq!(ctx.sde.types.get(&39_584).map(|t| t.name.as_str()), Some("Brutix Serpentis SKIN"));
+    assert_eq!(ctx.sde.types.get(&42_177).map(|t| t.name.as_str()), Some("Brutix Serpentis SKIN"));
+    assert_eq!(ctx.sde.skin_licenses.get(&39_584).map(|l| l.skin_id), Some(19));
+    assert_eq!(ctx.sde.skin_licenses.get(&42_177).map(|l| l.skin_id), Some(3_102));
+    assert!(!ctx.sde.skin_licenses.contains_key(&36_874));
+    assert_eq!(ctx.sde.skin_licenses.get(&36_891).map(|l| l.skin_id), Some(2_174));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&brutix_ship_id) {
+            ship.owner_id = cid;
+            ship.type_id = 16_229;
+            ship.location_id = station_id;
+        }
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.active_ship_id = brutix_ship_id;
+            ch.station_id = Some(station_id);
+        }
+        snap.items.insert(
+            dominix_ship_id,
+            InventoryItemRecord {
+                item_id: dominix_ship_id,
+                type_id: 645,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            942_001,
+            InventoryItemRecord {
+                item_id: 942_001,
+                type_id: 42_177,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            942_002,
+            InventoryItemRecord {
+                item_id: 942_002,
+                type_id: 39_584,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            942_003,
+            InventoryItemRecord {
+                item_id: 942_003,
+                type_id: 36_891,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    // Unlicensed duplicate-name lookup must deterministically report the lowest type_id (39584).
+    let unlicensed_err = handle(
+        &ctx,
+        &mut sess,
+        "shipCosmeticsMgr",
+        "ApplySkinToShip",
+        &[PyRep::Integer(brutix_ship_id), PyRep::String("Brutix Serpentis SKIN".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("unlicensed duplicate SKIN name must error");
+    assert_eq!(unlicensed_err.code, "SkinNotLicensed");
+    assert!(
+        unlicensed_err.message.contains("39584"),
+        "expected deterministic lowest candidate 39584 in error, got: {}",
+        unlicensed_err.message
+    );
+
+    // Wrong ship type must also deterministically report lowest-type_id skin (skin 19).
+    let wrong_ship_err = handle(
+        &ctx,
+        &mut sess,
+        "shipCosmeticsMgr",
+        "ApplySkinToShip",
+        &[PyRep::Integer(dominix_ship_id), PyRep::String("Brutix Serpentis SKIN".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("wrong ship type must error");
+    assert_eq!(wrong_ship_err.code, "InvalidShipTypeForSkin");
+    assert!(
+        wrong_ship_err.message.contains("id 19"),
+        "expected deterministic skin id 19 in error, got: {}",
+        wrong_ship_err.message
+    );
+
+    // Activate ONLY the higher type_id (42177 -> skin 3102) and apply by name.
+    let act_hi = handle(
+        &ctx,
+        &mut sess,
+        "shipCosmeticsMgr",
+        "ActivateSkinLicense",
+        &[PyRep::Integer(42_177)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(act_hi.dict_get("skinID"), Some(&PyRep::Integer(3_102)));
+
+    let apply_hi = handle(
+        &ctx,
+        &mut sess,
+        "shipCosmeticsMgr",
+        "ApplySkinToShip",
+        &[PyRep::Integer(brutix_ship_id), PyRep::String("brutix serpentis skin".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(apply_hi.dict_get("skinID"), Some(&PyRep::Integer(3_102)));
+    assert_eq!(apply_hi.dict_get("designName"), Some(&PyRep::String("Brutix Serpentis SKIN".into())));
+    assert_eq!(ctx.db.with_snapshot(|s| s.applied_ship_skins.get(&brutix_ship_id).copied()), Some(3_102));
+
+    // Also activate the lower type_id (39584 -> skin 19); when both are owned, lookup picks lowest type_id (skin 19).
+    let act_lo = handle(
+        &ctx,
+        &mut sess,
+        "shipCosmeticsMgr",
+        "ActivateSkinLicense",
+        &[PyRep::Integer(39_584)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(act_lo.dict_get("skinID"), Some(&PyRep::Integer(19)));
+
+    let apply_both = handle(
+        &ctx,
+        &mut sess,
+        "shipCosmeticsMgr",
+        "ApplySkinToShip",
+        &[PyRep::Integer(brutix_ship_id), PyRep::String("Brutix Serpentis SKIN".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(apply_both.dict_get("skinID"), Some(&PyRep::Integer(19)));
+    assert_eq!(ctx.db.with_snapshot(|s| s.applied_ship_skins.get(&brutix_ship_id).copied()), Some(19));
+
+    // Duplicate where lower type_id (36874) is unmapped in skin_licenses: activating 36891 applies skin 2174.
+    let act_dom = handle(
+        &ctx,
+        &mut sess,
+        "shipCosmeticsMgr",
+        "ActivateSkinLicense",
+        &[PyRep::Integer(36_891)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(act_dom.dict_get("skinID"), Some(&PyRep::Integer(2_174)));
+
+    let apply_dom = handle(
+        &ctx,
+        &mut sess,
+        "shipCosmeticsMgr",
+        "ApplySkinToShip",
+        &[
+            PyRep::Integer(dominix_ship_id),
+            PyRep::String("Dominix Golden Serenity Only SKIN (30 Days)".into()),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(apply_dom.dict_get("skinID"), Some(&PyRep::Integer(2_174)));
+    assert_eq!(ctx.db.with_snapshot(|s| s.applied_ship_skins.get(&dominix_ship_id).copied()), Some(2_174));
 }
 
 #[cfg(test)]
