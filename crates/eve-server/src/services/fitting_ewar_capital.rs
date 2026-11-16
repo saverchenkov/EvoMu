@@ -196,11 +196,14 @@ pub(crate) fn commit_pending_weapon_autoload_in_snapshot(
             return Err(BridgeRpcError::no_charges(mod_type.type_id as i64));
         }
         let has_existing = snap.items.values().any(|i| {
-            i.location_id == ship_id
-                && i.flag == slot_flag
-                && i.item_id != slot_id
-                && i.quantity > 0
-                && ctx.sde.types.get(&i.type_id).is_none_or(|t| t.group_id != 908)
+            crate::services::inventory_fitting::fitting_module_cycles::is_slot_loaded_charge_item(
+                ctx,
+                mod_type,
+                i,
+                ship_id,
+                slot_flag as u16,
+                slot_id,
+            )
         });
         if has_existing {
             return Err(BridgeRpcError::no_charges(mod_type.type_id as i64));
@@ -468,15 +471,14 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                                     .map(|i| i.flag as u16)
                                     .unwrap_or(m.flag_id);
                                 snap.items.values().any(|i| {
-                                    i.location_id == ship_id
-                                        && (i.flag as u16) == tf
-                                        && i.item_id != tid
-                                        && i.quantity > 0
-                                        && ctx
-                                            .sde
-                                            .types
-                                            .get(&i.type_id)
-                                            .is_none_or(|t| t.group_id != 908)
+                                    crate::services::inventory_fitting::fitting_module_cycles::is_slot_loaded_charge_item(
+                                        ctx,
+                                        mod_type,
+                                        i,
+                                        ship_id,
+                                        tf,
+                                        tid,
+                                    )
                                 })
                             })
                         });

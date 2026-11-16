@@ -4165,7 +4165,7 @@ async fn test_batch3_dungeon_instance_added_and_removed() {
             (gun_c, 640_000_515_i64, InventoryFlag::HiSlot2),
         ] {
             snap.items.insert(gid, make_item(gid, 490, PILOT_A, ship_a, flag, 1, true));
-            snap.items.insert(aid, make_item(aid, 206, PILOT_A, ship_a, flag, 500, false));
+            snap.items.insert(aid, make_item(aid, 193, PILOT_A, ship_a, flag, 500, false));
             snap.module_online_states.insert(gid, true);
         }
     });

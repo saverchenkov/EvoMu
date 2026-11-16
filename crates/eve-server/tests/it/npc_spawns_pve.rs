@@ -77,6 +77,9 @@ pub(crate) fn find_multi_hit_seed(ctx: &ServerContext, prob: f64, count: usize) 
 
 fn grant_combat_skills(ctx: &ServerContext, char_id: i64, type_ids: &[u32]) {
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = ch.clone_grade.max(2);
+        }
         let sk = snap.skills.entry(char_id).or_default();
         for &sid in &[
             3300u32, 3308, 3310, 3311, 3312, 3315, 3316, 3318, 3413, 3418, 3426, 20327, 21667,
@@ -90,6 +93,9 @@ fn grant_combat_skills(ctx: &ServerContext, char_id: i64, type_ids: &[u32]) {
                     eve_sde::attr_ids::REQUIRED_SKILL_1,
                     eve_sde::attr_ids::REQUIRED_SKILL_2,
                     eve_sde::attr_ids::REQUIRED_SKILL_3,
+                    1285,
+                    1289,
+                    1290,
                 ] {
                     if let Some(&req_f) = t.default_attributes.get(&sa) {
                         let rsid = req_f as u32;

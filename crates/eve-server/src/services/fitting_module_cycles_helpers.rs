@@ -26,8 +26,28 @@ pub(crate) fn resolve_snapshot_fitted_module(
             return None;
         }
         let is_online = snap.module_online_states.get(&module_id).copied().unwrap_or(true);
+        let mod_type_opt = ctx.sde.types.get(&item.type_id);
         let charge_item = snap.items.values().find(|c| {
-            c.location_id == ship_id && c.flag == item.flag && c.item_id != module_id && c.quantity > 0
+            if let Some(mod_type) = mod_type_opt {
+                crate::services::inventory_fitting::fitting_module_cycles::is_slot_loaded_charge_or_script_item(
+                    ctx,
+                    mod_type,
+                    c,
+                    ship_id,
+                    flag_u16,
+                    module_id,
+                )
+            } else {
+                c.location_id == ship_id
+                    && c.flag == item.flag
+                    && c.item_id != module_id
+                    && c.quantity > 0
+                    && ctx
+                        .sde
+                        .types
+                        .get(&c.type_id)
+                        .is_some_and(|ct| ct.category_id == 8)
+            }
         });
         let charge_tid = charge_item
             .map(|c| c.type_id)

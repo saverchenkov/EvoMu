@@ -1215,7 +1215,7 @@ pub(crate) async fn handle_module_cycles(
 
             let linked_turrets: Vec<i64> = if is_asb
                 || is_aar
-                || matches!(mod_type.group_id, 41 | 67 | 76 | 325 | 585 | 899 | 2018)
+                || matches!(mod_type.group_id, 41 | 67 | 76 | 325 | 585 | 899 | 2008 | 2018)
             {
                 Vec::new()
             } else {
@@ -1240,11 +1240,7 @@ pub(crate) async fn handle_module_cycles(
                         snap.items
                             .values()
                             .find(|i| {
-                                i.location_id == ship_id
-                                    && i.flag == tf
-                                    && i.item_id != tid
-                                    && i.quantity > 0
-                                    && ctx.sde.types.get(&i.type_id).is_none_or(|t| t.group_id != 908)
+                                is_slot_loaded_charge_item(ctx, mod_type, i, ship_id, tf as u16, tid)
                             })
                             .map(|i| i.type_id)
                     })
@@ -1287,11 +1283,7 @@ pub(crate) async fn handle_module_cycles(
                         for &tid in &linked_turrets {
                             if let Some(tf) = snap.items.get(&tid).map(|i| i.flag) {
                                 if let Some(charge_item) = snap.items.values().find(|i| {
-                                    i.location_id == ship_id
-                                        && i.flag == tf
-                                        && i.item_id != tid
-                                        && i.quantity > 0
-                                        && ctx.sde.types.get(&i.type_id).is_none_or(|t| t.group_id != 908)
+                                    is_slot_loaded_charge_item(ctx, mod_type, i, ship_id, tf as u16, tid)
                                 }) {
                                     active_burst_charge_tid = Some(charge_item.type_id);
                                     let c_sde = ctx.sde.types.get(&charge_item.type_id);
@@ -1336,11 +1328,7 @@ pub(crate) async fn handle_module_cycles(
                     for &tid in &linked_turrets {
                         if let Some(tf) = snap.items.get(&tid).map(|i| i.flag) {
                             for i in snap.items.values().filter(|i| {
-                                i.location_id == ship_id
-                                    && i.flag == tf
-                                    && i.item_id != tid
-                                    && i.quantity > 0
-                                    && ctx.sde.types.get(&i.type_id).is_none_or(|t| t.group_id != 908)
+                                is_slot_loaded_charge_item(ctx, mod_type, i, ship_id, tf as u16, tid)
                             }) {
                                 if !checked.contains(&i.type_id) {
                                     ctx.check_type_skill_prerequisites_in_snapshot(
@@ -1946,11 +1934,7 @@ pub(crate) async fn handle_module_cycles(
                         .map(|i| i.flag as u16)
                         .unwrap_or(m.flag_id);
                     let has_item = snap.items.values().any(|i| {
-                        i.location_id == ship_id
-                            && (i.flag as u16) == tf
-                            && i.item_id != module_id
-                            && i.quantity > 0
-                            && ctx.sde.types.get(&i.type_id).is_none_or(|t| t.group_id != 908)
+                        is_slot_loaded_charge_item(ctx, mod_type, i, ship_id, tf, module_id)
                     });
                     if !has_item && crystal_volatility_chance < 0.0 {
                         slot_still_has_charge = false;

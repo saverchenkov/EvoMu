@@ -15,6 +15,48 @@ use std::collections::HashMap;
 
 use self::triglavian_entropic_spool_edencom_vorton::*;
 
+fn grant_type_skills_for_test(
+    ctx: &ServerContext,
+    char_id: i64,
+    type_ids: &[u32],
+    ensure_omega: bool,
+) {
+    ctx.db.with_mut_snapshot(|snap| {
+        if ensure_omega {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.clone_grade = ch.clone_grade.max(2);
+            }
+        }
+        let sk = snap.skills.entry(char_id).or_default();
+        for &tid in type_ids {
+            if let Some(t) = ctx.sde.types.get(&tid) {
+                for sa in [
+                    eve_sde::attr_ids::REQUIRED_SKILL_1,
+                    eve_sde::attr_ids::REQUIRED_SKILL_2,
+                    eve_sde::attr_ids::REQUIRED_SKILL_3,
+                    1285,
+                    1289,
+                    1290,
+                ] {
+                    if let Some(&req_f) = t.default_attributes.get(&sa) {
+                        let rsid = req_f as u32;
+                        if rsid > 0 {
+                            sk.insert(
+                                rsid,
+                                eve_db::TrainedSkillRecord {
+                                    type_id: rsid,
+                                    level: 5,
+                                    skill_points: 1_280_000.0,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
 #[tokio::test]
 async fn test_c1_turret_families_hit_formula_wrecking_shots_and_crystal_degradation() {
     // parity: feat:modules.turret-hybrid
@@ -44,6 +86,7 @@ async fn test_c1_turret_families_hit_formula_wrecking_shots_and_crystal_degradat
         DVec3::ZERO,
     )
     .await;
+    grant_type_skills_for_test(&ctx, char_id, &[10678, 222, 486, 185, 3041, 246, 12565, 23071], false);
 
     // Spawn a high-HP target ball at 1,500m
     let target_id = 500_001;
@@ -319,6 +362,22 @@ async fn test_c2_missiles_drf_smartbombs_bombs_breacher_pods_damage_layers_and_s
         DVec3::new(3_000.0, 0.0, 0.0),
     )
     .await;
+    grant_type_skills_for_test(
+        &ctx,
+        char_id,
+        &[20539, 17859, 499, 1810, 3993, 27914, 27924, 27922, 27912, 85084, 85088],
+        false,
+    );
+    grant_type_skills_for_test(&ctx, victim_char_id, &[44102, 32782], true);
+    // Testbed hull (11377) fits XL Torpedo Launcher I + Large Smartbomb + LML + Bomb + Breacher
+    // simultaneously, so ensure ship CPU/PG output supports all five online weapon groups.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship_item) = snap.items.get_mut(&ship_id) {
+            ship_item.dynamic_attributes.insert(eve_sde::attr_ids::CPU_OUTPUT, 10_000.0);
+            ship_item.dynamic_attributes.insert(eve_sde::attr_ids::POWER_OUTPUT, 500_000.0);
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
 
     let sys_handle = ctx.systems.get_or_spawn(lowsec_sys_id);
 

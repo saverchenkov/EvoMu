@@ -1443,6 +1443,15 @@ async fn test_five_owner_observer_live_journeys_monotonic_and_clean() {
         with_mut_combat_runtime(&ctx, |rt| {
             rt.safety_levels.insert(owner.char_id, SafetyLevel::Red);
         });
+        ctx.db.with_mut_snapshot(|snap| {
+            let sk = snap.skills.entry(owner.char_id).or_default();
+            for sid in [3319_u32, 3321, 3322] {
+                sk.insert(
+                    sid,
+                    eve_db::TrainedSkillRecord { type_id: sid, level: 5, skill_points: 1_280_000.0 },
+                );
+            }
+        });
         let lml_id = 89_003_901_i64;
         fit_module_and_charge(
             &ctx,
