@@ -57,6 +57,7 @@ const ALL_REMOTE_SLASH_COMMANDS: &[&str] = &[
     "giveitem",
     "giveskill",
     "heal",
+    "help",
     "industrytimer",
     "kick",
     "kill",
@@ -114,6 +115,83 @@ pub fn format_remote_command_list_reason(role: u64) -> String {
         .map(|c| format!("'{c}'"))
         .collect();
     format!("Commands: [{}]", quoted.join(", "))
+}
+
+fn slash_command_usage(name: &str) -> Option<&'static str> {
+    match name {
+        "help" => Some("/help [command] - List available slash commands or show usage for a command"),
+        "giveisk" => Some("/giveisk [me|<characterID>] <amount> - Add positive integer ISK to wallet"),
+        "load" => Some("/load [me|<targetID>] <typeID> [quantity] - Spawn item into active ship cargo or hangar"),
+        "giveitem" | "createitem" => Some("/giveitem <typeID> [quantity] | /createitem <typeID> [quantity] - Spawn item into docked hangar or active ship cargo"),
+        "fit" => Some("/fit <typeID> [slot] - Fit a module or rig onto active ship"),
+        "setskill" | "giveskill" => Some("/setskill [me|<characterID>] <typeID> <0-5> - Set character skill level"),
+        "heal" => Some("/heal [targetID] - Restore shield, armor, hull, and capacitor"),
+        "teleport" | "tr" | "translocate" | "moveme" => {
+            Some("/tr [me|<characterID>] <solarSystemID|stationID> [noblock] - Move to system or station")
+        }
+        "whoami" => Some("/whoami - Show current session character, corp, location, ship, and role"),
+        "location" => Some("/location [characterID] - Show character location and coordinates"),
+        "online" => Some("/online [moduleID|all] - Online fitted modules"),
+        "spawn" | "spawnnpc" => Some("/spawn <typeID> [qty] | /spawnnpc <typeID> [qty] - Spawn NPC/entity in system"),
+        "unspawn" | "despawn" => Some("/unspawn <entityID> - Remove spawned space entity"),
+        "kill" => Some("/kill <entityID> - Destroy ship or space entity"),
+        "ban" => Some("/ban <account_id> [duration_seconds] [reason] - Ban account"),
+        "unban" => Some("/unban <account_id> - Remove account ban"),
+        "suspend" => Some("/suspend <account_id> <duration_seconds> [reason] - Temporarily suspend account"),
+        "unsuspend" => Some("/unsuspend <account_id> - Remove account suspension"),
+        "kick" => Some("/kick <account_id> [reason] - Disconnect active account sessions"),
+        "role" => Some("/role <account_id> <role_mask|name> - Set account service role mask"),
+        "setomega" => Some("/setomega <userID> <until_unix> - Set Omega clone expiration timestamp"),
+        "setunderage" => Some("/setunderage <userID> <1|true|0|false> - Set account underage flag"),
+        "getattr" => Some("/getattr [me|<itemID>] <attribute> - Read dogma attribute on ship or item"),
+        "setattr" => Some("/setattr [me|<itemID>] <attribute> <value> - Set dogma attribute"),
+        "advancetime" | "fastforward" | "ff" => Some("/advancetime <seconds> - Advance simulation clock"),
+        "completeskills" | "trainskills" | "finishskills" => {
+            Some("/completeskills [charID] - Finish active skill training queue")
+        }
+        "upwelltimer" | "structuretimer" | "finishstructure" => {
+            Some("/finishstructure [structureID] - Finish structure timer")
+        }
+        "completeindustry" | "finishjobs" | "industrytimer" => {
+            Some("/finishjobs [charID] - Finish active industry jobs")
+        }
+        "cleartimers" => Some("/cleartimers - Clear active admin timers"),
+        _ => None,
+    }
+}
+
+fn format_slash_help(role: u64, topic: Option<&str>) -> String {
+    let cmds = remote_slash_commands_for_role(role);
+    let normalized = topic
+        .map(|raw| raw.trim().trim_start_matches('/').to_ascii_lowercase())
+        .filter(|name| !name.is_empty());
+    if let Some(name) = normalized {
+        if !cmds.contains(&name.as_str()) {
+            if ALL_REMOTE_SLASH_COMMANDS.contains(&name.as_str()) {
+                return format!(
+                    "/{name}: requires a higher role than your current session role. Use /help to list available commands."
+                );
+            }
+            return format!(
+                "Unknown slash command '/{name}'. Use /help to list available commands."
+            );
+        }
+        if let Some(usage) = slash_command_usage(&name) {
+            return usage.to_string();
+        }
+        return format!(
+            "/{name}: available to your role (no detailed usage entry). Use /help to list commands."
+        );
+    }
+    let joined = cmds
+        .iter()
+        .map(|c| format!("/{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Available slash commands ({}): {joined}. Use /help <command> for usage.",
+        cmds.len()
+    )
 }
 
 pub fn required_slash_role(cmd: &str) -> u64 {
@@ -715,47 +793,93 @@ pub async fn handle(
                 }));
             }
             let res: Option<Result<PyRep, BridgeRpcError>> = async {
-                if let Some(rest) = cmd.strip_prefix("/giveisk ") {
-                let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
-                let Ok(amount) = tokens.first().map(String::as_str).unwrap_or("").parse::<i64>() else {
-                    return Some(Err(BridgeRpcError {
+                if cmd == "/help"
+                    || cmd
+                        .strip_prefix("/help")
+                        .is_some_and(|r| r.starts_with(char::is_whitespace))
+                {
+                    let rest = cmd.strip_prefix("/help").unwrap_or("");
+                    let tokens =
+                        crate::services::character_skills::character_gm_tools::parse_slash_tokens(
+                            rest,
+                        );
+                    let topic = tokens.first().map(String::as_str);
+                    Some(Ok(PyRep::String(format_slash_help(session.role, topic))))
+                } else if cmd == "/giveisk"
+                    || cmd
+                        .strip_prefix("/giveisk")
+                        .is_some_and(|r| r.starts_with(char::is_whitespace))
+                {
+                    let rest = cmd.strip_prefix("/giveisk").unwrap_or("");
+                    let tokens =
+                        crate::services::character_skills::character_gm_tools::parse_slash_tokens(
+                            rest,
+                        );
+                    let usage_err = || BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
-                        message: "Usage: /giveisk <positive_integer_amount>".into(),
+                        message: "Usage: /giveisk [me|<character_id>] <positive_integer_amount>"
+                            .into(),
                         client_error: None,
-                    }));
-                };
-                if amount <= 0 {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Amount for /giveisk must be positive".into(),
-                        client_error: None,
-                    }));
-                }
-                let new_bal = ctx.db.try_with_mut_snapshot(|snap| {
-                    let ch = snap.characters.get_mut(&cid).ok_or_else(|| BridgeRpcError {
-                        code: "CharacterNotFound".into(),
-                        message: format!("Character {cid} not found"),
-                        client_error: None,
-                    })?;
-                    let add = IskCents::from_isk(amount);
-                    ch.balance = ch.balance.checked_add(add).ok_or_else(|| BridgeRpcError {
-                        code: "BalanceOverflow".into(),
-                        message: "Adding ISK would overflow balance".into(),
-                        client_error: None,
-                    })?;
-                    Ok(ch.balance.to_wire_f64())
-                });
-                match new_bal {
-                    Ok(bal) => {
-                        let _ = ctx.notify_account_change(cid, "cash", cid, bal);
-                        Some(Ok(PyRep::keyval([
-                            ("command", PyRep::String(cmd.to_string())),
-                            ("newBalanceISK", PyRep::Real(bal)),
-                        ])))
+                    };
+                    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+                    let (target_cid, amount_tok) = match token_strs.as_slice() {
+                        [amt] => (cid, *amt),
+                        [target, amt]
+                            if target.eq_ignore_ascii_case("me")
+                                || target.eq_ignore_ascii_case("self") =>
+                        {
+                            (cid, *amt)
+                        }
+                        [target, amt] => {
+                            let Some(target_id) =
+                                target.parse::<i64>().ok().filter(|&id| id > 0)
+                            else {
+                                return Some(Err(usage_err()));
+                            };
+                            (target_id, *amt)
+                        }
+                        _ => return Some(Err(usage_err())),
+                    };
+                    let Ok(amount) = amount_tok.parse::<i64>() else {
+                        return Some(Err(usage_err()));
+                    };
+                    if amount <= 0 {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidSlashArgument".into(),
+                            message: "Amount for /giveisk must be positive".into(),
+                            client_error: None,
+                        }));
                     }
-                    Err(e) => Some(Err(e)),
-                }
-            } else if let Some(rest) = cmd.strip_prefix("/ban ") {
+                    let new_bal = ctx.db.try_with_mut_snapshot(|snap| {
+                        let ch = snap.characters.get_mut(&target_cid).ok_or_else(|| {
+                            BridgeRpcError {
+                                code: "CharacterNotFound".into(),
+                                message: format!("Character {target_cid} not found"),
+                                client_error: None,
+                            }
+                        })?;
+                        ch.balance = amount
+                            .checked_mul(100)
+                            .map(IskCents::from_raw_cents)
+                            .and_then(|add| ch.balance.checked_add(add))
+                            .ok_or_else(|| BridgeRpcError {
+                                code: "BalanceOverflow".into(),
+                                message: "Adding ISK would overflow balance".into(),
+                                client_error: None,
+                            })?;
+                        Ok(ch.balance.to_wire_f64())
+                    });
+                    match new_bal {
+                        Ok(bal) => {
+                            let _ = ctx.notify_account_change(target_cid, "cash", target_cid, bal);
+                            Some(Ok(PyRep::keyval([
+                                ("command", PyRep::String(cmd.to_string())),
+                                ("newBalanceISK", PyRep::Real(bal)),
+                            ])))
+                        }
+                        Err(e) => Some(Err(e)),
+                    }
+                } else if let Some(rest) = cmd.strip_prefix("/ban ") {
                 let mut parts = rest.trim().splitn(3, ' ');
                 let Some(target) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
                     return Some(Err(BridgeRpcError {

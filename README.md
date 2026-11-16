@@ -90,12 +90,50 @@ Ports and paths are set in [`evomu.toml`](./evomu.toml).
 ### Connect the client
 
 ```bash
+# macOS
 python3 tools/launch_client.py --login pilot1:choose-a-password
+
+# Windows PowerShell
+python tools/launch_client.py --client "C:/Games/EVE/tq" --login pilot1:choose-a-password
 ```
 
 The installed client can only log in to CCP's servers. The launcher makes a private copy of your client under `~/.evomu/client`, switches that copy to the login mode EvoMu supports, and starts it against your server. Your installed client is not modified.
 
-On Windows, add `--client` with the folder that contains `bin64`. Run the script with `--help` for the other options.
+On macOS, the launcher auto-detects `~/Library/Application Support/EVE Online/SharedCache/tq/EVE.app`. On Windows, pass `--client` with the folder that contains `bin64` and `start.ini`. Run the script with `--help` for the other options.
+
+#### Launching exefile directly
+
+If you prefer not to use `tools/launch_client.py` on every run:
+
+1. **Make a private copy of the client build folder** (the directory containing `bin64/` and `start.ini`, for example `C:\Games\EVE\tq` on Windows or `~/Library/Application Support/EVE Online/SharedCache/tq/EVE.app/Contents/Resources/build` on macOS) into a writable directory such as `~/.evomu/client` — or run `python3 tools/launch_client.py --prepare-only` (adding `--client ...` on Windows) — so your installed Tranquility client is untouched. Avoid symlinking files or editing inside a copied `.app` bundle.
+2. **Enable `Placebo` mode in that copy** by creating `common.ini` in the copied client root (next to `start.ini`):
+
+   ```ini
+   [main]
+   cryptoPack = Placebo
+   ```
+
+3. **Set `EVE_PUBLIC_GATEWAY_ADDRESS=127.0.0.1:26005` and launch `exefile` with the working directory set to that copied client folder.**
+
+   > [!WARNING]
+   > If `EVE_PUBLIC_GATEWAY_ADDRESS` is unset, `exefile` connects MachoNet to `127.0.0.1:26000` while sending Quasar gRPC calls to CCP's live `evetech.net` public gateway (`500 invalid character on request`).
+
+   ```powershell
+   # Windows PowerShell
+   cd "$HOME\.evomu\client"
+   $env:EVE_PUBLIC_GATEWAY_ADDRESS = "127.0.0.1:26005"
+   .\bin64\exefile.exe /server:127.0.0.1 /port:26000 /login:pilot1:choose-a-password
+   ```
+
+   ```bash
+   # macOS
+   cd ~/.evomu/client
+   EVE_PUBLIC_GATEWAY_ADDRESS=127.0.0.1:26005 ./bin64/exefile /server:127.0.0.1 /port:26000 /login:pilot1:choose-a-password
+   ```
+
+   Optional client flags supported by EvoMu and `tools/launch_client.py`:
+   - `/localdevtools` — enable GM menus and slash commands (equivalent to `--gm`).
+   - `/autoSelectCharacter:<char_id>` — auto-select a specific character on login (equivalent to `--character <char_id>`).
 
 ### Game-master mode and commands
 

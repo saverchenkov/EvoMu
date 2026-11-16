@@ -318,6 +318,26 @@ async fn gm_slash_commands_giveisk_ban_suspend_role_giveitem_setskill_teleport_a
         .code,
         "InvalidSlashArgument"
     );
+    let giveisk_usage = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/giveisk".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(giveisk_usage.code, "InvalidSlashArgument");
+    assert!(
+        giveisk_usage.message.contains("Usage: /giveisk"),
+        "bare /giveisk must return usage error, got: {giveisk_usage:?}"
+    );
+    let before_cents = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&cid).map(|c| c.balance.raw_cents()))
+        .expect("character exists");
     let isk_rep = handle(
         &ctx,
         &mut sess,
@@ -330,6 +350,156 @@ async fn gm_slash_commands_giveisk_ban_suspend_role_giveitem_setskill_teleport_a
     .unwrap()
     .unwrap();
     assert!(isk_rep.dict_get("newBalanceISK").is_some());
+    let isk_me_rep = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/giveisk me 1000".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(isk_me_rep.dict_get("newBalanceISK").is_some());
+    let isk_cid_rep = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/giveisk {cid} 500"))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(isk_cid_rep.dict_get("newBalanceISK").is_some());
+    let after_cents = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&cid).map(|c| c.balance.raw_cents()))
+        .expect("character exists");
+    assert_eq!(after_cents - before_cents, 400_000);
+    for (bad_cmd, expected_code) in [
+        ("/giveisk 0 100", "InvalidSlashArgument"),
+        ("/giveisk badtarget 100", "InvalidSlashArgument"),
+        ("/giveisk 100 200 300", "InvalidSlashArgument"),
+        ("/giveisk 922337203685477580", "BalanceOverflow"),
+    ] {
+        let err = handle(
+            &ctx,
+            &mut sess,
+            "slash",
+            "SlashCmd",
+            &[PyRep::String(bad_cmd.into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, expected_code, "for command '{bad_cmd}': {err:?}");
+    }
+
+    // /help and /help <command>
+    let help_rep = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/help".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let help_str = help_rep.as_str().expect("/help must return a string");
+    assert!(help_str.contains("/giveisk") && help_str.contains("/load") && help_str.contains("/help"));
+    let help_slash = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/help /".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        help_slash
+            .as_str()
+            .is_some_and(|s| s.contains("Available slash commands")),
+        "expected command summary from /help /, got: {help_slash:?}"
+    );
+    let help_load = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/help /load".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        help_load
+            .as_str()
+            .is_some_and(|s| s.contains("/load") && s.contains("<typeID>")),
+        "expected /load usage from /help /load, got: {help_load:?}"
+    );
+    let help_tidi = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/help tidi".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        help_tidi
+            .as_str()
+            .is_some_and(|s| s.contains("/tidi: available to your role")),
+        "expected role-aware summary from /help tidi, got: {help_tidi:?}"
+    );
+    let help_unknown = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/help nonexistent_cmd".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        help_unknown
+            .as_str()
+            .is_some_and(|s| s.contains("Unknown slash command '/nonexistent_cmd'")),
+        "expected unknown command response from /help nonexistent_cmd, got: {help_unknown:?}"
+    );
+    let mut gml_sess = sess.clone();
+    gml_sess.role = service_roles::ROLE_GML;
+    let help_role_denied = handle(
+        &ctx,
+        &mut gml_sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/help role".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        help_role_denied
+            .as_str()
+            .is_some_and(|s| s.contains("/role: requires a higher role")),
+        "ROLE_GML asking /help role must note insufficient role, got: {help_role_denied:?}"
+    );
 
     // Seed target account for /ban, /unban, /suspend, /unsuspend, /role, /kick
     ctx.db.with_mut_snapshot(|snap| {
