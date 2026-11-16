@@ -451,21 +451,15 @@ impl UserErrorKey {
         }
     }
 
-    /// Returns `true` if this key is a hold/bay capacity `UserError` taking `{"free", "required"}`.
+    /// Returns `true` if this key is a hold/bay capacity `UserError` taking `{"volume", "available"}`.
     pub const fn is_capacity_error(&self) -> bool {
         matches!(
             self,
             Self::NotEnoughCargoSpace
-                | Self::NotEnoughCargoSpaceOverload
                 | Self::NotEnoughDroneBaySpace
-                | Self::NotEnoughDroneBaySpaceOverload
                 | Self::NotEnoughFighterBaySpace
                 | Self::NotEnoughSpecialBaySpace
-                | Self::NotEnoughSpecialBaySpaceOverload
                 | Self::NotEnoughSpace
-                | Self::NotEnoughChargeSpace
-                | Self::NoSpaceForThat
-                | Self::NoSpaceForThatOverload
         )
     }
 
@@ -473,11 +467,32 @@ impl UserErrorKey {
     pub fn default_args(&self) -> Vec<(String, PyRep)> {
         if self.is_capacity_error() {
             return vec![
-                ("free".into(), PyRep::Real(0.0)),
-                ("required".into(), PyRep::Real(0.0)),
+                ("volume".into(), PyRep::Real(0.0)),
+                ("available".into(), PyRep::Real(0.0)),
             ];
         }
         match self {
+            Self::NoSpaceForThat => vec![
+                ("itemTypeName".into(), PyRep::Integer(0)),
+                ("itemVolume".into(), PyRep::Real(0.0)),
+                ("volumeAvailable".into(), PyRep::Real(0.0)),
+            ],
+            Self::NoSpaceForThatOverload => vec![
+                ("item".into(), PyRep::Integer(0)),
+                ("maximum".into(), PyRep::Real(0.0)),
+                ("used".into(), PyRep::Real(0.0)),
+            ],
+            Self::NotEnoughChargeSpace => vec![
+                ("capacity".into(), PyRep::Real(0.0)),
+                ("volume".into(), PyRep::Real(0.0)),
+            ],
+            Self::NotEnoughCargoSpaceOverload
+            | Self::NotEnoughDroneBaySpaceOverload
+            | Self::NotEnoughSpecialBaySpaceOverload => vec![
+                ("item".into(), PyRep::ascii_bytes("")),
+                ("maximum".into(), PyRep::Real(0.0)),
+                ("used".into(), PyRep::Real(0.0)),
+            ],
             Self::MarketExceededOrderCount => vec![
                 ("curCnt".into(), PyRep::Integer(0)),
                 ("maxCnt".into(), PyRep::Integer(0)),
@@ -668,15 +683,15 @@ impl BridgeRpcError {
                         code_str.clone()
                     }
                 } else if key.is_capacity_error() {
-                    let free = args.iter().find(|(k, _)| k == "free").and_then(|(_, v)| {
+                    let volume = args.iter().find(|(k, _)| k == "volume").and_then(|(_, v)| {
                         v.as_f64().or_else(|| v.as_i64().map(|n| n as f64))
                     });
-                    let req = args
+                    let available = args
                         .iter()
-                        .find(|(k, _)| k == "required")
+                        .find(|(k, _)| k == "available")
                         .and_then(|(_, v)| v.as_f64().or_else(|| v.as_i64().map(|n| n as f64)));
-                    if let (Some(f), Some(r)) = (free, req) {
-                        format!("free={f}, required={r}")
+                    if let (Some(vol), Some(avail)) = (volume, available) {
+                        format!("volume={vol}, available={avail}")
                     } else {
                         code_str.clone()
                     }
@@ -894,21 +909,80 @@ mod tests {
         let cargo = BridgeRpcError::user_error_with_args(
             UserErrorKey::NotEnoughCargoSpace,
             [
-                ("free", PyRep::Real(15.5)),
-                ("required", PyRep::Real(80.0)),
+                ("volume", PyRep::Real(80.0)),
+                ("available", PyRep::Real(15.5)),
             ],
         );
         assert_eq!(cargo.code, "NotEnoughCargoSpace");
-        assert_eq!(cargo.message, "free=15.5, required=80");
+        assert_eq!(cargo.message, "volume=80, available=15.5");
         assert_eq!(
             cargo.to_client_error("invbroker", "Add"),
             ClientError::User {
                 key: UserErrorKey::NotEnoughCargoSpace,
                 args: vec![
-                    ("free".into(), PyRep::Real(15.5)),
-                    ("required".into(), PyRep::Real(80.0)),
+                    ("volume".into(), PyRep::Real(80.0)),
+                    ("available".into(), PyRep::Real(15.5)),
                 ],
             }
+        );
+
+        for cap_key in [
+            UserErrorKey::NotEnoughCargoSpace,
+            UserErrorKey::NotEnoughDroneBaySpace,
+            UserErrorKey::NotEnoughFighterBaySpace,
+            UserErrorKey::NotEnoughSpecialBaySpace,
+            UserErrorKey::NotEnoughSpace,
+        ] {
+            assert!(cap_key.is_capacity_error(), "{cap_key:?} must be capacity error");
+            assert_eq!(
+                cap_key.default_args(),
+                vec![
+                    ("volume".into(), PyRep::Real(0.0)),
+                    ("available".into(), PyRep::Real(0.0)),
+                ]
+            );
+            let fallback = BridgeRpcError::user_error(cap_key.as_str()).to_client_error("invbroker", "Add");
+            assert_eq!(
+                fallback,
+                ClientError::User {
+                    key: cap_key,
+                    args: vec![
+                        ("volume".into(), PyRep::Real(0.0)),
+                        ("available".into(), PyRep::Real(0.0)),
+                    ],
+                }
+            );
+        }
+        assert_eq!(
+            UserErrorKey::NotEnoughChargeSpace.default_args(),
+            vec![
+                ("capacity".into(), PyRep::Real(0.0)),
+                ("volume".into(), PyRep::Real(0.0)),
+            ]
+        );
+        assert_eq!(
+            UserErrorKey::NoSpaceForThat.default_args(),
+            vec![
+                ("itemTypeName".into(), PyRep::Integer(0)),
+                ("itemVolume".into(), PyRep::Real(0.0)),
+                ("volumeAvailable".into(), PyRep::Real(0.0)),
+            ]
+        );
+        assert_eq!(
+            UserErrorKey::NoSpaceForThatOverload.default_args(),
+            vec![
+                ("item".into(), PyRep::Integer(0)),
+                ("maximum".into(), PyRep::Real(0.0)),
+                ("used".into(), PyRep::Real(0.0)),
+            ]
+        );
+        assert_eq!(
+            UserErrorKey::NotEnoughCargoSpaceOverload.default_args(),
+            vec![
+                ("item".into(), PyRep::ascii_bytes("")),
+                ("maximum".into(), PyRep::Real(0.0)),
+                ("used".into(), PyRep::Real(0.0)),
+            ]
         );
 
         let orders = BridgeRpcError::max_open_orders_reached(5, 5);

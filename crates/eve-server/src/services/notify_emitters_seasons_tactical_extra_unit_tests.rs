@@ -70,6 +70,63 @@ fn make_type(
     }
 }
 
+fn assert_cargo_space_wire_error(err: &eve_proto::BridgeRpcError, method: &str) -> (f64, f64) {
+    assert_eq!(err.code, "NotEnoughCargoSpace");
+    let (vol, avail) = match err.to_client_error("dogmaIM", method) {
+        eve_proto::ClientError::User {
+            key: eve_proto::UserErrorKey::NotEnoughCargoSpace,
+            args,
+        } => match args.as_slice() {
+            [(k0, PyRep::Real(v)), (k1, PyRep::Real(a))]
+                if k0 == "volume" && k1 == "available" => (*v, *a),
+            other => panic!("expected [('volume', Real), ('available', Real)], got {other:?}"),
+        },
+        other => panic!("expected UserError::NotEnoughCargoSpace, got {other:?}"),
+    };
+    assert!(
+        vol > 0.0 && avail >= 0.0 && vol > avail && vol.is_finite() && avail.is_finite(),
+        "vol={vol}, avail={avail}"
+    );
+    let PyRep::Tuple(parts) = err
+        .to_client_error("dogmaIM", method)
+        .to_macho_error_body(1)
+    else {
+        panic!("expected ErrorResponse tuple");
+    };
+    let PyRep::Tuple(inner) = &parts[2] else {
+        panic!("expected inner tuple");
+    };
+    let PyRep::Bytes(raw) = &inner[0] else {
+        panic!("expected marshaled bytes");
+    };
+    let PyRep::ObjectEx { header, .. } = eve_proto::marshal::decode(raw).expect("decode UserError") else {
+        panic!("expected ObjectEx");
+    };
+    let PyRep::Tuple(hdr) = *header else {
+        panic!("expected header tuple");
+    };
+    assert_eq!(hdr[0], PyRep::Token("eveexceptions.UserError".into()));
+    let PyRep::Tuple(u_args) = &hdr[1] else {
+        panic!("expected UserError args tuple");
+    };
+    assert_eq!(u_args[0].as_str(), Some("NotEnoughCargoSpace"));
+    let PyRep::Dict(entries) = &u_args[1] else {
+        panic!("expected UserError dict");
+    };
+    let wire_kv: Vec<(String, f64)> = entries
+        .iter()
+        .map(|(k, v)| match (k.as_str(), v) {
+            (Some(name), PyRep::Real(num)) => (name.to_string(), *num),
+            other => panic!("expected (str, PyRep::Real), got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        wire_kv,
+        vec![("volume".to_string(), vol), ("available".to_string(), avail)]
+    );
+    (vol, avail)
+}
+
 fn setup_ctx() -> (ServerContext, i64, Arc<VirtualServerClock>) {
     let mut sde = SdeRegistry::default();
     // Ship with 5.0 m3 cargo capacity (type 587)
@@ -553,16 +610,13 @@ async fn break_gate_cloak_deployables_and_load_ammo_all_branches() {
             },
         );
     });
-    assert_eq!(
-        handle_load_ammo(
-            &ctx,
-            &sess,
-            &[PyRep::Integer(ship_id), PyRep::Integer(wubble_mod), PyRep::Integer(890_099)],
-        )
-        .unwrap_err()
-        .code,
-        "NotEnoughCargoSpace"
-    );
+    let load_err = handle_load_ammo(
+        &ctx,
+        &sess,
+        &[PyRep::Integer(ship_id), PyRep::Integer(wubble_mod), PyRep::Integer(890_099)],
+    )
+    .unwrap_err();
+    assert_cargo_space_wire_error(&load_err, "LoadAmmo");
 
     // Mining crystal requires skill 18025 level 3 -> fails before training, succeeds after
     assert!(handle_load_ammo(
@@ -983,7 +1037,7 @@ fn issue_950_load_ammo_unloaded_and_cargo_volume_uses_attr_161_fallback() {
         ],
     )
     .unwrap_err();
-    assert_eq!(err.code, "NotEnoughCargoSpace");
+    assert_cargo_space_wire_error(&err, "LoadAmmo");
 
     // Trim Cargo stack to 290 m3 -> 290 + 50 - 50 + 100 = 390 <= 400 -> succeeds
     ctx.db.with_mut_snapshot(|snap| {

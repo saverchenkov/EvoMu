@@ -431,7 +431,7 @@ pub async fn execute_wreck_salvage_cycle(
     wreck_id: i64,
     salvager_type_id_opt: Option<u32>,
 ) -> Result<eve_proto::PyRep, eve_proto::BridgeRpcError> {
-    use eve_proto::{BridgeRpcError, PyRep};
+    use eve_proto::PyRep;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let (wreck_type_id, wreck_ball_opt) = validate_wreck_salvage_target(
         ctx,
@@ -608,14 +608,12 @@ pub async fn execute_wreck_salvage_cycle(
                 })
                 .sum();
             if used_cargo + salvage_vol > ship_cap + 1e-4 {
-                return Err(BridgeRpcError {
-                    code: "NotEnoughCargoSpace".into(),
-                    message: format!(
-                        "Insufficient ship cargo space for salvage ({salvage_vol:.2} m³ needed, {:.2}/{ship_cap:.2} m³ used)",
-                        used_cargo
-                    ),
-                    client_error: None,
-                });
+                return Err(crate::services::inventory_fitting::ship_hold_capacity_error(
+                    InventoryFlag::Cargo as u16,
+                    ship_cap,
+                    used_cargo,
+                    salvage_vol,
+                ));
             }
         }
         let wreck_owner = snap.items.get(&wreck_id).map(|i| i.owner_id).unwrap_or(char_id);

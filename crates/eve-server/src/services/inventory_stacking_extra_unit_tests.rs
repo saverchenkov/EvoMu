@@ -536,10 +536,70 @@ async fn ship_hold_capacity_errors_match_hold_specific_codes_for_add_and_multi_a
     assert_eq!(ship_hold_capacity_error_code(158), "NotEnoughFighterBaySpace");
     assert_eq!(ship_hold_capacity_error_code(134), "NotEnoughSpecialBaySpace");
 
+    let assert_hold_space_wire = |err: &eve_proto::BridgeRpcError,
+                                  method: &str,
+                                  expected_key: eve_proto::UserErrorKey|
+     -> (f64, f64) {
+        assert_eq!(err.code, expected_key.as_str());
+        let (vol, avail) = match err.to_client_error("invbroker", method) {
+            eve_proto::ClientError::User { key, args } if key == expected_key => {
+                match args.as_slice() {
+                    [(k0, PyRep::Real(v)), (k1, PyRep::Real(a))]
+                        if k0 == "volume" && k1 == "available" => (*v, *a),
+                    other => panic!("expected [('volume', Real), ('available', Real)], got {other:?}"),
+                }
+            }
+            other => panic!("expected UserError::{expected_key:?}, got {other:?}"),
+        };
+        assert!(vol > 0.0 && avail >= 0.0 && vol > avail, "vol={vol}, avail={avail}");
+        let PyRep::Tuple(parts) = err
+            .to_client_error("invbroker", method)
+            .to_macho_error_body(1)
+        else {
+            panic!("expected ErrorResponse tuple");
+        };
+        let PyRep::Tuple(inner) = &parts[2] else {
+            panic!("expected inner tuple");
+        };
+        let PyRep::Bytes(raw) = &inner[0] else {
+            panic!("expected marshaled bytes");
+        };
+        let PyRep::ObjectEx { header, .. } = eve_proto::marshal::decode(raw).expect("decode UserError") else {
+            panic!("expected ObjectEx");
+        };
+        let PyRep::Tuple(hdr) = *header else {
+            panic!("expected header tuple");
+        };
+        assert_eq!(hdr[0], PyRep::Token("eveexceptions.UserError".into()));
+        let PyRep::Tuple(u_args) = &hdr[1] else {
+            panic!("expected UserError args tuple");
+        };
+        assert_eq!(u_args[0].as_str(), Some(expected_key.as_str()));
+        let PyRep::Dict(entries) = &u_args[1] else {
+            panic!("expected UserError dict");
+        };
+        let wire_kv: Vec<(String, f64)> = entries
+            .iter()
+            .map(|(k, v)| match (k.as_str(), v) {
+                (Some(name), PyRep::Real(num)) => (name.to_string(), *num),
+                other => panic!("expected (str, PyRep::Real), got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            wire_kv,
+            vec![("volume".to_string(), vol), ("available".to_string(), avail)]
+        );
+        (vol, avail)
+    };
+
     let e = ship_hold_capacity_error(158, 1_000.0, 400.0, 800.0);
     assert_eq!(e.code, "NotEnoughFighterBaySpace");
-    assert!(e.message.contains("free=600"), "msg={}", e.message);
-    assert!(e.message.contains("required=800"), "msg={}", e.message);
+    assert!(e.message.contains("volume=800"), "msg={}", e.message);
+    assert!(e.message.contains("available=600"), "msg={}", e.message);
+    assert_eq!(
+        assert_hold_space_wire(&e, "Add", eve_proto::UserErrorKey::NotEnoughFighterBaySpace),
+        (800.0, 600.0)
+    );
 
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
@@ -686,7 +746,9 @@ async fn ship_hold_capacity_errors_match_hold_specific_codes_for_add_and_multi_a
     .await
     .unwrap_err();
     assert_eq!(err.code, "NotEnoughCargoSpace");
-    assert!(err.message.contains("free="));
+    assert!(err.message.contains("volume="), "msg={}", err.message);
+    assert!(err.message.contains("available="), "msg={}", err.message);
+    assert_hold_space_wire(&err, "MultiAdd", eve_proto::UserErrorKey::NotEnoughCargoSpace);
 
     // MultiAdd DroneBay on Venture -> NotEnoughDroneBaySpace
     let err = handle_multi_add(
@@ -703,6 +765,7 @@ async fn ship_hold_capacity_errors_match_hold_specific_codes_for_add_and_multi_a
     .await
     .unwrap_err();
     assert_eq!(err.code, "NotEnoughDroneBaySpace");
+    assert_hold_space_wire(&err, "MultiAdd", eve_proto::UserErrorKey::NotEnoughDroneBaySpace);
 
     // MultiAdd DroneBay on Rifter (0 m3 drone bay) -> NotEnoughDroneBaySpace (not CapacityExceeded/CannotMoveIntoHold)
     let err = handle_multi_add(
@@ -719,6 +782,7 @@ async fn ship_hold_capacity_errors_match_hold_specific_codes_for_add_and_multi_a
     .await
     .unwrap_err();
     assert_eq!(err.code, "NotEnoughDroneBaySpace");
+    assert_hold_space_wire(&err, "MultiAdd", eve_proto::UserErrorKey::NotEnoughDroneBaySpace);
 
     // MultiAdd OreHold -> NotEnoughSpecialBaySpace
     let err = handle_multi_add(
@@ -735,6 +799,7 @@ async fn ship_hold_capacity_errors_match_hold_specific_codes_for_add_and_multi_a
     .await
     .unwrap_err();
     assert_eq!(err.code, "NotEnoughSpecialBaySpace");
+    assert_hold_space_wire(&err, "MultiAdd", eve_proto::UserErrorKey::NotEnoughSpecialBaySpace);
 
     // Add & MultiAdd FighterBay -> NotEnoughFighterBaySpace
     let err = ctx
@@ -754,6 +819,7 @@ async fn ship_hold_capacity_errors_match_hold_specific_codes_for_add_and_multi_a
         .await
         .unwrap_err();
     assert_eq!(err.code, "NotEnoughFighterBaySpace");
+    assert_hold_space_wire(&err, "Add", eve_proto::UserErrorKey::NotEnoughFighterBaySpace);
     let err = handle_multi_add(
         &ctx,
         &mut sess,
@@ -768,6 +834,7 @@ async fn ship_hold_capacity_errors_match_hold_specific_codes_for_add_and_multi_a
     .await
     .unwrap_err();
     assert_eq!(err.code, "NotEnoughFighterBaySpace");
+    assert_hold_space_wire(&err, "MultiAdd", eve_proto::UserErrorKey::NotEnoughFighterBaySpace);
 }
 
 #[tokio::test]

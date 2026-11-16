@@ -1803,11 +1803,69 @@ pub(crate) mod pi_poco_gantry_deploy_reinforce {
             .expect_err("Missing input items must fail");
         assert_eq!(missing_in_err.code, "InsufficientInputItems");
 
-        ctx.db.with_mut_snapshot(|snap| {
+        let cargo_blocker = ctx.db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&char_id) {
                 ch.balance = IskCents::from_isk(50_000_000);
             }
             seed_item(snap, 85316, char_id, ship_id, InventoryFlag::Cargo, 30, false, false, None);
+            seed_item(snap, 34, char_id, ship_id, InventoryFlag::Cargo, 50_000_000, false, false, None)
+        });
+        let trader_space_err = ctx
+            .dispatch_rpc(&mut sess, "beyonce", None, "CallComponentFromClient", &[PyRep::Integer(trader_entity_id), PyRep::String("itemTrader".into()), PyRep::String("ProcessTrade".into()), PyRep::Integer(67), PyRep::Integer(1)], &kw, None)
+            .await
+            .expect_err("Full ship cargo must fail ProcessTrade with NotEnoughCargoSpace");
+        assert_eq!(trader_space_err.code, "NotEnoughCargoSpace");
+        let (vol, avail) = match trader_space_err.to_client_error("beyonce", "CallComponentFromClient") {
+            eve_proto::ClientError::User {
+                key: eve_proto::UserErrorKey::NotEnoughCargoSpace,
+                args,
+            } => match args.as_slice() {
+                [(k0, PyRep::Real(v)), (k1, PyRep::Real(a))]
+                    if k0 == "volume" && k1 == "available" => (*v, *a),
+                other => panic!("expected [('volume', Real), ('available', Real)], got {other:?}"),
+            },
+            other => panic!("expected UserError::NotEnoughCargoSpace, got {other:?}"),
+        };
+        assert!(vol >= 1.0 && avail == 0.0, "expected vol>=1.0, avail=0.0, got vol={vol}, avail={avail}");
+        let PyRep::Tuple(parts) = trader_space_err
+            .to_client_error("beyonce", "CallComponentFromClient")
+            .to_macho_error_body(1)
+        else {
+            panic!("expected ErrorResponse tuple");
+        };
+        let PyRep::Tuple(inner) = &parts[2] else {
+            panic!("expected inner tuple");
+        };
+        let PyRep::Bytes(raw) = &inner[0] else {
+            panic!("expected marshaled bytes");
+        };
+        let PyRep::ObjectEx { header, .. } = eve_proto::marshal::decode(raw).expect("decode UserError") else {
+            panic!("expected ObjectEx");
+        };
+        let PyRep::Tuple(hdr) = *header else {
+            panic!("expected header tuple");
+        };
+        assert_eq!(hdr[0], PyRep::Token("eveexceptions.UserError".into()));
+        let PyRep::Tuple(u_args) = &hdr[1] else {
+            panic!("expected UserError args tuple");
+        };
+        assert_eq!(u_args[0].as_str(), Some("NotEnoughCargoSpace"));
+        let PyRep::Dict(entries) = &u_args[1] else {
+            panic!("expected UserError dict");
+        };
+        let wire_kv: Vec<(String, f64)> = entries
+            .iter()
+            .map(|(k, v)| match (k.as_str(), v) {
+                (Some(name), PyRep::Real(num)) => (name.to_string(), *num),
+                other => panic!("expected (str, PyRep::Real), got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            wire_kv,
+            vec![("volume".to_string(), vol), ("available".to_string(), avail)]
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.remove(&cargo_blocker);
         });
         let bal_before = ctx.db.get_character(char_id).unwrap().balance;
         let trade_ok = ctx

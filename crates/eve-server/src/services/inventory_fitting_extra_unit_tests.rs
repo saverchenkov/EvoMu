@@ -271,11 +271,31 @@ fn ship_hold_capacity_error_code_and_error_message_pin_all_bay_flags() {
 
     let err_pos = ship_hold_capacity_error(87, 100.0, 40.0, 75.0);
     assert_eq!(err_pos.code, "NotEnoughDroneBaySpace");
-    assert_eq!(err_pos.message, "free=60, required=75");
+    assert_eq!(err_pos.message, "volume=75, available=60");
+    assert_eq!(
+        err_pos.to_client_error("invbroker", "Add"),
+        eve_proto::ClientError::User {
+            key: eve_proto::UserErrorKey::NotEnoughDroneBaySpace,
+            args: vec![
+                ("volume".into(), PyRep::Real(75.0)),
+                ("available".into(), PyRep::Real(60.0)),
+            ],
+        }
+    );
 
     let err_clamped = ship_hold_capacity_error(5, 100.0, 125.0, 10.0);
     assert_eq!(err_clamped.code, "NotEnoughCargoSpace");
-    assert_eq!(err_clamped.message, "free=0, required=10");
+    assert_eq!(err_clamped.message, "volume=10, available=0");
+    assert_eq!(
+        err_clamped.to_client_error("invbroker", "Add"),
+        eve_proto::ClientError::User {
+            key: eve_proto::UserErrorKey::NotEnoughCargoSpace,
+            args: vec![
+                ("volume".into(), PyRep::Real(10.0)),
+                ("available".into(), PyRep::Real(0.0)),
+            ],
+        }
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

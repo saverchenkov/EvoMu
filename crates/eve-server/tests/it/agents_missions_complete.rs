@@ -787,6 +787,41 @@ async fn test_invbroker_partial_split_container_and_multiadd_validation_regressi
         .await
         .expect_err("MultiAdd exceeding capacity must fail");
     assert_eq!(cap_err.code, "NotEnoughCargoSpace");
+    let PyRep::Tuple(parts) = cap_err.wire_body else {
+        panic!("expected ErrorResponse tuple, got {:?}", cap_err.wire_body);
+    };
+    let PyRep::Tuple(inner) = &parts[2] else {
+        panic!("expected inner tuple");
+    };
+    let PyRep::Bytes(raw) = &inner[0] else {
+        panic!("expected marshaled bytes");
+    };
+    let PyRep::ObjectEx { header, .. } = eve_proto::marshal::decode(raw).expect("decode UserError") else {
+        panic!("expected ObjectEx");
+    };
+    let PyRep::Tuple(hdr) = *header else {
+        panic!("expected header tuple");
+    };
+    assert_eq!(hdr[0], PyRep::Token("eveexceptions.UserError".into()));
+    let PyRep::Tuple(u_args) = &hdr[1] else {
+        panic!("expected UserError args tuple");
+    };
+    assert_eq!(u_args[0].as_str(), Some("NotEnoughCargoSpace"));
+    let PyRep::Dict(entries) = &u_args[1] else {
+        panic!("expected UserError dict");
+    };
+    let wire_kv: Vec<(String, f64)> = entries
+        .iter()
+        .map(|(k, v)| match (k.as_str(), v) {
+            (Some(name), PyRep::Real(num)) => (name.to_string(), *num),
+            other => panic!("expected (str, PyRep::Real), got {other:?}"),
+        })
+        .collect();
+    assert_eq!(wire_kv.len(), 2, "wire_kv={wire_kv:?}");
+    assert_eq!(wire_kv[0].0, "volume");
+    assert_eq!(wire_kv[1].0, "available");
+    let (vol, avail) = (wire_kv[0].1, wire_kv[1].1);
+    assert!(vol > 0.0 && avail >= 0.0 && vol > avail, "vol={vol}, avail={avail}");
     ctx.db.with_snapshot(|snap| {
         assert_eq!((snap.items.get(&item_a_id).map(|i| i.location_id), snap.items.get(&item_b_id).map(|i| i.location_id)), (Some(JITA_STATION_ID), Some(JITA_STATION_ID)));
     });

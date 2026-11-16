@@ -541,8 +541,8 @@ fn wrapped_user_error_dict_dict_key_and_named_helpers_roundtrip_all_fields() {
         6,
         "NotEnoughCargoSpace",
         vec![
-            (PyRep::ascii_bytes("free"), PyRep::Real(10.5)),
-            (PyRep::ascii_bytes("required"), PyRep::Real(25.0)),
+            (PyRep::ascii_bytes("volume"), PyRep::Real(25.0)),
+            (PyRep::ascii_bytes("available"), PyRep::Real(10.5)),
         ],
     );
     let PyRep::Tuple(multi_outer) = multi else {
@@ -575,8 +575,8 @@ fn wrapped_user_error_dict_dict_key_and_named_helpers_roundtrip_all_fields() {
             PyRep::Tuple(vec![
                 PyRep::ascii_bytes("NotEnoughCargoSpace"),
                 PyRep::Dict(vec![
-                    (PyRep::ascii_bytes("free"), PyRep::Real(10.5)),
-                    (PyRep::ascii_bytes("required"), PyRep::Real(25.0)),
+                    (PyRep::ascii_bytes("volume"), PyRep::Real(25.0)),
+                    (PyRep::ascii_bytes("available"), PyRep::Real(10.5)),
                 ]),
             ]),
         ])

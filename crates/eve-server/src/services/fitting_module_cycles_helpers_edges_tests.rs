@@ -262,6 +262,58 @@ fn unload_ammo_ownership_flag_fallback_and_not_enough_cargo_space() {
     let space_err = handle_unload_ammo(&ctx, &sess, &[PyRep::Integer(ship_id), PyRep::Integer(mod_id)])
         .unwrap_err();
     assert_eq!(space_err.code, "NotEnoughCargoSpace");
+    let (vol, avail) = match space_err.to_client_error("dogmaIM", "UnloadAmmo") {
+        eve_proto::ClientError::User {
+            key: eve_proto::UserErrorKey::NotEnoughCargoSpace,
+            args,
+        } => match args.as_slice() {
+            [(k0, PyRep::Real(v)), (k1, PyRep::Real(a))]
+                if k0 == "volume" && k1 == "available" => (*v, *a),
+            other => panic!("expected [('volume', Real), ('available', Real)], got {other:?}"),
+        },
+        other => panic!("expected UserError::NotEnoughCargoSpace, got {other:?}"),
+    };
+    assert!(
+        vol >= 50.0 && avail >= 0.0 && avail <= 40.0 && vol > avail,
+        "expected volume >= 50.0 > available in 0..=40.0, got volume={vol}, available={avail}"
+    );
+    let PyRep::Tuple(parts) = space_err
+        .to_client_error("dogmaIM", "UnloadAmmo")
+        .to_macho_error_body(1)
+    else {
+        panic!("expected ErrorResponse tuple");
+    };
+    let PyRep::Tuple(inner) = &parts[2] else {
+        panic!("expected inner tuple");
+    };
+    let PyRep::Bytes(raw) = &inner[0] else {
+        panic!("expected marshaled bytes");
+    };
+    let PyRep::ObjectEx { header, .. } = eve_proto::marshal::decode(raw).expect("decode UserError") else {
+        panic!("expected ObjectEx");
+    };
+    let PyRep::Tuple(hdr) = *header else {
+        panic!("expected header tuple");
+    };
+    assert_eq!(hdr[0], PyRep::Token("eveexceptions.UserError".into()));
+    let PyRep::Tuple(u_args) = &hdr[1] else {
+        panic!("expected UserError args tuple");
+    };
+    assert_eq!(u_args[0].as_str(), Some("NotEnoughCargoSpace"));
+    let PyRep::Dict(entries) = &u_args[1] else {
+        panic!("expected UserError dict");
+    };
+    let wire_kv: Vec<(String, f64)> = entries
+        .iter()
+        .map(|(k, v)| match (k.as_str(), v) {
+            (Some(name), PyRep::Real(num)) => (name.to_string(), *num),
+            other => panic!("expected (str, PyRep::Real), got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        wire_kv,
+        vec![("volume".to_string(), vol), ("available".to_string(), avail)]
+    );
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&charge_id].flag, InventoryFlag::HiSlot0);
         assert_eq!(snap.items[&charge_id].quantity, 2);
