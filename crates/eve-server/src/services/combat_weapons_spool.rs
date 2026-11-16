@@ -1128,19 +1128,36 @@ pub async fn step_system_entropic_spools(
             }
 
             // Consume one round
-            state.charge_item_id = ctx.db.with_mut_snapshot(|snap| {
-                match snap.items.get_mut(&ammo_cid) {
-                    Some(ci) if ci.quantity > 1 => {
-                        ci.quantity -= 1;
-                        ci.version += 1;
-                        Some(ammo_cid)
-                    }
-                    _ => {
-                        snap.items.remove(&ammo_cid);
-                        None
-                    }
+            let (next_charge_id, ammo_diff) = ctx.db.with_mut_snapshot(|snap| {
+                let Some(ci) = snap.items.get_mut(&ammo_cid) else {
+                    snap.module_active_charges.remove(&module_id);
+                    return (None, None);
+                };
+                let pre_rec = ci.clone();
+                if ci.quantity > 1 {
+                    ci.quantity -= 1;
+                    ci.version += 1;
+                    let post_rec = ci.clone();
+                    (Some(ammo_cid), Some((Some(pre_rec), Some(post_rec))))
+                } else {
+                    snap.items.remove(&ammo_cid);
+                    snap.module_active_charges.remove(&module_id);
+                    (None, Some((Some(pre_rec), None)))
                 }
             });
+            state.charge_item_id = next_charge_id;
+            if let Some((pre_rec, post_rec)) = ammo_diff {
+                let depleted = post_rec.is_none();
+                crate::services::inventory_fitting::fitting_module_cycles::emit_ship_charge_item_diffs(
+                    ctx,
+                    state.attacker_char_id,
+                    ship_id,
+                    &[(pre_rec, post_rec)],
+                );
+                if depleted {
+                    ctx.invalidate_and_push_fit(ship_id);
+                }
+            }
 
             // Target signature with player MWD bloom
             let player_target_info = ctx.db.with_snapshot(|snap| {

@@ -22,6 +22,30 @@ fn emit_limited_engagement_created(ctx: &ServerContext, char_a: i64, char_b: i64
     );
 }
 
+fn emit_weapon_charge_diff(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    diff: Option<(
+        Option<eve_db::InventoryItemRecord>,
+        Option<eve_db::InventoryItemRecord>,
+    )>,
+) {
+    let Some((pre_rec, post_rec)) = diff else {
+        return;
+    };
+    let depleted = post_rec.is_none();
+    crate::services::inventory_fitting::fitting_module_cycles::emit_ship_charge_item_diffs(
+        ctx,
+        char_id,
+        ship_id,
+        &[(pre_rec, post_rec)],
+    );
+    if depleted {
+        ctx.invalidate_and_push_fit(ship_id);
+    }
+}
+
 pub async fn handle_weapons(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -795,25 +819,25 @@ pub async fn handle_weapons(
                     let vol_dmg = charge_attr(784, 0.01).max(0.0);
                     let crystal_hp = charge_attr(9, 1.0).max(0.0001);
                     if ctx.mechanic_rng.roll(vol_chance) {
-                        let (prev_dmg, next_dmg, shatter_subloc) = ctx.db.with_mut_snapshot(|snap| {
+                        let (prev_dmg, next_dmg, shatter_diff) = ctx.db.with_mut_snapshot(|snap| {
                             if let Some(ci) = snap.items.get_mut(&charge_item_id) {
                                 let cur = ci.dynamic_attributes.get(&3).copied().unwrap_or(0.0);
                                 let next_dmg = cur + vol_dmg;
                                 crystal_damage_after = (next_dmg / crystal_hp).min(1.0);
                                 if next_dmg + 1e-9 >= crystal_hp {
                                     crystal_shattered = true;
-                                    let pre_qty = ci.quantity;
-                                    let slot_flag = ci.flag;
-                                    let c_tid = ci.type_id;
-                                    let new_qty = if ci.quantity > 1 {
+                                    let pre_rec = ci.clone();
+                                    let post_rec = if ci.quantity > 1 {
                                         ci.quantity -= 1;
+                                        ci.version += 1;
                                         ci.dynamic_attributes.insert(3, 0.0);
-                                        ci.quantity
+                                        Some(ci.clone())
                                     } else {
                                         snap.items.remove(&charge_item_id);
-                                        0
+                                        snap.module_active_charges.remove(&module_id);
+                                        None
                                     };
-                                    (cur, 0.0, Some((slot_flag, c_tid, pre_qty, new_qty)))
+                                    (cur, 0.0, Some((Some(pre_rec), post_rec)))
                                 } else {
                                     ci.dynamic_attributes.insert(3, next_dmg);
                                     (cur, next_dmg, None)
@@ -822,19 +846,7 @@ pub async fn handle_weapons(
                                 (0.0, 0.0, None)
                             }
                         });
-                        if let Some((slot_flag, c_tid, pre_qty, new_qty)) = shatter_subloc {
-                            if matches!(slot_flag as u16, 11..=34 | 125..=132) {
-                                crate::services::inventory_fitting::fitting_module_cycles::emit_charge_sublocation_quantity_change(
-                                    ctx,
-                                    char_id,
-                                    ship_id,
-                                    slot_flag,
-                                    c_tid,
-                                    pre_qty,
-                                    new_qty,
-                                );
-                            }
-                        }
+                        emit_weapon_charge_diff(ctx, char_id, ship_id, shatter_diff);
                         ctx.emit_typed(
                             NotificationTarget::Character(char_id),
                             crate::router::notify_registry::OnModuleAttributeChanges {
@@ -862,37 +874,24 @@ pub async fn handle_weapons(
                 }
             } else {
                 // Consume 1 round of projectile/hybrid/exotic-plasma/vorton/missile/breacher ammo
-                let ammo_delta = ctx.db.with_mut_snapshot(|snap| {
+                let ammo_diff = ctx.db.with_mut_snapshot(|snap| {
                     if let Some(ci) = snap.items.get_mut(&charge_item_id) {
-                        let pre_qty = ci.quantity;
-                        let slot_flag = ci.flag;
-                        let c_tid = ci.type_id;
-                        let new_qty = if ci.quantity > 1 {
+                        let pre_rec = ci.clone();
+                        let post_rec = if ci.quantity > 1 {
                             ci.quantity -= 1;
                             ci.version += 1;
-                            ci.quantity
+                            Some(ci.clone())
                         } else {
                             snap.items.remove(&charge_item_id);
-                            0
+                            snap.module_active_charges.remove(&module_id);
+                            None
                         };
-                        Some((slot_flag, c_tid, pre_qty, new_qty))
+                        Some((Some(pre_rec), post_rec))
                     } else {
                         None
                     }
                 });
-                        if let Some((slot_flag, c_tid, pre_qty, new_qty)) = ammo_delta {
-                            if matches!(slot_flag as u16, 11..=34 | 125..=132) {
-                                crate::services::inventory_fitting::fitting_module_cycles::emit_charge_sublocation_quantity_change(
-                                    ctx,
-                                    char_id,
-                                    ship_id,
-                                    slot_flag,
-                                    c_tid,
-                                    pre_qty,
-                                    new_qty,
-                                );
-                            }
-                        }
+                emit_weapon_charge_diff(ctx, char_id, ship_id, ammo_diff);
                 }
             }
 
@@ -1478,14 +1477,24 @@ pub async fn handle_weapons(
                 let _ = fit.deactivate_module(module_id, &ctx.sde);
                 combat_weapons_spool::reset_entropic_spool(ctx, ship_id, module_id);
             } else {
-                ctx.db.with_mut_snapshot(|snap| {
+                let remaining_charge_qty = ctx.db.with_mut_snapshot(|snap| {
                     snap.module_active_states.insert(module_id);
-                    if let Some(charge_type_id) = charge_type_id_opt {
+                    let rem_qty = charge_item_id_opt
+                        .and_then(|cid| snap.items.get(&cid).map(|i| i.quantity))
+                        .unwrap_or(0);
+                    if let (Some(charge_type_id), true) = (charge_type_id_opt, rem_qty > 0) {
                         snap.module_active_charges.insert(module_id, charge_type_id);
                     } else {
                         snap.module_active_charges.remove(&module_id);
                     }
+                    rem_qty
                 });
+                if let Some(fm) = fit.modules.get_mut(&module_id) {
+                    fm.charge_quantity = remaining_charge_qty.max(0) as u32;
+                    if remaining_charge_qty <= 0 {
+                        fm.charge_type_id = None;
+                    }
+                }
                 let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
             }
             ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());

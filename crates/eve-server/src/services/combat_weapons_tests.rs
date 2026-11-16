@@ -1369,3 +1369,168 @@ async fn combat_weapons_ewar_victim_resolution_lowsec_pod_and_sentry_aggression(
         rt.sentry_gun_aggression.get(&(sys_id, ship_id)).is_some_and(|s| s.active_on_grid)
     }));
 }
+
+#[tokio::test]
+async fn weapon_ammo_depletion_one_to_zero_emits_item_tombstone_and_sublocation_zero_gh1124() {
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let kwargs = HashMap::new();
+
+    let mut sde = (*ctx.sde).clone();
+    sde.types.insert(
+        55_901,
+        make_fighter_type(
+            55_901,
+            55,
+            7,
+            5.0,
+            vec![
+                (51, 1_000.0),
+                (54, 15_000.0),
+                (64, 1.5),
+                (128, 1.0),
+                (158, 5_000.0),
+                (160, 100.0),
+                (604, 83.0),
+            ],
+        ),
+    );
+    sde.types.insert(
+        83_901,
+        make_fighter_type(
+            83_901,
+            83,
+            8,
+            0.0025,
+            vec![(114, 100.0), (118, 50.0), (128, 1.0)],
+        ),
+    );
+    sde.types.insert(
+        10_099,
+        make_fighter_type(
+            10_099,
+            550,
+            11,
+            1_000.0,
+            vec![(eve_sde::attr_ids::ENTITY_KILL_BOUNTY, 10_000.0)],
+        ),
+    );
+    ctx.sde = std::sync::Arc::new(sde);
+
+    let turret_id = 830_001_i64;
+    let ammo_id = 830_002_i64;
+    let npc_id = 930_099_i64;
+
+    ctx.db
+        .acquire_online_lock(session.user_id.unwrap_or(1), 999_200, Some(char_id), true, ctx.now_unix())
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            turret_id,
+            make_fighter_item(turret_id, 55_901, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        let mut ammo_rec = make_fighter_item(ammo_id, 83_901, char_id, ship_id, InventoryFlag::HiSlot0, 1);
+        ammo_rec.singleton = false;
+        snap.items.insert(ammo_id, ammo_rec);
+        snap.module_active_charges.insert(turret_id, 83_901);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for (id, tid, pos) in [
+        (ship_id, 23_915_u32, DVec3::ZERO),
+        (npc_id, 10_099_u32, DVec3::new(3_000.0, 0.0, 0.0)),
+    ] {
+        sys_handle
+            .spawn_ball_with_combat(
+                Ball {
+                    id,
+                    type_id: tid,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 200.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    shield_hp: 1_000.0,
+                    max_shield_hp: 1_000.0,
+                    armor_hp: 1_000.0,
+                    max_armor_hp: 1_000.0,
+                    structure_hp: 1_000.0,
+                    max_structure_hp: 1_000.0,
+                    capacitor: 500.0,
+                    max_capacitor: 500.0,
+                    signature_radius: 120.0,
+                    base_signature_radius: Some(120.0),
+                    ..CombatState::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            TargetLock {
+                target_id: npc_id,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(50_000.0),
+            },
+        )
+        .await
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let _res = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(turret_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(npc_id),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("weapon fire consumes last round");
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&ammo_id), "last round item must be removed from snap.items");
+        assert!(
+            !snap.module_active_charges.contains_key(&turret_id),
+            "depleted module_active_charges entry must be cleared"
+        );
+    });
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args[0].dbrow_get("itemID") == Some(&PyRep::Integer(ammo_id))
+                && n.args[0].dbrow_get("locationID") == Some(&PyRep::Integer(6))
+                && n.args[0].dbrow_get("flagID") == Some(&PyRep::Integer(0))
+                && n.args[0].dbrow_get("quantity") == Some(&PyRep::Integer(0))
+        }),
+        "1 -> 0 round depletion must emit OnItemChange tombstone"
+    );
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnModuleAttributeChanges"
+                && matches!(n.args.first(), Some(PyRep::List(rows)) if rows.iter().any(|r| {
+                    matches!(r, PyRep::Tuple(cols)
+                        if cols.get(3) == Some(&PyRep::Integer(805))
+                            && cols.get(5) == Some(&PyRep::Real(0.0))
+                            && cols.get(6) == Some(&PyRep::Real(1.0)))
+                }))
+        }),
+        "1 -> 0 round depletion must emit OnModuleAttributeChanges(805: 1.0 -> 0.0)"
+    );
+}

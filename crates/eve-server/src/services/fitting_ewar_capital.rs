@@ -160,33 +160,43 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         });
                         let mut has_loaded_ammo = has_slot_item;
                         if !has_loaded_ammo {
-                            has_loaded_ammo = ctx.db.with_mut_snapshot(|snap| {
+                            let (loaded, autoload_diffs, loaded_bank) = ctx.db.with_mut_snapshot(|snap| {
                                 let bank = snap
                                     .weapon_banks
                                     .get(&ship_id)
                                     .and_then(|b| b.get(&module_id))
                                     .cloned()
                                     .unwrap_or_else(|| vec![module_id]);
+                                let valid_slots: Vec<(i64, eve_db::InventoryFlag)> = bank
+                                    .iter()
+                                    .filter_map(|&tid| snap.items.get(&tid).map(|i| (tid, i.flag)))
+                                    .collect();
+                                if valid_slots.is_empty() {
+                                    return (false, Vec::new(), Vec::new());
+                                }
                                 let cargo_charge = snap
                                     .items
                                     .values()
-                                    .find(|i| {
+                                    .filter(|i| {
                                         i.location_id == ship_id
                                             && matches!(
                                                 i.flag,
                                                 eve_db::InventoryFlag::Cargo
                                                     | eve_db::InventoryFlag::SpecializedAmmoHold
                                             )
+                                            && !i.singleton
                                             && i.quantity > 0
+                                            && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
                                             && ctx.sde.types.get(&i.type_id).is_some_and(|ct| {
                                                 ServerContext::is_charge_compatible_with_weapon(
                                                     mod_type, ct,
                                                 )
                                             })
                                     })
+                                    .min_by_key(|i| i.item_id)
                                     .map(|i| (i.item_id, i.type_id, i.owner_id, i.quantity));
                                 let Some((stack_id, ammo_tid, owner_id, avail_qty)) = cargo_charge else {
-                                    return false;
+                                    return (false, Vec::new(), Vec::new());
                                 };
                                 let charge_vol = ctx
                                     .sde
@@ -200,9 +210,10 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                                     1
                                 }
                                 .max(1);
-                                let num_mods = bank.len().max(1) as i32;
-                                let per_mod = cap_rounds.min((avail_qty / num_mods).max(1));
-                                let total_take = (per_mod * num_mods).min(avail_qty);
+                                let num_mods = valid_slots.len() as i32;
+                                let total_take = (cap_rounds * num_mods).min(avail_qty).max(1);
+                                let mut diffs = Vec::new();
+                                let pre_stack = snap.items.get(&stack_id).cloned();
                                 if let Some(st) = snap.items.get_mut(&stack_id) {
                                     if st.quantity > total_take {
                                         st.quantity -= total_take;
@@ -211,30 +222,52 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                                         snap.items.remove(&stack_id);
                                     }
                                 }
-                                for &tid in &bank {
-                                    if let Some(tf) = snap.items.get(&tid).map(|i| i.flag) {
-                                        let cid = snap.alloc_entity_id();
-                                        snap.items.insert(
-                                            cid,
-                                            eve_db::InventoryItemRecord {
-                                                item_id: cid,
-                                                type_id: ammo_tid,
-                                                owner_id,
-                                                location_id: ship_id,
-                                                flag: tf,
-                                                quantity: per_mod,
-                                                singleton: false,
-                                                version: 1,
-                                                ..Default::default()
-                                            },
-                                        );
-                                        snap.module_active_charges.insert(tid, ammo_tid);
-                                    }
+                                let post_stack = snap.items.get(&stack_id).cloned();
+                                if pre_stack.is_some() {
+                                    diffs.push((pre_stack, post_stack));
                                 }
-                                true
+                                let base = total_take / num_mods;
+                                let rem = total_take % num_mods;
+                                let mut loaded_mods = Vec::with_capacity(valid_slots.len());
+                                for (idx, (tid, tf)) in valid_slots.into_iter().enumerate() {
+                                    let give = base + if (idx as i32) < rem { 1 } else { 0 };
+                                    if give <= 0 {
+                                        continue;
+                                    }
+                                    let cid = snap.alloc_entity_id();
+                                    let new_rec = eve_db::InventoryItemRecord {
+                                        item_id: cid,
+                                        type_id: ammo_tid,
+                                        owner_id,
+                                        location_id: ship_id,
+                                        flag: tf,
+                                        quantity: give,
+                                        singleton: false,
+                                        version: 1,
+                                        ..Default::default()
+                                    };
+                                    snap.items.insert(cid, new_rec.clone());
+                                    snap.module_active_charges.insert(tid, ammo_tid);
+                                    diffs.push((None, Some(new_rec)));
+                                    loaded_mods.push(tid);
+                                }
+                                (true, diffs, loaded_mods)
                             });
+                            has_loaded_ammo = loaded;
                             if has_loaded_ammo {
-                                ctx.invalidate_ship_fitting(ship_id);
+                                ctx.invalidate_and_push_fit(ship_id);
+                                crate::services::inventory_fitting::fitting_module_cycles::emit_ship_charge_item_diffs(
+                                    ctx,
+                                    char_id,
+                                    ship_id,
+                                    &autoload_diffs,
+                                );
+                                crate::services::notify_emitters_seasons_tactical::emit_charge_and_bank_ammo_loaded(
+                                    ctx,
+                                    char_id,
+                                    ship_id,
+                                    &loaded_bank,
+                                );
                             }
                         }
                         if !has_loaded_ammo {
