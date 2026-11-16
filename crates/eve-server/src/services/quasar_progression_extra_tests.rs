@@ -761,3 +761,96 @@ fn private_helpers_track_allocation_save_guard_sde_migration_and_encounter_deleg
     assert_eq!(progressed[0].current_progress, 22);
     let _ = crate::services::quasar_social_chat::drain_local_notices();
 }
+
+#[test]
+fn community_track_and_tale_mutations_pass_quasar_tap_response_pairing() {
+    let reg = QuasarDescriptorRegistry::open_default()
+        .expect("open default quasar descriptors");
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let router = PublicGatewayRouter::new(Arc::clone(&reg), Arc::clone(&db), Arc::clone(&sde));
+    let mgr = Arc::new(ProgressionExtraManager::new_with_sde(
+        Some(Arc::clone(&db)),
+        Some(Arc::clone(&sde)),
+        None,
+    ));
+    mgr.community_track_templates.write().unwrap().insert(
+        702,
+        CommunityTrackTemplateInfo {
+            template_id: 702,
+            name: "Drifter Incursion".into(),
+            target_progress: 100,
+            tale_templates: vec![888],
+        },
+    );
+    register_progression_extra_handlers(&router, Arc::clone(&db), Arc::clone(&mgr));
+
+    let handlers = router.handlers.read().unwrap();
+    let dummy_any = GoogleAny::default();
+    let mut gm_ctx = AuthoritativeContext::for_session(
+        Some(1),
+        Some(90_000_001),
+        Some(1_000_009),
+        corp_roles::ROLE_DIRECTOR,
+        "tranquility",
+        vec![1],
+    );
+    gm_ctx.service_role_mask = u64::MAX;
+
+    let mut add_msg = seq_id_msg(1, 702);
+    add_msg.fields.insert(2, DynamicValue::Uint64(15));
+    let mut set_msg = seq_id_msg(1, 702);
+    set_msg.fields.insert(2, DynamicValue::Uint64(45));
+    let valid_sys = *sde.solar_systems.keys().next().unwrap_or(&30_000_142);
+    let mut start_tale = seq_id_msg(1, 888);
+    let mut sys_inner = DynamicQuasarMessage::new("Identifier");
+    sys_inner.fields.insert(1, DynamicValue::Uint64(valid_sys as u64));
+    start_tale.fields.insert(2, DynamicValue::Message(Box::new(sys_inner)));
+    let track_id_msg = seq_id_msg(1, 702);
+    let tale_id_msg = seq_id_msg(1, 888);
+
+    for (req_name, expected_rsp, req_msg) in [
+        (
+            "eve.communitytrack.api.StartRequest",
+            "eve.communitytrack.api.StartResponse",
+            &track_id_msg,
+        ),
+        (
+            "eve.communitytrack.api.AddProgressRequest",
+            "eve.communitytrack.api.AddProgressResponse",
+            &add_msg,
+        ),
+        (
+            "eve.communitytrack.admin.api.SetProgressRequest",
+            "eve.communitytrack.admin.api.SetProgressResponse",
+            &set_msg,
+        ),
+        (
+            "eve.communitytrack.api.StopRequest",
+            "eve.communitytrack.api.StopResponse",
+            &track_id_msg,
+        ),
+        (
+            "eve.tale.api.StartTaleRequest",
+            "eve.tale.api.StartTaleResponse",
+            &start_tale,
+        ),
+        (
+            "eve.tale.api.StopTalesRequest",
+            "eve.tale.api.StopTalesResponse",
+            &tale_id_msg,
+        ),
+    ] {
+        let rsp = handlers[req_name](&gm_ctx, &dummy_any, req_msg)
+            .unwrap_or_else(|e| panic!("{req_name} failed: {e:?}"));
+        assert_eq!(rsp.normalized_type_name(), expected_rsp);
+        assert!(rsp.value.is_empty(), "{expected_rsp} should carry empty wire payload");
+        let violations =
+            eve_testkit::quasar_tap::tap_exchange(&reg, req_name, 200, Some(&rsp), &[]);
+        assert!(
+            violations.is_empty(),
+            "unexpected quasar tap violations for {req_name}: {violations:#?}"
+        );
+    }
+    let _ = crate::services::quasar_social_chat::drain_local_notices();
+}

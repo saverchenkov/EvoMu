@@ -141,7 +141,7 @@ pub(crate) fn build_project_create_msg(name: &str, target_qty: u64, matcher: &st
     let (cfg_field, sub_bytes) = match matcher {
         "DestroyNPCShips" => (31, wrap_id(filter as u64, &[1, 4, 2, 1])),
         "DeliverItem" => (37, wrap_id(filter as u64, &[1, 3, 2, 1])),
-        "MineMaterials" => (25, wrap_id(filter as u64, &[1, 3, 2, 1])),
+        "MineMaterials" => (25, wrap_id(filter as u64, &[1, 3, 2, 2])),
         "ManufactureItems" => (38, wrap_id(filter as u64, &[1, 3, 2, 1])),
         other => panic!("unsupported matcher {other}"),
     };

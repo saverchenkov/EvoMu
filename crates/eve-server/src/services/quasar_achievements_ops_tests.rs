@@ -291,6 +291,106 @@ fn achievement_cdn_uses_dynamic_esi_port_and_matches_achv_flatbuffer_crc() {
     );
 }
 
+#[test]
+fn admin_endpoints_return_descriptor_paired_responses_and_pass_quasar_tap() {
+    let reg = eve_proto::quasar::QuasarDescriptorRegistry::open_default()
+        .expect("open default quasar descriptors");
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let mut mgr = AchievementManager::new_with_sde(Some(Arc::clone(&ctx.db)), None);
+    mgr.definitions = vec![AchievementDef {
+        id: 1,
+        is_client_achievement: false,
+        category_id: 1,
+        name: "ach1".into(),
+        description: String::new(),
+        notification_text: String::new(),
+        target: 10,
+        score: 25,
+        milestone_targets: vec![5, 10],
+        conditions: vec![AchievementConditionDef {
+            condition_id: 1,
+            target_value: 10,
+            statistic_event_id: 101,
+            event_name: "evt".into(),
+        }],
+        reward_isk: 0,
+        reward_sp: 0,
+    }];
+    let mgr = Arc::new(mgr);
+    let router = &ctx.quasar_gateway;
+    register_achievement_handlers(router, Arc::clone(&ctx.db), Arc::clone(&mgr));
+
+    let cid = 90_000_001_u32;
+    let admin_ctx = AuthoritativeContext::for_session(
+        Some(1),
+        Some(cid),
+        Some(1_000_009),
+        u64::MAX,
+        "tranquility",
+        vec![1, 2],
+    )
+    .with_service_roles(u64::MAX);
+    let dummy_any = GoogleAny::default();
+    let handlers = router.handlers.read().unwrap();
+
+    let mut prog_msg = DynamicQuasarMessage::new("AddProgress");
+    prog_msg.fields.insert(1, DynamicValue::Uint32(1));
+    prog_msg.fields.insert(2, DynamicValue::Uint64(5));
+
+    let mut id_msg = DynamicQuasarMessage::new("Req");
+    id_msg.fields.insert(1, DynamicValue::Uint32(1));
+    let empty_msg = DynamicQuasarMessage::new("Empty");
+
+    for (req_name, expected_rsp, req_msg) in [
+        (
+            "eve_public.achievement.api.admin.AddProgressRequest",
+            "eve_public.achievement.api.admin.AddProgressResponse",
+            &prog_msg,
+        ),
+        (
+            "eve_public.achievement.api.admin.CompleteRequest",
+            "eve_public.achievement.api.admin.CompleteResponse",
+            &id_msg,
+        ),
+        (
+            "eve_public.achievement.api.admin.ResetRequest",
+            "eve_public.achievement.api.admin.ResetResponse",
+            &id_msg,
+        ),
+        (
+            "eve_public.achievement.category.api.admin.ResetRequest",
+            "eve_public.achievement.category.api.admin.ResetResponse",
+            &id_msg,
+        ),
+        (
+            "eve_public.achievement.api.admin.ResetAllRequest",
+            "eve_public.achievement.api.admin.ResetAllResponse",
+            &empty_msg,
+        ),
+        (
+            "eve.achievement.definition.version.api.admin.SetDefaultVersionRequest",
+            "eve.achievement.definition.version.api.admin.SetDefaultVersionResponse",
+            &empty_msg,
+        ),
+    ] {
+        let _ = crate::services::quasar_social_chat::drain_local_notices();
+        let rsp = handlers[req_name](&admin_ctx, &dummy_any, req_msg)
+            .unwrap_or_else(|e| panic!("{req_name} failed: {e:?}"));
+        assert_eq!(rsp.normalized_type_name(), expected_rsp);
+        assert!(rsp.value.is_empty(), "{expected_rsp} should carry empty wire payload");
+        let notices: Vec<GoogleAny> = crate::services::quasar_social_chat::drain_local_notices()
+            .into_iter()
+            .map(|(_, any, _)| any)
+            .collect();
+        let violations =
+            eve_testkit::quasar_tap::tap_exchange(&reg, req_name, 200, Some(&rsp), &notices);
+        assert!(
+            violations.is_empty(),
+            "unexpected quasar tap violations for {req_name}: {violations:#?}"
+        );
+    }
+}
+
 #[cfg(test)]
 #[path = "quasar_achievements_ops_extra_unit_tests.rs"]
 mod quasar_achievements_ops_extra_unit_tests;

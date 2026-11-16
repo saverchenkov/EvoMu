@@ -156,12 +156,13 @@ async fn test_shard5_plan_q5_quasar_packages_end_to_end() {
         let mut goal_req = Vec::new();
         encode_string_field(1, "Q5 Live Goal", &mut goal_req);
         encode_varint_field(3, 250, &mut goal_req);
-        let mut cfg = Vec::new();
-        let mut sub = Vec::new();
-        let mut inner = Vec::new();
-        encode_varint_field(1, TRITANIUM as u64, &mut inner);
-        encode_bytes_field(1, &inner, &mut sub);
-        encode_bytes_field(17, &sub, &mut cfg);
+        let cfg = eve_proto::pb::message("eve_public.goal.ContributionConfiguration")
+            .set_with("earn_loyalty_points", |c| {
+                c.add_with("contribution_methods", |m| {
+                    m.set("corporation.match_value.sequential", 1_000_035u32)
+                })
+            })
+            .must_encode();
         encode_bytes_field(4, &cfg, &mut goal_req);
         let create_goal = quasar(&ctx, &p1, "eve_public.goal.api.CreateRequest", goal_req);
         assert_eq!(create_goal.status_code, STATUS_OK);
