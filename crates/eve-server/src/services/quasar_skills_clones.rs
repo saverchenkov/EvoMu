@@ -9,8 +9,8 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
-    PublicGatewayRouter, QuasarHandlerFn, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
-    STATUS_NOT_IMPLEMENTED,
+    PublicGatewayRouter, QuasarHandlerFn, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
+    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED,
 };
 use eve_db::WorldRepository;
 use eve_proto::pb;
@@ -384,7 +384,9 @@ fn build_skill_plan_attributes(plan: &SkillPlan) -> pb::ProtoBuilder {
 }
 
 pub fn encode_skill_plan_attributes(plan: &SkillPlan, out: &mut Vec<u8>) {
-    out.extend_from_slice(&build_skill_plan_attributes(plan).must_encode());
+    if let Err(e) = build_skill_plan_attributes(plan).encode_into(out) {
+        tracing::warn!("failed to encode skill plan attributes: {e}");
+    }
 }
 
 pub fn extract_uuid(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> Option<[u8; 16]> {
@@ -455,7 +457,8 @@ pub fn register_skill_handlers(
             for p in &cert_plans {
                 msg = msg.add_with("skill_plans", |id| id.set("uuid", p.uuid));
             }
-            Ok(msg.must_to_any())
+            msg.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -482,9 +485,10 @@ pub fn register_skill_handlers(
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Skill plan not found".into()))?,
             };
 
-            Ok(pb::message("eve_public.skill.plan.GetResponse")
+            pb::message("eve_public.skill.plan.GetResponse")
                 .set("skill_plan", build_skill_plan_attributes(&p))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -533,9 +537,10 @@ pub fn register_skill_handlers(
             mgr.create_personal_plan(cid, new_plan);
             mgr.save_to_db();
 
-            Ok(pb::message("eve_public.skill.plan.CreateResponse")
+            pb::message("eve_public.skill.plan.CreateResponse")
                 .set("skill_plan.uuid", plan_uuid)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -577,7 +582,8 @@ pub fn register_skill_handlers(
                 pb::message("eve_public.skill.plan.GetActiveResponse")
                     .set("skill_plan.uuid", [0u8; 16])
             };
-            Ok(msg.must_to_any())
+            msg.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -691,9 +697,10 @@ pub fn register_skill_handlers(
         }
         .encode();
 
-        Ok(pb::message("eve.skilltype.GetResponse")
+        pb::message("eve.skilltype.GetResponse")
             .set_raw_message("attributes", attr_bytes)
-            .must_to_any())
+            .to_any()
+            .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
     });
     router.register_handler("eve.skilltype.GetRequest", skilltype_handler);
 
@@ -713,7 +720,8 @@ pub fn register_skill_handlers(
             for cat_id in groups {
                 msg = msg.add_with("categories", |c| c.set("sequential", cat_id as u64));
             }
-            Ok(msg.must_to_any())
+            msg.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -751,9 +759,10 @@ pub fn register_skill_handlers(
                     .unwrap_or(0)
             });
 
-            Ok(pb::message("eve.skill.character.api.GetLevelResponse")
+            pb::message("eve.skill.character.api.GetLevelResponse")
                 .set("level", lvl as u32)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -868,7 +877,8 @@ pub fn register_skill_handlers(
             for tid in implants {
                 msg = msg.add_with("implants", |imp| imp.set("type.sequential", tid));
             }
-            Ok(msg.must_to_any())
+            msg.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -888,7 +898,8 @@ pub fn register_skill_handlers(
             for tid in tids {
                 msg = msg.add_with("implant_types", |it| it.set("id.sequential", tid as u64));
             }
-            Ok(msg.must_to_any())
+            msg.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -937,9 +948,10 @@ pub fn register_skill_handlers(
             mgr.personal_plans.write().unwrap_or_else(|e| e.into_inner()).entry(cid).or_default().push(plan);
             mgr.save_to_db();
 
-            Ok(pb::message("eve_public.character.skill.plan.CreateResponse")
+            pb::message("eve_public.character.skill.plan.CreateResponse")
                 .set("skill_plan.uuid", new_uuid)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -964,9 +976,10 @@ pub fn register_skill_handlers(
                     .ok_or_else(|| (STATUS_NOT_FOUND, "Character skill plan not found".into()))?,
             };
 
-            Ok(pb::message("eve_public.character.skill.plan.GetResponse")
+            pb::message("eve_public.character.skill.plan.GetResponse")
                 .set("skill_plan", build_skill_plan_attributes(&plan))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -982,7 +995,8 @@ pub fn register_skill_handlers(
             for p in &plans {
                 msg = msg.add_with("skill_plans", |id| id.set("uuid", p.uuid));
             }
-            Ok(msg.must_to_any())
+            msg.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -1001,9 +1015,10 @@ pub fn register_skill_handlers(
                 .find(|p| p.uuid == target_uuid)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Skill plan not found".into()))?;
 
-            Ok(pb::message("eve_public.character.skill.plan.GetSharedResponse")
+            pb::message("eve_public.character.skill.plan.GetSharedResponse")
                 .set("skill_plan", build_skill_plan_attributes(plan))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -1030,7 +1045,8 @@ pub fn register_skill_handlers(
                 pb::message("eve_public.character.skill.plan.GetActiveResponse")
                     .set("skill_plan.uuid", [0u8; 16])
             };
-            Ok(msg.must_to_any())
+            msg.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -1191,7 +1207,8 @@ pub fn register_skill_handlers(
                         .set("data.description", &ms.description)
                 });
             }
-            Ok(msg.must_to_any())
+            msg.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -1271,11 +1288,10 @@ pub fn register_skill_handlers(
             drop(plans);
             mgr.save_to_db();
 
-            Ok(
-                pb::message("eve_public.character.skill.plan.milestone.CreateResponse")
-                    .set("milestone.uuid", m_uuid)
-                    .must_to_any(),
-            )
+            pb::message("eve_public.character.skill.plan.milestone.CreateResponse")
+                .set("milestone.uuid", m_uuid)
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         })
     };
 

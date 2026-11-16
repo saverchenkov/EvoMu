@@ -2,21 +2,19 @@
 
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
-    STATUS_NOT_FOUND,
+    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
 };
 use eve_db::WorldRepository;
 use eve_proto::pb;
 use eve_proto::quasar::{DynamicValue, GoogleAny, GoogleTimestamp, TYPE_GOOGLEAPIS_PREFIX};
 use std::sync::{Arc, RwLock};
 
-pub(crate) fn encode_plex_balance_changed_notice(
-    _user_id: u64,
+fn try_encode_plex_balance_changed_notice(
     tx_id: u64,
     amount: i64,
     balance_after: i64,
-    _description: &str,
     now_unix: u64,
-) -> GoogleAny {
+) -> Result<GoogleAny, pb::PbError> {
     // V24.01 `eve_public.plex.vault.transaction.Attributes` (`#893`):
     //   field 1 (`timestamp`): `google.protobuf.Timestamp`
     //   field 2 (`amount_transferred`): `eve_public.plex.Currency` (field 1: `total_in_cents`, sint64 zigzag)
@@ -32,7 +30,24 @@ pub(crate) fn encode_plex_balance_changed_notice(
             "attributes.resulting_balance.total_in_cents",
             balance_after * 100,
         )
-        .must_to_any()
+        .to_any()
+}
+
+#[cfg(test)]
+pub(crate) fn encode_plex_balance_changed_notice(
+    _user_id: u64,
+    tx_id: u64,
+    amount: i64,
+    balance_after: i64,
+    _description: &str,
+    now_unix: u64,
+) -> GoogleAny {
+    try_encode_plex_balance_changed_notice(tx_id, amount, balance_after, now_unix).unwrap_or_else(
+        |e| {
+            tracing::warn!("failed to encode BalanceChangedNotice: {e}");
+            GoogleAny::default()
+        },
+    )
 }
 
 pub(crate) fn queue_plex_balance_changed_notice(
@@ -40,11 +55,17 @@ pub(crate) fn queue_plex_balance_changed_notice(
     tx_id: u64,
     amount: i64,
     balance_after: i64,
-    description: &str,
+    _description: &str,
     now_unix: u64,
 ) {
-    let any = encode_plex_balance_changed_notice(user_id, tx_id, amount, balance_after, description, now_unix);
-    super::quasar_social_chat::ctx_queue_notice(NoticeScope::User(user_id as i32), any, now_unix);
+    match try_encode_plex_balance_changed_notice(tx_id, amount, balance_after, now_unix) {
+        Ok(any) => super::quasar_social_chat::ctx_queue_notice(
+            NoticeScope::User(user_id as i32),
+            any,
+            now_unix,
+        ),
+        Err(e) => tracing::warn!("failed to encode BalanceChangedNotice for user {user_id}: {e}"),
+    }
 }
 
 pub fn emit_balance_changed_notice(
@@ -53,14 +74,16 @@ pub fn emit_balance_changed_notice(
     tx_id: u64,
     amount: i64,
     balance_after: i64,
-    description: &str,
+    _description: &str,
     now_unix: u64,
 ) {
-    let notice = encode_plex_balance_changed_notice(user_id, tx_id, amount, balance_after, description, now_unix);
-    router_notices
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((NoticeScope::User(user_id as i32), notice));
+    match try_encode_plex_balance_changed_notice(tx_id, amount, balance_after, now_unix) {
+        Ok(notice) => router_notices
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((NoticeScope::User(user_id as i32), notice)),
+        Err(e) => tracing::warn!("failed to encode BalanceChangedNotice for user {user_id}: {e}"),
+    }
 }
 
 pub fn cancel_user_payment_schedule(
@@ -82,14 +105,17 @@ pub fn cancel_user_payment_schedule(
     });
 
     if let Some(sched_type) = removed_type {
-        let notice = pb::message("eve_public.payment.schedule.api.CancelledNotice")
+        match pb::message("eve_public.payment.schedule.api.CancelledNotice")
             .set("schedule.sequential", sched_id)
             .set("type", sched_type)
-            .must_to_any();
-        router_notices
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((NoticeScope::User(uid as i32), notice));
+            .to_any()
+        {
+            Ok(notice) => router_notices
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((NoticeScope::User(uid as i32), notice)),
+            Err(e) => tracing::warn!("failed to encode schedule CancelledNotice: {e}"),
+        }
     }
     removed_type.is_some()
 }
@@ -167,7 +193,7 @@ pub fn process_due_payment_schedules(
             }
         });
         for (uid, interval_secs) in omega_renewals {
-            let _ = crate::services::quasar_auth_user::activate_user_omega_license_in_snapshot(
+            let _ = crate::services::quasar_auth_user::try_activate_user_omega_license_in_snapshot(
                 snap,
                 uid,
                 interval_secs,
@@ -179,10 +205,17 @@ pub fn process_due_payment_schedules(
 
     if !failed_scheds.is_empty() {
         for (uid, sched_id, sched_type) in failed_scheds {
-            let notice_bytes = pb::message("eve_public.payment.schedule.api.CancelledNotice")
+            let notice_bytes = match pb::message("eve_public.payment.schedule.api.CancelledNotice")
                 .set("schedule.sequential", sched_id)
                 .set("type", sched_type)
-                .must_encode();
+                .encode()
+            {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    tracing::warn!("failed to encode schedule CancelledNotice for {sched_id}: {e}");
+                    continue;
+                }
+            };
             router_notices
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
@@ -277,14 +310,17 @@ pub fn publish_schedule_set_notice(
     sched_id: u64,
     schedule_type: u32,
 ) {
-    let notice = pb::message("eve_public.payment.schedule.api.SetNotice")
+    match pb::message("eve_public.payment.schedule.api.SetNotice")
         .set("schedule.sequential", sched_id)
         .set("type", schedule_type)
-        .must_to_any();
-    pending_notices
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((NoticeScope::User(user_id as i32), notice));
+        .to_any()
+    {
+        Ok(notice) => pending_notices
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((NoticeScope::User(user_id as i32), notice)),
+        Err(e) => tracing::warn!("failed to encode schedule SetNotice: {e}"),
+    }
 }
 
 pub fn encode_targeted_offer_list_response(
@@ -332,7 +368,10 @@ pub fn encode_targeted_offer_list_response(
     if end < targeted.len() {
         out = out.set("next_page.token", end.to_string());
     }
-    out.must_encode()
+    out.encode().unwrap_or_else(|e| {
+        tracing::warn!("failed to encode targetaudience ListResponse: {e}");
+        Vec::new()
+    })
 }
 
 pub fn publish_quick_pay_added_notice(
@@ -340,13 +379,16 @@ pub fn publish_quick_pay_added_notice(
     user_id: u64,
     token_id: u32,
 ) {
-    let notice = pb::message("eve_public.payment.token.api.QuickPayAddedNotice")
+    match pb::message("eve_public.payment.token.api.QuickPayAddedNotice")
         .set("token.sequential", token_id)
-        .must_to_any();
-    pending_notices
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((NoticeScope::User(user_id as i32), notice));
+        .to_any()
+    {
+        Ok(notice) => pending_notices
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((NoticeScope::User(user_id as i32), notice)),
+        Err(e) => tracing::warn!("failed to encode QuickPayAddedNotice: {e}"),
+    }
 }
 
 pub fn add_user_quick_pay_token(
@@ -378,14 +420,19 @@ pub fn register_user_payment_token(
         tokens.push(token);
     });
     if is_qp {
-        let notice = pb::message("eve_public.payment.token.api.QuickPayAddedNotice")
+        match pb::message("eve_public.payment.token.api.QuickPayAddedNotice")
             .set("token.sequential", token_id)
-            .must_to_any();
-        let _ = ctx.quasar_gateway.publish_notice(
-            NoticeScope::User(uid as i32),
-            notice,
-            ctx.now_unix(),
-        );
+            .to_any()
+        {
+            Ok(notice) => {
+                let _ = ctx.quasar_gateway.publish_notice(
+                    NoticeScope::User(uid as i32),
+                    notice,
+                    ctx.now_unix(),
+                );
+            }
+            Err(e) => tracing::warn!("failed to encode QuickPayAddedNotice: {e}"),
+        }
     }
 }
 
@@ -713,13 +760,13 @@ pub fn register_plex_vault_extra_handlers(
                         let omega_target_uid = recipient_cid
                             .and_then(|cid| snap.characters.get(&cid).map(|c| c.user_id))
                             .unwrap_or(uid);
-                        let (_, n) = crate::services::quasar_auth_user::activate_user_omega_license_in_snapshot(
+                        let (_, n) = crate::services::quasar_auth_user::try_activate_user_omega_license_in_snapshot(
                             snap,
                             omega_target_uid,
                             30 * 86_400 * u64::from(qty),
                             now_unix,
                         );
-                        Some((omega_target_uid, n))
+                        n.map(|notice| (omega_target_uid, notice))
                     } else {
                         None
                     };
@@ -780,15 +827,14 @@ pub fn register_plex_vault_extra_handlers(
                 return Err((STATUS_FORBIDDEN, "Cannot query another user's PLEX operation".to_string()));
             }
 
-            Ok(
-                pb::message("eve.plex.vault.assetholding.operation.api.GetResponse")
-                    .set("operation.user.sequential", tx.user_id as i32)
-                    .set(
-                        "operation.balance_change.total_in_cents",
-                        tx.amount.abs() * 100,
-                    )
-                    .must_to_any(),
-            )
+            pb::message("eve.plex.vault.assetholding.operation.api.GetResponse")
+                .set("operation.user.sequential", tx.user_id as i32)
+                .set(
+                    "operation.balance_change.total_in_cents",
+                    tx.amount.abs() * 100,
+                )
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -854,7 +900,8 @@ pub fn register_plex_vault_extra_handlers(
             for oid in matching_ids {
                 out = out.add_with("offers", |off| off.set("store_offer", oid.to_string()));
             }
-            Ok(out.must_to_any())
+            out.to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -888,10 +935,11 @@ pub fn register_plex_vault_extra_handlers(
                 save_store_catalog(snap, &catalog);
                 next_id
             });
-            Ok(pb::message("eve.store.admin.api.CreateCategoryResponse")
+            pb::message("eve.store.admin.api.CreateCategoryResponse")
                 .set("category.sequential", id)
                 .set("category.catalog", cat_enum as i32)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -964,10 +1012,11 @@ pub fn register_plex_vault_extra_handlers(
                 save_store_catalog(snap, &catalog);
                 next_id
             });
-            Ok(pb::message("eve.store.admin.api.CreateProductResponse")
+            pb::message("eve.store.admin.api.CreateProductResponse")
                 .set("product.sequential", id)
                 .set("product.catalog", cat_enum as i32)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -1129,18 +1178,22 @@ pub fn register_plex_vault_extra_handlers(
             });
             if targeted {
                 let uid = ctx.effective_user_id().unwrap_or(1);
-                let notice = pb::message("eve_public.store.targetaudience.offer.api.PromotedNotice")
+                match pb::message("eve_public.store.targetaudience.offer.api.PromotedNotice")
                     .set("offer_id.user_id.sequential", uid)
                     .set("offer_id.catalogue_entry.name", id.to_string())
-                    .must_to_any();
-                pending_adm_off
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push((NoticeScope::Broadcast, notice));
+                    .to_any()
+                {
+                    Ok(notice) => pending_adm_off
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((NoticeScope::Broadcast, notice)),
+                    Err(e) => tracing::warn!("failed to encode PromotedNotice: {e}"),
+                }
             }
-            Ok(pb::message("eve.store.admin.api.CreateOfferResponse")
+            pb::message("eve.store.admin.api.CreateOfferResponse")
                 .set("offer.store_offer", id.to_string())
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 

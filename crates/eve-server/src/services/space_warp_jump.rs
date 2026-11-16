@@ -36,23 +36,25 @@ pub(crate) async fn handle(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("beyonce", "CmdWarpToStuff") | ("beyonce", "CmdWarpToStuffAutopilot") => Some(
-            handle_cmd_warp_to_stuff(
+            Box::pin(handle_cmd_warp_to_stuff(
                 ctx,
                 session,
                 bound_entry,
                 args,
                 kwargs,
                 method == "CmdWarpToStuffAutopilot",
-            )
+            ))
             .await,
         ),
-        ("beyonce", "CmdStargateJump") | ("beyonce", "StargateJump") => Some(handle_cmd_stargate_jump(ctx, session, bound_entry, args, kwargs).await),
+        ("beyonce", "CmdStargateJump") | ("beyonce", "StargateJump") => {
+            Some(Box::pin(handle_cmd_stargate_jump(ctx, session, bound_entry, args, kwargs)).await)
+        }
         // parity: plan:SP-4, plan:SP-5, feat:navigation.dock-station, feat:navigation.dock-structure, feat:navigation.undock, feat:navigation.session-change-timer-triggers
         // parity: rpc:beyonce.SetSessionCheck, rpc:beyonce.CmdDock
-        ("beyonce", "CmdDock") => Some(handle_dock(ctx, session, bound_entry, args).await),
-        ("beyonce", "Undock") => handle_undock(ctx, session, args, kwargs).await,
+        ("beyonce", "CmdDock") => Some(Box::pin(handle_dock(ctx, session, bound_entry, args)).await),
+        ("beyonce", "Undock") => Box::pin(handle_undock(ctx, session, args, kwargs)).await,
         ("beyonce", "SetSessionCheck") => {
-            Some(crate::services::nav_warp_interdiction::handle_set_session_check(ctx, session, args).await)
+            Some(Box::pin(crate::services::nav_warp_interdiction::handle_set_session_check(ctx, session, args)).await)
         }
         _ => None,
     }
@@ -70,6 +72,36 @@ fn resolve_bound_or_session_sys(
     session: &SessionState,
 ) -> Result<u32, BridgeRpcError> {
     resolve_bound_or_session_sys_inner(bound_entry, session, BEYONCE_SVC)
+}
+
+#[inline(never)]
+fn record_warp_progression(ctx: &ServerContext, char_id: i64) {
+    crate::quasar_gateway::isolate_side_effect(
+        "space_warp_jump.CmdWarpToStuff.cosmetics",
+        || {
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut ext = crate::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
+                if !ext.characters_warped.contains(&char_id) {
+                    ext.characters_warped.push(char_id);
+                    crate::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
+                }
+            });
+        },
+    );
+    ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
+        char_id as u32,
+        &["timesWarped"],
+        1,
+        ctx.now_unix(),
+        &ctx.quasar_gateway,
+    );
+    crate::services::operations_manager_helpers::record_server_operation_event(
+        ctx,
+        char_id,
+        "warpToLocation",
+        &[],
+        1,
+    );
 }
 
 async fn handle_cmd_warp_to_stuff(
@@ -658,26 +690,7 @@ async fn handle_cmd_warp_to_stuff(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(ship_id, char_id);
-            crate::quasar_gateway::isolate_side_effect(
-                "space_warp_jump.CmdWarpToStuff.progression",
-                || {
-                    ctx.db.with_mut_snapshot(|snap| {
-                        let mut ext = crate::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
-                        if !ext.characters_warped.contains(&char_id) {
-                            ext.characters_warped.push(char_id);
-                            crate::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
-                        }
-                    });
-                    ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["timesWarped"], 1, ctx.now_unix(), &ctx.quasar_gateway);
-                    crate::services::operations_manager_helpers::record_server_operation_event(
-                        ctx,
-                        char_id,
-                        "warpToLocation",
-                        &[],
-                        1,
-                    );
-                },
-            );
+            record_warp_progression(ctx, char_id);
             Ok(PyRep::Integer(tick as i64))
         }
         Err(e) => {

@@ -13,10 +13,11 @@
 
 #![forbid(unsafe_code)]
 
-use crate::quasar_gateway::{NoticeScope, PublicGatewayRouter};
+use crate::quasar_gateway::{NoticeScope, PublicGatewayRouter, STATUS_INTERNAL_ERROR};
 use eve_db::WorldRepository;
 use eve_proto::pb;
 use eve_proto::quasar::{DynamicQuasarMessage, DynamicValue, QuasarDescriptorRegistry};
+use eve_proto::BridgeRpcError;
 use eve_sde::SdeRegistry;
 use std::sync::Arc;
 
@@ -72,10 +73,12 @@ pub fn register_assetholding_handlers(
                         "Asset not found".to_string(),
                     )
                 })?;
-            let attrs = super::quasar_entitlement_ledger::encode_asset_attributes(asset, false);
-            Ok(pb::message("eve.assetholding.asset.api.GetResponse")
+            let attrs = super::quasar_entitlement_ledger::try_encode_asset_attributes(asset, false)
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))?;
+            pb::message("eve.assetholding.asset.api.GetResponse")
                 .set_raw_message("asset", attrs)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -107,10 +110,12 @@ pub fn register_assetholding_handlers(
                         "Asset not found".to_string(),
                     )
                 })?;
-            let attrs = super::quasar_entitlement_ledger::encode_asset_attributes(asset, true);
-            Ok(pb::message("eve_public.assetholding.asset.api.GetResponse")
+            let attrs = super::quasar_entitlement_ledger::try_encode_asset_attributes(asset, true)
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))?;
+            pb::message("eve_public.assetholding.asset.api.GetResponse")
                 .set_raw_message("asset", attrs)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -162,7 +167,8 @@ pub fn register_assetholding_handlers(
                     && e.holder == eff_holder
                     && group_filter.as_ref().is_none_or(|g| g.is_empty() || &e.group_name == g)
                 {
-                    let id_b = super::quasar_entitlement_ledger::public_identifier(e);
+                    let id_b = super::quasar_entitlement_ledger::try_public_identifier(e)
+                        .map_err(|err| (STATUS_INTERNAL_ERROR, err.to_string()))?;
                     resp = resp.add_with("entitlements", |entry| {
                         entry
                             .set_raw_message("entitlement", id_b)
@@ -173,7 +179,7 @@ pub fn register_assetholding_handlers(
                 }
             }
 
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -189,15 +195,12 @@ pub fn publish_asset_capacity_claimed_notice(
     previous_remaining: u64,
     current_remaining: u64,
     now_unix: u64,
-) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any = pb::message("eve_public.assetholding.asset.api.FiniteCapacityClaimedNotice")
+) -> Result<usize, BridgeRpcError> {
+    let notice = pb::message("eve_public.assetholding.asset.api.FiniteCapacityClaimedNotice")
         .set("asset.uuid", super::quasar_cosmetics_drafts::id_to_uuid_bytes(asset_id))
         .set("previous_remaining", previous_remaining)
-        .set("current_remaining", current_remaining)
-        .must_to_any();
-    let (_, delivered) =
-        gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix)?;
-    Ok(delivered)
+        .set("current_remaining", current_remaining);
+    gateway.publish_pb_notice_checked(NoticeScope::Character(character_id), notice, now_unix)
 }
 
 /// Helper for broadcasting `DeletedNotice`.
@@ -206,13 +209,10 @@ pub fn publish_asset_deleted_notice(
     character_id: u32,
     asset_id: u64,
     now_unix: u64,
-) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any = pb::message("eve_public.assetholding.asset.api.DeletedNotice")
-        .set("asset.uuid", super::quasar_cosmetics_drafts::id_to_uuid_bytes(asset_id))
-        .must_to_any();
-    let (_, delivered) =
-        gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix)?;
-    Ok(delivered)
+) -> Result<usize, BridgeRpcError> {
+    let notice = pb::message("eve_public.assetholding.asset.api.DeletedNotice")
+        .set("asset.uuid", super::quasar_cosmetics_drafts::id_to_uuid_bytes(asset_id));
+    gateway.publish_pb_notice_checked(NoticeScope::Character(character_id), notice, now_unix)
 }
 
 #[cfg(test)]

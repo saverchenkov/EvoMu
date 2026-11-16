@@ -761,50 +761,45 @@ impl AchievementManager {
         client_only: bool,
         gateway: &PublicGatewayRouter,
     ) {
-        crate::quasar_gateway::isolate_side_effect(
-            "quasar_achievements.apply_statistic_event_ids",
-            || {
-                let mut any_changed = false;
-                for &eid in event_ids {
-                    let updates = self.record_statistic_event_filtered(
-                        character_id,
-                        eid,
-                        delta,
-                        now_unix,
-                        client_only,
-                    );
-                    for (a, just_completed, milestones) in updates {
-                        any_changed = true;
-                        let cat_score = if a.def.category_id > 0 {
-                            self.category_score(character_id, a.def.category_id)
-                        } else {
-                            0
-                        };
-                        emit_achievement_notices(
-                            character_id,
-                            a.def.id,
-                            a.def.category_id,
-                            a.progress,
-                            cat_score,
-                            just_completed,
-                            &milestones,
-                            now_unix,
-                        );
-                    }
-                }
-                if any_changed {
-                    self.save_to_db();
-                }
-                for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
-                    let _ = gateway.publish_notice_isolated(
-                        scope,
-                        "quasar_achievements.apply_statistic_event_ids.notice",
-                        payload,
-                        ts,
-                    );
-                }
-            },
-        );
+        let mut any_changed = false;
+        for &eid in event_ids {
+            let updates = self.record_statistic_event_filtered(
+                character_id,
+                eid,
+                delta,
+                now_unix,
+                client_only,
+            );
+            for (a, just_completed, milestones) in updates {
+                any_changed = true;
+                let cat_score = if a.def.category_id > 0 {
+                    self.category_score(character_id, a.def.category_id)
+                } else {
+                    0
+                };
+                emit_achievement_notices(
+                    character_id,
+                    a.def.id,
+                    a.def.category_id,
+                    a.progress,
+                    cat_score,
+                    just_completed,
+                    &milestones,
+                    now_unix,
+                );
+            }
+        }
+        if any_changed {
+            self.save_to_db();
+        }
+        for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
+            let _ = gateway.publish_notice_isolated(
+                scope,
+                "quasar_achievements.apply_statistic_event_ids.notice",
+                payload,
+                ts,
+            );
+        }
     }
 
     pub fn mark_completed(&self, character_id: u32, achievement_id: u32, now_unix: u64) -> Result<CharacterAchievement, (u32, String)> {

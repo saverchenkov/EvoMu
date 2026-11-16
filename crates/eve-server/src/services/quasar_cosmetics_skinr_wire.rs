@@ -67,7 +67,12 @@ pub(crate) fn build_component_id(component_id: u32, is_pattern: bool) -> ProtoBu
 
 /// Encodes `eve_public.cosmetic.ship.skin.thirdparty.component.Identifier`.
 pub fn encode_component_id(component_id: u32, is_pattern: bool) -> Vec<u8> {
-    build_component_id(component_id, is_pattern).must_encode()
+    build_component_id(component_id, is_pattern)
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, component_id, is_pattern, "Failed to encode component Identifier");
+            Vec::new()
+        })
 }
 
 /// Parses `component.Identifier { 1: coating { 1: seq }, 2: pattern { 1: seq } }`.
@@ -127,7 +132,11 @@ pub fn encode_comp_license_id(character_id: u32, component_id: u32, is_pattern: 
         component_id,
         is_pattern,
     )
-    .must_encode()
+    .encode()
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, character_id, component_id, "Failed to encode component license Identifier");
+        Vec::new()
+    })
 }
 
 pub(crate) fn build_license_kind(
@@ -145,7 +154,12 @@ pub(crate) fn build_license_kind(
 
 /// Encodes `eve_public.cosmetic.ship.skin.thirdparty.component.license.Kind`.
 pub fn encode_license_kind(component_id: u32, is_pattern: bool, finite_qty: Option<u64>) -> Vec<u8> {
-    build_license_kind(component_id, is_pattern, finite_qty).must_encode()
+    build_license_kind(component_id, is_pattern, finite_qty)
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, component_id, is_pattern, "Failed to encode component license Kind");
+            Vec::new()
+        })
 }
 
 /// Emits `eve_public.cosmetic.ship.skin.thirdparty.component.license.api.GrantedNotice`.
@@ -156,12 +170,20 @@ pub fn queue_component_license_granted_notice(
     finite_qty: Option<u64>,
     now_unix: u64,
 ) {
-    let notice = pb::message(
+    match pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.api.GrantedNotice",
     )
     .set("kind", build_license_kind(component_id, is_pattern, finite_qty))
-    .must_to_any();
-    ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix);
+    .to_any()
+    {
+        Ok(notice) => ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix),
+        Err(e) => tracing::warn!(
+            error = %e,
+            character_id,
+            component_id,
+            "Failed to encode component license GrantedNotice"
+        ),
+    }
 }
 
 pub(crate) fn validate_component_in_sde(
@@ -328,11 +350,14 @@ pub(crate) fn encode_skin_attributes(rec: &SkinDesignRecord) -> Vec<u8> {
 }
 
 pub(crate) fn queue_skin_license_added_notice(lic: &ThirdPartySkinLicense, now_unix: u64) {
-    let notice = pb::message("eve_public.cosmetic.ship.skin.thirdparty.license.api.AddedNotice")
+    match pb::message("eve_public.cosmetic.ship.skin.thirdparty.license.api.AddedNotice")
         .set("id", build_skin_license_id("eve_public", lic.character_id, &lic.skin_hex))
         .set("attributes", build_skin_license_attrs("eve_public", lic))
-        .must_to_any();
-    ctx_queue_notice(NoticeScope::Character(lic.character_id), notice, now_unix);
+        .to_any()
+    {
+        Ok(notice) => ctx_queue_notice(NoticeScope::Character(lic.character_id), notice, now_unix),
+        Err(e) => tracing::warn!(error = %e, character_id = lic.character_id, "Failed to encode skin license AddedNotice"),
+    }
 }
 
 pub(crate) fn queue_skin_license_updated_notice(
@@ -340,19 +365,25 @@ pub(crate) fn queue_skin_license_updated_notice(
     prev: &ThirdPartySkinLicense,
     now_unix: u64,
 ) {
-    let notice = pb::message("eve_public.cosmetic.ship.skin.thirdparty.license.api.UpdatedNotice")
+    match pb::message("eve_public.cosmetic.ship.skin.thirdparty.license.api.UpdatedNotice")
         .set("id", build_skin_license_id("eve_public", lic.character_id, &lic.skin_hex))
         .set("attributes", build_skin_license_attrs("eve_public", lic))
         .set("previous_attributes", build_skin_license_attrs("eve_public", prev))
-        .must_to_any();
-    ctx_queue_notice(NoticeScope::Character(lic.character_id), notice, now_unix);
+        .to_any()
+    {
+        Ok(notice) => ctx_queue_notice(NoticeScope::Character(lic.character_id), notice, now_unix),
+        Err(e) => tracing::warn!(error = %e, character_id = lic.character_id, "Failed to encode skin license UpdatedNotice"),
+    }
 }
 
 pub(crate) fn queue_skin_license_deleted_notice(character_id: u32, skin_hex: &str, now_unix: u64) {
-    let notice = pb::message("eve_public.cosmetic.ship.skin.thirdparty.license.api.DeletedNotice")
+    match pb::message("eve_public.cosmetic.ship.skin.thirdparty.license.api.DeletedNotice")
         .set("id", build_skin_license_id("eve_public", character_id, skin_hex))
-        .must_to_any();
-    ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix);
+        .to_any()
+    {
+        Ok(notice) => ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix),
+        Err(e) => tracing::warn!(error = %e, character_id, "Failed to encode skin license DeletedNotice"),
+    }
 }
 
 pub(crate) fn queue_ship_skin_set_notice(
@@ -361,15 +392,18 @@ pub(crate) fn queue_ship_skin_set_notice(
     thirdparty_skin_hex: Option<&str>,
     now_unix: u64,
 ) {
-    let notice = pb::message("eve_public.cosmetic.ship.api.SetNotice")
+    match pb::message("eve_public.cosmetic.ship.api.SetNotice")
         .set("state.character.sequential", character_id)
         .set("state.ship.sequential", ship_id)
         .with(|b| match thirdparty_skin_hex {
             Some(hex) => b.set("state.skin.thirdparty.identifier", build_skin_id("eve_public", hex)),
             None => b.set("state.skin.no_skin", true),
         })
-        .must_to_any();
-    ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix);
+        .to_any()
+    {
+        Ok(notice) => ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix),
+        Err(e) => tracing::warn!(error = %e, character_id, ship_id, "Failed to encode ship skin SetNotice"),
+    }
 }
 
 pub(crate) fn parse_skin_hex(dyn_msg: &DynamicQuasarMessage, raw: &[u8]) -> Option<String> {

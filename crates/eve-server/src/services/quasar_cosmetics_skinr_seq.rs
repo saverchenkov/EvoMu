@@ -17,7 +17,7 @@ use super::quasar_cosmetics_skinr::{
 use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
-    STATUS_NOT_FOUND,
+    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
 };
 use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
@@ -58,9 +58,10 @@ fn handle_skin_get(
         return Err((STATUS_NOT_FOUND, format!("3rd-party SKIN design '{skin_hex}' not found")));
     };
     let prefix = if req_type.starts_with("eve.") { "eve" } else { "eve_public" };
-    Ok(pb::message(format!("{prefix}.cosmetic.ship.skin.thirdparty.api.GetResponse"))
+    pb::message(format!("{prefix}.cosmetic.ship.skin.thirdparty.api.GetResponse"))
         .set("skin", build_skin_attributes(prefix, design))
-        .must_to_any())
+        .to_any()
+        .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn handle_skin_license_get_owned(
@@ -88,7 +89,7 @@ fn handle_skin_license_get_owned(
     if prefix == "eve" && owned_hexes.is_empty() {
         rsp = rsp.add_with("licenses", |l| l.set("character.sequential", cid));
     }
-    Ok(rsp.must_to_any())
+    rsp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn handle_skin_license_get(
@@ -114,11 +115,12 @@ fn handle_skin_license_get(
         return Err((STATUS_NOT_FOUND, "3rd-party SKIN license not found".into()));
     };
     let prefix = if req_type.starts_with("eve.") { "eve" } else { "eve_public" };
-    Ok(pb::message(format!(
+    pb::message(format!(
         "{prefix}.cosmetic.ship.skin.thirdparty.license.api.GetResponse"
     ))
     .set("license", build_skin_license_attrs(prefix, &lic_cow))
-    .must_to_any())
+    .to_any()
+    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn handle_skin_license_activate(
@@ -334,11 +336,12 @@ fn handle_skin_license_admin_grant(
     }
     grant_or_increment_skin_license(state, cid, &skin_hex, unactivated, ctx.now_unix());
 
-    Ok(pb::message(
+    pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.admin.GrantResponse",
     )
     .set("license", build_skin_license_id("eve_public", cid, &skin_hex))
-    .must_to_any())
+    .to_any()
+    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn handle_skin_license_admin_revoke(
@@ -476,7 +479,9 @@ fn handle_get_tier_pricing(
                 .set("plex.total_in_cents", discounted.max(100) as i64)
         });
     }
-    Ok(rsp.set("discount_percentage_applied", discount_pct).must_to_any())
+    rsp.set("discount_percentage_applied", discount_pct)
+        .to_any()
+        .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn handle_get_tier_durations(
@@ -499,7 +504,9 @@ fn handle_get_tier_durations(
                 .set("duration", GoogleDuration { seconds: discounted_secs as i64, nanos: 0 })
         });
     }
-    Ok(rsp.set("discount_percentage_applied", discount_pct).must_to_any())
+    rsp.set("discount_percentage_applied", discount_pct)
+        .to_any()
+        .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 pub fn early_completion_plex_cents(remaining_secs: u64) -> u64 {
@@ -529,7 +536,7 @@ fn handle_get_early_completion_pricing(req_type: &str) -> HandlerResult {
                 .set("plex.total_in_cents", early_completion_plex_cents(lte_secs) as i64)
         });
     }
-    Ok(rsp.must_to_any())
+    rsp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn build_job_id(uuid: &[u8; 16]) -> ProtoBuilder {
@@ -556,31 +563,40 @@ fn build_job_attributes(job: &SequencingJobRecord) -> ProtoBuilder {
 }
 
 fn queue_job_started_notice(character_id: u32, uuid: &[u8; 16], now_unix: u64) {
-    let notice = pb::message(
+    match pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.StartedNotice",
     )
     .set("id", build_job_id(uuid))
-    .must_to_any();
-    ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix);
+    .to_any()
+    {
+        Ok(notice) => ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix),
+        Err(e) => tracing::warn!(character_id, error = %e, "failed to encode SKINR StartedNotice"),
+    }
 }
 
 fn queue_job_completed_notice(character_id: u32, uuid: &[u8; 16], now_unix: u64) {
-    let notice = pb::message(
+    match pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.CompletedNotice",
     )
     .set("id", build_job_id(uuid))
-    .must_to_any();
-    ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix);
+    .to_any()
+    {
+        Ok(notice) => ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix),
+        Err(e) => tracing::warn!(character_id, error = %e, "failed to encode SKINR CompletedNotice"),
+    }
 }
 
 fn queue_job_failed_notice(character_id: u32, uuid: &[u8; 16], reason_enum: u32, now_unix: u64) {
-    let notice = pb::message(
+    match pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.FailedNotice",
     )
     .set("id", build_job_id(uuid))
     .set("reason", reason_enum.max(1) as i32)
-    .must_to_any();
-    ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix);
+    .to_any()
+    {
+        Ok(notice) => ctx_queue_notice(NoticeScope::Character(character_id), notice, now_unix),
+        Err(e) => tracing::warn!(character_id, error = %e, "failed to encode SKINR FailedNotice"),
+    }
 }
 
 fn parse_initiate_slots(
@@ -879,12 +895,13 @@ fn handle_job_initiate(
     state.save();
     queue_job_started_notice(cid, &job_uuid, now);
 
-    Ok(pb::message(
+    pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateResponse",
     )
     .set("id", build_job_id(&job_uuid))
     .set("attributes", build_job_attributes(&job_rec))
-    .must_to_any())
+    .to_any()
+    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 pub(super) fn settle_completed_jobs(state: &SkinrCosmeticsState, now: u64) {
@@ -933,7 +950,7 @@ fn handle_job_get_all_active(
             });
         }
     }
-    Ok(rsp.must_to_any())
+    rsp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn parse_job_uuid(dyn_msg: &DynamicQuasarMessage, raw: &[u8]) -> Option<[u8; 16]> {
@@ -972,11 +989,12 @@ fn handle_job_get(
     if job.sequencer_id != caller && require_admin_role(ctx).is_err() {
         return Err((STATUS_FORBIDDEN, "Cannot inspect another character's sequencing job".into()));
     }
-    Ok(pb::message(
+    pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.GetResponse",
     )
     .set("job", build_job_attributes(job))
-    .must_to_any())
+    .to_any()
+    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn handle_job_complete_early(
@@ -1149,11 +1167,12 @@ pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
         "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetSkillBasedJobsCapacityRequest",
         |s: &Arc<SkinrCosmeticsState>, ctx: &AuthoritativeContext, _any: &GoogleAny, _d| {
             let (_, _, max_jobs) = skill_discounts_and_cap(s, ctx.effective_character_id());
-            Ok(pb::message(
+            pb::message(
                 "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetSkillBasedJobsCapacityResponse",
             )
             .set("capacity", max_jobs as u64)
-            .must_to_any())
+            .to_any()
+            .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }
     );
 

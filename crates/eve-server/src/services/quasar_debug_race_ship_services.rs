@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
-    require_admin_role, NoticeScope, PublicGatewayRouter,
+    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_INTERNAL_ERROR,
 };
 use eve_db::WorldRepository;
 use eve_proto::pb;
@@ -29,9 +29,10 @@ pub fn register_handlers(
                 Some(DynamicValue::Bytes(b)) => b.clone(),
                 _ => Vec::new(),
             };
-            Ok(pb::message("eve_public.debug.Response")
+            pb::message("eve_public.debug.Response")
                 .set("data", req_data)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -40,9 +41,10 @@ pub fn register_handlers(
         "eve.quasar.admin.IsAuthorizedRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             let is_authorized = require_admin_role(ctx).is_ok() || ctx.effective_user_id().is_some();
-            Ok(pb::message("eve.quasar.admin.IsAuthorizedResponse")
+            pb::message("eve.quasar.admin.IsAuthorizedResponse")
                 .set("authorized", is_authorized)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -74,9 +76,21 @@ pub fn register_handlers(
                         })
                 });
             }
-            Ok(out.must_to_any())
+            out.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
+}
+
+fn publish_notice_now(
+    gateway: &PublicGatewayRouter,
+    scope: NoticeScope,
+    builder: pb::ProtoBuilder,
+) -> Result<usize, BridgeRpcError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    gateway.publish_pb_notice_checked(scope, builder, now)
 }
 
 /// Publishes an `eve_public.debug.Notice` to the specified gateway scope.
@@ -85,16 +99,7 @@ pub fn publish_debug_notice(
     scope: NoticeScope,
     uuid: &[u8],
 ) -> Result<usize, BridgeRpcError> {
-    let notice = pb::message("eve_public.debug.Notice")
-        .set("uuid", uuid)
-        .must_to_any();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    gateway
-        .publish_notice(scope, notice, now)
-        .map(|(_, count)| count)
+    publish_notice_now(gateway, scope, pb::message("eve_public.debug.Notice").set("uuid", uuid))
 }
 
 /// Publishes an `eve.debug.monolith.event.EventEmitted` notice to the specified gateway scope.
@@ -103,16 +108,12 @@ pub fn publish_monolith_event_notice(
     scope: NoticeScope,
     tracer: &[u8],
 ) -> Result<usize, BridgeRpcError> {
-    let notice = pb::message("eve.debug.monolith.event.EventEmitted")
-        .set("tracer", String::from_utf8_lossy(tracer).into_owned())
-        .must_to_any();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    gateway
-        .publish_notice(scope, notice, now)
-        .map(|(_, count)| count)
+    publish_notice_now(
+        gateway,
+        scope,
+        pb::message("eve.debug.monolith.event.EventEmitted")
+            .set("tracer", String::from_utf8_lossy(tracer).into_owned()),
+    )
 }
 
 /// Publishes an `eve.quasar.CharacterRouteEstablished` notice to the specified gateway scope.
@@ -121,16 +122,12 @@ pub fn publish_character_route_established(
     scope: NoticeScope,
     character_id: u64,
 ) -> Result<usize, BridgeRpcError> {
-    let notice = pb::message("eve.quasar.CharacterRouteEstablished")
-        .set("character.sequential", character_id as u32)
-        .must_to_any();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    gateway
-        .publish_notice(scope, notice, now)
-        .map(|(_, count)| count)
+    publish_notice_now(
+        gateway,
+        scope,
+        pb::message("eve.quasar.CharacterRouteEstablished")
+            .set("character.sequential", character_id as u32),
+    )
 }
 
 /// Publishes an `eve.raffle.ItemRaffleCreated` notice.
@@ -155,16 +152,8 @@ pub fn publish_raffle_created_notice(
         .when(nanos != 0, |m| m.set("ticket_price.nanos", nanos))
         .set("item.sequential", item_id)
         .set("station.sequential", station_id)
-        .set("is_private", is_private)
-        .must_to_any();
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    gateway
-        .publish_notice(scope, notice, now)
-        .map(|(_, count)| count)
+        .set("is_private", is_private);
+    publish_notice_now(gateway, scope, notice)
 }
 
 /// Publishes an `eve.raffle.TicketBought` notice.
@@ -175,18 +164,14 @@ pub fn publish_raffle_ticket_bought_notice(
     ticket_number: u64,
     char_id: u64,
 ) -> Result<usize, BridgeRpcError> {
-    let notice = pb::message("eve.raffle.TicketBought")
-        .set("raffle_id", raffle_id.to_string())
-        .set("ticket_number", ticket_number.to_string())
-        .set("character.sequential", char_id as u32)
-        .must_to_any();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    gateway
-        .publish_notice(scope, notice, now)
-        .map(|(_, count)| count)
+    publish_notice_now(
+        gateway,
+        scope,
+        pb::message("eve.raffle.TicketBought")
+            .set("raffle_id", raffle_id.to_string())
+            .set("ticket_number", ticket_number.to_string())
+            .set("character.sequential", char_id as u32),
+    )
 }
 
 /// Publishes an `eve.raffle.Finished` notice.
@@ -196,17 +181,13 @@ pub fn publish_raffle_finished_notice(
     raffle_id: u64,
     winner_char_id: u64,
 ) -> Result<usize, BridgeRpcError> {
-    let notice = pb::message("eve.raffle.Finished")
-        .set("raffle_id", raffle_id.to_string())
-        .set("winner.sequential", winner_char_id as u32)
-        .must_to_any();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    gateway
-        .publish_notice(scope, notice, now)
-        .map(|(_, count)| count)
+    publish_notice_now(
+        gateway,
+        scope,
+        pb::message("eve.raffle.Finished")
+            .set("raffle_id", raffle_id.to_string())
+            .set("winner.sequential", winner_char_id as u32),
+    )
 }
 
 /// Publishes an `eve.raffle.Expired` notice.
@@ -215,16 +196,11 @@ pub fn publish_raffle_expired_notice(
     scope: NoticeScope,
     raffle_id: u64,
 ) -> Result<usize, BridgeRpcError> {
-    let notice = pb::message("eve.raffle.Expired")
-        .set("raffle_id", raffle_id.to_string())
-        .must_to_any();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    gateway
-        .publish_notice(scope, notice, now)
-        .map(|(_, count)| count)
+    publish_notice_now(
+        gateway,
+        scope,
+        pb::message("eve.raffle.Expired").set("raffle_id", raffle_id.to_string()),
+    )
 }
 
 /// Publishes an `eve.seasonalevent.challenge.ChallengeProgressed` notice.
@@ -235,19 +211,14 @@ pub fn publish_challenge_progressed_notice(
     challenge_id: u64,
     amount: u64,
 ) -> Result<usize, BridgeRpcError> {
-    let notice = pb::message("eve.seasonalevent.challenge.ChallengeProgressed")
-        .set("character.sequential", char_id as u32)
-        .set("progress.challenge.sequential", challenge_id)
-        .set("progress.amount", amount)
-        .must_to_any();
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    gateway
-        .publish_notice(scope, notice, now)
-        .map(|(_, count)| count)
+    publish_notice_now(
+        gateway,
+        scope,
+        pb::message("eve.seasonalevent.challenge.ChallengeProgressed")
+            .set("character.sequential", char_id as u32)
+            .set("progress.challenge.sequential", challenge_id)
+            .set("progress.amount", amount),
+    )
 }
 
 /// Encodes a security status float (-10.0 to +10.0) into `sint64 units = 1` and `sint32 nanos = 2`.
@@ -258,7 +229,11 @@ pub fn encode_security_status_value(sec_status: f64) -> Vec<u8> {
     pb::message("eve_public.securitystatus.Value")
         .set("units", units)
         .when(nanos != 0, |m| m.set("nanos", nanos))
-        .must_encode()
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Failed to encode securitystatus.Value");
+            Vec::new()
+        })
 }
 
 /// Decodes an `eve_public.securitystatus.Value` / `eve.securitystatus.Value` wire message.
@@ -288,7 +263,11 @@ pub fn decode_security_status_value(bytes: &[u8]) -> Result<f64, QuasarError> {
 pub fn encode_school_identifier(school_id: u64) -> Vec<u8> {
     pb::message("eve.school.Identifier")
         .set("sequential", school_id as u32)
-        .must_encode()
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, school_id, "Failed to encode school Identifier");
+            Vec::new()
+        })
 }
 
 /// Encodes a localized `eve.search.Tag` (`LocalizedKeyValue localized = 1`).
@@ -297,7 +276,11 @@ pub fn encode_localized_search_tag(key: &str, lang: u32, val: &str) -> Vec<u8> {
         .set("localized.key", key)
         .set("localized.language", lang as i32)
         .set("localized.value", val)
-        .must_encode()
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, key, "Failed to encode localized search Tag");
+            Vec::new()
+        })
 }
 
 /// Encodes an unlocalized `eve.search.Tag` (`KeyValue unlocalized = 2`).
@@ -305,14 +288,22 @@ pub fn encode_unlocalized_search_tag(key: &str, val: &str) -> Vec<u8> {
     pb::message("eve.search.Tag")
         .set("unlocalized.key", key)
         .set("unlocalized.string_value", val)
-        .must_encode()
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, key, "Failed to encode unlocalized search Tag");
+            Vec::new()
+        })
 }
 
 /// Encodes an `eve_public.ship.Identifier` or `eve.ship.Identifier` (`uint32 sequential = 1`).
 pub fn encode_ship_identifier(ship_id: u64) -> Vec<u8> {
     pb::message("eve.ship.Identifier")
         .set("sequential", ship_id)
-        .must_encode()
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, ship_id, "Failed to encode ship Identifier");
+            Vec::new()
+        })
 }
 
 /// Encodes an `eve.ship.Attributes` message (`type = 1`, `owner = 4`).
@@ -320,7 +311,11 @@ pub fn encode_ship_attributes(type_id: u64, owner_id: u64) -> Vec<u8> {
     pb::message("eve.ship.Attributes")
         .set("type.sequential", type_id)
         .set("owner.player.character.sequential", owner_id as u32)
-        .must_encode()
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, type_id, owner_id, "Failed to encode ship Attributes");
+            Vec::new()
+        })
 }
 
 #[cfg(test)]

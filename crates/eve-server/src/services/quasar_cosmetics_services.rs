@@ -433,10 +433,9 @@ pub fn publish_cosmetic_title_granted_notice(
     title_id: u64,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any = pb::message("eve_public.cosmetic.character.title.api.GrantedNotice")
-        .set("title.uuid", id_to_uuid(title_id))
-        .must_to_any();
-    gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
+    let notice = pb::message("eve_public.cosmetic.character.title.api.GrantedNotice")
+        .set("title.uuid", id_to_uuid(title_id));
+    gateway.publish_pb_notice_checked(NoticeScope::Character(character_id), notice, now_unix)
 }
 
 /// Helper for broadcasting `TransactionSucceededNotice` (`eve_public.cosmetic.market.transaction.api.TransactionSucceededNotice`).
@@ -446,10 +445,9 @@ pub fn publish_cosmetic_market_transaction_notice(
     transaction_id: u64,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any = pb::message("eve_public.cosmetic.market.transaction.api.TransactionSucceededNotice")
-        .set("transaction.uuid", id_to_uuid(transaction_id))
-        .must_to_any();
-    gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
+    let notice = pb::message("eve_public.cosmetic.market.transaction.api.TransactionSucceededNotice")
+        .set("transaction.uuid", id_to_uuid(transaction_id));
+    gateway.publish_pb_notice_checked(NoticeScope::Character(character_id), notice, now_unix)
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]

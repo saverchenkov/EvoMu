@@ -5,7 +5,8 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
-    require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
+    require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
+    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
 };
 use eve_db::{CorporationRecord, WorldRepository};
 use eve_proto::pb::{self, ProtoBuilder};
@@ -202,14 +203,15 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         ))
                     })
                     .ok_or_else(|| (STATUS_NOT_FOUND, format!("Alliance {all_id} not found")))?;
-                Ok(pb::message("eve.alliance.GetResponse")
+                pb::message("eve.alliance.GetResponse")
                     .set("alliance.name", name)
                     .set("alliance.short_name", short_name)
                     .set("alliance.date_founded", GoogleTimestamp::from_unix(founded as i64, 0))
                     .set("alliance.creator_character_id.sequential", creator_char)
                     .set("alliance.creator_corporation_id.sequential", creator_corp)
                     .set("alliance.executor_corporation_id.sequential", exec_corp)
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -228,7 +230,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 for id in ids {
                     resp = resp.add_with("alliance_ids", |b| b.set("sequential", id));
                 }
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -266,7 +268,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 for id in ids {
                     resp = resp.add_with("alliances", |b| b.set("sequential", id));
                 }
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -298,7 +300,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 for cid in corp_ids {
                     resp = resp.add_with("corporation_ids", |b| b.set("sequential", cid as u64));
                 }
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -345,7 +347,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                             .set("balance", build_isk_currency(div.balance.0))
                     });
                 }
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -396,7 +398,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         }
                     });
                 }
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -418,9 +420,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         )
                     })
                 })?;
-                Ok(pb::message("eve.corporation.homestation.GetResponse")
+                pb::message("eve.corporation.homestation.GetResponse")
                     .set("station.sequential", st_id as u64)
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -443,7 +446,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 } else {
                     resp.set("no_alliance", true)
                 };
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -477,7 +480,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         }
                     });
                 }
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -551,7 +554,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         }
                     });
                 }
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -628,7 +631,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                             })
                     });
                 }
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -696,7 +699,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         });
                     }
                 }
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -727,7 +730,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                             .set("attributes.online", true)
                     });
                 }
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -759,7 +762,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                             .set("attrs.last_updated", GoogleTimestamp::from_unix(now, 0))
                     });
                 }
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -783,7 +786,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             for cid in members {
                 resp = resp.add_with("members", |b| b.set("sequential", cid as u32));
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }));
     }
 
@@ -794,9 +797,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let limit = d.with_snapshot(|s| {
                 crate::domain::corp_governance::resolve_corp_member_limit(None, s, corpid).unwrap_or(10)
             });
-            Ok(pb::message("eve.corporation.members.GetLimitResponse")
+            pb::message("eve.corporation.members.GetLimitResponse")
                 .set("member_limit", limit.max(0) as u32)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }));
     }
 
@@ -827,7 +831,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         .set("roles_at_all", build_role_collection(mask))
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }));
     }
 
@@ -865,7 +869,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     b
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }));
     }
 
@@ -915,7 +919,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     }
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }));
     }
 
@@ -952,7 +956,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         .set("known_issuer.sequential", entry.issuer_id as u32)
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }));
     }
 
@@ -966,15 +970,16 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             for cid in npc_corps {
                 resp = resp.add_with("corporations", |b| b.set("sequential", cid));
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }));
     }
 
     router.register_handler("eve.corporation.npc.IsNPCCorporationRequest", Arc::new(move |_ctx, _any, msg| {
         let corpid = extract_id(msg, 1).unwrap_or(0);
-        Ok(pb::message("eve.corporation.npc.IsNPCCorporationResponse")
+        pb::message("eve.corporation.npc.IsNPCCorporationResponse")
             .set("is_npc", corpid > 0 && corpid < 2_000_000)
-            .must_to_any())
+            .to_any()
+            .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
     }));
 
     {
@@ -987,7 +992,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 }
                 Ok(s.corp_governance.get(&corpid).map(|g| (g.logo, g.logo_extra_colors)).unwrap_or(((415, 0, 0, 671), (0, 0))))
             })?;
-            Ok(pb::message("eve.corporation.logo.api.GetResponse")
+            pb::message("eve.corporation.logo.api.GetResponse")
                 .set_with("logo", |mut l| {
                     for (shape, color) in [(s1, c1), (s2, c2), (s3, c3)] {
                         if shape > 0 || color > 0 {
@@ -1000,7 +1005,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     }
                     l
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }));
     }
 
@@ -1028,7 +1034,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             for sys_id in systems {
                 resp = resp.add_with("solar_systems", |b| b.set("sequential", sys_id as u64));
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }));
     }
 
@@ -1057,7 +1063,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         .set("state.flag", pb::enum_name(structure_state_flag_variant(&state)))
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }));
     }
 
@@ -1098,7 +1104,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     b
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }));
     }
 
@@ -1112,9 +1118,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             if !is_admin && caller_corp != Some(vc.corporation_id) {
                 return Err((STATUS_FORBIDDEN, "Cross-corporation vote access denied".into()));
             }
-            Ok(pb::message("eve.corporation.vote.GetResponse")
+            pb::message("eve.corporation.vote.GetResponse")
                 .set("vote.corporation_id.sequential", vc.corporation_id as u32)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }));
     }
 
@@ -1141,7 +1148,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         .set("state.no_data", true)
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }));
     }
 
@@ -1201,7 +1208,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     })
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }));
     }
 
@@ -1219,7 +1226,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         .set("attributes.corporation.sequential", corpid as u32)
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         });
         router.register_handler("eve.corporation.medals.GetRequest", Arc::clone(&medals_fn));
         router.register_handler("eve.corporation.medals.medals.GetRequest", medals_fn);
@@ -1239,7 +1246,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         .set("attributes.status", pb::enum_name("STATUS_PUBLIC"))
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }));
     }
 
@@ -1294,7 +1301,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         .set("type", pb::enum_name(if tx.is_buy { "BUY" } else { "SELL" }))
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }));
     }
 
@@ -1332,7 +1339,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     b.set("standing", build_standing_value(val.clamp(-10.0, 10.0)))
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }));
     }
 
@@ -1385,7 +1392,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     b.set_opt("attributes.office_type.sequential", office_type_id)
                 });
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }));
     }
 }

@@ -13,7 +13,7 @@
 use super::quasar_cosmetics_services::{QuasarCosmeticsState, QuasarCosmeticsStateData};
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter,
-    STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
+    STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
 };
 use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
@@ -398,7 +398,11 @@ pub fn extract_target_char_and_title(
 pub fn encode_draft_id_msg(uuid: &[u8]) -> Vec<u8> {
     pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.Identifier")
         .set("uuid", uuid.to_vec())
-        .must_encode()
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to encode draft Identifier");
+            Vec::new()
+        })
 }
 
 fn build_draft_attributes(record: &SkinrDraftRecord) -> ProtoBuilder {
@@ -421,7 +425,10 @@ fn build_draft_attributes(record: &SkinrDraftRecord) -> ProtoBuilder {
 }
 
 pub fn encode_draft_attributes(record: &SkinrDraftRecord) -> Vec<u8> {
-    build_draft_attributes(record).must_encode()
+    build_draft_attributes(record).encode().unwrap_or_else(|e| {
+        tracing::warn!(draft_id = record.draft_id, error = %e, "failed to encode draft Attributes");
+        Vec::new()
+    })
 }
 
 fn build_set_notice(char_id: u32, title_id: Option<u64>) -> ProtoBuilder {
@@ -434,19 +441,43 @@ fn build_set_notice(char_id: u32, title_id: Option<u64>) -> ProtoBuilder {
 }
 
 pub fn encode_set_notice(char_id: u32, title_id: Option<u64>) -> Vec<u8> {
-    build_set_notice(char_id, title_id).must_encode()
+    build_set_notice(char_id, title_id)
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(character_id = char_id, error = %e, "failed to encode title SetNotice");
+            Vec::new()
+        })
 }
 
 pub fn encode_granted_notice(title_id: u64) -> Vec<u8> {
     pb::message("eve_public.cosmetic.character.title.api.GrantedNotice")
         .set("title.uuid", id_to_uuid_bytes(title_id).to_vec())
-        .must_encode()
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(title_id, error = %e, "failed to encode title GrantedNotice");
+            Vec::new()
+        })
 }
 
 pub fn encode_revoked_notice(title_id: u64) -> Vec<u8> {
     pb::message("eve_public.cosmetic.character.title.api.RevokedNotice")
         .set("title.uuid", id_to_uuid_bytes(title_id).to_vec())
-        .must_encode()
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(title_id, error = %e, "failed to encode title RevokedNotice");
+            Vec::new()
+        })
+}
+
+fn queue_title_notice(char_id: u32, builder: ProtoBuilder, now_unix: u64, label: &str) {
+    match builder.to_any() {
+        Ok(notice) => super::quasar_social_chat::ctx_queue_notice(
+            NoticeScope::Character(char_id),
+            notice,
+            now_unix,
+        ),
+        Err(e) => tracing::warn!(character_id = char_id, notice = label, error = %e, "failed to encode title notice"),
+    }
 }
 
 pub fn get_or_init_titles(char_id: u32, data: &mut QuasarCosmeticsStateData) -> HashSet<u64> {
@@ -509,7 +540,7 @@ pub fn register_draft_and_title_handlers(
                     });
                 }
 
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -559,9 +590,10 @@ pub fn register_draft_and_title_handlers(
                     None => return Err((STATUS_NOT_FOUND, "Draft not found".into())),
                 };
 
-                Ok(pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetResponse")
+                pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetResponse")
                     .set("draft", build_draft_attributes(&record))
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -652,10 +684,11 @@ pub fn register_draft_and_title_handlers(
                 };
                 st.sync_to_db();
 
-                Ok(pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveResponse")
+                pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveResponse")
                     .set("id.uuid", record.uuid.clone())
                     .set("attributes", build_draft_attributes(&record))
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -753,10 +786,11 @@ pub fn register_draft_and_title_handlers(
                 };
                 st.sync_to_db();
 
-                Ok(pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateResponse")
+                pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateResponse")
                     .set("id.uuid", record.uuid.clone())
                     .set("attributes", build_draft_attributes(&record))
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -812,8 +846,9 @@ pub fn register_draft_and_title_handlers(
                 }
                 st.sync_to_db();
 
-                Ok(pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.DeleteResponse")
-                    .must_to_any())
+                pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.DeleteResponse")
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -831,9 +866,10 @@ pub fn register_draft_and_title_handlers(
                     let data = st.data.read().unwrap_or_else(|e| e.into_inner());
                     data.custom_capacity.get(&char_id).copied().unwrap_or(20)
                 };
-                Ok(pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityResponse")
+                pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityResponse")
                     .set("capacity", cap)
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -867,7 +903,7 @@ pub fn register_draft_and_title_handlers(
                     resp = resp.add_with("titles", |b| b.set("uuid", id_to_uuid_bytes(tid).to_vec()));
                 }
 
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -922,7 +958,7 @@ pub fn register_draft_and_title_handlers(
                     None => resp.set("no_title", true),
                 };
 
-                Ok(resp.must_to_any())
+                resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -950,10 +986,11 @@ pub fn register_draft_and_title_handlers(
                     }
                     st.sync_to_db();
 
-                    super::quasar_social_chat::ctx_queue_notice(
-                        NoticeScope::Character(char_id),
-                        build_set_notice(char_id, None).must_to_any(),
+                    queue_title_notice(
+                        char_id,
+                        build_set_notice(char_id, None),
                         ctx.now_unix(),
+                        "SetNotice",
                     );
                 } else {
                     let title_id = opt_id.unwrap();
@@ -977,14 +1014,17 @@ pub fn register_draft_and_title_handlers(
                         }
                     });
 
-                    super::quasar_social_chat::ctx_queue_notice(
-                        NoticeScope::Character(char_id),
-                        build_set_notice(char_id, Some(title_id)).must_to_any(),
+                    queue_title_notice(
+                        char_id,
+                        build_set_notice(char_id, Some(title_id)),
                         ctx.now_unix(),
+                        "SetNotice",
                     );
                 }
 
-                Ok(pb::message("eve_public.cosmetic.character.title.api.EquipResponse").must_to_any())
+                pb::message("eve_public.cosmetic.character.title.api.EquipResponse")
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -1011,14 +1051,16 @@ pub fn register_draft_and_title_handlers(
                 });
 
                 // Publish SetNotice with no_title = true
-                super::quasar_social_chat::ctx_queue_notice(
-                    NoticeScope::Character(char_id),
-                    build_set_notice(char_id, None).must_to_any(),
+                queue_title_notice(
+                    char_id,
+                    build_set_notice(char_id, None),
                     ctx.now_unix(),
+                    "SetNotice",
                 );
 
-                Ok(pb::message("eve_public.cosmetic.character.title.api.UnequipResponse")
-                    .must_to_any())
+                pb::message("eve_public.cosmetic.character.title.api.UnequipResponse")
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
@@ -1037,12 +1079,12 @@ pub fn register_draft_and_title_handlers(
             }
             st.sync_to_db();
 
-            super::quasar_social_chat::ctx_queue_notice(
-                NoticeScope::Character(cid),
+            queue_title_notice(
+                cid,
                 pb::message("eve_public.cosmetic.character.title.api.GrantedNotice")
-                    .set("title.uuid", id_to_uuid_bytes(tid).to_vec())
-                    .must_to_any(),
+                    .set("title.uuid", id_to_uuid_bytes(tid).to_vec()),
                 ctx.now_unix(),
+                "GrantedNotice",
             );
 
             let rsp_pkg = if any.normalized_type_name().starts_with("eve.") {
@@ -1051,7 +1093,9 @@ pub fn register_draft_and_title_handlers(
                 "eve_public.cosmetic.character.title.api.admin.GrantResponse"
             };
 
-            Ok(pb::message(rsp_pkg).must_to_any())
+            pb::message(rsp_pkg)
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         });
         router.register_handler(
             "eve_public.cosmetic.character.title.api.admin.GrantRequest",
@@ -1084,19 +1128,20 @@ pub fn register_draft_and_title_handlers(
             };
             st.sync_to_db();
 
-            super::quasar_social_chat::ctx_queue_notice(
-                NoticeScope::Character(cid),
+            queue_title_notice(
+                cid,
                 pb::message("eve_public.cosmetic.character.title.api.RevokedNotice")
-                    .set("title.uuid", id_to_uuid_bytes(tid).to_vec())
-                    .must_to_any(),
+                    .set("title.uuid", id_to_uuid_bytes(tid).to_vec()),
                 ctx.now_unix(),
+                "RevokedNotice",
             );
 
             if was_equipped {
-                super::quasar_social_chat::ctx_queue_notice(
-                    NoticeScope::Character(cid),
-                    build_set_notice(cid, None).must_to_any(),
+                queue_title_notice(
+                    cid,
+                    build_set_notice(cid, None),
                     ctx.now_unix(),
+                    "SetNotice",
                 );
             }
 
@@ -1106,7 +1151,9 @@ pub fn register_draft_and_title_handlers(
                 "eve_public.cosmetic.character.title.api.admin.RevokeResponse"
             };
 
-            Ok(pb::message(rsp_pkg).must_to_any())
+            pb::message(rsp_pkg)
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         });
         router.register_handler(
             "eve_public.cosmetic.character.title.api.admin.RevokeRequest",

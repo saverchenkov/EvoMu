@@ -28,7 +28,7 @@ use super::quasar_cosmetics_skinr::{SkinrCosmeticsState, ThirdPartySkinLicense};
 use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
-    STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED, STATUS_UNAUTHORIZED,
+    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED, STATUS_UNAUTHORIZED,
 };
 use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldRepository};
@@ -486,10 +486,13 @@ fn queue_transaction_notice(cid: u32, tx_uuid: &[u8; 16], succeeded: bool, now_u
     } else {
         "eve_public.cosmetic.market.transaction.api.TransactionFailedNotice"
     };
-    let notice = pb::message(type_name)
+    match pb::message(type_name)
         .set("transaction.uuid", tx_uuid.to_vec())
-        .must_to_any();
-    ctx_queue_notice(NoticeScope::Character(cid), notice, now_unix);
+        .to_any()
+    {
+        Ok(notice) => ctx_queue_notice(NoticeScope::Character(cid), notice, now_unix),
+        Err(e) => tracing::warn!(character_id = cid, error = %e, "failed to encode cosmetic market transaction notice"),
+    }
 }
 
 fn next_uuid(data: &mut CosmeticsMarketData, prefix: &[u8; 8]) -> [u8; 16] {
@@ -541,7 +544,7 @@ fn market_get_broker_fees(_st: &CosmeticsMarketState, ctx: &AuthoritativeContext
                 fpd.set("duration", pb_dur(secs)).set("broker_fee", bf)
             });
     }
-    Ok(out.must_to_any())
+    out.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn paragon_hub_skill_reductions(st: &CosmeticsMarketState, cid: u32) -> (u64, usize) {
@@ -567,10 +570,11 @@ fn paragon_hub_tax_pct(st: &CosmeticsMarketState, cid: u32, target: &ListingTarg
 fn market_get_tax_rate(st: &CosmeticsMarketState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
     let cid = require_char(ctx)?;
     let rate_units = paragon_hub_tax_pct(st, cid, &parse_listing_target(sub(msg, 1))) as i64;
-    Ok(pb::message("eve_public.cosmetic.market.api.GetTaxRateResponse")
+    pb::message("eve_public.cosmetic.market.api.GetTaxRateResponse")
         .set("tax_rate.units", rate_units)
         .set("tax_rate.nanos", 0i32)
-        .must_to_any())
+        .to_any()
+        .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 // V24 `skin_listing_buyer_fee.pyj`: EverMarks (Paragon corp 1000419 LP) buyer fee per SKIN tier (1,000 public / 2,500 branded).
@@ -586,9 +590,10 @@ fn market_get_buyer_fee(st: &CosmeticsMarketState, ctx: &AuthoritativeContext, m
     };
     let tier = u64::from(tier_u32);
     let lp_amount = if target.is_branded() { tier * 2_500 } else { tier * 1_000 };
-    Ok(pb::message("eve_public.cosmetic.market.api.GetBuyerFeeResponse")
+    pb::message("eve_public.cosmetic.market.api.GetBuyerFeeResponse")
         .set("buyer_fee", build_buyer_fee(lp_amount))
-        .must_to_any())
+        .to_any()
+        .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn market_get_buyer_fees_definition(_st: &CosmeticsMarketState, ctx: &AuthoritativeContext, _msg: &DynamicQuasarMessage) -> HandlerResult {
@@ -602,7 +607,7 @@ fn market_get_buyer_fees_definition(_st: &CosmeticsMarketState, ctx: &Authoritat
                 .set("branded_fee", build_buyer_fee(level * 2_500))
         });
     }
-    Ok(out.must_to_any())
+    out.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn component_get_all(
@@ -626,7 +631,7 @@ fn component_get_all(
     for rec in &listings {
         out = out.add("listings", build_component_entry(rec));
     }
-    Ok(out.must_to_any())
+    out.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn component_initiate_purchase(
@@ -755,10 +760,11 @@ fn component_initiate_purchase(
     }
     record_tx(st, tx_uuid, now, succeeded, Some(cid), None, CosmeticTransactionDetails::PurchasingComponent);
     queue_transaction_notice(cid, &tx_uuid, succeeded, now);
-    Ok(pb::message("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingResponse")
+    pb::message("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingResponse")
         .set("transaction.uuid", tx_uuid.to_vec())
         .set("immediately_activate", immediately_activate)
-        .must_to_any())
+        .to_any()
+        .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn skin_visible_to(
@@ -815,7 +821,7 @@ fn skin_get_all(
     for rec in &listings {
         out = out.add("listings", build_skin_entry(rec));
     }
-    Ok(out.must_to_any())
+    out.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn skin_get_all_owned(
@@ -837,7 +843,7 @@ fn skin_get_all_owned(
     for rec in &listings {
         out = out.add("listings", build_skin_entry(rec));
     }
-    Ok(out.must_to_any())
+    out.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn skin_get(
@@ -878,9 +884,10 @@ fn skin_get(
             "Caller is not eligible for this targeted SKIN listing".to_string(),
         ));
     }
-    Ok(pb::message("eve_public.cosmetic.market.skin.listing.api.GetResponse")
+    pb::message("eve_public.cosmetic.market.skin.listing.api.GetResponse")
         .set("listing", build_skin_entry(&rec))
-        .must_to_any())
+        .to_any()
+        .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn extract_skin_hex(lic_msg: Option<&DynamicQuasarMessage>, cid: u32) -> Result<String, (u32, String)> {
@@ -1040,21 +1047,19 @@ fn skin_initiate_create(
         }
         record_tx(st, tx_uuid, now, false, None, Some(cid), CosmeticTransactionDetails::CreatingSkinListing);
         queue_transaction_notice(cid, &tx_uuid, false, now);
-        return Ok(
-            pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingResponse")
-                .set("transaction.uuid", tx_uuid.to_vec())
-                .must_to_any(),
-        );
+        return pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingResponse")
+            .set("transaction.uuid", tx_uuid.to_vec())
+            .to_any()
+            .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()));
     };
     if broker_fee.0 > 0 { st.emit_account_change(cid as i64, new_bal); }
     st.skinr.save();
     record_tx(st, tx_uuid, now, true, None, Some(cid), CosmeticTransactionDetails::CreatingSkinListing);
     queue_transaction_notice(cid, &tx_uuid, true, now);
-    Ok(
-        pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingResponse")
-            .set("transaction.uuid", tx_uuid.to_vec())
-            .must_to_any(),
-    )
+    pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingResponse")
+        .set("transaction.uuid", tx_uuid.to_vec())
+        .to_any()
+        .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn skin_cancel_listing(
@@ -1092,7 +1097,9 @@ fn skin_cancel_listing(
         st.skinr.save();
         st.save();
     }
-    Ok(pb::message("eve_public.cosmetic.market.skin.listing.api.CancelListingResponse").must_to_any())
+    pb::message("eve_public.cosmetic.market.skin.listing.api.CancelListingResponse")
+        .to_any()
+        .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn skin_initiate_purchase(
@@ -1390,11 +1397,10 @@ fn skin_initiate_purchase(
         CosmeticTransactionDetails::PurchasingSkin,
     );
     queue_transaction_notice(cid, &tx_uuid, settled, now);
-    Ok(
-        pb::message("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingResponse")
-            .set("transaction.uuid", tx_uuid.to_vec())
-            .must_to_any(),
-    )
+    pb::message("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingResponse")
+        .set("transaction.uuid", tx_uuid.to_vec())
+        .to_any()
+        .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn skin_admin_set_expiration_with_resp(
@@ -1420,7 +1426,9 @@ fn skin_admin_set_expiration_with_resp(
         rec.expires_unix = expires_unix;
     }
     st.save();
-    Ok(pb::message(resp_type).must_to_any())
+    pb::message(resp_type)
+        .to_any()
+        .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
 fn skin_admin_set_expiration(st: &CosmeticsMarketState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {

@@ -18,7 +18,8 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
-    NoticeScope, PublicGatewayRouter, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_UNAUTHORIZED,
+    NoticeScope, PublicGatewayRouter, STATUS_FORBIDDEN, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
+    STATUS_UNAUTHORIZED,
 };
 use eve_db::{MarketOrderRecord, WorldRepository};
 use eve_proto::pb;
@@ -40,7 +41,11 @@ fn build_isk_currency(isk_cents: i64) -> Vec<u8> {
     pb::message("eve.isk.Currency")
         .set("units", clamped / 100)
         .set("nanos", ((clamped % 100) * 10_000_000) as i32)
-        .must_encode()
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(isk_cents, error = %e, "failed to encode eve.isk.Currency");
+            Vec::new()
+        })
 }
 
 fn encode_order_attributes(
@@ -87,7 +92,11 @@ fn encode_order_attributes(
         .when(is_buy && include_private_details, |b| {
             b.set_raw_message("escrow", build_isk_currency(order.escrow.0))
         })
-        .must_encode()
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(order_id = order.order_id, error = %e, "failed to encode order Attributes");
+            Vec::new()
+        })
 }
 
 fn populate_sell_order_entry(
@@ -190,10 +199,10 @@ pub fn register_market_handlers(
                         }
                     }
                 }
-                msg.must_to_any()
+                msg.to_any()
             });
 
-            Ok(out)
+            out.map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -224,10 +233,10 @@ pub fn register_market_handlers(
                         });
                     }
                 }
-                msg.must_to_any()
+                msg.to_any()
             });
 
-            Ok(out)
+            out.map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -259,10 +268,10 @@ pub fn register_market_handlers(
                         });
                     }
                 }
-                msg.must_to_any()
+                msg.to_any()
             });
 
-            Ok(out)
+            out.map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -294,10 +303,10 @@ pub fn register_market_handlers(
                         });
                     }
                 }
-                msg.must_to_any()
+                msg.to_any()
             });
 
-            Ok(out)
+            out.map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -311,7 +320,7 @@ pub fn register_market_handlers(
             let out = db_clone.with_snapshot(|snap| {
                 let mut msg = pb::message("eve.market.orders.GetOpenInStationResponse");
                 if !can_caller_view_market_location(snap, caller_cid, station_id) {
-                    return msg.must_to_any();
+                    return msg.to_any();
                 }
                 for o in snap.market_orders.values() {
                     if o.station_id == station_id && o.vol_remaining > 0 {
@@ -320,9 +329,9 @@ pub fn register_market_handlers(
                         });
                     }
                 }
-                msg.must_to_any()
+                msg.to_any()
             });
-            Ok(out)
+            out.map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -356,7 +365,7 @@ pub fn register_market_handlers(
                         });
                     }
                 }
-                Ok(msg.must_to_any())
+                msg.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             })
         }),
     );
@@ -384,7 +393,7 @@ pub fn register_market_handlers(
             }
             let target_cid = effective_cid;
 
-            let out = db_clone.with_snapshot(|snap| {
+            db_clone.with_snapshot(|snap| {
                 let mut msg = pb::message("eve.market.orders.GetOpenForCharacterResponse");
                 for o in snap.market_orders.values() {
                     if o.owner_id == target_cid && o.vol_remaining > 0 {
@@ -393,9 +402,9 @@ pub fn register_market_handlers(
                         });
                     }
                 }
-                msg.must_to_any()
-            });
-            Ok(out)
+                msg.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
+            })
         }),
     );
 
@@ -422,7 +431,7 @@ pub fn register_market_handlers(
             }
             let target_cid = effective_cid;
 
-            let out = db_clone.with_snapshot(|snap| {
+            db_clone.with_snapshot(|snap| {
                 let mut msg = pb::message("eve.market.orders.GetHistoryForCharacterResponse");
                 for o in snap.market_orders.values() {
                     if o.owner_id == target_cid {
@@ -431,9 +440,9 @@ pub fn register_market_handlers(
                         });
                     }
                 }
-                msg.must_to_any()
-            });
-            Ok(out)
+                msg.to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
+            })
         }),
     );
 
@@ -453,7 +462,7 @@ pub fn register_market_handlers(
                         });
                     }
                 }
-                Ok(msg.must_to_any())
+                msg.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             })
         }),
     );
@@ -474,7 +483,7 @@ pub fn register_market_handlers(
                         });
                     }
                 }
-                Ok(msg.must_to_any())
+                msg.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             })
         }),
     );
@@ -501,7 +510,7 @@ pub fn register_market_handlers(
             for tid in types {
                 msg = msg.add_with("types", |t| t.set("sequential", tid as u64));
             }
-            Ok(msg.must_to_any())
+            msg.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -532,14 +541,15 @@ pub fn register_market_handlers(
                 }
             });
 
-            Ok(pb::message("eve.market.orders.GetPriceHistoryResponse")
+            pb::message("eve.market.orders.GetPriceHistoryResponse")
                 .add_with("entries", |entry| {
                     entry
                         .set("date.seconds", 1_760_000_000i64)
                         .set("order_count", count as u32)
                         .set_with("average", |c| set_isk_currency(c, avg_cents))
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -554,14 +564,13 @@ pub fn register_market_handlers(
 
             let avg_cents = avg_price_cents_in_region(&db_clone, caller_cid, region_id, item_type);
 
-            Ok(
-                pb::message("eve.market.price.history.GetForRegionAndTypeResponse")
-                    .add_with("day_statistics", |stat| {
-                        stat.set("date.seconds", 1_760_000_000i64)
-                            .set_with("average", |c| set_isk_currency(c, avg_cents))
-                    })
-                    .must_to_any(),
-            )
+            pb::message("eve.market.price.history.GetForRegionAndTypeResponse")
+                .add_with("day_statistics", |stat| {
+                    stat.set("date.seconds", 1_760_000_000i64)
+                        .set_with("average", |c| set_isk_currency(c, avg_cents))
+                })
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -576,14 +585,13 @@ pub fn register_market_handlers(
 
             let avg_cents = avg_price_cents_in_region(&db_clone, caller_cid, region_id, item_type);
 
-            Ok(
-                pb::message("eve.market.region.GetPriceHistoryForTypeResponse")
-                    .add_with("day_statistics", |stat| {
-                        stat.set("date.seconds", 1_760_000_000i64)
-                            .set_with("average", |c| set_isk_currency(c, avg_cents))
-                    })
-                    .must_to_any(),
-            )
+            pb::message("eve.market.region.GetPriceHistoryForTypeResponse")
+                .add_with("day_statistics", |stat| {
+                    stat.set("date.seconds", 1_760_000_000i64)
+                        .set_with("average", |c| set_isk_currency(c, avg_cents))
+                })
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -611,7 +619,7 @@ pub fn register_market_handlers(
                 });
             }
 
-            Ok(msg.must_to_any())
+            msg.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -641,11 +649,12 @@ pub fn register_market_handlers(
                         ),
                     ));
                 }
-                Ok(pb::message("eve.market.character.sellorder.GetResponse")
+                pb::message("eve.market.character.sellorder.GetResponse")
                     .set("order.character.sequential", order.owner_id as u32)
                     .set("order.item.item_type.sequential", order.type_id as u64)
                     .set("order.item.quantity", order.vol_remaining as u32)
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             })
         }),
     );
@@ -662,11 +671,12 @@ pub fn register_market_handlers(
                     .get(&order_id)
                     .ok_or((STATUS_NOT_FOUND, "Corp order not found".to_string()))?;
                 authorize_corp_financial_access(ctx, snap, ord.owner_id)?;
-                Ok(pb::message("eve.market.corporation.sellorder.GetResponse")
+                pb::message("eve.market.corporation.sellorder.GetResponse")
                     .set("order.corporation.sequential", ord.owner_id as u32)
                     .set("order.item.item_type.sequential", ord.type_id as u64)
                     .set("order.item.quantity", ord.vol_remaining as u32)
-                    .must_to_any())
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
             })
         }),
     );
@@ -787,10 +797,8 @@ pub fn publish_market_new_entry_notice(
     solar_system_id: u32,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let payload = pb::message("eve_public.market.entry.NewEntryNotice").must_to_any();
-    let (_, delivered) =
-        gateway.publish_notice(NoticeScope::SolarSystem(solar_system_id), payload, now_unix)?;
-    Ok(delivered)
+    let notice = pb::message("eve_public.market.entry.NewEntryNotice");
+    gateway.publish_pb_notice_checked(NoticeScope::SolarSystem(solar_system_id), notice, now_unix)
 }
 
 #[cfg(test)]

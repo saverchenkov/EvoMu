@@ -13,7 +13,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::quasar_gateway::{PublicGatewayRouter, STATUS_NOT_FOUND};
+use crate::quasar_gateway::{PublicGatewayRouter, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND};
 use eve_db::WorldRepository;
 use eve_proto::pb;
 use eve_proto::quasar::{
@@ -83,10 +83,11 @@ pub fn register_inventory_asset_handlers(
                 .get(&cat_id)
                 .ok_or((STATUS_NOT_FOUND, "Category not found".to_string()))?;
 
-            Ok(pb::message("eve.inventory.category.GetResponse")
+            pb::message("eve.inventory.category.GetResponse")
                 .set("attributes.name", &cat.name)
                 .set("attributes.published", cat.published)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -99,7 +100,7 @@ pub fn register_inventory_asset_handlers(
             for cid in sde_clone.categories.keys() {
                 resp = resp.add_with("categories", |m| m.set("sequential", *cid));
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -114,11 +115,12 @@ pub fn register_inventory_asset_handlers(
                 .get(&gid)
                 .ok_or((STATUS_NOT_FOUND, "Group not found".to_string()))?;
 
-            Ok(pb::message("eve.inventory.group.GetResponse")
+            pb::message("eve.inventory.group.GetResponse")
                 .set("attributes.name", &grp.name)
                 .set("attributes.category.sequential", grp.category_id)
                 .set("attributes.published", grp.published)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -131,7 +133,7 @@ pub fn register_inventory_asset_handlers(
             for gid in sde_clone.groups.keys().take(500) {
                 resp = resp.add_with("groups", |m| m.set("sequential", *gid));
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -147,7 +149,7 @@ pub fn register_inventory_asset_handlers(
                     resp = resp.add_with("groups", |m| m.set("sequential", *gid));
                 }
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -160,7 +162,7 @@ pub fn register_inventory_asset_handlers(
             for mgid in sde_clone.market_groups.keys() {
                 resp = resp.add_with("groups", |m| m.set("sequential", *mgid));
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -182,7 +184,7 @@ pub fn register_inventory_asset_handlers(
                 Some(pid) => resp.set("group.parent_group.sequential", pid),
                 None => resp.set("group.no_parent_group", true),
             };
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -197,11 +199,12 @@ pub fn register_inventory_asset_handlers(
                 .get(&tid)
                 .ok_or((STATUS_NOT_FOUND, "Item type not found".to_string()))?;
 
-            Ok(pb::message("eve.inventory.genericitemtype.GetResponse")
+            pb::message("eve.inventory.genericitemtype.GetResponse")
                 .set("type_info.name", &t.name)
                 .set("type_info.description", &t.description)
                 .set("type_info.group.sequential", t.group_id)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -214,7 +217,7 @@ pub fn register_inventory_asset_handlers(
             for tid in sde_clone.types.keys().take(500) {
                 resp = resp.add_with("types", |m| m.set("sequential", *tid as u64));
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -230,7 +233,7 @@ pub fn register_inventory_asset_handlers(
                     resp = resp.add_with("types", |m| m.set("sequential", *tid as u64));
                 }
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -254,7 +257,7 @@ pub fn register_inventory_asset_handlers(
                     });
                 }
             }
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -272,18 +275,17 @@ pub fn register_inventory_asset_handlers(
                     .unwrap_or(500_000)
             });
 
-            Ok(
-                pb::message("eve.inventory.genericitemtype.TypeValuationResponse")
-                    .set("type_value.units", cents.max(0) / 100)
-                    .set(
-                        "valuation_timestamp",
-                        GoogleTimestamp {
-                            seconds: 1_760_000_000,
-                            nanos: 0,
-                        },
-                    )
-                    .must_to_any(),
-            )
+            pb::message("eve.inventory.genericitemtype.TypeValuationResponse")
+                .set("type_value.units", cents.max(0) / 100)
+                .set(
+                    "valuation_timestamp",
+                    GoogleTimestamp {
+                        seconds: 1_760_000_000,
+                        nanos: 0,
+                    },
+                )
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -317,7 +319,7 @@ pub fn register_inventory_asset_handlers(
                 }
             }
 
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -333,9 +335,10 @@ pub fn register_inventory_asset_handlers(
                 .map(|t| t.name.clone())
                 .unwrap_or_else(|| format!("Item #{id}"));
 
-            Ok(pb::message("eve.inventory.genericname.GetNameByIDResponse")
+            pb::message("eve.inventory.genericname.GetNameByIDResponse")
                 .set("name", name)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -368,7 +371,7 @@ pub fn register_inventory_asset_handlers(
                 }
             }
 
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -387,13 +390,12 @@ pub fn register_inventory_asset_handlers(
             }
             let op_id = extract_u64_from_field(dyn_msg, 1);
             let loc_id = caller_location_id(ctx, &db_hold);
-            Ok(
-                pb::message("eve.inventory.assetholding.operation.api.HoldItemsResponse")
-                    .set("container.sequential", 999_001u64)
-                    .add_with("items", |m| m.set("sequential", op_id.max(1)))
-                    .set("source_location_used.item.sequential", loc_id)
-                    .must_to_any(),
-            )
+            pb::message("eve.inventory.assetholding.operation.api.HoldItemsResponse")
+                .set("container.sequential", 999_001u64)
+                .add_with("items", |m| m.set("sequential", op_id.max(1)))
+                .set("source_location_used.item.sequential", loc_id)
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -412,13 +414,12 @@ pub fn register_inventory_asset_handlers(
             }
             let op_id = extract_u64_from_field(dyn_msg, 1);
             let loc_id = caller_location_id(ctx, &db_hold_type);
-            Ok(
-                pb::message("eve.inventory.assetholding.operation.api.HoldItemsOfTypeResponse")
-                    .set("container.sequential", 999_002u64)
-                    .add_with("items", |m| m.set("sequential", op_id.max(1)))
-                    .set("source_location_used.item.sequential", loc_id)
-                    .must_to_any(),
-            )
+            pb::message("eve.inventory.assetholding.operation.api.HoldItemsOfTypeResponse")
+                .set("container.sequential", 999_002u64)
+                .add_with("items", |m| m.set("sequential", op_id.max(1)))
+                .set("source_location_used.item.sequential", loc_id)
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -437,12 +438,11 @@ pub fn register_inventory_asset_handlers(
             }
             let op_id = extract_u64_from_field(dyn_msg, 1);
             let loc_id = caller_location_id(ctx, &db_spawn);
-            Ok(
-                pb::message("eve.inventory.assetholding.operation.api.SpawnItemsOfTypeResponse")
-                    .add_with("items", |m| m.set("sequential", op_id.max(1)))
-                    .set("location.item.sequential", loc_id)
-                    .must_to_any(),
-            )
+            pb::message("eve.inventory.assetholding.operation.api.SpawnItemsOfTypeResponse")
+                .add_with("items", |m| m.set("sequential", op_id.max(1)))
+                .set("location.item.sequential", loc_id)
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -492,7 +492,7 @@ pub fn register_inventory_asset_handlers(
                 });
             }
 
-            Ok(resp.must_to_any())
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 

@@ -9,7 +9,7 @@
 
 use crate::quasar_gateway::{
     require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
-    STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_UNAUTHORIZED,
+    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
 use eve_proto::pb::{self, ProtoBuilder};
@@ -214,9 +214,10 @@ pub fn register_handlers(
         "eve.ship.api.CanJumpStarterSpaceShipCasterRequest",
         Arc::new(move |ctx, _any, msg| {
             let can_jump = can_jump_shipcaster(ctx, msg, &db_sc1, &sde_sc1, false)?;
-            Ok(pb::message("eve.ship.api.CanJumpStarterSpaceShipCasterResponse")
+            pb::message("eve.ship.api.CanJumpStarterSpaceShipCasterResponse")
                 .set("can_jump", can_jump)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -227,9 +228,10 @@ pub fn register_handlers(
         "eve.starterspace.api.CanJumpShipCasterRequest",
         Arc::new(move |ctx, _any, msg| {
             let can_jump = can_jump_shipcaster(ctx, msg, &db_ss1, &sde_ss1, true)?;
-            Ok(pb::message("eve.starterspace.api.CanJumpShipCasterResponse")
+            pb::message("eve.starterspace.api.CanJumpShipCasterResponse")
                 .set("can_jump", can_jump)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -264,7 +266,7 @@ pub fn register_handlers(
                     Some(st.clone())
                 })
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Structure not found".to_string()))?;
-            Ok(pb::message("eve.structure.api.GetResponse")
+            pb::message("eve.structure.api.GetResponse")
                 .set_with("attributes", |attrs| {
                     attrs
                         .set("type.sequential", u64::from(rec.type_id))
@@ -272,7 +274,8 @@ pub fn register_handlers(
                         .set("corporation_id.sequential", rec.owner_corp_id as u32)
                         .set("name", &rec.name)
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -313,19 +316,21 @@ pub fn register_handlers(
                         .filter(|&(_, exp)| exp > now)
                 })
                 .ok_or_else(|| (STATUS_NOT_FOUND, "No active stargate lock".to_string()))?;
-            Ok(pb::message("eve.stargate.lock.api.GetResponse")
+            pb::message("eve.stargate.lock.api.GetResponse")
                 .set("gate.sequential", gate_id as u64)
                 .set("expiry", ts_unix(expiry_unix))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
     router.register_handler(
         "eve.stargate.lock.api.GetRestrictedSystemsRequest",
         Arc::new(move |_ctx, _any, _msg| {
-            Ok(pb::message("eve.stargate.lock.api.GetRestrictedSystemsResponse")
+            pb::message("eve.stargate.lock.api.GetRestrictedSystemsResponse")
                 .add_with("solarsystems", |s| s.set("sequential", u64::from(ZARZAKH_SOLAR_SYSTEM_ID)))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -342,9 +347,10 @@ pub fn register_handlers(
             let sys_id = extract_required_u32(msg, 2, "solarsystem")?;
             let gate_id = extract_required_u64(msg, 3, "gate")?;
             if sys_id != ZARZAKH_SOLAR_SYSTEM_ID {
-                return Ok(pb::message("eve.stargate.lock.api.ValidateJumpResponse")
+                return pb::message("eve.stargate.lock.api.ValidateJumpResponse")
                     .set("allowed", true)
-                    .must_to_any());
+                    .to_any()
+                    .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()));
             }
             let now = ctx.now_unix();
             let active_lock = db_gl3.with_snapshot(|snap| {
@@ -355,17 +361,19 @@ pub fn register_handlers(
             });
             if let Some((locked_gate_id, expiry_unix)) = active_lock {
                 if locked_gate_id as u64 != gate_id {
-                    return Ok(pb::message("eve.stargate.lock.api.ValidateJumpResponse")
+                    return pb::message("eve.stargate.lock.api.ValidateJumpResponse")
                         .set_with("gate_lock", |lk| {
                             lk.set("gate.sequential", locked_gate_id as u64)
                                 .set("expiry", ts_unix(expiry_unix))
                         })
-                        .must_to_any());
+                        .to_any()
+                        .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()));
                 }
             }
-            Ok(pb::message("eve.stargate.lock.api.ValidateJumpResponse")
+            pb::message("eve.stargate.lock.api.ValidateJumpResponse")
                 .set("allowed", true)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -427,7 +435,7 @@ pub fn register_handlers(
             } else {
                 b = b.set("unclaimed", true);
             }
-            Ok(b.must_to_any())
+            b.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -435,7 +443,7 @@ pub fn register_handlers(
         "eve.sovereignty.api.GetVersionManifestRequest",
         Arc::new(move |_ctx, _any, _msg| {
             let semver = || pb::message("eve.semanticversion.Specification").set("major", 1u32).set("minor", 0u32).set("patch", 0u32);
-            Ok(pb::message("eve.sovereignty.api.GetVersionManifestResponse")
+            pb::message("eve.sovereignty.api.GetVersionManifestResponse")
                 .set_with("version_manifest", |m| {
                     m.set("planet_resources", semver())
                         .set("mercenary_den_activities", semver())
@@ -444,7 +452,8 @@ pub fn register_handlers(
                         .set("upgrades", semver())
                         .set("skyhooks", semver())
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -489,7 +498,7 @@ pub fn register_handlers(
                         })
                 });
             }
-            Ok(b.must_to_any())
+            b.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -516,9 +525,10 @@ pub fn register_handlers(
                     })
                     .unwrap_or(10)
             });
-            Ok(pb::message("eve.sovereignty.activitydefensemodifier.api.GetLevelResponse")
+            pb::message("eve.sovereignty.activitydefensemodifier.api.GetLevelResponse")
                 .set("level", level)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -562,7 +572,7 @@ pub fn register_handlers(
                         })
                 });
             }
-            Ok(b.must_to_any())
+            b.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -575,9 +585,10 @@ pub fn register_handlers(
             let ag = sde_ag_get
                 .agent(agent_id)
                 .ok_or_else(|| (STATUS_NOT_FOUND, format!("Agent {agent_id} not found")))?;
-            Ok(pb::message("eve.agent.GetResponse")
+            pb::message("eve.agent.GetResponse")
                 .set("agent.name", &ag.name)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -623,7 +634,7 @@ pub fn register_handlers(
             for ag in matched.into_iter().take(100) {
                 b = b.add_with("agents", |a| a.set("sequential", ag.agent_id as u32));
             }
-            Ok(b.must_to_any())
+            b.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -639,7 +650,7 @@ pub fn register_handlers(
                 .find(|r| r.acl_id == acl_id)
                 .ok_or_else(|| (STATUS_NOT_FOUND, format!("ACL {acl_id} not found")))?;
 
-            Ok(pb::message("eve.acl.api.GetResponse")
+            pb::message("eve.acl.api.GetResponse")
                 .set_with("acl", |attrs| {
                     attrs
                         .set("name", &record.name)
@@ -664,7 +675,8 @@ pub fn register_handlers(
                         })
                         .set("version.version", record.version)
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -686,9 +698,10 @@ pub fn register_handlers(
                 .iter()
                 .any(|(c, ctrl)| *c == char_id && (*ctrl == 3 || *ctrl == 4));
 
-            Ok(pb::message("eve.acl.api.CanManageResponse")
+            pb::message("eve.acl.api.CanManageResponse")
                 .set("can_manage", can_manage)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -709,7 +722,7 @@ pub fn register_handlers(
                     b = b.add_with("acls", |a| a.set("sequential", record.acl_id));
                 }
             }
-            Ok(b.must_to_any())
+            b.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -718,12 +731,13 @@ pub fn register_handlers(
         "eve.factionwarfare.stats.corporation.GetRequest",
         Arc::new(move |_ctx, _any, msg| {
             let _corp_id = extract_required_u64(msg, 1, "corporation")?;
-            Ok(pb::message("eve.factionwarfare.stats.corporation.GetResponse")
+            pb::message("eve.factionwarfare.stats.corporation.GetResponse")
                 .set("faction_id.sequential", 500_001u64)
                 .set("enlisting_datetime", ts_unix(1_700_000_000))
                 .set("pilots_count", 42u32)
                 .set("enlisted", true)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -731,7 +745,7 @@ pub fn register_handlers(
     router.register_handler(
         "eve.factionwarfare.stats.factions.GetRequest",
         Arc::new(move |_ctx, _any, _msg| {
-            Ok(pb::message("eve.factionwarfare.stats.factions.GetResponse")
+            pb::message("eve.factionwarfare.stats.factions.GetResponse")
                 .add_with("faction_stats", |fstat| {
                     fstat
                         .set("faction_id.sequential", 500_001u64)
@@ -739,7 +753,8 @@ pub fn register_handlers(
                         .set("systems_controlled", 24u32)
                         .set_with("kills", |k| k.set("yesterday", 12u64).set("last_week", 85u64).set("total", 8500u64))
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -748,10 +763,11 @@ pub fn register_handlers(
         "eve.fulfillment.offer.api.GetRequest",
         Arc::new(move |_ctx, _any, msg| {
             let offer_id = extract_required_u64(msg, 1, "offer")?;
-            Ok(pb::message("eve.fulfillment.offer.api.GetResponse")
+            pb::message("eve.fulfillment.offer.api.GetResponse")
                 .set("offer_attributes.name", "Standard PLEX Offer")
                 .add_with("products", |p| p.set("product.sequential", offer_id as u32))
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -761,12 +777,13 @@ pub fn register_handlers(
         Arc::new(move |ctx, _any, msg| {
             let user_id = extract_u64_checked(msg, 1)?.unwrap_or_else(|| ctx.effective_user_id().unwrap_or(1001) as u64);
             let offer_id = extract_u64_checked(msg, 2)?.unwrap_or(501);
-            Ok(pb::message("eve.fulfillment.RewardDeliveryResponse")
+            pb::message("eve.fulfillment.RewardDeliveryResponse")
                 .set("user.sequential", user_id as i32)
                 .set("offer.sequential", offer_id as u32)
                 .set("sale.sequential", 777_001u32)
                 .set("reward_result", 0i32)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -790,9 +807,10 @@ pub fn register_handlers(
             let completed_count = db_mission.with_snapshot(|snap| {
                 snap.characters.get(&cid).map(|_| 15u32).unwrap_or(0)
             });
-            Ok(pb::message("eve.mission.api.GetCompletedCountResponse")
+            pb::message("eve.mission.api.GetCompletedCountResponse")
                 .set("lifetime_missions_completed", completed_count)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -801,7 +819,7 @@ pub fn register_handlers(
         "eve.monolith.GetClusterInfoRequest",
         Arc::new(move |_ctx, _any, _msg| {
             let ver = eve_machonet::VersionExchange::default();
-            Ok(pb::message("eve.monolith.GetClusterInfoResponse")
+            pb::message("eve.monolith.GetClusterInfoResponse")
                 .set_with("cluster", |c| {
                     c.set("cluster_name", "macho.tranquility")
                         .set(
@@ -821,7 +839,8 @@ pub fn register_handlers(
                         .set("service_mask", 0x7FFFu64)
                         .set("cluster_group", 1i32)
                 })
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -850,7 +869,7 @@ pub fn register_handlers(
             } else {
                 b = b.set("in_space", true);
             }
-            Ok(b.must_to_any())
+            b.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -858,9 +877,10 @@ pub fn register_handlers(
     router.register_handler(
         "eve.monolith.character.logonstatus.GetRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(pb::message("eve.monolith.character.logonstatus.GetResponse")
+            pb::message("eve.monolith.character.logonstatus.GetResponse")
                 .set("is_online", true)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -872,7 +892,7 @@ pub fn register_handlers(
                 Some(DynamicValue::String(s)) => format!(r#"{{"echo":"{}", "status":"ok", "dispatched":true}}"#, s),
                 _ => r#"{"status":"ok", "dispatched":true}"#.to_string(),
             };
-            Ok(pb::message("eve.monolith.legacy.json.Response")
+            pb::message("eve.monolith.legacy.json.Response")
                 .set_with("headers", |h| {
                     h.set("correlation_uuid", "corr-legacy-dispatch")
                         .set("action", "monolith.dispatch")
@@ -880,9 +900,19 @@ pub fn register_handlers(
                         .set("error_msg", "success")
                 })
                 .set("body", body_str.into_bytes())
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
+}
+
+fn publish_proto_notice(
+    gateway: &PublicGatewayRouter,
+    scope: crate::quasar_gateway::NoticeScope,
+    builder: ProtoBuilder,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    gateway.publish_pb_notice_checked(scope, builder, now_unix)
 }
 
 /// Helper to publish `eve.academy.ships.events.Borrowed` notice to a target session or broadcast.
@@ -894,13 +924,15 @@ pub fn publish_academy_borrowed_notice(
     ship_id: u64,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any_msg = pb::message("eve.academy.ships.events.Borrowed")
-        .set("character.sequential", char_id as u32)
-        .set("ship_type.sequential", ship_type_id)
-        .set("ship.sequential", ship_id)
-        .must_to_any();
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+    publish_proto_notice(
+        gateway,
+        scope,
+        pb::message("eve.academy.ships.events.Borrowed")
+            .set("character.sequential", char_id as u32)
+            .set("ship_type.sequential", ship_type_id)
+            .set("ship.sequential", ship_id),
+        now_unix,
+    )
 }
 
 /// Helper to publish `eve.acl.api.MembershipUpdated` notice to a target session or broadcast.
@@ -911,12 +943,14 @@ pub fn publish_acl_membership_updated_notice(
     version: u32,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any_msg = pb::message("eve.acl.api.MembershipUpdated")
-        .set("acl.sequential", acl_id)
-        .set("version.version", version)
-        .must_to_any();
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+    publish_proto_notice(
+        gateway,
+        scope,
+        pb::message("eve.acl.api.MembershipUpdated")
+            .set("acl.sequential", acl_id)
+            .set("version.version", version),
+        now_unix,
+    )
 }
 
 /// Helper to publish `eve.dogma.modifier.system_wide.api.Applied` notice.
@@ -929,14 +963,16 @@ pub fn publish_system_wide_dbuff_applied(
     nanos: i32,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any_msg = pb::message("eve.dogma.modifier.system_wide.api.Applied")
-        .set("identifier.sequential", system_id)
-        .set("dbuff.sequential", dbuff_id)
-        .set("magnitude.units", units as i32)
-        .set("magnitude.nanos", nanos)
-        .must_to_any();
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+    publish_proto_notice(
+        gateway,
+        scope,
+        pb::message("eve.dogma.modifier.system_wide.api.Applied")
+            .set("identifier.sequential", system_id)
+            .set("dbuff.sequential", dbuff_id)
+            .set("magnitude.units", units as i32)
+            .set("magnitude.nanos", nanos),
+        now_unix,
+    )
 }
 
 /// Helper to publish `eve.dogma.modifier.system_wide.api.Removed` notice.
@@ -947,12 +983,14 @@ pub fn publish_system_wide_dbuff_removed(
     dbuff_id: u64,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any_msg = pb::message("eve.dogma.modifier.system_wide.api.Removed")
-        .set("identifier.sequential", system_id)
-        .set("dbuff.sequential", dbuff_id)
-        .must_to_any();
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+    publish_proto_notice(
+        gateway,
+        scope,
+        pb::message("eve.dogma.modifier.system_wide.api.Removed")
+            .set("identifier.sequential", system_id)
+            .set("dbuff.sequential", dbuff_id),
+        now_unix,
+    )
 }
 
 /// Helper to publish `eve.duel.ChallengeIssued` notice.
@@ -976,13 +1014,16 @@ pub fn publish_warp_scrambling_applied_notice(
     gateway: &PublicGatewayRouter, scope: crate::quasar_gateway::NoticeScope,
     scrambler_id: u64, scrambled_id: u64, module_type_id: u64, now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any_msg = pb::message("eve.effect.combat.electronic.pvp.WarpScramblingApplied")
-        .set("scrambler.sequential", scrambler_id as u32)
-        .set("scrambled_pilot.sequential", scrambled_id as u32)
-        .set("duration_scrambled", GoogleDuration { seconds: 10, nanos: 0 })
-        .set("module_type.sequential", module_type_id)
-        .must_to_any();
-    gateway.publish_notice(scope, any_msg, now_unix).map(|(_, d)| d)
+    publish_proto_notice(
+        gateway,
+        scope,
+        pb::message("eve.effect.combat.electronic.pvp.WarpScramblingApplied")
+            .set("scrambler.sequential", scrambler_id as u32)
+            .set("scrambled_pilot.sequential", scrambled_id as u32)
+            .set("duration_scrambled", GoogleDuration { seconds: 10, nanos: 0 })
+            .set("module_type.sequential", module_type_id),
+        now_unix,
+    )
 }
 
 /// Helper to publish `eve.mission.epicarc.event.CharacterCompleted` notice.
@@ -990,11 +1031,14 @@ pub fn publish_epicarc_character_completed_notice(
     gateway: &PublicGatewayRouter, scope: crate::quasar_gateway::NoticeScope,
     char_id: u64, faction_id: u64, now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any_msg = pb::message("eve.mission.epicarc.event.CharacterCompleted")
-        .set("character.sequential", char_id as u32)
-        .set("faction.sequential", faction_id)
-        .must_to_any();
-    gateway.publish_notice(scope, any_msg, now_unix).map(|(_, d)| d)
+    publish_proto_notice(
+        gateway,
+        scope,
+        pb::message("eve.mission.epicarc.event.CharacterCompleted")
+            .set("character.sequential", char_id as u32)
+            .set("faction.sequential", faction_id),
+        now_unix,
+    )
 }
 
 /// Helper to publish `eve.fleet.api.AdvertCreated` notice.
@@ -1002,12 +1046,15 @@ pub fn publish_fleet_advert_created_notice(
     gateway: &PublicGatewayRouter, scope: crate::quasar_gateway::NoticeScope,
     fleet_id: u64, char_id: u64, solar_system_id: u64, now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any_msg = pb::message("eve.fleet.api.AdvertCreated")
-        .set("fleet_id.sequential", fleet_id)
-        .set("character_id.sequential", char_id as u32)
-        .set("solar_system_id.sequential", solar_system_id)
-        .must_to_any();
-    gateway.publish_notice(scope, any_msg, now_unix).map(|(_, d)| d)
+    publish_proto_notice(
+        gateway,
+        scope,
+        pb::message("eve.fleet.api.AdvertCreated")
+            .set("fleet_id.sequential", fleet_id)
+            .set("character_id.sequential", char_id as u32)
+            .set("solar_system_id.sequential", solar_system_id),
+        now_unix,
+    )
 }
 
 /// Helper to publish `eve.fleet.member.Joined` notice.
@@ -1015,11 +1062,14 @@ pub fn publish_fleet_member_joined_notice(
     gateway: &PublicGatewayRouter, scope: crate::quasar_gateway::NoticeScope,
     fleet_id: u64, member_id: u64, now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let any_msg = pb::message("eve.fleet.member.Joined")
-        .set("fleet.sequential", fleet_id)
-        .set("member.sequential", member_id as u32)
-        .must_to_any();
-    gateway.publish_notice(scope, any_msg, now_unix).map(|(_, d)| d)
+    publish_proto_notice(
+        gateway,
+        scope,
+        pb::message("eve.fleet.member.Joined")
+            .set("fleet.sequential", fleet_id)
+            .set("member.sequential", member_id as u32),
+        now_unix,
+    )
 }
 
 /// Helper to encode duel ChallengeIssued message payload.
@@ -1027,7 +1077,11 @@ pub fn encode_duel_challenge_issued(challenger_id: u64, recipient_id: u64) -> Ve
     pb::message("eve.duel.ChallengeIssued")
         .set("challenger.sequential", challenger_id as u32)
         .set("recipient.sequential", recipient_id as u32)
-        .must_encode()
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to encode eve.duel.ChallengeIssued");
+            Vec::new()
+        })
 }
 
 /// Helper to encode duel ChallengeAccepted message payload.
@@ -1035,12 +1089,19 @@ pub fn encode_duel_challenge_accepted(challenger_id: u64, recipient_id: u64) -> 
     pb::message("eve.duel.ChallengeAccepted")
         .set("challenger.sequential", challenger_id as u32)
         .set("recipient.sequential", recipient_id as u32)
-        .must_encode()
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to encode eve.duel.ChallengeAccepted");
+            Vec::new()
+        })
 }
 
 /// Helper to encode DBS SettingValue.
 pub fn encode_dbs_setting_value(units: i64, nanos: i32) -> Vec<u8> {
-    dbs_setting_value_builder(units, nanos).must_encode()
+    dbs_setting_value_builder(units, nanos).encode().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "failed to encode eve.dynamicbountysystem.SettingValue");
+        Vec::new()
+    })
 }
 
 /// Helper to encode DBS Settings with min, max, and equilibrium multiplier fields.
@@ -1051,7 +1112,11 @@ pub fn encode_dbs_settings(
         .set("min_output", dbs_setting_value_builder(min_units, min_nanos))
         .set("max_output", dbs_setting_value_builder(max_units, max_nanos))
         .set("equilibrium_value", dbs_setting_value_builder(eq_units, eq_nanos))
-        .must_encode()
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to encode eve.dynamicbountysystem.Settings");
+            Vec::new()
+        })
 }
 
 /// Helper to encode DBS SolarSystemDetails.
@@ -1060,14 +1125,22 @@ pub fn encode_dbs_solar_system_details(solar_system_id: u64, sec_units: i64, sec
         .set("solar_system.sequential", solar_system_id)
         .set("security.units", sec_units)
         .set("security.nanos", sec_nanos)
-        .must_encode()
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to encode eve.dynamicbountysystem.SolarSystemDetails");
+            Vec::new()
+        })
 }
 
 /// Helper to encode fighter type identifier.
 pub fn encode_fighter_type_identifier(type_id: u32) -> Vec<u8> {
     pb::message("eve.fighter.fightertype.Identifier")
         .set("sequential", u64::from(type_id))
-        .must_encode()
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(type_id, error = %e, "failed to encode eve.fighter.fightertype.Identifier");
+            Vec::new()
+        })
 }
 
 /// Synthetic helper to encode fighter squad state (no `fighter.SquadState` message in descriptors).
@@ -1090,13 +1163,18 @@ pub fn encode_fighter_squad_state(
 
 /// Synthetic helper to encode epic arc progress stages (no `epicarc.Progress` message in descriptors).
 pub fn encode_epicarc_progress(arc_id: u32, branch_stage: u32, completed: bool) -> Vec<u8> {
+    let arc_id_bytes = pb::message("eve_public.epicarc.Identifier")
+        .set("sequential", u64::from(arc_id))
+        .encode()
+        .unwrap_or_else(|e| {
+            tracing::warn!(arc_id, error = %e, "failed to encode eve_public.epicarc.Identifier");
+            Vec::new()
+        });
     WireMessage {
         fields: vec![
             WireField {
                 field_number: 1,
-                value: WireValue::LengthDelimited(
-                    pb::message("eve_public.epicarc.Identifier").set("sequential", u64::from(arc_id)).must_encode(),
-                ),
+                value: WireValue::LengthDelimited(arc_id_bytes),
             },
             WireField { field_number: 2, value: WireValue::Varint(u64::from(branch_stage)) },
             WireField { field_number: 3, value: WireValue::Varint(u64::from(completed)) },

@@ -45,12 +45,12 @@ fn default_identity_store() -> QuasarIdentityStore {
     QuasarIdentityStore::default()
 }
 
-pub fn activate_user_omega_license_in_snapshot(
+pub(crate) fn try_activate_user_omega_license_in_snapshot(
     snap: &mut eve_db::WorldStateSnapshot,
     user_id: u64,
     duration_seconds: u64,
     now_unix: u64,
-) -> (u64, GoogleAny) {
+) -> (u64, Option<GoogleAny>) {
     let mut st = snap
         .owner_notes
         .get(&QUASAR_IDENTITY_NOTE_ID)
@@ -90,7 +90,7 @@ pub fn activate_user_omega_license_in_snapshot(
         }
     }
 
-    let notice = pb::message("eve_public.user.license.api.ActivatedNotice")
+    let notice = match pb::message("eve_public.user.license.api.ActivatedNotice")
         .set("identifier.license_type", "omega")
         .set(
             "license.expiry_date",
@@ -99,8 +99,26 @@ pub fn activate_user_omega_license_in_snapshot(
                 nanos: 0,
             },
         )
-        .must_to_any();
+        .to_any()
+    {
+        Ok(msg) => Some(msg),
+        Err(e) => {
+            tracing::warn!(error = %e, user_id, "Failed to encode Omega ActivatedNotice");
+            None
+        }
+    };
     (next, notice)
+}
+
+pub fn activate_user_omega_license_in_snapshot(
+    snap: &mut eve_db::WorldStateSnapshot,
+    user_id: u64,
+    duration_seconds: u64,
+    now_unix: u64,
+) -> (u64, GoogleAny) {
+    let (next, notice) =
+        try_activate_user_omega_license_in_snapshot(snap, user_id, duration_seconds, now_unix);
+    (next, notice.unwrap_or_default())
 }
 
 pub fn activate_user_omega_license(
@@ -111,13 +129,15 @@ pub fn activate_user_omega_license(
     now_unix: u64,
 ) -> u64 {
     let (new_expiry, notice) = db.with_mut_snapshot(|snap| {
-        activate_user_omega_license_in_snapshot(snap, user_id, duration_seconds, now_unix)
+        try_activate_user_omega_license_in_snapshot(snap, user_id, duration_seconds, now_unix)
     });
 
-    router_notices
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((NoticeScope::User(user_id as i32), notice));
+    if let Some(notice) = notice {
+        router_notices
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((NoticeScope::User(user_id as i32), notice));
+    }
     new_expiry
 }
 
@@ -181,7 +201,7 @@ pub fn expire_user_omega_license(
         }
     });
 
-    let notice = pb::message("eve_public.user.license.api.ExpiredNotice")
+    match pb::message("eve_public.user.license.api.ExpiredNotice")
         .set("identifier.license_type", "omega")
         .set(
             "license.expiry_date",
@@ -190,12 +210,18 @@ pub fn expire_user_omega_license(
                 nanos: 0,
             },
         )
-        .must_to_any();
-
-    router_notices
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((NoticeScope::User(user_id as i32), notice));
+        .to_any()
+    {
+        Ok(notice) => {
+            router_notices
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((NoticeScope::User(user_id as i32), notice));
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, user_id, "Failed to encode Omega ExpiredNotice");
+        }
+    }
 }
 
 pub fn load_identity_store_from_snap(snap: &eve_db::WorldStateSnapshot) -> QuasarIdentityStore {
@@ -296,15 +322,14 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 "Invalid username or password".into(),
             ));
         }
-        Ok(
-            pb::message("eve_public.auth.AuthenticateUsernameResponse")
-                .set(
-                    "login_successful.authentication_token",
-                    format!("evomu-auth-token-{username}"),
-                )
-                .set("login_successful.is_pwned_password", false)
-                .must_to_any(),
-        )
+        pb::message("eve_public.auth.AuthenticateUsernameResponse")
+            .set(
+                "login_successful.authentication_token",
+                format!("evomu-auth-token-{username}"),
+            )
+            .set("login_successful.is_pwned_password", false)
+            .to_any()
+            .map_err(|e| (crate::quasar_gateway::STATUS_INTERNAL_ERROR, e.to_string()))
     });
     router.register_handler(
         "eve_public.auth.AuthenticateUsernameRequest",
@@ -367,15 +392,14 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             } else {
                 caller_uid
             };
-            Ok(
-                pb::message("eve_public.auth.steam.AuthenticateSteamResponse")
-                    .set(
-                        "login_successful.authentication_token",
-                        format!("evomu-steam-token-{uid}"),
-                    )
-                    .set("login_successful.is_pwned_password", false)
-                    .must_to_any(),
-            )
+            pb::message("eve_public.auth.steam.AuthenticateSteamResponse")
+                .set(
+                    "login_successful.authentication_token",
+                    format!("evomu-steam-token-{uid}"),
+                )
+                .set("login_successful.is_pwned_password", false)
+                .to_any()
+                .map_err(|e| (crate::quasar_gateway::STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -401,7 +425,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             } else {
                 1
             };
-            Ok(pb::message("eve_public.user.license.api.GetResponse")
+            pb::message("eve_public.user.license.api.GetResponse")
                 .set(
                     "license.expiry_date",
                     GoogleTimestamp {
@@ -409,7 +433,8 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                         nanos: 0,
                     },
                 )
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (crate::quasar_gateway::STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -447,9 +472,10 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 });
             }
             let doc = WireMessage { fields: doc_fields }.encode();
-            Ok(pb::message("eve.legal.agreement.api.GetLatestResponse")
+            pb::message("eve.legal.agreement.api.GetLatestResponse")
                 .set_raw_message("agreement", doc)
-                .must_to_any())
+                .to_any()
+                .map_err(|e| (crate::quasar_gateway::STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -571,7 +597,9 @@ fn register_federated_and_transfer_handlers(
             with_identity_store(&db_steam_link, |st| {
                 st.steam_links.insert(steam_id.clone(), uid);
             });
-            Ok(pb::message("eve.vendors.steam.user.api.admin.LinkResponse").must_to_any())
+            pb::message("eve.vendors.steam.user.api.admin.LinkResponse")
+                .to_any()
+                .map_err(|e| (crate::quasar_gateway::STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -605,13 +633,12 @@ fn register_federated_and_transfer_handlers(
                     *st.epic_links.entry(epic_id.clone()).or_insert(caller_uid)
                 }
             });
-            Ok(
-                pb::message("eve.vendors.epic.api.GetUserByEpicUserIDResponse")
-                    .set("user.sequential", uid as i32)
-                    .set("epic_user.epic_user_id", &epic_id)
-                    .set("is_logged_in", true)
-                    .must_to_any(),
-            )
+            pb::message("eve.vendors.epic.api.GetUserByEpicUserIDResponse")
+                .set("user.sequential", uid as i32)
+                .set("epic_user.epic_user_id", &epic_id)
+                .set("is_logged_in", true)
+                .to_any()
+                .map_err(|e| (crate::quasar_gateway::STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -652,7 +679,9 @@ fn register_federated_and_transfer_handlers(
                     None,
                 )
             });
-            Ok(pb::message("eve.vendors.epic.api.DeliverEntitlementResponse").must_to_any())
+            pb::message("eve.vendors.epic.api.DeliverEntitlementResponse")
+                .to_any()
+                .map_err(|e| (crate::quasar_gateway::STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -690,7 +719,8 @@ fn register_federated_and_transfer_handlers(
                         .set("entitlement_attributes.entitlement_name", &t.description)
                 });
             }
-            Ok(msg.must_to_any())
+            msg.to_any()
+                .map_err(|e| (crate::quasar_gateway::STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -718,11 +748,10 @@ fn register_federated_and_transfer_handlers(
             with_identity_store(&db_twitch_link, |st| {
                 st.twitch_links.insert(twitch_id.clone(), uid);
             });
-            Ok(
-                pb::message("eve.id.federate.twitch.api.CompleteLinkingResponse")
-                    .set("success_callback_url", &twitch_id)
-                    .must_to_any(),
-            )
+            pb::message("eve.id.federate.twitch.api.CompleteLinkingResponse")
+                .set("success_callback_url", &twitch_id)
+                .to_any()
+                .map_err(|e| (crate::quasar_gateway::STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -759,14 +788,18 @@ fn register_federated_and_transfer_handlers(
                     )
                 })?;
                 if rsp_name == "eve.id.federate.twitch.api.GetResponse" {
-                    Ok(pb::message(rsp_name)
+                    pb::message(rsp_name)
                         .set("twitch.id", &twitch_id)
                         .set("attributes.preferred_username", &twitch_id)
-                        .must_to_any())
+                        .to_any()
+                        .map_err(|e| (crate::quasar_gateway::STATUS_INTERNAL_ERROR, e.to_string()))
                 } else {
                     let mut uuid = [0u8; 16];
                     uuid[8..16].copy_from_slice(&uid.to_be_bytes());
-                    Ok(pb::message(rsp_name).set("id.uuid", uuid).must_to_any())
+                    pb::message(rsp_name)
+                        .set("id.uuid", uuid)
+                        .to_any()
+                        .map_err(|e| (crate::quasar_gateway::STATUS_INTERNAL_ERROR, e.to_string()))
                 }
             }),
         );
@@ -828,9 +861,10 @@ fn register_federated_and_transfer_handlers(
                     )
                 });
                 if rsp_name == "eve.id.federate.twitch.api.VerifyExternalGrantResponse" {
-                    Ok(pb::message(rsp_name)
+                    pb::message(rsp_name)
                         .set("twitch_preferred_username", &twitch_id)
-                        .must_to_any())
+                        .to_any()
+                        .map_err(|e| (crate::quasar_gateway::STATUS_INTERNAL_ERROR, e.to_string()))
                 } else {
                     // Notice-only request names have no *Response descriptor in quasar_descriptors.sqlite.
                     Ok(GoogleAny {
@@ -1078,18 +1112,27 @@ fn register_federated_and_transfer_handlers(
                 })?;
 
                 if is_execute {
-                    let notice = pb::message("eve.user.character.transfer.api.Completed")
+                    match pb::message("eve.user.character.transfer.api.Completed")
                         .set("character.sequential", char_id as u32)
                         .set("previous_user.sequential", prev_uid as i32)
                         .set("new_user.sequential", dest_uid as i32)
-                        .must_to_any();
-                    pending_xfer
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .push((NoticeScope::User(dest_uid as i32), notice));
+                        .to_any()
+                    {
+                        Ok(notice) => {
+                            pending_xfer
+                                .write()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push((NoticeScope::User(dest_uid as i32), notice));
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, char_id, dest_uid, "Failed to encode character transfer Completed notice");
+                        }
+                    }
                 }
 
-                Ok(pb::message(rsp_name).must_to_any())
+                pb::message(rsp_name)
+                    .to_any()
+                    .map_err(|e| (crate::quasar_gateway::STATUS_INTERNAL_ERROR, e.to_string()))
             }),
         );
     }
