@@ -144,7 +144,6 @@ fn compute_blob_hashes(snap: &WorldStateSnapshot) -> HashMap<&'static str, u64> 
     m.insert("cosmic_anomalies", fp_map(&snap.cosmic_anomalies));
     m.insert("incursions", fp_map(&snap.incursions));
     m.insert("last_mission_decline_times", fp_map(&snap.last_mission_decline_times));
-    m.insert("wh_polarizations", fp_map(&snap.wh_polarizations));
     m.insert("module_online_states", fp_map(&snap.module_online_states));
     m.insert("module_active_states", fp_set(&snap.module_active_states));
     m.insert("module_active_charges", fp_map(&snap.module_active_charges));
@@ -152,7 +151,6 @@ fn compute_blob_hashes(snap: &WorldStateSnapshot) -> HashMap<&'static str, u64> 
     m.insert("weapon_banks", fp_nested_map(&snap.weapon_banks));
     m.insert("paused_skill_queues", fp_set(&snap.paused_skill_queues));
     m.insert("starbase_settings", fp_map(&snap.starbase_settings));
-    m.insert("corp_container_logs", fp_map(&snap.corp_container_logs));
     m.insert("killmail_details", fp_map(&snap.killmail_details));
     m.insert("station_office_rental_costs", fp_map(&snap.station_office_rental_costs));
     m.insert("structure_esi_timer_meta", fp_map(&snap.structure_esi_timer_meta));
@@ -185,7 +183,6 @@ fn serialize_blob(snap: &WorldStateSnapshot, key: &str) -> Result<String, String
         "cosmic_anomalies" => map_to_json(&snap.cosmic_anomalies),
         "incursions" => map_to_json(&snap.incursions),
         "last_mission_decline_times" => map_to_json(&snap.last_mission_decline_times),
-        "wh_polarizations" => map_to_json(&snap.wh_polarizations),
         "module_online_states" => map_to_json(&snap.module_online_states),
         "module_active_states" => {
             let mut sorted: Vec<i64> = snap.module_active_states.iter().copied().collect();
@@ -201,7 +198,6 @@ fn serialize_blob(snap: &WorldStateSnapshot, key: &str) -> Result<String, String
             super::fingerprints::to_checked_json_string(&sorted)
         }
         "starbase_settings" => map_to_json(&snap.starbase_settings),
-        "corp_container_logs" => map_to_json(&snap.corp_container_logs),
         "killmail_details" => map_to_json(&snap.killmail_details),
         "station_office_rental_costs" => map_to_json(&snap.station_office_rental_costs),
         "structure_esi_timer_meta" => map_to_json(&snap.structure_esi_timer_meta),
@@ -239,7 +235,6 @@ fn apply_blob_json_checked(snap: &mut WorldStateSnapshot, key: &str, js: &str) -
         "cosmic_anomalies" => snap.cosmic_anomalies = map_from_json(js)?,
         "incursions" => snap.incursions = map_from_json(js)?,
         "last_mission_decline_times" => snap.last_mission_decline_times = map_from_json(js)?,
-        "wh_polarizations" => snap.wh_polarizations = map_from_json(js)?,
         "module_online_states" => snap.module_online_states = map_from_json(js)?,
         "module_active_states" => {
             snap.module_active_states = serde_json::from_str(js).map_err(|e| e.to_string())?;
@@ -251,7 +246,6 @@ fn apply_blob_json_checked(snap: &mut WorldStateSnapshot, key: &str, js: &str) -
             snap.paused_skill_queues = serde_json::from_str(js).map_err(|e| e.to_string())?;
         }
         "starbase_settings" => snap.starbase_settings = map_from_json(js)?,
-        "corp_container_logs" => snap.corp_container_logs = map_from_json(js)?,
         "killmail_details" => snap.killmail_details = map_from_json(js)?,
         "station_office_rental_costs" => snap.station_office_rental_costs = map_from_json(js)?,
         "structure_esi_timer_meta" => snap.structure_esi_timer_meta = map_from_json(js)?,
@@ -342,7 +336,6 @@ pub fn load_d6_batch4_checked(
         "cosmic_anomalies" => cosmic_anomalies,
         "incursions" => incursions,
         "last_mission_decline_times" => last_mission_decline_times,
-        "wh_polarizations" => wh_polarizations,
         "module_online_states" => module_online_states,
         "module_active_states" => module_active_states,
         "module_active_charges" => module_active_charges,
@@ -350,7 +343,6 @@ pub fn load_d6_batch4_checked(
         "weapon_banks" => weapon_banks,
         "paused_skill_queues" => paused_skill_queues,
         "starbase_settings" => starbase_settings,
-        "corp_container_logs" => corp_container_logs,
         "killmail_details" => killmail_details,
         "station_office_rental_costs" => station_office_rental_costs,
         "structure_esi_timer_meta" => structure_esi_timer_meta,
@@ -597,7 +589,6 @@ pub fn rollback_d6_batch4(
             "cosmic_anomalies" => cosmic_anomalies,
             "incursions" => incursions,
             "last_mission_decline_times" => last_mission_decline_times,
-            "wh_polarizations" => wh_polarizations,
             "module_online_states" => module_online_states,
             "module_active_states" => module_active_states,
             "module_active_charges" => module_active_charges,
@@ -605,7 +596,6 @@ pub fn rollback_d6_batch4(
             "weapon_banks" => weapon_banks,
             "paused_skill_queues" => paused_skill_queues,
             "starbase_settings" => starbase_settings,
-            "corp_container_logs" => corp_container_logs,
             "killmail_details" => killmail_details,
             "station_office_rental_costs" => station_office_rental_costs,
             "structure_esi_timer_meta" => structure_esi_timer_meta,

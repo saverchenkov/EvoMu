@@ -845,8 +845,14 @@ fn changeset_and_selective_cold_domain_sync_branches() {
     assert_eq!(changes.items.len(), 2);
     assert_eq!(changes.market_orders.len(), 2);
     assert!(changes.cold_domains.part4_world_tail);
-    assert!(changes.cold_domains.d6_corp_crimewatch);
+    assert!(!changes.cold_domains.d6_corp_crimewatch);
     assert!(changes.cold_domains.crimewatch_changed);
+    assert!(changes.domain_rows.iter().any(|change| matches!(
+        change,
+        crate::sqlite_store::domain_rows::DomainRowChange::Upsert { domain, key, .. }
+            if *domain == crate::sqlite_store::domain_rows::DOMAIN_CRIMEWATCH
+                && key == &format!("crimewatch_states/{cid1}")
+    )));
 
     let mut staged_cold = fp.clone();
     {

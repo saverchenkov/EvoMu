@@ -56,7 +56,7 @@ pub fn sync_dirty_to_sqlite(
     cold_changed |= super::domain_rows::sync_service_domains_rows(tx, snap)?;
     cold_changed |= super::notes_lp_sequence_store::sync_d6(tx, snap, fp)?;
     cold_changed |= super::social_store::sync_d6_social(tx, snap, fp)?;
-    cold_changed |= super::corp_crimewatch_store::sync_d6_corp_crimewatch(tx, snap, fp)?;
+    cold_changed |= super::domain_rows::sync_corp_crimewatch_domain_rows(tx, snap)?;
     cold_changed |= super::industry_market_pve_store::sync_d6_batch4(tx, snap, fp)?;
     cold_changed |= super::service_domains_store::sync_service_domains(tx, snap, fp)?;
 
@@ -107,9 +107,6 @@ pub(crate) fn sync_selected_cold_domains_to_sqlite(
     }
     if cd.d6_social {
         super::social_store::sync_d6_social(tx, snap, fp)?;
-    }
-    if cd.d6_corp_crimewatch {
-        super::corp_crimewatch_store::sync_d6_corp_crimewatch(tx, snap, fp)?;
     }
     if cd.d6_batch4 {
         super::industry_market_pve_store::sync_d6_batch4(tx, snap, fp)?;
@@ -1428,7 +1425,6 @@ pub fn replace_sqlite_from_snapshot(
          DELETE FROM alliance_contacts;
          DELETE FROM alliance_contact_labels;
          DELETE FROM char_notes;
-         DELETE FROM d6_corp_crimewatch_kv;
          DELETE FROM world_kv_blobs;
          DELETE FROM entity_kv;",
     )

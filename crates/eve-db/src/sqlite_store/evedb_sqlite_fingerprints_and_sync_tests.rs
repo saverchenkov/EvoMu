@@ -6,7 +6,6 @@
 
 use super::evedb_sqlite_cov_tests::build_populated_snapshot;
 use super::evedb_sqlite_load_errors_and_schema_tests::open_migrated_conn;
-use crate::sqlite_store::corp_crimewatch_store::compute_d6_corp_crimewatch_fingerprints;
 use crate::sqlite_store::fingerprints::{
     compute_fingerprints, fp_asteroid, fp_character, fp_contract, fp_item, fp_market_order,
     fp_market_orders_digest, fp_system_state,
@@ -149,19 +148,28 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
     base2.paused_skill_queues.insert(90_000_002);
     base2.weapon_banks.entry(100).or_default().insert(1, vec![10]);
     base2.weapon_banks.entry(200).or_default().insert(2, vec![20]);
+    let mut base_acl_two = base2.clone();
     base2.structure_docking_acl_denied.entry(10).or_default().extend([1, 2]);
     base2.structure_docking_acl_denied.entry(20).or_default().extend([3, 4]);
     let b4_a = compute_d6_batch4_fingerprints(&base2);
-    let cw_a = compute_d6_corp_crimewatch_fingerprints(&base2);
+    let diff_init = crate::tx_engine::ChangeSet::diff(1, &base_acl_two, &base2);
+    base_acl_two = base2.clone();
     base2.paused_skill_queues.remove(&90_000_002);
     base2.paused_skill_queues.insert(90_000_003);
     base2.weapon_banks.get_mut(&200).unwrap().insert(2, vec![21]);
     base2.structure_docking_acl_denied.get_mut(&20).unwrap().insert(99);
     let b4_b = compute_d6_batch4_fingerprints(&base2);
-    let cw_b = compute_d6_corp_crimewatch_fingerprints(&base2);
+    let diff_acl_update = crate::tx_engine::ChangeSet::diff(2, &base_acl_two, &base2);
     assert_ne!(b4_a.blobs["paused_skill_queues"], b4_b.blobs["paused_skill_queues"]);
     assert_ne!(b4_a.blobs["weapon_banks"], b4_b.blobs["weapon_banks"]);
-    assert_ne!(cw_a.crimewatch_fp, cw_b.crimewatch_fp);
+    assert!(!diff_init.domain_rows.is_empty());
+    assert_eq!(diff_acl_update.domain_rows.len(), 1);
+    assert!(matches!(
+        &diff_acl_update.domain_rows[0],
+        crate::sqlite_store::domain_rows::DomainRowChange::Upsert { domain, key, .. }
+            if *domain == crate::sqlite_store::domain_rows::DOMAIN_CRIMEWATCH
+                && key == "structure_docking_acl_denied/20"
+    ));
 
     // 4. Clean no-op rollback guards across rollback_d6
     let empty_conn = open_migrated_conn();

@@ -225,6 +225,11 @@ impl ChangeSet {
             fleet_and_social_ops => DOMAIN_FLEET_AND_SOCIAL_OPS,
             cluster_and_runtime => DOMAIN_CLUSTER_AND_RUNTIME,
         );
+        crate::sqlite_store::domain_rows::collect_corp_crimewatch_domain_row_diffs(
+            before,
+            after,
+            &mut domain_rows,
+        );
 
         let cold_domains = compute_cold_domain_diff(before, after);
         let cold_changed = cold_domains.any()
@@ -363,40 +368,8 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
         || before.crimewatch_aggressions != after.crimewatch_aggressions
         || before.combat_crimewatch_state != after.combat_crimewatch_state;
 
-    let d6_corp_crimewatch = crimewatch_changed
-        || before.corp_governance != after.corp_governance
-        || before.employment_history != after.employment_history
-        || before.corp_hangar_divisions != after.corp_hangar_divisions
-        || before.corp_alliance_history != after.corp_alliance_history
-        || before.corp_container_logs != after.corp_container_logs
-        || before.corp_medals != after.corp_medals
-        || before.corp_issued_medals != after.corp_issued_medals
-        || before.corp_member_limits != after.corp_member_limits
-        || before.corp_titles != after.corp_titles
-        || before.corp_member_titles != after.corp_member_titles
-        || before.corp_role_assignments != after.corp_role_assignments
-        || before.corp_role_history != after.corp_role_history
-        || before.corp_shareholders != after.corp_shareholders
-        || before.char_medals != after.char_medals
-        || before.char_scoped_roles != after.char_scoped_roles
-        || before.corp_vote_cases != after.corp_vote_cases
-        || before.corp_vote_ballots != after.corp_vote_ballots
-        || before.wh_polarizations != after.wh_polarizations
-        || before.zarzakh_gate_locks != after.zarzakh_gate_locks
-        || before.structure_docking_acl_denied != after.structure_docking_acl_denied
-        || before.alliance_war_state != after.alliance_war_state
-        || before.war_state != after.war_state
-        || before.fw_runtime != after.fw_runtime
-        || before.sov_runtime != after.sov_runtime
-        || before.insurgency_runtime != after.insurgency_runtime
-        || before.sov_prospecting_levels != after.sov_prospecting_levels
-        || before.sov_campaign_scores != after.sov_campaign_scores
-        || before.fw_character_stats != after.fw_character_stats
-        || before.fw_corp_enlisted_on != after.fw_corp_enlisted_on
-        || before.fw_system_occupations != after.fw_system_occupations
-        || before.fw_wars != after.fw_wars
-        || before.war_lifecycle_meta != after.war_lifecycle_meta
-        || before.alliance_lifecycle_meta != after.alliance_lifecycle_meta;
+    // Family 4 (`corp_crimewatch`) now persists via incremental `domain_rows` diffs.
+    let d6_corp_crimewatch = false;
 
     let d6_batch4 = before.moon_extractions != after.moon_extractions
         || before.auto_moon_miners != after.auto_moon_miners
@@ -415,7 +388,6 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
         || before.cosmic_anomalies != after.cosmic_anomalies
         || before.incursions != after.incursions
         || before.last_mission_decline_times != after.last_mission_decline_times
-        || before.wh_polarizations != after.wh_polarizations
         || before.module_online_states != after.module_online_states
         || before.module_active_states != after.module_active_states
         || before.module_active_charges != after.module_active_charges
@@ -423,7 +395,6 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
         || before.weapon_banks != after.weapon_banks
         || before.paused_skill_queues != after.paused_skill_queues
         || before.starbase_settings != after.starbase_settings
-        || before.corp_container_logs != after.corp_container_logs
         || before.killmail_details != after.killmail_details
         || before.station_office_rental_costs != after.station_office_rental_costs
         || before.structure_esi_timer_meta != after.structure_esi_timer_meta
@@ -580,11 +551,6 @@ pub fn validate_changeset(
     if cd.d6_notes_lp_seq {
         if before.sp6_lifecycle != after.sp6_lifecycle {
             validate_row("d6_notes_lp_seq", "sp6_lifecycle".into(), &after.sp6_lifecycle, max_row_bytes)?;
-        }
-    }
-    if cd.d6_corp_crimewatch {
-        if before.crimewatch_states != after.crimewatch_states {
-            validate_row("d6_corp_crimewatch", "crimewatch_states".into(), &after.crimewatch_states, max_row_bytes)?;
         }
     }
     Ok(())

@@ -924,7 +924,7 @@ fn w5a_p2_0e_fail_closed_loader_quarantine_unreadable_finite_floats_and_serde_de
     crate::sqlite_store::apply_migrations(&mig_conn).unwrap();
     mig_conn
         .execute_batch(
-            "CREATE TRIGGER fail_startup_flush BEFORE INSERT ON d6_corp_crimewatch_kv BEGIN SELECT RAISE(ABORT, 'startup_flush_abort'); END;",
+            "CREATE TRIGGER fail_startup_flush BEFORE INSERT ON domain_rows BEGIN SELECT RAISE(ABORT, 'startup_flush_abort'); END;",
         )
         .unwrap();
     let flush_err = crate::sqlite_store::load_snapshot_from_sqlite(&mig_conn)

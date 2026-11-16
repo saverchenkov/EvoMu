@@ -25,6 +25,11 @@ pub const DOMAIN_OWNER_NOTES: &str = "notes_lp.owner_notes";
 pub const DOMAIN_CORP_LP_BALANCES: &str = "notes_lp.corp_lp_balances";
 pub const DOMAIN_CHAR_LP_LOGS: &str = "notes_lp.char_lp_logs";
 
+/// Family 4 (`corp_crimewatch`) canonical `domain_rows.domain` names (`#916`).
+pub const DOMAIN_CORP_GOVERNANCE: &str = "corp_crimewatch.corp_governance";
+pub const DOMAIN_CRIMEWATCH: &str = "corp_crimewatch.crimewatch";
+pub const DOMAIN_WARFARE: &str = "corp_crimewatch.warfare";
+
 /// Family 6 (`service_domains`) canonical `domain_rows.domain` names (`#916`).
 pub const DOMAIN_PVE_SPECIAL_SITES: &str = "service_domains.pve_special_sites";
 pub const DOMAIN_CRAB_BEACONS: &str = "service_domains.crab_beacons";
@@ -111,7 +116,7 @@ macro_rules! impl_int_key_codec {
     };
 }
 
-impl_int_key_codec!(i32, u32, i64, u64, i128, u128, usize);
+impl_int_key_codec!(u8, i32, u32, i64, u64, i128, u128, usize);
 
 impl KeyCodec for () {
     #[inline]
@@ -1475,6 +1480,391 @@ where
 }
 
 // ============================================================================
+// Shared `domain_rows` Helpers for Decomposed Domain Stores (`#916`)
+// ============================================================================
+
+#[inline]
+pub(crate) fn format_domain_field_key(prefix: &str, field: &str) -> String {
+    if prefix.is_empty() {
+        field.to_owned()
+    } else {
+        format!("{prefix}{field}")
+    }
+}
+
+#[inline]
+pub(crate) fn format_domain_entry_key<K: KeyCodec>(prefix: &str, field: &str, key: &K) -> String {
+    if prefix.is_empty() {
+        format!("{field}/{}", key.encode_key())
+    } else {
+        format!("{prefix}{field}/{}", key.encode_key())
+    }
+}
+
+pub(crate) fn diff_scalar<T: PartialEq + Serialize>(
+    domain: &'static str,
+    field: &str,
+    before: &T,
+    after: &T,
+    def: &T,
+    out: &mut Vec<DomainRowChange>,
+) {
+    if before == after {
+        return;
+    }
+    if after == def {
+        out.push(DomainRowChange::Delete {
+            domain,
+            key: field.to_owned(),
+        });
+    } else {
+        out.push(DomainRowChange::Upsert {
+            domain,
+            key: field.to_owned(),
+            value: to_checked_domain_json(domain, field, after),
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn diff_map_with_mapped<'a, K: KeyCodec + 'a, V: PartialEq + 'a, S: Serialize>(
+    domain: &'static str,
+    prefix: &str,
+    field: &'static str,
+    before_len: usize,
+    after_iter: impl Iterator<Item = (&'a K, &'a V)>,
+    before_get: impl Fn(&K) -> Option<&'a V>,
+    before_keys: impl Iterator<Item = &'a K>,
+    after_contains: impl Fn(&K) -> bool,
+    mut to_serializable: impl FnMut(&'a V) -> S,
+    out: &mut Vec<DomainRowChange>,
+) {
+    let mut kept = 0usize;
+    for (k, v) in after_iter {
+        let changed = match before_get(k) {
+            Some(prev) => {
+                kept += 1;
+                prev != v
+            }
+            None => true,
+        };
+        if changed {
+            let full_key = format_domain_entry_key(prefix, field, k);
+            let serializable = to_serializable(v);
+            let value = to_checked_domain_json(domain, &full_key, &serializable);
+            out.push(DomainRowChange::Upsert {
+                domain,
+                key: full_key,
+                value,
+            });
+        }
+    }
+    if kept < before_len {
+        for k in before_keys {
+            if !after_contains(k) {
+                out.push(DomainRowChange::Delete {
+                    domain,
+                    key: format_domain_entry_key(prefix, field, k),
+                });
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn diff_map_with<'a, K: KeyCodec + 'a, V: PartialEq + Serialize + 'a>(
+    domain: &'static str,
+    field: &'static str,
+    before_len: usize,
+    after_iter: impl Iterator<Item = (&'a K, &'a V)>,
+    before_get: impl Fn(&K) -> Option<&'a V>,
+    before_keys: impl Iterator<Item = &'a K>,
+    after_contains: impl Fn(&K) -> bool,
+    out: &mut Vec<DomainRowChange>,
+) {
+    diff_map_with_mapped(
+        domain,
+        "",
+        field,
+        before_len,
+        after_iter,
+        before_get,
+        before_keys,
+        after_contains,
+        |v| v,
+        out,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn diff_set_with_prefix<'a, K: KeyCodec + 'a>(
+    domain: &'static str,
+    prefix: &str,
+    field: &'static str,
+    before_len: usize,
+    after_iter: impl Iterator<Item = &'a K>,
+    before_contains: impl Fn(&K) -> bool,
+    before_iter: impl Iterator<Item = &'a K>,
+    after_contains: impl Fn(&K) -> bool,
+    out: &mut Vec<DomainRowChange>,
+) {
+    let mut kept = 0usize;
+    for k in after_iter {
+        if before_contains(k) {
+            kept += 1;
+        } else {
+            out.push(DomainRowChange::Upsert {
+                domain,
+                key: format_domain_entry_key(prefix, field, k),
+                value: Ok("true".to_owned()),
+            });
+        }
+    }
+    if kept < before_len {
+        for k in before_iter {
+            if !after_contains(k) {
+                out.push(DomainRowChange::Delete {
+                    domain,
+                    key: format_domain_entry_key(prefix, field, k),
+                });
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn diff_set_with<'a, K: KeyCodec + 'a>(
+    domain: &'static str,
+    field: &'static str,
+    before_len: usize,
+    after_iter: impl Iterator<Item = &'a K>,
+    before_contains: impl Fn(&K) -> bool,
+    before_iter: impl Iterator<Item = &'a K>,
+    after_contains: impl Fn(&K) -> bool,
+    out: &mut Vec<DomainRowChange>,
+) {
+    diff_set_with_prefix(
+        domain,
+        "",
+        field,
+        before_len,
+        after_iter,
+        before_contains,
+        before_iter,
+        after_contains,
+        out,
+    );
+}
+
+fn should_upsert<V: PartialEq + DeserializeOwned>(
+    existing: &HashMap<String, String>,
+    key: &str,
+    new_val: &V,
+    new_json: &str,
+) -> bool {
+    match existing.get(key) {
+        None => true,
+        Some(old_json) if old_json == new_json => false,
+        Some(old_json) => match from_checked_domain_json::<V>(old_json) {
+            Ok(old_val) => old_val != *new_val,
+            Err(_) => true,
+        },
+    }
+}
+
+pub(crate) struct DomainSyncState {
+    domain: &'static str,
+    existing: HashMap<String, String>,
+    live_keys: HashSet<String>,
+    upserts: Vec<(String, String)>,
+}
+
+impl DomainSyncState {
+    pub(crate) fn load(tx: &Transaction<'_>, domain: &'static str) -> Result<Self, String> {
+        let mut existing = HashMap::new();
+        {
+            let mut stmt = tx
+                .prepare("SELECT key, value FROM domain_rows WHERE domain = ?1")
+                .map_err(|e| format!("domain_rows sync prepare({domain}): {e}"))?;
+            let mut rows = stmt
+                .query(params![domain])
+                .map_err(|e| format!("domain_rows sync query({domain}): {e}"))?;
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| format!("domain_rows sync step({domain}): {e}"))?
+            {
+                let k: String = row.get(0).map_err(|e| e.to_string())?;
+                let v: String = row.get(1).map_err(|e| e.to_string())?;
+                existing.insert(k, v);
+            }
+        }
+        Ok(Self {
+            domain,
+            existing,
+            live_keys: HashSet::new(),
+            upserts: Vec::new(),
+        })
+    }
+
+    pub(crate) fn push_scalar<T: PartialEq + Serialize + DeserializeOwned>(
+        &mut self,
+        field: &str,
+        val: &T,
+        def: &T,
+    ) -> Result<(), String> {
+        if val != def {
+            let json =
+                to_checked_domain_json(self.domain, field, val).map_err(|e| e.to_string())?;
+            if should_upsert(&self.existing, field, val, &json) {
+                self.upserts.push((field.to_owned(), json));
+            }
+            self.live_keys.insert(field.to_owned());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn push_map_mapped<
+        'a,
+        K: KeyCodec + 'a,
+        V: PartialEq + DeserializeOwned + 'a,
+        S: Serialize,
+    >(
+        &mut self,
+        prefix: &str,
+        field: &'static str,
+        entries: impl Iterator<Item = (&'a K, &'a V)>,
+        mut to_serializable: impl FnMut(&'a V) -> S,
+    ) -> Result<(), String> {
+        for (k, v) in entries {
+            let full_key = format_domain_entry_key(prefix, field, k);
+            let serializable = to_serializable(v);
+            let json = to_checked_domain_json(self.domain, &full_key, &serializable)
+                .map_err(|e| e.to_string())?;
+            if should_upsert(&self.existing, &full_key, v, &json) {
+                self.upserts.push((full_key.clone(), json));
+            }
+            self.live_keys.insert(full_key);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn push_map<'a, K: KeyCodec + 'a, V: PartialEq + Serialize + DeserializeOwned + 'a>(
+        &mut self,
+        field: &'static str,
+        entries: impl Iterator<Item = (&'a K, &'a V)>,
+    ) -> Result<(), String> {
+        self.push_map_mapped("", field, entries, |v| v)
+    }
+
+    pub(crate) fn push_set_with_prefix<'a, K: KeyCodec + 'a>(
+        &mut self,
+        prefix: &str,
+        field: &'static str,
+        entries: impl Iterator<Item = &'a K>,
+    ) -> Result<(), String> {
+        for k in entries {
+            let full_key = format_domain_entry_key(prefix, field, k);
+            if should_upsert(&self.existing, &full_key, &true, "true") {
+                self.upserts.push((full_key.clone(), "true".to_owned()));
+            }
+            self.live_keys.insert(full_key);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn push_set<'a, K: KeyCodec + 'a>(
+        &mut self,
+        field: &'static str,
+        entries: impl Iterator<Item = &'a K>,
+    ) -> Result<(), String> {
+        self.push_set_with_prefix("", field, entries)
+    }
+
+    pub(crate) fn finish(self, tx: &Transaction<'_>) -> Result<bool, String> {
+        let has_deletes = self.existing.len() > self.live_keys.len()
+            || self.existing.keys().any(|k| !self.live_keys.contains(k));
+        if self.upserts.is_empty() && !has_deletes {
+            return Ok(false);
+        }
+        if !self.upserts.is_empty() {
+            let mut upsert_stmt = tx
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO domain_rows (domain, key, value) VALUES (?1, ?2, ?3)",
+                )
+                .map_err(|e| format!("domain_rows sync upsert prepare({}): {e}", self.domain))?;
+            for (k, v) in &self.upserts {
+                upsert_stmt
+                    .execute(params![self.domain, k, v])
+                    .map_err(|e| format!("domain_rows sync upsert({}, {k}): {e}", self.domain))?;
+            }
+        }
+        if has_deletes {
+            let mut del_stmt = tx
+                .prepare_cached("DELETE FROM domain_rows WHERE domain = ?1 AND key = ?2")
+                .map_err(|e| format!("domain_rows sync delete prepare({}): {e}", self.domain))?;
+            for old_key in self.existing.keys() {
+                if !self.live_keys.contains(old_key) {
+                    del_stmt
+                        .execute(params![self.domain, old_key])
+                        .map_err(|e| {
+                            format!("domain_rows sync delete({}, {old_key}): {e}", self.domain)
+                        })?;
+                }
+            }
+        }
+        Ok(true)
+    }
+}
+
+pub(crate) fn fetch_domain_row_entries(
+    conn: &Connection,
+    domain: &'static str,
+) -> Result<Vec<(i64, String, String)>, String> {
+    if !table_exists(conn, "domain_rows")? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare("SELECT rowid, key, value FROM domain_rows WHERE domain = ?1 ORDER BY key ASC")
+        .map_err(|e| format!("domain_rows load prepare({domain}): {e}"))?;
+    let mut rows = stmt
+        .query(params![domain])
+        .map_err(|e| format!("domain_rows load query({domain}): {e}"))?;
+    let mut out = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("domain_rows load step({domain}): {e}"))?
+    {
+        out.push((
+            row.get(0).map_err(|e| e.to_string())?,
+            row.get(1).map_err(|e| e.to_string())?,
+            row.get(2).map_err(|e| e.to_string())?,
+        ));
+    }
+    Ok(out)
+}
+
+pub(crate) fn decode_map_entry<K: KeyCodec, V: DeserializeOwned>(
+    subkey: &str,
+    raw_val: &str,
+) -> Result<(K, V), String> {
+    let key = K::decode_key(subkey)?;
+    let val = from_checked_domain_json::<V>(raw_val)?;
+    Ok((key, val))
+}
+
+pub(crate) fn decode_set_entry<K: KeyCodec>(subkey: &str, raw_val: &str) -> Result<K, String> {
+    let key = K::decode_key(subkey)?;
+    if !from_checked_domain_json::<bool>(raw_val)? {
+        return Err(format!("expected boolean true for set key '{subkey}'"));
+    }
+    Ok(key)
+}
+
+pub(crate) trait LegacyMerge: Sized {
+    fn merge_legacy(&mut self, legacy: Self);
+}
+
+// ============================================================================
 // Family 1 (`ledger`) Helpers & Legacy Blob-Table -> `domain_rows` Migration
 // ============================================================================
 
@@ -1854,6 +2244,13 @@ pub(crate) fn sync_notes_lp_domain_rows(
     Ok(dirty)
 }
 
+// Family 4 (`corp_crimewatch`) persistence lives in `corp_crimewatch_store.rs` and is
+// re-exported here so `domain_rows` serves as the single entry point for migrated families.
+pub(crate) use super::corp_crimewatch_store::{
+    collect_corp_crimewatch_domain_row_diffs, drop_legacy_corp_crimewatch_tables,
+    sync_corp_crimewatch_domain_rows,
+};
+
 // Family 6 (`service_domains`) persistence lives in `service_domains_store.rs` and is
 // re-exported here so `domain_rows` serves as the single entry point for migrated families.
 pub(crate) use super::service_domains_store::{
@@ -2166,9 +2563,35 @@ mod tests {
                 );
             }
             let domain_count: i64 = conn
-                .query_row("SELECT COUNT(*) FROM domain_rows", [], |r| r.get(0))
+                .query_row(
+                    "SELECT COUNT(*) FROM domain_rows WHERE domain IN (?1, ?2, ?3)",
+                    params![
+                        DOMAIN_WALLET_JOURNAL_META,
+                        DOMAIN_MARKET_TRANSACTIONS,
+                        DOMAIN_ACCOUNT_PLEX_VAULT
+                    ],
+                    |r| r.get(0),
+                )
                 .unwrap();
             assert_eq!(domain_count, 3);
+            let unexpected_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM domain_rows
+                     WHERE domain NOT IN (?1, ?2, ?3)
+                       AND NOT (domain = ?4 AND key LIKE 'fw_system_occupations/%')",
+                    params![
+                        DOMAIN_WALLET_JOURNAL_META,
+                        DOMAIN_MARKET_TRANSACTIONS,
+                        DOMAIN_ACCOUNT_PLEX_VAULT,
+                        DOMAIN_WARFARE
+                    ],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                unexpected_count, 0,
+                "only ledger rows and startup-backfilled fw_system_occupations should populate domain_rows"
+            );
         }
 
         // Reopen again and check persist-reload equivalence.

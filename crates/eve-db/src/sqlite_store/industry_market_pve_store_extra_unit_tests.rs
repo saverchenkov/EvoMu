@@ -235,7 +235,6 @@ fn populate_all_27_batch4_blobs_and_mining_ledger() -> WorldStateSnapshot {
         },
     );
     snap.last_mission_decline_times.insert(90_000_001, 1_700_001_000);
-    snap.wh_polarizations.insert((90_000_001, 500_001), 1_700_001_300);
     snap.module_online_states.insert(100_000_010, true);
     snap.module_active_states.insert(100_000_010);
     snap.module_active_charges.insert(100_000_010, 190);
@@ -254,23 +253,6 @@ fn populate_all_27_batch4_blobs_and_mining_ledger() -> WorldStateSnapshot {
     snap.paused_skill_queues.insert(90_000_001);
     snap.starbase_settings
         .insert(800_001, StarbaseDetailSettings::default());
-    snap.corp_container_logs.insert(
-        98_000_001,
-        vec![CorpContainerLogEntry {
-            logged_at_unix: 1_700_002_000,
-            container_id: 900_001,
-            container_type_id: 17366,
-            character_id: 90_000_001,
-            location_id: 60_003_760,
-            location_flag: "CorpSAG1".into(),
-            action: "unlock".into(),
-            password_type: Some("general".into()),
-            type_id: Some(34),
-            quantity: Some(10),
-            old_config_bitmask: None,
-            new_config_bitmask: None,
-        }],
-    );
     snap.quasar_state_blobs.insert("q_key".into(), "q_val".into());
     snap.service_state_blobs.insert("svc_key".into(), "svc_val".into());
     snap.killmail_details.insert(
@@ -351,11 +333,11 @@ fn all_27_batch4_blobs_and_mining_ledger_roundtrip_and_rollback() {
 
     let empty = WorldStateSnapshot::default();
     let empty_fp = compute_d6_batch4_fingerprints(&empty);
-    assert_eq!(empty_fp.blobs.len(), 36);
+    assert_eq!(empty_fp.blobs.len(), 34);
 
     let full = populate_all_27_batch4_blobs_and_mining_ledger();
     let full_fp = compute_d6_batch4_fingerprints(&full);
-    assert_eq!(full_fp.blobs.len(), 36);
+    assert_eq!(full_fp.blobs.len(), 34);
     assert_ne!(full_fp.mining_ledger, empty_fp.mining_ledger);
     for (key, empty_hash) in &empty_fp.blobs {
         assert_ne!(
@@ -404,7 +386,6 @@ fn all_27_batch4_blobs_and_mining_ledger_roundtrip_and_rollback() {
     assert_eq!(loaded.cosmic_anomalies, full.cosmic_anomalies);
     assert_eq!(loaded.incursions, full.incursions);
     assert_eq!(loaded.last_mission_decline_times, full.last_mission_decline_times);
-    assert_eq!(loaded.wh_polarizations, full.wh_polarizations);
     assert_eq!(loaded.module_online_states, full.module_online_states);
     assert_eq!(loaded.module_active_states, full.module_active_states);
     assert_eq!(loaded.module_active_charges, full.module_active_charges);
@@ -412,7 +393,6 @@ fn all_27_batch4_blobs_and_mining_ledger_roundtrip_and_rollback() {
     assert_eq!(loaded.weapon_banks, full.weapon_banks);
     assert_eq!(loaded.paused_skill_queues, full.paused_skill_queues);
     assert_eq!(loaded.starbase_settings, full.starbase_settings);
-    assert_eq!(loaded.corp_container_logs, full.corp_container_logs);
     assert_eq!(loaded.quasar_state_blobs, full.quasar_state_blobs);
     assert_eq!(loaded.service_state_blobs, full.service_state_blobs);
     assert_eq!(loaded.insurance_contracts, full.insurance_contracts);
@@ -438,7 +418,6 @@ fn all_27_batch4_blobs_and_mining_ledger_roundtrip_and_rollback() {
     assert_eq!(dirty.cosmic_anomalies, full.cosmic_anomalies);
     assert_eq!(dirty.incursions, full.incursions);
     assert_eq!(dirty.last_mission_decline_times, full.last_mission_decline_times);
-    assert_eq!(dirty.wh_polarizations, full.wh_polarizations);
     assert_eq!(dirty.module_online_states, full.module_online_states);
     assert_eq!(dirty.module_active_states, full.module_active_states);
     assert_eq!(dirty.module_active_charges, full.module_active_charges);
@@ -446,7 +425,6 @@ fn all_27_batch4_blobs_and_mining_ledger_roundtrip_and_rollback() {
     assert_eq!(dirty.weapon_banks, full.weapon_banks);
     assert_eq!(dirty.paused_skill_queues, full.paused_skill_queues);
     assert_eq!(dirty.starbase_settings, full.starbase_settings);
-    assert_eq!(dirty.corp_container_logs, full.corp_container_logs);
     assert_eq!(dirty.quasar_state_blobs, full.quasar_state_blobs);
     assert_eq!(dirty.service_state_blobs, full.service_state_blobs);
     assert_eq!(dirty.insurance_contracts, full.insurance_contracts);
