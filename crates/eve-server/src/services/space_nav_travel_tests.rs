@@ -796,3 +796,118 @@ async fn sync_ship_cloak_from_fitting_preserves_combat_state_and_locks_without_s
         if *ball_id == ship_id && (*max_speed - 400.0).abs() < 1e-6
     )));
 }
+
+#[tokio::test]
+async fn sync_ship_cloak_abyssal_force_decloak_pushes_updated_fit_projection_to_actor() {
+    let mut ctx = test_ctx();
+    let abyss_sys = 32_000_001;
+    let char_id = 96_510;
+    let ship_id = 78_510;
+    let covert_cloak_tid = 11_578;
+
+    clone_type_with(
+        &mut ctx.sde,
+        11_578,
+        covert_cloak_tid,
+        330,
+        7,
+        5.0,
+        0.0,
+        &[(20, 1.0), (1034, 1.0)],
+    );
+
+    let cloak_item_id = ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap
+            .characters
+            .values()
+            .next()
+            .cloned()
+            .expect("demo seed character");
+        ch.character_id = char_id;
+        ch.user_id = char_id as u64;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = abyss_sys;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        put_item(
+            snap,
+            ship_id,
+            588,
+            char_id,
+            i64::from(abyss_sys),
+            InventoryFlag::None,
+            1,
+            true,
+        );
+        let c_id = put_item(
+            snap,
+            78_511,
+            covert_cloak_tid,
+            char_id,
+            ship_id,
+            InventoryFlag::HiSlot0,
+            1,
+            true,
+        );
+        snap.module_active_states.insert(c_id);
+        c_id
+    });
+
+    let abyss_h = ctx.systems.get_or_spawn(abyss_sys);
+    abyss_h
+        .spawn_ball_with_combat(
+            make_ship_ball(ship_id, 588, 98_000_001, DVec3::ZERO),
+            eve_destiny::CombatState {
+                is_cloaked: true,
+                ..eve_destiny::CombatState::default()
+            },
+        )
+        .await
+        .expect("spawn ball");
+
+    let rev_before = ctx
+        .invalidate_and_push_fit(ship_id)
+        .expect("initial cloak FitProjection pushed");
+    let _ = abyss_h.get_ball_snapshot(ship_id).await;
+    let proj_before = abyss_h
+        .latest_fit_projection(ship_id)
+        .expect("initial FitProjection stored in actor");
+    assert_eq!(
+        proj_before.modules.get(&cloak_item_id).map(|m| m.state),
+        Some(eve_dogma::ModuleState::Active)
+    );
+
+    sync_ship_cloak_and_mjfg_from_fitting(&ctx, char_id, abyss_sys, ship_id).await;
+    let _ = abyss_h.get_ball_snapshot(ship_id).await;
+
+    assert!(!ctx
+        .db
+        .with_snapshot(|snap| snap.module_active_states.contains(&cloak_item_id)));
+    let rev_after = ctx.current_fit_rev(ship_id);
+    assert!(
+        rev_after.0 > rev_before.0,
+        "abyssal cloak strip must advance FitRev (before={}, after={})",
+        rev_before.0,
+        rev_after.0
+    );
+    let proj_after = abyss_h
+        .latest_fit_projection(ship_id)
+        .expect("abyssal cloak strip must push updated FitProjection to actor");
+    assert_eq!(proj_after.rev, rev_after);
+    assert!(
+        !matches!(
+            proj_after.modules.get(&cloak_item_id).map(|m| m.state),
+            Some(eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded)
+        ),
+        "stripped cloak must no longer be Active in actor FitProjection"
+    );
+
+    // Second pass when no active cloak exists in DB must be a no-op for FitRev.
+    sync_ship_cloak_and_mjfg_from_fitting(&ctx, char_id, abyss_sys, ship_id).await;
+    assert_eq!(
+        ctx.current_fit_rev(ship_id),
+        rev_after,
+        "subsequent sync without active cloak strip must not churn FitRev"
+    );
+}

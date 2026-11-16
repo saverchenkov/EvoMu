@@ -730,6 +730,9 @@ async fn test_tactical_rtc_tsb_break_locks_autotarget_wh_jump_and_nav_locks() {
 #[tokio::test]
 async fn test_entosis_subcap_contested_persist_and_command_burst_variants_crimewatch() {
     let ctx = test_ctx_with_custom_types(|sde| {
+        if let Some(bc) = sde.types.get_mut(&24_696) {
+            bc.default_attributes.insert(37, 6_000.0);
+        }
         sde.types.insert(930_001, custom_inv_type(sde, 930_001, 1313, 7, "Entosis Link I", &[(73, 120_000.0)]));
         sde.types.insert(930_002, custom_inv_type(sde, 930_002, 200, 7, "Rig Command Proc", &[]));
         if let Some(t) = sde.types.get_mut(&930_002) {
@@ -789,7 +792,7 @@ async fn test_entosis_subcap_contested_persist_and_command_burst_variants_crimew
     });
 
     let sys = ctx.systems.get_or_spawn(high_sys);
-    let _ = sys.spawn_ball_with_combat(Ball { id: subcap_a, type_id: 24_696, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 6_000.0, inertia: 1.0, mass: 1e7, radius: 200.0, speed_fraction: 0.0, mode: MovementMode::Stop }, CombatState { max_capacitor: 1000.0, capacitor: 1000.0, max_velocity_cap: Some(4_000.0), ..Default::default() }).await;
+    let _ = sys.spawn_ball_with_combat(Ball { id: subcap_a, type_id: 24_696, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 6_000.0, inertia: 1.0, mass: 1e7, radius: 200.0, speed_fraction: 0.0, mode: MovementMode::Stop }, CombatState { max_capacitor: 1000.0, capacitor: 1000.0, ..Default::default() }).await;
     let _ = sys.spawn_ball_with_combat(Ball { id: subcap_b, type_id: 587, position: DVec3::new(1000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 400.0, inertia: 1.0, mass: 1e6, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }, CombatState::default()).await;
     let _ = sys.spawn_ball_with_combat(Ball { id: crim_ship, type_id: 587, position: DVec3::new(1000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 400.0, inertia: 1.0, mass: 1e6, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }, CombatState::default()).await;
     let _ = sys.spawn_ball_with_combat(Ball { id: susp_ship, type_id: 587, position: DVec3::new(1000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 400.0, inertia: 1.0, mass: 1e6, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }, CombatState::default()).await;

@@ -162,8 +162,43 @@ pub(crate) fn sync_cycle_from_fit_projection_with_shield_boost_mult(
             );
         }
     }
-    if cp.prop_speed_boost > 0.0 {
+    if cp.prop_speed_boost > 0.0 && cp.prop_speed_boost.is_finite() {
         cycle.speed_boost_factor = cp.prop_speed_boost;
+    }
+    if cp.is_cloak
+        && cycle.effect_name.starts_with("cloaking")
+        && cp.cloak_velocity_bonus_pct.is_finite()
+        && cp.cloak_velocity_bonus_pct < 0.0
+    {
+        cycle.speed_boost_factor = cp.cloak_velocity_bonus_pct.max(-1.0);
+    }
+    if cp.is_mwd && cp.sig_radius_bonus_pct > 0.0 && cp.sig_radius_bonus_pct.is_finite() {
+        cycle.hic_sig_multiplier = Some(1.0 + cp.sig_radius_bonus_pct / 100.0);
+    }
+    if (cp.is_mwd || cp.is_afterburner)
+        && cp.mass_addition > 0.0
+        && cp.mass_addition.is_finite()
+    {
+        cycle.hic_mass_addition = Some(cp.mass_addition);
+    }
+    if cycle.shield_boost_amount > 0.0
+        && cp.shield_boost_amount > 0.0
+        && cp.shield_boost_amount.is_finite()
+    {
+        cycle.shield_boost_amount = cp.shield_boost_amount;
+    }
+    if !cycle.is_aar
+        && cycle.armor_repair_amount > 0.0
+        && cp.armor_repair_amount > 0.0
+        && cp.armor_repair_amount.is_finite()
+    {
+        cycle.armor_repair_amount = cp.armor_repair_amount;
+    }
+    if cycle.hull_repair_amount > 0.0
+        && cp.hull_repair_amount > 0.0
+        && cp.hull_repair_amount.is_finite()
+    {
+        cycle.hull_repair_amount = cp.hull_repair_amount;
     }
 }
 

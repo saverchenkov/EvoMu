@@ -1064,3 +1064,300 @@ async fn ecm_jam_and_burst_clear_target_bound_cycles_and_fit_projection_syncs_tu
         target_cs.shield_hp
     );
 }
+
+#[tokio::test]
+async fn fit_projection_sync_updates_mwd_rep_cloak_and_preserves_hic_wdfg_fields() {
+    let ship_id: BallId = 800_101;
+    let mwd_id: i64 = 900_101;
+    let sb_id: i64 = 900_102;
+    let rsb_id: i64 = 900_103;
+    let ar_id: i64 = 900_104;
+    let aar_id: i64 = 900_105;
+    let hr_id: i64 = 900_106;
+    let cloak_id: i64 = 900_107;
+    let wdfg_id: i64 = 900_108;
+
+    let mk_cp = |module_id: i64, module_type_id: u32| eve_dogma::CycleParams {
+        module_id,
+        module_type_id,
+        flag_id: 19,
+        state: eve_dogma::ModuleState::Active,
+        is_overloaded: false,
+        charge_type_id: None,
+        duration_ms: 5_000.0,
+        capacitor_need: 20.0,
+        is_turret: false,
+        is_missile: false,
+        damage: [0.0; 4],
+        damage_multiplier: 1.0,
+        optimal_range_m: 0.0,
+        falloff_m: 0.0,
+        tracking_speed: 0.0,
+        sig_resolution_m: 0.0,
+        missile_explosion_radius_m: 0.0,
+        missile_explosion_velocity_ms: 0.0,
+        missile_drf: 0.0,
+        missile_flight_time_ms: 0.0,
+        missile_max_velocity_ms: 0.0,
+        shield_boost_amount: 0.0,
+        armor_repair_amount: 0.0,
+        hull_repair_amount: 0.0,
+        speed_factor: 0.0,
+        speed_boost_factor: 0.0,
+        mass_addition: 0.0,
+        sig_radius_bonus_pct: 0.0,
+        prop_speed_boost: 0.0,
+        is_mwd: false,
+        is_afterburner: false,
+        is_cloak: false,
+        cloak_velocity_bonus_pct: 0.0,
+        is_hic_wdfg: false,
+    };
+
+    let mut modules = HashMap::new();
+
+    let mut cp_mwd = mk_cp(mwd_id, 434);
+    cp_mwd.duration_ms = 2_000.0;
+    cp_mwd.capacitor_need = 12.0;
+    cp_mwd.is_mwd = true;
+    cp_mwd.sig_radius_bonus_pct = 375.0;
+    cp_mwd.mass_addition = 420_000.0;
+    cp_mwd.prop_speed_boost = 6.2;
+    modules.insert(mwd_id, cp_mwd);
+
+    let mut cp_sb = mk_cp(sb_id, 399);
+    cp_sb.shield_boost_amount = 145.0;
+    modules.insert(sb_id, cp_sb);
+
+    let mut cp_rsb = mk_cp(rsb_id, 3608);
+    cp_rsb.shield_boost_amount = 999.0;
+    modules.insert(rsb_id, cp_rsb);
+
+    let mut cp_ar = mk_cp(ar_id, 3530);
+    cp_ar.armor_repair_amount = 115.0;
+    modules.insert(ar_id, cp_ar);
+
+    let mut cp_aar = mk_cp(aar_id, 33076);
+    cp_aar.armor_repair_amount = 80.0;
+    modules.insert(aar_id, cp_aar);
+
+    let mut cp_hr = mk_cp(hr_id, 3532);
+    cp_hr.hull_repair_amount = 75.0;
+    modules.insert(hr_id, cp_hr);
+
+    let mut cp_cloak = mk_cp(cloak_id, 11_370);
+    cp_cloak.is_cloak = true;
+    cp_cloak.cloak_velocity_bonus_pct = -0.60;
+    modules.insert(cloak_id, cp_cloak);
+
+    let mut cp_wdfg = mk_cp(wdfg_id, 27_951);
+    cp_wdfg.is_hic_wdfg = true;
+    modules.insert(wdfg_id, cp_wdfg);
+
+    let proj = eve_dogma::FitProjection {
+        rev: eve_dogma::FitRev(4),
+        ship_id,
+        ship_type_id: 587,
+        active_stance_type_id: None,
+        last_stance_switch_ms: None,
+        baseline: eve_dogma::CombatBaseline {
+            max_velocity: 350.0,
+            mass: 1_500_000.0,
+            agility: 2.5,
+            signature_radius: 40.0,
+            max_shield_hp: 500.0,
+            max_armor_hp: 500.0,
+            max_structure_hp: 400.0,
+            max_capacitor: 1_000.0,
+            shield_recharge_time_ms: 100_000.0,
+            capacitor_recharge_time_ms: 100_000.0,
+            shield_resonance: [1.0; 4],
+            armor_resonance: [1.0; 4],
+            structure_resonance: [1.0; 4],
+            warp_speed_au_s: 5.0,
+            max_locked_targets: 4,
+            max_target_range: 25_000.0,
+            scan_resolution: 500.0,
+        },
+        propulsion: None,
+        modules,
+    };
+    let projections = HashMap::from([(ship_id, proj.clone())]);
+
+    // 1. Local shield booster vs remote shield booster (remote must keep shield_boost_amount == 0.0).
+    let mut sb_cycle = ActiveModuleCycle {
+        ship_id,
+        module_id: sb_id,
+        module_type_id: 399,
+        duration_s: 4.0,
+        shield_boost_amount: 100.0,
+        ..Default::default()
+    };
+    sync_cycle_from_fit_projection(&mut sb_cycle, &projections);
+    assert!((sb_cycle.shield_boost_amount - 145.0).abs() < 1e-6);
+
+    let mut rsb_cycle = ActiveModuleCycle {
+        ship_id,
+        module_id: rsb_id,
+        module_type_id: 3608,
+        duration_s: 4.0,
+        shield_boost_amount: 0.0,
+        remote_shield_amount: 120.0,
+        ..Default::default()
+    };
+    sync_cycle_from_fit_projection(&mut rsb_cycle, &projections);
+    assert_eq!(rsb_cycle.shield_boost_amount, 0.0);
+
+    // 2. Normal armor repairer updates vs AAR paste-boosted amount preserved.
+    let mut ar_cycle = ActiveModuleCycle {
+        ship_id,
+        module_id: ar_id,
+        module_type_id: 3530,
+        duration_s: 4.0,
+        armor_repair_amount: 80.0,
+        ..Default::default()
+    };
+    sync_cycle_from_fit_projection(&mut ar_cycle, &projections);
+    assert!((ar_cycle.armor_repair_amount - 115.0).abs() < 1e-6);
+
+    let mut aar_cycle = ActiveModuleCycle {
+        ship_id,
+        module_id: aar_id,
+        module_type_id: 33076,
+        duration_s: 4.0,
+        is_aar: true,
+        armor_repair_amount: 240.0,
+        ..Default::default()
+    };
+    sync_cycle_from_fit_projection(&mut aar_cycle, &projections);
+    assert!((aar_cycle.armor_repair_amount - 240.0).abs() < 1e-6);
+
+    // 3. Hull repairer and non-covert cloak velocity modifier.
+    let mut hr_cycle = ActiveModuleCycle {
+        ship_id,
+        module_id: hr_id,
+        module_type_id: 3532,
+        duration_s: 4.0,
+        hull_repair_amount: 50.0,
+        ..Default::default()
+    };
+    sync_cycle_from_fit_projection(&mut hr_cycle, &projections);
+    assert!((hr_cycle.hull_repair_amount - 75.0).abs() < 1e-6);
+
+    let mut cloak_cycle = ActiveModuleCycle {
+        ship_id,
+        module_id: cloak_id,
+        module_type_id: 11_370,
+        effect_name: "cloakingPrototype".into(),
+        duration_s: 5.0,
+        speed_boost_factor: -0.75,
+        ..Default::default()
+    };
+    sync_cycle_from_fit_projection(&mut cloak_cycle, &projections);
+    assert!((cloak_cycle.speed_boost_factor - (-0.60)).abs() < 1e-6);
+
+    // 4. Negative isolation: HIC WDFG hic_sig_multiplier / hic_mass_addition must NOT be overwritten,
+    //    and overload mismatch must skip sync.
+    let mut wdfg_cycle = ActiveModuleCycle {
+        ship_id,
+        module_id: wdfg_id,
+        module_type_id: 27_951,
+        duration_s: 5.0,
+        hic_sig_multiplier: Some(2.0),
+        hic_mass_addition: Some(1_000_000.0),
+        ..Default::default()
+    };
+    sync_cycle_from_fit_projection(&mut wdfg_cycle, &projections);
+    assert_eq!(wdfg_cycle.hic_sig_multiplier, Some(2.0));
+    assert_eq!(wdfg_cycle.hic_mass_addition, Some(1_000_000.0));
+
+    let mut ovl_mwd_cycle = ActiveModuleCycle {
+        ship_id,
+        module_id: mwd_id,
+        module_type_id: 434,
+        is_overloaded: true,
+        duration_s: 1.5,
+        hic_sig_multiplier: Some(6.0),
+        hic_mass_addition: Some(500_000.0),
+        speed_boost_factor: 5.0,
+        ..Default::default()
+    };
+    sync_cycle_from_fit_projection(&mut ovl_mwd_cycle, &projections);
+    assert_eq!(ovl_mwd_cycle.hic_sig_multiplier, Some(6.0));
+    assert_eq!(ovl_mwd_cycle.hic_mass_addition, Some(500_000.0));
+    assert!((ovl_mwd_cycle.speed_boost_factor - 5.0).abs() < 1e-6);
+
+    // 5. End-to-end actor step: MWD crosses cycle boundary with FitProjection, updates
+    //    hic_sig_multiplier / hic_mass_addition / speed_boost_factor, and reconciles Ball + CombatState.
+    let reg = SystemRegistry::new();
+    let handle = reg.get_or_spawn(30_000_144);
+    handle
+        .spawn_ball_with_combat(
+            make_ship(ship_id, 587, DVec3::ZERO),
+            CombatState {
+                capacitor: 1_000.0,
+                max_capacitor: 1_000.0,
+                signature_radius: 40.0,
+                base_signature_radius: Some(40.0),
+                base_max_velocity: Some(350.0),
+                base_mass: Some(1_500_000.0),
+                base_inertia: Some(2.5),
+                shield_recharge_time_ms: 100_000.0,
+                capacitor_recharge_time_ms: 100_000.0,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    handle
+        .add_module_cycle(ActiveModuleCycle {
+            ship_id,
+            module_id: mwd_id,
+            module_type_id: 434,
+            effect_name: "moduleBonusMicrowarpdrive".into(),
+            repeat: 1,
+            duration_s: 1.5,
+            cap_need_per_cycle: 10.0,
+            speed_boost_factor: 5.0,
+            hic_sig_multiplier: Some(6.0),
+            hic_mass_addition: Some(500_000.0),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(handle.apply_fit_projection(ship_id, proj).await);
+
+    let _ = handle.step_manual(0.1).await.unwrap();
+    let cs_mid = handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((cs_mid.module_sig_multiplier - 6.0).abs() < 1e-6);
+
+    let _ = handle.step_manual(1.6).await.unwrap();
+    let cs_after = handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    let (_, ball_after) = handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(
+        (cs_after.module_sig_multiplier - 4.75).abs() < 1e-6,
+        "MWD cycle boundary must sync hic_sig_multiplier to 4.75 (got {})",
+        cs_after.module_sig_multiplier
+    );
+    assert!(
+        (cs_after.module_mass_addition - 420_000.0).abs() < 1e-3,
+        "MWD cycle boundary must sync hic_mass_addition to 420_000 (got {})",
+        cs_after.module_mass_addition
+    );
+    assert!(
+        (cs_after.signature_radius - 190.0).abs() < 1e-6,
+        "reconciled signature radius must reflect 4.75x bloom (got {})",
+        cs_after.signature_radius
+    );
+    assert!(
+        (ball_after.mass - 1_920_000.0).abs() < 1e-3,
+        "reconciled ball mass must reflect 420_000 added mass (got {})",
+        ball_after.mass
+    );
+    assert!(
+        (ball_after.max_velocity - 2_520.0).abs() < 1e-3,
+        "reconciled ball max_velocity must reflect 7.2x boost (got {})",
+        ball_after.max_velocity
+    );
+}

@@ -628,6 +628,7 @@ pub async fn activate_auto_targeting_system(
         }
     }
     ctx.db.with_mut_snapshot(|snap| { snap.module_active_states.insert(module_id); });
+    let _ = ctx.invalidate_and_push_fit(ship_id);
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),
         ("active", PyRep::Bool(true)),
@@ -742,15 +743,17 @@ pub async fn handle_entosis_link_activation(
     let is_capital = matches!(ship_group_id, 30 | 485 | 547 | 659 | 883 | 1538 | 4594);
     let base_cycle_s = mod_type.default_attributes.get(&73).copied().unwrap_or(300_000.0) / 1000.0;
     let cycle_duration_s = if is_capital { base_cycle_s * 5.0 } else { base_cycle_s };
+    let entosis_vel_cap = mod_type.default_attributes.get(&2033).copied().filter(|&v| v > 0.0).unwrap_or(4_000.0);
 
     if let Ok(Some(mut cs)) = sys.get_combat_state(ship_id).await {
         cs.warp_scramble_strength = cs.warp_scramble_strength.max(100);
+        cs.max_velocity_cap = Some(cs.max_velocity_cap.map_or(entosis_vel_cap, |c| c.min(entosis_vel_cap)));
         if is_capital { cs.disallow_assistance = true; }
         let _ = sys.set_combat_state(ship_id, cs).await;
     }
     if let Ok(Some((_, ball))) = sys.get_ball_snapshot(ship_id).await {
-        if ball.max_velocity > 4_000.0 {
-            let _ = sys.set_ball_max_velocity(ship_id, 4_000.0).await;
+        if ball.max_velocity > entosis_vel_cap {
+            let _ = sys.set_ball_max_velocity(ship_id, entosis_vel_cap).await;
         }
     }
 
@@ -775,7 +778,7 @@ pub async fn handle_entosis_link_activation(
     };
 
     scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner()).entosis_contested_nodes.insert(target_id, ship_id);
-    ctx.invalidate_ship_fitting_cache_only(ship_id);
+    let _ = ctx.invalidate_and_push_fit(ship_id);
     ctx.persist_server_runtime_to_db();
 
     Ok(PyRep::keyval([
@@ -1039,8 +1042,7 @@ pub async fn activate_command_burst(
         if exhausted { snap.module_active_charges.remove(&module_id); } else { snap.module_active_charges.insert(module_id, c_tid); }
     });
     for &(member_cid, member_sid) in &affected_ships {
-        ctx.invalidate_ship_fitting(member_sid);
-        ctx.push_fit_projection(member_cid, member_sid);
+        let _ = ctx.invalidate_and_push_fit(member_sid);
         ctx.notify(NotificationTarget::Character(member_cid), "OnDbuffUpdated", "charid", vec![PyRep::Integer(member_sid), PyRep::List(dbuff_id_reps.clone())]);
     }
     crate::services::notify_emitters_space_dungeons::emit_fleet_boosted(ctx, char_id, mod_type.type_id, affected_ships.len());
