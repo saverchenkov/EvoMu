@@ -2219,3 +2219,327 @@ fn get_inventory_from_id_accepts_item_descriptors_and_rejects_malformed_args() {
         assert_eq!(err.code, "InvalidArguments", "args: {bad_args:?}");
     }
 }
+
+#[tokio::test]
+async fn moveme_with_inflight_ship_and_station_invbroker_allows_get_self_inv_item_within_grace_window_gh1146()
+{
+    let ctx = test_ctx();
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let other_char = 95_114_602_i64;
+    let sys_from = 30_000_144_u32;
+    let sys_jita = 30_000_142_u32;
+    let station_jita = 60_003_760_i64;
+    let prev_ship_id = 1_897_301_923_i64;
+    let active_ship_id = 1_897_147_421_i64;
+    let other_ship_id = 1_897_999_001_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_from;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = active_ship_id;
+        }
+        let mut ch2 = snap.characters[&char_id].clone();
+        ch2.character_id = other_char;
+        ch2.user_id = other_char as u64;
+        ch2.name = "Other Pilot".into();
+        ch2.solar_system_id = sys_jita;
+        ch2.station_id = None;
+        ch2.structure_id = None;
+        ch2.active_ship_id = other_ship_id;
+        snap.characters.insert(other_char, ch2);
+
+        for (item_id, type_id, owner_id, location_id) in [
+            (prev_ship_id, 587_u32, char_id, i64::from(sys_from)),
+            (active_ship_id, 606_u32, char_id, i64::from(sys_from)),
+            (other_ship_id, 587_u32, other_char, i64::from(sys_jita)),
+        ] {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id,
+                    location_id,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    ctx.db
+        .acquire_online_lock(user_id, 9101, Some(char_id), false, ctx.now_unix())
+        .expect("acquire primary online lock");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let kw = HashMap::new();
+    let mut sess = SessionState {
+        session_id: 9101,
+        user_id: Some(user_id),
+        character_id: Some(char_id),
+        corporation_id: Some(1_000_009),
+        solar_system_id: Some(sys_from),
+        ship_id: Some(active_ship_id),
+        role: eve_machonet::service_roles::ROLE_GM_MASK,
+        ..Default::default()
+    };
+    let mut other_sess = SessionState {
+        session_id: 9102,
+        user_id: Some(other_char as u64),
+        character_id: Some(other_char),
+        corporation_id: Some(1_000_009),
+        solar_system_id: Some(sys_jita),
+        ship_id: Some(other_ship_id),
+        ..Default::default()
+    };
+
+    // 1. Bind system invbroker in Perimeter, plus active ship and prior ship (floating in Perimeter).
+    let bind_sys_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(i64::from(sys_from)), PyRep::None],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("bind system invbroker");
+    let sys_bid = extract_macho_bound_id(&bind_sys_rep);
+
+    let active_inv_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            Some(sys_bid),
+            "GetInventoryFromId",
+            &[PyRep::Integer(active_ship_id), PyRep::Integer(1)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetInventoryFromId(active_ship_id, 1)");
+    let active_bid = extract_macho_bound_id(&active_inv_rep);
+
+    let prev_inv_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            Some(sys_bid),
+            "GetInventoryFromId",
+            &[PyRep::Integer(prev_ship_id), PyRep::Integer(0)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetInventoryFromId(prev_ship_id, 0)");
+    let prev_bid = extract_macho_bound_id(&prev_inv_rep);
+    let prev_oid = ctx
+        .verify_bound_object(&sess, prev_bid)
+        .expect("prev_bid valid before /moveme")
+        .oid_str;
+
+    // 2. Teleport to Jita (/moveme 30000142) while prev_bid.GetSelfInvItem() is in flight.
+    ctx.dispatch_rpc(
+        &mut sess,
+        "slash",
+        None,
+        "SlashCmd",
+        &[PyRep::String(format!("/moveme {sys_jita}"))],
+        &kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("/moveme 30000142 succeeds");
+    assert_eq!(sess.solar_system_id, Some(sys_jita));
+
+    // Active ship binding remains live, while remote prev_bid was invalidated and disconnected.
+    assert!(ctx.verify_bound_object(&sess, active_bid).is_ok());
+    assert_eq!(
+        ctx.verify_bound_object(&sess, prev_bid).unwrap_err().code,
+        "InvalidBoundObject"
+    );
+    let disconnect_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(disconnect_notifs.iter().any(|n| {
+        n.event == "OnMachoObjectDisconnect"
+            && n.args.first() == Some(&PyRep::ascii_bytes(prev_oid.clone()))
+    }));
+
+    // 3. Already-queued prev_bid.GetSelfInvItem() arrives seconds after /moveme and succeeds.
+    ctx.advance_secs(5);
+    let prev_self = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "machoNet",
+            Some(prev_bid),
+            "GetSelfInvItem",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("in-flight prev_bid.GetSelfInvItem() succeeds within grace window (#1146)");
+    assert_eq!(prev_self.dbrow_get("itemID"), Some(&PyRep::Integer(prev_ship_id)));
+
+    // Active ship List() continues working as before.
+    assert!(
+        ctx.dispatch_rpc(
+            &mut sess,
+            "machoNet",
+            Some(active_bid),
+            "List",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .is_ok()
+    );
+
+    // Negative: remote List() on invalidated prev_bid and foreign character GetSelfInvItem() fail.
+    let list_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "machoNet",
+            Some(prev_bid),
+            "List",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(list_err.code, "InvalidBoundObject");
+
+    let other_err = ctx
+        .dispatch_rpc(
+            &mut other_sess,
+            "machoNet",
+            Some(prev_bid),
+            "GetSelfInvItem",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(other_err.code, "InvalidBoundObject");
+
+    // 4. Dock in Jita 4-4, bind station invbroker, /moveme out into space -> station GetSelfInvItem
+    //    succeeds during grace window while station List() fails and explicit release purges it.
+    ctx.db.dock_character(char_id, station_jita, false).expect("dock in Jita 4-4");
+    sess.station_id = Some(station_jita);
+    let bind_sta_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(station_jita), PyRep::None],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("bind station invbroker");
+    let sta_bid = extract_macho_bound_id(&bind_sta_rep);
+    let sta_oid = ctx
+        .verify_bound_object(&sess, sta_bid)
+        .expect("station bound valid while docked")
+        .oid_str;
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "slash",
+        None,
+        "SlashCmd",
+        &[PyRep::String(format!("/moveme {sys_from}"))],
+        &kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("/moveme from station into Perimeter space");
+    assert_eq!(sess.station_id, None);
+    assert_eq!(
+        ctx.verify_bound_object(&sess, sta_bid).unwrap_err().code,
+        "InvalidBoundObject"
+    );
+
+    let sta_self = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "machoNet",
+            Some(sta_bid),
+            "GetSelfInvItem",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("in-flight station GetSelfInvItem() succeeds within grace window");
+    assert_eq!(sta_self.dbrow_get("itemID"), Some(&PyRep::Integer(station_jita)));
+
+    let sta_list_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "machoNet",
+            Some(sta_bid),
+            "List",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(sta_list_err.code, "InvalidBoundObject");
+
+    // Client release notification clears station grace immediately; prev_bid expires after 31s.
+    ctx.dispatch_rpc(
+        &mut sess,
+        "machoNet",
+        None,
+        "ClientHasReleasedTheseObjects",
+        &[PyRep::ascii_bytes(sta_oid)],
+        &kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("ClientHasReleasedTheseObjects");
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut sess,
+            "machoNet",
+            Some(sta_bid),
+            "GetSelfInvItem",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "InvalidBoundObject"
+    );
+
+    ctx.advance_secs(31);
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut sess,
+            "machoNet",
+            Some(prev_bid),
+            "GetSelfInvItem",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "InvalidBoundObject"
+    );
+}

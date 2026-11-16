@@ -2,10 +2,12 @@
 
 use crate::router::context::{BoundObjectEntry, ServerContext, NEXT_BOUND_ID};
 use crate::router::{NotificationTarget, PendingMachoNotification};
+use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 /// Unified cluster-wide transport session ID allocator shared by `machoNet` TCP,
 /// Python Client Bridge TCP, and Quasar HTTP/2 gRPC listeners (`#852`).
@@ -21,6 +23,32 @@ const ERR_BOUND_OWNERSHIP: &str = "BoundObjectOwnershipViolation";
 
 /// Maximum concurrent bound objects retained per client session (`#882` / `C20`).
 pub const MAX_BOUND_OBJECTS_PER_SESSION: usize = 256;
+
+/// Retention window (`30s`, matching V24 `basesession.pyj::ObjectConnection.__del__ ->
+/// DisconnectObject(30)`) for in-flight read-only `invbroker` metadata calls that were already
+/// queued before a session transition disconnected their bound handle (`#1146`).
+const TRANSITION_DISCONNECT_GRACE_TICKS: i64 = 30 * 10_000_000;
+
+/// Maximum transition-disconnected `invbroker` grace entries retained per session.
+const MAX_TRANSITION_GRACE_PER_SESSION: usize = 256;
+
+#[derive(Clone)]
+struct TransitionDisconnectedBinding {
+    entry: BoundObjectEntry,
+    disconnected_ticks: i64,
+}
+
+struct ContextGraceStore {
+    owner: Weak<RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>>,
+    entries: HashMap<u64, TransitionDisconnectedBinding>,
+}
+
+static TRANSITION_DISCONNECT_GRACE: OnceLock<RwLock<HashMap<u64, ContextGraceStore>>> =
+    OnceLock::new();
+
+fn transition_disconnect_grace() -> &'static RwLock<HashMap<u64, ContextGraceStore>> {
+    TRANSITION_DISCONNECT_GRACE.get_or_init(|| RwLock::new(HashMap::new()))
+}
 
 /// RAII guard for TCP client connection tasks (`machoNet` and Python Client Bridge) ensuring
 /// synchronous session state (`session_closers`, `bound_objects`, and `PublicGatewayRouter`
@@ -134,6 +162,7 @@ impl ServerContext {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, v| v.session_id != session_id);
+        self.purge_transition_grace_where(|_, v| v.entry.session_id == session_id);
     }
 
     /// Releases all bound objects and Quasar notice subscriptions associated with `user_id`
@@ -143,6 +172,7 @@ impl ServerContext {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, v| v.user_id != user_id);
+        self.purge_transition_grace_where(|_, v| v.entry.user_id == user_id);
         self.quasar_gateway.unsubscribe_user(user_id);
     }
 
@@ -387,17 +417,23 @@ impl ServerContext {
         if target_bids.is_empty() {
             return 0;
         }
-        let mut map = self
-            .bound_objects
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let mut removed = 0;
-        for bid in target_bids {
-            if map.get(&bid).is_some_and(|e| e.session_id == session_id) {
-                map.remove(&bid);
-                removed += 1;
+        let removed = {
+            let mut map = self
+                .bound_objects
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let mut count = 0;
+            for &bid in &target_bids {
+                if map.get(&bid).is_some_and(|e| e.session_id == session_id) {
+                    map.remove(&bid);
+                    count += 1;
+                }
             }
-        }
+            count
+        };
+        self.purge_transition_grace_where(|bid, v| {
+            v.entry.session_id == session_id && target_bids.contains(bid)
+        });
         removed
     }
 
@@ -567,6 +603,140 @@ impl ServerContext {
         );
     }
 
+    fn is_grace_entry_active(binding: &TransitionDisconnectedBinding, now_ticks: i64) -> bool {
+        now_ticks >= binding.disconnected_ticks
+            && now_ticks.saturating_sub(binding.disconnected_ticks)
+                <= TRANSITION_DISCONNECT_GRACE_TICKS
+    }
+
+    fn record_transition_grace_bindings(&self, entries: &[BoundObjectEntry]) {
+        let inv_entries: Vec<&BoundObjectEntry> = entries
+            .iter()
+            .filter(|e| e.service == "invbroker")
+            .collect();
+        if inv_entries.is_empty() {
+            return;
+        }
+        let now_ticks = self.now_machonet_wallclock_filetime_ticks();
+        let owner = Arc::downgrade(&self.bound_objects);
+        let mut outer = transition_disconnect_grace()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        outer.retain(|_, store| store.owner.strong_count() > 0);
+        let store = outer.entry(self.instance_id).or_insert_with(|| ContextGraceStore {
+            owner,
+            entries: HashMap::new(),
+        });
+        store
+            .entries
+            .retain(|_, v| Self::is_grace_entry_active(v, now_ticks));
+        let mut touched_sessions = Vec::new();
+        for entry in inv_entries {
+            if !touched_sessions.contains(&entry.session_id) {
+                touched_sessions.push(entry.session_id);
+            }
+            store.entries.insert(
+                entry.bound_id,
+                TransitionDisconnectedBinding {
+                    entry: entry.clone(),
+                    disconnected_ticks: now_ticks,
+                },
+            );
+        }
+        for sid in touched_sessions {
+            let mut session_bids: Vec<(i64, u64)> = store
+                .entries
+                .iter()
+                .filter(|(_, v)| v.entry.session_id == sid)
+                .map(|(&bid, v)| (v.disconnected_ticks, bid))
+                .collect();
+            if session_bids.len() > MAX_TRANSITION_GRACE_PER_SESSION {
+                session_bids.sort_unstable();
+                let excess = session_bids.len() - MAX_TRANSITION_GRACE_PER_SESSION;
+                for (_, bid) in session_bids.into_iter().take(excess) {
+                    store.entries.remove(&bid);
+                }
+            }
+        }
+    }
+
+    fn purge_transition_grace_where<F>(&self, mut remove_pred: F)
+    where
+        F: FnMut(&u64, &TransitionDisconnectedBinding) -> bool,
+    {
+        let Some(lock) = TRANSITION_DISCONNECT_GRACE.get() else {
+            return;
+        };
+        let mut outer = lock.write().unwrap_or_else(|e| e.into_inner());
+        outer.retain(|_, store| store.owner.strong_count() > 0);
+        if let Some(store) = outer.get_mut(&self.instance_id) {
+            store.entries.retain(|bid, v| !remove_pred(bid, v));
+            if store.entries.is_empty() {
+                outer.remove(&self.instance_id);
+            }
+        }
+    }
+
+    fn lookup_transition_grace_entry(
+        &self,
+        session: &SessionState,
+        bound_id: u64,
+    ) -> Option<BoundObjectEntry> {
+        let uid = session.user_id?;
+        let cid = session.character_id?;
+        let now_ticks = self.now_machonet_wallclock_filetime_ticks();
+        let entry = {
+            let outer = TRANSITION_DISCONNECT_GRACE
+                .get()?
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            let store = outer.get(&self.instance_id)?;
+            let binding = store.entries.get(&bound_id)?;
+            if !Self::is_grace_entry_active(binding, now_ticks)
+                || binding.entry.service != "invbroker"
+                || binding.entry.session_id != session.session_id
+                || binding.entry.user_id != uid
+                || binding.entry.character_id != cid
+            {
+                return None;
+            }
+            binding.entry.clone()
+        };
+        if let Some(online) = self.db.get_online_session(uid) {
+            if online.session_id != session.session_id || online.character_id != Some(cid) {
+                return None;
+            }
+        }
+        Some(entry)
+    }
+
+    /// Returns a recently transition-disconnected `invbroker` binding when an already-in-flight
+    /// read-only metadata RPC (`GetSelfInvItem` / `GetAvailableTurretSlots`) arrives within the
+    /// 30s transition grace window for the owning live session (`#1146`).
+    pub(crate) fn grace_bound_object_for_inflight_invbroker(
+        &self,
+        session: &SessionState,
+        bound_id: u64,
+        method: &str,
+    ) -> Option<BoundObjectEntry> {
+        if !matches!(method, "GetSelfInvItem" | "GetAvailableTurretSlots") {
+            return None;
+        }
+        self.lookup_transition_grace_entry(session, bound_id)
+    }
+
+    /// Returns whether `bound_id` is currently authorized via the transition-disconnect grace
+    /// cache for `session` and `object_id` (`#1146`).
+    pub(crate) fn has_transition_grace_invbroker_binding(
+        &self,
+        session: &SessionState,
+        bound_id: u64,
+        object_id: i64,
+    ) -> bool {
+        self.lookup_transition_grace_entry(session, bound_id)
+            .is_some_and(|entry| entry.object_id == object_id)
+    }
+
     /// Invalidates solar-system-scoped and station/structure-scoped bound objects for `char_id`
     /// across location transitions (`stargate_jump`, `dock`, `undock`, `podding`, `wormhole_jump`,
     /// `jump_drive`, `cyno_jump`, `filamentJump`, `jump_bridge`, `shipcaster`, `clone_jump`, etc.)
@@ -589,6 +759,9 @@ impl ServerContext {
         }
         if matches!(reason, "set_account_key" | "login") {
             return;
+        }
+        if reason == "logout" {
+            self.purge_transition_grace_where(|_, v| v.entry.character_id == char_id);
         }
         let candidates: Vec<(u64, BoundObjectEntry)> = self
             .bound_objects
@@ -628,6 +801,9 @@ impl ServerContext {
                 }
             }
         }
+        if reason != "logout" {
+            self.record_transition_grace_bindings(&removed);
+        }
         for entry in &removed {
             self.emit_macho_object_disconnect(entry);
         }
@@ -646,6 +822,7 @@ impl ServerContext {
             .unwrap_or_else(|e| e.into_inner())
             .remove(&bound_id);
         if let Some(entry) = removed {
+            self.purge_transition_grace_where(|&bid, _| bid == bound_id);
             self.emit_macho_object_disconnect(&entry);
         }
         Ok(())

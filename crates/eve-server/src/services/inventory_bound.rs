@@ -115,7 +115,7 @@ pub fn handle(
         );
     };
     match method {
-        "GetSelfInvItem" => Some(self_inv_item(ctx, session, char_id, location_id)),
+        "GetSelfInvItem" => Some(self_inv_item(ctx, session, bound_entry, char_id, location_id)),
         "GetAvailableTurretSlots" => {
             // `monolith_task_tracker/client/eventHandler.pyj:38-46` (`OnHighSlotFittingChanged`):
             // calls `sm.GetService('invCache').GetInventoryFromId(shipID).GetAvailableTurretSlots()`
@@ -359,9 +359,14 @@ pub fn handle(
 fn self_inv_item(
     ctx: &ServerContext,
     session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
     char_id: i64,
     object_id: i64,
 ) -> Result<PyRep, BridgeRpcError> {
+    let allow_departed_location = bound_entry.is_some_and(|b| {
+        b.object_id == object_id
+            && ctx.has_transition_grace_invbroker_binding(session, b.bound_id, object_id)
+    });
     let header = DBRowDescriptor::inv_item_header();
     if let Some(item) = ctx.db.get_item(object_id).filter(|i| {
         i.owner_id == char_id
@@ -399,7 +404,7 @@ fn self_inv_item(
             let same_corp = session
                 .corporation_id
                 .is_some_and(|cid| cid > 0 && st.owner_corp_id == cid);
-            if !same_corp && session.structure_id != Some(object_id) {
+            if !same_corp && session.structure_id != Some(object_id) && !allow_departed_location {
                 return None;
             }
             let (gid, cid) = ctx
@@ -423,7 +428,7 @@ fn self_inv_item(
     }) {
         return Ok(row);
     }
-    if session.station_id == Some(object_id) {
+    if session.station_id == Some(object_id) || allow_departed_location {
         if let Some(st) = ctx.sde.stations.get(&object_id) {
             let (group_id, category_id) = ctx
                 .sde
