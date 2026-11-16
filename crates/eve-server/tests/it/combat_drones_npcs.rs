@@ -1382,3 +1382,192 @@ async fn test_c4_bounty_tick_dbs_ess_split_encounter_waves_and_sentry_guns() {
     .await;
     assert!(!engaged_offgrid, "Sentry guns must drop aggression when offender warps > 500km off-grid");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tristan_v24_partial_drone_stack_launch_contract() {
+    let ctx = ServerContext::new();
+    let sys_id = 30_000_142u32; // Jita
+    let kw = HashMap::new();
+
+    // 1. Exact GH #1075 repro: Tristan (593, 25 Mbit/s bandwidth) with Drones V (max 5)
+    //    and an 8-unit stack of Hobgoblin I (2454, 5 Mbit/s each) in drone bay.
+    let char_a = 91_000_801_i64;
+    let tristan_a = 101_000_801_i64;
+    let mut sess_a = setup_pilot_session(&ctx, 8801, char_a, tristan_a, 593, sys_id, DVec3::ZERO).await;
+    let hob_stack_id = 310_801_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            hob_stack_id,
+            InventoryItemRecord {
+                item_id: hob_stack_id,
+                type_id: 2454, // Hobgoblin I
+                owner_id: char_a,
+                location_id: tristan_a,
+                flag: InventoryFlag::DroneBay,
+                quantity: 8,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char_a);
+
+    let launch_rep = dispatch_combat_rpc(
+        &ctx,
+        &mut sess_a,
+        "ship",
+        "LaunchDrones",
+        &[
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(hob_stack_id),
+                PyRep::Integer(8),
+            ])]),
+            PyRep::None,
+            PyRep::Bool(false),
+        ],
+        &kw,
+    )
+    .await
+    .expect("Launching 8-unit Hobgoblin I stack on Tristan must partially launch 5");
+
+    let PyRep::Dict(entries) = launch_rep else {
+        panic!("V24 LaunchFromShip expects PyRep::Dict, got {launch_rep:?}");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, PyRep::Integer(hob_stack_id));
+    let PyRep::List(seq) = &entries[0].1 else {
+        panic!("expected per-item PyRep::List, got {:?}", entries[0].1);
+    };
+    assert_eq!(seq.len(), 6, "expected 5 launched IDs + ('NoDroneManagementAbilitiesLeft',), got {seq:?}");
+    let launched_hobs: Vec<i64> = seq[..5].iter().filter_map(PyRep::as_i64).collect();
+    assert_eq!(launched_hobs.len(), 5);
+    assert_eq!(
+        seq[5],
+        PyRep::Tuple(vec![PyRep::String("NoDroneManagementAbilitiesLeft".into())])
+    );
+
+    let active_hobs = with_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space
+            .values()
+            .filter(|d| d.parent_ship_id == tristan_a && !d.is_abandoned)
+            .count()
+    });
+    assert_eq!(active_hobs, 5, "5 Hobgoblin I drones must be active in space");
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items.get(&hob_stack_id).map(|i| i.quantity)),
+        Some(3),
+        "3 unlaunched Hobgoblin I drones must remain in the Tristan drone bay"
+    );
+    let notifs = ctx.drain_notifications_for_char(char_a);
+    assert_eq!(notifs.iter().filter(|n| n.event == "OnItemChange").count(), 6);
+    assert_eq!(notifs.iter().filter(|n| n.event == "OnDroneStateChange").count(), 5);
+
+    // Re-launching while 5/5 in space fails with top-level NoDroneManagementAbilitiesLeft
+    let cap_err = dispatch_combat_rpc(
+        &ctx,
+        &mut sess_a,
+        "ship",
+        "LaunchDrones",
+        &[
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(hob_stack_id),
+                PyRep::Integer(3),
+            ])]),
+            PyRep::None,
+            PyRep::Bool(false),
+        ],
+        &kw,
+    )
+    .await
+    .expect_err("LaunchDrones at 5/5 active cap must fail");
+    assert_eq!(cap_err.code, "NoDroneManagementAbilitiesLeft");
+
+    // 2. Bandwidth-capped stack launch: Tristan (25 Mbit/s) + 4x Hammerhead II (2185, 10 Mbit/s each)
+    //    launches 2 (20 Mbit/s), leaves 2 in bay, returns ('MaxBandwidthExceeded',) in ret[stackID].
+    let char_b = 91_000_802_i64;
+    let tristan_b = 101_000_802_i64;
+    let mut sess_b = setup_pilot_session(&ctx, 8802, char_b, tristan_b, 593, sys_id, DVec3::new(500.0, 0.0, 0.0)).await;
+    let hammer_stack_id = 310_802_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            hammer_stack_id,
+            InventoryItemRecord {
+                item_id: hammer_stack_id,
+                type_id: 2185, // Hammerhead II (10 Mbit/s)
+                owner_id: char_b,
+                location_id: tristan_b,
+                flag: InventoryFlag::DroneBay,
+                quantity: 4,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+
+    let bw_rep = dispatch_combat_rpc(
+        &ctx,
+        &mut sess_b,
+        "ship",
+        "LaunchDrones",
+        &[
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(hammer_stack_id),
+                PyRep::Integer(4),
+            ])]),
+            PyRep::None,
+            PyRep::Bool(false),
+        ],
+        &kw,
+    )
+    .await
+    .expect("Launching 4-unit Hammerhead II stack on Tristan must partially launch 2");
+
+    let PyRep::Dict(bw_entries) = bw_rep else {
+        panic!("expected PyRep::Dict, got {bw_rep:?}");
+    };
+    assert_eq!(bw_entries.len(), 1);
+    assert_eq!(bw_entries[0].0, PyRep::Integer(hammer_stack_id));
+    let PyRep::List(bw_seq) = &bw_entries[0].1 else {
+        panic!("expected PyRep::List, got {:?}", bw_entries[0].1);
+    };
+    assert_eq!(bw_seq.len(), 3, "expected 2 launched IDs + ('MaxBandwidthExceeded',), got {bw_seq:?}");
+    assert!(bw_seq[0].as_i64().is_some() && bw_seq[1].as_i64().is_some());
+    assert_eq!(
+        bw_seq[2],
+        PyRep::Tuple(vec![PyRep::String("MaxBandwidthExceeded".into())])
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items.get(&hammer_stack_id).map(|i| i.quantity)),
+        Some(2),
+        "2 Hammerhead II drones must remain in bay after launching 20/25 Mbit/s"
+    );
+
+    let bw_err = dispatch_combat_rpc(
+        &ctx,
+        &mut sess_b,
+        "ship",
+        "LaunchDrones",
+        &[
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(hammer_stack_id),
+                PyRep::Integer(2),
+            ])]),
+            PyRep::None,
+            PyRep::Bool(false),
+        ],
+        &kw,
+    )
+    .await
+    .expect_err("LaunchDrones when 0 remaining drones fit bandwidth must fail with MaxBandwidthExceeded");
+    assert_eq!(bw_err.code, "MaxBandwidthExceeded");
+}

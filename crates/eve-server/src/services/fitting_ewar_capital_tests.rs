@@ -751,7 +751,7 @@ async fn combat_charge_depletion_corp_wallet_balance_and_role_authority_invarian
 
     // 6. #951 & A5A-P1-02: `dogmaIM.GetAllInfo` populates `maxActiveDrones` (`352`) and `maxLockedTargets` (`192`)
     //    on `charInfo` (using Target Management `3429` & Advanced Target Management `3430`, NOT Long Range Targeting `3428`),
-    //    and `ship.LaunchDrones([(droneID, 2)], None, False)` launches 2 drones from a stack and returns `{}` (`PyRep::Dict`).
+    //    and `ship.LaunchDrones([(droneID, 2)], None, False)` launches 2 drones from a stack and returns `{ droneID: [id1, id2] }` (`PyRep::Dict`).
     let hob_stack_id = 910_500_005_i64;
     ctx.db.with_mut_snapshot(|snap| {
         let sk = snap.skills.entry(ceo_id).or_default();
@@ -886,18 +886,37 @@ async fn combat_charge_depletion_corp_wallet_balance_and_role_authority_invarian
         )
         .await
         .expect("V24 ship.LaunchDrones([(drone_id, 2)], None, False)");
+    let PyRep::Dict(launch_entries) = launch_v24 else {
+        panic!("V24 LaunchFromShip expects a PyRep::Dict, got {launch_v24:?}");
+    };
+    assert_eq!(launch_entries.len(), 1, "expected 1 source stack entry in LaunchDrones dict");
+    assert_eq!(launch_entries[0].0, PyRep::Integer(hob_stack_id));
+    let PyRep::List(launched_seq) = &launch_entries[0].1 else {
+        panic!("expected per-item PyRep::List, got {:?}", launch_entries[0].1);
+    };
+    let launched_ids: Vec<i64> = launched_seq.iter().filter_map(|v| v.as_i64()).collect();
     assert_eq!(
-        launch_v24,
-        PyRep::Dict(Vec::new()),
-        "V24 LaunchFromShip expects an empty error dict on full success"
+        launched_ids.len(),
+        2,
+        "V24 LaunchFromShip full success must return both launched IDs with no error tuples: {launched_seq:?}"
     );
-    let active_drone_count = crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.active_drones_in_space
-            .values()
-            .filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned)
-            .count()
-    });
-    assert_eq!(active_drone_count, 2, "both drones from the stack of 2 must be launched into space");
+    assert_eq!(
+        launched_seq.len(),
+        2,
+        "V24 LaunchFromShip full success must not append error tuples: {launched_seq:?}"
+    );
+    let active_drone_ids: std::collections::HashSet<i64> =
+        crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+            rt.active_drones_in_space
+                .values()
+                .filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned)
+                .map(|d| d.ball_id)
+                .collect()
+        });
+    assert_eq!(active_drone_ids.len(), 2, "both drones from the stack of 2 must be launched into space");
+    for id in launched_ids {
+        assert!(active_drone_ids.contains(&id), "returned drone ID {id} must be active in space");
+    }
 
     // 7. #953: `corpRegistry.GetCorporation` includes `memberLimit` on the returned KeyVal
     let corp_kv = ctx

@@ -410,6 +410,248 @@ pub(crate) fn pilot_drone_capacity(
     (max_drones, bw, cap)
 }
 
+struct PreparedLaunchDrone<'a> {
+    source_item_id: i64,
+    rec: InventoryItemRecord,
+    sde_t: Option<&'a eve_sde::InvType>,
+    is_sentry: bool,
+    max_vel: f64,
+    bw_used: f64,
+    opt_range: f64,
+    dmg_vec: DamageVector,
+    d_pos: DVec3,
+    sh_rep: f64,
+    ar_rep: f64,
+    hu_rep: f64,
+    web_f: f64,
+    neut_a: f64,
+    ecm_s: f64,
+    tp_s: f64,
+    eff_hp: Option<f64>,
+    eff_sh: Option<f64>,
+    eff_ar: Option<f64>,
+}
+
+fn no_drone_management_code(max_drones_allowed: usize) -> &'static str {
+    if max_drones_allowed == 0 {
+        "NoDroneManagementAbilities"
+    } else {
+        "NoDroneManagementAbilitiesLeft"
+    }
+}
+
+fn no_drone_management_error(max_drones_allowed: usize) -> BridgeRpcError {
+    BridgeRpcError::user_error(no_drone_management_code(max_drones_allowed))
+}
+
+fn drone_launch_error(code: &str) -> BridgeRpcError {
+    if code == "MaxBandwidthExceeded" {
+        BridgeRpcError::from_user_key(eve_proto::UserErrorKey::MaxBandwidthExceeded)
+    } else {
+        BridgeRpcError::user_error(code)
+    }
+}
+
+/// Validates that `did` is a launchable drone in `char_id`'s `ship_id` drone bay.
+fn validate_drone_bay_item(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    ship_id: i64,
+    did: i64,
+) -> Result<InventoryItemRecord, BridgeRpcError> {
+    let Some(it) = snap.items.get(&did).cloned() else {
+        return Err(BridgeRpcError {
+            code: "DroneNotFound".into(),
+            message: format!("Drone item {did} not found"),
+            client_error: None,
+        });
+    };
+    if it.owner_id != char_id
+        || it.location_id != ship_id
+        || it.flag != InventoryFlag::DroneBay
+        || it.quantity <= 0
+    {
+        return Err(BridgeRpcError {
+            code: "DroneNotInBay".into(),
+            message: format!("Drone {did} is not in ship {ship_id}'s drone bay"),
+            client_error: None,
+        });
+    }
+    if !ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 18) {
+        return Err(BridgeRpcError {
+            code: "NotADrone".into(),
+            message: format!("Item {did} (type {}) is not a drone", it.type_id),
+            client_error: None,
+        });
+    }
+    let is_excavator = ctx
+        .sde
+        .types
+        .get(&it.type_id)
+        .is_some_and(|t| t.group_id == 101 && t.default_attributes.get(&1272).copied() == Some(25.0));
+    if is_excavator {
+        let ship_type = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
+        let can_operate_excavator = ctx.sde.types.get(&ship_type).is_some_and(|t| {
+            t.default_attributes.contains_key(&3223) || t.default_attributes.contains_key(&3224)
+        });
+        if !can_operate_excavator {
+            return Err(BridgeRpcError {
+                code: "InvalidShipForExcavator".into(),
+                message: "Excavator mining drones can only be operated by a Capital Industrial Ship".into(),
+                client_error: None,
+            });
+        }
+    }
+    Ok(it)
+}
+
+/// Resolves an attribute for a drone item, scaling dynamic mutated overrides by fitting ratio.
+fn drone_effective_attribute(
+    ctx: &ServerContext,
+    ship_fit: Option<&eve_dogma::ShipFittingEngine>,
+    rec: &InventoryItemRecord,
+    sde_t: Option<&eve_sde::InvType>,
+    aid: u16,
+) -> Option<f64> {
+    let sde_base = sde_t.and_then(|t| t.default_attributes.get(&aid).copied());
+    let fit_eff = ship_fit
+        .and_then(|f| f.drone_state(rec.item_id, &ctx.sde))
+        .filter(|ds| {
+            ds.base_attributes.contains_key(&aid)
+                || ds.modifiers.iter().any(|m| m.target_attribute_id == aid)
+        })
+        .map(|ds| ds.get_attribute(aid, &ctx.sde));
+    if let Some(&mut_val) = rec.dynamic_attributes.get(&aid) {
+        if let (Some(fe), Some(sb)) = (fit_eff, sde_base.filter(|b| b.abs() > 1e-9)) {
+            Some(mut_val * (fe / sb))
+        } else {
+            Some(mut_val)
+        }
+    } else {
+        fit_eff.or(sde_base)
+    }
+}
+
+/// Captures effective stats and spawn position for a drone about to be launched into space.
+fn prepare_launch_drone<'a>(
+    ctx: &'a ServerContext,
+    ship_fit_opt: &mut Option<eve_dogma::ShipFittingEngine>,
+    rec: InventoryItemRecord,
+    d_pos: DVec3,
+) -> PreparedLaunchDrone<'a> {
+    if let Some(ref mut f) = ship_fit_opt {
+        if !f.drones.iter().any(|&(id, _)| id == rec.item_id) {
+            f.add_drone(rec.item_id, rec.type_id, &ctx.sde);
+        }
+    }
+    let sde_t = ctx.sde.types.get(&rec.type_id);
+    let attr = |aid: u16| drone_effective_attribute(ctx, ship_fit_opt.as_ref(), &rec, sde_t, aid);
+    let raw_vel = attr(37).unwrap_or(1_500.0);
+    let is_sentry = raw_vel < 1.0;
+    let max_vel = if is_sentry { 0.0 } else { raw_vel };
+    let bw_used = attr(1272).unwrap_or(5.0);
+    let opt_range = attr(54).unwrap_or(5_000.0);
+    let dmg_mult = attr(64).unwrap_or(1.0);
+    let dmg_vec = DamageVector {
+        em: attr(114).unwrap_or(0.0) * dmg_mult,
+        explosive: attr(116).unwrap_or(0.0) * dmg_mult,
+        kinetic: attr(117).unwrap_or(0.0) * dmg_mult,
+        thermal: attr(118).unwrap_or(0.0) * dmg_mult,
+    };
+    let sh_rep = attr(68).unwrap_or(0.0);
+    let ar_rep = attr(84).unwrap_or(0.0);
+    let hu_rep = attr(83).unwrap_or(0.0);
+    let web_f = attr(20).unwrap_or(0.0);
+    let neut_a = attr(97).unwrap_or(0.0);
+    let ecm_s = attr(238)
+        .or_else(|| attr(239))
+        .or_else(|| attr(240))
+        .or_else(|| attr(241))
+        .unwrap_or(0.0);
+    let tp_s = attr(554).unwrap_or(0.0);
+    let eff_hp = rec
+        .dynamic_attributes
+        .get(&9)
+        .copied()
+        .or_else(|| attr(9))
+        .filter(|&v| v > 0.0);
+    let eff_sh = rec
+        .dynamic_attributes
+        .get(&263)
+        .copied()
+        .or_else(|| attr(263))
+        .filter(|&v| v > 0.0);
+    let eff_ar = rec
+        .dynamic_attributes
+        .get(&265)
+        .copied()
+        .or_else(|| attr(265))
+        .filter(|&v| v > 0.0);
+    let source_item_id = rec.item_id;
+    PreparedLaunchDrone {
+        source_item_id,
+        rec,
+        sde_t,
+        is_sentry,
+        max_vel,
+        bw_used,
+        opt_range,
+        dmg_vec,
+        d_pos,
+        sh_rep,
+        ar_rep,
+        hu_rep,
+        web_f,
+        neut_a,
+        ecm_s,
+        tp_s,
+        eff_hp,
+        eff_sh,
+        eff_ar,
+    }
+}
+
+/// Plans a V24 `LaunchFromShip` partial launch up to remaining active drone slots and ship
+/// bandwidth, returning per-item launch counts and the limiting UserError key per truncated item.
+fn plan_v24_launch_budget(
+    requests: &[(i64, usize, f64)],
+    cur_count: usize,
+    max_drones_allowed: usize,
+    cur_bw: f64,
+    ship_bw: f64,
+) -> (Vec<usize>, HashMap<i64, &'static str>, Option<&'static str>) {
+    let mut sim_count = cur_count;
+    let mut sim_bw = cur_bw;
+    let mut counts = Vec::with_capacity(requests.len());
+    let mut errors: HashMap<i64, &'static str> = HashMap::new();
+    let mut first_error: Option<&'static str> = None;
+
+    for &(source_item_id, req_qty, unit_bw) in requests {
+        let mut launched_for_item = 0usize;
+        for _ in 0..req_qty {
+            if sim_count + 1 > max_drones_allowed {
+                let code = no_drone_management_code(max_drones_allowed);
+                errors.insert(source_item_id, code);
+                first_error.get_or_insert(code);
+                break;
+            }
+            if sim_bw + unit_bw > ship_bw + 1e-4 {
+                let code = "MaxBandwidthExceeded";
+                errors.insert(source_item_id, code);
+                first_error.get_or_insert(code);
+                break;
+            }
+            sim_count += 1;
+            sim_bw += unit_bw;
+            launched_for_item += 1;
+        }
+        counts.push(launched_for_item);
+    }
+
+    (counts, errors, first_error)
+}
+
 /// Handles all V24 client Drone RPCs (`ship.LaunchDrones`, `ship.ScoopToDroneBay`, `entity.CmdReturnBay`,
 /// `entity.CmdReturnHome`, `entity.CmdReturnAndOrbit`, `entity.CmdEngage`, `entity.CmdAssist`, `entity.CmdGuard`,
 /// `entity.ChangeDroneSettings`, `entity.SetAggressive`, `entity.CmdAbandonDrone`, `entity.CmdReconnectToDrones`, `entity.CmdSalvage`).
@@ -492,24 +734,6 @@ pub async fn handle_npcs_drones(
                 }
                 _ => {}
             }
-            let drone_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
-                let mut expanded = Vec::new();
-                for &(did, req_qty) in &requested_launches {
-                    let count = if req_qty > 1 {
-                        snap.items
-                            .get(&did)
-                            .map(|it| (it.quantity.max(1) as usize).min(req_qty))
-                            .unwrap_or(1)
-                    } else {
-                        1
-                    };
-                    for _ in 0..count {
-                        expanded.push(did);
-                    }
-                }
-                expanded
-            });
-
             let mut ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
             let snap_type_id = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.type_id)).unwrap_or(0);
             if snap_type_id > 0 && ship_fit_opt.as_ref().map(|f| f.ship.type_id) != Some(snap_type_id) {
@@ -526,72 +750,99 @@ pub async fn handle_npcs_drones(
                 (active.len(), active.iter().map(|d| d.bandwidth_used).sum::<f64>())
             });
 
-            if cur_count + drone_ids.len() > max_drones_allowed {
-                let code = if max_drones_allowed == 0 {
-                    "NoDroneManagementAbilities"
-                } else {
-                    "NoDroneManagementAbilitiesLeft"
-                };
-                return Some(Err(BridgeRpcError::user_error(code)));
+            // V24 `eveMisc.LaunchFromShip` passes `[(itemID, qty), ...]` and/or `(items, whoseBehalfID, ignoreWarning)`
+            // and expects `{ source_item_id: [launched_id, ..., (error_tuple,)] }`, launching up to remaining
+            // slots & bandwidth as long as at least one drone fits. Legacy single-arg ID lists remain all-or-nothing.
+            let is_v24_launch = has_tuple_entries || args.len() >= 2;
+            if !requested_launches.is_empty()
+                && (max_drones_allowed == 0
+                    || cur_count >= max_drones_allowed
+                    || (!is_v24_launch && cur_count + requested_launches.len() > max_drones_allowed))
+            {
+                return Some(Err(no_drone_management_error(max_drones_allowed)));
             }
 
-            let drone_records = match ctx.db.with_snapshot(|snap| {
-                let mut recs = Vec::new();
-                for &did in &drone_ids {
-                    let Some(it) = snap.items.get(&did).cloned() else {
-                        return Err(BridgeRpcError {
-                            code: "DroneNotFound".into(),
-                            message: format!("Drone item {did} not found"),
-                            client_error: None,
-                        });
+            let validated_requests: Vec<(InventoryItemRecord, usize)> = match ctx.db.with_snapshot(|snap| {
+                let mut out = Vec::with_capacity(requested_launches.len());
+                for &(did, req_qty) in &requested_launches {
+                    let rec = validate_drone_bay_item(ctx, snap, char_id, ship_id, did)?;
+                    let count = if req_qty > 1 {
+                        (rec.quantity.max(1) as usize).min(req_qty)
+                    } else {
+                        1
                     };
-                    if it.owner_id != char_id || it.location_id != ship_id || it.flag != InventoryFlag::DroneBay {
-                        return Err(BridgeRpcError { code: "DroneNotInBay".into(), message: format!("Drone {did} is not in ship {ship_id}'s drone bay"), client_error: None });
-                    }
-                    if !ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 18) {
-                        return Err(BridgeRpcError { code: "NotADrone".into(), message: format!("Item {did} (type {}) is not a drone", it.type_id), client_error: None });
-                    }
-                    let is_excavator = ctx
-                        .sde
-                        .types
-                        .get(&it.type_id)
-                        .is_some_and(|t| t.group_id == 101 && t.default_attributes.get(&1272).copied() == Some(25.0));
-                    if is_excavator {
-                        let ship_type = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
-                        let can_operate_excavator = ctx.sde.types.get(&ship_type).is_some_and(|t| {
-                            t.default_attributes.contains_key(&3223) || t.default_attributes.contains_key(&3224)
-                        });
-                        if !can_operate_excavator {
-                            return Err(BridgeRpcError {
-                                code: "InvalidShipForExcavator".into(),
-                                message: "Excavator mining drones can only be operated by a Capital Industrial Ship".into(),
-                                client_error: None,
-                            });
-                        }
-                    }
-                    recs.push(it);
+                    out.push((rec, count));
                 }
-                Ok(recs)
+                Ok(out)
             }) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
 
-            let req_bw: f64 = drone_records
-                .iter()
-                .map(|r| {
-                    r.dynamic_attributes.get(&1272).copied().unwrap_or_else(|| {
-                        ctx.sde
-                            .types
-                            .get(&r.type_id)
-                            .and_then(|t| t.default_attributes.get(&1272).copied())
-                            .unwrap_or(5.0)
+            let mut per_item_errors: HashMap<i64, &'static str> = HashMap::new();
+            let drone_records: Vec<InventoryItemRecord> = if is_v24_launch {
+                let mut budget_reqs = Vec::with_capacity(validated_requests.len());
+                for (rec, count) in &validated_requests {
+                    if let Some(ref mut f) = ship_fit_opt {
+                        if !f.drones.iter().any(|&(id, _)| id == rec.item_id) {
+                            f.add_drone(rec.item_id, rec.type_id, &ctx.sde);
+                        }
+                    }
+                    let sde_t = ctx.sde.types.get(&rec.type_id);
+                    let unit_bw = drone_effective_attribute(ctx, ship_fit_opt.as_ref(), rec, sde_t, 1272).unwrap_or(5.0);
+                    budget_reqs.push((rec.item_id, *count, unit_bw));
+                }
+                let (counts, errors, first_error) = plan_v24_launch_budget(
+                    &budget_reqs,
+                    cur_count,
+                    max_drones_allowed,
+                    cur_bw,
+                    ship_bw,
+                );
+                let total_selected: usize = counts.iter().sum();
+                if total_selected == 0 && !validated_requests.is_empty() {
+                    return Some(Err(drone_launch_error(
+                        first_error.unwrap_or("NoDroneManagementAbilitiesLeft"),
+                    )));
+                }
+                per_item_errors = errors;
+                let mut selected = Vec::with_capacity(total_selected);
+                for ((rec, _), launch_qty) in validated_requests.into_iter().zip(counts.into_iter()) {
+                    for _ in 0..launch_qty {
+                        selected.push(rec.clone());
+                    }
+                }
+                selected
+            } else {
+                let total_requested: usize = validated_requests.iter().map(|(_, c)| *c).sum();
+                if cur_count + total_requested > max_drones_allowed {
+                    return Some(Err(no_drone_management_error(max_drones_allowed)));
+                }
+                let mut expanded = Vec::with_capacity(total_requested);
+                for (rec, count) in validated_requests {
+                    for _ in 0..count {
+                        expanded.push(rec.clone());
+                    }
+                }
+                let req_bw: f64 = expanded
+                    .iter()
+                    .map(|r| {
+                        r.dynamic_attributes.get(&1272).copied().unwrap_or_else(|| {
+                            ctx.sde
+                                .types
+                                .get(&r.type_id)
+                                .and_then(|t| t.default_attributes.get(&1272).copied())
+                                .unwrap_or(5.0)
+                        })
                     })
-                })
-                .sum();
-            if cur_bw + req_bw > ship_bw + 1e-4 {
-                return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::MaxBandwidthExceeded)));
-            }
+                    .sum();
+                if cur_bw + req_bw > ship_bw + 1e-4 {
+                    return Some(Err(BridgeRpcError::from_user_key(
+                        eve_proto::UserErrorKey::MaxBandwidthExceeded,
+                    )));
+                }
+                expanded
+            };
 
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let ship_pos = sys_handle
@@ -603,62 +854,21 @@ pub async fn handle_npcs_drones(
                 .unwrap_or(DVec3::ZERO);
 
             static NEXT_DRONE_RES_ID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-200_000);
-            let mut prepared_drones = Vec::with_capacity(drone_records.len());
-            for (idx, rec) in drone_records.into_iter().enumerate() {
-                if let Some(ref mut f) = ship_fit_opt {
-                    if !f.drones.iter().any(|&(id, _)| id == rec.item_id) {
-                        f.add_drone(rec.item_id, rec.type_id, &ctx.sde);
-                    }
-                }
-                let rec_id = rec.item_id;
-                let sde_t = ctx.sde.types.get(&rec.type_id);
-                let attr = |aid: u16| -> Option<f64> {
-                    let sde_base = sde_t.and_then(|t| t.default_attributes.get(&aid).copied());
-                    let fit_eff = ship_fit_opt
-                        .as_ref()
-                        .and_then(|f| f.drone_state(rec_id, &ctx.sde))
-                        .filter(|ds| {
-                            ds.base_attributes.contains_key(&aid)
-                                || ds.modifiers.iter().any(|m| m.target_attribute_id == aid)
-                        })
-                        .map(|ds| ds.get_attribute(aid, &ctx.sde));
-                    if let Some(&mut_val) = rec.dynamic_attributes.get(&aid) {
-                        if let (Some(fe), Some(sb)) = (fit_eff, sde_base.filter(|b| b.abs() > 1e-9)) {
-                            Some(mut_val * (fe / sb))
-                        } else {
-                            Some(mut_val)
-                        }
-                    } else {
-                        fit_eff.or(sde_base)
-                    }
-                };
-                let raw_vel = attr(37).unwrap_or(1_500.0);
-                let is_sentry = raw_vel < 1.0;
-                let max_vel = if is_sentry { 0.0 } else { raw_vel };
-                let bw_used = attr(1272).unwrap_or(5.0);
-                let opt_range = attr(54).unwrap_or(5_000.0);
-                let dmg_mult = attr(64).unwrap_or(1.0);
-                let dmg_vec = DamageVector {
-                    em: attr(114).unwrap_or(0.0) * dmg_mult,
-                    explosive: attr(116).unwrap_or(0.0) * dmg_mult,
-                    kinetic: attr(117).unwrap_or(0.0) * dmg_mult,
-                    thermal: attr(118).unwrap_or(0.0) * dmg_mult,
-                };
-                let d_pos = ship_pos + DVec3::new(((idx as f64) * 50.0).cos() * 40.0, 0.0, ((idx as f64) * 50.0).sin() * 40.0);
-                let rof_ms = attr(68).unwrap_or(0.0);
-                let falloff_m = attr(84).unwrap_or(0.0);
-                let tracking = attr(83).unwrap_or(0.0);
-                let orb_vel = attr(20).unwrap_or(0.0);
-                let sig_res = attr(97).unwrap_or(0.0);
-                let orbit_dist = attr(238).or_else(|| attr(239)).or_else(|| attr(240)).or_else(|| attr(241)).unwrap_or(0.0);
-                let sig_rad = attr(554).unwrap_or(0.0);
-                let eff_hp = rec.dynamic_attributes.get(&9).copied().or_else(|| attr(9)).filter(|&v| v > 0.0);
-                let eff_sh = rec.dynamic_attributes.get(&263).copied().or_else(|| attr(263)).filter(|&v| v > 0.0);
-                let eff_ar = rec.dynamic_attributes.get(&265).copied().or_else(|| attr(265)).filter(|&v| v > 0.0);
-                prepared_drones.push((rec, sde_t, is_sentry, max_vel, bw_used, opt_range, dmg_vec, d_pos, rof_ms, falloff_m, tracking, orb_vel, sig_res, orbit_dist, sig_rad, (eff_hp, eff_sh, eff_ar)));
-            }
+            let mut prepared_drones: Vec<PreparedLaunchDrone<'_>> = drone_records
+                .into_iter()
+                .enumerate()
+                .map(|(idx, rec)| {
+                    let d_pos = ship_pos
+                        + DVec3::new(
+                            ((idx as f64) * 50.0).cos() * 40.0,
+                            0.0,
+                            ((idx as f64) * 50.0).sin() * 40.0,
+                        );
+                    prepare_launch_drone(ctx, &mut ship_fit_opt, rec, d_pos)
+                })
+                .collect();
 
-            let res_ids: Vec<i64> = (0..prepared_drones.len())
+            let mut res_ids: Vec<i64> = (0..prepared_drones.len())
                 .map(|_| NEXT_DRONE_RES_ID.fetch_sub(1, std::sync::atomic::Ordering::Relaxed))
                 .collect();
             let reserve_res: Result<(), BridgeRpcError> = with_mut_combat_runtime(ctx, |rt| {
@@ -670,24 +880,61 @@ pub async fn handle_npcs_drones(
                         .collect();
                     (active.len(), active.iter().map(|d| d.bandwidth_used).sum::<f64>())
                 };
-                if cur_count + prepared_drones.len() > max_drones_allowed {
-                    let code = if max_drones_allowed == 0 {
-                        "NoDroneManagementAbilities"
-                    } else {
-                        "NoDroneManagementAbilitiesLeft"
-                    };
-                    return Err(BridgeRpcError::user_error(code));
+                if is_v24_launch {
+                    if !prepared_drones.is_empty() && (max_drones_allowed == 0 || cur_count >= max_drones_allowed) {
+                        return Err(no_drone_management_error(max_drones_allowed));
+                    }
+                    let mut sim_count = cur_count;
+                    let mut sim_bw = cur_bw;
+                    let mut kept_drones = Vec::with_capacity(prepared_drones.len());
+                    let mut kept_res_ids = Vec::with_capacity(res_ids.len());
+                    let mut race_first_error: Option<&'static str> = None;
+                    for (drone, rid) in std::mem::take(&mut prepared_drones)
+                        .into_iter()
+                        .zip(std::mem::take(&mut res_ids).into_iter())
+                    {
+                        if sim_count + 1 > max_drones_allowed {
+                            let code = "NoDroneManagementAbilitiesLeft";
+                            per_item_errors.entry(drone.source_item_id).or_insert(code);
+                            race_first_error.get_or_insert(code);
+                            continue;
+                        }
+                        if sim_bw + drone.bw_used > ship_bw + 1e-4 {
+                            let code = "MaxBandwidthExceeded";
+                            per_item_errors.entry(drone.source_item_id).or_insert(code);
+                            race_first_error.get_or_insert(code);
+                            continue;
+                        }
+                        sim_count += 1;
+                        sim_bw += drone.bw_used;
+                        kept_drones.push(drone);
+                        kept_res_ids.push(rid);
+                    }
+                    if kept_drones.is_empty() && !requested_launches.is_empty() {
+                        return Err(drone_launch_error(
+                            race_first_error.unwrap_or("NoDroneManagementAbilitiesLeft"),
+                        ));
+                    }
+                    prepared_drones = kept_drones;
+                    res_ids = kept_res_ids;
+                } else {
+                    if cur_count + prepared_drones.len() > max_drones_allowed {
+                        return Err(no_drone_management_error(max_drones_allowed));
+                    }
+                    let req_bw: f64 = prepared_drones.iter().map(|d| d.bw_used).sum();
+                    if cur_bw + req_bw > ship_bw + 1e-4 {
+                        return Err(BridgeRpcError::from_user_key(
+                            eve_proto::UserErrorKey::MaxBandwidthExceeded,
+                        ));
+                    }
                 }
-                if cur_bw + req_bw > ship_bw + 1e-4 {
-                    return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::MaxBandwidthExceeded));
-                }
-                for (i, (rec, sde_t, is_sentry, max_vel, bw_used, opt_range, dmg_vec, _, sh_rep, ar_rep, hu_rep, web_f, neut_a, ecm_s, tp_s, _)) in prepared_drones.iter().enumerate() {
+                for (i, d) in prepared_drones.iter().enumerate() {
                     let rid = res_ids[i];
                     rt.active_drones_in_space.insert(rid, DroneSpaceState {
                         ball_id: rid,
-                        drone_item_id: rec.item_id,
-                        type_id: rec.type_id,
-                        group_id: sde_t.map(|t| t.group_id).unwrap_or(100),
+                        drone_item_id: d.rec.item_id,
+                        type_id: d.rec.type_id,
+                        group_id: d.sde_t.map(|t| t.group_id).unwrap_or(100),
                         owner_char_id: char_id,
                         original_owner_char_id: char_id,
                         parent_ship_id: ship_id,
@@ -697,18 +944,18 @@ pub async fn handle_npcs_drones(
                         assist_char_id: None,
                         guard_char_id: None,
                         is_abandoned: false,
-                        is_sentry: *is_sentry,
-                        bandwidth_used: *bw_used,
-                        max_velocity: *max_vel,
-                        optimal_range: *opt_range,
-                        damage_vector: *dmg_vec,
-                        shield_repair_amount: *sh_rep,
-                        armor_repair_amount: *ar_rep,
-                        hull_repair_amount: *hu_rep,
-                        web_speed_factor: *web_f,
-                        neut_amount: *neut_a,
-                        ecm_strength: *ecm_s,
-                        tp_sig_bonus_pct: *tp_s,
+                        is_sentry: d.is_sentry,
+                        bandwidth_used: d.bw_used,
+                        max_velocity: d.max_vel,
+                        optimal_range: d.opt_range,
+                        damage_vector: d.dmg_vec,
+                        shield_repair_amount: d.sh_rep,
+                        armor_repair_amount: d.ar_rep,
+                        hull_repair_amount: d.hu_rep,
+                        web_speed_factor: d.web_f,
+                        neut_amount: d.neut_a,
+                        ecm_strength: d.ecm_s,
+                        tp_sig_bonus_pct: d.tp_s,
                     });
                 }
                 Ok(())
@@ -729,7 +976,9 @@ pub async fn handle_npcs_drones(
                 }
                 let mut results = Vec::with_capacity(prepared_drones.len());
                 let mut bay_stack_decrements: HashMap<i64, (u32, i64, i32, i32, bool)> = HashMap::new();
-                for (rec, _, _, _, _, _, _, d_pos, _, _, _, _, _, _, _, _) in &prepared_drones {
+                for d in &prepared_drones {
+                    let rec = &d.rec;
+                    let d_pos = d.d_pos;
                     let cur_qty = {
                         let it = snap.items.get(&rec.item_id).ok_or_else(|| BridgeRpcError {
                             code: "DroneNotFound".into(),
@@ -867,22 +1116,25 @@ pub async fn handle_npcs_drones(
                 }
             });
 
-            let mut launched_ball_ids = Vec::new();
-            for ((rec, sde_t, is_sentry, max_vel, _, _, _, d_pos, _, _, _, _, _, _, _, (eff_hp, eff_sh, eff_ar)), (ball_id, _launched_drone_item_id, _)) in prepared_drones.into_iter().zip(committed_launches.into_iter()) {
+            let mut launched_ball_ids = Vec::with_capacity(prepared_drones.len());
+            let mut launched_by_source: HashMap<i64, Vec<i64>> = HashMap::new();
+            for (d, (ball_id, _launched_drone_item_id, _)) in prepared_drones.into_iter().zip(committed_launches.into_iter()) {
+                let rec = d.rec;
+                let sde_t = d.sde_t;
                 let mut cs = ctx.build_type_combat_state(rec.type_id);
                 if cs.structure_hp <= 0.0 {
                     cs.structure_hp = 200.0;
                     cs.max_structure_hp = 200.0;
                 }
-                if let Some(eff_hp) = eff_hp {
+                if let Some(eff_hp) = d.eff_hp {
                     cs.structure_hp = eff_hp;
                     cs.max_structure_hp = eff_hp;
                 }
-                if let Some(eff_sh) = eff_sh {
+                if let Some(eff_sh) = d.eff_sh {
                     cs.shield_hp = eff_sh;
                     cs.max_shield_hp = eff_sh;
                 }
-                if let Some(eff_ar) = eff_ar {
+                if let Some(eff_ar) = d.eff_ar {
                     cs.armor_hp = eff_ar;
                     cs.max_armor_hp = eff_ar;
                 }
@@ -890,7 +1142,7 @@ pub async fn handle_npcs_drones(
                 let mass = if is_excavator { 10_000_000.0 } else { sde_t.map(|t| t.mass).filter(|&m| m > 0.0).unwrap_or(10_000.0) };
                 let inertia = if is_excavator { 2.8 } else { sde_t.and_then(|t| t.default_attributes.get(&70).copied()).unwrap_or(0.5).clamp(0.1, 5.0) };
                 let radius = if is_excavator { 50.0 } else { sde_t.map(|t| t.radius).filter(|&r| r > 0.0).unwrap_or(10.0) };
-                cs.base_max_velocity = Some(max_vel);
+                cs.base_max_velocity = Some(d.max_vel);
                 cs.base_mass = Some(mass);
                 cs.base_inertia = Some(inertia);
                 let (pilot_corp_id, pilot_alliance_id) = ctx
@@ -918,13 +1170,13 @@ pub async fn handle_npcs_drones(
                         Ball {
                             id: ball_id,
                             type_id: rec.type_id,
-                            position: d_pos,
+                            position: d.d_pos,
                             velocity: DVec3::ZERO,
-                            max_velocity: max_vel,
+                            max_velocity: d.max_vel,
                             inertia,
                             mass,
                             radius,
-                            speed_fraction: if is_sentry { 0.0 } else { 1.0 },
+                            speed_fraction: if d.is_sentry { 0.0 } else { 1.0 },
                             mode: MovementMode::Stop,
                         },
                         cs,
@@ -958,10 +1210,27 @@ pub async fn handle_npcs_drones(
                         target_id: None,
                     },
                 );
+                launched_by_source
+                    .entry(d.source_item_id)
+                    .or_default()
+                    .push(ball_id);
                 launched_ball_ids.push(ball_id);
             }
-            if has_tuple_entries || args.len() >= 2 {
-                Some(Ok(PyRep::Dict(Vec::new())))
+            if is_v24_launch {
+                let mut dict_entries = Vec::with_capacity(requested_launches.len());
+                for &(source_id, _) in &requested_launches {
+                    let mut seq: Vec<PyRep> = launched_by_source
+                        .remove(&source_id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(PyRep::Integer)
+                        .collect();
+                    if let Some(&err_code) = per_item_errors.get(&source_id) {
+                        seq.push(PyRep::Tuple(vec![PyRep::String(err_code.to_string())]));
+                    }
+                    dict_entries.push((PyRep::Integer(source_id), PyRep::List(seq)));
+                }
+                Some(Ok(PyRep::Dict(dict_entries)))
             } else {
                 Some(Ok(PyRep::List(
                     launched_ball_ids.into_iter().map(PyRep::Integer).collect(),
