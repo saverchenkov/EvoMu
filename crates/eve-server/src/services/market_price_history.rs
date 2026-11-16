@@ -518,7 +518,7 @@ pub(crate) fn order_to_packed_cells_with_ctx(
         resolve_station_solar_and_constellation(ctx, snap, o.station_id);
     vec![
         PyRep::Real(o.price.to_wire_f64()),
-        PyRep::Real(o.vol_remaining as f64),
+        PyRep::Integer(o.vol_remaining as i64),
         PyRep::Integer(o.type_id as i64),
         PyRep::Integer(o.order_id),
         PyRep::Integer(o.vol_entered as i64),
