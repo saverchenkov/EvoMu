@@ -890,3 +890,456 @@ async fn section4_inbound_undecodable_and_malformed_calls_never_hang_or_drop() {
     );
     assert!(matches!(read_framed_pyrep(&mut s).await, Ok(None)));
 }
+
+fn collect_destiny_actions_from_list(updates: &PyRep) -> Vec<(String, Vec<PyRep>)> {
+    let PyRep::List(entries) = updates else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let (name, args) = destiny_entry_action(entry)?;
+            Some((name.to_string(), args.to_vec()))
+        })
+        .collect()
+}
+
+fn collect_destiny_actions_from_frames(
+    frames: &[crate::outbound_sequencer::OutFrame],
+) -> Vec<(String, Vec<PyRep>)> {
+    let mut actions = Vec::new();
+    for frame in frames {
+        if let crate::outbound_sequencer::OutFrame::DoDestinyUpdate { updates, .. } = frame {
+            actions.extend(collect_destiny_actions_from_list(updates));
+        }
+    }
+    actions
+}
+
+fn contains_warping_fx(actions: &[(String, Vec<PyRep>)], ship_id: i64, start: i64) -> bool {
+    actions.iter().any(|(name, args)| {
+        name == "OnSpecialFX"
+            && args.first().and_then(PyRep::as_i64) == Some(ship_id)
+            && args.get(5).and_then(PyRep::as_str) == Some("effects.Warping")
+            && match start {
+                0 => matches!(args.get(7), Some(PyRep::Integer(0) | PyRep::Bool(false))),
+                other => args.get(7).and_then(PyRep::as_i64) == Some(other),
+            }
+    })
+}
+
+fn contains_ship_stop(actions: &[(String, Vec<PyRep>)], ship_id: i64) -> bool {
+    actions.iter().any(|(name, args)| {
+        name == "Stop" && args.first().and_then(PyRep::as_i64) == Some(ship_id)
+    })
+}
+
+#[test]
+fn test_1147_strip_self_non_dock_warp_stop_fx_and_build_destiny_batch_contexts() {
+    use eve_destiny::wire::encode_destiny_updates;
+    use eve_destiny::DestinyEvent;
+
+    let ctx = ServerContext::new();
+    let ego_ship = 1_897_147_421_i64;
+    let peer_ship = 1_897_147_422_i64;
+
+    // 1. NonDock strips only ego's OnSpecialFX("effects.Warping", start=0) while preserving
+    //    Stop, warp start (start=1), peer OnSpecialFX("effects.Warping", 0), and unrelated FX.
+    let mixed_events = vec![
+        DestinyEvent::OnSpecialFX {
+            ball_id: ego_ship,
+            module_id: None,
+            guid: "effects.Warping".into(),
+            is_active: false,
+        },
+        DestinyEvent::Stop { ball_id: ego_ship },
+        DestinyEvent::OnSpecialFX {
+            ball_id: ego_ship,
+            module_id: None,
+            guid: "effects.Warping".into(),
+            is_active: true,
+        },
+        DestinyEvent::OnSpecialFX {
+            ball_id: peer_ship,
+            module_id: None,
+            guid: "effects.Warping".into(),
+            is_active: false,
+        },
+        DestinyEvent::OnSpecialFX {
+            ball_id: ego_ship,
+            module_id: None,
+            guid: "effects.JumpIn".into(),
+            is_active: false,
+        },
+    ];
+    let mixed_updates = encode_destiny_updates(100, &mixed_events, None);
+    let non_dock_batch = build_destiny_batch(
+        &ctx,
+        1,
+        100,
+        &mixed_events,
+        mixed_updates,
+        &[ego_ship],
+        SelfDestinyWireContext::NonDock,
+    )
+    .expect("mixed NonDock batch must remain non-empty");
+    let non_dock_actions = collect_destiny_actions_from_list(&non_dock_batch.updates);
+    assert!(!contains_warping_fx(&non_dock_actions, ego_ship, 0));
+    assert!(contains_ship_stop(&non_dock_actions, ego_ship));
+    assert!(contains_warping_fx(&non_dock_actions, ego_ship, 1));
+    assert!(contains_warping_fx(&non_dock_actions, peer_ship, 0));
+    assert!(non_dock_actions.iter().any(|(name, args)| {
+        name == "OnSpecialFX"
+            && args.first().and_then(PyRep::as_i64) == Some(ego_ship)
+            && args.get(5).and_then(PyRep::as_str) == Some("effects.JumpIn")
+    }));
+
+    // 2. NonDock batch containing solely ego's warp stop FX drops cleanly to None.
+    let stop_only_events = vec![DestinyEvent::OnSpecialFX {
+        ball_id: ego_ship,
+        module_id: None,
+        guid: "effects.Warping".into(),
+        is_active: false,
+    }];
+    let stop_only_updates = encode_destiny_updates(101, &stop_only_events, None);
+    assert!(
+        build_destiny_batch(
+            &ctx,
+            1,
+            101,
+            &stop_only_events,
+            stop_only_updates,
+            &[ego_ship],
+            SelfDestinyWireContext::NonDock,
+        )
+        .is_none(),
+        "NonDock batch consisting solely of ego warp-stop FX should collapse to None"
+    );
+
+    // 3. Direct helper also strips Bool(false) start flags for suppressed ships and respects empty slice.
+    let bool_stop_entry = |ship_id: i64| {
+        PyRep::Tuple(vec![
+            PyRep::Integer(102),
+            PyRep::Tuple(vec![
+                PyRep::String("OnSpecialFX".into()),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(ship_id),
+                    PyRep::None,
+                    PyRep::None,
+                    PyRep::None,
+                    PyRep::None,
+                    PyRep::String("effects.Warping".into()),
+                    PyRep::Bool(false),
+                    PyRep::Bool(false),
+                    PyRep::Bool(false),
+                    PyRep::Integer(-1),
+                    PyRep::None,
+                    PyRep::None,
+                    PyRep::Integer(0),
+                    PyRep::None,
+                ]),
+            ]),
+        ])
+    };
+    let bool_updates = PyRep::List(vec![bool_stop_entry(ego_ship), bool_stop_entry(peer_ship)]);
+    assert_eq!(
+        collect_destiny_actions_from_list(&strip_self_non_dock_warp_stop_fx(
+            bool_updates.clone(),
+            &[]
+        ))
+        .len(),
+        2
+    );
+    let filtered_bool_actions =
+        collect_destiny_actions_from_list(&strip_self_non_dock_warp_stop_fx(
+            bool_updates,
+            &[ego_ship],
+        ));
+    assert!(!contains_warping_fx(&filtered_bool_actions, ego_ship, 0));
+    assert!(contains_warping_fx(&filtered_bool_actions, peer_ship, 0));
+
+    // 4. DockSettle preserves ego's OnSpecialFX("effects.Warping", 0) and Stop in atomic order.
+    let dock_events = vec![
+        DestinyEvent::SetBallMassive {
+            ball_id: ego_ship,
+            is_massive: true,
+        },
+        DestinyEvent::OnSpecialFX {
+            ball_id: ego_ship,
+            module_id: None,
+            guid: "effects.Warping".into(),
+            is_active: false,
+        },
+        DestinyEvent::Stop { ball_id: ego_ship },
+    ];
+    let dock_updates = encode_destiny_updates(103, &dock_events, None);
+    let dock_batch = build_destiny_batch(
+        &ctx,
+        1,
+        103,
+        &dock_events,
+        dock_updates,
+        &[ego_ship],
+        SelfDestinyWireContext::DockSettle,
+    )
+    .expect("DockSettle batch must preserve dock-settle events");
+    let dock_names: Vec<String> = collect_destiny_actions_from_list(&dock_batch.updates)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(dock_names, vec!["SetBallMassive", "OnSpecialFX", "Stop"]);
+}
+
+#[tokio::test]
+async fn test_1147_wire_warp_cancel_and_natural_exit_suppress_ego_fx_and_arm_settle() {
+    use crate::router::client_wire::ClientWireSession;
+    use eve_db::{InventoryFlag, InventoryItemRecord};
+    use eve_destiny::{Ball, CombatState, MovementMode};
+    use glam::DVec3;
+
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    ctx.session_change_timers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+
+    let sys_id = 30_000_142_u32;
+    let st_id = 60_003_760_i64;
+    let st_pos = ctx.sde.stations[&st_id].position;
+    let ego_char_id = 90_000_001_i64;
+    let ego_ship = 895_147_i64;
+    let peer_char_id = 90_000_002_i64;
+    let peer_ship = 895_148_i64;
+    let tayra_type_id = 649_u32;
+
+    let ego_pos = st_pos + DVec3::new(500_000_000.0, 0.0, 0.0);
+    let peer_pos = ego_pos + DVec3::new(1_000.0, 0.0, 0.0);
+
+    let (ego_corp_id, peer_corp_id) = ctx.db.with_mut_snapshot(|snap| {
+        let mut setup_char = |cid: i64, sid: i64| {
+            let corp_id = snap
+                .characters
+                .get_mut(&cid)
+                .map(|ch| {
+                    ch.active_ship_id = sid;
+                    ch.solar_system_id = sys_id;
+                    ch.station_id = None;
+                    ch.structure_id = None;
+                    ch.corporation_id
+                })
+                .expect("seeded character");
+            snap.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid,
+                    type_id: tayra_type_id,
+                    owner_id: cid,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            corp_id
+        };
+        (
+            setup_char(ego_char_id, ego_ship),
+            setup_char(peer_char_id, peer_ship),
+        )
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let full_combat = CombatState {
+        shield_hp: 1_000.0,
+        max_shield_hp: 1_000.0,
+        armor_hp: 1_000.0,
+        max_armor_hp: 1_000.0,
+        structure_hp: 1_000.0,
+        max_structure_hp: 1_000.0,
+        capacitor: 1_000.0,
+        max_capacitor: 1_000.0,
+        ..Default::default()
+    };
+    let make_ship_ball = |id: i64, pos: DVec3| Ball {
+        id,
+        type_id: tayra_type_id,
+        position: pos,
+        velocity: DVec3::ZERO,
+        max_velocity: 350.0,
+        inertia: 2.0,
+        mass: 1_100_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    sys_handle
+        .spawn_ball_with_combat(make_ship_ball(ego_ship, ego_pos), full_combat.clone())
+        .await
+        .unwrap();
+    sys_handle
+        .spawn_ball_with_combat(make_ship_ball(peer_ship, peer_pos), full_combat.clone())
+        .await
+        .unwrap();
+
+    let mut ego_sess = SessionState::new(11_471);
+    ego_sess.user_id = Some(1);
+    ego_sess.character_id = Some(ego_char_id);
+    ego_sess.corporation_id = Some(ego_corp_id);
+    ego_sess.solar_system_id = Some(sys_id);
+    ego_sess.ship_id = Some(ego_ship);
+    ego_sess.live_notify_listener = true;
+
+    let mut peer_sess = SessionState::new(11_472);
+    peer_sess.user_id = Some(2);
+    peer_sess.character_id = Some(peer_char_id);
+    peer_sess.corporation_id = Some(peer_corp_id);
+    peer_sess.solar_system_id = Some(sys_id);
+    peer_sess.ship_id = Some(peer_ship);
+    peer_sess.live_notify_listener = true;
+    ctx.db
+        .acquire_online_lock(
+            1,
+            ego_sess.session_id,
+            Some(ego_char_id),
+            true,
+            ctx.now_unix_secs(),
+        )
+        .unwrap();
+    ctx.db
+        .acquire_online_lock(
+            2,
+            peer_sess.session_id,
+            Some(peer_char_id),
+            true,
+            ctx.now_unix_secs(),
+        )
+        .unwrap();
+    ctx.sync_session(&mut ego_sess);
+    ctx.sync_session(&mut peer_sess);
+
+    sys_handle.step_manual(1.0).await.unwrap();
+    let _ = sys_handle.drain_observer_updates(ego_ship).await;
+    let _ = sys_handle.drain_observer_updates(peer_ship).await;
+
+    let mut ego_wire = ClientWireSession::from_session(&ctx, ego_sess);
+    let mut peer_wire = ClientWireSession::from_session(&ctx, peer_sess);
+    let ego_beyonce_bid = ctx
+        .bind_object(&ego_wire.session, "beyonce", sys_id as i64)
+        .expect("bind beyonce");
+    let empty_kw = HashMap::new();
+
+    // 1. Start warp: ego receives WarpTo + OnSpecialFX("effects.Warping", start=1).
+    let warp1 = ego_wire
+        .call_wire(
+            "beyonce",
+            Some(ego_beyonce_bid),
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(st_id)],
+            &empty_kw,
+        )
+        .await;
+    assert!(warp1.rpc_result.is_ok(), "1st CmdWarpToStuff: {:?}", warp1.rpc_result);
+    let warp1_actions = collect_destiny_actions_from_frames(&warp1.out_frames);
+    assert!(contains_warping_fx(&warp1_actions, ego_ship, 1));
+    assert!(warp1_actions.iter().any(|(name, _)| name == "WarpTo"));
+
+    // Advance 1s while still in Aligning (~3.05s align time), clearing pending peer start FX.
+    sys_handle.step_manual(1.0).await.unwrap();
+    let _ = ego_wire.drain_pending_frames();
+    let _ = peer_wire.drain_pending_frames();
+
+    // 2. Abort warp with CmdStop (#1147 repro sequence step 2):
+    //    - ego receives Stop without OnSpecialFX("effects.Warping", 0)
+    //    - warp_stop_settle_deadline is armed immediately on observer drain (before 1Hz tick)
+    //    - peer observer STILL receives OnSpecialFX(ego_ship, "effects.Warping", 0)
+    let stop1 = ego_wire
+        .call_wire("beyonce", Some(ego_beyonce_bid), "CmdStop", &[], &empty_kw)
+        .await;
+    assert!(stop1.rpc_result.is_ok(), "CmdStop: {:?}", stop1.rpc_result);
+    let stop1_actions = collect_destiny_actions_from_frames(&stop1.out_frames);
+    assert!(contains_ship_stop(&stop1_actions, ego_ship));
+    assert!(
+        !contains_warping_fx(&stop1_actions, ego_ship, 0),
+        "ego non-dock CmdStop batch must suppress OnSpecialFX(effects.Warping, 0): {stop1_actions:?}"
+    );
+    assert!(
+        sys_handle
+            .warp_stop_settle_deadline(ego_ship, std::time::Duration::from_millis(3_500))
+            .is_some(),
+        "post-CmdStop observer drain must immediately arm warp_stop_settle_deadline"
+    );
+
+    sys_handle.step_manual(1.0).await.unwrap();
+    let _ = ego_wire.drain_pending_frames();
+    let (peer_abort_frames, _) = peer_wire.drain_pending_frames();
+    let peer_abort_actions = collect_destiny_actions_from_frames(&peer_abort_frames);
+    assert!(contains_ship_stop(&peer_abort_actions, ego_ship));
+    assert!(
+        contains_warping_fx(&peer_abort_actions, ego_ship, 0),
+        "peer observer must still receive ego OnSpecialFX(effects.Warping, 0): {peer_abort_actions:?}"
+    );
+
+    // 3. Re-warp immediately after CmdStop (#1147 step 3) and complete natural warp exit:
+    //    - re-entering warp re-emits start=1 and clears warp_stopped_at
+    //    - natural exit on 1Hz TickBroadcast delivers Stop to ego without OnSpecialFX(0),
+    //      while delivering OnSpecialFX(0) to peer.
+    let warp2 = ego_wire
+        .call_wire(
+            "beyonce",
+            Some(ego_beyonce_bid),
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(st_id)],
+            &empty_kw,
+        )
+        .await;
+    assert!(warp2.rpc_result.is_ok(), "2nd CmdWarpToStuff: {:?}", warp2.rpc_result);
+    let warp2_actions = collect_destiny_actions_from_frames(&warp2.out_frames);
+    assert!(contains_warping_fx(&warp2_actions, ego_ship, 1));
+    assert!(
+        sys_handle
+            .warp_stop_settle_deadline(ego_ship, std::time::Duration::from_millis(3_500))
+            .is_none(),
+        "new CmdWarpToStuff must clear prior warp_stop_settle_deadline"
+    );
+
+    // Move peer ship into Jita 4-4's destination grid so it observes ego's warp arrival/exit.
+    let _ = sys_handle.remove_ball(peer_ship).await;
+    sys_handle
+        .spawn_ball_with_combat(
+            make_ship_ball(peer_ship, st_pos + DVec3::new(100_000.0, 0.0, 0.0)),
+            full_combat,
+        )
+        .await
+        .unwrap();
+    let _ = sys_handle.drain_observer_updates(peer_ship).await;
+
+    let mut ego_tick_actions = Vec::new();
+    let mut peer_tick_actions = Vec::new();
+    let mut exited_naturally = false;
+    for _ in 0..60 {
+        sys_handle.step_manual(1.0).await.unwrap();
+        let (ef, _) = ego_wire.drain_pending_frames();
+        let (pf, _) = peer_wire.drain_pending_frames();
+        ego_tick_actions.extend(collect_destiny_actions_from_frames(&ef));
+        peer_tick_actions.extend(collect_destiny_actions_from_frames(&pf));
+        if let Some((_, snap)) = sys_handle.get_ball_snapshot(ego_ship).await.unwrap() {
+            if !matches!(snap.mode, MovementMode::Warp { .. }) {
+                exited_naturally = true;
+                break;
+            }
+        }
+    }
+    assert!(exited_naturally, "2nd warp should finish naturally within 60 ticks");
+    assert!(contains_ship_stop(&ego_tick_actions, ego_ship));
+    assert!(
+        !contains_warping_fx(&ego_tick_actions, ego_ship, 0),
+        "ego natural warp exit ticks must suppress OnSpecialFX(effects.Warping, 0): {ego_tick_actions:?}"
+    );
+    assert!(
+        contains_warping_fx(&peer_tick_actions, ego_ship, 0),
+        "peer observer must still receive ego OnSpecialFX(effects.Warping, 0) on natural warp exit"
+    );
+}
+
