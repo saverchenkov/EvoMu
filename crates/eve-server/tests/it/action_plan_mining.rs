@@ -752,3 +752,350 @@ async fn test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_rep
     let reject_err = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(non_reprocess_item)], &kw, None).await.expect_err("Raw mineral must be rejected");
     assert_eq!(reject_err.code, "ItemNotReprocessable");
 }
+
+// ====================================================================
+// GH #1183: Reprocess Output Destination, ACL, and m³ Capacity Checks
+// ====================================================================
+#[tokio::test]
+async fn test_gh1183_reprocess_destination_and_capacity_enforcement() {
+    use eve_db::{corp_roles, CorporationRecord, IskCents};
+
+    let ctx = fast_demo_ctx();
+    common::pin_clock(&ctx);
+    let char_id = 90_000_001i64;
+    let corp_id = 98_118_399i64;
+    let station_id = 60_003_760i64;
+    let rifter_id = 800_183_100i64;
+    let small_cont_id = 800_183_101i64;
+    let station_cont_id = 800_183_102i64;
+    let alsc_cont_id = 800_183_103i64;
+    let locked_cont_id = 800_183_104i64;
+    let mod_id = 800_183_105i64;
+    let bpo_id = 800_183_106i64;
+    let office_id = 800_183_107i64;
+    let ore_big_id = 800_183_201i64;
+    let ore_hangar_id = 800_183_202i64;
+    let ore_corp_id = 800_183_203i64;
+    let ore_cont_id = 800_183_204i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "GH1183 Reproc Corp".into();
+        corp.ticker = "G183".into();
+        corp.ceo_id = 90_000_099; // Someone else so role checks apply cleanly.
+        corp.members.insert(90_000_099);
+        corp.members.insert(char_id);
+        corp.set_division_balance(1, IskCents::from_f64_isk(50_000_000.0));
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+            ch.active_ship_id = rifter_id;
+            ch.balance = IskCents::from_f64_isk(100_000_000.0);
+        }
+
+        // Docked Rifter (140 m3 cargo) pre-loaded with 4,000 Tritanium (40 m3 -> 100 m3 free).
+        snap.items.insert(
+            rifter_id,
+            make_item(rifter_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            800_183_150,
+            make_item(800_183_150, 34, char_id, rifter_id, InventoryFlag::Cargo, 4_000, false),
+        );
+
+        // Small Standard Container (120 m3) pre-loaded with 2,000 Tritanium (20 m3 -> 100 m3 free).
+        snap.items.insert(
+            small_cont_id,
+            make_item(small_cont_id, 3297, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            800_183_151,
+            make_item(800_183_151, 34, char_id, small_cont_id, InventoryFlag::Hangar, 2_000, false),
+        );
+
+        // Large Station Container (1,000,000 m3) + ALSC (120 m3) + Locked Container + Non-containers.
+        snap.items.insert(
+            station_cont_id,
+            make_item(station_cont_id, 17_366, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            alsc_cont_id,
+            make_item(alsc_cont_id, 17_363, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            locked_cont_id,
+            make_item(locked_cont_id, 3297, char_id, station_id, InventoryFlag::Locked, 1, true),
+        );
+        snap.items.insert(
+            mod_id,
+            make_item(mod_id, 2048, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            bpo_id,
+            make_item(bpo_id, 691, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+
+        // 50,000 Compressed Veldspar -> >= 1,000 m3 Tritanium (overflows 100 m3 destinations).
+        snap.items.insert(
+            ore_big_id,
+            make_item(ore_big_id, 62_516, char_id, station_id, InventoryFlag::Hangar, 50_000, false),
+        );
+        // Three small 500-unit Veldspar stacks for positive destination tests.
+        for ore_id in [ore_hangar_id, ore_corp_id, ore_cont_id] {
+            snap.items.insert(
+                ore_id,
+                make_item(ore_id, 1230, char_id, station_id, InventoryFlag::Hangar, 500, false),
+            );
+        }
+    });
+
+    let mut sess = setup_pilot_session(&ctx, char_id).await;
+    let kw = HashMap::new();
+
+    // Configure ALSC passwordPerAction=true so ALSC container blocks unattended reprocessing deposits.
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "ALSCConfigSet",
+        &[PyRep::Integer(alsc_cont_id), PyRep::String("vault-pw".into())],
+        &HashMap::from([
+            ("lockByDefault".into(), PyRep::Bool(false)),
+            ("passwordPerAction".into(), PyRep::Bool(true)),
+            ("configBitmask".into(), PyRep::Integer(2)),
+        ]),
+        None,
+    )
+    .await
+    .expect("ALSCConfigSet");
+
+    // 1. Capacity failure against ship Cargo (100 m3 free vs 1,000 m3 output) leaves input & cargo untouched.
+    let ship_cap_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[
+                PyRep::List(vec![PyRep::Integer(ore_big_id)]),
+                PyRep::Integer(station_id),
+                PyRep::Integer(char_id),
+                PyRep::Integer(rifter_id),
+                PyRep::Integer(InventoryFlag::Cargo as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Ship Cargo 100 m3 free must reject 1,000 m3 output");
+    assert_eq!(ship_cap_err.code, "NotEnoughCargoSpace");
+    assert_eq!(ctx.db.get_item(ore_big_id).map(|i| i.quantity), Some(50_000));
+
+    // 2. Capacity failure against station container (100 m3 free vs 1,000 m3 output) leaves both untouched.
+    let cont_cap_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[
+                PyRep::List(vec![PyRep::Integer(ore_big_id)]),
+                PyRep::Integer(station_id),
+                PyRep::Integer(char_id),
+                PyRep::Integer(small_cont_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Station container 100 m3 free must reject 1,000 m3 output");
+    assert_eq!(cont_cap_err.code, "CapacityExceeded");
+    assert_eq!(ctx.db.get_item(ore_big_id).map(|i| i.quantity), Some(50_000));
+
+    // 3. Negative targets: non-container module/BPO, HiSlot0 flag, locked container, ALSC password, unrented CorpSAG.
+    for (target_loc, target_flag, exp_code) in [
+        (mod_id, InventoryFlag::Hangar, "InvalidOutputLocation"),
+        (bpo_id, InventoryFlag::Hangar, "InvalidOutputLocation"),
+        (rifter_id, InventoryFlag::HiSlot0, "InvalidOutputLocation"),
+        (station_cont_id, InventoryFlag::HiSlot0, "InvalidOutputLocation"),
+        (locked_cont_id, InventoryFlag::Hangar, "ItemLocked"),
+        (alsc_cont_id, InventoryFlag::Hangar, "ALSCPasswordRequired"),
+    ] {
+        let err = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "reprocessingSvc",
+                None,
+                "Reprocess",
+                &[
+                    PyRep::List(vec![PyRep::Integer(ore_hangar_id)]),
+                    PyRep::Integer(station_id),
+                    PyRep::Integer(char_id),
+                    PyRep::Integer(target_loc),
+                    PyRep::Integer(target_flag as i64),
+                ],
+                &kw,
+                None,
+            )
+            .await
+            .expect_err("Invalid destination/flag must fail");
+        assert_eq!(err.code, exp_code, "loc={target_loc} flag={target_flag:?}");
+    }
+
+    let no_office_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[
+                PyRep::List(vec![PyRep::Integer(ore_corp_id)]),
+                PyRep::Integer(station_id),
+                PyRep::Integer(corp_id),
+                PyRep::Integer(station_id),
+                PyRep::Integer(InventoryFlag::CorpSAG2 as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("CorpSAG without rented office must fail");
+    assert_eq!(no_office_err.code, "NoOfficeAtStation");
+
+    // Seed rented office without CorpSAG2 role -> CrpAccessDenied; then grant ROLE_HANGAR_CAN_QUERY[1].
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            office_id,
+            make_item(office_id, 27, corp_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        snap.corp_governance
+            .entry(corp_id)
+            .or_default()
+            .offices
+            .insert(station_id, office_id);
+    });
+    let unauth_sag_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[
+                PyRep::List(vec![PyRep::Integer(ore_corp_id)]),
+                PyRep::Integer(station_id),
+                PyRep::Integer(corp_id),
+                PyRep::Integer(office_id),
+                PyRep::Integer(InventoryFlag::CorpSAG2 as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Unauthorized CorpSAG2 must fail");
+    assert_eq!(unauth_sag_err.code, "CrpAccessDenied");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles
+                .insert(char_id, corp_roles::ROLE_HANGAR_CAN_QUERY[1]);
+        }
+    });
+
+    // 4. Positive reprocessing into (station_id, Hangar), (office_id, CorpSAG2), and (station_cont_id, Hangar).
+    let hangar_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[
+                PyRep::List(vec![PyRep::Integer(ore_hangar_id)]),
+                PyRep::Integer(station_id),
+                PyRep::Integer(char_id),
+                PyRep::Integer(station_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Reprocess into station Hangar");
+    let PyRep::List(hangar_list) = hangar_res else { panic!() };
+    let hangar_trit_id = get_dict_val(&hangar_list[0], "tritaniumItemID")
+        .and_then(|v| v.as_i64())
+        .expect("hangar trit id");
+
+    let corp_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[
+                PyRep::List(vec![PyRep::Integer(ore_corp_id)]),
+                PyRep::Integer(station_id),
+                PyRep::Integer(corp_id),
+                PyRep::Integer(office_id),
+                PyRep::Integer(InventoryFlag::CorpSAG2 as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Reprocess into authorized office CorpSAG2");
+    let PyRep::List(corp_list) = corp_res else { panic!() };
+    let corp_trit_id = get_dict_val(&corp_list[0], "tritaniumItemID")
+        .and_then(|v| v.as_i64())
+        .expect("corp trit id");
+
+    let cont_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[
+                PyRep::List(vec![PyRep::Integer(ore_cont_id)]),
+                PyRep::Integer(station_id),
+                PyRep::Integer(char_id),
+                PyRep::Integer(station_cont_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Reprocess into unlocked Station Container");
+    let PyRep::List(cont_list) = cont_res else { panic!() };
+    let cont_trit_id = get_dict_val(&cont_list[0], "tritaniumItemID")
+        .and_then(|v| v.as_i64())
+        .expect("cont trit id");
+
+    // 5. Persist to SQLite, reload into a fresh ServerContext, and verify all destinations persist.
+    let reloaded_ctx = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "gh1183_reprocess");
+    reloaded_ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&ore_hangar_id));
+        assert!(!snap.items.contains_key(&ore_corp_id));
+        assert!(!snap.items.contains_key(&ore_cont_id));
+        assert_eq!(snap.items.get(&ore_big_id).map(|i| i.quantity), Some(50_000));
+
+        let h_it = snap.items.get(&hangar_trit_id).expect("persisted hangar Tritanium");
+        assert_eq!((h_it.owner_id, h_it.location_id, h_it.flag), (char_id, station_id, InventoryFlag::Hangar));
+        assert!(h_it.quantity > 0);
+
+        let c_it = snap.items.get(&corp_trit_id).expect("persisted CorpSAG2 Tritanium");
+        assert_eq!((c_it.owner_id, c_it.location_id, c_it.flag), (corp_id, office_id, InventoryFlag::CorpSAG2));
+        assert!(c_it.quantity > 0);
+
+        let sc_it = snap.items.get(&cont_trit_id).expect("persisted container Tritanium");
+        assert_eq!((sc_it.owner_id, sc_it.location_id, sc_it.flag), (char_id, station_cont_id, InventoryFlag::Hangar));
+        assert!(sc_it.quantity > 0);
+    });
+}
+
