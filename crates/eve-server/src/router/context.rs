@@ -1966,11 +1966,14 @@ impl ServerContext {
     /// (`sim_clock_anchoring`) when present, clamping monotonically against
     /// `last_sim_activation_ft_by_system` so `0.5 -> 1.0` transitions preserve the current sim
     /// stamp and immediate post-transition activations emit history-safe timestamps (`#1081`).
+    /// Uses client-aligned wallclock (`now_machonet_wallclock_filetime_ticks`) so unrebased
+    /// `/advancetime` jumps never push anchored sim timestamps >24h into the client's future
+    /// and trigger `godma.py ActualStopEffect` sleep overflows (`#1143`, `#1144`).
     pub fn now_system_sim_filetime_ticks(&self, solar_system_id: Option<u32>) -> i64 {
         let Some(sys_id) = solar_system_id else {
             return self.now_client_sim_filetime_ticks();
         };
-        let now_wall_ft = self.now_blueos_filetime_ticks();
+        let now_wall_ft = self.now_machonet_wallclock_filetime_ticks();
         let mut cn = self
             .systems
             .cluster_nodes
@@ -1981,7 +1984,7 @@ impl ServerContext {
             drop(cn);
             return self.now_client_sim_filetime_ticks();
         };
-        let elapsed_wall_ft = now_wall_ft.saturating_sub(anchor_wall_ft);
+        let elapsed_wall_ft = now_wall_ft.saturating_sub(anchor_wall_ft).max(0);
         let dilated_ft = ((elapsed_wall_ft as f64) * factor.clamp(0.10, 1.0)).round() as i64;
         let base_ft = anchor_sim_ft.saturating_add(dilated_ft);
         let prev = cn

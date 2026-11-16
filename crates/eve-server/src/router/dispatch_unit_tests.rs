@@ -878,3 +878,60 @@ async fn market_get_orders_cached_result_and_station_dock_undock_excludes_self()
         "Station peer must receive OnCharNowInStation"
     );
 }
+
+#[tokio::test]
+async fn maybe_emit_login_sim_clock_rebase_stays_client_anchored_across_advancetime() {
+    let base = 1_750_000_000_u64;
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(base)));
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let user_id = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    ctx.db
+        .acquire_online_lock(user_id, 9_101, Some(char_id), true, base)
+        .unwrap();
+    let handle = ctx.systems.get_or_spawn(sys_id);
+
+    // 1. Un-dilated ballpark caught up to real client wallclock must NOT emit a bogus
+    //    DoSimClockRebase when `/advancetime` shifts server virtual time +12.95 days ahead.
+    handle.ballpark.write().unwrap().sim_unix_secs = base;
+    ctx.advance_secs_without_sim_clock_rebase(1_119_223);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    maybe_emit_login_sim_clock_rebase(&ctx, char_id, sys_id);
+    assert!(
+        !ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "DoSimClockRebase"),
+        "/advancetime alone must not trigger negative DoSimClockRebase on login"
+    );
+
+    // 2. Dilated/anchored system after `/advancetime` emits DoSimClockRebase anchored to client
+    //    wallclock (within seconds of now_machonet_wallclock_filetime_ticks), never +12.95 days.
+    crate::services::serverops_cluster::set_system_tidi_factor(&ctx, sys_id, 0.50);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.advance_secs(10); // 10s real/rebased wall advance => sim clock ~5s behind wallclock
+    let _ = ctx.drain_notifications_for_char(char_id);
+    maybe_emit_login_sim_clock_rebase(&ctx, char_id, sys_id);
+    let rebases: Vec<_> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "DoSimClockRebase")
+        .collect();
+    assert_eq!(rebases.len(), 1, "expected single login DoSimClockRebase for dilated system");
+    let PyRep::Tuple(times) = &rebases[0].args[0] else {
+        panic!("expected 2-tuple (oldSimTime, newSimTime)");
+    };
+    let old_sim = times[0].as_i64().unwrap();
+    let new_sim = times[1].as_i64().unwrap();
+    let client_ft = ctx.now_machonet_wallclock_filetime_ticks();
+    let day_ticks: i64 = 86_400 * 10_000_000;
+    assert!(old_sim > new_sim);
+    assert!(
+        old_sim - client_ft < day_ticks && (old_sim - client_ft).abs() < 5 * 10_000_000,
+        "login DoSimClockRebase oldSimTime drifted from client clock"
+    );
+    assert!(
+        new_sim - client_ft < day_ticks && (client_ft - new_sim).abs() < 15 * 10_000_000,
+        "login DoSimClockRebase newSimTime drifted from client clock"
+    );
+}

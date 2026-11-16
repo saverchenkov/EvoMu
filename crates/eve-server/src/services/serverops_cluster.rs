@@ -46,7 +46,7 @@ fn default_constellation_worker_node(ctx: &ServerContext, solar_system_id: Solar
 }
 
 fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, old_factor: f64, new_factor: f64) {
-    let now_wall_ft = ctx.now_blueos_filetime_ticks();
+    let now_wall_ft = ctx.now_machonet_wallclock_filetime_ticks();
     let (old_sim_ft, new_sim_ft) = {
         let mut cn = ctx
             .systems
@@ -56,7 +56,7 @@ fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, ol
         let (old_ft, new_ft) = if let Some(&(anchor_wall_ft, anchor_sim_ft, prev_factor)) =
             cn.sim_clock_anchoring.get(&solar_system_id)
         {
-            let elapsed_wall_ft = now_wall_ft.saturating_sub(anchor_wall_ft);
+            let elapsed_wall_ft = now_wall_ft.saturating_sub(anchor_wall_ft).max(0);
             let factor = prev_factor.clamp(0.10, 1.0);
             let dilated_elapsed_ft = ((elapsed_wall_ft as f64) * factor).round() as i64;
             (anchor_sim_ft, anchor_sim_ft.saturating_add(dilated_elapsed_ft))
@@ -102,7 +102,7 @@ pub fn emit_sim_clock_rebase_on_entry_if_needed(
         return false;
     }
     let factor = get_system_tidi_factor(ctx, solar_system_id);
-    let now_wall_ft = ctx.now_blueos_filetime_ticks();
+    let now_wall_ft = ctx.now_machonet_wallclock_filetime_ticks();
     let payload_opt = {
         let mut cn = ctx
             .systems
@@ -135,7 +135,7 @@ pub fn emit_sim_clock_rebase_on_entry_if_needed(
         let (old_ft, new_ft) = if let Some(&(anchor_wall_ft, anchor_sim_ft, cur_factor)) =
             cn.sim_clock_anchoring.get(&solar_system_id)
         {
-            let elapsed_wall_ft = now_wall_ft.saturating_sub(anchor_wall_ft);
+            let elapsed_wall_ft = now_wall_ft.saturating_sub(anchor_wall_ft).max(0);
             let dilated_elapsed_ft =
                 ((elapsed_wall_ft as f64) * cur_factor.clamp(0.10, 1.0)).round() as i64;
             (now_wall_ft, anchor_sim_ft.saturating_add(dilated_elapsed_ft))
