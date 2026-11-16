@@ -410,12 +410,17 @@ async fn warp_vector_consumption_guards_cooldown_star_distance_and_session_check
         it.dynamic_attributes.insert(5432, 1e15);
         it.dynamic_attributes.insert(5429, 1_000.0); // < 150,000 m
     });
+    let warp_short_err = handle_use_warp_vector(&ctx, &mut sess, &[PyRep::Integer(vec_iid)])
+        .await
+        .unwrap_err();
+    assert_eq!(warp_short_err.code, "WarpDistanceTooShort");
     assert_eq!(
-        handle_use_warp_vector(&ctx, &mut sess, &[PyRep::Integer(vec_iid)])
-            .await
-            .unwrap_err()
-            .code,
-        "WarpDistanceTooShort"
+        warp_short_err.client_presentation("warpVectorMgr", "UseVector"),
+        eve_proto::UserErrorPresentation::Notify
+    );
+    assert_eq!(
+        warp_short_err.to_client_error("warpVectorMgr", "UseVector"),
+        eve_proto::ClientError::user(eve_proto::UserErrorKey::WarpTooShort)
     );
 
     ctx.db.with_mut_snapshot(|snap| {

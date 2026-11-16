@@ -392,7 +392,16 @@ async fn keeper_and_agency_warp_to_content_branches() {
         })
         .await;
 
-    assert_eq!(call_cache_err(&ctx, &mut non_gm, &cap, "warp_to_content", &[PyRep::Integer(900_002)], &kw).await.code, "WarpDistanceTooShort");
+    let warp_short_err = call_cache_err(&ctx, &mut non_gm, &cap, "warp_to_content", &[PyRep::Integer(900_002)], &kw).await;
+    assert_eq!(warp_short_err.code, "WarpDistanceTooShort");
+    assert_eq!(
+        warp_short_err.client_presentation(&cap, "warp_to_content"),
+        eve_proto::UserErrorPresentation::Notify
+    );
+    assert_eq!(
+        warp_short_err.to_client_error(&cap, "warp_to_content"),
+        eve_proto::ClientError::user(eve_proto::UserErrorKey::WarpTooShort)
+    );
     let warp_sig = handle(&ctx, &mut non_gm, &cap, "warp_to_content", &[PyRep::keyval([("dungeonID", PyRep::Integer(101))])], &kw).await.unwrap().unwrap();
     assert_eq!(warp_sig, PyRep::None);
 }

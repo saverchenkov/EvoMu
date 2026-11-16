@@ -992,11 +992,10 @@ pub async fn handle(
 
         let warp_dist = current_ball.position.distance(dest_pos);
         if warp_dist < 150_000.0 {
-            return Some(Err(BridgeRpcError {
-                code: "WarpDistanceTooShort".into(),
-                message: format!("Cannot warp {:.1} m (minimum warp distance is 150,000 m)", warp_dist),
-                client_error: None,
-            }));
+            return Some(Err(BridgeRpcError::warp_distance_too_short(format!(
+                "Cannot warp {:.1} m (minimum warp distance is 150,000 m)",
+                warp_dist
+            ))));
         }
 
         if let Err(e) = crate::services::nav_warp_interdiction::execute_agency_content_warp(

@@ -611,30 +611,63 @@ fn fnv1a_i64(input: &str) -> i64 {
     hash as i64
 }
 
-/// Disambiguates generic `uthread2` / `MollycoddledUthread` wrapper stack hashes (such as `-1040548311`)
-/// by mixing in the `Formatted exception info:` summary line and leaf `Thrown at:` frame so unrelated
-/// tasklet exceptions do not collide on the same GitHub issue.
-fn disambiguate_uthread_stack_hash(stack_hash: i64, stack_key: &str, trace: &str) -> i64 {
-    if !stack_key.contains("MollycoddledUthread") && !trace.contains("MollycoddledUthread") {
-        return stack_hash;
-    }
-    let formatted_line = trace
-        .lines()
+/// Returns `true` when `line` represents a server `InternalError` or
+/// `DatabasePersistenceError` surfaced on the client as a `RuntimeError`.
+fn is_server_internal_runtime_error(line: &str) -> bool {
+    let candidate = line
+        .strip_prefix("Formatted exception info:")
         .map(str::trim)
-        .find(|l| l.starts_with("Formatted exception info:"))
-        .unwrap_or("");
-    let thrown_leaf = trace
+        .unwrap_or(line);
+    if !candidate.starts_with("RuntimeError:") && !candidate.starts_with("RuntimeError(") {
+        return false;
+    }
+    candidate.contains("InternalError") || candidate.contains("DatabasePersistenceError")
+}
+
+/// Extracts the innermost `<pre>` frame inside a `Thrown at:` block.
+fn extract_thrown_leaf(trace: &str) -> &str {
+    trace
         .lines()
         .map(str::trim)
         .skip_while(|l| !l.starts_with("Thrown at:"))
         .take_while(|l| !l.starts_with("Formatted exception info:") && !l.starts_with("EXCEPTION END"))
         .filter(|l| l.starts_with("<pre>"))
         .last()
-        .unwrap_or("");
-    if formatted_line.is_empty() && thrown_leaf.is_empty() {
-        return stack_hash;
+        .unwrap_or("")
+}
+
+/// Disambiguates generic `uthread2` / `MollycoddledUthread` wrapper stack hashes (such as `-1040548311`)
+/// and server `InternalError` / `DatabasePersistenceError` `RuntimeError` traces by mixing in the
+/// exception summary line and leaf `Thrown at:` frame so unrelated tasklet exceptions or server
+/// panics do not collide on existing client-call-site GitHub issues.
+fn disambiguate_uthread_stack_hash(stack_hash: i64, stack_key: &str, trace: &str) -> i64 {
+    let is_uthread =
+        stack_key.contains("MollycoddledUthread") || trace.contains("MollycoddledUthread");
+    let thrown_leaf = extract_thrown_leaf(trace);
+    let internal_line = trace
+        .lines()
+        .map(str::trim)
+        .take_while(|l| !l.starts_with("EXCEPTION END"))
+        .find(|l| is_server_internal_runtime_error(l));
+    if is_uthread {
+        let formatted_line = trace
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with("Formatted exception info:"))
+            .unwrap_or("");
+        let summary = match (formatted_line, internal_line) {
+            ("Formatted exception info:" | "", Some(line)) => line,
+            _ => formatted_line,
+        };
+        if summary.is_empty() && thrown_leaf.is_empty() {
+            return stack_hash;
+        }
+        return fnv1a_i64(&format!("{stack_hash}:{thrown_leaf}:{summary}"));
     }
-    fnv1a_i64(&format!("{stack_hash}:{thrown_leaf}:{formatted_line}"))
+    let Some(internal_line) = internal_line else {
+        return stack_hash;
+    };
+    fnv1a_i64(&format!("{stack_hash}:{thrown_leaf}:{internal_line}"))
 }
 
 fn parse_char_id_from_session_info(desc: &str) -> Option<i64> {
