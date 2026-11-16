@@ -142,7 +142,7 @@ pub fn special_fx_guid_for_module_sde(
         }
         40 | 1156 => Some(("effects.ShieldBoosting".to_string(), false)),
         62 | 1199 => Some(("effects.ArmorRepair".to_string(), false)),
-        506..=511 | 524 | 1245 => Some(("effects.MissileDeployment".to_string(), true)),
+        506..=511 | 524 | 771 | 1245 => Some(("effects.MissileDeployment".to_string(), true)),
         _ => match eff_name {
             "remoteWebifierFalloff" | "modifyTargetSpeed2" | "decreaseTargetSpeed" => {
                 Some(("effects.ModifyTargetSpeed".to_string(), true))

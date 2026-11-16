@@ -482,6 +482,21 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
         entries.push(("hostile_response_threshold", PyRep::Real(11.0)));
         entries.push(("friendly_response_threshold", PyRep::Real(11.0)));
     }
+    if let Some(source_ship_id) = meta.source_ship_id {
+        entries.push(("sourceShipID", PyRep::Integer(source_ship_id)));
+    }
+    if !meta.launch_modules.is_empty() {
+        entries.push((
+            "launchModules",
+            PyRep::List(
+                meta.launch_modules
+                    .iter()
+                    .copied()
+                    .map(PyRep::Integer)
+                    .collect(),
+            ),
+        ));
+    }
     PyRep::Dict(
         entries
             .into_iter()
@@ -917,28 +932,49 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
             module_id,
             guid,
             is_active,
-        } => PyRep::Tuple(vec![
-            PyRep::String("OnSpecialFX".into()),
-            // V24 14-arg layout (`michelle.py:2087`, `spaceMgr.py:605`):
-            // (shipID, moduleID, moduleTypeID, targetID, otherTypeID, guid, isOffensive,
-            //  start, active, duration, repeat, startTime, timeFromStart, graphicInfo).
+        } => {
+            let fx_meta = park.and_then(|p| {
+                p.special_fx_meta
+                    .get(&(*ball_id, *module_id, guid.clone()))
+            });
             PyRep::Tuple(vec![
-                PyRep::Integer(*ball_id),
-                module_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                PyRep::None,
-                PyRep::None,
-                PyRep::None,
-                PyRep::String(guid.clone()),
-                PyRep::Bool(false),
-                PyRep::Integer(i64::from(*is_active)),
-                PyRep::Integer(i64::from(*is_active)),
-                PyRep::Integer(-1),
-                PyRep::None,
-                PyRep::None,
-                PyRep::Integer(0),
-                PyRep::None,
-            ]),
-        ]),
+                PyRep::String("OnSpecialFX".into()),
+                // V24 14-arg layout (`michelle.py:2087`, `spaceMgr.py:605`):
+                // (shipID, moduleID, moduleTypeID, targetID, otherTypeID, guid, isOffensive,
+                //  start, active, duration, repeat, startTime, timeFromStart, graphicInfo).
+                PyRep::Tuple(vec![
+                    PyRep::Integer(*ball_id),
+                    module_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    fx_meta
+                        .and_then(|m| m.module_type_id)
+                        .map(|t| PyRep::Integer(i64::from(t)))
+                        .unwrap_or(PyRep::None),
+                    fx_meta
+                        .and_then(|m| m.target_id)
+                        .map(PyRep::Integer)
+                        .unwrap_or(PyRep::None),
+                    fx_meta
+                        .and_then(|m| m.other_type_id)
+                        .map(|t| PyRep::Integer(i64::from(t)))
+                        .unwrap_or(PyRep::None),
+                    PyRep::String(guid.clone()),
+                    PyRep::Bool(fx_meta.is_some_and(|m| m.is_offensive)),
+                    PyRep::Integer(i64::from(*is_active)),
+                    PyRep::Integer(i64::from(*is_active)),
+                    fx_meta
+                        .and_then(|m| m.duration_ms)
+                        .map(PyRep::Real)
+                        .unwrap_or(PyRep::Integer(-1)),
+                    fx_meta
+                        .and_then(|m| m.repeat)
+                        .map(PyRep::Integer)
+                        .unwrap_or(PyRep::None),
+                    PyRep::None,
+                    PyRep::Integer(0),
+                    PyRep::None,
+                ]),
+            ])
+        }
         DestinyEvent::CloakBall { ball_id, cloaked } => PyRep::Tuple(vec![
             // evemu_Crucible `Destiny.xmlp:670-681` (`SetBallCloak`): `(entityID, bool cloaked)`.
             PyRep::String("CloakBall".into()),

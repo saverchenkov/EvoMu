@@ -1811,6 +1811,62 @@ impl ServerContext {
         duration_ms_opt: Option<f64>,
         charge_type_id_override: Option<u32>,
     ) -> Vec<PendingMachoNotification> {
+        self.notify_module_effect_started_with_cycle_impl(
+            char_id,
+            ship_id,
+            module_id,
+            module_type_id,
+            effect_name,
+            target_id,
+            repeat_opt,
+            duration_ms_opt,
+            charge_type_id_override,
+            true,
+        )
+    }
+
+    /// Emits `OnGodmaShipEffect` (`start=1`) without `OnSpecialFX` (used by guided missiles whose
+    /// deployment `OnSpecialFX` is broadcast after next-tick `AddBalls2`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn notify_module_godma_effect_started_only(
+        &self,
+        char_id: i64,
+        ship_id: i64,
+        module_id: i64,
+        module_type_id: u32,
+        effect_name: Option<&str>,
+        target_id: Option<i64>,
+        repeat_opt: Option<i32>,
+        duration_ms_opt: Option<f64>,
+    ) -> Vec<PendingMachoNotification> {
+        self.notify_module_effect_started_with_cycle_impl(
+            char_id,
+            ship_id,
+            module_id,
+            module_type_id,
+            effect_name,
+            target_id,
+            repeat_opt,
+            duration_ms_opt,
+            None,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn notify_module_effect_started_with_cycle_impl(
+        &self,
+        char_id: i64,
+        ship_id: i64,
+        module_id: i64,
+        module_type_id: u32,
+        effect_name: Option<&str>,
+        target_id: Option<i64>,
+        repeat_opt: Option<i32>,
+        duration_ms_opt: Option<f64>,
+        charge_type_id_override: Option<u32>,
+        emit_special_fx: bool,
+    ) -> Vec<PendingMachoNotification> {
         let effect_id = self.effect_id_for_module(module_type_id, effect_name).unwrap_or(0);
         let duration_ms = duration_ms_opt.unwrap_or_else(|| {
             self.ship_fittings
@@ -1868,19 +1924,21 @@ impl ServerContext {
                 PyRep::None,
             ],
         );
-        self.emit_module_special_fx_started(
-            char_id,
-            ship_id,
-            module_id,
-            module_type_id,
-            effect_id,
-            effect_name,
-            target_id,
-            repeat,
-            duration_ms,
-            now,
-            charge_type_id_override,
-        );
+        if emit_special_fx {
+            self.emit_module_special_fx_started(
+                char_id,
+                ship_id,
+                module_id,
+                module_type_id,
+                effect_id,
+                effect_name,
+                target_id,
+                repeat,
+                duration_ms,
+                now,
+                charge_type_id_override,
+            );
+        }
         notifs
     }
 

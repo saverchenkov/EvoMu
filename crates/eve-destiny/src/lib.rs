@@ -1120,6 +1120,10 @@ pub struct SlimItemMeta {
     #[serde(default)] pub name: Option<String>,
     #[serde(default)] pub origin_system_owner_id: Option<i64>,
     #[serde(default)] pub dest_system_owner_id: Option<i64>,
+    /// Launching attacker ship/structure ID for missile balls (`V24 missile.pyj`).
+    #[serde(default)] pub source_ship_id: Option<i64>,
+    /// Launcher module item IDs associated with this missile volley (`V24 missile.pyj`).
+    #[serde(default)] pub launch_modules: Vec<i64>,
 }
 
 impl Default for SlimItemMeta {
@@ -1140,6 +1144,8 @@ impl Default for SlimItemMeta {
             name: None,
             origin_system_owner_id: None,
             dest_system_owner_id: None,
+            source_ship_id: None,
+            launch_modules: Vec::new(),
         }
     }
 }
@@ -1322,6 +1328,17 @@ fn default_next_grid_id() -> u64 {
     1
 }
 
+/// Optional V24 `OnSpecialFX` 14-arg wire metadata stored sidecar on `Ballpark`.
+#[derive(Debug, Clone, Default)]
+pub struct SpecialFxWireMeta {
+    pub module_type_id: Option<u32>,
+    pub target_id: Option<BallId>,
+    pub other_type_id: Option<u32>,
+    pub is_offensive: bool,
+    pub duration_ms: Option<f64>,
+    pub repeat: Option<i64>,
+}
+
 /// Represents a solar system's active space simulation instance (`Destiny.Ballpark`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ballpark {
@@ -1386,6 +1403,9 @@ pub struct Ballpark {
     /// Monotonically incremented whenever static balls are added, removed, or repositioned.
     #[serde(skip, default)]
     pub(crate) static_epoch: u64,
+    /// Optional V24 `OnSpecialFX` 14-arg wire metadata keyed by `(ball_id, module_id, guid)`.
+    #[serde(skip, default)]
+    pub special_fx_meta: BTreeMap<(BallId, Option<i64>, String), SpecialFxWireMeta>,
 }
 
 /// Converts Unix epoch seconds to Windows FILETIME (`100ns` ticks since 1601-01-01 UTC).

@@ -1,9 +1,10 @@
 //! `Ballpark` spatial grid management, ball lifecycle, warp bubbles, cloaking, MJD/MJFG, and target locking.
 
 use crate::{
-    Ball, BallId, Ballpark, DamageVector, DestinyEvent, GridBubble, MovementMode, SlimItemMeta,
-    WarpBubble, WarpBubbleMgr, WarpPhase, BUBBLE_RADIUS_METERS, BUBBLE_TRANSITION_THRESHOLD_METERS,
-    DECLOAK_DISTANCE_METERS, GRID_WALL_EXPANSION_THRESHOLD_METERS, MAX_GRID_EXTENT_METERS,
+    Ball, BallId, Ballpark, CombatState, DamageVector, DestinyEvent, GridBubble, MovementMode,
+    SlimItemMeta, WarpBubble, WarpBubbleMgr, WarpPhase, BUBBLE_RADIUS_METERS,
+    BUBBLE_TRANSITION_THRESHOLD_METERS, DECLOAK_DISTANCE_METERS,
+    GRID_WALL_EXPANSION_THRESHOLD_METERS, MAX_GRID_EXTENT_METERS,
 };
 use glam::DVec3;
 use std::collections::{BTreeMap, BTreeSet};
@@ -86,6 +87,7 @@ impl Ballpark {
             sim_unix_secs: 0,
             registered_observers: None,
             static_epoch: 0,
+            special_fx_meta: BTreeMap::new(),
         }
     }
 
@@ -581,7 +583,83 @@ impl Ballpark {
         self.scheduled_observer_events = remaining;
     }
 
-    pub fn remove_ball(&mut self, ball_id: BallId) -> Option<Ball> {
+    /// Spawns multiple dynamic balls in a single tick, emitting one batched `AddBalls2` event
+    /// per grid and one `AddBalls2` event into `pending_events`.
+    pub fn spawn_balls_batched(
+        &mut self,
+        items: Vec<(Ball, CombatState, Option<SlimItemMeta>)>,
+    ) -> Vec<BallId> {
+        let mut by_grid: std::collections::BTreeMap<u64, Vec<Ball>> =
+            std::collections::BTreeMap::new();
+        let mut all_added = Vec::with_capacity(items.len());
+        let mut added_ids = Vec::with_capacity(items.len());
+        for (ball, cs, meta_opt) in items {
+            let ball_id = ball.id;
+            if self.balls.contains_key(&ball_id) {
+                continue;
+            }
+            let ball_pos = ball.position;
+            let is_cloaked = cs.is_cloaked;
+            if let Some(meta) = meta_opt {
+                if meta.group_id > 0 {
+                    self.ball_group_ids.insert(ball_id, meta.group_id);
+                }
+                self.ball_slim_meta.insert(ball_id, meta);
+            }
+            let mut cs = cs;
+            cs.was_cloaked_last_tick = is_cloaked;
+            self.combat_states.insert(ball_id, cs);
+            if matches!(ball.mode, MovementMode::Field) {
+                self.warp_bubble_mgr
+                    .add_bubble(WarpBubble::new(ball_id, ball_pos, ball.radius));
+            }
+            self.balls.insert(ball_id, ball.clone());
+            if self.is_registered_observer(ball_id) {
+                self.observer_events.insert(ball_id, Vec::new());
+            }
+            let grid_id = self.find_or_create_grid_for_position(ball_pos);
+            if let Some(g) = self.grids.get_mut(&grid_id) {
+                g.members.insert(ball_id);
+            }
+            self.ball_grid_ids.insert(ball_id, grid_id);
+            added_ids.push(ball_id);
+            if !is_cloaked {
+                all_added.push(ball.clone());
+                by_grid.entry(grid_id).or_default().push(ball);
+            }
+        }
+        if !all_added.is_empty() {
+            self.pending_events
+                .push(DestinyEvent::AddBalls2 { balls: all_added });
+            let added_set: std::collections::HashSet<BallId> = added_ids.iter().copied().collect();
+            for (gid, grid_balls) in by_grid {
+                let ev = DestinyEvent::AddBalls2 { balls: grid_balls };
+                let Some(g) = self.grids.get(&gid) else {
+                    continue;
+                };
+                let members: Vec<BallId> = g.members.iter().copied().collect();
+                for obs_id in members {
+                    if added_set.contains(&obs_id) {
+                        continue;
+                    }
+                    if !self
+                        .registered_observers
+                        .as_ref()
+                        .is_none_or(|set| set.contains(&obs_id))
+                    {
+                        continue;
+                    }
+                    self.observer_events
+                        .entry(obs_id)
+                        .or_default()
+                        .push(ev.clone());
+                }
+            }
+        }
+        added_ids
+    }
+
+    fn remove_ball_state_only(&mut self, ball_id: BallId) -> Option<(Ball, Option<u64>, bool)> {
         let Some(removed) = self.balls.remove(&ball_id) else {
             self.combat_states.remove(&ball_id);
             return None;
@@ -599,6 +677,8 @@ impl Ballpark {
         self.non_free_ball_ids.remove(&ball_id);
         self.ball_group_ids.remove(&ball_id);
         self.ball_slim_meta.remove(&ball_id);
+        self.special_fx_meta
+            .retain(|(bid, _, _), meta| *bid != ball_id && meta.target_id != Some(ball_id));
         self.combat_states.remove(&ball_id);
         self.mushroom_states.remove(&ball_id);
         self.troll_states.remove(&ball_id);
@@ -642,6 +722,11 @@ impl Ballpark {
         self.pending_handoff_observers.remove(&ball_id);
         self.scheduled_observer_events
             .retain(|(_, obs_id, _)| *obs_id != ball_id);
+        Some((removed, old_grid_id, was_static))
+    }
+
+    pub fn remove_ball(&mut self, ball_id: BallId) -> Option<Ball> {
+        let (removed, old_grid_id, was_static) = self.remove_ball_state_only(ball_id)?;
         self.pending_events
             .push(DestinyEvent::RemoveBall { ball_id });
         if let Some(gid) = old_grid_id {
@@ -661,6 +746,54 @@ impl Ballpark {
             );
         }
         Some(removed)
+    }
+
+    /// Removes multiple balls in one batch and emits `DestinyEvent::RemoveBalls` to affected grid
+    /// observers and `pending_events`.
+    pub fn remove_balls_batch(&mut self, ball_ids: &[BallId]) -> Vec<Ball> {
+        let mut removed_balls = Vec::with_capacity(ball_ids.len());
+        let mut removed_ids = Vec::with_capacity(ball_ids.len());
+        let mut by_grid: std::collections::BTreeMap<u64, Vec<BallId>> =
+            std::collections::BTreeMap::new();
+        let mut static_only = Vec::new();
+        for &ball_id in ball_ids {
+            let Some((removed, old_grid_id, was_static)) = self.remove_ball_state_only(ball_id)
+            else {
+                continue;
+            };
+            removed_ids.push(ball_id);
+            removed_balls.push(removed);
+            if let Some(gid) = old_grid_id {
+                if let Some(g) = self.grids.get_mut(&gid) {
+                    g.members.remove(&ball_id);
+                }
+                by_grid.entry(gid).or_default().push(ball_id);
+            } else if was_static {
+                static_only.push(ball_id);
+            }
+        }
+        if !removed_ids.is_empty() {
+            self.pending_events.push(DestinyEvent::RemoveBalls {
+                ball_ids: removed_ids,
+            });
+            for (gid, g_ids) in by_grid {
+                self.queue_event_for_grid_observers(
+                    gid,
+                    None,
+                    &DestinyEvent::RemoveBalls { ball_ids: g_ids },
+                );
+                self.contract_or_delete_grid(gid);
+            }
+            if !static_only.is_empty() {
+                self.queue_event_for_all_grid_observers(
+                    None,
+                    &DestinyEvent::RemoveBalls {
+                        ball_ids: static_only,
+                    },
+                );
+            }
+        }
+        removed_balls
     }
 
     /// Recomputes `ball_id`'s effective attributes in-place, returning `Some(new_max_velocity)`

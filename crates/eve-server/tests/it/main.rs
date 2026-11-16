@@ -36,6 +36,7 @@ mod client_harness;
 mod client_journeys_expansion;
 mod combat;
 mod combat_death_crimewatch;
+mod combat_missile_flight_timing;
 mod combat_drones_npcs;
 mod combat_fighters_insurance_bounties;
 mod combat_entropic_pvp_atomicity;

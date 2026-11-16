@@ -945,8 +945,36 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
     let ship_ball = Ball { id: ship_id, type_id: 639, position: station_pos + DVec3::new(100.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 100_000_000.0, radius: 250.0, speed_fraction: 0.0, mode: MovementMode::Stop };
     sys.spawn_ball_with_meta(ship_ball.clone(), ctx.build_ship_combat_state(P1, ship_id, 639), ctx.build_ship_slim_meta(P1, 639)).await.unwrap();
 
-    let sec_agent = ctx.sde.agents.values().find(|a| a.agent_type_id == 2 && a.division_id == 24 && a.level == 1 && a.station_id == Some(JITA_STATION_ID)).cloned()
-        .or_else(|| ctx.sde.agents.values().find(|a| a.agent_type_id == 2 && a.division_id == 24 && a.level == 1 && a.station_id.is_some()).cloned()).unwrap();
+    let sec_agent = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 2 && a.division_id == 24 && a.level == 1 && a.station_id == Some(JITA_STATION_ID))
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .or_else(|| {
+            ctx.sde
+                .agents
+                .values()
+                .filter(|a| {
+                    a.agent_type_id == 2
+                        && a.division_id == 24
+                        && a.level == 1
+                        && a.station_id.is_some()
+                        && a.solar_system_id == Some(JITA_SYSTEM_ID)
+                })
+                .min_by_key(|a| a.agent_id)
+                .cloned()
+        })
+        .or_else(|| {
+            ctx.sde
+                .agents
+                .values()
+                .filter(|a| a.agent_type_id == 2 && a.division_id == 24 && a.level == 1 && a.station_id.is_some())
+                .min_by_key(|a| a.agent_id)
+                .cloned()
+        })
+        .unwrap();
     let ag_station = sec_agent.station_id.unwrap();
     let ag_sys = sec_agent.solar_system_id.unwrap();
 
@@ -1022,16 +1050,29 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
         });
         sess.station_id = None;
         sess.solar_system_id = Some(m_sys);
-        ag_space.spawn_ball_with_meta(ship_ball.clone(), ctx.build_ship_combat_state(P1, ship_id, 587), ctx.build_ship_slim_meta(P1, 587)).await.unwrap();
+        let m_spawn_pos = ctx
+            .sde
+            .solar_systems
+            .get(&m_sys)
+            .and_then(|s| s.stations.first().map(|st| st.position))
+            .unwrap_or(station_pos)
+            + DVec3::new(100.0, 0.0, 0.0);
+        let mut m_ship_ball = ship_ball.clone();
+        m_ship_ball.position = m_spawn_pos;
+        ag_space.spawn_ball_with_meta(m_ship_ball, ctx.build_ship_combat_state(P1, ship_id, 639), ctx.build_ship_slim_meta(P1, 639)).await.unwrap();
     }
     let ag_beyonce = ctx.bind_object(&sess, "beyonce", i64::from(m_sys)).unwrap();
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(ag_beyonce), "CmdWarpToStuff", &[PyRep::String("mission".into()), PyRep::Integer(i64::from(m_id))], &HashMap::new(), None).await.unwrap();
-    for _ in 0..120 {
+    for _ in 0..600 {
         ag_space.step_manual(1.0).await.unwrap();
         if matches!(ag_space.get_ball_snapshot(ship_id).await.unwrap(), Some((_, b)) if b.mode == MovementMode::Stop) {
             break;
         }
     }
+    assert!(
+        matches!(ag_space.get_ball_snapshot(ship_id).await.unwrap(), Some((_, b)) if b.mode == MovementMode::Stop),
+        "ship must finish warping into mission pocket before locking NPC"
+    );
     let (initial_npcs, first_npc, initial_npc_ids) = ctx.db.with_snapshot(|s| (
         s.active_missions[&(P1, m_id)].npcs_remaining,
         s.active_missions[&(P1, m_id)].spawned_npc_ball_ids[0],

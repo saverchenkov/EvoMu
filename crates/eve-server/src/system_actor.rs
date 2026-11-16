@@ -13,6 +13,8 @@ mod cycles_tackle;
 pub(crate) use cycles_tackle::*;
 mod disruptors;
 pub(crate) use disruptors::*;
+mod missiles;
+pub(crate) use missiles::*;
 mod types;
 pub use types::*;
 
@@ -81,6 +83,7 @@ pub struct SystemRegistry {
     /// in this registry's ballparks, preventing player scan RPCs from respawning killed guards.
     hydrated_wh_ore_anomalies: RankedMutex<std::collections::HashSet<(SolarSystemId, String)>, RANK_LEAF>,
     pub tactical_state: Arc<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
+    pub module_reload_sim_deadlines: Arc<RankedRwLock<HashMap<i64, (SolarSystemId, f64, f64)>, RANK_LEAF>>,
     pending_notifications_opt: Option<Arc<RankedRwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>, RANK_LEAF>>>,
     notify_tx_opt: Option<broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
     pub cluster_nodes: RankedRwLock<ClusterNodeRegistry, RANK_SERVICE_STATE>,
@@ -108,6 +111,7 @@ impl SystemRegistry {
             special_site_spawned_balls: RankedMutex::new(std::collections::HashSet::new()),
             hydrated_wh_ore_anomalies: RankedMutex::new(std::collections::HashSet::new()),
             tactical_state: Arc::new(RankedRwLock::new(Default::default())),
+            module_reload_sim_deadlines: Arc::new(RankedRwLock::new(HashMap::new())),
             pending_notifications_opt: None,
             notify_tx_opt: None,
             cluster_nodes: RankedRwLock::new(ClusterNodeRegistry::default()),
@@ -251,6 +255,46 @@ impl SystemRegistry {
         self.get_handle(solar_system_id)
             .map(|h| h.sim_elapsed_secs())
             .unwrap_or(0.0)
+    }
+
+    pub fn get_system_tidi_factor(&self, solar_system_id: SolarSystemId) -> f64 {
+        self.get_handle(solar_system_id)
+            .map(|h| h.tidi_factor())
+            .unwrap_or(1.0)
+    }
+
+    pub fn record_module_reload_sim_deadlines(
+        &self,
+        module_ids: &[i64],
+        solar_system_id: SolarSystemId,
+        sim_start_s: f64,
+        sim_deadline_s: f64,
+    ) {
+        let mut guard = self
+            .module_reload_sim_deadlines
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        for &mid in module_ids {
+            guard.insert(mid, (solar_system_id, sim_start_s, sim_deadline_s));
+        }
+    }
+
+    pub fn clear_module_reload_sim_deadline(&self, module_id: i64) {
+        self.module_reload_sim_deadlines
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&module_id);
+    }
+
+    pub fn check_module_reload_sim_deadline(
+        &self,
+        module_id: i64,
+    ) -> Option<(SolarSystemId, f64, f64)> {
+        self.module_reload_sim_deadlines
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&module_id)
+            .copied()
     }
 
     pub fn take_pending_cycle_actions(&self, solar_system_id: SolarSystemId) -> Vec<PendingCycleAction> {
@@ -521,6 +565,7 @@ impl SystemRegistry {
             db_opt,
             mechanic_rng_opt: Some(mechanic_rng.clone()),
             tactical_state: self.tactical_state.clone(),
+            module_reload_sim_deadlines: self.module_reload_sim_deadlines.clone(),
             pending_notifications_opt: self.pending_notifications_opt.clone(),
             notify_tx_opt: self.notify_tx_opt.clone(),
             hibernated: Arc::clone(&hibernated),
@@ -595,11 +640,16 @@ impl SystemRegistry {
                     sim_elapsed_secs,
                     pending_cycle_actions,
                     tactical_state,
+                    module_reload_sim_deadlines,
                     pending_notifications_opt,
                     notify_tx_opt,
                     ball_space_entry_epochs,
                     fit_projections,
                     weapon_cycle_start_modules,
+                    pending_missile_launches,
+                    pending_missile_deploy_fx,
+                    active_guided_missiles,
+                    next_missile_ball_id,
                     ..
                 } = &mut *actor_st;
                 {
@@ -1677,15 +1727,24 @@ impl SystemRegistry {
                                     .cloned()
                                 {
                                     weapon_cycle_start_modules.insert((ship_id, module_id));
-                                    cycles::apply_weapon_cycle_damage(
-                                        &cycle,
-                                        &mut ballpark,
-                                        rah_incoming_damage,
-                                        sde_opt,
-                                        db_opt,
-                                        &mut volley_actions,
-                                        &mut volley_destroyed,
-                                    );
+                                    if cycle.weapon_is_guided_missile {
+                                        missiles::enqueue_missile_launches_for_cycle(
+                                            &cycle,
+                                            &ballpark,
+                                            db_opt,
+                                            pending_missile_launches,
+                                        );
+                                    } else {
+                                        cycles::apply_weapon_cycle_damage(
+                                            &cycle,
+                                            &mut ballpark,
+                                            rah_incoming_damage,
+                                            sde_opt,
+                                            db_opt,
+                                            &mut volley_actions,
+                                            &mut volley_destroyed,
+                                        );
+                                    }
                                     cycles::flush_pending_cycle_damage_notifications_with_ballpark(
                                         &ballpark,
                                         sde_opt.as_deref(),
@@ -2069,7 +2128,13 @@ impl SystemRegistry {
                                 }
                             }
                             let pre_tick_caps = cycles::snapshot_player_ship_capacitors(&ballpark, db_opt.as_ref());
+                            let pre_missile_positions =
+                                missiles::snapshot_missile_positions(&ballpark, active_guided_missiles);
                             let events = ballpark.step(dt_sim);
+                            missiles::flush_pending_missile_deploy_fx(
+                                &mut ballpark,
+                                pending_missile_deploy_fx,
+                            );
                             let landed_warps = celestials::collect_landed_warp_positions(&ballpark, &events);
                             persist_landed_warps_in_db(
                                 &ballpark,
@@ -2139,13 +2204,55 @@ impl SystemRegistry {
                                     }
                                 }
                             }
-                            let mut destroyed_balls = step_cycles_and_capacitor_with_epochs(
+                            let mut missile_destroyed = Vec::new();
+                            missiles::step_guided_missiles_in_actor(
+                                &mut ballpark,
+                                active_guided_missiles,
+                                &pre_missile_positions,
+                                rah_incoming_damage,
+                                sde_opt,
+                                db_opt,
+                                pending_cycle_actions,
+                                &mut missile_destroyed,
+                                dt_sim,
+                            );
+                            let mut destroyed_balls = step_cycles_and_capacitor_with_missiles(
                                 &mut ballpark, active_module_cycles, pending_anchoring_disruptors,
                                 active_nanite_repairs, ship_rack_heat, rah_incoming_damage,
                                 &base_scramble_strengths, &base_core_strengths, &sde_opt, &db_opt,
                                 ball_space_entry_epochs, fit_projections, weapon_cycle_start_modules,
-                                mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, dt_sim, deact_guard.as_ref(),
+                                pending_missile_launches,
+                                mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions, *sim_elapsed_secs, dt_sim, deact_guard.as_ref(),
                             );
+                            destroyed_balls.extend(missile_destroyed);
+                            missiles::flush_pending_missile_launches(
+                                &mut ballpark,
+                                pending_missile_launches,
+                                active_guided_missiles,
+                                pending_missile_deploy_fx,
+                                next_missile_ball_id,
+                                sde_opt,
+                            );
+                            {
+                                let mut dead_guard = module_reload_sim_deadlines
+                                    .write()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                for action in pending_cycle_actions.iter() {
+                                    if let PendingCycleAction::AutoReloadStarted {
+                                        module_ids,
+                                        sim_deadline_s,
+                                        ..
+                                    } = action
+                                    {
+                                        for &mid in module_ids {
+                                            dead_guard.insert(
+                                                mid,
+                                                (solar_system_id, *sim_elapsed_secs, *sim_deadline_s),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             cycles::record_player_ship_capacitor_deltas(&ballpark, &pre_tick_caps, pending_cycle_actions);
                             cycles::flush_pending_cycle_damage_notifications_with_ballpark(
                                 &ballpark,

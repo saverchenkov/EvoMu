@@ -373,6 +373,526 @@ async fn warp_and_approach_fleet_ship(
     move_ship_to_ball(ctx, sess, sys_id, ship_id, "item", PyRep::Integer(target_ship_id)).await;
 }
 
+struct Shard5State {
+    cyno_mid_sess: SessionState,
+    cyno_mid_cid: i64,
+    cyno_mid_mod: i64,
+    cyno_null_sess: SessionState,
+    cyno_null_cid: i64,
+    cyno_null_mod: i64,
+    falcon_null_id: i64,
+    lancer_sess: SessionState,
+    lancer_ship_id: i64,
+    siege_id: i64,
+    dlance_id: i64,
+    titan_sess: SessionState,
+    titan_ship_id: i64,
+    doomsday_id: i64,
+    megathron_ship_id: i64,
+    mega_lasers: Vec<i64>,
+    laser_id: i64,
+    depot_item: i64,
+    refit_mod_id: i64,
+    paste_id: i64,
+    p2_stab: i64,
+    null_sys_id: u32,
+    null_station_id: i64,
+    null_sun: i64,
+    null_sys: eve_server::system_actor::SystemHandle,
+}
+
+#[inline(never)]
+async fn run_shard5_nosferatu_phase(ctx: &ServerContext) -> (SessionState, SessionState) {
+    ctx.set_mechanic_rng_seed(Some(2026));
+    fund_pilots(ctx, &[(PILOT_1, 800_000_000_000.0)]).await;
+    fund_pilots(ctx, &[(PILOT_1, 800_000_000_000.0)]).await;
+    fund_pilots(ctx, &[(PILOT_2, 500_000_000_000.0)]).await;
+
+    let mut p1 = login(ctx, 51_001, "demo", PILOT_1).await;
+    let mut p2 = login(ctx, 51_002, "other", PILOT_2).await;
+    assert_eq!(p1.role & service_roles::ROLE_GM_MASK, 0);
+    assert_eq!(p2.role & service_roles::ROLE_GM_MASK, 0);
+
+    train_skills(ctx, &mut p1, &[530, 533, 377], true).await;
+    train_skills(ctx, &mut p2, &[629, 10_836], false).await;
+
+    // 1. Energy Nosferatu absolute GJ vs percentage rule (`feat:modules.energy-nosferatu-relative-capacitor`)
+    let v_ship = p1.ship_id.unwrap();
+    let nos = buy(ctx, &mut p1, 530, 1).await[0];
+    let neut = buy(ctx, &mut p1, 533, 1).await[0];
+    move_item(ctx, &mut p1, nos, v_ship, 28).await;
+    move_item(ctx, &mut p1, neut, v_ship, 29).await;
+
+    let rupture = buy(ctx, &mut p2, 629, 1).await[0];
+    rpc(ctx, &mut p2, "ship", "AssembleShip", &[PyRep::Integer(rupture)]).await.unwrap();
+    ctx.advance_secs(12);
+    rpc(ctx, &mut p2, "ship", "Board", &[PyRep::Integer(rupture)]).await.unwrap();
+    let msb = buy(ctx, &mut p2, 10_836, 1).await[0];
+    move_item(ctx, &mut p2, msb, rupture, 19).await;
+
+    let sun = ctx.sde.celestials_in_system(JITA_SYS).into_iter().find(|c| c.group_id == 6).expect("sun").celestial_id;
+    fast_travel(ctx, &mut p1, JITA_SYS).await;
+    fast_warp_to(ctx, &mut p1, sun, 100_000.0).await;
+    fast_travel(ctx, &mut p2, JITA_SYS).await;
+    fast_warp_to(ctx, &mut p2, sun, 100_000.0).await;
+    ctx.advance_secs(15);
+    let jita = ctx.systems.get_or_spawn(JITA_SYS);
+    for _ in 0..15 {
+        let _ = jita.step_manual(1.0).await;
+    }
+    rpc(ctx, &mut p1, "dogmaIM", "AddTarget", &[PyRep::Integer(rupture)]).await.unwrap();
+    let _ = jita.step_manual(12.0).await;
+
+    // Rupture burns its cap down below 58% (~500 GJ) > Rifter max (250 GJ), and 1 neut cycle gives Rifter empty cap room (> 8 GJ)
+    rpc(ctx, &mut p2, "dogmaIM", "Activate", &[PyRep::Integer(msb), PyRep::String("shieldBoosting".into())]).await.unwrap();
+    for _ in 0..100 {
+        let _ = jita.step_manual(3.0).await;
+        let st = jita.get_combat_state(rupture).await.unwrap().unwrap();
+        if st.capacitor / st.max_capacitor < 0.58 {
+            break;
+        }
+    }
+    rpc(ctx, &mut p2, "dogmaIM", "Deactivate", &[PyRep::Integer(msb), PyRep::String("shieldBoosting".into())]).await.unwrap();
+    let _ = jita.step_manual(3.5).await;
+    rpc(ctx, &mut p1, "dogmaIM", "Activate", &[PyRep::Integer(neut), PyRep::String("energyNeutralizerFalloff".into()), PyRep::Integer(rupture)]).await.unwrap();
+    let _ = jita.step_manual(1.0).await;
+    rpc(ctx, &mut p1, "dogmaIM", "Deactivate", &[PyRep::Integer(neut), PyRep::String("energyNeutralizerFalloff".into())]).await.unwrap();
+    let _ = jita.step_manual(6.0).await;
+
+    let v_cap0 = jita.get_combat_state(v_ship).await.unwrap().unwrap().capacitor;
+    let r_cap0 = jita.get_combat_state(rupture).await.unwrap().unwrap().capacitor;
+    assert!(r_cap0 > v_cap0);
+    rpc(ctx, &mut p1, "dogmaIM", "Activate", &[PyRep::Integer(nos), PyRep::String("energyNosferatuFalloff".into()), PyRep::Integer(rupture)]).await.unwrap();
+    let mut prev_r = r_cap0;
+    let mut drained = false;
+    for _ in 0..50 {
+        let _ = jita.step_manual(0.1).await;
+        let now_r = jita.get_combat_state(rupture).await.unwrap().unwrap().capacitor;
+        if now_r < prev_r - 1.0 {
+            drained = true;
+            break;
+        }
+        prev_r = now_r;
+    }
+    rpc(ctx, &mut p1, "dogmaIM", "Deactivate", &[PyRep::Integer(nos), PyRep::String("energyNosferatuFalloff".into())]).await.unwrap();
+    assert!(drained, "Nosferatu drains target when target GJ > caster GJ");
+    (p1, p2)
+}
+
+#[inline(never)]
+async fn run_shard5_setup_and_moros_phase(
+    ctx: &ServerContext,
+    p1: &mut SessionState,
+    p2: &mut SessionState,
+) -> Shard5State {
+    // 2. Nanite Repair Paste in space (`feat:modules.nanite-repair-paste-in-space`)
+    ctx.advance_secs(905);
+    fast_dock_station(ctx, p1, JITA_STATION).await;
+    fast_dock_station(ctx, p2, JITA_STATION).await;
+
+    let (mut cyno_mid_sess, cyno_mid_cid) = create_funded_pilot(ctx, 51_055, "cyno_mid", "Cyno Mid", 500_000_000_000.0).await;
+    let (mut cyno_null_sess, cyno_null_cid) = create_funded_pilot(ctx, 51_056, "cyno_null", "Cyno Null", 500_000_000_000.0).await;
+    let (mut lancer_sess, lancer_cid) = create_funded_pilot(ctx, 51_057, "lancer_alt", "Lancer Pilot", 600_000_000_000.0).await;
+    let (mut titan_sess, titan_cid) = create_funded_pilot(ctx, 51_058, "titan_alt", "Titan Pilot", 800_000_000_000.0).await;
+
+    // PILOT_1 starts as permanent Omega in demo_seed.
+    train_skills(
+        ctx,
+        p1,
+        &[641, 3041, 12_565, 28_668, 33_474, 377, 28_164, 28_879, 28_880, 3_336, 3_423, 3_347, 21_803],
+        true,
+    )
+    .await;
+    // Upgrade Alpha pilots via Jita PLEX market right before their own skill training
+    // so prior train_skills clock advances do not expire their Omega time before their skills queue.
+    upgrade_omega_via_market(ctx, &mut cyno_mid_sess, 120).await;
+    train_skills(ctx, &mut cyno_mid_sess, &[11_957, 21_096], true).await;
+    upgrade_omega_via_market(ctx, &mut cyno_null_sess, 120).await;
+    train_skills(ctx, &mut cyno_null_sess, &[11_957, 21_096], true).await;
+    upgrade_omega_via_market(ctx, &mut lancer_sess, 120).await;
+    train_skills(ctx, &mut lancer_sess, &[77_283, 4_292, 77_399, 3_456, 21_611], true).await;
+    upgrade_omega_via_market(ctx, &mut titan_sess, 120).await;
+    train_skills(ctx, &mut titan_sess, &[11_567, 40_631, 3_456, 21_611], true).await;
+    upgrade_omega_via_market(ctx, p2, 120).await;
+    train_skills(ctx, p2, &[19_724, 3_456, 21_611], true).await;
+    // Refresh Alpha->Omega window after sequential skill-queue clock advances.
+    upgrade_omega_via_market(ctx, &mut cyno_mid_sess, 2).await;
+    upgrade_omega_via_market(ctx, &mut cyno_null_sess, 2).await;
+    upgrade_omega_via_market(ctx, &mut lancer_sess, 2).await;
+    upgrade_omega_via_market(ctx, &mut titan_sess, 2).await;
+    upgrade_omega_via_market(ctx, p2, 2).await;
+
+    // Purchase & fit Megathron for PILOT_1, Bane for lancer_alt, Avatar for titan_alt in Jita
+    let megathron_ship_id = buy(ctx, p1, 641, 1).await[0];
+    rpc(ctx, p1, "ship", "AssembleShip", &[PyRep::Integer(megathron_ship_id)]).await.unwrap();
+    let mut mega_lasers = Vec::new();
+    let mut mega_crystals = Vec::new();
+    let depot_item = buy(ctx, p1, 33_474, 1).await[0];
+    let ext_item = buy(ctx, p1, 377, 1).await[0];
+    let refit_mod_id = ext_item;
+    let paste_id = buy(ctx, p1, 28_668, 40).await[0];
+
+    let lancer_ship_id = buy(ctx, &mut lancer_sess, 77_283, 1).await[0];
+    rpc(ctx, &mut lancer_sess, "ship", "AssembleShip", &[PyRep::Integer(lancer_ship_id)]).await.unwrap();
+    let siege_id = buy(ctx, &mut lancer_sess, 4_292, 1).await[0];
+    let dlance_id = buy(ctx, &mut lancer_sess, 77_399, 1).await[0];
+    let bane_stront = buy(ctx, &mut lancer_sess, 16_275, 250).await[0];
+    let bane_iso = buy(ctx, &mut lancer_sess, 16_274, 70_000).await[0];
+    rpc(ctx, &mut lancer_sess, "ship", "Board", &[PyRep::Integer(lancer_ship_id)]).await.unwrap();
+    ctx.advance_secs(12);
+    move_item(ctx, &mut lancer_sess, siege_id, lancer_ship_id, InventoryFlag::HiSlot0 as i64).await;
+    move_item(ctx, &mut lancer_sess, dlance_id, lancer_ship_id, InventoryFlag::HiSlot1 as i64).await;
+    move_item(ctx, &mut lancer_sess, bane_stront, lancer_ship_id, InventoryFlag::Cargo as i64).await;
+    move_item(ctx, &mut lancer_sess, bane_iso, lancer_ship_id, InventoryFlag::SpecializedFuelBay as i64).await;
+
+    let titan_ship_id = buy(ctx, &mut titan_sess, 11_567, 1).await[0];
+    rpc(ctx, &mut titan_sess, "ship", "AssembleShip", &[PyRep::Integer(titan_ship_id)]).await.unwrap();
+    let doomsday_id = buy(ctx, &mut titan_sess, 40_631, 1).await[0];
+    let titan_jump_iso = buy(ctx, &mut titan_sess, 16_274, 40_000).await[0];
+    let titan_lance_iso = buy(ctx, &mut titan_sess, 16_274, 100_000).await[0];
+    rpc(ctx, &mut titan_sess, "ship", "Board", &[PyRep::Integer(titan_ship_id)]).await.unwrap();
+    ctx.advance_secs(12);
+    move_item(ctx, &mut titan_sess, doomsday_id, titan_ship_id, InventoryFlag::HiSlot0 as i64).await;
+    move_item(ctx, &mut titan_sess, titan_jump_iso, titan_ship_id, InventoryFlag::SpecializedFuelBay as i64).await;
+    move_item(ctx, &mut titan_sess, titan_lance_iso, titan_ship_id, InventoryFlag::Cargo as i64).await;
+
+    rpc(ctx, p1, "ship", "Board", &[PyRep::Integer(megathron_ship_id)]).await.unwrap();
+    ctx.advance_secs(12);
+    for slot in [InventoryFlag::HiSlot0, InventoryFlag::HiSlot1, InventoryFlag::HiSlot2, InventoryFlag::HiSlot3] {
+        let l_id = buy(ctx, p1, 3041, 1).await[0];
+        move_item(ctx, p1, l_id, megathron_ship_id, slot as i64).await;
+        mega_lasers.push(l_id);
+        let c_id = buy(ctx, p1, 246, 1).await[0];
+        move_item(ctx, p1, c_id, megathron_ship_id, InventoryFlag::Cargo as i64).await;
+        mega_crystals.push(c_id);
+    }
+    let laser_id = mega_lasers[0];
+    move_item(ctx, p1, depot_item, megathron_ship_id, InventoryFlag::Cargo as i64).await;
+    move_item(ctx, p1, ext_item, megathron_ship_id, InventoryFlag::Cargo as i64).await;
+    move_item(ctx, p1, paste_id, megathron_ship_id, InventoryFlag::Cargo as i64).await;
+    rpc(ctx, p1, "dogmaIM", "LoadAmmo", &[
+        PyRep::Integer(megathron_ship_id),
+        PyRep::List(mega_lasers.iter().map(|&id| PyRep::Integer(id)).collect()),
+        PyRep::List(mega_crystals.iter().map(|&id| PyRep::Integer(id)).collect()),
+    ]).await.unwrap();
+
+    // Purchase & fit Moros for PILOT_2 in Jita
+    let p2_stab = buy(ctx, p2, 19_724, 1).await[0];
+    rpc(ctx, p2, "ship", "AssembleShip", &[PyRep::Integer(p2_stab)]).await.unwrap();
+    let moros_iso = buy(ctx, p2, 17_887, 40_000).await[0];
+    rpc(ctx, p2, "ship", "Board", &[PyRep::Integer(p2_stab)]).await.unwrap();
+    ctx.advance_secs(12);
+    move_item(ctx, p2, moros_iso, p2_stab, InventoryFlag::SpecializedFuelBay as i64).await;
+
+    // Purchase & fit Falcon cyno recons for cyno_mid & cyno_null in Jita
+    let falcon_mid_id = buy(ctx, &mut cyno_mid_sess, 11_957, 1).await[0];
+    rpc(ctx, &mut cyno_mid_sess, "ship", "AssembleShip", &[PyRep::Integer(falcon_mid_id)]).await.unwrap();
+    let cyno_mid_mod = buy(ctx, &mut cyno_mid_sess, 21_096, 1).await[0];
+    let ozone_mid = buy(ctx, &mut cyno_mid_sess, 16_273, 700).await[0];
+    rpc(ctx, &mut cyno_mid_sess, "ship", "Board", &[PyRep::Integer(falcon_mid_id)]).await.unwrap();
+    ctx.advance_secs(12);
+    move_item(ctx, &mut cyno_mid_sess, cyno_mid_mod, falcon_mid_id, InventoryFlag::HiSlot0 as i64).await;
+    move_item(ctx, &mut cyno_mid_sess, ozone_mid, falcon_mid_id, InventoryFlag::Cargo as i64).await;
+
+    let falcon_null_id = buy(ctx, &mut cyno_null_sess, 11_957, 1).await[0];
+    rpc(ctx, &mut cyno_null_sess, "ship", "AssembleShip", &[PyRep::Integer(falcon_null_id)]).await.unwrap();
+    let cyno_null_mod = buy(ctx, &mut cyno_null_sess, 21_096, 1).await[0];
+    let ozone_null = buy(ctx, &mut cyno_null_sess, 16_273, 700).await[0];
+    rpc(ctx, &mut cyno_null_sess, "ship", "Board", &[PyRep::Integer(falcon_null_id)]).await.unwrap();
+    ctx.advance_secs(12);
+    move_item(ctx, &mut cyno_null_sess, cyno_null_mod, falcon_null_id, InventoryFlag::HiSlot0 as i64).await;
+    move_item(ctx, &mut cyno_null_sess, ozone_null, falcon_null_id, InventoryFlag::Cargo as i64).await;
+
+    // Form fleet (PILOT_1 leader, PILOT_2, cyno_mid, cyno_null, lancer_alt, titan_alt)
+    rpc(ctx, p1, "fleetMgr", "CreateFleet", &[]).await.unwrap();
+    rpc(ctx, p1, "fleetMgr", "Invite", &[PyRep::Integer(PILOT_2), PyRep::Integer(4)]).await.unwrap();
+    rpc(ctx, p2, "fleetMgr", "AcceptInvite", &[]).await.unwrap();
+    rpc(ctx, p1, "fleetMgr", "Invite", &[PyRep::Integer(cyno_mid_cid), PyRep::Integer(4)]).await.unwrap();
+    rpc(ctx, &mut cyno_mid_sess, "fleetMgr", "AcceptInvite", &[]).await.unwrap();
+    rpc(ctx, p1, "fleetMgr", "Invite", &[PyRep::Integer(cyno_null_cid), PyRep::Integer(4)]).await.unwrap();
+    rpc(ctx, &mut cyno_null_sess, "fleetMgr", "AcceptInvite", &[]).await.unwrap();
+    rpc(ctx, p1, "fleetMgr", "Invite", &[PyRep::Integer(lancer_cid), PyRep::Integer(4)]).await.unwrap();
+    rpc(ctx, &mut lancer_sess, "fleetMgr", "AcceptInvite", &[]).await.unwrap();
+    rpc(ctx, p1, "fleetMgr", "Invite", &[PyRep::Integer(titan_cid), PyRep::Integer(4)]).await.unwrap();
+    rpc(ctx, &mut titan_sess, "fleetMgr", "AcceptInvite", &[]).await.unwrap();
+
+    let (null_sys_id, null_station_id) = (NULL_SYS, NULL_STATION);
+    let null_sun = ctx.sde.celestials_in_system(null_sys_id).into_iter().find(|c| c.group_id == 6).expect("FDZ4-A sun").celestial_id;
+    let null_sys = ctx.systems.get_or_spawn(null_sys_id);
+
+    // PILOT_1 flies Megathron along stargates to FDZ4-A, docks, and stashes Nanite Paste in hangar first
+    fast_fly_stargates_to(ctx, p1, null_sys_id).await;
+    warp_and_dock_at_station(ctx, p1, megathron_ship_id, null_sys_id, null_station_id).await;
+    move_item(ctx, p1, paste_id, null_station_id, InventoryFlag::Hangar as i64).await;
+
+    // Station cyno_mid at Walvalin midpoint and cyno_null at FDZ4-A once; Moros jumps Jita -> Walvalin -> FDZ4-A
+    fast_fly_stargates_to(ctx, &mut cyno_mid_sess, CYNO_MID_SYS).await;
+    fast_fly_stargates_to(ctx, &mut cyno_null_sess, null_sys_id).await;
+    fast_warp_to(ctx, &mut cyno_null_sess, null_sun, 100_000.0).await;
+    ctx.advance_secs(12);
+    let _ = ctx.systems.get_or_spawn(CYNO_MID_SYS).step_manual(12.0).await;
+    let cyno1 = rpc(ctx, &mut cyno_mid_sess, "dogmaIM", "Activate", &[PyRep::Integer(cyno_mid_mod), PyRep::String("cynosuralGeneration".into())]).await.unwrap();
+    let beacon1 = cyno1.dict_get("beaconID").and_then(|v| v.as_i64()).expect("cyno1 beaconID");
+
+    undock_from_station(ctx, p2, JITA_SYS).await;
+    ctx.advance_secs(15);
+    let _ = ctx.systems.get_or_spawn(JITA_SYS).step_manual(15.0).await;
+    rpc(ctx, p2, "beyonce", "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(cyno_mid_cid), PyRep::Integer(i64::from(CYNO_MID_SYS)), PyRep::Integer(beacon1)]).await.unwrap();
+    let _ = rpc(ctx, &mut cyno_mid_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(cyno_mid_mod)]).await;
+    for _ in 0..16 {
+        let _ = ctx.systems.get_or_spawn(CYNO_MID_SYS).step_manual(60.0).await;
+    }
+    // Clear max jump reactivation cooldown cap (30 min = 1800s) before 2nd jump.
+    ctx.advance_secs(1800);
+
+    ctx.advance_secs(12);
+    let _ = null_sys.step_manual(12.0).await;
+    let cyno2 = rpc(ctx, &mut cyno_null_sess, "dogmaIM", "Activate", &[PyRep::Integer(cyno_null_mod), PyRep::String("cynosuralGeneration".into())]).await.unwrap();
+    let beacon2 = cyno2.dict_get("beaconID").and_then(|v| v.as_i64()).expect("cyno2 beaconID");
+    rpc(ctx, p2, "beyonce", "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(cyno_null_cid), PyRep::Integer(i64::from(null_sys_id)), PyRep::Integer(beacon2)]).await.unwrap();
+    warp_and_dock_at_station(ctx, p2, p2_stab, null_sys_id, null_station_id).await;
+    let _ = rpc(ctx, &mut cyno_null_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(cyno_null_mod)]).await;
+    for _ in 0..20 {
+        let _ = null_sys.step_manual(60.0).await;
+    }
+    ctx.advance_secs(1200);
+
+    Shard5State {
+        cyno_mid_sess,
+        cyno_mid_cid,
+        cyno_mid_mod,
+        cyno_null_sess,
+        cyno_null_cid,
+        cyno_null_mod,
+        falcon_null_id,
+        lancer_sess,
+        lancer_ship_id,
+        siege_id,
+        dlance_id,
+        titan_sess,
+        titan_ship_id,
+        doomsday_id,
+        megathron_ship_id,
+        mega_lasers,
+        laser_id,
+        depot_item,
+        refit_mod_id,
+        paste_id,
+        p2_stab,
+        null_sys_id,
+        null_station_id,
+        null_sun,
+        null_sys,
+    }
+}
+
+#[inline(never)]
+async fn run_shard5_nanite_and_depot_phase(
+    ctx: &ServerContext,
+    p1: &mut SessionState,
+    p2: &mut SessionState,
+    s: &Shard5State,
+) -> (i64, i64) {
+    // Undock Megathron (no paste in cargo) and Moros in FDZ4-A near the sun
+    undock_from_station(ctx, p1, s.null_sys_id).await;
+    undock_from_station(ctx, p2, s.null_sys_id).await;
+    fast_warp_to(ctx, p2, s.null_sun, 100_000.0).await;
+    warp_and_approach_fleet_ship(ctx, p1, s.null_sys_id, s.megathron_ship_id, PILOT_2, s.p2_stab).await;
+    ctx.advance_secs(15);
+    for _ in 0..15 {
+        let _ = s.null_sys.step_manual(1.0).await;
+    }
+    lock(ctx, s.null_sys_id, p1, s.p2_stab).await;
+
+    // Overheat lasers legitimately via dogmaIM.Overload until heat damage accumulates
+    for &l_id in &s.mega_lasers {
+        rpc(ctx, p1, "dogmaIM", "Overload", &[PyRep::Integer(l_id), PyRep::String("targetAttack".into()), PyRep::Integer(s.p2_stab), PyRep::Integer(200)]).await.unwrap();
+    }
+    let mut heat_dmg = 0.0_f64;
+    for _ in 0..240 {
+        s.null_sys.try_step_full_tick(1.0);
+        ctx.advance_secs(1);
+        heat_dmg = ctx.db.with_snapshot(|snap| {
+            snap.items.get(&s.laser_id).and_then(|i| i.dynamic_attributes.get(&eve_dogma::attr_ids::DAMAGE).copied()).unwrap_or(0.0)
+        });
+        if heat_dmg >= 1.0 {
+            break;
+        }
+    }
+    let rack_heat = ctx.db.with_snapshot(|snap| {
+        snap.transient_item_attributes.get(&s.megathron_ship_id).and_then(|m| m.get(&1175).copied()).unwrap_or(0.0)
+    });
+    assert!(heat_dmg >= 1.0, "Overheating pulse laser must inflict real heat damage (got {heat_dmg}, hi_rack_heat={rack_heat})");
+    for &l_id in &s.mega_lasers {
+        let _ = rpc(ctx, p1, "dogmaIM", "Deactivate", &[PyRep::Integer(l_id), PyRep::String("targetAttack".into())]).await;
+    }
+    for _ in 0..8 {
+        s.null_sys.try_step_full_tick(1.0);
+    }
+
+    let no_paste = rpc(ctx, p1, "dogmaIM", "RepairModule", &[PyRep::Integer(s.laser_id)]).await.unwrap_err();
+    assert_eq!(no_paste.code, "NotEnoughNanitePaste");
+
+    // Dock at FDZ4-A station, retrieve Nanite Repair Paste into Megathron cargo, undock and repair in space
+    ctx.advance_secs(60);
+    warp_and_dock_at_station(ctx, p1, s.megathron_ship_id, s.null_sys_id, s.null_station_id).await;
+    move_item(ctx, p1, s.paste_id, s.megathron_ship_id, InventoryFlag::Cargo as i64).await;
+    undock_from_station(ctx, p1, s.null_sys_id).await;
+    ctx.advance_secs(12);
+    let _ = s.null_sys.step_manual(12.0).await;
+
+    let rep = rpc(ctx, p1, "dogmaIM", "RepairModule", &[PyRep::Integer(s.laser_id)]).await.unwrap();
+    assert_eq!(rep.dict_get("pasteConsumed"), Some(&PyRep::Integer(1)));
+    let mut dmg_now = heat_dmg;
+    for _ in 0..6 {
+        s.null_sys.try_step_full_tick(1.0);
+        dmg_now = ctx.db.with_snapshot(|snap| {
+            snap.items.get(&s.laser_id).and_then(|i| i.dynamic_attributes.get(&eve_dogma::attr_ids::DAMAGE).copied()).unwrap_or(0.0)
+        });
+        if dmg_now < heat_dmg {
+            break;
+        }
+    }
+    assert!(dmg_now < heat_dmg, "Nanite Repair Paste tick must reduce real module heat damage ({dmg_now} vs {heat_dmg})");
+    rpc(ctx, p1, "dogmaIM", "StopRepairModule", &[PyRep::Integer(s.laser_id)]).await.unwrap();
+    if dmg_now > 0.05 {
+        rpc(ctx, p1, "dogmaIM", "RepairModule", &[PyRep::Integer(s.laser_id)]).await.unwrap();
+        rpc(ctx, p1, "dogmaIM", "StopRepairModule", &[PyRep::Integer(s.laser_id)]).await.unwrap();
+    }
+
+    // 3. Mobile Depot deployment & in-space refitting (`feat:modules.mobile-depot-deployment-and-refitting`)
+    let null_gate = ctx.sde.jumps.values().find(|j| j.from_solar_system_id == s.null_sys_id).expect("FDZ4-A stargate").stargate_id;
+    fast_warp_to(ctx, p1, null_gate, 100_000.0).await;
+    let mega_pos = s.null_sys.get_ball_snapshot(s.megathron_ship_id).await.unwrap().unwrap().1.position;
+    let dep_rep = rpc(ctx, p1, "posMgr", "AnchorStructure", &[PyRep::Integer(s.depot_item), PyRep::Tuple(vec![PyRep::Real(mega_pos.x + 400.0), PyRep::Real(mega_pos.y), PyRep::Real(mega_pos.z)])]).await.unwrap();
+    let dep_id = dep_rep.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    ctx.advance_secs(65);
+    let _ = s.null_sys.step_manual(1.0).await;
+    rpc(ctx, p1, "invbroker", "Add", &[PyRep::Integer(s.refit_mod_id), PyRep::Integer(s.megathron_ship_id), PyRep::Integer(InventoryFlag::MedSlot0 as i64)]).await.unwrap();
+    let st = ctx.db.with_snapshot(|snap| depots::read_deployable_state_snap(snap).deployables.get(&dep_id).cloned()).unwrap();
+    assert!(st.anchor_completed);
+
+    // Dock Megathron at FDZ4-A before phase 4.
+    warp_and_dock_at_station(ctx, p1, s.megathron_ship_id, s.null_sys_id, s.null_station_id).await;
+    (dep_id, null_gate)
+}
+
+#[inline(never)]
+async fn run_shard5_disruptive_lance_phase(
+    ctx: &ServerContext,
+    p2: &mut SessionState,
+    s: &mut Shard5State,
+    null_gate: i64,
+) {
+    // 4a. Disruptive Lance (`feat:modules.disruptive-lance`)
+    // lancer_alt undocks Bane in Jita and cyno-jumps via Walvalin to FDZ4-A.
+    ctx.advance_secs(12);
+    let _ = ctx.systems.get_or_spawn(CYNO_MID_SYS).step_manual(12.0).await;
+    let cyno3 = rpc(ctx, &mut s.cyno_mid_sess, "dogmaIM", "Activate", &[PyRep::Integer(s.cyno_mid_mod), PyRep::String("cynosuralGeneration".into())]).await.unwrap();
+    let beacon3 = cyno3.dict_get("beaconID").and_then(|v| v.as_i64()).expect("cyno3 beaconID");
+    undock_from_station(ctx, &mut s.lancer_sess, JITA_SYS).await;
+    ctx.advance_secs(15);
+    let _ = ctx.systems.get_or_spawn(JITA_SYS).step_manual(15.0).await;
+    rpc(ctx, &mut s.lancer_sess, "beyonce", "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(s.cyno_mid_cid), PyRep::Integer(i64::from(CYNO_MID_SYS)), PyRep::Integer(beacon3)]).await.unwrap();
+    let _ = rpc(ctx, &mut s.cyno_mid_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(s.cyno_mid_mod)]).await;
+    for _ in 0..16 {
+        let _ = ctx.systems.get_or_spawn(CYNO_MID_SYS).step_manual(60.0).await;
+    }
+    // Clear max jump reactivation cooldown cap (30 min = 1800s) before Bane's 2nd jump.
+    ctx.advance_secs(1800);
+
+    warp_and_approach_fleet_ship(ctx, &mut s.cyno_null_sess, s.null_sys_id, s.falcon_null_id, PILOT_2, s.p2_stab).await;
+    ctx.advance_secs(12);
+    let _ = s.null_sys.step_manual(12.0).await;
+    let cyno4 = rpc(ctx, &mut s.cyno_null_sess, "dogmaIM", "Activate", &[PyRep::Integer(s.cyno_null_mod), PyRep::String("cynosuralGeneration".into())]).await.unwrap();
+    let beacon4 = cyno4.dict_get("beaconID").and_then(|v| v.as_i64()).expect("cyno4 beaconID");
+    rpc(ctx, &mut s.lancer_sess, "beyonce", "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(s.cyno_null_cid), PyRep::Integer(i64::from(s.null_sys_id)), PyRep::Integer(beacon4)]).await.unwrap();
+    warp_and_approach_fleet_ship(ctx, &mut s.lancer_sess, s.null_sys_id, s.lancer_ship_id, PILOT_2, s.p2_stab).await;
+    let _ = rpc(ctx, &mut s.cyno_null_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(s.cyno_null_mod)]).await;
+    for _ in 0..20 {
+        let _ = s.null_sys.step_manual(60.0).await;
+    }
+    ctx.advance_secs(1200);
+    // Move Falcon out of Disruptive Lance collateral beam corridor (`2,500 m` / `10,000 m`) before firing (#697/#583).
+    fast_warp_to(ctx, &mut s.cyno_null_sess, null_gate, 100_000.0).await;
+
+    let p2_beyonce = match rpc(ctx, p2, "beyonce", "MachoBindObject", &[PyRep::Integer(i64::from(s.null_sys_id)), PyRep::None]).await.unwrap() {
+        PyRep::Tuple(parts) => parts[0].as_i64().unwrap() as u64,
+        _ => panic!("p2 beyonce bind tuple"),
+    };
+    let dl_shield0 = s.null_sys.get_combat_state(s.p2_stab).await.unwrap().unwrap().shield_hp;
+    rpc(ctx, &mut s.lancer_sess, "dogmaIM", "Activate", &[PyRep::Integer(s.siege_id)]).await.unwrap();
+    let dl_res = rpc(ctx, &mut s.lancer_sess, "dogmaIM", "Activate", &[PyRep::Integer(s.dlance_id), PyRep::String("default".into()), PyRep::Integer(s.p2_stab)]).await.unwrap();
+    assert_eq!(dl_res.dict_get("hitCount"), Some(&PyRep::Integer(1)));
+    assert_eq!(dl_res.dict_get("fuelConsumed"), Some(&PyRep::Integer(20_000)));
+    assert!(s.null_sys.get_combat_state(s.p2_stab).await.unwrap().unwrap().shield_hp < dl_shield0);
+    let dl_warp_err = ctx.dispatch_rpc(p2, "beyonce", Some(p2_beyonce), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(s.null_sun)], &HashMap::new(), None).await.unwrap_err();
+    assert_eq!(dl_warp_err.code, "DisruptiveLanceDebuffActive");
+
+    let _ = rpc(ctx, &mut s.lancer_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(s.siege_id)]).await;
+    ctx.advance_secs(310);
+    let _ = s.null_sys.step_manual(310.0).await;
+    warp_and_dock_at_station(ctx, &mut s.lancer_sess, s.lancer_ship_id, s.null_sys_id, s.null_station_id).await;
+}
+
+#[inline(never)]
+async fn run_shard5_titan_doomsday_phase(ctx: &ServerContext, s: &mut Shard5State) -> i64 {
+    // 4b. Titan Directional Lance Doomsday via `superWeaponMgr.ActivateSlashModule`
+    ctx.advance_secs(12);
+    let _ = ctx.systems.get_or_spawn(CYNO_MID_SYS).step_manual(12.0).await;
+    let cyno5 = rpc(ctx, &mut s.cyno_mid_sess, "dogmaIM", "Activate", &[PyRep::Integer(s.cyno_mid_mod), PyRep::String("cynosuralGeneration".into())]).await.unwrap();
+    let beacon5 = cyno5.dict_get("beaconID").and_then(|v| v.as_i64()).expect("cyno5 beaconID");
+    undock_from_station(ctx, &mut s.titan_sess, JITA_SYS).await;
+    ctx.advance_secs(15);
+    let _ = ctx.systems.get_or_spawn(JITA_SYS).step_manual(15.0).await;
+    rpc(ctx, &mut s.titan_sess, "beyonce", "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(s.cyno_mid_cid), PyRep::Integer(i64::from(CYNO_MID_SYS)), PyRep::Integer(beacon5)]).await.unwrap();
+    let _ = rpc(ctx, &mut s.cyno_mid_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(s.cyno_mid_mod)]).await;
+    for _ in 0..16 {
+        let _ = ctx.systems.get_or_spawn(CYNO_MID_SYS).step_manual(60.0).await;
+    }
+    // Clear max jump reactivation cooldown cap (30 min = 1800s) before Avatar's 2nd jump.
+    ctx.advance_secs(1800);
+
+    warp_and_approach_fleet_ship(ctx, &mut s.cyno_null_sess, s.null_sys_id, s.falcon_null_id, PILOT_2, s.p2_stab).await;
+    ctx.advance_secs(12);
+    let _ = s.null_sys.step_manual(12.0).await;
+    let cyno6 = rpc(ctx, &mut s.cyno_null_sess, "dogmaIM", "Activate", &[PyRep::Integer(s.cyno_null_mod), PyRep::String("cynosuralGeneration".into())]).await.unwrap();
+    let beacon6 = cyno6.dict_get("beaconID").and_then(|v| v.as_i64()).expect("cyno6 beaconID");
+    rpc(ctx, &mut s.titan_sess, "beyonce", "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(s.cyno_null_cid), PyRep::Integer(i64::from(s.null_sys_id)), PyRep::Integer(beacon6)]).await.unwrap();
+    warp_and_approach_fleet_ship(ctx, &mut s.titan_sess, s.null_sys_id, s.titan_ship_id, PILOT_2, s.p2_stab).await;
+    let _ = rpc(ctx, &mut s.cyno_null_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(s.cyno_null_mod)]).await;
+    for _ in 0..15 {
+        let _ = s.null_sys.step_manual(1.0).await;
+    }
+    for _ in 0..30 {
+        let _ = s.null_sys.step_manual(60.0).await;
+    }
+    ctx.advance_secs(1815);
+    let cs_before = s.null_sys.get_combat_state(s.p2_stab).await.unwrap().unwrap();
+    let p1_pos = s.null_sys.get_ball_snapshot(s.titan_ship_id).await.unwrap().unwrap().1.position;
+    let p2_pos = s.null_sys.get_ball_snapshot(s.p2_stab).await.unwrap().unwrap().1.position;
+    let dir = (p2_pos - p1_pos).normalize_or_zero();
+    let end_pos = p1_pos + if dir.length_squared() > 0.0 { dir } else { DVec3::Y } * 180_000.0;
+
+    let origin_arg = PyRep::Tuple(vec![PyRep::Real(p1_pos.x), PyRep::Real(p1_pos.y), PyRep::Real(p1_pos.z)]);
+    let endpoint_arg = PyRep::Tuple(vec![PyRep::Real(end_pos.x), PyRep::Real(end_pos.y), PyRep::Real(end_pos.z)]);
+    let titan_iso_before: i64 = ctx.db.with_snapshot(|snap| snap.items.values().filter(|i| i.location_id == s.titan_ship_id && i.type_id == 16_274).map(|i| i64::from(i.quantity)).sum());
+    let titan_iso_expected = titan_iso_before - 50_000;
+    let lance_res = rpc(ctx, &mut s.titan_sess, "superWeaponMgr", "ActivateSlashModule", &[PyRep::Integer(s.doomsday_id), origin_arg, endpoint_arg]).await.unwrap();
+    assert_eq!(lance_res.dict_get("warmupSeconds"), Some(&PyRep::Real(15.0)));
+    assert_eq!(lance_res.dict_get("jumpBlockSeconds"), Some(&PyRep::Real(300.0)));
+    assert_eq!(lance_res.dict_get("fuelConsumed"), Some(&PyRep::Integer(50_000)));
+    for _ in 0..22 {
+        let _ = s.null_sys.step_manual(1.0).await;
+    }
+    let lance_damaged_or_destroyed = match s.null_sys.get_combat_state(s.p2_stab).await.unwrap() {
+        Some(cs) => cs.shield_hp < cs_before.shield_hp || cs.armor_hp < cs_before.armor_hp || cs.structure_hp < cs_before.structure_hp,
+        None => true,
+    };
+    assert!(lance_damaged_or_destroyed, "Directional lance beam must damage target inside beam corridor");
+    titan_iso_expected
+}
+
 // parity: feat:modules.disruptive-lance
 // parity: feat:modules.energy-nosferatu-relative-capacitor
 // parity: feat:modules.lance-doomsday-directional-geometry
@@ -395,441 +915,19 @@ async fn test_shard5_lance_doomsday_nosferatu_nanite_and_mobile_depot() {
     let titan_ship_id: i64;
     let titan_iso_expected: i64;
     let megathron_ship_id: i64;
-    let laser_id: i64;
     let reload_time: u64;
 
     {
         let ctx = open_mem_ctx(base_time);
-        ctx.set_mechanic_rng_seed(Some(2026));
-        fund_pilots(&ctx, &[(PILOT_1, 800_000_000_000.0)]).await;
-        fund_pilots(&ctx, &[(PILOT_1, 800_000_000_000.0)]).await;
-        fund_pilots(&ctx, &[(PILOT_2, 500_000_000_000.0)]).await;
-
-        let mut p1 = login(&ctx, 51_001, "demo", PILOT_1).await;
-        let mut p2 = login(&ctx, 51_002, "other", PILOT_2).await;
-        assert_eq!(p1.role & service_roles::ROLE_GM_MASK, 0);
-        assert_eq!(p2.role & service_roles::ROLE_GM_MASK, 0);
-
-        train_skills(&ctx, &mut p1, &[530, 533, 377], true).await;
-        train_skills(&ctx, &mut p2, &[629, 10_836], false).await;
-
-        // 1. Energy Nosferatu absolute GJ vs percentage rule (`feat:modules.energy-nosferatu-relative-capacitor`)
-        let v_ship = p1.ship_id.unwrap();
-        let nos = buy(&ctx, &mut p1, 530, 1).await[0];
-        let neut = buy(&ctx, &mut p1, 533, 1).await[0];
-        move_item(&ctx, &mut p1, nos, v_ship, 28).await;
-        move_item(&ctx, &mut p1, neut, v_ship, 29).await;
-
-        let rupture = buy(&ctx, &mut p2, 629, 1).await[0];
-        rpc(&ctx, &mut p2, "ship", "AssembleShip", &[PyRep::Integer(rupture)]).await.unwrap();
-        ctx.advance_secs(12);
-        rpc(&ctx, &mut p2, "ship", "Board", &[PyRep::Integer(rupture)]).await.unwrap();
-        let msb = buy(&ctx, &mut p2, 10_836, 1).await[0];
-        move_item(&ctx, &mut p2, msb, rupture, 19).await;
-
-        let sun = ctx.sde.celestials_in_system(JITA_SYS).into_iter().find(|c| c.group_id == 6).expect("sun").celestial_id;
-        fast_travel(&ctx, &mut p1, JITA_SYS).await;
-        fast_warp_to(&ctx, &mut p1, sun, 100_000.0).await;
-        fast_travel(&ctx, &mut p2, JITA_SYS).await;
-        fast_warp_to(&ctx, &mut p2, sun, 100_000.0).await;
-        ctx.advance_secs(15);
-        let jita = ctx.systems.get_or_spawn(JITA_SYS);
-        for _ in 0..15 {
-            let _ = jita.step_manual(1.0).await;
-        }
-        rpc(&ctx, &mut p1, "dogmaIM", "AddTarget", &[PyRep::Integer(rupture)]).await.unwrap();
-        let _ = jita.step_manual(12.0).await;
-
-        // Rupture burns its cap down below 58% (~500 GJ) > Rifter max (250 GJ), and 1 neut cycle gives Rifter empty cap room (> 8 GJ)
-        rpc(&ctx, &mut p2, "dogmaIM", "Activate", &[PyRep::Integer(msb), PyRep::String("shieldBoosting".into())]).await.unwrap();
-        for _ in 0..100 {
-            let _ = jita.step_manual(3.0).await;
-            let st = jita.get_combat_state(rupture).await.unwrap().unwrap();
-            if st.capacitor / st.max_capacitor < 0.58 {
-                break;
-            }
-        }
-        rpc(&ctx, &mut p2, "dogmaIM", "Deactivate", &[PyRep::Integer(msb), PyRep::String("shieldBoosting".into())]).await.unwrap();
-        let _ = jita.step_manual(3.5).await;
-        rpc(&ctx, &mut p1, "dogmaIM", "Activate", &[PyRep::Integer(neut), PyRep::String("energyNeutralizerFalloff".into()), PyRep::Integer(rupture)]).await.unwrap();
-        let _ = jita.step_manual(1.0).await;
-        rpc(&ctx, &mut p1, "dogmaIM", "Deactivate", &[PyRep::Integer(neut), PyRep::String("energyNeutralizerFalloff".into())]).await.unwrap();
-        let _ = jita.step_manual(6.0).await;
-
-        let v_cap0 = jita.get_combat_state(v_ship).await.unwrap().unwrap().capacitor;
-        let r_cap0 = jita.get_combat_state(rupture).await.unwrap().unwrap().capacitor;
-        assert!(r_cap0 > v_cap0);
-        rpc(&ctx, &mut p1, "dogmaIM", "Activate", &[PyRep::Integer(nos), PyRep::String("energyNosferatuFalloff".into()), PyRep::Integer(rupture)]).await.unwrap();
-        let mut prev_r = r_cap0;
-        let mut drained = false;
-        for _ in 0..50 {
-            let _ = jita.step_manual(0.1).await;
-            let now_r = jita.get_combat_state(rupture).await.unwrap().unwrap().capacitor;
-            if now_r < prev_r - 1.0 {
-                drained = true;
-                break;
-            }
-            prev_r = now_r;
-        }
-        rpc(&ctx, &mut p1, "dogmaIM", "Deactivate", &[PyRep::Integer(nos), PyRep::String("energyNosferatuFalloff".into())]).await.unwrap();
-        assert!(drained, "Nosferatu drains target when target GJ > caster GJ");
-
-        // 2. Nanite Repair Paste in space (`feat:modules.nanite-repair-paste-in-space`)
-        ctx.advance_secs(905);
-        fast_dock_station(&ctx, &mut p1, JITA_STATION).await;
-        fast_dock_station(&ctx, &mut p2, JITA_STATION).await;
-
-        let (mut cyno_mid_sess, cyno_mid_cid) = create_funded_pilot(&ctx, 51_055, "cyno_mid", "Cyno Mid", 500_000_000_000.0).await;
-        let (mut cyno_null_sess, cyno_null_cid) = create_funded_pilot(&ctx, 51_056, "cyno_null", "Cyno Null", 500_000_000_000.0).await;
-        let (mut lancer_sess, lancer_cid) = create_funded_pilot(&ctx, 51_057, "lancer_alt", "Lancer Pilot", 600_000_000_000.0).await;
-        let (mut titan_sess, titan_cid) = create_funded_pilot(&ctx, 51_058, "titan_alt", "Titan Pilot", 800_000_000_000.0).await;
-
-        // PILOT_1 starts as permanent Omega in demo_seed.
-        train_skills(
-            &ctx,
-            &mut p1,
-            &[641, 3041, 12_565, 28_668, 33_474, 377, 28_164, 28_879, 28_880, 3_336, 3_423, 3_347, 21_803],
-            true,
-        )
-        .await;
-        // Upgrade Alpha pilots via Jita PLEX market right before their own skill training
-        // so prior train_skills clock advances do not expire their Omega time before their skills queue.
-        upgrade_omega_via_market(&ctx, &mut cyno_mid_sess, 120).await;
-        train_skills(&ctx, &mut cyno_mid_sess, &[11_957, 21_096], true).await;
-        upgrade_omega_via_market(&ctx, &mut cyno_null_sess, 120).await;
-        train_skills(&ctx, &mut cyno_null_sess, &[11_957, 21_096], true).await;
-        upgrade_omega_via_market(&ctx, &mut lancer_sess, 120).await;
-        train_skills(&ctx, &mut lancer_sess, &[77_283, 4_292, 77_399, 3_456, 21_611], true).await;
-        upgrade_omega_via_market(&ctx, &mut titan_sess, 120).await;
-        train_skills(&ctx, &mut titan_sess, &[11_567, 40_631, 3_456, 21_611], true).await;
-        upgrade_omega_via_market(&ctx, &mut p2, 120).await;
-        train_skills(&ctx, &mut p2, &[19_724, 3_456, 21_611], true).await;
-        // Refresh Alpha->Omega window after sequential skill-queue clock advances.
-        upgrade_omega_via_market(&ctx, &mut cyno_mid_sess, 2).await;
-        upgrade_omega_via_market(&ctx, &mut cyno_null_sess, 2).await;
-        upgrade_omega_via_market(&ctx, &mut lancer_sess, 2).await;
-        upgrade_omega_via_market(&ctx, &mut titan_sess, 2).await;
-        upgrade_omega_via_market(&ctx, &mut p2, 2).await;
-
-        // Purchase & fit Megathron for PILOT_1, Bane for lancer_alt, Avatar for titan_alt in Jita
-        megathron_ship_id = buy(&ctx, &mut p1, 641, 1).await[0];
-        rpc(&ctx, &mut p1, "ship", "AssembleShip", &[PyRep::Integer(megathron_ship_id)]).await.unwrap();
-        let mut mega_lasers = Vec::new();
-        let mut mega_crystals = Vec::new();
-        let depot_item = buy(&ctx, &mut p1, 33_474, 1).await[0];
-        let ext_item = buy(&ctx, &mut p1, 377, 1).await[0];
-        refit_mod_id = ext_item;
-        let paste_id = buy(&ctx, &mut p1, 28_668, 40).await[0];
-
-        let lancer_ship_id = buy(&ctx, &mut lancer_sess, 77_283, 1).await[0];
-        rpc(&ctx, &mut lancer_sess, "ship", "AssembleShip", &[PyRep::Integer(lancer_ship_id)]).await.unwrap();
-        let siege_id = buy(&ctx, &mut lancer_sess, 4_292, 1).await[0];
-        let dlance_id = buy(&ctx, &mut lancer_sess, 77_399, 1).await[0];
-        let bane_stront = buy(&ctx, &mut lancer_sess, 16_275, 250).await[0];
-        let bane_iso = buy(&ctx, &mut lancer_sess, 16_274, 70_000).await[0];
-        rpc(&ctx, &mut lancer_sess, "ship", "Board", &[PyRep::Integer(lancer_ship_id)]).await.unwrap();
-        ctx.advance_secs(12);
-        move_item(&ctx, &mut lancer_sess, siege_id, lancer_ship_id, InventoryFlag::HiSlot0 as i64).await;
-        move_item(&ctx, &mut lancer_sess, dlance_id, lancer_ship_id, InventoryFlag::HiSlot1 as i64).await;
-        move_item(&ctx, &mut lancer_sess, bane_stront, lancer_ship_id, InventoryFlag::Cargo as i64).await;
-        move_item(&ctx, &mut lancer_sess, bane_iso, lancer_ship_id, InventoryFlag::SpecializedFuelBay as i64).await;
-
-        titan_ship_id = buy(&ctx, &mut titan_sess, 11_567, 1).await[0];
-        rpc(&ctx, &mut titan_sess, "ship", "AssembleShip", &[PyRep::Integer(titan_ship_id)]).await.unwrap();
-        let doomsday_id = buy(&ctx, &mut titan_sess, 40_631, 1).await[0];
-        let titan_jump_iso = buy(&ctx, &mut titan_sess, 16_274, 40_000).await[0];
-        let titan_lance_iso = buy(&ctx, &mut titan_sess, 16_274, 100_000).await[0];
-        rpc(&ctx, &mut titan_sess, "ship", "Board", &[PyRep::Integer(titan_ship_id)]).await.unwrap();
-        ctx.advance_secs(12);
-        move_item(&ctx, &mut titan_sess, doomsday_id, titan_ship_id, InventoryFlag::HiSlot0 as i64).await;
-        move_item(&ctx, &mut titan_sess, titan_jump_iso, titan_ship_id, InventoryFlag::SpecializedFuelBay as i64).await;
-        move_item(&ctx, &mut titan_sess, titan_lance_iso, titan_ship_id, InventoryFlag::Cargo as i64).await;
-
-        rpc(&ctx, &mut p1, "ship", "Board", &[PyRep::Integer(megathron_ship_id)]).await.unwrap();
-        ctx.advance_secs(12);
-        for slot in [InventoryFlag::HiSlot0, InventoryFlag::HiSlot1, InventoryFlag::HiSlot2, InventoryFlag::HiSlot3] {
-            let l_id = buy(&ctx, &mut p1, 3041, 1).await[0];
-            move_item(&ctx, &mut p1, l_id, megathron_ship_id, slot as i64).await;
-            mega_lasers.push(l_id);
-            let c_id = buy(&ctx, &mut p1, 246, 1).await[0];
-            move_item(&ctx, &mut p1, c_id, megathron_ship_id, InventoryFlag::Cargo as i64).await;
-            mega_crystals.push(c_id);
-        }
-        laser_id = mega_lasers[0];
-        move_item(&ctx, &mut p1, depot_item, megathron_ship_id, InventoryFlag::Cargo as i64).await;
-        move_item(&ctx, &mut p1, ext_item, megathron_ship_id, InventoryFlag::Cargo as i64).await;
-        move_item(&ctx, &mut p1, paste_id, megathron_ship_id, InventoryFlag::Cargo as i64).await;
-        rpc(&ctx, &mut p1, "dogmaIM", "LoadAmmo", &[
-            PyRep::Integer(megathron_ship_id),
-            PyRep::List(mega_lasers.iter().map(|&id| PyRep::Integer(id)).collect()),
-            PyRep::List(mega_crystals.iter().map(|&id| PyRep::Integer(id)).collect()),
-        ]).await.unwrap();
-
-        // Purchase & fit Moros for PILOT_2 in Jita
-        let p2_stab = buy(&ctx, &mut p2, 19_724, 1).await[0];
-        rpc(&ctx, &mut p2, "ship", "AssembleShip", &[PyRep::Integer(p2_stab)]).await.unwrap();
-        let moros_iso = buy(&ctx, &mut p2, 17_887, 40_000).await[0];
-        rpc(&ctx, &mut p2, "ship", "Board", &[PyRep::Integer(p2_stab)]).await.unwrap();
-        ctx.advance_secs(12);
-        move_item(&ctx, &mut p2, moros_iso, p2_stab, InventoryFlag::SpecializedFuelBay as i64).await;
-
-        // Purchase & fit Falcon cyno recons for cyno_mid & cyno_null in Jita
-        let falcon_mid_id = buy(&ctx, &mut cyno_mid_sess, 11_957, 1).await[0];
-        rpc(&ctx, &mut cyno_mid_sess, "ship", "AssembleShip", &[PyRep::Integer(falcon_mid_id)]).await.unwrap();
-        let cyno_mid_mod = buy(&ctx, &mut cyno_mid_sess, 21_096, 1).await[0];
-        let ozone_mid = buy(&ctx, &mut cyno_mid_sess, 16_273, 700).await[0];
-        rpc(&ctx, &mut cyno_mid_sess, "ship", "Board", &[PyRep::Integer(falcon_mid_id)]).await.unwrap();
-        ctx.advance_secs(12);
-        move_item(&ctx, &mut cyno_mid_sess, cyno_mid_mod, falcon_mid_id, InventoryFlag::HiSlot0 as i64).await;
-        move_item(&ctx, &mut cyno_mid_sess, ozone_mid, falcon_mid_id, InventoryFlag::Cargo as i64).await;
-
-        let falcon_null_id = buy(&ctx, &mut cyno_null_sess, 11_957, 1).await[0];
-        rpc(&ctx, &mut cyno_null_sess, "ship", "AssembleShip", &[PyRep::Integer(falcon_null_id)]).await.unwrap();
-        let cyno_null_mod = buy(&ctx, &mut cyno_null_sess, 21_096, 1).await[0];
-        let ozone_null = buy(&ctx, &mut cyno_null_sess, 16_273, 700).await[0];
-        rpc(&ctx, &mut cyno_null_sess, "ship", "Board", &[PyRep::Integer(falcon_null_id)]).await.unwrap();
-        ctx.advance_secs(12);
-        move_item(&ctx, &mut cyno_null_sess, cyno_null_mod, falcon_null_id, InventoryFlag::HiSlot0 as i64).await;
-        move_item(&ctx, &mut cyno_null_sess, ozone_null, falcon_null_id, InventoryFlag::Cargo as i64).await;
-
-        // Form fleet (PILOT_1 leader, PILOT_2, cyno_mid, cyno_null, lancer_alt, titan_alt)
-        rpc(&ctx, &mut p1, "fleetMgr", "CreateFleet", &[]).await.unwrap();
-        rpc(&ctx, &mut p1, "fleetMgr", "Invite", &[PyRep::Integer(PILOT_2), PyRep::Integer(4)]).await.unwrap();
-        rpc(&ctx, &mut p2, "fleetMgr", "AcceptInvite", &[]).await.unwrap();
-        rpc(&ctx, &mut p1, "fleetMgr", "Invite", &[PyRep::Integer(cyno_mid_cid), PyRep::Integer(4)]).await.unwrap();
-        rpc(&ctx, &mut cyno_mid_sess, "fleetMgr", "AcceptInvite", &[]).await.unwrap();
-        rpc(&ctx, &mut p1, "fleetMgr", "Invite", &[PyRep::Integer(cyno_null_cid), PyRep::Integer(4)]).await.unwrap();
-        rpc(&ctx, &mut cyno_null_sess, "fleetMgr", "AcceptInvite", &[]).await.unwrap();
-        rpc(&ctx, &mut p1, "fleetMgr", "Invite", &[PyRep::Integer(lancer_cid), PyRep::Integer(4)]).await.unwrap();
-        rpc(&ctx, &mut lancer_sess, "fleetMgr", "AcceptInvite", &[]).await.unwrap();
-        rpc(&ctx, &mut p1, "fleetMgr", "Invite", &[PyRep::Integer(titan_cid), PyRep::Integer(4)]).await.unwrap();
-        rpc(&ctx, &mut titan_sess, "fleetMgr", "AcceptInvite", &[]).await.unwrap();
-
-        let (null_sys_id, null_station_id) = (NULL_SYS, NULL_STATION);
-        let null_sun = ctx.sde.celestials_in_system(null_sys_id).into_iter().find(|c| c.group_id == 6).expect("FDZ4-A sun").celestial_id;
-        let null_sys = ctx.systems.get_or_spawn(null_sys_id);
-
-        // PILOT_1 flies Megathron along stargates to FDZ4-A, docks, and stashes Nanite Paste in hangar first
-        fast_fly_stargates_to(&ctx, &mut p1, null_sys_id).await;
-        warp_and_dock_at_station(&ctx, &mut p1, megathron_ship_id, null_sys_id, null_station_id).await;
-        move_item(&ctx, &mut p1, paste_id, null_station_id, InventoryFlag::Hangar as i64).await;
-
-        // Station cyno_mid at Walvalin midpoint and cyno_null at FDZ4-A once; Moros jumps Jita -> Walvalin -> FDZ4-A
-        fast_fly_stargates_to(&ctx, &mut cyno_mid_sess, CYNO_MID_SYS).await;
-        fast_fly_stargates_to(&ctx, &mut cyno_null_sess, null_sys_id).await;
-        fast_warp_to(&ctx, &mut cyno_null_sess, null_sun, 100_000.0).await;
-        ctx.advance_secs(12);
-        let _ = ctx.systems.get_or_spawn(CYNO_MID_SYS).step_manual(12.0).await;
-        let cyno1 = rpc(&ctx, &mut cyno_mid_sess, "dogmaIM", "Activate", &[PyRep::Integer(cyno_mid_mod), PyRep::String("cynosuralGeneration".into())]).await.unwrap();
-        let beacon1 = cyno1.dict_get("beaconID").and_then(|v| v.as_i64()).expect("cyno1 beaconID");
-
-        undock_from_station(&ctx, &mut p2, JITA_SYS).await;
-        ctx.advance_secs(15);
-        let _ = ctx.systems.get_or_spawn(JITA_SYS).step_manual(15.0).await;
-        rpc(&ctx, &mut p2, "beyonce", "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(cyno_mid_cid), PyRep::Integer(i64::from(CYNO_MID_SYS)), PyRep::Integer(beacon1)]).await.unwrap();
-        let _ = rpc(&ctx, &mut cyno_mid_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(cyno_mid_mod)]).await;
-        for _ in 0..16 {
-            let _ = ctx.systems.get_or_spawn(CYNO_MID_SYS).step_manual(60.0).await;
-        }
-        // Clear max jump reactivation cooldown cap (30 min = 1800s) before 2nd jump.
-        ctx.advance_secs(1800);
-
-        ctx.advance_secs(12);
-        let _ = null_sys.step_manual(12.0).await;
-        let cyno2 = rpc(&ctx, &mut cyno_null_sess, "dogmaIM", "Activate", &[PyRep::Integer(cyno_null_mod), PyRep::String("cynosuralGeneration".into())]).await.unwrap();
-        let beacon2 = cyno2.dict_get("beaconID").and_then(|v| v.as_i64()).expect("cyno2 beaconID");
-        rpc(&ctx, &mut p2, "beyonce", "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(cyno_null_cid), PyRep::Integer(i64::from(null_sys_id)), PyRep::Integer(beacon2)]).await.unwrap();
-        warp_and_dock_at_station(&ctx, &mut p2, p2_stab, null_sys_id, null_station_id).await;
-        let _ = rpc(&ctx, &mut cyno_null_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(cyno_null_mod)]).await;
-        for _ in 0..20 {
-            let _ = null_sys.step_manual(60.0).await;
-        }
-        ctx.advance_secs(1200);
-
-        // Undock Megathron (no paste in cargo) and Moros in FDZ4-A near the sun
-        undock_from_station(&ctx, &mut p1, null_sys_id).await;
-        undock_from_station(&ctx, &mut p2, null_sys_id).await;
-        fast_warp_to(&ctx, &mut p2, null_sun, 100_000.0).await;
-        warp_and_approach_fleet_ship(&ctx, &mut p1, null_sys_id, megathron_ship_id, PILOT_2, p2_stab).await;
-        ctx.advance_secs(15);
-        for _ in 0..15 {
-            let _ = null_sys.step_manual(1.0).await;
-        }
-        lock(&ctx, null_sys_id, &mut p1, p2_stab).await;
-
-        // Overheat lasers legitimately via dogmaIM.Overload until heat damage accumulates
-        for &l_id in &mega_lasers {
-            rpc(&ctx, &mut p1, "dogmaIM", "Overload", &[PyRep::Integer(l_id), PyRep::String("targetAttack".into()), PyRep::Integer(p2_stab), PyRep::Integer(200)]).await.unwrap();
-        }
-        let mut heat_dmg = 0.0_f64;
-        for _ in 0..240 {
-            null_sys.try_step_full_tick(1.0);
-            ctx.advance_secs(1);
-            heat_dmg = ctx.db.with_snapshot(|s| {
-                s.items.get(&laser_id).and_then(|i| i.dynamic_attributes.get(&eve_dogma::attr_ids::DAMAGE).copied()).unwrap_or(0.0)
-            });
-            if heat_dmg >= 1.0 {
-                break;
-            }
-        }
-        let rack_heat = ctx.db.with_snapshot(|s| {
-            s.transient_item_attributes.get(&megathron_ship_id).and_then(|m| m.get(&1175).copied()).unwrap_or(0.0)
-        });
-        assert!(heat_dmg >= 1.0, "Overheating pulse laser must inflict real heat damage (got {heat_dmg}, hi_rack_heat={rack_heat})");
-        for &l_id in &mega_lasers {
-            let _ = rpc(&ctx, &mut p1, "dogmaIM", "Deactivate", &[PyRep::Integer(l_id), PyRep::String("targetAttack".into())]).await;
-        }
-        for _ in 0..8 {
-            null_sys.try_step_full_tick(1.0);
-        }
-
-        let no_paste = rpc(&ctx, &mut p1, "dogmaIM", "RepairModule", &[PyRep::Integer(laser_id)]).await.unwrap_err();
-        assert_eq!(no_paste.code, "NotEnoughNanitePaste");
-
-        // Dock at FDZ4-A station, retrieve Nanite Repair Paste into Megathron cargo, undock and repair in space
-        ctx.advance_secs(60);
-        warp_and_dock_at_station(&ctx, &mut p1, megathron_ship_id, null_sys_id, null_station_id).await;
-        move_item(&ctx, &mut p1, paste_id, megathron_ship_id, InventoryFlag::Cargo as i64).await;
-        undock_from_station(&ctx, &mut p1, null_sys_id).await;
-        ctx.advance_secs(12);
-        let _ = null_sys.step_manual(12.0).await;
-
-        let rep = rpc(&ctx, &mut p1, "dogmaIM", "RepairModule", &[PyRep::Integer(laser_id)]).await.unwrap();
-        assert_eq!(rep.dict_get("pasteConsumed"), Some(&PyRep::Integer(1)));
-        let mut dmg_now = heat_dmg;
-        for _ in 0..6 {
-            null_sys.try_step_full_tick(1.0);
-            dmg_now = ctx.db.with_snapshot(|s| {
-                s.items.get(&laser_id).and_then(|i| i.dynamic_attributes.get(&eve_dogma::attr_ids::DAMAGE).copied()).unwrap_or(0.0)
-            });
-            if dmg_now < heat_dmg {
-                break;
-            }
-        }
-        assert!(dmg_now < heat_dmg, "Nanite Repair Paste tick must reduce real module heat damage ({dmg_now} vs {heat_dmg})");
-        rpc(&ctx, &mut p1, "dogmaIM", "StopRepairModule", &[PyRep::Integer(laser_id)]).await.unwrap();
-        if dmg_now > 0.05 {
-            rpc(&ctx, &mut p1, "dogmaIM", "RepairModule", &[PyRep::Integer(laser_id)]).await.unwrap();
-            rpc(&ctx, &mut p1, "dogmaIM", "StopRepairModule", &[PyRep::Integer(laser_id)]).await.unwrap();
-        }
-
-        // 3. Mobile Depot deployment & in-space refitting (`feat:modules.mobile-depot-deployment-and-refitting`)
-        let null_gate = ctx.sde.jumps.values().find(|j| j.from_solar_system_id == null_sys_id).expect("FDZ4-A stargate").stargate_id;
-        fast_warp_to(&ctx, &mut p1, null_gate, 100_000.0).await;
-        let mega_pos = null_sys.get_ball_snapshot(megathron_ship_id).await.unwrap().unwrap().1.position;
-        let dep_rep = rpc(&ctx, &mut p1, "posMgr", "AnchorStructure", &[PyRep::Integer(depot_item), PyRep::Tuple(vec![PyRep::Real(mega_pos.x + 400.0), PyRep::Real(mega_pos.y), PyRep::Real(mega_pos.z)])]).await.unwrap();
-        dep_id = dep_rep.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
-        ctx.advance_secs(65);
-        let _ = null_sys.step_manual(1.0).await;
-        rpc(&ctx, &mut p1, "invbroker", "Add", &[PyRep::Integer(refit_mod_id), PyRep::Integer(megathron_ship_id), PyRep::Integer(InventoryFlag::MedSlot0 as i64)]).await.unwrap();
-        let st = ctx.db.with_snapshot(|s| depots::read_deployable_state_snap(s).deployables.get(&dep_id).cloned()).unwrap();
-        assert!(st.anchor_completed);
-
-        // 4. Disruptive Lance & Directional Lance Doomsday (`feat:modules.disruptive-lance`, `feat:modules.lance-doomsday-directional-geometry`)
-        // Dock Megathron at FDZ4-A; lancer_alt undocks Bane in Jita and cyno-jumps via Walvalin to FDZ4-A.
-        warp_and_dock_at_station(&ctx, &mut p1, megathron_ship_id, null_sys_id, null_station_id).await;
-
-        ctx.advance_secs(12);
-        let _ = ctx.systems.get_or_spawn(CYNO_MID_SYS).step_manual(12.0).await;
-        let cyno3 = rpc(&ctx, &mut cyno_mid_sess, "dogmaIM", "Activate", &[PyRep::Integer(cyno_mid_mod), PyRep::String("cynosuralGeneration".into())]).await.unwrap();
-        let beacon3 = cyno3.dict_get("beaconID").and_then(|v| v.as_i64()).expect("cyno3 beaconID");
-        undock_from_station(&ctx, &mut lancer_sess, JITA_SYS).await;
-        ctx.advance_secs(15);
-        let _ = ctx.systems.get_or_spawn(JITA_SYS).step_manual(15.0).await;
-        rpc(&ctx, &mut lancer_sess, "beyonce", "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(cyno_mid_cid), PyRep::Integer(i64::from(CYNO_MID_SYS)), PyRep::Integer(beacon3)]).await.unwrap();
-        let _ = rpc(&ctx, &mut cyno_mid_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(cyno_mid_mod)]).await;
-        for _ in 0..16 {
-            let _ = ctx.systems.get_or_spawn(CYNO_MID_SYS).step_manual(60.0).await;
-        }
-        // Clear max jump reactivation cooldown cap (30 min = 1800s) before Bane's 2nd jump.
-        ctx.advance_secs(1800);
-
-        warp_and_approach_fleet_ship(&ctx, &mut cyno_null_sess, null_sys_id, falcon_null_id, PILOT_2, p2_stab).await;
-        ctx.advance_secs(12);
-        let _ = null_sys.step_manual(12.0).await;
-        let cyno4 = rpc(&ctx, &mut cyno_null_sess, "dogmaIM", "Activate", &[PyRep::Integer(cyno_null_mod), PyRep::String("cynosuralGeneration".into())]).await.unwrap();
-        let beacon4 = cyno4.dict_get("beaconID").and_then(|v| v.as_i64()).expect("cyno4 beaconID");
-        rpc(&ctx, &mut lancer_sess, "beyonce", "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(cyno_null_cid), PyRep::Integer(i64::from(null_sys_id)), PyRep::Integer(beacon4)]).await.unwrap();
-        warp_and_approach_fleet_ship(&ctx, &mut lancer_sess, null_sys_id, lancer_ship_id, PILOT_2, p2_stab).await;
-        let _ = rpc(&ctx, &mut cyno_null_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(cyno_null_mod)]).await;
-        for _ in 0..20 {
-            let _ = null_sys.step_manual(60.0).await;
-        }
-        ctx.advance_secs(1200);
-        // Move Falcon out of Disruptive Lance collateral beam corridor (`2,500 m` / `10,000 m`) before firing (#697/#583).
-        fast_warp_to(&ctx, &mut cyno_null_sess, null_gate, 100_000.0).await;
-
-        let p2_beyonce = match rpc(&ctx, &mut p2, "beyonce", "MachoBindObject", &[PyRep::Integer(i64::from(null_sys_id)), PyRep::None]).await.unwrap() {
-            PyRep::Tuple(parts) => parts[0].as_i64().unwrap() as u64,
-            _ => panic!("p2 beyonce bind tuple"),
-        };
-        let dl_shield0 = null_sys.get_combat_state(p2_stab).await.unwrap().unwrap().shield_hp;
-        rpc(&ctx, &mut lancer_sess, "dogmaIM", "Activate", &[PyRep::Integer(siege_id)]).await.unwrap();
-        let dl_res = rpc(&ctx, &mut lancer_sess, "dogmaIM", "Activate", &[PyRep::Integer(dlance_id), PyRep::String("default".into()), PyRep::Integer(p2_stab)]).await.unwrap();
-        assert_eq!(dl_res.dict_get("hitCount"), Some(&PyRep::Integer(1)));
-        assert_eq!(dl_res.dict_get("fuelConsumed"), Some(&PyRep::Integer(20_000)));
-        assert!(null_sys.get_combat_state(p2_stab).await.unwrap().unwrap().shield_hp < dl_shield0);
-        let dl_warp_err = ctx.dispatch_rpc(&mut p2, "beyonce", Some(p2_beyonce), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(null_sun)], &HashMap::new(), None).await.unwrap_err();
-        assert_eq!(dl_warp_err.code, "DisruptiveLanceDebuffActive");
-
-        // Titan Directional Lance Doomsday via `superWeaponMgr.ActivateSlashModule`
-        let _ = rpc(&ctx, &mut lancer_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(siege_id)]).await;
-        ctx.advance_secs(310);
-        let _ = null_sys.step_manual(310.0).await;
-        warp_and_dock_at_station(&ctx, &mut lancer_sess, lancer_ship_id, null_sys_id, null_station_id).await;
-
-        ctx.advance_secs(12);
-        let _ = ctx.systems.get_or_spawn(CYNO_MID_SYS).step_manual(12.0).await;
-        let cyno5 = rpc(&ctx, &mut cyno_mid_sess, "dogmaIM", "Activate", &[PyRep::Integer(cyno_mid_mod), PyRep::String("cynosuralGeneration".into())]).await.unwrap();
-        let beacon5 = cyno5.dict_get("beaconID").and_then(|v| v.as_i64()).expect("cyno5 beaconID");
-        undock_from_station(&ctx, &mut titan_sess, JITA_SYS).await;
-        ctx.advance_secs(15);
-        let _ = ctx.systems.get_or_spawn(JITA_SYS).step_manual(15.0).await;
-        rpc(&ctx, &mut titan_sess, "beyonce", "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(cyno_mid_cid), PyRep::Integer(i64::from(CYNO_MID_SYS)), PyRep::Integer(beacon5)]).await.unwrap();
-        let _ = rpc(&ctx, &mut cyno_mid_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(cyno_mid_mod)]).await;
-        for _ in 0..16 {
-            let _ = ctx.systems.get_or_spawn(CYNO_MID_SYS).step_manual(60.0).await;
-        }
-        // Clear max jump reactivation cooldown cap (30 min = 1800s) before Avatar's 2nd jump.
-        ctx.advance_secs(1800);
-
-        warp_and_approach_fleet_ship(&ctx, &mut cyno_null_sess, null_sys_id, falcon_null_id, PILOT_2, p2_stab).await;
-        ctx.advance_secs(12);
-        let _ = null_sys.step_manual(12.0).await;
-        let cyno6 = rpc(&ctx, &mut cyno_null_sess, "dogmaIM", "Activate", &[PyRep::Integer(cyno_null_mod), PyRep::String("cynosuralGeneration".into())]).await.unwrap();
-        let beacon6 = cyno6.dict_get("beaconID").and_then(|v| v.as_i64()).expect("cyno6 beaconID");
-        rpc(&ctx, &mut titan_sess, "beyonce", "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(cyno_null_cid), PyRep::Integer(i64::from(null_sys_id)), PyRep::Integer(beacon6)]).await.unwrap();
-        warp_and_approach_fleet_ship(&ctx, &mut titan_sess, null_sys_id, titan_ship_id, PILOT_2, p2_stab).await;
-        let _ = rpc(&ctx, &mut cyno_null_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(cyno_null_mod)]).await;
-        for _ in 0..15 {
-            let _ = null_sys.step_manual(1.0).await;
-        }
-        for _ in 0..30 {
-            let _ = null_sys.step_manual(60.0).await;
-        }
-        ctx.advance_secs(1815);
-        let cs_before = null_sys.get_combat_state(p2_stab).await.unwrap().unwrap();
-        let p1_pos = null_sys.get_ball_snapshot(titan_ship_id).await.unwrap().unwrap().1.position;
-        let p2_pos = null_sys.get_ball_snapshot(p2_stab).await.unwrap().unwrap().1.position;
-        let dir = (p2_pos - p1_pos).normalize_or_zero();
-        let end_pos = p1_pos + if dir.length_squared() > 0.0 { dir } else { DVec3::Y } * 180_000.0;
-
-        let origin_arg = PyRep::Tuple(vec![PyRep::Real(p1_pos.x), PyRep::Real(p1_pos.y), PyRep::Real(p1_pos.z)]);
-        let endpoint_arg = PyRep::Tuple(vec![PyRep::Real(end_pos.x), PyRep::Real(end_pos.y), PyRep::Real(end_pos.z)]);
-        let titan_iso_before: i64 = ctx.db.with_snapshot(|s| s.items.values().filter(|i| i.location_id == titan_ship_id && i.type_id == 16_274).map(|i| i64::from(i.quantity)).sum());
-        titan_iso_expected = titan_iso_before - 50_000;
-        let lance_res = rpc(&ctx, &mut titan_sess, "superWeaponMgr", "ActivateSlashModule", &[PyRep::Integer(doomsday_id), origin_arg, endpoint_arg]).await.unwrap();
-        assert_eq!(lance_res.dict_get("warmupSeconds"), Some(&PyRep::Real(15.0)));
-        assert_eq!(lance_res.dict_get("jumpBlockSeconds"), Some(&PyRep::Real(300.0)));
-        assert_eq!(lance_res.dict_get("fuelConsumed"), Some(&PyRep::Integer(50_000)));
-        for _ in 0..22 {
-            let _ = null_sys.step_manual(1.0).await;
-        }
-        let lance_damaged_or_destroyed = match null_sys.get_combat_state(p2_stab).await.unwrap() {
-            Some(cs) => cs.shield_hp < cs_before.shield_hp || cs.armor_hp < cs_before.armor_hp || cs.structure_hp < cs_before.structure_hp,
-            None => true,
-        };
-        assert!(lance_damaged_or_destroyed, "Directional lance beam must damage target inside beam corridor");
+        let (mut p1, mut p2) = run_shard5_nosferatu_phase(&ctx).await;
+        let mut s = run_shard5_setup_and_moros_phase(&ctx, &mut p1, &mut p2).await;
+        let (dep, null_gate) = run_shard5_nanite_and_depot_phase(&ctx, &mut p1, &mut p2, &s).await;
+        run_shard5_disruptive_lance_phase(&ctx, &mut p2, &mut s, null_gate).await;
+        titan_iso_expected = run_shard5_titan_doomsday_phase(&ctx, &mut s).await;
+        dep_id = dep;
+        refit_mod_id = s.refit_mod_id;
+        titan_ship_id = s.titan_ship_id;
+        megathron_ship_id = s.megathron_ship_id;
         ctx.db.save_to_sqlite(&db_path).expect("save_to_sqlite");
         reload_time = ctx.now_unix() + 120;
     }

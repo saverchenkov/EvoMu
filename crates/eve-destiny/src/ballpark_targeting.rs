@@ -382,7 +382,7 @@ impl Ballpark {
                     | 64_896
                     | 80_876
             )
-            || matches!(ball.mode, MovementMode::Field | MovementMode::Mushroom)
+            || matches!(ball.mode, MovementMode::Field | MovementMode::Mushroom | MovementMode::Missile { .. })
             || matches!(ball.mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
             || matches!(
                 pre_ball_opt.map(|b| &b.mode),
