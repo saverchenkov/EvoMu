@@ -1,7 +1,8 @@
 //! Integration & wire-contract tests for `GH #1085` (Session ordering & persistence):
-//! 1. Deferred `shipid` on dock from space (`[shipID, None]` held until station/structure
-//!    hangar `invbroker` `List`/`ListByFlags`/`GetSelfInvItem`, `MachoBindObject` piggybacked
-//!    `List`, or `350 ms` elapsed fallback — plus intervening `Undock` masking & failure guards).
+//! 1. Deferred `shipid` on NPC station dock from space (`[shipID, None]` held until station
+//!    hangar `invbroker` `List`/`ListByFlags`/`GetSelfInvItem` — including `"machoNet"` wire-service
+//!    bound calls — `MachoBindObject` piggybacked `List`, or `350 ms` elapsed fallback — plus
+//!    intervening `Undock` masking, failure guards, and Upwell structure dock `shipid` preservation).
 //! 2. Hull `OnItemChange` before `shipid` `SessionChangeNotification` on docked ship swap
 //!    (`Board`, `BoardStoredShip`, `LeaveShip`), keeping `#1070` capsule tombstone after
 //!    `SessionChangeNotification`, in-space `SetState`/ballpark-before-`SessionChange`, and
@@ -879,7 +880,8 @@ async fn test_1085_deferred_ship_id_on_dock_from_space_hangar_and_timeout() {
         Some(&(PyRep::None, PyRep::Integer(ship_id)))
     );
 
-    // Case 3: Structure dock + MachoBindObject piggybacked List flushes deferred shipid after CallRsp.
+    // Case 3: Upwell structure dock preserves shipid immediately (GH #1140 / #1141) without
+    // arming deferred_ship_id, so godma.Prime -> MakeShipActive never sees shipID = None.
     let struct_id = 1_045_000_000_101_i64;
     let struct_pos = DVec3::new(200_000.0, 0.0, 0.0);
     seed_owned_structure(&ctx, struct_id, sys_id, corp_id, struct_pos);
@@ -896,11 +898,17 @@ async fn test_1085_deferred_ship_id_on_dock_from_space_hangar_and_timeout() {
         .call_exchange("structureDocking", None, "Dock", &[PyRep::Integer(struct_id)], &kw)
         .await;
     assert!(sdock_out.result.is_ok());
+    let sdock_sc = decode_session_change_map(&sdock_out.session_change_packets[0]);
     assert_eq!(
-        decode_session_change_map(&sdock_out.session_change_packets[0]).get("shipid"),
-        Some(&(PyRep::Integer(ship_id), PyRep::None))
+        sdock_sc.get("structureid"),
+        Some(&(PyRep::None, PyRep::Integer(struct_id)))
     );
-    assert!(harness.transport().inner.deferred_ship_id.is_some());
+    assert!(
+        !sdock_sc.contains_key("shipid"),
+        "Upwell structure dock must not clear/defer shipid: {sdock_sc:?}"
+    );
+    assert!(harness.transport().inner.deferred_ship_id.is_none());
+    assert_eq!(harness.transport().inner.session.ship_id, Some(ship_id));
 
     let piggyback_out = harness
         .call_exchange(
@@ -919,20 +927,9 @@ async fn test_1085_deferred_ship_id_on_dock_from_space_hangar_and_timeout() {
         )
         .await;
     assert!(piggyback_out.result.is_ok());
-    let pig_rsp_idx = piggyback_out
-        .frames
-        .iter()
-        .position(|f| matches!(f.kind, ClientWireFrameKind::CallRsp { .. }))
-        .expect("CallRsp on piggybacked MachoBindObject(List)");
-    let pig_sc_idx = piggyback_out
-        .frames
-        .iter()
-        .position(|f| matches!(f.kind, ClientWireFrameKind::SessionChange { .. }))
-        .expect("deferred SessionChange on piggybacked MachoBindObject(List)");
-    assert!(pig_rsp_idx < pig_sc_idx);
-    assert_eq!(
-        decode_session_change_map(&piggyback_out.session_change_packets[0]).get("shipid"),
-        Some(&(PyRep::None, PyRep::Integer(ship_id)))
+    assert!(
+        piggyback_out.session_change_packets.is_empty(),
+        "structure MachoBindObject(List) must not emit deferred shipid SessionChange"
     );
 
     // Case 4: Rapid intervening Undock within 350ms disarms pending timer and masks prev shipid -> [None, ship_id].
@@ -1087,6 +1084,224 @@ async fn test_1085_deferred_ship_id_on_dock_from_space_hangar_and_timeout() {
     assert_eq!(
         flush_map.get("shipid"),
         Some(&(PyRep::None, PyRep::Integer(tcp_ship_id)))
+    );
+}
+
+#[tokio::test]
+async fn test_1140_1141_structure_dock_preserves_shipid_and_station_machonet_hangar_flush() {
+    // parity: feat:serverops.session-changes, feat:navigation.dock-station, feat:navigation.dock-structure, notify:OnSessionChanged
+    eve_testkit::attest(&[
+        "feat:serverops.session-changes",
+        "feat:navigation.dock-station",
+        "feat:navigation.dock-structure",
+        "notify:OnSessionChanged",
+    ]);
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let station_id = 60_003_760_i64;
+    let station_pos = ctx.sde.stations[&station_id].position;
+    let (ship_id, corp_id) = ctx.db.with_snapshot(|s| {
+        (
+            s.characters[&char_id].active_ship_id,
+            s.characters[&char_id].corporation_id,
+        )
+    });
+    let struct_id = 1_045_000_000_199_i64;
+    let struct_pos = DVec3::new(220_000.0, 0.0, 0.0);
+    seed_owned_structure(&ctx, struct_id, sys_id, corp_id, struct_pos);
+
+    let mut sess = SessionState::new(85_140);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let mut harness = common::wrap_wire_harness(&ctx, sess);
+    harness
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw)
+        .await;
+
+    ctx.advance_secs(12);
+    harness.call_ok("stationSvc", None, "Undock", &[], &kw).await;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    assert_set_ball_pos(
+        &sys_handle,
+        ship_id,
+        struct_pos + DVec3::new(1_500.0, 0.0, 0.0),
+        "position near Upwell structure",
+    )
+    .await;
+
+    // Live V24 client invokes `stationSvc.Dock(struct_id)` when docking at an Upwell structure.
+    let sdock_out = harness
+        .call_exchange("stationSvc", None, "Dock", &[PyRep::Integer(struct_id)], &kw)
+        .await;
+    assert!(sdock_out.result.is_ok(), "stationSvc.Dock(struct_id) failed: {:?}", sdock_out.result);
+    assert_eq!(sdock_out.session_change_packets.len(), 1);
+    let sdock_sc = decode_session_change_map(&sdock_out.session_change_packets[0]);
+    assert_eq!(
+        sdock_sc.get("structureid"),
+        Some(&(PyRep::None, PyRep::Integer(struct_id)))
+    );
+    assert!(
+        !sdock_sc.contains_key("shipid"),
+        "structure dock must keep shipid preserved immediately: {sdock_sc:?}"
+    );
+    assert!(harness.transport().inner.deferred_ship_id.is_none());
+    assert_eq!(harness.transport().inner.session.ship_id, Some(ship_id));
+
+    // Timer must never fire a delayed shipid change after structure dock.
+    tokio::time::sleep(Duration::from_millis(370)).await;
+    assert!(
+        harness.transport_mut().inner.poll_deferred_ship_id().0.is_empty(),
+        "structure dock must not schedule a deferred shipid flush"
+    );
+
+    // Client immediately primes dogmaIM via `GetAllInfo` on structure dock (`~7 ms` post-Dock).
+    let dogma_bind = harness
+        .call_ok(
+            "dogmaIM",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![PyRep::Integer(i64::from(sys_id)), PyRep::Integer(15)]),
+                PyRep::None,
+            ],
+            &kw,
+        )
+        .await;
+    let dogma_bid = extract_bound_id_from_wire_rep(&dogma_bind).expect("dogmaIM bound id");
+    let all_info = harness
+        .call_ok(
+            "machoNet",
+            Some(dogma_bid),
+            "GetAllInfo",
+            &[PyRep::Bool(false), PyRep::Bool(true), PyRep::Bool(true)],
+            &kw,
+        )
+        .await;
+    assert!(
+        all_info.dict_get("shipState").is_some_and(|v| !matches!(v, PyRep::None)),
+        "expected non-None shipState in GetAllInfo: {all_info:?}"
+    );
+    assert!(
+        all_info.dict_get("structureInfo").is_some_and(|v| !matches!(v, PyRep::None)),
+        "expected non-None structureInfo in GetAllInfo: {all_info:?}"
+    );
+    assert!(
+        all_info.dict_get("shipInfo").is_some_and(|v| !matches!(v, PyRep::None)),
+        "expected non-None shipInfo in GetAllInfo: {all_info:?}"
+    );
+
+    // NPC station dock retains `#1085` deferred shipid and flushes on live-wire `machoNet` bound `List`.
+    ctx.advance_secs(12);
+    harness.call_ok("structureDocking", None, "Undock", &[], &kw).await;
+    assert_set_ball_pos(
+        &sys_handle,
+        ship_id,
+        station_pos + DVec3::new(1_000.0, 0.0, 0.0),
+        "position near station for machoNet bound List flush",
+    )
+    .await;
+    let st_dock = harness
+        .call_exchange("stationSvc", None, "Dock", &[PyRep::Integer(station_id)], &kw)
+        .await;
+    assert!(st_dock.result.is_ok());
+    assert!(harness.transport().inner.deferred_ship_id.is_some());
+
+    let bind_hangar = harness
+        .call_exchange(
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Integer(station_id),
+                PyRep::Tuple(vec![
+                    PyRep::String("GetInventory".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(CONTAINER_HANGAR), PyRep::None]),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+            &kw,
+        )
+        .await;
+    assert!(bind_hangar.result.is_ok());
+    assert!(bind_hangar.session_change_packets.is_empty());
+    assert!(harness.transport().inner.deferred_ship_id.is_some());
+    let hangar_bid = extract_bound_id_from_wire_rep(
+        bind_hangar.result.as_ref().expect("hangar MachoBindObject result"),
+    )
+    .expect("station hangar bound id");
+
+    let list_out = harness
+        .call_exchange("machoNet", Some(hangar_bid), "List", &[], &kw)
+        .await;
+    assert!(list_out.result.is_ok());
+    assert!(harness.transport().inner.deferred_ship_id.is_none());
+    let list_rsp_idx = list_out
+        .frames
+        .iter()
+        .position(|f| matches!(f.kind, ClientWireFrameKind::CallRsp { .. }))
+        .expect("CallRsp on machoNet bound hangar List");
+    let list_sc_idx = list_out
+        .frames
+        .iter()
+        .position(|f| matches!(f.kind, ClientWireFrameKind::SessionChange { .. }))
+        .expect("deferred SessionChange after machoNet bound hangar List");
+    assert!(list_rsp_idx < list_sc_idx);
+    assert_eq!(
+        decode_session_change_map(&list_out.session_change_packets[0]).get("shipid"),
+        Some(&(PyRep::None, PyRep::Integer(ship_id)))
+    );
+
+    // NPC station dock also flushes on `invbroker.MachoBindObject((station_id, 15), ("List", ...))`.
+    ctx.advance_secs(12);
+    harness.call_ok("stationSvc", None, "Undock", &[], &kw).await;
+    assert_set_ball_pos(
+        &sys_handle,
+        ship_id,
+        station_pos + DVec3::new(1_000.0, 0.0, 0.0),
+        "position near station for MachoBindObject piggyback flush",
+    )
+    .await;
+    let st_dock_2 = harness
+        .call_exchange("stationSvc", None, "Dock", &[PyRep::Integer(station_id)], &kw)
+        .await;
+    assert!(st_dock_2.result.is_ok());
+    assert!(harness.transport().inner.deferred_ship_id.is_some());
+
+    let pig_out = harness
+        .call_exchange(
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![PyRep::Integer(station_id), PyRep::Integer(15)]),
+                PyRep::Tuple(vec![
+                    PyRep::String("List".into()),
+                    PyRep::Tuple(Vec::new()),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+            &kw,
+        )
+        .await;
+    assert!(pig_out.result.is_ok());
+    assert!(harness.transport().inner.deferred_ship_id.is_none());
+    let pig_rsp_idx = pig_out
+        .frames
+        .iter()
+        .position(|f| matches!(f.kind, ClientWireFrameKind::CallRsp { .. }))
+        .expect("CallRsp on station MachoBindObject(List)");
+    let pig_sc_idx = pig_out
+        .frames
+        .iter()
+        .position(|f| matches!(f.kind, ClientWireFrameKind::SessionChange { .. }))
+        .expect("deferred SessionChange on station MachoBindObject(List)");
+    assert!(pig_rsp_idx < pig_sc_idx);
+    assert_eq!(
+        decode_session_change_map(&pig_out.session_change_packets[0]).get("shipid"),
+        Some(&(PyRep::None, PyRep::Integer(ship_id)))
     );
 }
 

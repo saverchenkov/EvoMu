@@ -1064,3 +1064,158 @@ async fn drain_pending_tick_frames_emits_service_call_for_target_fail_lock_targe
         "expected wire Notification targeting client service 'target' with FailLockTarget, got {decoded:?}"
     );
 }
+
+#[tokio::test]
+async fn test_1140_structure_dock_preserves_ship_id_and_station_machonet_hangar_flush() {
+    let ctx = Arc::new(ServerContext::new());
+    let client_id = 77_u64;
+    let char_id = 90_000_001_i64;
+    let ship_id = 200_114_001_i64;
+    let sys_id = 30_000_142_u32;
+    let station_id = 60_003_760_i64;
+    let struct_id = 1_001_896_944_936_i64;
+
+    let mut space_session = SessionState::new(1140);
+    space_session.user_id = Some(1);
+    space_session.character_id = Some(char_id);
+    space_session.ship_id = Some(ship_id);
+    space_session.solar_system_id = Some(sys_id);
+
+    // 1. Upwell structure dock (`structure_id` set, `station_id` None) must preserve `shipid`
+    //    immediately so `godma.Prime` -> `clientDogmaLocation._MakeShipActive` never sees None.
+    let mut struct_docked = space_session.clone();
+    struct_docked.structure_id = Some(struct_id);
+
+    let mut deferred = None;
+    let (sess_frame, flush_frame) = resolve_deferred_session_change_frame(
+        &ctx,
+        client_id,
+        &space_session,
+        &struct_docked,
+        &mut deferred,
+        false,
+    );
+    assert!(flush_frame.is_none());
+    assert!(
+        deferred.is_none(),
+        "structure dock must not arm deferred_ship_id timer"
+    );
+    let wire_rep = sess_frame.expect("structureid session change frame");
+    let pkt = MachoPacket::from_pyrep(&wire_rep).expect("decode SessionChange MachoPacket");
+    let sc_map: std::collections::HashMap<String, (PyRep, PyRep)> =
+        eve_machonet::SessionChange::from_pyrep(&pkt.payload)
+            .expect("decode SessionChange payload")
+            .changes
+            .into_iter()
+            .collect();
+    assert_eq!(
+        sc_map.get("structureid"),
+        Some(&(PyRep::None, PyRep::Integer(struct_id)))
+    );
+    assert!(
+        !sc_map.contains_key("shipid"),
+        "structure dock SessionChange must preserve shipid without [ship_id, None]: {sc_map:?}"
+    );
+
+    // 2. NPC station dock (`station_id` set, `structure_id` None) retains `#1085` deferral, and
+    //    live-wire bound `machoNet` calls backed by `invbroker` trigger early hangar flush.
+    let mut station_docked = space_session.clone();
+    station_docked.station_id = Some(station_id);
+    let (st_frame, st_flush) = resolve_deferred_session_change_frame(
+        &ctx,
+        client_id,
+        &space_session,
+        &station_docked,
+        &mut deferred,
+        false,
+    );
+    assert!(st_flush.is_none());
+    assert!(deferred.is_some());
+    let st_pkt = MachoPacket::from_pyrep(&st_frame.expect("station session change"))
+        .expect("decode station SessionChange MachoPacket");
+    let st_map: std::collections::HashMap<String, (PyRep, PyRep)> =
+        eve_machonet::SessionChange::from_pyrep(&st_pkt.payload)
+            .expect("decode station SessionChange payload")
+            .changes
+            .into_iter()
+            .collect();
+    assert_eq!(
+        st_map.get("shipid"),
+        Some(&(PyRep::Integer(ship_id), PyRep::None))
+    );
+
+    let hangar_bid = 55_001_u64;
+    let ship_bid = 55_002_u64;
+    let dogma_bid = 55_003_u64;
+    {
+        let mut bounds = ctx.bound_objects.write().unwrap();
+        for (bid, svc, obj_id) in [
+            (hangar_bid, "invbroker", station_id),
+            (ship_bid, "invbroker", ship_id),
+            (dogma_bid, "dogmaIM", station_id),
+        ] {
+            bounds.insert(
+                bid,
+                crate::router::context::BoundObjectEntry {
+                    bound_id: bid,
+                    session_id: space_session.session_id,
+                    user_id: 1,
+                    character_id: char_id,
+                    service: svc.into(),
+                    object_id: obj_id,
+                    oid_str: bid.to_string(),
+                    ref_id: 0,
+                },
+            );
+        }
+    }
+
+    assert!(is_dock_hangar_flush_rpc(
+        &ctx,
+        "machoNet",
+        Some(hangar_bid),
+        "List",
+        &[],
+        deferred
+    ));
+    assert!(is_dock_hangar_flush_rpc(
+        &ctx,
+        "machoNet",
+        Some(hangar_bid),
+        "GetSelfInvItem",
+        &[],
+        deferred
+    ));
+    assert!(is_dock_hangar_flush_rpc(
+        &ctx,
+        "invbroker",
+        Some(hangar_bid),
+        "ListByFlags",
+        &[],
+        deferred
+    ));
+    assert!(!is_dock_hangar_flush_rpc(
+        &ctx,
+        "machoNet",
+        Some(ship_bid),
+        "List",
+        &[],
+        deferred
+    ));
+    assert!(!is_dock_hangar_flush_rpc(
+        &ctx,
+        "machoNet",
+        Some(dogma_bid),
+        "List",
+        &[],
+        deferred
+    ));
+    assert!(!is_dock_hangar_flush_rpc(
+        &ctx,
+        "machoNet",
+        Some(hangar_bid),
+        "GetInventoryFromId",
+        &[],
+        deferred
+    ));
+}
