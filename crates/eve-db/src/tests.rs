@@ -1041,3 +1041,30 @@ fn test_create_character_accepts_v24_undefined_ancestry_64() {
     assert_eq!(created.bloodline_id, 8);
     assert_ne!(created.ancestry_id, 64);
 }
+
+#[test]
+fn test_provision_gm_account_seeds_and_backfills_bloodline_and_race() {
+    let repo = WorldRepository::new_empty();
+    repo.provision_gm_account("admin", "admin-pass", 90_000_003, "ISD Polaris");
+    let ch = repo.get_character(90_000_003).expect("ISD Polaris seeded");
+    assert_eq!(ch.race_id, 1);
+    assert_eq!(ch.bloodline_id, 1);
+    assert_eq!(ch.ancestry_id, 11);
+    assert_eq!(ch.school_id, 17);
+    assert_eq!(ch.gender, 0);
+
+    // Simulate a legacy DB record with missing bloodline_id/race_id and verify backfill.
+    repo.with_mut_snapshot(|snap| {
+        let gm = snap.characters.get_mut(&90_000_003).unwrap();
+        gm.bloodline_id = 0;
+        gm.race_id = 0;
+        gm.ancestry_id = 0;
+        gm.school_id = 0;
+    });
+    repo.provision_gm_account("admin", "admin-pass", 90_000_003, "ISD Polaris");
+    let backfilled = repo.get_character(90_000_003).expect("ISD Polaris backfilled");
+    assert_eq!(backfilled.race_id, 1);
+    assert_eq!(backfilled.bloodline_id, 1);
+    assert_eq!(backfilled.ancestry_id, 11);
+    assert_eq!(backfilled.school_id, 17);
+}

@@ -755,6 +755,10 @@ pub struct SessionState {
     pub region_id: Option<u32>,
     pub ship_id: Option<i64>,
     pub race_id: Option<u32>,
+    #[serde(default)]
+    pub bloodline_id: Option<u32>,
+    #[serde(default)]
+    pub gender_id: Option<u32>,
     pub corp_role: u64,
     #[serde(default)]
     pub corp_account_key: i32,
@@ -948,6 +952,18 @@ impl SessionState {
             changes.insert(
                 "raceID".into(),
                 (opt_u32(self.race_id), opt_u32(next.race_id)),
+            );
+        }
+        if self.bloodline_id != next.bloodline_id {
+            changes.insert(
+                "bloodlineID".into(),
+                (opt_u32(self.bloodline_id), opt_u32(next.bloodline_id)),
+            );
+        }
+        if self.gender_id != next.gender_id {
+            changes.insert(
+                "genderID".into(),
+                (opt_u32(self.gender_id), opt_u32(next.gender_id)),
             );
         }
         if self.corp_role != next.corp_role {

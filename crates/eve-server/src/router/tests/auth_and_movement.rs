@@ -56,6 +56,8 @@ async fn test_authentication_and_ownership_enforcement() {
     login_and_select_aura(&ctx, &mut session).await;
     assert_eq!(session.character_id, Some(90_000_001));
     assert_eq!(session.race_id, Some(2));
+    assert_eq!(session.bloodline_id, Some(3));
+    assert_eq!(session.gender_id, Some(0));
 
     let bad_bind = ctx
         .dispatch_rpc(
@@ -130,6 +132,9 @@ async fn test_authentication_and_ownership_enforcement() {
     )
     .await
     .unwrap();
+    assert_eq!(admin_sess.race_id, Some(1));
+    assert_eq!(admin_sess.bloodline_id, Some(1));
+    assert_eq!(admin_sess.gender_id, Some(0));
     ctx.dispatch_rpc(
         &mut admin_sess,
         "slash",

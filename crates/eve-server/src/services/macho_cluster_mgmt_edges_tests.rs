@@ -154,6 +154,8 @@ fn session_attribute_update_validation_station_structure_exclusivity_and_remote_
         ("corprole", PyRep::Integer(-2)),
         ("corpAccountKey", PyRep::Integer(i64::from(i32::MAX) + 1)),
         ("userType", PyRep::String("not-int".into())),
+        ("bloodlineID", PyRep::Integer(-1)),
+        ("genderID", PyRep::Integer(-1)),
         ("languageID", PyRep::Integer(42)),
         ("address", PyRep::Bytes(vec![0xFF, 0x80])),
         ("maxSessionTime", PyRep::Integer(-10)),
@@ -272,6 +274,8 @@ fn session_attribute_update_validation_station_structure_exclusivity_and_remote_
         ch.character_id = remote_cid;
         ch.user_id = remote_uid;
         ch.corporation_id = 1_000_125;
+        ch.bloodline_id = 1;
+        ch.gender = 0;
         snap.characters.insert(remote_cid, ch);
         snap.accounts.insert(
             "remote_acc".into(),
@@ -304,6 +308,8 @@ fn session_attribute_update_validation_station_structure_exclusivity_and_remote_
                 (PyRep::String("corpid".into()), PyRep::Integer(98_555_001)),
                 (PyRep::String("allianceid".into()), PyRep::Integer(99_555_001)),
                 (PyRep::String("corprole".into()), PyRep::Integer(256)),
+                (PyRep::String("bloodlineID".into()), PyRep::Integer(3)),
+                (PyRep::String("genderID".into()), PyRep::Integer(1)),
                 (
                     PyRep::String("role".into()),
                     PyRep::Integer(eve_db::service_roles::ROLE_GMH as i64),
@@ -319,6 +325,8 @@ fn session_attribute_update_validation_station_structure_exclusivity_and_remote_
         let ch = snap.characters.get(&remote_cid).unwrap();
         assert_eq!(ch.corporation_id, 98_555_001);
         assert_eq!(ch.alliance_id, Some(99_555_001));
+        assert_eq!(ch.bloodline_id, 3);
+        assert_eq!(ch.gender, 1);
         assert_eq!(
             snap.accounts.get("remote_acc").unwrap().role,
             eve_db::service_roles::ROLE_GMH

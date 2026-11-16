@@ -741,6 +741,51 @@ fn apply_character_transition_in_snap_with_trades(
     Ok((snap.characters[&char_id].clone(), cancelled_trades))
 }
 
+/// Resolves a valid `(bloodline_id, race_id)` pair for `ch`, deriving/falling back via `sde` if
+/// `bloodline_id == 0` or unknown in a populated SDE.
+pub(crate) fn resolve_character_bloodline_and_race(
+    ch: &CharacterRecord,
+    sde: Option<&SdeRegistry>,
+) -> (u32, u32) {
+    let valid_in_sde = sde.map_or(true, |s| {
+        s.bloodlines.is_empty() || s.bloodlines.contains_key(&ch.bloodline_id)
+    });
+    if ch.bloodline_id > 0 && valid_in_sde {
+        let race_id = if ch.race_id > 0 {
+            ch.race_id
+        } else {
+            sde.and_then(|s| s.bloodlines.get(&ch.bloodline_id))
+                .map(|b| b.race_id)
+                .unwrap_or(1)
+        };
+        return (ch.bloodline_id, race_id);
+    }
+    if let Some(sde) = sde.filter(|s| !s.bloodlines.is_empty()) {
+        let picked = (ch.race_id > 0)
+            .then(|| {
+                sde.bloodlines
+                    .values()
+                    .filter(|b| b.race_id == ch.race_id)
+                    .min_by_key(|b| b.bloodline_id)
+            })
+            .flatten()
+            .or_else(|| {
+                sde.bloodlines
+                    .values()
+                    .filter(|b| b.race_id == 1)
+                    .min_by_key(|b| b.bloodline_id)
+            })
+            .or_else(|| sde.bloodlines.values().min_by_key(|b| b.bloodline_id));
+        if let Some(bl) = picked {
+            return (bl.bloodline_id, bl.race_id);
+        }
+    }
+    (
+        if ch.bloodline_id > 0 { ch.bloodline_id } else { 1 },
+        if ch.race_id > 0 { ch.race_id } else { 1 },
+    )
+}
+
 /// Clears all character/spatial attributes on a `SessionState` (used on logoff / character clear).
 pub fn clear_session_character_state(session: &mut SessionState) {
     session.station_id = None;
@@ -749,9 +794,12 @@ pub fn clear_session_character_state(session: &mut SessionState) {
     session.constellation_id = None;
     session.region_id = None;
     session.ship_id = None;
+    session.race_id = None;
+    session.bloodline_id = None;
+    session.gender_id = None;
 }
 
-/// Synchronizes all spatial and active-ship attributes on `SessionState` from a `CharacterRecord`.
+/// Synchronizes all spatial, active-ship, and character-identity attributes on `SessionState` from a `CharacterRecord`.
 pub fn apply_session_from_character(
     session: &mut SessionState,
     ch: &CharacterRecord,
@@ -779,6 +827,10 @@ pub fn apply_session_from_character(
     session.structure_id = ch.structure_id;
     session.ship_id =
         override_ship.unwrap_or_else(|| (ch.active_ship_id > 0).then_some(ch.active_ship_id));
+    let (bloodline_id, race_id) = resolve_character_bloodline_and_race(ch, sde);
+    session.race_id = Some(race_id);
+    session.bloodline_id = Some(bloodline_id);
+    session.gender_id = Some(ch.gender);
 }
 
 fn synthetic_session_from_character(
@@ -873,6 +925,27 @@ pub fn build_session_state_keyval(session: &SessionState, char_id: i64) -> PyRep
             session
                 .region_id
                 .map(|r| PyRep::Integer(i64::from(r)))
+                .unwrap_or(PyRep::None),
+        ),
+        (
+            "raceID",
+            session
+                .race_id
+                .map(|r| PyRep::Integer(i64::from(r)))
+                .unwrap_or(PyRep::None),
+        ),
+        (
+            "bloodlineID",
+            session
+                .bloodline_id
+                .map(|b| PyRep::Integer(i64::from(b)))
+                .unwrap_or(PyRep::None),
+        ),
+        (
+            "genderID",
+            session
+                .gender_id
+                .map(|g| PyRep::Integer(i64::from(g)))
                 .unwrap_or(PyRep::None),
         ),
     ])
@@ -2208,6 +2281,9 @@ mod tests {
         // - While docked at station: `solarsystemid` is `PyRep::None`, `solarsystemid2` is `Integer(30_000_142)`,
         //   `locationid` is `Integer(jita_station)`.
         apply_session_from_character(&mut sess, &ch, None, Some(&ctx.sde));
+        assert_eq!(sess.race_id, Some(1));
+        assert_eq!(sess.bloodline_id, Some(1));
+        assert_eq!(sess.gender_id, Some(1));
         let kv_docked = build_session_state_keyval(&sess, char_id);
         assert_eq!(kv_docked.dict_get("solarsystemid"), Some(&PyRep::None));
         assert_eq!(
@@ -2218,6 +2294,28 @@ mod tests {
             kv_docked.dict_get("locationid"),
             Some(&PyRep::Integer(jita_station))
         );
+        assert_eq!(kv_docked.dict_get("raceID"), Some(&PyRep::Integer(1)));
+        assert_eq!(kv_docked.dict_get("bloodlineID"), Some(&PyRep::Integer(1)));
+        assert_eq!(kv_docked.dict_get("genderID"), Some(&PyRep::Integer(1)));
+
+        let mut ch_missing_bl = ch.clone();
+        ch_missing_bl.bloodline_id = 0;
+        ch_missing_bl.race_id = 2;
+        ch_missing_bl.gender = 0;
+        let (fallback_bl, fallback_race) =
+            resolve_character_bloodline_and_race(&ch_missing_bl, Some(&ctx.sde));
+        assert!(fallback_bl > 0);
+        assert_eq!(fallback_race, 2);
+        apply_session_from_character(&mut sess, &ch_missing_bl, None, Some(&ctx.sde));
+        assert_eq!(sess.bloodline_id, Some(fallback_bl));
+        assert_eq!(sess.race_id, Some(2));
+        assert_eq!(sess.gender_id, Some(0));
+
+        clear_session_character_state(&mut sess);
+        assert_eq!(sess.race_id, None);
+        assert_eq!(sess.bloodline_id, None);
+        assert_eq!(sess.gender_id, None);
+        apply_session_from_character(&mut sess, &ch, None, Some(&ctx.sde));
 
         // - While in space: both `solarsystemid` and `solarsystemid2` are `Integer(30_000_142)`.
         sess.station_id = None;

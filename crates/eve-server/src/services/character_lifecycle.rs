@@ -252,6 +252,10 @@ pub fn handle(
                 }
                 Ok(true)
             });
+            if matches!(updated, Ok(true)) && session.character_id == Some(char_id) {
+                session.bloodline_id = Some(bloodline_id);
+                session.race_id = Some(binfo.race_id);
+            }
             Some(updated.map(PyRep::Bool))
         }
         ("charUnboundMgr", "UpdateCharacterGender") => {
@@ -272,6 +276,9 @@ pub fn handle(
                     false
                 }
             });
+            if updated && session.character_id == Some(char_id) {
+                session.gender_id = Some(gender_id);
+            }
             Some(Ok(PyRep::Bool(updated)))
         }
         _ => None,

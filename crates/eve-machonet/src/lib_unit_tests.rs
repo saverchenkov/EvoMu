@@ -398,6 +398,8 @@ fn session_state_notifications_locations_and_full_diff_matrix() {
     s2.region_id = Some(10_000_002);
     s2.ship_id = Some(60);
     s2.race_id = Some(1);
+    s2.bloodline_id = Some(1);
+    s2.gender_id = Some(0);
     s2.corp_role = 128;
     s2.fleet_id = Some(70);
     s2.war_faction_id = Some(80);
@@ -420,6 +422,8 @@ fn session_state_notifications_locations_and_full_diff_matrix() {
         "regionid",
         "shipid",
         "raceID",
+        "bloodlineID",
+        "genderID",
         "corprole",
         "fleetid",
         "warfactionid",
@@ -429,6 +433,14 @@ fn session_state_notifications_locations_and_full_diff_matrix() {
     ] {
         assert!(diff.contains_key(key), "missing diff key {key}");
     }
+    assert_eq!(
+        diff.get("bloodlineID"),
+        Some(&(PyRep::None, PyRep::Integer(1)))
+    );
+    assert_eq!(
+        diff.get("genderID"),
+        Some(&(PyRep::None, PyRep::Integer(0)))
+    );
     assert!(s2.to_session_change_pyrep(&base, vec![888_444]).is_some());
     assert_eq!(
         s2.to_initial_session_notification(888_444, 9001).packet_type,

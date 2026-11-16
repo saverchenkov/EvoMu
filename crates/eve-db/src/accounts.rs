@@ -312,7 +312,11 @@ impl WorldRepository {
         char_name: &str,
     ) {
         let already_complete = self.authenticate(username, password_token).is_ok()
-            && self.with_snapshot(|snap| snap.characters.contains_key(&char_id));
+            && self.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .is_some_and(|c| c.race_id > 0 && c.bloodline_id > 0)
+            });
         if already_complete {
             return;
         }
@@ -378,6 +382,18 @@ impl WorldRepository {
                     },
                 );
                 snap.account_plex_vault.insert(user_id, 10_000);
+            } else if let Some(existing_char) = snap.characters.get_mut(&char_id) {
+                if existing_char.race_id == 0 || existing_char.bloodline_id == 0 {
+                    existing_char.race_id = 1;
+                    existing_char.bloodline_id = 1;
+                    if existing_char.ancestry_id == 0 {
+                        existing_char.ancestry_id = 11;
+                    }
+                    if existing_char.school_id == 0 {
+                        existing_char.school_id = 17;
+                    }
+                    existing_char.version += 1;
+                }
             }
             Ok::<(), std::convert::Infallible>(())
         });

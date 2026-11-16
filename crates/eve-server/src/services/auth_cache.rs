@@ -573,7 +573,6 @@ pub async fn handle(
             session.corporation_id = None;
             session.alliance_id = None;
             crate::router::clear_session_character_state(session);
-            session.race_id = None;
             session.corp_role = 0;
             session.fleet_id = None;
             session.war_faction_id = None;

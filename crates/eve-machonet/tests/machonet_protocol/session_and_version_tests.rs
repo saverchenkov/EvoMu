@@ -203,6 +203,8 @@ fn test_session_state_diffs_notifications_and_gm_roles() {
     s2.region_id = Some(10_000_032);
     s2.ship_id = Some(500);
     s2.race_id = Some(1);
+    s2.bloodline_id = Some(1);
+    s2.gender_id = Some(0);
     s2.corp_role = 16;
     s2.fleet_id = Some(600);
     s2.war_faction_id = Some(500_001);
@@ -225,6 +227,8 @@ fn test_session_state_diffs_notifications_and_gm_roles() {
         "regionid",
         "shipid",
         "raceID",
+        "bloodlineID",
+        "genderID",
         "corprole",
         "fleetid",
         "warfactionid",
