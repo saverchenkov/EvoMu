@@ -228,6 +228,27 @@ pub async fn write_framed_pyrep<W: AsyncWriteExt + Unpin>(
     .await
 }
 
+pub(crate) const SLOW_ENCODE_THRESHOLD_MS: u64 = 100;
+pub(crate) const SLOW_WRITE_ALL_THRESHOLD_MS: u64 = 25;
+
+fn encode_macho_frame_with_slow_warn(
+    rep: &PyRep,
+) -> std::result::Result<Vec<u8>, eve_proto::ProtoError> {
+    let encode_start = std::time::Instant::now();
+    let bytes = marshal::try_encode_with_limits(rep, MAX_MACHO_FRAME_LEN)?;
+    let encode_ms = encode_start.elapsed().as_millis() as u64;
+    if encode_ms >= SLOW_ENCODE_THRESHOLD_MS {
+        warn!(
+            target: "rpc.slow",
+            stage = "encode",
+            bytes = bytes.len(),
+            ms = encode_ms,
+            "Wire writer marshal::encode exceeded slow-work threshold"
+        );
+    }
+    Ok(bytes)
+}
+
 async fn write_encoded_frame_with_timeout<W: AsyncWriteExt + Unpin>(
     stream: &mut W,
     bytes: &[u8],
@@ -235,6 +256,7 @@ async fn write_encoded_frame_with_timeout<W: AsyncWriteExt + Unpin>(
 ) -> Result<()> {
     let frame_len = u32::try_from(bytes.len())
         .map_err(|_| anyhow::anyhow!("machoNet frame length {} exceeds u32", bytes.len()))?;
+    let write_start = std::time::Instant::now();
     tokio::time::timeout(write_timeout, async {
         stream.write_u32_le(frame_len).await?;
         stream.write_all(bytes).await?;
@@ -248,6 +270,16 @@ async fn write_encoded_frame_with_timeout<W: AsyncWriteExt + Unpin>(
             write_timeout.as_millis()
         )
     })??;
+    let write_ms = write_start.elapsed().as_millis() as u64;
+    if write_ms >= SLOW_WRITE_ALL_THRESHOLD_MS {
+        warn!(
+            target: "rpc.slow",
+            stage = "write_all",
+            bytes = bytes.len(),
+            ms = write_ms,
+            "Wire writer write_all exceeded slow-work threshold"
+        );
+    }
     Ok(())
 }
 
@@ -256,7 +288,7 @@ pub(crate) async fn write_framed_pyrep_with_timeout<W: AsyncWriteExt + Unpin>(
     rep: &PyRep,
     write_timeout: std::time::Duration,
 ) -> Result<()> {
-    let bytes = marshal::try_encode_with_limits(rep, MAX_MACHO_FRAME_LEN)
+    let bytes = encode_macho_frame_with_slow_warn(rep)
         .map_err(|e| anyhow::anyhow!("Failed to marshal machoNet frame: {e}"))?;
     write_encoded_frame_with_timeout(stream, &bytes, write_timeout).await
 }
@@ -393,7 +425,7 @@ pub(crate) async fn write_out_frames_for_call_req<W: AsyncWriteExt + Unpin>(
     for frame in frames {
         let is_call_rsp = matches!(frame, crate::outbound_sequencer::OutFrame::CallRsp { .. });
         let wire_pyrep = out_frame_to_wire_pyrep(proxy_node_id, client_id, user_id, frame);
-        match marshal::try_encode_with_limits(&wire_pyrep, MAX_MACHO_FRAME_LEN) {
+        match encode_macho_frame_with_slow_warn(&wire_pyrep) {
             Ok(bytes) => {
                 write_encoded_frame_with_timeout(writer, &bytes, write_timeout).await?;
                 if is_call_rsp {
@@ -782,6 +814,21 @@ pub async fn execute_call_req_wire(
 ) -> CallReqWireOutcome {
     let call_started_at = std::time::Instant::now();
     let was_live_before_rpc = wire.wire_state.destiny.is_live();
+    let call_id = match (req_dest, req_source) {
+        (
+            MachoAddress::Node { call_id, .. }
+            | MachoAddress::Any { call_id, .. }
+            | MachoAddress::Client { call_id, .. },
+            _,
+        ) if *call_id != 0 => *call_id,
+        (
+            _,
+            MachoAddress::Client { call_id, .. }
+            | MachoAddress::Node { call_id, .. }
+            | MachoAddress::Any { call_id, .. },
+        ) => *call_id,
+        _ => 0,
+    };
     let mut drained_char_notifications = Vec::new();
     let mut pre_rpc_notifs = Vec::new();
     if let Some(cid) = session.character_id {
@@ -803,8 +850,9 @@ pub async fn execute_call_req_wire(
             })
         })
     });
-    let rpc_res = ctx
-        .dispatch_rpc(
+    let rpc_res = crate::router::dispatch::with_active_rpc_call_id(
+        call_id,
+        ctx.dispatch_rpc(
             session,
             service,
             bound_id,
@@ -812,8 +860,9 @@ pub async fn execute_call_req_wire(
             call_args,
             call_kwargs,
             Some("machoNet:26000"),
-        )
-        .await;
+        ),
+    )
+    .await;
     if let Some(cid) = session.character_id {
         for notif in ctx.drain_notifications_for_char(cid) {
             drained_char_notifications.push(notif.clone());
@@ -936,8 +985,23 @@ pub async fn execute_call_req_wire(
         }
     }
 
+    let bootstrap_phase = crate::ops_telemetry::classify_bootstrap_phase(service, method);
+    let bootstrap_elapsed_ms = bootstrap_phase.map(|phase| {
+        let elapsed_ms = call_started_at.elapsed().as_millis() as u64;
+        crate::ops_telemetry::record_bootstrap_timing(crate::ops_telemetry::BootstrapPacketTiming {
+            phase: phase.to_string(),
+            service: service.to_string(),
+            method: method.to_string(),
+            session_id: session.session_id,
+            character_id: session.character_id,
+            elapsed_since_request_ms: elapsed_ms,
+            timestamp_unix: ctx.now_unix(),
+        });
+        elapsed_ms
+    });
+
     let mut error_wire_body = None;
-    let (rpc_result, rsp_pkt) = match rpc_res {
+    let (rpc_result, mut rsp_pkt) = match rpc_res {
         Ok(val) => {
             let mut named_payload = HashMap::new();
             let maybe_substruct = match &val {
@@ -999,6 +1063,12 @@ pub async fn execute_call_req_wire(
             (Err(err), pkt)
         }
     };
+    if let Some(elapsed_ms) = bootstrap_elapsed_ms {
+        rsp_pkt.named_payload.insert(
+            "elapsed_since_request_ms".into(),
+            PyRep::Integer(elapsed_ms as i64),
+        );
+    }
 
     let docking_transition = was_in_space && !is_in_space;
     let death_respawn_docking = docking_transition && session.ship_id != prev_session.ship_id;
@@ -1061,14 +1131,16 @@ pub async fn execute_call_req_wire(
             call_args,
             *wire.deferred_ship_id,
         );
-    let (session_change_frame, deferred_flush_frame) = resolve_deferred_session_change_frame(
-        ctx,
-        wire.client_id,
-        &prev_session,
-        session,
-        wire.deferred_ship_id,
-        is_dock_hangar_flush,
-    );
+    let (session_change_frame, deferred_flush_frame) =
+        resolve_deferred_session_change_frame_with_elapsed(
+            ctx,
+            wire.client_id,
+            &prev_session,
+            session,
+            wire.deferred_ship_id,
+            is_dock_hangar_flush,
+            bootstrap_elapsed_ms,
+        );
 
     let mut pending_tick_batches = cross_sys_pre_ticks;
     let mut post_rpc_direct_batch = None;
@@ -1862,6 +1934,10 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                 {
                     Ok(r) => r,
                     Err(e) => {
+                        let dec = crate::warn_limiter::check_global_warn(
+                            crate::warn_limiter::WarnCategory::MarshalOddity,
+                            format!("macho_decode:{e}"),
+                        );
                         if handshake.is_authenticated() {
                             if let Some((req_source, recovered_call_id)) =
                                 recover_call_req_from_corrupt_payload(
@@ -1870,7 +1946,15 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     max_nodes,
                                 )
                             {
-                                warn!("Failed to decode authenticated CallReq call_id={recovered_call_id} on machoNet session {session_id}: {e}; returning wrapped Internal error");
+                                if dec.should_log {
+                                    warn!(
+                                        session_id,
+                                        recovered_call_id,
+                                        count = dec.count,
+                                        suppressed = dec.suppressed_for_key,
+                                        "Failed to decode authenticated CallReq call_id={recovered_call_id} on machoNet session {session_id}: {e}; returning wrapped Internal error"
+                                    );
+                                }
                                 if write_call_req_internal_error_fallback(
                                     &mut writer,
                                     &req_source,
@@ -1886,7 +1970,14 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 continue;
                             }
                         }
-                        warn!("Failed to decode marshal payload on machoNet session {session_id}: {e}");
+                        if dec.should_log {
+                            warn!(
+                                session_id,
+                                count = dec.count,
+                                suppressed = dec.suppressed_for_key,
+                                "Failed to decode marshal payload on machoNet session {session_id}: {e}"
+                            );
+                        }
                         let closed = GPSTransportClosed::new(
                             format!("Invalid marshal frame: {e}"),
                             "HANDSHAKE_INCOMPATIBLEPROTOCOL",
@@ -2004,6 +2095,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             }
                         }
                         Ok(HandshakeStepOutput::Authenticated { frames, identity }) => {
+                            let auth_started = std::time::Instant::now();
                             let now_unix = ctx.now_unix();
                             if ctx.is_shutting_down()
                                 && (identity.role & eve_machonet::service_roles::ROLE_GMS) == 0
@@ -2081,6 +2173,18 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             session.user_type = identity.user_type;
                             is_authenticated_flag.store(true, Ordering::Release);
                             preauth_guard.complete_auth();
+                            crate::lifecycle::set_open_sessions(ctx.db.online_session_count() as usize);
+                            crate::ops_telemetry::record_bootstrap_timing(
+                                crate::ops_telemetry::BootstrapPacketTiming {
+                                    phase: "login".to_string(),
+                                    service: "authentication".to_string(),
+                                    method: "Login".to_string(),
+                                    session_id,
+                                    character_id: None,
+                                    elapsed_since_request_ms: auth_started.elapsed().as_millis() as u64,
+                                    timestamp_unix: now_unix,
+                                },
+                            );
 
                             let mut failed = false;
                             for f in &frames {
@@ -2370,6 +2474,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
 
     reader_task.abort();
     ctx.cleanup_disconnected_client_session(&mut session).await;
+    crate::lifecycle::set_open_sessions(ctx.db.online_session_count() as usize);
 
     Ok(())
 }
@@ -2463,6 +2568,22 @@ pub fn build_filtered_session_change_packet(
     session_id: u64,
     raw_payload: PyRep,
 ) -> Option<PyRep> {
+    build_filtered_session_change_packet_with_elapsed(
+        client_id,
+        user_id,
+        session_id,
+        raw_payload,
+        None,
+    )
+}
+
+fn build_filtered_session_change_packet_with_elapsed(
+    client_id: u64,
+    user_id: Option<u64>,
+    session_id: u64,
+    raw_payload: PyRep,
+    elapsed_since_request_ms: Option<u64>,
+) -> Option<PyRep> {
     let (filtered_payload, dropped) = eve_machonet::filter_session_change_payload(raw_payload);
     if !dropped.is_empty() {
         debug!(
@@ -2475,6 +2596,12 @@ pub fn build_filtered_session_change_packet(
     let sess_change_payload = filtered_payload?;
     let mut named_payload = HashMap::new();
     named_payload.insert("channel".into(), PyRep::ascii_bytes("sessionchange"));
+    if let Some(elapsed_ms) = elapsed_since_request_ms {
+        named_payload.insert(
+            "elapsed_since_request_ms".into(),
+            PyRep::Integer(elapsed_ms as i64),
+        );
+    }
     let sess_pkt = MachoPacket {
         packet_type: MachoPacketType::SessionChangeNotification,
         source: MachoAddress::Node {
@@ -2499,6 +2626,7 @@ fn build_session_change_wire_frame(
     client_id: u64,
     prev_session: &SessionState,
     session: &SessionState,
+    elapsed_since_request_ms: Option<u64>,
 ) -> Option<PyRep> {
     let mut raw_payload = eve_machonet::SessionChange::from_diff(
         prev_session,
@@ -2507,11 +2635,12 @@ fn build_session_change_wire_frame(
     )
     .to_pyrep()?;
     enrich_session_change_scoped_roles(ctx, prev_session, session, &mut raw_payload);
-    build_filtered_session_change_packet(
+    build_filtered_session_change_packet_with_elapsed(
         client_id,
         session.user_id,
         session.session_id,
         raw_payload,
+        elapsed_since_request_ms,
     )
 }
 
@@ -2587,6 +2716,26 @@ fn resolve_deferred_session_change_frame(
     deferred_ship_id: &mut Option<PendingDeferredShipId>,
     flush_now: bool,
 ) -> (Option<PyRep>, Option<PyRep>) {
+    resolve_deferred_session_change_frame_with_elapsed(
+        ctx,
+        client_id,
+        prev_session,
+        session,
+        deferred_ship_id,
+        flush_now,
+        None,
+    )
+}
+
+fn resolve_deferred_session_change_frame_with_elapsed(
+    ctx: &ServerContext,
+    client_id: u64,
+    prev_session: &SessionState,
+    session: &SessionState,
+    deferred_ship_id: &mut Option<PendingDeferredShipId>,
+    flush_now: bool,
+    elapsed_since_request_ms: Option<u64>,
+) -> (Option<PyRep>, Option<PyRep>) {
     let was_in_space = prev_session.character_id.is_some()
         && prev_session.station_id.is_none()
         && prev_session.structure_id.is_none()
@@ -2650,8 +2799,13 @@ fn resolve_deferred_session_change_frame(
         }
     }
 
-    let sess_frame =
-        build_session_change_wire_frame(ctx, client_id, &effective_prev, &effective_next);
+    let sess_frame = build_session_change_wire_frame(
+        ctx,
+        client_id,
+        &effective_prev,
+        &effective_next,
+        elapsed_since_request_ms,
+    );
     (sess_frame, deferred_flush_frame)
 }
 

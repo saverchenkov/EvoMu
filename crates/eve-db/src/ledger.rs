@@ -314,8 +314,7 @@ pub fn unix_secs_to_date_str(unix_secs: u64) -> String {
 
 impl WorldStateSnapshot {
     pub fn append_journal_entry(&mut self, input: JournalEntryInput<'_>) -> i64 {
-        self.next_entity_id += 1;
-        let entry_id = self.next_entity_id;
+        let entry_id = self.alloc_entity_id();
         let date_unix = input.meta.date_unix;
         let first_party_id = input.meta.first_party_id;
         let second_party_id = input.meta.second_party_id;
@@ -364,8 +363,7 @@ impl WorldStateSnapshot {
         seller_id: i64,
         journal_ref_id: i64,
     ) -> i64 {
-        self.next_entity_id += 1;
-        let transaction_id = self.next_entity_id;
+        let transaction_id = self.alloc_entity_id();
         self.market_transactions.insert(
             transaction_id,
             MarketTransactionRecord {

@@ -41,6 +41,19 @@ pub fn normalize_quasar_any_payload(
     }
     if let Some(desc) = descriptors.get_message(&norm) {
         any_out.value = coerce_quasar_bytes_to_message(descriptors, desc, &any_out.value, 0);
+    } else if !norm.is_empty() && !norm.starts_with("google.protobuf.") {
+        let dec = crate::warn_limiter::check_global_warn(
+            crate::warn_limiter::WarnCategory::UnknownQuasarNoticeType,
+            norm.clone(),
+        );
+        if dec.should_log {
+            tracing::warn!(
+                notice_type = %norm,
+                count = dec.count,
+                suppressed = dec.suppressed_for_key,
+                "Unknown Quasar notice type during Any payload normalization"
+            );
+        }
     }
 }
 

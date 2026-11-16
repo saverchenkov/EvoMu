@@ -9,9 +9,9 @@ use crate::types::{
 };
 use rusqlite::{params, Connection, Transaction};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Block size persisted to `world_meta.next_entity_block` for crash/abort-safe ID allocation (`P-9`).
 pub const ENTITY_ID_BLOCK_SIZE: i64 = 1024;
@@ -660,6 +660,7 @@ pub type PostCommitListener = Arc<dyn Fn(&WorldStateSnapshot, &ChangeSet, &Effec
 pub struct EntityIdAllocator {
     next: AtomicI64,
     persisted_high_water: AtomicI64,
+    referenced_ids: Mutex<HashSet<i64>>,
 }
 
 impl EntityIdAllocator {
@@ -670,7 +671,45 @@ impl EntityIdAllocator {
         Self {
             next: AtomicI64::new(floor),
             persisted_high_water: AtomicI64::new(persisted_high_water.max(200_000_000)),
+            referenced_ids: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Replaces the tracked cross-table referenced ID set on boot or snapshot reload (`#1087`).
+    pub fn replace_referenced_ids(&self, ids: HashSet<i64>) {
+        *self
+            .referenced_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = ids;
+    }
+
+    /// Adds additional referenced IDs to the cross-table skip set (`#1087`).
+    pub fn seed_referenced_ids(&self, ids: impl IntoIterator<Item = i64>) {
+        let mut guard = self
+            .referenced_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for id in ids {
+            if id > 0 {
+                guard.insert(id);
+            }
+        }
+    }
+
+    /// Returns `true` if `candidate` is recorded in the cross-table referenced ID set (`#1087`).
+    #[inline]
+    pub fn is_referenced(&self, candidate: i64) -> bool {
+        self.referenced_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&candidate)
+    }
+
+    fn mark_referenced(&self, id: i64) {
+        self.referenced_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id);
     }
 
     /// Returns the most recently allocated (or initialized) ID counter without incrementing it.
@@ -692,12 +731,85 @@ impl EntityIdAllocator {
             .store(persisted_high_water.max(200_000_000), Ordering::Release);
     }
 
-    /// Allocates a strictly monotonic entity ID, immediately persisting the next block of
-    /// [`ENTITY_ID_BLOCK_SIZE`] into `world_meta.next_entity_block` in autocommit mode if crossed.
+    /// Allocates a strictly monotonic entity ID, skipping any candidate still referenced in
+    /// cross-table SQLite records or the tracked referenced set, and immediately persisting the
+    /// next block of [`ENTITY_ID_BLOCK_SIZE`] into `world_meta.next_entity_block` in autocommit mode.
     pub fn alloc_with_conn(&self, conn: &Connection) -> Result<i64, String> {
-        let id = self.next.fetch_add(1, Ordering::AcqRel) + 1;
-        self.ensure_block_persisted(conn, id)?;
-        Ok(id)
+        loop {
+            let id = self.next.fetch_add(1, Ordering::AcqRel) + 1;
+            if self.is_referenced(id)
+                || crate::sqlite_store::sqlite_entity_id_exists(conn, id)?
+            {
+                self.mark_referenced(id);
+                continue;
+            }
+            self.mark_referenced(id);
+            self.ensure_block_persisted(conn, id)?;
+            return Ok(id);
+        }
+    }
+
+    /// Allocates a strictly monotonic entity ID while also consulting `snap` for uncommitted or
+    /// non-SQLite domain IDs (`#1087`).
+    pub fn alloc_with_conn_and_snap(
+        &self,
+        conn: &Connection,
+        snap: &WorldStateSnapshot,
+    ) -> Result<i64, String> {
+        loop {
+            let id = self.next.fetch_add(1, Ordering::AcqRel) + 1;
+            if self.is_referenced(id)
+                || snap.is_entity_id_referenced(id)
+                || crate::sqlite_store::sqlite_entity_id_exists(conn, id)?
+            {
+                self.mark_referenced(id);
+                continue;
+            }
+            self.mark_referenced(id);
+            self.ensure_block_persisted(conn, id)?;
+            return Ok(id);
+        }
+    }
+
+    /// Synchronously commits both `next_entity_id` and `next_entity_block` to `world_meta`
+    /// (used at identity/account/character boundaries so exact counter values survive crash) (`#1087`).
+    pub fn commit_counter_sync(&self, conn: &Connection, floor: i64) -> Result<i64, String> {
+        let mut cur = self.next.load(Ordering::Acquire);
+        let floor = floor.max(200_000_000);
+        while cur < floor {
+            match self.next.compare_exchange_weak(
+                cur,
+                floor,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => cur = observed,
+            }
+        }
+        let committed = self.next.load(Ordering::Acquire).max(floor);
+        let block = self
+            .persisted_high_water
+            .load(Ordering::Acquire)
+            .max(committed);
+        conn.execute(
+            "INSERT OR REPLACE INTO world_meta (meta_key, meta_value) VALUES ('next_entity_id', ?1), ('next_entity_block', ?2)",
+            params![committed, block],
+        )
+        .map_err(|e| e.to_string())?;
+        let mut prev = self.persisted_high_water.load(Ordering::Acquire);
+        while prev < block {
+            match self.persisted_high_water.compare_exchange_weak(
+                prev,
+                block,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => prev = observed,
+            }
+        }
+        Ok(committed)
     }
 
     /// Advances the allocator to at least `floor` (preserving monotonic IDs allocated via legacy
@@ -780,7 +892,7 @@ impl<'a> WorldTx<'a> {
         }
         let id = self
             .entity_ids
-            .alloc_with_conn(self.conn)
+            .alloc_with_conn_and_snap(self.conn, self.snap)
             .map_err(TxError::Persist)?;
         self.snap.next_entity_id = self.snap.next_entity_id.max(id);
         Ok(id)
@@ -1550,5 +1662,477 @@ mod tests {
                 "entity IDs must be strictly monotonic across wtx/snap interleaving & aborts: {seen:?}"
             );
         }
+    }
+
+    #[test]
+    fn transient_item_never_persists_to_sqlite_or_wal_and_reclaims_on_unload() {
+        // parity: feat:serverops.persistence
+        let dir = TestTempDir::new("transient_ns");
+        let db_path = dir.path().join("transient_ns.sqlite");
+        let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite");
+
+        let transient_ship_id = 200_777_001_i64;
+        let transient_cargo_id = 200_777_002_i64;
+        let sys_id = 30_000_142_u32;
+
+        repo.tx("insert_transient_items", |wtx| -> Result<(), TxError> {
+            let mut ship = make_test_item(transient_ship_id, 100_001, 1);
+            ship.location_id = i64::from(sys_id);
+            ship.singleton = true;
+            let mut cargo = make_test_item(transient_cargo_id, 100_001, 50);
+            cargo.location_id = transient_ship_id;
+            wtx.snap.insert_transient_item(ship);
+            wtx.snap.insert_transient_item(cargo);
+            Ok(())
+        })
+        .expect("insert_transient_items");
+
+        let published = repo.read_state();
+        assert_eq!(published.wal_seq, 0, "transient insert must not advance wal_seq");
+        assert!(published.is_transient_item(transient_ship_id));
+        assert!(published.is_transient_item(transient_cargo_id));
+        assert!(!published.items.contains_key(&transient_ship_id));
+
+        let json_snap = serde_json::to_string(&*published).expect("serialize snapshot");
+        assert!(
+            !json_snap.contains("200777001") && !json_snap.contains("200777002"),
+            "transient items must be skipped by serde snapshot serialization"
+        );
+
+        let sql_count: i64 = repo
+            .with_sqlite_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM items WHERE item_id IN (?1, ?2)",
+                    params![transient_ship_id, transient_cargo_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())
+            })
+            .expect("sqlite count");
+        assert_eq!(sql_count, 0, "transient items must never reach SQLite items table");
+
+        // Reclaim on scene unload removes root + child transient items.
+        let reclaimed = repo
+            .tx("reclaim_scene", |wtx| -> Result<usize, TxError> {
+                Ok(wtx.snap.reclaim_transient_items_in_system(sys_id))
+            })
+            .expect("reclaim_scene");
+        assert_eq!(reclaimed, 2);
+        assert!(repo.read_state().get_any_item(transient_ship_id).is_none());
+        assert!(repo.read_state().get_any_item(transient_cargo_id).is_none());
+
+        // Materialization via death/loot pipeline turns transient item into persistent row.
+        let loot_id = 200_777_003_i64;
+        repo.tx("seed_and_materialize", |wtx| -> Result<(), TxError> {
+            let mut item = make_test_item(loot_id, 100_001, 7);
+            item.location_id = i64::from(sys_id);
+            wtx.snap.insert_transient_item(item);
+            let mat = wtx
+                .snap
+                .materialize_transient_item(loot_id)
+                .expect("materialize");
+            mat.location_id = 60_003_760;
+            Ok(())
+        })
+        .expect("seed_and_materialize");
+        assert!(!repo.read_state().is_transient_item(loot_id));
+        assert!(repo.read_state().items.contains_key(&loot_id));
+        drop(repo);
+
+        let reopened = WorldRepository::open_sqlite(&db_path).expect("reopen");
+        assert!(!reopened.read_state().is_transient_item(transient_ship_id));
+        assert!(reopened.read_state().items.contains_key(&loot_id));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(16))]
+        #[test]
+        fn transient_item_property_never_reaches_sqlite(
+            raw_id in 200_500_000_i64..200_999_999_i64,
+            qty in 1_i32..500_i32,
+            sys_id in 30_000_001_u32..30_000_200_u32,
+        ) {
+            // parity: feat:serverops.persistence
+            let dir = TestTempDir::new("prop_transient");
+            let db_path = dir.path().join("prop_transient.sqlite");
+            let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite");
+            repo.tx("prop_insert_transient", |wtx| -> Result<(), TxError> {
+                let mut item = make_test_item(raw_id, 100_001, qty);
+                item.location_id = i64::from(sys_id);
+                wtx.snap.insert_transient_item(item);
+                Ok(())
+            })
+            .expect("prop_insert_transient");
+
+            let cnt: i64 = repo
+                .with_sqlite_conn(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM items WHERE item_id = ?1",
+                        params![raw_id],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| e.to_string())
+                })
+                .expect("count");
+            prop_assert_eq!(cnt, 0);
+            prop_assert_eq!(repo.read_state().wal_seq, 0);
+            let encoded = serde_json::to_string(&*repo.read_state()).expect("json");
+            prop_assert!(!encoded.contains(&raw_id.to_string()));
+        }
+    }
+
+    #[test]
+    fn id_allocator_cross_table_guard_prevents_duplicates_across_all_tables() {
+        // parity: feat:serverops.persistence
+        let dir = TestTempDir::new("id_cross_table");
+        let db_path = dir.path().join("id_cross_table.sqlite");
+
+        let seeded_ids: [i64; 22] = [
+            200_000_101, // item
+            200_000_102, // structure
+            200_000_103, // mail
+            200_000_104, // notification (owner_notes -79)
+            200_000_105, // contract
+            200_000_106, // bookmark
+            200_000_107, // killmail
+            200_000_108, // LP log
+            200_000_109, // note (owner_notes)
+            200_000_110, // market_order
+            200_000_111, // market_transaction (domain_rows)
+            200_000_112, // industry_job
+            200_000_113, // fleet
+            200_000_114, // war
+            200_000_115, // corporation
+            200_000_116, // alliance
+            200_000_117, // saved_fitting
+            200_000_118, // wallet_journal + wallet_journal_meta
+            200_000_119, // item_positions
+            200_000_120, // item_custom_names
+            200_000_121, // applied_ship_skins
+            200_000_122, // entity_kv
+        ];
+        let max_seeded = *seeded_ids.iter().max().expect("non-empty seeded_ids");
+
+        {
+            let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite");
+            repo.tx("seed_all_id_tables", |wtx| -> Result<(), TxError> {
+                wtx.snap
+                    .items
+                    .insert(seeded_ids[0], make_test_item(seeded_ids[0], 90_000_001, 1));
+                wtx.snap.structures.insert(
+                    seeded_ids[1],
+                    crate::types::UpwellStructureRecord {
+                        structure_id: seeded_ids[1],
+                        type_id: 35832,
+                        owner_corp_id: 98_000_001,
+                        solar_system_id: 30_000_142,
+                        name: "Seeded Citadel".into(),
+                        ..Default::default()
+                    },
+                );
+                wtx.snap.mails.push(crate::types::MailRecord {
+                    message_id: seeded_ids[2],
+                    sender_id: 90_000_001,
+                    recipient_id: 90_000_002,
+                    subject: "Seed".into(),
+                    body: "Body".into(),
+                });
+                let notif_key = -7_900_000_000_000_i64 - seeded_ids[3];
+                wtx.snap.owner_notes.insert(
+                    notif_key,
+                    crate::types::OwnerNoteRecord {
+                        note_id: notif_key,
+                        character_id: -79,
+                        item_id: 90_000_001,
+                        label: "SeedNotif".into(),
+                        note: "{}".into(),
+                        timestamp_unix: 1,
+                    },
+                );
+                wtx.snap.contracts.insert(
+                    seeded_ids[4],
+                    crate::types::ContractRecord {
+                        contract_id: seeded_ids[4],
+                        issuer_id: 90_000_001,
+                        contract_type: "ItemExchange".into(),
+                        status: "Outstanding".into(),
+                        ..Default::default()
+                    },
+                );
+                wtx.snap.bookmarks.insert(
+                    seeded_ids[5],
+                    crate::types::BookmarkRecord {
+                        bookmark_id: seeded_ids[5],
+                        owner_id: 90_000_001,
+                        label: "BM".into(),
+                        solar_system_id: 30_000_142,
+                        ..Default::default()
+                    },
+                );
+                wtx.snap.killmails.insert(
+                    seeded_ids[6],
+                    crate::types::KillmailRecord {
+                        kill_id: seeded_ids[6],
+                        victim_character_id: 90_000_001,
+                        attacker_character_id: 90_000_002,
+                        solar_system_id: 30_000_142,
+                        ship_type_id: 587,
+                        ..Default::default()
+                    },
+                );
+                wtx.snap.char_lp_logs.insert(
+                    90_000_001,
+                    vec![crate::snapshot_ext::LpRewardLogEntry {
+                        log_id: seeded_ids[7],
+                        corp_id: 1_000_180,
+                        amount: 100,
+                        reason: "Seed".into(),
+                        timestamp_unix: 1,
+                    }],
+                );
+                wtx.snap.owner_notes.insert(
+                    seeded_ids[8],
+                    crate::types::OwnerNoteRecord {
+                        note_id: seeded_ids[8],
+                        character_id: 90_000_001,
+                        item_id: 0,
+                        label: "Note".into(),
+                        note: "Body".into(),
+                        timestamp_unix: 1,
+                    },
+                );
+                wtx.snap.market_orders.insert(
+                    seeded_ids[9],
+                    crate::types::MarketOrderRecord {
+                        order_id: seeded_ids[9],
+                        owner_id: 90_000_001,
+                        station_id: 60_003_760,
+                        region_id: 10_000_002,
+                        type_id: 34,
+                        vol_entered: 10,
+                        vol_remaining: 10,
+                        min_volume: 1,
+                        ..Default::default()
+                    },
+                );
+                wtx.snap.market_transactions.insert(
+                    seeded_ids[10],
+                    crate::ledger::MarketTransactionRecord {
+                        transaction_id: seeded_ids[10],
+                        type_id: 34,
+                        quantity: 1,
+                        location_id: 60_003_760,
+                        buyer_id: 90_000_001,
+                        seller_id: 90_000_002,
+                        ..Default::default()
+                    },
+                );
+                wtx.snap.industry_jobs.insert(
+                    seeded_ids[11],
+                    crate::types::IndustryJobRecord {
+                        job_id: seeded_ids[11],
+                        installer_id: 90_000_001,
+                        facility_id: 60_003_760,
+                        activity_id: 1,
+                        runs: 1,
+                        status: "Active".into(),
+                        ..Default::default()
+                    },
+                );
+                wtx.snap.fleets.insert(
+                    seeded_ids[12],
+                    crate::types::FleetRecord {
+                        fleet_id: seeded_ids[12],
+                        boss_id: 90_000_001,
+                        ..Default::default()
+                    },
+                );
+                wtx.snap.wars.insert(
+                    seeded_ids[13],
+                    crate::types::WarRecord {
+                        war_id: seeded_ids[13],
+                        aggressor_corp_id: 98_000_001,
+                        defender_corp_id: 98_000_002,
+                        active: true,
+                        ..Default::default()
+                    },
+                );
+                wtx.snap.corporations.insert(
+                    seeded_ids[14],
+                    crate::types::CorporationRecord {
+                        corporation_id: seeded_ids[14],
+                        name: "SeedCorp1087".into(),
+                        ticker: "S1087".into(),
+                        ceo_id: 90_000_001,
+                        ..Default::default()
+                    },
+                );
+                wtx.snap.alliances.insert(
+                    seeded_ids[15],
+                    crate::types::AllianceRecord {
+                        alliance_id: seeded_ids[15],
+                        name: "SeedAlliance1087".into(),
+                        short_name: "SA87".into(),
+                        executor_corp_id: seeded_ids[14],
+                        ..Default::default()
+                    },
+                );
+                wtx.snap.saved_fittings.insert(
+                    seeded_ids[16],
+                    crate::types::SavedFittingRecord {
+                        fitting_id: seeded_ids[16],
+                        owner_id: 90_000_001,
+                        name: "Fit1087".into(),
+                        ship_type_id: 587,
+                        ..Default::default()
+                    },
+                );
+                wtx.snap.wallet_journal.push(crate::types::WalletJournalEntry {
+                    entry_id: seeded_ids[17],
+                    character_id: 90_000_001,
+                    entry_type: "Test".into(),
+                    ..Default::default()
+                });
+                wtx.snap
+                    .wallet_journal_meta
+                    .insert(seeded_ids[17], crate::ledger::JournalMeta::default());
+                wtx.snap.item_positions.insert(seeded_ids[18], [1.0, 2.0, 3.0]);
+                wtx.snap
+                    .item_custom_names
+                    .insert(seeded_ids[19], "CustomHull1087".into());
+                wtx.snap.applied_ship_skins.insert(seeded_ids[20], 42);
+                wtx.snap.entity_kv.insert(
+                    crate::service_domains::EntityKvKey::new(
+                        crate::service_domains::Ns::AlphaAvailNotified,
+                        seeded_ids[21],
+                        "",
+                    ),
+                    crate::service_domains::EntityKvRow {
+                        value_json: "true".into(),
+                        updated_unix: 1,
+                    },
+                );
+                Ok(())
+            })
+            .expect("seed_all_id_tables");
+
+            // Simulate stale persisted counter below all seeded IDs before restart.
+            repo.with_sqlite_conn(|conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO world_meta (meta_key, meta_value) VALUES ('next_entity_id', 200000000), ('next_entity_block', 200000000)",
+                    [],
+                )
+                .map_err(|e| e.to_string())?;
+                Ok::<(), String>(())
+            })
+            .expect("reset stale counter");
+        }
+
+        // Boot consults high-water mark over all ID-bearing tables and never duplicates seeded IDs.
+        let reopened = WorldRepository::open_sqlite(&db_path).expect("reopen");
+        assert!(
+            reopened.read_state().next_entity_id >= max_seeded,
+            "boot high-water mark must cover all ID-bearing tables, got {}",
+            reopened.read_state().next_entity_id
+        );
+
+        let allocated = reopened
+            .tx("alloc_post_boot", |wtx| -> Result<(i64, i64), TxError> {
+                let a = wtx.alloc_entity_id()?;
+                let b = wtx.snap.alloc_entity_id();
+                Ok((a, b))
+            })
+            .expect("alloc_post_boot");
+        assert!(allocated.0 > max_seeded);
+        assert!(allocated.1 > allocated.0);
+        for sid in seeded_ids {
+            assert_ne!(allocated.0, sid);
+            assert_ne!(allocated.1, sid);
+        }
+
+        // Verify transaction abort still advances persistent block/allocator so an aborted ID cannot collide.
+        let aborted_id_cell = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let aborted_id_ref = std::sync::Arc::clone(&aborted_id_cell);
+        let abort_res: Result<(), String> = reopened.tx("alloc_then_abort", |wtx| {
+            let id = wtx
+                .alloc_entity_id()
+                .map_err(|e| format!("alloc failed: {e:?}"))?;
+            aborted_id_ref.store(id, std::sync::atomic::Ordering::SeqCst);
+            Err("intentional_abort".to_string())
+        });
+        assert_eq!(abort_res, Err("intentional_abort".to_string()));
+        let aborted_id = aborted_id_cell.load(std::sync::atomic::Ordering::SeqCst);
+        let post_abort_id = reopened
+            .tx("alloc_after_abort", |wtx| wtx.alloc_entity_id())
+            .expect("alloc_after_abort");
+        assert!(
+            post_abort_id > aborted_id,
+            "post-abort allocation {post_abort_id} must remain strictly above aborted {aborted_id}"
+        );
+
+        // Also prove candidate skipping works when tables hold IDs >= 900_000_000 right ahead of counter.
+        reopened
+            .tx("skip_900m_collision", |wtx| -> Result<(), TxError> {
+                let high_struct_id = 900_000_501_i64;
+                let high_tx_id = 900_000_502_i64;
+                let high_pos_id = 900_000_503_i64;
+                wtx.snap.structures.insert(
+                    high_struct_id,
+                    crate::types::UpwellStructureRecord {
+                        structure_id: high_struct_id,
+                        type_id: 35832,
+                        owner_corp_id: 98_000_001,
+                        solar_system_id: 30_000_142,
+                        name: "High Collision Citadel".into(),
+                        ..Default::default()
+                    },
+                );
+                wtx.snap.market_transactions.insert(
+                    high_tx_id,
+                    crate::ledger::MarketTransactionRecord {
+                        transaction_id: high_tx_id,
+                        type_id: 34,
+                        quantity: 1,
+                        ..Default::default()
+                    },
+                );
+                wtx.snap
+                    .item_positions
+                    .insert(high_pos_id, [10.0, 20.0, 30.0]);
+                wtx.snap.next_entity_id = high_struct_id - 1;
+                let picked = wtx.alloc_entity_id()?;
+                assert_ne!(picked, high_struct_id);
+                assert_ne!(picked, high_tx_id);
+                assert_ne!(picked, high_pos_id);
+                assert_eq!(picked, high_pos_id + 1);
+                Ok(())
+            })
+            .expect("skip_900m_collision");
+
+        // Account/character boundaries (player + GM) commit counter synchronously to world_meta.
+        let uid = reopened.provision_player_account("sync_counter_user", "pw");
+        assert!(uid > 0);
+        reopened.provision_gm_account("gm_sync_1087", "gm_pw", 90_000_199, "ISD Sync");
+        let (meta_id, meta_block): (i64, i64) = reopened
+            .with_sqlite_conn(|conn| {
+                let id: i64 = conn
+                    .query_row(
+                        "SELECT meta_value FROM world_meta WHERE meta_key = 'next_entity_id'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                let block: i64 = conn
+                    .query_row(
+                        "SELECT meta_value FROM world_meta WHERE meta_key = 'next_entity_block'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                Ok::<(i64, i64), String>((id, block))
+            })
+            .expect("read world_meta");
+        assert!(meta_id >= reopened.read_state().next_entity_id);
+        assert!(meta_block >= meta_id);
     }
 }

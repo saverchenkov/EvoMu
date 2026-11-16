@@ -109,6 +109,7 @@ pub(crate) fn resolve_destroyed_ship_contents_in_snap(
     let mut root_children: Vec<i64> = snap
         .items
         .values()
+        .chain(snap.transient_items.values())
         .filter(|i| {
             i.location_id == ship_id
                 && Some(i.item_id) != escape_frigate_id
@@ -117,12 +118,14 @@ pub(crate) fn resolve_destroyed_ship_contents_in_snap(
         .map(|i| i.item_id)
         .collect();
     root_children.sort_unstable();
+    root_children.dedup();
 
     let mut children_by_parent: HashMap<i64, Vec<i64>> = HashMap::new();
-    for it in snap.items.values() {
+    for it in snap.items.values().chain(snap.transient_items.values()) {
         if it.location_id != ship_id
             && Some(it.location_id) != escape_frigate_id
-            && snap.items.contains_key(&it.location_id)
+            && (snap.items.contains_key(&it.location_id)
+                || snap.transient_items.contains_key(&it.location_id))
         {
             children_by_parent
                 .entry(it.location_id)
@@ -132,6 +135,7 @@ pub(crate) fn resolve_destroyed_ship_contents_in_snap(
     }
     for list in children_by_parent.values_mut() {
         list.sort_unstable();
+        list.dedup();
     }
 
     let mut out = DestroyedShipLootOutcome::default();
@@ -157,11 +161,12 @@ pub(crate) fn resolve_destroyed_ship_contents_in_snap(
         if !visited.insert(iid) {
             return;
         }
-        let Some(item_snap) = snap.items.get(&iid).cloned() else {
+        let Some(item_snap) = snap.get_any_item(iid).cloned() else {
             return;
         };
         if item_snap.type_id == 3468 {
             snap.items.remove(&iid);
+            snap.transient_items.remove(&iid);
             if let Some(kids) = children_by_parent.get(&iid) {
                 for &cid in kids {
                     visit_item(
@@ -202,7 +207,8 @@ pub(crate) fn resolve_destroyed_ship_contents_in_snap(
             && roll_fn(iid) < drop_threshold;
 
         if survives {
-            if let Some(it_mut) = snap.items.get_mut(&iid) {
+            let was_transient = snap.is_transient_item(iid);
+            if let Some(it_mut) = snap.materialize_transient_item(iid) {
                 it_mut.location_id = survive_loc_id;
                 if force_cargo_flag {
                     it_mut.flag = InventoryFlag::Cargo;
@@ -210,7 +216,9 @@ pub(crate) fn resolve_destroyed_ship_contents_in_snap(
                 if let Some(oid) = override_owner_id {
                     it_mut.owner_id = oid;
                 }
-                it_mut.version += 1;
+                if !was_transient {
+                    it_mut.version += 1;
+                }
             }
             out.dropped_ids.push(iid);
             out.dropped_km.push(eve_db::KillmailItemEntry {
@@ -242,6 +250,7 @@ pub(crate) fn resolve_destroyed_ship_contents_in_snap(
             }
         } else {
             snap.items.remove(&iid);
+            snap.transient_items.remove(&iid);
             if let Some(kids) = children_by_parent.get(&iid) {
                 for &cid in kids {
                     visit_item(
@@ -579,8 +588,7 @@ pub fn execute_death_pipeline_sync_inner(
             .map(|i| i.item_id)
             .collect();
 
-        snap.next_entity_id += 1;
-        let wreck_id = snap.next_entity_id;
+        let wreck_id = snap.alloc_entity_id();
 
         crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
             snap, wreck_id, now_unix, is_criminal,
@@ -788,6 +796,7 @@ pub fn execute_death_pipeline_sync_inner(
         }
 
         snap.items.remove(&victim_ship_id);
+        snap.transient_items.remove(&victim_ship_id);
         snap.item_positions.remove(&victim_ship_id);
         snap.insurance_contracts.remove(&victim_ship_id);
         snap.sp6_lifecycle.ship_combat_hp.remove(&victim_ship_id);
@@ -814,8 +823,7 @@ pub fn execute_death_pipeline_sync_inner(
                 );
                 esc_id
             } else {
-                snap.next_entity_id += 1;
-                let cid = snap.next_entity_id;
+                let cid = snap.alloc_entity_id();
                 snap.items.insert(
                     cid,
                     InventoryItemRecord {
@@ -928,8 +936,7 @@ pub fn execute_death_pipeline_sync_inner(
                 )
                 .with_context(eve_db::ledger::JournalContext::Type, i64::from(victim_ship_type_id)),
             });
-            snap.next_entity_id += 1;
-            let mid = snap.next_entity_id;
+            let mid = snap.alloc_entity_id();
             let subject = format!("Insurance Payout for Ship {victim_ship_id}");
             snap.mails.push(eve_db::MailRecord {
                 message_id: mid,
@@ -967,8 +974,7 @@ pub fn execute_death_pipeline_sync_inner(
             })
             .unwrap_or((vic_c, vic_a, victim_ship_type_id));
 
-        snap.next_entity_id += 1;
-        let kid = snap.next_entity_id;
+        let kid = snap.alloc_entity_id();
         snap.record_killmail(
             KillmailRecord {
                 kill_id: kid,
@@ -1251,10 +1257,7 @@ pub fn execute_death_pipeline_sync_inner(
                                 })
                             });
                             if !has_kr {
-                                let kr_id = ctx.db.with_mut_snapshot(|snap| {
-                                    snap.next_entity_id += 1;
-                                    snap.next_entity_id
-                                });
+                                let kr_id = ctx.db.with_mut_snapshot(|snap| snap.alloc_entity_id());
                                 crate::services::combat_crimewatch::create_kill_right(
                                     ctx,
                                     kr_id,

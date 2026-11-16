@@ -2170,3 +2170,57 @@ async fn piloted_ship_destruction_clears_modules_runtime_state_and_emits_tombsto
         );
     }
 }
+
+#[test]
+fn transient_items_materialize_only_on_surviving_loot_drop() {
+    // parity: feat:serverops.persistence
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let npc_ship_id = 200_880_001_i64;
+    let drop_mod_id = 200_880_002_i64;
+    let destroy_mod_id = 200_880_003_i64;
+    let wreck_id = 200_880_004_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mk = |item_id: i64, location_id: i64, flag: InventoryFlag| InventoryItemRecord {
+            item_id,
+            type_id: 587,
+            owner_id: 1_000_180,
+            location_id,
+            flag,
+            quantity: 1,
+            singleton: true,
+            version: 1,
+            dynamic_attributes: HashMap::new(),
+            source_mutaplasmid_id: None,
+            insured_payout_isk: 0.0,
+            is_blueprint_copy: false,
+            blueprint_runs_remaining: None,
+        };
+        snap.insert_transient_item(mk(npc_ship_id, i64::from(sys_id), InventoryFlag::None));
+        snap.insert_transient_item(mk(drop_mod_id, npc_ship_id, InventoryFlag::Cargo));
+        snap.insert_transient_item(mk(destroy_mod_id, npc_ship_id, InventoryFlag::Cargo));
+
+        let out = resolve_destroyed_ship_contents_in_snap(
+            snap,
+            &ctx.sde,
+            npc_ship_id,
+            wreck_id,
+            Some(90_000_001),
+            None,
+            false,
+            0.5,
+            |_| true,
+            |iid| if iid == drop_mod_id { 0.1 } else { 0.9 },
+        );
+
+        assert!(out.dropped_ids.contains(&drop_mod_id));
+        assert!(out.destroyed_ids.contains(&destroy_mod_id));
+        assert!(!snap.is_transient_item(drop_mod_id));
+        assert!(snap.items.contains_key(&drop_mod_id), "surviving drop must materialize into persistent items");
+        assert_eq!(snap.items[&drop_mod_id].location_id, wreck_id);
+        assert_eq!(snap.items[&drop_mod_id].owner_id, 90_000_001);
+        assert!(!snap.is_transient_item(destroy_mod_id));
+        assert!(!snap.items.contains_key(&destroy_mod_id), "destroyed transient item must never persist");
+    });
+}

@@ -437,8 +437,7 @@ impl LivingWorldDirector {
 
         let now_unix = db.clock().now_unix_secs();
         db.try_with_mut_snapshot(|snap| -> Result<(i64, i64, IskCents), String> {
-            snap.next_entity_id += 1;
-            let wreck_item_id = snap.next_entity_id;
+            let wreck_item_id = snap.alloc_entity_id();
             crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
                 snap,
                 wreck_item_id,
@@ -464,8 +463,7 @@ impl LivingWorldDirector {
                 },
             );
 
-            snap.next_entity_id += 1;
-            let loot_item_id = snap.next_entity_id;
+            let loot_item_id = snap.alloc_entity_id();
             snap.items.insert(
                 loot_item_id,
                 InventoryItemRecord {
@@ -768,8 +766,7 @@ impl LivingWorldDirector {
                                 existing.quantity.saturating_add(in_transit_cargo as i32);
                             existing.version += 1;
                         } else {
-                            snap.next_entity_id += 1;
-                            let iid = snap.next_entity_id;
+                            let iid = snap.alloc_entity_id();
                             snap.items.insert(
                                 iid,
                                 eve_db::InventoryItemRecord {
@@ -815,8 +812,7 @@ impl LivingWorldDirector {
                             }
                         }
                         if !found_order {
-                            snap.next_entity_id += 1;
-                            let oid = snap.next_entity_id;
+                            let oid = snap.alloc_entity_id();
                             snap.market_orders.insert(
                                 oid,
                                 eve_db::MarketOrderRecord {
@@ -869,8 +865,7 @@ impl LivingWorldDirector {
                     existing.quantity = existing.quantity.saturating_add(loaded_units);
                     existing.version += 1;
                 } else {
-                    snap.next_entity_id += 1;
-                    let item_id = snap.next_entity_id;
+                    let item_id = snap.alloc_entity_id();
                     snap.items.insert(
                         item_id,
                         eve_db::InventoryItemRecord {

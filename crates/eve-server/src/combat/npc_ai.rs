@@ -1436,8 +1436,7 @@ fn finalize_destroyed_npc_side_effects(
             );
 
             // Persist Killmail with dynamic bounty value (NOT flat 100k)
-            snap.next_entity_id += 1;
-            let kid = snap.next_entity_id;
+            let kid = snap.alloc_entity_id();
             snap.record_killmail(
                 KillmailRecord {
                     kill_id: kid,
@@ -1453,8 +1452,7 @@ fn finalize_destroyed_npc_side_effects(
 
             if !(32_000_000..=32_999_999).contains(&sys_id) {
                 // Spawn physical NPC wreck item (26557)
-                snap.next_entity_id += 1;
-                let wreck_id = snap.next_entity_id;
+                let wreck_id = snap.alloc_entity_id();
                 crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
                     snap, wreck_id, now_unix, true,
                 );
@@ -1491,8 +1489,7 @@ fn finalize_destroyed_npc_side_effects(
                 };
                 let loot_drops = [(15331, 10), (ammo_type_id, 100)];
                 for &(lid_type, lid_qty) in &loot_drops {
-                    snap.next_entity_id += 1;
-                    let lid = snap.next_entity_id;
+                    let lid = snap.alloc_entity_id();
                     snap.items.insert(
                         lid,
                         InventoryItemRecord {

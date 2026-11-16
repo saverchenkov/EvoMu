@@ -501,8 +501,7 @@ impl WorldRepository {
             item.version += 1;
             let updated_orig = item.clone();
 
-            guard.next_entity_id += 1;
-            let new_id = guard.next_entity_id;
+            let new_id = guard.alloc_entity_id();
             let new_item = InventoryItemRecord {
                 item_id: new_id,
                 type_id: updated_orig.type_id,
@@ -1565,8 +1564,7 @@ impl WorldStateSnapshot {
                 src_mut.quantity -= target_qty;
                 src_mut.version += 1;
             }
-            self.next_entity_id += 1;
-            let new_id = self.next_entity_id;
+            let new_id = self.alloc_entity_id();
             let mut new_item = InventoryItemRecord {
                 item_id: new_id,
                 type_id: item.type_id,

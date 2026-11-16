@@ -321,8 +321,7 @@ fn seed_market_catalog_internal(
                 let vol = if full_jita_catalog { 1_000_000 } else { 1_000 };
 
                 if existing.insert((1_000_035, station_id, type_id, false)) {
-                    snap.next_entity_id += 1;
-                    let ask_id = snap.next_entity_id;
+                    let ask_id = snap.alloc_entity_id();
                     snap.market_orders.insert(
                         ask_id,
                         MarketOrderRecord {
@@ -348,8 +347,7 @@ fn seed_market_catalog_internal(
                         || inv_type.meta_group_id == Some(2)
                         || type_id == 44_992);
                 if should_seed_bid && existing.insert((1_000_125, station_id, type_id, true)) {
-                    snap.next_entity_id += 1;
-                    let bid_id = snap.next_entity_id;
+                    let bid_id = snap.alloc_entity_id();
                     let bid_vol = vol / 2;
                     let escrow = IskCents::from_f64_isk(bid_isk * f64::from(bid_vol));
                     snap.market_orders.insert(
@@ -428,8 +426,7 @@ fn seed_npc_skillbooks_and_faction_items(
                         .unwrap_or(DEFAULT_FALLBACK_BASE_PRICE_ISK)
                 },
             );
-            snap.next_entity_id += 1;
-            let id = snap.next_entity_id;
+            let id = snap.alloc_entity_id();
             snap.market_orders.insert(
                 id,
                 MarketOrderRecord {

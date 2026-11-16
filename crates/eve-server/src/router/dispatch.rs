@@ -2,10 +2,31 @@
 
 use crate::router::context::ServerContext;
 use crate::services;
+use crate::warn_limiter::{check_global_warn, WarnCategory};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 use tracing::{info, warn};
+
+/// Slow-work warning threshold (ms) for RPC handlers and `after_call` hooks (`#1087`).
+pub const SLOW_RPC_THRESHOLD_MS: u64 = 100;
+
+tokio::task_local! {
+    static ACTIVE_RPC_CALL_ID: u64;
+}
+
+/// Runs `fut` with `call_id` bound for `rpc.slow` diagnostics.
+pub async fn with_active_rpc_call_id<F, R>(call_id: u64, fut: F) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    ACTIVE_RPC_CALL_ID.scope(call_id, Box::pin(fut)).await
+}
+
+#[inline]
+fn current_rpc_call_id() -> u64 {
+    ACTIVE_RPC_CALL_ID.try_with(|id| *id).unwrap_or(0)
+}
 
 #[inline(never)]
 pub fn box_fut<'a, F, Fut, T>(
@@ -509,6 +530,18 @@ impl ServerContext {
                 is_bootstrap,
             );
         }
+        let call_id = current_rpc_call_id();
+        let handler_ms = duration.as_millis() as u64;
+        if handler_ms >= SLOW_RPC_THRESHOLD_MS {
+            warn!(
+                target: "rpc.slow",
+                service,
+                method,
+                call_id,
+                ms = handler_ms,
+                "RPC handler exceeded slow-work threshold"
+            );
+        }
 
         let status_desc = match &res {
             Ok(rep) => format!("Ok({})", format_pyrep_summary(rep)),
@@ -524,6 +557,8 @@ impl ServerContext {
             duration,
             &status_desc,
         );
+
+        let after_call_start = std::time::Instant::now();
 
         if !tx_poisoned {
             if initial_active_char_id.is_some() && session.character_id != initial_active_char_id {
@@ -614,6 +649,19 @@ impl ServerContext {
                     });
                 }
             }
+        }
+
+        let after_call_ms = after_call_start.elapsed().as_millis() as u64;
+        if after_call_ms >= SLOW_RPC_THRESHOLD_MS {
+            warn!(
+                target: "rpc.slow",
+                service,
+                method,
+                call_id,
+                hook = "after_call",
+                ms = after_call_ms,
+                "RPC after_call hooks exceeded slow-work threshold"
+            );
         }
 
         res
@@ -947,6 +995,18 @@ impl ServerContext {
                     .and_then(|a| a.as_str())
                     .unwrap_or("eve_public.character");
                 if !self.quasar_domains.contains(domain) {
+                    let dec = check_global_warn(
+                        WarnCategory::NotInCatalog,
+                        format!("quasar_domain:{domain}"),
+                    );
+                    if dec.should_log {
+                        warn!(
+                            domain,
+                            count = dec.count,
+                            suppressed = dec.suppressed_for_key,
+                            "NOT_IN_CATALOG: Quasar domain not in quasar_protobuf_catalog.json"
+                        );
+                    }
                     return Err(BridgeRpcError {
                         code: "UnknownQuasarDomain".into(),
                         message: format!(
@@ -1463,13 +1523,36 @@ impl ServerContext {
             return res;
         }
 
-        warn!(
-            service = effective_service,
-            method,
-            arg_count = args.len(),
-            caller = caller_trace.unwrap_or("unknown"),
-            "Unimplemented RPC intercepted — returning explicit UnimplementedRPC error"
-        );
+        let in_catalog = self.cataloged_services.contains(effective_service);
+        let warn_cat = if in_catalog {
+            WarnCategory::UnknownRpc
+        } else {
+            WarnCategory::NotInCatalog
+        };
+        let dec = check_global_warn(warn_cat, format!("{effective_service}.{method}"));
+        if dec.should_log {
+            if in_catalog {
+                warn!(
+                    service = effective_service,
+                    method,
+                    arg_count = args.len(),
+                    caller = caller_trace.unwrap_or("unknown"),
+                    count = dec.count,
+                    suppressed = dec.suppressed_for_key,
+                    "Unknown RPC intercepted — returning explicit UnimplementedRPC error"
+                );
+            } else {
+                warn!(
+                    service = effective_service,
+                    method,
+                    arg_count = args.len(),
+                    caller = caller_trace.unwrap_or("unknown"),
+                    count = dec.count,
+                    suppressed = dec.suppressed_for_key,
+                    "NOT_IN_CATALOG: unknown service/RPC intercepted — returning explicit UnimplementedRPC error"
+                );
+            }
+        }
         if session.is_authenticated() {
             append_unimplemented_rpc_log(
                 session.session_id,
@@ -1638,8 +1721,8 @@ pub async fn tick_sov_prospecting_deposit_respawn(ctx: &ServerContext, sys_id: u
             sigs.retain(|s| s.sig_group != "SovOre");
         }
 
-        snap.next_entity_id += 1;
-        let anom_id = format!("DNG-{}-{}", site.dungeon_id, snap.next_entity_id);
+        let anom_seq = snap.alloc_entity_id();
+        let anom_id = format!("DNG-{}-{}", site.dungeon_id, anom_seq);
         let mut volume = 0.0_f64;
         let mut spawned = Vec::with_capacity(site.asteroids.len());
         for (i, a) in site.asteroids.iter().enumerate() {
@@ -1647,8 +1730,7 @@ pub async fn tick_sov_prospecting_deposit_respawn(ctx: &ServerContext, sys_id: u
             let pos = [sov_pos[0] + off[0], sov_pos[1] + off[1], sov_pos[2] + off[2]];
             let (uvol, rad) = type_vol_rad(a.type_id);
             volume += a.units as f64 * uvol;
-            snap.next_entity_id += 1;
-            let aid = snap.next_entity_id;
+            let aid = snap.alloc_entity_id();
             snap.asteroids.insert(
                 aid,
                 AsteroidRecord {
@@ -1808,8 +1890,7 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
         let mut guards: Vec<(i64, TypeId, DVec3)> = Vec::new();
         let mut pochven_sites: Vec<(u32, [f64; 3])> = Vec::new();
         for (p, centre) in planned.iter().zip(centres.iter().copied()) {
-            snap.next_entity_id += 1;
-            let seq = snap.next_entity_id;
+            let seq = snap.alloc_entity_id();
             let blank_sig = |id: String, group: &str, name: String, strength: f64| CosmicSignatureRecord {
                 signature_id: id, solar_system_id: sys_id, sig_group: group.into(), type_name: name,
                 signal_strength: strength, position: centre, wormhole_type_id: None, destination_system_id: None,
@@ -1878,8 +1959,7 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
                 let off = asteroid_offset(i);
                 let pos = [centre[0] + off[0], centre[1] + off[1], centre[2] + off[2]];
                 let (uvol, rad) = type_vol_rad(tid);
-                snap.next_entity_id += 1;
-                let aid = snap.next_entity_id;
+                let aid = snap.alloc_entity_id();
                 snap.asteroids.insert(aid, AsteroidRecord {
                     asteroid_id: aid, solar_system_id: sys_id, belt_id: 0, type_id: tid,
                     quantity: units, initial_quantity: units, position: (pos[0], pos[1], pos[2]), radius: rad,

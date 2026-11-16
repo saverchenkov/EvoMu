@@ -281,7 +281,7 @@ impl WorldRepository {
             return existing.user_id;
         }
         let hashed_token = Self::hash_password_token(username, password_token);
-        self.try_with_mut_snapshot(|snap| {
+        let user_id = self.try_with_mut_snapshot(|snap| {
             if let Some(existing) = snap.accounts.get_mut(username) {
                 existing.password_token = hashed_token;
                 return Ok::<u64, std::convert::Infallible>(existing.user_id);
@@ -300,7 +300,9 @@ impl WorldRepository {
             );
             Ok::<u64, std::convert::Infallible>(user_id)
         })
-        .unwrap()
+        .unwrap();
+        let _ = self.commit_entity_counter_sync();
+        user_id
     }
 
     /// Explicitly and idempotently provisions a GM / administrator account (`role = ROLE_GM_DEFAULT`) outside of the default player seed (`R23-P1-4`, `S-9`).
@@ -349,8 +351,7 @@ impl WorldRepository {
                 uid
             };
             if !snap.characters.contains_key(&char_id) {
-                snap.next_entity_id += 1;
-                let ship_id = snap.next_entity_id;
+                let ship_id = snap.alloc_entity_id();
                 snap.characters.insert(
                     char_id,
                     CharacterRecord {
@@ -397,6 +398,7 @@ impl WorldRepository {
             }
             Ok::<(), std::convert::Infallible>(())
         });
+        let _ = self.commit_entity_counter_sync();
     }
 
     /// Configures and persists an explicit per-deployment SSO JWT HS256 signing secret, requiring

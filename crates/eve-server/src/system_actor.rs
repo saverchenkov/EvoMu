@@ -619,6 +619,14 @@ impl SystemRegistry {
                 }
             };
             if removed {
+                if let Some(ref db) = self.db {
+                    if !db.is_write_locked_by_current_thread() {
+                        let _ = db.tx("reclaim_transient_items", |wtx| {
+                            wtx.snap.reclaim_transient_items_in_system(sys_id);
+                            Ok::<_, eve_db::TxError>(())
+                        });
+                    }
+                }
                 evicted.push(sys_id);
             }
         }
