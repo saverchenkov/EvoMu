@@ -1,27 +1,40 @@
-//! Relational SQLite persistence for `D-6` Batch 2 social durability (`0004_d6_social_durability`).
+//! Relational `domain_rows` SQLite persistence for Family 3 (`social`).
 //!
-//! Persists character/corporation/alliance contacts and contact labels, mail read/deleted/trash
-//! flags and assigned labels, mailing lists, calendar events, bookmark extended metadata and
-//! bookmark folders (including subfolders and ACLs), player-owned chat channels and ACLs, and
-//! character/owner notes across server restarts.
+//! Normalizes all 24 persisted social collections across mail state, mailing lists, calendar events,
+//! bookmarks/access groups, chat channels & ACLs, social contacts/labels/notifications, and
+//! character item notes into canonical `domain_rows` rows (`social.mail`, `social.bookmarks`,
+//! `social.chat_calendar`, `social.contacts_notes`), with zero-clone `ChangeSet::diff` incremental
+//! writes, one-shot startup migration and drop of the 19 legacy `0004_d6_social_durability` tables,
+//! and fail-closed reload/rollback.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+#![forbid(unsafe_code)]
 
-use rusqlite::{params, Connection, Transaction};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
-use super::fingerprints::{fp_json, to_checked_json_string, TableFingerprints};
+use rusqlite::{Connection, Transaction};
+use serde::{de::DeserializeOwned, Deserialize};
+
+#[cfg(test)]
+use serde::Serialize;
+
 use crate::durable_domain_types::SocialContactNotificationRecord;
 use crate::snapshot_ext::{
     CalendarEventRecord, ChatChannelAclRecord, MailingListRecord, SocialContactRecord,
     WorldStateSnapshot,
 };
-use crate::types::{BookmarkFolderRecord, ChatChannelRecord, MailLabelRecord};
+use crate::sqlite_store::domain_rows::{
+    decode_map_entry, decode_set_entry, diff_map_with, diff_set_with, fetch_domain_row_entries,
+    from_checked_domain_json, table_exists, DomainRowChange, DomainSyncState,
+    DOMAIN_SOCIAL_BOOKMARKS, DOMAIN_SOCIAL_CHAT_CALENDAR, DOMAIN_SOCIAL_CONTACTS_NOTES,
+    DOMAIN_SOCIAL_MAIL,
+};
+use crate::sqlite_store::quarantine::{
+    row_col_string, row_composite_key_string, row_payload_summary, LoadContext,
+};
+use crate::types::{BookmarkFolderRecord, BookmarkRecord, ChatChannelRecord, MailLabelRecord};
 
-pub(super) const D6_SOCIAL_SCHEMA_VERSION: i64 = 4;
-pub(super) const D6_SOCIAL_MIGRATION_NAME: &str = "0004_d6_social_durability";
-
-pub(super) const DDL_0004_D6_SOCIAL: &str = r#"
+#[cfg(test)]
+pub(crate) const LEGACY_D6_SOCIAL_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS read_mails (
     character_id INTEGER NOT NULL,
     mail_id INTEGER NOT NULL,
@@ -125,14 +138,38 @@ CREATE TABLE IF NOT EXISTS access_groups (
 );
 "#;
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+const LEGACY_SOCIAL_TABLES: &[&str] = &[
+    "read_mails",
+    "deleted_mails",
+    "trashed_mails",
+    "mail_labels",
+    "mail_assigned_labels",
+    "mailing_lists",
+    "calendar_events",
+    "bookmark_meta",
+    "bookmark_folders",
+    "chat_channels",
+    "char_contacts",
+    "char_contact_notifications",
+    "char_contact_labels",
+    "corp_contacts",
+    "corp_contact_labels",
+    "alliance_contacts",
+    "alliance_contact_labels",
+    "char_notes",
+    "access_groups",
+];
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(default)]
 struct PersistedBookmarkMeta {
     subfolder_id: Option<i64>,
     expiry_unix: Option<u64>,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(default)]
 struct PersistedBookmarkFolder {
     record: BookmarkFolderRecord,
@@ -141,7 +178,8 @@ struct PersistedBookmarkFolder {
     parent_folder_id: Option<i64>,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(default)]
 struct PersistedChatChannel {
     record: ChatChannelRecord,
@@ -149,336 +187,514 @@ struct PersistedChatChannel {
     standalone_acl_only: bool,
 }
 
-fn is_chat_acl_non_empty(acl: &ChatChannelAclRecord) -> bool {
+#[derive(Debug, Default)]
+struct StagedSocialState {
+    read_mails: HashSet<(i64, i64)>,
+    deleted_mails: HashSet<(i64, i64)>,
+    trashed_mails: HashSet<(i64, i64)>,
+    mail_labels: HashMap<i64, Vec<MailLabelRecord>>,
+    mail_assigned_labels: HashMap<(i64, i64), Vec<i64>>,
+    mailing_lists: HashMap<i64, MailingListRecord>,
+    calendar_events: HashMap<i64, CalendarEventRecord>,
+    bookmark_folders: HashMap<i64, BookmarkFolderRecord>,
+    bookmark_subfolders: HashMap<i64, i64>,
+    bookmark_subfolder_parents: HashMap<i64, i64>,
+    bookmark_expiries: HashMap<i64, u64>,
+    bookmark_folder_acls: HashMap<i64, Vec<i64>>,
+    access_groups: HashMap<i64, Vec<i64>>,
+    bookmark_folder_known_by: HashMap<(i64, i64), bool>,
+    chat_channels: HashMap<String, ChatChannelRecord>,
+    chat_channel_acl: HashMap<String, ChatChannelAclRecord>,
+    char_contacts: HashMap<i64, Vec<SocialContactRecord>>,
+    char_contact_notifications: HashMap<i64, Vec<SocialContactNotificationRecord>>,
+    char_contact_labels: HashMap<i64, Vec<(i64, String)>>,
+    corp_contacts: HashMap<i64, Vec<SocialContactRecord>>,
+    corp_contact_labels: HashMap<i64, Vec<(i64, String, u32)>>,
+    alliance_contacts: HashMap<i64, Vec<SocialContactRecord>>,
+    alliance_contact_labels: HashMap<i64, Vec<(i64, String)>>,
+    char_notes: HashMap<(i64, i64), String>,
+}
+
+/// Returns `true` when `acl` carries at least one allow, deny, or mute rule and therefore warrants
+/// a durable row in `domain_rows`.
+pub(crate) fn is_chat_acl_non_empty(acl: &ChatChannelAclRecord) -> bool {
     !acl.allow_list.is_empty() || !acl.deny_list.is_empty() || !acl.muted_until.is_empty()
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct D6SocialFingerprints {
-    pub(crate) read_mails: HashSet<(i64, i64)>,
-    pub(crate) deleted_mails: HashSet<(i64, i64)>,
-    pub(crate) trashed_mails: HashSet<(i64, i64)>,
-    pub(crate) mail_labels: HashMap<i64, u64>,
-    pub(crate) mail_assigned_labels: HashMap<(i64, i64), u64>,
-    pub(crate) mailing_lists: HashMap<i64, u64>,
-    pub(crate) calendar_events: HashMap<i64, u64>,
-    pub(crate) bookmark_meta: HashMap<i64, u64>,
-    pub(crate) bookmark_folders: HashMap<i64, u64>,
-    pub(crate) access_groups: HashMap<i64, u64>,
-    pub(crate) chat_channels: HashMap<String, u64>,
-    pub(crate) char_contacts: HashMap<i64, u64>,
-    pub(crate) char_contact_notifications: HashMap<i64, u64>,
-    pub(crate) char_contact_labels: HashMap<i64, u64>,
-    pub(crate) corp_contacts: HashMap<i64, u64>,
-    pub(crate) corp_contact_labels: HashMap<i64, u64>,
-    pub(crate) alliance_contacts: HashMap<i64, u64>,
-    pub(crate) alliance_contact_labels: HashMap<i64, u64>,
-    pub(crate) char_notes: HashMap<(i64, i64), u64>,
-}
-
-pub(super) fn apply_d6_social_migration(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(DDL_0004_D6_SOCIAL)
-        .map_err(|e| e.to_string())?;
-    let now_unix = crate::clock::host_wall_unix_secs_and_nanos().0 as i64;
-    conn.execute(
-        "INSERT OR IGNORE INTO schema_migrations (version, name, applied_unix) VALUES (?1, ?2, ?3)",
-        params![D6_SOCIAL_SCHEMA_VERSION, D6_SOCIAL_MIGRATION_NAME, now_unix],
-    )
-    .map_err(|e| e.to_string())?;
+fn load_domain_entries<F>(
+    conn: &Connection,
+    domain: &'static str,
+    ctx: &mut LoadContext,
+    mut apply: F,
+) -> Result<(), String>
+where
+    F: FnMut(&str, &str, &str) -> Result<(), String>,
+{
+    for (rowid, raw_key, raw_val) in fetch_domain_row_entries(conn, domain)? {
+        let res = match raw_key.split_once('/') {
+            Some((field, subkey)) => apply(field, subkey, &raw_val),
+            None => Err(format!("invalid domain_rows key '{raw_key}' in '{domain}'")),
+        };
+        if let Err(err) = res {
+            ctx.record_bad_row("domain_rows", domain, raw_key, raw_val, err, Some(rowid))?;
+        }
+    }
     Ok(())
 }
 
-fn fp_keyed_map<K: Copy + Eq + std::hash::Hash, V: Serialize>(map: &HashMap<K, V>) -> HashMap<K, u64> {
-    map.iter().map(|(&k, v)| (k, fp_json(v))).collect()
+macro_rules! social_domain_ops {
+    (
+        $diff_fn:ident,
+        $sync_fn:ident,
+        $load_fn:ident,
+        $domain:expr,
+        sets: [$($set_field:ident),* $(,)?],
+        maps: [$($map_field:ident),* $(,)?]
+    ) => {
+        fn $diff_fn(
+            before: &WorldStateSnapshot,
+            after: &WorldStateSnapshot,
+            out: &mut Vec<DomainRowChange>,
+        ) {
+            $(
+                diff_set_with(
+                    $domain,
+                    stringify!($set_field),
+                    before.$set_field.len(),
+                    after.$set_field.iter(),
+                    |k| before.$set_field.contains(k),
+                    before.$set_field.iter(),
+                    |k| after.$set_field.contains(k),
+                    out,
+                );
+            )*
+            $(
+                diff_map_with(
+                    $domain,
+                    stringify!($map_field),
+                    before.$map_field.len(),
+                    after.$map_field.iter(),
+                    |k| before.$map_field.get(k),
+                    before.$map_field.keys(),
+                    |k| after.$map_field.contains_key(k),
+                    out,
+                );
+            )*
+        }
+
+        fn $sync_fn(tx: &Transaction<'_>, snap: &WorldStateSnapshot) -> Result<bool, String> {
+            let mut state = DomainSyncState::load(tx, $domain)?;
+            $(
+                state.push_set(stringify!($set_field), snap.$set_field.iter())?;
+            )*
+            $(
+                state.push_map(stringify!($map_field), snap.$map_field.iter())?;
+            )*
+            state.finish(tx)
+        }
+
+        fn $load_fn(
+            conn: &Connection,
+            staged: &mut StagedSocialState,
+            ctx: &mut LoadContext,
+        ) -> Result<(), String> {
+            load_domain_entries(conn, $domain, ctx, |field, subkey, raw_val| match field {
+                $(
+                    stringify!($set_field) => {
+                        let key = decode_set_entry(subkey, raw_val)?;
+                        staged.$set_field.insert(key);
+                        Ok(())
+                    }
+                )*
+                $(
+                    stringify!($map_field) => {
+                        let (key, val) = decode_map_entry(subkey, raw_val)?;
+                        staged.$map_field.insert(key, val);
+                        Ok(())
+                    }
+                )*
+                _ => Err(format!("unknown field '{field}' in domain '{}'", $domain)),
+            })
+        }
+    };
 }
 
-fn build_persisted_bookmark_meta(snap: &WorldStateSnapshot, bid: i64) -> PersistedBookmarkMeta {
-    PersistedBookmarkMeta {
-        subfolder_id: snap.bookmark_subfolders.get(&bid).copied(),
-        expiry_unix: snap.bookmark_expiries.get(&bid).copied(),
-    }
+social_domain_ops!(
+    diff_social_mail,
+    sync_social_mail,
+    load_social_mail_domain_rows,
+    DOMAIN_SOCIAL_MAIL,
+    sets: [read_mails, deleted_mails, trashed_mails],
+    maps: [mail_labels, mail_assigned_labels, mailing_lists]
+);
+
+social_domain_ops!(
+    diff_social_bookmarks,
+    sync_social_bookmarks,
+    load_social_bookmarks_domain_rows,
+    DOMAIN_SOCIAL_BOOKMARKS,
+    sets: [],
+    maps: [
+        bookmark_folders,
+        bookmark_subfolders,
+        bookmark_subfolder_parents,
+        bookmark_expiries,
+        bookmark_folder_acls,
+        access_groups,
+        bookmark_folder_known_by,
+    ]
+);
+
+social_domain_ops!(
+    diff_social_contacts_notes,
+    sync_social_contacts_notes,
+    load_social_contacts_notes_domain_rows,
+    DOMAIN_SOCIAL_CONTACTS_NOTES,
+    sets: [],
+    maps: [
+        char_contacts,
+        char_contact_notifications,
+        char_contact_labels,
+        corp_contacts,
+        corp_contact_labels,
+        alliance_contacts,
+        alliance_contact_labels,
+        char_notes,
+    ]
+);
+
+fn diff_social_chat_calendar(
+    before: &WorldStateSnapshot,
+    after: &WorldStateSnapshot,
+    out: &mut Vec<DomainRowChange>,
+) {
+    diff_map_with(
+        DOMAIN_SOCIAL_CHAT_CALENDAR,
+        "calendar_events",
+        before.calendar_events.len(),
+        after.calendar_events.iter(),
+        |k| before.calendar_events.get(k),
+        before.calendar_events.keys(),
+        |k| after.calendar_events.contains_key(k),
+        out,
+    );
+    diff_map_with(
+        DOMAIN_SOCIAL_CHAT_CALENDAR,
+        "chat_channels",
+        before.chat_channels.len(),
+        after.chat_channels.iter(),
+        |k| before.chat_channels.get(k),
+        before.chat_channels.keys(),
+        |k| after.chat_channels.contains_key(k),
+        out,
+    );
+    diff_map_with(
+        DOMAIN_SOCIAL_CHAT_CALENDAR,
+        "chat_channel_acl",
+        before.chat_channel_acl.len(),
+        after
+            .chat_channel_acl
+            .iter()
+            .filter(|(_, acl)| is_chat_acl_non_empty(acl)),
+        |k| {
+            before
+                .chat_channel_acl
+                .get(k)
+                .filter(|acl| is_chat_acl_non_empty(acl))
+        },
+        before
+            .chat_channel_acl
+            .iter()
+            .filter_map(|(k, acl)| is_chat_acl_non_empty(acl).then_some(k)),
+        |k| {
+            after
+                .chat_channel_acl
+                .get(k)
+                .is_some_and(is_chat_acl_non_empty)
+        },
+        out,
+    );
 }
 
-fn compute_bookmark_meta_fps(snap: &WorldStateSnapshot) -> HashMap<i64, u64> {
-    let mut ids: BTreeSet<i64> = snap.bookmark_subfolders.keys().copied().collect();
-    ids.extend(snap.bookmark_expiries.keys().copied());
-    ids.into_iter()
-        .map(|bid| (bid, fp_json(&build_persisted_bookmark_meta(snap, bid))))
-        .collect()
-}
-
-fn build_persisted_bookmark_folder(
+fn sync_social_chat_calendar(
+    tx: &Transaction<'_>,
     snap: &WorldStateSnapshot,
-    fid: i64,
-    folder: &BookmarkFolderRecord,
-) -> PersistedBookmarkFolder {
-    let mut known_by: Vec<(i64, bool)> = snap
-        .bookmark_folder_known_by
-        .iter()
-        .filter_map(|(&(f, c), &active)| (f == fid).then_some((c, active)))
-        .collect();
-    known_by.sort_unstable_by_key(|&(c, _)| c);
-    PersistedBookmarkFolder {
-        record: folder.clone(),
-        access_group_ids: snap
-            .bookmark_folder_acls
-            .get(&fid)
-            .cloned()
-            .unwrap_or_default(),
-        known_by,
-        parent_folder_id: snap.bookmark_subfolder_parents.get(&fid).copied(),
-    }
+) -> Result<bool, String> {
+    let mut state = DomainSyncState::load(tx, DOMAIN_SOCIAL_CHAT_CALENDAR)?;
+    state.push_map("calendar_events", snap.calendar_events.iter())?;
+    state.push_map("chat_channels", snap.chat_channels.iter())?;
+    state.push_map(
+        "chat_channel_acl",
+        snap.chat_channel_acl
+            .iter()
+            .filter(|(_, acl)| is_chat_acl_non_empty(acl)),
+    )?;
+    state.finish(tx)
 }
 
-fn compute_bookmark_folders_fps(snap: &WorldStateSnapshot) -> HashMap<i64, u64> {
-    snap.bookmark_folders
-        .iter()
-        .map(|(&fid, folder)| (fid, fp_json(&build_persisted_bookmark_folder(snap, fid, folder))))
-        .collect()
-}
-
-fn build_persisted_chat_channel(snap: &WorldStateSnapshot, cid: &str) -> Option<PersistedChatChannel> {
-    if let Some(chan) = snap.chat_channels.get(cid) {
-        Some(PersistedChatChannel {
-            record: chan.clone(),
-            acl: snap
-                .chat_channel_acl
-                .get(cid)
-                .cloned()
-                .unwrap_or_default(),
-            standalone_acl_only: false,
-        })
-    } else if let Some(acl) = snap.chat_channel_acl.get(cid).filter(|a| is_chat_acl_non_empty(a)) {
-        Some(PersistedChatChannel {
-            record: ChatChannelRecord {
-                channel_id: cid.to_string(),
-                name: cid.to_string(),
-                motd: String::new(),
-                owner_id: None,
-                members: Default::default(),
-                is_system_local: false,
-                solar_system_id: None,
-                is_private: false,
-                operators: Default::default(),
-                password: None,
-                is_delayed_local: false,
-            },
-            acl: acl.clone(),
-            standalone_acl_only: true,
-        })
-    } else {
-        None
-    }
-}
-
-fn compute_chat_channels_fps(snap: &WorldStateSnapshot) -> HashMap<String, u64> {
-    let mut out = HashMap::with_capacity(snap.chat_channels.len() + snap.chat_channel_acl.len());
-    for (cid, chan) in &snap.chat_channels {
-        let persisted = PersistedChatChannel {
-            record: chan.clone(),
-            acl: snap
-                .chat_channel_acl
-                .get(cid)
-                .cloned()
-                .unwrap_or_default(),
-            standalone_acl_only: false,
-        };
-        out.insert(cid.clone(), fp_json(&persisted));
-    }
-    for (cid, acl) in &snap.chat_channel_acl {
-        if snap.chat_channels.contains_key(cid) || !is_chat_acl_non_empty(acl) {
-            continue;
-        }
-        if let Some(persisted) = build_persisted_chat_channel(snap, cid) {
-            out.insert(cid.clone(), fp_json(&persisted));
-        }
-    }
-    out
-}
-
-pub(super) fn compute_d6_social_fp(snap: &WorldStateSnapshot) -> D6SocialFingerprints {
-    D6SocialFingerprints {
-        read_mails: snap.read_mails.clone(),
-        deleted_mails: snap.deleted_mails.clone(),
-        trashed_mails: snap.trashed_mails.clone(),
-        mail_labels: fp_keyed_map(&snap.mail_labels),
-        mail_assigned_labels: fp_keyed_map(&snap.mail_assigned_labels),
-        mailing_lists: fp_keyed_map(&snap.mailing_lists),
-        calendar_events: fp_keyed_map(&snap.calendar_events),
-        bookmark_meta: compute_bookmark_meta_fps(snap),
-        bookmark_folders: compute_bookmark_folders_fps(snap),
-        access_groups: fp_keyed_map(&snap.access_groups),
-        chat_channels: compute_chat_channels_fps(snap),
-        char_contacts: fp_keyed_map(&snap.char_contacts),
-        char_contact_notifications: fp_keyed_map(&snap.char_contact_notifications),
-        char_contact_labels: fp_keyed_map(&snap.char_contact_labels),
-        corp_contacts: fp_keyed_map(&snap.corp_contacts),
-        corp_contact_labels: fp_keyed_map(&snap.corp_contact_labels),
-        alliance_contacts: fp_keyed_map(&snap.alliance_contacts),
-        alliance_contact_labels: fp_keyed_map(&snap.alliance_contact_labels),
-        char_notes: fp_keyed_map(&snap.char_notes),
-    }
-}
-
-#[cfg(test)]
-pub(super) fn load_d6_social_into_snapshot(
+fn load_social_chat_calendar_domain_rows(
     conn: &Connection,
-    snap: &mut WorldStateSnapshot,
+    staged: &mut StagedSocialState,
+    ctx: &mut LoadContext,
 ) -> Result<(), String> {
-    let mut ctx = super::quarantine::LoadContext::new(false);
-    load_d6_social_into_snapshot_with_ctx(conn, snap, &mut ctx)
+    load_domain_entries(
+        conn,
+        DOMAIN_SOCIAL_CHAT_CALENDAR,
+        ctx,
+        |field, subkey, raw_val| match field {
+            "calendar_events" => {
+                let (key, val) = decode_map_entry(subkey, raw_val)?;
+                staged.calendar_events.insert(key, val);
+                Ok(())
+            }
+            "chat_channels" => {
+                let (key, val) = decode_map_entry(subkey, raw_val)?;
+                staged.chat_channels.insert(key, val);
+                Ok(())
+            }
+            "chat_channel_acl" => {
+                let (key, val) = decode_map_entry::<String, ChatChannelAclRecord>(subkey, raw_val)?;
+                if is_chat_acl_non_empty(&val) {
+                    staged.chat_channel_acl.insert(key, val);
+                }
+                Ok(())
+            }
+            _ => Err(format!(
+                "unknown field '{field}' in domain '{DOMAIN_SOCIAL_CHAT_CALENDAR}'"
+            )),
+        },
+    )
 }
 
-pub(super) fn load_d6_social_into_snapshot_with_ctx(
-    conn: &Connection,
-    snap: &mut WorldStateSnapshot,
-    ctx: &mut super::quarantine::LoadContext,
-) -> Result<(), String> {
-    use super::quarantine::{row_col_string, row_composite_key_string, row_payload_summary};
+/// Appends per-row `domain_rows` diffs for all 24 Family 3 (`social`) collections without cloning
+/// cold fingerprint maps.
+pub(crate) fn collect_social_domain_row_diffs(
+    before: &WorldStateSnapshot,
+    after: &WorldStateSnapshot,
+    out: &mut Vec<DomainRowChange>,
+) {
+    diff_social_mail(before, after, out);
+    diff_social_bookmarks(before, after, out);
+    diff_social_chat_calendar(before, after, out);
+    diff_social_contacts_notes(before, after, out);
+}
 
-    fn load_pair_set(
-        conn: &Connection,
-        ctx: &mut super::quarantine::LoadContext,
-        table: &'static str,
-        dst: &mut HashSet<(i64, i64)>,
-    ) -> Result<(), String> {
-        dst.clear();
-        let sql = format!("SELECT rowid, character_id, mail_id FROM {table}");
-        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
-            let rowid = r.get::<_, i64>(0).ok();
-            let res: Result<(i64, i64), String> =
-                (|| Ok((r.get::<_, i64>(1).map_err(|e| e.to_string())?, r.get::<_, i64>(2).map_err(|e| e.to_string())?)))();
-            match res {
-                Ok(pair) => {
-                    dst.insert(pair);
-                }
-                Err(err) => {
-                    let key = row_composite_key_string(r, 1, 2);
-                    let payload = row_payload_summary(r, 1, 2);
-                    ctx.record_bad_row(table, table, key, payload, err, rowid)?;
-                }
+/// Synchronizes all 4 Family 3 (`social`) `domain_rows` domains against `snap`.
+pub(crate) fn sync_social_domain_rows(
+    tx: &Transaction<'_>,
+    snap: &WorldStateSnapshot,
+) -> Result<bool, String> {
+    let mut changed = false;
+    changed |= sync_social_mail(tx, snap)?;
+    changed |= sync_social_bookmarks(tx, snap)?;
+    changed |= sync_social_chat_calendar(tx, snap)?;
+    changed |= sync_social_contacts_notes(tx, snap)?;
+    Ok(changed)
+}
+
+fn load_legacy_pair_set(
+    conn: &Connection,
+    ctx: &mut LoadContext,
+    table: &'static str,
+    dst: &mut HashSet<(i64, i64)>,
+) -> Result<bool, String> {
+    if !table_exists(conn, table)? {
+        return Ok(false);
+    }
+    let sql = format!("SELECT rowid, character_id, mail_id FROM {table}");
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+        let rowid = r.get::<_, i64>(0).ok();
+        let res: Result<(i64, i64), String> = (|| {
+            Ok((
+                r.get::<_, i64>(1).map_err(|e| e.to_string())?,
+                r.get::<_, i64>(2).map_err(|e| e.to_string())?,
+            ))
+        })();
+        match res {
+            Ok(pair) => {
+                dst.insert(pair);
+            }
+            Err(err) => {
+                let key = row_composite_key_string(r, 1, 2);
+                let payload = row_payload_summary(r, 1, 2);
+                ctx.record_bad_row(table, table, key, payload, err, rowid)?;
             }
         }
-        Ok(())
     }
+    Ok(true)
+}
 
-    fn load_i64_json_map<T: DeserializeOwned>(
-        conn: &Connection,
-        ctx: &mut super::quarantine::LoadContext,
-        table: &'static str,
-        pk_col: &str,
-        json_col: &str,
-        dst: &mut HashMap<i64, T>,
-    ) -> Result<(), String> {
-        dst.clear();
-        let sql = format!("SELECT rowid, {pk_col}, {json_col} FROM {table}");
-        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
-            let rowid = r.get::<_, i64>(0).ok();
-            let res: Result<(i64, T), String> = (|| {
-                let id: i64 = r.get(1).map_err(|e| e.to_string())?;
-                let js: String = r.get(2).map_err(|e| e.to_string())?;
-                let val: T = serde_json::from_str(&js).map_err(|e| e.to_string())?;
-                Ok((id, val))
-            })();
-            match res {
-                Ok((id, val)) => {
-                    dst.insert(id, val);
-                }
-                Err(err) => {
-                    let key = row_col_string(r, 1);
-                    let payload = row_col_string(r, 2);
-                    ctx.record_bad_row(table, table, key, payload, err, rowid)?;
-                }
+fn load_legacy_i64_json_table<T: DeserializeOwned>(
+    conn: &Connection,
+    ctx: &mut LoadContext,
+    table: &'static str,
+    pk_col: &str,
+    json_col: &str,
+    mut on_entry: impl FnMut(i64, T),
+) -> Result<bool, String> {
+    if !table_exists(conn, table)? {
+        return Ok(false);
+    }
+    let sql = format!("SELECT rowid, {pk_col}, {json_col} FROM {table}");
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+        let rowid = r.get::<_, i64>(0).ok();
+        let res: Result<(i64, T), String> = (|| {
+            let id: i64 = r.get(1).map_err(|e| e.to_string())?;
+            let raw: String = r.get(2).map_err(|e| e.to_string())?;
+            let val: T = from_checked_domain_json(&raw)?;
+            Ok((id, val))
+        })();
+        match res {
+            Ok((id, val)) => on_entry(id, val),
+            Err(err) => {
+                let key = row_col_string(r, 1);
+                let payload = row_col_string(r, 2);
+                ctx.record_bad_row(table, table, key, payload, err, rowid)?;
             }
         }
-        Ok(())
     }
+    Ok(true)
+}
 
-    let mut staged = WorldStateSnapshot::default();
+fn load_legacy_pair_table<T>(
+    conn: &Connection,
+    ctx: &mut LoadContext,
+    table: &'static str,
+    cols: (&str, &str, &str),
+    parse: impl Fn(&str) -> Result<T, String>,
+    dst: &mut HashMap<(i64, i64), T>,
+) -> Result<bool, String> {
+    if !table_exists(conn, table)? {
+        return Ok(false);
+    }
+    let (k1_col, k2_col, val_col) = cols;
+    let sql = format!("SELECT rowid, {k1_col}, {k2_col}, {val_col} FROM {table}");
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+        let rowid = r.get::<_, i64>(0).ok();
+        let res: Result<((i64, i64), T), String> = (|| {
+            let k1: i64 = r.get(1).map_err(|e| e.to_string())?;
+            let k2: i64 = r.get(2).map_err(|e| e.to_string())?;
+            let raw: String = r.get(3).map_err(|e| e.to_string())?;
+            let val = parse(&raw)?;
+            Ok(((k1, k2), val))
+        })();
+        match res {
+            Ok((k, val)) => {
+                dst.insert(k, val);
+            }
+            Err(err) => {
+                let key = row_composite_key_string(r, 1, 2);
+                let payload = row_col_string(r, 3);
+                ctx.record_bad_row(table, table, key, payload, err, rowid)?;
+            }
+        }
+    }
+    Ok(true)
+}
 
-    // 1. read_mails, deleted_mails, trashed_mails
-    load_pair_set(conn, ctx, "read_mails", &mut staged.read_mails)?;
-    load_pair_set(conn, ctx, "deleted_mails", &mut staged.deleted_mails)?;
-    load_pair_set(conn, ctx, "trashed_mails", &mut staged.trashed_mails)?;
+fn load_legacy_chat_channels(
+    conn: &Connection,
+    ctx: &mut LoadContext,
+    staged: &mut StagedSocialState,
+) -> Result<bool, String> {
+    if !table_exists(conn, "chat_channels")? {
+        return Ok(false);
+    }
+    let mut stmt = conn
+        .prepare("SELECT rowid, channel_id, record_json FROM chat_channels")
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+        let rowid = r.get::<_, i64>(0).ok();
+        let res: Result<(String, PersistedChatChannel), String> = (|| {
+            let cid: String = r.get(1).map_err(|e| e.to_string())?;
+            let raw: String = r.get(2).map_err(|e| e.to_string())?;
+            let persisted: PersistedChatChannel = from_checked_domain_json(&raw)?;
+            Ok((cid, persisted))
+        })();
+        match res {
+            Ok((cid, persisted)) => {
+                if !persisted.standalone_acl_only {
+                    staged.chat_channels.insert(cid.clone(), persisted.record);
+                }
+                if is_chat_acl_non_empty(&persisted.acl) {
+                    staged.chat_channel_acl.insert(cid, persisted.acl);
+                }
+            }
+            Err(err) => {
+                let key = row_col_string(r, 1);
+                let payload = row_col_string(r, 2);
+                ctx.record_bad_row("chat_channels", "chat_channels", key, payload, err, rowid)?;
+            }
+        }
+    }
+    Ok(true)
+}
 
-    // 2. mail_labels & mail_assigned_labels
-    load_i64_json_map::<Vec<MailLabelRecord>>(
+fn load_legacy_social_tables(
+    conn: &Connection,
+    bookmarks: &HashMap<i64, BookmarkRecord>,
+    ctx: &mut LoadContext,
+    staged: &mut StagedSocialState,
+) -> Result<bool, String> {
+    let mut had_legacy = false;
+    had_legacy |= load_legacy_pair_set(conn, ctx, "read_mails", &mut staged.read_mails)?;
+    had_legacy |= load_legacy_pair_set(conn, ctx, "deleted_mails", &mut staged.deleted_mails)?;
+    had_legacy |= load_legacy_pair_set(conn, ctx, "trashed_mails", &mut staged.trashed_mails)?;
+    had_legacy |= load_legacy_i64_json_table::<Vec<MailLabelRecord>>(
         conn,
         ctx,
         "mail_labels",
         "character_id",
         "labels_json",
-        &mut staged.mail_labels,
+        |cid, val| {
+            staged.mail_labels.insert(cid, val);
+        },
     )?;
-    {
-        let mut stmt = conn
-            .prepare("SELECT rowid, character_id, mail_id, labels_json FROM mail_assigned_labels")
-            .map_err(|e| e.to_string())?;
-        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
-            let rowid = r.get::<_, i64>(0).ok();
-            let res: Result<((i64, i64), Vec<i64>), String> = (|| {
-                let cid: i64 = r.get(1).map_err(|e| e.to_string())?;
-                let mid: i64 = r.get(2).map_err(|e| e.to_string())?;
-                let js: String = r.get(3).map_err(|e| e.to_string())?;
-                let labels: Vec<i64> = serde_json::from_str(&js).map_err(|e| e.to_string())?;
-                Ok(((cid, mid), labels))
-            })();
-            match res {
-                Ok((k, labels)) => {
-                    staged.mail_assigned_labels.insert(k, labels);
-                }
-                Err(err) => {
-                    let key = row_composite_key_string(r, 1, 2);
-                    let payload = row_col_string(r, 3);
-                    ctx.record_bad_row(
-                        "mail_assigned_labels",
-                        "mail_assigned_labels",
-                        key,
-                        payload,
-                        err,
-                        rowid,
-                    )?;
-                }
-            }
-        }
-    }
-
-    // 3. mailing_lists & calendar_events
-    load_i64_json_map::<MailingListRecord>(
+    had_legacy |= load_legacy_pair_table(
+        conn,
+        ctx,
+        "mail_assigned_labels",
+        ("character_id", "mail_id", "labels_json"),
+        from_checked_domain_json::<Vec<i64>>,
+        &mut staged.mail_assigned_labels,
+    )?;
+    had_legacy |= load_legacy_i64_json_table::<MailingListRecord>(
         conn,
         ctx,
         "mailing_lists",
         "list_id",
         "record_json",
-        &mut staged.mailing_lists,
+        |id, val| {
+            staged.mailing_lists.insert(id, val);
+        },
     )?;
-    load_i64_json_map::<CalendarEventRecord>(
+    had_legacy |= load_legacy_i64_json_table::<CalendarEventRecord>(
         conn,
         ctx,
         "calendar_events",
         "event_id",
         "record_json",
-        &mut staged.calendar_events,
+        |id, val| {
+            staged.calendar_events.insert(id, val);
+        },
     )?;
-
-    // 4. bookmark_meta & bookmark_folders
-    {
-        let mut meta_map = HashMap::<i64, PersistedBookmarkMeta>::new();
-        load_i64_json_map(
-            conn,
-            ctx,
-            "bookmark_meta",
-            "bookmark_id",
-            "record_json",
-            &mut meta_map,
-        )?;
-        for (bid, meta) in meta_map {
-            if snap.bookmarks.contains_key(&bid) {
+    had_legacy |= load_legacy_i64_json_table::<PersistedBookmarkMeta>(
+        conn,
+        ctx,
+        "bookmark_meta",
+        "bookmark_id",
+        "record_json",
+        |bid, meta| {
+            // Preserve the legacy invariant that orphaned bookmark subfolder entries are not
+            // revived once their owning bookmark record has been deleted or swept.
+            if bookmarks.contains_key(&bid) {
                 if let Some(sf) = meta.subfolder_id {
                     staged.bookmark_subfolders.insert(bid, sf);
                 }
@@ -488,19 +704,15 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
                     staged.bookmark_expiries.insert(bid, exp);
                 }
             }
-        }
-    }
-    {
-        let mut folder_map = HashMap::<i64, PersistedBookmarkFolder>::new();
-        load_i64_json_map(
-            conn,
-            ctx,
-            "bookmark_folders",
-            "folder_id",
-            "record_json",
-            &mut folder_map,
-        )?;
-        for (fid, persisted) in folder_map {
+        },
+    )?;
+    had_legacy |= load_legacy_i64_json_table::<PersistedBookmarkFolder>(
+        conn,
+        ctx,
+        "bookmark_folders",
+        "folder_id",
+        "record_json",
+        |fid, persisted| {
             staged.bookmark_folders.insert(fid, persisted.record);
             if !persisted.access_group_ids.is_empty() {
                 staged
@@ -513,136 +725,117 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
             if let Some(pfid) = persisted.parent_folder_id {
                 staged.bookmark_subfolder_parents.insert(fid, pfid);
             }
-        }
-    }
-
-    load_i64_json_map::<Vec<i64>>(
+        },
+    )?;
+    had_legacy |= load_legacy_i64_json_table::<Vec<i64>>(
         conn,
         ctx,
         "access_groups",
         "group_id",
         "members_json",
-        &mut staged.access_groups,
+        |gid, members| {
+            staged.access_groups.insert(gid, members);
+        },
     )?;
-
-    // 5. chat_channels & chat_channel_acl
-    {
-        let mut stmt = conn
-            .prepare("SELECT rowid, channel_id, record_json FROM chat_channels")
-            .map_err(|e| e.to_string())?;
-        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
-            let rowid = r.get::<_, i64>(0).ok();
-            let res: Result<(String, PersistedChatChannel), String> = (|| {
-                let cid: String = r.get(1).map_err(|e| e.to_string())?;
-                let js: String = r.get(2).map_err(|e| e.to_string())?;
-                let persisted: PersistedChatChannel =
-                    serde_json::from_str(&js).map_err(|e| e.to_string())?;
-                Ok((cid, persisted))
-            })();
-            match res {
-                Ok((cid, persisted)) => {
-                    if !persisted.standalone_acl_only {
-                        staged.chat_channels.insert(cid.clone(), persisted.record);
-                    }
-                    if is_chat_acl_non_empty(&persisted.acl) {
-                        staged.chat_channel_acl.insert(cid, persisted.acl);
-                    }
-                }
-                Err(err) => {
-                    let key = row_col_string(r, 1);
-                    let payload = row_col_string(r, 2);
-                    ctx.record_bad_row("chat_channels", "chat_channels", key, payload, err, rowid)?;
-                }
-            }
-        }
-    }
-
-    // 6. char/corp/alliance contacts and contact labels
-    load_i64_json_map::<Vec<SocialContactRecord>>(
+    had_legacy |= load_legacy_chat_channels(conn, ctx, staged)?;
+    had_legacy |= load_legacy_i64_json_table::<Vec<SocialContactRecord>>(
         conn,
         ctx,
         "char_contacts",
         "character_id",
         "contacts_json",
-        &mut staged.char_contacts,
+        |cid, val| {
+            staged.char_contacts.insert(cid, val);
+        },
     )?;
-    load_i64_json_map::<Vec<SocialContactNotificationRecord>>(
+    had_legacy |= load_legacy_i64_json_table::<Vec<SocialContactNotificationRecord>>(
         conn,
         ctx,
         "char_contact_notifications",
         "character_id",
         "notifications_json",
-        &mut staged.char_contact_notifications,
+        |cid, val| {
+            staged.char_contact_notifications.insert(cid, val);
+        },
     )?;
-    load_i64_json_map::<Vec<(i64, String)>>(
+    had_legacy |= load_legacy_i64_json_table::<Vec<(i64, String)>>(
         conn,
         ctx,
         "char_contact_labels",
         "character_id",
         "labels_json",
-        &mut staged.char_contact_labels,
+        |cid, val| {
+            staged.char_contact_labels.insert(cid, val);
+        },
     )?;
-    load_i64_json_map::<Vec<SocialContactRecord>>(
+    had_legacy |= load_legacy_i64_json_table::<Vec<SocialContactRecord>>(
         conn,
         ctx,
         "corp_contacts",
         "corporation_id",
         "contacts_json",
-        &mut staged.corp_contacts,
+        |id, val| {
+            staged.corp_contacts.insert(id, val);
+        },
     )?;
-    load_i64_json_map::<Vec<(i64, String, u32)>>(
+    had_legacy |= load_legacy_i64_json_table::<Vec<(i64, String, u32)>>(
         conn,
         ctx,
         "corp_contact_labels",
         "corporation_id",
         "labels_json",
-        &mut staged.corp_contact_labels,
+        |id, val| {
+            staged.corp_contact_labels.insert(id, val);
+        },
     )?;
-    load_i64_json_map::<Vec<SocialContactRecord>>(
+    had_legacy |= load_legacy_i64_json_table::<Vec<SocialContactRecord>>(
         conn,
         ctx,
         "alliance_contacts",
         "alliance_id",
         "contacts_json",
-        &mut staged.alliance_contacts,
+        |id, val| {
+            staged.alliance_contacts.insert(id, val);
+        },
     )?;
-    load_i64_json_map::<Vec<(i64, String)>>(
+    had_legacy |= load_legacy_i64_json_table::<Vec<(i64, String)>>(
         conn,
         ctx,
         "alliance_contact_labels",
         "alliance_id",
         "labels_json",
-        &mut staged.alliance_contact_labels,
+        |id, val| {
+            staged.alliance_contact_labels.insert(id, val);
+        },
     )?;
+    had_legacy |= load_legacy_pair_table(
+        conn,
+        ctx,
+        "char_notes",
+        ("character_id", "item_id", "note"),
+        |raw| Ok(raw.to_owned()),
+        &mut staged.char_notes,
+    )?;
+    Ok(had_legacy)
+}
 
-    // 7. char_notes
-    {
-        let mut stmt = conn
-            .prepare("SELECT rowid, character_id, item_id, note FROM char_notes")
-            .map_err(|e| e.to_string())?;
-        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
-            let rowid = r.get::<_, i64>(0).ok();
-            let res: Result<((i64, i64), String), String> = (|| {
-                let cid: i64 = r.get(1).map_err(|e| e.to_string())?;
-                let iid: i64 = r.get(2).map_err(|e| e.to_string())?;
-                let note: String = r.get(3).map_err(|e| e.to_string())?;
-                Ok(((cid, iid), note))
-            })();
-            match res {
-                Ok((k, note)) => {
-                    staged.char_notes.insert(k, note);
-                }
-                Err(err) => {
-                    let key = row_composite_key_string(r, 1, 2);
-                    let payload = row_col_string(r, 3);
-                    ctx.record_bad_row("char_notes", "char_notes", key, payload, err, rowid)?;
-                }
-            }
-        }
-    }
+fn load_staged_social(
+    conn: &Connection,
+    bookmarks: &HashMap<i64, BookmarkRecord>,
+    ctx: &mut LoadContext,
+) -> Result<(StagedSocialState, bool), String> {
+    let mut staged = StagedSocialState::default();
+    // Load legacy 0004_d6_social tables first, then overlay canonical `domain_rows` entries so
+    // any already-migrated rows take precedence over stale legacy records.
+    let had_legacy = load_legacy_social_tables(conn, bookmarks, ctx, &mut staged)?;
+    load_social_mail_domain_rows(conn, &mut staged, ctx)?;
+    load_social_bookmarks_domain_rows(conn, &mut staged, ctx)?;
+    load_social_chat_calendar_domain_rows(conn, &mut staged, ctx)?;
+    load_social_contacts_notes_domain_rows(conn, &mut staged, ctx)?;
+    Ok((staged, had_legacy))
+}
 
+fn apply_staged_social(staged: StagedSocialState, snap: &mut WorldStateSnapshot) {
     snap.read_mails = staged.read_mails;
     snap.deleted_mails = staged.deleted_mails;
     snap.trashed_mails = staged.trashed_mails;
@@ -650,13 +843,13 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
     snap.mail_assigned_labels = staged.mail_assigned_labels;
     snap.mailing_lists = staged.mailing_lists;
     snap.calendar_events = staged.calendar_events;
-    snap.bookmark_subfolders = staged.bookmark_subfolders;
-    snap.bookmark_expiries = staged.bookmark_expiries;
     snap.bookmark_folders = staged.bookmark_folders;
-    snap.bookmark_folder_acls = staged.bookmark_folder_acls;
-    snap.bookmark_folder_known_by = staged.bookmark_folder_known_by;
+    snap.bookmark_subfolders = staged.bookmark_subfolders;
     snap.bookmark_subfolder_parents = staged.bookmark_subfolder_parents;
+    snap.bookmark_expiries = staged.bookmark_expiries;
+    snap.bookmark_folder_acls = staged.bookmark_folder_acls;
     snap.access_groups = staged.access_groups;
+    snap.bookmark_folder_known_by = staged.bookmark_folder_known_by;
     snap.chat_channels = staged.chat_channels;
     snap.chat_channel_acl = staged.chat_channel_acl;
     snap.char_contacts = staged.char_contacts;
@@ -667,347 +860,51 @@ pub(super) fn load_d6_social_into_snapshot_with_ctx(
     snap.alliance_contacts = staged.alliance_contacts;
     snap.alliance_contact_labels = staged.alliance_contact_labels;
     snap.char_notes = staged.char_notes;
+}
 
+/// Loads all 24 Family 3 (`social`) collections from `domain_rows` (and any unmigrated legacy
+/// `0004_d6_social` tables) into `snap`, returning `Ok(true)` if any legacy tables existed.
+///
+/// Fails closed without mutating `snap` on any error when `ctx.quarantine_unreadable` is `false`.
+pub fn load_social_domain_rows(
+    conn: &Connection,
+    snap: &mut WorldStateSnapshot,
+    ctx: &mut LoadContext,
+) -> Result<bool, String> {
+    let (staged, had_legacy) = load_staged_social(conn, &snap.bookmarks, ctx)?;
+    apply_staged_social(staged, snap);
+    Ok(had_legacy)
+}
+
+/// Drops the retired legacy `0004_d6_social_durability` SQLite tables once migrated into
+/// `domain_rows`.
+pub(crate) fn drop_legacy_social_tables(tx: &Transaction<'_>) -> Result<(), String> {
+    for tbl in LEGACY_SOCIAL_TABLES {
+        tx.execute(&format!("DROP TABLE IF EXISTS {tbl}"), [])
+            .map_err(|e| format!("drop legacy social table '{tbl}': {e}"))?;
+    }
     Ok(())
 }
 
-fn sync_pair_set_table(
-    tx: &Transaction<'_>,
-    table: &str,
-    snap_set: &HashSet<(i64, i64)>,
-    fp_set: &mut HashSet<(i64, i64)>,
-) -> Result<bool, String> {
-    if snap_set == fp_set {
-        return Ok(false);
+fn rollback_social_inner(conn: &Connection, snap: &mut WorldStateSnapshot) -> Result<(), String> {
+    if !table_exists(conn, "domain_rows")? {
+        return Err("cannot rollback social store: table 'domain_rows' does not exist".to_string());
     }
-    let del_sql = format!("DELETE FROM {table} WHERE character_id = ?1 AND mail_id = ?2");
-    let ins_sql = format!("INSERT OR IGNORE INTO {table} (character_id, mail_id) VALUES (?1, ?2)");
-    let removed: Vec<(i64, i64)> = fp_set.difference(snap_set).copied().collect();
-    for (cid, mid) in removed {
-        tx.execute(&del_sql, params![cid, mid])
-            .map_err(|e| e.to_string())?;
-        fp_set.remove(&(cid, mid));
-    }
-    let added: Vec<(i64, i64)> = snap_set.difference(fp_set).copied().collect();
-    for (cid, mid) in added {
-        tx.execute(&ins_sql, params![cid, mid])
-            .map_err(|e| e.to_string())?;
-        fp_set.insert((cid, mid));
-    }
-    Ok(true)
+    let mut ctx = LoadContext::new(false);
+    let (staged, _had_legacy) = load_staged_social(conn, &snap.bookmarks, &mut ctx)?;
+    apply_staged_social(staged, snap);
+    Ok(())
 }
 
-fn sync_i64_json_table<V: Serialize>(
-    tx: &Transaction<'_>,
-    table: &str,
-    pk_col: &str,
-    json_col: &str,
-    snap_map: &HashMap<i64, V>,
-    fp_map: &mut HashMap<i64, u64>,
-) -> Result<bool, String> {
-    let mut changed = false;
-    let del_sql = format!("DELETE FROM {table} WHERE {pk_col} = ?1");
-    let ups_sql = format!("INSERT OR REPLACE INTO {table} ({pk_col}, {json_col}) VALUES (?1, ?2)");
-    let removed: Vec<i64> = fp_map
-        .keys()
-        .filter(|k| !snap_map.contains_key(*k))
-        .copied()
-        .collect();
-    for k in removed {
-        changed = true;
-        tx.execute(&del_sql, params![k])
-            .map_err(|e| e.to_string())?;
-        fp_map.remove(&k);
+/// Fail-closed reload of all 24 Family 3 (`social`) collections from SQLite into `snap`,
+/// leaving `snap` untouched on any schema or decoding error.
+pub fn rollback_social(conn: &Connection, snap: &mut WorldStateSnapshot) -> Result<(), String> {
+    if let Err(err) = rollback_social_inner(conn, snap) {
+        crate::persistence::record_persist_failure();
+        tracing::error!("rollback_social failed closed without mutating snapshot: {err}");
+        return Err(err);
     }
-    for (&k, v) in snap_map {
-        let h = fp_json(v);
-        if fp_map.get(&k) != Some(&h) {
-            changed = true;
-            let js = to_checked_json_string(v)?;
-            tx.execute(&ups_sql, params![k, js])
-                .map_err(|e| e.to_string())?;
-            fp_map.insert(k, h);
-        }
-    }
-    Ok(changed)
-}
-
-pub(super) fn sync_d6_social(
-    tx: &Transaction<'_>,
-    snap: &WorldStateSnapshot,
-    fp: &mut TableFingerprints,
-) -> Result<bool, String> {
-    let mut staged = fp.d6_social.clone();
-    let mut changed = false;
-
-    changed |= sync_pair_set_table(tx, "read_mails", &snap.read_mails, &mut staged.read_mails)?;
-    changed |= sync_pair_set_table(
-        tx,
-        "deleted_mails",
-        &snap.deleted_mails,
-        &mut staged.deleted_mails,
-    )?;
-    changed |= sync_pair_set_table(
-        tx,
-        "trashed_mails",
-        &snap.trashed_mails,
-        &mut staged.trashed_mails,
-    )?;
-
-    changed |= sync_i64_json_table(
-        tx,
-        "mail_labels",
-        "character_id",
-        "labels_json",
-        &snap.mail_labels,
-        &mut staged.mail_labels,
-    )?;
-
-    {
-        let removed: Vec<(i64, i64)> = staged
-            .mail_assigned_labels
-            .keys()
-            .filter(|k| !snap.mail_assigned_labels.contains_key(*k))
-            .copied()
-            .collect();
-        for (cid, mid) in removed {
-            changed = true;
-            tx.execute(
-                "DELETE FROM mail_assigned_labels WHERE character_id = ?1 AND mail_id = ?2",
-                params![cid, mid],
-            )
-            .map_err(|e| e.to_string())?;
-            staged.mail_assigned_labels.remove(&(cid, mid));
-        }
-        for (&(cid, mid), labels) in &snap.mail_assigned_labels {
-            let h = fp_json(labels);
-            if staged.mail_assigned_labels.get(&(cid, mid)) != Some(&h) {
-                changed = true;
-                let js = to_checked_json_string(labels)?;
-                tx.execute(
-                    "INSERT OR REPLACE INTO mail_assigned_labels (character_id, mail_id, labels_json) VALUES (?1, ?2, ?3)",
-                    params![cid, mid, js],
-                )
-                .map_err(|e| e.to_string())?;
-                staged.mail_assigned_labels.insert((cid, mid), h);
-            }
-        }
-    }
-
-    changed |= sync_i64_json_table(
-        tx,
-        "mailing_lists",
-        "list_id",
-        "record_json",
-        &snap.mailing_lists,
-        &mut staged.mailing_lists,
-    )?;
-    changed |= sync_i64_json_table(
-        tx,
-        "calendar_events",
-        "event_id",
-        "record_json",
-        &snap.calendar_events,
-        &mut staged.calendar_events,
-    )?;
-
-    {
-        let mut meta_ids: BTreeSet<i64> = snap.bookmark_subfolders.keys().copied().collect();
-        meta_ids.extend(snap.bookmark_expiries.keys().copied());
-        let removed: Vec<i64> = staged
-            .bookmark_meta
-            .keys()
-            .filter(|k| !meta_ids.contains(k))
-            .copied()
-            .collect();
-        for bid in removed {
-            changed = true;
-            tx.execute(
-                "DELETE FROM bookmark_meta WHERE bookmark_id = ?1",
-                params![bid],
-            )
-            .map_err(|e| e.to_string())?;
-            staged.bookmark_meta.remove(&bid);
-        }
-        for bid in meta_ids {
-            let meta = build_persisted_bookmark_meta(snap, bid);
-            let h = fp_json(&meta);
-            if staged.bookmark_meta.get(&bid) != Some(&h) {
-                changed = true;
-                let js = to_checked_json_string(&meta)?;
-                tx.execute(
-                    "INSERT OR REPLACE INTO bookmark_meta (bookmark_id, record_json) VALUES (?1, ?2)",
-                    params![bid, js],
-                )
-                .map_err(|e| e.to_string())?;
-                staged.bookmark_meta.insert(bid, h);
-            }
-        }
-    }
-
-    {
-        let removed: Vec<i64> = staged
-            .bookmark_folders
-            .keys()
-            .filter(|k| !snap.bookmark_folders.contains_key(*k))
-            .copied()
-            .collect();
-        for fid in removed {
-            changed = true;
-            tx.execute(
-                "DELETE FROM bookmark_folders WHERE folder_id = ?1",
-                params![fid],
-            )
-            .map_err(|e| e.to_string())?;
-            staged.bookmark_folders.remove(&fid);
-        }
-        for (&fid, folder) in &snap.bookmark_folders {
-            let persisted = build_persisted_bookmark_folder(snap, fid, folder);
-            let h = fp_json(&persisted);
-            if staged.bookmark_folders.get(&fid) != Some(&h) {
-                changed = true;
-                let js = to_checked_json_string(&persisted)?;
-                tx.execute(
-                    "INSERT OR REPLACE INTO bookmark_folders (folder_id, record_json) VALUES (?1, ?2)",
-                    params![fid, js],
-                )
-                .map_err(|e| e.to_string())?;
-                staged.bookmark_folders.insert(fid, h);
-            }
-        }
-    }
-
-    changed |= sync_i64_json_table(
-        tx,
-        "access_groups",
-        "group_id",
-        "members_json",
-        &snap.access_groups,
-        &mut staged.access_groups,
-    )?;
-
-    {
-        let next_chat_fps = compute_chat_channels_fps(snap);
-        let removed: Vec<String> = staged
-            .chat_channels
-            .keys()
-            .filter(|k| !next_chat_fps.contains_key(*k))
-            .cloned()
-            .collect();
-        for cid in removed {
-            changed = true;
-            tx.execute(
-                "DELETE FROM chat_channels WHERE channel_id = ?1",
-                params![cid],
-            )
-            .map_err(|e| e.to_string())?;
-            staged.chat_channels.remove(&cid);
-        }
-        for (cid, &h) in &next_chat_fps {
-            if staged.chat_channels.get(cid) != Some(&h) {
-                if let Some(persisted) = build_persisted_chat_channel(snap, cid) {
-                    changed = true;
-                    let js = to_checked_json_string(&persisted)?;
-                    tx.execute(
-                        "INSERT OR REPLACE INTO chat_channels (channel_id, record_json) VALUES (?1, ?2)",
-                        params![cid, js],
-                    )
-                    .map_err(|e| e.to_string())?;
-                    staged.chat_channels.insert(cid.clone(), h);
-                }
-            }
-        }
-    }
-
-    changed |= sync_i64_json_table(
-        tx,
-        "char_contacts",
-        "character_id",
-        "contacts_json",
-        &snap.char_contacts,
-        &mut staged.char_contacts,
-    )?;
-    changed |= sync_i64_json_table(
-        tx,
-        "char_contact_notifications",
-        "character_id",
-        "notifications_json",
-        &snap.char_contact_notifications,
-        &mut staged.char_contact_notifications,
-    )?;
-    changed |= sync_i64_json_table(
-        tx,
-        "char_contact_labels",
-        "character_id",
-        "labels_json",
-        &snap.char_contact_labels,
-        &mut staged.char_contact_labels,
-    )?;
-    changed |= sync_i64_json_table(
-        tx,
-        "corp_contacts",
-        "corporation_id",
-        "contacts_json",
-        &snap.corp_contacts,
-        &mut staged.corp_contacts,
-    )?;
-    changed |= sync_i64_json_table(
-        tx,
-        "corp_contact_labels",
-        "corporation_id",
-        "labels_json",
-        &snap.corp_contact_labels,
-        &mut staged.corp_contact_labels,
-    )?;
-    changed |= sync_i64_json_table(
-        tx,
-        "alliance_contacts",
-        "alliance_id",
-        "contacts_json",
-        &snap.alliance_contacts,
-        &mut staged.alliance_contacts,
-    )?;
-    changed |= sync_i64_json_table(
-        tx,
-        "alliance_contact_labels",
-        "alliance_id",
-        "labels_json",
-        &snap.alliance_contact_labels,
-        &mut staged.alliance_contact_labels,
-    )?;
-
-    {
-        let removed: Vec<(i64, i64)> = staged
-            .char_notes
-            .keys()
-            .filter(|k| !snap.char_notes.contains_key(*k))
-            .copied()
-            .collect();
-        for (cid, iid) in removed {
-            changed = true;
-            tx.execute(
-                "DELETE FROM char_notes WHERE character_id = ?1 AND item_id = ?2",
-                params![cid, iid],
-            )
-            .map_err(|e| e.to_string())?;
-            staged.char_notes.remove(&(cid, iid));
-        }
-        for (&(cid, iid), note) in &snap.char_notes {
-            let h = fp_json(note);
-            if staged.char_notes.get(&(cid, iid)) != Some(&h) {
-                changed = true;
-                tx.execute(
-                    "INSERT OR REPLACE INTO char_notes (character_id, item_id, note) VALUES (?1, ?2, ?3)",
-                    params![cid, iid, note],
-                )
-                .map_err(|e| e.to_string())?;
-                staged.char_notes.insert((cid, iid), h);
-            }
-        }
-    }
-
-    fp.d6_social = staged;
-    Ok(changed)
+    Ok(())
 }
 
 #[cfg(test)]

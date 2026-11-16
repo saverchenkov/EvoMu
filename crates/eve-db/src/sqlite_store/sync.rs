@@ -55,7 +55,7 @@ pub fn sync_dirty_to_sqlite(
     cold_changed |= super::domain_rows::sync_notes_lp_domain_rows(tx, snap)?;
     cold_changed |= super::domain_rows::sync_service_domains_rows(tx, snap)?;
     cold_changed |= super::notes_lp_sequence_store::sync_d6(tx, snap, fp)?;
-    cold_changed |= super::social_store::sync_d6_social(tx, snap, fp)?;
+    cold_changed |= super::domain_rows::sync_social_domain_rows(tx, snap)?;
     cold_changed |= super::domain_rows::sync_corp_crimewatch_domain_rows(tx, snap)?;
     cold_changed |= super::industry_market_pve_store::sync_d6_batch4(tx, snap, fp)?;
     cold_changed |= super::service_domains_store::sync_service_domains(tx, snap, fp)?;
@@ -104,9 +104,6 @@ pub(crate) fn sync_selected_cold_domains_to_sqlite(
     }
     if cd.d6_notes_lp_seq {
         super::notes_lp_sequence_store::sync_d6(tx, snap, fp)?;
-    }
-    if cd.d6_social {
-        super::social_store::sync_d6_social(tx, snap, fp)?;
     }
     if cd.d6_batch4 {
         super::industry_market_pve_store::sync_d6_batch4(tx, snap, fp)?;
@@ -1406,25 +1403,6 @@ pub fn replace_sqlite_from_snapshot(
          DELETE FROM skill_history;
          DELETE FROM character_doll_info;
          DELETE FROM domain_rows;
-         DELETE FROM read_mails;
-         DELETE FROM deleted_mails;
-         DELETE FROM trashed_mails;
-         DELETE FROM mail_labels;
-         DELETE FROM mail_assigned_labels;
-         DELETE FROM mailing_lists;
-         DELETE FROM calendar_events;
-         DELETE FROM bookmark_meta;
-         DELETE FROM bookmark_folders;
-         DELETE FROM access_groups;
-         DELETE FROM chat_channels;
-         DELETE FROM char_contacts;
-         DELETE FROM char_contact_notifications;
-         DELETE FROM char_contact_labels;
-         DELETE FROM corp_contacts;
-         DELETE FROM corp_contact_labels;
-         DELETE FROM alliance_contacts;
-         DELETE FROM alliance_contact_labels;
-         DELETE FROM char_notes;
          DELETE FROM world_kv_blobs;
          DELETE FROM entity_kv;",
     )

@@ -225,6 +225,11 @@ impl ChangeSet {
             fleet_and_social_ops => DOMAIN_FLEET_AND_SOCIAL_OPS,
             cluster_and_runtime => DOMAIN_CLUSTER_AND_RUNTIME,
         );
+        crate::sqlite_store::domain_rows::collect_social_domain_row_diffs(
+            before,
+            after,
+            &mut domain_rows,
+        );
         crate::sqlite_store::domain_rows::collect_corp_crimewatch_domain_row_diffs(
             before,
             after,
@@ -339,30 +344,8 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
         || before.next_report_id != after.next_report_id
         || before.sp6_lifecycle != after.sp6_lifecycle;
 
-    let d6_social = before.read_mails != after.read_mails
-        || before.deleted_mails != after.deleted_mails
-        || before.trashed_mails != after.trashed_mails
-        || before.mail_labels != after.mail_labels
-        || before.mail_assigned_labels != after.mail_assigned_labels
-        || before.mailing_lists != after.mailing_lists
-        || before.calendar_events != after.calendar_events
-        || before.bookmark_folders != after.bookmark_folders
-        || before.bookmark_subfolders != after.bookmark_subfolders
-        || before.bookmark_subfolder_parents != after.bookmark_subfolder_parents
-        || before.bookmark_expiries != after.bookmark_expiries
-        || before.bookmark_folder_acls != after.bookmark_folder_acls
-        || before.access_groups != after.access_groups
-        || before.bookmark_folder_known_by != after.bookmark_folder_known_by
-        || before.chat_channels != after.chat_channels
-        || before.chat_channel_acl != after.chat_channel_acl
-        || before.char_contacts != after.char_contacts
-        || before.char_contact_notifications != after.char_contact_notifications
-        || before.char_contact_labels != after.char_contact_labels
-        || before.corp_contacts != after.corp_contacts
-        || before.corp_contact_labels != after.corp_contact_labels
-        || before.alliance_contacts != after.alliance_contacts
-        || before.alliance_contact_labels != after.alliance_contact_labels
-        || before.char_notes != after.char_notes;
+    // Family 3 (`social`) now persists via incremental `domain_rows` diffs.
+    let d6_social = false;
 
     let crimewatch_changed = before.crimewatch_states != after.crimewatch_states
         || before.crimewatch_aggressions != after.crimewatch_aggressions

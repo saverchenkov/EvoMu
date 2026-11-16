@@ -25,6 +25,12 @@ pub const DOMAIN_OWNER_NOTES: &str = "notes_lp.owner_notes";
 pub const DOMAIN_CORP_LP_BALANCES: &str = "notes_lp.corp_lp_balances";
 pub const DOMAIN_CHAR_LP_LOGS: &str = "notes_lp.char_lp_logs";
 
+/// Family 3 (`social`) canonical `domain_rows.domain` names (`#916`).
+pub const DOMAIN_SOCIAL_MAIL: &str = "social.mail";
+pub const DOMAIN_SOCIAL_BOOKMARKS: &str = "social.bookmarks";
+pub const DOMAIN_SOCIAL_CHAT_CALENDAR: &str = "social.chat_calendar";
+pub const DOMAIN_SOCIAL_CONTACTS_NOTES: &str = "social.contacts_notes";
+
 /// Family 4 (`corp_crimewatch`) canonical `domain_rows.domain` names (`#916`).
 pub const DOMAIN_CORP_GOVERNANCE: &str = "corp_crimewatch.corp_governance";
 pub const DOMAIN_CRIMEWATCH: &str = "corp_crimewatch.crimewatch";
@@ -2243,6 +2249,12 @@ pub(crate) fn sync_notes_lp_domain_rows(
     dirty |= snap.char_lp_logs.sync_full(tx, DOMAIN_CHAR_LP_LOGS)?;
     Ok(dirty)
 }
+
+// Family 3 (`social`) persistence lives in `social_store.rs` and is re-exported here so
+// `domain_rows` serves as the single entry point for migrated families.
+pub(crate) use super::social_store::{
+    collect_social_domain_row_diffs, drop_legacy_social_tables, sync_social_domain_rows,
+};
 
 // Family 4 (`corp_crimewatch`) persistence lives in `corp_crimewatch_store.rs` and is
 // re-exported here so `domain_rows` serves as the single entry point for migrated families.

@@ -890,7 +890,6 @@ pub struct TableFingerprints {
     pub skill_history: HashMap<i64, u64>,
     pub character_doll_info: HashMap<i64, u64>,
     pub d6: super::notes_lp_sequence_store::D6Fingerprints,
-    pub d6_social: super::social_store::D6SocialFingerprints,
     pub d6_batch4: super::industry_market_pve_store::D6Batch4Fingerprints,
     pub service_domains: super::service_domains_store::ServiceDomainsFingerprints,
 }
@@ -1027,7 +1026,6 @@ pub fn compute_fingerprints(snap: &WorldStateSnapshot) -> TableFingerprints {
         fp.character_doll_info.insert(cid, fp_json(v));
     }
     fp.d6 = super::notes_lp_sequence_store::compute_d6_fingerprints(snap);
-    fp.d6_social = super::social_store::compute_d6_social_fp(snap);
     fp.d6_batch4 = super::industry_market_pve_store::compute_d6_batch4_fingerprints(snap);
     fp.service_domains =
         super::service_domains_store::compute_service_domains_fingerprints(snap);
@@ -1560,7 +1558,6 @@ mod tests {
             assert_eq!(cand_fp.fleets, base_fp.fleets, "round {round} fleets");
             assert_eq!(cand_fp.planetary_colonies, base_fp.planetary_colonies, "round {round} colonies");
             assert_eq!(cand_fp.npe_progress, base_fp.npe_progress, "round {round} npe_progress");
-            assert_eq!(cand_fp.d6_social, base_fp.d6_social, "round {round} social");
             assert_eq!(cand_fp.service_domains, base_fp.service_domains, "round {round} service_domains");
 
             // Also roundtrip through JSON to allocate brand-new RandomState SipHash seeds on every HashMap/HashSet.

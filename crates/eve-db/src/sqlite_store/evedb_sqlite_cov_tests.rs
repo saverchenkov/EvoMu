@@ -611,59 +611,58 @@ fn build_social_populated_snapshot() -> WorldStateSnapshot {
 
 #[test]
 fn social_store_dropped_tables_corrupt_json_and_migration_error_paths() {
+    use crate::sqlite_store::domain_rows::{
+        DOMAIN_SOCIAL_BOOKMARKS, DOMAIN_SOCIAL_CHAT_CALENDAR, DOMAIN_SOCIAL_CONTACTS_NOTES,
+        DOMAIN_SOCIAL_MAIL,
+    };
+    use crate::sqlite_store::quarantine::LoadContext;
     use crate::sqlite_store::social_store::{
-        apply_d6_social_migration, load_d6_social_into_snapshot, sync_d6_social,
+        load_social_domain_rows, sync_social_domain_rows, LEGACY_D6_SOCIAL_SQL,
     };
 
     let pop = build_social_populated_snapshot();
-    let base_fp = compute_fingerprints(&pop);
-    let empty = WorldStateSnapshot::default();
-    let social_tables = [
-        "read_mails",
-        "deleted_mails",
-        "trashed_mails",
-        "mail_labels",
-        "mail_assigned_labels",
-        "mailing_lists",
-        "calendar_events",
-        "bookmark_meta",
-        "bookmark_folders",
-        "chat_channels",
-        "char_contacts",
-        "char_contact_notifications",
-        "char_contact_labels",
-        "corp_contacts",
-        "corp_contact_labels",
-        "alliance_contacts",
-        "alliance_contact_labels",
-        "char_notes",
-        "access_groups",
-    ];
 
-    for tbl in social_tables {
-        // 1. Insert sync error when table dropped
-        let mut ins_conn = open_migrated_conn();
-        ins_conn.execute(&format!("DROP TABLE {tbl}"), []).unwrap();
-        let mut e_fp = TableFingerprints::default();
-        {
-            let tx = ins_conn.transaction().unwrap();
-            assert!(sync_d6_social(&tx, &pop, &mut e_fp).is_err(), "insert missing {tbl}");
-        }
-        // 2. Load error when table dropped
+    // 1. Dropped `domain_rows` causes sync insert/delete errors while load cleanly returns `Ok(false)`.
+    let mut no_dr = open_migrated_conn();
+    {
+        let tx = no_dr.transaction().unwrap();
+        assert!(sync_social_domain_rows(&tx, &pop).unwrap());
+        tx.commit().unwrap();
+    }
+    no_dr.execute("DROP TABLE domain_rows", []).unwrap();
+    {
+        let tx = no_dr.transaction().unwrap();
+        assert!(
+            sync_social_domain_rows(&tx, &pop).is_err(),
+            "sync_social_domain_rows must fail when domain_rows is missing"
+        );
+    }
+    let mut empty_dst = WorldStateSnapshot::default();
+    assert!(!load_social_domain_rows(&no_dr, &mut empty_dst, &mut LoadContext::new(false)).unwrap());
+
+    // 2. Corrupt JSON in each canonical `social.*` namespace fails closed on strict load.
+    for (domain, key) in [
+        (DOMAIN_SOCIAL_MAIL, "mail_labels/1"),
+        (DOMAIN_SOCIAL_BOOKMARKS, "bookmark_folders/1"),
+        (DOMAIN_SOCIAL_CHAT_CALENDAR, "calendar_events/1"),
+        (DOMAIN_SOCIAL_CHAT_CALENDAR, "chat_channels/x"),
+        (DOMAIN_SOCIAL_CONTACTS_NOTES, "char_contacts/1"),
+        (DOMAIN_SOCIAL_CONTACTS_NOTES, "char_notes/1|2"),
+    ] {
+        let conn = open_migrated_conn();
+        conn.execute(
+            "INSERT INTO domain_rows (domain, key, value) VALUES (?1, ?2, '{bad')",
+            rusqlite::params![domain, key],
+        )
+        .unwrap();
         let mut s = WorldStateSnapshot::default();
-        assert!(load_d6_social_into_snapshot(&ins_conn, &mut s).is_err(), "load missing {tbl}");
-
-        // 3. Delete sync error when table dropped
-        let mut del_conn = open_migrated_conn();
-        del_conn.execute(&format!("DROP TABLE {tbl}"), []).unwrap();
-        let mut p_fp = base_fp.clone();
-        {
-            let tx = del_conn.transaction().unwrap();
-            assert!(sync_d6_social(&tx, &empty, &mut p_fp).is_err(), "delete missing {tbl}");
-        }
+        assert!(
+            load_social_domain_rows(&conn, &mut s, &mut LoadContext::new(false)).is_err(),
+            "expected err for {domain}/{key}"
+        );
     }
 
-    // Corrupt JSON rows in each JSON-carrying social table fail load cleanly
+    // 3. Corrupt JSON rows in each JSON-carrying legacy social table fail strict migration load cleanly.
     let json_corrupt_sql = [
         "INSERT INTO mail_labels (character_id, labels_json) VALUES (1, '{bad')",
         "INSERT INTO mail_assigned_labels (character_id, mail_id, labels_json) VALUES (1, 1, '{bad')",
@@ -683,20 +682,14 @@ fn social_store_dropped_tables_corrupt_json_and_migration_error_paths() {
     ];
     for sql in json_corrupt_sql {
         let conn = open_migrated_conn();
+        conn.execute_batch(LEGACY_D6_SOCIAL_SQL).unwrap();
         conn.execute(sql, []).unwrap();
         let mut s = WorldStateSnapshot::default();
-        assert!(load_d6_social_into_snapshot(&conn, &mut s).is_err(), "expected json err for: {sql}");
+        assert!(
+            load_social_domain_rows(&conn, &mut s, &mut LoadContext::new(false)).is_err(),
+            "expected legacy json err for: {sql}"
+        );
     }
-
-    // Migration error when conflicting view replaces read_mails or schema_migrations is dropped
-    let bad_mig = Connection::open_in_memory().unwrap();
-    bad_mig.execute("CREATE VIEW read_mails AS SELECT 1 AS character_id, 2 AS mail_id", []).unwrap();
-    assert!(apply_d6_social_migration(&bad_mig).is_err());
-
-    let conn2 = Connection::open_in_memory().unwrap();
-    conn2.execute_batch("CREATE TABLE read_mails (character_id INTEGER, mail_id INTEGER); CREATE VIEW deleted_mails AS SELECT 1;").unwrap();
-    assert!(apply_d6_social_migration(&conn2).is_err());
-    drop(bad_mig);
 }
 
 #[test]
@@ -739,7 +732,6 @@ fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
     assert!(crate::sqlite_store::auth_store::apply_auth_migration(&c_ro).is_err());
     assert!(crate::sqlite_store::domain_rows::apply_domain_rows_migration(&c_ro).is_err());
     assert!(crate::sqlite_store::notes_lp_sequence_store::apply_d6_migration(&c_ro).is_err());
-    assert!(crate::sqlite_store::social_store::apply_d6_social_migration(&c_ro).is_err());
     assert!(crate::sqlite_store::industry_market_pve_store::apply_d6_batch4_migration(&c_ro).is_err());
     assert!(crate::sqlite_store::service_domains_store::apply_service_domains_migration(&c_ro).is_err());
     // View collision on items triggers index/alter/schema failure during apply_migrations

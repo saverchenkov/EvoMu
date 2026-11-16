@@ -1,264 +1,681 @@
-use super::*;
-use rusqlite::Connection;
-use std::collections::HashSet;
+#![forbid(unsafe_code)]
 
-fn init_migrations_table(conn: &Connection) {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_unix INTEGER NOT NULL);",
+use super::{
+    drop_legacy_social_tables, load_social_domain_rows, rollback_social, sync_social_domain_rows,
+    PersistedBookmarkFolder, PersistedBookmarkMeta, PersistedChatChannel, LEGACY_D6_SOCIAL_SQL,
+    LEGACY_SOCIAL_TABLES,
+};
+use crate::durable_domain_types::SocialContactNotificationRecord;
+use crate::persistence::WorldRepository;
+use crate::sqlite_store::domain_rows::{
+    DOMAIN_SOCIAL_BOOKMARKS, DOMAIN_SOCIAL_CHAT_CALENDAR, DOMAIN_SOCIAL_CONTACTS_NOTES,
+    DOMAIN_SOCIAL_MAIL,
+};
+use crate::sqlite_store::load::load_snapshot_from_sqlite;
+use crate::sqlite_store::quarantine::LoadContext;
+use crate::sqlite_store::schema::apply_migrations;
+use crate::types::{
+    BookmarkFolderRecord, CalendarEventRecord, ChatChannelAclRecord, ChatChannelRecord,
+    MailLabelRecord, MailingListRecord, SocialContactRecord, WorldStateSnapshot,
+};
+use rusqlite::{params, Connection};
+use std::collections::{HashMap, HashSet};
+
+fn temp_social_db_path(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "evomu_social_edges_{tag}_{}.sqlite",
+        std::process::id()
+    ))
+}
+
+fn existing_legacy_social_tables(conn: &Connection) -> Vec<String> {
+    let mut stmt = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .unwrap();
+    stmt.query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|name| LEGACY_SOCIAL_TABLES.contains(&name.as_str()))
+        .collect()
+}
+
+fn populate_all_24_social_fields(snap: &mut WorldStateSnapshot) {
+    let cid = 90_000_001_i64;
+    let peer = 90_000_002_i64;
+    snap.read_mails.insert((cid, 1001));
+    snap.deleted_mails.insert((cid, 1002));
+    snap.trashed_mails.insert((cid, 1003));
+    snap.mail_labels.insert(
+        cid,
+        vec![MailLabelRecord {
+            label_id: 1,
+            name: "Important".into(),
+            color: "#ff0000".into(),
+        }],
+    );
+    snap.mail_assigned_labels.insert((cid, 1001), vec![1]);
+    snap.mailing_lists.insert(
+        31_000_001,
+        MailingListRecord {
+            list_id: 31_000_001,
+            name: "FleetAlerts".into(),
+            owner_id: cid,
+            default_access: 1,
+            default_role: 2,
+            cost: 100,
+            members: HashMap::from([(cid, 3)]),
+            entity_access: HashMap::from([(98_000_001, 1)]),
+            welcome_mail: Some(("Welcome".into(), "Fly safe".into())),
+            mail_ids: HashSet::from([1001]),
+        },
+    );
+
+    snap.bookmark_folders.insert(
+        32_000_001,
+        BookmarkFolderRecord {
+            folder_id: 32_000_001,
+            owner_id: cid,
+            folder_name: "CorpSafe".into(),
+            is_shared: true,
+            corporation_id: Some(98_000_001),
+            description: "Shared corp bookmarks".into(),
+            admin_group_id: Some(33_000_001),
+            manage_group_id: Some(33_000_002),
+            use_group_id: None,
+            view_group_id: None,
+        },
+    );
+    snap.bookmark_folders.insert(
+        32_000_002,
+        BookmarkFolderRecord {
+            folder_id: 32_000_002,
+            owner_id: cid,
+            folder_name: "Tacticals".into(),
+            ..Default::default()
+        },
+    );
+    snap.bookmark_subfolders.insert(34_000_001, 32_000_002);
+    snap.bookmark_subfolder_parents
+        .insert(32_000_002, 32_000_001);
+    snap.bookmark_expiries.insert(34_000_001, 1_950_000_000);
+    snap.bookmark_folder_acls
+        .insert(32_000_001, vec![33_000_001, 33_000_002]);
+    snap.access_groups.insert(33_000_001, vec![cid, peer]);
+    snap.bookmark_folder_known_by.insert((32_000_001, peer), true);
+
+    snap.calendar_events.insert(
+        35_000_001,
+        CalendarEventRecord {
+            event_id: 35_000_001,
+            owner_id: cid,
+            creator_id: cid,
+            event_date_time: 1_700_001_000,
+            duration: 60,
+            importance: 1,
+            title: "Stratop".into(),
+            description: "Undock in Jita".into(),
+            scope: "Corporation".into(),
+            responses: HashMap::from([(cid, 1), (peer, 2)]),
+            is_deleted: false,
+        },
+    );
+    snap.chat_channels.insert(
+        "corp_98000001".into(),
+        ChatChannelRecord {
+            channel_id: "corp_98000001".into(),
+            name: "Corp".into(),
+            motd: "Welcome".into(),
+            owner_id: Some(cid),
+            members: HashSet::from([cid, peer]),
+            is_system_local: false,
+            solar_system_id: Some(30_000_142),
+            is_private: true,
+            operators: HashSet::from([cid]),
+            password: Some("secret".into()),
+            is_delayed_local: false,
+        },
+    );
+    snap.chat_channel_acl.insert(
+        "corp_98000001".into(),
+        ChatChannelAclRecord {
+            allow_list: HashSet::from([cid]),
+            deny_list: HashSet::new(),
+            muted_until: HashMap::new(),
+        },
+    );
+    snap.chat_channel_acl.insert(
+        "global".into(),
+        ChatChannelAclRecord {
+            allow_list: HashSet::new(),
+            deny_list: HashSet::from([peer]),
+            muted_until: HashMap::from([(peer, (1_900_000_000, "spam".into()))]),
+        },
+    );
+
+    let contact = SocialContactRecord {
+        contact_id: peer,
+        contact_type: "character".into(),
+        standing: 5.0,
+        is_watched: true,
+        is_blocked: false,
+        label_ids: vec![1],
+    };
+    snap.char_contacts.insert(cid, vec![contact.clone()]);
+    snap.char_contact_notifications.insert(
+        cid,
+        vec![SocialContactNotificationRecord {
+            notification_id: 77,
+            sender_character_id: peer,
+            send_date_unix: 1_700_000_200,
+            standing_level: 5.0,
+            message: "Added".into(),
+        }],
+    );
+    snap.char_contact_labels
+        .insert(cid, vec![(1, "Friends".into())]);
+    snap.corp_contacts
+        .insert(98_000_001, vec![contact.clone()]);
+    snap.corp_contact_labels
+        .insert(98_000_001, vec![(1, "Blues".into(), 2)]);
+    snap.alliance_contacts.insert(99_000_001, vec![contact]);
+    snap.alliance_contact_labels
+        .insert(99_000_001, vec![(1, "Allies".into())]);
+    snap.char_notes.insert((cid, peer), "Trusted scout".into());
+}
+
+fn assert_all_24_social_fields_equal(actual: &WorldStateSnapshot, expected: &WorldStateSnapshot) {
+    assert_eq!(actual.read_mails, expected.read_mails);
+    assert_eq!(actual.deleted_mails, expected.deleted_mails);
+    assert_eq!(actual.trashed_mails, expected.trashed_mails);
+    assert_eq!(actual.mail_labels, expected.mail_labels);
+    assert_eq!(actual.mail_assigned_labels, expected.mail_assigned_labels);
+    assert_eq!(actual.mailing_lists, expected.mailing_lists);
+    assert_eq!(actual.bookmark_folders, expected.bookmark_folders);
+    assert_eq!(actual.bookmark_subfolders, expected.bookmark_subfolders);
+    assert_eq!(
+        actual.bookmark_subfolder_parents,
+        expected.bookmark_subfolder_parents
+    );
+    assert_eq!(actual.bookmark_expiries, expected.bookmark_expiries);
+    assert_eq!(actual.bookmark_folder_acls, expected.bookmark_folder_acls);
+    assert_eq!(actual.access_groups, expected.access_groups);
+    assert_eq!(
+        actual.bookmark_folder_known_by,
+        expected.bookmark_folder_known_by
+    );
+    assert_eq!(actual.calendar_events, expected.calendar_events);
+    assert_eq!(actual.chat_channels, expected.chat_channels);
+    assert_eq!(actual.chat_channel_acl, expected.chat_channel_acl);
+    assert_eq!(actual.char_contacts, expected.char_contacts);
+    assert_eq!(
+        actual.char_contact_notifications,
+        expected.char_contact_notifications
+    );
+    assert_eq!(actual.char_contact_labels, expected.char_contact_labels);
+    assert_eq!(actual.corp_contacts, expected.corp_contacts);
+    assert_eq!(actual.corp_contact_labels, expected.corp_contact_labels);
+    assert_eq!(actual.alliance_contacts, expected.alliance_contacts);
+    assert_eq!(
+        actual.alliance_contact_labels,
+        expected.alliance_contact_labels
+    );
+    assert_eq!(actual.char_notes, expected.char_notes);
+}
+
+#[test]
+fn social_legacy_tables_migration_preserves_newer_domain_rows_and_drops_tables() {
+    let path = temp_social_db_path("legacy_migration");
+    let _ = std::fs::remove_file(&path);
+    let conn = Connection::open(&path).expect("open");
+    apply_migrations(&conn).expect("apply_migrations");
+    assert!(
+        existing_legacy_social_tables(&conn).is_empty(),
+        "fresh schema must not create any of the 19 legacy social tables"
+    );
+
+    // Simulate a pre-#916 database containing all 19 legacy social tables.
+    conn.execute_batch(LEGACY_D6_SOCIAL_SQL)
+        .expect("create legacy d6_social tables");
+    assert_eq!(existing_legacy_social_tables(&conn).len(), 19);
+
+    let mut legacy = WorldStateSnapshot::default();
+    populate_all_24_social_fields(&mut legacy);
+    let cid = 90_000_001_i64;
+    let peer = 90_000_002_i64;
+
+    // Seed parent bookmark so live `bookmark_meta.subfolder_id` survives orphan filtering, plus
+    // an orphaned `bookmark_meta` row (id 34_000_099) that must NOT revive `bookmark_subfolders`.
+    conn.execute(
+        "INSERT INTO bookmarks (bookmark_id, owner_id, label, solar_system_id, x, y, z, item_id, memo, folder_id, is_shared) VALUES (34000001, ?1, 'Safe', 30000142, 1.0, 2.0, 3.0, NULL, '', 32000001, 1)",
+        [cid],
     )
     .unwrap();
-}
+    conn.execute(
+        "INSERT INTO read_mails (character_id, mail_id) VALUES (?1, 1001)",
+        [cid],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO deleted_mails (character_id, mail_id) VALUES (?1, 1002)",
+        [cid],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO trashed_mails (character_id, mail_id) VALUES (?1, 1003)",
+        [cid],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO mail_labels (character_id, labels_json) VALUES (?1, ?2)",
+        params![cid, serde_json::to_string(&legacy.mail_labels[&cid]).unwrap()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO mail_assigned_labels (character_id, mail_id, labels_json) VALUES (?1, 1001, ?2)",
+        params![
+            cid,
+            serde_json::to_string(&legacy.mail_assigned_labels[&(cid, 1001)]).unwrap()
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO mailing_lists (list_id, record_json) VALUES (31000001, ?1)",
+        [serde_json::to_string(&legacy.mailing_lists[&31_000_001]).unwrap()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO calendar_events (event_id, record_json) VALUES (35000001, ?1)",
+        [serde_json::to_string(&legacy.calendar_events[&35_000_001]).unwrap()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO bookmark_meta (bookmark_id, record_json) VALUES (34000001, ?1), (34000099, ?2)",
+        params![
+            serde_json::to_string(&PersistedBookmarkMeta {
+                subfolder_id: Some(32_000_002),
+                expiry_unix: Some(1_950_000_000),
+            })
+            .unwrap(),
+            serde_json::to_string(&PersistedBookmarkMeta {
+                subfolder_id: Some(32_000_002),
+                expiry_unix: Some(0),
+            })
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO bookmark_folders (folder_id, record_json) VALUES (32000001, ?1), (32000002, ?2)",
+        params![
+            serde_json::to_string(&PersistedBookmarkFolder {
+                record: legacy.bookmark_folders[&32_000_001].clone(),
+                access_group_ids: vec![33_000_001, 33_000_002],
+                known_by: vec![(peer, true)],
+                parent_folder_id: None,
+            })
+            .unwrap(),
+            serde_json::to_string(&PersistedBookmarkFolder {
+                record: legacy.bookmark_folders[&32_000_002].clone(),
+                access_group_ids: vec![],
+                known_by: vec![],
+                parent_folder_id: Some(32_000_001),
+            })
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO access_groups (group_id, members_json) VALUES (33000001, ?1)",
+        [serde_json::to_string(&legacy.access_groups[&33_000_001]).unwrap()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO chat_channels (channel_id, record_json) VALUES ('corp_98000001', ?1), ('global', ?2)",
+        params![
+            serde_json::to_string(&PersistedChatChannel {
+                record: legacy.chat_channels["corp_98000001"].clone(),
+                acl: legacy.chat_channel_acl["corp_98000001"].clone(),
+                standalone_acl_only: false,
+            })
+            .unwrap(),
+            serde_json::to_string(&PersistedChatChannel {
+                record: ChatChannelRecord {
+                    channel_id: "global".into(),
+                    ..Default::default()
+                },
+                acl: legacy.chat_channel_acl["global"].clone(),
+                standalone_acl_only: true,
+            })
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO char_contacts (character_id, contacts_json) VALUES (?1, ?2)",
+        params![cid, serde_json::to_string(&legacy.char_contacts[&cid]).unwrap()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO char_contact_notifications (character_id, notifications_json) VALUES (?1, ?2)",
+        params![
+            cid,
+            serde_json::to_string(&legacy.char_contact_notifications[&cid]).unwrap()
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO char_contact_labels (character_id, labels_json) VALUES (?1, ?2)",
+        params![
+            cid,
+            serde_json::to_string(&legacy.char_contact_labels[&cid]).unwrap()
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO corp_contacts (corporation_id, contacts_json) VALUES (98000001, ?1)",
+        [serde_json::to_string(&legacy.corp_contacts[&98_000_001]).unwrap()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO corp_contact_labels (corporation_id, labels_json) VALUES (98000001, ?1)",
+        [serde_json::to_string(&legacy.corp_contact_labels[&98_000_001]).unwrap()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO alliance_contacts (alliance_id, contacts_json) VALUES (99000001, ?1)",
+        [serde_json::to_string(&legacy.alliance_contacts[&99_000_001]).unwrap()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO alliance_contact_labels (alliance_id, labels_json) VALUES (99000001, ?1)",
+        [serde_json::to_string(&legacy.alliance_contact_labels[&99_000_001]).unwrap()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO char_notes (character_id, item_id, note) VALUES (?1, ?2, 'LegacyNote')",
+        params![cid, peer],
+    )
+    .unwrap();
 
-fn get_social_tables(conn: &Connection) -> Vec<String> {
-    let mut stmt = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name != 'schema_migrations' ORDER BY name")
-        .unwrap();
-    stmt.query_map([], |row| row.get::<_, String>(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect()
-}
+    // Newer `domain_rows` overrides must take precedence over stale legacy rows across domains.
+    let mut newer_folder = legacy.bookmark_folders[&32_000_001].clone();
+    newer_folder.folder_name = "NewerCorpSafe".into();
+    let mut newer_list = legacy.mailing_lists[&31_000_001].clone();
+    newer_list.name = "NewerFleetAlerts".into();
+    let mut newer_event = legacy.calendar_events[&35_000_001].clone();
+    newer_event.title = "NewerStratop".into();
+    conn.execute(
+        "INSERT INTO domain_rows (domain, key, value) VALUES
+            (?1, 'mailing_lists/31000001', ?2),
+            (?3, 'bookmark_folders/32000001', ?4),
+            (?5, 'calendar_events/35000001', ?6),
+            (?7, ?8, '\"NewerNote\"')",
+        params![
+            DOMAIN_SOCIAL_MAIL,
+            serde_json::to_string(&newer_list).unwrap(),
+            DOMAIN_SOCIAL_BOOKMARKS,
+            serde_json::to_string(&newer_folder).unwrap(),
+            DOMAIN_SOCIAL_CHAT_CALENDAR,
+            serde_json::to_string(&newer_event).unwrap(),
+            DOMAIN_SOCIAL_CONTACTS_NOTES,
+            format!("char_notes/{cid}|{peer}"),
+        ],
+    )
+    .unwrap();
 
-fn get_table_columns(conn: &Connection, table: &str) -> Vec<(String, String)> {
-    let sql = format!("PRAGMA table_info(\"{table}\")");
-    let mut stmt = conn.prepare(&sql).unwrap();
-    stmt.query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect()
+    let (migrated, _) = load_snapshot_from_sqlite(&conn).expect("load + migrate legacy social tables");
+    assert!(
+        existing_legacy_social_tables(&conn).is_empty(),
+        "startup migration must drop all 19 legacy social tables"
+    );
+    assert_eq!(migrated.read_mails, legacy.read_mails);
+    assert_eq!(migrated.deleted_mails, legacy.deleted_mails);
+    assert_eq!(migrated.trashed_mails, legacy.trashed_mails);
+    assert_eq!(migrated.mail_labels, legacy.mail_labels);
+    assert_eq!(migrated.mail_assigned_labels, legacy.mail_assigned_labels);
+    assert_eq!(migrated.mailing_lists[&31_000_001].name, "NewerFleetAlerts");
+    assert_eq!(
+        migrated.bookmark_folders[&32_000_001].folder_name,
+        "NewerCorpSafe"
+    );
+    assert_eq!(migrated.bookmark_subfolders, legacy.bookmark_subfolders);
+    assert!(
+        !migrated.bookmark_subfolders.contains_key(&34_000_099),
+        "orphaned bookmark subfolder must not be revived"
+    );
+    assert!(
+        !migrated.bookmark_expiries.contains_key(&34_000_099),
+        "zero bookmark expiry must not be persisted"
+    );
+    assert_eq!(
+        migrated.bookmark_subfolder_parents,
+        legacy.bookmark_subfolder_parents
+    );
+    assert_eq!(migrated.bookmark_expiries, legacy.bookmark_expiries);
+    assert_eq!(migrated.bookmark_folder_acls, legacy.bookmark_folder_acls);
+    assert_eq!(migrated.access_groups, legacy.access_groups);
+    assert_eq!(
+        migrated.bookmark_folder_known_by,
+        legacy.bookmark_folder_known_by
+    );
+    assert_eq!(migrated.calendar_events[&35_000_001].title, "NewerStratop");
+    assert_eq!(migrated.chat_channels, legacy.chat_channels);
+    assert!(
+        !migrated.chat_channels.contains_key("global"),
+        "standalone_acl_only must not create phantom ChatChannelRecord"
+    );
+    assert_eq!(migrated.chat_channel_acl, legacy.chat_channel_acl);
+    assert_eq!(migrated.char_contacts, legacy.char_contacts);
+    assert_eq!(
+        migrated.char_contact_notifications,
+        legacy.char_contact_notifications
+    );
+    assert_eq!(migrated.char_contact_labels, legacy.char_contact_labels);
+    assert_eq!(migrated.corp_contacts, legacy.corp_contacts);
+    assert_eq!(migrated.corp_contact_labels, legacy.corp_contact_labels);
+    assert_eq!(migrated.alliance_contacts, legacy.alliance_contacts);
+    assert_eq!(
+        migrated.alliance_contact_labels,
+        legacy.alliance_contact_labels
+    );
+    assert_eq!(migrated.char_notes.get(&(cid, peer)), Some(&"NewerNote".into()));
+    drop(conn);
+
+    // Reopen with WorldRepository, delete a migrated row, and confirm it never resurrects.
+    let repo = WorldRepository::open_sqlite(&path).expect("reopen migrated db");
+    repo.with_mut_snapshot(|snap| {
+        snap.char_notes.remove(&(cid, peer));
+        snap.chat_channel_acl.remove("global");
+    });
+    drop(repo);
+
+    let reopened = WorldRepository::open_sqlite(&path).expect("second reopen");
+    reopened.with_snapshot(|snap| {
+        assert!(!snap.char_notes.contains_key(&(cid, peer)));
+        assert!(!snap.chat_channel_acl.contains_key("global"));
+        assert_eq!(snap.mailing_lists[&31_000_001].name, "NewerFleetAlerts");
+    });
+    drop(reopened);
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
-fn social_migration_readonly_and_missing_schema_migrations_fail() {
-    // Missing schema_migrations causes migration error
-    let no_mig = Connection::open_in_memory().unwrap();
-    assert!(apply_d6_social_migration(&no_mig).is_err());
-
-    // Wrong schema_migrations columns causes error
-    let bad_mig = Connection::open_in_memory().unwrap();
-    bad_mig
-        .execute_batch("CREATE TABLE schema_migrations (bad INTEGER);")
-        .unwrap();
-    assert!(apply_d6_social_migration(&bad_mig).is_err());
-
-    // Read-only DB fails DDL execution
-    let tmp = std::env::temp_dir().join(format!(
-        "evomu_d6_soc_ro_{}_{:?}.sqlite",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_file(&tmp);
-    drop(Connection::open(&tmp).unwrap());
-    let ro = Connection::open_with_flags(&tmp, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-    assert!(apply_d6_social_migration(&ro).is_err());
-    drop(ro);
-    let _ = std::fs::remove_file(&tmp);
-
-    let base = Connection::open_in_memory().unwrap();
-    init_migrations_table(&base);
-    apply_d6_social_migration(&base).unwrap();
-    let tables = get_social_tables(&base);
-    assert_eq!(tables.len(), 19, "expected 19 d6 social tables, got {:?}", tables);
-}
-
-#[test]
-fn social_load_missing_tables_and_corrupt_rows_cover_all_19_tables() {
-    let proto = Connection::open_in_memory().unwrap();
-    init_migrations_table(&proto);
-    apply_d6_social_migration(&proto).unwrap();
-    let tables = get_social_tables(&proto);
-
-    for table in &tables {
-        // 1. Missing table error branch
-        let conn_missing = Connection::open_in_memory().unwrap();
-        init_migrations_table(&conn_missing);
-        apply_d6_social_migration(&conn_missing).unwrap();
-        conn_missing
-            .execute(&format!("DROP TABLE \"{table}\""), [])
-            .unwrap();
-        let mut snap = WorldStateSnapshot::default();
-        assert!(
-            load_d6_social_into_snapshot(&conn_missing, &mut snap).is_err(),
-            "expected error when table {table} is dropped"
-        );
-
-        // 2. Integer type mismatch in primary/first INTEGER column -> row.map_err
-        let cols = get_table_columns(&proto, table);
-        if cols.iter().any(|(_, ty)| ty.eq_ignore_ascii_case("INTEGER")) {
-            let conn_bad_type = Connection::open_in_memory().unwrap();
-            init_migrations_table(&conn_bad_type);
-            apply_d6_social_migration(&conn_bad_type).unwrap();
-            conn_bad_type
-                .execute(&format!("DROP TABLE \"{table}\""), [])
-                .unwrap();
-            let col_defs: Vec<String> = cols
-                .iter()
-                .map(|(name, _)| format!("\"{name}\" TEXT"))
-                .collect();
-            conn_bad_type
-                .execute(
-                    &format!("CREATE TABLE \"{table}\" ({})", col_defs.join(", ")),
-                    [],
-                )
-                .unwrap();
-            let vals: Vec<&str> = cols.iter().map(|_| "'not_an_int'").collect();
-            conn_bad_type
-                .execute(
-                    &format!("INSERT INTO \"{table}\" VALUES ({})", vals.join(", ")),
-                    [],
-                )
-                .unwrap();
-            let mut snap_bad = WorldStateSnapshot::default();
-            assert!(
-                load_d6_social_into_snapshot(&conn_bad_type, &mut snap_bad).is_err(),
-                "expected row type error on {table}"
-            );
-        }
-
-        // 3. Corrupt JSON in *_json column fails cleanly
-        if cols.iter().any(|(name, _)| name.ends_with("_json")) {
-            let conn_bad_json = Connection::open_in_memory().unwrap();
-            init_migrations_table(&conn_bad_json);
-            apply_d6_social_migration(&conn_bad_json).unwrap();
-            let placeholders: Vec<String> = cols
-                .iter()
-                .map(|(name, ty)| {
-                    if name.ends_with("_json") {
-                        "'{corrupt_json'".to_string()
-                    } else if ty.eq_ignore_ascii_case("INTEGER") {
-                        "1".to_string()
-                    } else {
-                        "'key1'".to_string()
-                    }
-                })
-                .collect();
-            conn_bad_json
-                .execute(
-                    &format!("INSERT INTO \"{table}\" VALUES ({})", placeholders.join(", ")),
-                    [],
-                )
-                .unwrap();
-            let mut snap_json = WorldStateSnapshot::default();
-            assert!(
-                load_d6_social_into_snapshot(&conn_bad_json, &mut snap_json).is_err(),
-                "expected corrupt JSON error on {table}"
-            );
-        }
-    }
-}
-
-#[test]
-fn social_fingerprint_sync_load_and_rollback_edges() {
+fn social_load_missing_tables_unknown_keys_and_corrupt_rows_fail_closed_or_quarantine() {
+    // 1. Dropped `domain_rows` without legacy tables loads cleanly as `Ok(false)`.
     let mut conn = Connection::open_in_memory().unwrap();
-    init_migrations_table(&conn);
-    apply_d6_social_migration(&conn).unwrap();
+    apply_migrations(&conn).unwrap();
+    conn.execute("DROP TABLE domain_rows", []).unwrap();
+    let mut empty = WorldStateSnapshot::default();
+    assert!(!load_social_domain_rows(&conn, &mut empty, &mut LoadContext::new(false)).unwrap());
 
-    let mut snap = WorldStateSnapshot::default();
-    // Populate bookmark folders, folder ACLs, subfolder parents, and bookmark meta
-    snap.bookmark_folders.insert(10, BookmarkFolderRecord::default());
-    snap.bookmark_folder_acls.insert(10, vec![1001]);
-    snap.bookmark_subfolders.insert(1, 10);
-    snap.bookmark_expiries.insert(1, 9_999_999);
-    snap.bookmark_subfolder_parents.insert(11, 10);
-
-    // Chat channel + ACL (allow_list, deny_list, muted_until) + standalone empty ACL ignored
-    let ch = ChatChannelRecord {
-        channel_id: "500".into(),
-        name: "EdgeChan".into(),
-        motd: "hello".into(),
-        owner_id: Some(1001),
-        members: HashSet::new(),
-        is_system_local: false,
-        solar_system_id: None,
-        is_private: true,
-        operators: HashSet::new(),
-        password: None,
-        is_delayed_local: false,
-    };
-    snap.chat_channels.insert("500".into(), ch);
-    let mut ch_acl = ChatChannelAclRecord::default();
-    ch_acl.allow_list.insert(2001);
-    ch_acl.deny_list.insert(2002);
-    ch_acl.muted_until.insert(2003, (9_999_999, "mute".into()));
-    snap.chat_channel_acl.insert("500".into(), ch_acl);
-
-    let mut standalone_acl = ChatChannelAclRecord::default();
-    standalone_acl.allow_list.insert(3001);
-    snap.chat_channel_acl.insert("501".into(), standalone_acl);
-    // Empty standalone ACL should be ignored by fingerprint and sync
-    snap.chat_channel_acl.insert("502".into(), ChatChannelAclRecord::default());
-
-    let fp_initial = compute_d6_social_fp(&snap);
-
-    // Mutating each social ACL/subfolder structure changes the fingerprint
-    let mut snap_f_acl = snap.clone();
-    snap_f_acl.bookmark_folder_acls.get_mut(&10).unwrap().push(1002);
-    assert_ne!(compute_d6_social_fp(&snap_f_acl), fp_initial);
-
-    let mut snap_sub = snap.clone();
-    snap_sub.bookmark_subfolder_parents.insert(10, 99);
-    assert_ne!(compute_d6_social_fp(&snap_sub), fp_initial);
-
-    let mut snap_allow = snap.clone();
-    snap_allow
-        .chat_channel_acl
-        .get_mut("501")
-        .unwrap()
-        .allow_list
-        .insert(3002);
-    assert_ne!(compute_d6_social_fp(&snap_allow), fp_initial);
-
-    // Empty standalone ACL does not change fp
-    let mut snap_no_empty = snap.clone();
-    snap_no_empty.chat_channel_acl.remove("502");
-    assert_eq!(compute_d6_social_fp(&snap_no_empty), fp_initial);
-
-    // Ensure folder 11 is in bookmark_folders so its subfolder parent is persisted & reloaded
-    snap.bookmark_folders.insert(11, BookmarkFolderRecord::default());
-    // Sync roundtrip and reload clears stale entries
-    let mut fp = TableFingerprints::default();
+    // `sync_social_domain_rows` rejects missing `domain_rows`.
+    let mut populated = WorldStateSnapshot::default();
+    populate_all_24_social_fields(&mut populated);
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_d6_social(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_social_domain_rows(&tx, &populated).is_err());
+    }
+
+    // 2. Corrupt JSON, unknown fields, and keys without `/` across all 4 social domains fail
+    //    closed under strict load and quarantine under quarantine mode.
+    for domain in [
+        DOMAIN_SOCIAL_MAIL,
+        DOMAIN_SOCIAL_BOOKMARKS,
+        DOMAIN_SOCIAL_CHAT_CALENDAR,
+        DOMAIN_SOCIAL_CONTACTS_NOTES,
+    ] {
+        for (bad_key, bad_val) in [
+            ("unknown_field/1", "1"),
+            ("malformed_no_slash", "1"),
+            ("mailing_lists/bad_int", "{}"),
+        ] {
+            if bad_key == "mailing_lists/bad_int" && domain != DOMAIN_SOCIAL_MAIL {
+                continue;
+            }
+            let c = Connection::open_in_memory().unwrap();
+            apply_migrations(&c).unwrap();
+            c.execute(
+                "INSERT INTO domain_rows (domain, key, value) VALUES (?1, ?2, ?3)",
+                params![domain, bad_key, bad_val],
+            )
+            .unwrap();
+            let mut snap = WorldStateSnapshot::default();
+            let err = load_social_domain_rows(&c, &mut snap, &mut LoadContext::new(false))
+                .expect_err("strict load must fail closed");
+            assert!(err.contains(domain), "expected domain in `{err}`");
+
+            let mut qctx = LoadContext::quarantine_in_memory();
+            assert!(!load_social_domain_rows(&c, &mut snap, &mut qctx).unwrap());
+            assert_eq!(qctx.quarantined.len(), 1);
+            assert_eq!(qctx.quarantined[0].source_table, "domain_rows");
+            assert_eq!(qctx.quarantined[0].key, bad_key);
+        }
+    }
+
+    // 3. Corrupt JSON / wrong SQLite types in legacy 19 tables fail closed strictly and quarantine.
+    let legacy_corrupt_sql = [
+        "INSERT INTO read_mails (character_id, mail_id) VALUES ('bad_int', 1)",
+        "INSERT INTO deleted_mails (character_id, mail_id) VALUES (1, 'bad_int')",
+        "INSERT INTO trashed_mails (character_id, mail_id) VALUES ('bad_int', 1)",
+        "INSERT INTO mail_labels (character_id, labels_json) VALUES (1, '{bad')",
+        "INSERT INTO mail_assigned_labels (character_id, mail_id, labels_json) VALUES (1, 1, '{bad')",
+        "INSERT INTO mail_assigned_labels (character_id, mail_id, labels_json) VALUES ('bad_int', 1, '[1]')",
+        "INSERT INTO mailing_lists (list_id, record_json) VALUES (1, '{bad')",
+        "INSERT INTO calendar_events (event_id, record_json) VALUES (1, '{bad')",
+        "INSERT INTO bookmark_meta (bookmark_id, record_json) VALUES (1, '{bad')",
+        "INSERT INTO bookmark_folders (folder_id, record_json) VALUES (1, '{bad')",
+        "INSERT INTO access_groups (group_id, members_json) VALUES (1, '{bad')",
+        "INSERT INTO chat_channels (channel_id, record_json) VALUES ('ch1', '{bad')",
+        "INSERT INTO char_contacts (character_id, contacts_json) VALUES (1, '{bad')",
+        "INSERT INTO char_contact_notifications (character_id, notifications_json) VALUES (1, '{bad')",
+        "INSERT INTO char_contact_labels (character_id, labels_json) VALUES (1, '{bad')",
+        "INSERT INTO corp_contacts (corporation_id, contacts_json) VALUES (1, '{bad')",
+        "INSERT INTO corp_contact_labels (corporation_id, labels_json) VALUES (1, '{bad')",
+        "INSERT INTO alliance_contacts (alliance_id, contacts_json) VALUES (1, '{bad')",
+        "INSERT INTO alliance_contact_labels (alliance_id, labels_json) VALUES (1, '{bad')",
+        "INSERT INTO char_notes (character_id, item_id, note) VALUES ('bad_int', 1, 'note')",
+        "INSERT INTO char_notes (character_id, item_id, note) VALUES (1, 1, X'DEAD')",
+    ];
+    for sql in legacy_corrupt_sql {
+        let mut c = Connection::open_in_memory().unwrap();
+        apply_migrations(&c).unwrap();
+        c.execute_batch(LEGACY_D6_SOCIAL_SQL).unwrap();
+        c.execute(sql, []).unwrap();
+        let mut s = WorldStateSnapshot::default();
+        assert!(
+            load_social_domain_rows(&c, &mut s, &mut LoadContext::new(false)).is_err(),
+            "expected strict legacy error for `{sql}`"
+        );
+        let mut qctx = LoadContext::quarantine_in_memory();
+        assert!(
+            load_social_domain_rows(&c, &mut s, &mut qctx).unwrap(),
+            "expected had_legacy=true for `{sql}`"
+        );
+        assert_eq!(qctx.quarantined.len(), 1);
+        let tx = c.transaction().unwrap();
+        drop_legacy_social_tables(&tx).unwrap();
+        tx.commit().unwrap();
+        assert!(existing_legacy_social_tables(&c).is_empty());
+    }
+}
+
+#[test]
+fn social_rollback_fails_closed_and_restores_all_four_domains() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    apply_migrations(&conn).unwrap();
+
+    let mut committed = WorldStateSnapshot::default();
+    populate_all_24_social_fields(&mut committed);
+    {
+        let tx = conn.transaction().unwrap();
+        assert!(sync_social_domain_rows(&tx, &committed).unwrap());
         tx.commit().unwrap();
     }
-    assert_eq!(fp.d6_social, compute_d6_social_fp(&snap));
-    // Clean sync is a no-op
-    {
-        let tx = conn.transaction().unwrap();
-        assert!(!sync_d6_social(&tx, &snap, &mut fp).unwrap());
-        tx.commit().unwrap();
-    }
 
-    let mut loaded = WorldStateSnapshot::default();
-    loaded.bookmark_subfolder_parents.insert(999, 888); // stale entry must be cleared
-    load_d6_social_into_snapshot(&conn, &mut loaded).unwrap();
-    assert!(!loaded.bookmark_subfolder_parents.contains_key(&999));
-    assert_eq!(loaded.bookmark_subfolder_parents.get(&11), Some(&10));
-    assert!(loaded.chat_channel_acl.get("501").unwrap().allow_list.contains(&3001));
-    assert!(!loaded.chat_channel_acl.contains_key("502"));
+    // Mutate every domain in memory.
+    let mut dirty = committed.clone();
+    dirty.read_mails.clear();
+    dirty.deleted_mails.insert((90_000_001, 9999));
+    dirty.trashed_mails.clear();
+    dirty.mail_labels.clear();
+    dirty.mail_assigned_labels.clear();
+    dirty.mailing_lists.clear();
+    dirty.bookmark_folders.clear();
+    dirty.bookmark_subfolders.clear();
+    dirty.bookmark_subfolder_parents.clear();
+    dirty.bookmark_expiries.clear();
+    dirty.bookmark_folder_acls.clear();
+    dirty.access_groups.clear();
+    dirty.bookmark_folder_known_by.clear();
+    dirty.calendar_events.clear();
+    dirty.chat_channels.clear();
+    dirty.chat_channel_acl.clear();
+    dirty.char_contacts.clear();
+    dirty.char_contact_notifications.clear();
+    dirty.char_contact_labels.clear();
+    dirty.corp_contacts.clear();
+    dirty.corp_contact_labels.clear();
+    dirty.alliance_contacts.clear();
+    dirty.alliance_contact_labels.clear();
+    dirty.char_notes.insert((90_000_001, 90_000_002), "Dirty".into());
+    let expected_dirty = dirty.clone();
 
-    // Reload restores dirty snapshot to persisted state
-    let mut dirty = loaded.clone();
-    dirty.bookmark_subfolder_parents.insert(777, 10);
-    load_d6_social_into_snapshot(&conn, &mut dirty).unwrap();
-    assert!(!dirty.bookmark_subfolder_parents.contains_key(&777));
+    // Corrupt 1 row in `social.contacts_notes` -> `load_social_domain_rows` & `rollback_social`
+    // must fail closed without mutating any field of `dirty`.
+    conn.execute(
+        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'char_notes/90000001|999', '{bad')",
+        [DOMAIN_SOCIAL_CONTACTS_NOTES],
+    )
+    .unwrap();
+    let load_err = load_social_domain_rows(&conn, &mut dirty, &mut LoadContext::new(false))
+        .expect_err("corrupt row must fail load_social_domain_rows");
+    assert!(load_err.contains(DOMAIN_SOCIAL_CONTACTS_NOTES), "{load_err}");
+    assert_all_24_social_fields_equal(&dirty, &expected_dirty);
 
-    let tables = get_social_tables(&conn);
-    conn.execute(&format!("DROP TABLE \"{}\"", tables[0]), []).unwrap();
+    let failures_before = crate::persist_failures_total();
+    let rb_err = rollback_social(&conn, &mut dirty)
+        .expect_err("corrupt row must fail rollback_social closed");
+    assert!(rb_err.contains(DOMAIN_SOCIAL_CONTACTS_NOTES), "{rb_err}");
+    assert!(crate::persist_failures_total() >= failures_before + 1);
+    assert_all_24_social_fields_equal(&dirty, &expected_dirty);
 
-    // Sync SQL error when a social table is missing preserves fp
-    let mut dirty_for_err = loaded.clone();
-    dirty_for_err.read_mails.insert((999, 999));
-    dirty_for_err.access_groups.insert(999, vec![1]);
-    dirty_for_err
-        .bookmark_folders
-        .insert(555, BookmarkFolderRecord::default());
-    dirty_for_err.bookmark_subfolder_parents.insert(555, 10);
-    let saved_fp = fp.d6_social.clone();
-    {
-        let tx = conn.transaction().unwrap();
-        assert!(sync_d6_social(&tx, &dirty_for_err, &mut fp).is_err());
-    }
-    assert_eq!(fp.d6_social, saved_fp);
+    // Clean DB restores all 24 collections cleanly back to `committed`.
+    conn.execute(
+        "DELETE FROM domain_rows WHERE domain = ?1 AND key = 'char_notes/90000001|999'",
+        [DOMAIN_SOCIAL_CONTACTS_NOTES],
+    )
+    .unwrap();
+    rollback_social(&conn, &mut dirty).expect("clean rollback restores all 24 fields");
+    assert_all_24_social_fields_equal(&dirty, &committed);
+
+    // Dropped `domain_rows` causes `rollback_social` to fail closed + increment metric.
+    conn.execute("DROP TABLE domain_rows", []).unwrap();
+    dirty.char_notes.insert((90_000_001, 90_000_002), "KeepMe".into());
+    let before_drop_fail = crate::persist_failures_total();
+    assert!(rollback_social(&conn, &mut dirty).is_err());
+    assert!(crate::persist_failures_total() >= before_drop_fail + 1);
+    assert_eq!(
+        dirty.char_notes.get(&(90_000_001, 90_000_002)),
+        Some(&"KeepMe".into())
+    );
 }

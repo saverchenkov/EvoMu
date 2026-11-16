@@ -850,10 +850,12 @@ fn w5a_p2_0e_fail_closed_loader_quarantine_unreadable_finite_floats_and_serde_de
     );
     assert!(repo.with_snapshot(|s| s.incursions.is_empty()));
 
-    // 2. Inject corrupt JSON into `domain_rows` (`notes_lp.char_lp_logs`) and `social_store`
-    //    (`char_contact_labels`), then verify default `open_sqlite` fails closed naming the
-    //    domain/table and primary key (#906 / #856 / #916).
+    // 2. Inject corrupt JSON into `domain_rows` (`notes_lp.char_lp_logs`) and legacy
+    //    `social_store` (`char_contact_labels`), then verify default `open_sqlite` fails closed
+    //    naming the domain/table and primary key (#906 / #856 / #916).
     repo.with_sqlite_conn(|conn| {
+        conn.execute_batch(crate::sqlite_store::social_store::LEGACY_D6_SOCIAL_SQL)
+            .unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO domain_rows (domain, key, value) VALUES (?1, '90000088', '{corrupt')",
             [crate::sqlite_store::domain_rows::DOMAIN_CHAR_LP_LOGS],
@@ -983,7 +985,7 @@ fn issue_874_tx_error_hooks_poison_short_circuit_and_next_entity_id_monotonicity
     let pre_fail_id = repo.with_snapshot(|s| s.next_entity_id);
     repo.with_sqlite_conn(|conn| {
         conn.execute_batch(
-            "CREATE TRIGGER abort_notes_ins BEFORE INSERT ON char_notes BEGIN SELECT RAISE(ABORT, 'abort_note_persist'); END;",
+            "CREATE TRIGGER abort_notes_ins BEFORE INSERT ON domain_rows BEGIN SELECT RAISE(ABORT, 'abort_note_persist'); END;",
         )
         .unwrap();
     });
@@ -1331,6 +1333,7 @@ fn issue_826_with_mut_snapshot_cowmap_and_domain_rows_zero_cold_clones_and_zero_
         snap.owner_notes.get_mut(&1).unwrap().note = "N1-updated".into();
         snap.corp_lp_balances.insert((98_000_001, 1_000_035), 500);
         snap.char_lp_logs.get_mut(&cid).unwrap()[0].amount = 500;
+        snap.char_notes.insert((cid, 1), "UpdatedSocialNote".into());
     });
 
     assert_eq!(
@@ -1357,10 +1360,11 @@ fn issue_826_with_mut_snapshot_cowmap_and_domain_rows_zero_cold_clones_and_zero_
     assert_eq!(reloaded.owner_notes[&1].note, "N1-updated");
     assert_eq!(reloaded.corp_lp_balances.get(&(98_000_001, 1_000_035)), Some(&500));
     assert_eq!(reloaded.char_lp_logs[&cid][0].amount, 500);
+    assert_eq!(reloaded.char_notes.get(&(cid, 1)), Some(&"UpdatedSocialNote".into()));
 
     // Mutating a cold domain stages cold fingerprints exactly once.
     repo.with_mut_snapshot(|snap| {
-        snap.char_notes.insert((cid, 2), "ColdMutation".into());
+        snap.character_last_jump_unix.insert(cid, 1_700_000_050);
     });
     assert_eq!(super::thread_cold_fp_clones_for_test(), 1);
     assert!(sqlite_store::fingerprints::thread_fingerprint_calls_for_test() > 0);

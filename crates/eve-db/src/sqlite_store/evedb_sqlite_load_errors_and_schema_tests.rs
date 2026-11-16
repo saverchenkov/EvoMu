@@ -11,14 +11,17 @@ use crate::sqlite_store::corp_crimewatch_store::{
 use crate::sqlite_store::domain_rows::{
     load_ledger_domain_rows, load_notes_lp_domain_rows, sync_ledger_domain_rows,
     sync_notes_lp_domain_rows, DOMAIN_CHAR_LP_LOGS, DOMAIN_CRIMEWATCH,
-    DOMAIN_MARKET_TRANSACTIONS, DOMAIN_WALLET_JOURNAL_META,
+    DOMAIN_MARKET_TRANSACTIONS, DOMAIN_SOCIAL_BOOKMARKS, DOMAIN_SOCIAL_CHAT_CALENDAR,
+    DOMAIN_SOCIAL_CONTACTS_NOTES, DOMAIN_SOCIAL_MAIL, DOMAIN_WALLET_JOURNAL_META,
 };
 use crate::sqlite_store::industry_market_pve_store::load_d6_batch4;
 use crate::sqlite_store::load::load_snapshot_from_sqlite;
 use crate::sqlite_store::quarantine::LoadContext;
 use crate::sqlite_store::notes_lp_sequence_store::{load_d6, sync_d6};
 use crate::sqlite_store::schema::{apply_migrations, load_or_init_jwt_secret, save_jwt_secret};
-use crate::sqlite_store::social_store::{load_d6_social_into_snapshot, sync_d6_social};
+use crate::sqlite_store::social_store::{
+    load_social_domain_rows, sync_social_domain_rows, LEGACY_D6_SOCIAL_SQL,
+};
 use crate::types::WorldStateSnapshot;
 use rusqlite::{params, Connection};
 
@@ -63,25 +66,6 @@ fn sqlite_store_load_error_and_optional_table_missing_branches() {
         "idempotency_keys",
         "licensed_skins",
         "applied_ship_skins",
-        "read_mails",
-        "deleted_mails",
-        "trashed_mails",
-        "mail_labels",
-        "mail_assigned_labels",
-        "mailing_lists",
-        "calendar_events",
-        "bookmark_meta",
-        "bookmark_folders",
-        "access_groups",
-        "chat_channels",
-        "char_contacts",
-        "char_contact_notifications",
-        "char_contact_labels",
-        "corp_contacts",
-        "corp_contact_labels",
-        "alliance_contacts",
-        "alliance_contact_labels",
-        "char_notes",
     ];
 
     for tbl in strict_load_tables {
@@ -156,6 +140,39 @@ fn sqlite_store_malformed_json_and_unknown_kv_keys_coverage() {
         "INSERT INTO system_states (solar_system_id, dbs_multiplier, ess_main_bank_cents, ess_reserve_bank_cents, sov_alliance_id, record_json) VALUES (30000142, 1.0, 0, 0, NULL, '{bad')",
         "INSERT INTO licensed_skins (character_id, skins_json) VALUES (1, '{bad')",
         "INSERT INTO standings (character_id, tx_json) VALUES (1, '{bad')",
+    ];
+    for sql in corrupt_json_inserts {
+        let conn = open_migrated_conn();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;")
+            .expect("disable fk for corrupt row insert");
+        conn.execute(sql, [])
+            .unwrap_or_else(|e| panic!("insert corrupt row ({sql}): {e}"));
+        assert!(
+            load_snapshot_from_sqlite(&conn).is_err(),
+            "expected load error for corrupt JSON SQL: {sql}"
+        );
+    }
+
+    for (domain, key) in [
+        (DOMAIN_SOCIAL_MAIL, "mail_labels/1"),
+        (DOMAIN_SOCIAL_BOOKMARKS, "bookmark_folders/1"),
+        (DOMAIN_SOCIAL_CHAT_CALENDAR, "calendar_events/1"),
+        (DOMAIN_SOCIAL_CHAT_CALENDAR, "chat_channels/ch1"),
+        (DOMAIN_SOCIAL_CONTACTS_NOTES, "char_contacts/1"),
+    ] {
+        let conn = open_migrated_conn();
+        conn.execute(
+            "INSERT INTO domain_rows (domain, key, value) VALUES (?1, ?2, '{bad')",
+            params![domain, key],
+        )
+        .unwrap();
+        assert!(
+            load_snapshot_from_sqlite(&conn).is_err(),
+            "expected load error for corrupt social domain_rows ({domain}, {key})"
+        );
+    }
+
+    let legacy_social_corrupt_json_inserts = [
         "INSERT INTO mail_labels (character_id, labels_json) VALUES (1, '{bad')",
         "INSERT INTO mailing_lists (list_id, record_json) VALUES (1, '{bad')",
         "INSERT INTO calendar_events (event_id, record_json) VALUES (1, '{bad')",
@@ -171,15 +188,15 @@ fn sqlite_store_malformed_json_and_unknown_kv_keys_coverage() {
         "INSERT INTO alliance_contacts (alliance_id, contacts_json) VALUES (1, '{bad')",
         "INSERT INTO alliance_contact_labels (alliance_id, labels_json) VALUES (1, '{bad')",
     ];
-    for sql in corrupt_json_inserts {
+    for sql in legacy_social_corrupt_json_inserts {
         let conn = open_migrated_conn();
-        conn.execute_batch("PRAGMA foreign_keys = OFF;")
-            .expect("disable fk for corrupt row insert");
+        conn.execute_batch(LEGACY_D6_SOCIAL_SQL)
+            .expect("create legacy social tables");
         conn.execute(sql, [])
-            .unwrap_or_else(|e| panic!("insert corrupt row ({sql}): {e}"));
+            .unwrap_or_else(|e| panic!("insert corrupt legacy social row ({sql}): {e}"));
         assert!(
             load_snapshot_from_sqlite(&conn).is_err(),
-            "expected load error for corrupt JSON SQL: {sql}"
+            "expected load error for corrupt legacy social JSON SQL: {sql}"
         );
     }
 
@@ -261,12 +278,27 @@ fn sqlite_store_malformed_json_and_unknown_kv_keys_coverage() {
     )
     .expect("load corp_crimewatch with dropped domain_rows");
     assert!(!had_optional_cw);
+    let had_optional_social = load_social_domain_rows(
+        &drop_optional_conn,
+        &mut empty_dst,
+        &mut LoadContext::quarantine_in_memory(),
+    )
+    .expect("load social with dropped domain_rows");
+    assert!(!had_optional_social);
     load_d6_batch4(&drop_optional_conn, &mut empty_dst);
 
-    // Direct social error check when a social table is dropped
-    conn.execute("DROP TABLE mail_labels", [])
-        .expect("drop mail_labels");
-    assert!(load_d6_social_into_snapshot(&conn, &mut dst).is_err());
+    // Direct social error & quarantine check on legacy mail_labels table
+    conn.execute_batch(LEGACY_D6_SOCIAL_SQL)
+        .expect("create legacy social tables");
+    conn.execute(
+        "INSERT INTO mail_labels (character_id, labels_json) VALUES (1, '{bad')",
+        [],
+    )
+    .expect("insert bad legacy mail_labels");
+    assert!(load_social_domain_rows(&conn, &mut dst, &mut LoadContext::new(false)).is_err());
+    let mut q_social = LoadContext::quarantine_in_memory();
+    assert!(load_social_domain_rows(&conn, &mut dst, &mut q_social).expect("quarantine social"));
+    assert_eq!(q_social.quarantined.len(), 1);
 }
 
 #[test]
@@ -325,6 +357,7 @@ fn sqlite_store_schema_and_jwt_secret_error_and_edge_branches() {
         let tx = mut_conn.transaction().expect("begin tx");
         assert!(sync_ledger_domain_rows(&tx, &snap).is_err());
         assert!(sync_notes_lp_domain_rows(&tx, &snap).is_err());
+        assert!(sync_social_domain_rows(&tx, &snap).is_err());
     }
     mut_conn
         .execute("DROP TABLE sp6_lifecycle_state", [])
@@ -332,13 +365,6 @@ fn sqlite_store_schema_and_jwt_secret_error_and_edge_branches() {
     {
         let tx = mut_conn.transaction().expect("begin tx");
         assert!(sync_d6(&tx, &snap, &mut fp).is_err());
-    }
-    mut_conn
-        .execute("DROP TABLE read_mails", [])
-        .expect("drop read_mails");
-    {
-        let tx = mut_conn.transaction().expect("begin tx");
-        assert!(sync_d6_social(&tx, &snap, &mut fp).is_err());
     }
 }
 
@@ -380,6 +406,20 @@ fn sqlite_store_load_row_decode_error_branches() {
         "INSERT INTO idempotency_keys (character_id, idem_key) VALUES (1, X'DEAD')",
         "INSERT INTO licensed_skins (character_id, skins_json) VALUES (1, X'DEAD')",
         "INSERT INTO applied_ship_skins (ship_id, skin_id) VALUES (1, X'DEAD')",
+        "INSERT INTO domain_rows (domain, key, value) VALUES ('social.mail', 'mail_labels/1', X'DEAD')",
+    ];
+    for sql in blob_row_inserts {
+        let conn = open_migrated_conn();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        conn.execute(sql, [])
+            .unwrap_or_else(|e| panic!("insert blob row ({sql}): {e}"));
+        assert!(
+            load_snapshot_from_sqlite(&conn).is_err(),
+            "expected load error for blob column SQL: {sql}"
+        );
+    }
+
+    let legacy_social_blob_inserts = [
         "INSERT INTO read_mails (character_id, mail_id) VALUES (1, X'DEAD')",
         "INSERT INTO deleted_mails (character_id, mail_id) VALUES (1, X'DEAD')",
         "INSERT INTO trashed_mails (character_id, mail_id) VALUES (1, X'DEAD')",
@@ -400,14 +440,14 @@ fn sqlite_store_load_row_decode_error_branches() {
         "INSERT INTO alliance_contact_labels (alliance_id, labels_json) VALUES (1, X'DEAD')",
         "INSERT INTO char_notes (character_id, item_id, note) VALUES (1, 1, X'DEAD')",
     ];
-    for sql in blob_row_inserts {
+    for sql in legacy_social_blob_inserts {
         let conn = open_migrated_conn();
-        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        conn.execute_batch(LEGACY_D6_SOCIAL_SQL).unwrap();
         conn.execute(sql, [])
-            .unwrap_or_else(|e| panic!("insert blob row ({sql}): {e}"));
+            .unwrap_or_else(|e| panic!("insert legacy social blob row ({sql}): {e}"));
         assert!(
             load_snapshot_from_sqlite(&conn).is_err(),
-            "expected load error for blob column SQL: {sql}"
+            "expected load error for legacy social blob column SQL: {sql}"
         );
     }
 }
