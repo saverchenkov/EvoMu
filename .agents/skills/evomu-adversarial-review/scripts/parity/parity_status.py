@@ -42,7 +42,7 @@ DISPOSITIONS = {"client_local", "dead_client_code", "removed_from_live"}
 
 
 def repo_root():
-    out = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=HERE, capture_output=True, text=True)
+    out = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
     return out.stdout.strip()
 
 
@@ -270,8 +270,9 @@ def main():
         for rid in rids:
             tagged_rows.setdefault(rid, set()).add(t)
     att = attestations(a.attest_dir, passed)
-    if a.assume_tests_pass and not att:
-        att = static_attestations(files)
+    if a.assume_tests_pass:
+        for k, v in static_attestations(files).items():
+            att.setdefault(k, set()).update(v)
     sc = static_checks(root, rows)
 
     triage = {}

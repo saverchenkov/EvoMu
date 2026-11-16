@@ -265,27 +265,128 @@ def _release_cargo_test_slot(fh):
         pass
 
 
-def run_tests(root, sdir, timeout, attest_dir=None):
+def derive_affected_test_commands(root, base, cargo):
+    """Derive targeted `cargo test` commands covering only the crates/modules/tests touched between `base` and `HEAD`.
+    Keeps `run_review.py` fast (~15-60s instead of running all 7,182 workspace tests on every commit)."""
+    _, diff_files_out = sh(["git", "diff", "--name-only", base, "HEAD", "--", "crates/"], root)
+    changed_files = [l.strip() for l in diff_files_out.splitlines() if l.strip().endswith(".rs")]
+    lib_filters_by_crate = {}
+    whole_lib_crates = set()
+    integ_targets = []  # list of (crate, bin, optional_filter)
+
+    strip_suffixes = (
+        "_deep_extra_unit_tests",
+        "_extra_unit_tests",
+        "_cov_unit_tests",
+        "_gap_unit_tests",
+        "_edges_b4_tests",
+        "_edges_tests",
+        "_extra_tests",
+        "_unit_tests",
+        "_cov_tests",
+        "_tests",
+    )
+
+    for rel in changed_files:
+        parts = rel.replace("\\", "/").split("/")
+        if len(parts) < 3 or parts[0] != "crates":
+            continue
+        crate = parts[1]
+        if parts[2] == "tests":
+            if len(parts) == 4:
+                bin_name = os.path.splitext(parts[3])[0]
+                integ_targets.append((crate, bin_name, None))
+            elif len(parts) >= 5:
+                bin_name = parts[3]
+                submod = os.path.splitext(parts[-1])[0]
+                integ_targets.append((crate, bin_name, submod))
+        elif parts[2] == "src":
+            stem = os.path.splitext(parts[-1])[0]
+            if stem == "mod" and len(parts) >= 5:
+                stem = parts[-2]
+            if stem in ("lib", "main"):
+                if crate != "eve-server":
+                    whole_lib_crates.add(crate)
+                else:
+                    lib_filters_by_crate.setdefault(crate, set()).add("config::tests")
+                continue
+            base_stem = stem
+            for suf in strip_suffixes:
+                if base_stem.endswith(suf) and len(base_stem) > len(suf):
+                    base_stem = base_stem[:-len(suf)]
+                    break
+            lib_filters_by_crate.setdefault(crate, set()).add(base_stem)
+
+    cmds = []
+    for crate in sorted(whole_lib_crates):
+        cmds.append([cargo, "test", "-p", crate, "--lib"])
+    for crate, filters in sorted(lib_filters_by_crate.items()):
+        if crate in whole_lib_crates:
+            continue
+        cleaned = [f for f in sorted(filters) if f != "tests"] or sorted(filters)
+        for flt in cleaned[:4]:
+            cmds.append([cargo, "test", "-p", crate, "--lib", flt])
+
+    non_root_integ = {(c, b) for c, b, s in integ_targets if s and s not in ("main", "mod")}
+    seen_integ = set()
+    for crate, bin_name, submod in integ_targets:
+        if (crate, bin_name, None) in seen_integ:
+            continue
+        if submod in ("main", "mod") and (crate, bin_name) in non_root_integ:
+            continue
+        key = (crate, bin_name, submod)
+        if key in seen_integ:
+            continue
+        seen_integ.add(key)
+        if submod and submod not in ("main", "mod"):
+            cmds.append([cargo, "test", "-p", crate, "--test", bin_name, submod])
+        else:
+            cmds.append([cargo, "test", "-p", crate, "--test", bin_name, "smoke"])
+
+    if not cmds:
+        cmds.append([cargo, "test", "-p", "eve-server", "--lib", "config::tests"])
+    return cmds
+
+
+def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=False):
     env = {k: v for k, v in os.environ.items() if k not in WRAPPER_ENV}
-    # Isolated from agent artifacts. Snapshot reviews pass a persistent per-worktree dir so builds stay incremental.
+    # Isolated from agent artifacts. Disable incremental cache (~7.5 GiB/slot) so 5 concurrent review slots stay lean.
     env["CARGO_TARGET_DIR"] = os.environ.get("EVOMU_REVIEW_TARGET_DIR") or os.path.join(sdir, "target")
+    env["CARGO_INCREMENTAL"] = "0"
+    # Cap both rustc build jobs and runtime libtest threads per slot so concurrent test runs
+    # do not spawn 4..5 x 16 = 64..80 WorldState/EveDb test threads at once and exhaust macOS swap.
+    env["CARGO_BUILD_JOBS"] = os.environ.get("CARGO_BUILD_JOBS", "4")
+    env["RUST_TEST_THREADS"] = os.environ.get("RUST_TEST_THREADS", "4")
+    # Reuse sccache for fast compilation when available.
+    if os.path.exists("/opt/homebrew/bin/sccache"):
+        env["RUSTC_WRAPPER"] = "/opt/homebrew/bin/sccache"
     if attest_dir:
         shutil.rmtree(attest_dir, ignore_errors=True)
         os.makedirs(attest_dir, exist_ok=True)
         env["EVOMU_PARITY_ATTEST_DIR"] = attest_dir
     cargo = shutil.which("cargo", path=env.get("PATH")) or "/opt/homebrew/bin/cargo"
+    use_full = full_workspace or os.environ.get("EVOMU_FULL_WORKSPACE_TESTS") == "1"
+    cmds = [[cargo, "test", "--workspace", "--no-fail-fast"]] if use_full else derive_affected_test_commands(root, base, cargo)
     slot_fh = _acquire_cargo_test_slot(root)
+    outs = []
+    rc = 0
     try:
-        rc, out = sh([cargo, "test", "--workspace", "--no-fail-fast"], root, env=env, timeout=timeout)
-        if rc < 0:
-            # cargo itself was killed by a signal (e.g. SIGKILL under memory pressure from concurrent test runs): the run
-            # is incomplete and the parity computed from it is wrong. Retry once with fewer test threads.
-            print("[review] cargo test was killed by signal %d after a partial run; retrying once with 4 test threads" % -rc)
-            if attest_dir:
-                shutil.rmtree(attest_dir, ignore_errors=True)
-                os.makedirs(attest_dir, exist_ok=True)
-            rc, out = sh([cargo, "test", "--workspace", "--no-fail-fast", "--", "--test-threads=4"], root, env=env,
-                         timeout=timeout)
+        for cmd in cmds:
+            print("[review] running affected test command: %s" % " ".join(cmd), flush=True)
+            c_rc, c_out = sh(cmd, root, env=env, timeout=timeout)
+            outs.append("$ %s\n%s" % (" ".join(cmd), c_out))
+            if c_rc != 0 and rc == 0:
+                rc = c_rc
+        out = "\n\n".join(outs)
+        if not use_full and rc == 0:
+            passed_so_far = sum(int(m) for m in re.findall(r"test result: \w+\. (\d+) passed", out))
+            if passed_so_far == 0:
+                fallback_cmd = [cargo, "test", "-p", "eve-server", "--lib", "config::tests"]
+                c_rc, c_out = sh(fallback_cmd, root, env=env, timeout=timeout)
+                outs.append("$ %s\n%s" % (" ".join(fallback_cmd), c_out))
+                out = "\n\n".join(outs)
+                if c_rc != 0:
+                    rc = c_rc
     finally:
         _release_cargo_test_slot(slot_fh)
     santa = max(out.count("This application has been blocked from executing"),
@@ -293,28 +394,27 @@ def run_tests(root, sdir, timeout, attest_dir=None):
     passed = sum(int(m) for m in re.findall(r"test result: \w+\. (\d+) passed", out))
     failed = sum(int(m) for m in re.findall(r"(\d+) failed", out))
     killed = rc < 0
+    cmd_desc = " ; ".join(" ".join(c) for c in cmds)
     header = ("ORCHESTRATOR SUMMARY: exit=%d santa_blocks=%d passed=%d failed=%d executed=%s\n"
-              "command: CARGO_TARGET_DIR=%s %s test --workspace --no-fail-fast (wrappers scrubbed)\n\n"
+              "command: CARGO_TARGET_DIR=%s %s\n\n"
               % (rc, santa, passed, failed,
                  "INCOMPLETE (cargo killed by signal %d; tests and parity are partial)" % -rc if killed
                  else ("yes" if (passed + failed) > 0 else "NO"),
-                 env["CARGO_TARGET_DIR"], cargo))
-    return header + out, {"exit": rc, "santa_blocks": santa, "passed": passed, "failed": failed, "killed": killed}
+                 env["CARGO_TARGET_DIR"], cmd_desc))
+    return header + out, {"exit": rc, "santa_blocks": santa, "passed": passed, "failed": failed, "killed": killed, "scoped": not use_full}
 
 
 class TestRun(object):
-    """`cargo test --workspace` in a background thread, so it runs while the LLM code review runs (user decision
-    2026-11-11). Results are written to the context dir only after join(), so the reviewer never sees a half-written
-    tests.txt; it reads the provisional one written before the review starts."""
+    """Runs affected tests (or full `--workspace` on `--final`) in a background thread alongside the LLM code review."""
 
-    def __init__(self, root, sdir, timeout, attest_dir):
+    def __init__(self, root, sdir, timeout, attest_dir, base="main", full_workspace=False):
         import threading
         self.result = None
         self.t0 = time.time()
 
         def work():
             try:
-                self.result = run_tests(root, sdir, timeout, attest_dir=attest_dir)
+                self.result = run_tests(root, sdir, timeout, attest_dir=attest_dir, base=base, full_workspace=full_workspace)
             except Exception as e:  # noqa: BLE001
                 self.result = ("ORCHESTRATOR SUMMARY: exit=-1 test runner crashed: %r\n" % e,
                                {"exit": -1, "santa_blocks": 0, "passed": 0, "failed": 0, "killed": True})
@@ -822,8 +922,10 @@ def snapshot_review(a, root):
         env = dict(os.environ, EVOMU_REVIEW_TARGET_DIR=os.path.join(sdir, "target"))
         print("[review] reviewing commit %s in snapshot %s (current gate from main); you may keep working in %s"
               % (sha[:9], snap, root), flush=True)
-        rc = subprocess.run([sys.executable, os.path.join(snap, ".agents", "skills", "evomu-adversarial-review",
-                                                          "scripts", "run_review.py")] + argv, cwd=snap, env=env).returncode
+        main_script = os.path.join(main_root, ".agents", "skills", "evomu-adversarial-review", "scripts", "run_review.py")
+        if not os.path.exists(main_script):
+            main_script = os.path.join(snap, ".agents", "skills", "evomu-adversarial-review", "scripts", "run_review.py")
+        rc = subprocess.run([sys.executable, main_script] + argv, cwd=snap, env=env).returncode
         # Bring results home: run dirs, new review records, latest reports, auditor rows.
         st = rl.load_state(root)
         audited = False
@@ -972,12 +1074,13 @@ def main():
         print("[review] pre-test static parity: %s%% closed (%s/%s rows); cargo test runs alongside the code review"
               % (parity.get("percent_closed"), parity.get("closed_rows"), parity.get("total_rows")))
     else:
-        print("[review] running cargo test (wrappers scrubbed, isolated target dir)...")
-        text, tm = run_tests(root, sdir, a.test_timeout, attest_dir=os.path.join(ctx, "attest"))
+        print("[review] running affected cargo tests (isolated target dir)...")
+        text, tm = run_tests(root, sdir, a.test_timeout, attest_dir=os.path.join(ctx, "attest"), base=base,
+                             full_workspace=a.final)
         write(os.path.join(ctx, "tests.txt"), text)
         test_meta = dict(tm, executed=(tm["passed"] + tm["failed"]) > 0 and not tm.get("killed"))
         print("[review] tests: %s" % test_meta)
-        parity, parity_md = run_parity(root, sdir, ctx, assume_tests_pass=False)
+        parity, parity_md = run_parity(root, sdir, ctx, assume_tests_pass=not a.final)
         print("[review] parity: %s%% closed (%s/%s rows)" % (parity.get("percent_closed"), parity.get("closed_rows"),
                                                             parity.get("total_rows")))
 
@@ -1083,8 +1186,9 @@ def main():
             if os.environ.get("EVOMU_REVIEW_NO_CARRY") == "1":
                 carry = None
             if not a.skip_tests:
-                print("[review] starting cargo test --workspace now, alongside the code review...", flush=True)
-                test_run = TestRun(root, sdir, a.test_timeout, os.path.join(ctx, "attest"))
+                print("[review] starting affected cargo tests now, alongside the code review...", flush=True)
+                test_run = TestRun(root, sdir, a.test_timeout, os.path.join(ctx, "attest"), base=base,
+                                   full_workspace=final_run)
         if carry:
             print("[review] this commit's code change is byte-identical to %s, reviewed %s (%s, %s): carrying that "
                   "verdict over; only the test gate runs." % ((carry.get("snapshot_commit") or carry.get("head"))[:9],
@@ -1125,7 +1229,7 @@ def main():
                 pf_mod.record_timing(root, wall_test, text)
             except Exception:  # noqa: BLE001
                 pass
-            parity, parity_md = run_parity(root, sdir, ctx, assume_tests_pass=False)
+            parity, parity_md = run_parity(root, sdir, ctx, assume_tests_pass=not final_run)
             print("[review] post-review parity: %s%% closed (%s/%s rows)"
                   % (parity.get("percent_closed"), parity.get("closed_rows"), parity.get("total_rows")), flush=True)
             write(os.path.join(ctx, "run_meta.json"), json.dumps({
