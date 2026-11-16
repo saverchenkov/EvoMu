@@ -1668,3 +1668,344 @@ async fn machonet_get_time_stays_anchored_to_wallclock_across_sqlite_restart() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn gm_giveskill_sets_syncs_removes_targets_and_prunes_queue_gh1137_1138() {
+    let ctx = test_ctx();
+    let uid = 1_u64;
+    let cid = 90_000_001_i64;
+    let other_uid = 2_u64;
+    let other_cid = 90_000_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(mut ch) = snap.characters.get(&cid).cloned() {
+            ch.character_id = other_cid;
+            ch.user_id = other_uid;
+            ch.name = "SkillTargetAlt".into();
+            snap.characters.insert(other_cid, ch);
+        }
+    });
+
+    let mut sess = auth_session(uid, cid, 98_000_001, 30_000_142);
+    sess.role = service_roles::ROLE_GM_MASK;
+    let kw = HashMap::new();
+    ctx.db
+        .acquire_online_lock(uid, sess.session_id.max(1), Some(cid), true, ctx.now_unix())
+        .expect("online lock cid");
+    ctx.db
+        .acquire_online_lock(other_uid, 202, Some(other_cid), true, ctx.now_unix())
+        .expect("online lock other_cid");
+    let _ = ctx.drain_notifications_for_char(cid);
+    let _ = ctx.drain_notifications_for_char(other_cid);
+
+    // 1. Granting 3335 (Amarr Cruiser) emits OnServerSkillsChanged for 3335 only;
+    //    3333 (Minmatar Cruiser, required by Rupture 629) stays absent until granted.
+    let rep_amarr = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveskill 3335 5".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/giveskill 3335 5");
+    assert_eq!(rep_amarr.dict_get("skillID"), Some(&PyRep::Integer(3335)));
+    assert_eq!(
+        rep_amarr.dict_get("skillName"),
+        Some(&PyRep::String("Amarr Cruiser".into()))
+    );
+    assert_eq!(rep_amarr.dict_get("level"), Some(&PyRep::Integer(5)));
+
+    let notifs = ctx.drain_notifications_for_char(cid);
+    let skills_changed = notifs
+        .iter()
+        .find(|n| n.event == "OnServerSkillsChanged")
+        .expect("OnServerSkillsChanged on /giveskill 3335 5");
+    let PyRep::Dict(entries) = &skills_changed.args[0] else {
+        panic!("OnServerSkillsChanged skillInfos must be Dict");
+    };
+    let (_, amarr_info) = entries
+        .iter()
+        .find(|(k, _)| *k == PyRep::Integer(3335))
+        .expect("3335 in OnServerSkillsChanged");
+    assert_eq!(
+        amarr_info.dict_get("trainedSkillLevel"),
+        Some(&PyRep::Integer(5))
+    );
+    assert_eq!(
+        amarr_info.dict_get("effectiveSkillLevel"),
+        Some(&PyRep::Integer(5))
+    );
+    assert_eq!(
+        amarr_info.dict_get("trainedSkillPoints"),
+        Some(&PyRep::Real(1_280_000.0))
+    );
+
+    let wire_skills = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "skillMgr2",
+            None,
+            "GetSkills",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("skillMgr2.GetSkills");
+    let PyRep::Dict(wire_dict) = wire_skills else {
+        panic!("normalized GetSkills must be Dict");
+    };
+    assert!(wire_dict.iter().any(|(k, _)| *k == PyRep::Integer(3335)));
+    assert!(!wire_dict.iter().any(|(k, _)| *k == PyRep::Integer(3333)));
+
+    let rep_minmatar = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveskill 3333 5".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/giveskill 3333 5");
+    assert_eq!(
+        rep_minmatar.dict_get("skillName"),
+        Some(&PyRep::String("Minmatar Cruiser".into()))
+    );
+    let notifs_min = ctx.drain_notifications_for_char(cid);
+    assert!(
+        notifs_min.iter().any(|n| n.event == "OnServerSkillsChanged"),
+        "expected OnServerSkillsChanged for 3333"
+    );
+
+    // 2. Removing a previously trained skill with level 0 must emit negative SP (-1.0)
+    //    so V24 SkillsSvc deletes it instead of retaining the previous trained level.
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/setskill 3335 0".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/setskill 3335 0");
+    assert!(ctx.db.with_snapshot(|s| {
+        s.skills
+            .get(&cid)
+            .is_none_or(|m| !m.contains_key(&3335))
+    }));
+    let notifs_rem = ctx.drain_notifications_for_char(cid);
+    let rem = notifs_rem
+        .iter()
+        .find(|n| n.event == "OnServerSkillsRemoved")
+        .expect("OnServerSkillsRemoved when removing trained skill");
+    let PyRep::Dict(rem_entries) = &rem.args[0] else {
+        panic!("OnServerSkillsRemoved skillInfos must be Dict");
+    };
+    let (_, rem_info) = rem_entries
+        .iter()
+        .find(|(k, _)| *k == PyRep::Integer(3335))
+        .expect("3335 in OnServerSkillsRemoved");
+    assert_eq!(rem_info.dict_get("skillPoints"), Some(&PyRep::Real(-1.0)));
+    assert_eq!(
+        rem_info.dict_get("trainedSkillPoints"),
+        Some(&PyRep::Real(-1.0))
+    );
+    assert_eq!(rem_info.dict_get("virtualSkillLevel"), Some(&PyRep::None));
+
+    // Repeating level 0 for an already-absent skill must not emit a bogus removal notice.
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveskill 3335 0".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/giveskill 3335 0 repeat");
+    assert!(
+        !ctx.drain_notifications_for_char(cid)
+            .iter()
+            .any(|n| n.event == "OnServerSkillsRemoved"),
+        "removing an already absent skill must not emit OnServerSkillsRemoved"
+    );
+
+    // 3. [me|<characterID>] targeting updates target_cid cleanly and sends notices to target_cid.
+    let rep_other = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/giveskill {other_cid} 3300 3"))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/giveskill <other_cid> 3300 3");
+    assert_eq!(
+        rep_other.dict_get("characterID"),
+        Some(&PyRep::Integer(other_cid))
+    );
+    assert_eq!(
+        ctx.db
+            .with_snapshot(|s| s.skills.get(&other_cid).and_then(|m| m.get(&3300)).map(|r| r.level)),
+        Some(3)
+    );
+    assert!(ctx
+        .drain_notifications_for_char(other_cid)
+        .iter()
+        .any(|n| n.event == "OnServerSkillsChanged"));
+    assert!(!ctx
+        .drain_notifications_for_char(cid)
+        .iter()
+        .any(|n| n.event == "OnServerSkillsChanged"));
+
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveskill me 3300 1".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/giveskill me 3300 1");
+    assert_eq!(
+        ctx.db
+            .with_snapshot(|s| s.skills.get(&cid).and_then(|m| m.get(&3300)).map(|r| r.level)),
+        Some(1)
+    );
+    let _ = ctx.drain_notifications_for_char(cid);
+
+    // 4. Skill queue reconciliation drops completed levels, updates head timestamps,
+    //    prunes downstream entries whose prerequisites break on /setskill 0, and emits OnNewSkillQueueSaved.
+    let now_u = ctx.now_unix();
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveskill 3327 5".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/giveskill 3327 5");
+    let _ = ctx.drain_notifications_for_char(cid);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.paused_skill_queues.remove(&cid);
+        snap.skill_queues.insert(
+            cid,
+            vec![
+                eve_db::SkillQueueEntry {
+                    type_id: 3300,
+                    target_level: 2,
+                    start_sp: 250.0,
+                    end_sp: 1_414.213_562,
+                    duration_seconds: 120.0,
+                    started_at_unix: Some(now_u),
+                },
+                eve_db::SkillQueueEntry {
+                    type_id: 3300,
+                    target_level: 3,
+                    start_sp: 1_414.213_562,
+                    end_sp: 8_000.0,
+                    duration_seconds: 300.0,
+                    started_at_unix: None,
+                },
+                eve_db::SkillQueueEntry {
+                    type_id: 3331,
+                    target_level: 1,
+                    start_sp: 0.0,
+                    end_sp: 500.0,
+                    duration_seconds: 60.0,
+                    started_at_unix: None,
+                },
+            ],
+        );
+    });
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveskill 3300 2".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/giveskill 3300 2");
+    ctx.db.with_snapshot(|snap| {
+        let q = &snap.skill_queues[&cid];
+        assert_eq!(q.len(), 2);
+        assert_eq!((q[0].type_id, q[0].target_level), (3300, 3));
+        assert!(q[0].started_at_unix.is_some());
+        assert_eq!((q[1].type_id, q[1].target_level), (3331, 1));
+    });
+    assert!(ctx
+        .drain_notifications_for_char(cid)
+        .iter()
+        .any(|n| n.event == "OnNewSkillQueueSaved"));
+
+    // Removing Spaceship Command (3327 -> 0) drops dependent Amarr Frigate (3331, req 3327 I).
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/setskill 3327 0".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/setskill 3327 0");
+    ctx.db.with_snapshot(|snap| {
+        let q = &snap.skill_queues[&cid];
+        assert_eq!(q.len(), 1);
+        assert_eq!((q[0].type_id, q[0].target_level), (3300, 3));
+    });
+    assert!(ctx
+        .drain_notifications_for_char(cid)
+        .iter()
+        .any(|n| n.event == "OnNewSkillQueueSaved"));
+
+    // 5. Bare / malformed argument handling returns InvalidSlashArgument.
+    for bad in [
+        "/giveskill",
+        "/setskill",
+        "/giveskill 3300",
+        "/giveskill badtarget 3300 3",
+        "/giveskill 3300 3 extra",
+    ] {
+        let err = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "slash",
+                None,
+                "SlashCmd",
+                &[PyRep::String(bad.into())],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "InvalidSlashArgument", "for {bad}");
+    }
+}

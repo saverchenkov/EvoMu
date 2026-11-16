@@ -1365,126 +1365,11 @@ pub async fn handle(
                     }
                     Err(e) => Some(Err(e)),
                 }
-            } else if let Some(rest) = cmd.strip_prefix("/setskill ").or_else(|| cmd.strip_prefix("/giveskill ")) {
-                let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
-                let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
-                let (skill_id_opt, lvl_opt) = match token_strs.as_slice() {
-                    [s, l] => (Some(*s), Some(*l)),
-                    [_target, s, l, ..] => (Some(*s), Some(*l)),
-                    [s] => (Some(*s), None),
-                    [] => (None, None),
-                };
-                let Some(skill_id_str) = skill_id_opt else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /setskill <skill_id> <level> or /giveskill <skill_id> <level>".into(),
-                        client_error: None,
-                    }));
-                };
-                let Ok(skill_id) = skill_id_str.parse::<u32>() else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Invalid skill_id for /setskill".into(),
-                        client_error: None,
-                    }));
-                };
-                let Some(lvl_str) = lvl_opt else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /setskill <skill_id> <level>".into(),
-                        client_error: None,
-                    }));
-                };
-                let Ok(lvl) = lvl_str.parse::<u8>() else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Invalid level for /setskill".into(),
-                        client_error: None,
-                    }));
-                };
-                if lvl > 5 {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Level for /setskill must be between 0 and 5".into(),
-                        client_error: None,
-                    }));
-                }
-                let Some(skill_type) = ctx.sde.types.get(&skill_id) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "SkillNotFound".into(),
-                        message: format!("Skill type ID {skill_id} not found in SDE"),
-                        client_error: None,
-                    }));
-                };
-                if skill_type.category_id != 16 {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSkillType".into(),
-                        message: format!("Type {skill_id} is not a skill (category 16)"),
-                        client_error: None,
-                    }));
-                }
-                let rank = skill_type
-                    .default_attributes
-                    .get(&275)
-                    .copied()
-                    .unwrap_or(1.0);
-                let target_sp = crate::formulas::sp_for_skill_level(rank, lvl);
-
-                let res = ctx.db.try_with_mut_snapshot(|snap| {
-                    let ch = snap.characters.get_mut(&cid).ok_or_else(|| BridgeRpcError {
-                        code: "CharacterNotFound".into(),
-                        message: format!("Character {cid} not found"),
-                        client_error: None,
-                    })?;
-                    let skills_map = snap.skills.entry(cid).or_default();
-                    let prev_sp = skills_map.get(&skill_id).map(|s| s.skill_points).unwrap_or(0.0);
-                    let prev_lvl = skills_map.get(&skill_id).map(|s| s.level).unwrap_or(0);
-                    let sp_diff = target_sp - prev_sp;
-                    ch.skill_points = (ch.skill_points + sp_diff).max(0.0);
-
-                    if lvl == 0 {
-                        skills_map.remove(&skill_id);
-                    } else {
-                        skills_map.insert(
-                            skill_id,
-                            eve_db::TrainedSkillRecord {
-                                type_id: skill_id,
-                                level: lvl,
-                                skill_points: target_sp,
-                            },
-                        );
-                    }
-                    let active_ship = ch.active_ship_id;
-                    Ok((target_sp, ch.skill_points, active_ship, prev_lvl))
-                });
-                match res {
-                    Ok((sp, total_sp, active_ship, prev_lvl)) => {
-                        ctx.invalidate_ship_fitting(active_ship);
-                        if lvl == 0 {
-                            crate::services::jump_clone_names::emit_server_skills_removed(
-                                ctx,
-                                cid,
-                                &[(skill_id, prev_lvl)],
-                            );
-                        } else {
-                            crate::services::jump_clone_names::emit_server_skills_changed(
-                                ctx,
-                                cid,
-                                &[skill_id],
-                                Some("GMGiveSkill"),
-                            );
-                        }
-                        ctx.push_brain_update(cid);
-                        Some(Ok(PyRep::keyval([
-                            ("command", PyRep::String(cmd.to_string())),
-                            ("skillID", PyRep::Integer(skill_id as i64)),
-                            ("level", PyRep::Integer(lvl as i64)),
-                            ("skillPoints", PyRep::Real(sp)),
-                            ("characterTotalSP", PyRep::Real(total_sp)),
-                        ])))
-                    }
-                    Err(e) => Some(Err(e)),
-                }
+            } else if let Some(rest) = ["/setskill", "/giveskill"].iter().find_map(|prefix| {
+                cmd.strip_prefix(prefix)
+                    .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+            }) {
+                Some(handle_slash_set_skill(ctx, cid, cmd, rest))
             } else if let Some(rest) = cmd.strip_prefix("/spawnnpc ") {
                 let type_id_str = rest.trim();
                 let Ok(type_id) = type_id_str.parse::<u32>() else {
@@ -1595,6 +1480,282 @@ pub async fn handle(
 
         _ => super::config_service::handle(ctx, session, service, method, args, kwargs),
     }
+}
+
+/// Reconciles `snap.skill_queues` for `target_cid` after `/setskill` or `/giveskill` mutates
+/// `skill_id` to `(lvl, target_sp)`. Returns `true` when the persisted queue changed.
+#[allow(clippy::too_many_arguments)]
+fn reconcile_skill_queue_after_set_skill(
+    ctx: &ServerContext,
+    snap: &mut eve_db::WorldStateSnapshot,
+    target_cid: i64,
+    clone_grade: u32,
+    skill_id: u32,
+    lvl: u8,
+    target_sp: f64,
+    now_unix: u64,
+) -> bool {
+    if !snap
+        .skill_queues
+        .get(&target_cid)
+        .is_some_and(|q| !q.is_empty())
+    {
+        return false;
+    }
+    let train_mult = ctx.skill_training_multiplier();
+    let eff_attrs = if (train_mult - 1.0).abs() > 1e-9 {
+        Some(crate::services::jump_clone_names::effective_character_attributes(
+            &ctx.sde,
+            snap,
+            target_cid,
+        ))
+    } else {
+        None
+    };
+    let mut valid_next_lvl: HashMap<u32, u8> = snap
+        .skills
+        .get(&target_cid)
+        .map(|m| m.iter().map(|(&k, v)| (k, v.level)).collect())
+        .unwrap_or_default();
+    let paused = snap.paused_skill_queues.contains(&target_cid);
+    let Some(queue) = snap.skill_queues.get_mut(&target_cid) else {
+        return false;
+    };
+    let prev_queue = queue.clone();
+    let prev_head = prev_queue.first().map(|e| (e.type_id, e.target_level));
+    queue.retain_mut(|q| {
+        if q.type_id == skill_id && lvl == 0 {
+            return false;
+        }
+        if let Some(st) = ctx.sde.types.get(&q.type_id) {
+            for (req_attr, req_lvl_attr) in eve_dogma::REQUIRED_SKILL_ATTR_IDS
+                .into_iter()
+                .zip(eve_dogma::REQUIRED_SKILL_LEVEL_ATTR_IDS)
+            {
+                if let Some(&req_tid_f) = st.default_attributes.get(&req_attr) {
+                    let req_tid = req_tid_f as u32;
+                    if req_tid > 0 {
+                        let req_lvl = st
+                            .default_attributes
+                            .get(&req_lvl_attr)
+                            .copied()
+                            .unwrap_or(1.0)
+                            .max(1.0) as u8;
+                        let have_lvl = valid_next_lvl.get(&req_tid).copied().unwrap_or(0);
+                        if have_lvl < req_lvl {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        if q.type_id == skill_id {
+            let expected_prev = valid_next_lvl.get(&skill_id).copied().unwrap_or(0);
+            if q.target_level <= lvl || q.target_level != expected_prev + 1 {
+                return false;
+            }
+            if q.target_level == lvl + 1 {
+                let new_start_sp = target_sp.min(q.end_sp);
+                if (q.start_sp - new_start_sp).abs() > 1e-6 {
+                    let old_needed = (q.end_sp - q.start_sp).max(1.0);
+                    q.start_sp = new_start_sp;
+                    q.duration_seconds = if let Some(attrs) = eff_attrs {
+                        crate::services::jump_clone_names::skill_queue_entry_duration_with_attrs(
+                            ctx,
+                            q.type_id,
+                            q.start_sp,
+                            q.end_sp,
+                            clone_grade,
+                            attrs,
+                            q.duration_seconds,
+                        )
+                    } else {
+                        q.duration_seconds * (((q.end_sp - q.start_sp).max(0.0)) / old_needed)
+                    };
+                    if q.started_at_unix.is_some() {
+                        q.started_at_unix = Some(now_unix);
+                    }
+                }
+            }
+        }
+        valid_next_lvl.insert(q.type_id, q.target_level);
+        true
+    });
+    let new_head = queue.first().map(|e| (e.type_id, e.target_level));
+    if new_head != prev_head {
+        if let Some(head) = queue.first_mut() {
+            head.started_at_unix = if paused { None } else { Some(now_unix) };
+        }
+    } else if !paused {
+        if let Some(head) = queue.first_mut() {
+            head.started_at_unix.get_or_insert(now_unix);
+        }
+    }
+    *queue != prev_queue
+}
+
+/// Handles `/setskill` and `/giveskill` GM slash commands (`[me|<characterID>] <typeID> <0-5>`).
+fn handle_slash_set_skill(
+    ctx: &ServerContext,
+    cid: i64,
+    cmd: &str,
+    rest: &str,
+) -> Result<PyRep, BridgeRpcError> {
+    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let usage_err = || BridgeRpcError {
+        code: "InvalidSlashArgument".into(),
+        message: "Usage: /setskill [me|<characterID>] <typeID> <0-5> or /giveskill [me|<characterID>] <typeID> <0-5>"
+            .into(),
+        client_error: None,
+    };
+    let (target_cid, skill_id_str, lvl_str) = match token_strs.as_slice() {
+        [s, l] => (cid, *s, *l),
+        [target, s, l]
+            if target.eq_ignore_ascii_case("me") || target.eq_ignore_ascii_case("self") =>
+        {
+            (cid, *s, *l)
+        }
+        [target, s, l] => {
+            let Some(target_id) = target.parse::<i64>().ok().filter(|&id| id > 0) else {
+                return Err(usage_err());
+            };
+            (target_id, *s, *l)
+        }
+        _ => return Err(usage_err()),
+    };
+    let Ok(skill_id) = skill_id_str.parse::<u32>() else {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Invalid skill_id for /setskill".into(),
+            client_error: None,
+        });
+    };
+    let Ok(lvl) = lvl_str.parse::<u8>() else {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Invalid level for /setskill".into(),
+            client_error: None,
+        });
+    };
+    if lvl > 5 {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Level for /setskill must be between 0 and 5".into(),
+            client_error: None,
+        });
+    }
+    let Some(skill_type) = ctx.sde.types.get(&skill_id) else {
+        return Err(BridgeRpcError {
+            code: "SkillNotFound".into(),
+            message: format!("Skill type ID {skill_id} not found in SDE"),
+            client_error: None,
+        });
+    };
+    if skill_type.category_id != 16 {
+        return Err(BridgeRpcError {
+            code: "InvalidSkillType".into(),
+            message: format!("Type {skill_id} is not a skill (category 16)"),
+            client_error: None,
+        });
+    }
+    let rank = skill_type
+        .default_attributes
+        .get(&eve_sde::attr_ids::SKILL_TIME_CONSTANT)
+        .copied()
+        .unwrap_or(1.0);
+    let skill_name = skill_type.name.clone();
+    let target_sp = crate::formulas::sp_for_skill_level(rank, lvl);
+    let now_unix = ctx.now_unix();
+
+    let (total_sp, active_ship, was_present, queue_changed) =
+        ctx.db.try_with_mut_snapshot(|snap| {
+            let (clone_grade, active_ship) = snap
+                .characters
+                .get(&target_cid)
+                .map(|ch| (ch.clone_grade, ch.active_ship_id))
+                .ok_or_else(|| BridgeRpcError {
+                    code: "CharacterNotFound".into(),
+                    message: format!("Character {target_cid} not found"),
+                    client_error: None,
+                })?;
+            let (prev_sp, was_present) = {
+                let skills_map = snap.skills.entry(target_cid).or_default();
+                let prev_sp = skills_map.get(&skill_id).map(|s| s.skill_points).unwrap_or(0.0);
+                let was_present = if lvl == 0 {
+                    skills_map.remove(&skill_id).is_some()
+                } else {
+                    skills_map.insert(
+                        skill_id,
+                        eve_db::TrainedSkillRecord {
+                            type_id: skill_id,
+                            level: lvl,
+                            skill_points: target_sp,
+                        },
+                    );
+                    false
+                };
+                (prev_sp, was_present)
+            };
+            let sp_diff = target_sp - prev_sp;
+            let total_sp = {
+                let ch = snap.characters.get_mut(&target_cid).ok_or_else(|| BridgeRpcError {
+                    code: "CharacterNotFound".into(),
+                    message: format!("Character {target_cid} not found"),
+                    client_error: None,
+                })?;
+                ch.skill_points = (ch.skill_points + sp_diff).max(0.0);
+                ch.skill_points
+            };
+            let queue_changed = reconcile_skill_queue_after_set_skill(
+                ctx,
+                snap,
+                target_cid,
+                clone_grade,
+                skill_id,
+                lvl,
+                target_sp,
+                now_unix,
+            );
+            Ok((total_sp, active_ship, was_present, queue_changed))
+        })?;
+
+    ctx.sync_ship_ballpark_stats(target_cid, active_ship);
+    if lvl == 0 {
+        if was_present {
+            // Pass post-removal level 0 so `emit_server_skills_removed` emits `-1.0` SP and
+            // V24 `SkillsSvc._UpdateMySkillsAndReturnLevelsTrained` deletes the cached skill.
+            crate::services::jump_clone_names::emit_server_skills_removed(
+                ctx,
+                target_cid,
+                &[(skill_id, 0)],
+            );
+        }
+    } else {
+        crate::services::jump_clone_names::emit_server_skills_changed(
+            ctx,
+            target_cid,
+            &[skill_id],
+            Some("GMGiveSkill"),
+        );
+    }
+    ctx.push_brain_update(target_cid);
+    if queue_changed {
+        let _ = ctx.notify_new_skill_queue_saved(
+            target_cid,
+            crate::services::jump_clone_names::skill_queue_rowset(ctx, target_cid),
+        );
+    }
+
+    Ok(PyRep::keyval([
+        ("command", PyRep::String(cmd.to_string())),
+        ("characterID", PyRep::Integer(target_cid)),
+        ("skillID", PyRep::Integer(skill_id as i64)),
+        ("skillName", PyRep::String(skill_name)),
+        ("level", PyRep::Integer(lvl as i64)),
+        ("skillPoints", PyRep::Real(target_sp)),
+        ("characterTotalSP", PyRep::Real(total_sp)),
+    ]))
 }
 
 /// Handles `/teleport`, `/tr`, `/translocate`, and `/moveme` slash commands.
