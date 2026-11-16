@@ -790,10 +790,14 @@ pub async fn handle(
                 let mil_lvl = st.map(|s| i64::from(s.military_index)).unwrap_or(0);
                 let ind_lvl = st.map(|s| i64::from(s.industrial_index)).unwrap_or(0);
                 let strat_lvl = st.map(|s| i64::from(s.strategic_index)).unwrap_or(0);
+                let has_sov = st.and_then(|s| s.sov_alliance_id).is_some();
+                if !has_sov {
+                    return PyRep::Dict(Vec::new());
+                }
                 let mil_pts = mil_lvl * 20_000;
                 let ind_pts = ind_lvl * 20_000;
                 let strat_pts = strat_lvl * 20_000;
-                let inc = i64::from(st.and_then(|s| s.sov_alliance_id).is_some());
+                let inc = i64::from(has_sov);
                 let mk = |attr_id: i64, pts: i64, lvl: i64| {
                     (
                         PyRep::Integer(attr_id),

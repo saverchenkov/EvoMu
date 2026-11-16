@@ -1257,6 +1257,31 @@ pub fn get_sde_npc_npc_standings(sde: &eve_sde::SdeRegistry) -> Vec<(i64, i64, f
     rows
 }
 
+/// Returns true iff `id` is a valid EVE owner ID (`idCheckers.IsOwner`: faction, NPC corp,
+/// agent/NPC character, player character, player corp, alliance, or an owner registered in
+/// SDE/world state). Prevents non-owner IDs (`<= 0`, solar systems, stations, item IDs, junk)
+/// from entering `standingMgr` rowsets where `cfg.eveowners.Prime(...)` would crash.
+pub(crate) fn is_valid_standing_owner_id(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    id: i64,
+) -> bool {
+    if id <= 0 {
+        return false;
+    }
+    (500_000..=599_999).contains(&id)
+        || (1_000_000..=1_999_999).contains(&id)
+        || (3_000_000..=3_999_999).contains(&id)
+        || (90_000_000..=99_999_999).contains(&id)
+        || (2_100_000_000..=2_129_999_999).contains(&id)
+        || snap.characters.contains_key(&id)
+        || snap.corporations.contains_key(&id)
+        || snap.alliances.contains_key(&id)
+        || u32::try_from(id).ok().is_some_and(|fid| ctx.sde.factions.contains_key(&fid))
+        || ctx.sde.npc_corporations.contains_key(&id)
+        || ctx.sde.agents.contains_key(&id)
+}
+
 /// Applies a primary faction standing percentage change (`fac_pct`, positive for gain or
 /// negative for loss) and, when `apply_derived` is true, propagates derived faction standings
 /// per EVE Wiki (`NPC_standings.md`):
@@ -2036,7 +2061,6 @@ pub(super) async fn handle_extended_with_bound(
             });
             Some(Ok(PyRep::Bool(in_dungeon)))
         }
-
         ("standingMgr", "GetCorpStandings") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rows = ctx.db.with_snapshot(|snap| {
@@ -2044,6 +2068,9 @@ pub(super) async fn handle_extended_with_bound(
                 let mut agg: HashMap<i64, (f64, usize)> = HashMap::new();
                 for ch in snap.characters.values().filter(|c| c.corporation_id == corp_id) {
                     for (&from_id, &val) in &ch.standings {
+                        if !is_valid_standing_owner_id(ctx, snap, from_id) {
+                            continue;
+                        }
                         let e = agg.entry(from_id).or_insert((0.0, 0));
                         e.0 += val;
                         e.1 += 1;
@@ -2061,10 +2088,16 @@ pub(super) async fn handle_extended_with_bound(
 
         ("standingMgr", "GetNPCNPCStandings") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let rows: Vec<Vec<PyRep>> = get_sde_npc_npc_standings(&ctx.sde)
-                .into_iter()
-                .map(|(from_id, to_id, st)| vec![PyRep::Integer(from_id), PyRep::Integer(to_id), PyRep::Real(st)])
-                .collect();
+            let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
+                get_sde_npc_npc_standings(&ctx.sde)
+                    .into_iter()
+                    .filter(|&(from_id, to_id, _)| {
+                        is_valid_standing_owner_id(ctx, snap, from_id)
+                            && is_valid_standing_owner_id(ctx, snap, to_id)
+                    })
+                    .map(|(from_id, to_id, st)| vec![PyRep::Integer(from_id), PyRep::Integer(to_id), PyRep::Real(st)])
+                    .collect()
+            });
             Some(Ok(PyRep::rowset(vec!["fromID", "toID", "standing"], rows)))
         }
 
@@ -2077,13 +2110,24 @@ pub(super) async fn handle_extended_with_bound(
                 .filter(|&id| id > 0)
                 .unwrap_or(char_id);
             let res = ctx.db.with_snapshot(|snap| {
+                if !is_valid_standing_owner_id(ctx, snap, target_to) {
+                    return PyRep::List(vec![]);
+                }
                 let Some(ch) = snap.characters.get(&target_to).or_else(|| snap.characters.get(&char_id)) else {
                     return PyRep::List(vec![]);
                 };
                 let mut entities: Vec<i64> = if let Some(fid) = target_from {
-                    vec![fid]
+                    if is_valid_standing_owner_id(ctx, snap, fid) {
+                        vec![fid]
+                    } else {
+                        vec![]
+                    }
                 } else {
-                    ch.standings.keys().copied().collect()
+                    ch.standings
+                        .keys()
+                        .copied()
+                        .filter(|&fid| is_valid_standing_owner_id(ctx, snap, fid))
+                        .collect()
                 };
                 entities.sort_unstable();
                 let list: Vec<PyRep> = entities

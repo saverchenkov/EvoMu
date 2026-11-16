@@ -250,11 +250,17 @@ async fn test_station_services_and_corp_station_mgr_parity() {
         &mut s1,
         "stationSvc",
         "GetAllianceSystems",
-        &[PyRep::Integer(test_alliance_id)],
+        &[],
     )
     .await
     .expect("stationSvc.GetAllianceSystems");
-    assert_eq!(ally_sys_1, PyRep::List(vec![PyRep::Integer(SYS_JITA as i64)]));
+    assert_eq!(
+        ally_sys_1,
+        PyRep::rowset(
+            vec!["solarSystemID", "allianceID"],
+            vec![vec![PyRep::Integer(SYS_JITA as i64), PyRep::Integer(test_alliance_id)]],
+        )
+    );
 
     let ally_sys_2 = rpc(
         &ctx,
@@ -276,7 +282,10 @@ async fn test_station_services_and_corp_station_mgr_parity() {
     )
     .await
     .expect("GetAllianceSystems for unheld alliance");
-    assert_eq!(unheld_sys, PyRep::List(vec![]));
+    assert_eq!(
+        unheld_sys,
+        PyRep::rowset(vec!["solarSystemID", "allianceID"], vec![]),
+    );
 
     // 6. corpStationMgr.DoStandingCheckForStationService (V24 FSD stationstandingsrestrictions.fsdbinary)
     // 6a. Undocked caller without explicit stationID must fail with MissingStationId (no silent Jita fallback)

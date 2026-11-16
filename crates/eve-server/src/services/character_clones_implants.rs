@@ -860,11 +860,20 @@ pub fn handle_clones_and_sheet(
                 snap.characters
                     .get(&char_id)
                     .map(|c| {
-                        c.standings
+                        let mut entries: Vec<(i64, f64)> = c
+                            .standings
                             .iter()
-                            .map(|(&from_id, &val)| {
-                                vec![PyRep::Integer(from_id), PyRep::Real(val)]
+                            .filter(|(&from_id, _)| {
+                                crate::services::agents_missions::agents_standings_arcs::is_valid_standing_owner_id(
+                                    ctx, snap, from_id,
+                                )
                             })
+                            .map(|(&from_id, &val)| (from_id, val))
+                            .collect();
+                        entries.sort_by_key(|&(fid, _)| fid);
+                        entries
+                            .into_iter()
+                            .map(|(from_id, val)| vec![PyRep::Integer(from_id), PyRep::Real(val)])
                             .collect()
                     })
                     .unwrap_or_default()
@@ -883,7 +892,15 @@ pub fn handle_clones_and_sheet(
                     .get(&char_id)
                     .map(|txs| {
                         txs.iter()
-                            .filter(|tx| from_filter.map_or(true, |f| f == tx.from_id))
+                            .filter(|tx| {
+                                from_filter.map_or(true, |f| f == tx.from_id)
+                                    && crate::services::agents_missions::agents_standings_arcs::is_valid_standing_owner_id(
+                                        ctx, snap, tx.from_id,
+                                    )
+                                    && crate::services::agents_missions::agents_standings_arcs::is_valid_standing_owner_id(
+                                        ctx, snap, tx.to_id,
+                                    )
+                            })
                             .map(|tx| {
                                 vec![
                                     PyRep::Integer(tx.event_id),
@@ -1305,7 +1322,8 @@ pub fn handle_clones_and_sheet(
                             change_entries.push((PyRep::Integer(4), PyRep::Integer(old_flag)));
                         }
                         if it.quantity != old_qty {
-                            change_entries.push((PyRep::Integer(5), PyRep::Integer(i64::from(old_qty))));
+                            // V24.01 invCache uses ixStackSize (9), never legacy ixQuantity (5).
+                            change_entries.push((PyRep::Integer(9), PyRep::Integer(i64::from(old_qty))));
                         }
                         let (group_id, category_id) = ctx
                             .sde

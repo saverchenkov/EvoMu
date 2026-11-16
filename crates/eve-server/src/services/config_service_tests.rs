@@ -474,6 +474,55 @@ fn config_corp_ticker_names_includes_governance_logo_fields() {
     assert_eq!(rows[0].dbrow_get("color3"), Some(&PyRep::Real(673.0)));
 }
 
+#[test]
+fn get_multi_owners_ex_returns_generic_and_npc_corp_fallback_rows_for_unknown_ids() {
+    let ctx = test_ctx();
+    let mut sess = auth_session(930_002, 98_300_002, 30_000_142);
+    let kw = HashMap::new();
+    let unknown_npc_corp_id = 1_999_123_i64;
+    let unknown_faction_id = 599_123_i64;
+    let unknown_alliance_id = 99_999_123_i64;
+    let unknown_generic_id = 888_777_666_i64;
+
+    let rep = handle(
+        &ctx,
+        &mut sess,
+        "config",
+        "GetMultiOwnersEx",
+        &[PyRep::List(vec![
+            PyRep::Integer(unknown_npc_corp_id),
+            PyRep::Integer(unknown_faction_id),
+            PyRep::Integer(unknown_alliance_id),
+            PyRep::Integer(unknown_generic_id),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .expect("GetMultiOwnersEx fallback rows");
+
+    let PyRep::TupleSet { columns, rows } = rep else {
+        panic!("Expected TupleSet from GetMultiOwnersEx, got {rep:?}");
+    };
+    assert_eq!(
+        columns,
+        vec!["ownerID", "ownerName", "typeID", "gender", "ownerNameID"]
+    );
+    assert_eq!(rows.len(), 4, "no requested owner ID may be dropped");
+    assert_eq!(rows[0].first(), Some(&PyRep::Integer(unknown_npc_corp_id)));
+    assert_eq!(rows[0].get(2), Some(&PyRep::Integer(2)));
+    assert_eq!(rows[0].get(3), Some(&PyRep::Bool(false)));
+    assert_eq!(rows[1].first(), Some(&PyRep::Integer(unknown_faction_id)));
+    assert_eq!(rows[1].get(2), Some(&PyRep::Integer(30)));
+    assert_eq!(rows[1].get(3), Some(&PyRep::Bool(false)));
+    assert_eq!(rows[2].first(), Some(&PyRep::Integer(unknown_alliance_id)));
+    assert_eq!(rows[2].get(2), Some(&PyRep::Integer(16159)));
+    assert_eq!(rows[2].get(3), Some(&PyRep::Bool(false)));
+    assert_eq!(rows[3].first(), Some(&PyRep::Integer(unknown_generic_id)));
+    assert_eq!(rows[3].get(2), Some(&PyRep::Integer(1373)));
+    assert_eq!(rows[3].get(3), Some(&PyRep::None));
+    assert_eq!(rows[3].get(4), Some(&PyRep::None));
+}
+
 #[cfg(test)]
 #[path = "config_service_extra_unit_tests.rs"]
 mod config_service_extra_unit_tests;
