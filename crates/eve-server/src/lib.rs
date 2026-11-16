@@ -5,6 +5,7 @@
 pub mod bug_reporting;
 pub mod combat;
 pub mod config;
+pub mod critical_log;
 pub mod domain;
 pub mod esi;
 pub mod flight_recorder;
@@ -19,6 +20,7 @@ pub mod macho_listener;
 pub mod ops_metrics;
 pub mod outbound_sequencer;
 pub mod router;
+pub mod sequencer_invariants;
 pub mod services;
 pub mod sp6_lifecycle;
 pub mod sso;

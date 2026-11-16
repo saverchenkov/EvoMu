@@ -13,6 +13,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const MAX_HISTORY_PER_SESSION: usize = 30;
 pub const MAX_OUTBOUND_LEDGER_PER_SESSION: usize = 500;
 pub const MAX_DESTINY_STAMPS_PER_SESSION: usize = 500;
+pub const MAX_INVARIANT_VIOLATIONS_PER_SESSION: usize = 200;
+pub const MAX_PREVENTED_JOLTS_PER_SESSION: usize = 200;
 pub const PACKET_PERF_WARN_THRESHOLD_MS: u64 = 100;
 const MAX_PACKET_PERF_WARNINGS: usize = 200;
 const MAX_HISTOGRAM_SAMPLES_PER_METHOD: usize = 2048;
@@ -99,6 +101,87 @@ pub struct PacketPerfWarning {
     pub duration_micros: u64,
     #[serde(default)]
     pub bootstrap: bool,
+}
+
+/// Bounded per-session invariant violation record captured by the outbound sequencer (`GH #1084`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SequencerInvariantViolationRecord {
+    pub timestamp_millis: u64,
+    pub session_id: u64,
+    pub epoch: u32,
+    pub stamp: u32,
+    pub invariant: String,
+    pub detail: String,
+}
+
+/// Bounded per-session prevented-jolt marker recorded when a backstepping stamp is rejected (`GH #1084`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PreventedJoltRecord {
+    pub timestamp_millis: u64,
+    pub session_id: u64,
+    pub epoch: u32,
+    pub batch_stamp: u32,
+    pub trusted_stamp: u32,
+    pub reason: String,
+}
+
+/// Per-session outbound sequencer counters exposed via `/session ledger` and `/ops` (`GH #1084`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionSequencerCounters {
+    pub dropped_dependent_notifications: u64,
+    pub dropped_dependent_by_name: HashMap<String, u64>,
+    pub invariant_violations: u64,
+    pub invariant_violations_by_name: HashMap<String, u64>,
+    pub prevented_jolts: u64,
+}
+
+/// Cluster-wide sequencer gate/validator summary exposed via `--gm` `/ops` (`GH #1084`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SequencerObservabilitySummary {
+    pub dropped_dependent_notifications_total: u64,
+    pub dropped_dependent_by_name: HashMap<String, u64>,
+    pub invariant_violations_total: u64,
+    pub invariant_violations_by_name: HashMap<String, u64>,
+    pub prevented_jolts_total: u64,
+    pub sessions_with_counters: usize,
+    pub recent_invariant_violations: Vec<SequencerInvariantViolationRecord>,
+    pub recent_prevented_jolts: Vec<PreventedJoltRecord>,
+}
+
+fn push_bounded_session_queue<T>(
+    map: &mut HashMap<u64, VecDeque<T>>,
+    session_id: u64,
+    cap: usize,
+    entry: T,
+) {
+    if map.len() >= MAX_TRACKED_SESSIONS && !map.contains_key(&session_id) {
+        if let Some(oldest) = map.keys().next().copied() {
+            map.remove(&oldest);
+        }
+    }
+    let queue = map.entry(session_id).or_default();
+    if queue.len() >= cap {
+        queue.pop_front();
+    }
+    queue.push_back(entry);
+}
+
+fn read_bounded_session_queue<T: Clone>(
+    lock: &RwLock<HashMap<u64, VecDeque<T>>>,
+    session_id: u64,
+    limit: usize,
+) -> Vec<T> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let Ok(guard) = lock.read() else {
+        return Vec::new();
+    };
+    let Some(queue) = guard.get(&session_id) else {
+        return Vec::new();
+    };
+    let count = queue.len().min(limit);
+    queue.iter().rev().take(count).rev().cloned().collect()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -196,11 +279,20 @@ pub struct FlightRecorder {
     destiny_stamps: RwLock<HashMap<u64, VecDeque<DestinyStampRecord>>>,
     latency_histograms: RwLock<LatencyHistogramState>,
     packet_perf_warnings: RwLock<VecDeque<PacketPerfWarning>>,
+    sequencer_counters: RwLock<HashMap<u64, SessionSequencerCounters>>,
+    invariant_violations: RwLock<HashMap<u64, VecDeque<SequencerInvariantViolationRecord>>>,
+    prevented_jolts: RwLock<HashMap<u64, VecDeque<PreventedJoltRecord>>>,
 }
 
 impl Default for FlightRecorder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl std::fmt::Debug for FlightRecorder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlightRecorder").finish_non_exhaustive()
     }
 }
 
@@ -212,6 +304,9 @@ impl FlightRecorder {
             destiny_stamps: RwLock::new(HashMap::new()),
             latency_histograms: RwLock::new(LatencyHistogramState::default()),
             packet_perf_warnings: RwLock::new(VecDeque::new()),
+            sequencer_counters: RwLock::new(HashMap::new()),
+            invariant_violations: RwLock::new(HashMap::new()),
+            prevented_jolts: RwLock::new(HashMap::new()),
         }
     }
 
@@ -486,6 +581,164 @@ impl FlightRecorder {
         };
         let count = lock.len().min(limit);
         lock.iter().rev().take(count).rev().cloned().collect()
+    }
+
+    fn update_session_counters(&self, session_id: u64, f: impl FnOnce(&mut SessionSequencerCounters)) {
+        if let Ok(mut lock) = self.sequencer_counters.write() {
+            if lock.len() >= MAX_TRACKED_SESSIONS && !lock.contains_key(&session_id) {
+                if let Some(oldest) = lock.keys().next().copied() {
+                    lock.remove(&oldest);
+                }
+            }
+            let entry = lock.entry(session_id).or_default();
+            f(entry);
+        }
+    }
+
+    /// Increments the per-session and per-name dropped dependent notification counter (`GH #1084`).
+    pub fn record_dropped_dependent_notification(&self, session_id: u64, notification_name: &str) {
+        self.update_session_counters(session_id, |c| {
+            c.dropped_dependent_notifications = c.dropped_dependent_notifications.saturating_add(1);
+            *c.dropped_dependent_by_name
+                .entry(notification_name.to_string())
+                .or_insert(0) += 1;
+        });
+    }
+
+    /// Records a destiny group invariant violation for `session_id` (`GH #1084`).
+    pub fn record_invariant_violation(
+        &self,
+        session_id: u64,
+        epoch: u32,
+        stamp: u32,
+        invariant: &str,
+        detail: &str,
+    ) {
+        self.update_session_counters(session_id, |c| {
+            c.invariant_violations = c.invariant_violations.saturating_add(1);
+            *c.invariant_violations_by_name
+                .entry(invariant.to_string())
+                .or_insert(0) += 1;
+        });
+        let entry = SequencerInvariantViolationRecord {
+            timestamp_millis: now_unix_millis(),
+            session_id,
+            epoch,
+            stamp,
+            invariant: invariant.to_string(),
+            detail: detail.to_string(),
+        };
+        if let Ok(mut lock) = self.invariant_violations.write() {
+            push_bounded_session_queue(
+                &mut lock,
+                session_id,
+                MAX_INVARIANT_VIOLATIONS_PER_SESSION,
+                entry,
+            );
+        }
+    }
+
+    /// Records a prevented-jolt marker when a backstepping destiny batch is rejected (`GH #1084`).
+    pub fn record_prevented_jolt(
+        &self,
+        session_id: u64,
+        epoch: u32,
+        batch_stamp: u32,
+        trusted_stamp: u32,
+        reason: &str,
+    ) {
+        self.update_session_counters(session_id, |c| {
+            c.prevented_jolts = c.prevented_jolts.saturating_add(1);
+        });
+        let entry = PreventedJoltRecord {
+            timestamp_millis: now_unix_millis(),
+            session_id,
+            epoch,
+            batch_stamp,
+            trusted_stamp,
+            reason: reason.to_string(),
+        };
+        if let Ok(mut lock) = self.prevented_jolts.write() {
+            push_bounded_session_queue(&mut lock, session_id, MAX_PREVENTED_JOLTS_PER_SESSION, entry);
+        }
+    }
+
+    /// Returns the per-session gate, invariant violation, and prevented-jolt counters (`GH #1084`).
+    pub fn session_sequencer_counters(&self, session_id: u64) -> SessionSequencerCounters {
+        self.sequencer_counters
+            .read()
+            .ok()
+            .and_then(|lock| lock.get(&session_id).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Returns up to `limit` most recent invariant violations for `session_id` in chronological order.
+    pub fn get_session_invariant_violations(
+        &self,
+        session_id: u64,
+        limit: usize,
+    ) -> Vec<SequencerInvariantViolationRecord> {
+        read_bounded_session_queue(&self.invariant_violations, session_id, limit)
+    }
+
+    /// Returns up to `limit` most recent prevented-jolt markers for `session_id` in chronological order.
+    pub fn get_session_prevented_jolts(
+        &self,
+        session_id: u64,
+        limit: usize,
+    ) -> Vec<PreventedJoltRecord> {
+        read_bounded_session_queue(&self.prevented_jolts, session_id, limit)
+    }
+
+    /// Returns the aggregated cluster-wide gate/validator/prevented-jolt summary for `/ops` (`GH #1084`).
+    pub fn sequencer_observability_summary(&self, recent_limit: usize) -> SequencerObservabilitySummary {
+        let mut summary = SequencerObservabilitySummary::default();
+        if let Ok(lock) = self.sequencer_counters.read() {
+            summary.sessions_with_counters = lock.len();
+            for c in lock.values() {
+                summary.dropped_dependent_notifications_total = summary
+                    .dropped_dependent_notifications_total
+                    .saturating_add(c.dropped_dependent_notifications);
+                for (name, count) in &c.dropped_dependent_by_name {
+                    *summary
+                        .dropped_dependent_by_name
+                        .entry(name.clone())
+                        .or_insert(0) += *count;
+                }
+                summary.invariant_violations_total = summary
+                    .invariant_violations_total
+                    .saturating_add(c.invariant_violations);
+                for (name, count) in &c.invariant_violations_by_name {
+                    *summary
+                        .invariant_violations_by_name
+                        .entry(name.clone())
+                        .or_insert(0) += *count;
+                }
+                summary.prevented_jolts_total =
+                    summary.prevented_jolts_total.saturating_add(c.prevented_jolts);
+            }
+        }
+        if recent_limit > 0 {
+            if let Ok(lock) = self.invariant_violations.read() {
+                let mut all: Vec<SequencerInvariantViolationRecord> = lock
+                    .values()
+                    .flat_map(|q| q.iter().cloned())
+                    .collect();
+                all.sort_by_key(|e| (e.timestamp_millis, e.session_id, e.stamp));
+                let start = all.len().saturating_sub(recent_limit);
+                summary.recent_invariant_violations = all.split_off(start);
+            }
+            if let Ok(lock) = self.prevented_jolts.read() {
+                let mut all: Vec<PreventedJoltRecord> = lock
+                    .values()
+                    .flat_map(|q| q.iter().cloned())
+                    .collect();
+                all.sort_by_key(|e| (e.timestamp_millis, e.session_id, e.batch_stamp));
+                let start = all.len().saturating_sub(recent_limit);
+                summary.recent_prevented_jolts = all.split_off(start);
+            }
+        }
+        summary
     }
 }
 

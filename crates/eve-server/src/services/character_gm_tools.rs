@@ -2462,6 +2462,21 @@ pub async fn handle_gm_slash_ext(
 
         let ledger = ctx.flight_recorder.get_outbound_ledger(target_sid, limit);
         let stamps = ctx.flight_recorder.get_destiny_stamps(target_sid, limit);
+        let seq_counters = ctx.flight_recorder.session_sequencer_counters(target_sid);
+        let inv_violations = ctx.flight_recorder.get_session_invariant_violations(target_sid, limit);
+        let prevented_jolts = ctx.flight_recorder.get_session_prevented_jolts(target_sid, limit);
+
+        let sorted_counts = |map: &std::collections::HashMap<String, u64>| -> PyRep {
+            let mut pairs: Vec<(&String, &u64)> = map.iter().collect();
+            pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+            PyRep::Dict(
+                pairs
+                    .into_iter()
+                    .map(|(k, &v)| (PyRep::String(k.clone()), PyRep::Integer(v as i64)))
+                    .collect(),
+            )
+        };
+
         let entry_reps: Vec<PyRep> = ledger
             .iter()
             .map(|e| {
@@ -2506,6 +2521,30 @@ pub async fn handle_gm_slash_ext(
                 ])
             })
             .collect();
+        let violation_reps: Vec<PyRep> = inv_violations
+            .iter()
+            .map(|v| {
+                PyRep::keyval([
+                    ("timestampMillis", PyRep::Integer(v.timestamp_millis as i64)),
+                    ("epoch", PyRep::Integer(i64::from(v.epoch))),
+                    ("stamp", PyRep::Integer(i64::from(v.stamp))),
+                    ("invariant", PyRep::String(v.invariant.clone())),
+                    ("detail", PyRep::String(v.detail.clone())),
+                ])
+            })
+            .collect();
+        let jolt_reps: Vec<PyRep> = prevented_jolts
+            .iter()
+            .map(|j| {
+                PyRep::keyval([
+                    ("timestampMillis", PyRep::Integer(j.timestamp_millis as i64)),
+                    ("epoch", PyRep::Integer(i64::from(j.epoch))),
+                    ("batchStamp", PyRep::Integer(i64::from(j.batch_stamp))),
+                    ("trustedStamp", PyRep::Integer(i64::from(j.trusted_stamp))),
+                    ("reason", PyRep::String(j.reason.clone())),
+                ])
+            })
+            .collect();
 
         return Some(Ok(PyRep::keyval([
             ("command", PyRep::String(cmd.to_string())),
@@ -2515,6 +2554,28 @@ pub async fn handle_gm_slash_ext(
             ("count", PyRep::Integer(entry_reps.len() as i64)),
             ("entries", PyRep::List(entry_reps)),
             ("destinyStamps", PyRep::List(stamp_reps)),
+            (
+                "droppedDependentNotifications",
+                PyRep::Integer(seq_counters.dropped_dependent_notifications as i64),
+            ),
+            (
+                "droppedDependentByName",
+                sorted_counts(&seq_counters.dropped_dependent_by_name),
+            ),
+            (
+                "invariantViolations",
+                PyRep::Integer(seq_counters.invariant_violations as i64),
+            ),
+            (
+                "invariantViolationsByName",
+                sorted_counts(&seq_counters.invariant_violations_by_name),
+            ),
+            (
+                "preventedJolts",
+                PyRep::Integer(seq_counters.prevented_jolts as i64),
+            ),
+            ("invariantViolationEntries", PyRep::List(violation_reps)),
+            ("preventedJoltEntries", PyRep::List(jolt_reps)),
         ])));
     }
 

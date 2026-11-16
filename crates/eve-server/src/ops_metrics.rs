@@ -140,6 +140,7 @@ pub fn build_ops_snapshot(ctx: &ServerContext) -> Value {
 
     let latency_histograms = ctx.flight_recorder.latency_histogram_report();
     let recent_packet_perf = ctx.flight_recorder.recent_packet_perf_warnings(50);
+    let sequencer = ctx.flight_recorder.sequencer_observability_summary(50);
 
     json!({
         "gm_mode": true,
@@ -159,6 +160,7 @@ pub fn build_ops_snapshot(ctx: &ServerContext) -> Value {
         },
         "latency_histograms": latency_histograms,
         "recent_packet_perf": recent_packet_perf,
+        "sequencer": sequencer,
         "living_world": {
             "status": "not_implemented",
             "enabled": false,
