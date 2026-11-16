@@ -79,6 +79,39 @@ fn pick_lowsec_pair(ctx: &ServerContext) -> (u32, u32) {
     panic!("no suitable lowsec pair found");
 }
 
+/// Spawns a live ship ball in `Ballpark` with SDE physics, combat state, and slim metadata.
+async fn spawn_ship_ball(
+    ctx: &ServerContext,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    type_id: u32,
+    position: DVec3,
+) {
+    let (_, _, mass, radius, max_velocity, inertia, _) =
+        sp6_lifecycle::sde_ship_physics(&ctx.sde, type_id);
+    ctx.systems
+        .get_or_spawn(sys_id)
+        .spawn_ball_with_meta(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id,
+                position,
+                velocity: DVec3::ZERO,
+                max_velocity,
+                inertia,
+                mass,
+                radius,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, type_id),
+            ctx.build_ship_slim_meta(char_id, type_id),
+        )
+        .await
+        .expect("spawn_ship_ball");
+}
+
 #[tokio::test]
 async fn test_safe_logout_emergency_warp_and_weapons_timer() {
     // parity: feat:account.logout
@@ -101,6 +134,7 @@ async fn test_safe_logout_emergency_warp_and_weapons_timer() {
         }
         snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
     });
+    spawn_ship_ball(&ctx, sys_id, char_id, ship_id, 587, DVec3::ZERO).await;
 
     let entry = sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, char_id).await.expect("entry");
     assert!(entry.emergency_warp_dest.is_some(), "Pilot with no timers must emergency warp on logoff");
@@ -119,6 +153,7 @@ async fn test_safe_logout_emergency_warp_and_weapons_timer() {
         }
         snap.item_positions.insert(ship2_id, [1000.0, 0.0, 0.0]);
     });
+    spawn_ship_ball(&ctx, sys_id, char2_id, ship2_id, 587, DVec3::new(1000.0, 0.0, 0.0)).await;
     ctx.crimewatch.write().unwrap().states.entry(char2_id).or_default().weapon_timer_until_unix = now_unix + 300;
 
     let entry2 = sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, char2_id).await.expect("entry2");
