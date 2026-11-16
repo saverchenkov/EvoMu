@@ -350,6 +350,57 @@ pub fn save_industry_material_monitors(
     );
 }
 
+/// Checks whether `sub.char_id` is authorized to query `sub.flag_id` materials in `sub.owner_id`'s hangar.
+fn can_query_industry_monitor_div(
+    ctx: &ServerContext,
+    sub: &IndustryMaterialMonitorSub,
+) -> bool {
+    if sub.owner_id == sub.char_id {
+        return true;
+    }
+    let div_bits = if (116..=122).contains(&sub.flag_id) {
+        let div_idx = (sub.flag_id as u16) - 116;
+        (1u64 << (13 + div_idx)) | (1u64 << (20 + div_idx))
+    } else {
+        0
+    };
+    let (is_ceo, roles) = crate::services::fleet_social::get_effective_corp_roles(
+        ctx,
+        sub.owner_id,
+        sub.char_id,
+    );
+    is_ceo
+        || roles == u64::MAX
+        || (roles
+            & (eve_db::corp_roles::ROLE_DIRECTOR
+                | eve_db::corp_roles::ROLE_FACTORY_MANAGER
+                | div_bits))
+            != 0
+}
+
+/// Collects total unlocked, non-singleton stack quantities grouped by `type_id`
+/// for `(owner_id, location_id, flag_id)`.
+pub fn collect_available_monitor_materials(
+    snap: &eve_db::WorldStateSnapshot,
+    owner_id: i64,
+    location_id: i64,
+    flag_id: i64,
+) -> std::collections::BTreeMap<u32, i64> {
+    let mut avail_map = std::collections::BTreeMap::new();
+    for it in snap.items.values() {
+        if it.owner_id == owner_id
+            && it.location_id == location_id
+            && (it.flag as i64) == flag_id
+            && it.quantity > 0
+            && !it.singleton
+            && !snap.is_item_or_ancestor_locked_or_impounded(it.item_id)
+        {
+            *avail_map.entry(it.type_id).or_insert(0) += i64::from(it.quantity);
+        }
+    }
+    avail_map
+}
+
 /// Emits `OnIndustryMaterials(monitorID, materials)` (`materials = {typeID: remaining_available_qty}`)
 /// per V24 `IndustryService.OnIndustryMaterials` / `Material.update_available` to subscribed monitors
 /// when an industry job consumes materials from the monitored hangar/container.
@@ -402,48 +453,88 @@ pub fn emit_industry_materials_consumed(
     }
 
     for (monitor_id, sub) in matching_subs {
-        let can_query_div = if use_corp && (116..=122).contains(&sub.flag_id) {
-            let div_idx = (sub.flag_id as u16) - 116;
-            let query_bit = 1u64 << (20 + div_idx);
-            let take_bit = 1u64 << (13 + div_idx);
-            let (is_ceo, roles) = crate::services::fleet_social::get_effective_corp_roles(
-                ctx,
-                sub.owner_id,
-                sub.char_id,
-            );
-            is_ceo
-                || roles == u64::MAX
-                || (roles
-                    & (eve_db::corp_roles::ROLE_DIRECTOR
-                        | eve_db::corp_roles::ROLE_FACTORY_MANAGER
-                        | query_bit
-                        | take_bit))
-                    != 0
-        } else {
-            true
-        };
-        if !can_query_div {
+        if !can_query_industry_monitor_div(ctx, &sub) {
             continue;
         }
         let entries: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
+            let avail_map = collect_available_monitor_materials(
+                snap,
+                sub.owner_id,
+                sub.location_id,
+                sub.flag_id,
+            );
             tids.iter()
                 .map(|&tid| {
-                    let avail: i64 = snap
-                        .items
-                        .values()
-                        .filter(|i| {
-                            i.owner_id == sub.owner_id
-                                && i.location_id == sub.location_id
-                                && (i.flag as i64) == sub.flag_id
-                                && i.type_id == tid
-                                && i.quantity > 0
-                                && !i.singleton
-                                && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                        })
-                        .map(|i| i64::from(i.quantity))
-                        .sum();
+                    let avail = avail_map.get(&tid).copied().unwrap_or(0);
                     (PyRep::Integer(i64::from(tid)), PyRep::Integer(avail))
                 })
+                .collect()
+        });
+        ctx.emit_typed(
+            NotificationTarget::Character(sub.char_id),
+            OnIndustryMaterials {
+                job_id: monitor_id,
+                materials: PyRep::Dict(entries),
+            },
+        );
+    }
+}
+
+/// Emits `OnIndustryMaterials(monitorID, materials)` to active `industryMonitor` subscribers
+/// whose `(owner_id, location_id, flag_id)` matches any affected item scope `(owner_id, location_id, flag_id, type_id)`.
+///
+/// Because V24 `IndustryService.OnIndustryMaterials` assigns `job.available = materials` (replacing
+/// the full dict rather than merging keys), the emitted dict includes all currently available
+/// non-singleton unlocked items in the monitored scope plus `0` for affected `type_id`s with none left.
+pub fn emit_industry_materials_for_scopes(
+    ctx: &ServerContext,
+    scopes: &[(i64, i64, i64, u32)],
+) {
+    if scopes.is_empty() {
+        return;
+    }
+    let matching_subs: Vec<(i64, IndustryMaterialMonitorSub)> = ctx.db.with_snapshot(|snap| {
+        let monitors = load_industry_material_monitors(snap);
+        if monitors.is_empty() {
+            return Vec::new();
+        }
+        monitors
+            .into_iter()
+            .filter(|(_, sub)| {
+                scopes.iter().any(|&(owner_id, loc_id, flag_id, _)| {
+                    sub.owner_id == owner_id
+                        && sub.location_id == loc_id
+                        && sub.flag_id == flag_id
+                })
+            })
+            .collect()
+    });
+    if matching_subs.is_empty() {
+        return;
+    }
+
+    for (monitor_id, sub) in matching_subs {
+        if !can_query_industry_monitor_div(ctx, &sub) {
+            continue;
+        }
+        let entries: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
+            let mut avail_map = collect_available_monitor_materials(
+                snap,
+                sub.owner_id,
+                sub.location_id,
+                sub.flag_id,
+            );
+            for &(owner_id, loc_id, flag_id, tid) in scopes {
+                if owner_id == sub.owner_id
+                    && loc_id == sub.location_id
+                    && flag_id == sub.flag_id
+                {
+                    avail_map.entry(tid).or_insert(0);
+                }
+            }
+            avail_map
+                .into_iter()
+                .map(|(tid, qty)| (PyRep::Integer(i64::from(tid)), PyRep::Integer(qty)))
                 .collect()
         });
         ctx.emit_typed(

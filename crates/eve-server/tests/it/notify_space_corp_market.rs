@@ -2473,6 +2473,258 @@ async fn test_on_industry_materials_v24_dict_shape() {
 }
 
 #[tokio::test]
+async fn test_industry_window_createitem_and_move_refresh_materials_and_multi_change_gh1071() {
+    // parity: notify:OnIndustryMaterials, notify:OnMultipleItemChange, notify:OnItemChange
+    eve_testkit::attest(&[
+        "notify:OnIndustryMaterials",
+        "notify:OnMultipleItemChange",
+        "notify:OnItemChange",
+    ]);
+
+    let ctx = ServerContext::new();
+    let mut sess = login_pilot(&ctx, 8810, "demo", "demo-secret", PILOT_A).await;
+    sess.role |= service_roles::ROLE_GM_MASK;
+
+    let bp_id = 920_100_001_i64;
+    let pyerite_id = 920_100_002_i64;
+    let ship_id = ctx
+        .db
+        .with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+                ch.station_id = Some(JITA_STATION);
+                ch.structure_id = None;
+            }
+            // Start with 0 Tritanium (34) and 500 Pyerite (35) in Jita 4-4 Item Hangar
+            snap.items.retain(|_, i| {
+                !(i.owner_id == PILOT_A
+                    && i.location_id == JITA_STATION
+                    && i.flag == InventoryFlag::Hangar
+                    && i.type_id == 34)
+            });
+            snap.items.insert(
+                bp_id,
+                make_item(bp_id, 687, PILOT_A, JITA_STATION, InventoryFlag::Hangar, 1, true),
+            );
+            snap.items.insert(
+                pyerite_id,
+                make_item(pyerite_id, 35, PILOT_A, JITA_STATION, InventoryFlag::Hangar, 500, false),
+            );
+            snap.characters.get(&PILOT_A).map(|c| c.active_ship_id).unwrap_or(98_000_001)
+        });
+    let _ = ctx.drain_notifications_for_char(PILOT_A);
+
+    // 1. Open industryWnd -> ConnectJob(job.dump()) with nested inputLocation returns initial available {35: >=500} (no 34)
+    let job_dump = PyRep::Dict(vec![
+        (PyRep::String("blueprintID".into()), PyRep::Integer(bp_id)),
+        (PyRep::String("facilityID".into()), PyRep::Integer(JITA_STATION)),
+        (PyRep::String("activityID".into()), PyRep::Integer(1)),
+        (
+            PyRep::String("inputLocation".into()),
+            PyRep::ObjectEx {
+                is_type_2: true,
+                header: Box::new(PyRep::Tuple(vec![
+                    PyRep::Tuple(vec![PyRep::Token("industry.job.Location".into())]),
+                    PyRep::Dict(vec![
+                        (PyRep::String("itemID".into()), PyRep::Integer(JITA_STATION)),
+                        (PyRep::String("flagID".into()), PyRep::Integer(InventoryFlag::Hangar as i64)),
+                        (PyRep::String("ownerID".into()), PyRep::Integer(PILOT_A)),
+                    ]),
+                ])),
+                list: Vec::new(),
+                dict: Vec::new(),
+            },
+        ),
+    ]);
+    let mon_rep = rpc(&ctx, &mut sess, "industryMonitor", "ConnectJob", &[job_dump])
+        .await
+        .expect("ConnectJob should succeed");
+    let PyRep::Tuple(mon_parts) = mon_rep else {
+        panic!("ConnectJob must return (monitorID, available) tuple");
+    };
+    let monitor_id = mon_parts[0].as_i64().expect("monitorID");
+    let PyRep::Dict(init_entries) = &mon_parts[1] else {
+        panic!("ConnectJob must return available materials Dict");
+    };
+    assert!(
+        !init_entries.iter().any(|(k, _)| k.as_i64() == Some(34)),
+        "Tritanium (34) must initially be absent"
+    );
+    let _ = ctx.drain_notifications_for_char(PILOT_A);
+
+    // 2. Run `/createitem 34 3000` while industryWnd stays open -> must emit OnItemChange,
+    //    OnMultipleItemChange (for MaterialGroups), AND OnIndustryMaterials (for IndustryService/SubmitButton).
+    let created_rep = rpc(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/createitem 34 3000".into())],
+    )
+    .await
+    .expect("/createitem 34 3000 should succeed");
+    let trit_id = created_rep.dict_get("itemID").and_then(|v| v.as_i64()).expect("created itemID");
+
+    let create_notifs = ctx.drain_notifications_for_char(PILOT_A);
+    assert_eq!(find_notifs(&create_notifs, "OnItemChange").len(), 1);
+    let pos_item = create_notifs
+        .iter()
+        .position(|n| n.event == "OnItemChange")
+        .expect("OnItemChange after /createitem");
+    let pos_mat = create_notifs
+        .iter()
+        .position(|n| n.event == "OnIndustryMaterials")
+        .expect("OnIndustryMaterials after /createitem");
+    let pos_multi = create_notifs
+        .iter()
+        .position(|n| n.event == "OnMultipleItemChange")
+        .expect("OnMultipleItemChange after /createitem");
+    assert!(
+        pos_item < pos_mat && pos_mat < pos_multi,
+        "OnIndustryMaterials must precede OnMultipleItemChange after OnItemChange (item={pos_item}, mat={pos_mat}, multi={pos_multi})"
+    );
+    let multi = find_notifs(&create_notifs, "OnMultipleItemChange");
+    assert_eq!(multi.len(), 1, "MaterialGroups expects OnMultipleItemChange after /createitem");
+    assert!(matches!(
+        &multi[0].args[0],
+        PyRep::List(rows) if rows.len() == 1 && rows[0].dbrow_get("itemID") == Some(&PyRep::Integer(trit_id))
+    ));
+    let mats = find_notifs(&create_notifs, "OnIndustryMaterials");
+    assert_eq!(mats.len(), 1, "IndustryService expects OnIndustryMaterials after /createitem");
+    assert_eq!(mats[0].args[0], PyRep::Integer(monitor_id));
+    let PyRep::Dict(mat_entries) = &mats[0].args[1] else {
+        panic!("expected Dict in OnIndustryMaterials");
+    };
+    let trit_avail = mat_entries
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(34))
+        .and_then(|(_, v)| v.as_i64());
+    let pyerite_avail = mat_entries
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(35))
+        .and_then(|(_, v)| v.as_i64());
+    assert_eq!(trit_avail, Some(3000), "Tritanium availability must jump to 3000");
+    assert!(
+        pyerite_avail.is_some_and(|qty| qty >= 500),
+        "Existing hangar Pyerite availability must be preserved because client overwrites job.available"
+    );
+
+    // 3. Moving Tritanium from Jita Hangar -> Ship Cargo via invbroker.Add emits OnItemChange -> OnIndustryMaterials (34 -> 0) -> OnMultipleItemChange.
+    let _ = ctx.drain_notifications_for_char(PILOT_A);
+    rpc(
+        &ctx,
+        &mut sess,
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(trit_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+    )
+    .await
+    .expect("move Tritanium out of hangar into ship cargo");
+
+    let move_notifs = ctx.drain_notifications_for_char(PILOT_A);
+    let m_item = move_notifs
+        .iter()
+        .position(|n| n.event == "OnItemChange")
+        .expect("OnItemChange after move");
+    let m_mat = move_notifs
+        .iter()
+        .position(|n| n.event == "OnIndustryMaterials")
+        .expect("OnIndustryMaterials after move");
+    let m_multi = move_notifs
+        .iter()
+        .position(|n| n.event == "OnMultipleItemChange")
+        .expect("OnMultipleItemChange after move");
+    assert!(
+        m_item < m_mat && m_mat < m_multi,
+        "Move must emit OnItemChange -> OnIndustryMaterials -> OnMultipleItemChange (item={m_item}, mat={m_mat}, multi={m_multi})"
+    );
+    assert_eq!(find_notifs(&move_notifs, "OnMultipleItemChange").len(), 1);
+    let move_mats = find_notifs(&move_notifs, "OnIndustryMaterials");
+    assert_eq!(move_mats.len(), 1);
+    let PyRep::Dict(move_entries) = &move_mats[0].args[1] else {
+        panic!("expected Dict in post-move OnIndustryMaterials");
+    };
+    let moved_trit_avail = move_entries
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(34))
+        .and_then(|(_, v)| v.as_i64());
+    assert_eq!(moved_trit_avail, Some(0), "Tritanium moved out of hangar must report 0");
+
+    // 3b. `/giveitem 34 500` and `/load <JITA_STATION> 34 100` each emit causal notifications and accumulate availability (0 -> 500 -> 600).
+    let give_rep = rpc(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/giveitem 34 500".into())],
+    )
+    .await
+    .expect("/giveitem 34 500 should succeed");
+    let give_id = give_rep.dict_get("itemID").and_then(|v| v.as_i64()).expect("give itemID");
+    let give_notifs = ctx.drain_notifications_for_char(PILOT_A);
+    let g_item = give_notifs.iter().position(|n| n.event == "OnItemChange").expect("give OnItemChange");
+    let g_mat = give_notifs.iter().position(|n| n.event == "OnIndustryMaterials").expect("give OnIndustryMaterials");
+    let g_multi = give_notifs.iter().position(|n| {
+        n.event == "OnMultipleItemChange"
+            && matches!(&n.args[0], PyRep::List(rows) if rows.len() == 1 && rows[0].dbrow_get("itemID") == Some(&PyRep::Integer(give_id)))
+    }).expect("give OnMultipleItemChange");
+    assert!(g_item < g_mat && g_mat < g_multi, "give order: item={g_item}, mat={g_mat}, multi={g_multi}");
+    let PyRep::Dict(give_entries) = &give_notifs[g_mat].args[1] else {
+        panic!("expected Dict in /giveitem OnIndustryMaterials");
+    };
+    assert_eq!(
+        give_entries.iter().find(|(k, _)| k.as_i64() == Some(34)).and_then(|(_, v)| v.as_i64()),
+        Some(500),
+        "/giveitem 34 500 must report 500 Tritanium"
+    );
+
+    let load_rep = rpc(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/load {JITA_STATION} 34 100"))],
+    )
+    .await
+    .expect("/load <station> 34 100 should succeed");
+    let load_id = load_rep.dict_get("itemID").and_then(|v| v.as_i64()).expect("load itemID");
+    let load_notifs = ctx.drain_notifications_for_char(PILOT_A);
+    let l_item = load_notifs.iter().position(|n| n.event == "OnItemChange").expect("load OnItemChange");
+    let l_mat = load_notifs.iter().position(|n| n.event == "OnIndustryMaterials").expect("load OnIndustryMaterials");
+    let l_multi = load_notifs.iter().position(|n| {
+        n.event == "OnMultipleItemChange"
+            && matches!(&n.args[0], PyRep::List(rows) if rows.len() == 1 && rows[0].dbrow_get("itemID") == Some(&PyRep::Integer(load_id)))
+    }).expect("load OnMultipleItemChange");
+    assert!(l_item < l_mat && l_mat < l_multi, "load order: item={l_item}, mat={l_mat}, multi={l_multi}");
+    let PyRep::Dict(load_entries) = &load_notifs[l_mat].args[1] else {
+        panic!("expected Dict in /load OnIndustryMaterials");
+    };
+    assert_eq!(
+        load_entries.iter().find(|(k, _)| k.as_i64() == Some(34)).and_then(|(_, v)| v.as_i64()),
+        Some(600),
+        "/load <station> 34 100 must accumulate Tritanium to 600"
+    );
+
+    // 4. Negative: after DisconnectJob, creating more Tritanium emits 0 OnIndustryMaterials.
+    assert_eq!(
+        rpc(&ctx, &mut sess, "industryMonitor", "DisconnectJob", &[PyRep::Integer(monitor_id)])
+            .await
+            .expect("DisconnectJob"),
+        PyRep::Bool(true)
+    );
+    let _ = ctx.drain_notifications_for_char(PILOT_A);
+    rpc(&ctx, &mut sess, "slash", "SlashCmd", &[PyRep::String("/createitem 34 100".into())])
+        .await
+        .expect("second /createitem");
+    let post_disc = ctx.drain_notifications_for_char(PILOT_A);
+    assert_eq!(find_notifs(&post_disc, "OnMultipleItemChange").len(), 1);
+    assert!(find_notifs(&post_disc, "OnIndustryMaterials").is_empty());
+}
+
+#[tokio::test]
 async fn test_on_community_fittings_updated_auth_and_broadcast() {
     // parity: notify:OnCommunityFittingsUpdated
     eve_testkit::attest(&["notify:OnCommunityFittingsUpdated"]);

@@ -644,10 +644,19 @@ fn compute_item_change_dict_and_mutation_router_v24_parity() {
 
     ctx.notify_item_mutation(char_id, None, Some(&other_personal_item));
     let created_other = ctx.drain_notifications_for_char(other_char);
-    assert_eq!(created_other.len(), 1);
+    assert_eq!(created_other.len(), 2);
     assert_eq!(created_other[0].event, "OnItemChange");
     assert_eq!(
         created_other[0].args[1],
+        PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))])
+    );
+    assert_eq!(created_other[1].event, "OnMultipleItemChange");
+    assert!(matches!(
+        &created_other[1].args[0],
+        PyRep::List(rows) if rows.len() == 1 && rows[0].dbrow_get("itemID") == Some(&PyRep::Integer(other_personal_item.item_id))
+    ));
+    assert_eq!(
+        created_other[1].args[1],
         PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))])
     );
 }
@@ -1136,7 +1145,7 @@ fn notify_item_mutation_creation_emits_ix_location_zero_for_ship_cargo_and_stati
     };
     ctx.notify_item_mutation(char_id, None, Some(&cargo_item));
     let cargo_notifs = ctx.drain_notifications_for_char(char_id);
-    assert_eq!(cargo_notifs.len(), 1);
+    assert_eq!(cargo_notifs.len(), 2);
     assert_eq!(cargo_notifs[0].event, "OnItemChange");
     assert_eq!(cargo_notifs[0].id_type, "charid");
     assert_eq!(
@@ -1155,6 +1164,16 @@ fn notify_item_mutation_creation_emits_ix_location_zero_for_ship_cargo_and_stati
         cargo_notifs[0].args[1],
         PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))])
     );
+    assert_eq!(cargo_notifs[1].event, "OnMultipleItemChange");
+    assert_eq!(cargo_notifs[1].id_type, "charid");
+    assert!(matches!(
+        &cargo_notifs[1].args[0],
+        PyRep::List(rows) if rows.len() == 1 && rows[0].dbrow_get("itemID") == Some(&PyRep::Integer(cargo_item.item_id))
+    ));
+    assert_eq!(
+        cargo_notifs[1].args[1],
+        PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))])
+    );
 
     let hangar_item = InventoryItemRecord {
         item_id: 886_002,
@@ -1168,7 +1187,7 @@ fn notify_item_mutation_creation_emits_ix_location_zero_for_ship_cargo_and_stati
     };
     ctx.notify_item_mutation(char_id, None, Some(&hangar_item));
     let hangar_notifs = ctx.drain_notifications_for_char(char_id);
-    assert_eq!(hangar_notifs.len(), 1);
+    assert_eq!(hangar_notifs.len(), 2);
     assert_eq!(hangar_notifs[0].event, "OnItemChange");
     assert_eq!(hangar_notifs[0].id_type, "charid");
     assert_eq!(
@@ -1187,4 +1206,208 @@ fn notify_item_mutation_creation_emits_ix_location_zero_for_ship_cargo_and_stati
         hangar_notifs[0].args[1],
         PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))])
     );
+    assert_eq!(hangar_notifs[1].event, "OnMultipleItemChange");
+    assert_eq!(hangar_notifs[1].id_type, "charid");
+    assert!(matches!(
+        &hangar_notifs[1].args[0],
+        PyRep::List(rows) if rows.len() == 1 && rows[0].dbrow_get("itemID") == Some(&PyRep::Integer(hangar_item.item_id))
+    ));
+    assert_eq!(
+        hangar_notifs[1].args[1],
+        PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))])
+    );
+}
+
+#[test]
+fn notify_item_mutation_refreshes_on_multiple_item_change_and_active_industry_monitors_gh1071() {
+    use crate::services::notify_emitters_character_services::{
+        save_industry_material_monitors, IndustryMaterialMonitorSub,
+    };
+
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let ship_id = 98_000_001_i64;
+    let uid = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id))
+        .unwrap_or(1);
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, 415, Some(char_id), false, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let monitor_id = 77_001_i64;
+    let pyerite_item = InventoryItemRecord {
+        item_id: 887_001,
+        type_id: 35,
+        owner_id: char_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 500,
+        singleton: false,
+        ..Default::default()
+    };
+    let trit_item = InventoryItemRecord {
+        item_id: 887_002,
+        type_id: 34,
+        owner_id: char_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 3000,
+        singleton: false,
+        ..Default::default()
+    };
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.retain(|_, it| {
+            !(it.owner_id == char_id
+                && it.location_id == station_id
+                && it.flag == InventoryFlag::Hangar)
+        });
+        snap.items.insert(pyerite_item.item_id, pyerite_item.clone());
+        snap.items.insert(trit_item.item_id, trit_item.clone());
+        let mut monitors = std::collections::BTreeMap::new();
+        monitors.insert(
+            monitor_id,
+            IndustryMaterialMonitorSub {
+                char_id,
+                owner_id: char_id,
+                location_id: station_id,
+                flag_id: InventoryFlag::Hangar as i64,
+            },
+        );
+        save_industry_material_monitors(snap, &monitors);
+    });
+
+    // 1. Creation emits OnItemChange -> OnIndustryMaterials -> OnMultipleItemChange, preserving Pyerite (35).
+    ctx.notify_item_mutation(char_id, None, Some(&trit_item));
+    let created = ctx.drain_notifications_for_char(char_id);
+    let pos_item = created
+        .iter()
+        .position(|n| n.event == "OnItemChange")
+        .expect("OnItemChange emitted on creation");
+    let pos_mat = created
+        .iter()
+        .position(|n| n.event == "OnIndustryMaterials")
+        .expect("OnIndustryMaterials emitted for matching active monitor on creation");
+    let pos_multi = created
+        .iter()
+        .position(|n| {
+            n.event == "OnMultipleItemChange"
+                && matches!(&n.args[0], PyRep::List(rows) if rows.len() == 1 && rows[0].dbrow_get("itemID") == Some(&PyRep::Integer(trit_item.item_id)))
+        })
+        .expect("OnMultipleItemChange emitted for created item");
+    assert!(
+        pos_item < pos_mat && pos_mat < pos_multi,
+        "OnIndustryMaterials must precede OnMultipleItemChange after OnItemChange (indices: item={pos_item}, mat={pos_mat}, multi={pos_multi})"
+    );
+    let mat_created = &created[pos_mat];
+    assert_eq!(mat_created.args[0], PyRep::Integer(monitor_id));
+    assert_eq!(
+        mat_created.args[1],
+        PyRep::Dict(vec![
+            (PyRep::Integer(34), PyRep::Integer(3000)),
+            (PyRep::Integer(35), PyRep::Integer(500)),
+        ])
+    );
+
+    // 2. Moving Tritanium out of monitored station hangar into ship cargo emits causal order and updates monitor (34 -> 0, 35 -> 500).
+    let trit_cargo = InventoryItemRecord {
+        location_id: ship_id,
+        flag: InventoryFlag::Cargo,
+        ..trit_item.clone()
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(trit_cargo.item_id, trit_cargo.clone());
+    });
+    ctx.notify_item_mutation(char_id, Some(&trit_item), Some(&trit_cargo));
+    let moved = ctx.drain_notifications_for_char(char_id);
+    let move_item = moved
+        .iter()
+        .position(|n| n.event == "OnItemChange")
+        .expect("OnItemChange emitted on move");
+    let move_mat = moved
+        .iter()
+        .position(|n| n.event == "OnIndustryMaterials")
+        .expect("OnIndustryMaterials emitted when item moves out of monitored hangar");
+    let move_multi = moved
+        .iter()
+        .position(|n| n.event == "OnMultipleItemChange")
+        .expect("OnMultipleItemChange emitted on move");
+    assert!(
+        move_item < move_mat && move_mat < move_multi,
+        "Causal order violated on move (item={move_item}, mat={move_mat}, multi={move_multi})"
+    );
+    let mat_moved = &moved[move_mat];
+    assert_eq!(mat_moved.args[0], PyRep::Integer(monitor_id));
+    assert_eq!(
+        mat_moved.args[1],
+        PyRep::Dict(vec![
+            (PyRep::Integer(34), PyRep::Integer(0)),
+            (PyRep::Integer(35), PyRep::Integer(500)),
+        ])
+    );
+
+    // 3. Deleting an item from monitored station hangar emits locJunkyard tombstone (OnItemChange -> OnIndustryMaterials -> OnMultipleItemChange).
+    let trit_deleted = InventoryItemRecord {
+        item_id: 887_004,
+        quantity: 900,
+        ..trit_item.clone()
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(trit_deleted.item_id, trit_deleted.clone());
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&trit_deleted.item_id);
+    });
+    ctx.notify_item_mutation(char_id, Some(&trit_deleted), None);
+    let deleted = ctx.drain_notifications_for_char(char_id);
+    let del_item = deleted
+        .iter()
+        .position(|n| n.event == "OnItemChange")
+        .expect("OnItemChange tombstone emitted on deletion");
+    let del_mat = deleted
+        .iter()
+        .position(|n| n.event == "OnIndustryMaterials")
+        .expect("OnIndustryMaterials emitted on deletion");
+    let del_multi = deleted
+        .iter()
+        .position(|n| {
+            n.event == "OnMultipleItemChange"
+                && matches!(
+                    (&n.args[0], &n.args[1]),
+                    (PyRep::List(rows), PyRep::Dict(changes))
+                        if rows.len() == 1
+                            && rows[0].dbrow_get("itemID") == Some(&PyRep::Integer(trit_deleted.item_id))
+                            && rows[0].dbrow_get("locationID") == Some(&PyRep::Integer(6))
+                            && changes.iter().any(|(k, v)| k.as_i64() == Some(9) && v.as_i64() == Some(900))
+                )
+        })
+        .expect("OnMultipleItemChange locJunkyard tombstone emitted on deletion");
+    assert!(
+        del_item < del_mat && del_mat < del_multi,
+        "Causal order violated on deletion (item={del_item}, mat={del_mat}, multi={del_multi})"
+    );
+    assert_eq!(deleted[del_mat].args[0], PyRep::Integer(monitor_id));
+    assert_eq!(
+        deleted[del_mat].args[1],
+        PyRep::Dict(vec![
+            (PyRep::Integer(34), PyRep::Integer(0)),
+            (PyRep::Integer(35), PyRep::Integer(500)),
+        ])
+    );
+
+    // 4. Mutation in an unmonitored scope does NOT emit OnIndustryMaterials.
+    let other_cargo = InventoryItemRecord {
+        item_id: 887_003,
+        ..trit_cargo.clone()
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(other_cargo.item_id, other_cargo.clone());
+    });
+    ctx.notify_item_mutation(char_id, None, Some(&other_cargo));
+    let unmonitored = ctx.drain_notifications_for_char(char_id);
+    assert!(unmonitored.iter().any(|n| n.event == "OnMultipleItemChange"));
+    assert!(unmonitored.iter().all(|n| n.event != "OnIndustryMaterials"));
 }

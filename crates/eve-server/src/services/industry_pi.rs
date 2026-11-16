@@ -1050,22 +1050,69 @@ pub(crate) fn handle_industry_job_queries(
             let job_arg = &args[0];
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                let input_loc = job_arg.dict_get("inputLocation");
                 let explicit_loc = job_arg
                     .dict_get("inputLocationID")
                     .and_then(|v| v.as_i64())
-                    .or_else(|| job_arg.dict_get("locationID").and_then(|v| v.as_i64()))
-                    .or_else(|| job_arg.dict_get("facilityID").and_then(|v| v.as_i64()));
+                    .filter(|&id| id > 0)
+                    .or_else(|| {
+                        job_arg
+                            .dict_get("locationID")
+                            .and_then(|v| v.as_i64())
+                            .filter(|&id| id > 0)
+                    })
+                    .or_else(|| {
+                        input_loc
+                            .and_then(|loc| loc.dict_get("itemID"))
+                            .and_then(|v| v.as_i64())
+                            .filter(|&id| id > 0)
+                    })
+                    .or_else(|| {
+                        job_arg
+                            .dict_get("facilityID")
+                            .and_then(|v| v.as_i64())
+                            .filter(|&id| id > 0)
+                    });
                 let (owner_id, location_id, flag_id) = if let Some(loc_id) = explicit_loc {
                     let flg_id = job_arg
                         .dict_get("inputFlagID")
                         .and_then(|v| v.as_i64())
-                        .or_else(|| job_arg.dict_get("inputFlag").and_then(|v| v.as_i64()))
-                        .or_else(|| job_arg.dict_get("flagID").and_then(|v| v.as_i64()))
-                        .or_else(|| job_arg.dict_get("flag").and_then(|v| v.as_i64()))
+                        .filter(|&f| f > 0)
+                        .or_else(|| {
+                            job_arg
+                                .dict_get("inputFlag")
+                                .and_then(|v| v.as_i64())
+                                .filter(|&f| f > 0)
+                        })
+                        .or_else(|| {
+                            job_arg
+                                .dict_get("flagID")
+                                .and_then(|v| v.as_i64())
+                                .filter(|&f| f > 0)
+                        })
+                        .or_else(|| {
+                            job_arg
+                                .dict_get("flag")
+                                .and_then(|v| v.as_i64())
+                                .filter(|&f| f > 0)
+                        })
+                        .or_else(|| {
+                            input_loc
+                                .and_then(|loc| loc.dict_get("flagID"))
+                                .and_then(|v| v.as_i64())
+                                .filter(|&f| f > 0)
+                        })
                         .unwrap_or(eve_db::InventoryFlag::Hangar as i64);
                     let oid = job_arg
                         .dict_get("ownerID")
                         .and_then(|v| v.as_i64())
+                        .filter(|&o| o > 0)
+                        .or_else(|| {
+                            input_loc
+                                .and_then(|loc| loc.dict_get("ownerID"))
+                                .and_then(|v| v.as_i64())
+                                .filter(|&o| o > 0)
+                        })
                         .unwrap_or_else(|| {
                             if (116..=122).contains(&flg_id) {
                                 char_corp
@@ -1178,23 +1225,15 @@ pub(crate) fn handle_industry_job_queries(
                     );
                 }
 
-                let mut avail_map: std::collections::BTreeMap<i64, i64> =
-                    std::collections::BTreeMap::new();
-                for it in snap.items.values() {
-                    if it.owner_id == owner_id
-                        && it.location_id == location_id
-                        && (it.flag as i64) == flag_id
-                        && it.quantity > 0
-                        && !it.singleton
-                        && !snap.is_item_locked_in_contract_or_job(it.item_id)
-                    {
-                        *avail_map.entry(i64::from(it.type_id)).or_insert(0) +=
-                            i64::from(it.quantity);
-                    }
-                }
-                let avail_entries: Vec<(PyRep, PyRep)> = avail_map
+                let avail_entries: Vec<(PyRep, PyRep)> =
+                    crate::services::notify_emitters_character_services::collect_available_monitor_materials(
+                        snap,
+                        owner_id,
+                        location_id,
+                        flag_id,
+                    )
                     .into_iter()
-                    .map(|(tid, qty)| (PyRep::Integer(tid), PyRep::Integer(qty)))
+                    .map(|(tid, qty)| (PyRep::Integer(i64::from(tid)), PyRep::Integer(qty)))
                     .collect();
                 Ok(PyRep::Tuple(vec![
                     PyRep::Integer(monitor_id),
