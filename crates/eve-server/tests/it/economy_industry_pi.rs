@@ -611,7 +611,9 @@ async fn test_industry_blueprint_data_facilities_jobs() {
             .map(|i| i.quantity)
             .sum::<i32>()
     });
-    let mat_err = rpc(
+    // Insufficient manufacturing materials (20 runs fits within EVE's 30-day cap while exceeding pilot stock);
+    // 1,000 runs on Rifter BPO exceeds EVE's 30-day job duration cap cleanly.
+    let dur_cap_err = rpc(
         &ctx,
         &mut s1,
         "industryManager",
@@ -622,6 +624,23 @@ async fn test_industry_blueprint_data_facilities_jobs() {
             ("facilityID", PyRep::Integer(JITA_STATION_ID)),
             ("activityID", PyRep::Integer(1)),
             ("runs", PyRep::Integer(1_000)),
+        ])],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(dur_cap_err.code, "InvalidIndustryJobParameters");
+
+    let mat_err = rpc(
+        &ctx,
+        &mut s1,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(rifter_bpo_id)),
+            ("blueprintTypeID", PyRep::Integer(RIFTER_BP_TYPE_ID as i64)),
+            ("facilityID", PyRep::Integer(JITA_STATION_ID)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(20)),
         ])],
     )
     .await

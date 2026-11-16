@@ -49,8 +49,9 @@ pub struct IndustryJobCostMeta {
     pub paused_at_unix: Option<u64>,
     #[serde(default)]
     pub blueprint_original_flag: Option<eve_db::InventoryFlag>,
+    /// Consumed BOM quantities recorded in `i64` so multi-run jobs above `i32::MAX` never truncate.
     #[serde(default)]
-    pub consumed_materials: Vec<(TypeId, i32)>,
+    pub consumed_materials: Vec<(TypeId, i64)>,
     #[serde(default)]
     pub blueprint_location_id: i64,
     #[serde(default)]
