@@ -884,7 +884,999 @@ pub use crate::services::mining_cycle::{
     compute_reprocessing_rates_for_item, compute_reprocessing_rates_for_item_at,
 };
 
+struct ParsedReprocessArgs {
+    item_ids: Vec<i64>,
+    is_multi_arg: bool,
+    is_batch_call: bool,
+    from_loc: Option<i64>,
+    explicit_out_owner: Option<i64>,
+    explicit_out_loc: Option<i64>,
+    explicit_out_flag: Option<InventoryFlag>,
+}
 
+enum ReprocessDestConstraint {
+    StationOrOfficeHangar,
+    ShipHold {
+        ship_id: i64,
+        ship_type_id: TypeId,
+        flag: InventoryFlag,
+        cap_m3: f64,
+    },
+    Container {
+        cont_id: i64,
+        cap_m3: f64,
+    },
+}
+
+struct ResolvedReprocessDest {
+    owner_id: i64,
+    location_id: i64,
+    flag: InventoryFlag,
+    constraint: ReprocessDestConstraint,
+}
+
+struct PlannedOutputMat {
+    type_id: TypeId,
+    quantity: i32,
+}
+
+struct PlannedReprocessItem {
+    source_item: InventoryItemRecord,
+    remainder: i32,
+    dest: ResolvedReprocessDest,
+    outputs: Vec<PlannedOutputMat>,
+    station_base_yield: f64,
+    yield_rate: f64,
+    station_tax_rate: f64,
+    tax_cents: IskCents,
+}
+
+fn is_corp_sag_flag(flag: InventoryFlag) -> bool {
+    matches!(
+        flag,
+        InventoryFlag::CorpSAG1
+            | InventoryFlag::CorpSAG2
+            | InventoryFlag::CorpSAG3
+            | InventoryFlag::CorpSAG4
+            | InventoryFlag::CorpSAG5
+            | InventoryFlag::CorpSAG6
+            | InventoryFlag::CorpSAG7
+    )
+}
+
+fn is_station_hangar_alias_flag(flag: InventoryFlag) -> bool {
+    matches!(
+        flag,
+        InventoryFlag::Cargo
+            | InventoryFlag::SpecializedAsteroidHold
+            | InventoryFlag::SpecializedOreHold
+            | InventoryFlag::SpecializedIceHold
+            | InventoryFlag::SpecializedGasHold
+    )
+}
+
+fn is_valid_reprocess_container_type(inv_type: &eve_sde::InvType) -> bool {
+    inv_type.category_id == 2
+        && matches!(inv_type.group_id, 12 | 340 | 448 | 649)
+        && inv_type.type_id != 3468
+}
+
+fn container_capacity_m3(item: &InventoryItemRecord, inv_type: &eve_sde::InvType) -> f64 {
+    item.dynamic_attributes
+        .get(&eve_sde::attr_ids::CAPACITY)
+        .copied()
+        .filter(|&c| c > 0.0)
+        .unwrap_or_else(|| {
+            if inv_type.capacity > 0.0 {
+                inv_type.capacity
+            } else {
+                inv_type
+                    .default_attributes
+                    .get(&eve_sde::attr_ids::CAPACITY)
+                    .copied()
+                    .unwrap_or(0.0)
+            }
+        })
+}
+
+/// Parses 1-arg, 2-arg, legacy Crucible, and V24 5-arg `reprocessingSvc.Reprocess` call shapes.
+fn parse_reprocess_args(args: &[PyRep]) -> Result<ParsedReprocessArgs, BridgeRpcError> {
+    let is_multi_arg = args.len() >= 2;
+    let is_batch_call = is_multi_arg
+        || matches!(
+            args.first(),
+            Some(PyRep::List(_) | PyRep::Dict(_) | PyRep::Tuple(_))
+        );
+    let item_ids: Vec<i64> = match args.first() {
+        Some(PyRep::List(list)) | Some(PyRep::Tuple(list)) => {
+            list.iter().filter_map(PyRep::as_i64).collect()
+        }
+        Some(PyRep::Dict(entries)) => entries.iter().filter_map(|(k, _)| k.as_i64()).collect(),
+        Some(first) => first.as_i64().into_iter().collect(),
+        None => Vec::new(),
+    };
+    if item_ids.is_empty() {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "Reprocess requires at least one integer itemID".into(),
+            client_error: None,
+        });
+    }
+    let mut seen_ids = std::collections::HashSet::with_capacity(item_ids.len());
+    for &id in &item_ids {
+        if !seen_ids.insert(id) {
+            return Err(BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: format!("Duplicate itemID {id} in Reprocess batch"),
+                client_error: None,
+            });
+        }
+    }
+
+    let from_loc = is_multi_arg
+        .then(|| args.get(1).and_then(PyRep::as_i64).filter(|&id| id > 0))
+        .flatten();
+    if !is_multi_arg {
+        return Ok(ParsedReprocessArgs {
+            item_ids,
+            is_multi_arg,
+            is_batch_call,
+            from_loc,
+            explicit_out_owner: None,
+            explicit_out_loc: None,
+            explicit_out_flag: None,
+        });
+    }
+
+    // Legacy Crucible call: `(itemIDs, stationID, 4 /* Hangar */, false, [])`.
+    let is_legacy_crucible = args.len() >= 5
+        && args.get(2).and_then(PyRep::as_i64) == Some(InventoryFlag::Hangar as i64)
+        && matches!(args.get(3), Some(PyRep::Bool(_)))
+        && matches!(args.get(4), Some(PyRep::List(v)) if v.is_empty());
+    if is_legacy_crucible {
+        return Ok(ParsedReprocessArgs {
+            item_ids,
+            is_multi_arg,
+            is_batch_call,
+            from_loc,
+            explicit_out_owner: None,
+            explicit_out_loc: None,
+            explicit_out_flag: Some(InventoryFlag::Hangar),
+        });
+    }
+
+    let explicit_out_owner = match args.get(2) {
+        None | Some(PyRep::None) => None,
+        Some(rep) => match rep.as_i64() {
+            Some(0) => None,
+            Some(id) if id > 0 => Some(id),
+            _ => {
+                return Err(BridgeRpcError {
+                    code: "InvalidOutputLocation".into(),
+                    message: "Reprocess outputOwner must be a positive owner ID or None".into(),
+                    client_error: None,
+                });
+            }
+        },
+    };
+
+    let arg4_absent = matches!(args.get(4), None | Some(PyRep::None))
+        || matches!(args.get(4), Some(PyRep::List(v)) if v.is_empty());
+    let legacy_arg3_flag = arg4_absent
+        .then(|| args.get(3).and_then(PyRep::as_i64))
+        .flatten()
+        .filter(|&f| (1..=10_000).contains(&f));
+
+    let (explicit_out_loc, explicit_out_flag) = if let Some(flag_val) = legacy_arg3_flag {
+        (None, Some(InventoryFlag::from_u16(flag_val as u16)))
+    } else {
+        let out_loc = match args.get(3) {
+            None | Some(PyRep::None) => None,
+            Some(rep) => match rep.as_i64() {
+                Some(0) => None,
+                Some(id) if id > 0 => Some(id),
+                _ => {
+                    return Err(BridgeRpcError {
+                        code: "InvalidOutputLocation".into(),
+                        message: "Reprocess outputLocation must be a valid location ID or None"
+                            .into(),
+                        client_error: None,
+                    });
+                }
+            },
+        };
+        let out_flag = match args.get(4) {
+            None | Some(PyRep::None) => None,
+            Some(PyRep::List(v)) if v.is_empty() => None,
+            Some(rep) => match rep.as_i64() {
+                Some(0) => None,
+                Some(f) if (1..=u16::MAX as i64).contains(&f) => {
+                    Some(InventoryFlag::from_u16(f as u16))
+                }
+                _ => {
+                    return Err(BridgeRpcError {
+                        code: "InvalidOutputLocation".into(),
+                        message: "Reprocess outputFlag must be a valid inventory flag ID".into(),
+                        client_error: None,
+                    });
+                }
+            },
+        };
+        (out_loc, out_flag)
+    };
+
+    Ok(ParsedReprocessArgs {
+        item_ids,
+        is_multi_arg,
+        is_batch_call,
+        from_loc,
+        explicit_out_owner,
+        explicit_out_loc,
+        explicit_out_flag,
+    })
+}
+
+fn find_corp_office_at_station(
+    snap: &eve_db::WorldStateSnapshot,
+    corp_id: i64,
+    station_id: i64,
+) -> Option<i64> {
+    if corp_id <= 0 {
+        return None;
+    }
+    snap.items
+        .values()
+        .find(|it| it.type_id == 27 && it.owner_id == corp_id && it.location_id == station_id)
+        .map(|it| it.item_id)
+        .or_else(|| {
+            snap.corp_governance
+                .get(&corp_id)
+                .and_then(|g| g.offices.get(&station_id).copied())
+        })
+}
+
+fn check_corp_division_deposit_access(
+    snap: &eve_db::WorldStateSnapshot,
+    corp_id: i64,
+    char_id: i64,
+    station_id: i64,
+    sag_flag: InventoryFlag,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    if corp_id <= 0 || find_corp_office_at_station(snap, corp_id, station_id).is_none() {
+        return Err(BridgeRpcError::from_user_key(
+            eve_proto::UserErrorKey::NoOfficeAtStation,
+        ));
+    }
+    let flag_num = sag_flag as i64;
+    if !(116..=122).contains(&flag_num) {
+        return Err(BridgeRpcError {
+            code: "InvalidOutputLocation".into(),
+            message: format!("Flag {flag_num} is not a corporate hangar division"),
+            client_error: None,
+        });
+    }
+    let div_idx = (flag_num - 116) as usize;
+    let (is_ceo, role_mask) =
+        crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap_at(
+            snap,
+            corp_id,
+            char_id,
+            Some(station_id),
+            now_unix,
+        );
+    let div_access_roles = eve_db::corp_roles::ROLE_DIRECTOR
+        | eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[div_idx]
+        | eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[div_idx];
+    if !is_ceo && (role_mask & div_access_roles) == 0 {
+        return Err(BridgeRpcError {
+            code: "CrpAccessDenied".into(),
+            message: format!(
+                "Missing hangar query/take access to corporate division {} at station {station_id}",
+                div_idx + 1
+            ),
+            client_error: None,
+        });
+    }
+    Ok(())
+}
+
+fn check_container_lock_and_password(
+    snap: &eve_db::WorldStateSnapshot,
+    cs_state: &crate::services::inventory_fitting::fitting_containers_ships::ContainerShipRuntimeState,
+    cont: &InventoryItemRecord,
+    char_id: i64,
+) -> Result<(), BridgeRpcError> {
+    crate::services::inventory_fitting::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(
+        snap, cont,
+    )?;
+    if cont.flag == InventoryFlag::Locked || cs_state.alsc_locked_items.contains(&cont.item_id) {
+        return Err(BridgeRpcError {
+            code: "ItemLocked".into(),
+            message: format!("Container {} is locked", cont.item_id),
+            client_error: None,
+        });
+    }
+    let cfg = cs_state
+        .container_configs
+        .get(&cont.item_id)
+        .cloned()
+        .unwrap_or_default();
+    let need_pw_check =
+        cfg.password_per_action || !cs_state.unlocked_containers.contains(&(cont.item_id, char_id));
+    if need_pw_check
+        && cs_state
+            .container_passwords
+            .get(&cont.item_id)
+            .is_some_and(|pw| !pw.is_empty())
+    {
+        return Err(BridgeRpcError {
+            code: "ALSCPasswordRequired".into(),
+            message: format!("Password required to deposit into container {}", cont.item_id),
+            client_error: None,
+        });
+    }
+    Ok(())
+}
+
+fn sum_items_volume_m3<'a>(
+    sde: &eve_sde::SdeRegistry,
+    items: impl Iterator<Item = &'a InventoryItemRecord>,
+) -> f64 {
+    items
+        .map(|it| {
+            crate::services::inventory_fitting::fitting_containers_ships::effective_item_unit_volume(
+                sde, it,
+            ) * (it.quantity.max(0) as f64)
+        })
+        .sum()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_station_or_office_dest(
+    snap: &eve_db::WorldStateSnapshot,
+    parsed: &ParsedReprocessArgs,
+    station_id: i64,
+    target_loc: i64,
+    is_own_corp_office: bool,
+    char_id: i64,
+    caller_corp: i64,
+    default_station_flag: InventoryFlag,
+    now_unix: u64,
+) -> Result<ResolvedReprocessDest, BridgeRpcError> {
+    let requested_flag = match parsed.explicit_out_flag {
+        Some(f)
+            if target_loc == station_id
+                && is_station_hangar_alias_flag(f)
+                && parsed.explicit_out_owner != Some(caller_corp) =>
+        {
+            if parsed.explicit_out_owner.is_some() {
+                InventoryFlag::Hangar
+            } else {
+                default_station_flag
+            }
+        }
+        Some(f) => f,
+        None => {
+            if is_own_corp_office || parsed.explicit_out_owner == Some(caller_corp) {
+                default_station_flag
+            } else if parsed.explicit_out_owner == Some(char_id) {
+                InventoryFlag::Hangar
+            } else {
+                default_station_flag
+            }
+        }
+    };
+
+    if is_corp_sag_flag(requested_flag) {
+        if parsed.explicit_out_owner == Some(char_id) {
+            return Err(BridgeRpcError {
+                code: "InvalidOutputLocation".into(),
+                message: "Personal character ownership cannot target a corporate CorpSAG division"
+                    .into(),
+                client_error: None,
+            });
+        }
+        check_corp_division_deposit_access(
+            snap,
+            caller_corp,
+            char_id,
+            station_id,
+            requested_flag,
+            now_unix,
+        )?;
+        return Ok(ResolvedReprocessDest {
+            owner_id: caller_corp,
+            location_id: target_loc,
+            flag: requested_flag,
+            constraint: ReprocessDestConstraint::StationOrOfficeHangar,
+        });
+    }
+
+    if is_own_corp_office || parsed.explicit_out_owner == Some(caller_corp) {
+        return Err(BridgeRpcError {
+            code: "InvalidOutputLocation".into(),
+            message: format!(
+                "Corporate reprocessing output at station {station_id} requires a CorpSAG1..7 division flag (got {})",
+                requested_flag as u16
+            ),
+            client_error: None,
+        });
+    }
+
+    if requested_flag != InventoryFlag::Hangar {
+        return Err(BridgeRpcError {
+            code: "InvalidOutputLocation".into(),
+            message: format!(
+                "Output flag {} is not valid in station hangar {target_loc}",
+                requested_flag as u16
+            ),
+            client_error: None,
+        });
+    }
+
+    Ok(ResolvedReprocessDest {
+        owner_id: char_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        constraint: ReprocessDestConstraint::StationOrOfficeHangar,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_ship_hold_dest(
+    sde: &eve_sde::SdeRegistry,
+    snap: &eve_db::WorldStateSnapshot,
+    char_skills: &std::collections::HashMap<TypeId, u8>,
+    parsed: &ParsedReprocessArgs,
+    dest_item: &InventoryItemRecord,
+    dest_type: &eve_sde::InvType,
+    station_id: i64,
+    char_id: i64,
+    caller_corp: i64,
+) -> Result<ResolvedReprocessDest, BridgeRpcError> {
+    let target_loc = dest_item.item_id;
+    if !dest_item.singleton
+        || dest_item.quantity != 1
+        || dest_item.location_id != station_id
+        || dest_item.flag != InventoryFlag::Hangar
+        || dest_item.owner_id != char_id
+        || parsed.explicit_out_owner == Some(caller_corp)
+    {
+        return Err(BridgeRpcError {
+            code: "InvalidOutputLocation".into(),
+            message: format!(
+                "Ship {target_loc} must be an assembled personal ship docked in hangar at station {station_id}"
+            ),
+            client_error: None,
+        });
+    }
+    let hold_flag = parsed.explicit_out_flag.unwrap_or(InventoryFlag::Cargo);
+    if !matches!(
+        hold_flag,
+        InventoryFlag::Cargo | InventoryFlag::SpecializedMineralHold
+    ) {
+        return Err(BridgeRpcError {
+            code: "InvalidOutputLocation".into(),
+            message: format!(
+                "Output flag {} is not a valid ship reprocessing destination (only Cargo or SpecializedMineralHold allowed)",
+                hold_flag as u16
+            ),
+            client_error: None,
+        });
+    }
+    let eval_cargo_cap = if hold_flag == InventoryFlag::Cargo {
+        let mut engine = eve_dogma::ShipFittingEngine::from_sde(
+            dest_item.item_id,
+            dest_item.type_id,
+            sde,
+        )
+        .with_character_skills(char_skills.clone());
+        for it in snap.items.values() {
+            if it.location_id == dest_item.item_id
+                && matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=132)
+                && sde.types.get(&it.type_id).is_none_or(|t| t.category_id != 8)
+            {
+                let online = snap
+                    .module_online_states
+                    .get(&it.item_id)
+                    .copied()
+                    .unwrap_or(true);
+                let _ = engine.fit_module_with_state(
+                    it.item_id,
+                    it.type_id,
+                    it.flag as u16,
+                    online,
+                    sde,
+                );
+            }
+        }
+        let eval_ctx = engine.evaluated_context(sde);
+        Some(
+            eval_ctx
+                .ship
+                .get_attribute(eve_sde::attr_ids::CAPACITY, sde)
+                .max(0.0),
+        )
+    } else {
+        None
+    };
+    let cap_m3 = crate::services::fitting_saved_apply::get_ship_hold_capacity(
+        hold_flag as u16,
+        dest_type,
+        eval_cargo_cap,
+    );
+    Ok(ResolvedReprocessDest {
+        owner_id: char_id,
+        location_id: target_loc,
+        flag: hold_flag,
+        constraint: ReprocessDestConstraint::ShipHold {
+            ship_id: target_loc,
+            ship_type_id: dest_item.type_id,
+            flag: hold_flag,
+            cap_m3,
+        },
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_station_container_dest(
+    sde: &eve_sde::SdeRegistry,
+    snap: &eve_db::WorldStateSnapshot,
+    cs_state: &crate::services::inventory_fitting::fitting_containers_ships::ContainerShipRuntimeState,
+    parsed: &ParsedReprocessArgs,
+    dest_item: &InventoryItemRecord,
+    dest_type: &eve_sde::InvType,
+    station_id: i64,
+    char_id: i64,
+    caller_corp: i64,
+    now_unix: u64,
+) -> Result<ResolvedReprocessDest, BridgeRpcError> {
+    let target_loc = dest_item.item_id;
+    if !is_valid_reprocess_container_type(dest_type)
+        || !dest_item.singleton
+        || dest_item.quantity != 1
+    {
+        return Err(BridgeRpcError {
+            code: "InvalidOutputLocation".into(),
+            message: format!(
+                "Output location {target_loc} (type {}) is not an assembled station container or docked ship",
+                dest_item.type_id
+            ),
+            client_error: None,
+        });
+    }
+    let cap_m3 = container_capacity_m3(dest_item, dest_type);
+    if cap_m3 <= 0.0 {
+        return Err(BridgeRpcError {
+            code: "InvalidOutputLocation".into(),
+            message: format!("Container {target_loc} has zero m³ storage capacity"),
+            client_error: None,
+        });
+    }
+
+    let is_corp_cont = caller_corp > 0 && dest_item.owner_id == caller_corp;
+    let is_personal_cont = dest_item.owner_id == char_id;
+    if !is_personal_cont && !is_corp_cont {
+        return Err(BridgeRpcError {
+            code: "OwnershipOrLocationViolation".into(),
+            message: format!(
+                "Container {target_loc} is not owned by character {char_id} or their corporation"
+            ),
+            client_error: None,
+        });
+    }
+    if is_personal_cont && parsed.explicit_out_owner == Some(caller_corp) {
+        return Err(BridgeRpcError {
+            code: "InvalidOutputLocation".into(),
+            message: "Cannot assign corporate output owner inside a personal container".into(),
+            client_error: None,
+        });
+    }
+    if is_corp_cont && parsed.explicit_out_owner == Some(char_id) {
+        return Err(BridgeRpcError {
+            code: "InvalidOutputLocation".into(),
+            message: "Cannot assign personal output owner inside a corporate container".into(),
+            client_error: None,
+        });
+    }
+
+    // Walk container ancestry to verify it sits inside an accessible personal hangar or corp
+    // division at `station_id` and that every container along the chain is unlocked and valid.
+    let mut visited = std::collections::HashSet::new();
+    let mut cur = dest_item;
+    let mut root_sag_flag: Option<InventoryFlag> = None;
+    for hop in 0..8 {
+        if !visited.insert(cur.item_id) {
+            return Err(BridgeRpcError {
+                code: "InvalidOutputLocation".into(),
+                message: "Cyclic container hierarchy".into(),
+                client_error: None,
+            });
+        }
+        check_container_lock_and_password(snap, cs_state, cur, char_id)?;
+        if cur.owner_id != dest_item.owner_id {
+            return Err(BridgeRpcError {
+                code: "OwnershipOrLocationViolation".into(),
+                message: format!("Container {target_loc} hierarchy has mismatched ownership"),
+                client_error: None,
+            });
+        }
+        if cur.location_id == station_id {
+            if is_personal_cont {
+                if cur.flag != InventoryFlag::Hangar {
+                    return Err(BridgeRpcError {
+                        code: "InvalidOutputLocation".into(),
+                        message: format!(
+                            "Container {target_loc} is not inside station hangar at {station_id}"
+                        ),
+                        client_error: None,
+                    });
+                }
+            } else {
+                if !is_corp_sag_flag(cur.flag) {
+                    return Err(BridgeRpcError {
+                        code: "InvalidOutputLocation".into(),
+                        message: format!(
+                            "Corporate container {target_loc} is not inside a CorpSAG division"
+                        ),
+                        client_error: None,
+                    });
+                }
+                check_corp_division_deposit_access(
+                    snap,
+                    caller_corp,
+                    char_id,
+                    station_id,
+                    cur.flag,
+                    now_unix,
+                )?;
+                root_sag_flag = Some(cur.flag);
+            }
+            break;
+        }
+        let Some(parent) = snap.items.get(&cur.location_id) else {
+            return Err(BridgeRpcError {
+                code: "InvalidOutputLocation".into(),
+                message: format!("Container {target_loc} is not anchored at station {station_id}"),
+                client_error: None,
+            });
+        };
+        if parent.type_id == 27 {
+            if !is_corp_cont
+                || parent.owner_id != caller_corp
+                || parent.location_id != station_id
+                || !is_corp_sag_flag(cur.flag)
+            {
+                return Err(BridgeRpcError {
+                    code: "InvalidOutputLocation".into(),
+                    message: format!(
+                        "Container {target_loc} is not anchored in an authorized corporate office at {station_id}"
+                    ),
+                    client_error: None,
+                });
+            }
+            check_corp_division_deposit_access(
+                snap,
+                caller_corp,
+                char_id,
+                station_id,
+                cur.flag,
+                now_unix,
+            )?;
+            root_sag_flag = Some(cur.flag);
+            break;
+        }
+        let Some(parent_type) = sde.types.get(&parent.type_id) else {
+            return Err(BridgeRpcError {
+                code: "InvalidOutputLocation".into(),
+                message: format!("Parent container {} has unknown type", parent.item_id),
+                client_error: None,
+            });
+        };
+        if !is_valid_reprocess_container_type(parent_type)
+            || !parent.singleton
+            || parent.quantity != 1
+        {
+            return Err(BridgeRpcError {
+                code: "InvalidOutputLocation".into(),
+                message: format!(
+                    "Container {target_loc} cannot reside inside non-container item {}",
+                    parent.item_id
+                ),
+                client_error: None,
+            });
+        }
+        let child_flag_ok = matches!(cur.flag, InventoryFlag::Hangar | InventoryFlag::Unlocked)
+            || (is_corp_cont && is_corp_sag_flag(cur.flag));
+        if !child_flag_ok || hop == 7 {
+            return Err(BridgeRpcError {
+                code: "InvalidOutputLocation".into(),
+                message: format!(
+                    "Container {target_loc} exceeds nesting depth or has invalid parent flag"
+                ),
+                client_error: None,
+            });
+        }
+        cur = parent;
+    }
+
+    let out_flag = match parsed.explicit_out_flag {
+        None | Some(InventoryFlag::Hangar) => InventoryFlag::Hangar,
+        Some(InventoryFlag::Unlocked) => InventoryFlag::Unlocked,
+        Some(f) if is_corp_cont && root_sag_flag == Some(f) => InventoryFlag::Hangar,
+        Some(bad) => {
+            return Err(BridgeRpcError {
+                code: "InvalidOutputLocation".into(),
+                message: format!(
+                    "Output flag {} is not valid inside station container {target_loc}",
+                    bad as u16
+                ),
+                client_error: None,
+            });
+        }
+    };
+
+    Ok(ResolvedReprocessDest {
+        owner_id: dest_item.owner_id,
+        location_id: target_loc,
+        flag: out_flag,
+        constraint: ReprocessDestConstraint::Container {
+            cont_id: target_loc,
+            cap_m3,
+        },
+    })
+}
+
+/// Validates and resolves the destination `(owner_id, location_id, flag)` and capacity bounds
+/// for a single reprocessed input item (`#1183`).
+#[allow(clippy::too_many_arguments)]
+fn resolve_reprocess_output_dest(
+    sde: &eve_sde::SdeRegistry,
+    snap: &eve_db::WorldStateSnapshot,
+    cs_state: &crate::services::inventory_fitting::fitting_containers_ships::ContainerShipRuntimeState,
+    char_skills: &std::collections::HashMap<TypeId, u8>,
+    parsed: &ParsedReprocessArgs,
+    source_item: &InventoryItemRecord,
+    station_id: i64,
+    char_id: i64,
+    caller_corp: i64,
+    now_unix: u64,
+) -> Result<ResolvedReprocessDest, BridgeRpcError> {
+    let default_station_flag = if is_corp_sag_flag(source_item.flag) {
+        source_item.flag
+    } else {
+        InventoryFlag::Hangar
+    };
+
+    if !parsed.is_multi_arg
+        || (parsed.explicit_out_owner.is_none()
+            && parsed.explicit_out_loc.is_none()
+            && parsed.explicit_out_flag.is_none())
+    {
+        return Ok(ResolvedReprocessDest {
+            owner_id: source_item.owner_id,
+            location_id: station_id,
+            flag: default_station_flag,
+            constraint: ReprocessDestConstraint::StationOrOfficeHangar,
+        });
+    }
+
+    if let Some(out_owner) = parsed.explicit_out_owner {
+        if out_owner != char_id && !(caller_corp > 0 && out_owner == caller_corp) {
+            return Err(BridgeRpcError {
+                code: "OwnershipOrLocationViolation".into(),
+                message: format!(
+                    "Output owner {out_owner} is neither character {char_id} nor their corporation"
+                ),
+                client_error: None,
+            });
+        }
+    }
+
+    let target_loc = parsed.explicit_out_loc.unwrap_or(station_id);
+    let office_id_opt = find_corp_office_at_station(snap, caller_corp, station_id);
+    let is_own_corp_office = caller_corp > 0 && office_id_opt == Some(target_loc);
+
+    if snap
+        .items
+        .get(&target_loc)
+        .is_some_and(|item| item.type_id == 27 && !is_own_corp_office)
+    {
+        return Err(BridgeRpcError {
+            code: "InvalidOutputLocation".into(),
+            message: format!(
+                "Location {target_loc} is not a rented corporate office for character {char_id} at station {station_id}"
+            ),
+            client_error: None,
+        });
+    }
+
+    if target_loc == station_id || is_own_corp_office {
+        return resolve_station_or_office_dest(
+            snap,
+            parsed,
+            station_id,
+            target_loc,
+            is_own_corp_office,
+            char_id,
+            caller_corp,
+            default_station_flag,
+            now_unix,
+        );
+    }
+
+    let Some(dest_item) = snap.items.get(&target_loc) else {
+        return Err(BridgeRpcError {
+            code: "InvalidOutputLocation".into(),
+            message: format!("Output location {target_loc} does not exist"),
+            client_error: None,
+        });
+    };
+    let Some(dest_type) = sde.types.get(&dest_item.type_id) else {
+        return Err(BridgeRpcError {
+            code: "InvalidOutputLocation".into(),
+            message: format!(
+                "Output location {target_loc} has unknown SDE type {}",
+                dest_item.type_id
+            ),
+            client_error: None,
+        });
+    };
+
+    crate::services::inventory_fitting::fitting_containers_ships::check_item_lock_impound_asset_safety_in_snap(
+        snap, dest_item,
+    )?;
+    if dest_item.flag == InventoryFlag::Locked || cs_state.alsc_locked_items.contains(&target_loc) {
+        return Err(BridgeRpcError {
+            code: "ItemLocked".into(),
+            message: format!("Output destination {target_loc} is locked"),
+            client_error: None,
+        });
+    }
+
+    if dest_type.category_id == 6 {
+        return resolve_ship_hold_dest(
+            sde,
+            snap,
+            char_skills,
+            parsed,
+            dest_item,
+            dest_type,
+            station_id,
+            char_id,
+            caller_corp,
+        );
+    }
+
+    resolve_station_container_dest(
+        sde,
+        snap,
+        cs_state,
+        parsed,
+        dest_item,
+        dest_type,
+        station_id,
+        char_id,
+        caller_corp,
+        now_unix,
+    )
+}
+
+/// Validates hold type rules and cumulative `m³` capacity across the whole planned batch before
+/// any snapshot items are mutated (`#1183`).
+fn validate_planned_reprocess_capacities(
+    sde: &eve_sde::SdeRegistry,
+    snap: &eve_db::WorldStateSnapshot,
+    planned: &[PlannedReprocessItem],
+) -> Result<(), BridgeRpcError> {
+    use std::collections::HashMap;
+    struct DestVolAccum {
+        cap_m3: f64,
+        added_m3: f64,
+        freed_m3: f64,
+    }
+    let mut ship_holds: HashMap<(i64, InventoryFlag), DestVolAccum> = HashMap::new();
+    let mut containers: HashMap<i64, DestVolAccum> = HashMap::new();
+
+    for p in planned {
+        let consumed_qty = (p.source_item.quantity - p.remainder).max(0) as f64;
+        let src_freed_m3 = crate::services::inventory_fitting::fitting_containers_ships::effective_item_unit_volume(
+            sde,
+            &p.source_item,
+        ) * consumed_qty;
+        let out_vol: f64 = p
+            .outputs
+            .iter()
+            .map(|mat| {
+                sde.types.get(&mat.type_id).map(|t| t.volume).unwrap_or(0.0)
+                    * (mat.quantity as f64)
+            })
+            .sum();
+        match p.dest.constraint {
+            ReprocessDestConstraint::StationOrOfficeHangar => {}
+            ReprocessDestConstraint::ShipHold {
+                ship_id,
+                ship_type_id,
+                flag,
+                cap_m3,
+            } => {
+                if let Some(ship_type) = sde.types.get(&ship_type_id) {
+                    for mat in &p.outputs {
+                        let Some(mat_type) = sde.types.get(&mat.type_id) else {
+                            return Err(BridgeRpcError::user_error("InvalidItemTypeForHold"));
+                        };
+                        if !crate::services::fitting_saved_apply::is_item_allowed_in_ship_hold(
+                            flag as u16,
+                            mat_type,
+                            ship_type,
+                        ) {
+                            return Err(BridgeRpcError::user_error("InvalidItemTypeForHold"));
+                        }
+                    }
+                }
+                let entry = ship_holds.entry((ship_id, flag)).or_insert(DestVolAccum {
+                    cap_m3,
+                    added_m3: 0.0,
+                    freed_m3: 0.0,
+                });
+                entry.added_m3 += out_vol;
+                if p.source_item.location_id == ship_id && p.source_item.flag == flag {
+                    entry.freed_m3 += src_freed_m3;
+                }
+            }
+            ReprocessDestConstraint::Container { cont_id, cap_m3 } => {
+                let entry = containers.entry(cont_id).or_insert(DestVolAccum {
+                    cap_m3,
+                    added_m3: 0.0,
+                    freed_m3: 0.0,
+                });
+                entry.added_m3 += out_vol;
+                if p.source_item.location_id == cont_id {
+                    entry.freed_m3 += src_freed_m3;
+                }
+            }
+        }
+    }
+
+    for ((ship_id, flag), acc) in ship_holds {
+        let existing_used = sum_items_volume_m3(
+            sde,
+            snap.items
+                .values()
+                .filter(|it| it.location_id == ship_id && it.flag == flag),
+        );
+        let net_used = (existing_used - acc.freed_m3).max(0.0);
+        if acc.cap_m3 <= 0.0 || net_used + acc.added_m3 > acc.cap_m3 + 1e-4 {
+            return Err(crate::services::inventory_fitting::ship_hold_capacity_error(
+                flag as u16,
+                acc.cap_m3,
+                net_used,
+                acc.added_m3,
+            ));
+        }
+    }
+
+    for (cont_id, acc) in containers {
+        let existing_used = sum_items_volume_m3(
+            sde,
+            snap.items.values().filter(|it| it.location_id == cont_id),
+        );
+        let net_used = (existing_used - acc.freed_m3).max(0.0);
+        if acc.cap_m3 <= 0.0 || net_used + acc.added_m3 > acc.cap_m3 + 1e-4 {
+            return Err(BridgeRpcError {
+                code: "CapacityExceeded".into(),
+                message: format!(
+                    "Container {cont_id} capacity of {:.2} m³ exceeded (used {:.2} m³, required {:.2} m³)",
+                    acc.cap_m3, net_used, acc.added_m3
+                ),
+                client_error: None,
+            });
+        }
+    }
+
+    Ok(())
+}
 
 pub async fn handle(
     ctx: &ServerContext,
@@ -912,43 +1904,10 @@ pub async fn handle(
                     client_error: None,
                 }));
             };
-            let is_multi_arg = args.len() >= 2;
-            let is_batch_call = is_multi_arg
-                || matches!(
-                    args.first(),
-                    Some(PyRep::List(_) | PyRep::Dict(_) | PyRep::Tuple(_))
-                );
-            let from_loc = is_multi_arg
-                .then(|| args.get(1).and_then(PyRep::as_i64).filter(|&id| id > 0))
-                .flatten();
-            let explicit_out_owner = is_multi_arg
-                .then(|| args.get(2).and_then(PyRep::as_i64).filter(|&id| id > 0))
-                .flatten();
-            let explicit_out_loc = is_multi_arg
-                .then(|| args.get(3).and_then(PyRep::as_i64).filter(|&id| id > 10_000))
-                .flatten();
-            let explicit_out_flag = is_multi_arg
-                .then(|| {
-                    args.get(4)
-                        .and_then(PyRep::as_i64)
-                        .filter(|&f| (1..=u16::MAX as i64).contains(&f))
-                        .map(|f| InventoryFlag::from_u16(f as u16))
-                })
-                .flatten();
-            let item_ids: Vec<i64> = match args.first() {
-                Some(PyRep::List(list)) => list.iter().filter_map(|a| a.as_i64()).collect(),
-                Some(PyRep::Tuple(tuple)) => tuple.iter().filter_map(|a| a.as_i64()).collect(),
-                Some(PyRep::Dict(entries)) => entries.iter().filter_map(|(k, _)| k.as_i64()).collect(),
-                Some(first) => first.as_i64().into_iter().collect(),
-                None => Vec::new(),
+            let parsed = match parse_reprocess_args(args) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
             };
-            if item_ids.is_empty() {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "Reprocess requires at least one integer itemID".into(),
-                    client_error: None,
-                }));
-            }
 
             enum ReprocessItemDelta {
                 Updated(InventoryItemRecord, Vec<(i32, PyRep)>),
@@ -959,8 +1918,12 @@ pub async fn handle(
 
             let now_unix = ctx.now_unix();
             if let Some(cid) = session.corporation_id.filter(|&id| id > 0) {
-                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, cid);
+                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(
+                    ctx, cid,
+                );
             }
+            let char_skills = ctx.character_skill_levels(char_id);
+            let is_batch_call = parsed.is_batch_call;
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if station_id >= 1_000_000_000_000 {
                     crate::services::structure_profile_services::require_structure_service_access_in_snap(
@@ -979,11 +1942,26 @@ pub async fn handle(
                     });
                 }
 
-                let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                let mut batch_results = Vec::with_capacity(item_ids.len());
-                for item_id in item_ids {
+                let caller_corp = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .unwrap_or(0);
+                let cs_state = crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state_snap(snap);
+
+                // Phase 1: Validate every input item, output destination, cumulative ISK tax,
+                // and cumulative m³ capacity before mutating snapshot items or balances.
+                let mut planned: Vec<PlannedReprocessItem> =
+                    Vec::with_capacity(parsed.item_ids.len());
+                let mut sim_next_entity_id = snap.next_entity_id;
+
+                for &item_id in &parsed.item_ids {
                     let Some(item) = snap.items.get(&item_id).cloned() else {
-                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {item_id} does not exist"), client_error: None });
+                        return Err(BridgeRpcError {
+                            code: "ItemNotFound".into(),
+                            message: format!("Item {item_id} does not exist"),
+                            client_error: None,
+                        });
                     };
                     let personal_ok = item.owner_id == char_id
                         && matches!(
@@ -997,16 +1975,7 @@ pub async fn handle(
                         );
                     let corp_ok = caller_corp > 0
                         && item.owner_id == caller_corp
-                        && matches!(
-                            item.flag,
-                            InventoryFlag::CorpSAG1
-                                | InventoryFlag::CorpSAG2
-                                | InventoryFlag::CorpSAG3
-                                | InventoryFlag::CorpSAG4
-                                | InventoryFlag::CorpSAG5
-                                | InventoryFlag::CorpSAG6
-                                | InventoryFlag::CorpSAG7
-                        )
+                        && is_corp_sag_flag(item.flag)
                         && caller_can_take_corp_hangar_item_at(
                             snap,
                             char_id,
@@ -1031,35 +2000,88 @@ pub async fn handle(
                                 && parent.owner_id == char_id
                                 && !snap.is_item_or_ancestor_locked_or_impounded(item.location_id)
                         });
-                    let from_loc_ok = from_loc.is_none_or(|fl| fl == item.location_id);
+                    let from_loc_ok = parsed.from_loc.is_none_or(|fl| fl == item.location_id);
                     let valid_location = (in_station_hangar || in_docked_parent) && from_loc_ok;
                     if (!personal_ok && !corp_ok) || !valid_location || item.quantity <= 0 {
                         return Err(BridgeRpcError {
                             code: "OwnershipOrLocationViolation".into(),
-                            message: format!("Item {item_id} must be owned by character {char_id} or an authorized corporate division at station {station_id}"),
+                            message: format!(
+                                "Item {item_id} must be owned by character {char_id} or an authorized corporate division at station {station_id}"
+                            ),
                             client_error: None,
                         });
                     }
-                    let active_ship_id = snap.characters.get(&char_id).map(|c| c.active_ship_id).or(session.ship_id);
-                    if active_ship_id == Some(item_id) || snap.is_character_boarded_or_saved_ship(char_id, session.ship_id, item_id) {
-                        return Err(BridgeRpcError { code: "CannotReprocessActiveShip".into(), message: format!("Item {item_id} is your currently active ship and cannot be reprocessed"), client_error: None });
+                    let active_ship_id = snap
+                        .characters
+                        .get(&char_id)
+                        .map(|c| c.active_ship_id)
+                        .or(session.ship_id);
+                    if active_ship_id == Some(item_id)
+                        || snap.is_character_boarded_or_saved_ship(char_id, session.ship_id, item_id)
+                    {
+                        return Err(BridgeRpcError {
+                            code: "CannotReprocessActiveShip".into(),
+                            message: format!(
+                                "Item {item_id} is your currently active ship and cannot be reprocessed"
+                            ),
+                            client_error: None,
+                        });
                     }
                     let Some(inv_type) = ctx.sde.types.get(&item.type_id) else {
-                        return Err(BridgeRpcError { code: "ItemNotReprocessable".into(), message: format!("Unknown item type {}", item.type_id), client_error: None });
+                        return Err(BridgeRpcError {
+                            code: "ItemNotReprocessable".into(),
+                            message: format!("Unknown item type {}", item.type_id),
+                            client_error: None,
+                        });
                     };
-                    if !ctx.sde.type_materials.get(&inv_type.type_id).is_some_and(|m| !m.is_empty())
+                    if !ctx
+                        .sde
+                        .type_materials
+                        .get(&inv_type.type_id)
+                        .is_some_and(|m| !m.is_empty())
                         && ctx.sde.randomized_type_materials_for(inv_type.type_id).is_empty()
                     {
-                        return Err(BridgeRpcError { code: "ItemNotReprocessable".into(), message: format!("Item type {} ({}) has no SDE typeMaterials and cannot be reprocessed", item.type_id, inv_type.name), client_error: None });
+                        return Err(BridgeRpcError {
+                            code: "ItemNotReprocessable".into(),
+                            message: format!(
+                                "Item type {} ({}) has no SDE typeMaterials and cannot be reprocessed",
+                                item.type_id, inv_type.name
+                            ),
+                            client_error: None,
+                        });
                     }
-                    if crate::services::inventory_fitting::fitting_containers_ships::container_has_active_audit_log_snap(snap, item_id, now_unix as u64) {
-                        return Err(BridgeRpcError { code: "ContainerHasActiveAuditLog".into(), message: format!("Container {item_id} has audit log entries younger than 3 weeks and cannot be reprocessed"), client_error: None });
+                    if crate::services::inventory_fitting::fitting_containers_ships::container_has_active_audit_log_snap(
+                        snap,
+                        item_id,
+                        now_unix as u64,
+                    ) {
+                        return Err(BridgeRpcError {
+                            code: "ContainerHasActiveAuditLog".into(),
+                            message: format!(
+                                "Container {item_id} has audit log entries younger than 3 weeks and cannot be reprocessed"
+                            ),
+                            client_error: None,
+                        });
                     }
-                    if item.singleton || snap.items.values().any(|child| child.location_id == item_id) {
-                        return Err(BridgeRpcError { code: "ItemMustBeRepackaged".into(), message: format!("Item {item_id} must be emptied and repackaged before reprocessing"), client_error: None });
+                    if item.singleton
+                        || snap.items.values().any(|child| child.location_id == item_id)
+                    {
+                        return Err(BridgeRpcError {
+                            code: "ItemMustBeRepackaged".into(),
+                            message: format!(
+                                "Item {item_id} must be emptied and repackaged before reprocessing"
+                            ),
+                            client_error: None,
+                        });
                     }
-                    if item.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(item_id) {
-                        return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked and cannot be reprocessed"), client_error: None });
+                    if item.flag == InventoryFlag::Locked
+                        || snap.is_item_locked_in_contract_or_job(item_id)
+                    {
+                        return Err(BridgeRpcError {
+                            code: "ItemLocked".into(),
+                            message: format!("Item {item_id} is locked and cannot be reprocessed"),
+                            client_error: None,
+                        });
                     }
                     let portion_size = inv_type.portion_size.max(1) as i32;
                     let portions = item.quantity / portion_size;
@@ -1069,41 +2091,121 @@ pub async fn handle(
                         &ctx.sde,
                         inv_type,
                         item_id,
-                        snap.next_entity_id,
+                        sim_next_entity_id,
                         rng_bits,
                         portions.max(1),
                         false,
                     ) else {
-                        return Err(BridgeRpcError { code: "ItemNotReprocessable".into(), message: format!("Item type {} ({}) has no SDE typeMaterials and cannot be reprocessed", item.type_id, inv_type.name), client_error: None });
+                        return Err(BridgeRpcError {
+                            code: "ItemNotReprocessable".into(),
+                            message: format!(
+                                "Item type {} ({}) has no SDE typeMaterials and cannot be reprocessed",
+                                item.type_id, inv_type.name
+                            ),
+                            client_error: None,
+                        });
                     };
                     if item.quantity < portion_size {
-                        return Err(BridgeRpcError { code: "InsufficientBatchPortion".into(), message: format!("Need at least {portion_size} units to reprocess type {} (have {})", item.type_id, item.quantity), client_error: None });
+                        return Err(BridgeRpcError {
+                            code: "InsufficientBatchPortion".into(),
+                            message: format!(
+                                "Need at least {portion_size} units to reprocess type {} (have {})",
+                                item.type_id, item.quantity
+                            ),
+                            client_error: None,
+                        });
                     }
+
+                    let dest = resolve_reprocess_output_dest(
+                        &ctx.sde,
+                        snap,
+                        &cs_state,
+                        &char_skills,
+                        &parsed,
+                        &item,
+                        station_id,
+                        char_id,
+                        caller_corp,
+                        now_unix,
+                    )?;
+
                     let (station_base_yield, yield_rate, station_tax_rate) =
-                        compute_reprocessing_rates_for_item_at(&ctx.sde, snap, char_id, station_id, inv_type, Some(now_unix));
+                        compute_reprocessing_rates_for_item_at(
+                            &ctx.sde,
+                            snap,
+                            char_id,
+                            station_id,
+                            inv_type,
+                            Some(now_unix),
+                        );
                     let mut gross_value_cents = 0_i64;
+                    let mut outputs = Vec::with_capacity(materials.len());
                     for mat in &materials {
-                        let unit_val = ctx.sde.types.get(&mat.material_type_id).map(|t| t.base_price.max(4.0)).unwrap_or(4.0);
+                        let unit_val = ctx
+                            .sde
+                            .types
+                            .get(&mat.material_type_id)
+                            .map(|t| t.base_price.max(4.0))
+                            .unwrap_or(4.0);
                         let unit_cents = IskCents::from_f64_isk(unit_val).0;
-                        let est_qty = ((mat.quantity as f64) * yield_rate).floor() as i64;
-                        gross_value_cents = gross_value_cents.saturating_add(unit_cents.saturating_mul(est_qty.max(0)));
+                        let out_qty = ((mat.quantity as f64) * yield_rate).floor() as i32;
+                        gross_value_cents = gross_value_cents
+                            .saturating_add(unit_cents.saturating_mul(out_qty.max(0) as i64));
+                        if out_qty > 0 {
+                            sim_next_entity_id += 1;
+                            outputs.push(PlannedOutputMat {
+                                type_id: mat.material_type_id,
+                                quantity: out_qty,
+                            });
+                        }
                     }
                     let tax_cents = if station_tax_rate > 0.0 && gross_value_cents > 0 {
-                        IskCents(((gross_value_cents as f64) * station_tax_rate).round().max(100.0) as i64)
+                        IskCents(
+                            ((gross_value_cents as f64) * station_tax_rate)
+                                .round()
+                                .max(100.0) as i64,
+                        )
                     } else {
                         IskCents(0)
                     };
-                    let tax_isk = (tax_cents.0 as f64) / 100.0;
-                    if tax_cents.0 > 0 {
-                        let char_balance = snap.characters.get(&char_id).map(|c| c.balance).unwrap_or(IskCents(0));
-                        if char_balance < tax_cents {
-                            return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::NotEnoughMoney));
-                        }
+                    planned.push(PlannedReprocessItem {
+                        source_item: item,
+                        remainder,
+                        dest,
+                        outputs,
+                        station_base_yield,
+                        yield_rate,
+                        station_tax_rate,
+                        tax_cents,
+                    });
+                }
+
+                let total_tax_cents = planned
+                    .iter()
+                    .fold(0_i64, |acc, p| acc.saturating_add(p.tax_cents.0));
+                if total_tax_cents > 0 {
+                    let char_balance = snap
+                        .characters
+                        .get(&char_id)
+                        .map(|c| c.balance)
+                        .unwrap_or(IskCents(0));
+                    if char_balance.0 < total_tax_cents {
+                        return Err(BridgeRpcError::from_user_key(
+                            eve_proto::UserErrorKey::NotEnoughMoney,
+                        ));
                     }
-                    let old_qty = item.quantity;
-                    if remainder > 0 {
+                }
+
+                validate_planned_reprocess_capacities(&ctx.sde, snap, &planned)?;
+
+                // Phase 2: Commit validated input consumption, mineral minting, and tax deductions.
+                let mut batch_results = Vec::with_capacity(planned.len());
+                for p in planned {
+                    let item_id = p.source_item.item_id;
+                    let old_qty = p.source_item.quantity;
+                    if p.remainder > 0 {
                         if let Some(im) = snap.items.get_mut(&item_id) {
-                            im.quantity = remainder;
+                            im.quantity = p.remainder;
                             im.version += 1;
                             item_deltas.push(ReprocessItemDelta::Updated(
                                 im.clone(),
@@ -1112,116 +2214,71 @@ pub async fn handle(
                         }
                     } else {
                         snap.items.remove(&item_id);
-                        item_deltas.push(ReprocessItemDelta::Deleted(item.clone()));
+                        item_deltas.push(ReprocessItemDelta::Deleted(p.source_item));
                     }
-                    let default_station_flag = match item.flag {
-                        InventoryFlag::CorpSAG1
-                        | InventoryFlag::CorpSAG2
-                        | InventoryFlag::CorpSAG3
-                        | InventoryFlag::CorpSAG4
-                        | InventoryFlag::CorpSAG5
-                        | InventoryFlag::CorpSAG6
-                        | InventoryFlag::CorpSAG7 => item.flag,
-                        _ => InventoryFlag::Hangar,
-                    };
-                    let (out_owner, out_loc, out_flag) = if is_multi_arg {
-                        let requested_loc = explicit_out_loc.unwrap_or(station_id);
-                        let valid_container = requested_loc != station_id
-                            && snap.items.get(&requested_loc).is_some_and(|c| {
-                                c.location_id == station_id
-                                    && (c.owner_id == char_id
-                                        || (caller_corp > 0 && c.owner_id == caller_corp))
-                            });
-                        let target_loc = if requested_loc == station_id || valid_container {
-                            requested_loc
-                        } else {
-                            station_id
-                        };
-                        let raw_flag = explicit_out_flag.unwrap_or(default_station_flag);
-                        let requested_flag = if target_loc == station_id
-                            && matches!(
-                                raw_flag,
-                                InventoryFlag::Cargo
-                                    | InventoryFlag::SpecializedAsteroidHold
-                                    | InventoryFlag::SpecializedOreHold
-                                    | InventoryFlag::SpecializedIceHold
-                                    | InventoryFlag::SpecializedGasHold
-                            )
-                        {
-                            default_station_flag
-                        } else {
-                            raw_flag
-                        };
-                        let is_corp_sag = matches!(
-                            requested_flag,
-                            InventoryFlag::CorpSAG1
-                                | InventoryFlag::CorpSAG2
-                                | InventoryFlag::CorpSAG3
-                                | InventoryFlag::CorpSAG4
-                                | InventoryFlag::CorpSAG5
-                                | InventoryFlag::CorpSAG6
-                                | InventoryFlag::CorpSAG7
-                        );
-                        if is_corp_sag && caller_corp > 0 && explicit_out_owner == Some(caller_corp) {
-                            (caller_corp, target_loc, requested_flag)
-                        } else if !is_corp_sag && (explicit_out_owner.is_none() || explicit_out_owner == Some(char_id)) {
-                            (char_id, target_loc, requested_flag)
-                        } else {
-                            (item.owner_id, station_id, default_station_flag)
-                        }
-                    } else {
-                        (item.owner_id, station_id, default_station_flag)
-                    };
-                    let mut outputs: Vec<(i64, TypeId, i32)> = Vec::with_capacity(materials.len());
-                    for mat in &materials {
-                        let out_qty = ((mat.quantity as f64) * yield_rate).floor() as i32;
-                        if out_qty <= 0 { continue; }
+
+                    let mut outputs: Vec<(i64, TypeId, i32)> = Vec::with_capacity(p.outputs.len());
+                    for mat in p.outputs {
                         snap.next_entity_id += 1;
                         let mid = snap.next_entity_id;
-                        let new_item =
-                            InventoryItemRecord {
-                                item_id: mid,
-                                type_id: mat.material_type_id,
-                                owner_id: out_owner,
-                                location_id: out_loc,
-                                flag: out_flag,
-                                quantity: out_qty,
-                                singleton: false,
-                                version: 1,
-                                ..Default::default()
-                            };
+                        let new_item = InventoryItemRecord {
+                            item_id: mid,
+                            type_id: mat.type_id,
+                            owner_id: p.dest.owner_id,
+                            location_id: p.dest.location_id,
+                            flag: p.dest.flag,
+                            quantity: mat.quantity,
+                            singleton: false,
+                            version: 1,
+                            ..Default::default()
+                        };
                         snap.items.insert(mid, new_item.clone());
                         item_deltas.push(ReprocessItemDelta::Updated(
                             new_item,
                             vec![(3, PyRep::Integer(0))],
                         ));
-                        outputs.push((mid, mat.material_type_id, out_qty));
+                        outputs.push((mid, mat.type_id, mat.quantity));
                     }
 
-                    if tax_cents.0 > 0 {
+                    let tax_isk = (p.tax_cents.0 as f64) / 100.0;
+                    if p.tax_cents.0 > 0 {
                         let bal_after = if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            ch.balance = ch.balance.checked_sub(tax_cents).unwrap_or(IskCents(0));
+                            ch.balance = ch
+                                .balance
+                                .checked_sub(p.tax_cents)
+                                .unwrap_or(IskCents(0));
                             ch.balance
                         } else {
                             IskCents(0)
                         };
                         wallet_notify = Some(bal_after.to_wire_f64());
                         if station_id >= 1_000_000_000_000 {
-                            if let Some(owner_corp_id) = snap.structures.get(&station_id).map(|s| s.owner_corp_id) {
+                            if let Some(owner_corp_id) =
+                                snap.structures.get(&station_id).map(|s| s.owner_corp_id)
+                            {
                                 crate::services::station_structure::structure_upwell_ops::credit_structure_owner_corp_div1(
-                                    snap, owner_corp_id, tax_cents, eve_db::ledger::ref_types::TRANSACTION_TAX, "ReprocessingTax", char_id,
-                                    format!("Structure reprocessing tax ({:.2}%) at structure {station_id}", station_tax_rate * 100.0), now_unix,
+                                    snap,
+                                    owner_corp_id,
+                                    p.tax_cents,
+                                    eve_db::ledger::ref_types::TRANSACTION_TAX,
+                                    "ReprocessingTax",
+                                    char_id,
+                                    format!(
+                                        "Structure reprocessing tax ({:.2}%) at structure {station_id}",
+                                        p.station_tax_rate * 100.0
+                                    ),
+                                    now_unix,
                                 );
                             }
                         }
                         snap.append_journal(
                             char_id,
                             "ReprocessingTax",
-                            tax_cents,
+                            p.tax_cents,
                             bal_after,
                             format!(
                                 "Station reprocessing tax ({:.2}%) at station {station_id}",
-                                station_tax_rate * 100.0
+                                p.station_tax_rate * 100.0
                             ),
                         );
                     }
@@ -1244,11 +2301,11 @@ pub async fn handle(
                         .collect();
                     batch_results.push(PyRep::keyval([
                         ("itemID", PyRep::Integer(item_id)),
-                        ("stationBaseYield", PyRep::Real(station_base_yield)),
-                        ("yieldRate", PyRep::Real(yield_rate)),
-                        ("stationTaxRate", PyRep::Real(station_tax_rate)),
+                        ("stationBaseYield", PyRep::Real(p.station_base_yield)),
+                        ("yieldRate", PyRep::Real(p.yield_rate)),
+                        ("stationTaxRate", PyRep::Real(p.station_tax_rate)),
                         ("reprocessingTaxISK", PyRep::Real(tax_isk)),
-                        ("remainderQuantity", PyRep::Integer(remainder as i64)),
+                        ("remainderQuantity", PyRep::Integer(p.remainder as i64)),
                         ("tritaniumItemID", PyRep::Integer(trit_id)),
                         ("tritaniumQuantity", PyRep::Integer(trit_qty as i64)),
                         ("outputs", PyRep::List(output_entries)),
