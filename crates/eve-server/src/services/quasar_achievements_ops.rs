@@ -5,7 +5,7 @@
 
 use crate::quasar_gateway::{
     require_admin_role, PublicGatewayRouter, QuasarHandlerFn, STATUS_BAD_REQUEST,
-    STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED, STATUS_SERVICE_UNAVAILABLE,
+    STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED,
 };
 use super::quasar_achievements::{
     emit_achievement_notices, extract_u32_ident, extract_u64_val, AchievementManager,
@@ -475,27 +475,16 @@ pub fn register_achievement_handlers(
     );
 
     // 6. eve_public.achievement.definition.api.cdn.GetLatestRequest -> GetLatestResponse
+    // V24.02 FlatbufferContentProvider.fetch treats any non-200 status as GenericError
+    // and skips downloading whenever checkpoint.version matches local current_version
+    // (GetLatestResponse has only field 1 checkpoint). Always return 200 OK with the
+    // authoritative 24.1.<count> checkpoint so matching clients skip re-download and
+    // stale clients upgrade without 503 startup exceptions.
     let mgr_cdn = Arc::clone(&manager);
     let esi_port_cdn = Arc::clone(&router.esi_port);
     router.register_handler(
         "eve_public.achievement.definition.api.cdn.GetLatestRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
-            let no_local = dyn_msg.get(2).and_then(|v| match v {
-                DynamicValue::Bool(b) => Some(*b),
-                DynamicValue::Uint64(u) => Some(*u != 0),
-                DynamicValue::Uint32(u) => Some(*u != 0),
-                DynamicValue::Int64(i) => Some(*i != 0),
-                DynamicValue::Int32(i) => Some(*i != 0),
-                _ => None,
-            }).unwrap_or(false);
-
-            if dyn_msg.get(1).is_some() && !no_local {
-                return Err((
-                    STATUS_SERVICE_UNAVAILABLE,
-                    "External TLS CDN not configured; use local client achievement definitions"
-                        .to_string(),
-                ));
-            }
+        Arc::new(move |_ctx, _any, _dyn_msg| {
             let count = mgr_cdn.sde_achievement_count;
             let hash = &mgr_cdn.sde_achievement_hash;
             let cdn_base = crate::quasar_gateway::resolve_cdn_base_url(
@@ -509,50 +498,9 @@ pub fn register_achievement_handlers(
                 .set("checkpoint.url", &url)
                 .set("checkpoint.crc.crc", crc_val)
                 .set_with("checkpoint.version", |ver| {
-                    if let Some(DynamicValue::Message(client_ver)) = dyn_msg.get(1) {
-                        let mut v = ver
-                            .set_opt(
-                                "major",
-                                client_ver
-                                    .get(1)
-                                    .and_then(extract_u64_val)
-                                    .and_then(|n| u32::try_from(n).ok()),
-                            )
-                            .set_opt(
-                                "minor",
-                                client_ver
-                                    .get(2)
-                                    .and_then(extract_u64_val)
-                                    .and_then(|n| u32::try_from(n).ok()),
-                            )
-                            .set_opt(
-                                "patch",
-                                client_ver
-                                    .get(3)
-                                    .and_then(extract_u64_val)
-                                    .and_then(|n| u32::try_from(n).ok()),
-                            );
-                        for (fno, field_name) in [(4, "prerelease_tags"), (5, "build_tags")] {
-                            match client_ver.get(fno) {
-                                Some(DynamicValue::String(tag)) => {
-                                    v = v.add(field_name, tag.as_str());
-                                }
-                                Some(DynamicValue::Repeated(tags)) => {
-                                    for t in tags {
-                                        if let DynamicValue::String(tag) = t {
-                                            v = v.add(field_name, tag.as_str());
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        v
-                    } else {
-                        ver.set("major", 24u32)
-                            .set("minor", 1u32)
-                            .set("patch", count as u32)
-                    }
+                    ver.set("major", 24u32)
+                        .set("minor", 1u32)
+                        .set("patch", count as u32)
                 });
 
             msg.to_any_or_internal_err()

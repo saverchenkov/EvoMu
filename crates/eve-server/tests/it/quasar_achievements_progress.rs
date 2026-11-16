@@ -13,7 +13,7 @@ use eve_proto::quasar::{
 };
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::{
-    STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_OK, STATUS_SERVICE_UNAVAILABLE,
+    STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_OK,
 };
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
@@ -213,15 +213,36 @@ async fn test_parity_quasar_achievement_remediation_suite() {
     let url_str = cp_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_str().ok().flatten()).unwrap();
     assert!(url_str.contains("/cdn/achievements/v24.1.60/"), "Checkpoint URL must include authentic path");
 
-    // CDN GetLatestRequest with current_version Specification and no no_local flag -> STATUS_SERVICE_UNAVAILABLE fallback
+    // CDN GetLatestRequest with current_version Specification and no no_local flag -> 200 OK authoritative Checkpoint (#1128)
     let mut ver_msg = Vec::new();
     encode_varint_field(1, 24, &mut ver_msg);
     encode_varint_field(2, 1, &mut ver_msg);
     encode_varint_field(3, 60, &mut ver_msg);
     let mut cdn_req_ver = Vec::new();
     encode_bytes_field(1, &ver_msg, &mut cdn_req_ver);
-    let r_cdn_fallback = quasar_rpc(&ctx, &mut admin_sess, "eve_public.achievement.definition.api.cdn.GetLatestRequest", cdn_req_ver, b"c-02").await;
-    assert_eq!(r_cdn_fallback.status_code, STATUS_SERVICE_UNAVAILABLE, "Must signal local definition fallback");
+    let r_cdn_cur = quasar_rpc(&ctx, &mut admin_sess, "eve_public.achievement.definition.api.cdn.GetLatestRequest", cdn_req_ver, b"c-02").await;
+    assert_eq!(r_cdn_cur.status_code, STATUS_OK, "Matching current_version must return 200 OK checkpoint");
+    assert_eq!(
+        r_cdn_cur.payload.as_ref().unwrap().value,
+        r_cdn.payload.as_ref().unwrap().value,
+        "Matching current_version checkpoint must match no_local checkpoint"
+    );
+
+    // Stale client current_version must receive authoritative 24.1.60 checkpoint, never echoed stale version
+    let mut stale_ver = Vec::new();
+    encode_varint_field(1, 24, &mut stale_ver);
+    encode_varint_field(2, 0, &mut stale_ver);
+    encode_varint_field(3, 1, &mut stale_ver);
+    let mut cdn_req_stale = Vec::new();
+    encode_bytes_field(1, &stale_ver, &mut cdn_req_stale);
+    let r_cdn_stale = quasar_rpc(&ctx, &mut admin_sess, "eve_public.achievement.definition.api.cdn.GetLatestRequest", cdn_req_stale, b"c-02b").await;
+    assert_eq!(r_cdn_stale.status_code, STATUS_OK);
+    let wm_stale = WireMessage::decode(&r_cdn_stale.payload.as_ref().unwrap().value).expect("wire stale cdn");
+    let cp_stale = WireMessage::decode(wm_stale.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).expect("wire stale checkpoint");
+    let ver_stale = WireMessage::decode(cp_stale.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_bytes().unwrap()).expect("wire stale version");
+    assert_eq!(ver_stale.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()), Some(24));
+    assert_eq!(ver_stale.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(1));
+    assert_eq!(ver_stale.fields.iter().find(|f| f.field_number == 3).and_then(|f| f.value.as_varint()), Some(60));
 
     // 4. Category Queries
     let r_cat_bad = quasar_rpc(&ctx, &mut admin_sess, "eve_public.achievement.category.api.GetRequest", Vec::new(), b"cat-01").await;

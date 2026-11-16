@@ -4,7 +4,7 @@
 
 use crate::quasar_gateway::{
     NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
-    STATUS_PRECONDITION_FAILED, STATUS_SERVICE_UNAVAILABLE,
+    STATUS_PRECONDITION_FAILED,
 };
 use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::test_ctx_and_clock;
 use crate::services::quasar_achievements::{
@@ -16,7 +16,8 @@ use crate::services::quasar_achievements_ops::{
     register_achievement_handlers,
 };
 use eve_proto::quasar::{
-    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, WireMessage,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::sync::Arc;
 
@@ -437,8 +438,7 @@ fn query_claim_showcase_unclaimed_and_cdn_latest_branches() {
         STATUS_PRECONDITION_FAILED
     );
 
-    // 5. CDN GetLatestRequest branches:
-    // a) client_ver present & no_local == false -> STATUS_SERVICE_UNAVAILABLE
+    // 5. CDN GetLatestRequest branches: all shapes return authoritative (24, 1, count) checkpoint without 503.
     let mut ver_msg = DynamicQuasarMessage::new("Ver");
     ver_msg.fields.insert(1, DynamicValue::Uint64(24));
     ver_msg.fields.insert(2, DynamicValue::Uint64(1));
@@ -458,20 +458,107 @@ fn query_claim_showcase_unclaimed_and_cdn_latest_branches() {
         ),
         value: Vec::new(),
     };
-    assert_eq!(
-        call_ach(
-            router,
-            "eve_public.achievement.definition.api.cdn.GetLatestRequest",
-            &player_ctx,
-            &google_any,
-            &cdn_req
-        )
-        .unwrap_err()
-        .0,
-        STATUS_SERVICE_UNAVAILABLE
-    );
+    let cdn_with_ver = call_ach(
+        router,
+        "eve_public.achievement.definition.api.cdn.GetLatestRequest",
+        &player_ctx,
+        &google_any,
+        &cdn_req,
+    )
+    .expect("current_version with no_local == false must return 200 OK");
 
-    // b) client_ver present & no_local == true -> encodes client_ver spec + checkpoint
+    let wm_cdn = WireMessage::decode(&cdn_with_ver.value).expect("decode GetLatestResponse");
+    let cp_bytes = wm_cdn
+        .fields
+        .iter()
+        .find(|f| f.field_number == 1)
+        .and_then(|f| f.value.as_bytes())
+        .expect("checkpoint");
+    let cp_wm = WireMessage::decode(cp_bytes).expect("decode checkpoint");
+    let url = cp_wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 1)
+        .and_then(|f| f.value.as_str().ok().flatten())
+        .expect("checkpoint.url");
+    assert!(
+        url.ends_with(&format!(
+            "/achievements/v24.1.{}/{}.fb",
+            mgr.sde_achievement_count, mgr.sde_achievement_hash
+        )),
+        "unexpected url: {url}"
+    );
+    let ver_bytes = cp_wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 2)
+        .and_then(|f| f.value.as_bytes())
+        .expect("checkpoint.version");
+    let ver_wm = WireMessage::decode(ver_bytes).expect("decode version");
+    assert_eq!(
+        ver_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 1)
+            .and_then(|f| f.value.as_varint()),
+        Some(24)
+    );
+    assert_eq!(
+        ver_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 2)
+            .and_then(|f| f.value.as_varint()),
+        Some(1)
+    );
+    assert_eq!(
+        ver_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 3)
+            .and_then(|f| f.value.as_varint()),
+        Some(mgr.sde_achievement_count as u64)
+    );
+    assert!(
+        ver_wm.fields.iter().all(|f| f.field_number <= 3),
+        "must not echo client prerelease_tags or build_tags"
+    );
+    let crc_bytes = cp_wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 3)
+        .and_then(|f| f.value.as_bytes())
+        .expect("checkpoint.crc");
+    let crc_wm = WireMessage::decode(crc_bytes).expect("decode crc");
+    let crc_val = crc_wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 1)
+        .and_then(|f| f.value.as_varint())
+        .expect("crc.crc");
+    let expected_crc = crate::router::cache_notifications::crc32_ieee(&mgr.flatbuffer_bytes()) as u32;
+    assert_eq!(crc_val as u32, expected_crc);
+
+    // b) stale current_version & no_local == false -> identical authoritative checkpoint
+    let mut stale_ver = DynamicQuasarMessage::new("StaleVer");
+    stale_ver.fields.insert(1, DynamicValue::Uint64(24));
+    stale_ver.fields.insert(2, DynamicValue::Uint64(0));
+    stale_ver.fields.insert(3, DynamicValue::Uint64(1));
+    let mut stale_req = DynamicQuasarMessage::new("StaleReq");
+    stale_req
+        .fields
+        .insert(1, DynamicValue::Message(Box::new(stale_ver)));
+    let cdn_stale = call_ach(
+        router,
+        "eve_public.achievement.definition.api.cdn.GetLatestRequest",
+        &player_ctx,
+        &google_any,
+        &stale_req,
+    )
+    .unwrap();
+    assert_eq!(cdn_stale.value, cdn_with_ver.value);
+
+    // c) no_local == true -> identical authoritative checkpoint
     cdn_req.fields.insert(2, DynamicValue::Bool(true));
     let cdn_ok = call_ach(
         router,
@@ -481,9 +568,9 @@ fn query_claim_showcase_unclaimed_and_cdn_latest_branches() {
         &cdn_req,
     )
     .unwrap();
-    assert!(!cdn_ok.value.is_empty());
+    assert_eq!(cdn_ok.value, cdn_with_ver.value);
 
-    // c) client_ver absent & googleapis type_url -> encodes default (24, 1, count) spec
+    // d) client_ver absent & no_local == false -> identical authoritative checkpoint
     let cdn_default = call_ach(
         router,
         "eve_public.achievement.definition.api.cdn.GetLatestRequest",
@@ -492,5 +579,5 @@ fn query_claim_showcase_unclaimed_and_cdn_latest_branches() {
         &empty_msg,
     )
     .unwrap();
-    assert!(!cdn_default.value.is_empty());
+    assert_eq!(cdn_default.value, cdn_with_ver.value);
 }
