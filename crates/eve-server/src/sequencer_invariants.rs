@@ -417,7 +417,7 @@ fn extract_slim_ball_id(rep: &PyRep) -> Option<BallId> {
         .and_then(positive_i64)
 }
 
-fn parse_destiny_entry(entry: &PyRep) -> Option<(Option<u32>, &str, Option<&PyRep>)> {
+pub(crate) fn parse_destiny_entry(entry: &PyRep) -> Option<(Option<u32>, &str, Option<&PyRep>)> {
     let outer = match entry {
         PyRep::Tuple(items) | PyRep::List(items) if items.len() >= 2 => items,
         _ => return None,
@@ -598,7 +598,7 @@ pub fn extract_remove_balls_entities(args: &PyRep, out: &mut Vec<BallId>) {
     }
 }
 
-fn collect_materialization_effect(entry: &PyRep) -> (bool, Vec<BallId>, Vec<BallId>) {
+pub(crate) fn collect_materialization_effect(entry: &PyRep) -> (bool, Vec<BallId>, Vec<BallId>) {
     let Some((_, action, args_opt)) = parse_destiny_entry(entry) else {
         return (false, Vec::new(), Vec::new());
     };
@@ -632,7 +632,7 @@ fn first_pos_arg(args: &PyRep) -> Option<BallId> {
     }
 }
 
-fn extract_dependent_destiny_target_from_entry(entry: &PyRep) -> Option<(String, BallId)> {
+pub(crate) fn extract_dependent_destiny_target_from_entry(entry: &PyRep) -> Option<(String, BallId)> {
     let (_, action, args_opt) = parse_destiny_entry(entry)?;
     let args = args_opt?;
     let target = extract_dependent_destiny_target(action, args)?;
