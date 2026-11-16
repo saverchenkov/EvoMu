@@ -428,12 +428,27 @@ pub fn handle_char_unbound(
                 ctx, None, c.character_id,
             );
             c = ctx.db.get_character(c.character_id).unwrap_or(c);
+            let (resolved_bloodline, resolved_race) =
+                crate::router::session_transition::resolve_character_bloodline_and_race(
+                    &c,
+                    Some(&ctx.sde),
+                );
+            if c.bloodline_id != resolved_bloodline || c.race_id != resolved_race {
+                ctx.db.with_mut_snapshot(|snap| {
+                    if let Some(ch_mut) = snap.characters.get_mut(&c.character_id) {
+                        ch_mut.bloodline_id = resolved_bloodline;
+                        ch_mut.race_id = resolved_race;
+                        ch_mut.version += 1;
+                    }
+                });
+                c.bloodline_id = resolved_bloodline;
+                c.race_id = resolved_race;
+            }
             let now_unix = ctx.now_unix();
             session.character_id = Some(c.character_id); session.corporation_id = Some(c.corporation_id);
             session.alliance_id = c.alliance_id; session.war_faction_id = c.war_faction_id;
             crate::router::apply_session_from_character(session, &c, None, Some(&ctx.sde));
             session.solar_system_id = Some(eff_sys);
-            session.race_id = Some(c.race_id);
             session.corp_role = ctx.db.with_snapshot(|snap| {
                 if !snap.corporations.contains_key(&c.corporation_id) {
                     return 0;

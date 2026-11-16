@@ -319,6 +319,34 @@ fn cluster_shutdown_code_reload_and_auxiliary_services() {
             .into_iter()
             .any(|(ev, _)| ev == "OnSessionChanged")
     );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut gm,
+            "sessionMgr",
+            "UpdateSessionAttributes",
+            &[PyRep::Dict(vec![
+                (PyRep::String("bloodlineID".into()), PyRep::Integer(2)),
+                (PyRep::String("genderID".into()), PyRep::Integer(0)),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(gm.bloodline_id, Some(2));
+    assert_eq!(gm.gender_id, Some(0));
+    let char_attr_notifs = gm.drain_notifications();
+    assert!(char_attr_notifs.iter().any(|(ev, args)| {
+        ev == "OnSessionChanged"
+            && matches!(
+                args.get(2),
+                Some(PyRep::Dict(diff))
+                    if diff.iter().any(|(k, _)| k.as_str() == Some("bloodlineID"))
+                        && diff.iter().any(|(k, _)| k.as_str() == Some("genderID"))
+            )
+    }));
     handle(
         &ctx,
         &mut gm,

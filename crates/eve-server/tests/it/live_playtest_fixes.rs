@@ -1586,3 +1586,104 @@ async fn test_1066_advancetime_partial_skill_training_pushes_notifications_and_a
         .expect("trainedSkillPoints from GetSkills");
     assert!((wire_sp - db_sp).abs() < 1e-4);
 }
+
+#[tokio::test]
+async fn test_issue_1116_isd_polaris_session_includes_bloodline_and_gender() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.db
+        .provision_gm_account("gm_1116", "gm-1116-secret", 90_000_003, "ISD Polaris");
+
+    let kw = HashMap::new();
+    let mut harness = crate::common::new_wire_harness(&ctx, 111_601)
+        .with_mode(eve_testkit::client_harness::ContractValidationMode::Ratcheted);
+    harness
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("gm_1116".into()),
+                PyRep::String("gm-1116-secret".into()),
+            ],
+            &kw,
+        )
+        .await;
+    let sel_out = harness
+        .call_exchange(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(90_000_003)],
+            &kw,
+        )
+        .await;
+    assert!(sel_out.result.is_ok(), "SelectCharacterID failed: {:?}", sel_out.result);
+    assert!(
+        !sel_out.session_change_packets.is_empty(),
+        "SelectCharacterID must emit SessionChangeNotification"
+    );
+
+    let extract_change_dict = |pkt_rep: &PyRep| -> HashMap<String, (PyRep, PyRep)> {
+        let pkt = eve_machonet::MachoPacket::from_pyrep(pkt_rep).expect("MachoPacket");
+        let PyRep::Tuple(outer) = pkt.payload else { panic!("expected Tuple payload") };
+        let PyRep::Tuple(inner) = &outer[1] else { panic!("expected inner tuple") };
+        let PyRep::Dict(entries) = &inner[1] else { panic!("expected Dict changes") };
+        entries
+            .iter()
+            .filter_map(|(k, v)| {
+                let key = k.as_str()?.to_string();
+                let PyRep::Tuple(pair) = v else { return None };
+                Some((key, (pair[0].clone(), pair[1].clone())))
+            })
+            .collect()
+    };
+
+    let changes = extract_change_dict(&sel_out.session_change_packets[0]);
+    assert_eq!(
+        changes.get("bloodlineID"),
+        Some(&(PyRep::None, PyRep::Integer(1)))
+    );
+    assert_eq!(
+        changes.get("raceID"),
+        Some(&(PyRep::None, PyRep::Integer(1)))
+    );
+    assert_eq!(
+        changes.get("genderID"),
+        Some(&(PyRep::None, PyRep::Integer(0)))
+    );
+
+    // Updating bloodline or gender on the active character updates session and emits SessionChangeNotification.
+    let bl_out = harness
+        .call_exchange(
+            "charUnboundMgr",
+            None,
+            "UpdateCharacterBloodline",
+            &[PyRep::Integer(90_000_003), PyRep::Integer(2)],
+            &kw,
+        )
+        .await;
+    assert_eq!(bl_out.result.unwrap(), PyRep::Bool(true));
+    assert!(!bl_out.session_change_packets.is_empty());
+    let bl_changes = extract_change_dict(&bl_out.session_change_packets[0]);
+    assert_eq!(
+        bl_changes.get("bloodlineID"),
+        Some(&(PyRep::Integer(1), PyRep::Integer(2)))
+    );
+
+    let gd_out = harness
+        .call_exchange(
+            "charUnboundMgr",
+            None,
+            "UpdateCharacterGender",
+            &[PyRep::Integer(90_000_003), PyRep::Integer(1)],
+            &kw,
+        )
+        .await;
+    assert_eq!(gd_out.result.unwrap(), PyRep::Bool(true));
+    assert!(!gd_out.session_change_packets.is_empty());
+    let gd_changes = extract_change_dict(&gd_out.session_change_packets[0]);
+    assert_eq!(
+        gd_changes.get("genderID"),
+        Some(&(PyRep::Integer(0), PyRep::Integer(1)))
+    );
+}

@@ -518,6 +518,102 @@ async fn select_character_restores_ceo_corprole_and_scoped_roles_over_machonet()
     assert_eq!(lookup("rolesAtHQ"), Some(expected.clone()));
     assert_eq!(lookup("rolesAtBase"), Some(expected.clone()));
     assert_eq!(lookup("rolesAtOther"), Some(expected));
+    assert_eq!(
+        lookup("raceID"),
+        Some(PyRep::Tuple(vec![PyRep::None, PyRep::Integer(2)]))
+    );
+    assert_eq!(
+        lookup("bloodlineID"),
+        Some(PyRep::Tuple(vec![PyRep::None, PyRep::Integer(3)]))
+    );
+    assert_eq!(
+        lookup("genderID"),
+        Some(PyRep::Tuple(vec![PyRep::None, PyRep::Integer(0)]))
+    );
+    drop(s);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn select_character_isd_polaris_emits_bloodline_and_gender_session_change() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    ctx.db
+        .provision_gm_account("admin", "admin-secret", 90_000_003, "ISD Polaris");
+    // Also simulate a legacy DB record missing bloodline_id/race_id to verify SelectCharacterID backfill.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_003) {
+            ch.bloodline_id = 0;
+            ch.race_id = 0;
+        }
+    });
+
+    let addr = spawn_macho_test_server(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) = connect_and_authenticate(addr, "admin", "admin-secret").await;
+    let sel_req = make_call_req(
+        client_id,
+        user_id,
+        1,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        vec![PyRep::Integer(90_000_003)],
+    );
+    write_framed_pyrep(&mut s, &sel_req.to_pyrep()).await.unwrap();
+
+    let mut sess_changes: Option<PyRep> = None;
+    let mut got_rsp = false;
+    for _ in 0..8 {
+        let pkt = MachoPacket::from_pyrep(
+            &tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                read_framed_pyrep(&mut s),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
+        if pkt.packet_type == MachoPacketType::CallRsp {
+            got_rsp = true;
+        } else if pkt.packet_type == MachoPacketType::SessionChangeNotification {
+            sess_changes = Some(pkt.payload);
+        }
+        if got_rsp && sess_changes.is_some() {
+            break;
+        }
+    }
+    assert!(got_rsp, "SelectCharacterID CallRsp missing");
+    let payload = sess_changes.expect("SessionChangeNotification missing");
+    let PyRep::Tuple(outer) = payload else { panic!("expected Tuple payload") };
+    let PyRep::Tuple(inner) = &outer[1] else { panic!("expected inner tuple") };
+    let PyRep::Dict(entries) = &inner[1] else { panic!("expected Dict changes") };
+    let lookup = |k: &str| {
+        entries
+            .iter()
+            .find(|(ek, _)| ek.as_str() == Some(k))
+            .map(|(_, v)| v.clone())
+    };
+    assert_eq!(
+        lookup("charid"),
+        Some(PyRep::Tuple(vec![PyRep::None, PyRep::Integer(90_000_003)]))
+    );
+    assert_eq!(
+        lookup("raceID"),
+        Some(PyRep::Tuple(vec![PyRep::None, PyRep::Integer(1)]))
+    );
+    assert_eq!(
+        lookup("bloodlineID"),
+        Some(PyRep::Tuple(vec![PyRep::None, PyRep::Integer(1)]))
+    );
+    assert_eq!(
+        lookup("genderID"),
+        Some(PyRep::Tuple(vec![PyRep::None, PyRep::Integer(0)]))
+    );
+    let ch = ctx.db.get_character(90_000_003).unwrap();
+    assert_eq!(ch.race_id, 1);
+    assert_eq!(ch.bloodline_id, 1);
     drop(s);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 }

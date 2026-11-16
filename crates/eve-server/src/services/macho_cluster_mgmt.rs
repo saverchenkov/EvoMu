@@ -1218,6 +1218,22 @@ fn parse_opt_u32_attr(key: &str, val: &PyRep) -> Result<Option<u32>, BridgeRpcEr
     }
 }
 
+fn parse_opt_nonneg_u32_attr(key: &str, val: &PyRep) -> Result<Option<u32>, BridgeRpcError> {
+    match val {
+        PyRep::None => Ok(None),
+        PyRep::Integer(v) if *v >= 0 => u32::try_from(*v).map(Some).map_err(|_| {
+            session_attr_err(
+                "InvalidSessionAttribute",
+                format!("Session attribute '{key}' overflows u32: {v}"),
+            )
+        }),
+        _ => Err(session_attr_err(
+            "InvalidSessionAttribute",
+            format!("Session attribute '{key}' expects a non-negative 32-bit integer or None"),
+        )),
+    }
+}
+
 fn parse_req_u64_attr(key: &str, val: &PyRep) -> Result<u64, BridgeRpcError> {
     match val {
         PyRep::None => Ok(0),
@@ -1269,6 +1285,8 @@ fn canonical_session_attr_name(raw: &str) -> Option<&'static str> {
         "regionid" => Some("regionid"),
         "shipid" => Some("shipid"),
         "raceID" | "raceid" => Some("raceID"),
+        "bloodlineID" | "bloodlineid" => Some("bloodlineID"),
+        "genderID" | "genderid" => Some("genderID"),
         "corprole" => Some("corprole"),
         "corpAccountKey" | "corpaccountkey" => Some("corpAccountKey"),
         "fleetid" => Some("fleetid"),
@@ -1323,6 +1341,8 @@ fn session_state_to_keyval(s: &SessionState) -> PyRep {
         ("regionid", opt_u32(s.region_id)),
         ("shipid", opt_i64(s.ship_id)),
         ("raceID", opt_u32(s.race_id)),
+        ("bloodlineID", opt_u32(s.bloodline_id)),
+        ("genderID", opt_u32(s.gender_id)),
         ("corprole", PyRep::Integer(s.corp_role as i64)),
         ("corpAccountKey", PyRep::Integer(i64::from(s.corp_account_key))),
         ("fleetid", opt_i64(s.fleet_id)),
@@ -1366,6 +1386,8 @@ fn apply_session_attr(
         "regionid" => state.region_id = parse_opt_u32_attr(canon_key, val)?,
         "shipid" => state.ship_id = parse_opt_pos_i64_attr(canon_key, val)?,
         "raceID" => state.race_id = parse_opt_u32_attr(canon_key, val)?,
+        "bloodlineID" => state.bloodline_id = parse_opt_u32_attr(canon_key, val)?,
+        "genderID" => state.gender_id = parse_opt_nonneg_u32_attr(canon_key, val)?,
         "corprole" => state.corp_role = parse_req_u64_attr(canon_key, val)?,
         "corpAccountKey" => {
             let v = parse_req_i64_attr(canon_key, val)?;
@@ -1451,6 +1473,17 @@ fn populate_session_from_registry_json(state: &mut SessionState, entry: &serde_j
     }
     if let Some(race) = opt_u32("raceID").or_else(|| opt_u32("race_id")) {
         state.race_id = Some(race);
+    }
+    if let Some(bloodline) = opt_u32("bloodlineID").or_else(|| opt_u32("bloodline_id")) {
+        state.bloodline_id = Some(bloodline);
+    }
+    if let Some(gender) = entry
+        .get("genderID")
+        .or_else(|| entry.get("gender_id"))
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u32::try_from(n).ok())
+    {
+        state.gender_id = Some(gender);
     }
     if let Some(cr) = entry.get("corprole").or_else(|| entry.get("corp_role")).and_then(|v| v.as_u64()) {
         state.corp_role = cr;
@@ -1620,6 +1653,10 @@ fn handle_session_attribute_update(
                         st.ship_id = Some(ch.active_ship_id);
                     }
                     st.race_id.get_or_insert(ch.race_id);
+                    if ch.bloodline_id > 0 {
+                        st.bloodline_id.get_or_insert(ch.bloodline_id);
+                    }
+                    st.gender_id.get_or_insert(ch.gender);
                 }
             }
             st
@@ -1711,6 +1748,16 @@ fn handle_session_attribute_update(
                         "raceID" => {
                             if let Some(race) = target_state.race_id {
                                 ch.race_id = race;
+                            }
+                        }
+                        "bloodlineID" => {
+                            if let Some(bloodline) = target_state.bloodline_id {
+                                ch.bloodline_id = bloodline;
+                            }
+                        }
+                        "genderID" => {
+                            if let Some(gender) = target_state.gender_id {
+                                ch.gender = gender;
                             }
                         }
                         _ => {}

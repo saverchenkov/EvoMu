@@ -55,6 +55,7 @@ fn char_unbound_mgr_prepare_cancel_delete_bloodline_and_gender() {
         .unwrap(),
         PyRep::Bool(true)
     );
+    assert_eq!(sess.gender_id, Some(1));
     assert_eq!(
         handle(
             &ctx,
@@ -87,6 +88,26 @@ fn char_unbound_mgr_prepare_cancel_delete_bloodline_and_gender() {
         .unwrap(),
         PyRep::Bool(true)
     );
+    assert_eq!(sess.bloodline_id, Some(valid_bl));
+    assert_eq!(sess.race_id, Some(ch_race));
+
+    // Updating another character's gender while active on a different character must not leak into session.
+    let mut other_char_sess = auth_session(uid, 90_000_002, corp_id, 30_000_142);
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut other_char_sess,
+            "charUnboundMgr",
+            "UpdateCharacterGender",
+            &[PyRep::Integer(cid), PyRep::Integer(0)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(other_char_sess.gender_id, None);
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&cid].gender), 0);
 
     // Seed a sacrificial character on account 1 in a player corporation with an office, market order, and contract
     let sac_cid = 90_888_001_i64;
