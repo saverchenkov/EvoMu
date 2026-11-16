@@ -908,22 +908,28 @@ async fn test_invariant_atomic_rollback_randomized_fault_injection() {
         }
     }
 
-    // Persistence-layer fault injection via SQLite BEFORE UPDATE / BEFORE INSERT triggers
+    // Persistence-layer fault injection via SQLite BEFORE UPDATE / BEFORE INSERT triggers.
+    // `char_contacts` is normalized into `domain_rows` under `DOMAIN_SOCIAL_CONTACTS_NOTES`
+    // (`char_contacts/<char_id>`), and `apply_domain_row_changes` uses `INSERT OR REPLACE`
+    // (so we guard both `BEFORE INSERT` and `BEFORE UPDATE` on `domain_rows` for that slice).
     {
         let raw_conn = rusqlite::Connection::open(&db_path).expect("open sqlite for trigger");
+        let contacts_domain = eve_db::sqlite_store::DOMAIN_SOCIAL_CONTACTS_NOTES;
         raw_conn
-            .execute_batch(
+            .execute_batch(&format!(
                 "CREATE TRIGGER fail_char_persist BEFORE UPDATE ON characters \
                  BEGIN SELECT RAISE(ABORT, 'injected_disk_persist_failure'); END; \
-                 CREATE TRIGGER fail_contact_ins BEFORE INSERT ON char_contacts \
+                 CREATE TRIGGER fail_contact_ins BEFORE INSERT ON domain_rows \
+                 WHEN NEW.domain = '{contacts_domain}' AND NEW.key LIKE 'char_contacts/%' \
                  BEGIN SELECT RAISE(ABORT, 'injected_contact_persist_failure'); END; \
-                 CREATE TRIGGER fail_contact_upd BEFORE UPDATE ON char_contacts \
+                 CREATE TRIGGER fail_contact_upd BEFORE UPDATE ON domain_rows \
+                 WHEN NEW.domain = '{contacts_domain}' AND NEW.key LIKE 'char_contacts/%' \
                  BEGIN SELECT RAISE(ABORT, 'injected_contact_persist_failure'); END; \
                  CREATE TRIGGER fail_label_ins BEFORE INSERT ON item_custom_names \
                  BEGIN SELECT RAISE(ABORT, 'injected_label_persist_failure'); END; \
                  CREATE TRIGGER fail_label_upd BEFORE UPDATE ON item_custom_names \
                  BEGIN SELECT RAISE(ABORT, 'injected_label_persist_failure'); END;",
-            )
+            ))
             .expect("install fault trigger");
     }
     let pre_persist_fault = capture_observable_state(&ctx);
@@ -940,15 +946,21 @@ async fn test_invariant_atomic_rollback_randomized_fault_injection() {
     assert!(fault_cash.is_err());
     assert_eq!(capture_observable_state(&ctx), pre_persist_fault);
 
-    let fault_contact = rpc(
+    let fault_contact_err = rpc(
         &ctx,
         &mut p1,
         "charMgr",
         "AddContact",
         &[PyRep::Integer(90_000_003), PyRep::Real(10.0), PyRep::Bool(true)],
     )
-    .await;
-    assert!(fault_contact.is_err());
+    .await
+    .expect_err("AddContact must abort on domain_rows fault trigger");
+    assert!(
+        fault_contact_err
+            .message
+            .contains("injected_contact_persist_failure"),
+        "expected injected_contact_persist_failure, got: {fault_contact_err:?}"
+    );
     assert_eq!(capture_observable_state(&ctx), pre_persist_fault);
 
     let fault_label = rpc(
