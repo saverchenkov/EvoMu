@@ -782,6 +782,73 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     }
                     ctx.invalidate_ship_fitting(sid);
                     let _ = ctx.fit(char_id, sid);
+                    if session.station_id.is_none() && session.structure_id.is_none() {
+                        if let Some(sys_id) = session.solar_system_id.filter(|&s| s > 0) {
+                            let sid_type_id = ctx
+                                .db
+                                .with_snapshot(|s| s.items.get(&sid).map(|i| i.type_id))
+                                .unwrap_or(0);
+                            if sid_type_id > 0 {
+                                let boarded_cs =
+                                    ctx.build_ship_combat_state(char_id, sid, sid_type_id);
+                                let sys_h = ctx.systems.get_or_spawn(sys_id);
+                                let _ = sys_h
+                                    .modify_combat_state(sid, move |cs| {
+                                        let scale_attr = |cur: f64, prev_max: f64, new_max: f64| {
+                                            if new_max <= 0.0 {
+                                                0.0
+                                            } else if prev_max <= 0.0 {
+                                                new_max
+                                            } else {
+                                                ((cur / prev_max).clamp(0.0, 1.0)) * new_max
+                                            }
+                                        };
+                                        cs.shield_hp = scale_attr(
+                                            cs.shield_hp,
+                                            cs.max_shield_hp,
+                                            boarded_cs.max_shield_hp,
+                                        );
+                                        cs.max_shield_hp = boarded_cs.max_shield_hp;
+                                        cs.base_max_shield_hp = boarded_cs.base_max_shield_hp;
+                                        cs.armor_hp = scale_attr(
+                                            cs.armor_hp,
+                                            cs.max_armor_hp,
+                                            boarded_cs.max_armor_hp,
+                                        );
+                                        cs.max_armor_hp = boarded_cs.max_armor_hp;
+                                        cs.base_max_armor_hp = boarded_cs.base_max_armor_hp;
+                                        cs.structure_hp = scale_attr(
+                                            cs.structure_hp,
+                                            cs.max_structure_hp,
+                                            boarded_cs.max_structure_hp,
+                                        );
+                                        cs.max_structure_hp = boarded_cs.max_structure_hp;
+                                        cs.base_max_structure_hp = boarded_cs.base_max_structure_hp;
+                                        cs.capacitor = scale_attr(
+                                            cs.capacitor,
+                                            cs.max_capacitor,
+                                            boarded_cs.max_capacitor,
+                                        );
+                                        cs.max_capacitor = boarded_cs.max_capacitor;
+                                        cs.base_max_capacitor = boarded_cs.base_max_capacitor;
+                                        cs.shield_recharge_time_ms =
+                                            boarded_cs.shield_recharge_time_ms;
+                                        cs.capacitor_recharge_time_ms =
+                                            boarded_cs.capacitor_recharge_time_ms;
+                                        cs.base_capacitor_recharge_time_ms =
+                                            boarded_cs.base_capacitor_recharge_time_ms;
+                                        cs.shield_resonance = boarded_cs.shield_resonance;
+                                        cs.base_shield_resonance = boarded_cs.base_shield_resonance;
+                                        cs.armor_resonance = boarded_cs.armor_resonance;
+                                        cs.base_armor_resonance = boarded_cs.base_armor_resonance;
+                                        cs.structure_resonance = boarded_cs.structure_resonance;
+                                        cs.base_structure_resonance =
+                                            boarded_cs.base_structure_resonance;
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
                     let _ = ctx.execute_session_transition_sync(
                         Some(session),
                         crate::router::SessionTransitionSpec::for_kind(
@@ -1046,7 +1113,11 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         speed_fraction: 0.0,
                         mode: eve_destiny::MovementMode::Stop,
                     },
-                    eve_destiny::CombatState::default(),
+                    if t_sde.is_some_and(|t| t.category_id == 6) {
+                        ctx.build_type_combat_state(type_id)
+                    } else {
+                        eve_destiny::CombatState::default()
+                    },
                     eve_destiny::SlimItemMeta {
                         group_id: t_sde.map(|t| t.group_id).unwrap_or(25),
                         category_id: t_sde.map(|t| t.category_id).unwrap_or(6),

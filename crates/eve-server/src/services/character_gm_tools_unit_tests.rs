@@ -1828,3 +1828,105 @@ async fn gm_bridge_slash_commands_target_explicit_player_across_systems() {
         assert_ne!(snap.characters[&gm_cid].security_status, -2.5);
     });
 }
+
+#[tokio::test]
+async fn gm_advancetime_heal_cap_upgrade_and_gm_fit_process_inv_change() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001i64;
+    let sys_id = 30_000_142u32;
+    let ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
+    let mut sess = gm_session(char_id, ship_id);
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.solar_system_id = Some(sys_id);
+    ctx.db
+        .acquire_online_lock(1, sess.session_id.max(1), Some(char_id), true, ctx.now_unix())
+        .expect("online lock");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = i64::from(sys_id);
+            ship.flag = eve_db::InventoryFlag::None;
+        }
+        crate::sp6_lifecycle::enter_space_in_snap(snap, ship_id, sys_id);
+    });
+
+    // 1. /heal with stale lower max_capacitor (e.g. CombatState::default() or unboarded hull)
+    // must upgrade SystemActor max_capacitor from the fitted ship and emit OnCapacitorChange (#1268).
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let mut stale_cs = eve_destiny::CombatState::default();
+    stale_cs.max_capacitor = 50.0;
+    stale_cs.capacitor = 10.0;
+    stale_cs.capacitor_recharge_time_ms = 150_000.0;
+    sys_h.try_spawn_ball_with_combat(
+        eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        },
+        stale_cs,
+    );
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    handle_gm_slash_ext(&ctx, &mut sess, char_id, "/heal")
+        .await
+        .expect("handled")
+        .expect("/heal succeeds");
+    let healed_cs = sys_h.get_combat_state(ship_id).await.unwrap().expect("cs");
+    assert!(healed_cs.max_capacitor >= 250.0 - 1e-6);
+    assert!((healed_cs.capacitor - healed_cs.max_capacitor).abs() < 1e-6);
+    let heal_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(heal_notifs.iter().any(|n| n.event == "OnModuleAttributeChanges"));
+    assert!(heal_notifs.iter().any(|n| n.event == "OnCapacitorChange"));
+
+    // 2. /advancetime me 6000 recharges stationary drained ship capacitor & emits OnCapacitorChange (#1268).
+    let _ = sys_h
+        .modify_combat_state(ship_id, |cs| {
+            cs.capacitor = 10.0;
+        })
+        .await;
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_gm_slash_ext(&ctx, &mut sess, char_id, "/advancetime me 6000")
+        .await
+        .expect("handled")
+        .expect("/advancetime me 6000 succeeds");
+    let recharged_cs = sys_h.get_combat_state(ship_id).await.unwrap().expect("cs");
+    assert!(recharged_cs.capacitor > 245.0, "expected recharged cap > 245, got {}", recharged_cs.capacitor);
+    let adv_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(adv_notifs.iter().any(|n| n.event == "OnCapacitorChange"));
+    assert!(!adv_notifs.iter().any(|n| n.event == "DoSimClockRebase"));
+
+    // 3. /fit "me" 2048 emits OnItemChange, OnMultipleItemChange, ProcessInventoryChange before OnModuleFitted (#1252).
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.retain(|_, it| !(it.location_id == ship_id && it.type_id == 2048));
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_gm_slash_ext(&ctx, &mut sess, char_id, r#"/fit "me" 2048"#)
+        .await
+        .expect("handled")
+        .expect("/fit succeeds");
+    let fit_notifs = ctx.drain_notifications_for_char(char_id);
+    let proc_idx = fit_notifs
+        .iter()
+        .position(|n| n.event == "ProcessInventoryChange")
+        .expect("ProcessInventoryChange emitted on /fit");
+    let fitted_idx = fit_notifs
+        .iter()
+        .position(|n| n.event == "OnModuleFitted")
+        .expect("OnModuleFitted emitted on /fit");
+    assert!(proc_idx < fitted_idx, "ProcessInventoryChange must precede OnModuleFitted");
+    assert!(fit_notifs.iter().any(|n| n.event == "OnItemChange"));
+    assert!(fit_notifs.iter().any(|n| n.event == "OnMultipleItemChange"));
+}

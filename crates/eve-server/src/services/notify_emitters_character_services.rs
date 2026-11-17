@@ -1221,7 +1221,9 @@ pub fn handle_batch3_gm_slash_cmd(
             };
             // #1005 / #1015: Advance server timers without emitting `DoSimClockRebase` so live
             // client `Ballpark.AdjustTimes` and `blue.os` clocks are not pushed into the future
-            // (`router/dispatch.rs` `timeControl.AdvanceClock` parity).
+            // (`router/dispatch.rs` `timeControl.AdvanceClock` parity). Callers in async slash
+            // paths (`character_gm_tools::handle_gm_slash_ext`) also invoke
+            // `fast_forward_and_sync_space_clock` so live `SystemActor` capacitor/shield and HUD sync.
             ctx.advance_secs_without_sim_clock_rebase(secs);
             crate::services::space_destiny::clear_session_change_timer(ctx, target_cid);
             Some(Ok(PyRep::keyval([
@@ -1572,6 +1574,133 @@ pub fn handle_batch3_gm_slash_cmd(
             ])))
         }
         _ => None,
+    }
+}
+
+/// Fast-forwards a character's in-space `SystemActor` simulation (`fast_forward_clock`), persists any
+/// recharged capacitor/shield attributes to `items[ship_id].dynamic_attributes`, and emits
+/// `OnCapacitorChange` / `OnModuleAttributeChanges` so client HUD and dogma remain in sync (#1268).
+pub(crate) async fn fast_forward_and_sync_space_clock(
+    ctx: &ServerContext,
+    target_cid: i64,
+    explicit_space: Option<(u32, i64)>,
+    secs: u64,
+) {
+    if secs == 0 {
+        return;
+    }
+    let space = explicit_space.or_else(|| {
+        if target_cid <= 0 {
+            return None;
+        }
+        ctx.db.with_snapshot(|snap| {
+            let ch = snap.characters.get(&target_cid)?;
+            if ch.station_id.is_none()
+                && ch.structure_id.is_none()
+                && ch.solar_system_id > 0
+                && ch.active_ship_id > 0
+            {
+                Some((ch.solar_system_id, ch.active_ship_id))
+            } else {
+                None
+            }
+        })
+    });
+    let Some((sys_id, ship_id)) = space else {
+        return;
+    };
+    if sys_id == 0 || ship_id <= 0 {
+        return;
+    }
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let pre_cs = sys_h.get_combat_state(ship_id).await.ok().flatten();
+    let _ = sys_h.fast_forward_clock(ship_id, secs).await;
+    let Some(post_cs) = sys_h.get_combat_state(ship_id).await.ok().flatten() else {
+        return;
+    };
+
+    let cap_changed = pre_cs
+        .as_ref()
+        .is_none_or(|pre| (post_cs.capacitor - pre.capacitor).abs() > 1e-6);
+    let shield_changed = pre_cs
+        .as_ref()
+        .is_none_or(|pre| (post_cs.shield_hp - pre.shield_hp).abs() > 1e-6);
+
+    if cap_changed || shield_changed {
+        ctx.db.with_mut_snapshot(|snap| {
+            if crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
+                snap,
+                ship_id,
+                Some(sys_id),
+                None,
+            ) {
+                return;
+            }
+            if let Some(item) = snap.items.get_mut(&ship_id) {
+                if cap_changed && post_cs.max_capacitor > 0.0 {
+                    let clamped_cap = post_cs.capacitor.clamp(0.0, post_cs.max_capacitor);
+                    item.dynamic_attributes.insert(18u16, clamped_cap);
+                    item.version += 1;
+                }
+                if shield_changed && post_cs.max_shield_hp > 0.0 {
+                    let clamped_shield = post_cs.shield_hp.clamp(0.0, post_cs.max_shield_hp);
+                    item.dynamic_attributes
+                        .insert(eve_sde::attr_ids::SHIELD_CHARGE, clamped_shield);
+                    item.version += 1;
+                }
+            }
+        });
+    }
+
+    let notify_cid = if target_cid > 0 {
+        target_cid
+    } else {
+        ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .values()
+                .find(|c| {
+                    c.active_ship_id == ship_id
+                        && c.solar_system_id == sys_id
+                        && c.station_id.is_none()
+                        && c.structure_id.is_none()
+                })
+                .map(|c| c.character_id)
+                .unwrap_or(0)
+        })
+    };
+    if notify_cid > 0 {
+        if cap_changed && post_cs.max_capacitor > 0.0 {
+            let _ = ctx.notify_ship_capacitor_change(
+                notify_cid,
+                ship_id,
+                post_cs.capacitor,
+                post_cs.max_capacitor,
+                pre_cs.as_ref().map(|c| c.capacitor),
+            );
+        }
+        if shield_changed && post_cs.max_shield_hp > 0.0 {
+            let now_ft = ctx.now_blueos_filetime_ticks();
+            let old_shield = pre_cs
+                .as_ref()
+                .map(|c| c.shield_hp)
+                .unwrap_or(post_cs.shield_hp);
+            ctx.emit_typed(
+                NotificationTarget::Character(notify_cid),
+                crate::router::notify_registry::OnModuleAttributeChanges {
+                    changes: PyRep::List(vec![PyRep::Tuple(vec![
+                        PyRep::String("OnModuleAttributeChange".into()),
+                        PyRep::Integer(notify_cid),
+                        PyRep::Integer(ship_id),
+                        PyRep::Integer(i64::from(eve_sde::attr_ids::SHIELD_CHARGE)),
+                        PyRep::Integer(now_ft),
+                        PyRep::Real(post_cs.shield_hp),
+                        PyRep::Real(old_shield),
+                        PyRep::None,
+                    ])]),
+                },
+            );
+        }
     }
 }
 

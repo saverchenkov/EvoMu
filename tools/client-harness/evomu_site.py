@@ -1031,6 +1031,7 @@ def _install_camera_dock_guard():
 
     _install_hangar_view_teardown_guard()
     _install_hangar_transition_guard()
+    _install_live_client_sync_guards()
 
 
 class _HangarViewTornDown(Exception):
@@ -1323,6 +1324,454 @@ def _install_hangar_view_teardown_guard():
     return True
 
 
+class _NullHangarCamera(object):
+    """Minimal stand-in when ModularHangarShipBehaviour.GetCamera() returns None during teardown (#1218)."""
+
+    def ClearRefs(self):
+        return None
+
+
+def _is_inventory_not_accessible_error(exc):
+    """Return True if *exc* represents an InventoryNotAccessible UserError or stringified message."""
+    if exc is None:
+        return False
+    msg = repr(exc)
+    if "InventoryNotAccessible" in msg:
+        return True
+    err_dict = getattr(exc, "dict", None)
+    if isinstance(err_dict, dict) and "InventoryNotAccessible" in repr(err_dict):
+        return True
+    return "InventoryNotAccessible" in str(exc)
+
+
+def _is_stale_inventory_controller_for_session(inv_cont, sess):
+    """Return True when *inv_cont*'s controller targets a station/structure unreachable in *sess* (#1267)."""
+    if sess is None or inv_cont is None:
+        return False
+    ctrl = getattr(inv_cont, "invController", None)
+    if ctrl is None:
+        return False
+    ctrl_name = getattr(getattr(ctrl, "__class__", None), "__name__", "")
+    sess_station = getattr(sess, "stationid", None)
+    sess_struct = getattr(sess, "structureid", None)
+    sess_ship = getattr(sess, "shipid", None)
+    if sess_station is None and sess_struct is None and (
+        "Structure" in ctrl_name or "Station" in ctrl_name
+    ):
+        return True
+    ctrl_item_id = getattr(ctrl, "itemID", None)
+    if ctrl_item_id is not None and (
+        "Structure" in ctrl_name or "Station" in ctrl_name
+    ):
+        return ctrl_item_id not in (sess_ship, sess_struct, sess_station)
+    return False
+
+
+def _install_inventory_transition_guard():
+    """Guard V24 Inventory/InvContCapacityGauge against stale structure polls after /moveme (#1267)."""
+    changed = False
+    inv_mod = sys.modules.get("eve.client.script.ui.shared.inventory.invWindow")
+    inv_cls = getattr(inv_mod, "Inventory", None) if inv_mod is not None else None
+    if (
+        inv_cls is not None
+        and "invWindow" not in _HOOKED_CAMERA_GUARD_TARGETS
+        and (isinstance(inv_cls, type) or hasattr(inv_cls, "__bases__"))
+    ):
+        orig_valid = getattr(inv_cls, "_IsCurrentInventoryValid", None)
+        if callable(orig_valid) and not getattr(orig_valid, "_evomu_camera_guard", False):
+            def _wrapped_is_current_inventory_valid(self):
+                sess = getattr(__builtin__, "session", None)
+                if (
+                    sess is not None
+                    and getattr(sess, "structureid", None) is None
+                    and getattr(sess, "stationid", None) is None
+                ):
+                    curr_inv_id = getattr(self, "currInvID", None)
+                    win_id = str(getattr(self, "default_windowID", "") or "")
+                    if win_id.startswith(
+                        ("InventoryStructure", "InventoryStation", "StructureItems", "StructureShips")
+                    ):
+                        return False
+                    if curr_inv_id:
+                        inv_head = (
+                            str(curr_inv_id[0])
+                            if isinstance(curr_inv_id, (tuple, list)) and curr_inv_id
+                            else str(curr_inv_id)
+                        )
+                        if inv_head.startswith(("Structure", "Station")):
+                            return False
+                        get_ctrl = getattr(inv_mod, "GetInvCtrlFromInvID", None)
+                        if callable(get_ctrl):
+                            try:
+                                ctrl = get_ctrl(curr_inv_id)
+                                if ctrl is not None:
+                                    inv_item = ctrl.GetInventoryItem()
+                                    if inv_item is not None:
+                                        sm = getattr(__builtin__, "sm", None)
+                                        if sm is not None:
+                                            return bool(
+                                                sm.GetService("invCache").ValidateItemCanBeOpened(inv_item)
+                                            )
+                            except Exception as exc:
+                                if isinstance(exc, (KeyError, RuntimeError)) or _is_inventory_not_accessible_error(exc):
+                                    return False
+                                raise
+                return orig_valid(self)
+
+            _wrapped_is_current_inventory_valid._evomu_camera_guard = True
+            inv_cls._IsCurrentInventoryValid = _wrapped_is_current_inventory_valid
+
+        orig_on_sess = getattr(inv_cls, "OnSessionChanged", None)
+        if callable(orig_on_sess) and not getattr(orig_on_sess, "_evomu_camera_guard", False):
+            def _wrapped_on_session_changed(self, isRemote, sess, change):
+                res = orig_on_sess(self, isRemote, sess, change)
+                valid_fn = getattr(self, "_IsCurrentInventoryValid", None)
+                if getattr(self, "currInvID", None) is None or (
+                    callable(valid_fn) and not valid_fn()
+                ):
+                    self.updateSelectedItemsPending = None
+                return res
+
+            _wrapped_on_session_changed._evomu_camera_guard = True
+            inv_cls.OnSessionChanged = _wrapped_on_session_changed
+
+        orig_update = getattr(inv_cls, "_UpdateSelectedItems", None)
+        if callable(orig_update) and not getattr(orig_update, "_evomu_camera_guard", False):
+            def _wrapped_update_selected_items(self):
+                sess = getattr(__builtin__, "session", None)
+                if getattr(self, "destroyed", False) or getattr(sess, "mutating", False):
+                    self.updateSelectedItemsPending = None
+                    return None
+                valid_fn = getattr(self, "_IsCurrentInventoryValid", None)
+                if callable(valid_fn) and not valid_fn():
+                    self.updateSelectedItemsPending = None
+                    return None
+                inv_cont = getattr(self, "invCont", None)
+                if _is_stale_inventory_controller_for_session(inv_cont, sess):
+                    self.updateSelectedItemsPending = None
+                    return None
+                try:
+                    return orig_update(self)
+                except Exception as exc:
+                    if (
+                        getattr(self, "destroyed", False)
+                        or getattr(sess, "mutating", False)
+                        or _is_inventory_not_accessible_error(exc)
+                        and (
+                            (callable(valid_fn) and not valid_fn())
+                            or _is_stale_inventory_controller_for_session(inv_cont, sess)
+                        )
+                    ):
+                        self.updateSelectedItemsPending = None
+                        return None
+                    raise
+
+            _wrapped_update_selected_items._evomu_camera_guard = True
+            inv_cls._UpdateSelectedItems = _wrapped_update_selected_items
+
+        _HOOKED_CAMERA_GUARD_TARGETS.add("invWindow")
+        changed = True
+
+    cont_mod = sys.modules.get("eve.client.script.ui.shared.container")
+    gauge_cls = getattr(cont_mod, "InvContCapacityGauge", None) if cont_mod is not None else None
+    if (
+        gauge_cls is not None
+        and "invContainer" not in _HOOKED_CAMERA_GUARD_TARGETS
+        and (isinstance(gauge_cls, type) or hasattr(gauge_cls, "__bases__"))
+    ):
+        for meth_name in ("SetSecondaryVolume", "UpdateLabel"):
+            orig_meth = getattr(gauge_cls, meth_name, None)
+            if callable(orig_meth) and not getattr(orig_meth, "_evomu_camera_guard", False):
+                def _make_gauge_guard(orig_fn):
+                    def _wrapped_gauge_method(self, *args, **kwargs):
+                        sess = getattr(__builtin__, "session", None)
+                        inv_cont = getattr(self, "invCont", None)
+                        if (
+                            getattr(self, "destroyed", False)
+                            or inv_cont is None
+                            or getattr(inv_cont, "destroyed", False)
+                            or getattr(sess, "mutating", False)
+                            or _is_stale_inventory_controller_for_session(inv_cont, sess)
+                        ):
+                            return None
+                        try:
+                            return orig_fn(self, *args, **kwargs)
+                        except Exception as exc:
+                            if (
+                                getattr(self, "destroyed", False)
+                                or getattr(inv_cont, "destroyed", False)
+                                or (
+                                    _is_inventory_not_accessible_error(exc)
+                                    and (
+                                        _is_hangar_session_undocked()
+                                        or _is_stale_inventory_controller_for_session(inv_cont, sess)
+                                    )
+                                )
+                            ):
+                                return None
+                            raise
+
+                    _wrapped_gauge_method._evomu_camera_guard = True
+                    return _wrapped_gauge_method
+
+                setattr(gauge_cls, meth_name, _make_gauge_guard(orig_meth))
+        _HOOKED_CAMERA_GUARD_TARGETS.add("invContainer")
+        changed = True
+    return changed
+
+
+def _install_fitting_active_ship_guard():
+    """Guard fittingSvc/fittingWarnings against session.shipid=None during dock (#1254)."""
+    changed = False
+    fsvc_mod = sys.modules.get("eve.client.script.environment.fittingSvc")
+    fsvc_cls = None
+    if fsvc_mod is not None:
+        fsvc_cls = getattr(fsvc_mod, "fittingSvc", None) or getattr(fsvc_mod, "FittingSvc", None)
+    if (
+        fsvc_cls is not None
+        and "fittingSvc" not in _HOOKED_CAMERA_GUARD_TARGETS
+        and (isinstance(fsvc_cls, type) or hasattr(fsvc_cls, "__bases__"))
+    ):
+        orig_get = getattr(fsvc_cls, "GetFittingDictForActiveShip", None)
+        if callable(orig_get) and not getattr(orig_get, "_evomu_camera_guard", False):
+            def _wrapped_get_fitting_dict_for_active_ship(self, *args, **kwargs):
+                eve_cfg = getattr(fsvc_mod, "eveCfg", None)
+                active_ship = None
+                if eve_cfg is not None and callable(getattr(eve_cfg, "GetActiveShip", None)):
+                    active_ship = eve_cfg.GetActiveShip()
+                else:
+                    sess = getattr(__builtin__, "session", None)
+                    active_ship = getattr(sess, "shipid", None)
+                if active_ship is None:
+                    raise RuntimeError("No active ship")
+                return orig_get(self, *args, **kwargs)
+
+            _wrapped_get_fitting_dict_for_active_ship._evomu_camera_guard = True
+            fsvc_cls.GetFittingDictForActiveShip = _wrapped_get_fitting_dict_for_active_ship
+        _HOOKED_CAMERA_GUARD_TARGETS.add("fittingSvc")
+        changed = True
+
+    fw_mod = sys.modules.get("shipfitting.fittingWarnings")
+    if fw_mod is not None and "fittingWarnings" not in _HOOKED_CAMERA_GUARD_TARGETS:
+        orig_eval = getattr(fw_mod, "EvaluateFit", None)
+        if callable(orig_eval) and not getattr(orig_eval, "_evomu_camera_guard", False):
+            def _wrapped_evaluate_fit(fittingController):
+                try:
+                    return orig_eval(fittingController)
+                except IndexError as exc:
+                    sess = getattr(__builtin__, "session", None)
+                    if getattr(sess, "shipid", None) is None or "None" in str(exc):
+                        return None
+                    raise
+
+            _wrapped_evaluate_fit._evomu_camera_guard = True
+            fw_mod.EvaluateFit = _wrapped_evaluate_fit
+        _HOOKED_CAMERA_GUARD_TARGETS.add("fittingWarnings")
+        changed = True
+
+    wic_mod = sys.modules.get("eve.client.script.ui.shared.fittingScreen.warningIconCont")
+    wic_cls = getattr(wic_mod, "WarningIconCont", None) if wic_mod is not None else None
+    if (
+        wic_cls is not None
+        and "warningIconCont" not in _HOOKED_CAMERA_GUARD_TARGETS
+        and (isinstance(wic_cls, type) or hasattr(wic_cls, "__bases__"))
+    ):
+        orig_thread = getattr(wic_cls, "_WarningIconCont__UpdateIcon_thread", None)
+        if callable(orig_thread) and not getattr(orig_thread, "_evomu_camera_guard", False):
+            def _wrapped_update_icon_thread(self):
+                if getattr(self, "destroyed", False):
+                    return None
+                try:
+                    return orig_thread(self)
+                except IndexError as exc:
+                    sess = getattr(__builtin__, "session", None)
+                    if getattr(sess, "shipid", None) is None or "None" in str(exc):
+                        return None
+                    raise
+
+            _wrapped_update_icon_thread._evomu_camera_guard = True
+            wic_cls._WarningIconCont__UpdateIcon_thread = _wrapped_update_icon_thread
+        _HOOKED_CAMERA_GUARD_TARGETS.add("warningIconCont")
+        changed = True
+    return changed
+
+
+def _install_modular_hangar_teardown_guard():
+    """Guard ModularHangarShipBehaviour.CleanScene against GetCamera() returning None (#1218)."""
+    if "modularHangarBehaviours" in _HOOKED_CAMERA_GUARD_TARGETS:
+        return False
+    mhb_mod = sys.modules.get("eve.client.script.ui.view.hangarBehaviours.modularHangarBehaviours")
+    if mhb_mod is None:
+        return False
+    hooked = False
+    for cls_name in ("ModularHangarShipBehaviour", "ModularHangarDroneBehaviour"):
+        cls = getattr(mhb_mod, cls_name, None)
+        if cls is None or not (isinstance(cls, type) or hasattr(cls, "__bases__")):
+            continue
+        orig_clean = getattr(cls, "CleanScene", None)
+        if callable(orig_clean) and not getattr(orig_clean, "_evomu_camera_guard", False):
+            def _make_clean_guard(orig_fn):
+                def _wrapped_clean_scene(self):
+                    if getattr(self, "smallDocks", None) is None:
+                        self.smallDocks = []
+                    if getattr(self, "bigDocks", None) is None:
+                        self.bigDocks = []
+                    override_cam = False
+                    get_cam = getattr(self, "GetCamera", None)
+                    cam_val = None
+                    if callable(get_cam):
+                        try:
+                            cam_val = get_cam()
+                        except Exception:
+                            cam_val = None
+                        if cam_val is None:
+                            self.GetCamera = lambda: _NullHangarCamera()
+                            override_cam = True
+                    try:
+                        return orig_fn(self)
+                    except AttributeError as exc:
+                        if "ClearRefs" in str(exc) and cam_val is None:
+                            return None
+                        raise
+                    finally:
+                        if override_cam and isinstance(getattr(self, "__dict__", None), dict):
+                            self.__dict__.pop("GetCamera", None)
+
+                _wrapped_clean_scene._evomu_camera_guard = True
+                return _wrapped_clean_scene
+
+            cls.CleanScene = _make_clean_guard(orig_clean)
+            hooked = True
+    if hooked:
+        _HOOKED_CAMERA_GUARD_TARGETS.add("modularHangarBehaviours")
+    return hooked
+
+
+def _install_wreck_rotation_guard():
+    """Guard Wreck.SetRandomRotation / Prepare when self.model is None on persisted ballID=0 wrecks (#1217)."""
+    if "wreck" in _HOOKED_CAMERA_GUARD_TARGETS:
+        return False
+    wreck_mod = sys.modules.get("eve.client.script.environment.spaceObject.wreck")
+    wreck_cls = getattr(wreck_mod, "Wreck", None) if wreck_mod is not None else None
+    if wreck_cls is None or not (isinstance(wreck_cls, type) or hasattr(wreck_cls, "__bases__")):
+        return False
+
+    orig_rot = getattr(wreck_cls, "SetRandomRotation", None)
+    if callable(orig_rot) and not getattr(orig_rot, "_evomu_camera_guard", False):
+        def _wrapped_set_random_rotation(self):
+            try:
+                return orig_rot(self)
+            except AttributeError:
+                if getattr(self, "model", None) is None:
+                    return None
+                raise
+
+        _wrapped_set_random_rotation._evomu_camera_guard = True
+        wreck_cls.SetRandomRotation = _wrapped_set_random_rotation
+
+    orig_prep = getattr(wreck_cls, "Prepare", None)
+    if callable(orig_prep) and not getattr(orig_prep, "_evomu_camera_guard", False):
+        def _wrapped_prepare(self):
+            try:
+                return orig_prep(self)
+            except AttributeError:
+                if getattr(self, "model", None) is None:
+                    return None
+                raise
+
+        _wrapped_prepare._evomu_camera_guard = True
+        wreck_cls.Prepare = _wrapped_prepare
+
+    _HOOKED_CAMERA_GUARD_TARGETS.add("wreck")
+    return True
+
+
+def _install_slots_container_sync_guard():
+    """Ensure SlotsContainer rebuilds HUD slots on OnModuleFitted / late ProcessShipEffect (#1252)."""
+    if "slotsContainer" in _HOOKED_CAMERA_GUARD_TARGETS:
+        return False
+    sc_mod = sys.modules.get("eve.client.script.ui.inflight.shipHud.slotsContainer")
+    sc_cls = getattr(sc_mod, "SlotsContainer", None) if sc_mod is not None else None
+    if sc_cls is None or not (isinstance(sc_cls, type) or hasattr(sc_cls, "__bases__")):
+        return False
+
+    def _schedule_slots_refresh(cont):
+        if getattr(cont, "destroyed", False):
+            return
+        init_delayed = getattr(cont, "InitSlotsDelayed", None)
+        if callable(init_delayed):
+            init_delayed()
+
+    notify_events = getattr(sc_cls, "__notifyevents__", None)
+    if isinstance(notify_events, (list, tuple)) and "OnModuleFitted" not in notify_events:
+        if isinstance(notify_events, list):
+            notify_events.append("OnModuleFitted")
+        else:
+            sc_cls.__notifyevents__ = list(notify_events) + ["OnModuleFitted"]
+
+    if not getattr(getattr(sc_cls, "OnModuleFitted", None), "_evomu_camera_guard", False):
+        def _on_module_fitted(self, *args, **kwargs):
+            _schedule_slots_refresh(self)
+
+        _on_module_fitted._evomu_camera_guard = True
+        sc_cls.OnModuleFitted = _on_module_fitted
+
+    orig_pse = getattr(sc_cls, "ProcessShipEffect", None)
+    if callable(orig_pse) and not getattr(orig_pse, "_evomu_camera_guard", False):
+        def _wrapped_process_ship_effect(self, godmaStm, effectState):
+            res = orig_pse(self, godmaStm, effectState)
+            if not getattr(self, "destroyed", False) and effectState is not None:
+                item_id = getattr(effectState, "itemID", None)
+                mods_by_id = getattr(self, "modulesByID", None) or {}
+                if item_id is not None and item_id not in mods_by_id:
+                    ctrl = getattr(self, "controller", None)
+                    get_mods = getattr(ctrl, "GetModules", None) if ctrl is not None else None
+                    if callable(get_mods):
+                        for m in get_mods() or ():
+                            if getattr(m, "itemID", None) == item_id:
+                                _schedule_slots_refresh(self)
+                                break
+            return res
+
+        _wrapped_process_ship_effect._evomu_camera_guard = True
+        sc_cls.ProcessShipEffect = _wrapped_process_ship_effect
+
+    orig_inv = getattr(sc_cls, "OnInvChange", None)
+    if callable(orig_inv) and not getattr(orig_inv, "_evomu_camera_guard", False):
+        def _wrapped_on_inv_change(self, item, change):
+            res = orig_inv(self, item, change)
+            if not getattr(self, "destroyed", False) and item is not None:
+                sess = getattr(__builtin__, "session", None)
+                ship_id = getattr(sess, "shipid", None)
+                item_id = getattr(item, "itemID", None)
+                mods_by_id = getattr(self, "modulesByID", None) or {}
+                if (
+                    ship_id is not None
+                    and getattr(item, "locationID", None) == ship_id
+                    and item_id is not None
+                    and item_id not in mods_by_id
+                ):
+                    is_fit_flag = getattr(sc_mod, "IsShipFittingFlag", None)
+                    if callable(is_fit_flag) and is_fit_flag(getattr(item, "flagID", None)):
+                        _schedule_slots_refresh(self)
+            return res
+
+        _wrapped_on_inv_change._evomu_camera_guard = True
+        sc_cls.OnInvChange = _wrapped_on_inv_change
+
+    _HOOKED_CAMERA_GUARD_TARGETS.add("slotsContainer")
+    return True
+
+
+def _install_live_client_sync_guards():
+    """Install all live-client transition/sync guards (#1267, #1254, #1218, #1217, #1252)."""
+    _install_inventory_transition_guard()
+    _install_fitting_active_ship_guard()
+    _install_modular_hangar_teardown_guard()
+    _install_wreck_rotation_guard()
+    _install_slots_container_sync_guard()
+
+
 def _maybe_schedule_driver_on_main_thread():
     global _DRIVER_SCHEDULED
     if _DRIVER_SCHEDULED:
@@ -1340,6 +1789,7 @@ def _maybe_schedule_driver_on_main_thread():
     _install_flatbuffer_cdn_http_guard()
     _install_fsd_typelist_preload_hook(preload_typelist=False)
     _install_camera_dock_guard()
+    _install_live_client_sync_guards()
     _DRIVER_SCHEDULED = True
     try:
         if os.environ.get("EVOMU_PLAYTESTER_PORT") or os.environ.get("EVOMU_PLAYTESTER_CFG"):
@@ -1360,6 +1810,7 @@ class _EvomuMetaHook(object):
         _install_flatbuffer_cdn_http_guard()
         _install_fsd_typelist_preload_hook(preload_typelist=False)
         _install_camera_dock_guard()
+        _install_live_client_sync_guards()
         _maybe_schedule_driver_on_main_thread()
         return None
 
