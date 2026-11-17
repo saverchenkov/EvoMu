@@ -3572,7 +3572,6 @@ async fn test_smb_launch_and_board_preserves_persisted_ship_damage_and_ball_stat
     fb_cs.armor_hp = (fb_cs.max_armor_hp * 0.50).max(1.0);
     fb_cs.structure_hp = (fb_cs.max_structure_hp * 0.55).max(1.0);
     fb_cs.capacitor = (fb_cs.max_capacitor * 0.35).max(1.0);
-    eve_server::sp6_lifecycle::persist_ship_combat_hp_in_db(&ctx.db, fallback_rifter_id, &fb_cs);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(sh) = snap.items.get_mut(&fallback_rifter_id) {
             sh.location_id = i64::from(sys_id);
@@ -3595,9 +3594,29 @@ async fn test_smb_launch_and_board_preserves_persisted_ship_damage_and_ball_stat
         })
         .await;
     sys_handle
-        .set_combat_state(fallback_rifter_id, eve_destiny::CombatState::default())
+        .set_combat_state(
+            fallback_rifter_id,
+            eve_destiny::CombatState {
+                shield_hp: 0.0,
+                max_shield_hp: 0.0,
+                armor_hp: 0.0,
+                max_armor_hp: 0.0,
+                structure_hp: 0.0,
+                max_structure_hp: 0.0,
+                capacitor: 0.0,
+                max_capacitor: 0.0,
+                ..eve_destiny::CombatState::default()
+            },
+        )
         .await
         .expect("seed zeroed CombatState");
+    eve_server::sp6_lifecycle::persist_ship_combat_hp_in_db(&ctx.db, fallback_rifter_id, &fb_cs);
+    let pre_fb = sys_handle
+        .get_combat_state(fallback_rifter_id)
+        .await
+        .expect("get pre-board fallback combat state")
+        .expect("fallback Rifter has zeroed CombatState before Board");
+    assert_eq!(pre_fb.max_armor_hp, 0.0, "precondition: prev_max must be zero before fallback Board");
 
     ctx.advance_secs(12);
     ctx.dispatch_rpc(
@@ -3617,9 +3636,28 @@ async fn test_smb_launch_and_board_preserves_persisted_ship_damage_and_ball_stat
         .await
         .expect("get fallback combat state")
         .expect("fallback Rifter has CombatState");
-    assert!((fb_live.armor_hp - fb_cs.armor_hp).abs() < 1e-4 && fb_live.armor_hp < fb_live.max_armor_hp);
-    assert!((fb_live.structure_hp - fb_cs.structure_hp).abs() < 1e-4 && fb_live.structure_hp < fb_live.max_structure_hp);
-    assert!((fb_live.shield_hp - fb_cs.shield_hp).abs() < 1e-4 && fb_live.shield_hp < fb_live.max_shield_hp);
+    assert!(
+        (fb_live.armor_hp - fb_cs.armor_hp).abs() < 1e-4 && fb_live.armor_hp < fb_live.max_armor_hp,
+        "Board fallback must preserve armor damage: got {} expected {} (max={})",
+        fb_live.armor_hp,
+        fb_cs.armor_hp,
+        fb_live.max_armor_hp,
+    );
+    assert!(
+        (fb_live.structure_hp - fb_cs.structure_hp).abs() < 1e-4
+            && fb_live.structure_hp < fb_live.max_structure_hp,
+        "Board fallback must preserve structure damage: got {} expected {} (max={})",
+        fb_live.structure_hp,
+        fb_cs.structure_hp,
+        fb_live.max_structure_hp
+    );
+    assert!(
+        (fb_live.shield_hp - fb_cs.shield_hp).abs() < 1e-4 && fb_live.shield_hp < fb_live.max_shield_hp,
+        "Board fallback must preserve shield damage: got {} expected {} (max={})",
+        fb_live.shield_hp,
+        fb_cs.shield_hp,
+        fb_live.max_shield_hp
+    );
 
     // Board back into damaged_rifter_id and Dock into Jita 4-4: persisted DB damage must remain intact (no 0-ISK repair).
     ctx.advance_secs(12);
@@ -3634,6 +3672,17 @@ async fn test_smb_launch_and_board_preserves_persisted_ship_damage_and_ball_stat
     )
     .await
     .expect("Re-board damaged Rifter before Dock");
+    let reboarded_cs = sys_handle
+        .get_combat_state(damaged_rifter_id)
+        .await
+        .expect("get reboarded combat state")
+        .expect("reboarded Rifter has CombatState");
+    assert!(
+        (reboarded_cs.shield_hp - expected_shield).abs() < 1e-4 && reboarded_cs.shield_hp < reboarded_cs.max_shield_hp,
+        "Re-boarding damaged Rifter in space must keep damaged shield ({} vs {})",
+        reboarded_cs.shield_hp,
+        expected_shield
+    );
     sys_handle.set_ball_position(damaged_rifter_id, space_pos).await;
     ctx.advance_secs(12);
     ctx.dispatch_rpc(
@@ -3657,7 +3706,8 @@ async fn test_smb_launch_and_board_preserves_persisted_ship_damage_and_ball_stat
             .expect("ship_combat_hp persisted across Dock");
         assert!((hp.armor_hp - expected_armor).abs() < 1e-4);
         assert!((hp.hull_hp - expected_hull).abs() < 1e-4);
-        assert!(hp.shield_hp < ref_cs.max_shield_hp);
+        // Docking restores shield to 100% (#1082) while keeping armor and hull damage intact.
+        assert!((hp.shield_hp - ref_cs.max_shield_hp).abs() < 1e-4);
         let item = &snap.items[&damaged_rifter_id];
         assert_eq!(item.location_id, station_id);
         let armor_dmg = item.dynamic_attributes.get(&eve_sde::attr_ids::ARMOR_DAMAGE).copied().unwrap_or(0.0);

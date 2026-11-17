@@ -780,7 +780,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             }
                         }
                     }
-                    ctx.invalidate_ship_fitting(sid);
+                    ctx.invalidate_ship_fitting_cache_only(sid);
                     let _ = ctx.fit(char_id, sid);
                     if session.station_id.is_none() && session.structure_id.is_none() {
                         if let Some(sys_id) = session.solar_system_id.filter(|&s| s > 0) {
@@ -871,6 +871,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             }
                         }
                     }
+                    let _ = ctx.push_fit_projection(char_id, sid);
                     let _ = ctx.execute_session_transition_sync(
                         Some(session),
                         crate::router::SessionTransitionSpec::for_kind(
