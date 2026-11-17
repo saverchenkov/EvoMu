@@ -26,7 +26,7 @@ pub fn read_superweapon_runtime(
 ) -> Option<PersistedSuperweaponRuntime> {
     db.with_snapshot(|snap| {
         let rt = &snap.superweapon_runtime;
-        (!rt.active_cycles.is_empty() || !rt.warp_suppressions.is_empty()).then(|| rt.clone())
+        (!rt.active_cycles.is_empty() || !rt.warp_suppressions.is_empty()).then(|| rt.as_inner().clone())
     })
 }
 

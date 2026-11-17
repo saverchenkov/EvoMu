@@ -1,5 +1,9 @@
 //! Durable transactional snapshot persistence, WAL journaling, and SQLite relational storage.
 
+use crate::cow::{CowCell, CowMap};
+use crate::cow_collections::{CowActiveMissions, CowIdVec};
+#[cfg(test)]
+use crate::cow_collections::CowVecDiff;
 use crate::lock_rank::{RankedMutex, RankedRwLock, RANK_CLOCK, RANK_LEAF, RANK_WAL_LOCK, RANK_WORLD_INNER};
 use crate::sqlite_store;
 use crate::tx_engine::{
@@ -66,15 +70,21 @@ pub struct WorldStateWalDelta {
 impl WorldStateWalDelta {
     #[cfg(test)]
     pub(crate) fn from_diff(old: &WorldStateSnapshot, new: &WorldStateSnapshot) -> Self {
-        let skills_only_upserted = old.skills.iter().all(|(cid, old_m)| {
-            new.skills
-                .get(cid)
-                .is_some_and(|new_m| old_m.keys().all(|tid| new_m.contains_key(tid)))
-        }) && old
-            .skill_queues
-            .keys()
-            .all(|cid| new.skill_queues.contains_key(cid));
-        let cold_equal = old.markets_seeded == new.markets_seeded
+        let skills_only_upserted = (old.skills.ptr_eq(&new.skills)
+            || old.skills.diff(&new.skills).all(|d| match d {
+                CowDiffItem::Remove(..) => false,
+                CowDiffItem::Add(..) => true,
+                CowDiffItem::Update {
+                    old: (_, old_m),
+                    new: (_, new_m),
+                } => old_m.keys().all(|tid| new_m.contains_key(tid)),
+            }))
+            && (old.skill_queues.ptr_eq(&new.skill_queues)
+                || !old
+                    .skill_queues
+                    .diff(&new.skill_queues)
+                    .any(|d| matches!(d, CowDiffItem::Remove(..))));
+        let cold_equal_top = old.markets_seeded == new.markets_seeded
             && old.accounts == new.accounts
             && skills_only_upserted
             && old.jump_clones == new.jump_clones
@@ -230,22 +240,30 @@ impl WorldStateWalDelta {
             && old.fleet_and_social_ops == new.fleet_and_social_ops
             && old.cluster_and_runtime == new.cluster_and_runtime
             && old.entity_kv == new.entity_kv
-            && old.bookmark_subfolder_parents == new.bookmark_subfolder_parents
-            && new.wallet_journal.len() >= old.wallet_journal.len()
-            && new.wallet_journal[..old.wallet_journal.len()] == old.wallet_journal[..]
-            && old
-                .characters
-                .keys()
-                .all(|k| new.characters.contains_key(k))
-            && old.contracts.keys().all(|k| new.contracts.contains_key(k))
-            && old
-                .system_states
-                .keys()
-                .all(|k| new.system_states.contains_key(k))
-            && old
+            && old.bookmark_subfolder_parents == new.bookmark_subfolder_parents;
+
+        let wallet_diff = old.wallet_journal.classify_diff(&new.wallet_journal);
+        let cold_equal = cold_equal_top
+            && !matches!(wallet_diff, CowVecDiff::Rewritten)
+            && (old.characters.ptr_eq(&new.characters)
+                || !old
+                    .characters
+                    .diff(&new.characters)
+                    .any(|d| matches!(d, CowDiffItem::Remove(..))))
+            && (old.contracts.ptr_eq(&new.contracts)
+                || old.contracts.keys().all(|k| new.contracts.contains_key(k)))
+            && (old.system_states.ptr_eq(&new.system_states)
+                || old
+                    .system_states
+                    .keys()
+                    .all(|k| new.system_states.contains_key(k)))
+            && (old
                 .committed_idempotency_keys
-                .iter()
-                .all(|k| new.committed_idempotency_keys.contains(k));
+                .ptr_eq(&new.committed_idempotency_keys)
+                || old
+                    .committed_idempotency_keys
+                    .iter()
+                    .all(|k| new.committed_idempotency_keys.contains(k)));
 
         if !cold_equal {
             return Self {
@@ -317,26 +335,37 @@ impl WorldStateWalDelta {
                 }
             }
         }
-        if new.wallet_journal.len() > old.wallet_journal.len() {
-            delta
-                .appended_wallet_journal
-                .extend_from_slice(&new.wallet_journal[old.wallet_journal.len()..]);
+        if let CowVecDiff::AppendOnly { old_len } = wallet_diff {
+            delta.appended_wallet_journal.extend(
+                new.wallet_journal
+                    .iter_from(old_len)
+                    .map(|(_, e)| e.clone()),
+            );
         }
-        for (id, c) in &new.contracts {
-            if old.contracts.get(id) != Some(c) {
-                delta.upserted_contracts.push(c.clone());
+        if !old.contracts.ptr_eq(&new.contracts) {
+            for (id, c) in &new.contracts {
+                if old.contracts.get(id) != Some(c) {
+                    delta.upserted_contracts.push(c.clone());
+                }
             }
         }
-        for (id, st) in &new.system_states {
-            if old.system_states.get(id) != Some(st) {
-                let mut norm = st.clone();
-                norm.solar_system_id = *id;
-                delta.upserted_system_states.push(norm);
+        if !old.system_states.ptr_eq(&new.system_states) {
+            for (id, st) in &new.system_states {
+                if old.system_states.get(id) != Some(st) {
+                    let mut norm = st.clone();
+                    norm.solar_system_id = *id;
+                    delta.upserted_system_states.push(norm);
+                }
             }
         }
-        for k in &new.committed_idempotency_keys {
-            if !old.committed_idempotency_keys.contains(k) {
-                delta.added_idempotency_keys.push(k.clone());
+        if !old
+            .committed_idempotency_keys
+            .ptr_eq(&new.committed_idempotency_keys)
+        {
+            for k in &new.committed_idempotency_keys {
+                if !old.committed_idempotency_keys.contains(k) {
+                    delta.added_idempotency_keys.push(k.clone());
+                }
             }
         }
         delta
@@ -836,73 +865,73 @@ impl WorldRepository {
         }
 
         let market_orders = CowMap::new();
-        let system_states = HashMap::new();
+        let system_states = CowCell::new(HashMap::new());
         let mut initial_snap = WorldStateSnapshot {
             next_entity_id: 200_000_000,
             wal_seq: 0,
             markets_seeded: false,
-            accounts: HashMap::new(),
+            accounts: CowCell::new(HashMap::new()),
             characters: CowMap::new(),
             skills: CowMap::new(),
             skill_queues: CowMap::new(),
-            jump_clones: HashMap::new(),
-            active_implants: HashMap::new(),
+            jump_clones: CowCell::new(HashMap::new()),
+            active_implants: CowCell::new(HashMap::new()),
             items: CowMap::new(),
-            saved_fittings: HashMap::new(),
+            saved_fittings: CowCell::new(HashMap::new()),
             market_orders,
-            wallet_journal: Vec::new(),
-            contracts: HashMap::new(),
-            industry_jobs: HashMap::new(),
-            planetary_colonies: HashMap::new(),
-            active_missions: HashMap::new(),
-            mission_tally: HashMap::new(),
-            standing_transactions: HashMap::new(),
-            npe_progress: HashMap::new(),
-            bookmarks: HashMap::new(),
-            mails: Vec::new(),
-            fleets: HashMap::new(),
-            corporations: HashMap::new(),
-            alliances: HashMap::new(),
-            wars: HashMap::new(),
-            corp_projects: HashMap::new(),
-            killmails: HashMap::new(),
-            kill_rights: HashMap::new(),
-            structures: HashMap::new(),
+            wallet_journal: CowIdVec::new(),
+            contracts: CowCell::new(HashMap::new()),
+            industry_jobs: CowCell::new(HashMap::new()),
+            planetary_colonies: CowCell::new(HashMap::new()),
+            active_missions: CowActiveMissions::new(),
+            mission_tally: CowCell::new(HashMap::new()),
+            standing_transactions: CowCell::new(HashMap::new()),
+            npe_progress: CowCell::new(HashMap::new()),
+            bookmarks: CowCell::new(HashMap::new()),
+            mails: CowIdVec::new(),
+            fleets: CowCell::new(HashMap::new()),
+            corporations: CowCell::new(HashMap::new()),
+            alliances: CowCell::new(HashMap::new()),
+            wars: CowCell::new(HashMap::new()),
+            corp_projects: CowCell::new(HashMap::new()),
+            killmails: CowCell::new(HashMap::new()),
+            kill_rights: CowCell::new(HashMap::new()),
+            structures: CowMap::new(),
             system_states,
-            committed_idempotency_keys: HashSet::new(),
-            licensed_skins: HashMap::new(),
-            applied_ship_skins: HashMap::new(),
-            chat_channels: HashMap::new(),
-            cosmic_signatures: HashMap::new(),
-            read_mails: HashSet::new(),
-            deleted_mails: HashSet::new(),
-            mail_labels: HashMap::new(),
-            mail_assigned_labels: HashMap::new(),
-            bookmark_folders: HashMap::new(),
-            wh_polarizations: HashMap::new(),
-            mining_ledger: Vec::new(),
-            module_online_states: HashMap::new(),
-            module_active_states: HashSet::new(),
-            module_active_charges: HashMap::new(),
-            ship_fit_inputs: HashMap::new(),
-            weapon_banks: HashMap::new(),
-            asteroids: HashMap::new(),
-            moon_extractions: HashMap::new(),
-            auto_moon_miners: HashMap::new(),
-            observer_mining_ledger: HashMap::new(),
-            paused_skill_queues: HashSet::new(),
-            cosmic_anomalies: HashMap::new(),
-            sov_prospecting_levels: HashMap::new(),
-            last_mission_decline_times: HashMap::new(),
-            character_last_jump_unix: HashMap::new(),
-            character_cspa_charges: HashMap::new(),
-            mail_timestamps: HashMap::new(),
-            character_login_stats: HashMap::new(),
-            item_custom_names: HashMap::new(),
-            item_positions: HashMap::new(),
-            structure_vulnerability_windows: HashMap::new(),
-            skill_history: HashMap::new(),
-            character_doll_info: HashMap::new(),
+            committed_idempotency_keys: CowCell::new(HashSet::new()),
+            licensed_skins: CowCell::new(HashMap::new()),
+            applied_ship_skins: CowCell::new(HashMap::new()),
+            chat_channels: CowCell::new(HashMap::new()),
+            cosmic_signatures: CowCell::new(HashMap::new()),
+            read_mails: CowCell::new(HashSet::new()),
+            deleted_mails: CowCell::new(HashSet::new()),
+            mail_labels: CowCell::new(HashMap::new()),
+            mail_assigned_labels: CowCell::new(HashMap::new()),
+            bookmark_folders: CowCell::new(HashMap::new()),
+            wh_polarizations: CowCell::new(HashMap::new()),
+            mining_ledger: CowCell::new(Vec::new()),
+            module_online_states: CowCell::new(HashMap::new()),
+            module_active_states: CowCell::new(HashSet::new()),
+            module_active_charges: CowCell::new(HashMap::new()),
+            ship_fit_inputs: CowCell::new(HashMap::new()),
+            weapon_banks: CowCell::new(HashMap::new()),
+            asteroids: CowCell::new(HashMap::new()),
+            moon_extractions: CowCell::new(HashMap::new()),
+            auto_moon_miners: CowCell::new(HashMap::new()),
+            observer_mining_ledger: CowCell::new(HashMap::new()),
+            paused_skill_queues: CowCell::new(HashSet::new()),
+            cosmic_anomalies: CowCell::new(HashMap::new()),
+            sov_prospecting_levels: CowCell::new(HashMap::new()),
+            last_mission_decline_times: CowCell::new(HashMap::new()),
+            character_last_jump_unix: CowCell::new(HashMap::new()),
+            character_cspa_charges: CowCell::new(HashMap::new()),
+            mail_timestamps: CowMap::new(),
+            character_login_stats: CowCell::new(HashMap::new()),
+            item_custom_names: CowMap::new(),
+            item_positions: CowCell::new(HashMap::new()),
+            structure_vulnerability_windows: CowCell::new(HashMap::new()),
+            skill_history: CowCell::new(HashMap::new()),
+            character_doll_info: CowCell::new(HashMap::new()),
             ..Default::default()
         };
         initial_snap.fold_legacy_plex_balances();
@@ -1260,8 +1289,17 @@ impl WorldRepository {
                 }
             }
 
-        for (&sid, st) in &mut writer.working.system_states {
-            st.solar_system_id = sid;
+        writer.working.wallet_journal.reconcile_indexes();
+        writer.working.mails.reconcile_indexes();
+        writer.working.char_lp_logs.reconcile_id_index();
+        writer.working.active_missions.reconcile_id_index();
+
+        if !before.system_states.ptr_eq(&writer.working.system_states) {
+            for (&sid, st) in &mut writer.working.system_states {
+                if st.solar_system_id != sid {
+                    st.solar_system_id = sid;
+                }
+            }
         }
 
         let mut changes = ChangeSet::diff(writer.seq.saturating_add(1), &before, &writer.working);

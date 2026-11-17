@@ -14,6 +14,7 @@ use super::domain_rows::{
     DOMAIN_SUPERWEAPON_RUNTIME, DOMAIN_TOURNEY_STATE,
 };
 use super::fingerprints::{canonical_fp, TableFingerprints};
+use crate::cow::{CowCell, CowMap};
 use crate::service_domains::{
     AbyssalRuntimeStore, ClusterAndRuntimeStore, CrabBeaconStore, DungeonEditorStore,
     DungeonRuntimeStore, EntityKvKey, EntityKvRow, FleetAndSocialOpsStore, FobObservatoryStore,
@@ -23,7 +24,6 @@ use crate::service_domains::{
 };
 use crate::types::WorldStateSnapshot;
 use rusqlite::{params, Connection, Transaction};
-use serde::Serialize;
 use std::collections::BTreeMap;
 
 pub const ENTITY_KV_SCHEMA_VERSION: i64 = 7;
@@ -53,7 +53,7 @@ CREATE INDEX IF NOT EXISTS entity_kv_by_entity ON entity_kv(entity_id, ns);
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServiceDomainsFingerprints {
     pub entity_kv_fp: u64,
-    pub entity_kv_rows: BTreeMap<EntityKvKey, u64>,
+    pub entity_kv_rows: CowCell<BTreeMap<EntityKvKey, u64>>,
 }
 
 /// Applies the schema DDL for `entity_kv` (legacy `service_domain_state` now lives in `domain_rows`).
@@ -69,11 +69,17 @@ pub fn apply_service_domains_migration(conn: &Connection) -> Result<(), String> 
     Ok(())
 }
 
-fn fp_domain<T: Default + PartialEq + Serialize>(val: &T) -> u64 {
-    if *val == T::default() {
-        return 0;
-    }
-    let out = canonical_fp(val);
+#[inline]
+fn mix_u64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+#[inline]
+pub(crate) fn entity_kv_row_fp(row: &EntityKvRow) -> u64 {
+    let out = canonical_fp(row);
     if out == 0 {
         1
     } else {
@@ -81,18 +87,35 @@ fn fp_domain<T: Default + PartialEq + Serialize>(val: &T) -> u64 {
     }
 }
 
+#[inline]
+pub(crate) fn entity_kv_row_contrib(key: &EntityKvKey, rfp: u64) -> u64 {
+    let kh = canonical_fp(key);
+    mix_u64(kh.rotate_left(17) ^ mix_u64(rfp))
+}
+
+pub(crate) fn compute_entity_kv_digest(entity_kv: &CowMap<EntityKvKey, EntityKvRow>) -> u64 {
+    let mut fp = 0u64;
+    for (k, v) in entity_kv {
+        let rfp = entity_kv_row_fp(v);
+        fp ^= entity_kv_row_contrib(k, rfp);
+    }
+    fp
+}
+
 pub fn compute_service_domains_fingerprints(
     snap: &WorldStateSnapshot,
 ) -> ServiceDomainsFingerprints {
-    let mut fp = ServiceDomainsFingerprints {
-        entity_kv_fp: fp_domain(&snap.entity_kv),
-        entity_kv_rows: BTreeMap::new(),
-    };
+    let mut fp_digest = 0u64;
+    let mut entity_kv_rows = BTreeMap::new();
     for (k, v) in &snap.entity_kv {
-        let rfp = canonical_fp(v);
-        fp.entity_kv_rows.insert(k.clone(), if rfp == 0 { 1 } else { rfp });
+        let rfp = entity_kv_row_fp(v);
+        fp_digest ^= entity_kv_row_contrib(k, rfp);
+        entity_kv_rows.insert(k.clone(), rfp);
     }
-    fp
+    ServiceDomainsFingerprints {
+        entity_kv_fp: fp_digest,
+        entity_kv_rows: CowCell::new(entity_kv_rows),
+    }
 }
 
 macro_rules! impl_service_domain_persist {
@@ -580,7 +603,7 @@ macro_rules! define_staged_service_domains {
             }
 
             fn apply_to(self, snap: &mut WorldStateSnapshot) {
-                $(snap.$field = self.$field;)+
+                $(snap.$field = self.$field.into();)+
             }
         }
     };
@@ -679,7 +702,10 @@ pub(crate) fn sync_service_domains_rows(
     let mut dirty = false;
     macro_rules! sync_domains {
         ($(($field:ident, $ty:ty, $domain:ident, $legacy:expr),)+) => {
-            $(dirty |= snap.$field.sync_full(tx, $domain)?;)+
+            $(
+                let inner: &$ty = &snap.$field;
+                dirty |= inner.sync_full(tx, $domain)?;
+            )+
         };
     }
     for_each_service_domain_spec!(sync_domains);
@@ -789,7 +815,7 @@ pub fn sync_entity_kv(
     snap: &WorldStateSnapshot,
     fp: &mut TableFingerprints,
 ) -> Result<bool, String> {
-    let cur_fp = fp_domain(&snap.entity_kv);
+    let cur_fp = compute_entity_kv_digest(&snap.entity_kv);
     if cur_fp == fp.service_domains.entity_kv_fp
         && snap.entity_kv.len() == fp.service_domains.entity_kv_rows.len()
     {
@@ -798,14 +824,7 @@ pub fn sync_entity_kv(
     let mut changed = false;
     let mut new_rows = BTreeMap::new();
     for (k, row) in &snap.entity_kv {
-        let rfp = {
-            let h = canonical_fp(row);
-            if h == 0 {
-                1
-            } else {
-                h
-            }
-        };
+        let rfp = entity_kv_row_fp(row);
         if fp.service_domains.entity_kv_rows.get(k).copied() != Some(rfp) {
             crate::service_domains::validate_entity_kv_value(k.ns, &row.value_json)?;
             tx.execute(
@@ -834,7 +853,7 @@ pub fn sync_entity_kv(
         }
     }
     fp.service_domains.entity_kv_fp = cur_fp;
-    fp.service_domains.entity_kv_rows = new_rows;
+    fp.service_domains.entity_kv_rows = CowCell::new(new_rows);
     Ok(changed)
 }
 
@@ -887,7 +906,7 @@ pub fn load_service_domains_checked(
     let (staged, had_legacy) = stage_service_domains_rows(conn, ctx)?;
     let staged_entity_kv = read_entity_kv_map(conn, ctx, false)?;
     staged.apply_to(snap);
-    snap.entity_kv = staged_entity_kv;
+    snap.entity_kv = staged_entity_kv.into_iter().collect();
     Ok(had_legacy)
 }
 
@@ -919,9 +938,10 @@ fn rollback_service_domains_inner(
     if !has_domain_rows && !has_legacy_table {
         return Err("rollback service_domains missing domain_rows table".into());
     }
-    let staged_entity_kv = if fp_domain(&snap.entity_kv) != fp.service_domains.entity_kv_fp
-        || snap.entity_kv.len() != fp.service_domains.entity_kv_rows.len()
-    {
+    let staged_entity_kv =
+        if compute_entity_kv_digest(&snap.entity_kv) != fp.service_domains.entity_kv_fp
+            || snap.entity_kv.len() != fp.service_domains.entity_kv_rows.len()
+        {
         Some(load_entity_kv_for_rollback(conn, fp)?)
     } else {
         None
@@ -930,7 +950,7 @@ fn rollback_service_domains_inner(
     let (staged, _) = stage_service_domains_rows(conn, &mut ctx)?;
     staged.apply_to(snap);
     if let Some(kv) = staged_entity_kv {
-        snap.entity_kv = kv;
+        snap.entity_kv = kv.into_iter().collect();
     }
     Ok(())
 }

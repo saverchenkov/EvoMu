@@ -131,7 +131,7 @@ pub fn load_d6_checked(
     snap.next_notification_id = next_notification_id;
     snap.next_report_id = next_report_id;
     if let Some(st) = staged_sp6 {
-        snap.sp6_lifecycle = st;
+        snap.sp6_lifecycle = crate::cow::CowCell::new(st);
     }
     snap.reconcile_id_counters();
     Ok(())
@@ -243,6 +243,6 @@ pub fn rollback_d6(
     snap.next_corporation_id = df.next_corporation_id;
     snap.next_notification_id = df.next_notification_id;
     snap.next_report_id = df.next_report_id;
-    snap.sp6_lifecycle = fresh_sp6;
+    snap.sp6_lifecycle = crate::cow::CowCell::new(fresh_sp6);
     Ok(())
 }

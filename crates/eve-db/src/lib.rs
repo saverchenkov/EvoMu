@@ -12,6 +12,7 @@ pub mod accounts;
 pub mod characters;
 pub mod clock;
 pub mod cow;
+pub mod cow_collections;
 pub mod durable_domain_types;
 pub use durable_domain_types as d6_types;
 pub mod fw_seed;
@@ -58,8 +59,9 @@ pub use clock::{ServerClock, VirtualServerClock};
 #[cfg(any(test, feature = "testkit"))]
 pub use persistence::WorldTablesSnapshot;
 pub use cow::{
-    cow_full_touch_by_site, cow_full_touch_total, reset_cow_full_touch_for_test, CowCell,
-    CowDiffItem, CowDiffIter, CowInlineDiffItem, CowInlineDiffIter, CowMap, CowMapInline,
+    cow_full_touch_by_site, cow_full_touch_total, reset_cow_full_touch_for_test, CowActiveMissions,
+    CowCell, CowDiffItem, CowDiffIter, CowIdVec, CowIdVecIter, CowInlineDiffItem,
+    CowInlineDiffIter, CowLpLogs, CowMap, CowMapInline, CowVecDiff, HasEntityId,
     IMBL_ORD_CHUNK_SIZE,
 };
 pub use fw_seed::DEFAULT_FW_WARZONE_SYSTEMS;

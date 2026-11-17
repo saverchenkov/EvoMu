@@ -623,7 +623,7 @@ fn legacy_world_kv_blobs_migrates_preserving_newer_domain_rows_and_drops_table()
         ("planetary_colony_layouts", map_vec_json(&legacy.planetary_colony_layouts)),
         ("corp_customs_offices", map_vec_json(&legacy.corp_customs_offices)),
         ("orbital_provision_types", map_vec_json(&legacy.orbital_provision_types)),
-        ("wallet_journal_timestamps", map_vec_json(&legacy.wallet_journal_timestamps)),
+        ("wallet_journal_timestamps", map_vec_json(&legacy.wallet_journal_timestamps.iter().map(|(&k, &v)| (k, v)).collect())),
         ("char_wallet_transactions", map_vec_json(&legacy.char_wallet_transactions)),
         ("corp_wallet_journals", map_vec_json(&legacy.corp_wallet_journals)),
         ("corp_wallet_transactions", map_vec_json(&legacy.corp_wallet_transactions)),
@@ -706,7 +706,7 @@ fn legacy_world_kv_blobs_migrates_preserving_newer_domain_rows_and_drops_table()
         migrated.service_state_blobs.get(&existing_service_key).map(String::as_str),
         Some("newer-domain-value")
     );
-    assert_eq!(migrated.system_jump_events, newer_jump);
+    assert_eq!(*migrated.system_jump_events, newer_jump);
     assert!(migrated.paused_skill_queues.contains(&90_999_001));
     assert!(
         legacy

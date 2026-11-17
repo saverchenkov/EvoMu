@@ -552,7 +552,8 @@ async fn test_daily_maintenance_jobs_mutate_belts_ice_market_history_sci_sov_mis
                 last_sov_claim_tick: 0,
             },
         );
-        snap.system_states.insert(hub_sov_sys, snap.system_states[&null_sov_sys].clone());
+        let null_st_template = snap.system_states[&null_sov_sys].clone();
+        snap.system_states.insert(hub_sov_sys, null_st_template);
         if let Some(hub_st) = snap.system_states.get_mut(&hub_sov_sys) {
             hub_st.solar_system_id = hub_sov_sys;
         }

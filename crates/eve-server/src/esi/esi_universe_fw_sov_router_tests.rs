@@ -407,7 +407,7 @@ fn sov_fw_system_jumps_kills_openapi_and_router_protocol_edges() {
                 victory_points_threshold: 3_000,
             },
         );
-        snap.fw_wars = vec![(500_001, 500_004)];
+        snap.fw_wars = vec![(500_001, 500_004)].into();
         snap.sov_campaign_scores.insert(
             1_055_000_001,
             SovCampaignScoreRecord {

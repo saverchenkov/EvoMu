@@ -32,7 +32,7 @@ use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::iter::FusedIterator;
-use std::ops::{Deref, DerefMut, Index, IndexMut};
+use std::ops::{Deref, DerefMut, Index, IndexMut, RangeBounds};
 use std::panic::Location;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -43,9 +43,14 @@ pub const IMBL_ORD_CHUNK_SIZE: usize = 16;
 static COW_FULL_TOUCH_TOTAL: AtomicU64 = AtomicU64::new(0);
 static COW_FULL_TOUCH_BY_SITE: OnceLock<Mutex<BTreeMap<String, u64>>> = OnceLock::new();
 
+thread_local! {
+    static THREAD_COW_FULL_TOUCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 #[inline]
 fn record_full_touch(loc: &'static Location<'static>) {
     COW_FULL_TOUCH_TOTAL.fetch_add(1, Ordering::Relaxed);
+    THREAD_COW_FULL_TOUCH.with(|c| c.set(c.get().saturating_add(1)));
     let mutex = COW_FULL_TOUCH_BY_SITE.get_or_init(|| Mutex::new(BTreeMap::new()));
     if let Ok(mut map) = mutex.lock() {
         let key = format!("{}:{}", loc.file(), loc.line());
@@ -74,6 +79,16 @@ pub fn reset_cow_full_touch_for_test() {
             map.clear();
         }
     }
+}
+
+/// Resets the thread-local full-touch counter so parallel unit tests never race on the process-wide atomic.
+pub fn reset_thread_cow_full_touch_for_test() {
+    THREAD_COW_FULL_TOUCH.with(|c| c.set(0));
+}
+
+/// Returns the number of full-table mutable touches recorded on the current test thread.
+pub fn thread_cow_full_touch_for_test() -> u64 {
+    THREAD_COW_FULL_TOUCH.with(|c| c.get())
 }
 
 /// Private per-row `Arc<V>` wrapper that short-circuits `PartialEq` via `Arc::ptr_eq` even when
@@ -717,6 +732,90 @@ impl<'a, K, V> DoubleEndedIterator for Iter<'a, K, V> {
 impl<'a, K, V> ExactSizeIterator for Iter<'a, K, V> {}
 impl<'a, K, V> FusedIterator for Iter<'a, K, V> {}
 
+enum RangeIterInner<'a, K, V> {
+    Ord(imbl::ordmap::RangedIter<'a, K, Row<V>, imbl::shared_ptr::DefaultSharedPtr>),
+    Dirty(std::collections::btree_map::Range<'a, K, Row<V>>),
+    Empty,
+}
+
+/// An iterator over a bounded key range of a [`CowMap`] in ascending key order.
+pub struct RangeIter<'a, K, V> {
+    inner: RangeIterInner<'a, K, V>,
+}
+
+impl<'a, K, V> Clone for RangeIter<'a, K, V> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            inner: match &self.inner {
+                RangeIterInner::Ord(it) => RangeIterInner::Ord(it.clone()),
+                RangeIterInner::Dirty(it) => RangeIterInner::Dirty(it.clone()),
+                RangeIterInner::Empty => RangeIterInner::Empty,
+            },
+        }
+    }
+}
+
+impl<'a, K, V> Iterator for RangeIter<'a, K, V> {
+    type Item = (&'a K, &'a V);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.inner {
+            RangeIterInner::Ord(it) => it.next().map(|(k, r)| (k, &*r.0)),
+            RangeIterInner::Dirty(it) => it.next().map(|(k, r)| (k, &*r.0)),
+            RangeIterInner::Empty => None,
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match &self.inner {
+            RangeIterInner::Ord(it) => it.size_hint(),
+            RangeIterInner::Dirty(it) => it.size_hint(),
+            RangeIterInner::Empty => (0, Some(0)),
+        }
+    }
+}
+
+impl<'a, K, V> DoubleEndedIterator for RangeIter<'a, K, V> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match &mut self.inner {
+            RangeIterInner::Ord(it) => it.next_back().map(|(k, r)| (k, &*r.0)),
+            RangeIterInner::Dirty(it) => it.next_back().map(|(k, r)| (k, &*r.0)),
+            RangeIterInner::Empty => None,
+        }
+    }
+}
+
+impl<'a, K, V> FusedIterator for RangeIter<'a, K, V> {}
+
+impl<K: Ord, V> CowMap<K, V> {
+    /// Returns an iterator over entries whose keys fall within `range` in ascending order (`O(log N)`).
+    #[inline]
+    pub fn range<Q, R>(&self, range: R) -> RangeIter<'_, K, V>
+    where
+        Q: Ord + ?Sized,
+        K: Borrow<Q>,
+        R: RangeBounds<Q>,
+    {
+        match &self.dirty {
+            Some(d) => RangeIter {
+                inner: RangeIterInner::Dirty(d.range(range)),
+            },
+            None => match self.ord.get() {
+                Some(ord) => RangeIter {
+                    inner: RangeIterInner::Ord(ord.range(range)),
+                },
+                None => RangeIter {
+                    inner: RangeIterInner::Empty,
+                },
+            },
+        }
+    }
+}
+
 /// An iterator over the keys of a [`CowMap`] in ascending key order.
 pub struct Keys<'a, K, V> {
     inner: Iter<'a, K, V>,
@@ -933,7 +1032,7 @@ impl<K: Ord, V: PartialEq> PartialEq for CowMap<K, V> {
             return false;
         }
         if let (Some(a), Some(b)) = (self.ord.get(), other.ord.get()) {
-            return a == b;
+            return a.ptr_eq(b) || a == b;
         }
         self.iter()
             .zip(other.iter())
@@ -1595,7 +1694,7 @@ impl<K: Ord, V: PartialEq> PartialEq for CowMapInline<K, V> {
             return false;
         }
         if let (Some(a), Some(b)) = (self.ord.get(), other.ord.get()) {
-            return a == b;
+            return a.ptr_eq(b) || a == b;
         }
         self.iter()
             .zip(other.iter())
@@ -1755,7 +1854,7 @@ where
 ///
 /// - `Clone` is `O(1)` (`Arc::clone`).
 /// - `PartialEq` short-circuits on `Arc::ptr_eq` in `O(1)` even when `T: PartialEq + !Eq`.
-/// - `get_mut` unshares the inner `T` via `Arc::make_mut` on first write.
+/// - `as_inner_mut` (or `DerefMut`) unshares the inner `T` via `Arc::make_mut` on first write.
 #[derive(Debug)]
 pub struct CowCell<T>(Arc<T>);
 
@@ -1774,7 +1873,7 @@ impl<T> CowCell<T> {
 
     /// Returns a shared reference to the inner value.
     #[inline]
-    pub fn get(&self) -> &T {
+    pub fn as_inner(&self) -> &T {
         &self.0
     }
 
@@ -1815,7 +1914,7 @@ impl<T: Clone> CowCell<T> {
     /// Returns a mutable reference to the inner value, cloning `T` via `Arc::make_mut` only if
     /// the `Arc<T>` is currently shared (`strong_count > 1`).
     #[inline]
-    pub fn get_mut(&mut self) -> &mut T {
+    pub fn as_inner_mut(&mut self) -> &mut T {
         Arc::make_mut(&mut self.0)
     }
 
@@ -1848,6 +1947,13 @@ impl<T: PartialEq> PartialEq for CowCell<T> {
 }
 
 impl<T: Eq> Eq for CowCell<T> {}
+
+impl<T: PartialEq> PartialEq<T> for CowCell<T> {
+    #[inline]
+    fn eq(&self, other: &T) -> bool {
+        *self.0 == *other
+    }
+}
 
 impl<T> Deref for CowCell<T> {
     type Target = T;
@@ -1897,6 +2003,58 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for CowCell<T> {
         T::deserialize(deserializer).map(Self::new)
     }
 }
+
+impl<'a, T> IntoIterator for &'a CowCell<T>
+where
+    &'a T: IntoIterator,
+{
+    type Item = <&'a T as IntoIterator>::Item;
+    type IntoIter = <&'a T as IntoIterator>::IntoIter;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        (&**self).into_iter()
+    }
+}
+
+impl<'a, T: Clone> IntoIterator for &'a mut CowCell<T>
+where
+    &'a mut T: IntoIterator,
+{
+    type Item = <&'a mut T as IntoIterator>::Item;
+    type IntoIter = <&'a mut T as IntoIterator>::IntoIter;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        (&mut **self).into_iter()
+    }
+}
+
+impl<T, Idx> Index<Idx> for CowCell<T>
+where
+    T: Index<Idx>,
+{
+    type Output = T::Output;
+
+    #[inline]
+    fn index(&self, idx: Idx) -> &Self::Output {
+        &(**self)[idx]
+    }
+}
+
+impl<T: Clone, Idx> IndexMut<Idx> for CowCell<T>
+where
+    T: IndexMut<Idx>,
+{
+    #[inline]
+    fn index_mut(&mut self, idx: Idx) -> &mut Self::Output {
+        &mut (**self)[idx]
+    }
+}
+
+pub use crate::cow_collections::{
+    CowActiveMissions, CowIdVec, CowIdVecIter, CowLpLogs, CowVecDiff, HasEntityId,
+};
 
 #[cfg(test)]
 mod tests {

@@ -150,6 +150,17 @@ pub struct ChangeSet {
     pub skills: Vec<RowChange<i64, HashMap<TypeId, TrainedSkillRecord>>>,
     pub skill_queues: Vec<RowChange<i64, Vec<SkillQueueEntry>>>,
     pub market_orders: Vec<RowChange<i64, MarketOrderRecord>>,
+    pub wallet_journal_diff: crate::cow_collections::CowVecDiff,
+    pub mails_diff: crate::cow_collections::CowVecDiff,
+    pub structures: Vec<RowChange<i64, crate::types::UpwellStructureRecord>>,
+    pub mail_timestamps: Vec<RowChange<i64, u64>>,
+    pub item_custom_names: Vec<RowChange<i64, String>>,
+    pub entity_kv: Vec<
+        RowChange<
+            crate::service_domains::EntityKvKey,
+            crate::service_domains::EntityKvRow,
+        >,
+    >,
     pub domain_rows: Vec<crate::sqlite_store::domain_rows::DomainRowChange>,
     pub cold_changed: bool,
     pub cold_domains: ColdDomainDiff,
@@ -165,6 +176,18 @@ impl ChangeSet {
             && self.skills.is_empty()
             && self.skill_queues.is_empty()
             && self.market_orders.is_empty()
+            && matches!(
+                self.wallet_journal_diff,
+                crate::cow_collections::CowVecDiff::Unchanged
+            )
+            && matches!(
+                self.mails_diff,
+                crate::cow_collections::CowVecDiff::Unchanged
+            )
+            && self.structures.is_empty()
+            && self.mail_timestamps.is_empty()
+            && self.item_custom_names.is_empty()
+            && self.entity_kv.is_empty()
             && self.domain_rows.is_empty()
             && !self.cold_changed
     }
@@ -191,12 +214,27 @@ impl ChangeSet {
         let skills = diff_cow_map(&before.skills, &after.skills);
         let skill_queues = diff_cow_map(&before.skill_queues, &after.skill_queues);
         let market_orders = diff_cow_map(&before.market_orders, &after.market_orders);
+        let wallet_journal_diff = before.wallet_journal.classify_diff(&after.wallet_journal);
+        let mails_diff = before.mails.classify_diff(&after.mails);
+        let structures = diff_cow_map(&before.structures, &after.structures);
+        let mail_timestamps = diff_cow_map(&before.mail_timestamps, &after.mail_timestamps);
+        let item_custom_names = diff_cow_map(&before.item_custom_names, &after.item_custom_names);
+        let entity_kv = diff_cow_map(&before.entity_kv, &after.entity_kv);
 
         let mut domain_rows = Vec::new();
         macro_rules! push_domain_diff {
             ($($field:ident => $domain:ident),+ $(,)?) => {
                 $(
                     before.$field.collect_diff_ops(&after.$field, $domain, &mut domain_rows);
+                )+
+            };
+        }
+        macro_rules! push_cow_domain_diff {
+            ($($field:ident => $domain:ident),+ $(,)?) => {
+                $(
+                    if !before.$field.ptr_eq(&after.$field) {
+                        (*before.$field).collect_diff_ops(&*after.$field, $domain, &mut domain_rows);
+                    }
                 )+
             };
         }
@@ -207,11 +245,13 @@ impl ChangeSet {
             owner_notes => DOMAIN_OWNER_NOTES,
             corp_lp_balances => DOMAIN_CORP_LP_BALANCES,
             char_lp_logs => DOMAIN_CHAR_LP_LOGS,
+        );
+        push_cow_domain_diff!(
             pve_special_sites => DOMAIN_PVE_SPECIAL_SITES,
-            crab_beacons => DOMAIN_CRAB_BEACONS,
             abyssal_state => DOMAIN_ABYSSAL_STATE,
             dungeon_runtime => DOMAIN_DUNGEON_RUNTIME,
             dungeon_editor => DOMAIN_DUNGEON_EDITOR,
+            crab_beacons => DOMAIN_CRAB_BEACONS,
             fob_observatory_state => DOMAIN_FOB_OBSERVATORY_STATE,
             mining_and_ess_state => DOMAIN_MINING_AND_ESS_STATE,
             pvp_filament_state => DOMAIN_PVP_FILAMENT_STATE,
@@ -248,7 +288,16 @@ impl ChangeSet {
             || characters.iter().any(|c| c.after.is_none())
             || skills.iter().any(|c| c.after.is_none())
             || skill_queues.iter().any(|c| c.after.is_none())
-            || market_orders.iter().any(|c| c.after.is_none());
+            || market_orders.iter().any(|c| c.after.is_none())
+            || matches!(
+                wallet_journal_diff,
+                crate::cow_collections::CowVecDiff::Rewritten
+            )
+            || !matches!(mails_diff, crate::cow_collections::CowVecDiff::Unchanged)
+            || !structures.is_empty()
+            || !mail_timestamps.is_empty()
+            || !item_custom_names.is_empty()
+            || !entity_kv.is_empty();
 
         Self {
             seq,
@@ -261,6 +310,12 @@ impl ChangeSet {
             skills,
             skill_queues,
             market_orders,
+            wallet_journal_diff,
+            mails_diff,
+            structures,
+            mail_timestamps,
+            item_custom_names,
+            entity_kv,
             domain_rows,
             cold_changed,
             cold_domains,
@@ -305,8 +360,7 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
     let part1_cold = before.accounts != after.accounts
         || before.jump_clones != after.jump_clones
         || before.active_implants != after.active_implants
-        || before.saved_fittings != after.saved_fittings
-        || before.wallet_journal != after.wallet_journal;
+        || before.saved_fittings != after.saved_fittings;
 
     let part2_activity = before.contracts != after.contracts
         || before.industry_jobs != after.industry_jobs
@@ -315,8 +369,7 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
         || before.mission_tally != after.mission_tally
         || before.standing_transactions != after.standing_transactions
         || before.npe_progress != after.npe_progress
-        || before.bookmarks != after.bookmarks
-        || before.mails != after.mails;
+        || before.bookmarks != after.bookmarks;
 
     let part3_social_corp = before.fleets != after.fleets
         || before.corporations != after.corporations
@@ -326,8 +379,7 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
         || before.killmails != after.killmails
         || before.kill_rights != after.kill_rights;
 
-    let part4_world_tail = before.structures != after.structures
-        || before.system_states != after.system_states
+    let part4_world_tail = before.system_states != after.system_states
         || before.committed_idempotency_keys != after.committed_idempotency_keys
         || before.licensed_skins != after.licensed_skins
         || before.applied_ship_skins != after.applied_ship_skins
@@ -335,9 +387,7 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
 
     let extension_tables = before.character_last_jump_unix != after.character_last_jump_unix
         || before.character_cspa_charges != after.character_cspa_charges
-        || before.mail_timestamps != after.mail_timestamps
         || before.character_login_stats != after.character_login_stats
-        || before.item_custom_names != after.item_custom_names
         || before.item_positions != after.item_positions
         || before.structure_vulnerability_windows != after.structure_vulnerability_windows
         || before.skill_history != after.skill_history
@@ -363,7 +413,8 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
     // `domain_rows`; only `char_mining_ledger` remains a relational cold table here.
     let d6_batch4 = before.mining_ledger != after.mining_ledger;
 
-    let service_domains = before.entity_kv != after.entity_kv;
+    // `entity_kv` now persists via incremental `ChangeSet::entity_kv` (`CowMap` diff).
+    let service_domains = false;
 
     ColdDomainDiff {
         part1_cold,
@@ -450,13 +501,54 @@ pub fn validate_changeset(
             validate_row("market_orders", c.key.to_string(), &**o, max_row_bytes)?;
         }
     }
+    match changes.wallet_journal_diff {
+        crate::cow_collections::CowVecDiff::Unchanged => {}
+        crate::cow_collections::CowVecDiff::AppendOnly { old_len } => {
+            for (idx, e) in after.wallet_journal.iter_from(old_len) {
+                validate_row("wallet_journal", idx.to_string(), e, max_row_bytes)?;
+            }
+        }
+        crate::cow_collections::CowVecDiff::Rewritten => {
+            for (idx, e) in after.wallet_journal.iter().enumerate() {
+                validate_row("wallet_journal", idx.to_string(), e, max_row_bytes)?;
+            }
+        }
+    }
+    match changes.mails_diff {
+        crate::cow_collections::CowVecDiff::Unchanged => {}
+        crate::cow_collections::CowVecDiff::AppendOnly { old_len } => {
+            for (idx, m) in after.mails.iter_from(old_len) {
+                validate_row("mails", idx.to_string(), m, max_row_bytes)?;
+            }
+        }
+        crate::cow_collections::CowVecDiff::Rewritten => {
+            for (idx, m) in after.mails.iter().enumerate() {
+                validate_row("mails", idx.to_string(), m, max_row_bytes)?;
+            }
+        }
+    }
+    for c in &changes.structures {
+        if let Some(ref s) = c.after {
+            validate_row("structures", c.key.to_string(), &**s, max_row_bytes)?;
+        }
+    }
+    for c in &changes.item_custom_names {
+        if let Some(ref name) = c.after {
+            validate_row("item_custom_names", c.key.to_string(), &**name, max_row_bytes)?;
+        }
+    }
+    for c in &changes.entity_kv {
+        if let Some(ref row) = c.after {
+            validate_row("entity_kv", c.key.to_map_key_string(), &**row, max_row_bytes)?;
+        }
+    }
     crate::sqlite_store::domain_rows::validate_domain_row_changes(
         &changes.domain_rows,
         max_row_bytes,
     )?;
 
     let cd = &changes.cold_domains;
-    if cd.part1_cold {
+    if cd.part1_cold && !before.saved_fittings.ptr_eq(&after.saved_fittings) {
         for (k, v) in &after.saved_fittings {
             if before.saved_fittings.get(k) != Some(v) {
                 validate_row("saved_fittings", k.to_string(), v, max_row_bytes)?;
@@ -464,36 +556,41 @@ pub fn validate_changeset(
         }
     }
     if cd.part2_activity {
-        for (k, v) in &after.contracts {
-            if before.contracts.get(k) != Some(v) {
-                validate_row("contracts", k.to_string(), v, max_row_bytes)?;
+        if !before.contracts.ptr_eq(&after.contracts) {
+            for (k, v) in &after.contracts {
+                if before.contracts.get(k) != Some(v) {
+                    validate_row("contracts", k.to_string(), v, max_row_bytes)?;
+                }
             }
         }
-        for (k, v) in &after.industry_jobs {
-            if before.industry_jobs.get(k) != Some(v) {
-                validate_row("industry_jobs", k.to_string(), v, max_row_bytes)?;
+        if !before.industry_jobs.ptr_eq(&after.industry_jobs) {
+            for (k, v) in &after.industry_jobs {
+                if before.industry_jobs.get(k) != Some(v) {
+                    validate_row("industry_jobs", k.to_string(), v, max_row_bytes)?;
+                }
             }
         }
-        for (k, v) in &after.bookmarks {
-            if before.bookmarks.get(k) != Some(v) {
-                validate_row("bookmarks", k.to_string(), v, max_row_bytes)?;
+        if !before.bookmarks.ptr_eq(&after.bookmarks) {
+            for (k, v) in &after.bookmarks {
+                if before.bookmarks.get(k) != Some(v) {
+                    validate_row("bookmarks", k.to_string(), v, max_row_bytes)?;
+                }
             }
         }
     }
     if cd.part4_world_tail {
-        for (k, v) in &after.structures {
-            if before.structures.get(k) != Some(v) {
-                validate_row("structures", k.to_string(), v, max_row_bytes)?;
+        if !before.system_states.ptr_eq(&after.system_states) {
+            for (k, v) in &after.system_states {
+                if before.system_states.get(k) != Some(v) {
+                    validate_row("system_states", k.to_string(), v, max_row_bytes)?;
+                }
             }
         }
-        for (k, v) in &after.system_states {
-            if before.system_states.get(k) != Some(v) {
-                validate_row("system_states", k.to_string(), v, max_row_bytes)?;
-            }
-        }
-        for (k, v) in &after.asteroids {
-            if before.asteroids.get(k) != Some(v) {
-                validate_row("asteroids", k.to_string(), v, max_row_bytes)?;
+        if !before.asteroids.ptr_eq(&after.asteroids) {
+            for (k, v) in &after.asteroids {
+                if before.asteroids.get(k) != Some(v) {
+                    validate_row("asteroids", k.to_string(), v, max_row_bytes)?;
+                }
             }
         }
     }
@@ -714,10 +811,7 @@ impl EntityIdAllocator {
     ) -> Result<i64, String> {
         loop {
             let id = self.next.fetch_add(1, Ordering::AcqRel) + 1;
-            if self.is_referenced(id)
-                || snap.is_entity_id_referenced(id)
-                || crate::sqlite_store::sqlite_entity_id_exists(conn, id)?
-            {
+            if self.is_referenced(id) || snap.is_entity_id_referenced(id) {
                 self.mark_referenced(id);
                 continue;
             }
@@ -841,6 +935,12 @@ impl<'a> WorldTx<'a> {
     /// Aborting or panicking after calling this method still burns the allocated ID and keeps the
     /// persisted `world_meta.next_entity_block` high-water mark so IDs are never reissued.
     pub fn alloc_entity_id(&mut self) -> Result<i64, TxError> {
+        if self.snap.active_missions.is_dirty_ids() {
+            self.snap.active_missions.reconcile_id_index();
+        }
+        if self.snap.char_lp_logs.is_dirty_ids() {
+            self.snap.char_lp_logs.reconcile_id_index();
+        }
         if self.snap.next_entity_id > self.entity_ids.current() {
             self.entity_ids
                 .advance_to(self.conn, self.snap.next_entity_id)
@@ -941,11 +1041,84 @@ impl<'a, 'conn> TxSqlExecutor<'a, 'conn> {
 /// diffed in `O(k log N)` via structural sharing in `ChangeSet::diff`, so `WorldRepository::tx`
 /// never re-fingerprints mutated `CowMap` rows (`#826`).
 #[derive(Default)]
-pub(crate) struct HotFpDelta;
+pub(crate) struct HotFpDelta {
+    pub(crate) wallet_journal: Option<(usize, u64)>,
+    pub(crate) mails: Option<(usize, u64)>,
+    pub(crate) structures: Vec<(i64, Option<u64>)>,
+    pub(crate) mail_timestamps: Vec<(i64, Option<u64>)>,
+    pub(crate) item_custom_names: Vec<(i64, Option<u64>)>,
+    pub(crate) entity_kv: Vec<(crate::service_domains::EntityKvKey, Option<u64>)>,
+}
 
 impl HotFpDelta {
     #[inline]
-    pub(crate) fn apply_to(self, _fp: &mut TableFingerprints) {}
+    pub(crate) fn apply_to(self, fp: &mut TableFingerprints) {
+        self.apply_to_ref(fp);
+    }
+
+    fn apply_to_ref(&self, fp: &mut TableFingerprints) {
+        if let Some((len, hash)) = self.wallet_journal {
+            fp.wallet_journal_len = len;
+            fp.wallet_journal_hash = hash;
+        }
+        if let Some((len, hash)) = self.mails {
+            fp.mails_len = len;
+            fp.mails_hash = hash;
+        }
+        if !self.structures.is_empty() {
+            for &(sid, opt_fp) in &self.structures {
+                match opt_fp {
+                    Some(h) => {
+                        fp.structures.insert(sid, h);
+                    }
+                    None => {
+                        fp.structures.remove(&sid);
+                    }
+                }
+            }
+        }
+        if !self.mail_timestamps.is_empty() {
+            for &(mid, opt_ts) in &self.mail_timestamps {
+                match opt_ts {
+                    Some(ts) => {
+                        fp.mail_timestamps.insert(mid, ts);
+                    }
+                    None => {
+                        fp.mail_timestamps.remove(&mid);
+                    }
+                }
+            }
+        }
+        if !self.item_custom_names.is_empty() {
+            for &(iid, opt_fp) in &self.item_custom_names {
+                match opt_fp {
+                    Some(h) => {
+                        fp.item_custom_names.insert(iid, h);
+                    }
+                    None => {
+                        fp.item_custom_names.remove(&iid);
+                    }
+                }
+            }
+        }
+        if !self.entity_kv.is_empty() {
+            use crate::sqlite_store::service_domains_store::entity_kv_row_contrib;
+            for (k, opt_rfp) in &self.entity_kv {
+                if let Some(old_rfp) = fp.service_domains.entity_kv_rows.get(k).copied() {
+                    fp.service_domains.entity_kv_fp ^= entity_kv_row_contrib(k, old_rfp);
+                }
+                match *opt_rfp {
+                    Some(new_rfp) => {
+                        fp.service_domains.entity_kv_fp ^= entity_kv_row_contrib(k, new_rfp);
+                        fp.service_domains.entity_kv_rows.insert(k.clone(), new_rfp);
+                    }
+                    None => {
+                        fp.service_domains.entity_kv_rows.remove(k);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Applies `changes` inside an already-started SQLite `Transaction` in `O(k)` for `CowMap` hot
@@ -965,7 +1138,7 @@ pub(crate) fn apply_changeset_to_sqlite(
         next_entity_id: snap.next_entity_id,
         ..Default::default()
     });
-    let hot_fp = HotFpDelta;
+    let mut hot_fp = HotFpDelta::default();
 
     if changes.meta_changed {
         exec.execute(
@@ -1197,6 +1370,224 @@ pub(crate) fn apply_changeset_to_sqlite(
         }
     }
 
+    match changes.wallet_journal_diff {
+        crate::cow_collections::CowVecDiff::Unchanged => {}
+        crate::cow_collections::CowVecDiff::AppendOnly { old_len } => {
+            for (idx, e) in snap.wallet_journal.iter_from(old_len) {
+                exec.execute(
+                    "wallet_journal:append",
+                    "INSERT OR REPLACE INTO wallet_journal (seq_idx, entry_id, character_id, entry_type, amount_cents, balance_after_cents, reason)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        idx as i64,
+                        e.entry_id,
+                        e.character_id,
+                        e.entry_type,
+                        e.amount.0,
+                        e.balance_after.0,
+                        e.reason,
+                    ],
+                )?;
+                if need_wal_delta {
+                    delta.appended_wallet_journal.push(e.clone());
+                }
+            }
+            let len = snap.wallet_journal.len();
+            hot_fp.wallet_journal = Some((len, snap.wallet_journal.prefix_hash(len)));
+        }
+        crate::cow_collections::CowVecDiff::Rewritten => {
+            exec.execute(
+                "wallet_journal:delete_all",
+                "DELETE FROM wallet_journal",
+                params![],
+            )?;
+            for (idx, e) in snap.wallet_journal.iter().enumerate() {
+                exec.execute(
+                    "wallet_journal:insert",
+                    "INSERT INTO wallet_journal (seq_idx, entry_id, character_id, entry_type, amount_cents, balance_after_cents, reason)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        idx as i64,
+                        e.entry_id,
+                        e.character_id,
+                        e.entry_type,
+                        e.amount.0,
+                        e.balance_after.0,
+                        e.reason,
+                    ],
+                )?;
+            }
+            let len = snap.wallet_journal.len();
+            hot_fp.wallet_journal = Some((len, snap.wallet_journal.prefix_hash(len)));
+        }
+    }
+
+    match changes.mails_diff {
+        crate::cow_collections::CowVecDiff::Unchanged => {}
+        crate::cow_collections::CowVecDiff::AppendOnly { old_len } => {
+            for (idx, m) in snap.mails.iter_from(old_len) {
+                exec.execute(
+                    "mail:append",
+                    "INSERT OR REPLACE INTO mail (seq_idx, message_id, sender_id, recipient_id, subject, body)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        idx as i64,
+                        m.message_id,
+                        m.sender_id,
+                        m.recipient_id,
+                        m.subject,
+                        m.body,
+                    ],
+                )?;
+            }
+            let len = snap.mails.len();
+            hot_fp.mails = Some((len, snap.mails.prefix_hash(len)));
+        }
+        crate::cow_collections::CowVecDiff::Rewritten => {
+            exec.execute("mail:delete_all", "DELETE FROM mail", params![])?;
+            for (idx, m) in snap.mails.iter().enumerate() {
+                exec.execute(
+                    "mail:insert",
+                    "INSERT INTO mail (seq_idx, message_id, sender_id, recipient_id, subject, body)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        idx as i64,
+                        m.message_id,
+                        m.sender_id,
+                        m.recipient_id,
+                        m.subject,
+                        m.body,
+                    ],
+                )?;
+            }
+            let len = snap.mails.len();
+            hot_fp.mails = Some((len, snap.mails.prefix_hash(len)));
+        }
+    }
+
+    if !changes.structures.is_empty() {
+        use crate::sqlite_store::fingerprints::fp_structure;
+        for ch in &changes.structures {
+            match &ch.after {
+                None => {
+                    exec.execute(
+                        "structures:delete",
+                        "DELETE FROM structures WHERE structure_id = ?1",
+                        params![ch.key],
+                    )?;
+                    hot_fp.structures.push((ch.key, None));
+                }
+                Some(st) => {
+                    let js = to_checked_json_string(&**st).map_err(TxError::Persist)?;
+                    exec.execute(
+                        "structures:upsert",
+                        "INSERT OR REPLACE INTO structures (structure_id, type_id, owner_corp_id, solar_system_id, name, state, quantum_core_installed, fuel_blocks, shield_hp, armor_hp, hull_hp, record_json)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        params![
+                            st.structure_id,
+                            st.type_id as i64,
+                            st.owner_corp_id,
+                            st.solar_system_id as i64,
+                            st.name,
+                            st.state,
+                            i64::from(st.quantum_core_installed),
+                            st.fuel_blocks as i64,
+                            st.shield_hp,
+                            st.armor_hp,
+                            st.hull_hp,
+                            js,
+                        ],
+                    )?;
+                    hot_fp.structures.push((ch.key, Some(fp_structure(&**st))));
+                }
+            }
+        }
+    }
+
+    if !changes.mail_timestamps.is_empty() {
+        for ch in &changes.mail_timestamps {
+            match &ch.after {
+                None => {
+                    exec.execute(
+                        "mail_timestamps:delete",
+                        "DELETE FROM mail_timestamps WHERE mail_id = ?1",
+                        params![ch.key],
+                    )?;
+                    hot_fp.mail_timestamps.push((ch.key, None));
+                }
+                Some(ts) => {
+                    exec.execute(
+                        "mail_timestamps:upsert",
+                        "INSERT OR REPLACE INTO mail_timestamps (mail_id, timestamp_unix) VALUES (?1, ?2)",
+                        params![ch.key, **ts as i64],
+                    )?;
+                    hot_fp.mail_timestamps.push((ch.key, Some(**ts)));
+                }
+            }
+        }
+    }
+
+    if !changes.item_custom_names.is_empty() {
+        use crate::sqlite_store::fingerprints::fp_json;
+        for ch in &changes.item_custom_names {
+            match &ch.after {
+                None => {
+                    exec.execute(
+                        "item_custom_names:delete",
+                        "DELETE FROM item_custom_names WHERE item_id = ?1",
+                        params![ch.key],
+                    )?;
+                    hot_fp.item_custom_names.push((ch.key, None));
+                }
+                Some(name) => {
+                    exec.execute(
+                        "item_custom_names:upsert",
+                        "INSERT OR REPLACE INTO item_custom_names (item_id, custom_name) VALUES (?1, ?2)",
+                        params![ch.key, &**name],
+                    )?;
+                    hot_fp.item_custom_names.push((ch.key, Some(fp_json(&**name))));
+                }
+            }
+        }
+    }
+
+    if !changes.entity_kv.is_empty() {
+        use crate::sqlite_store::service_domains_store::entity_kv_row_fp;
+        for ch in &changes.entity_kv {
+            match &ch.after {
+                None => {
+                    exec.execute(
+                        "entity_kv:delete",
+                        "DELETE FROM entity_kv WHERE ns = ?1 AND entity_id = ?2 AND sub_key = ?3",
+                        params![ch.key.ns.as_str(), ch.key.entity_id, ch.key.sub_key],
+                    )?;
+                    hot_fp.entity_kv.push((ch.key.clone(), None));
+                }
+                Some(row) => {
+                    crate::service_domains::validate_entity_kv_value(
+                        ch.key.ns,
+                        &row.value_json,
+                    )
+                    .map_err(TxError::Persist)?;
+                    exec.execute(
+                        "entity_kv:upsert",
+                        "INSERT OR REPLACE INTO entity_kv (ns, entity_id, sub_key, value, updated_unix) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            ch.key.ns.as_str(),
+                            ch.key.entity_id,
+                            ch.key.sub_key,
+                            row.value_json.as_bytes(),
+                            row.updated_unix as i64
+                        ],
+                    )?;
+                    hot_fp
+                        .entity_kv
+                        .push((ch.key.clone(), Some(entity_kv_row_fp(&**row))));
+                }
+            }
+        }
+    }
+
     if !changes.domain_rows.is_empty() {
         crate::sqlite_store::domain_rows::apply_domain_row_changes(exec, &changes.domain_rows)?;
     }
@@ -1204,6 +1595,7 @@ pub(crate) fn apply_changeset_to_sqlite(
     // Selective cold domain SQL sync: never scans the 5 hot CowMap tables!
     let cd = &changes.cold_domains;
     if cd.any() {
+        hot_fp.apply_to_ref(staged_cold_fp);
         exec.step_fault_check("cold_domains")?;
         crate::sqlite_store::sync::sync_selected_cold_domains_to_sqlite(
             exec.tx,

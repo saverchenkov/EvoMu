@@ -384,7 +384,7 @@ pub(crate) fn handle_calendar_mutate(
     });
     {
         let mut s = ctx.social_extras.lock().unwrap();
-        for (eid, ev) in db_evs {
+        for (&eid, ev) in &db_evs {
             s.next_id = s.next_id.max(eid);
             let entry = s.calendar_events.entry(eid).or_insert_with(|| CalendarEventState {
                 event_id: ev.event_id,
@@ -393,10 +393,10 @@ pub(crate) fn handle_calendar_mutate(
                 event_date_time: ev.event_date_time,
                 duration: ev.duration,
                 importance: ev.importance,
-                title: ev.title,
-                description: ev.description,
-                _scope: ev.scope,
-                responses: ev.responses,
+                title: ev.title.clone(),
+                description: ev.description.clone(),
+                _scope: ev.scope.clone(),
+                responses: ev.responses.clone(),
                 is_deleted: ev.is_deleted,
             });
             if ev.is_deleted {
@@ -824,7 +824,7 @@ pub fn handle_calendar_get(
     let corp_opt = session.corporation_id.or(char_corp);
     let ally_opt = session.alliance_id.or(char_ally);
     let mut s = ctx.social_extras.lock().unwrap();
-    for (eid, ev) in db_evs {
+    for (&eid, ev) in &db_evs {
         s.next_id = s.next_id.max(eid);
         let entry = s.calendar_events.entry(eid).or_insert_with(|| CalendarEventState {
             event_id: ev.event_id,
@@ -833,10 +833,10 @@ pub fn handle_calendar_get(
             event_date_time: ev.event_date_time,
             duration: ev.duration,
             importance: ev.importance,
-            title: ev.title,
-            description: ev.description,
-            _scope: ev.scope,
-            responses: ev.responses,
+            title: ev.title.clone(),
+            description: ev.description.clone(),
+            _scope: ev.scope.clone(),
+            responses: ev.responses.clone(),
             is_deleted: ev.is_deleted,
         });
         if ev.is_deleted {

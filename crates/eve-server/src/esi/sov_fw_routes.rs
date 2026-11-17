@@ -299,7 +299,7 @@ pub fn dispatch_sov_route(
         // Faction Warfare war matrix from live `snap.fw_wars`, SDE empire militia war pairs, and active wars.
         ("GET", "/fw/wars") => Some(ctx.db.with_snapshot(|snap| {
             let mut pairs: Vec<(i64, i64)> = if !snap.fw_wars.is_empty() {
-                snap.fw_wars.clone()
+                snap.fw_wars.as_inner().clone()
             } else {
                 sde_empire_fw_war_pairs(&ctx.sde)
             };

@@ -246,7 +246,7 @@ fn daily_maintenance_jobs_asteroids_market_ohlcv_contracts_sov_ess_and_declines(
             .insert(90_000_001, dt_base - 15_000);
         snap.last_mission_decline_times
             .insert(90_000_002, dt_base - 3_600);
-        let lp_logs = snap.char_lp_logs.entry(90_000_001).or_default();
+        let mut lp_logs = snap.char_lp_logs.entry(90_000_001).or_default();
         for i in 0..505_i64 {
             lp_logs.push(LpRewardLogEntry {
                 log_id: i,

@@ -164,9 +164,9 @@ impl<'a> CrimeWatchRestoreGuard<'a> {
     ) -> Self {
         let orig_stages = snapshot_corruption_stages(snap, now_unix);
         let dir = CrimeWatchDirector {
-            states: std::mem::take(&mut snap.crimewatch_states),
+            states: std::mem::take(&mut *snap.crimewatch_states),
             aggression_mgr: AggressionManager {
-                records: std::mem::take(&mut snap.crimewatch_aggressions),
+                records: std::mem::take(&mut *snap.crimewatch_aggressions),
             },
             system_corruption_stages: orig_stages.clone(),
             pending_concord_despawns,
@@ -181,8 +181,9 @@ impl<'a> CrimeWatchRestoreGuard<'a> {
 
 impl<'a> Drop for CrimeWatchRestoreGuard<'a> {
     fn drop(&mut self) {
-        self.snap.crimewatch_states = std::mem::take(&mut self.dir.states);
-        self.snap.crimewatch_aggressions = std::mem::take(&mut self.dir.aggression_mgr.records);
+        self.snap.crimewatch_states = std::mem::take(&mut self.dir.states).into();
+        self.snap.crimewatch_aggressions =
+            std::mem::take(&mut self.dir.aggression_mgr.records).into();
         persist_corruption_stage_diffs(
             self.snap,
             &self.orig_stages,
@@ -292,8 +293,8 @@ impl CrimeWatchLock {
         let now_unix = self.db.now_unix_secs();
         let (states, records, stages) = self.db.with_snapshot(|s| {
             (
-                s.crimewatch_states.clone(),
-                s.crimewatch_aggressions.clone(),
+                s.crimewatch_states.as_inner().clone(),
+                s.crimewatch_aggressions.as_inner().clone(),
                 snapshot_corruption_stages(s, now_unix),
             )
         });
@@ -320,8 +321,8 @@ impl CrimeWatchLock {
         let now_unix = self.db.now_unix_secs();
         let (states, records, stages) = self.db.with_snapshot(|s| {
             (
-                s.crimewatch_states.clone(),
-                s.crimewatch_aggressions.clone(),
+                s.crimewatch_states.as_inner().clone(),
+                s.crimewatch_aggressions.as_inner().clone(),
                 snapshot_corruption_stages(s, now_unix),
             )
         });
@@ -395,8 +396,8 @@ impl<'a> Drop for CrimeWatchWriteGuard<'a> {
         let stages_changed = self.director.system_corruption_stages != self.orig_stages;
         let changed = stages_changed
             || self.db.with_snapshot(|s| {
-                self.director.states != s.crimewatch_states
-                    || self.director.aggression_mgr.records != s.crimewatch_aggressions
+                self.director.states != *s.crimewatch_states
+                    || self.director.aggression_mgr.records != *s.crimewatch_aggressions
             });
         if changed {
             let states = std::mem::take(&mut self.director.states);
@@ -404,8 +405,8 @@ impl<'a> Drop for CrimeWatchWriteGuard<'a> {
             let stages = std::mem::take(&mut self.director.system_corruption_stages);
             let orig_stages = &self.orig_stages;
             self.db.with_mut_snapshot(|snap| {
-                snap.crimewatch_states = states;
-                snap.crimewatch_aggressions = aggs;
+                snap.crimewatch_states = states.into();
+                snap.crimewatch_aggressions = aggs.into();
                 persist_corruption_stage_diffs(snap, orig_stages, &stages);
             });
         }

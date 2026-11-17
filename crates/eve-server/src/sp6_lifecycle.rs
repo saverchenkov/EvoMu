@@ -84,11 +84,11 @@ pub fn unix_to_filetime(unix_secs: u64) -> i64 {
 }
 
 pub fn load_sp6_state_from_snap(snap: &eve_db::WorldStateSnapshot) -> Sp6PersistedState {
-    snap.sp6_lifecycle.clone()
+    (&*snap.sp6_lifecycle).clone()
 }
 
 pub fn save_sp6_state_to_snap(snap: &mut eve_db::WorldStateSnapshot, state: &Sp6PersistedState) {
-    snap.sp6_lifecycle = state.clone();
+    snap.sp6_lifecycle.set(state.clone());
 }
 
 pub fn with_sp6_state<R>(
@@ -105,14 +105,14 @@ struct Sp6RestoreGuard<'a> {
 
 impl<'a> Sp6RestoreGuard<'a> {
     fn new(snap: &'a mut eve_db::WorldStateSnapshot) -> Self {
-        let state = std::mem::take(&mut snap.sp6_lifecycle);
+        let state = std::mem::take(&mut snap.sp6_lifecycle).into_inner();
         Self { snap, state }
     }
 }
 
 impl<'a> Drop for Sp6RestoreGuard<'a> {
     fn drop(&mut self) {
-        self.snap.sp6_lifecycle = std::mem::take(&mut self.state);
+        self.snap.sp6_lifecycle.set(std::mem::take(&mut self.state));
         self.snap.mark_other_domains_dirty();
     }
 }

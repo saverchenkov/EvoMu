@@ -3611,7 +3611,7 @@ async fn test_upwell_market_acl_offline_filter_and_corp_div1_ledger() {
         let entry = &cj[cj_pre_sell];
         assert_eq!(entry.ref_type, "MarketBrokerFee");
         assert!((entry.amount - 2_000.0).abs() < 1e-6);
-        assert!(s.wallet_journal[wj_pre_sell..].iter().any(|e| e.character_id == corp_id && e.entry_type == "MarketBrokerFee" && e.amount.0 == 2_000_00));
+        assert!(s.wallet_journal.iter().skip(wj_pre_sell).any(|e| e.character_id == corp_id && e.entry_type == "MarketBrokerFee" && e.amount.0 == 2_000_00));
     });
     let sell_oid = ctx.db.with_snapshot(|s| s.market_orders.values().find(|o| !o.is_bid && o.owner_id == vip_cid).unwrap().order_id);
 

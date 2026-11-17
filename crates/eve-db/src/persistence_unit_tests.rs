@@ -1372,3 +1372,1003 @@ fn issue_826_with_mut_snapshot_cowmap_and_domain_rows_zero_cold_clones_and_zero_
     drop(repo);
     let _ = std::fs::remove_file(&db_path);
 }
+
+#[test]
+fn issue_1181_is_entity_id_referenced_exact_lookup_and_collision_skip() {
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!("evomu_issue_1181_entity_ref_{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&db_path);
+    let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite");
+
+    let cid = 90_000_010_i64;
+    let mail_id_old = 100_000_501_i64;
+    let mail_id_new = 100_000_502_i64;
+    let wj_id_old = 100_000_601_i64;
+    let wj_id_new = 100_000_602_i64;
+    let lp_id_old = 100_000_701_i64;
+    let lp_id_new = 100_000_702_i64;
+    let npc_id_old = 100_000_801_i64;
+    let npc_id_new = 100_000_802_i64;
+    let ekv_id = 100_000_901_i64;
+
+    repo.tx("seed_all_five_stores", |wtx| -> Result<(), TxError> {
+        wtx.snap.characters.insert(cid, sample_character(cid, 10_000));
+        wtx.snap.mails.push(MailRecord {
+            message_id: mail_id_old,
+            sender_id: cid,
+            recipient_id: cid,
+            subject: "S".into(),
+            body: "B".into(),
+        });
+        wtx.snap.wallet_journal.push(WalletJournalEntry {
+            entry_id: wj_id_old,
+            character_id: cid,
+            entry_type: "Bounty".into(),
+            amount: IskCents(100),
+            balance_after: IskCents(100),
+            reason: "Test".into(),
+        });
+        wtx.snap.char_lp_logs.insert(
+            cid,
+            vec![crate::snapshot_ext::LpRewardLogEntry {
+                log_id: lp_id_old,
+                corp_id: 1_000_035,
+                amount: 50,
+                reason: "Mission".into(),
+                timestamp_unix: 1_700_000_000,
+            }],
+        );
+        wtx.snap.active_missions.insert(
+            (cid, 1),
+            ActiveMissionRecord {
+                mission_id: 10,
+                character_id: cid,
+                agent_id: 1,
+                solar_system_id: 30_000_142,
+                state: "Accepted".into(),
+                current_room_id: 1,
+                npcs_remaining: 1,
+                spawned_npc_ball_ids: vec![npc_id_old],
+                bookmark_id: None,
+            },
+        );
+        wtx.snap.entity_kv.insert(
+            crate::service_domains::entity_kv::EntityKvKey {
+                ns: crate::service_domains::entity_kv::Ns::ContractDeposit,
+                entity_id: ekv_id,
+                sub_key: "state".into(),
+            },
+            crate::service_domains::entity_kv::EntityKvRow {
+                value_json: "\"ok\"".into(),
+                updated_unix: 1_700_000_000,
+            },
+        );
+        Ok(())
+    })
+    .expect("seed_all_five_stores");
+
+    repo.with_snapshot(|snap| {
+        assert!(snap.is_entity_id_referenced(mail_id_old));
+        assert!(snap.is_entity_id_referenced(wj_id_old));
+        assert!(snap.is_entity_id_referenced(lp_id_old));
+        assert!(snap.is_entity_id_referenced(npc_id_old));
+        assert!(snap.is_entity_id_referenced(ekv_id));
+        assert!(!snap.is_entity_id_referenced(mail_id_new));
+        assert!(!snap.is_entity_id_referenced(wj_id_new));
+        assert!(!snap.is_entity_id_referenced(lp_id_new));
+        assert!(!snap.is_entity_id_referenced(npc_id_new));
+        assert!(!snap.is_entity_id_referenced(ekv_id + 1));
+    });
+
+    // Mutate via IndexMut / get_mut / remove and verify index reconciliation works both
+    // mid-transaction and after commit, and verify alloc_entity_id skips colliding IDs.
+    repo.tx("mutate_and_alloc", |wtx| -> Result<(), TxError> {
+        wtx.snap.mails[0].message_id = mail_id_new;
+        wtx.snap.wallet_journal[0].entry_id = wj_id_new;
+        wtx.snap.char_lp_logs.get_mut(&cid).unwrap()[0].log_id = lp_id_new;
+        wtx.snap.active_missions.get_mut(&(cid, 1)).unwrap().spawned_npc_ball_ids = vec![npc_id_new];
+        wtx.snap.entity_kv.remove(&crate::service_domains::entity_kv::EntityKvKey {
+            ns: crate::service_domains::entity_kv::Ns::ContractDeposit,
+            entity_id: ekv_id,
+            sub_key: "state".into(),
+        });
+
+        assert!(!wtx.snap.is_entity_id_referenced(mail_id_old));
+        assert!(wtx.snap.is_entity_id_referenced(mail_id_new));
+        assert!(!wtx.snap.is_entity_id_referenced(wj_id_old));
+        assert!(wtx.snap.is_entity_id_referenced(wj_id_new));
+        assert!(!wtx.snap.is_entity_id_referenced(lp_id_old));
+        assert!(wtx.snap.is_entity_id_referenced(lp_id_new));
+        assert!(!wtx.snap.is_entity_id_referenced(npc_id_old));
+        assert!(wtx.snap.is_entity_id_referenced(npc_id_new));
+        assert!(!wtx.snap.is_entity_id_referenced(ekv_id));
+
+        // Seed next candidate collision in mails, verify alloc_entity_id skips over it.
+        let peek_next = wtx.snap.next_entity_id + 1;
+        wtx.snap.mails.push(MailRecord {
+            message_id: peek_next,
+            sender_id: cid,
+            recipient_id: cid,
+            subject: "Collide".into(),
+            body: "Collide".into(),
+        });
+        let allocated = wtx.alloc_entity_id()?;
+        assert!(
+            allocated > peek_next,
+            "alloc_entity_id ({allocated}) must skip colliding mail message_id ({peek_next})"
+        );
+        Ok(())
+    })
+    .expect("mutate_and_alloc");
+
+    repo.with_snapshot(|snap| {
+        assert!(!snap.is_entity_id_referenced(mail_id_old));
+        assert!(snap.is_entity_id_referenced(mail_id_new));
+        assert!(!snap.is_entity_id_referenced(wj_id_old));
+        assert!(snap.is_entity_id_referenced(wj_id_new));
+        assert!(!snap.is_entity_id_referenced(lp_id_old));
+        assert!(snap.is_entity_id_referenced(lp_id_new));
+        assert!(!snap.is_entity_id_referenced(npc_id_old));
+        assert!(snap.is_entity_id_referenced(npc_id_new));
+        assert!(!snap.is_entity_id_referenced(ekv_id));
+    });
+
+    drop(repo);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn issue_1181_cow_id_vec_wal_delta_and_sqlite_sync_append_truncate_rewrite() {
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!("evomu_issue_1181_wal_sync_{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&db_path);
+    let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite");
+    let cid = 90_000_020_i64;
+
+    let snap_base = repo.with_snapshot(|s| s.clone());
+
+    // 1a. AppendOnly wallet_journal -> incremental WAL delta (`full_snapshot.is_none()`)
+    repo.tx("append_wallet_journal", |wtx| -> Result<(), TxError> {
+        for i in 1..=3_i64 {
+            wtx.snap.wallet_journal.push(WalletJournalEntry {
+                entry_id: 200_000 + i,
+                character_id: cid,
+                entry_type: "Bounty".into(),
+                amount: IskCents(100 * i),
+                balance_after: IskCents(100 * i),
+                reason: format!("r{i}"),
+            });
+        }
+        Ok(())
+    })
+    .expect("append_wallet_journal");
+
+    let snap_wj = repo.with_snapshot(|s| s.clone());
+    assert_eq!(
+        snap_base.wallet_journal.classify_diff(&snap_wj.wallet_journal),
+        crate::CowVecDiff::AppendOnly { old_len: 0 }
+    );
+    let delta_wj_append = WorldStateWalDelta::from_diff(&snap_base, &snap_wj);
+    assert_eq!(delta_wj_append.appended_wallet_journal.len(), 3);
+    assert!(delta_wj_append.full_snapshot.is_none());
+
+    let mut target_wj = snap_base.clone();
+    delta_wj_append.apply_to(&mut target_wj);
+    assert_eq!(target_wj.wallet_journal, snap_wj.wallet_journal);
+
+    // 1b. AppendOnly mails -> `CowVecDiff::AppendOnly` + SQLite incremental append
+    repo.tx("append_mails", |wtx| -> Result<(), TxError> {
+        for i in 1..=3_i64 {
+            wtx.snap.mails.push(MailRecord {
+                message_id: 300_000 + i,
+                sender_id: cid,
+                recipient_id: cid,
+                subject: format!("s{i}"),
+                body: format!("b{i}"),
+            });
+        }
+        Ok(())
+    })
+    .expect("append_mails");
+
+    let snap_1 = repo.with_snapshot(|s| s.clone());
+    assert_eq!(
+        snap_wj.mails.classify_diff(&snap_1.mails),
+        crate::CowVecDiff::AppendOnly { old_len: 0 }
+    );
+
+    let reloaded_1 = repo.reload_snapshot_from_sqlite().expect("reload_1");
+    assert_eq!(reloaded_1.wallet_journal, snap_1.wallet_journal);
+    assert_eq!(reloaded_1.mails, snap_1.mails);
+
+    // 2. Rewritten (IndexMut edit at index 0 keeping length equal)
+    repo.tx("rewrite_prefix", |wtx| -> Result<(), TxError> {
+        wtx.snap.wallet_journal[0].reason = "r1-edited".into();
+        wtx.snap.mails[0].body = "b1-edited".into();
+        Ok(())
+    })
+    .expect("rewrite_prefix");
+
+    let snap_2 = repo.with_snapshot(|s| s.clone());
+    assert_eq!(
+        snap_1.wallet_journal.classify_diff(&snap_2.wallet_journal),
+        crate::CowVecDiff::Rewritten
+    );
+    assert_eq!(
+        snap_1.mails.classify_diff(&snap_2.mails),
+        crate::CowVecDiff::Rewritten
+    );
+    let delta_rewrite = WorldStateWalDelta::from_diff(&snap_1, &snap_2);
+    assert!(delta_rewrite.full_snapshot.is_some());
+
+    let mut target_2 = snap_1.clone();
+    delta_rewrite.apply_to(&mut target_2);
+    assert_eq!(target_2.wallet_journal, snap_2.wallet_journal);
+    assert_eq!(target_2.mails, snap_2.mails);
+
+    let reloaded_2 = repo.reload_snapshot_from_sqlite().expect("reload_2");
+    assert_eq!(reloaded_2.wallet_journal[0].reason, "r1-edited");
+    assert_eq!(reloaded_2.mails[0].body, "b1-edited");
+
+    // 3. Rewritten via truncate
+    repo.tx("truncate_tail", |wtx| -> Result<(), TxError> {
+        wtx.snap.wallet_journal.truncate(1);
+        wtx.snap.mails.truncate(2);
+        Ok(())
+    })
+    .expect("truncate_tail");
+
+    let snap_3 = repo.with_snapshot(|s| s.clone());
+    assert_eq!(
+        snap_2.wallet_journal.classify_diff(&snap_3.wallet_journal),
+        crate::CowVecDiff::Rewritten
+    );
+    assert_eq!(
+        snap_2.mails.classify_diff(&snap_3.mails),
+        crate::CowVecDiff::Rewritten
+    );
+    let delta_trunc = WorldStateWalDelta::from_diff(&snap_2, &snap_3);
+    assert!(delta_trunc.full_snapshot.is_some());
+
+    let reloaded_3 = repo.reload_snapshot_from_sqlite().expect("reload_3");
+    assert_eq!(reloaded_3.wallet_journal.len(), 1);
+    assert_eq!(reloaded_3.mails.len(), 2);
+    assert!(!reloaded_3.is_entity_id_referenced(200_002));
+    assert!(!reloaded_3.is_entity_id_referenced(300_003));
+
+    drop(repo);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_ologn_and_zero_clone() {
+    let n_cold = 1_000_000usize;
+    let cid = 90_000_030_i64;
+
+    let mut conn = rusqlite::Connection::open_in_memory().expect("open_in_memory");
+    crate::sqlite_store::apply_migrations(&conn).expect("migrations");
+
+    let mut snap = WorldStateSnapshot::default();
+    let wj_vec: Vec<WalletJournalEntry> = (0..n_cold)
+        .map(|i| WalletJournalEntry {
+            entry_id: 500_000_000 + i as i64,
+            character_id: cid,
+            entry_type: "Bounty".into(),
+            amount: IskCents(100),
+            balance_after: IskCents(100),
+            reason: "j".into(),
+        })
+        .collect();
+    let mail_vec: Vec<MailRecord> = (0..n_cold)
+        .map(|i| MailRecord {
+            message_id: 600_000_000 + i as i64,
+            sender_id: cid,
+            recipient_id: cid,
+            subject: "s".into(),
+            body: "b".into(),
+        })
+        .collect();
+    snap.wallet_journal = CowIdVec::from(wj_vec);
+    snap.mails = CowIdVec::from(mail_vec);
+    snap.wallet_journal_timestamps = (0..n_cold)
+        .map(|i| (500_000_000 + i as i64, 1_700_000_000_u64))
+        .collect();
+    snap.wallet_journal_meta = (0..n_cold)
+        .map(|i| {
+            (
+                500_000_000 + i as i64,
+                crate::ledger::JournalMeta::new(10, cid, cid, 1_700_000_000),
+            )
+        })
+        .collect();
+
+    // Also populate CowMap, CowCell, CowLpLogs, CowActiveMissions, and cold stores.
+    let item_id = 200_900_001_i64;
+    snap.items.insert(
+        item_id,
+        InventoryItemRecord {
+            item_id,
+            type_id: 34,
+            owner_id: cid,
+            location_id: 60_003_760,
+            flag: InventoryFlag::Hangar,
+            quantity: 10,
+            ..Default::default()
+        },
+    );
+    snap.char_lp_logs.insert(
+        cid,
+        vec![crate::snapshot_ext::LpRewardLogEntry {
+            log_id: 700_000_001,
+            corp_id: 1_000_035,
+            amount: 100,
+            reason: "m".into(),
+            timestamp_unix: 1_700_000_000,
+        }],
+    );
+    snap.active_missions.insert(
+        (cid, 1),
+        ActiveMissionRecord {
+            mission_id: 1,
+            character_id: cid,
+            agent_id: 1,
+            solar_system_id: 30_000_142,
+            state: "Accepted".into(),
+            current_room_id: 1,
+            npcs_remaining: 1,
+            spawned_npc_ball_ids: vec![800_000_001],
+            bookmark_id: None,
+        },
+    );
+    snap.entity_kv.insert(
+        crate::service_domains::entity_kv::EntityKvKey {
+            ns: crate::service_domains::entity_kv::Ns::ContractDeposit,
+            entity_id: 850_000_001,
+            sub_key: "k".into(),
+        },
+        crate::service_domains::entity_kv::EntityKvRow {
+            value_json: "\"v\"".into(),
+            updated_unix: 1_700_000_000,
+        },
+    );
+
+    let mut fp = crate::sqlite_store::compute_fingerprints(&snap);
+    {
+        let tx = conn.transaction().expect("seed item + 1M sql tx");
+        let item = snap.items.get(&item_id).unwrap();
+        tx.execute(
+            "INSERT INTO items (item_id, type_id, owner_id, location_id, flag, quantity, singleton, version, record_json)
+             VALUES (?1, 34, ?2, 60003760, 4, 10, 0, 1, ?3)",
+            rusqlite::params![item_id, cid, serde_json::to_string(item).unwrap()],
+        )
+        .expect("seed item");
+        {
+            let mut st_wj = tx
+                .prepare_cached(
+                    "INSERT INTO wallet_journal (seq_idx, entry_id, character_id, entry_type, amount_cents, balance_after_cents, reason)
+                     VALUES (?1, ?2, ?3, 'Bounty', 100, 100, 'j')",
+                )
+                .expect("prepare wallet_journal");
+            for (idx, e) in snap.wallet_journal.iter().enumerate() {
+                st_wj
+                    .execute(rusqlite::params![idx as i64, e.entry_id, cid])
+                    .expect("insert wallet_journal");
+            }
+        }
+        {
+            let mut st_mail = tx
+                .prepare_cached(
+                    "INSERT INTO mail (seq_idx, message_id, sender_id, recipient_id, subject, body)
+                     VALUES (?1, ?2, ?3, ?3, 's', 'b')",
+                )
+                .expect("prepare mail");
+            for (idx, m) in snap.mails.iter().enumerate() {
+                st_mail
+                    .execute(rusqlite::params![idx as i64, m.message_id, cid])
+                    .expect("insert mail");
+            }
+        }
+        tx.commit().expect("seed 1M commit");
+    }
+    fp.items.insert(
+        item_id,
+        crate::sqlite_store::fingerprints::fp_item(snap.items.get(&item_id).unwrap()),
+    );
+
+    // Indexed SQLite entity ID checks on 2M persisted rows must stay O(log N) (< 5ms).
+    let t_sqlite_exists = std::time::Instant::now();
+    assert!(
+        crate::sqlite_store::sqlite_entity_id_exists(&conn, 500_500_000)
+            .expect("sqlite_entity_id_exists wj")
+    );
+    assert!(
+        crate::sqlite_store::sqlite_entity_id_exists(&conn, 600_500_000)
+            .expect("sqlite_entity_id_exists mail")
+    );
+    assert!(
+        !crate::sqlite_store::sqlite_entity_id_exists(&conn, 999_999_999)
+            .expect("sqlite_entity_id_exists miss")
+    );
+    let sqlite_exists_dur = t_sqlite_exists.elapsed();
+    assert!(
+        sqlite_exists_dur < std::time::Duration::from_millis(5),
+        "indexed sqlite_entity_id_exists across 2M rows took {sqlite_exists_dur:?} (expected < 5ms)"
+    );
+
+    let jwt_secret =
+        crate::sqlite_store::load_or_init_jwt_secret(&conn, WorldRepository::generate_random_secret_32)
+            .expect("jwt");
+    let repo = WorldRepository::from_parts(
+        snap,
+        conn,
+        fp,
+        900_000_000,
+        None,
+        crate::types::AuthRuntimeState::new(jwt_secret),
+    );
+
+    let before_snap = repo.with_snapshot(|s| s.clone());
+    let cloned_snap = before_snap.clone();
+    assert!(before_snap.wallet_journal.ptr_eq(&cloned_snap.wallet_journal));
+    assert!(before_snap
+        .wallet_journal_timestamps
+        .ptr_eq(&cloned_snap.wallet_journal_timestamps));
+    assert!(before_snap
+        .wallet_journal_meta
+        .ptr_eq(&cloned_snap.wallet_journal_meta));
+    assert!(before_snap.mails.ptr_eq(&cloned_snap.mails));
+    assert!(before_snap.char_lp_logs.ptr_eq(&cloned_snap.char_lp_logs));
+    assert!(before_snap.active_missions.ptr_eq(&cloned_snap.active_missions));
+    assert!(before_snap.structures.ptr_eq(&cloned_snap.structures));
+    assert!(before_snap.contracts.ptr_eq(&cloned_snap.contracts));
+    assert!(before_snap.system_states.ptr_eq(&cloned_snap.system_states));
+    assert!(before_snap.corp_governance.ptr_eq(&cloned_snap.corp_governance));
+    assert!(before_snap.fleet_and_social_ops.ptr_eq(&cloned_snap.fleet_and_social_ops));
+    assert!(before_snap.committed_idempotency_keys.ptr_eq(&cloned_snap.committed_idempotency_keys));
+    assert!(before_snap.entity_kv.ptr_eq(&cloned_snap.entity_kv));
+    assert!(before_snap.sp6_lifecycle.ptr_eq(&cloned_snap.sp6_lifecycle));
+    assert!(before_snap.pve_special_sites.ptr_eq(&cloned_snap.pve_special_sites));
+    assert!(before_snap.abyssal_state.ptr_eq(&cloned_snap.abyssal_state));
+    assert!(before_snap.dungeon_runtime.ptr_eq(&cloned_snap.dungeon_runtime));
+    assert!(before_snap.dungeon_editor.ptr_eq(&cloned_snap.dungeon_editor));
+    assert!(before_snap.module_online_states.ptr_eq(&cloned_snap.module_online_states));
+    assert!(before_snap.module_active_states.ptr_eq(&cloned_snap.module_active_states));
+    assert!(before_snap.module_active_charges.ptr_eq(&cloned_snap.module_active_charges));
+    assert!(before_snap.paused_skill_queues.ptr_eq(&cloned_snap.paused_skill_queues));
+
+    crate::cow::reset_thread_cow_full_touch_for_test();
+    super::reset_thread_cold_fp_clones_for_test();
+    sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
+
+    // Commit 5 transactions: each mutates 1 item and allocates 100 entity IDs.
+    let t0 = std::time::Instant::now();
+    for round in 0..5_i32 {
+        repo.tx("hot_1_item_plus_100_allocs", |wtx| -> Result<(), TxError> {
+            wtx.snap.items.get_mut(&item_id).unwrap().quantity += 1;
+            let mut prev = 0_i64;
+            for _ in 0..100 {
+                let id = wtx.alloc_entity_id()?;
+                assert!(id > prev);
+                prev = id;
+            }
+            let _ = round;
+            Ok(())
+        })
+        .expect("hot_1_item_plus_100_allocs");
+    }
+    let avg_tx_dur = t0.elapsed() / 5;
+    assert!(
+        avg_tx_dur < std::time::Duration::from_millis(50),
+        "1M wallet_journal + 1M mails single-item tx + 100 allocs took {avg_tx_dur:?} (expected << 50ms)"
+    );
+    assert_eq!(
+        crate::cow::thread_cow_full_touch_for_test(),
+        0,
+        "1M-cold tx commit must perform 0 full-table touches"
+    );
+    assert_eq!(
+        super::thread_cold_fp_clones_for_test(),
+        0,
+        "hot item tx with 1M wallet_journal/mails must perform 0 cold FP clones"
+    );
+    assert_eq!(
+        sqlite_store::fingerprints::thread_fingerprint_calls_for_test(),
+        0,
+        "hot item tx must trigger 0 full cold fingerprint scans"
+    );
+
+    let after_hot_snap = repo.with_snapshot(|s| s.clone());
+    assert!(before_snap.wallet_journal.ptr_eq(&after_hot_snap.wallet_journal));
+    assert!(before_snap
+        .wallet_journal_timestamps
+        .ptr_eq(&after_hot_snap.wallet_journal_timestamps));
+    assert!(before_snap
+        .wallet_journal_meta
+        .ptr_eq(&after_hot_snap.wallet_journal_meta));
+    assert!(before_snap.mails.ptr_eq(&after_hot_snap.mails));
+    assert!(before_snap.char_lp_logs.ptr_eq(&after_hot_snap.char_lp_logs));
+    assert!(before_snap.active_missions.ptr_eq(&after_hot_snap.active_missions));
+    assert!(before_snap.contracts.ptr_eq(&after_hot_snap.contracts));
+    assert!(before_snap.corp_governance.ptr_eq(&after_hot_snap.corp_governance));
+    assert!(before_snap.fleet_and_social_ops.ptr_eq(&after_hot_snap.fleet_and_social_ops));
+    assert!(before_snap.entity_kv.ptr_eq(&after_hot_snap.entity_kv));
+    assert!(!before_snap.items.ptr_eq(&after_hot_snap.items));
+
+    // Appending 1 journal entry via `WorldStateSnapshot::append_journal_entry` (updating
+    // `wallet_journal`, `wallet_journal_meta`, and `wallet_journal_timestamps`) + 1 mail entry on
+    // 1M SQLite-backed sequences/maps is O(log N), performs 0 cold FP clones, 0 full-table
+    // touches (`CowMap::diff` for `wallet_journal_timestamps` / `wallet_journal_meta`), and 0
+    // fingerprint calls during commit/sync.
+    crate::cow::reset_thread_cow_full_touch_for_test();
+    super::reset_thread_cold_fp_clones_for_test();
+    sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
+
+    let mut appended_journal_id = 0_i64;
+    let mut closure_fp_calls = usize::MAX;
+    let t_append = std::time::Instant::now();
+    repo.tx("append_1_journal_and_1_mail", |wtx| -> Result<(), TxError> {
+        let m_id = wtx.alloc_entity_id()?;
+        let j_id = wtx.snap.append_journal_entry(crate::ledger::JournalEntryInput {
+            owner_id: cid,
+            entry_type: "Bounty",
+            amount: IskCents(500),
+            balance_after: IskCents(600),
+            reason: "append-fast".into(),
+            meta: crate::ledger::JournalMeta::new(10, cid, cid, 1_700_000_123),
+        });
+        assert_ne!(j_id, m_id);
+        appended_journal_id = j_id;
+        wtx.snap.mails.push(MailRecord {
+            message_id: m_id,
+            sender_id: cid,
+            recipient_id: cid,
+            subject: "Fast".into(),
+            body: "Fast".into(),
+        });
+        closure_fp_calls = sqlite_store::fingerprints::thread_fingerprint_calls_for_test();
+        sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
+        Ok(())
+    })
+    .expect("append_1_journal_and_1_mail");
+    let append_dur = t_append.elapsed();
+    assert!(
+        append_dur < std::time::Duration::from_millis(50),
+        "appending 1 journal + 1 mail to 1M sequences/maps took {append_dur:?} (expected << 50ms)"
+    );
+    assert!(
+        closure_fp_calls <= 2,
+        "pushing 1 journal + 1 mail must call canonical_fp <= 2 times, got {closure_fp_calls}"
+    );
+    assert_eq!(
+        sqlite_store::fingerprints::thread_fingerprint_calls_for_test(),
+        0,
+        "append_1_journal_and_1_mail commit/sync must trigger 0 fingerprint calls"
+    );
+    assert_eq!(
+        super::thread_cold_fp_clones_for_test(),
+        0,
+        "append_1_journal_and_1_mail must perform 0 cold FP clones"
+    );
+    assert_eq!(
+        crate::cow::thread_cow_full_touch_for_test(),
+        0,
+        "append_journal_entry must diff wallet_journal_timestamps/meta with 0 full-table touches"
+    );
+    let read_after = repo.read_state();
+    assert_eq!(read_after.wallet_journal.len(), n_cold + 1);
+    assert_eq!(read_after.wallet_journal_timestamps.len(), n_cold + 1);
+    assert_eq!(read_after.wallet_journal_meta.len(), n_cold + 1);
+    assert_eq!(
+        read_after.wallet_journal_timestamps.get(&appended_journal_id),
+        Some(&1_700_000_123)
+    );
+    assert_eq!(read_after.mails.len(), n_cold + 1);
+    let (sql_wj_cnt, sql_mail_cnt, ts_val, meta_exists): (i64, i64, String, bool) = repo
+        .with_sqlite_conn(|c| {
+            let wj: i64 = c
+                .query_row("SELECT COUNT(*) FROM wallet_journal", [], |r| r.get(0))
+                .map_err(|e| e.to_string())?;
+            let m: i64 = c
+                .query_row("SELECT COUNT(*) FROM mail", [], |r| r.get(0))
+                .map_err(|e| e.to_string())?;
+            let ts: String = c
+                .query_row(
+                    "SELECT value FROM domain_rows WHERE domain = ?1 AND key = ?2",
+                    rusqlite::params![
+                        crate::sqlite_store::domain_rows::DOMAIN_WALLET_AND_MARKET,
+                        format!("wallet_journal_timestamps/{appended_journal_id}"),
+                    ],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let meta_row: Option<String> = c
+                .query_row(
+                    "SELECT value FROM domain_rows WHERE domain = ?1 AND key = ?2",
+                    rusqlite::params![
+                        crate::sqlite_store::domain_rows::DOMAIN_WALLET_JOURNAL_META,
+                        appended_journal_id.to_string(),
+                    ],
+                    |r| r.get(0),
+                )
+                .ok();
+            Ok::<(i64, i64, String, bool), String>((wj, m, ts, meta_row.is_some()))
+        })
+        .expect("sqlite count");
+    assert_eq!(sql_wj_cnt, (n_cold + 1) as i64);
+    assert_eq!(sql_mail_cnt, (n_cold + 1) as i64);
+    assert_eq!(ts_val, "1700000123");
+    assert!(meta_exists);
+
+    // Updating + deleting an existing entry in 1M `wallet_journal_timestamps` also runs in
+    // O(k log N) with 0 full-table touches, 0 cold FP clones, and exact `domain_rows` SQLite sync.
+    crate::cow::reset_thread_cow_full_touch_for_test();
+    super::reset_thread_cold_fp_clones_for_test();
+    sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
+    repo.tx("update_1m_wallet_ts", |wtx| -> Result<(), TxError> {
+        wtx.snap
+            .wallet_journal_timestamps
+            .insert(appended_journal_id, 1_700_000_999);
+        Ok(())
+    })
+    .expect("update_1m_wallet_ts");
+    assert_eq!(crate::cow::thread_cow_full_touch_for_test(), 0);
+    assert_eq!(super::thread_cold_fp_clones_for_test(), 0);
+    assert_eq!(
+        sqlite_store::fingerprints::thread_fingerprint_calls_for_test(),
+        0
+    );
+    let updated_ts: String = repo
+        .with_sqlite_conn(|c| {
+            c.query_row(
+                "SELECT value FROM domain_rows WHERE domain = ?1 AND key = ?2",
+                rusqlite::params![
+                    crate::sqlite_store::domain_rows::DOMAIN_WALLET_AND_MARKET,
+                    format!("wallet_journal_timestamps/{appended_journal_id}"),
+                ],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .expect("sqlite verify ts update");
+    assert_eq!(updated_ts, "1700000999");
+
+    repo.tx("remove_1m_wallet_ts", |wtx| -> Result<(), TxError> {
+        wtx.snap
+            .wallet_journal_timestamps
+            .remove(&appended_journal_id);
+        Ok(())
+    })
+    .expect("remove_1m_wallet_ts");
+    assert_eq!(crate::cow::thread_cow_full_touch_for_test(), 0);
+    assert_eq!(super::thread_cold_fp_clones_for_test(), 0);
+    assert_eq!(
+        sqlite_store::fingerprints::thread_fingerprint_calls_for_test(),
+        0
+    );
+    let removed_exists: bool = repo
+        .with_sqlite_conn(|c| {
+            let row: Option<String> = c
+                .query_row(
+                    "SELECT value FROM domain_rows WHERE domain = ?1 AND key = ?2",
+                    rusqlite::params![
+                        crate::sqlite_store::domain_rows::DOMAIN_WALLET_AND_MARKET,
+                        format!("wallet_journal_timestamps/{appended_journal_id}"),
+                    ],
+                    |r| r.get(0),
+                )
+                .ok();
+            Ok::<bool, String>(row.is_some())
+        })
+        .expect("sqlite verify ts delete");
+    assert!(!removed_exists);
+
+    let after_append_snap = repo.with_snapshot(|s| s.clone());
+    assert!(after_hot_snap.contracts.ptr_eq(&after_append_snap.contracts));
+    assert!(after_hot_snap.corp_governance.ptr_eq(&after_append_snap.corp_governance));
+}
+
+#[test]
+fn issue_1181_incremental_cold_tables_tx_zero_clone_and_zero_full_touch() {
+    let mut conn = rusqlite::Connection::open_in_memory().expect("open_in_memory");
+    crate::sqlite_store::apply_migrations(&conn).expect("migrations");
+
+    let mut snap = WorldStateSnapshot::default();
+    let n_seed = 200_i64;
+    for i in 1..=n_seed {
+        snap.structures.insert(
+            1_020_000_000_000 + i,
+            crate::types::UpwellStructureRecord {
+                structure_id: 1_020_000_000_000 + i,
+                type_id: 35832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_000_142,
+                name: format!("Struct-{i}"),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                ..Default::default()
+            },
+        );
+        snap.mail_timestamps.insert(600_000_000 + i, 1_700_000_000 + i as u64);
+        snap.item_custom_names
+            .insert(200_000_000 + i, format!("Ship-{i}"));
+        snap.entity_kv.insert(
+            crate::service_domains::entity_kv::EntityKvKey::new(
+                crate::service_domains::entity_kv::Ns::ContractDeposit,
+                850_000_000 + i,
+                "k",
+            ),
+            crate::service_domains::entity_kv::EntityKvRow {
+                value_json: format!("{i}"),
+                updated_unix: 1_700_000_000 + i as u64,
+            },
+        );
+    }
+
+    let fp = {
+        let tx = conn.transaction().expect("seed tx");
+        let mut fake_fp = crate::sqlite_store::TableFingerprints::default();
+        crate::sqlite_store::sync::sync_dirty_to_sqlite(
+            &tx,
+            &snap,
+            &mut fake_fp,
+            false,
+        )
+        .expect("initial sync");
+        tx.commit().expect("seed commit");
+        fake_fp
+    };
+
+    let jwt_secret =
+        crate::sqlite_store::load_or_init_jwt_secret(&conn, WorldRepository::generate_random_secret_32)
+            .expect("jwt");
+    let repo = WorldRepository::from_parts(
+        snap,
+        conn,
+        fp,
+        900_000_000,
+        None,
+        crate::types::AuthRuntimeState::new(jwt_secret),
+    );
+
+    // 1. Mutate 1 structure
+    crate::cow::reset_thread_cow_full_touch_for_test();
+    super::reset_thread_cold_fp_clones_for_test();
+    sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
+    repo.tx("single_structure", |wtx| -> Result<(), TxError> {
+        wtx.snap
+            .structures
+            .get_mut(&(1_020_000_000_001))
+            .unwrap()
+            .fuel_blocks = 999;
+        Ok(())
+    })
+    .expect("single_structure");
+    assert_eq!(super::thread_cold_fp_clones_for_test(), 0);
+    assert_eq!(crate::cow::thread_cow_full_touch_for_test(), 0);
+    assert!(
+        sqlite_store::fingerprints::thread_fingerprint_calls_for_test() <= 2,
+        "expected O(k) structure fp calls"
+    );
+
+    // 2. Mutate 1 mail_timestamp (0 canonical_fp calls)
+    crate::cow::reset_thread_cow_full_touch_for_test();
+    super::reset_thread_cold_fp_clones_for_test();
+    sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
+    repo.tx("single_mail_timestamp", |wtx| -> Result<(), TxError> {
+        wtx.snap.mail_timestamps.insert(600_000_999, 1_800_000_000);
+        Ok(())
+    })
+    .expect("single_mail_timestamp");
+    assert_eq!(super::thread_cold_fp_clones_for_test(), 0);
+    assert_eq!(crate::cow::thread_cow_full_touch_for_test(), 0);
+    assert_eq!(sqlite_store::fingerprints::thread_fingerprint_calls_for_test(), 0);
+
+    // 3. Mutate 1 item_custom_name
+    crate::cow::reset_thread_cow_full_touch_for_test();
+    super::reset_thread_cold_fp_clones_for_test();
+    sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
+    repo.tx("single_item_custom_name", |wtx| -> Result<(), TxError> {
+        wtx.snap
+            .item_custom_names
+            .insert(200_000_001, "Renamed".into());
+        Ok(())
+    })
+    .expect("single_item_custom_name");
+    assert_eq!(super::thread_cold_fp_clones_for_test(), 0);
+    assert_eq!(crate::cow::thread_cow_full_touch_for_test(), 0);
+    assert!(
+        sqlite_store::fingerprints::thread_fingerprint_calls_for_test() <= 2,
+        "expected O(k) item_custom_names fp calls"
+    );
+
+    // 4. Insert + remove 1 entity_kv row (and verify fp digest matches compute_fingerprints)
+    crate::cow::reset_thread_cow_full_touch_for_test();
+    super::reset_thread_cold_fp_clones_for_test();
+    sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
+    repo.tx("single_entity_kv", |wtx| -> Result<(), TxError> {
+        wtx.snap.entity_kv.insert(
+            crate::service_domains::entity_kv::EntityKvKey::new(
+                crate::service_domains::entity_kv::Ns::ContractDeposit,
+                850_000_001,
+                "k",
+            ),
+            crate::service_domains::entity_kv::EntityKvRow {
+                value_json: "9999".into(),
+                updated_unix: 1_800_000_001,
+            },
+        );
+        wtx.snap.entity_kv.remove(
+            &crate::service_domains::entity_kv::EntityKvKey::new(
+                crate::service_domains::entity_kv::Ns::ContractDeposit,
+                850_000_002,
+                "k",
+            ),
+        );
+        Ok(())
+    })
+    .expect("single_entity_kv");
+    assert_eq!(super::thread_cold_fp_clones_for_test(), 0);
+    assert_eq!(crate::cow::thread_cow_full_touch_for_test(), 0);
+    assert!(
+        sqlite_store::fingerprints::thread_fingerprint_calls_for_test() <= 8,
+        "expected O(k) entity_kv fp calls"
+    );
+
+    let expected_snap = repo.read_state();
+    let expected_fp = crate::sqlite_store::compute_fingerprints(&expected_snap);
+    let actual_writer_fp_digest = repo
+        .writer
+        .lock()
+        .unwrap()
+        .fp
+        .service_domains
+        .entity_kv_fp;
+    assert_eq!(
+        actual_writer_fp_digest,
+        expected_fp.service_domains.entity_kv_fp
+    );
+    let (loaded_snap, _) = repo
+        .with_sqlite_conn(|c| crate::sqlite_store::load_snapshot_from_sqlite_with_options(c, false))
+        .expect("reload sqlite");
+    assert_eq!(loaded_snap.structures, expected_snap.structures);
+    assert_eq!(loaded_snap.mail_timestamps, expected_snap.mail_timestamps);
+    assert_eq!(loaded_snap.item_custom_names, expected_snap.item_custom_names);
+    assert_eq!(loaded_snap.entity_kv, expected_snap.entity_kv);
+}
+
+#[test]
+fn issue_1181_snapshot_alloc_entity_id_reconciles_dirty_lp_logs_and_active_missions() {
+    let mut snap = WorldStateSnapshot::default();
+    snap.next_entity_id = 200_000_000;
+    let cid = 90_000_031_i64;
+    snap.char_lp_logs.insert(
+        cid,
+        vec![crate::snapshot_ext::LpRewardLogEntry {
+            log_id: 200_000_000,
+            corp_id: 1_000_035,
+            amount: 50,
+            reason: "seed".into(),
+            timestamp_unix: 1_700_000_000,
+        }],
+    );
+    snap.active_missions.insert(
+        (cid, 1),
+        ActiveMissionRecord {
+            mission_id: 1,
+            character_id: cid,
+            agent_id: 1,
+            solar_system_id: 30_000_142,
+            state: "Accepted".into(),
+            current_room_id: 1,
+            npcs_remaining: 1,
+            spawned_npc_ball_ids: vec![],
+            bookmark_id: None,
+        },
+    );
+
+    // Dirty both indexes without explicit reconciliation.
+    for (_k, vec) in snap.char_lp_logs.iter_mut() {
+        vec.push(crate::snapshot_ext::LpRewardLogEntry {
+            log_id: 200_000_001,
+            corp_id: 1_000_035,
+            amount: 75,
+            reason: "dirty-iter-mut".into(),
+            timestamp_unix: 1_700_000_001,
+        });
+    }
+    for m in snap.active_missions.values_mut() {
+        m.spawned_npc_ball_ids.push(200_000_002);
+    }
+
+    let id = snap.alloc_entity_id();
+    assert_eq!(id, 200_000_003);
+    assert_eq!(snap.next_entity_id, 200_000_003);
+
+    // Also verify WorldTx::alloc_entity_id reconciles dirty char_lp_logs.
+    let conn = rusqlite::Connection::open_in_memory().expect("mem");
+    crate::sqlite_store::apply_migrations(&conn).expect("migrations");
+    let jwt_secret =
+        crate::sqlite_store::load_or_init_jwt_secret(&conn, WorldRepository::generate_random_secret_32)
+            .expect("jwt");
+    let fp = crate::sqlite_store::compute_fingerprints(&snap);
+    let repo = WorldRepository::from_parts(
+        snap,
+        conn,
+        fp,
+        200_000_003,
+        None,
+        crate::types::AuthRuntimeState::new(jwt_secret),
+    );
+    repo.tx("tx_alloc_dirty_lp_logs", |wtx| -> Result<(), TxError> {
+        for (_k, vec) in wtx.snap.char_lp_logs.iter_mut() {
+            vec.push(crate::snapshot_ext::LpRewardLogEntry {
+                log_id: 200_000_004,
+                corp_id: 1_000_035,
+                amount: 99,
+                reason: "dirty-tx".into(),
+                timestamp_unix: 1_700_000_002,
+            });
+        }
+        let next_id = wtx.alloc_entity_id()?;
+        assert_eq!(next_id, 200_000_005);
+        Ok(())
+    })
+    .expect("tx_alloc_dirty_lp_logs");
+}
+
+#[test]
+fn issue_1181_entity_kv_cow_map_and_wrapped_fields_serde_roundtrip() {
+    let mut snap = WorldStateSnapshot::default();
+    snap.entity_kv.insert(
+        crate::service_domains::entity_kv::EntityKvKey::new(
+            crate::service_domains::entity_kv::Ns::ContractDeposit,
+            501,
+            "escrow",
+        ),
+        crate::service_domains::entity_kv::EntityKvRow {
+            value_json: "12345".into(),
+            updated_unix: 1_700_000_010,
+        },
+    );
+    snap.entity_kv.insert(
+        crate::service_domains::entity_kv::EntityKvKey::new(
+            crate::service_domains::entity_kv::Ns::XmppHostname,
+            0,
+            "",
+        ),
+        crate::service_domains::entity_kv::EntityKvRow {
+            value_json: "\"chat.evomu.local\"".into(),
+            updated_unix: 1_700_000_020,
+        },
+    );
+    snap.paused_skill_queues.insert(90_000_001);
+    snap.module_online_states.insert(200_000_010, true);
+    snap.module_active_states.insert(200_000_011);
+    snap.module_active_charges.insert(200_000_012, 1234);
+
+    let cloned = snap.clone();
+    assert!(snap.entity_kv.ptr_eq(&cloned.entity_kv));
+    assert!(snap.paused_skill_queues.ptr_eq(&cloned.paused_skill_queues));
+    assert!(snap.module_online_states.ptr_eq(&cloned.module_online_states));
+    assert!(snap.module_active_states.ptr_eq(&cloned.module_active_states));
+    assert!(snap.module_active_charges.ptr_eq(&cloned.module_active_charges));
+
+    let json = serde_json::to_string(&snap).expect("serialize snapshot");
+    let expected_k1 = crate::service_domains::entity_kv::EntityKvKey::new(
+        crate::service_domains::entity_kv::Ns::ContractDeposit,
+        501,
+        "escrow",
+    )
+    .to_map_key_string();
+    let expected_k2 = crate::service_domains::entity_kv::EntityKvKey::new(
+        crate::service_domains::entity_kv::Ns::XmppHostname,
+        0,
+        "",
+    )
+    .to_map_key_string();
+    assert!(json.contains(&format!("\"{expected_k1}\"")));
+    assert!(json.contains(&format!("\"{expected_k2}\"")));
+    let decoded: WorldStateSnapshot = serde_json::from_str(&json).expect("deserialize snapshot");
+    assert_eq!(decoded, snap);
+}

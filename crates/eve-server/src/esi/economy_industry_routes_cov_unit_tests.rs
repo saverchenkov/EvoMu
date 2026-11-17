@@ -391,7 +391,7 @@ fn facilities_jobs_format_mining_extractions_and_observers_edge_cases() {
             MiningLedgerRecord { character_id: char_id, solar_system_id: 30_000_142, type_id: 1230, quantity: 250, date: format_date_utc(mining_recent), timestamp_unix: now },
             MiningLedgerRecord { character_id: char_id, solar_system_id: 30_000_142, type_id: 1230, quantity: 999, date: String::new(), timestamp_unix: mining_expired },
             MiningLedgerRecord { character_id: char_id, solar_system_id: 30_000_142, type_id: 1230, quantity: 0, date: String::new(), timestamp_unix: now },
-        ];
+        ].into();
 
         snap.moon_extractions.clear();
         for (eid, status) in [(1_i64, "Started"), (2, "Cancelled")] {

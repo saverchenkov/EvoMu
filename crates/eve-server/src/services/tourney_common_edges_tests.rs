@@ -17,7 +17,7 @@ fn tourney_common_team_names_countdowns_and_store_fallbacks() {
 
     // 1. Corrupt store JSON falls back to default
     ctx.db.with_mut_snapshot(|snap| {
-        snap.tourney_state = TourneyStore::default();
+        snap.tourney_state = TourneyStore::default().into();
         let loaded = load_store(snap);
         assert!(loaded.matches.is_empty());
     });

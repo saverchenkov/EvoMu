@@ -148,7 +148,7 @@ pub fn process_due_payment_schedules(
         let catalog = read_store_catalog(snap);
         let tokens = snap.quasar_commerce.payment_tokens.clone();
         let next_entity_id = &mut snap.next_entity_id;
-        let commerce = &mut snap.quasar_commerce;
+        let commerce = &mut *snap.quasar_commerce;
         let scheds = &mut commerce.payment_schedules;
         let receipts = &mut commerce.payment_receipts;
         let mut omega_renewals: Vec<(u64, u64)> = Vec::new();

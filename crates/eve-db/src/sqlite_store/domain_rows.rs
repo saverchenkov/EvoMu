@@ -1367,28 +1367,7 @@ where
         domain: &'static str,
         out: &mut Vec<DomainRowChange>,
     ) {
-        if self.ptr_eq(after) {
-            return;
-        }
-        for item in self.diff(after) {
-            match item {
-                CowDiffItem::Add(k, v) | CowDiffItem::Update { new: (k, v), .. } => {
-                    let key_str = k.encode_key();
-                    let value = to_checked_domain_json(domain, &key_str, &**v);
-                    out.push(DomainRowChange::Upsert {
-                        domain,
-                        key: key_str,
-                        value,
-                    });
-                }
-                CowDiffItem::Remove(k, _) => {
-                    out.push(DomainRowChange::Delete {
-                        domain,
-                        key: k.encode_key(),
-                    });
-                }
-            }
-        }
+        diff_cow_map_field(domain, "", "", self, after, out);
     }
 
     fn sync_full(&self, tx: &Transaction<'_>, domain: &'static str) -> Result<bool, String> {
@@ -1479,7 +1458,7 @@ where
     }
 
     fn sync_full(&self, tx: &Transaction<'_>, domain: &'static str) -> Result<bool, String> {
-        sync_entries_map(tx, domain, std::iter::once((().encode_key(), self.get())))
+        sync_entries_map(tx, domain, std::iter::once((().encode_key(), self.as_inner())))
     }
 
     fn load_domain(
@@ -1492,6 +1471,31 @@ where
             .pop()
             .map(|(_, val)| CowCell::new(val))
             .unwrap_or_default())
+    }
+}
+
+impl Persist for crate::cow_collections::CowLpLogs {
+    fn collect_diff_ops(
+        &self,
+        after: &Self,
+        domain: &'static str,
+        out: &mut Vec<DomainRowChange>,
+    ) {
+        self.as_cow_map()
+            .collect_diff_ops(after.as_cow_map(), domain, out);
+    }
+
+    fn sync_full(&self, tx: &Transaction<'_>, domain: &'static str) -> Result<bool, String> {
+        self.as_cow_map().sync_full(tx, domain)
+    }
+
+    fn load_domain(
+        conn: &Connection,
+        domain: &'static str,
+        ctx: &mut super::quarantine::LoadContext,
+    ) -> Result<Self, String> {
+        CowMap::<i64, Vec<crate::snapshot_ext::LpRewardLogEntry>>::load_domain(conn, domain, ctx)
+            .map(Self::from)
     }
 }
 
@@ -1636,6 +1640,68 @@ pub(crate) fn diff_map_with<'a, K: KeyCodec + 'a, V: PartialEq + Serialize + 'a>
         |v| v,
         out,
     );
+}
+
+/// Emits `O(k log N)` `domain_rows` diffs for a [`CowMap`] via [`CowMap::diff`] without scanning
+/// all entries. Uses `{prefix}{field}/{encoded_key}` keys (or `{encoded_key}` when both `prefix`
+/// and `field` are empty), and preserves bit-exact unchanged `NaN` handling.
+pub(crate) fn diff_cow_map_field<K, V>(
+    domain: &'static str,
+    prefix: &str,
+    field: &str,
+    before: &CowMap<K, V>,
+    after: &CowMap<K, V>,
+    out: &mut Vec<DomainRowChange>,
+) where
+    K: Ord + Clone + KeyCodec,
+    V: Clone + PartialEq + Serialize,
+{
+    if before.ptr_eq(after) {
+        return;
+    }
+    let encode_row_key = |k: &K| {
+        if prefix.is_empty() && field.is_empty() {
+            k.encode_key()
+        } else {
+            format_domain_entry_key(prefix, field, k)
+        }
+    };
+    for item in before.diff(after) {
+        match item {
+            CowDiffItem::Add(k, v) => {
+                let key_str = encode_row_key(k);
+                let value = to_checked_domain_json(domain, &key_str, &**v);
+                out.push(DomainRowChange::Upsert {
+                    domain,
+                    key: key_str,
+                    value,
+                });
+            }
+            CowDiffItem::Update {
+                old: (_, prev),
+                new: (k, v),
+            } => {
+                let key_str = encode_row_key(k);
+                let value = to_checked_domain_json(domain, &key_str, &**v);
+                if matches!(value, Err(TxError::NonFinite { .. }))
+                    && serialized_bits_equal(&**prev, &**v)
+                {
+                    continue;
+                }
+                out.push(DomainRowChange::Upsert {
+                    domain,
+                    key: key_str,
+                    value,
+                });
+            }
+            CowDiffItem::Remove(k, _) => {
+                out.push(DomainRowChange::Delete {
+                    domain,
+                    key: encode_row_key(k),
+                });
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2257,7 +2323,7 @@ pub(crate) fn load_notes_lp_domain_rows(
 
     snap.owner_notes = owner_notes;
     snap.corp_lp_balances = corp_lp_balances;
-    snap.char_lp_logs = char_lp_logs;
+    snap.char_lp_logs = char_lp_logs.into();
 
     Ok(had_legacy)
 }
@@ -2436,7 +2502,7 @@ mod tests {
         assert!(ops.is_empty());
 
         let mut cell_after = cell_before.clone();
-        cell_after.get_mut().amount_u128 = u128::MAX;
+        cell_after.as_inner_mut().amount_u128 = u128::MAX;
         cell_before.collect_diff_ops(&cell_after, "test.cell", &mut ops);
         assert_eq!(ops.len(), 1);
 
