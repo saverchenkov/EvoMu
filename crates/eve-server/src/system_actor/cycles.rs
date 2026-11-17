@@ -1210,6 +1210,25 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                         });
                     }
                 }
+                if let Some(cid) = cycle.owner_char_id {
+                    if let Some(mt) = sde_opt.as_ref().and_then(|s| s.types.get(&cycle.module_type_id)) {
+                        if let Some(jam_t) = crate::services::inventory_fitting::fitting_ewar_capital::ewar_jamming_type(
+                            mt,
+                            cycle.ammo_type_id,
+                            cycle.disables_target_mwd_mjd,
+                            cycle.hic_bubble_radius_m,
+                        ) {
+                            pending_cycle_actions.push(PendingCycleAction::CareerProgressEvent {
+                                char_id: cid,
+                                source_ship_id: cycle.ship_id,
+                                target_id,
+                                activity_kind: "ewar",
+                                sub_kind: jam_t,
+                                amount: cycle.duration_s,
+                            });
+                        }
+                    }
+                }
             }
 
             // 3. Thermodynamics & rack heat accumulation + slot-adjacency heat damage (`feat:dogma.heat-rack-thermodynamics`)
@@ -1897,23 +1916,6 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                                     sub_kind: "shield_boost",
                                     amount: rollover_shield_repaired,
                                 });
-                            }
-                            if let Some(mt) = sde_opt.as_ref().and_then(|s| s.types.get(&cycle.module_type_id)) {
-                                if let Some(jam_t) = crate::services::inventory_fitting::fitting_ewar_capital::ewar_jamming_type(
-                                    mt,
-                                    cycle.ammo_type_id,
-                                    cycle.disables_target_mwd_mjd,
-                                    cycle.hic_bubble_radius_m,
-                                ) {
-                                    pending_cycle_actions.push(PendingCycleAction::CareerProgressEvent {
-                                        char_id: cid,
-                                        source_ship_id: cycle.ship_id,
-                                        target_id,
-                                        activity_kind: "ewar",
-                                        sub_kind: jam_t,
-                                        amount: cycle.duration_s,
-                                    });
-                                }
                             }
                         }
                     }

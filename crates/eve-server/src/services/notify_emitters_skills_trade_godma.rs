@@ -846,10 +846,7 @@ pub async fn handle_dogma_take_module_offline(
             .with_snapshot(|s| s.items.get(&module_id).map(|i| i.type_id))
             .and_then(|tid| ctx.sde.types.get(&tid))
             .is_some_and(|t| {
-                matches!(
-                    t.group_id,
-                    40 | 1156 | 41 | 1697 | 67 | 71 | 76 | 72 | 1122 | 650 | 80 | 353
-                )
+                crate::services::inventory_fitting::fitting_module_cycles::is_cycle_gated_module_group(t.group_id)
             });
         if let Ok(Some(rem_delay)) = sys.remove_module_cycle(ship_id, module_id).await {
             if is_cycle_gated && rem_delay > 0.0 {

@@ -1201,6 +1201,51 @@ impl CareerGoalManager {
         delta: u64,
         gateway: &PublicGatewayRouter,
     ) {
+        self.on_career_gameplay_event_with_notifier(char_id, ev, delta, |scope, label, builder, ts| {
+            let _ = gateway.publish_pb_notice(scope, label, builder, ts);
+        });
+    }
+
+    pub fn on_career_gameplay_event_queued(
+        &self,
+        char_id: u32,
+        ev: CareerGameplayEvent<'_>,
+        delta: u64,
+        pending_notices: &Arc<
+            std::sync::RwLock<Vec<(crate::quasar_gateway::NoticeScope, eve_proto::quasar::GoogleAny)>>,
+        >,
+    ) {
+        self.on_career_gameplay_event_with_notifier(
+            char_id,
+            ev,
+            delta,
+            |scope, label, builder, _ts| match builder.to_any() {
+                Ok(any) => {
+                    pending_notices
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((scope, any));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        side_effect = label,
+                        error = %e,
+                        "Failed to encode queued career goal notice"
+                    );
+                }
+            },
+        );
+    }
+
+    fn on_career_gameplay_event_with_notifier<F>(
+        &self,
+        char_id: u32,
+        ev: CareerGameplayEvent<'_>,
+        delta: u64,
+        mut emit_notice: F,
+    ) where
+        F: FnMut(crate::quasar_gateway::NoticeScope, &str, eve_proto::pb::ProtoBuilder, u64),
+    {
         if matches!(ev.activity_kind, "hacking" | "advanced_hacking" | "combat_sites")
             && ev.solar_system_id.is_some_and(|sid| {
                 self.sde
@@ -1282,7 +1327,7 @@ impl CareerGoalManager {
             }
 
             for (uuid, new_progress, just_completed) in progressed {
-                let _ = gateway.publish_pb_notice(
+                emit_notice(
                     crate::quasar_gateway::NoticeScope::Character(char_id),
                     "quasar_career_goals.on_gameplay_event.progressed",
                     pb::message("eve_public.career.goal.api.ProgressedNotice")
@@ -1292,7 +1337,7 @@ impl CareerGoalManager {
                 );
 
                 if just_completed {
-                    let _ = gateway.publish_pb_notice(
+                    emit_notice(
                         crate::quasar_gateway::NoticeScope::Character(char_id),
                         "quasar_career_goals.on_gameplay_event.completed",
                         pb::message("eve_public.career.goal.api.CompletedNotice")
@@ -2195,7 +2240,9 @@ pub(crate) fn record_mission_completion_career_goals(
             if epic_arc_completed {
                 record_career_sub_kind(ctx, char_id, "epic_arc", Some("epic_arc_complete"), 1);
             }
-            return;
+            if agent.level != 1 {
+                return;
+            }
         }
         if is_fw_agent {
             if agent.level == 1 {

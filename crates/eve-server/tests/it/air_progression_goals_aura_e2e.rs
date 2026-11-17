@@ -1244,3 +1244,115 @@ async fn career_program_warp_arrival_dedup_and_corp_fw_enlist_e2e() {
     assert_eq!(prog_of(corp_dir_cid, "SofJoinFW"), 1);
     assert_eq!(prog_of(corp_member_cid, "SofJoinFW"), 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quasar_local_chat_broadcast_career_progress_e2e() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let chat_cid = 2_115_200_401_i64;
+    let admin_cid = 2_115_200_402_i64;
+    seed_pilot(&ctx.db, chat_cid, 5601, "QuasarChatPilot", 10_000_000_00, 1_000);
+    seed_pilot(&ctx.db, admin_cid, 5602, "QuasarChatAdmin", 10_000_000_00, 1_000);
+
+    let mut chat_sess = sess(61, 5601, chat_cid, service_roles::ROLE_PLAYER_DEFAULT);
+    chat_sess.solar_system_id = Some(JITA_SYS);
+    let mut admin_sess = sess(
+        62,
+        5602,
+        admin_cid,
+        service_roles::ROLE_PLAYER_DEFAULT | service_roles::ROLE_ADMIN,
+    );
+    admin_sess.solar_system_id = Some(JITA_SYS);
+    let _ = ctx
+        .db
+        .acquire_online_lock(5601, 61, Some(chat_cid), false, ctx.now_unix());
+
+    let mut rx = subscribe(&ctx, &mut chat_sess).await;
+    let _ = drain_notices(&mut rx);
+
+    let prog_of = |cid: i64, lbl: &str| -> u64 {
+        ctx.quasar_gateway
+            .progression
+            .career_goals
+            .get_or_init_goals(cid as u32)
+            .into_iter()
+            .find(|g| g.def.goal_label == lbl)
+            .unwrap_or_else(|| panic!("missing goal {lbl}"))
+            .progress
+    };
+
+    // 1. Missing message fails validation -> 0 progress.
+    let bad_rsp = qrpc(
+        &ctx,
+        &mut chat_sess,
+        "eve_public.chat.local.api.BroadcastMessageRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(bad_rsp.status_code, STATUS_BAD_REQUEST);
+    assert_eq!(prog_of(chat_cid, "SofSendChatMessage"), 0);
+
+    // 2. Whitespace-only broadcast does not advance SofSendChatMessage.
+    let ws_bytes = eve_proto::pb::message("eve_public.chat.local.api.BroadcastMessageRequest")
+        .set("message", "   ")
+        .must_to_any()
+        .value;
+    let ws_rsp = qrpc(
+        &ctx,
+        &mut chat_sess,
+        "eve_public.chat.local.api.BroadcastMessageRequest",
+        ws_bytes,
+    )
+    .await;
+    assert_eq!(ws_rsp.status_code, STATUS_OK);
+    assert_eq!(prog_of(chat_cid, "SofSendChatMessage"), 0);
+    let _ = drain_notices(&mut rx);
+
+    // 3. Valid local broadcast advances SofSendChatMessage and emits ProgressedNotice via gateway.
+    let ok_bytes = eve_proto::pb::message("eve_public.chat.local.api.BroadcastMessageRequest")
+        .set("message", "o7 Jita local!")
+        .must_to_any()
+        .value;
+    let ok_rsp = qrpc(
+        &ctx,
+        &mut chat_sess,
+        "eve_public.chat.local.api.BroadcastMessageRequest",
+        ok_bytes.clone(),
+    )
+    .await;
+    assert_eq!(ok_rsp.status_code, STATUS_OK);
+    assert_eq!(prog_of(chat_cid, "SofSendChatMessage"), 1);
+    let notices = drain_notices(&mut rx);
+    assert!(notices
+        .iter()
+        .any(|(t, _)| t == "eve_public.chat.local.api.MessageBroadcastNotice"));
+    assert!(notices
+        .iter()
+        .any(|(t, _)| t == "eve_public.career.goal.api.ProgressedNotice"));
+
+    // 4. Muted broadcast returns 403 Forbidden and does NOT increment SofSendChatMessage.
+    let mute_bytes = eve_proto::pb::message("eve_public.chat.local.api.admin.MuteRequest")
+        .set("character.sequential", chat_cid as u32)
+        .set("duration", eve_proto::quasar::GoogleDuration { seconds: 120, nanos: 0 })
+        .set("reason", "test mute")
+        .must_to_any()
+        .value;
+    let mute_rsp = qrpc(
+        &ctx,
+        &mut admin_sess,
+        "eve_public.chat.local.api.admin.MuteRequest",
+        mute_bytes,
+    )
+    .await;
+    assert_eq!(mute_rsp.status_code, STATUS_OK);
+    let muted_rsp = qrpc(
+        &ctx,
+        &mut chat_sess,
+        "eve_public.chat.local.api.BroadcastMessageRequest",
+        ok_bytes,
+    )
+    .await;
+    assert_eq!(muted_rsp.status_code, STATUS_FORBIDDEN);
+    assert_eq!(prog_of(chat_cid, "SofSendChatMessage"), 1);
+}

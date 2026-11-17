@@ -392,7 +392,6 @@ pub async fn handle_ship_or_npc_destruction(
             target_ball_id,
         );
     }
-
     let is_abyssal_npc_or_cache =
         !is_non_ship_structure_or_deployable && (32_000_000..=32_999_999).contains(&sys_id);
     let victim_id = if is_non_ship_structure_or_deployable {

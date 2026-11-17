@@ -370,6 +370,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let db_bcast = Arc::clone(&db);
     let state_bcast = Arc::clone(&state);
     let subs_bcast = Arc::clone(&router.subscribers);
+    let prog_bcast = Arc::clone(&router.progression);
+    let pending_notices_bcast = Arc::clone(&router.pending_notices);
     router.register_handler(
         "eve_public.chat.local.api.BroadcastMessageRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -471,6 +473,19 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 
             // Queue notice to solar system scope
             ctx_queue_notice(NoticeScope::SolarSystem(sys_id), notice_any, now);
+
+            if !msg_text.trim().is_empty() {
+                prog_bcast.career_goals.on_career_gameplay_event_queued(
+                    cid as u32,
+                    crate::services::quasar_career_goals::CareerGameplayEvent {
+                        activity_kind: "social",
+                        sub_kind: Some("chat_message"),
+                        ..Default::default()
+                    },
+                    1,
+                    &pending_notices_bcast,
+                );
+            }
 
             pb::message("eve_public.chat.local.api.BroadcastMessageResponse")
                 .to_any()
