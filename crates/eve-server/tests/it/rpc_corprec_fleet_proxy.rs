@@ -386,3 +386,172 @@ async fn test_fleet_proxy_and_fleet_mgr_rpcs() {
         .expect("GetMyFleetFinderAdvert empty");
     assert_eq!(my_ad_empty, PyRep::None);
 }
+
+#[tokio::test]
+// parity: rpc:fleetObjectHandler.Init, rpc:fleetProxy.AddFleetFinderAdvert, rpc:fleetProxy.GetAvailableFleetAds, rpc:fleetProxy.GetFleetAdsForChar, rpc:fleetProxy.GetMyFleetFinderAdvert
+async fn test_fleet_proxy_advert_date_created_non_negative_across_advancetime_and_init() {
+    const YEAR1800_TICKS: i64 = 199 * 365 * 86_400 * 10_000_000;
+
+    fn assert_client_fmtdate_non_negative(ad_rep: &PyRep, client_wall_ft: i64, label: &str) {
+        let date_created = field(ad_rep, "dateCreated")
+            .as_i64()
+            .unwrap_or_else(|| panic!("{label}: expected integer dateCreated"));
+        assert!(
+            date_created > 0,
+            "{label}: dateCreated must be positive FILETIME ticks, got {date_created}"
+        );
+        let delta = client_wall_ft - date_created;
+        assert!(
+            delta >= 0,
+            "{label}: gametime.GetWallclockTime() - dateCreated must be >= 0 (delta={delta}, client_wall_ft={client_wall_ft}, date_created={date_created})"
+        );
+        assert!(
+            delta < YEAR1800_TICKS,
+            "{label}: delta ({delta}) must stay < const.YEAR365 * 199 for FmtDate('ns')"
+        );
+    }
+
+    let ctx = ServerContext::new();
+    let mut sess1 = login_pilot_char(&ctx, 28_012, "demo", "demo-secret", PILOT_1).await;
+    let mut sess2 = login_pilot_char(&ctx, 28_013, "other", "other-secret", PILOT_2).await;
+    sess1.role |= eve_machonet::service_roles::ROLE_GML;
+    sess1.solar_system_id = Some(30_000_142);
+    sess2.solar_system_id = Some(30_000_142);
+
+    // 1. AdvanceClock before CreateFleet + Init (#1295-#1298 live sequence)
+    rpc(&ctx, &mut sess1, "timeControl", "AdvanceClock", &[PyRep::Integer(7_200)])
+        .await
+        .expect("AdvanceClock +7200s");
+    assert_eq!(ctx.unrebased_clock_offset_secs(), 7_200);
+
+    let fid_rep = rpc(&ctx, &mut sess1, "fleetObjectHandler", "CreateFleet", &[])
+        .await
+        .expect("CreateFleet");
+    let fleet_id = fid_rep.as_i64().expect("CreateFleet integer fleetID");
+    assert!(fleet_id > 0);
+
+    let init_ad_info = PyRep::keyval([
+        ("fleetName", PyRep::String("Post-AdvanceClock Init Fleet".into())),
+        ("description", PyRep::String("Created after AdvanceClock".into())),
+        ("inviteScope", PyRep::Integer(3)),
+        ("useAdvanceOptions", PyRep::Bool(true)),
+        ("minStanding", PyRep::Real(-10.0)),
+        ("minSecurity", PyRep::Real(-10.0)),
+    ]);
+    rpc(
+        &ctx,
+        &mut sess1,
+        "fleetObjectHandler",
+        "Init",
+        &[PyRep::None, PyRep::None, init_ad_info],
+    )
+    .await
+    .expect("fleetObjectHandler.Init");
+
+    // AdvanceClock again after creation + advance virtual time by 12s
+    rpc(&ctx, &mut sess1, "timeControl", "AdvanceClock", &[PyRep::Integer(1_800)])
+        .await
+        .expect("AdvanceClock +1800s");
+    ctx.advance_secs(12);
+
+    let my_init_ad = rpc(&ctx, &mut sess1, "fleetProxy", "GetMyFleetFinderAdvert", &[])
+        .await
+        .expect("GetMyFleetFinderAdvert after Init");
+    let avail_init = rpc(&ctx, &mut sess2, "fleetProxy", "GetAvailableFleetAds", &[])
+        .await
+        .expect("GetAvailableFleetAds after Init");
+    let char_init = rpc(&ctx, &mut sess2, "fleetProxy", "GetFleetAdsForChar", &[])
+        .await
+        .expect("GetFleetAdsForChar after Init");
+
+    let client_wall_after_init = rpc(&ctx, &mut sess2, "machoNet", "GetTime", &[])
+        .await
+        .expect("machoNet.GetTime after Init")
+        .as_i64()
+        .expect("GetTime integer");
+
+    assert_client_fmtdate_non_negative(&my_init_ad, client_wall_after_init, "GetMyFleetFinderAdvert(Init)");
+    for (label, rep) in [
+        ("GetAvailableFleetAds(Init)", avail_init),
+        ("GetFleetAdsForChar(Init)", char_init),
+    ] {
+        let PyRep::Dict(entries) = rep else {
+            panic!("{label}: expected Dict");
+        };
+        let ad_entry = entries
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(fleet_id))
+            .map(|(_, v)| v)
+            .unwrap_or_else(|| panic!("{label}: missing fleet_id {fleet_id}"));
+        assert_client_fmtdate_non_negative(ad_entry, client_wall_after_init, label);
+    }
+
+    // 2. AddFleetFinderAdvert + UpdateAdvertInfo after further AdvanceClock
+    rpc(&ctx, &mut sess1, "timeControl", "AdvanceClock", &[PyRep::Integer(3_600)])
+        .await
+        .expect("AdvanceClock +3600s");
+
+    let add_rep = rpc(
+        &ctx,
+        &mut sess1,
+        "fleetProxy",
+        "AddFleetFinderAdvert",
+        &[
+            PyRep::String("AdvanceClock Public Ops".into()),
+            PyRep::String("Open fleet".into()),
+            PyRep::Integer(3),
+            PyRep::Bool(true),
+            PyRep::Real(-10.0),
+            PyRep::Real(-10.0),
+        ],
+    )
+    .await
+    .expect("AddFleetFinderAdvert");
+    let upd_rep = rpc(
+        &ctx,
+        &mut sess1,
+        "fleetProxy",
+        "UpdateAdvertInfo",
+        &[
+            PyRep::String("AdvanceClock Public Ops v2".into()),
+            PyRep::String("Still open".into()),
+            PyRep::Integer(3),
+        ],
+    )
+    .await
+    .expect("UpdateAdvertInfo");
+
+    let avail_after_add = rpc(&ctx, &mut sess2, "fleetProxy", "GetAvailableFleetAds", &[])
+        .await
+        .expect("GetAvailableFleetAds after Add");
+    let char_after_add = rpc(&ctx, &mut sess2, "fleetProxy", "GetFleetAdsForChar", &[])
+        .await
+        .expect("GetFleetAdsForChar after Add");
+    let my_after_add = rpc(&ctx, &mut sess1, "fleetProxy", "GetMyFleetFinderAdvert", &[])
+        .await
+        .expect("GetMyFleetFinderAdvert after Add");
+
+    let client_wall_after_add = rpc(&ctx, &mut sess2, "machoNet", "GetTime", &[])
+        .await
+        .expect("machoNet.GetTime after Add")
+        .as_i64()
+        .expect("GetTime integer");
+
+    assert_client_fmtdate_non_negative(&add_rep, client_wall_after_add, "AddFleetFinderAdvert");
+    assert_client_fmtdate_non_negative(&upd_rep, client_wall_after_add, "UpdateAdvertInfo");
+    assert_client_fmtdate_non_negative(&my_after_add, client_wall_after_add, "GetMyFleetFinderAdvert(Add)");
+    for (label, rep) in [
+        ("GetAvailableFleetAds(Add)", avail_after_add),
+        ("GetFleetAdsForChar(Add)", char_after_add),
+    ] {
+        let PyRep::Dict(entries) = rep else {
+            panic!("{label}: expected Dict");
+        };
+        let ad_entry = entries
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(fleet_id))
+            .map(|(_, v)| v)
+            .unwrap_or_else(|| panic!("{label}: missing fleet_id {fleet_id}"));
+        assert_client_fmtdate_non_negative(ad_entry, client_wall_after_add, label);
+    }
+}

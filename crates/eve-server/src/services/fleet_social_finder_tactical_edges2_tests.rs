@@ -517,7 +517,7 @@ async fn finder_adverts_join_requests_reconnect_and_unhandled_dispatch() {
         allowed_entities: [90_000_002, 90_000_001].into_iter().collect(),
         _created_unix: 1_700_000_000,
     };
-    let ad_rep = super::advert_to_dict(&ad, 4, None);
+    let ad_rep = super::advert_to_dict(&ctx, &ad, 4, None);
     assert_eq!(ad_rep.dict_get("fleetID"), Some(&PyRep::Integer(fleet_id)));
     assert_eq!(ad_rep.dict_get("joinNeedsApproval"), Some(&PyRep::Bool(true)));
 

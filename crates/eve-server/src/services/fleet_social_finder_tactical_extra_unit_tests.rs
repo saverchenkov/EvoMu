@@ -1,14 +1,15 @@
 //! Comprehensive branch-coverage and mutation-killing tests for `fleet_social_finder_tactical.rs`.
 
 use crate::services::fleet_social::fleet_social_finder_tactical::{
-    clear_destroyed_target_tag, ensure_fleet_formations_loaded, ensure_fleet_setups_loaded,
-    formation_name, handle_fleet_watchlist_ops, sync_fleet_formations_to_db,
+    advert_to_dict, clear_destroyed_target_tag, ensure_fleet_formations_loaded,
+    ensure_fleet_setups_loaded, formation_name, handle_fleet_watchlist_ops,
+    normalize_advert_date_created_filetime, sync_fleet_formations_to_db,
     sync_fleet_setups_to_db,
 };
 use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::{
     seed_multi_member_fleet, test_ctx_and_clock,
 };
-use crate::services::fleet_social::fleet_social_fleets::FleetSetupRecord;
+use crate::services::fleet_social::fleet_social_fleets::{FleetAdvertState, FleetSetupRecord};
 use crate::services::fleet_social::handle;
 use eve_db::{FleetRole, InventoryFlag, InventoryItemRecord, SocialContactRecord};
 use eve_destiny::{Ball, CombatState, MovementMode};
@@ -361,4 +362,308 @@ async fn call_fleet_proxy(
 ) -> Result<PyRep, BridgeRpcError> {
     let svc = ["fleetProxy"][0];
     handle(ctx, session, svc, method, args, kwargs).await.unwrap()
+}
+
+const CLIENT_YEAR1800_TICKS: i64 = 199 * 365 * 86_400 * 10_000_000;
+
+fn assert_advert_date_created_valid(ad_rep: &PyRep, now_client_wall_ft: i64, label: &str) -> i64 {
+    let date_created = ad_rep
+        .dict_get("dateCreated")
+        .and_then(PyRep::as_i64)
+        .unwrap_or_else(|| panic!("{label}: missing integer dateCreated in {ad_rep:?}"));
+    assert!(
+        date_created > 0,
+        "{label}: dateCreated must be positive FILETIME ticks, got {date_created}"
+    );
+    let elapsed_ticks = now_client_wall_ft - date_created;
+    assert!(
+        elapsed_ticks >= 0,
+        "{label}: gametime.GetWallclockTime() - dateCreated must be >= 0 for FmtDate (elapsed_ticks={elapsed_ticks}, now_client_wall_ft={now_client_wall_ft}, date_created={date_created})"
+    );
+    assert!(
+        elapsed_ticks < CLIENT_YEAR1800_TICKS,
+        "{label}: elapsed_ticks ({elapsed_ticks}) must remain < const.YEAR365 * 199 for FmtDate('ns')"
+    );
+    date_created
+}
+
+#[test]
+fn normalize_advert_date_created_filetime_handles_advancetime_zero_negative_filetime_and_skew() {
+    let unix_to_ft = crate::sp6_lifecycle::unix_to_filetime;
+    let host_now: u64 = 1_775_000_000;
+
+    // 1. Normal historical Unix timestamp (unrebased = 0)
+    let normal_now_ft = unix_to_ft(host_now);
+    assert_eq!(
+        normalize_advert_date_created_filetime(1_700_000_000, host_now, normal_now_ft, 0),
+        unix_to_ft(1_700_000_000)
+    );
+
+    // 2. AdvanceClock (+3600s) before advert creation (#1295-#1298):
+    //    server now_unix & ad._created_unix both carry +3600, while client wallclock stays at host_now.
+    let adv_secs: u64 = 3_600;
+    let server_now = host_now + adv_secs;
+    let dt_at_create = normalize_advert_date_created_filetime(server_now, server_now, normal_now_ft, adv_secs);
+    assert_eq!(dt_at_create, normal_now_ft);
+    assert_eq!(normal_now_ft - dt_at_create, 0);
+
+    // 25s later in real time: client sees +25s age
+    let dt_later = normalize_advert_date_created_filetime(
+        server_now,
+        server_now + 25,
+        unix_to_ft(host_now + 25),
+        adv_secs,
+    );
+    assert_eq!(unix_to_ft(host_now + 25) - dt_later, 25 * 10_000_000);
+
+    // 3. AdvanceClock (+3600s) after advert creation: age reflects +3600s server time and >= 0
+    let dt_pre_adv = normalize_advert_date_created_filetime(host_now, server_now, normal_now_ft, adv_secs);
+    assert_eq!(normal_now_ft - dt_pre_adv, (adv_secs as i64) * 10_000_000);
+
+    // 4. Zero / negative-bitcast / invalid intermediate tick fallback safely to client wallclock now
+    assert_eq!(
+        normalize_advert_date_created_filetime(0, server_now, normal_now_ft, adv_secs),
+        normal_now_ft
+    );
+    assert_eq!(
+        normalize_advert_date_created_filetime((-120_i64) as u64, server_now, normal_now_ft, adv_secs),
+        normal_now_ft
+    );
+    assert_eq!(
+        normalize_advert_date_created_filetime(50_000_000_000_000, server_now, normal_now_ft, adv_secs),
+        normal_now_ft
+    );
+
+    // 5. Future-seeded / forward clock skew clamps cleanly to client wallclock now
+    assert_eq!(
+        normalize_advert_date_created_filetime(server_now + 86_400, server_now, normal_now_ft, adv_secs),
+        normal_now_ft
+    );
+
+    // 6. Unix-vs-FILETIME mismatch: FILETIME ticks stored directly into _created_unix
+    let past_ft = unix_to_ft(server_now - 90) as u64;
+    let norm_past_ft = normalize_advert_date_created_filetime(past_ft, server_now, normal_now_ft, adv_secs);
+    assert_eq!(normal_now_ft - norm_past_ft, 90 * 10_000_000);
+
+    let future_ft = unix_to_ft(server_now + 1_200) as u64;
+    assert_eq!(
+        normalize_advert_date_created_filetime(future_ft, server_now, normal_now_ft, adv_secs),
+        normal_now_ft
+    );
+
+    // 7. Unix milliseconds stored into _created_unix
+    let ms_created = (server_now - 45) * 1_000;
+    let norm_ms = normalize_advert_date_created_filetime(ms_created, server_now, normal_now_ft, adv_secs);
+    assert_eq!(normal_now_ft - norm_ms, 45 * 10_000_000);
+}
+
+#[tokio::test]
+async fn fleet_finder_adverts_prevent_negative_fmtdate_across_advancetime_seeds_and_reload() {
+    let dir = std::env::temp_dir().join(format!(
+        "evomu_fleet_ad_fmtdate_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let db_path = dir.join("fleet_ad_fmtdate.sqlite");
+    let kw = HashMap::new();
+
+    let sde_ctx = crate::router::ServerContext::new();
+    let sde = std::sync::Arc::clone(&sde_ctx.sde);
+    let demo_char = sde_ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&90_000_001).cloned())
+        .expect("demo character seeded");
+
+    // Boot 1: AdvanceClock (+7200s) before advert creation, exercise Add/Update/Get + corrupt seeds, persist SQLite checkpoints.
+    let fleet_id = {
+        let db1 = std::sync::Arc::new(
+            eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite boot 1"),
+        );
+        db1.with_mut_snapshot(|s| {
+            s.characters.insert(demo_char.character_id, demo_char.clone());
+        });
+        let ctx1 = crate::router::ServerContext::with_sde_and_repository(
+            std::sync::Arc::clone(&sde),
+            db1,
+        );
+        let (fleet_id, mut boss_sess) = seed_multi_member_fleet(&ctx1).await;
+        let outsider_id = 90_000_088_i64;
+        ctx1.db.with_mut_snapshot(|snap| {
+            let mut outsider = demo_char.clone();
+            outsider.character_id = outsider_id;
+            outsider.user_id = outsider_id as u64;
+            outsider.fleet_id = None;
+            outsider.security_status = 0.0;
+            snap.characters.insert(outsider_id, outsider);
+        });
+        let mut outsider_sess = make_session(outsider_id, None, Some(30_000_142), None);
+
+        // Reproduce #1295-#1298: timeControl.AdvanceClock before creating advert
+        ctx1.advance_secs_without_sim_clock_rebase(7_200);
+
+        let add_ad = call_fleet_proxy(
+            &ctx1,
+            &mut boss_sess,
+            "AddFleetFinderAdvert",
+            &[
+                PyRep::String("AdvanceClock Public Fleet".into()),
+                PyRep::String("Testing FmtDate baseline".into()),
+                PyRep::Integer(3),
+                PyRep::Bool(true),
+                PyRep::Real(-10.0),
+                PyRep::Real(-10.0),
+            ],
+            &kw,
+        )
+        .await
+        .unwrap();
+        let wall_ft = ctx1.now_machonet_wallclock_filetime_ticks();
+        assert_advert_date_created_valid(&add_ad, wall_ft, "AddFleetFinderAdvert");
+
+        // AdvanceClock again after advert creation + query GetAvailableFleetAds / GetFleetAdsForChar / GetMyFleetFinderAdvert
+        ctx1.advance_secs_without_sim_clock_rebase(1_800);
+        let wall_ft_after = ctx1.now_machonet_wallclock_filetime_ticks();
+
+        let upd_ad = call_fleet_proxy(
+            &ctx1,
+            &mut boss_sess,
+            "UpdateAdvertInfo",
+            &[
+                PyRep::String("AdvanceClock Updated Fleet".into()),
+                PyRep::String("Post-advance desc".into()),
+                PyRep::Integer(3),
+            ],
+            &kw,
+        )
+        .await
+        .unwrap();
+        assert_advert_date_created_valid(&upd_ad, wall_ft_after, "UpdateAdvertInfo");
+
+        let my_ad = call_fleet_proxy(&ctx1, &mut boss_sess, "GetMyFleetFinderAdvert", &[], &kw)
+            .await
+            .unwrap();
+        assert_advert_date_created_valid(&my_ad, wall_ft_after, "GetMyFleetFinderAdvert");
+
+        for method in ["GetAvailableFleetAds", "GetFleetAdsForChar"] {
+            let ads = call_fleet_proxy(&ctx1, &mut outsider_sess, method, &[], &kw)
+                .await
+                .unwrap();
+            let PyRep::Dict(entries) = ads else {
+                panic!("{method} must return Dict");
+            };
+            assert!(
+                !entries.is_empty(),
+                "{method} must contain active public advert"
+            );
+            for (k, v) in &entries {
+                assert_advert_date_created_valid(v, wall_ft_after, &format!("{method}[{k:?}]"));
+            }
+        }
+
+        // Verify direct advert_to_dict and RPC normalization on zero, negative-wrapped, future-skewed, and FILETIME seeds
+        let now_u = ctx1.now_unix();
+        for (bad_fid, bad_ts, tag) in [
+            (fleet_id + 101, 0_u64, "zero_created_unix"),
+            (fleet_id + 102, (-300_i64) as u64, "negative_bitcast_created_unix"),
+            (fleet_id + 103, now_u + 86_400, "future_skew_created_unix"),
+            (
+                fleet_id + 104,
+                crate::sp6_lifecycle::unix_to_filetime(now_u + 3_600) as u64,
+                "future_filetime_created_unix",
+            ),
+        ] {
+            let bad_ad = FleetAdvertState {
+                fleet_id: bad_fid,
+                leader_id: 90_000_001,
+                fleet_name: format!("Seeded {tag}"),
+                description: tag.into(),
+                solar_system_id: 30_000_142,
+                invite_scope: 3,
+                auto_join: true,
+                min_standing: -10.0,
+                min_security: -10.0,
+                allowed_entities: HashSet::new(),
+                _created_unix: bad_ts,
+            };
+            let direct = advert_to_dict(&ctx1, &bad_ad, 1, None);
+            assert_advert_date_created_valid(&direct, ctx1.now_machonet_wallclock_filetime_ticks(), tag);
+            ctx1.fleet_extras.lock().unwrap().adverts.insert(bad_fid, bad_ad);
+        }
+
+        let ads_all = call_fleet_proxy(&ctx1, &mut outsider_sess, "GetAvailableFleetAds", &[], &kw)
+            .await
+            .unwrap();
+        let wall_ft_seeded = ctx1.now_machonet_wallclock_filetime_ticks();
+        if let PyRep::Dict(entries) = ads_all {
+            assert_eq!(entries.len(), 5);
+            for (k, v) in &entries {
+                assert_advert_date_created_valid(v, wall_ft_seeded, &format!("seeded[{k:?}]"));
+            }
+        } else {
+            panic!("GetAvailableFleetAds must return Dict");
+        }
+
+        // Remove synthetic corrupt test adverts so only the live advert persists across restart
+        {
+            let mut ex = ctx1.fleet_extras.lock().unwrap();
+            for offset in [101_i64, 102, 103, 104] {
+                ex.adverts.remove(&(fleet_id + offset));
+            }
+        }
+        ctx1.persist_server_runtime_to_db();
+        fleet_id
+    };
+
+    // Boot 2: reload persisted adverts + unrebased_clock_offset_secs from SQLite and confirm dateCreated remains non-negative
+    {
+        let db2 = std::sync::Arc::new(
+            eve_db::WorldRepository::open_sqlite(&db_path).expect("open sqlite boot 2"),
+        );
+        assert_eq!(db2.persisted_unrebased_clock_offset_secs(), Ok(9_000));
+        db2.with_mut_snapshot(|snap| {
+            snap.characters.insert(demo_char.character_id, demo_char.clone());
+            let mut outsider = demo_char.clone();
+            outsider.character_id = 90_000_088;
+            outsider.user_id = 90_000_088;
+            outsider.fleet_id = None;
+            outsider.security_status = 0.0;
+            snap.characters.insert(90_000_088, outsider);
+        });
+        let ctx2 = crate::router::ServerContext::with_sde_and_repository(sde, db2);
+        ctx2.rehydrate_runtime_from_db();
+        assert!(
+            ctx2.fleet_extras.lock().unwrap().adverts.contains_key(&fleet_id),
+            "persisted advert must reload across SQLite restart"
+        );
+        let mut outsider_sess = make_session(90_000_088, None, Some(30_000_142), None);
+        let mut boss_sess = make_session(90_000_001, Some(fleet_id), Some(30_000_142), None);
+        let wall_ft_reloaded = ctx2.now_machonet_wallclock_filetime_ticks();
+
+        let reloaded_my = call_fleet_proxy(&ctx2, &mut boss_sess, "GetMyFleetFinderAdvert", &[], &kw)
+            .await
+            .unwrap();
+        assert_advert_date_created_valid(&reloaded_my, wall_ft_reloaded, "reloaded GetMyFleetFinderAdvert");
+
+        for method in ["GetAvailableFleetAds", "GetFleetAdsForChar"] {
+            let reloaded_ads = call_fleet_proxy(&ctx2, &mut outsider_sess, method, &[], &kw)
+                .await
+                .unwrap();
+            let PyRep::Dict(entries) = reloaded_ads else {
+                panic!("{method} after reload must return Dict");
+            };
+            assert_eq!(entries.len(), 1);
+            assert_advert_date_created_valid(
+                &entries[0].1,
+                wall_ft_reloaded,
+                &format!("reloaded {method}"),
+            );
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

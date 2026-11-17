@@ -77,6 +77,55 @@ fn leader_keyval(leader_id: i64, leader_meta: Option<(i64, Option<i64>, f64)>) -
     ])
 }
 
+const FILETIME_TICKS_PER_SEC: i64 = 10_000_000;
+const FILETIME_UNIX_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
+const UNIX_SECS_UPPER_BOUND: u64 = 10_000_000_000;
+const UNIX_MS_UPPER_BOUND: u64 = 10_000_000_000_000;
+
+/// Normalizes a stored fleet advert creation timestamp into a client-wallclock
+/// Windows FILETIME (`100ns` ticks since 1601-01-01) so `gametime.GetWallclockTime() - dateCreated`
+/// is always non-negative in V24 `FmtDate` (`#1295`-`#1298`), even across `/advancetime`,
+/// zero/negative seeds, Unix-vs-FILETIME mismatches, or forward clock skew.
+pub(crate) fn normalize_advert_date_created_filetime(
+    created_raw: u64,
+    now_unix: u64,
+    now_client_wall_ft: i64,
+    unrebased_offset_secs: u64,
+) -> i64 {
+    let safe_now_client_ft = now_client_wall_ft.max(0);
+    let client_now_unix = now_unix.saturating_sub(unrebased_offset_secs);
+    let client_now_unix_ft = crate::sp6_lifecycle::unix_to_filetime(client_now_unix)
+        .clamp(0, safe_now_client_ft);
+
+    if created_raw == 0 || created_raw > i64::MAX as u64 {
+        return client_now_unix_ft;
+    }
+
+    if created_raw < UNIX_MS_UPPER_BOUND {
+        let created_unix = if created_raw < UNIX_SECS_UPPER_BOUND {
+            created_raw
+        } else {
+            created_raw / 1_000
+        };
+        let client_created_unix = created_unix
+            .saturating_sub(unrebased_offset_secs)
+            .min(client_now_unix);
+        return crate::sp6_lifecycle::unix_to_filetime(client_created_unix)
+            .clamp(0, safe_now_client_ft);
+    }
+
+    if (created_raw as i64) >= FILETIME_UNIX_EPOCH_TICKS {
+        let unrebased_ticks = i64::try_from(unrebased_offset_secs)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(FILETIME_TICKS_PER_SEC);
+        return (created_raw as i64)
+            .saturating_sub(unrebased_ticks)
+            .clamp(0, safe_now_client_ft);
+    }
+
+    client_now_unix_ft
+}
+
 struct FleetAdvertReply {
     fleet_id: i64,
     leader_id: i64,
@@ -95,14 +144,19 @@ struct FleetAdvertReply {
 
 impl FleetAdvertReply {
     fn from_state(
+        ctx: &ServerContext,
         ad: &FleetAdvertState,
         num_members: i64,
         leader_meta: Option<(i64, Option<i64>, f64)>,
     ) -> Self {
         let mut allowed: Vec<i64> = ad.allowed_entities.iter().copied().collect();
         allowed.sort_unstable();
-        let date_created =
-            ((ad._created_unix as i64) + 11_644_473_600).saturating_mul(10_000_000);
+        let date_created = normalize_advert_date_created_filetime(
+            ad._created_unix,
+            ctx.now_unix(),
+            ctx.now_machonet_wallclock_filetime_ticks(),
+            ctx.unrebased_clock_offset_secs(),
+        );
         Self {
             fleet_id: ad.fleet_id,
             leader_id: ad.leader_id,
@@ -179,12 +233,13 @@ impl FleetAdvertReply {
     }
 }
 
-fn advert_to_dict(
+pub(crate) fn advert_to_dict(
+    ctx: &ServerContext,
     ad: &FleetAdvertState,
     num_members: i64,
     leader_meta: Option<(i64, Option<i64>, f64)>,
 ) -> PyRep {
-    FleetAdvertReply::from_state(ad, num_members, leader_meta).into_pyrep()
+    FleetAdvertReply::from_state(ctx, ad, num_members, leader_meta).into_pyrep()
 }
 
 pub(crate) fn formation_name(formation_id: i64) -> &'static str {
@@ -659,7 +714,7 @@ fn handle_update_advert_info(
         NotificationTarget::Fleet(fleet_id),
         crate::router::notify_registry::OnFleetFinderAdvertChanged {},
     );
-    Ok(advert_to_dict(&ad_snapshot, num_members, leader_meta))
+    Ok(advert_to_dict(ctx, &ad_snapshot, num_members, leader_meta))
 }
 
 fn handle_update_advert_allowed_entities(
@@ -1051,7 +1106,7 @@ pub(super) async fn handle_finder_and_tactical(
                 NotificationTarget::Fleet(fleet_id),
                 crate::router::notify_registry::OnFleetFinderAdvertChanged {},
             );
-            Some(Ok(advert_to_dict(&ad_state, num_members, leader_meta)))
+            Some(Ok(advert_to_dict(ctx, &ad_state, num_members, leader_meta)))
         }
 
         // parity: rpc:fleetProxy.UpdateAdvertInfo
@@ -1103,7 +1158,7 @@ pub(super) async fn handle_finder_and_tactical(
                         .map(|ad| {
                             let num_members = snap.fleets.get(&ad.fleet_id).map(|f| f.members.len() as i64).unwrap_or(1);
                             let leader_meta = snap.characters.get(&ad.leader_id).map(|c| (c.corporation_id, c.alliance_id, c.security_status));
-                            advert_to_dict(&ad, num_members, leader_meta)
+                            advert_to_dict(ctx, &ad, num_members, leader_meta)
                         })
                 });
                 return Some(Ok(my_ad.unwrap_or(PyRep::None)));
@@ -1143,7 +1198,7 @@ pub(super) async fn handle_finder_and_tactical(
                         let fid = ad.fleet_id;
                         let num_members = snap.fleets.get(&fid).map(|f| f.members.len() as i64).unwrap_or(1);
                         let leader_meta = snap.characters.get(&ad.leader_id).map(|c| (c.corporation_id, c.alliance_id, c.security_status));
-                        (PyRep::Integer(fid), advert_to_dict(&ad, num_members, leader_meta))
+                        (PyRep::Integer(fid), advert_to_dict(ctx, &ad, num_members, leader_meta))
                     })
                     .collect();
                 out.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
