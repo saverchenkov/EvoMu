@@ -1579,3 +1579,80 @@ async fn multi_add_multi_item_volume_exact_bounds_across_holds_containers_sma_an
     .await
     .expect("!item_ids.contains in Fleet Hangar");
 }
+
+#[test]
+fn multi_merge_batch_lock_index_rejects_escrow_and_non_empty_and_commits_once() {
+    let ctx = make_ctx();
+    let char_id = 91_222_001;
+    let corp_id = 98_222_001;
+    let station_id = 60_003_760;
+    let ship_id = 1_100_222_001;
+    let mut sess = seed_char(&ctx, char_id, corp_id, Some(station_id), 30_000_142, ship_id);
+
+    let dst = 1_100_222_010_i64;
+    let src_a = 1_100_222_011_i64;
+    let src_b = 1_100_222_012_i64;
+    let src_contract = 1_100_222_013_i64;
+    let src_non_empty = 1_100_222_014_i64;
+    let child_in_box = 1_100_222_015_i64;
+
+    for id in [dst, src_a, src_b, src_contract, src_non_empty] {
+        put_item(&ctx, id, 34, char_id, station_id, InventoryFlag::Hangar, 10, false);
+    }
+    put_item(&ctx, child_in_box, 34, char_id, src_non_empty, InventoryFlag::Cargo, 1, false);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.contracts.insert(
+            990_001,
+            eve_db::ContractRecord {
+                contract_id: 990_001,
+                issuer_id: char_id,
+                contract_type: "ItemExchange".into(),
+                status: "Outstanding".into(),
+                start_station_id: station_id,
+                end_station_id: station_id,
+                item_ids: vec![src_contract],
+                ..Default::default()
+            },
+        );
+    });
+
+    let kw = HashMap::new();
+    let commits_before = ctx.db.tx_commit_count();
+    for bad_src in [src_contract, src_non_empty] {
+        let err = handle_stack_ops(
+            &ctx,
+            &mut sess,
+            None,
+            "invbroker",
+            "MultiMerge",
+            &[PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(bad_src),
+                PyRep::Integer(dst),
+            ])])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, "StackFailed");
+    }
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+
+    let ok = handle_stack_ops(
+        &ctx,
+        &mut sess,
+        None,
+        "invbroker",
+        "MultiMerge",
+        &[PyRep::List(vec![
+            PyRep::Tuple(vec![PyRep::Integer(src_a), PyRep::Integer(dst)]),
+            PyRep::Tuple(vec![PyRep::Integer(src_b), PyRep::Integer(dst)]),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(ctx.db.tx_commit_count(), commits_before + 1);
+    assert_eq!(ok.dict_get("quantity"), Some(&PyRep::Integer(30)));
+    assert_eq!(ok.dict_get("mergedCount"), Some(&PyRep::Integer(2)));
+}
+

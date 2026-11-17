@@ -1662,4 +1662,428 @@ fn issue_888_partial_multimerge_is_atomic_on_destination_failure() {
     });
 }
 
+#[test]
+fn stack_all_preserves_all_eligibility_rules_tiebreak_notifs_and_reply() {
+    let ctx = test_ctx();
+    let char_id = 92_000_070;
+    let corp_id = 98_000_070;
+    let station_id = 60_003_760;
+    let ship_id = 1_000_270_001;
+
+    ensure_char(&ctx, char_id, corp_id, Some(station_id), 30_000_142, ship_id);
+    insert_item(&ctx, ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+
+    let id_high = 1_000_270_020_i64;
+    let id_low = 1_000_270_010_i64;
+    let id_singleton = 1_000_270_021_i64;
+    let id_bpc = 1_000_270_022_i64;
+    let id_runs = 1_000_270_023_i64;
+    let id_dyn = 1_000_270_024_i64;
+    let id_muta = 1_000_270_025_i64;
+    let id_alsc = 1_000_270_026_i64;
+    let id_tube = 1_000_270_027_i64;
+    let id_flag_locked = 1_000_270_028_i64;
+    let id_flag_impounded = 1_000_270_029_i64;
+    let id_flag_asset_safety = 1_000_270_030_i64;
+    let id_contract = 1_000_270_031_i64;
+    let id_job = 1_000_270_032_i64;
+    let id_trade = 1_000_270_033_i64;
+    let id_raffle = 1_000_270_034_i64;
+    let id_courier = 1_000_270_035_i64;
+    let id_non_empty = 1_000_270_036_i64;
+    let id_non_empty_child = 1_000_270_037_i64;
+    let cont_locked = 1_000_270_100_i64;
+    let cont_child_a = 1_000_270_101_i64;
+    let cont_child_b = 1_000_270_102_i64;
+
+    for (id, qty, singleton, flag) in [
+        (id_high, 25, false, InventoryFlag::Hangar),
+        (id_low, 15, false, InventoryFlag::Hangar),
+        (id_singleton, 1, true, InventoryFlag::Hangar),
+        (id_bpc, 10, false, InventoryFlag::Hangar),
+        (id_runs, 10, false, InventoryFlag::Hangar),
+        (id_dyn, 10, false, InventoryFlag::Hangar),
+        (id_muta, 10, false, InventoryFlag::Hangar),
+        (id_alsc, 10, false, InventoryFlag::Hangar),
+        (id_tube, 10, false, InventoryFlag::Hangar),
+        (id_flag_locked, 10, false, InventoryFlag::Locked),
+        (id_flag_impounded, 10, false, InventoryFlag::Impounded),
+        (id_flag_asset_safety, 10, false, InventoryFlag::from_u16(36)),
+        (id_contract, 10, false, InventoryFlag::Hangar),
+        (id_job, 10, false, InventoryFlag::Hangar),
+        (id_trade, 10, false, InventoryFlag::Hangar),
+        (id_raffle, 10, false, InventoryFlag::Hangar),
+        (id_courier, 10, false, InventoryFlag::Hangar),
+        (id_non_empty, 10, false, InventoryFlag::Hangar),
+    ] {
+        insert_item(&ctx, id, 34, char_id, station_id, flag, qty, singleton);
+    }
+    insert_item(
+        &ctx,
+        id_non_empty_child,
+        34,
+        char_id,
+        id_non_empty,
+        InventoryFlag::Cargo,
+        5,
+        false,
+    );
+    insert_item(&ctx, cont_locked, 3293, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, cont_child_a, 34, char_id, cont_locked, InventoryFlag::Cargo, 20, false);
+    insert_item(&ctx, cont_child_b, 34, char_id, cont_locked, InventoryFlag::Cargo, 30, false);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&id_bpc).unwrap().is_blueprint_copy = true;
+        snap.items.get_mut(&id_runs).unwrap().blueprint_runs_remaining = Some(2);
+        snap.items.get_mut(&id_dyn).unwrap().dynamic_attributes.insert(1, 3.0);
+        snap.items.get_mut(&id_muta).unwrap().source_mutaplasmid_id = Some(47_740);
+        snap.item_custom_names
+            .insert(id_courier, "courier_cargo:77".into());
+        snap.contracts.insert(
+            930_001,
+            eve_db::ContractRecord {
+                contract_id: 930_001,
+                issuer_id: char_id,
+                contract_type: "ItemExchange".into(),
+                status: "Outstanding".into(),
+                start_station_id: station_id,
+                end_station_id: station_id,
+                item_ids: vec![id_contract],
+                ..Default::default()
+            },
+        );
+        snap.industry_jobs.insert(
+            930_002,
+            eve_db::IndustryJobRecord {
+                job_id: 930_002,
+                installer_id: char_id,
+                facility_id: station_id,
+                blueprint_item_id: id_job,
+                status: "Active".into(),
+                ..Default::default()
+            },
+        );
+        snap.owner_notes.insert(
+            -73_901,
+            eve_db::OwnerNoteRecord {
+                note_id: -73_901,
+                character_id: -73,
+                item_id: 1,
+                label: "trade".into(),
+                note: serde_json::json!({
+                    "trade_id": 930_003_i64,
+                    "station_id": station_id,
+                    "items_a": [[id_trade, 10]],
+                    "items_b": [],
+                    "completed": false,
+                    "cancelled": false
+                })
+                .to_string(),
+                timestamp_unix: 1,
+            },
+        );
+        snap.owner_notes.insert(
+            -74_901,
+            eve_db::OwnerNoteRecord {
+                note_id: -74_901,
+                character_id: -74,
+                item_id: 1,
+                label: "raffle".into(),
+                note: serde_json::json!({
+                    "item_id": id_raffle,
+                    "winner_id": null,
+                    "expired": false
+                })
+                .to_string(),
+                timestamp_unix: 1,
+            },
+        );
+    });
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.alsc_locked_items.insert(id_alsc);
+        st.alsc_locked_items.insert(cont_locked);
+        save_container_ship_state(&ctx, &st);
+    }
+    ctx.fighter_tube_loads
+        .write()
+        .unwrap()
+        .insert((ship_id, 0), id_tube);
+
+    let kw = HashMap::new();
+    let mut sess = make_session(char_id, corp_id, Some(station_id), Some(30_000_142), Some(ship_id));
+    let station_bound = make_bound(station_id, char_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let commits_before = ctx.db.tx_commit_count();
+    let reply = handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&station_bound),
+        "invbroker",
+        "StackAll",
+        &[PyRep::Integer(InventoryFlag::Hangar as i64)],
+        &kw,
+    )
+    .expect("matched")
+    .expect("StackAll ok");
+    assert_eq!(ctx.db.tx_commit_count(), commits_before + 1);
+
+    assert_eq!(reply.dict_get("locationID"), Some(&PyRep::Integer(station_id)));
+    assert_eq!(
+        reply.dict_get("flagID"),
+        Some(&PyRep::Integer(InventoryFlag::Hangar as i64))
+    );
+    assert_eq!(reply.dict_get("mergedCount"), Some(&PyRep::Integer(1)));
+    let Some(PyRep::List(stacks)) = reply.dict_get("stacks") else {
+        panic!("expected stacks list in StackAll reply: {reply:?}");
+    };
+    assert_eq!(stacks.len(), 1);
+    assert_eq!(stacks[0].dict_get("itemID"), Some(&PyRep::Integer(id_low)));
+    assert_eq!(stacks[0].dict_get("typeID"), Some(&PyRep::Integer(34)));
+    assert_eq!(stacks[0].dict_get("quantity"), Some(&PyRep::Integer(40)));
+    assert_eq!(stacks[0].dict_get("version"), Some(&PyRep::Integer(2)));
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let changes: Vec<_> = notifs.iter().filter(|n| n.event == "OnItemChange").collect();
+    assert_eq!(changes.len(), 2);
+    let del_notif = changes
+        .iter()
+        .find(|n| dbrow_col_i64(&n.args[0], "itemID") == Some(id_high))
+        .expect("deleted source OnItemChange");
+    assert_eq!(dbrow_col_i64(&del_notif.args[0], "locationID"), Some(6));
+    let surv_notif = changes
+        .iter()
+        .find(|n| dbrow_col_i64(&n.args[0], "itemID") == Some(id_low))
+        .expect("survivor OnItemChange");
+    assert_eq!(dbrow_col_i64(&surv_notif.args[0], "quantity"), Some(40));
+    let PyRep::Dict(change_map) = &surv_notif.args[1] else {
+        panic!("expected change dict in OnItemChange: {:?}", surv_notif.args);
+    };
+    assert!(change_map
+        .iter()
+        .any(|(k, v)| k.as_i64() == Some(9) && v.as_i64() == Some(15)));
+    assert!(!change_map.iter().any(|(k, _)| k.as_i64() == Some(5)));
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&id_high));
+        assert_eq!(snap.items[&id_low].quantity, 40);
+        for kept in [
+            id_singleton,
+            id_bpc,
+            id_runs,
+            id_dyn,
+            id_muta,
+            id_alsc,
+            id_tube,
+            id_flag_locked,
+            id_flag_impounded,
+            id_flag_asset_safety,
+            id_contract,
+            id_job,
+            id_trade,
+            id_raffle,
+            id_courier,
+            id_non_empty,
+            cont_child_a,
+            cont_child_b,
+        ] {
+            assert!(snap.items.contains_key(&kept), "excluded item {kept} must not be deleted");
+        }
+    });
+
+    // StackAll inside ALSC-locked ancestor container merges nothing and commits 0 transactions
+    let cont_bound = make_bound(cont_locked, char_id);
+    let cont_reply = handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&cont_bound),
+        "invbroker",
+        "StackAll",
+        &[PyRep::Integer(InventoryFlag::Cargo as i64)],
+        &kw,
+    )
+    .expect("matched")
+    .expect("StackAll on locked container ok");
+    assert_eq!(cont_reply.dict_get("mergedCount"), Some(&PyRep::Integer(0)));
+    assert_eq!(ctx.db.tx_commit_count(), commits_before + 1);
+}
+
+#[test]
+fn stack_all_single_commit_and_linear_scaling_over_thousand_items() {
+    let ctx = test_ctx();
+    let char_id = 92_000_071;
+    let corp_id = 98_000_071;
+    let station_id = 60_003_760;
+    let ship_id = 1_000_271_001;
+
+    ensure_char(&ctx, char_id, corp_id, Some(station_id), 30_000_142, ship_id);
+    insert_item(&ctx, ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+
+    let per_type = 600_i64;
+    let types = [34_u32, 35_u32];
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut next_id = 1_271_000_000_i64;
+        for &tid in &types {
+            for idx in 0..per_type {
+                let id = next_id;
+                next_id += 1;
+                snap.items.insert(
+                    id,
+                    InventoryItemRecord {
+                        item_id: id,
+                        type_id: tid,
+                        owner_id: char_id,
+                        location_id: station_id,
+                        flag: InventoryFlag::Hangar,
+                        quantity: (idx as i32) + 1,
+                        singleton: false,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        for i in 0..150_i64 {
+            snap.contracts.insert(
+                940_000 + i,
+                eve_db::ContractRecord {
+                    contract_id: 940_000 + i,
+                    issuer_id: char_id,
+                    contract_type: "ItemExchange".into(),
+                    status: "Outstanding".into(),
+                    start_station_id: station_id,
+                    end_station_id: station_id,
+                    item_ids: vec![1_290_000_000 + i],
+                    ..Default::default()
+                },
+            );
+            snap.industry_jobs.insert(
+                941_000 + i,
+                eve_db::IndustryJobRecord {
+                    job_id: 941_000 + i,
+                    installer_id: char_id,
+                    facility_id: station_id,
+                    blueprint_item_id: 1_291_000_000 + i,
+                    status: "Active".into(),
+                    ..Default::default()
+                },
+            );
+            snap.owner_notes.insert(
+                -73_500 - i,
+                eve_db::OwnerNoteRecord {
+                    note_id: -73_500 - i,
+                    character_id: -73,
+                    item_id: 1,
+                    label: "t".into(),
+                    note: serde_json::json!({
+                        "trade_id": 95_000 + i,
+                        "items_a": [[1_292_000_000 + i, 1]],
+                        "items_b": [],
+                        "completed": false,
+                        "cancelled": false
+                    })
+                    .to_string(),
+                    timestamp_unix: 1,
+                },
+            );
+            snap.owner_notes.insert(
+                -74_500 - i,
+                eve_db::OwnerNoteRecord {
+                    note_id: -74_500 - i,
+                    character_id: -74,
+                    item_id: 1,
+                    label: "r".into(),
+                    note: serde_json::json!({
+                        "item_id": 1_293_000_000 + i,
+                        "winner_id": null,
+                        "expired": false
+                    })
+                    .to_string(),
+                    timestamp_unix: 1,
+                },
+            );
+        }
+    });
+
+    let kw = HashMap::new();
+    let mut sess = make_session(char_id, corp_id, Some(station_id), Some(30_000_142), Some(ship_id));
+    let station_bound = make_bound(station_id, char_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let commits_before = ctx.db.tx_commit_count();
+    let started = std::time::Instant::now();
+    let reply = handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&station_bound),
+        "invbroker",
+        "StackAll",
+        &[],
+        &kw,
+    )
+    .expect("matched")
+    .expect("StackAll ok");
+    let elapsed = started.elapsed();
+
+    assert_eq!(ctx.db.tx_commit_count(), commits_before + 1);
+    assert_eq!(reply.dict_get("mergedCount"), Some(&PyRep::Integer(1_198)));
+    let Some(PyRep::List(stacks)) = reply.dict_get("stacks") else {
+        panic!("expected stacks list");
+    };
+    assert_eq!(stacks.len(), 2);
+    let expected_sum: i64 = (1..=per_type).sum();
+    for (idx, &tid) in types.iter().enumerate() {
+        assert_eq!(
+            stacks[idx].dict_get("itemID"),
+            Some(&PyRep::Integer(1_271_000_000 + (idx as i64) * per_type))
+        );
+        assert_eq!(stacks[idx].dict_get("typeID"), Some(&PyRep::Integer(tid as i64)));
+        assert_eq!(
+            stacks[idx].dict_get("quantity"),
+            Some(&PyRep::Integer(expected_sum))
+        );
+    }
+
+    ctx.db.with_snapshot(|snap| {
+        let hangar_items: Vec<_> = snap
+            .items
+            .values()
+            .filter(|it| {
+                it.location_id == station_id
+                    && it.flag == InventoryFlag::Hangar
+                    && it.owner_id == char_id
+            })
+            .collect();
+        assert_eq!(hangar_items.len(), 3);
+        assert!(hangar_items.iter().any(|it| it.item_id == ship_id && it.singleton));
+        for (idx, &tid) in types.iter().enumerate() {
+            let expected_id = 1_271_000_000 + (idx as i64) * per_type;
+            let survivor = hangar_items
+                .iter()
+                .find(|it| it.item_id == expected_id)
+                .expect("expected merged survivor stack");
+            assert_eq!(survivor.type_id, tid);
+            assert_eq!(survivor.quantity, expected_sum as i32);
+        }
+    });
+
+    // emit_inv_item_{deleted,change} emit OnItemChange + OnMultipleItemChange pairs,
+    // so direct handler calls without dispatch_rpc retain MAX_PENDING_NOTIFICATIONS_PER_CHAR events.
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(
+        notifs.len(),
+        crate::router::cache_notifications::MAX_PENDING_NOTIFICATIONS_PER_CHAR
+    );
+    let changes: Vec<_> = notifs.iter().filter(|n| n.event == "OnItemChange").collect();
+    assert_eq!(
+        changes.len(),
+        crate::router::cache_notifications::MAX_PENDING_NOTIFICATIONS_PER_CHAR / 2
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "expected linear O(N+M) single-tx StackAll over 1,200 items, took {elapsed:?}"
+    );
+}
+
+
 

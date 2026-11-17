@@ -7,7 +7,7 @@ use crate::services::inventory_bound;
 use crate::services::inventory_fitting::{
     fitting_containers_ships, get_effective_corp_roles_at_location,
 };
-use eve_db::{InventoryFlag, TypeId};
+use eve_db::InventoryFlag;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
@@ -432,6 +432,7 @@ pub(in crate::services) fn handle_stack_ops(
                     crate::services::station_structure::structure_upwell_ops::load_ext_state(
                         guard,
                     );
+                let lock_index = guard.build_inventory_lock_index();
                 let mut events = Vec::with_capacity(ops.len());
                 for &(src_id, dst_id, qty_opt) in &ops {
                     if cs_state_merge.alsc_locked_items.contains(&src_id)
@@ -451,23 +452,15 @@ pub(in crate::services) fn handle_stack_ops(
                             client_error: None,
                         });
                     }
-                    if guard
-                        .item_custom_names
-                        .get(&src_id)
-                        .is_some_and(|s| s.starts_with("courier_cargo:"))
-                        || guard
-                            .item_custom_names
-                            .get(&dst_id)
-                            .is_some_and(|s| s.starts_with("courier_cargo:"))
-                    {
+                    if guard.is_courier_cargo_item(src_id) || guard.is_courier_cargo_item(dst_id) {
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
                             message: "Cannot stack courier mission cargo".into(),
                             client_error: None,
                         });
                     }
-                    if guard.is_item_locked_in_contract_or_job(src_id)
-                        || guard.is_item_locked_in_contract_or_job(dst_id)
+                    if guard.is_item_escrow_locked_with_index(&lock_index, src_id)
+                        || guard.is_item_escrow_locked_with_index(&lock_index, dst_id)
                     {
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
@@ -517,10 +510,8 @@ pub(in crate::services) fn handle_stack_ops(
                             client_error: None,
                         });
                     }
-                    if matches!(src.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
-                        || matches!(tgt.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
-                        || src.type_id == 3_468
-                        || tgt.type_id == 3_468
+                    if eve_db::WorldStateSnapshot::has_locked_flag_or_wrap_type(&src)
+                        || eve_db::WorldStateSnapshot::has_locked_flag_or_wrap_type(&tgt)
                     {
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
@@ -529,8 +520,8 @@ pub(in crate::services) fn handle_stack_ops(
                         });
                     }
                     if eve_db::WorldStateSnapshot::is_fitted_slot_flag(src.flag)
-                        || guard.is_container_non_empty(src_id)
-                        || guard.is_container_non_empty(dst_id)
+                        || lock_index.non_empty_containers.contains(&src_id)
+                        || lock_index.non_empty_containers.contains(&dst_id)
                     {
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
@@ -538,14 +529,8 @@ pub(in crate::services) fn handle_stack_ops(
                             client_error: None,
                         });
                     }
-                    if src.singleton
-                        || src.is_blueprint_copy
-                        || !src.dynamic_attributes.is_empty()
-                        || src.source_mutaplasmid_id.is_some()
-                        || tgt.singleton
-                        || tgt.is_blueprint_copy
-                        || !tgt.dynamic_attributes.is_empty()
-                        || tgt.source_mutaplasmid_id.is_some()
+                    if eve_db::WorldStateSnapshot::has_non_stackable_item_state(&src)
+                        || eve_db::WorldStateSnapshot::has_non_stackable_item_state(&tgt)
                     {
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
@@ -606,8 +591,11 @@ pub(in crate::services) fn handle_stack_ops(
                         }
                         cur = anc.location_id;
                     }
-                    if guard.is_item_or_ancestor_locked_or_impounded(dst_id)
-                        || guard.is_item_or_ancestor_locked_or_impounded(src_id)
+                    if guard.is_item_or_ancestor_locked_or_impounded_with_index(&lock_index, dst_id)
+                        || guard.is_item_or_ancestor_locked_or_impounded_with_index(
+                            &lock_index,
+                            src_id,
+                        )
                     {
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
@@ -763,8 +751,6 @@ pub(in crate::services) fn handle_stack_ops(
                 .map(|f| InventoryFlag::from_u16(f as u16))
                 .unwrap_or(default_flag);
 
-            let alsc_locked_set =
-                fitting_containers_ships::read_container_ship_state(ctx).alsc_locked_items;
             let loaded_tube_items: HashSet<i64> = ctx
                 .fighter_tube_loads
                 .read()
@@ -772,83 +758,47 @@ pub(in crate::services) fn handle_stack_ops(
                 .values()
                 .copied()
                 .collect();
-            let groups: HashMap<TypeId, Vec<i64>> = ctx.db.with_snapshot(|snap| {
-                let mut by_type: HashMap<TypeId, Vec<i64>> = HashMap::new();
-                for item in snap.items.values() {
-                    if item.owner_id == char_id
-                        && item.location_id == target_loc
-                        && item.flag == target_flag
-                        && !item.singleton
-                        && !item.is_blueprint_copy
-                        && item.dynamic_attributes.is_empty()
-                        && item.source_mutaplasmid_id.is_none()
-                        && item.quantity > 0
-                        && !matches!(item.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
-                        && !matches!(item.flag as u16, 36 | 63 | 72 | 159..=163)
-                        && !alsc_locked_set.contains(&item.item_id)
-                        && !loaded_tube_items.contains(&item.item_id)
-                        && !snap.is_item_locked_in_contract_or_job(item.item_id)
-                        && !snap
-                            .item_custom_names
-                            .get(&item.item_id)
-                            .is_some_and(|s| s.starts_with("courier_cargo:"))
-                    {
-                        by_type.entry(item.type_id).or_default().push(item.item_id);
-                    }
+            let outcome = match ctx.db.stack_all_items(
+                char_id,
+                target_loc,
+                target_flag,
+                &loaded_tube_items,
+            ) {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    return Some(Err(BridgeRpcError {
+                        code: "StackFailed".into(),
+                        message: err.to_string(),
+                        client_error: None,
+                    }));
                 }
-                for ids in by_type.values_mut() {
-                    ids.sort_unstable();
-                }
-                by_type
-            });
+            };
 
-            let mut merged_count = 0_i64;
-            let mut survivors = Vec::new();
-            for (_type_id, ids) in groups {
-                if ids.len() < 2 {
-                    continue;
-                }
-                let dst_id = ids[0];
-                let (old_dst_qty, src_snaps) = ctx.db.with_snapshot(|snap| {
-                    let dst_q = snap.items.get(&dst_id).map(|i| i.quantity).unwrap_or(0);
-                    let srcs: Vec<(i64, Option<eve_db::InventoryItemRecord>)> = ids[1..]
-                        .iter()
-                        .map(|&sid| (sid, snap.items.get(&sid).cloned()))
-                        .collect();
-                    (dst_q, srcs)
-                });
-                let mut latest = None;
-                for (src_id, old_src_opt) in src_snaps {
-                    if let Ok(upd) = ctx.db.stack_items(char_id, dst_id, src_id) {
-                        merged_count += 1;
-                        if let Some(old_src) = old_src_opt {
-                            inventory_bound::emit_inv_item_deleted(ctx, char_id, &old_src);
-                        }
-                        latest = Some(upd);
-                    }
-                }
-                if let Some(upd) = latest {
-                    inventory_bound::emit_inv_item_change(
-                        ctx,
-                        char_id,
-                        &upd,
-                        vec![
-                            // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
-                            (9, PyRep::Integer(old_dst_qty as i64)),
-                        ],
-                    );
-                    survivors.push(PyRep::keyval([
-                        ("itemID", PyRep::Integer(upd.item_id)),
-                        ("typeID", PyRep::Integer(upd.type_id as i64)),
-                        ("quantity", PyRep::Integer(upd.quantity as i64)),
-                        ("version", PyRep::Integer(upd.version as i64)),
-                    ]));
-                }
+            for old_src in &outcome.deleted_sources {
+                inventory_bound::emit_inv_item_deleted(ctx, char_id, old_src);
+            }
+            let mut survivors = Vec::with_capacity(outcome.survivors.len());
+            for survivor in &outcome.survivors {
+                inventory_bound::emit_inv_item_change(
+                    ctx,
+                    char_id,
+                    &survivor.updated,
+                    vec![
+                        // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
+                        (9, PyRep::Integer(survivor.old_quantity as i64)),
+                    ],
+                );
+                survivors.push(PyRep::keyval([
+                    ("itemID", PyRep::Integer(survivor.updated.item_id)),
+                    ("typeID", PyRep::Integer(survivor.updated.type_id as i64)),
+                    ("quantity", PyRep::Integer(survivor.updated.quantity as i64)),
+                    ("version", PyRep::Integer(survivor.updated.version as i64)),
+                ]));
             }
             Some(Ok(PyRep::keyval([
                 ("locationID", PyRep::Integer(target_loc)),
                 ("flagID", PyRep::Integer(target_flag as i64)),
-                ("mergedCount", PyRep::Integer(merged_count)),
+                ("mergedCount", PyRep::Integer(outcome.merged_count)),
                 ("stacks", PyRep::List(survivors)),
             ])))
         }
