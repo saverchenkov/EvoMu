@@ -805,3 +805,117 @@ fn give_cash_rejects_subcent_amounts_and_oversized_reason_memos() {
         assert!(s.wallet_journal.iter().any(|e| e.character_id == char_b && e.reason.contains(&memo_64)));
     });
 }
+
+#[test]
+fn set_starbase_permissions_rejects_oversized_rep_flags_without_mutation() {
+    let ctx = make_test_context();
+    let char_id = 90_000_001;
+    let corp_id = 98_000_001;
+    let tower_id = 1_000_000_590;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+        }
+        snap.corporations.insert(
+            corp_id,
+            {
+                let mut corp = CorporationRecord::default();
+                corp.corporation_id = corp_id;
+                corp.name = "Perm Guard Corp".into();
+                corp.ticker = "PGC".into();
+                corp.ceo_id = char_id;
+                corp
+            },
+        );
+        snap.structures.insert(
+            tower_id,
+            UpwellStructureRecord {
+                structure_id: tower_id,
+                type_id: 12235,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: "Perm Tower".into(),
+                state: "Online".into(),
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut sess = char_session(char_id, corp_id);
+    sess.solar_system_id = Some(30_000_142);
+
+    // Seed baseline permissions first so we verify failed calls leave `starbase_settings` intact.
+    handle(
+        &ctx,
+        &mut sess,
+        "posMgr",
+        "SetStarbasePermissions",
+        &[
+            PyRep::Integer(tower_id),
+            PyRep::String("alliance".into()),
+            PyRep::String("corp".into()),
+            PyRep::String("starbase".into()),
+            PyRep::String("corp".into()),
+        ],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap();
+    let before = ctx.db.with_snapshot(|s| s.starbase_settings[&tower_id].clone());
+    let commits_before = ctx.db.tx_commit_count();
+
+    let oversize_str = "x".repeat(65);
+    let invalid_payloads = [
+        // `util.Row` container
+        PyRep::Object {
+            type_name: "util.Row".into(),
+            args: Box::new(PyRep::Tuple(vec![
+                PyRep::List(vec![
+                    PyRep::String("anchor".into()),
+                    PyRep::String("unanchor".into()),
+                ]),
+                PyRep::List(vec![
+                    PyRep::String(oversize_str.clone()),
+                    PyRep::String("corp".into()),
+                ]),
+            ])),
+        },
+        // `KeyVal` container
+        PyRep::KeyVal(HashMap::from([
+            ("anchor".to_string(), PyRep::String("alliance".into())),
+            ("online".to_string(), PyRep::String(oversize_str.clone())),
+        ])),
+        // `Dict` container
+        PyRep::Dict(vec![
+            (PyRep::String("anchor".into()), PyRep::String("corp".into())),
+            (
+                PyRep::String("offline".into()),
+                PyRep::Bytes(oversize_str.as_bytes().to_vec()),
+            ),
+        ]),
+    ];
+
+    for payload in invalid_payloads {
+        let err = handle(
+            &ctx,
+            &mut sess,
+            "posMgr",
+            "SetStarbasePermissions",
+            &[PyRep::Integer(tower_id), payload],
+            &HashMap::new(),
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, "InvalidArgument");
+    }
+
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.starbase_settings[&tower_id].anchor, before.anchor);
+        assert_eq!(s.starbase_settings[&tower_id].unanchor, before.unanchor);
+        assert_eq!(s.starbase_settings[&tower_id].online, before.online);
+        assert_eq!(s.starbase_settings[&tower_id].offline, before.offline);
+    });
+}

@@ -323,6 +323,8 @@ impl ServerContext {
 
         let prev_station_id = session.station_id;
         let initial_active_char_id = session.character_id;
+        let pre_dispatch_user_id = session.user_id;
+        let pre_dispatch_was_docked = session.station_id.is_some() || session.structure_id.is_some();
         let is_outer_notify_scope =
             !crate::router::cache_notifications::has_staged_dispatch_notifications_scope();
         let start_time = std::time::Instant::now();
@@ -508,17 +510,21 @@ impl ServerContext {
         let resolved_service =
             bound_id.and_then(|bid| self.owned_bound_service_for_metrics(session, bid));
         let metric_service = resolved_service.as_deref().unwrap_or(service);
-        if is_outer_tx_scope
-            && !tx_poisoned
-            && res.is_ok()
-            && matches!(
-                (metric_service, method),
-                ("authentication", "Login")
-                    | ("charUnboundMgr", "SelectCharacterID")
-                    | ("stationSvc", "Undock")
-                    | ("structureDocking", "Undock")
-            )
-        {
+        let genuine_bootstrap_transition = match (metric_service, method) {
+            ("authentication", "Login") => {
+                session.user_id.is_some() && pre_dispatch_user_id != session.user_id
+            }
+            ("charUnboundMgr", "SelectCharacterID") => {
+                session.character_id.is_some() && initial_active_char_id != session.character_id
+            }
+            ("stationSvc", "Undock") | ("structureDocking", "Undock") => {
+                pre_dispatch_was_docked
+                    && session.station_id.is_none()
+                    && session.structure_id.is_none()
+            }
+            _ => false,
+        };
+        if is_outer_tx_scope && !tx_poisoned && res.is_ok() && genuine_bootstrap_transition {
             self.grant_session_bootstrap_burst(session.session_id);
         }
         let track_individual =
@@ -756,7 +762,7 @@ impl ServerContext {
     pub(crate) fn is_bootstrap_burst_rpc(service: &str, method: &str) -> bool {
         matches!(
             (service, method),
-            ("authentication", "Login" | "Logout" | "Ping")
+            ("authentication", "Logout" | "Ping")
                 | (
                     "machoNet",
                     "GetTime"
@@ -768,15 +774,22 @@ impl ServerContext {
                 )
                 | ("cache", "Rowset" | "Setting" | "GetServerVersionAndBuild")
                 | ("objectCaching", "GetCachableObject")
-                | (
-                    "charUnboundMgr",
-                    "GetCharactersToSelect" | "SelectCharacterID" | "GetCharacterInfo"
-                )
+                | ("charUnboundMgr", "GetCharactersToSelect" | "GetCharacterInfo")
                 | (
                     "character",
                     "GetCharacterSelectionInfo" | "GetCharacterToSelect"
                 )
-                | ("config", _)
+                | (
+                    "config",
+                    "GetBlackListedPlanets"
+                        | "GetOldStationData"
+                        | "GetMultiOwnersEx"
+                        | "GetLocationsEx"
+                        | "GetMultiLocationsEx"
+                        | "GetMultiAllianceShortNamesEx"
+                        | "GetMultiCorpTickerNamesEx"
+                        | "GetStationSolarSystemsByOwner"
+                )
                 | (
                     "stationSvc",
                     "Undock" | "GetStation" | "GetSolarSystem" | "GetGuests"
@@ -807,7 +820,7 @@ impl ServerContext {
         bound_id: Option<u64>,
         method: &str,
     ) -> Result<(), BridgeRpcError> {
-        if self.is_gm_ops_enabled() && (session.has_gm_role() || service == "slash") {
+        if self.is_gm_ops_enabled() && session.has_gm_role() {
             return Ok(());
         }
         let resolved_service =

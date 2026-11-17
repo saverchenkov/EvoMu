@@ -1,7 +1,9 @@
 //! Edge-case behavioral tests for `router::dispatch`.
 
 use crate::router::{
-    ServerContext, RPC_BOOTSTRAP_BURST_ALLOWANCE, RPC_RATE_BURST_TOKENS, RPC_RATE_REFILL_PER_SEC,
+    ServerContext, RPC_BOOTSTRAP_BURST_ALLOWANCE, RPC_BOOTSTRAP_GRANT_COOLDOWN,
+    RPC_BOOTSTRAP_TRANSITION_ALLOWANCE, RPC_RATE_BURST_TOKENS, RPC_RATE_IDLE_TTL,
+    RPC_RATE_PRUNE_THRESHOLD, RPC_RATE_REFILL_PER_SEC,
 };
 use eve_db::{VirtualServerClock, WorldRepository};
 use eve_machonet::{service_roles, SessionState};
@@ -856,6 +858,348 @@ async fn dispatch_rpc_gm_soak_exemption_requires_gm_mode_and_gm_role() {
     assert!(
         player_limited,
         "regular player session must remain rate-limited even when --gm is active"
+    );
+
+    // BF-1186B-01: non-GM callers targeting `slash` (unbound or bound) must NOT bypass throttling under `--gm`.
+    // Keep advancing through any early role/syntax `Err` replies until burst depletion triggers `RateLimited`.
+    let mut player_slash_unbound = demo_session(&ctx, 9_304, service_roles::ROLE_PLAYER);
+    let mut slash_unbound_limited = false;
+    for _ in 0..loop_calls {
+        if let Err(err) = ctx
+            .dispatch_rpc(
+                &mut player_slash_unbound,
+                "slash",
+                None,
+                "SlashCmd",
+                &[PyRep::String("/".into())],
+                &kw,
+                None,
+            )
+            .await
+        {
+            if err.code == "RateLimited" {
+                slash_unbound_limited = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        slash_unbound_limited,
+        "ROLE_PLAYER calling unbound `slash` must still be rate-limited under --gm"
+    );
+
+    let mut player_slash_bound = demo_session(&ctx, 9_305, service_roles::ROLE_PLAYER);
+    let slash_bid = ctx
+        .bind_verified_sub_object(&player_slash_bound, "slash", 30_000_142)
+        .expect("bind slash for ROLE_PLAYER");
+    let mut slash_bound_limited = false;
+    for _ in 0..loop_calls {
+        if let Err(err) = ctx
+            .dispatch_rpc(
+                &mut player_slash_bound,
+                "slash",
+                Some(slash_bid),
+                "SlashCmd",
+                &[PyRep::String("/".into())],
+                &kw,
+                None,
+            )
+            .await
+        {
+            if err.code == "RateLimited" {
+                slash_bound_limited = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        slash_bound_limited,
+        "ROLE_PLAYER calling bound `slash` must still be rate-limited under --gm"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_rpc_login_and_select_char_charge_standard_bucket_and_gate_bootstrap_grants() {
+    let ctx = edge_ctx();
+    let kw = HashMap::new();
+
+    // BF-1186B-02: Login, SelectCharacterID, and heavy config RPCs (`GetMap`,
+    // `GetAverageMarketPrices`) do not consume the bootstrap burst pool, whereas explicit light
+    // login/char-select `config` methods do.
+    assert!(!ServerContext::is_bootstrap_burst_rpc("authentication", "Login"));
+    assert!(!ServerContext::is_bootstrap_burst_rpc(
+        "charUnboundMgr",
+        "SelectCharacterID"
+    ));
+    assert!(!ServerContext::is_bootstrap_burst_rpc("config", "GetMap"));
+    assert!(!ServerContext::is_bootstrap_burst_rpc(
+        "config",
+        "GetAverageMarketPrices"
+    ));
+    assert!(ServerContext::is_bootstrap_burst_rpc(
+        "config",
+        "GetBlackListedPlanets"
+    ));
+    assert!(ServerContext::is_bootstrap_burst_rpc(
+        "config",
+        "GetMultiOwnersEx"
+    ));
+
+    let burst = RPC_RATE_BURST_TOKENS as usize;
+
+    // `authentication.Login` consumes standard burst tokens (never bootstrap) and cannot draw
+    // from `bootstrap_tokens` when the standard bucket is empty.
+    let mut login_spam = SessionState::new(9_401);
+    ctx.dispatch_rpc(
+        &mut login_spam,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("initial Login must succeed");
+    assert!(login_spam.user_id.is_some());
+    assert_eq!(
+        ctx.bootstrap_tokens_remaining(login_spam.session_id),
+        Some(RPC_BOOTSTRAP_BURST_ALLOWANCE),
+        "Login must not draw from bootstrap_tokens"
+    );
+
+    // Exhaust bootstrap_tokens intentionally and confirm repeat `Login` on same user_id
+    // does NOT grant transition bootstrap tokens.
+    for _ in 0..RPC_BOOTSTRAP_BURST_ALLOWANCE {
+        ctx.dispatch_rpc(&mut login_spam, "machoNet", None, "GetTime", &[], &kw, None)
+            .await
+            .expect("bootstrap call succeeds");
+    }
+    assert_eq!(ctx.bootstrap_tokens_remaining(login_spam.session_id), Some(0));
+    ctx.dispatch_rpc(
+        &mut login_spam,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("repeat Login before standard burst exhaustion succeeds");
+    assert_eq!(
+        ctx.bootstrap_tokens_remaining(login_spam.session_id),
+        Some(0),
+        "repeat Login for unchanged user_id must not replenish bootstrap tokens"
+    );
+
+    // Select a character so we can drain standard tokens cleanly with `account.GetCashBalance`
+    // while keeping bootstrap tokens full, then verify both `Login` and `SelectCharacterID`
+    // reject with `RateLimited` instead of consuming `bootstrap_tokens`.
+    let mut select_spam = SessionState::new(9_402);
+    ctx.dispatch_rpc(
+        &mut select_spam,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("pre-select Login succeeds");
+    ctx.dispatch_rpc(
+        &mut select_spam,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("initial SelectCharacterID succeeds");
+    assert_eq!(
+        ctx.bootstrap_tokens_remaining(select_spam.session_id),
+        Some(RPC_BOOTSTRAP_BURST_ALLOWANCE),
+        "SelectCharacterID must charge standard bucket, leaving bootstrap_tokens untouched"
+    );
+    // Drain bootstrap tokens too, repeat `SelectCharacterID` on the same char, and verify it
+    // does NOT restore bootstrap_tokens.
+    for _ in 0..RPC_BOOTSTRAP_BURST_ALLOWANCE {
+        ctx.dispatch_rpc(&mut select_spam, "machoNet", None, "GetTime", &[], &kw, None)
+            .await
+            .expect("bootstrap call succeeds");
+    }
+    assert_eq!(ctx.bootstrap_tokens_remaining(select_spam.session_id), Some(0));
+    ctx.dispatch_rpc(
+        &mut select_spam,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("repeat SelectCharacterID within standard burst succeeds");
+    assert_eq!(
+        ctx.bootstrap_tokens_remaining(select_spam.session_id),
+        Some(0),
+        "repeat SelectCharacterID for same character must not replenish bootstrap tokens"
+    );
+
+    // Fresh logged-in session with untouched 512 bootstrap tokens, standard burst drained:
+    // both `Login` and `SelectCharacterID` immediately fail with `RateLimited`.
+    let ctx_std = edge_ctx();
+    let mut empty_std = demo_session(&ctx_std, 9_405, service_roles::ROLE_PLAYER);
+    for _ in 0..(burst + 20) {
+        if let Err(err) = ctx_std
+            .dispatch_rpc(&mut empty_std, "account", None, "GetCashBalance", &[], &kw, None)
+            .await
+        {
+            assert_eq!(err.code, "RateLimited");
+            break;
+        }
+    }
+    assert_eq!(
+        ctx_std.bootstrap_tokens_remaining(empty_std.session_id),
+        Some(RPC_BOOTSTRAP_BURST_ALLOWANCE)
+    );
+    let login_err = ctx_std
+        .dispatch_rpc(
+            &mut empty_std,
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        login_err.code, "RateLimited",
+        "Login must not bypass empty standard bucket via bootstrap_tokens"
+    );
+    let select_err = ctx_std
+        .dispatch_rpc(
+            &mut empty_std,
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(90_000_001)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        select_err.code, "RateLimited",
+        "SelectCharacterID must not bypass empty standard bucket via bootstrap_tokens"
+    );
+
+    // Repeated `stationSvc.Undock` while already in space (`station_id: None`, `structure_id: None`
+    // in both DB and session) must NOT grant transition bootstrap tokens.
+    let ctx_space = edge_ctx();
+    ctx_space.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    let mut in_space = demo_session(&ctx_space, 9_403, service_roles::ROLE_PLAYER);
+    in_space.station_id = None;
+    in_space.structure_id = None;
+    in_space.solar_system_id = Some(30_000_142);
+    for _ in 0..RPC_BOOTSTRAP_BURST_ALLOWANCE {
+        ctx_space
+            .dispatch_rpc(&mut in_space, "machoNet", None, "GetTime", &[], &kw, None)
+            .await
+            .expect("drain bootstrap pool");
+    }
+    assert_eq!(ctx_space.bootstrap_tokens_remaining(in_space.session_id), Some(0));
+    let _ = ctx_space
+        .dispatch_rpc(&mut in_space, "stationSvc", None, "Undock", &[], &kw, None)
+        .await;
+    assert_eq!(
+        ctx_space.bootstrap_tokens_remaining(in_space.session_id),
+        Some(0),
+        "calling Undock when already in space must not replenish bootstrap tokens"
+    );
+
+    // Cooldown prevents repeated transition grants within `RPC_BOOTSTRAP_GRANT_COOLDOWN`.
+    let t0 = std::time::Instant::now();
+    assert!(ctx.try_consume_rpc_token_at(9_404, t0, true));
+    for _ in 0..(RPC_BOOTSTRAP_BURST_ALLOWANCE - 1) {
+        assert!(ctx.try_consume_rpc_token_at(9_404, t0, true));
+    }
+    assert_eq!(ctx.bootstrap_tokens_remaining(9_404), Some(0));
+    assert!(ctx.grant_session_bootstrap_burst_at(9_404, t0));
+    assert_eq!(
+        ctx.bootstrap_tokens_remaining(9_404),
+        Some(RPC_BOOTSTRAP_TRANSITION_ALLOWANCE)
+    );
+    for _ in 0..RPC_BOOTSTRAP_TRANSITION_ALLOWANCE {
+        assert!(ctx.try_consume_rpc_token_at(9_404, t0, true));
+    }
+    assert_eq!(ctx.bootstrap_tokens_remaining(9_404), Some(0));
+    let t_soon = t0 + std::time::Duration::from_secs(1);
+    assert!(
+        !ctx.grant_session_bootstrap_burst_at(9_404, t_soon),
+        "cooldown must suppress immediate repeat transition bootstrap grant"
+    );
+    assert_eq!(ctx.bootstrap_tokens_remaining(9_404), Some(0));
+    let t_ready = t0 + RPC_BOOTSTRAP_GRANT_COOLDOWN;
+    assert!(ctx.grant_session_bootstrap_burst_at(9_404, t_ready));
+    assert_eq!(
+        ctx.bootstrap_tokens_remaining(9_404),
+        Some(RPC_BOOTSTRAP_TRANSITION_ALLOWANCE)
+    );
+}
+
+#[test]
+fn session_rpc_rate_bucket_evicts_idle_bootstrap_entries_past_ttl() {
+    let ctx = edge_ctx();
+    let t0 = std::time::Instant::now();
+
+    // Create > `RPC_RATE_PRUNE_THRESHOLD` sessions that each consume 1 bootstrap token
+    // (`bootstrap_tokens` drops to 511 < 512 while standard `tokens` stays 300.0).
+    let idle_sessions = RPC_RATE_PRUNE_THRESHOLD + 25;
+    for offset in 0..idle_sessions {
+        let sid = 10_000 + offset as u64;
+        assert!(ctx.try_consume_rpc_token_at(sid, t0, true));
+    }
+    assert_eq!(ctx.rpc_rate_bucket_count(), idle_sessions);
+
+    // Recent active throttled session added 1s before TTL expiry must be retained.
+    let t_after_ttl = t0 + RPC_RATE_IDLE_TTL;
+    let t_recent = t_after_ttl - std::time::Duration::from_secs(1);
+    let sid_active = 20_000_u64;
+    for _ in 0..(RPC_RATE_BURST_TOKENS as usize) {
+        assert!(ctx.try_consume_rpc_token_at(sid_active, t_recent, false));
+    }
+
+    // Inserting a new session once age >= `RPC_RATE_IDLE_TTL` triggers pruning that evicts all
+    // stale bootstrap-touched entries before `refill`, keeping only recent active entries.
+    let sid_fresh = 20_001_u64;
+    assert!(ctx.try_consume_rpc_token_at(sid_fresh, t_after_ttl, false));
+    assert_eq!(
+        ctx.rpc_rate_bucket_count(),
+        2,
+        "all stale bootstrap-touched buckets idle >= RPC_RATE_IDLE_TTL must be evicted"
     );
 }
 

@@ -88,11 +88,23 @@ async fn login_path_rpcs_answer_before_character_selection() {
     assert_eq!(eve_server::services::client_login::delivered_bean_count(&ctx, sat_id), i64::MAX);
 
     let cap = eve_server::services::client_login::ALERT_REGISTRY_CAP;
+    let mut alert_sessions = Vec::with_capacity(16);
+    for idx in 0..16_u64 {
+        let uname = format!("alert_cap_pilot_{idx}");
+        let pw = "alert-cap-secret";
+        ctx.db.provision_player_account(&uname, pw);
+        let mut s = SessionState::new(9_110 + idx);
+        login_pilot(&ctx, &mut s, &uname, pw).await;
+        assert!(s.character_id.is_none());
+        alert_sessions.push(s);
+    }
+    let alert_count = alert_sessions.len();
     for i in 0..(cap + 32) {
+        let alert_sess = &mut alert_sessions[i % alert_count];
         let h = 0x7000_0000_i64 + i as i64;
         let cap_stack = PyRep::Tuple(vec![PyRep::Integer(h), PyRep::ascii_bytes("cap")]);
         ctx.dispatch_rpc(
-            &mut sess,
+            alert_sess,
             "alert",
             None,
             "SendClientStackTraceAlert",
@@ -106,7 +118,7 @@ async fn login_path_rpcs_answer_before_character_selection() {
             PyRep::Integer(h),
             PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(0)]),
         )]);
-        ctx.dispatch_rpc(&mut sess, "alert", None, "BeanDelivery", &[cap_beans], &kw, None)
+        ctx.dispatch_rpc(alert_sess, "alert", None, "BeanDelivery", &[cap_beans], &kw, None)
             .await
             .unwrap();
     }

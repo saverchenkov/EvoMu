@@ -151,18 +151,20 @@ const MAX_STARBASE_PERM_FLAG_BYTES: usize = 64;
 const MAX_STARBASE_PASSWORD_CHARS: usize = 128;
 const MAX_STARBASE_PASSWORD_BYTES: usize = 256;
 
-fn perm_rep_to_flag(rep: &PyRep) -> Option<String> {
-    if let Some(s) = rep.as_str() {
-        return crate::router::check_str_bounds(
-            s,
-            "permFlag",
-            MAX_STARBASE_PERM_FLAG_CHARS,
-            MAX_STARBASE_PERM_FLAG_BYTES,
-        )
-        .ok()
-        .map(str::to_string);
+fn perm_rep_to_flag(rep: &PyRep) -> Result<Option<String>, BridgeRpcError> {
+    match rep {
+        PyRep::None => Ok(None),
+        PyRep::String(_) | PyRep::Bytes(_) => {
+            let s = crate::router::check_str_rep_max(
+                rep,
+                "permFlag",
+                MAX_STARBASE_PERM_FLAG_CHARS,
+                MAX_STARBASE_PERM_FLAG_BYTES,
+            )?;
+            Ok(Some(s.to_string()))
+        }
+        _ => Ok(perm_int_to_flag(rep)),
     }
-    perm_int_to_flag(rep)
 }
 
 fn perm_int_to_flag(rep: &PyRep) -> Option<String> {
@@ -173,7 +175,9 @@ fn perm_int_to_flag(rep: &PyRep) -> Option<String> {
     })
 }
 
-fn extract_deploy_flags_from_rep(rep: &PyRep) -> Option<(String, String, String, String)> {
+fn extract_deploy_flags_from_rep(
+    rep: &PyRep,
+) -> Result<Option<(String, String, String, String)>, BridgeRpcError> {
     match rep {
         PyRep::Object { type_name, args } if type_name.ends_with("Row") => {
             if let PyRep::Tuple(items) = args.as_ref() {
@@ -182,49 +186,61 @@ fn extract_deploy_flags_from_rep(rep: &PyRep) -> Option<(String, String, String,
                 {
                     let mut map = HashMap::new();
                     for (c, v) in cols.iter().zip(vals.iter()) {
-                        if let (Some(k), Some(f)) = (c.as_str(), perm_rep_to_flag(v)) {
-                            map.insert(k.to_string(), f);
+                        if let Some(k) = c.as_str() {
+                            if let Some(f) = perm_rep_to_flag(v)? {
+                                map.insert(k.to_string(), f);
+                            }
                         }
                     }
-                    return Some((
+                    return Ok(Some((
                         map.remove("anchor").unwrap_or_else(|| "corp".into()),
                         map.remove("unanchor").unwrap_or_else(|| "corp".into()),
                         map.remove("online").unwrap_or_else(|| "corp".into()),
                         map.remove("offline").unwrap_or_else(|| "corp".into()),
-                    ));
+                    )));
                 }
             }
-            None
+            Ok(None)
         }
-        PyRep::KeyVal(map) => Some((
+        PyRep::KeyVal(map) => Ok(Some((
             map.get("anchor")
-                .and_then(perm_rep_to_flag)
+                .map(perm_rep_to_flag)
+                .transpose()?
+                .flatten()
                 .unwrap_or_else(|| "corp".into()),
             map.get("unanchor")
-                .and_then(perm_rep_to_flag)
+                .map(perm_rep_to_flag)
+                .transpose()?
+                .flatten()
                 .unwrap_or_else(|| "corp".into()),
             map.get("online")
-                .and_then(perm_rep_to_flag)
+                .map(perm_rep_to_flag)
+                .transpose()?
+                .flatten()
                 .unwrap_or_else(|| "corp".into()),
             map.get("offline")
-                .and_then(perm_rep_to_flag)
+                .map(perm_rep_to_flag)
+                .transpose()?
+                .flatten()
                 .unwrap_or_else(|| "corp".into()),
-        )),
+        ))),
         PyRep::Dict(entries) => {
             let mut map = HashMap::new();
             for (k, v) in entries {
-                if let (Some(ks), Some(f)) = (k.as_str(), perm_rep_to_flag(v)) {
-                    map.insert(ks.to_string(), f);
+                if let Some(ks) = k.as_str() {
+                    if let Some(f) = perm_rep_to_flag(v)? {
+                        map.insert(ks.to_string(), f);
+                    }
                 }
             }
-            Some((
+            Ok(Some((
                 map.remove("anchor").unwrap_or_else(|| "corp".into()),
                 map.remove("unanchor").unwrap_or_else(|| "corp".into()),
                 map.remove("online").unwrap_or_else(|| "corp".into()),
                 map.remove("offline").unwrap_or_else(|| "corp".into()),
-            ))
+            )))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -823,43 +839,47 @@ pub fn handle(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = RpcArgs::new(args, kwargs);
             let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let (flag_anchor, flag_unanchor, flag_online, flag_offline) = if let Some(extracted) =
-                args.get(1).and_then(extract_deploy_flags_from_rep)
+            let (flag_anchor, flag_unanchor, flag_online, flag_offline) = match args
+                .get(1)
+                .map(extract_deploy_flags_from_rep)
+                .transpose()
             {
-                extracted
-            } else {
-                let extract_perm = |idx: usize, kw: &str| -> Result<String, BridgeRpcError> {
-                    match rpc.opt_str_max(
-                        idx,
-                        kw,
-                        MAX_STARBASE_PERM_FLAG_CHARS,
-                        MAX_STARBASE_PERM_FLAG_BYTES,
-                    ) {
-                        Ok(Some(v)) => Ok(v.to_string()),
-                        Ok(None) => Ok("corp".to_string()),
-                        Err(e) => match args.get(idx).and_then(perm_int_to_flag) {
-                            Some(s) => Ok(s),
-                            None => Err(e),
-                        },
-                    }
-                };
-                let fa = match extract_perm(1, "anchor") {
-                    Ok(v) => v,
-                    Err(e) => return Some(Err(e)),
-                };
-                let fu = match extract_perm(2, "unanchor") {
-                    Ok(v) => v,
-                    Err(e) => return Some(Err(e)),
-                };
-                let fon = match extract_perm(3, "online") {
-                    Ok(v) => v,
-                    Err(e) => return Some(Err(e)),
-                };
-                let foff = match extract_perm(4, "offline") {
-                    Ok(v) => v,
-                    Err(e) => return Some(Err(e)),
-                };
-                (fa, fu, fon, foff)
+                Ok(Some(Some(extracted))) => extracted,
+                Err(e) => return Some(Err(e)),
+                Ok(Some(None) | None) => {
+                    let extract_perm = |idx: usize, kw: &str| -> Result<String, BridgeRpcError> {
+                        match rpc.opt_str_max(
+                            idx,
+                            kw,
+                            MAX_STARBASE_PERM_FLAG_CHARS,
+                            MAX_STARBASE_PERM_FLAG_BYTES,
+                        ) {
+                            Ok(Some(v)) => Ok(v.to_string()),
+                            Ok(None) => Ok("corp".to_string()),
+                            Err(e) => match args.get(idx).and_then(perm_int_to_flag) {
+                                Some(s) => Ok(s),
+                                None => Err(e),
+                            },
+                        }
+                    };
+                    let fa = match extract_perm(1, "anchor") {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let fu = match extract_perm(2, "unanchor") {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let fon = match extract_perm(3, "online") {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let foff = match extract_perm(4, "offline") {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    (fa, fu, fon, foff)
+                }
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 check_starbase_auth(snap, session, char_id, item_id)?;
