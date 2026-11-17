@@ -1039,18 +1039,19 @@ class _HangarViewTornDown(Exception):
 
 
 # Guarded HangarView methods that require an active station/structure dock (#1163).
+# ReloadView uses _make_hangar_reload_guard below to track in-flight reloads too (#1286).
 _HANGAR_VIEW_UNDOCK_METHODS = (
     "GetShipItemFromHangar",
     "SetUpModels",
     "LoadAndSetupScene",
     "LoadView",
     "LoadCamera",
-    "ReloadView",
     "ProcessActiveShipChanged",
 )
 
 
 # Guarded HangarView methods: (method_name, abort_replace_on_stale, check_after_call)
+# OnActiveShipSkinChange uses _make_hangar_skin_change_guard for reload/stale-ship checks (#1286).
 _HANGAR_VIEW_TEARDOWN_METHODS = (
     ("_ReplaceExistingShipModelModular", True, True),
     ("RemoveAllShipsFromScene", True, False),
@@ -1060,7 +1061,6 @@ _HANGAR_VIEW_TEARDOWN_METHODS = (
     ("PlayUpdateShipSequence", False, False),
     ("_SetUpLightingRig", False, False),
     ("ConfigureVFXMultiEffect", False, False),
-    ("OnActiveShipSkinChange", False, True),
 )
 
 
@@ -1119,6 +1119,8 @@ def _is_none_clear_refs_error(exc):
 def _make_hangar_clear_scene_guard(orig_fn):
     def _wrapped_clear_scene(self, *args, **kwargs):
         _install_modular_hangar_teardown_guard()
+        _install_modular_capital_hangar_guard()
+        _install_base_hangar_behaviour_guard()
         try:
             return orig_fn(self, *args, **kwargs)
         except AttributeError as exc:
@@ -1203,6 +1205,57 @@ def _make_hangar_undock_guard(orig_fn):
 
     _wrapped_hangar_undock_method._evomu_camera_guard = True
     return _wrapped_hangar_undock_method
+
+
+def _session_ship_id():
+    sess = getattr(__builtin__, "session", None)
+    return getattr(sess, "shipid", None) if sess is not None else None
+
+
+def _is_hangar_skin_change_stale(view, args, kwargs):
+    """Return True during HangarView reloads or while shipBehaviour still tracks a prior ship (#1286)."""
+    if getattr(view, "_evomu_hangar_reload_pending", False):
+        return True
+    item_id = args[0] if args else kwargs.get("itemID")
+    if item_id is not None:
+        sess_ship = _session_ship_id()
+        if sess_ship is not None and item_id != sess_ship:
+            return True
+        ship_behaviour = getattr(view, "shipBehaviour", None)
+        if ship_behaviour is not None and hasattr(ship_behaviour, "playerShipItemID"):
+            if getattr(ship_behaviour, "playerShipItemID", None) != item_id:
+                return True
+    return False
+
+
+def _make_hangar_skin_change_guard(orig_fn):
+    """Guard HangarView.OnActiveShipSkinChange against teardown and stale ship-switch races (#1154, #1286)."""
+    teardown_wrapped = _make_hangar_teardown_guard(orig_fn, abort_replace=False, check_after=True)
+
+    def _wrapped_on_active_ship_skin_change(self, *args, **kwargs):
+        if _is_hangar_skin_change_stale(self, args, kwargs):
+            return None
+        return teardown_wrapped(self, *args, **kwargs)
+
+    _wrapped_on_active_ship_skin_change._evomu_camera_guard = True
+    return _wrapped_on_active_ship_skin_change
+
+
+def _make_hangar_reload_guard(orig_fn):
+    """Mark HangarView reload pending until ActivateView/ReloadView finishes while keeping undock protection (#1163, #1286)."""
+    undock_wrapped = _make_hangar_undock_guard(orig_fn)
+
+    def _wrapped_reload_view(self, *args, **kwargs):
+        if _is_hangar_session_undocked():
+            return None
+        self._evomu_hangar_reload_pending = True
+        try:
+            return undock_wrapped(self, *args, **kwargs)
+        finally:
+            self._evomu_hangar_reload_pending = False
+
+    _wrapped_reload_view._evomu_camera_guard = True
+    return _wrapped_reload_view
 
 
 def _close_transition_fade_layer(transition):
@@ -1325,9 +1378,10 @@ def _install_hangar_view_teardown_guard():
             )
 
     for method_name in _HANGAR_VIEW_UNDOCK_METHODS:
-        orig_fn = getattr(hangar_cls, method_name, None)
-        if callable(orig_fn) and not getattr(orig_fn, "_evomu_camera_guard", False):
-            setattr(hangar_cls, method_name, _make_hangar_undock_guard(orig_fn))
+        _wrap_cls_method_if_present(hangar_cls, method_name, _make_hangar_undock_guard)
+
+    _wrap_cls_method_if_present(hangar_cls, "OnActiveShipSkinChange", _make_hangar_skin_change_guard)
+    _wrap_cls_method_if_present(hangar_cls, "ReloadView", _make_hangar_reload_guard)
 
     _HOOKED_CAMERA_GUARD_TARGETS.add("hangarView")
     return True
@@ -1627,8 +1681,81 @@ def _install_fitting_active_ship_guard():
     return changed
 
 
+def _make_modular_skin_change_guard(orig_fn):
+    """Skip ProcessSkinChange when playerShipItemID is unset or stale vs session.shipid (#1286)."""
+    def _wrapped_process_skin_change(self, newModel, *args, **kwargs):
+        player_ship_id = getattr(self, "playerShipItemID", None)
+        if not player_ship_id:
+            return None
+        sess_ship = _session_ship_id()
+        if sess_ship is not None and player_ship_id != sess_ship:
+            return None
+        return orig_fn(self, newModel, *args, **kwargs)
+
+    _wrapped_process_skin_change._evomu_camera_guard = True
+    return _wrapped_process_skin_change
+
+
+def _make_hangar_ship_damage_guard(orig_fn):
+    """Skip BaseHangarShipBehaviour.SetShipDamage for unset, stale, or undocked ships (#1286)."""
+    def _wrapped_set_ship_damage(self, itemID, model, *args, **kwargs):
+        if not itemID or _is_hangar_session_undocked():
+            return False
+        sess_ship = _session_ship_id()
+        if sess_ship is not None and itemID != sess_ship:
+            return False
+        return orig_fn(self, itemID, model, *args, **kwargs)
+
+    _wrapped_set_ship_damage._evomu_camera_guard = True
+    return _wrapped_set_ship_damage
+
+
+def _wrap_cls_method_if_present(cls, method_name, wrapper_factory):
+    orig_fn = getattr(cls, method_name, None)
+    if callable(orig_fn) and not getattr(orig_fn, "_evomu_camera_guard", False):
+        setattr(cls, method_name, wrapper_factory(orig_fn))
+        return True
+    return False
+
+
+def _install_cls_method_guard(target_key, mod_name, cls_name, method_name, wrapper_factory):
+    """Wrap ``mod.cls.method_name`` once per session using ``wrapper_factory``."""
+    if target_key in _HOOKED_CAMERA_GUARD_TARGETS:
+        return False
+    mod = sys.modules.get(mod_name)
+    cls = getattr(mod, cls_name, None) if mod is not None else None
+    if cls is None or not (isinstance(cls, type) or hasattr(cls, "__bases__")):
+        return False
+    if _wrap_cls_method_if_present(cls, method_name, wrapper_factory):
+        _HOOKED_CAMERA_GUARD_TARGETS.add(target_key)
+        return True
+    return False
+
+
+def _install_base_hangar_behaviour_guard():
+    """Guard BaseHangarShipBehaviour.SetShipDamage against stale unboarded ship IDs (#1286)."""
+    return _install_cls_method_guard(
+        "baseHangarBehaviours",
+        "eve.client.script.ui.view.hangarBehaviours.baseHangarBehaviours",
+        "BaseHangarShipBehaviour",
+        "SetShipDamage",
+        _make_hangar_ship_damage_guard,
+    )
+
+
+def _install_modular_capital_hangar_guard():
+    """Guard ModularCapitalHangarShipBehaviour.ProcessSkinChange against stale ship IDs (#1286)."""
+    return _install_cls_method_guard(
+        "modularHangarCapitalBehaviours",
+        "eve.client.script.ui.view.hangarBehaviours.modularHangarCapitalBehaviours",
+        "ModularCapitalHangarShipBehaviour",
+        "ProcessSkinChange",
+        _make_modular_skin_change_guard,
+    )
+
+
 def _install_modular_hangar_teardown_guard():
-    """Guard ModularHangarShipBehaviour.CleanScene against GetCamera() returning None (#1218)."""
+    """Guard ModularHangarShipBehaviour against CleanScene None-camera (#1218) and stale ProcessSkinChange (#1286)."""
     if "modularHangarBehaviours" in _HOOKED_CAMERA_GUARD_TARGETS:
         return False
     mhb_mod = sys.modules.get("eve.client.script.ui.view.hangarBehaviours.modularHangarBehaviours")
@@ -1673,6 +1800,9 @@ def _install_modular_hangar_teardown_guard():
 
             cls.CleanScene = _make_clean_guard(orig_clean)
             hooked = True
+        if cls_name == "ModularHangarShipBehaviour":
+            if _wrap_cls_method_if_present(cls, "ProcessSkinChange", _make_modular_skin_change_guard):
+                hooked = True
     if hooked:
         _HOOKED_CAMERA_GUARD_TARGETS.add("modularHangarBehaviours")
     return hooked
@@ -1795,10 +1925,13 @@ def _install_slots_container_sync_guard():
 
 
 def _install_live_client_sync_guards():
-    """Install all live-client transition/sync guards (#1267, #1254, #1218, #1217, #1252)."""
+    """Install all live-client transition/sync guards (#1267, #1254, #1218, #1217, #1252, #1286)."""
     _install_inventory_transition_guard()
     _install_fitting_active_ship_guard()
+    _install_hangar_view_teardown_guard()
+    _install_base_hangar_behaviour_guard()
     _install_modular_hangar_teardown_guard()
+    _install_modular_capital_hangar_guard()
     _install_wreck_rotation_guard()
     _install_slots_container_sync_guard()
 

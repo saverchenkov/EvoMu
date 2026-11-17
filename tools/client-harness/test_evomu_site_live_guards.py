@@ -34,7 +34,10 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
             "fittingSvc",
             "fittingWarnings",
             "warningIconCont",
+            "hangarView",
+            "baseHangarBehaviours",
             "modularHangarBehaviours",
+            "modularHangarCapitalBehaviours",
             "wreck",
             "slotsContainer",
         })
@@ -524,6 +527,249 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
         self.assertIsNone(ModularHangarShipBehaviour().CleanScene())
         with self.assertRaises(AttributeError):
             ModularHangarShipBehaviour(bad_attr=True).CleanScene()
+
+    def test_1286_1287_hangar_skin_change_skipped_during_reload_and_stale_ship_switch(self):
+        events = []
+
+        def _load_dogma_item(item_id):
+            events.append(("LoadItem", item_id))
+            if item_id != getattr(builtins.session, "shipid", None):
+                raise RuntimeError("Dogma was unable to get invItem to load dogmaItem!")
+
+        bhb_mod = types.ModuleType("eve.client.script.ui.view.hangarBehaviours.baseHangarBehaviours")
+
+        class BaseHangarShipBehaviour(object):
+            def SetShipDamage(self, itemID, model, steps=1, duration=0.1):
+                events.append(("SetShipDamage", itemID, model))
+                _load_dogma_item(itemID)
+                return True
+
+        bhb_mod.BaseHangarShipBehaviour = BaseHangarShipBehaviour
+        sys.modules["eve.client.script.ui.view.hangarBehaviours.baseHangarBehaviours"] = bhb_mod
+
+        mhb_mod = types.ModuleType("eve.client.script.ui.view.hangarBehaviours.modularHangarBehaviours")
+
+        class ModularHangarShipBehaviour(BaseHangarShipBehaviour):
+            def __init__(self, item_id=0, type_id=0):
+                self.playerShipItemID = item_id
+                self.playerShipTypeID = type_id
+
+            def UpdateActiveShipIDs(self, type_id, item_id):
+                self.playerShipTypeID = type_id
+                self.playerShipItemID = item_id
+
+            def CleanScene(self):
+                events.append("CleanScene")
+
+            def ShouldSwitchSkin(self, _skin_id):
+                return True
+
+            def LoadShipModel(self, item_id, type_id, playerShip=False, skipSetupAnimation=False):
+                events.append(("Modular.LoadShipModel", item_id, type_id, playerShip))
+                if playerShip:
+                    self.UpdateActiveShipIDs(type_id, item_id)
+                return ("model", item_id, type_id)
+
+            def ProcessSkinChange(self, new_model):
+                events.append(("Modular.ProcessSkinChange", self.playerShipItemID, new_model))
+                return self.SetShipDamage(self.playerShipItemID, new_model)
+
+        mhb_mod.ModularHangarShipBehaviour = ModularHangarShipBehaviour
+        sys.modules["eve.client.script.ui.view.hangarBehaviours.modularHangarBehaviours"] = mhb_mod
+
+        mcb_mod = types.ModuleType("eve.client.script.ui.view.hangarBehaviours.modularHangarCapitalBehaviours")
+
+        class ModularCapitalHangarShipBehaviour(BaseHangarShipBehaviour):
+            def __init__(self, item_id=0, type_id=0):
+                self.playerShipItemID = item_id
+                self.playerShipTypeID = type_id
+
+            def LoadShipModel(self, item_id, type_id, playerShip=True):
+                events.append(("ModularCap.LoadShipModel", item_id, type_id, playerShip))
+                if playerShip:
+                    self.playerShipItemID = item_id
+                    self.playerShipTypeID = type_id
+                return ("cap_model", item_id, type_id)
+
+            def ProcessSkinChange(self, new_model):
+                events.append(("ModularCap.ProcessSkinChange", self.playerShipItemID, new_model))
+                return self.SetShipDamage(self.playerShipItemID, new_model)
+
+        mcb_mod.ModularCapitalHangarShipBehaviour = ModularCapitalHangarShipBehaviour
+        sys.modules["eve.client.script.ui.view.hangarBehaviours.modularHangarCapitalBehaviours"] = mcb_mod
+
+        hv_mod = types.ModuleType("eve.client.script.ui.view.hangarView")
+
+        class HangarView(object):
+            def __init__(self, behaviour, on_fade=None):
+                self.shipBehaviour = behaviour
+                self.activeHangarScene = object()
+                self.activeShipModel = ("old_model", getattr(behaviour, "playerShipItemID", 0))
+                self.activeShipItem = types.SimpleNamespace(itemID=getattr(behaviour, "playerShipItemID", 0))
+                self._on_fade = on_fade
+                self._raise_in_reload = False
+
+            def ClearScene(self):
+                events.append("HangarView.ClearScene")
+                if self.shipBehaviour is not None:
+                    self.shipBehaviour.CleanScene()
+                self.shipBehaviour = None
+                self.activeHangarScene = None
+                self.activeShipModel = None
+                self.activeShipItem = None
+
+            def ReloadView(self):
+                events.append("HangarView.ReloadView.enter")
+                if self._on_fade is not None:
+                    self._on_fade(self)
+                if self._raise_in_reload:
+                    raise RuntimeError("reload_failed")
+                self.ClearScene()
+                # Recreate fresh capital hangar state after ClearScene (simulates SetUpModels + PlaceShip).
+                self.shipBehaviour = ModularCapitalHangarShipBehaviour(0, 0)
+                self.activeHangarScene = object()
+                self.activeShipItem = types.SimpleNamespace(itemID=builtins.session.shipid)
+                self.activeShipModel = ("cap_model", builtins.session.shipid)
+                self.shipBehaviour.playerShipItemID = builtins.session.shipid
+                self.shipBehaviour.playerShipTypeID = 11567
+
+            def ProcessActiveShipChanged(self, ship_id, _old_ship_id):
+                self.activeShipItem = types.SimpleNamespace(itemID=ship_id)
+                return self.ReloadView()
+
+            def OnActiveShipSkinChange(self, item_id, _skin_id, updateSkin=True, reloadSubsystems=False):
+                events.append(("OnActiveShipSkinChange.orig", item_id, updateSkin, reloadSubsystems))
+                new_model = self.shipBehaviour.LoadShipModel(item_id, 11567)
+                return self.shipBehaviour.ProcessSkinChange(new_model)
+
+        hv_mod.HangarView = HangarView
+        sys.modules["eve.client.script.ui.view.hangarView"] = hv_mod
+
+        evomu_site._install_live_client_sync_guards()
+
+        # Case 1: Exact #1286/#1287 race: docked Rupture (1897286922) switches to Avatar (1897140648),
+        # FadeIn yields BEFORE ClearScene while FittingController triggers OnActiveShipSkinChange(1897140648).
+        builtins.session = types.SimpleNamespace(stationid=None, structureid=1001896944936, shipid=1897140648)
+
+        def _trigger_skin_mid_fade(hv):
+            self.assertTrue(getattr(hv, "_evomu_hangar_reload_pending", False))
+            self.assertIsNone(hv.OnActiveShipSkinChange(1897140648, None, updateSkin=True, reloadSubsystems=True))
+
+        view_reload = HangarView(ModularHangarShipBehaviour(1897286922, 629), on_fade=_trigger_skin_mid_fade)
+        view_reload.ProcessActiveShipChanged(1897140648, 1897286922)
+        self.assertFalse(getattr(view_reload, "_evomu_hangar_reload_pending", False))
+        self.assertEqual(view_reload._evomu_hangar_gen, 1)
+        self.assertEqual(
+            [e for e in events if e[0] in ("OnActiveShipSkinChange.orig", "LoadItem", "Modular.ProcessSkinChange")],
+            [],
+        )
+        # Once reload + PlaceShip finishes, skin change on the active Avatar runs normally.
+        self.assertTrue(view_reload.OnActiveShipSkinChange(1897140648, 77))
+
+        # Case 2: Same-hangar switch async window (0.2s / boarding moment without ReloadView):
+        # activeShipItem already updated to 1897140648, but playerShipItemID is still old 1897286922.
+        events[:] = []
+        beh_same = ModularHangarShipBehaviour(1897286922, 629)
+        view_same = HangarView(beh_same)
+        view_same.activeShipItem = types.SimpleNamespace(itemID=1897140648)
+        self.assertIsNone(view_same.OnActiveShipSkinChange(1897140648, None, updateSkin=True, reloadSubsystems=True))
+        self.assertIsNone(view_same.OnActiveShipSkinChange(1897286922, 5))
+        self.assertEqual(events, [])
+        beh_same.UpdateActiveShipIDs(11567, 1897140648)
+        self.assertTrue(view_same.OnActiveShipSkinChange(1897140648, 99))
+        self.assertIn(("LoadItem", 1897140648), events)
+
+        # Case 3: Non-modular shipBehaviour (no playerShipItemID) is still skipped mid-ReloadView,
+        # and an exception in ReloadView resets _evomu_hangar_reload_pending cleanly.
+        events[:] = []
+
+        class PlainHangarBehaviour(BaseHangarShipBehaviour):
+            def LoadShipModel(self, item_id, type_id):
+                events.append(("Plain.LoadShipModel", item_id, type_id))
+                return ("plain", item_id)
+
+            def ProcessSkinChange(self, new_model):
+                return self.SetShipDamage(builtins.session.shipid, new_model)
+
+        view_plain = HangarView(PlainHangarBehaviour(), on_fade=_trigger_skin_mid_fade)
+        view_plain._raise_in_reload = True
+        with self.assertRaises(RuntimeError):
+            view_plain.ReloadView()
+        self.assertFalse(getattr(view_plain, "_evomu_hangar_reload_pending", False))
+        self.assertEqual(events, ["HangarView.ReloadView.enter"])
+
+        # Case 4: Defense-in-depth on ProcessSkinChange & SetShipDamage + unmasked genuine errors.
+        events[:] = []
+        self.assertIsNone(ModularHangarShipBehaviour(0, 0).ProcessSkinChange(object()))
+        self.assertIsNone(ModularHangarShipBehaviour(1897286922, 629).ProcessSkinChange(object()))
+        self.assertIsNone(ModularCapitalHangarShipBehaviour(0, 0).ProcessSkinChange(object()))
+        self.assertIsNone(ModularCapitalHangarShipBehaviour(1897286922, 11567).ProcessSkinChange(object()))
+        self.assertFalse(BaseHangarShipBehaviour().SetShipDamage(0, object()))
+        self.assertFalse(BaseHangarShipBehaviour().SetShipDamage(1897286922, object()))
+        self.assertEqual(events, [])
+
+        # Undocked SetShipDamage returns False cleanly without LoadItem.
+        builtins.session = types.SimpleNamespace(stationid=None, structureid=None, shipid=1897140648)
+        self.assertFalse(BaseHangarShipBehaviour().SetShipDamage(1897140648, object()))
+        self.assertEqual(events, [])
+
+        # Genuine RuntimeError on the active docked ship still propagates (never masked).
+        builtins.session = types.SimpleNamespace(stationid=None, structureid=1001896944936, shipid=1897140648)
+        beh_cap = ModularCapitalHangarShipBehaviour(1897140648, 11567)
+
+        def _broken_set_ship_damage(_item_id, _model):
+            raise RuntimeError("genuine_dogma_bug_on_active_ship")
+
+        beh_cap.SetShipDamage = _broken_set_ship_damage
+        with self.assertRaises(RuntimeError):
+            beh_cap.ProcessSkinChange(object())
+
+    def test_1286_late_imported_modular_capital_and_base_behaviours_still_hooked(self):
+        # Simulate modularHangarBehaviours importing before baseHangarBehaviours / modularHangarCapitalBehaviours.
+        mhb_mod = types.ModuleType("eve.client.script.ui.view.hangarBehaviours.modularHangarBehaviours")
+
+        class ModularHangarShipBehaviour(object):
+            def CleanScene(self):
+                return None
+
+            def ProcessSkinChange(self, _model):
+                return "should_not_run"
+
+        mhb_mod.ModularHangarShipBehaviour = ModularHangarShipBehaviour
+        sys.modules["eve.client.script.ui.view.hangarBehaviours.modularHangarBehaviours"] = mhb_mod
+        evomu_site._install_live_client_sync_guards()
+        self.assertIn("modularHangarBehaviours", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertNotIn("modularHangarCapitalBehaviours", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertNotIn("baseHangarBehaviours", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+
+        bhb_mod = types.ModuleType("eve.client.script.ui.view.hangarBehaviours.baseHangarBehaviours")
+
+        class BaseHangarShipBehaviour(object):
+            def SetShipDamage(self, _item_id, _model):
+                return True
+
+        bhb_mod.BaseHangarShipBehaviour = BaseHangarShipBehaviour
+        sys.modules["eve.client.script.ui.view.hangarBehaviours.baseHangarBehaviours"] = bhb_mod
+
+        mcb_mod = types.ModuleType("eve.client.script.ui.view.hangarBehaviours.modularHangarCapitalBehaviours")
+
+        class ModularCapitalHangarShipBehaviour(object):
+            def __init__(self, ship_id):
+                self.playerShipItemID = ship_id
+
+            def ProcessSkinChange(self, _model):
+                return "should_not_run"
+
+        mcb_mod.ModularCapitalHangarShipBehaviour = ModularCapitalHangarShipBehaviour
+        sys.modules["eve.client.script.ui.view.hangarBehaviours.modularHangarCapitalBehaviours"] = mcb_mod
+
+        evomu_site._EvomuMetaHook().find_module("late")
+        self.assertIn("baseHangarBehaviours", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertIn("modularHangarCapitalBehaviours", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+
+        builtins.session = types.SimpleNamespace(stationid=60003760, structureid=None, shipid=200)
+        self.assertFalse(BaseHangarShipBehaviour().SetShipDamage(100, object()))
+        self.assertIsNone(ModularCapitalHangarShipBehaviour(100).ProcessSkinChange(object()))
 
 
 if __name__ == "__main__":
