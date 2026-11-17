@@ -331,14 +331,26 @@ async fn strip_fitting_validation_flags_and_container_hooks() {
         "OutOfRange"
     );
 
-    ctx.db
-        .with_mut_snapshot(|s| s.sp6_lifecycle.space_object_meta.remove(&cont_id));
+    ctx.db.with_mut_snapshot(|s| {
+        let meta = s
+            .sp6_lifecycle
+            .space_object_meta
+            .entry(cont_id)
+            .or_default();
+        meta.anchor_start_unix = Some(1);
+        meta.created_unix = Some(1);
+    });
     let cont_keyval = PyRep::keyval([("itemID", PyRep::Integer(cont_id))]);
-    post_inventory_fitting_hook(&ctx, &sess, Some(&bound), "ValidateItemCanBeOpened", &[cont_keyval])
+    post_inventory_fitting_hook(&ctx, &sess, None, "ValidateItemCanBeOpened", &[cont_keyval.clone()])
         .await;
-    assert!(!ctx
-        .db
-        .with_snapshot(|s| s.sp6_lifecycle.space_object_meta.contains_key(&cont_id)));
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s
+            .sp6_lifecycle
+            .space_object_meta
+            .get(&cont_id)
+            .and_then(|m| m.anchor_start_unix)),
+        Some(1)
+    );
 
     let _ = sys_h.remove_ball(cont_id).await;
     let _ = sys_h
@@ -366,9 +378,35 @@ async fn strip_fitting_validation_flags_and_container_hooks() {
         PyRep::Integer(1),
         PyRep::String(String::new()),
     ]);
-    post_inventory_fitting_hook(&ctx, &sess, Some(&bound), "ValidateItemCanBeOpened", &[cont_dbrow])
+    post_inventory_fitting_hook(&ctx, &sess, None, "ValidateItemCanBeOpened", &[cont_dbrow])
         .await;
-    assert!(ctx
-        .db
-        .with_snapshot(|s| s.sp6_lifecycle.space_object_meta.contains_key(&cont_id)));
+    let refreshed_ts = ctx.db.with_snapshot(|s| {
+        s.sp6_lifecycle
+            .space_object_meta
+            .get(&cont_id)
+            .and_then(|m| m.anchor_start_unix)
+    });
+    assert!(refreshed_ts.is_some_and(|ts| ts > 1));
+
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(meta) = s.sp6_lifecycle.space_object_meta.get_mut(&cont_id) {
+            meta.anchor_start_unix = Some(1);
+            meta.created_unix = Some(1);
+        }
+    });
+    post_inventory_fitting_hook(
+        &ctx,
+        &sess,
+        None,
+        "ValidateItemListCanBeOpened",
+        &[PyRep::List(vec![cont_keyval])],
+    )
+    .await;
+    let list_refreshed_ts = ctx.db.with_snapshot(|s| {
+        s.sp6_lifecycle
+            .space_object_meta
+            .get(&cont_id)
+            .and_then(|m| m.anchor_start_unix)
+    });
+    assert!(list_refreshed_ts.is_some_and(|ts| ts > 1));
 }
