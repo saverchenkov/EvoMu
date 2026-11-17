@@ -1576,7 +1576,15 @@ pub fn handle_industry_facilities_bps(
                         snap.items.get(&facility_id).and_then(|it| {
                             if matches!(
                                 it.type_id,
-                                35825 | 35826 | 35827 | 35832 | 35833 | 35834 | 35835 | 35836
+                                35825
+                                    | 35826
+                                    | 35827
+                                    | 35832
+                                    | 35833
+                                    | 35834
+                                    | 35835
+                                    | 35836
+                                    | 47512..=47516
                             ) {
                                 Some(it.owner_id)
                             } else {
@@ -1584,14 +1592,41 @@ pub fn handle_industry_facilities_bps(
                             }
                         })
                     });
-                if let Some(owner_corp_id) = owner_id {
+                if !session.has_gm_role() {
+                    // NPC stations have no player-structure owner (`owner_id == None`), and
+                    // unowned/NPC-corp facilities (`!is_player_corp`) must never be mutable by
+                    // non-GM players regardless of session roles.
+                    let Some(owner_corp_id) = owner_id else {
+                        return Err(BridgeRpcError {
+                            code: "FacilityPermissionDenied".into(),
+                            message: format!(
+                                "Character {char_id} cannot modify taxes on NPC or unowned facility {facility_id}"
+                            ),
+                            client_error: None,
+                        });
+                    };
+                    let is_player_corp = (owner_corp_id >= 98_000_000
+                        && !ctx.sde.npc_corporations.contains_key(&owner_corp_id))
+                        || snap
+                            .corporations
+                            .get(&owner_corp_id)
+                            .is_some_and(|c| c.ceo_id != 0 || !c.members.is_empty());
+                    if !is_player_corp {
+                        return Err(BridgeRpcError {
+                            code: "FacilityPermissionDenied".into(),
+                            message: format!(
+                                "Facility {facility_id} is not owned by a player corporation (owner {owner_corp_id})"
+                            ),
+                            client_error: None,
+                        });
+                    }
                     let char_corp = snap
                         .characters
                         .get(&char_id)
                         .map(|c| c.corporation_id)
                         .or(session.corporation_id)
                         .unwrap_or(0);
-                    if owner_corp_id != char_corp && owner_corp_id != char_id {
+                    if owner_corp_id != char_corp {
                         return Err(BridgeRpcError {
                             code: "FacilityPermissionDenied".into(),
                             message: format!(
@@ -1600,28 +1635,23 @@ pub fn handle_industry_facilities_bps(
                             client_error: None,
                         });
                     }
-                    if owner_corp_id != char_id {
-                        let req_roles = eve_db::corp_roles::ROLE_DIRECTOR
-                            | eve_db::corp_roles::ROLE_STATION_MANAGER;
-                        let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
-                            owner_corp_id,
-                            char_id,
-                            Some(facility_id),
-                            session.corp_role,
-                            ctx.now_unix(),
-                        );
-                        let has_role = session.has_gm_role()
-                            || is_ceo
-                            || (eff_roles & req_roles) != 0;
-                        if !has_role {
-                            return Err(BridgeRpcError {
-                                code: "InsufficientCorpRoles".into(),
-                                message:
-                                    "Setting facility taxes requires Director or Station Manager role"
-                                        .into(),
-                                client_error: None,
-                            });
-                        }
+                    let req_roles = eve_db::corp_roles::ROLE_DIRECTOR
+                        | eve_db::corp_roles::ROLE_STATION_MANAGER;
+                    let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+                        owner_corp_id,
+                        char_id,
+                        Some(facility_id),
+                        session.corp_role,
+                        ctx.now_unix(),
+                    );
+                    if !is_ceo && (eff_roles & req_roles) == 0 {
+                        return Err(BridgeRpcError {
+                            code: "InsufficientCorpRoles".into(),
+                            message:
+                                "Setting facility taxes requires Director or Station Manager role"
+                                    .into(),
+                            client_error: None,
+                        });
                     }
                 }
                 let mut taxes = load_facility_taxes_with_sde(Some(&ctx.sde), snap, facility_id);

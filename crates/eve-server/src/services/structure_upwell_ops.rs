@@ -297,7 +297,8 @@ pub(crate) fn require_structure_corp_member(snap: &WorldStateSnapshot, char_id: 
         return Err(err("StructureDestroyed", format!("Structure {structure_id} has been destroyed")));
     }
     let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-    if st.owner_corp_id != caller_corp {
+    // Reject unowned (`owner_corp_id <= 0`) structures so default-initialized records never grant corp access.
+    if st.owner_corp_id <= 0 || st.owner_corp_id != caller_corp {
         return Err(err("StructureOwnershipViolation", format!("Character {char_id} (corp {caller_corp}) does not belong to owning corp {} of structure {structure_id}", st.owner_corp_id)));
     }
     Ok(st)
@@ -1268,7 +1269,8 @@ pub fn evaluate_character_structure_access_in_snap_at(snap: &WorldStateSnapshot,
 pub(crate) fn require_corp_profile_manager(snap: &WorldStateSnapshot, session: &SessionState, char_id: i64, corp_id: i64) -> Result<(), BridgeRpcError> {
     if session.has_gm_role() { return Ok(()); }
     let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
-    if corp_id != 0 && char_corp != corp_id { return Err(err("StructureOwnershipViolation", "Caller does not belong to the owning corporation")); }
+    // Reject unowned (`corp_id <= 0`) profiles/groups so missing ownership never skips the corp check and falls back to `session.corp_role`.
+    if corp_id <= 0 || char_corp != corp_id { return Err(err("StructureOwnershipViolation", "Caller does not belong to the owning corporation")); }
     let req = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
     let (is_ceo, roles) = snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, 0);
     let has_role = is_ceo || (roles & req) != 0;
