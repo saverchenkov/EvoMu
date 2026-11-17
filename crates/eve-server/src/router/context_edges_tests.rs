@@ -580,3 +580,92 @@ async fn now_system_sim_filetime_ticks_stays_client_anchored_with_tidi_and_advan
     );
     assert!(sim_b_2 > sim_b_1);
 }
+
+#[tokio::test]
+async fn rpc_rate_budget_default_enabled_and_test_disable_toggle() {
+    use eve_machonet::{service_roles, SessionState};
+    use std::sync::atomic::Ordering;
+
+    let ctx_a = edge_ctx(1_750_000_000);
+    let ctx_b = edge_ctx(1_750_000_000);
+    assert!(!ctx_a.rpc_rate_budget_disabled.load(Ordering::Acquire));
+    assert!(!ctx_b.rpc_rate_budget_disabled.load(Ordering::Acquire));
+
+    let t0 = std::time::Instant::now();
+    let sid_unit = 9_501_u64;
+    let burst = RPC_RATE_BURST_TOKENS as usize;
+    for i in 0..burst {
+        assert!(
+            ctx_a.try_consume_rpc_token_at(sid_unit, t0, false),
+            "default context must allow burst token {i}"
+        );
+    }
+    assert!(
+        !ctx_a.try_consume_rpc_token_at(sid_unit, t0, false),
+        "default context must reject token consumption past burst"
+    );
+
+    let char_id = 90_000_001_i64;
+    let (uid, corp_id, sol_id, ship_id) = ctx_a.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        (ch.user_id, ch.corporation_id, ch.solar_system_id, ch.active_ship_id)
+    });
+    let make_sess = |ctx: &ServerContext, session_id: u64| {
+        let mut s = SessionState {
+            session_id,
+            user_id: Some(uid),
+            character_id: Some(char_id),
+            corporation_id: Some(corp_id),
+            solar_system_id: Some(sol_id),
+            station_id: Some(60_003_760),
+            ship_id: Some(ship_id),
+            role: service_roles::ROLE_PLAYER,
+            ..Default::default()
+        };
+        ctx.sync_session(&mut s);
+        s
+    };
+
+    let kw = HashMap::new();
+    let mut sess_a = make_sess(&ctx_a, 9_502);
+    let mut saw_rate_limited = false;
+    for _ in 0..(burst + 150) {
+        if let Err(err) = ctx_a
+            .dispatch_rpc(&mut sess_a, "account", None, "GetCashBalance", &[], &kw, None)
+            .await
+        {
+            assert_eq!(err.code, "RateLimited");
+            saw_rate_limited = true;
+            break;
+        }
+    }
+    assert!(saw_rate_limited, "default context must enforce RateLimited in dispatch_rpc");
+
+    let buckets_before = ctx_a.rpc_rate_bucket_count();
+    ctx_a.disable_rpc_rate_budget_for_test();
+    assert!(ctx_a.rpc_rate_budget_disabled.load(Ordering::Acquire));
+
+    // Exhausted bucket and previously unseen sessions both bypass without inserting buckets.
+    assert!(ctx_a.try_consume_rpc_token_at(sid_unit, t0, false));
+    assert!(ctx_a.try_consume_rpc_token_at(9_599, t0, false));
+    assert_eq!(ctx_a.rpc_rate_bucket_count(), buckets_before);
+
+    for _ in 0..50 {
+        ctx_a
+            .dispatch_rpc(&mut sess_a, "account", None, "GetCashBalance", &[], &kw, None)
+            .await
+            .expect("disabled rate budget must allow dispatch_rpc beyond burst");
+    }
+
+    // Weak downgrade/upgrade preserves the disabled fast-path state.
+    let upgraded = ctx_a.downgrade().upgrade().expect("upgrade ServerContext");
+    assert!(upgraded.rpc_rate_budget_disabled.load(Ordering::Acquire));
+    assert!(upgraded.try_consume_rpc_token_at(sid_unit, t0, false));
+
+    // Separate ServerContext remains rate-limited by default.
+    assert!(!ctx_b.rpc_rate_budget_disabled.load(Ordering::Acquire));
+    for _ in 0..burst {
+        assert!(ctx_b.try_consume_rpc_token_at(sid_unit, t0, false));
+    }
+    assert!(!ctx_b.try_consume_rpc_token_at(sid_unit, t0, false));
+}

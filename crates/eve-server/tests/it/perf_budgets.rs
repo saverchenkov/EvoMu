@@ -25,6 +25,9 @@ fn new_perf_ctx() -> ServerContext {
     let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     common::pin_clock(&ctx);
+    // Bypass per-session RPC token buckets so multi-thousand-call latency benchmarks
+    // neither trip `RateLimited` nor pay `rpc_rate_buckets` mutex overhead.
+    ctx.disable_rpc_rate_budget_for_test();
     ctx
 }
 
