@@ -464,7 +464,7 @@ async fn ensure_special_sites_spawned_for_systems(
                     .incursion_site_waves
                     .get(&s.site_id)
                     .is_none_or(|w| w.current_wave >= w.total_waves);
-                if on_final_wave {
+                if on_final_wave && !s.boss_destroyed {
                     g_list.push((
                         s.solar_system_id,
                         s.boss_npc_ball_id,

@@ -340,7 +340,7 @@ async fn test_incursion_tale_influence_remove_and_insurgency_security_notificati
     let inc_ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
     common::pin_clock(&inc_ctx);
     let (inc_ship, inc_gun) = (810_300_001_i64, 810_300_010_i64);
-    fit_turret_and_skills(&inc_ctx, PILOT_A, inc_ship, inc_gun, 34_288, 20_783, 2);
+    fit_turret_and_skills(&inc_ctx, PILOT_A, inc_ship, inc_gun, 34_288, 20_799, 2);
     let mut sess_inc = login_space_pilot(&inc_ctx, 13_001, "demo", "demo-secret", PILOT_A, inc_ship, 26_842, SYS_JITA, DVec3::ZERO).await;
     sess_inc.role |= ROLE_GM_DEFAULT;
     rpc(&inc_ctx, &mut sess_inc, "taleMgr", "GetGlobalWorldEventTales", &[]).await.expect("GetGlobalWorldEventTales");
