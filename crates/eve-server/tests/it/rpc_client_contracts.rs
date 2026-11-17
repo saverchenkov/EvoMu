@@ -3132,9 +3132,9 @@ fn test_crowset_descriptor_columns_reads_canonical_empty_rowsets() {
     assert!(has_column_in_collection(&legacy_arg_crowset, "warID"));
 }
 
-/// `[C-2 / #926]` Enforces the falling `raw_dispatch_ratchet.json` baseline on `tests/it/` and
-/// measures how many catalog RPC replies diverge between legacy `caller_trace = None` and
-/// `ClientHarness` on the exact `machoNet` wire path.
+/// `[C-2 / #926, C-9 / #1189]` Enforces the falling `raw_dispatch_ratchet.json` baseline on
+/// `tests/it/` and ratchets catalog RPC divergence (`differing_replies`) between legacy
+/// `caller_trace = None` and `ClientHarness` down toward `0`.
 #[tokio::test]
 async fn test_c2_raw_dispatch_ratchet_and_none_vs_wire_harness_diff_count() {
     use eve_testkit::client_harness::{ContractValidationMode, RawDispatchRatchet};
@@ -3155,6 +3155,8 @@ async fn test_c2_raw_dispatch_ratchet_and_none_vs_wire_harness_diff_count() {
 
     let ctx_raw = shared_comprehensive_ctx().await;
     let ctx_wire = shared_comprehensive_ctx().await;
+    common::pin_clock(&ctx_raw);
+    common::pin_clock(&ctx_wire);
     let raw_caller_trace: Option<&str> = None;
 
     let mut sess_raw = SessionState::new(77_101);
@@ -3412,9 +3414,20 @@ async fn test_c2_raw_dispatch_ratchet_and_none_vs_wire_harness_diff_count() {
         println!("  [C-2 Reply Diff] {rpc}");
     }
 
+    let compat_ratchet = eve_testkit::client_compat_ratchet::ClientCompatRatchet::load_default()
+        .expect("load client_compat_ratchet.json");
+    let max_differing = compat_ratchet
+        .max_transport_differing_replies
+        .unwrap_or_else(|| {
+            panic!(
+                "client_compat_ratchet.json `max_transport_differing_replies` is unset; pin observed differing_replies={}",
+                differing_rpcs.len()
+            )
+        });
     assert!(
-        !differing_rpcs.is_empty(),
-        "ClientHarness wire path must produce distinct client-normalized replies vs caller_trace = None across catalog RPCs"
+        differing_rpcs.len() <= max_differing,
+        "caller_trace=None vs ClientHarness wire differing_replies={} exceeded falling ratchet max_transport_differing_replies={max_differing}",
+        differing_rpcs.len()
     );
 }
 

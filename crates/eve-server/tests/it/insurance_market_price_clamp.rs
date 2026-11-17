@@ -15,6 +15,7 @@ use eve_server::formulas::{
 use eve_server::router::ServerContext;
 use eve_server::services::industry_pi::industry_rigs::collect_live_market_adjusted_prices_with_sde;
 use eve_server::services::station_structure::npc_station_offers_service;
+use eve_testkit::client_harness::ClientErrorResponse;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -26,14 +27,15 @@ const ISOGEN_TYPE_ID: TypeId = 37;
 const ZYDRINE_TYPE_ID: TypeId = 39;
 const MANIPULATION_PRICE_ISK: f64 = 1_000_000_000.0;
 
-async fn rpc(
+async fn call_wire(
     ctx: &ServerContext,
     sess: &mut SessionState,
     service: &str,
     method: &str,
     args: &[PyRep],
-) -> Result<PyRep, eve_proto::BridgeRpcError> {
-    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None)
+) -> Result<PyRep, ClientErrorResponse> {
+    common::borrow_wire_harness(ctx, sess)
+        .call(service, None, method, args, &HashMap::new())
         .await
 }
 
@@ -47,7 +49,7 @@ async fn login_pilot_session(
     let mut sess = SessionState::new(sess_id);
     common::login_pilot(ctx, &mut sess, user, pass).await;
     sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
-    rpc(
+    call_wire(
         ctx,
         &mut sess,
         "charUnboundMgr",
@@ -171,7 +173,7 @@ async fn execute_one_unit_self_trade(
         id
     });
 
-    rpc(
+    call_wire(
         ctx,
         s_seller,
         "marketProxy",
@@ -191,7 +193,7 @@ async fn execute_one_unit_self_trade(
     .await
     .expect("PlaceMultiSellOrder 1 unit");
 
-    rpc(
+    call_wire(
         ctx,
         s_buyer,
         "marketProxy",
@@ -322,7 +324,7 @@ async fn test_insurance_rejects_one_unit_and_ten_region_same_day_mineral_self_tr
         ins_sys_id,
         ins_station_id,
     );
-    let quote_1_reg = rpc(
+    let quote_1_reg = call_wire(
         &ctx,
         &mut s_seller,
         "insuranceSvc",
@@ -333,7 +335,7 @@ async fn test_insurance_rejects_one_unit_and_ten_region_same_day_mineral_self_tr
     .expect("GetInsurancePrice after 1-region self-trade")
     .as_f64()
     .expect("float insurance quote");
-    let quote_1_ship = rpc(
+    let quote_1_ship = call_wire(
         &ctx,
         &mut s_seller,
         "insuranceSvc",
@@ -404,7 +406,7 @@ async fn test_insurance_rejects_one_unit_and_ten_region_same_day_mineral_self_tr
         ins_sys_id,
         ins_station_id,
     );
-    let quote_10_reg = rpc(
+    let quote_10_reg = call_wire(
         &ctx,
         &mut s_seller,
         "insuranceSvc",
@@ -420,7 +422,7 @@ async fn test_insurance_rejects_one_unit_and_ten_region_same_day_mineral_self_tr
         "10-region same-day 1-unit trades must not compound insurance ref_val: {quote_10_reg}"
     );
 
-    let prices_dict = rpc(
+    let prices_dict = call_wire(
         &ctx,
         &mut s_seller,
         "insuranceSvc",
@@ -440,7 +442,7 @@ async fn test_insurance_rejects_one_unit_and_ten_region_same_day_mineral_self_tr
     assert!(rifter_dict_val <= base_ref * INSURANCE_REF_MAX_MULT + 1e-6);
 
     // 3. Purchase Platinum insurance (1.00x) and assert self-trade + Platinum loop is strictly non-profitable.
-    let insure_res = rpc(
+    let insure_res = call_wire(
         &ctx,
         &mut s_seller,
         "insuranceSvc",

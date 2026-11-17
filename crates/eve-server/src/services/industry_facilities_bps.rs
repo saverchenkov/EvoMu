@@ -405,9 +405,7 @@ pub fn compute_industry_job_costs_with_step(
 }
 
 /// Conversion trait for strongly-typed V24 client wire replies (`RFC-3 C-9`, `#933`).
-pub trait ToClient {
-    fn into_client_rep(self) -> PyRep;
-}
+pub use crate::router::ToClient;
 
 const INDUSTRY_CATEGORIES: &[i64] = &[
     4, 5, 6, 7, 8, 9, 16, 17, 18, 20, 22, 23, 24, 25, 32, 34, 35, 39, 40, 41, 42, 43, 46, 65, 66,

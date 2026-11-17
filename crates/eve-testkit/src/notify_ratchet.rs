@@ -91,7 +91,7 @@ fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-fn is_test_only_rel_path(rel_unix: &str) -> bool {
+pub(crate) fn is_test_only_rel_path(rel_unix: &str) -> bool {
     let file_name = rel_unix.rsplit('/').next().unwrap_or(rel_unix);
     rel_unix.starts_with("tests/")
         || rel_unix.contains("/tests/")
@@ -260,7 +260,7 @@ pub fn count_raw_notify_calls_in_clean_src(clean: &str) -> usize {
     count
 }
 
-fn is_fn_def_header(bytes: &[u8], ident_start: usize) -> bool {
+pub(crate) fn is_fn_def_header(bytes: &[u8], ident_start: usize) -> bool {
     let mut pos = ident_start;
     while pos > 0 && bytes[pos - 1].is_ascii_whitespace() {
         pos -= 1;
@@ -270,7 +270,7 @@ fn is_fn_def_header(bytes: &[u8], ident_start: usize) -> bool {
         && (pos == 2 || !is_ident_byte(bytes[pos - 3]))
 }
 
-fn collect_rs_files_recursive(base: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
+pub(crate) fn collect_rs_files_recursive(base: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
     let entries = std::fs::read_dir(dir)
         .map_err(|e| format!("failed to read {}: {e}", dir.display()))?;
     for entry in entries {

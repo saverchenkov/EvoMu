@@ -15,13 +15,17 @@ use crate::client_contract::{
     LoadedClientContracts, SemanticLookupContext,
 };
 use crate::shadow_client::{ShadowClient, ShadowDivergence};
+use eve_db::WorldRepository;
 use eve_proto::PyRep;
+use eve_sde::SdeRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 
 /// Mapped V24 client `ErrorResponse` returned when an RPC fails on the wire path (`C-2`).
 #[derive(Debug, Clone, PartialEq)]
@@ -575,6 +579,90 @@ impl<T: ClientWireTransport> ClientHarness<T> {
     }
 }
 
+/// Lightweight closure-backed [`ClientWireTransport`] for in-memory test sessions (`#1189`).
+pub struct InMemorySessionTransport<F, Fut> {
+    handler: F,
+    sde: Option<Arc<SdeRegistry>>,
+    db: Option<Arc<WorldRepository>>,
+    _fut: PhantomData<fn() -> Fut>,
+}
+
+impl<F, Fut> InMemorySessionTransport<F, Fut> {
+    /// Attaches `SdeRegistry` and `WorldRepository` so `ClientHarness` runs semantic FK checks.
+    pub fn with_semantic_lookup(mut self, sde: Arc<SdeRegistry>, db: Arc<WorldRepository>) -> Self {
+        self.sde = Some(sde);
+        self.db = Some(db);
+        self
+    }
+}
+
+impl<F, Fut> ClientWireTransport for InMemorySessionTransport<F, Fut>
+where
+    F: FnMut(String, Option<u64>, String, Vec<PyRep>, HashMap<String, PyRep>) -> Fut + Send,
+    Fut: Future<Output = ClientWireExchange> + Send,
+{
+    fn send_wire_call<'a>(
+        &'a mut self,
+        service: &'a str,
+        bound_id: Option<u64>,
+        method: &'a str,
+        args: &'a [PyRep],
+        kwargs: &'a HashMap<String, PyRep>,
+    ) -> Pin<Box<dyn Future<Output = ClientWireExchange> + Send + 'a>> {
+        let fut = (self.handler)(
+            service.to_string(),
+            bound_id,
+            method.to_string(),
+            args.to_vec(),
+            kwargs.clone(),
+        );
+        Box::pin(fut)
+    }
+
+    fn semantic_lookup(&self) -> Option<SemanticLookupContext<'_>> {
+        match (&self.sde, &self.db) {
+            (Some(sde), Some(db)) => Some(SemanticLookupContext {
+                sde: sde.as_ref(),
+                db: db.as_ref(),
+            }),
+            _ => None,
+        }
+    }
+}
+
+impl<F, Fut> ClientHarness<InMemorySessionTransport<F, Fut>>
+where
+    F: FnMut(String, Option<u64>, String, Vec<PyRep>, HashMap<String, PyRep>) -> Fut + Send,
+    Fut: Future<Output = ClientWireExchange> + Send,
+{
+    /// Constructs a lightweight in-memory [`ClientHarness`] over an async dispatch closure (`#1189`).
+    pub fn in_memory_session(handler: F) -> Self {
+        Self::new(InMemorySessionTransport {
+            handler,
+            sde: None,
+            db: None,
+            _fut: PhantomData,
+        })
+    }
+
+    /// Constructs a lightweight in-memory [`ClientHarness`] with semantic SDE + DB lookup enabled.
+    pub fn in_memory_session_with_lookup(
+        handler: F,
+        sde: Arc<SdeRegistry>,
+        db: Arc<WorldRepository>,
+    ) -> Self {
+        Self::new(
+            InMemorySessionTransport {
+                handler,
+                sde: None,
+                db: None,
+                _fut: PhantomData,
+            }
+            .with_semantic_lookup(sde, db),
+        )
+    }
+}
+
 /// Extracts the server `bound_id` from either the V24 client wire bound-object wrapper
 /// (`SubStruct(SubStream((b"N=<node>:<bound_id>", ref_id)))` or `(bound_rep, sub_result)`),
 /// a legacy plain `Integer`, or a `{boundID: ...}` dictionary/KeyVal (`C-2`).
@@ -609,6 +697,7 @@ pub struct RawDispatchScanReport {
     pub total_dispatch_rpc_calls: usize,
     pub macho_net_calls: usize,
     pub per_file_raw_none: HashMap<String, usize>,
+    pub files_with_dispatch_rpc: BTreeSet<String>,
 }
 
 /// Falling ratchet limiting RPCs whose execution commits more than one database transaction
@@ -729,7 +818,7 @@ impl RawDispatchRatchet {
     }
 }
 
-fn is_ident_byte(b: u8) -> bool {
+pub(crate) fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
@@ -849,38 +938,23 @@ pub(crate) fn strip_rust_comments_and_literals(src: &str) -> String {
     String::from_utf8(out).expect("ASCII comment/literal masking preserves UTF-8")
 }
 
-/// Recursively collects `.rs` file paths under `dir`.
-fn collect_rust_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| format!("failed to read {}: {e}", dir.display()))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("failed reading dir entry: {e}"))?;
-        let p = entry.path();
-        if p.is_dir() {
-            collect_rust_files_recursive(&p, out)?;
-        } else if p.extension().and_then(|e| e.to_str()) == Some("rs") {
-            out.push(p);
-        }
-    }
-    Ok(())
-}
-
 /// Recursively scans `.rs` files in `dir` for `.dispatch_rpc(..., <caller_trace>)` invocations.
 pub fn scan_raw_dispatch_calls_in_dir(dir: &Path) -> Result<RawDispatchScanReport, String> {
-    let mut paths = Vec::new();
-    collect_rust_files_recursive(dir, &mut paths)?;
-    paths.sort();
+    let mut files = Vec::new();
+    crate::notify_ratchet::collect_rs_files_recursive(dir, dir, &mut files)?;
+    files.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut report = RawDispatchScanReport::default();
     let needle = ".dispatch_rpc";
 
-    for path in paths {
+    for (rel_key, path) in files {
         let raw = std::fs::read_to_string(&path)
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
         let clean = strip_rust_comments_and_literals(&raw);
         let bytes = clean.as_bytes();
         let mut idx = 0usize;
         let mut file_none = 0usize;
+        let mut file_dispatch = 0usize;
 
         while let Some(rel) = clean[idx..].find(needle) {
             let after_needle = idx + rel + needle.len();
@@ -892,6 +966,7 @@ pub fn scan_raw_dispatch_calls_in_dir(dir: &Path) -> Result<RawDispatchScanRepor
                 idx = after_needle;
                 continue;
             }
+            file_dispatch += 1;
             report.total_dispatch_rpc_calls += 1;
             let mut pos = open + 1;
             let mut depth = 1usize;
@@ -929,13 +1004,11 @@ pub fn scan_raw_dispatch_calls_in_dir(dir: &Path) -> Result<RawDispatchScanRepor
             idx = pos.saturating_add(1);
         }
 
+        if file_dispatch > 0 {
+            report.files_with_dispatch_rpc.insert(rel_key.clone());
+        }
         if file_none > 0 {
             report.files_with_raw_none += 1;
-            let rel_key = path
-                .strip_prefix(dir)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
             report.per_file_raw_none.insert(rel_key, file_none);
         }
     }
@@ -1275,5 +1348,35 @@ mod tests {
             harness.shadow().unwrap().wallet.personal_balance_isk,
             Some(12_345_678.0)
         );
+    }
+
+    #[tokio::test]
+    async fn in_memory_session_validates_marshal_roundtrip_and_contracts() {
+        let mut harness = ClientHarness::in_memory_session(
+            |_service, _bound_id, _method, _args, _kwargs| async move {
+                let rep = PyRep::Tuple(vec![PyRep::None, PyRep::None]);
+                let wire_packet = rep.clone();
+                let bytes = eve_proto::marshal::encode(&wire_packet);
+                let marshal_errors = eve_proto::marshal::decode(&bytes)
+                    .err()
+                    .map(|e| vec![e.to_string()])
+                    .unwrap_or_default();
+                ClientWireExchange {
+                    rpc_result: Ok(rep.clone()),
+                    frames: vec![ClientWireFrame {
+                        kind: ClientWireFrameKind::CallRsp {
+                            call_id: 1,
+                            reply: rep,
+                        },
+                        wire_packet,
+                    }],
+                    marshal_errors,
+                }
+            },
+        );
+        let reply = harness
+            .call_ok("alert", None, "BeanCount", &[PyRep::Integer(1)], &HashMap::new())
+            .await;
+        assert_eq!(reply, PyRep::Tuple(vec![PyRep::None, PyRep::None]));
     }
 }

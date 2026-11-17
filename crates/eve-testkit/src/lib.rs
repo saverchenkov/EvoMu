@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod client_compat_ratchet;
 pub mod client_contract;
 pub mod client_harness;
 pub mod destiny_invariants;
