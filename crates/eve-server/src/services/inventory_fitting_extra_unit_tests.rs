@@ -1067,3 +1067,142 @@ async fn invbroker_add_quantum_core_auth_split_corp_owner_and_locked_flags() {
         "UserError"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invbroker_add_preserves_native_ship_hangar_and_fleet_hangar_flags_and_capacities() {
+    let (mut ctx, mut session, char_id, _corp_id, station_id, _default_ship_id) = setup_inv_ctx();
+    let carrier_tid = 999_620u32;
+    let shuttle_tid = 999_621u32;
+    let isotope_tid = 999_622u32;
+    {
+        let sde_mut = Arc::make_mut(&mut ctx.sde);
+        let mut carrier = sde_mut.types[&587].clone();
+        carrier.type_id = carrier_tid;
+        carrier.group_id = 30;
+        carrier.category_id = 6;
+        carrier.name = "Synthetic Titan".into();
+        carrier.capacity = 11_250.0;
+        carrier.volume = 155_000_000.0;
+        carrier.default_attributes.insert(908, 5_000_000.0); // shipMaintenanceBayCapacity
+        carrier.default_attributes.insert(912, 1_000.0); // fleetHangarCapacity
+        carrier.default_attributes.insert(1549, 60_000.0); // specialFuelBayCapacity
+        sde_mut.types.insert(carrier_tid, carrier);
+
+        let mut shuttle = sde_mut.types[&587].clone();
+        shuttle.type_id = shuttle_tid;
+        shuttle.group_id = 31;
+        shuttle.category_id = 6;
+        shuttle.name = "Synthetic Frigate".into();
+        shuttle.volume = 2_800_000.0;
+        shuttle.capacity = 120.0;
+        sde_mut.types.insert(shuttle_tid, shuttle);
+
+        let mut isotope = sde_mut.types[&34].clone();
+        isotope.type_id = isotope_tid;
+        isotope.group_id = 423;
+        isotope.category_id = 4;
+        isotope.name = "Synthetic Isotope".into();
+        isotope.volume = 100.0;
+        sde_mut.types.insert(isotope_tid, isotope);
+    }
+
+    let titan_id = 96_620_001i64;
+    let hull_1 = 96_620_002i64;
+    let hull_2 = 96_620_003i64;
+    let fh_item_1 = 96_620_004i64;
+    let fh_item_2 = 96_620_005i64;
+    let fh_overflow = 96_620_006i64;
+    let cargo_item = 96_620_007i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            titan_id,
+            mk_item(titan_id, carrier_tid, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = titan_id;
+        }
+        snap.items.insert(
+            hull_1,
+            mk_item(hull_1, shuttle_tid, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            hull_2,
+            mk_item(hull_2, shuttle_tid, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        // 500 m3 + 500 m3 fills fleet hangar (1,000 m3); cargo item verifies flag 155 != flag 5 merge/cap collision.
+        snap.items.insert(
+            fh_item_1,
+            mk_item(fh_item_1, isotope_tid, char_id, station_id, InventoryFlag::Hangar, 5, false),
+        );
+        snap.items.insert(
+            fh_item_2,
+            mk_item(fh_item_2, isotope_tid, char_id, station_id, InventoryFlag::Hangar, 5, false),
+        );
+        snap.items.insert(
+            fh_overflow,
+            mk_item(fh_overflow, isotope_tid, char_id, station_id, InventoryFlag::Hangar, 1, false),
+        );
+        snap.items.insert(
+            cargo_item,
+            mk_item(cargo_item, isotope_tid, char_id, titan_id, InventoryFlag::Cargo, 5, false),
+        );
+    });
+    session.ship_id = Some(titan_id);
+
+    // 1. Add(..., 155) persists InventoryFlag::FleetHangar (155), does NOT merge with Cargo (5),
+    //    and properly counts toward Fleet Hangar capacity on subsequent moves.
+    let rep_fh1 = call_add(
+        &ctx,
+        &mut session,
+        &[PyRep::Integer(fh_item_1), PyRep::Integer(titan_id), PyRep::Integer(155)],
+    )
+    .await
+    .expect("first FleetHangar add");
+    assert_eq!(rep_fh1.dict_get("flagID").and_then(|v| v.as_i64()), Some(155));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&fh_item_1].flag, InventoryFlag::FleetHangar);
+        assert_eq!(snap.items[&cargo_item].quantity, 5);
+    });
+
+    let rep_fh2 = call_add(
+        &ctx,
+        &mut session,
+        &[PyRep::Integer(fh_item_2), PyRep::Integer(titan_id), PyRep::Integer(155)],
+    )
+    .await
+    .expect("second FleetHangar add merges into fh_item_1 at flag 155");
+    assert_eq!(rep_fh2.dict_get("itemID").and_then(|v| v.as_i64()), Some(fh_item_1));
+    assert_eq!(rep_fh2.dict_get("flagID").and_then(|v| v.as_i64()), Some(155));
+    assert_eq!(rep_fh2.dict_get("quantity").and_then(|v| v.as_i64()), Some(10));
+
+    let err_fh = call_add(
+        &ctx,
+        &mut session,
+        &[PyRep::Integer(fh_overflow), PyRep::Integer(titan_id), PyRep::Integer(155)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_fh.code, "CapacityExceeded");
+
+    // 2. Add(..., 90) persists InventoryFlag::ShipHangar (90) and counts 90 | 138 against SMA capacity (5,000,000 m3).
+    let rep_sma = call_add(
+        &ctx,
+        &mut session,
+        &[PyRep::Integer(hull_1), PyRep::Integer(titan_id), PyRep::Integer(90)],
+    )
+    .await
+    .expect("first SMA add");
+    assert_eq!(rep_sma.dict_get("flagID").and_then(|v| v.as_i64()), Some(90));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&hull_1].flag, InventoryFlag::ShipHangar);
+    });
+
+    let err_sma = call_add(
+        &ctx,
+        &mut session,
+        &[PyRep::Integer(hull_2), PyRep::Integer(titan_id), PyRep::Integer(90)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_sma.code, "CapacityExceeded");
+}

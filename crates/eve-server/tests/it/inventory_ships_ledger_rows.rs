@@ -1295,8 +1295,287 @@ async fn test_dogma_dbuffs_command_bursts_storms_and_abyssal_trade() {
     let cid = int(&c_rep, "contractID");
     call(&ctx, &mut s2_dock, "contractProxy", "AcceptContract", vec![PyRep::Integer(cid)]).await.expect("C2 accepts Abyssal contract");
     let traded = item(&ctx, mut_id).unwrap();
+    let shipped = item(&ctx, mut_id).unwrap();
+    let _ = shipped;
     assert_eq!((traded.owner_id, traded.type_id, traded.source_mutaplasmid_id), (C2, 47408, Some(47297)));
     assert_eq!(traded.dynamic_attributes.get(&20).copied(), Some(rolled_spd));
     let show_info = call(&ctx, &mut s2_dock, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(mut_id)]).await.unwrap();
     assert!((attr_dict_val(show_info.dict_get("dynamicAttributes").unwrap(), 20) - rolled_spd).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn avatar_upwell_keepstar_and_venture_station_overfilled_cargo_and_bays() {
+    let ctx = new_ctx();
+    let mut s1 = pilot(&ctx, C1, 6130).await;
+    let kw = HashMap::new();
+
+    let decode_user_error = |err: &BridgeRpcError| -> (String, Vec<(String, f64)>) {
+        let PyRep::Tuple(parts) = err.to_client_error("invbroker", "Add").to_macho_error_body(1) else {
+            panic!("expected ErrorResponse tuple");
+        };
+        let PyRep::Tuple(inner) = &parts[2] else {
+            panic!("expected inner tuple");
+        };
+        let PyRep::Bytes(raw) = &inner[0] else {
+            panic!("expected marshaled bytes");
+        };
+        let PyRep::ObjectEx { header, .. } = eve_proto::marshal::decode(raw).expect("decode UserError") else {
+            panic!("expected ObjectEx");
+        };
+        let PyRep::Tuple(hdr) = *header else {
+            panic!("expected header tuple");
+        };
+        assert_eq!(hdr[0], PyRep::Token("eveexceptions.UserError".into()));
+        let PyRep::Tuple(u_args) = &hdr[1] else {
+            panic!("expected UserError args tuple");
+        };
+        let key = u_args[0].as_str().expect("UserError key").to_string();
+        let PyRep::Dict(entries) = &u_args[1] else {
+            panic!("expected UserError dict");
+        };
+        let kv = entries
+            .iter()
+            .map(|(k, v)| (k.as_str().expect("dict key").to_string(), v.as_f64().expect("real arg")))
+            .collect();
+        (key, kv)
+    };
+
+    // --- Scenario #1290: Avatar (11567) docked in Upwell Keepstar (35834) with overfilled Cargo (flag 5) ---
+    let keepstar_id = 1_001_896_944_936i64;
+    let avatar_id = 790_001i64;
+    let overfill_bulk_id = 790_002i64;
+    let isotopes_id = 790_003i64;
+    let fh_stack_1 = 790_004i64;
+    let fh_stack_2 = 790_005i64;
+    let stored_rifter = 790_006i64;
+    let corp_id = ctx.db.with_snapshot(|snap| snap.characters[&C1].corporation_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            keepstar_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: keepstar_id,
+                type_id: 35834, // Keepstar
+                owner_corp_id: corp_id,
+                solar_system_id: JITA,
+                name: "1DQ1-A Keepstar".into(),
+                position: [1_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.items.insert(
+            keepstar_id,
+            InventoryItemRecord {
+                item_id: keepstar_id,
+                type_id: 35834,
+                owner_id: corp_id,
+                location_id: JITA as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let ch = snap.characters.get_mut(&C1).unwrap();
+        ch.station_id = None;
+        ch.structure_id = Some(keepstar_id);
+        ch.active_ship_id = avatar_id;
+    });
+    s1.station_id = None;
+    s1.structure_id = Some(keepstar_id);
+    s1.ship_id = Some(avatar_id);
+
+    seed(&ctx, avatar_id, 11567, C1, keepstar_id, InventoryFlag::Hangar, 1, true);
+    // 45,000 m3 of Tritanium (4,500,000 * 0.01 m3) seeded over Avatar's 11,250.0 m3 cargo hold.
+    seed(&ctx, overfill_bulk_id, 34, C1, avatar_id, InventoryFlag::Cargo, 4_500_000, false);
+    // 25,000 Helium Isotopes (16274, 0.03 m3 each = 750.0 m3) in Keepstar Item Hangar.
+    seed(&ctx, isotopes_id, 16274, C1, keepstar_id, InventoryFlag::Hangar, 25_000, false);
+    seed(&ctx, fh_stack_1, 34, C1, keepstar_id, InventoryFlag::Hangar, 1_000, false);
+    seed(&ctx, fh_stack_2, 34, C1, keepstar_id, InventoryFlag::Hangar, 500, false);
+    seed(&ctx, stored_rifter, RIFTER, C1, keepstar_id, InventoryFlag::Hangar, 1, true);
+
+    let ks_bind = call(
+        &ctx,
+        &mut s1,
+        "invbroker",
+        "MachoBindObject",
+        vec![PyRep::Tuple(vec![PyRep::Integer(keepstar_id), PyRep::Integer(1404)]), PyRep::None],
+    )
+    .await
+    .expect("bind structure invbroker");
+    let PyRep::Tuple(ks_parts) = &ks_bind else { panic!("MachoBindObject tuple") };
+    let ks_mgr = ks_parts[0].as_i64().unwrap() as u64;
+    let avatar_inv = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "invbroker",
+            Some(ks_mgr),
+            "GetInventoryFromId",
+            &[PyRep::Integer(avatar_id), PyRep::Integer(0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetInventoryFromId(Avatar)")
+        .as_i64()
+        .unwrap() as u64;
+
+    // Bound ShipCargo Add(isotopes_id, keepstar_id) targets Avatar cargo (flag 5) -> overfilled -> available=0.0.
+    let err_1290 = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "invbroker",
+            Some(avatar_inv),
+            "Add",
+            &[PyRep::Integer(isotopes_id), PyRep::Integer(keepstar_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("overfilled Avatar cargo rejects 750 m3");
+    assert_eq!(decode_user_error(&err_1290), ("NotEnoughCargoSpace".to_string(), vec![("volume".to_string(), 750.0), ("available".to_string(), 0.0)]));
+    assert_eq!(item(&ctx, isotopes_id).unwrap().location_id, keepstar_id);
+
+    // Same 25,000 Helium Isotopes fit cleanly into Avatar's SpecializedFuelBay (flag 133, 60,000 m3).
+    let fuel_rep = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "invbroker",
+            Some(avatar_inv),
+            "Add",
+            &[PyRep::Integer(isotopes_id), PyRep::Integer(keepstar_id), PyRep::Integer(133)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Helium Isotopes move into Avatar Fuel Bay");
+    assert_eq!(int(&fuel_rep, "flagID"), 133);
+    assert_eq!(item(&ctx, isotopes_id).unwrap().flag, InventoryFlag::SpecializedFuelBay);
+
+    // FleetHangar (155) & ShipHangar (90) keep native flags (not Cargo 5 / 138) and stack independently of Cargo.
+    let fh1_rep = call(
+        &ctx,
+        &mut s1,
+        "invbroker",
+        "Add",
+        vec![PyRep::Integer(fh_stack_1), PyRep::Integer(avatar_id), PyRep::Integer(155)],
+    )
+    .await
+    .expect("move into FleetHangar");
+    assert_eq!(int(&fh1_rep, "flagID"), 155);
+    assert_eq!(item(&ctx, fh_stack_1).unwrap().flag, InventoryFlag::FleetHangar);
+
+    let fh2_rep = call(
+        &ctx,
+        &mut s1,
+        "invbroker",
+        "Add",
+        vec![PyRep::Integer(fh_stack_2), PyRep::Integer(avatar_id), PyRep::Integer(155)],
+    )
+    .await
+    .expect("merge second stack in FleetHangar");
+    assert_eq!(int(&fh2_rep, "itemID"), fh_stack_1);
+    assert_eq!(int(&fh2_rep, "flagID"), 155);
+    assert_eq!(item(&ctx, fh_stack_1).unwrap().quantity, 1_500);
+
+    let sma_rep = call(
+        &ctx,
+        &mut s1,
+        "invbroker",
+        "Add",
+        vec![PyRep::Integer(stored_rifter), PyRep::Integer(avatar_id), PyRep::Integer(90)],
+    )
+    .await
+    .expect("store Rifter in Avatar Ship Maintenance Bay");
+    assert_eq!(int(&sma_rep, "flagID"), 90);
+    assert_eq!(item(&ctx, stored_rifter).unwrap().flag, InventoryFlag::ShipHangar);
+
+    // --- Scenario #1301: Venture (32880, 50 m3 cargo) at NPC Station with overfilled Cargo (flag 5) ---
+    let venture_id = 790_010i64;
+    let venture_overfill_id = 790_011i64;
+    let probes_id = 790_012i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&C1).unwrap();
+        ch.structure_id = None;
+        ch.station_id = Some(JITA44);
+        ch.active_ship_id = venture_id;
+    });
+    s1.structure_id = None;
+    s1.station_id = Some(JITA44);
+    s1.ship_id = Some(venture_id);
+
+    seed(&ctx, venture_id, 32880, C1, JITA44, InventoryFlag::Hangar, 1, true);
+    seed(&ctx, venture_overfill_id, 34, C1, venture_id, InventoryFlag::Cargo, 2_729_900, false); // 27,299.0 m3 > 50.0 m3
+    seed(&ctx, probes_id, 30013, C1, JITA44, InventoryFlag::Hangar, 16, false); // 16 * 0.1 m3 = 1.6 m3
+
+    let st_bind = call(
+        &ctx,
+        &mut s1,
+        "invbroker",
+        "MachoBindObject",
+        vec![PyRep::Tuple(vec![PyRep::Integer(JITA44), PyRep::Integer(15)]), PyRep::None],
+    )
+    .await
+    .expect("bind station invbroker");
+    let PyRep::Tuple(st_parts) = &st_bind else { panic!("MachoBindObject tuple") };
+    let st_mgr = st_parts[0].as_i64().unwrap() as u64;
+    let venture_inv = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "invbroker",
+            Some(st_mgr),
+            "GetInventoryFromId",
+            &[PyRep::Integer(venture_id), PyRep::Integer(0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetInventoryFromId(Venture)")
+        .as_i64()
+        .unwrap() as u64;
+
+    let err_1301 = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "invbroker",
+            Some(venture_inv),
+            "Add",
+            &[PyRep::Integer(probes_id), PyRep::Integer(JITA44)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("overfilled Venture cargo rejects 1.6 m3 probes");
+    let (k1301, d1301) = decode_user_error(&err_1301);
+    assert_eq!(k1301, "NotEnoughCargoSpace");
+    assert!((d1301[0].1 - 1.6).abs() < 1e-6 && d1301[1].1 == 0.0, "got {d1301:?}");
+
+    // Once cargo holds free space (< 50.0 m3), dragging probes onto Venture ShipCargo succeeds cleanly.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&venture_overfill_id);
+    });
+    let ok_rep = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "invbroker",
+            Some(venture_inv),
+            "Add",
+            &[PyRep::Integer(probes_id), PyRep::Integer(JITA44)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("probes fit once Venture cargo has space");
+    assert_eq!(int(&ok_rep, "flagID"), 5);
+    assert_eq!(item(&ctx, probes_id).unwrap().location_id, venture_id);
+    assert_eq!(item(&ctx, probes_id).unwrap().flag, InventoryFlag::Cargo);
 }

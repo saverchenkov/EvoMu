@@ -337,11 +337,9 @@ async fn handle_invbroker_add(
                     }
                 }
             }
-            let mut flag = match flag_u16 {
-                90 => InventoryFlag::SpecializedShipHold,
-                155 => InventoryFlag::Cargo,
-                other => InventoryFlag::from_u16(other),
-            };
+            // Preserve native ShipHangar (90) and FleetHangar (155) flags so SMA/FleetHangar
+            // capacity, stacking, and notifications never collide with Cargo (5) or flag 138.
+            let mut flag = InventoryFlag::from_u16(flag_u16);
             let requested_qty_opt = kwargs
                 .get("qty")
                 .or_else(|| kwargs.get("quantity"))
@@ -1445,7 +1443,13 @@ async fn handle_invbroker_add(
                                 }
                                 if !matches!(flag_u16, 177 | 179) && hold_capacity > 0.0 {
                                     let used_vol: f64 = snap.items.values()
-                                        .filter(|i| i.location_id == new_loc && (i.flag as u16) == flag_u16 && i.item_id != orig_item_id)
+                                        .filter(|i| {
+                                            i.location_id == new_loc
+                                                && i.item_id != orig_item_id
+                                                && ((i.flag as u16) == flag_u16
+                                                    || (matches!(flag_u16, 90 | 138)
+                                                        && matches!(i.flag as u16, 90 | 138)))
+                                        })
                                         .map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity as f64)).sum();
                                     if used_vol + item_vol > hold_capacity + 1e-4 {
                                         return Err(ship_hold_capacity_error(flag_u16, hold_capacity, used_vol, item_vol));
@@ -1601,7 +1605,13 @@ async fn handle_invbroker_add(
                     (orig_item_id, orig_item.clone())
                 };
 
-                if dest_is_ship_hold {
+                let dest_is_ship_fleet_hangar = flag_u16 == 155
+                    && snap
+                        .items
+                        .get(&new_loc)
+                        .and_then(|d| ctx.sde.types.get(&d.type_id))
+                        .is_some_and(|t| t.category_id == 6);
+                if dest_is_ship_hold || dest_is_ship_fleet_hangar {
                     let is_courier = |id: i64| snap.item_custom_names.get(&id).is_some_and(|s| s.starts_with("courier_cargo:"));
                     let can_merge = !active_src_record.singleton
                         && !active_src_record.is_blueprint_copy
