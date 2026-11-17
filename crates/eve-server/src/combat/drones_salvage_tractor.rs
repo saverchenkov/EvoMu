@@ -270,6 +270,15 @@ pub async fn attempt_salvage_wreck(
             1,
             Some(sys_id as i64),
         );
+        crate::quasar_gateway::isolate_side_effect("combat.drones_salvage_tractor.career_salvage", || {
+            crate::services::quasar_career_goals::record_career_sub_kind(
+                ctx,
+                char_id,
+                "salvage",
+                None,
+                1,
+            );
+        });
 
         let types = salvage_materials.iter().map(|&(t, _)| t).collect();
         let quantities = salvage_materials.iter().map(|&(_, q)| q).collect();

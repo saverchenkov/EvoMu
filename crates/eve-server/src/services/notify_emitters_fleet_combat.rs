@@ -210,6 +210,29 @@ pub fn emit_ship_death(ctx: &ServerContext, char_id: i64) {
     if char_id <= 0 {
         return;
     }
+    let destroyed_ship_type_opt = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        rt.detailed_killmails
+            .values()
+            .filter(|dkm| dkm.victim_character_id == char_id)
+            .max_by_key(|dkm| dkm.kill_id)
+            .map(|dkm| dkm.victim_ship_type_id)
+    });
+    if let Some(ship_type_id) = destroyed_ship_type_opt {
+        let is_corvette = ctx
+            .sde
+            .types
+            .get(&ship_type_id)
+            .is_some_and(|t| t.group_id == 237);
+        if ship_type_id != 670 && !is_corvette {
+            crate::services::quasar_career_goals::record_career_sub_kind(
+                ctx,
+                char_id,
+                "destruction",
+                None,
+                1,
+            );
+        }
+    }
     ctx.emit_typed(NotificationTarget::Character(char_id), OnShipDeath {});
 }
 

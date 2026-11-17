@@ -594,6 +594,16 @@ pub fn flush_npc_bounty_tick(
         );
     }
 
+    if pilot_isk >= 1.0 {
+        crate::quasar_gateway::isolate_side_effect("combat_npc_encounters.career_bounty", || {
+            crate::services::quasar_career_goals::record_bounty_career_event(
+                ctx,
+                char_id,
+                pilot_isk.round() as u64,
+            );
+        });
+    }
+
     NpcBountyTickPayout {
         pilot_isk,
         main_ess_isk: main_ess,
@@ -983,6 +993,18 @@ pub fn record_npc_kill_progression(
             1,
             &ctx.quasar_gateway,
         );
+        if npc_type_id.is_some_and(|tid| {
+            crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype(ctx, tid)
+                == "Triglavian"
+        }) {
+            crate::services::quasar_career_goals::record_career_sub_kind(
+                ctx,
+                killer_char_id,
+                "abyssal",
+                Some("kill_triglavians"),
+                1,
+            );
+        }
         ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
             killer_char_id as u32,
             &["destroyHostileNPC", "entityGroupDestroyed"],

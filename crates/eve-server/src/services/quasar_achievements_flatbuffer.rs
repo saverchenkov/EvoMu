@@ -244,20 +244,32 @@ fn category_internal_name(category_id: u32) -> Cow<'static, str> {
     }
 }
 
+/// V24 localization message IDs for achievement category 5 (`social`):
+/// `sde_achievement_categories` provides keys for categories 1..=4, so category 5
+/// falls back to V24's localized "Social" group name (`599_698`) and hint (`582_715`).
+const V24_SOCIAL_CATEGORY_NAME_ID: u32 = 599_698;
+const V24_SOCIAL_CATEGORY_DESC_ID: u32 = 582_715;
+
 fn category_localization_ids(
     category_id: u32,
     labels_by_key: &HashMap<&str, u32>,
 ) -> (u32, u32) {
-    let (name_key, desc_key) = match category_id {
-        1 => ("Combat_Name", "Combat_Description"),
-        2 => ("Exploration_Name", "Exploration_Description"),
-        3 => ("Industry_Name", "Industry_Description"),
-        4 => ("Goals_Name", "Goals_Description"),
+    let (name_key, desc_key, default_name, default_desc) = match category_id {
+        1 => ("Combat_Name", "Combat_Description", 0, 0),
+        2 => ("Exploration_Name", "Exploration_Description", 0, 0),
+        3 => ("Industry_Name", "Industry_Description", 0, 0),
+        4 => ("Goals_Name", "Goals_Description", 0, 0),
+        5 => (
+            "Social_Name",
+            "Social_Description",
+            V24_SOCIAL_CATEGORY_NAME_ID,
+            V24_SOCIAL_CATEGORY_DESC_ID,
+        ),
         _ => return (0, 0),
     };
     (
-        labels_by_key.get(name_key).copied().unwrap_or(0),
-        labels_by_key.get(desc_key).copied().unwrap_or(0),
+        labels_by_key.get(name_key).copied().unwrap_or(default_name),
+        labels_by_key.get(desc_key).copied().unwrap_or(default_desc),
     )
 }
 

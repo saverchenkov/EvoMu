@@ -1329,6 +1329,33 @@ pub fn notify_incursion_site_completed(
         now,
         gateway,
     );
+    if result.concord_lp_per_pilot > 0 {
+        let now_ft = ((now as i64) + 11_644_473_600) * 10_000_000;
+        let paid_lp: Vec<(i64, i64)> =
+            crate::services::pve_special_sites::with_pve_special_reg_db(db, now, |reg| {
+                reg.incursion_lp_logs
+                    .iter()
+                    .filter_map(|(&pid, logs)| {
+                        logs.iter()
+                            .rev()
+                            .find(|e| {
+                                e.site_id == result.site_id
+                                    && e.concord_lp_earned > 0
+                                    && (now_ft - e.timestamp_filetime).abs() <= 600_000_000
+                            })
+                            .map(|e| (pid, e.concord_lp_earned))
+                    })
+                    .collect()
+            });
+        for (pid, lp_amt) in paid_lp {
+            crate::services::quasar_career_goals::record_lp_career_event_gateway(
+                gateway,
+                pid,
+                false,
+                lp_amt,
+            );
+        }
+    }
 }
 
 pub fn emit_active_incursion_tale_data_for_system(ctx: &ServerContext, sys_id: SolarSystemId) {

@@ -1045,6 +1045,30 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                     );
                 }
             });
+            for &(cid, _) in &present {
+                if per_pilot_lp > 0 {
+                    crate::services::quasar_career_goals::record_lp_career_event(
+                        ctx,
+                        cid,
+                        false,
+                        per_pilot_lp,
+                    );
+                }
+                if matches!(tier.as_str(), "Novice" | "Scout") {
+                    let complex_sub = if first_fac == occ_fac {
+                        "defend_scout_complex"
+                    } else {
+                        "capture_scout_complex"
+                    };
+                    crate::services::quasar_career_goals::record_career_sub_kind(
+                        ctx,
+                        cid,
+                        "faction_warfare",
+                        Some(complex_sub),
+                        1,
+                    );
+                }
+            }
             let signed_vp = if first_fac == occ_fac { -vp_earned } else { vp_earned };
             add_victory_points(ctx, sys_id, signed_vp);
             complete_fw_dungeon_and_objective(ctx, sys_id, first_fac, first_fac != occ_fac, 1, gid);
@@ -1331,6 +1355,7 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             let per_pilot_lp = ((raw_per_pilot_lp as f64) * supp_lp_mult).round() as i64;
             let lp_corp = militia_lp_corp_id(&ctx.sde, lead_fac);
             let per_pilot_vp = (2_000 / (n as i64)).max(1);
+            let mut bf_standing_events: Vec<(i64, i64, f64)> = Vec::new();
             let cleanup_npcs = ctx.db.with_mut_snapshot(|snap| {
                 snap.fw_runtime.battlefield_pilot_seconds.remove(&bf_id);
                 for &cid in winning_pilots.iter().take(BATTLEFIELD_MAX_FULL_PAYOUT_PILOTS) {
@@ -1341,7 +1366,11 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                         let cur_fac_st = ch.standings.get(&lead_fac).copied().unwrap_or(0.0);
                         ch.standings.insert(lead_fac, crate::formulas::apply_standing_increase(cur_fac_st, scaled_st));
                         let cur_corp_st = ch.standings.get(&lp_corp).copied().unwrap_or(0.0);
-                        ch.standings.insert(lp_corp, crate::formulas::apply_standing_increase(cur_corp_st, scaled_st));
+                        let next_corp_st = crate::formulas::apply_standing_increase(cur_corp_st, scaled_st);
+                        ch.standings.insert(lp_corp, next_corp_st);
+                        if next_corp_st > cur_corp_st {
+                            bf_standing_events.push((cid, lp_corp, next_corp_st));
+                        }
                     }
                 }
                 for &cid in &winning_pilots {
@@ -1359,6 +1388,21 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                 }
                 snap.fw_runtime.battlefield_npc_waves.remove(&bf_id).unwrap_or_default()
             });
+            for (cid, from_id, next_st) in bf_standing_events {
+                crate::services::quasar_career_goals::record_standing_career_event(
+                    ctx, cid, from_id, next_st,
+                );
+            }
+            if per_pilot_lp > 0 {
+                for &cid in &winning_pilots {
+                    crate::services::quasar_career_goals::record_lp_career_event(
+                        ctx,
+                        cid,
+                        false,
+                        per_pilot_lp,
+                    );
+                }
+            }
             crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
                 for &nid in &cleanup_npcs {
                     rt.npc_entities.remove(&nid);

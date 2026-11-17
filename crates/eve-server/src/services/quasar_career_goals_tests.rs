@@ -990,3 +990,318 @@ fn derived_wiki_career_points_and_objective_predicates() {
     );
     assert_eq!(prog_of("ExplorerVisitHisec"), 3, "rehydrated seen_regions must stay deduplicated");
 }
+
+#[test]
+fn career_dispatcher_helpers_cover_market_lp_standings_missions_combat_and_sites() {
+    let (ctx, _) = test_ctx_and_clock(1_700_000_000);
+    let buyer_id = 91_000_001_i64;
+    let seller_id = 91_000_002_i64;
+    let buyer_ship_id = 91_100_001_i64;
+    let seller_ship_id = 91_100_002_i64;
+    let pod_id = 91_100_003_i64;
+    let npc_ship_id = 91_100_004_i64;
+
+    let npc_corp_id = *ctx.sde.npc_corporations.keys().next().expect("SDE NPC corp");
+    let faction_id = *ctx.sde.factions.keys().next().expect("SDE faction") as i64;
+    let bpo_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 9)
+        .expect("SDE blueprint type")
+        .type_id;
+    let explorer_career_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 12 && a.division_id == 26)
+        .expect("Explorer career agent")
+        .agent_id;
+    let producer_career_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 12 && a.division_id == 27)
+        .expect("Producer career agent")
+        .agent_id;
+    let epic_arc_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 10)
+        .expect("Epic Arc agent")
+        .agent_id;
+    let l1_sec_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 2 && a.level == 1 && a.division_id == 24)
+        .expect("L1 security agent")
+        .agent_id;
+    let dist_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 2 && a.division_id == 22)
+        .expect("Distribution agent")
+        .agent_id;
+    let mining_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 2 && a.division_id == 23)
+        .expect("Mining agent")
+        .agent_id;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, sid) in [(buyer_id, buyer_ship_id), (seller_id, seller_ship_id)] {
+            snap.characters.insert(
+                cid,
+                eve_db::CharacterRecord {
+                    character_id: cid,
+                    user_id: cid as u64,
+                    name: format!("Pilot_{cid}"),
+                    corporation_id: 98_000_001,
+                    alliance_id: None,
+                    war_faction_id: None,
+                    station_id: None,
+                    structure_id: None,
+                    solar_system_id: 30_000_142,
+                    constellation_id: 20_000_020,
+                    region_id: 10_000_002,
+                    active_ship_id: sid,
+                    balance: eve_db::IskCents(1_000_000_00),
+                    plex_balance: 0,
+                    loyalty_points: HashMap::new(),
+                    standings: HashMap::new(),
+                    security_status: 5.0,
+                    clone_grade: 1,
+                    home_station_id: 60_003_760,
+                    race_id: 1,
+                    bloodline_id: 1,
+                    ancestry_id: 11,
+                    school_id: 17,
+                    neural: eve_db::NeuralAttributes::default(),
+                    skill_points: 0.0,
+                    activity_status: None,
+                    free_skill_points: 0.0,
+                    last_clone_jump_unix: 0,
+                    jump_fatigue_minutes: 0.0,
+                    jump_cooldown_until_unix: 0,
+                    jump_fatigue_until_unix: 0,
+                    description: String::new(),
+                    title: String::new(),
+                    gender: 0,
+                    create_date_unix: 1_700_000_000,
+                    fleet_id: None,
+                    autopilot_waypoints: Vec::new(),
+                    version: 1,
+                    system_epoch: 1,
+                },
+            );
+        }
+        snap.items.insert(
+            buyer_ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: buyer_ship_id,
+                type_id: 587,
+                owner_id: buyer_id,
+                location_id: 30_000_142,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.items.insert(
+            seller_ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: seller_ship_id,
+                type_id: 587,
+                owner_id: seller_id,
+                location_id: 30_000_142,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.items.insert(
+            pod_id,
+            eve_db::InventoryItemRecord {
+                item_id: pod_id,
+                type_id: 670,
+                owner_id: seller_id,
+                location_id: 30_000_142,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.items.insert(
+            npc_ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: npc_ship_id,
+                type_id: 587,
+                owner_id: 1_000_001,
+                location_id: 30_000_142,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+
+    assert_eq!(isk_cents_to_whole_isk(eve_db::IskCents(0)), 0);
+    assert_eq!(isk_cents_to_whole_isk(eve_db::IskCents(-500)), 0);
+    assert_eq!(isk_cents_to_whole_isk(eve_db::IskCents(5_000_050)), 50_001);
+    assert_eq!(parse_career_ordinal_from_title("Balancing the Books (2 of 10)"), Some((2, 10)));
+    assert_eq!(parse_career_ordinal_from_title("No parens"), None);
+    assert_eq!(career_division_key(26), Some("explorer"));
+    assert_eq!(career_division_key(29), Some("soldier_of_fortune"));
+    assert_eq!(ewar_sub_kind_from_jam_type("warpScramblerMWD"), Some("warp_scramble"));
+    assert_eq!(ewar_sub_kind_from_jam_type("ewEnergyNeut"), None);
+    assert!(is_combat_site_category("WormholeCombat"));
+    assert!(!is_combat_site_category("Relic"));
+
+    let prog_of = |cid: i64, lbl: &str| -> u64 {
+        ctx.quasar_gateway
+            .progression
+            .career_goals
+            .get_or_init_goals(cid as u32)
+            .into_iter()
+            .find(|g| g.def.goal_label == lbl)
+            .unwrap_or_else(|| panic!("missing goal {lbl}"))
+            .progress
+    };
+
+    // Market fills convert IskCents to whole ISK and record buyer Blueprint acquisitions.
+    record_market_fill_career_goals(&ctx, buyer_id, seller_id, bpo_tid, eve_db::IskCents(5_000_000));
+    assert_eq!(prog_of(buyer_id, "EnforcerSpendMarketIsk50k"), 50_000);
+    assert_eq!(prog_of(buyer_id, "IndustrialistBuyBlueprint"), 1);
+    assert_eq!(prog_of(seller_id, "IndustrialistEarnMarketIsk50k"), 50_000);
+
+    // LP & Bounties & Corporation-only Standings.
+    record_lp_career_event(&ctx, buyer_id, false, 150);
+    record_lp_career_event(&ctx, buyer_id, true, 300);
+    record_bounty_career_event(&ctx, buyer_id, 25_000);
+    record_standing_career_event(&ctx, buyer_id, faction_id, 5.0);
+    assert_eq!(prog_of(buyer_id, "EnforcerGetStandingTo025"), 0, "faction standing ignored");
+    record_standing_career_event(&ctx, buyer_id, npc_corp_id, 0.3);
+    assert_eq!(prog_of(buyer_id, "EnforcerEarnLp250"), 150);
+    assert_eq!(prog_of(buyer_id, "EnforcerSpendLp300"), 300);
+    assert_eq!(prog_of(buyer_id, "EnforcerGetStandingTo025"), 25);
+    assert_eq!(prog_of(buyer_id, "EnforcerGetStandingTo05"), 30);
+
+    // Missions: Career Agent (10-part + 5-part scaled), Epic Arc step + complete, Dist/Mining/Security.
+    record_mission_completion_career_goals(
+        &ctx, buyer_id, explorer_career_agent, "Cash Flow (3 of 10)",
+        false, false, false, false, false, 0,
+    );
+    record_mission_completion_career_goals(
+        &ctx, buyer_id, producer_career_agent, "Make It Work (2 of 5)",
+        false, false, false, false, false, 0,
+    );
+    record_mission_completion_career_goals(
+        &ctx, buyer_id, epic_arc_agent, "Blood-Stained Stars",
+        false, false, true, false, true, 0,
+    );
+    record_mission_completion_career_goals(
+        &ctx, buyer_id, dist_agent, "Haul Cargo", true, false, false, false, false, 0,
+    );
+    record_mission_completion_career_goals(
+        &ctx, buyer_id, mining_agent, "Mine Plagioclase", false, true, false, false, false, 0,
+    );
+    record_mission_completion_career_goals(
+        &ctx, buyer_id, l1_sec_agent, "Pirates!", false, false, true, false, false, 200,
+    );
+    assert_eq!(prog_of(buyer_id, "ExplorerCareerAgentMission3"), 1);
+    assert_eq!(prog_of(buyer_id, "IndustrialistProducerCareerAgentMission4"), 1);
+    assert_eq!(prog_of(buyer_id, "EnforcerEpicArcMissions1"), 1);
+    assert_eq!(prog_of(buyer_id, "EnforcerEpicArcComplete"), 1);
+
+    // EWAR / Cap Warfare / Remote Repair capsuleer & self guards.
+    assert!(is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, seller_ship_id, buyer_id));
+    assert!(!is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, buyer_ship_id, buyer_id));
+    assert!(!is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, pod_id, buyer_id));
+    assert!(!is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, npc_ship_id, buyer_id));
+
+    record_ewar_career_seconds(&ctx, buyer_id, seller_ship_id, "webify", 10.0);
+    record_ewar_career_seconds(&ctx, buyer_id, npc_ship_id, "webify", 50.0);
+    record_ewar_career_seconds(&ctx, buyer_id, pod_id, "webify", 50.0);
+    assert_eq!(prog_of(buyer_id, "SofWebify"), 10);
+
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, seller_ship_id, "nosferatu", 80.0);
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, npc_ship_id, "neutralizer", 90.0);
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, buyer_ship_id, "neutralizer", 90.0);
+    assert_eq!(prog_of(buyer_id, "EnforcerEarnLp500"), 350);
+    assert_eq!(prog_of(buyer_id, "SofNeutralizeCapacitor100"), 90);
+
+    let all_buyer_goals = ctx
+        .quasar_gateway
+        .progression
+        .career_goals
+        .get_or_init_goals(buyer_id as u32);
+    let max_prog = |kind: &str| -> u64 {
+        all_buyer_goals
+            .iter()
+            .filter(|g| g.def.activity_kind == kind)
+            .map(|g| g.progress)
+            .max()
+            .unwrap_or(0)
+    };
+    assert_eq!(max_prog("bounties"), 25_000);
+    assert_eq!(max_prog("distribution_missions"), 1);
+    assert_eq!(max_prog("mining_missions"), 1);
+    assert_eq!(max_prog("combat_missions"), 1);
+    assert!(all_buyer_goals
+        .iter()
+        .any(|g| g.def.goal_label.starts_with("SofDrainCapacitor") && g.progress == 80));
+    assert!(all_buyer_goals
+        .iter()
+        .any(|g| g.def.goal_label.starts_with("SofNeutralizeCapacitor") && g.progress == 90));
+
+    record_remote_repair_career(&ctx, buyer_id, seller_ship_id, "armor_repair", 125.0);
+    record_remote_repair_career(&ctx, buyer_id, buyer_ship_id, "armor_repair", 200.0);
+    record_remote_repair_career(&ctx, buyer_id, npc_ship_id, "shield_boost", 200.0);
+    let rep_goals = ctx
+        .quasar_gateway
+        .progression
+        .career_goals
+        .get_or_init_goals(buyer_id as u32);
+    assert!(rep_goals
+        .iter()
+        .any(|g| g.def.goal_label.starts_with("SofRemoteRepArmorHp") && g.progress == 125));
+    assert!(rep_goals
+        .iter()
+        .filter(|g| g.def.goal_label.starts_with("SofRemoteBoostShieldHp"))
+        .all(|g| g.progress == 0));
+
+    // Site entry & combat site completion.
+    record_site_entry_career_goals(&ctx, buyer_id, "CombatAnomaly");
+    record_combat_site_completion_gateway(&ctx.quasar_gateway, buyer_id, "WormholeCombat");
+    assert_eq!(prog_of(buyer_id, "ExplorerEnterCombatSites1"), 1);
+    assert_eq!(prog_of(buyer_id, "EnforcerCompleteCombatSites5"), 1);
+}

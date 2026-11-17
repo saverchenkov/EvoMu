@@ -928,6 +928,11 @@ impl ServerContext {
                         if let Some(ref sid) = clr {
                             let (cat, did) = crate::services::pve_exploration::pve_site_category_and_dungeon_id(db, now_s, sys_id, sid);
                             ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(sys_id, &cat, did, 1, now_s, &ctx.quasar_gateway);
+                            crate::services::quasar_career_goals::record_combat_site_completion_gateway(
+                                &ctx.quasar_gateway,
+                                kid,
+                                &cat,
+                            );
                         }
                     });
                     crate::services::pve_exploration::notify_pve_destruction_events(db, &*ctx.pending_notifications, tx, kid, clr, esc, step);
@@ -1322,7 +1327,7 @@ impl ServerContext {
         ctx
     }
 
-    pub fn mark_signature_scanned(&self, char_id: i64, solar_system_id: u32, sig_ball_id: i64) {
+    pub fn mark_signature_scanned(&self, char_id: i64, solar_system_id: u32, sig_ball_id: i64) -> bool {
         let inserted = self
             .scanned_signatures
             .write()
@@ -1345,6 +1350,7 @@ impl ServerContext {
                 crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(self, char_id, &["ScanSignatures"], 1, Some(solar_system_id as i64));
             });
         }
+        inserted
     }
 
     pub fn has_scanned_signature(

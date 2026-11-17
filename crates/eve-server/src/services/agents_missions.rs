@@ -1741,6 +1741,7 @@ pub async fn handle_with_bound(
                                 .is_some_and(|a| matches!(a.agent_type_id, 5 | 8 | 10));
                         let (new_st, st_changes) = apply_mission_completion_standings(ctx, snap, char_id, m_agent_id, mission_id, corp_id, standing_pct, is_special);
 
+                        let mut arc_completed_now = false;
                         if ctx.sde.agents.get(&m_agent_id)
                             .is_some_and(|a| a.agent_type_id == 10)
                         {
@@ -1763,6 +1764,7 @@ pub async fn handle_with_bound(
                                 if done >= required_missions {
                                     arc.completed_at_unix = Some(now);
                                     arc.cooldown_until_unix = Some(now + 7_776_000);
+                                    arc_completed_now = true;
                                 }
                             } else {
                                 arcs.push(EpicArcStateEntry {
@@ -1866,11 +1868,11 @@ pub async fn handle_with_bound(
                         let item_reward = crate::services::agents_mission_rewards::mint_mission_item_reward_in_snap(ctx, snap, char_id, delivery_station, &tmpl, ctx.sde.agents.get(&m_agent_id));
                         let isk_paid = isk_reward > 0 || bonus_paid > 0;
                         let new_bal_opt = isk_paid.then(|| snap.characters.get(&char_id).map(|c| c.balance)).flatten();
-                        Ok((new_st, t, storyline, bonus_paid, st_changes, item_reward, new_bal_opt))
+                        Ok((new_st, t, storyline, bonus_paid, st_changes, item_reward, new_bal_opt, credited_lp, m_agent_id, is_courier, is_mining_mission, is_kill, arc_completed_now))
                     });
 
                     match res {
-                        Ok((new_standing, tally, storyline_offered, bonus_paid, st_changes, item_reward, new_bal_opt)) => {
+                        Ok((new_standing, tally, storyline_offered, bonus_paid, st_changes, item_reward, new_bal_opt, credited_lp, completed_agent_id, is_courier, is_mining_mission, is_kill, arc_completed_now)) => {
                             if let Some(bal) = new_bal_opt {
                                 let _ = ctx.notify_wallet_balance(false, char_id, 1, bal);
                             }
@@ -1878,6 +1880,22 @@ pub async fn handle_with_bound(
                                 crate::services::agents_mission_rewards::emit_mission_item_reward_notification(ctx, char_id, irw);
                             }
                             notify_standing_changes(ctx, char_id, &st_changes);
+                            let mission_title_career = ctx.sde.missions.get(&mission_id).map(|m| m.title.as_str()).unwrap_or("");
+                            let is_fw_mission_agent = ctx.sde.agents.get(&completed_agent_id).is_some_and(is_fw_agent);
+                            crate::quasar_gateway::isolate_side_effect("agents_missions.career_mission_complete", || {
+                                crate::services::quasar_career_goals::record_mission_completion_career_goals(
+                                    ctx,
+                                    char_id,
+                                    completed_agent_id,
+                                    mission_title_career,
+                                    is_courier,
+                                    is_mining_mission,
+                                    is_kill,
+                                    is_fw_mission_agent,
+                                    arc_completed_now,
+                                    credited_lp,
+                                );
+                            });
                             ctx.emit_typed(
                                 NotificationTarget::Character(char_id),
                                 OnAgentMissionObjectivesCompleted {

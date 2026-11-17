@@ -900,7 +900,7 @@ pub fn handle(
                     Ok((
                         old_price, new_price, relist_fee, scc_surcharge, final_escrow, escrow_delta,
                         meta, procurement_lvl, marketing_lvl, daytrading_lvl, visibility_lvl, delivered_to_corp_deliveries,
-                        mod_acct_after, cross_res.acct_updates, cross_res.item_deliveries, cross_res.matched_orders, order_owner_id,
+                        mod_acct_after, cross_res.acct_updates, cross_res.item_deliveries, cross_res.matched_orders, cross_res.career_fills, order_owner_id,
                     ))
                 });
 
@@ -908,8 +908,13 @@ pub fn handle(
                     Ok((
                         old_price, new_price, relist_fee, scc_surcharge, final_escrow, escrow_delta,
                         meta, proc_lvl, mkt_lvl, day_lvl, vis_lvl, corp_delivered_qty,
-                        mod_acct_after, cross_acct_updates, cross_item_deliveries, cross_matched_orders, order_owner_id,
+                        mod_acct_after, cross_acct_updates, cross_item_deliveries, cross_matched_orders, cross_career_fills, order_owner_id,
                     )) => {
+                        for (b_id, s_id, tid, gross) in cross_career_fills {
+                            crate::services::quasar_career_goals::record_market_fill_career_goals(
+                                ctx, b_id, s_id, tid, gross,
+                            );
+                        }
                         if let Some((is_c, own, div, bal)) = mod_acct_after {
                             super::market_trading::emit_market_account_change(ctx, is_c, own, div, bal);
                         }
@@ -1149,6 +1154,7 @@ pub fn handle(
                     let mut rem_qty = qty_i32;
                     let mut first_matched_oid = None;
                     let mut total_tax = IskCents(0);
+                    let mut career_fills: Vec<(i64, i64, u32, IskCents)> = Vec::new();
 
                     for (bid_oid, _) in candidate_bids {
                         if rem_qty <= 0 { break; }
@@ -1243,6 +1249,7 @@ pub fn handle(
                             tax_collector_id: tax_collector,
                             region_id: Some(resting.region_id),
                         });
+                        career_fills.push((resting.owner_id, char_id, PLEX_TYPE_ID, fill_gross));
                         if !resting.is_npc {
                             if snap.adjust_plex_vault(resting.owner_id, fill_qty as i64).is_none() {
                                 snap.next_entity_id += 1;
@@ -1274,7 +1281,7 @@ pub fn handle(
                     let rem_vault = snap.plex_vault_balance(char_id);
 
                     if rem_qty == 0 {
-                        return Ok((first_matched_oid.unwrap_or(0), true, IskCents(0), total_tax, rem_vault,));
+                        return Ok((first_matched_oid.unwrap_or(0), true, IskCents(0), total_tax, rem_vault, career_fills));
                     }
                     if duration_days == 0 {
                         return Err(rpc_err("ImmediateOrderUnfilled", "Immediate PLEX sell order could not be completely filled"));
@@ -1324,11 +1331,16 @@ pub fn handle(
                     save_market_order_meta(snap, new_oid, MarketOrderMeta {
                         range: 32767, duration: duration_days, issue_unix: now_unix, order_state: None, account_key: None, final_vol_remaining: None, closed_unix: None,
                     });
-                    Ok((new_oid, false, broker_fee, total_tax, rem_vault))
+                    Ok((new_oid, false, broker_fee, total_tax, rem_vault, career_fills))
                 });
 
                 return match res {
-                    Ok((oid, filled_imm, broker_fee, sales_tax, rem_vault)) => {
+                    Ok((oid, filled_imm, broker_fee, sales_tax, rem_vault, career_fills)) => {
+                        for (b_id, s_id, tid, gross) in career_fills {
+                            crate::services::quasar_career_goals::record_market_fill_career_goals(
+                                ctx, b_id, s_id, tid, gross,
+                            );
+                        }
                         ctx.emit_typed(
                             NotificationTarget::Character(char_id),
                             crate::router::notify_registry::OnOwnOrdersChanged::from_payload(

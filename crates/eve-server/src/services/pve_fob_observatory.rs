@@ -457,6 +457,18 @@ pub async fn destroy_pirate_fob_and_payout(
             }
         }
     });
+    if per_pilot_bounty > 0 {
+        crate::quasar_gateway::isolate_side_effect("pve_fob_observatory.career_fob_bounty", || {
+            let bounty_u64 = u64::try_from(per_pilot_bounty).unwrap_or(0);
+            for &cid in &eligible_attackers {
+                crate::services::quasar_career_goals::record_bounty_career_event(
+                    ctx,
+                    cid,
+                    bounty_u64,
+                );
+            }
+        });
+    }
 
     Ok(PyRep::keyval([
         ("fobID", PyRep::Integer(fob_id)),
@@ -758,6 +770,18 @@ pub fn complete_observatory_flashpoint(
     with_dungeon_runtime_store(ctx, |store| {
         store.instances.remove(&obs_state.dungeon_instance_id);
     });
+    if lp_each > 0 {
+        crate::quasar_gateway::isolate_side_effect("pve_fob_observatory.career_obs_lp", || {
+            for &cid in &eligible {
+                crate::services::quasar_career_goals::record_lp_career_event(
+                    ctx,
+                    cid,
+                    false,
+                    lp_each,
+                );
+            }
+        });
+    }
 
     Ok(PyRep::keyval([
         ("siteID", PyRep::Integer(site_id)),

@@ -405,3 +405,455 @@ async fn daily_goals_evermark_redemption_and_ai_assistant() {
     assert_eq!(ai_rsp.status_code, STATUS_OK);
     assert!(!ai_rsp.payload.unwrap().value.is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn achievements_cat5_and_live_daily_damage_ships_capsuleer_vs_npc() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let atk_cid = 2_115_200_101i64;
+    let def_cid = 2_115_200_102i64;
+    let atk_ship_id = atk_cid + 50_000;
+    let def_ship_id = def_cid + 50_000;
+    let npc_ship_id = 2_115_900_999i64;
+    let gun_id = 2_115_900_101i64;
+    let ammo_id = 2_115_900_102i64;
+
+    let low_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.security_status > 0.05 && s.security_status < 0.40)
+        .expect("SDE lowsec system")
+        .solar_system_id;
+
+    seed_pilot(&ctx.db, atk_cid, 5301, "DamageAttacker", 10_000_000_00, 1_000);
+    seed_pilot(&ctx.db, def_cid, 5302, "DamageDefender", 10_000_000_00, 1_000);
+
+    let mut atk_sess = sess(31, 5301, atk_cid, service_roles::ROLE_PLAYER_DEFAULT);
+    atk_sess.station_id = None;
+    atk_sess.solar_system_id = Some(low_sys);
+    atk_sess.ship_id = Some(atk_ship_id);
+
+    // 1. Achievement Category 5 (Social) query succeeds and CDN definitions build cleanly.
+    let mut cat5_req = Vec::new();
+    id_msg(1, 5, &mut cat5_req);
+    let cat5_rsp = qrpc(&ctx, &mut atk_sess, "eve_public.achievement.category.api.GetRequest", cat5_req).await;
+    assert_eq!(cat5_rsp.status_code, STATUS_OK);
+    assert_eq!(
+        qrpc(&ctx, &mut atk_sess, "eve_public.achievement.definition.api.cdn.GetLatestRequest", Vec::new())
+            .await
+            .status_code,
+        STATUS_OK
+    );
+
+    // 2. Spawn attacker, defender capsuleer ship, and an NPC ship in lowsec.
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, sid) in [(atk_cid, atk_ship_id), (def_cid, def_ship_id)] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.station_id = None;
+                ch.solar_system_id = low_sys;
+            }
+            if let Some(ship) = snap.items.get_mut(&sid) {
+                ship.location_id = i64::from(low_sys);
+                ship.flag = InventoryFlag::None;
+            }
+        }
+        snap.items.insert(
+            npc_ship_id,
+            InventoryItemRecord {
+                item_id: npc_ship_id,
+                type_id: 587,
+                owner_id: 1_000_001,
+                location_id: i64::from(low_sys),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.items.insert(
+            gun_id,
+            InventoryItemRecord {
+                item_id: gun_id,
+                type_id: 2881,
+                owner_id: atk_cid,
+                location_id: atk_ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.items.insert(
+            ammo_id,
+            InventoryItemRecord {
+                item_id: ammo_id,
+                type_id: 21898,
+                owner_id: atk_cid,
+                location_id: atk_ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 500,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.module_online_states.insert(gun_id, true);
+        let sk = snap.skills.entry(atk_cid).or_default();
+        for sid in [3300_u32, 3302, 3311, 3413, 3426] {
+            sk.insert(
+                sid,
+                eve_db::TrainedSkillRecord {
+                    type_id: sid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+    });
+    ctx.invalidate_ship_fitting(atk_ship_id);
+
+    let kw = HashMap::new();
+    ctx.dispatch_rpc(&mut atk_sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(0)], &kw, None)
+        .await
+        .expect("SetSafetyLevel Red");
+
+    let sys_h = ctx.systems.get_or_spawn(low_sys);
+    for (bid, pos_x, cs, meta) in [
+        (
+            atk_ship_id,
+            0.0,
+            ctx.build_ship_combat_state(atk_cid, atk_ship_id, 587),
+            ctx.build_ship_slim_meta(atk_cid, 587),
+        ),
+        (
+            npc_ship_id,
+            1_000.0,
+            eve_destiny::CombatState::new(),
+            eve_destiny::SlimItemMeta::default(),
+        ),
+        (
+            def_ship_id,
+            1_200.0,
+            ctx.build_ship_combat_state(def_cid, def_ship_id, 587),
+            ctx.build_ship_slim_meta(def_cid, 587),
+        ),
+    ] {
+        let _ = sys_h
+            .spawn_ball_with_meta(
+                eve_destiny::Ball {
+                    id: bid,
+                    type_id: 587,
+                    position: glam::DVec3::new(pos_x, 0.0, 0.0),
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_067_000.0,
+                    radius: 400.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                cs,
+                meta,
+            )
+            .await;
+    }
+
+    let damage_goal_prog = || {
+        ctx.quasar_gateway
+            .progression
+            .daily_goals
+            .get_or_init_goals(atk_cid as u32)
+            .into_iter()
+            .find(|g| g.template.category == 7)
+            .expect("DamageShips daily goal")
+            .current_progress
+    };
+    assert_eq!(damage_goal_prog(), 0);
+
+    // 3. Fire turret at NPC ball -> must NOT increment DamageShips daily goal.
+    ctx.dispatch_rpc(&mut atk_sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(npc_ship_id)], &kw, None)
+        .await
+        .expect("AddTarget NPC");
+    for _ in 0..30 {
+        if sys_h.get_target_locks(atk_ship_id).await.unwrap().iter().any(|l| l.target_id == npc_ship_id && l.locked) {
+            break;
+        }
+        let _ = sys_h.step_manual(1.0).await;
+    }
+    ctx.dispatch_rpc(
+        &mut atk_sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[PyRep::Integer(gun_id), PyRep::Integer(npc_ship_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate turret on NPC");
+    let _ = ctx
+        .dispatch_rpc(&mut atk_sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(gun_id)], &kw, None)
+        .await;
+    assert_eq!(damage_goal_prog(), 0, "NPC ship damage must never credit DamageShips");
+
+    // 4. Fire turret at capsuleer ship -> MUST increment DamageShips daily goal > 0.
+    ctx.dispatch_rpc(&mut atk_sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(def_ship_id)], &kw, None)
+        .await
+        .expect("AddTarget capsuleer");
+    for _ in 0..30 {
+        if sys_h.get_target_locks(atk_ship_id).await.unwrap().iter().any(|l| l.target_id == def_ship_id && l.locked) {
+            break;
+        }
+        let _ = sys_h.step_manual(1.0).await;
+    }
+    ctx.dispatch_rpc(
+        &mut atk_sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[PyRep::Integer(gun_id), PyRep::Integer(def_ship_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate turret on capsuleer ship");
+    let _ = ctx
+        .dispatch_rpc(&mut atk_sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(gun_id)], &kw, None)
+        .await;
+    assert!(damage_goal_prog() > 0, "Capsuleer ship damage must credit DamageShips daily goal");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn career_program_live_rpc_duels_social_fw_and_market() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let c1 = 2_115_200_201i64;
+    let c2 = 2_115_200_202i64;
+    let pyerite_item_id = 2_115_900_201i64;
+    seed_pilot(&ctx.db, c1, 5401, "CareerTrader1", 50_000_000_00, 1_000);
+    seed_pilot(&ctx.db, c2, 5402, "CareerTrader2", 50_000_000_00, 1_000);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.retain(|_, o| o.type_id != 35);
+        snap.items.insert(
+            pyerite_item_id,
+            InventoryItemRecord {
+                item_id: pyerite_item_id,
+                type_id: 35,
+                owner_id: c1,
+                location_id: JITA_STATION,
+                flag: InventoryFlag::Hangar,
+                quantity: 1_000,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+
+    let mut s1 = sess(41, 5401, c1, service_roles::ROLE_PLAYER_DEFAULT);
+    s1.region_id = Some(10_000_002);
+    s1.constellation_id = Some(20_000_020);
+    let mut s2 = sess(42, 5402, c2, service_roles::ROLE_PLAYER_DEFAULT);
+    s2.region_id = Some(10_000_002);
+    s2.constellation_id = Some(20_000_020);
+    let _ = ctx
+        .db
+        .acquire_online_lock(5401, 41, Some(c1), false, ctx.now_unix());
+    let _ = ctx
+        .db
+        .acquire_online_lock(5402, 42, Some(c2), false, ctx.now_unix());
+    let kw = HashMap::new();
+
+    // 1. Social RPCs: AddContact, SendMail, JoinChannel + SendMessage
+    ctx.dispatch_rpc(
+        &mut s1,
+        "charMgr",
+        None,
+        "AddContact",
+        &[PyRep::Integer(c2), PyRep::Real(5.0), PyRep::Bool(false), PyRep::Bool(false), PyRep::String("wing".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("AddContact");
+
+    ctx.dispatch_rpc(
+        &mut s1,
+        "mailMgr",
+        None,
+        "SendMail",
+        &[PyRep::List(vec![PyRep::Integer(c2)]), PyRep::String("Hello".into()), PyRep::String("Fly safe".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SendMail");
+
+    ctx.dispatch_rpc(
+        &mut s1,
+        "LSC",
+        None,
+        "JoinChannel",
+        &[PyRep::String("player_career_it".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("JoinChannel");
+    ctx.dispatch_rpc(
+        &mut s1,
+        "LSC",
+        None,
+        "SendMessage",
+        &[PyRep::String("player_career_it".into()), PyRep::String("o7".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SendMessage");
+
+    // 2. FW Direct Enlistment
+    ctx.dispatch_rpc(
+        &mut s1,
+        "fwCharacterEnlistmentMgr",
+        None,
+        "CreateMyDirectEnlistment",
+        &[PyRep::Integer(500_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CreateMyDirectEnlistment");
+
+    // 3. Market sell + instant buy -> seller earn_isk, buyer spend_isk (whole ISK = 50,000)
+    let sell_arg = PyRep::List(vec![PyRep::keyval([
+        ("itemID", PyRep::Integer(pyerite_item_id)),
+        ("typeID", PyRep::Integer(35)),
+        ("price", PyRep::Real(100.0)),
+        ("quantity", PyRep::Integer(1_000)),
+        ("stationID", PyRep::Integer(JITA_STATION)),
+        ("duration", PyRep::Integer(90)),
+    ])]);
+    ctx.dispatch_rpc(
+        &mut s1,
+        "marketProxy",
+        None,
+        "PlaceMultiSellOrder",
+        &[sell_arg, PyRep::Bool(false)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("PlaceMultiSellOrder");
+
+    let buy_arg = PyRep::List(vec![PyRep::keyval([
+        ("typeID", PyRep::Integer(35)),
+        ("quantity", PyRep::Integer(500)),
+        ("maxPrice", PyRep::Real(100.0)),
+        ("stationID", PyRep::Integer(JITA_STATION)),
+        ("orderRange", PyRep::Integer(-1)),
+    ])]);
+    let buy_res = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "marketProxy",
+            None,
+            "BuyMultipleItems",
+            &[buy_arg, PyRep::Bool(false)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("BuyMultipleItems");
+    assert_eq!(buy_res.dict_get("purchasedCount").and_then(PyRep::as_i64), Some(1));
+
+    // 4. Undock both pilots into space in JITA_SYS for Duels
+    let sys_h = ctx.systems.get_or_spawn(JITA_SYS);
+    ctx.db.with_mut_snapshot(|snap| {
+        for cid in [c1, c2] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.station_id = None;
+                ch.solar_system_id = JITA_SYS;
+            }
+            let sid = cid + 50_000;
+            if let Some(ship) = snap.items.get_mut(&sid) {
+                ship.location_id = i64::from(JITA_SYS);
+                ship.flag = InventoryFlag::None;
+            }
+        }
+    });
+    for (idx, cid) in [c1, c2].into_iter().enumerate() {
+        let sid = cid + 50_000;
+        let _ = sys_h
+            .spawn_ball_with_meta(
+                eve_destiny::Ball {
+                    id: sid,
+                    type_id: 587,
+                    position: glam::DVec3::new((idx as f64) * 1_000.0, 0.0, 0.0),
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_067_000.0,
+                    radius: 400.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                ctx.build_ship_combat_state(cid, sid, 587),
+                ctx.build_ship_slim_meta(cid, 587),
+            )
+            .await;
+    }
+    s1.station_id = None;
+    s1.ship_id = Some(c1 + 50_000);
+    s2.station_id = None;
+    s2.ship_id = Some(c2 + 50_000);
+
+    ctx.dispatch_rpc(&mut s1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(c2)], &kw, None)
+        .await
+        .expect("StartDuelChallenge");
+    ctx.dispatch_rpc(&mut s2, "crimewatch", None, "RespondToDuelChallenge", &[PyRep::Integer(c1), PyRep::Bool(true)], &kw, None)
+        .await
+        .expect("RespondToDuelChallenge");
+
+    let prog_of = |cid: i64, lbl: &str| -> u64 {
+        ctx.quasar_gateway
+            .progression
+            .career_goals
+            .get_or_init_goals(cid as u32)
+            .into_iter()
+            .find(|g| g.def.goal_label == lbl)
+            .unwrap_or_else(|| panic!("missing goal {lbl}"))
+            .progress
+    };
+    assert_eq!(prog_of(c1, "SofAddContact"), 1);
+    assert_eq!(prog_of(c1, "SofSendMail"), 1);
+    assert_eq!(prog_of(c1, "SofSendChatMessage"), 1);
+    assert_eq!(prog_of(c1, "SofJoinFW"), 1);
+    assert_eq!(prog_of(c1, "IndustrialistEarnMarketIsk50k"), 50_000);
+    assert_eq!(prog_of(c2, "EnforcerSpendMarketIsk50k"), 50_000);
+    assert_eq!(prog_of(c1, "SofDuelChallenge"), 1);
+    assert_eq!(prog_of(c1, "SofDuelWin1"), 1);
+    assert_eq!(prog_of(c2, "SofDuelWin1"), 1);
+}

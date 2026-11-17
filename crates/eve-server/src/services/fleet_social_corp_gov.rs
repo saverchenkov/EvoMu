@@ -943,6 +943,13 @@ pub(super) fn handle_add_corporation(
             let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(
                 &ctx.quasar_gateway, &ctx.db, char_id as u32, now_unix,
             );
+            crate::services::quasar_career_goals::record_career_sub_kind(
+                ctx,
+                char_id,
+                "social",
+                Some("join_corp"),
+                1,
+            );
             let sys_id = session.solar_system_id.unwrap_or(0);
             crate::services::space_destiny::record_session_change_timer(
                 ctx,

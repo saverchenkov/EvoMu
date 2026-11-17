@@ -1130,6 +1130,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                         ballpark, target_id, sde_opt,
                     );
                 let mut nos_transferred = 0.0;
+                let mut remote_armor_repaired = 0.0;
                 if let Some(cs) = ballpark.combat_states.get_mut(&target_id) {
                     // Nosferatu transfer rule (`feat:combat.nosferatu-drain-cap`, `feat:modules.nosferatu-transfer-rule`, `feat:npc.sleeper-capacitor-immunity-and-leash`):
                     // Transfers at cycle end (`t = duration_s`) when target capacitor > self capacitor, or when Blood Raider hull bonus overrides the cap comparison;
@@ -1167,9 +1168,11 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                             }
                         }
                         if cycle.remote_armor_amount > 0.0 {
+                            let old_armor = cs.armor_hp;
                             cs.armor_hp = (cs.armor_hp
                                 + cycle.remote_armor_amount * att * spool_mult * impedance)
                                 .min(cs.max_armor_hp);
+                            remote_armor_repaired = (cs.armor_hp - old_armor).max(0.0);
                         }
                         if cycle.remote_hull_amount > 0.0 {
                             cs.structure_hp = (cs.structure_hp + cycle.remote_hull_amount * att * impedance)
@@ -1181,6 +1184,28 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                     if let Some(src_cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
                         src_cs.capacitor =
                             (src_cs.capacitor + nos_transferred).min(src_cs.max_capacitor);
+                    }
+                    if let Some(cid) = cycle.owner_char_id {
+                        pending_cycle_actions.push(PendingCycleAction::CareerProgressEvent {
+                            char_id: cid,
+                            source_ship_id: cycle.ship_id,
+                            target_id,
+                            activity_kind: "cap_warfare",
+                            sub_kind: "nosferatu",
+                            amount: nos_transferred,
+                        });
+                    }
+                }
+                if remote_armor_repaired > 0.0 {
+                    if let Some(cid) = cycle.owner_char_id {
+                        pending_cycle_actions.push(PendingCycleAction::CareerProgressEvent {
+                            char_id: cid,
+                            source_ship_id: cycle.ship_id,
+                            target_id,
+                            activity_kind: "remote_repair",
+                            sub_kind: "armor_repair",
+                            amount: remote_armor_repaired,
+                        });
                     }
                 }
             }
@@ -1821,6 +1846,8 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                         } else {
                             1.0
                         };
+                        let mut rollover_cap_drained = 0.0;
+                        let mut rollover_shield_repaired = 0.0;
                         if let Some(cs) = ballpark.combat_states.get_mut(&target_id) {
                             let mut att = 1.0;
                             if cycle.remote_falloff > 0.0 || cycle.remote_optimal > 0.0 {
@@ -1830,17 +1857,60 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                                 }
                             }
                             if cycle.cap_drain_target > 0.0 && !is_sleeper_target {
+                                let old_cap = cs.capacitor;
                                 cs.capacitor = (cs.capacitor - cycle.cap_drain_target * att).max(0.0);
+                                rollover_cap_drained = (old_cap - cs.capacitor).max(0.0);
                             }
                             if !cs.disallow_assistance {
                                 if cycle.remote_shield_amount > 0.0 {
+                                    let old_shield = cs.shield_hp;
                                     cs.shield_hp = (cs.shield_hp
                                         + cycle.remote_shield_amount * att * impedance)
                                         .min(cs.max_shield_hp);
+                                    rollover_shield_repaired = (cs.shield_hp - old_shield).max(0.0);
                                 }
                                 if cycle.remote_cap_amount > 0.0 {
                                     cs.capacitor = (cs.capacitor + cycle.remote_cap_amount * att)
                                         .min(cs.max_capacitor);
+                                }
+                            }
+                        }
+                        if let Some(cid) = cycle.owner_char_id {
+                            if rollover_cap_drained > 0.0 {
+                                pending_cycle_actions.push(PendingCycleAction::CareerProgressEvent {
+                                    char_id: cid,
+                                    source_ship_id: cycle.ship_id,
+                                    target_id,
+                                    activity_kind: "cap_warfare",
+                                    sub_kind: "neutralizer",
+                                    amount: rollover_cap_drained,
+                                });
+                            }
+                            if rollover_shield_repaired > 0.0 {
+                                pending_cycle_actions.push(PendingCycleAction::CareerProgressEvent {
+                                    char_id: cid,
+                                    source_ship_id: cycle.ship_id,
+                                    target_id,
+                                    activity_kind: "remote_repair",
+                                    sub_kind: "shield_boost",
+                                    amount: rollover_shield_repaired,
+                                });
+                            }
+                            if let Some(mt) = sde_opt.as_ref().and_then(|s| s.types.get(&cycle.module_type_id)) {
+                                if let Some(jam_t) = crate::services::inventory_fitting::fitting_ewar_capital::ewar_jamming_type(
+                                    mt,
+                                    cycle.ammo_type_id,
+                                    cycle.disables_target_mwd_mjd,
+                                    cycle.hic_bubble_radius_m,
+                                ) {
+                                    pending_cycle_actions.push(PendingCycleAction::CareerProgressEvent {
+                                        char_id: cid,
+                                        source_ship_id: cycle.ship_id,
+                                        target_id,
+                                        activity_kind: "ewar",
+                                        sub_kind: jam_t,
+                                        amount: cycle.duration_s,
+                                    });
                                 }
                             }
                         }

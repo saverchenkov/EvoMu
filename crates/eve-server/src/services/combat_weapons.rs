@@ -485,6 +485,27 @@ pub async fn handle_weapons(
                 } else {
                     crate::sp6_lifecycle::record_npc_aggression_timer(ctx, char_id, now_unix);
                 }
+                let disables_mwd_mjd = mod_type.group_id == 52
+                    && eve_dogma::eval_warp_scrambler_effects(&[&mod_state], &[0.0], &ctx.sde).blocks_mwd;
+                if let Some(jam_t) = crate::services::inventory_fitting::fitting_ewar_capital::ewar_jamming_type(
+                    mod_type,
+                    m.charge_type_id,
+                    disables_mwd_mjd,
+                    None,
+                ) {
+                    let duration_ms = {
+                        let d = mod_state.get_attribute(eve_sde::attr_ids::DURATION, &ctx.sde);
+                        if d > 0.0 {
+                            d
+                        } else {
+                            mod_state.get_attribute(eve_sde::attr_ids::SPEED, &ctx.sde)
+                        }
+                    };
+                    let duration_s = if duration_ms > 0.0 { duration_ms / 1000.0 } else { 1.0 };
+                    crate::services::quasar_career_goals::record_ewar_career_seconds(
+                        ctx, char_id, tid, jam_t, duration_s,
+                    );
+                }
                 return Some(Ok(PyRep::keyval([
                     ("moduleID", PyRep::Integer(module_id)),
                     ("targetID", PyRep::Integer(tid)),
@@ -1481,6 +1502,16 @@ pub async fn handle_weapons(
                 };
                 (app, dest, s_r, a_r, h_r, false)
             };
+
+            if !is_upwell_target && applied_dmg >= 1.0 {
+                crate::services::station_structure::structure_lifecycle_rpc::record_ship_damage_progression(
+                    ctx,
+                    sys_id,
+                    char_id,
+                    target_ball_id,
+                    applied_dmg,
+                );
+            }
 
             let victim_char_opt = player_target_info.map(|(vcid, _)| vcid);
             emit_combat_log_and_damage_state(

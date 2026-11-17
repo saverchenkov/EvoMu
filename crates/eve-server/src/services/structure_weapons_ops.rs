@@ -369,6 +369,15 @@ pub async fn trigger_structure_auto_defense_on_grid(
                 .await
             {
                 if dealt > 0.0 {
+                    if let Some(gunner_char) = pilot_opt {
+                        crate::services::station_structure::structure_lifecycle_rpc::record_ship_damage_progression(
+                            ctx,
+                            sys_id,
+                            gunner_char,
+                            ship_id,
+                            dealt,
+                        );
+                    }
                     ctx.emit_typed(
                         crate::router::NotificationTarget::Character(target_char_id),
                         crate::router::notify_registry::OnDamageMessage {

@@ -72,6 +72,37 @@ pub fn on_player_ship_destroyed_in_combat_detailed(
         victim_ship_type_id,
         net_loss_isk,
     );
+    if victim_ship_type_id != 670 {
+        crate::services::quasar_career_goals::record_career_sub_kind(
+            ctx,
+            killer_char_id,
+            "pvp",
+            None,
+            1,
+        );
+        let is_fw_kill = ctx.db.with_snapshot(|snap| {
+            let Some(v_fac) =
+                crate::services::fw_services::effective_char_militia_in_snap(snap, victim_char_id)
+            else {
+                return false;
+            };
+            let Some(k_fac) =
+                crate::services::fw_services::effective_char_militia_in_snap(snap, killer_char_id)
+            else {
+                return false;
+            };
+            crate::services::fw_services::is_opposing_militia(k_fac, v_fac)
+        });
+        if is_fw_kill {
+            crate::services::quasar_career_goals::record_career_sub_kind(
+                ctx,
+                killer_char_id,
+                "faction_warfare",
+                Some("kill_fw_capsuleer"),
+                1,
+            );
+        }
+    }
 }
 
 pub fn on_player_ship_destroyed_in_combat(
@@ -757,6 +788,13 @@ pub async fn handle(
                     )
                     .await;
                     crate::services::notify_emitters_character_services::emit_campaign_enrollment_changed(ctx, char_id);
+                    crate::services::quasar_career_goals::record_career_sub_kind(
+                        ctx,
+                        char_id,
+                        "faction_warfare",
+                        Some("join_fw"),
+                        1,
+                    );
                     Some(Ok(PyRep::Bool(true)))
                 }
                 Err(e) => Some(Err(e)),
@@ -960,6 +998,13 @@ pub async fn handle(
                     )
                     .await;
                     crate::services::notify_emitters_character_services::emit_campaign_enrollment_changed(ctx, char_id);
+                    crate::services::quasar_career_goals::record_career_sub_kind(
+                        ctx,
+                        char_id,
+                        "faction_warfare",
+                        Some("join_fw"),
+                        1,
+                    );
                     Some(Ok(PyRep::Bool(true)))
                 }
                 Err(e) => Some(Err(e)),

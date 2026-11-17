@@ -102,6 +102,13 @@ pub(super) fn handle_mail_and_calendar(
                         status_mask: 0,
                     };
                     crate::services::mail_notify::emit_mail_sent(ctx, &sent, &others);
+                    crate::services::quasar_career_goals::record_career_sub_kind(
+                        ctx,
+                        char_id,
+                        "social",
+                        Some("send_mail"),
+                        1,
+                    );
                     Some(Ok(PyRep::Integer(out.mail_id)))
                 }
                 Err(e) => Some(Err(crate::services::domain_err_to_rpc(e))),

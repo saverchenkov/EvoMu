@@ -739,6 +739,11 @@ pub fn award_fw_kill_lp_split(
             (aid, afac, share)
         })
         .collect();
+    let lp_credits: Vec<(i64, i64)> = shares
+        .iter()
+        .filter(|(_, _, share)| *share > 0)
+        .map(|&(aid, _, share)| (aid, share))
+        .collect();
     ctx.db.with_mut_snapshot(|snap| {
         for (aid, afac, share) in shares {
             if share > 0 {
@@ -757,6 +762,9 @@ pub fn award_fw_kill_lp_split(
             record_fw_stat_event_in_snap(snap, now_u, aid, Some(afac), 1, 0);
         }
     });
+    for (aid, share) in lp_credits {
+        crate::services::quasar_career_goals::record_lp_career_event(ctx, aid, false, share);
+    }
     total_paid
 }
 

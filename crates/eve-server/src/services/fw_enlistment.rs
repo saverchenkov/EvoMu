@@ -482,6 +482,13 @@ fn create_direct(
             .and_then(|c| s.fw_runtime.corp_war_factions.get(&c.corporation_id).copied())
     });
     notify_member_war_faction_change(ctx, char_id, None, Some(faction_id), Some(faction_id), corp_fac);
+    crate::services::quasar_career_goals::record_career_sub_kind(
+        ctx,
+        char_id,
+        "faction_warfare",
+        Some("join_fw"),
+        1,
+    );
     Ok(PyRep::None)
 }
 

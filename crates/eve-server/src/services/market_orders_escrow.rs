@@ -248,6 +248,7 @@ pub fn handle_orders_escrow(
                 let mut buyer_acct_updates: Vec<(bool, i64, u8, IskCents)> = Vec::new();
                 let mut delivered_items: Vec<(i64, InventoryItemRecord)> = Vec::new();
                 let mut seller_acct_final: Option<(bool, i64, u8, IskCents)> = None;
+                let mut career_fills: Vec<(i64, i64, u32, IskCents)> = Vec::new();
 
                 for (station_id, type_id, raw_item_id, order_price, quantity_i32, item_dur) in parsed_items {
                     let _ = order_price
@@ -595,6 +596,7 @@ pub fn handle_orders_escrow(
                             tax_collector_id: tax_collector,
                             region_id: Some(resting.region_id),
                         });
+                        career_fills.push((resting.owner_id, seller_id, type_id, fill_gross));
                         if !resting.is_npc {
                             matched_buyers.push((oid, resting.owner_id));
                             let buyer_is_corp = snap.corporations.contains_key(&resting.owner_id);
@@ -824,11 +826,16 @@ pub fn handle_orders_escrow(
                     }
                 }
 
-                Ok((order_ids, order_owner_id, total_broker_fee, total_sales_tax, all_filled_immediately, matched_buyers, consumed_items, buyer_acct_updates, delivered_items, seller_acct_final))
+                Ok((order_ids, order_owner_id, total_broker_fee, total_sales_tax, all_filled_immediately, matched_buyers, consumed_items, buyer_acct_updates, delivered_items, seller_acct_final, career_fills))
             });
 
             match res {
-                Ok((order_ids, order_owner_id, total_broker, total_tax, all_filled_immediately, matched_buyers, consumed_items, buyer_acct_updates, delivered_items, seller_acct_final)) => {
+                Ok((order_ids, order_owner_id, total_broker, total_tax, all_filled_immediately, matched_buyers, consumed_items, buyer_acct_updates, delivered_items, seller_acct_final, career_fills)) => {
+                    for (b_id, s_id, tid, gross) in career_fills {
+                        crate::services::quasar_career_goals::record_market_fill_career_goals(
+                            ctx, b_id, s_id, tid, gross,
+                        );
+                    }
                     for (rec, changes) in &consumed_items {
                         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, rec.item_id);
                         super::emit_market_item_change(ctx, char_id, rec, changes.clone());
@@ -1344,6 +1351,7 @@ pub fn handle_orders_escrow(
                 let mut touched_seller_accts: Vec<(bool, i64, u8)> = Vec::new();
                 let mut delivered_item_records: Vec<InventoryItemRecord> = Vec::new();
                 let mut matched_sellers: Vec<(i64, i64)> = Vec::new();
+                let mut career_fills: Vec<(i64, i64, u32, IskCents)> = Vec::new();
 
                 for (oid, fill_tid, fill_qty, fill_gross, seller_id, is_npc, ask_price, ord_st_id, ord_reg_id) in planned_fills {
                     let buyer_bal = snap.characters.get_mut(&char_id).map(|buyer| {
@@ -1384,6 +1392,7 @@ pub fn handle_orders_escrow(
                         seller_net, seller_balance_after: seller_bal, sales_tax: fill_tax, tax_collector_id: tax_collector,
                         region_id: Some(ord_reg_id),
                     });
+                    career_fills.push((char_id, seller_id, fill_tid, fill_gross));
 
                     let mut resting_completed = false;
                     let resting_clone = snap.market_orders.get(&oid).cloned();
@@ -1457,11 +1466,16 @@ pub fn handle_orders_escrow(
                     })
                     .collect();
 
-                Ok((purchased_lines, total_qty_bought, total_cost, total_sales_tax, orders_created, item_statuses, buyer_bal_final, seller_acct_updates, delivered_item_records, matched_sellers))
+                Ok((purchased_lines, total_qty_bought, total_cost, total_sales_tax, orders_created, item_statuses, buyer_bal_final, seller_acct_updates, delivered_item_records, matched_sellers, career_fills))
             });
 
             match res {
-                Ok((line_count, total_qty, total_cost, total_sales_tax, orders_created, item_statuses, buyer_bal_final, seller_acct_updates, delivered_item_records, matched_sellers)) => {
+                Ok((line_count, total_qty, total_cost, total_sales_tax, orders_created, item_statuses, buyer_bal_final, seller_acct_updates, delivered_item_records, matched_sellers, career_fills)) => {
+                    for (b_id, s_id, tid, gross) in career_fills {
+                        crate::services::quasar_career_goals::record_market_fill_career_goals(
+                            ctx, b_id, s_id, tid, gross,
+                        );
+                    }
                     for (matched_oid, seller_id) in matched_sellers {
                         super::notify_own_order_changed(ctx, seller_id, 0, matched_oid, "Change");
                     }

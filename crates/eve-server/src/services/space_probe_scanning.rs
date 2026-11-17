@@ -1472,8 +1472,18 @@ async fn handle_request_scans(
     let mut rows = Vec::new();
     for (sig, wh_item_id, covering_probes, resolved, diff_level, req_min_strength, formation_strength, sig_max_dev_au, sig_range_au) in scan_results {
         ctx.record_character_scan_progress(char_id, sys_id, &sig.signature_id, sig.signal_strength);
-        if resolved {
-            ctx.mark_signature_scanned(char_id, sys_id, wh_item_id);
+        if resolved && ctx.mark_signature_scanned(char_id, sys_id, wh_item_id)
+            && sig.sig_group.eq_ignore_ascii_case("Wormhole")
+        {
+            crate::quasar_gateway::isolate_side_effect("space_probe_scanning.career_wormhole", || {
+                crate::services::quasar_career_goals::record_career_sub_kind(
+                    ctx,
+                    char_id,
+                    "wormholes",
+                    None,
+                    1,
+                );
+            });
         }
         let sig_max_dev_m = sig_max_dev_au * AU_IN_METERS;
         let show_group = sig.signal_strength >= 0.25;

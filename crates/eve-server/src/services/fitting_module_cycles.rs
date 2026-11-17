@@ -1877,6 +1877,16 @@ pub(crate) async fn handle_module_cycles(
                 started_at_unix: ctx.now_unix_secs(),
             };
 
+            let pre_target_combat_state = if cap_drain_target > 0.0 || remote_shield_amount > 0.0 {
+                if let Some(tid) = target_id_opt {
+                    sys.get_combat_state(tid).await.ok().flatten()
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             if let Err(e) = sys.add_module_cycle(cycle).await {
                 ctx.remove_projected_ewar_by_module(ship_id, module_id);
                 if e.contains("ModuleAlreadyActive") {
@@ -2087,6 +2097,43 @@ pub(crate) async fn handle_module_cycles(
                 ctx, sys_id, char_id, ship_id, module_id, m.type_id, mod_type, m.charge_type_id,
                 disables_target_mwd_mjd, hic_bubble_radius_m, target_id_opt,
             );
+            if let Some(tid) = target_id_opt {
+                if let Some(jam_t) = crate::services::inventory_fitting::fitting_ewar_capital::ewar_jamming_type(
+                    mod_type,
+                    m.charge_type_id,
+                    disables_target_mwd_mjd,
+                    hic_bubble_radius_m,
+                ) {
+                    crate::services::quasar_career_goals::record_ewar_career_seconds(
+                        ctx, char_id, tid, jam_t, duration_s,
+                    );
+                }
+                if let Some(pre_cs) = pre_target_combat_state {
+                    if let Ok(Some(post_cs)) = sys.get_combat_state(tid).await {
+                        if cap_drain_target > 0.0 {
+                            let drained = (pre_cs.capacitor - post_cs.capacitor).max(0.0);
+                            crate::services::quasar_career_goals::record_cap_warfare_career(
+                                ctx,
+                                char_id,
+                                ship_id,
+                                tid,
+                                "neutralizer",
+                                drained,
+                            );
+                        }
+                        if remote_shield_amount > 0.0 {
+                            let boosted = (post_cs.shield_hp - pre_cs.shield_hp).max(0.0);
+                            crate::services::quasar_career_goals::record_remote_repair_career(
+                                ctx,
+                                char_id,
+                                tid,
+                                "shield_boost",
+                                boosted,
+                            );
+                        }
+                    }
+                }
+            }
 
             let mut volley_destroyed_target = false;
             if (is_turret_group || is_missile_group || is_vorton_group) && target_id_opt.is_some() {

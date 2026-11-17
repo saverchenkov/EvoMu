@@ -1201,6 +1201,13 @@ pub async fn handle_crimewatch(
                     expiry_time: expiry_ft,
                 },
             );
+            crate::services::quasar_career_goals::record_career_sub_kind(
+                ctx,
+                char_id,
+                "duels",
+                Some("challenge_duel"),
+                1,
+            );
             Some(Ok(PyRep::keyval([
                 ("challengerID", PyRep::Integer(char_id)),
                 ("targetID", PyRep::Integer(target_char_id)),
@@ -1316,6 +1323,20 @@ pub async fn handle_crimewatch(
                         timeout: PyRep::Bool(true),
                         do_alert: None,
                     },
+                );
+                crate::services::quasar_career_goals::record_career_sub_kind(
+                    ctx,
+                    char_id,
+                    "duels",
+                    Some("participate_duel"),
+                    1,
+                );
+                crate::services::quasar_career_goals::record_career_sub_kind(
+                    ctx,
+                    challenger_id,
+                    "duels",
+                    Some("participate_duel"),
+                    1,
                 );
             }
             Some(Ok(PyRep::keyval([

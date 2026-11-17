@@ -519,14 +519,33 @@ fn sde_achievement_flatbuffer_encodes_all_roots_categories_methods_and_definitio
         let aid_str = ach.get_str(4).expect("Achievement Id").to_string();
         encoded_achs.insert(aid_str, ach);
     }
+    let mut saw_social = false;
     for cat in &child_cats {
         let cat_id_str = cat.get_str(4).expect("Category Id");
         assert!(cat_id_str.starts_with("00000000-0000-0000-0000-"));
+        let name_id = cat.get_u32(6, 0);
+        let desc_id = cat.get_u32(8, 0);
+        assert!(
+            name_id > 0,
+            "category {cat_id_str} ({:?}) must encode non-zero Name localization id",
+            cat.get_str(18)
+        );
+        assert!(
+            desc_id > 0,
+            "category {cat_id_str} ({:?}) must encode non-zero Description localization id",
+            cat.get_str(18)
+        );
+        if cat.get_str(18) == Some("social") {
+            saw_social = true;
+            assert_eq!(name_id, 599_698);
+            assert_eq!(desc_id, 582_715);
+        }
         for ach in cat.get_table_vec(16) {
             let aid_str = ach.get_str(4).expect("Achievement Id").to_string();
             encoded_achs.insert(aid_str, ach);
         }
     }
+    assert!(saw_social, "category 5 (social) must be encoded under Challenges");
 
     assert_eq!(encoded_achs.len(), mgr.definitions.len());
     assert!(!encoded_achs.is_empty());

@@ -716,6 +716,24 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                     Ok(kv) => completed_kvs.push(kv),
                     Err(e) => return Some(Err(e)),
                 }
+                let runs = u64::try_from(commit.job.runs).unwrap_or(0).max(1);
+                let research_ev = match commit.job.activity_id {
+                    5 => Some(("copy_blueprint", runs)),
+                    4 => Some(("research_me", runs)),
+                    3 => Some(("research_te", runs.saturating_mul(2))),
+                    _ => None,
+                };
+                if let Some((sub_kind, delta)) = research_ev {
+                    crate::quasar_gateway::isolate_side_effect("industry_jobs_lifecycle.career_research", || {
+                        crate::services::quasar_career_goals::record_career_sub_kind(
+                            ctx,
+                            char_id,
+                            "research",
+                            Some(sub_kind),
+                            delta,
+                        );
+                    });
+                }
             }
             if method == "CompleteManyJobs" {
                 Some(Ok(PyRep::List(completed_kvs)))
