@@ -574,6 +574,8 @@ pub fn handle(
             for (idx, &tid) in p0_resources.iter().enumerate() {
                 let extracted_qty = extracted_map.get(&tid).copied().unwrap_or(0);
                 let depletion = ((extracted_qty as f64) / 100_000.0).min(0.40);
+                // DERIVED: SDE omits per-planet P0 density maps; deterministic rank-decay curve
+                // `(0.85 - 0.08 * rank) - min(extracted / 100k, 0.40)` clamped to `[0.25, 1.0]`.
                 let quality = (0.85 - (idx as f64) * 0.08 - depletion).clamp(0.25, 1.0);
                 entries.push((PyRep::Integer(tid as i64), PyRep::Real(quality)));
             }

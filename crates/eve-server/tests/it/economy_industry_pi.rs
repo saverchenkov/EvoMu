@@ -1368,6 +1368,13 @@ async fn test_pi_colony_command_center_pins_and_links() {
             TrainedSkillRecord { type_id: 33467, level: 4, skill_points: 135_765.0, },
         );
     });
+    s1.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
     let bal_before_launch = ctx.db.get_character(90_000_001).unwrap().balance;
     let launch_res = rpc(
         &ctx,

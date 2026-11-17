@@ -98,6 +98,8 @@ async fn test_planetary_interaction_expedited_transfer() {
         grant_pi_skills(snap, char_id);
         seed_cargo_item(snap, CC_PIN_TYPE_ID, char_id, ship_id, 1);
     });
+    sess.station_id = None;
+    sess.structure_id = None;
 
     // Deploy colony
     let col_dep = rpc(
@@ -329,6 +331,8 @@ async fn test_planetary_interaction_launch_commodities_v24() {
         grant_pi_skills(snap, char_id);
         seed_cargo_item(snap, CC_PIN_TYPE_ID, char_id, ship_id, 1);
     });
+    sess.station_id = None;
+    sess.structure_id = None;
 
     let col_dep = rpc(
         &ctx,
@@ -371,6 +375,7 @@ async fn test_planetary_interaction_launch_commodities_v24() {
         let mut net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
         if let Some(cc) = net.pins.iter_mut().find(|p| p.pin_id == cc_pin_id) {
             cc.contents.insert(WATER_P1_TYPE_ID, 2_800);
+            cc.contents.insert(2268, 250); // Aqueous Liquids P0 for multi-commodity launch
         }
         if let Some(lp) = net.pins.iter_mut().find(|p| p.pin_id == launch_pin_id) {
             lp.contents.insert(WATER_P1_TYPE_ID, 500);
@@ -379,6 +384,8 @@ async fn test_planetary_interaction_launch_commodities_v24() {
             ext.contents.insert(WATER_P1_TYPE_ID, 50);
         }
         eve_server::services::industry_pi::save_pi_network(snap, char_id, JITA_PLANET_ID, &net);
+        seed_cargo_item(snap, WATER_P1_TYPE_ID, char_id, ship_id, 100);
+        seed_cargo_item(snap, 2268, char_id, ship_id, 150);
     });
 
     let bound_planet_id = ctx
@@ -460,7 +467,18 @@ async fn test_planetary_interaction_launch_commodities_v24() {
     .expect_err("Insufficient commodities in pin must fail");
     assert_eq!(err_insuf.code, "InsufficientCommoditiesForRouting");
 
-    // 2. Successful V24 bound launch under ContractValidationMode::Strict -> scalar Blue FileTime timestamp
+    // 2. Successful V24 bound multi-commodity launch while docked -> scalar Blue FileTime timestamp
+    sess.solar_system_id = Some(JITA_SOLAR_SYSTEM_ID);
+    sess.station_id = Some(60_003_760);
+    sess.structure_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = JITA_SOLAR_SYSTEM_ID;
+            ch.station_id = Some(60_003_760);
+            ch.structure_id = None;
+        }
+    });
+    assert!(sess.station_id.is_some(), "Command Center launch must succeed while docked");
     let expected_ft = ctx.now_blueos_filetime_ticks();
     let launch_rep = ClientHarness::new(SessionBorrowWireTransport {
         ctx: &ctx,
@@ -474,7 +492,10 @@ async fn test_planetary_interaction_launch_commodities_v24() {
         "UserLaunchCommodities",
         &[
             PyRep::Integer(cc_pin_id),
-            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(200))]),
+            PyRep::Dict(vec![
+                (PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(200)),
+                (PyRep::Integer(2268), PyRep::Integer(100)),
+            ]),
         ],
         &HashMap::new(),
     )
@@ -484,6 +505,22 @@ async fn test_planetary_interaction_launch_commodities_v24() {
         Some(expected_ft),
         "V24 UserLaunchCommodities must return scalar Blue FileTime lastLaunchTime"
     );
+
+    // Customs Office / Launchpad transfers must fail while docked (NotInSpace)
+    let err_docked_poco = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(launch_pin_id),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(50))]),
+        ],
+    )
+    .await
+    .expect_err("Docked Launchpad/CustomsOffice launch must fail with NotInSpace");
+    assert_eq!(err_docked_poco.code, "NotInSpace");
 
     // Immediate retry from same pin must fail with 60s LaunchOnCooldown
     let err_cd = rpc(
@@ -501,7 +538,7 @@ async fn test_planetary_interaction_launch_commodities_v24() {
     .expect_err("Immediate repeat launch from same pin must hit 60s cooldown");
     assert_eq!(err_cd.code, "LaunchOnCooldown");
 
-    // Inspect created launch canister & verify pin deduction
+    // Inspect created multi-stack launch canister (Blue FileTime launchTime + aggregated quantity + commodities dict) & verify pin deduction
     let launches = rpc(&ctx, &mut sess, "planetMgr", "GetMyLaunchesDetails", &[PyRep::Integer(JITA_PLANET_ID)])
         .await
         .expect("GetMyLaunchesDetails");
@@ -513,18 +550,50 @@ async fn test_planetary_interaction_launch_commodities_v24() {
         .dict_get("launchID")
         .and_then(|v| v.as_i64())
         .expect("launchID");
-    assert_eq!(launch_rows[0].dict_get("quantity").and_then(|v| v.as_i64()), Some(200));
+    assert_eq!(launch_rows[0].dict_get("quantity").and_then(|v| v.as_i64()), Some(300));
+    assert_eq!(launch_rows[0].dict_get("launchTime").and_then(|v| v.as_i64()), Some(expected_ft));
+    let PyRep::Dict(comms_entries) = launch_rows[0]
+        .dict_get("commodities")
+        .expect("commodities dict in launch details")
+    else {
+        panic!("expected Dict for commodities");
+    };
+    assert_eq!(comms_entries.len(), 2);
+    assert!(comms_entries.contains(&(PyRep::Integer(2268), PyRep::Integer(100))));
+    assert!(comms_entries.contains(&(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(200))));
 
     ctx.db.with_snapshot(|snap| {
         let net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
         let cc = net.pins.iter().find(|p| p.pin_id == cc_pin_id).expect("cc");
         assert_eq!(cc.contents.get(&WATER_P1_TYPE_ID).copied(), Some(2_600));
+        assert_eq!(cc.contents.get(&2268).copied(), Some(150));
         let container = snap.items.get(&launch_id).expect("launch container item");
         assert_eq!(container.location_id, i64::from(JITA_SOLAR_SYSTEM_ID));
     });
 
-    // Advance 61s and launch again from the same pin
+    // Advance 61s and launch from a remote solar system (Command Center works anywhere in the universe)
     ctx.advance_secs(61);
+    sess.solar_system_id = Some(30_000_001);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = 30_000_001;
+        }
+    });
+    let err_remote_lp = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(launch_pin_id),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(50))]),
+        ],
+    )
+    .await
+    .expect_err("Remote Launchpad/CustomsOffice launch must fail");
+    assert_eq!(err_remote_lp.code, "ColonyNotInCurrentSystem");
+
     let expected_ft_2 = ctx.now_blueos_filetime_ticks();
     let launch_rep_2 = ClientHarness::new(SessionBorrowWireTransport {
         ctx: &ctx,
@@ -544,4 +613,40 @@ async fn test_planetary_interaction_launch_commodities_v24() {
     )
     .await;
     assert_eq!(launch_rep_2.as_i64(), Some(expected_ft_2));
+
+    // Undocked same-system multi-commodity ImportToColony consumes and credits all entries 1:1
+    sess.solar_system_id = Some(JITA_SOLAR_SYSTEM_ID);
+    sess.station_id = None;
+    sess.structure_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = JITA_SOLAR_SYSTEM_ID;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    let imp_multi = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(launch_pin_id),
+            PyRep::Dict(vec![
+                (PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(40)),
+                (PyRep::Integer(2268), PyRep::Integer(60)),
+            ]),
+            PyRep::String("ImportToColony".into()),
+        ],
+    )
+    .await
+    .expect("multi-commodity ImportToColony succeeds");
+    assert_eq!(get_i64(&imp_multi, "routedQuantity"), Some(100));
+    ctx.db.with_snapshot(|snap| {
+        let net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+        let lp = net.pins.iter().find(|p| p.pin_id == launch_pin_id).expect("lp");
+        assert_eq!(lp.contents.get(&WATER_P1_TYPE_ID).copied(), Some(540));
+        assert_eq!(lp.contents.get(&2268).copied(), Some(60));
+    });
 }

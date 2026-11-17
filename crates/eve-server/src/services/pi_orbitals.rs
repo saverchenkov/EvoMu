@@ -259,12 +259,31 @@ fn parse_user_launch_commodities_args(
             })?;
             commodities.insert(tid, qty_i32);
         }
+        let explicit_dest = kwargs
+            .get("destination")
+            .and_then(PyRep::as_str)
+            .or_else(|| launch_args.get(2).and_then(PyRep::as_str))
+            .filter(|d| {
+                matches!(
+                    *d,
+                    "ImportToColony"
+                        | "Import"
+                        | "CommandCenterLaunch"
+                        | "CommandCenter"
+                        | "CustomsOffice"
+                        | "Skyhook"
+                        | "Storage"
+                        | "Hangar"
+                )
+            });
+        let destination = explicit_dest.unwrap_or("CommandCenterLaunch").to_string();
+        let is_v24_wire = !matches!(destination.as_str(), "ImportToColony" | "Import");
         return Ok(ParsedLaunchRequest {
             planet_id,
             launch_pin_id: Some(pin_id),
             commodities,
-            destination: "CommandCenterLaunch".to_string(),
-            is_v24_wire: true,
+            destination,
+            is_v24_wire,
         });
     }
 
@@ -819,16 +838,6 @@ pub fn handle_pi_orbitals(
                         client_error: None,
                     });
                 };
-                if current_sys_id != Some(col.solar_system_id) {
-                    return Err(BridgeRpcError {
-                        code: "ColonyNotInCurrentSystem".into(),
-                        message: format!(
-                            "Planetary colony {planet_id} is in solar system {}, not {:?}",
-                            col.solar_system_id, current_sys_id
-                        ),
-                        client_error: None,
-                    });
-                }
 
                 let mut total_vol_m3 = 0.0_f64;
                 let mut total_base_value = 0.0_f64;
@@ -848,6 +857,26 @@ pub fn handle_pi_orbitals(
                 }
 
                 if req.destination == "ImportToColony" || req.destination == "Import" {
+                    if current_sys_id != Some(col.solar_system_id) {
+                        return Err(BridgeRpcError {
+                            code: "ColonyNotInCurrentSystem".into(),
+                            message: format!(
+                                "Planetary colony {planet_id} is in solar system {}, not {:?}",
+                                col.solar_system_id, current_sys_id
+                            ),
+                            client_error: None,
+                        });
+                    }
+                    if session.station_id.is_some() || session.structure_id.is_some() {
+                        return Err(BridgeRpcError {
+                            code: "NotInSpace".into(),
+                            message: format!(
+                                "Orbital transfer via {} requires caller to be undocked in space",
+                                req.destination
+                            ),
+                            client_error: None,
+                        });
+                    }
                     let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
                     let target_idx = req
                         .launch_pin_id
@@ -872,23 +901,29 @@ pub fn handle_pi_orbitals(
                             client_error: None,
                         });
                     }
-                    let existing_pin_qty = net.pins[target_idx].contents.get(&first_tid).copied().unwrap_or(0);
-                    let new_pin_qty = existing_pin_qty.checked_add(first_qty).ok_or_else(|| BridgeRpcError {
-                        code: "InvalidCommodityQuantity".into(),
-                        message: "Target pin commodity quantity overflow".into(),
-                        client_error: None,
-                    })?;
-
-                    let import_plan = plan_pi_import_consumptions(
-                        snap,
-                        char_id,
-                        planet_id,
-                        first_tid,
-                        first_qty,
-                        session.ship_id,
-                        session.station_id,
-                        session.structure_id,
-                    )?;
+                    let mut planned_imports = Vec::with_capacity(req.commodities.len());
+                    for (&tid, &qty_i32) in &req.commodities {
+                        let qty = qty_i32 as u64;
+                        let existing_pin_qty =
+                            net.pins[target_idx].contents.get(&tid).copied().unwrap_or(0);
+                        let new_pin_qty =
+                            existing_pin_qty.checked_add(qty).ok_or_else(|| BridgeRpcError {
+                                code: "InvalidCommodityQuantity".into(),
+                                message: "Target pin commodity quantity overflow".into(),
+                                client_error: None,
+                            })?;
+                        let import_plan = plan_pi_import_consumptions(
+                            snap,
+                            char_id,
+                            planet_id,
+                            tid,
+                            qty,
+                            session.ship_id,
+                            session.station_id,
+                            session.structure_id,
+                        )?;
+                        planned_imports.push((tid, new_pin_qty, import_plan));
+                    }
                     let poco_tax = prepare_poco_commodity_tax(
                         ctx,
                         snap,
@@ -900,21 +935,27 @@ pub fn handle_pi_orbitals(
                         "import",
                     )?;
 
-                    apply_pi_import_consumptions(snap, char_id, &import_plan)?;
+                    for (_, _, import_plan) in &planned_imports {
+                        apply_pi_import_consumptions(snap, char_id, import_plan)?;
+                    }
                     commit_poco_commodity_tax(
                         snap,
                         char_id,
                         planet_id,
                         poco_tax,
-                        format!("POCO import tax for {first_qty}x type {first_tid} on planet {planet_id}"),
+                        format!(
+                            "POCO import tax for {total_qty} units on planet {planet_id}"
+                        ),
                         "import",
                     )?;
 
-                    net.pins[target_idx].contents.insert(first_tid, new_pin_qty);
+                    for (tid, new_pin_qty, _) in planned_imports {
+                        net.pins[target_idx].contents.insert(tid, new_pin_qty);
+                    }
                     save_pi_network(snap, char_id, planet_id, &net);
 
                     return Ok((
-                        first_qty,
+                        total_qty,
                         poco_tax.tax_isk,
                         poco_tax.tax_isk,
                         poco_tax.orbital_tid,
@@ -961,6 +1002,36 @@ pub fn handle_pi_orbitals(
                         })?
                 };
 
+                let is_cc_pin = is_command_center_pin(&ctx.sde, net.pins[launch_pin_idx].type_id);
+                let is_cc = if req.is_v24_wire {
+                    is_cc_pin
+                } else {
+                    req.destination == "CommandCenterLaunch" || req.destination == "CommandCenter"
+                };
+                if !is_cc && current_sys_id != Some(col.solar_system_id) {
+                    return Err(BridgeRpcError {
+                        code: "ColonyNotInCurrentSystem".into(),
+                        message: format!(
+                            "Planetary colony {planet_id} is in solar system {}, not {:?}",
+                            col.solar_system_id, current_sys_id
+                        ),
+                        client_error: None,
+                    });
+                }
+                if !is_cc
+                    && req.destination != "Hangar"
+                    && (session.station_id.is_some() || session.structure_id.is_some())
+                {
+                    return Err(BridgeRpcError {
+                        code: "NotInSpace".into(),
+                        message: format!(
+                            "Orbital launch via {} requires caller to be undocked in space",
+                            req.destination
+                        ),
+                        client_error: None,
+                    });
+                }
+
                 if req.is_v24_wire {
                     let last_launch = net.pins[launch_pin_idx].last_launch_unix;
                     if last_launch > 0 && now_unix < last_launch.saturating_add(60) {
@@ -975,13 +1046,6 @@ pub fn handle_pi_orbitals(
                         });
                     }
                 }
-
-                let is_cc_pin = is_command_center_pin(&ctx.sde, net.pins[launch_pin_idx].type_id);
-                let is_cc = if req.is_v24_wire {
-                    is_cc_pin
-                } else {
-                    req.destination == "CommandCenterLaunch" || req.destination == "CommandCenter"
-                };
                 if req.is_v24_wire
                     || req.destination == "CustomsOffice"
                     || req.destination == "Skyhook"
@@ -1220,16 +1284,34 @@ pub fn handle_pi_orbitals(
                                 })
                                 .unwrap_or(session_sys_id)
                         };
-                        let launch_ts = meta
-                            .and_then(|m| m.created_unix)
-                            .map(|t| t as i64)
-                            .unwrap_or(now_unix as i64);
-                        let (comm_tid, comm_qty) = snap
+                        let launch_ts = crate::sp6_lifecycle::unix_to_filetime(
+                            meta.and_then(|m| m.created_unix).unwrap_or(now_unix),
+                        );
+                        let mut contents = snap
                             .items
                             .values()
-                            .find(|c| c.location_id == it.item_id)
-                            .map(|c| (c.type_id, c.quantity))
-                            .unwrap_or((it.type_id, it.quantity));
+                            .filter(|c| c.location_id == it.item_id)
+                            .collect::<Vec<_>>();
+                        contents.sort_by_key(|c| (c.type_id, c.item_id));
+                        let mut total_comm_qty = 0_i64;
+                        let mut grouped_comms = BTreeMap::<TypeId, i64>::new();
+                        for c in &contents {
+                            let q = i64::from(c.quantity.max(0));
+                            total_comm_qty = total_comm_qty.saturating_add(q);
+                            *grouped_comms.entry(c.type_id).or_default() += q;
+                        }
+                        let mut commodities_dict = Vec::with_capacity(grouped_comms.len());
+                        for (tid, qty) in &grouped_comms {
+                            commodities_dict.push((
+                                PyRep::Integer(i64::from(*tid)),
+                                PyRep::Integer(*qty),
+                            ));
+                        }
+                        let (comm_tid, comm_qty) = if let Some(first_c) = contents.first() {
+                            (first_c.type_id, total_comm_qty)
+                        } else {
+                            (it.type_id, i64::from(it.quantity))
+                        };
                         let pos = snap
                             .item_positions
                             .get(&it.item_id)
@@ -1242,7 +1324,8 @@ pub fn handle_pi_orbitals(
                             ("planetID", PyRep::Integer(launch_planet)),
                             ("solarSystemID", PyRep::Integer(sys_id)),
                             ("typeID", PyRep::Integer(comm_tid as i64)),
-                            ("quantity", PyRep::Integer(comm_qty as i64)),
+                            ("quantity", PyRep::Integer(comm_qty)),
+                            ("commodities", PyRep::Dict(commodities_dict)),
                             ("status", PyRep::Integer(1)),
                             ("launchTime", PyRep::Integer(launch_ts)),
                             ("x", PyRep::Real(pos[0])),
