@@ -430,83 +430,141 @@ pub fn handle_anchor_orbital(
     }
     let planet_id = target_planet.celestial_id;
 
-    let (tid, pid) = ctx.db.try_with_mut_snapshot(|snap| {
-        if snap
-            .structures
-            .get(&item_id)
-            .is_some_and(|st| st.state != "Destroyed" && st.state != "Unanchored")
-        {
-            return Err(BridgeRpcError {
-                code: "AlreadyAnchored".into(),
-                message: format!("Orbital structure {item_id} is already anchored in space"),
-                client_error: None,
-            });
-        }
-        let tag = format!("Orbital:{planet_id}");
-        if snap.structures.values().any(|st| {
-            st.solar_system_id == sys_id
-                && st.state != "Destroyed"
-                && st.state != "Unanchored"
-                && st.name == tag
-        }) {
-            return Err(BridgeRpcError {
-                code: "PlanetAlreadyHasOrbital".into(),
-                message: format!("Planet {planet_id} already has an anchored orbital"),
-                client_error: None,
-            });
-        }
-        let it = snap.items.get_mut(&item_id).ok_or_else(|| BridgeRpcError {
-            code: "ItemNotFound".into(),
-            message: format!("Gantry item {item_id} not found"),
-            client_error: None,
+    let (orbital_id, tid, pid, prev_cargo, updated_item, spawned_orbital) =
+        ctx.db.try_with_mut_snapshot(|snap| {
+            if snap
+                .structures
+                .get(&item_id)
+                .is_some_and(|st| st.state != "Destroyed" && st.state != "Unanchored")
+            {
+                return Err(err(
+                    "AlreadyAnchored",
+                    format!("Orbital structure {item_id} is already anchored in space"),
+                ));
+            }
+            let tag = format!("Orbital:{planet_id}");
+            if snap.structures.values().any(|st| {
+                st.solar_system_id == sys_id
+                    && st.state != "Destroyed"
+                    && st.state != "Unanchored"
+                    && st.name == tag
+            }) {
+                return Err(err(
+                    "PlanetAlreadyHasOrbital",
+                    format!("Planet {planet_id} already has an anchored orbital"),
+                ));
+            }
+            let it_snapshot = snap.items.get(&item_id).cloned().ok_or_else(|| {
+                err("ItemNotFound", format!("Gantry item {item_id} not found"))
+            })?;
+            if it_snapshot.owner_id != char_corp && it_snapshot.owner_id != char_id {
+                return Err(err(
+                    "NotItemOwner",
+                    format!("Character {char_id} does not own item {item_id}"),
+                ));
+            }
+            if snap.is_item_or_ancestor_locked_or_impounded(item_id)
+                || snap.is_item_locked_in_contract_or_job(item_id)
+            {
+                return Err(err(
+                    "ItemLocked",
+                    format!("Gantry item {item_id} is locked and cannot be anchored"),
+                ));
+            }
+            if it_snapshot.location_id != ship_id
+                || it_snapshot.flag != eve_db::InventoryFlag::Cargo
+            {
+                return Err(err(
+                    "ItemNotInCargo",
+                    format!(
+                        "Gantry item {item_id} must be in the cargo hold of active ship {ship_id}"
+                    ),
+                ));
+            }
+            if it_snapshot.quantity < 1 {
+                return Err(err(
+                    "InvalidQuantity",
+                    format!(
+                        "Gantry item {item_id} has invalid quantity {}",
+                        it_snapshot.quantity
+                    ),
+                ));
+            }
+            let tid = it_snapshot.type_id;
+            let (orbital_id, updated_item, spawned_orbital) = if it_snapshot.quantity == 1 {
+                let it = snap.items.get_mut(&item_id).ok_or_else(|| {
+                    err("ItemNotFound", format!("Gantry item {item_id} not found"))
+                })?;
+                it.owner_id = char_corp;
+                it.location_id = planet_id;
+                it.flag = eve_db::InventoryFlag::None;
+                it.quantity = 1;
+                it.singleton = true;
+                it.version = it.version.saturating_add(1);
+                (item_id, it.clone(), None)
+            } else {
+                let it = snap.items.get_mut(&item_id).ok_or_else(|| {
+                    err("ItemNotFound", format!("Gantry item {item_id} not found"))
+                })?;
+                it.quantity -= 1;
+                it.singleton = false;
+                it.version = it.version.saturating_add(1);
+                let updated_cargo = it.clone();
+                snap.next_entity_id += 1;
+                let new_orbital_id = snap.next_entity_id;
+                let new_orbital = eve_db::InventoryItemRecord {
+                    item_id: new_orbital_id,
+                    type_id: tid,
+                    owner_id: char_corp,
+                    location_id: planet_id,
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                };
+                snap.items.insert(new_orbital_id, new_orbital.clone());
+                (new_orbital_id, updated_cargo, Some(new_orbital))
+            };
+            snap.structures.insert(
+                orbital_id,
+                eve_db::UpwellStructureRecord {
+                    structure_id: orbital_id,
+                    type_id: tid,
+                    owner_corp_id: char_corp,
+                    solar_system_id: sys_id,
+                    name: tag,
+                    position: ship_pos.to_array(),
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 1_000,
+                    shield_hp: 500_000.0,
+                    armor_hp: 500_000.0,
+                    hull_hp: 300_000.0,
+                    reinforced_until_unix: 0,
+                    last_damage_tick: 0,
+                    last_damage_unix: 0,
+                    self_destruct_at_unix: None,
+                },
+            );
+            Ok((
+                orbital_id,
+                tid,
+                planet_id,
+                it_snapshot,
+                updated_item,
+                spawned_orbital,
+            ))
         })?;
-        if it.owner_id != char_corp && it.owner_id != char_id {
-            return Err(BridgeRpcError {
-                code: "NotItemOwner".into(),
-                message: format!("Character {char_id} does not own item {item_id}"),
-                client_error: None,
-            });
-        }
-        if it.location_id != ship_id || it.flag != eve_db::InventoryFlag::Cargo {
-            return Err(BridgeRpcError {
-                code: "ItemNotInCargo".into(),
-                message: format!("Gantry item {item_id} must be in the cargo hold of active ship {ship_id}"),
-                client_error: None,
-            });
-        }
-        let tid = it.type_id;
-        it.owner_id = char_corp;
-        it.location_id = planet_id;
-        it.flag = eve_db::InventoryFlag::None;
-        it.singleton = true;
-        it.version += 1;
-        snap.structures.insert(
-            item_id,
-            eve_db::UpwellStructureRecord {
-                structure_id: item_id,
-                type_id: tid,
-                owner_corp_id: char_corp,
-                solar_system_id: sys_id,
-                name: tag,
-                position: ship_pos.to_array(),
-                state: "ShieldVulnerable".into(),
-                quantum_core_installed: true,
-                fuel_blocks: 1_000,
-                shield_hp: 500_000.0,
-                armor_hp: 500_000.0,
-                hull_hp: 300_000.0,
-                reinforced_until_unix: 0,
-                last_damage_tick: 0,
-                last_damage_unix: 0,
-                self_destruct_at_unix: None,
-            },
-        );
-        Ok((tid, planet_id))
-    })?;
+
+    ctx.notify_item_mutation(char_id, Some(&prev_cargo), Some(&updated_item));
+    if let Some(ref spawned) = spawned_orbital {
+        ctx.notify_item_mutation(char_id, None, Some(spawned));
+    }
 
     Ok(PyRep::keyval([
-        ("itemID", PyRep::Integer(item_id)),
-        ("orbitalID", PyRep::Integer(item_id)),
+        ("itemID", PyRep::Integer(orbital_id)),
+        ("orbitalID", PyRep::Integer(orbital_id)),
         ("planetID", PyRep::Integer(pid)),
         ("typeID", PyRep::Integer(i64::from(tid))),
         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),

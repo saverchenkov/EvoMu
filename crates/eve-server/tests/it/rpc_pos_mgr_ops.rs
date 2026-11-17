@@ -1711,3 +1711,224 @@ async fn test_pos_mgr_unanchor_orbital_e2e_lifecycle_and_security() {
         .expect_err("planetMgr.DeleteLaunch must reject corp Customs Office");
     assert_eq!(del_corp_poco_err.code, "LaunchAccessDenied");
 }
+
+#[tokio::test]
+async fn test_pos_mgr_anchor_orbital_stacked_and_locked_gantry() {
+    const RANCER_SYS: u32 = 30_002_718;
+    const GANTRY_TYPE_ID: u32 = 3962;
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let planet = ctx
+        .sde
+        .celestials_in_system(RANCER_SYS)
+        .into_iter()
+        .find(|c| c.group_id == 7)
+        .expect("Rancer planet");
+    let near_planet = planet.position + glam::DVec3::new(planet.radius + 5_000.0, 0.0, 0.0);
+
+    let mut dir_sess = setup_pilot(&ctx, 508, "demo", "demo-secret", PILOT1).await;
+    let ship_id = dir_sess.ship_id.expect("Active ship");
+    let corp_id = 98_556_001_i64;
+    let stack_gantry_id = 890_556_201_i64;
+    let locked_flag_gantry_id = 890_556_202_i64;
+    let contract_locked_gantry_id = 890_556_203_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Stacked Orbital Corp".into();
+        corp.ticker = "STCK".into();
+        corp.ceo_id = PILOT1;
+        snap.corporations.insert(corp_id, corp);
+
+        if let Some(ch) = snap.characters.get_mut(&PILOT1) {
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = RANCER_SYS;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.type_id = 20185; // Charon freighter (465,000 m3 cargo)
+            sh.location_id = i64::from(RANCER_SYS);
+            sh.flag = InventoryFlag::None;
+            sh.singleton = true;
+        }
+        snap.items.insert(
+            stack_gantry_id,
+            InventoryItemRecord {
+                item_id: stack_gantry_id,
+                type_id: GANTRY_TYPE_ID,
+                owner_id: PILOT1,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 2,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            locked_flag_gantry_id,
+            InventoryItemRecord {
+                item_id: locked_flag_gantry_id,
+                type_id: GANTRY_TYPE_ID,
+                owner_id: PILOT1,
+                location_id: ship_id,
+                flag: InventoryFlag::Locked,
+                quantity: 2,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            contract_locked_gantry_id,
+            InventoryItemRecord {
+                item_id: contract_locked_gantry_id,
+                type_id: GANTRY_TYPE_ID,
+                owner_id: PILOT1,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 2,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.contracts.insert(
+            890_556_901,
+            eve_db::ContractRecord {
+                contract_id: 890_556_901,
+                issuer_id: PILOT1,
+                contract_type: "ItemExchange".into(),
+                status: "Outstanding".into(),
+                start_station_id: 60_003_760,
+                end_station_id: 60_003_760,
+                item_ids: vec![contract_locked_gantry_id],
+                ..Default::default()
+            },
+        );
+    });
+
+    dir_sess.corporation_id = Some(corp_id);
+    dir_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    dir_sess.solar_system_id = Some(RANCER_SYS);
+    dir_sess.station_id = None;
+    dir_sess.structure_id = None;
+
+    let sys_handle = ctx.systems.get_or_spawn(RANCER_SYS);
+    sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 20185,
+            position: near_planet,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 100.0,
+            inertia: 1.0,
+            mass: 1e8,
+            radius: 500.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .expect("spawn ship ball");
+
+    let bound_pos = Some(
+        ctx.bind_object(&dir_sess, "posMgr", i64::from(RANCER_SYS))
+            .expect("bind posMgr"),
+    );
+
+    // Locked flag or contract-locked stack must be rejected with ItemLocked without decrementing quantity.
+    for (locked_id, label) in [
+        (locked_flag_gantry_id, "Locked flag gantry stack"),
+        (contract_locked_gantry_id, "Contract-locked gantry stack"),
+    ] {
+        let locked_err = wire_rpc(
+            &ctx,
+            &mut dir_sess,
+            "posMgr",
+            bound_pos,
+            "AnchorOrbital",
+            &[PyRep::Integer(locked_id), PyRep::Integer(planet.celestial_id)],
+        )
+        .await
+        .expect_err(&format!("{label} must fail AnchorOrbital"));
+        assert_eq!(locked_err.code, "ItemLocked", "{label}");
+        assert_eq!(ctx.db.get_item(locked_id).unwrap().quantity, 2);
+    }
+
+    // Anchoring a stacked Customs Office Gantry (quantity == 2) splits 1 singleton unit off the stack.
+    let _ = ctx.drain_notifications_for_char(PILOT1);
+    let mut dir_harness = common::borrow_wire_harness(&ctx, &mut dir_sess);
+    let anchored = dir_harness
+        .call_ok(
+            "posMgr",
+            bound_pos,
+            "AnchorOrbital",
+            &[PyRep::Integer(stack_gantry_id), PyRep::Integer(planet.celestial_id)],
+            &HashMap::new(),
+        )
+        .await;
+    let anchor_notifs = dir_harness.drain_notifications();
+    drop(dir_harness);
+    assert!(
+        anchor_notifs.iter().any(|(ev, _)| ev == "OnItemChange"),
+        "Stacked AnchorOrbital must emit OnItemChange, got: {:?}",
+        anchor_notifs.iter().map(|(ev, _)| ev.as_str()).collect::<Vec<_>>()
+    );
+
+    let orbital_id = anchored
+        .dict_get("orbitalID")
+        .and_then(|v| v.as_i64())
+        .expect("orbitalID in AnchorOrbital reply");
+    assert_eq!(
+        anchored.dict_get("itemID").and_then(|v| v.as_i64()),
+        Some(orbital_id)
+    );
+    assert_ne!(
+        orbital_id, stack_gantry_id,
+        "Anchoring from a quantity > 1 stack must allocate a new singleton orbitalID"
+    );
+
+    ctx.db.with_snapshot(|snap| {
+        let cargo_stack = snap.items.get(&stack_gantry_id).expect("cargo stack remains");
+        assert_eq!(cargo_stack.location_id, ship_id);
+        assert_eq!(cargo_stack.flag, InventoryFlag::Cargo);
+        assert_eq!(cargo_stack.owner_id, PILOT1);
+        assert_eq!(cargo_stack.quantity, 1);
+        assert!(!cargo_stack.singleton);
+        assert!(!snap.structures.contains_key(&stack_gantry_id));
+
+        let orbital_item = snap.items.get(&orbital_id).expect("spawned orbital item");
+        assert_eq!(orbital_item.owner_id, corp_id);
+        assert_eq!(orbital_item.location_id, planet.celestial_id);
+        assert_eq!(orbital_item.flag, InventoryFlag::None);
+        assert_eq!(orbital_item.quantity, 1);
+        assert!(orbital_item.singleton);
+
+        let st = snap.structures.get(&orbital_id).expect("anchored orbital structure");
+        assert_eq!(st.owner_corp_id, corp_id);
+        assert_eq!(st.state, "ShieldVulnerable");
+    });
+
+    // Newly split orbital_id can subsequently be unanchored cleanly back into ship cargo.
+    let unanchored = wire_rpc(
+        &ctx,
+        &mut dir_sess,
+        "posMgr",
+        bound_pos,
+        "UnanchorOrbital",
+        &[PyRep::Integer(orbital_id)],
+    )
+    .await
+    .expect("Unanchor split orbital_id");
+    assert_eq!(unanchored.dict_get("itemID"), Some(&PyRep::Integer(orbital_id)));
+    assert_eq!(unanchored.dict_get("state"), Some(&PyRep::String("Unanchored".into())));
+    ctx.db.with_snapshot(|snap| {
+        let unanchored_item = snap.items.get(&orbital_id).expect("unanchored item");
+        assert_eq!(unanchored_item.location_id, ship_id);
+        assert_eq!(unanchored_item.flag, InventoryFlag::Cargo);
+        assert_eq!(unanchored_item.owner_id, PILOT1);
+        assert_eq!(unanchored_item.quantity, 1);
+        assert!(!unanchored_item.singleton);
+    });
+}
