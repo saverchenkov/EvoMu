@@ -1,34 +1,33 @@
 #[tokio::test]
 async fn test_failed_wal_write_restores_before_image_without_poisoning_subsequent_txs() {
-    let tmp_path = std::env::temp_dir().join(format!(
-        "evomu_cow_wal_recover_{}.json",
+    let sqlite_path = std::env::temp_dir().join(format!(
+        "evomu_cow_sqlite_recover_{}.sqlite",
         std::process::id()
     ));
-    let wal_dir = tmp_path.with_extension("json.wal");
-    let _ = std::fs::remove_file(&tmp_path);
-    let _ = std::fs::remove_dir_all(&wal_dir);
+    let sqlite_wal = std::path::PathBuf::from(format!("{}-wal", sqlite_path.display()));
+    let sqlite_shm = std::path::PathBuf::from(format!("{}-shm", sqlite_path.display()));
+    let _ = std::fs::remove_file(&sqlite_path);
+    let _ = std::fs::remove_file(&sqlite_wal);
+    let _ = std::fs::remove_file(&sqlite_shm);
 
-    let repo = eve_db::WorldRepository::new_empty_with_snapshot_path(Some(tmp_path.clone()))
-        .expect("new_empty_with_snapshot_path");
-    std::fs::write(&tmp_path, b"{}").expect("seed tmp_path");
-    // Block WAL append by placing a directory at `<tmp_path>.wal`.
-    std::fs::create_dir_all(&wal_dir).expect("create_dir_all wal_dir");
+    let repo = eve_db::WorldRepository::open_sqlite(&sqlite_path).expect("open_sqlite");
+    // Inject a SQLite commit failure on the next non-empty transaction.
+    repo.set_fault_plan_for_test(eve_db::TxFaultPlan::FailAtCommit);
 
     let first_err: Result<(), String> = repo.try_with_mut_snapshot(|snap| {
         snap.service_state_blobs
             .insert("first_tx".into(), "should_rollback".into());
         Ok(())
     });
-    assert!(first_err.is_err(), "blocked WAL must fail the transaction");
+    assert!(first_err.is_err(), "failed SQLite commit must fail the transaction");
     repo.with_snapshot(|snap| {
         assert!(
             !snap.service_state_blobs.contains_key("first_tx"),
-            "failed WAL tx must restore pre-tx snapshot"
+            "failed SQLite tx must restore pre-tx snapshot"
         );
     });
 
-    // Once the WAL path becomes writable again, subsequent transactions commit cleanly without poison.
-    let _ = std::fs::remove_dir_all(&wal_dir);
+    // TxFaultPlan is single-use; subsequent transactions commit cleanly without poison.
     repo.with_mut_snapshot(|snap| {
         snap.service_state_blobs
             .insert("second_tx".into(), "committed_ok".into());
@@ -41,8 +40,9 @@ async fn test_failed_wal_write_restores_before_image_without_poisoning_subsequen
     });
 
     drop(repo);
-    let _ = std::fs::remove_file(&tmp_path);
-    let _ = std::fs::remove_dir_all(&wal_dir);
+    let _ = std::fs::remove_file(&sqlite_path);
+    let _ = std::fs::remove_file(&sqlite_wal);
+    let _ = std::fs::remove_file(&sqlite_shm);
 }
 
 fn issue_874_make_session(session_id: u64, user_id: u64, char_id: i64, corp_id: i64) -> eve_machonet::SessionState {
@@ -258,13 +258,15 @@ async fn test_issue_874_ignored_try_with_mut_snapshot_failure_poisons_rpc_withou
 
 #[tokio::test]
 async fn test_issue_874_staged_notifications_discarded_for_caller_and_bystander_on_failure() {
-    let wal_tmp = std::env::temp_dir().join(format!(
-        "evomu_874_notify_stage_{}.json",
+    let sqlite_path = std::env::temp_dir().join(format!(
+        "evomu_874_notify_stage_{}.sqlite",
         std::process::id()
     ));
-    let wal_dir = wal_tmp.with_extension("json.wal");
-    let _ = std::fs::remove_file(&wal_tmp);
-    let _ = std::fs::remove_dir_all(&wal_dir);
+    let sqlite_wal = std::path::PathBuf::from(format!("{}-wal", sqlite_path.display()));
+    let sqlite_shm = std::path::PathBuf::from(format!("{}-shm", sqlite_path.display()));
+    let _ = std::fs::remove_file(&sqlite_path);
+    let _ = std::fs::remove_file(&sqlite_wal);
+    let _ = std::fs::remove_file(&sqlite_shm);
 
     let seed = eve_db::WorldRepository::with_demo_seed();
     let char_a = 90_000_001i64;
@@ -283,9 +285,7 @@ async fn test_issue_874_staged_notifications_discarded_for_caller_and_bystander_
     acct_b.user_id = uid_b;
     acct_b.username = "bystander874".into();
 
-    let repo = eve_db::WorldRepository::new_empty_with_snapshot_path(Some(wal_tmp.clone()))
-        .expect("wal repo");
-    std::fs::write(&wal_tmp, b"{}").expect("seed wal");
+    let repo = eve_db::WorldRepository::open_sqlite(&sqlite_path).expect("sqlite repo");
     let ctx = crate::router::ServerContext::with_repository(std::sync::Arc::new(repo));
     ctx.db.with_mut_snapshot(|s| {
         s.accounts.insert(acct_a.username.clone(), acct_a);
@@ -309,9 +309,9 @@ async fn test_issue_874_staged_notifications_discarded_for_caller_and_bystander_
     );
     let mut notify_rx = ctx.notify_tx.subscribe();
 
-    // Block WAL writes so `try_with_mut_snapshot` fails while caller & non-caller notifications are emitted.
-    let _ = std::fs::remove_file(&wal_dir);
-    std::fs::create_dir_all(&wal_dir).expect("block wal");
+    // Inject a SQLite commit failure so `try_with_mut_snapshot` fails while caller & non-caller notifications are emitted.
+    ctx.db
+        .set_fault_plan_for_test(eve_db::TxFaultPlan::FailAtCommit);
 
     super::ensure_dispatch_tx_hooks_installed();
     let fail_outcome: Result<(), eve_proto::BridgeRpcError> = super::maybe_with_dispatch_tx_error(
@@ -372,8 +372,7 @@ async fn test_issue_874_staged_notifications_discarded_for_caller_and_bystander_
         assert_eq!(b_events, vec!["PreExistingBystander"]);
     }
 
-    // Unblock WAL writes and confirm a succeeding dispatch scope flushes caller + bystander notifications.
-    let _ = std::fs::remove_dir_all(&wal_dir);
+    // Fault plan is single-use and was consumed by the failed commit; confirm a succeeding dispatch scope flushes caller + bystander notifications.
     let ok_outcome: Result<(), eve_proto::BridgeRpcError> = super::maybe_with_dispatch_tx_error(
         true,
         super::maybe_with_staged_dispatch_notifications(
@@ -412,8 +411,9 @@ async fn test_issue_874_staged_notifications_discarded_for_caller_and_bystander_
     assert_eq!(b_events, vec!["PreExistingBystander", "CommittedBystander"]);
 
     drop(ctx);
-    let _ = std::fs::remove_file(&wal_tmp);
-    let _ = std::fs::remove_dir_all(&wal_dir);
+    let _ = std::fs::remove_file(&sqlite_path);
+    let _ = std::fs::remove_file(&sqlite_wal);
+    let _ = std::fs::remove_file(&sqlite_shm);
 }
 
 #[test]
