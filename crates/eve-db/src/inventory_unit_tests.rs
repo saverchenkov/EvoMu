@@ -2847,4 +2847,596 @@ fn issue_887_and_849_merge_overflow_preserves_source_and_recursive_owner_transfe
     });
 }
 
+#[test]
+fn stack_all_items_preserves_eligibility_guards_tiebreak_and_overflow() {
+    let repo = WorldRepository::with_demo_seed();
+    let cid = 90_000_001_i64;
+    let ch = repo.get_character(cid).unwrap();
+    let station_id = ch.station_id.unwrap();
+
+    let mk = |id: i64, type_id: u32, owner: i64, loc: i64, flag: InventoryFlag, qty: i32| {
+        InventoryItemRecord {
+            item_id: id,
+            type_id,
+            owner_id: owner,
+            location_id: loc,
+            flag,
+            quantity: qty,
+            singleton: false,
+            version: 1,
+            ..InventoryItemRecord::default()
+        }
+    };
+
+    // Valid Tritanium (type 34) stacks inserted in non-sorted ID order + released/finished items
+    let id_valid_high = 800_100_005_i64;
+    let id_valid_low = 800_100_002_i64;
+    let id_finished_contract = 800_100_006_i64;
+    let id_delivered_job = 800_100_007_i64;
+    let id_completed_trade = 800_100_008_i64;
+    let id_expired_raffle = 800_100_009_i64;
+    let id_paid_wrap_item = 800_100_010_i64;
+
+    // Ineligible stacks (all type 34)
+    let id_tube = 800_100_020_i64;
+    let id_singleton = 800_100_021_i64;
+    let id_bpc = 800_100_022_i64;
+    let id_runs = 800_100_023_i64;
+    let id_dyn = 800_100_024_i64;
+    let id_muta = 800_100_025_i64;
+    let id_courier = 800_100_026_i64;
+    let id_alsc = 800_100_027_i64;
+    let id_contract_out = 800_100_028_i64;
+    let id_contract_prog = 800_100_029_i64;
+    let id_job_active = 800_100_030_i64;
+    let id_job_paused = 800_100_031_i64;
+    let id_trade_a = 800_100_032_i64;
+    let id_trade_b = 800_100_033_i64;
+    let id_raffle_active = 800_100_034_i64;
+    let id_unpaid_wrap = 800_100_035_i64;
+    let id_non_empty_box = 800_100_036_i64;
+    let id_non_empty_child = 800_100_037_i64;
+    let id_zero_qty = 800_100_038_i64;
+    let id_other_owner = 800_100_039_i64;
+    let id_flag_locked = 800_100_040_i64;
+    let id_flag_impounded = 800_100_041_i64;
+    let id_flag_asset_safety = 800_100_042_i64;
+    let id_pwrap_type = 800_100_043_i64;
+
+    // Ancestor-locked containers & nested duplicate stacks
+    let box_contract = 800_100_100_i64;
+    let box_contract_c1 = 800_100_101_i64;
+    let box_contract_c2 = 800_100_102_i64;
+    let box_impounded = 800_100_110_i64;
+    let box_impounded_c1 = 800_100_111_i64;
+    let box_impounded_c2 = 800_100_112_i64;
+    let box_alsc = 800_100_120_i64;
+    let box_alsc_c1 = 800_100_121_i64;
+    let box_alsc_c2 = 800_100_122_i64;
+
+    // Overflow test (type 35 Pyerite)
+    let id_ovf_dst = 800_100_201_i64;
+    let id_ovf_big = 800_100_202_i64;
+    let id_ovf_small = 800_100_203_i64;
+
+    repo.with_mut_snapshot(|snap| {
+        // Remove any demo-seed hangar stacks so assertions are 100% deterministic.
+        let seed_cleanup: Vec<i64> = snap
+            .items
+            .values()
+            .filter(|i| {
+                i.owner_id == cid
+                    && i.location_id == station_id
+                    && i.flag == InventoryFlag::Hangar
+                    && i.item_id != ch.active_ship_id
+            })
+            .map(|i| i.item_id)
+            .collect();
+        for sid in seed_cleanup {
+            snap.items.remove(&sid);
+        }
+
+        for (id, qty) in [
+            (id_valid_high, 30),
+            (id_valid_low, 20),
+            (id_finished_contract, 5),
+            (id_delivered_job, 6),
+            (id_completed_trade, 7),
+            (id_expired_raffle, 8),
+            (id_paid_wrap_item, 9),
+        ] {
+            snap.items
+                .insert(id, mk(id, 34, cid, station_id, InventoryFlag::Hangar, qty));
+        }
+
+        for id in [
+            id_tube,
+            id_alsc,
+            id_contract_out,
+            id_contract_prog,
+            id_job_active,
+            id_job_paused,
+            id_trade_a,
+            id_trade_b,
+            id_raffle_active,
+            id_unpaid_wrap,
+            id_non_empty_box,
+        ] {
+            snap.items
+                .insert(id, mk(id, 34, cid, station_id, InventoryFlag::Hangar, 10));
+        }
+        snap.items.insert(
+            id_non_empty_child,
+            mk(id_non_empty_child, 34, cid, id_non_empty_box, InventoryFlag::Cargo, 4),
+        );
+
+        let mut single = mk(id_singleton, 34, cid, station_id, InventoryFlag::Hangar, 1);
+        single.singleton = true;
+        snap.items.insert(id_singleton, single);
+
+        let mut bpc = mk(id_bpc, 34, cid, station_id, InventoryFlag::Hangar, 2);
+        bpc.is_blueprint_copy = true;
+        snap.items.insert(id_bpc, bpc);
+
+        let mut runs = mk(id_runs, 34, cid, station_id, InventoryFlag::Hangar, 2);
+        runs.blueprint_runs_remaining = Some(5);
+        snap.items.insert(id_runs, runs);
+
+        let mut dyn_rec = mk(id_dyn, 34, cid, station_id, InventoryFlag::Hangar, 2);
+        dyn_rec.dynamic_attributes.insert(1, 2.0);
+        snap.items.insert(id_dyn, dyn_rec);
+
+        let mut muta = mk(id_muta, 34, cid, station_id, InventoryFlag::Hangar, 2);
+        muta.source_mutaplasmid_id = Some(47_740);
+        snap.items.insert(id_muta, muta);
+
+        snap.items.insert(
+            id_courier,
+            mk(id_courier, 34, cid, station_id, InventoryFlag::Hangar, 10),
+        );
+        snap.item_custom_names
+            .insert(id_courier, "courier_cargo:55".into());
+
+        snap.items
+            .insert(id_zero_qty, mk(id_zero_qty, 34, cid, station_id, InventoryFlag::Hangar, 0));
+        snap.items.insert(
+            id_other_owner,
+            mk(id_other_owner, 34, cid + 99, station_id, InventoryFlag::Hangar, 10),
+        );
+        snap.items.insert(
+            id_flag_locked,
+            mk(id_flag_locked, 34, cid, station_id, InventoryFlag::Locked, 10),
+        );
+        snap.items.insert(
+            id_flag_impounded,
+            mk(id_flag_impounded, 34, cid, station_id, InventoryFlag::Impounded, 10),
+        );
+        snap.items.insert(
+            id_flag_asset_safety,
+            mk(
+                id_flag_asset_safety,
+                34,
+                cid,
+                station_id,
+                InventoryFlag::from_u16(FLAG_ASSET_SAFETY),
+                10,
+            ),
+        );
+        snap.items.insert(
+            id_pwrap_type,
+            mk(id_pwrap_type, TYPE_PLASTIC_WRAP, cid, station_id, InventoryFlag::Hangar, 10),
+        );
+        // Second plastic wrap item so pair check would trigger if type wasn't excluded
+        snap.items.insert(
+            id_pwrap_type + 1,
+            mk(
+                id_pwrap_type + 1,
+                TYPE_PLASTIC_WRAP,
+                cid,
+                station_id,
+                InventoryFlag::Hangar,
+                10,
+            ),
+        );
+
+        // Contracts (Outstanding + InProgress vs Finished)
+        for (c_id, status, item_ids) in [
+            (910_001_i64, "Outstanding", vec![id_contract_out, box_contract]),
+            (910_002_i64, "InProgress", vec![id_contract_prog]),
+            (910_003_i64, "Finished", vec![id_finished_contract]),
+        ] {
+            snap.contracts.insert(
+                c_id,
+                ContractRecord {
+                    contract_id: c_id,
+                    issuer_id: cid,
+                    contract_type: "ItemExchange".into(),
+                    status: status.into(),
+                    start_station_id: station_id,
+                    end_station_id: station_id,
+                    item_ids,
+                    ..ContractRecord::default()
+                },
+            );
+        }
+
+        // Industry jobs (Active + Paused vs Delivered)
+        for (j_id, status, bp_id) in [
+            (920_001_i64, "Active", id_job_active),
+            (920_002_i64, "Paused", id_job_paused),
+            (920_003_i64, "Delivered", id_delivered_job),
+        ] {
+            snap.industry_jobs.insert(
+                j_id,
+                IndustryJobRecord {
+                    job_id: j_id,
+                    installer_id: cid,
+                    facility_id: station_id,
+                    blueprint_item_id: bp_id,
+                    status: status.into(),
+                    ..IndustryJobRecord::default()
+                },
+            );
+        }
+
+        // Direct trades (-73): active vs completed
+        snap.owner_notes.insert(
+            -73_101,
+            OwnerNoteRecord {
+                note_id: -73_101,
+                character_id: -73,
+                item_id: 1,
+                label: "trade-active".into(),
+                note: serde_json::json!({
+                    "trade_id": 8801_i64,
+                    "station_id": 0_i64,
+                    "items_a": [[id_trade_a, 10]],
+                    "items_b": [[id_trade_b, 10]],
+                    "completed": false,
+                    "cancelled": false
+                })
+                .to_string(),
+                timestamp_unix: 1,
+            },
+        );
+        snap.owner_notes.insert(
+            -73_102,
+            OwnerNoteRecord {
+                note_id: -73_102,
+                character_id: -73,
+                item_id: 1,
+                label: "trade-done".into(),
+                note: serde_json::json!({
+                    "trade_id": 8802_i64,
+                    "items_a": [[id_completed_trade, 7]],
+                    "items_b": [],
+                    "completed": true,
+                    "cancelled": false
+                })
+                .to_string(),
+                timestamp_unix: 1,
+            },
+        );
+
+        // HyperNet raffles (-74): active vs expired
+        snap.owner_notes.insert(
+            -74_101,
+            OwnerNoteRecord {
+                note_id: -74_101,
+                character_id: -74,
+                item_id: 1,
+                label: "raffle-active".into(),
+                note: serde_json::json!({
+                    "item_id": id_raffle_active,
+                    "winner_id": null,
+                    "expired": false
+                })
+                .to_string(),
+                timestamp_unix: 1,
+            },
+        );
+        snap.owner_notes.insert(
+            -74_102,
+            OwnerNoteRecord {
+                note_id: -74_102,
+                character_id: -74,
+                item_id: 1,
+                label: "raffle-expired".into(),
+                note: serde_json::json!({
+                    "item_id": id_expired_raffle,
+                    "winner_id": null,
+                    "expired": true
+                })
+                .to_string(),
+                timestamp_unix: 1,
+            },
+        );
+
+        // ALSC lock note (-8_400_000_000_000)
+        snap.owner_notes.insert(
+            CONTAINER_SHIP_NOTE_ID,
+            OwnerNoteRecord {
+                note_id: CONTAINER_SHIP_NOTE_ID,
+                character_id: CONTAINER_SHIP_NOTE_ID,
+                item_id: 1,
+                label: "alsc".into(),
+                note: serde_json::json!({
+                    "alsc_locked_items": [id_alsc, box_alsc]
+                })
+                .to_string(),
+                timestamp_unix: 1,
+            },
+        );
+
+        // Unpaid vs paid Asset Safety wraps (-7_700_001)
+        snap.item_custom_names.insert(
+            STRUCTURE_EXT_STATE_KEY,
+            serde_json::json!({
+                "asset_safety_wraps": {
+                    "950001": {
+                        "wrap_id": 950_001_i64,
+                        "retrieval_fee_paid": false,
+                        "item_ids": [id_unpaid_wrap]
+                    },
+                    "950002": {
+                        "wrap_id": 950_002_i64,
+                        "retrieval_fee_paid": true,
+                        "item_ids": [id_paid_wrap_item]
+                    }
+                }
+            })
+            .to_string(),
+        );
+
+        // Locked ancestor containers + children
+        for (box_id, flag, c1, c2) in [
+            (box_contract, InventoryFlag::Hangar, box_contract_c1, box_contract_c2),
+            (box_impounded, InventoryFlag::Impounded, box_impounded_c1, box_impounded_c2),
+            (box_alsc, InventoryFlag::Hangar, box_alsc_c1, box_alsc_c2),
+        ] {
+            let mut b = mk(box_id, 3293, cid, station_id, flag, 1);
+            b.singleton = true;
+            snap.items.insert(box_id, b);
+            snap.items
+                .insert(c1, mk(c1, 34, cid, box_id, InventoryFlag::Cargo, 15));
+            snap.items
+                .insert(c2, mk(c2, 34, cid, box_id, InventoryFlag::Cargo, 25));
+        }
+
+        // Pyerite overflow group
+        snap.items.insert(
+            id_ovf_dst,
+            mk(id_ovf_dst, 35, cid, station_id, InventoryFlag::Hangar, 2_000_000_000),
+        );
+        snap.items.insert(
+            id_ovf_big,
+            mk(id_ovf_big, 35, cid, station_id, InventoryFlag::Hangar, 2_000_000_000),
+        );
+        snap.items.insert(
+            id_ovf_small,
+            mk(id_ovf_small, 35, cid, station_id, InventoryFlag::Hangar, 15),
+        );
+    });
+
+    let mut extra_excluded = HashSet::new();
+    extra_excluded.insert(id_tube);
+
+    let commits_before = repo.tx_commit_count();
+    let outcome = repo
+        .stack_all_items(cid, station_id, InventoryFlag::Hangar, &extra_excluded)
+        .unwrap();
+    assert_eq!(repo.tx_commit_count(), commits_before + 1);
+    // 6 Tritanium merges into id_valid_low + 1 Pyerite merge (id_ovf_small into id_ovf_dst) = 7
+    assert_eq!(outcome.merged_count, 7);
+    assert_eq!(outcome.survivors.len(), 2);
+
+    // Lowest ID Tritanium survivor receives sum = 20+30+5+6+7+8+9 = 85; old_quantity = 20
+    let trit = repo.get_item(id_valid_low).expect("lowest Tritanium ID must survive");
+    assert_eq!(trit.quantity, 85);
+    assert_eq!(trit.version, 2);
+    for removed in [
+        id_valid_high,
+        id_finished_contract,
+        id_delivered_job,
+        id_completed_trade,
+        id_expired_raffle,
+        id_paid_wrap_item,
+    ] {
+        assert!(repo.get_item(removed).is_none(), "merged source {removed} must be deleted");
+    }
+
+    // Overflow skip: id_ovf_big stays intact while id_ovf_small merged into id_ovf_dst
+    assert_eq!(repo.get_item(id_ovf_dst).unwrap().quantity, 2_000_000_015);
+    assert_eq!(repo.get_item(id_ovf_big).unwrap().quantity, 2_000_000_000);
+    assert!(repo.get_item(id_ovf_small).is_none());
+
+    // All ineligible stacks remain untouched
+    for kept in [
+        id_tube,
+        id_singleton,
+        id_bpc,
+        id_runs,
+        id_dyn,
+        id_muta,
+        id_courier,
+        id_alsc,
+        id_contract_out,
+        id_contract_prog,
+        id_job_active,
+        id_job_paused,
+        id_trade_a,
+        id_trade_b,
+        id_raffle_active,
+        id_unpaid_wrap,
+        id_non_empty_box,
+        id_zero_qty,
+        id_other_owner,
+        id_flag_locked,
+        id_flag_impounded,
+        id_flag_asset_safety,
+        id_pwrap_type,
+        id_pwrap_type + 1,
+    ] {
+        assert!(repo.get_item(kept).is_some(), "ineligible stack {kept} must remain intact");
+    }
+
+    // Re-running StackAll and targeting locked/fitted flags or locked ancestor containers merges 0 & commits 0
+    let commits_idle = repo.tx_commit_count();
+    let noop = repo
+        .stack_all_items(cid, station_id, InventoryFlag::Hangar, &extra_excluded)
+        .unwrap();
+    assert_eq!(noop.merged_count, 0);
+    assert_eq!(repo.tx_commit_count(), commits_idle);
+
+    for locked_loc in [box_contract, box_impounded, box_alsc] {
+        let locked_out = repo
+            .stack_all_items(cid, locked_loc, InventoryFlag::Cargo, &HashSet::new())
+            .unwrap();
+        assert_eq!(locked_out.merged_count, 0);
+    }
+    let locked_flag_out = repo
+        .stack_all_items(cid, station_id, InventoryFlag::Locked, &HashSet::new())
+        .unwrap();
+    assert_eq!(locked_flag_out.merged_count, 0);
+    assert_eq!(repo.tx_commit_count(), commits_idle);
+}
+
+#[test]
+fn stack_all_items_single_commit_and_linear_scaling() {
+    let repo = WorldRepository::with_demo_seed();
+    let cid = 90_000_001_i64;
+    let ch = repo.get_character(cid).unwrap();
+    let station_id = ch.station_id.unwrap();
+
+    let count_per_type = 400_i64;
+    let type_ids = [34_u32, 35_u32, 36_u32];
+    repo.with_mut_snapshot(|snap| {
+        let seed_cleanup: Vec<i64> = snap
+            .items
+            .values()
+            .filter(|i| {
+                i.owner_id == cid
+                    && i.location_id == station_id
+                    && i.flag == InventoryFlag::Hangar
+                    && i.item_id != ch.active_ship_id
+            })
+            .map(|i| i.item_id)
+            .collect();
+        for sid in seed_cleanup {
+            snap.items.remove(&sid);
+        }
+
+        let mut next_id = 850_000_000_i64;
+        for &tid in &type_ids {
+            for idx in 0..count_per_type {
+                let id = next_id;
+                next_id += 1;
+                snap.items.insert(
+                    id,
+                    InventoryItemRecord {
+                        item_id: id,
+                        type_id: tid,
+                        owner_id: cid,
+                        location_id: station_id,
+                        flag: InventoryFlag::Hangar,
+                        quantity: (idx as i32) + 1,
+                        singleton: false,
+                        version: 1,
+                        ..InventoryItemRecord::default()
+                    },
+                );
+            }
+        }
+
+        // Populate contracts, jobs, trades, and raffles so any O(N^2) scan would stand out.
+        for i in 0..200_i64 {
+            snap.contracts.insert(
+                860_000 + i,
+                ContractRecord {
+                    contract_id: 860_000 + i,
+                    issuer_id: cid,
+                    contract_type: "ItemExchange".into(),
+                    status: "Outstanding".into(),
+                    start_station_id: station_id,
+                    end_station_id: station_id,
+                    item_ids: vec![890_000_000 + i],
+                    ..ContractRecord::default()
+                },
+            );
+            snap.industry_jobs.insert(
+                870_000 + i,
+                IndustryJobRecord {
+                    job_id: 870_000 + i,
+                    installer_id: cid,
+                    facility_id: station_id,
+                    blueprint_item_id: 891_000_000 + i,
+                    status: "Active".into(),
+                    ..IndustryJobRecord::default()
+                },
+            );
+            snap.owner_notes.insert(
+                -73_000 - i,
+                OwnerNoteRecord {
+                    note_id: -73_000 - i,
+                    character_id: -73,
+                    item_id: 1,
+                    label: "t".into(),
+                    note: serde_json::json!({
+                        "trade_id": 70_000 + i,
+                        "items_a": [[892_000_000 + i, 1]],
+                        "items_b": [],
+                        "completed": false,
+                        "cancelled": false
+                    })
+                    .to_string(),
+                    timestamp_unix: 1,
+                },
+            );
+            snap.owner_notes.insert(
+                -74_000 - i,
+                OwnerNoteRecord {
+                    note_id: -74_000 - i,
+                    character_id: -74,
+                    item_id: 1,
+                    label: "r".into(),
+                    note: serde_json::json!({
+                        "item_id": 893_000_000 + i,
+                        "winner_id": null,
+                        "expired": false
+                    })
+                    .to_string(),
+                    timestamp_unix: 1,
+                },
+            );
+        }
+    });
+
+    let expected_sum: i32 = (1..=count_per_type as i32).sum();
+    let commits_before = repo.tx_commit_count();
+    let started = std::time::Instant::now();
+    let outcome = repo
+        .stack_all_items(cid, station_id, InventoryFlag::Hangar, &HashSet::new())
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(repo.tx_commit_count(), commits_before + 1);
+    assert_eq!(outcome.merged_count, (count_per_type - 1) * (type_ids.len() as i64));
+    assert_eq!(
+        outcome.deleted_sources.len(),
+        ((count_per_type - 1) * (type_ids.len() as i64)) as usize
+    );
+    assert_eq!(outcome.survivors.len(), type_ids.len());
+    for (idx, surv) in outcome.survivors.iter().enumerate() {
+        assert_eq!(surv.old_quantity, 1);
+        assert_eq!(surv.updated.type_id, type_ids[idx]);
+        assert_eq!(surv.updated.quantity, expected_sum);
+        assert_eq!(surv.updated.item_id, 850_000_000 + (idx as i64) * count_per_type);
+    }
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "expected linear O(N+M) single-tx stack_all_items across 1,200 items, took {elapsed:?}"
+    );
+}
+
+
 

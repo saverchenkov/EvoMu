@@ -4,10 +4,8 @@
 
 use crate::router::{context::BoundObjectEntry, ServerContext};
 use crate::services::inventory_bound;
-use crate::services::inventory_fitting::{
-    fitting_containers_ships, get_effective_corp_roles_at_location,
-};
-use eve_db::{InventoryFlag, TypeId};
+use crate::services::inventory_fitting::fitting_containers_ships;
+use eve_db::InventoryFlag;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
@@ -56,42 +54,687 @@ fn parse_split_args(
     Ok((loc_hint, item_id, split_quantity))
 }
 
-fn validate_split_stack_access(
+#[derive(Clone, Copy)]
+struct ContainerChainPolicy {
+    reject_sealed_wrap: bool,
+    reject_alsc_locked: bool,
+    reject_locked_or_escrow: bool,
+    check_corp_take_role: bool,
+    locked_err_code: &'static str,
+}
+
+struct ContainerChainInfo {
+    chain_locs: Vec<i64>,
+    root_loc: i64,
+}
+
+fn snapshot_pre_balls(
     ctx: &ServerContext,
-    session: &mut SessionState,
+    session: &SessionState,
     char_id: i64,
-    loc_hint: Option<i64>,
-    item_id: i64,
-    kwargs: &HashMap<String, PyRep>,
-) -> Result<i64, BridgeRpcError> {
-    let cs_state = fitting_containers_ships::read_container_ship_state(ctx);
-    let loaded_tube_items: HashSet<i64> = ctx
-        .fighter_tube_loads
+) -> HashMap<i64, (glam::DVec3, f64)> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return crate::services::structure_acl_defense_rules::snapshot_system_balls_for_inventory(
+            ctx, session, char_id,
+        );
+    }
+    let sys_id = session
+        .solar_system_id
+        .or_else(|| {
+            ctx.db.with_snapshot(|s| {
+                s.characters
+                    .get(&char_id)
+                    .map(|c| c.solar_system_id)
+                    .filter(|&id| id > 0)
+            })
+        })
+        .unwrap_or(0);
+    if sys_id == 0 {
+        return HashMap::new();
+    }
+    let Some(sys_h) = ctx.systems.get_handle(sys_id) else {
+        return HashMap::new();
+    };
+    let Ok(bp) = sys_h.ballpark.read() else {
+        return HashMap::new();
+    };
+    bp.balls
+        .iter()
+        .map(|(&id, b)| (id, (b.position, b.radius)))
+        .collect()
+}
+
+fn snapshot_loaded_tube_items(ctx: &ServerContext) -> HashSet<i64> {
+    ctx.fighter_tube_loads
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .values()
         .copied()
-        .collect();
-    let pre_balls = if tokio::runtime::Handle::try_current().is_ok() {
-        crate::services::structure_acl_defense_rules::snapshot_system_balls_for_inventory(
-            ctx, session, char_id,
-        )
-    } else {
-        HashMap::new()
-    };
-    let provided_pw = kwargs.get("password").and_then(|v| v.as_str());
+        .collect()
+}
 
-    let (effective_owner_id, newly_unlocked) = ctx.db.with_snapshot(|snap| {
-        let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
+fn character_or_session_fallback(
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+) -> Result<eve_db::CharacterRecord, BridgeRpcError> {
+    if let Some(ch) = snap.characters.get(&char_id) {
+        return Ok(ch.clone());
+    }
+    if session
+        .station_id
+        .or(session.structure_id)
+        .or_else(|| session.solar_system_id.map(i64::from))
+        .is_none()
+    {
+        return Err(BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
             client_error: None,
-        })?;
-        let item = snap.items.get(&item_id).ok_or_else(|| BridgeRpcError {
-            code: "SplitFailed".into(),
-            message: format!("Item {item_id} not found"),
-            client_error: None,
-        })?;
+        });
+    }
+    let mut ch = eve_db::CharacterRecord::default();
+    ch.character_id = char_id;
+    ch.user_id = session.user_id.unwrap_or(char_id as u64);
+    ch.corporation_id = session.corporation_id.unwrap_or(0);
+    ch.station_id = session.station_id;
+    ch.structure_id = session.structure_id;
+    ch.solar_system_id = session.solar_system_id.unwrap_or(0);
+    ch.active_ship_id = session.ship_id.unwrap_or(0);
+    Ok(ch)
+}
+
+fn persist_unlocked_containers_in_snap(
+    guard: &mut eve_db::WorldStateSnapshot,
+    unlock_pairs: &[(i64, i64)],
+) {
+    if unlock_pairs.is_empty() {
+        return;
+    }
+    fitting_containers_ships::write_container_ship_state_snap(guard, |st| {
+        for &pair in unlock_pairs {
+            st.unlocked_containers.insert(pair);
+        }
+    });
+}
+
+fn parse_opt_positive_id(
+    val: Option<&PyRep>,
+    err_code: &'static str,
+    field_label: &str,
+) -> Result<Option<i64>, BridgeRpcError> {
+    match val {
+        None | Some(PyRep::None) => Ok(None),
+        Some(v) => v
+            .as_i64()
+            .filter(|&id| id > 0)
+            .map(Some)
+            .ok_or_else(|| BridgeRpcError {
+                code: err_code.into(),
+                message: format!("{field_label} must be a positive integer"),
+                client_error: None,
+            }),
+    }
+}
+
+fn collect_container_chain(
+    snap: &eve_db::WorldStateSnapshot,
+    start_loc: i64,
+    max_hops: usize,
+) -> ContainerChainInfo {
+    let mut chain_locs = Vec::with_capacity(max_hops + 1);
+    let mut cur_loc = start_loc;
+    chain_locs.push(cur_loc);
+    for _ in 0..max_hops {
+        let Some(anc) = snap.items.get(&cur_loc) else {
+            break;
+        };
+        cur_loc = anc.location_id;
+        chain_locs.push(cur_loc);
+    }
+    ContainerChainInfo {
+        chain_locs,
+        root_loc: cur_loc,
+    }
+}
+
+fn validate_bound_and_hint_chain(
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    bound_loc: Option<i64>,
+    hint_locs: &[Option<i64>],
+    chain: &ContainerChainInfo,
+    err_code: &'static str,
+    subject: &str,
+) -> Result<(), BridgeRpcError> {
+    let is_upwell_inv_mgr_bound = |bl: i64| -> bool {
+        session.station_id.is_none()
+            && session.structure_id == Some(chain.root_loc)
+            && snap
+                .structures
+                .get(&chain.root_loc)
+                .is_some_and(|st| i64::from(st.solar_system_id) == bl)
+    };
+    let bound_pos = match bound_loc {
+        Some(bl) => Some(
+            if let Some(pos) = chain.chain_locs.iter().position(|&id| id == bl) {
+                pos
+            } else if is_upwell_inv_mgr_bound(bl) {
+                // V24 `GetInventoryMgr()` binds to `solar_system_id` when docked in an Upwell
+                // structure, acting as the logical parent above `chain.root_loc == structure_id`.
+                chain.chain_locs.len()
+            } else {
+                return Err(BridgeRpcError {
+                    code: err_code.into(),
+                    message: format!("{subject} is not located within bound inventory {bl}"),
+                    client_error: None,
+                });
+            },
+        ),
+        None => None,
+    };
+    for hint in hint_locs.iter().copied().flatten() {
+        let Some(hint_pos) = chain.chain_locs.iter().position(|&id| id == hint) else {
+            return Err(BridgeRpcError {
+                code: err_code.into(),
+                message: format!("{subject} is not located at {hint}"),
+                client_error: None,
+            });
+        };
+        if let Some(b_pos) = bound_pos {
+            if hint_pos > b_pos {
+                return Err(BridgeRpcError {
+                    code: err_code.into(),
+                    message: format!(
+                        "{subject} location hint {hint} mismatches bound inventory {}",
+                        bound_loc.unwrap_or_default()
+                    ),
+                    client_error: None,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn enforce_container_chain_policies(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    cs_state: &fitting_containers_ships::ContainerShipRuntimeState,
+    char_id: i64,
+    corp_id: i64,
+    check_corp_containers: bool,
+    chain: &ContainerChainInfo,
+    provided_pw: Option<&str>,
+    policy: ContainerChainPolicy,
+) -> Result<Vec<(i64, i64)>, BridgeRpcError> {
+    let container_hops = &chain.chain_locs[..chain.chain_locs.len().saturating_sub(1)];
+    for &anc_id in container_hops {
+        let Some(anc) = snap.items.get(&anc_id) else {
+            break;
+        };
+        if policy.check_corp_take_role
+            && check_corp_containers
+            && corp_id > 0
+            && anc.owner_id == corp_id
+            && (116..=122).contains(&(anc.flag as u16))
+        {
+            let div_idx = (anc.flag as u16 - 116) as usize;
+            let (is_ceo, role_mask) =
+                crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap_at(
+                    snap,
+                    corp_id,
+                    char_id,
+                    Some(anc.location_id),
+                    ctx.now_unix(),
+                );
+            let container_take = eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[div_idx];
+            if !is_ceo
+                && !eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_DIRECTOR)
+                && (role_mask & container_take) == 0
+            {
+                return Err(BridgeRpcError {
+                    code: "CorpRoleDenied".into(),
+                    message: format!(
+                        "Character {char_id} lacks container take role in division {}",
+                        div_idx + 1
+                    ),
+                    client_error: None,
+                });
+            }
+        }
+        if policy.reject_alsc_locked && cs_state.alsc_locked_items.contains(&anc.item_id) {
+            return Err(BridgeRpcError {
+                code: "ALSCItemLocked".into(),
+                message: "Parent Audit Log Secure Container is locked".into(),
+                client_error: None,
+            });
+        }
+        if policy.reject_sealed_wrap && anc.type_id == 3_468 {
+            return Err(BridgeRpcError {
+                code: policy.locked_err_code.into(),
+                message: "Cannot modify items inside a sealed Plastic Wrap".into(),
+                client_error: None,
+            });
+        }
+        if policy.reject_locked_or_escrow
+            && (matches!(anc.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
+                || matches!(anc.flag as u16, 36 | 63 | 72)
+                || snap.is_item_locked_in_contract_or_job(anc.item_id))
+        {
+            return Err(BridgeRpcError {
+                code: policy.locked_err_code.into(),
+                message: "Parent container is locked, impounded, or in Asset Safety".into(),
+                client_error: None,
+            });
+        }
+    }
+
+    let mut unlock_pairs = Vec::new();
+    for &anc_id in container_hops {
+        if let Some(req_pw) = cs_state.container_passwords.get(&anc_id) {
+            if !req_pw.is_empty() {
+                let password_per_action = cs_state
+                    .container_configs
+                    .get(&anc_id)
+                    .is_some_and(|c| c.password_per_action);
+                let already_unlocked = !password_per_action
+                    && (cs_state.unlocked_containers.contains(&(anc_id, char_id))
+                        || cs_state.unlocked_containers.contains(&(char_id, anc_id)));
+                if !already_unlocked {
+                    if provided_pw == Some(req_pw.as_str()) {
+                        if !password_per_action {
+                            unlock_pairs.push((anc_id, char_id));
+                        }
+                    } else {
+                        return Err(BridgeRpcError {
+                            code: "ALSCPasswordRequired".into(),
+                            message: format!(
+                                "Password required to access Secure Container {anc_id}"
+                            ),
+                            client_error: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(unlock_pairs)
+}
+
+fn validate_location_reachability_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    cs_state: &fitting_containers_ships::ContainerShipRuntimeState,
+    session: &SessionState,
+    ch: &eve_db::CharacterRecord,
+    char_id: i64,
+    pre_balls: &HashMap<i64, (glam::DVec3, f64)>,
+    target_loc: i64,
+    target_bay_flag: Option<InventoryFlag>,
+    chain: &ContainerChainInfo,
+    provided_pw: Option<&str>,
+    access_err_code: &'static str,
+    range_err_code: &'static str,
+    check_container_owner: bool,
+) -> Result<Option<(i64, i64)>, BridgeRpcError> {
+    if let Some(sess_dock) = session.station_id.or(session.structure_id) {
+        if ch
+            .station_id
+            .or(ch.structure_id)
+            .is_some_and(|cd| cd > 0 && cd != sess_dock)
+        {
+            return Err(BridgeRpcError {
+                code: access_err_code.into(),
+                message: "Session docked location does not match character location".into(),
+                client_error: None,
+            });
+        }
+    }
+
+    let ch_dock = if session.station_id.is_none()
+        && session.structure_id.is_none()
+        && session.solar_system_id.is_some()
+    {
+        0
+    } else {
+        ch.station_id.or(ch.structure_id).unwrap_or(0)
+    };
+    let ch_sys = if ch.solar_system_id > 0 {
+        i64::from(ch.solar_system_id)
+    } else {
+        session.solar_system_id.map(i64::from).unwrap_or(0)
+    };
+    let caller_ship_id = session.ship_id.filter(|&id| id > 0).unwrap_or(ch.active_ship_id);
+
+    if let Some(st) = snap.structures.get(&chain.root_loc) {
+        if st.state == "Destroyed" {
+            return Err(BridgeRpcError {
+                code: "StructureDestroyed".into(),
+                message: format!("Structure {} is destroyed", chain.root_loc),
+                client_error: None,
+            });
+        }
+        let docked_at_structure = (ch_dock == chain.root_loc
+            && session.structure_id == Some(chain.root_loc))
+            || (ch.station_id.is_none()
+                && ch.structure_id.is_none()
+                && session.solar_system_id.is_none()
+                && session.structure_id == Some(chain.root_loc));
+        if !docked_at_structure {
+            return Err(BridgeRpcError {
+                code: access_err_code.into(),
+                message: format!(
+                    "Character {char_id} is not docked at structure {}",
+                    chain.root_loc
+                ),
+                client_error: None,
+            });
+        }
+        let has_acl = snap.has_structure_acl_access(chain.root_loc, char_id)
+            && crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap_at(
+                snap,
+                chain.root_loc,
+                char_id,
+                Some(ctx.now_unix()),
+            );
+        if !has_acl {
+            return Err(BridgeRpcError {
+                code: access_err_code.into(),
+                message: format!(
+                    "Character {char_id} lacks structure ACL access at {}",
+                    chain.root_loc
+                ),
+                client_error: None,
+            });
+        }
+    }
+
+    if ch_dock == 0 && ch_sys > 0 && chain.root_loc == ch_sys {
+        // In-space targets rooted in the active solar system use exact chain + 2,500m/5,000m range
+        // verification directly so targets >5,000m away still return `range_err_code` (`OutOfRange`)
+        // before ship-bay/container password checks.
+        let Some(outer_id) = chain.chain_locs.iter().rev().nth(1).copied() else {
+            return Err(BridgeRpcError {
+                code: access_err_code.into(),
+                message: format!("Inventory {target_loc} is not physically co-located with pilot"),
+                client_error: None,
+            });
+        };
+        if outer_id != caller_ship_id && outer_id != ch.active_ship_id {
+            let Some(outer_node) = snap.items.get(&outer_id) else {
+                return Err(BridgeRpcError {
+                    code: access_err_code.into(),
+                    message: format!("Inventory {target_loc} is not physically co-located with pilot"),
+                    client_error: None,
+                });
+            };
+            let ship_pos = pre_balls.get(&caller_ship_id).map(|b| b.0).or_else(|| {
+                snap.item_positions
+                    .get(&caller_ship_id)
+                    .copied()
+                    .map(glam::DVec3::from)
+            });
+            let cont_pos = pre_balls.get(&outer_id).map(|b| b.0).or_else(|| {
+                snap.item_positions
+                    .get(&outer_id)
+                    .copied()
+                    .map(glam::DVec3::from)
+            });
+            let Some((s_pos, t_pos)) = ship_pos.zip(cont_pos) else {
+                return Err(BridgeRpcError {
+                    code: range_err_code.into(),
+                    message: format!(
+                        "Cannot verify range to container {outer_id}: missing ship or container position"
+                    ),
+                    client_error: None,
+                });
+            };
+            let cat = ctx
+                .sde
+                .types
+                .get(&outer_node.type_id)
+                .map(|t| t.category_id)
+                .unwrap_or(0);
+            let max_range = if cat == 22 { 5_000.0 } else { 2_500.0 };
+            let ship_r = pre_balls
+                .get(&caller_ship_id)
+                .map(|b| b.1)
+                .or_else(|| {
+                    snap.items
+                        .get(&caller_ship_id)
+                        .and_then(|si| ctx.sde.types.get(&si.type_id))
+                        .map(|t| t.radius)
+                })
+                .unwrap_or(0.0);
+            let cont_r = pre_balls
+                .get(&outer_id)
+                .map(|b| b.1)
+                .or_else(|| ctx.sde.types.get(&outer_node.type_id).map(|t| t.radius))
+                .unwrap_or(0.0);
+            let edge_dist = (s_pos.distance(t_pos) - ship_r - cont_r).max(0.0);
+            if edge_dist > max_range {
+                return Err(BridgeRpcError {
+                    code: range_err_code.into(),
+                    message: format!(
+                        "Container {outer_id} is out of range ({edge_dist:.1}m > {max_range:.0}m)"
+                    ),
+                    client_error: None,
+                });
+            }
+        }
+    } else {
+        // `is_inventory_location_colocated` walks 4 hops; for deeper container chains pass the
+        // nearest child below `root_loc` so depth up to `max_hops` resolves against dock/system.
+        let coloc_probe = if chain.chain_locs.len() > 4 {
+            chain.chain_locs[chain.chain_locs.len().saturating_sub(2)]
+        } else {
+            target_loc
+        };
+        let colocated = crate::services::inventory_bound::is_inventory_location_colocated(
+            snap,
+            session,
+            ch,
+            pre_balls,
+            coloc_probe,
+        ) || (ch.station_id.is_none()
+            && ch.structure_id.is_none()
+            && session.solar_system_id.is_none()
+            && session
+                .station_id
+                .or(session.structure_id)
+                .is_some_and(|sd| sd > 0 && sd == chain.root_loc));
+        if !colocated {
+            return Err(BridgeRpcError {
+                code: access_err_code.into(),
+                message: format!("Inventory {target_loc} is not physically co-located with pilot"),
+                client_error: None,
+            });
+        }
+    }
+
+    let is_in_space_root = (30_000_000..=39_999_999).contains(&chain.root_loc)
+        && !snap.structures.contains_key(&chain.root_loc);
+    let container_hops = &chain.chain_locs[..chain.chain_locs.len().saturating_sub(1)];
+    if check_container_owner || !is_in_space_root {
+        for &anc_id in container_hops {
+            if let Some(node) = snap.items.get(&anc_id) {
+                let allowed_container = session.has_gm_role()
+                    || node.owner_id == char_id
+                    || node.owner_id == 0
+                    || (is_in_space_root && node.type_id == 23)
+                    || (ch.corporation_id > 0 && node.owner_id == ch.corporation_id);
+                if !allowed_container {
+                    return Err(BridgeRpcError {
+                        code: access_err_code.into(),
+                        message: format!(
+                            "Character {char_id} cannot access inventory {target_loc}"
+                        ),
+                        client_error: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // Check foreign ship bay access and password strictly after co-location and range checks
+    // so remote/out-of-range callers cannot probe ship bay passwords.
+    let mut ship_bay_unlock = None;
+    if is_in_space_root {
+        if let Some(&root_obj_id) = container_hops.last() {
+            if let Some(root_item) = snap.items.get(&root_obj_id) {
+                let is_foreign_ship = root_item.owner_id != char_id
+                    && root_item.owner_id != 0
+                    && !session.has_gm_role()
+                    && ctx
+                        .sde
+                        .types
+                        .get(&root_item.type_id)
+                        .is_some_and(|t| t.category_id == 6);
+                if is_foreign_ship {
+                    let root_bay_flag = container_hops
+                        .len()
+                        .checked_sub(2)
+                        .and_then(|idx| snap.items.get(&container_hops[idx]).map(|c| c.flag))
+                        .or(target_bay_flag);
+                    if !check_container_owner
+                        || matches!(
+                            root_bay_flag,
+                            Some(InventoryFlag::FleetHangar | InventoryFlag::ShipHangar)
+                        )
+                    {
+                        let (is_sma, deny_code) = match root_bay_flag {
+                            Some(InventoryFlag::FleetHangar) => (false, "FleetHangarAccessDenied"),
+                            Some(InventoryFlag::ShipHangar) => (true, "SMAAccessDenied"),
+                            _ => {
+                                return Err(BridgeRpcError {
+                                    code: access_err_code.into(),
+                                    message: format!(
+                                        "Character {char_id} cannot access inventory {target_loc}"
+                                    ),
+                                    client_error: None,
+                                });
+                            }
+                        };
+                        if !fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
+                            snap,
+                            char_id,
+                            root_obj_id,
+                            root_item.owner_id,
+                            is_sma,
+                            provided_pw,
+                        ) {
+                            return Err(BridgeRpcError {
+                                code: deny_code.into(),
+                                message: format!(
+                                    "Character {char_id} lacks ship bay access or valid password for {root_obj_id}"
+                                ),
+                                client_error: None,
+                            });
+                        }
+                        if let Some(cfg) = cs_state.ship_configs.get(&root_obj_id) {
+                            if let Some(req_pw) = cfg.password.as_deref().filter(|s| !s.is_empty())
+                            {
+                                let already_unlocked = cs_state
+                                    .unlocked_containers
+                                    .contains(&(char_id, root_obj_id))
+                                    || cs_state
+                                        .unlocked_containers
+                                        .contains(&(root_obj_id, char_id));
+                                if !already_unlocked && provided_pw == Some(req_pw) {
+                                    ship_bay_unlock = Some((char_id, root_obj_id));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(ship_bay_unlock)
+}
+
+fn execute_split_stack_in_tx(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    bound_loc: Option<i64>,
+    loc_hint: Option<i64>,
+    item_id: i64,
+    split_quantity: i32,
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<(eve_db::InventoryItemRecord, eve_db::InventoryItemRecord), BridgeRpcError> {
+    let loaded_tube_items = snapshot_loaded_tube_items(ctx);
+    let pre_balls = snapshot_pre_balls(ctx, session, char_id);
+    let provided_pw = kwargs.get("password").and_then(|v| v.as_str());
+
+    ctx.db.try_with_mut_snapshot(|guard| {
+        let cs_state = fitting_containers_ships::read_container_ship_state_snap(guard);
+        let ch = guard
+            .characters
+            .get(&char_id)
+            .cloned()
+            .ok_or_else(|| BridgeRpcError {
+                code: "CharacterNotFound".into(),
+                message: format!("Character {char_id} not found"),
+                client_error: None,
+            })?;
+        let item = guard
+            .items
+            .get(&item_id)
+            .cloned()
+            .ok_or_else(|| BridgeRpcError {
+                code: "SplitFailed".into(),
+                message: format!("Item {item_id} not found"),
+                client_error: None,
+            })?;
+
+        let is_corp_item = ch.corporation_id > 0 && item.owner_id == ch.corporation_id;
+        if item.owner_id != char_id && !is_corp_item {
+            return Err(BridgeRpcError {
+                code: "SplitFailed".into(),
+                message: format!("Character {char_id} does not own stack {item_id}"),
+                client_error: None,
+            });
+        }
+
+        let chain = collect_container_chain(guard, item.location_id, 8);
+        validate_bound_and_hint_chain(
+            guard,
+            session,
+            bound_loc,
+            &[loc_hint],
+            &chain,
+            "SplitFailed",
+            &format!("Item {item_id}"),
+        )?;
+        let ship_unlock = validate_location_reachability_in_snap(
+            ctx,
+            guard,
+            &cs_state,
+            session,
+            &ch,
+            char_id,
+            &pre_balls,
+            item.location_id,
+            Some(item.flag),
+            &chain,
+            provided_pw,
+            "SplitFailed",
+            "SplitFailed",
+            false,
+        )?;
+        if is_corp_item {
+            crate::services::inventory_bound::validate_corp_source_item_take_access_in_snap(
+                ctx,
+                guard,
+                char_id,
+                ch.corporation_id,
+                &item,
+            )?;
+        }
 
         if cs_state.alsc_locked_items.contains(&item_id) {
             return Err(BridgeRpcError {
@@ -107,10 +750,8 @@ fn validate_split_stack_access(
                 client_error: None,
             });
         }
-        if matches!(item.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
-            || matches!(item.flag as u16, 36 | 63 | 72)
-            || item.type_id == 3_468
-            || snap.is_item_locked_in_contract_or_job(item_id)
+        if eve_db::WorldStateSnapshot::has_locked_flag_or_wrap_type(&item)
+            || guard.is_item_locked_in_contract_or_job(item_id)
         {
             return Err(BridgeRpcError {
                 code: "SplitFailed".into(),
@@ -118,13 +759,7 @@ fn validate_split_stack_access(
                 client_error: None,
             });
         }
-        let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
-        let in_asset_safety = ext.asset_safety_wraps.values().any(|w| {
-            w.wrap_id == item_id
-                || w.wrap_id == item.location_id
-                || w.item_ids.contains(&item_id)
-        });
-        if in_asset_safety {
+        if guard.is_item_in_active_asset_safety_wrap(item_id) {
             return Err(BridgeRpcError {
                 code: "SplitFailed".into(),
                 message: format!("Item {item_id} is sealed inside an Asset Safety wrap"),
@@ -132,155 +767,38 @@ fn validate_split_stack_access(
             });
         }
 
-        let is_corp_item = ch.corporation_id > 0 && item.owner_id == ch.corporation_id;
-        if item.owner_id != char_id && !is_corp_item {
-            return Err(BridgeRpcError {
+        let mut unlock_pairs = enforce_container_chain_policies(
+            ctx,
+            guard,
+            &cs_state,
+            char_id,
+            ch.corporation_id,
+            true,
+            &chain,
+            provided_pw,
+            ContainerChainPolicy {
+                reject_sealed_wrap: true,
+                reject_alsc_locked: true,
+                reject_locked_or_escrow: true,
+                check_corp_take_role: true,
+                locked_err_code: "SplitFailed",
+            },
+        )?;
+        if let Some(pair) = ship_unlock {
+            unlock_pairs.push(pair);
+        }
+
+        let split_res = guard
+            .split_stack_in_snap(item.owner_id, item_id, split_quantity)
+            .map_err(|e| BridgeRpcError {
                 code: "SplitFailed".into(),
-                message: format!("Character {char_id} does not own stack {item_id}"),
+                message: e.to_string(),
                 client_error: None,
-            });
-        }
-        if is_corp_item {
-            crate::services::inventory_bound::validate_corp_source_item_take_access_in_snap(
-                ctx,
-                snap,
-                char_id,
-                ch.corporation_id,
-                item,
-            )?;
-        }
-
-        let mut unlock_ids = Vec::new();
-        let mut cur_loc = item.location_id;
-        for _ in 0..8 {
-            let Some(anc) = snap.items.get(&cur_loc) else {
-                break;
-            };
-            if cs_state.alsc_locked_items.contains(&anc.item_id) {
-                return Err(BridgeRpcError {
-                    code: "ALSCItemLocked".into(),
-                    message: "Parent Audit Log Secure Container is locked".into(),
-                    client_error: None,
-                });
-            }
-            if anc.type_id == 3_468 {
-                return Err(BridgeRpcError {
-                    code: "SplitFailed".into(),
-                    message: "Cannot split items inside a sealed Plastic Wrap".into(),
-                    client_error: None,
-                });
-            }
-            if matches!(anc.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
-                || matches!(anc.flag as u16, 36 | 63 | 72)
-                || snap.is_item_locked_in_contract_or_job(anc.item_id)
-            {
-                return Err(BridgeRpcError {
-                    code: "SplitFailed".into(),
-                    message: "Parent container is locked, impounded, or in Asset Safety".into(),
-                    client_error: None,
-                });
-            }
-            if let Some(req_pw) = cs_state.container_passwords.get(&anc.item_id) {
-                if !req_pw.is_empty()
-                    && !cs_state.unlocked_containers.contains(&(anc.item_id, char_id))
-                {
-                    if provided_pw == Some(req_pw.as_str()) {
-                        unlock_ids.push(anc.item_id);
-                    } else {
-                        return Err(BridgeRpcError {
-                            code: "ALSCPasswordRequired".into(),
-                            message: format!(
-                                "Password required to access Secure Container {}",
-                                anc.item_id
-                            ),
-                            client_error: None,
-                        });
-                    }
-                }
-            }
-            if is_corp_item
-                && anc.owner_id == ch.corporation_id
-                && (116..=122).contains(&(anc.flag as u16))
-            {
-                let div_idx = (anc.flag as u16 - 116) as usize;
-                let (is_ceo, role_mask) = get_effective_corp_roles_at_location(
-                    ctx,
-                    ch.corporation_id,
-                    char_id,
-                    Some(anc.location_id),
-                );
-                let container_take = eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[div_idx];
-                if !is_ceo
-                    && !eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_DIRECTOR)
-                    && (role_mask & container_take) == 0
-                {
-                    return Err(BridgeRpcError {
-                        code: "CorpRoleDenied".into(),
-                        message: format!(
-                            "Character {char_id} lacks container take role in division {}",
-                            div_idx + 1
-                        ),
-                        client_error: None,
-                    });
-                }
-            }
-            cur_loc = anc.location_id;
-        }
-
-        if let Some(sess_dock) = session.station_id.or(session.structure_id) {
-            if ch
-                .station_id
-                .or(ch.structure_id)
-                .is_some_and(|cd| cd > 0 && cd != sess_dock)
-            {
-                return Err(BridgeRpcError {
-                    code: "SplitFailed".into(),
-                    message: "Session docked location does not match character location".into(),
-                    client_error: None,
-                });
-            }
-        }
-        if let Some(hint_loc) = loc_hint {
-            if hint_loc != item.location_id && hint_loc != cur_loc {
-                return Err(BridgeRpcError {
-                    code: "SplitFailed".into(),
-                    message: format!("Item {item_id} is not located at {hint_loc}"),
-                    client_error: None,
-                });
-            }
-        }
-        let colocated = crate::services::inventory_bound::is_inventory_location_colocated(
-            snap,
-            session,
-            ch,
-            &pre_balls,
-            item.location_id,
-        ) || (ch.station_id.is_none()
-            && ch.structure_id.is_none()
-            && session.solar_system_id.is_none()
-            && session
-                .station_id
-                .or(session.structure_id)
-                .is_some_and(|sd| sd > 0 && sd == cur_loc));
-        if !colocated {
-            return Err(BridgeRpcError {
-                code: "SplitFailed".into(),
-                message: format!("Item {item_id} is not physically co-located with pilot"),
-                client_error: None,
-            });
-        }
-
-        Ok((item.owner_id, unlock_ids))
-    })?;
-
-    if !newly_unlocked.is_empty() {
-        fitting_containers_ships::write_container_ship_state(ctx, |st| {
-            for &cid in &newly_unlocked {
-                st.unlocked_containers.insert((cid, char_id));
-            }
-        });
-    }
-    Ok(effective_owner_id)
+            })?;
+        // Persist container unlock only after `split_stack_in_snap` succeeds inside the same tx.
+        persist_unlocked_containers_in_snap(guard, &unlock_pairs);
+        Ok(split_res)
+    })
 }
 
 pub(in crate::services) fn handle_stack_ops(
@@ -298,18 +816,22 @@ pub(in crate::services) fn handle_stack_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let bound_loc = bound_entry.map(|b| b.object_id).filter(|&id| id > 0);
             let (loc_hint, item_id, split_quantity) =
                 match parse_split_args(bound_entry, args, kwargs) {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };
-            let owner_id = match validate_split_stack_access(
-                ctx, session, char_id, loc_hint, item_id, kwargs,
+            match execute_split_stack_in_tx(
+                ctx,
+                session,
+                char_id,
+                bound_loc,
+                loc_hint,
+                item_id,
+                split_quantity,
+                kwargs,
             ) {
-                Ok(oid) => oid,
-                Err(e) => return Some(Err(e)),
-            };
-            match ctx.db.split_stack(owner_id, item_id, split_quantity) {
                 Ok((orig, new_i)) => {
                     let old_orig_qty = (orig.quantity + new_i.quantity) as i64;
                     inventory_bound::emit_inv_item_change(
@@ -335,11 +857,7 @@ pub(in crate::services) fn handle_stack_ops(
                         ("typeID", PyRep::Integer(orig.type_id as i64)),
                     ])))
                 }
-                Err(e) => Some(Err(BridgeRpcError {
-                    code: "SplitFailed".into(),
-                    message: e.to_string(),
-                    client_error: None,
-                })),
+                Err(e) => Some(Err(e)),
             }
         }
 
@@ -417,68 +935,52 @@ pub(in crate::services) fn handle_stack_ops(
                     old_dst_qty: i32,
                 },
             }
+            let bound_loc = bound_entry.map(|b| b.object_id).filter(|&id| id > 0);
+            let source_container_hint =
+                if matches!(args.first(), Some(PyRep::List(_) | PyRep::Tuple(_))) {
+                    match parse_opt_positive_id(
+                        args.get(1),
+                        "StackFailed",
+                        "MultiMerge sourceContainerID",
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    }
+                } else {
+                    None
+                };
+            let kw_loc = match parse_opt_positive_id(
+                kwargs.get("locationID"),
+                "StackFailed",
+                "MultiMerge locationID",
+            ) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let kw_src_cont = match parse_opt_positive_id(
+                kwargs.get("sourceContainerID"),
+                "StackFailed",
+                "MultiMerge sourceContainerID",
+            ) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let provided_pw = kwargs.get("password").and_then(|v| v.as_str());
-            let loaded_tube_items: HashSet<i64> = ctx
-                .fighter_tube_loads
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .values()
-                .copied()
-                .collect();
+            let loaded_tube_items = snapshot_loaded_tube_items(ctx);
+            let pre_balls = snapshot_pre_balls(ctx, session, char_id);
             let tx_res = ctx.db.try_with_mut_snapshot(|guard| {
+                let ch = character_or_session_fallback(guard, session, char_id)?;
                 let cs_state_merge =
                     fitting_containers_ships::read_container_ship_state_snap(guard);
-                let ext =
-                    crate::services::station_structure::structure_upwell_ops::load_ext_state(
-                        guard,
-                    );
+                let lock_index = guard.build_inventory_lock_index();
                 let mut events = Vec::with_capacity(ops.len());
+                let mut checked_reachability = HashSet::new();
+                let mut unlock_pairs = Vec::new();
                 for &(src_id, dst_id, qty_opt) in &ops {
-                    if cs_state_merge.alsc_locked_items.contains(&src_id)
-                        || cs_state_merge.alsc_locked_items.contains(&dst_id)
-                    {
-                        return Err(BridgeRpcError {
-                            code: "ALSCItemLocked".into(),
-                            message: "Cannot merge items locked in an Audit Log Secure Container"
-                                .into(),
-                            client_error: None,
-                        });
-                    }
                     if src_id == dst_id {
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
                             message: "Cannot stack an item into itself".into(),
-                            client_error: None,
-                        });
-                    }
-                    if guard
-                        .item_custom_names
-                        .get(&src_id)
-                        .is_some_and(|s| s.starts_with("courier_cargo:"))
-                        || guard
-                            .item_custom_names
-                            .get(&dst_id)
-                            .is_some_and(|s| s.starts_with("courier_cargo:"))
-                    {
-                        return Err(BridgeRpcError {
-                            code: "StackFailed".into(),
-                            message: "Cannot stack courier mission cargo".into(),
-                            client_error: None,
-                        });
-                    }
-                    if guard.is_item_locked_in_contract_or_job(src_id)
-                        || guard.is_item_locked_in_contract_or_job(dst_id)
-                    {
-                        return Err(BridgeRpcError {
-                            code: "StackFailed".into(),
-                            message: "Cannot merge locked items".into(),
-                            client_error: None,
-                        });
-                    }
-                    if loaded_tube_items.contains(&src_id) || loaded_tube_items.contains(&dst_id) {
-                        return Err(BridgeRpcError {
-                            code: "StackFailed".into(),
-                            message: "Cannot merge fighters loaded in a fighter tube".into(),
                             client_error: None,
                         });
                     }
@@ -517,10 +1019,71 @@ pub(in crate::services) fn handle_stack_ops(
                             client_error: None,
                         });
                     }
-                    if matches!(src.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
-                        || matches!(tgt.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
-                        || src.type_id == 3_468
-                        || tgt.type_id == 3_468
+                    let chain = collect_container_chain(guard, src.location_id, 8);
+                    validate_bound_and_hint_chain(
+                        guard,
+                        session,
+                        bound_loc,
+                        &[kw_loc, kw_src_cont, source_container_hint],
+                        &chain,
+                        "StackFailed",
+                        &format!("Items {src_id}/{dst_id}"),
+                    )?;
+                    if checked_reachability.insert((src.location_id, src.flag as u16)) {
+                        if let Some(ship_unlock) = validate_location_reachability_in_snap(
+                            ctx,
+                            guard,
+                            &cs_state_merge,
+                            session,
+                            &ch,
+                            char_id,
+                            &pre_balls,
+                            src.location_id,
+                            Some(src.flag),
+                            &chain,
+                            provided_pw,
+                            "DestinationAccessDenied",
+                            "OutOfRange",
+                            false,
+                        )? {
+                            unlock_pairs.push(ship_unlock);
+                        }
+                    }
+                    if cs_state_merge.alsc_locked_items.contains(&src_id)
+                        || cs_state_merge.alsc_locked_items.contains(&dst_id)
+                    {
+                        return Err(BridgeRpcError {
+                            code: "ALSCItemLocked".into(),
+                            message: "Cannot merge items locked in an Audit Log Secure Container"
+                                .into(),
+                            client_error: None,
+                        });
+                    }
+                    if guard.is_courier_cargo_item(src_id) || guard.is_courier_cargo_item(dst_id) {
+                        return Err(BridgeRpcError {
+                            code: "StackFailed".into(),
+                            message: "Cannot stack courier mission cargo".into(),
+                            client_error: None,
+                        });
+                    }
+                    if guard.is_item_escrow_locked_with_index(&lock_index, src_id)
+                        || guard.is_item_escrow_locked_with_index(&lock_index, dst_id)
+                    {
+                        return Err(BridgeRpcError {
+                            code: "StackFailed".into(),
+                            message: "Cannot merge locked items".into(),
+                            client_error: None,
+                        });
+                    }
+                    if loaded_tube_items.contains(&src_id) || loaded_tube_items.contains(&dst_id) {
+                        return Err(BridgeRpcError {
+                            code: "StackFailed".into(),
+                            message: "Cannot merge fighters loaded in a fighter tube".into(),
+                            client_error: None,
+                        });
+                    }
+                    if eve_db::WorldStateSnapshot::has_locked_flag_or_wrap_type(&src)
+                        || eve_db::WorldStateSnapshot::has_locked_flag_or_wrap_type(&tgt)
                     {
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
@@ -529,8 +1092,8 @@ pub(in crate::services) fn handle_stack_ops(
                         });
                     }
                     if eve_db::WorldStateSnapshot::is_fitted_slot_flag(src.flag)
-                        || guard.is_container_non_empty(src_id)
-                        || guard.is_container_non_empty(dst_id)
+                        || lock_index.non_empty_containers.contains(&src_id)
+                        || lock_index.non_empty_containers.contains(&dst_id)
                     {
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
@@ -538,14 +1101,8 @@ pub(in crate::services) fn handle_stack_ops(
                             client_error: None,
                         });
                     }
-                    if src.singleton
-                        || src.is_blueprint_copy
-                        || !src.dynamic_attributes.is_empty()
-                        || src.source_mutaplasmid_id.is_some()
-                        || tgt.singleton
-                        || tgt.is_blueprint_copy
-                        || !tgt.dynamic_attributes.is_empty()
-                        || tgt.source_mutaplasmid_id.is_some()
+                    if eve_db::WorldStateSnapshot::has_non_stackable_item_state(&src)
+                        || eve_db::WorldStateSnapshot::has_non_stackable_item_state(&tgt)
                     {
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
@@ -554,60 +1111,42 @@ pub(in crate::services) fn handle_stack_ops(
                             client_error: None,
                         });
                     }
-                    if ext.asset_safety_wraps.values().any(|w| {
-                        w.wrap_id == src.location_id
-                            || w.item_ids.contains(&src_id)
-                            || w.item_ids.contains(&dst_id)
-                    }) {
+                    if lock_index.unpaid_wrap_items.contains(&src_id)
+                        || lock_index.unpaid_wrap_items.contains(&dst_id)
+                        || chain
+                            .chain_locs
+                            .iter()
+                            .any(|loc| lock_index.unpaid_wrap_items.contains(loc))
+                    {
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
                             message: "Cannot merge items inside an Asset Safety wrap".into(),
                             client_error: None,
                         });
                     }
-                    let mut cur = src.location_id;
-                    for _ in 0..8 {
-                        let Some(anc) = guard.items.get(&cur) else {
-                            break;
-                        };
-                        if anc.type_id == 3_468 {
-                            return Err(BridgeRpcError {
-                                code: "StackFailed".into(),
-                                message: "Cannot merge items inside a sealed container".into(),
-                                client_error: None,
-                            });
-                        }
-                        if cs_state_merge.alsc_locked_items.contains(&anc.item_id) {
-                            return Err(BridgeRpcError {
-                                code: "ALSCItemLocked".into(),
-                                message: "Cannot merge items inside a locked ALSC container".into(),
-                                client_error: None,
-                            });
-                        }
-                        if let Some(req_pw) = cs_state_merge.container_passwords.get(&anc.item_id) {
-                            if !req_pw.is_empty()
-                                && !cs_state_merge
-                                    .unlocked_containers
-                                    .contains(&(anc.item_id, char_id))
-                                && !cs_state_merge
-                                    .unlocked_containers
-                                    .contains(&(char_id, anc.item_id))
-                                && provided_pw != Some(req_pw.as_str())
-                            {
-                                return Err(BridgeRpcError {
-                                    code: "ALSCPasswordRequired".into(),
-                                    message: format!(
-                                        "Password required to merge items inside container {}",
-                                        anc.item_id
-                                    ),
-                                    client_error: None,
-                                });
-                            }
-                        }
-                        cur = anc.location_id;
-                    }
-                    if guard.is_item_or_ancestor_locked_or_impounded(dst_id)
-                        || guard.is_item_or_ancestor_locked_or_impounded(src_id)
+                    let chain_unlocks = enforce_container_chain_policies(
+                        ctx,
+                        guard,
+                        &cs_state_merge,
+                        char_id,
+                        ch.corporation_id,
+                        true,
+                        &chain,
+                        provided_pw,
+                        ContainerChainPolicy {
+                            reject_sealed_wrap: true,
+                            reject_alsc_locked: true,
+                            reject_locked_or_escrow: false,
+                            check_corp_take_role: true,
+                            locked_err_code: "StackFailed",
+                        },
+                    )?;
+                    unlock_pairs.extend(chain_unlocks);
+                    if guard.is_item_or_ancestor_locked_or_impounded_with_index(&lock_index, dst_id)
+                        || guard.is_item_or_ancestor_locked_or_impounded_with_index(
+                            &lock_index,
+                            src_id,
+                        )
                     {
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
@@ -673,6 +1212,7 @@ pub(in crate::services) fn handle_stack_ops(
                         });
                     }
                 }
+                persist_unlocked_containers_in_snap(guard, &unlock_pairs);
                 Ok(events)
             });
             let events = match tx_res {
@@ -735,9 +1275,28 @@ pub(in crate::services) fn handle_stack_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(target_loc) = bound_entry
-                .map(|b| b.object_id)
-                .or_else(|| kwargs.get("locationID").and_then(|v| v.as_i64()))
+            let bound_loc = bound_entry.map(|b| b.object_id).filter(|&id| id > 0);
+            let kw_loc = match parse_opt_positive_id(
+                kwargs.get("locationID"),
+                "InvalidLocation",
+                "StackAll locationID",
+            ) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if let (Some(bl), Some(kl)) = (bound_loc, kw_loc) {
+                if bl != kl {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidLocation".into(),
+                        message: format!(
+                            "StackAll locationID {kl} conflicts with bound inventory {bl}"
+                        ),
+                        client_error: None,
+                    }));
+                }
+            }
+            let Some(target_loc) = bound_loc
+                .or(kw_loc)
                 .or(session.station_id)
                 .or(session.structure_id)
                 .or(session.ship_id)
@@ -748,6 +1307,13 @@ pub(in crate::services) fn handle_stack_ops(
                     client_error: None,
                 }));
             };
+            if (30_000_000..=39_999_999).contains(&target_loc) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidLocation".into(),
+                    message: format!("Cannot run StackAll directly on solar system {target_loc}"),
+                    client_error: None,
+                }));
+            }
             let default_flag = if Some(target_loc) == session.station_id
                 || Some(target_loc) == session.structure_id
             {
@@ -755,100 +1321,128 @@ pub(in crate::services) fn handle_stack_ops(
             } else {
                 InventoryFlag::Cargo
             };
-            let target_flag = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()))
-                .filter(|&f| f > 0)
-                .map(|f| InventoryFlag::from_u16(f as u16))
-                .unwrap_or(default_flag);
-
-            let alsc_locked_set =
-                fitting_containers_ships::read_container_ship_state(ctx).alsc_locked_items;
-            let loaded_tube_items: HashSet<i64> = ctx
-                .fighter_tube_loads
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .values()
-                .copied()
-                .collect();
-            let groups: HashMap<TypeId, Vec<i64>> = ctx.db.with_snapshot(|snap| {
-                let mut by_type: HashMap<TypeId, Vec<i64>> = HashMap::new();
-                for item in snap.items.values() {
-                    if item.owner_id == char_id
-                        && item.location_id == target_loc
-                        && item.flag == target_flag
-                        && !item.singleton
-                        && !item.is_blueprint_copy
-                        && item.dynamic_attributes.is_empty()
-                        && item.source_mutaplasmid_id.is_none()
-                        && item.quantity > 0
-                        && !matches!(item.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
-                        && !matches!(item.flag as u16, 36 | 63 | 72 | 159..=163)
-                        && !alsc_locked_set.contains(&item.item_id)
-                        && !loaded_tube_items.contains(&item.item_id)
-                        && !snap.is_item_locked_in_contract_or_job(item.item_id)
-                        && !snap
-                            .item_custom_names
-                            .get(&item.item_id)
-                            .is_some_and(|s| s.starts_with("courier_cargo:"))
-                    {
-                        by_type.entry(item.type_id).or_default().push(item.item_id);
+            let raw_flag = match args.first() {
+                Some(v) if !matches!(v, PyRep::None) => Some(v),
+                _ => match kwargs.get("flag") {
+                    Some(v) if !matches!(v, PyRep::None) => Some(v),
+                    _ => None,
+                },
+            };
+            let target_flag = match raw_flag {
+                None => default_flag,
+                Some(v) => {
+                    let Some(f) = v.as_i64() else {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidInventoryFlag".into(),
+                            message: "StackAll flag must be an integer".into(),
+                            client_error: None,
+                        }));
+                    };
+                    if f == 0 {
+                        default_flag
+                    } else {
+                        let Ok(flag_u16) = u16::try_from(f) else {
+                            return Some(Err(BridgeRpcError {
+                                code: "InvalidInventoryFlag".into(),
+                                message: format!("StackAll flag {f} out of valid range"),
+                                client_error: None,
+                            }));
+                        };
+                        InventoryFlag::from_u16(flag_u16)
                     }
                 }
-                for ids in by_type.values_mut() {
-                    ids.sort_unstable();
-                }
-                by_type
-            });
+            };
 
-            let mut merged_count = 0_i64;
-            let mut survivors = Vec::new();
-            for (_type_id, ids) in groups {
-                if ids.len() < 2 {
-                    continue;
+            let provided_pw = kwargs.get("password").and_then(|v| v.as_str());
+            let loaded_tube_items = snapshot_loaded_tube_items(ctx);
+            let pre_balls = snapshot_pre_balls(ctx, session, char_id);
+            let outcome = match ctx.db.try_with_mut_snapshot(|guard| {
+                let ch = character_or_session_fallback(guard, session, char_id)?;
+                let cs_state = fitting_containers_ships::read_container_ship_state_snap(guard);
+                let chain = collect_container_chain(guard, target_loc, 9);
+                validate_bound_and_hint_chain(
+                    guard,
+                    session,
+                    bound_loc,
+                    &[kw_loc],
+                    &chain,
+                    "InvalidLocation",
+                    &format!("Inventory {target_loc}"),
+                )?;
+                let ship_unlock = validate_location_reachability_in_snap(
+                    ctx,
+                    guard,
+                    &cs_state,
+                    session,
+                    &ch,
+                    char_id,
+                    &pre_balls,
+                    target_loc,
+                    Some(target_flag),
+                    &chain,
+                    provided_pw,
+                    "DestinationAccessDenied",
+                    "OutOfRange",
+                    true,
+                )?;
+                let mut unlock_pairs = enforce_container_chain_policies(
+                    ctx,
+                    guard,
+                    &cs_state,
+                    char_id,
+                    ch.corporation_id,
+                    true,
+                    &chain,
+                    provided_pw,
+                    ContainerChainPolicy {
+                        reject_sealed_wrap: false,
+                        reject_alsc_locked: false,
+                        reject_locked_or_escrow: false,
+                        check_corp_take_role: true,
+                        locked_err_code: "StackFailed",
+                    },
+                )?;
+                if let Some(pair) = ship_unlock {
+                    unlock_pairs.push(pair);
                 }
-                let dst_id = ids[0];
-                let (old_dst_qty, src_snaps) = ctx.db.with_snapshot(|snap| {
-                    let dst_q = snap.items.get(&dst_id).map(|i| i.quantity).unwrap_or(0);
-                    let srcs: Vec<(i64, Option<eve_db::InventoryItemRecord>)> = ids[1..]
-                        .iter()
-                        .map(|&sid| (sid, snap.items.get(&sid).cloned()))
-                        .collect();
-                    (dst_q, srcs)
-                });
-                let mut latest = None;
-                for (src_id, old_src_opt) in src_snaps {
-                    if let Ok(upd) = ctx.db.stack_items(char_id, dst_id, src_id) {
-                        merged_count += 1;
-                        if let Some(old_src) = old_src_opt {
-                            inventory_bound::emit_inv_item_deleted(ctx, char_id, &old_src);
-                        }
-                        latest = Some(upd);
-                    }
-                }
-                if let Some(upd) = latest {
-                    inventory_bound::emit_inv_item_change(
-                        ctx,
-                        char_id,
-                        &upd,
-                        vec![
-                            // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
-                            (9, PyRep::Integer(old_dst_qty as i64)),
-                        ],
-                    );
-                    survivors.push(PyRep::keyval([
-                        ("itemID", PyRep::Integer(upd.item_id)),
-                        ("typeID", PyRep::Integer(upd.type_id as i64)),
-                        ("quantity", PyRep::Integer(upd.quantity as i64)),
-                        ("version", PyRep::Integer(upd.version as i64)),
-                    ]));
-                }
+                let outcome = guard.stack_all_items_in_snap(
+                    char_id,
+                    target_loc,
+                    target_flag,
+                    &loaded_tube_items,
+                );
+                persist_unlocked_containers_in_snap(guard, &unlock_pairs);
+                Ok(outcome)
+            }) {
+                Ok(outcome) => outcome,
+                Err(e) => return Some(Err(e)),
+            };
+
+            for old_src in &outcome.deleted_sources {
+                inventory_bound::emit_inv_item_deleted(ctx, char_id, old_src);
+            }
+            let mut survivors = Vec::with_capacity(outcome.survivors.len());
+            for survivor in &outcome.survivors {
+                inventory_bound::emit_inv_item_change(
+                    ctx,
+                    char_id,
+                    &survivor.updated,
+                    vec![
+                        // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
+                        (9, PyRep::Integer(survivor.old_quantity as i64)),
+                    ],
+                );
+                survivors.push(PyRep::keyval([
+                    ("itemID", PyRep::Integer(survivor.updated.item_id)),
+                    ("typeID", PyRep::Integer(survivor.updated.type_id as i64)),
+                    ("quantity", PyRep::Integer(survivor.updated.quantity as i64)),
+                    ("version", PyRep::Integer(survivor.updated.version as i64)),
+                ]));
             }
             Some(Ok(PyRep::keyval([
                 ("locationID", PyRep::Integer(target_loc)),
                 ("flagID", PyRep::Integer(target_flag as i64)),
-                ("mergedCount", PyRep::Integer(merged_count)),
+                ("mergedCount", PyRep::Integer(outcome.merged_count)),
                 ("stacks", PyRep::List(survivors)),
             ])))
         }

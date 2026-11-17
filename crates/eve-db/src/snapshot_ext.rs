@@ -1377,44 +1377,129 @@ impl WorldStateSnapshot {
         self.is_item_locked_excluding_trade(item_id, None)
     }
 
-    /// Returns `true` if `item_id` (or an ancestor container up to 8 hops) is escrowed in an active contract, industry job, direct trade (optionally excluding `exempt_trade_id`), or HyperNet raffle.
-    pub fn is_item_locked_excluding_trade(&self, item_id: i64, exempt_trade_id: Option<i64>) -> bool {
-        #[derive(serde::Deserialize)]
-        struct TradeRef { #[serde(default)] trade_id: i64, #[serde(default)] char_a: i64, #[serde(default)] char_b: i64, #[serde(default)] station_id: i64, #[serde(default)] items_a: Vec<(i64, i32)>, #[serde(default)] items_b: Vec<(i64, i32)>, #[serde(default)] completed: bool, #[serde(default)] cancelled: bool }
-        #[derive(serde::Deserialize)]
-        struct RaffleRef { item_id: i64, #[serde(default)] winner_id: Option<i64>, #[serde(default)] expired: bool }
-        let is_direct_lock = |check_id: i64| -> bool {
-            self.contracts.values().any(|c| matches!(c.status.as_str(), "Outstanding" | "InProgress") && c.item_ids.contains(&check_id))
-                || self.industry_jobs.values().any(|j| matches!(j.status.as_str(), "Active" | "Paused") && j.blueprint_item_id == check_id)
-                || self.owner_notes.values().any(|n| match n.character_id {
-                    -73 => serde_json::from_str::<TradeRef>(&n.note).is_ok_and(|t| {
-                        let both_docked = t.station_id <= 0 || (
-                            self.characters.get(&t.char_a).is_none_or(|c| c.station_id.or(c.structure_id) == Some(t.station_id))
-                            && self.characters.get(&t.char_b).is_none_or(|c| c.station_id.or(c.structure_id) == Some(t.station_id))
-                        );
-                        exempt_trade_id != Some(t.trade_id) && !t.completed && !t.cancelled && both_docked && (t.items_a.iter().any(|(id, _)| *id == check_id) || t.items_b.iter().any(|(id, _)| *id == check_id))
-                    }),
-                    -74 => serde_json::from_str::<RaffleRef>(&n.note).is_ok_and(|r| !r.expired && r.winner_id.is_none() && r.item_id == check_id),
-                    _ => false,
-                })
-        };
+    pub(crate) fn collect_escrow_ancestor_chain(&self, item_id: i64) -> Vec<i64> {
+        let mut chain = Vec::with_capacity(9);
         let mut cur_id = item_id;
-        let mut visited = Vec::with_capacity(9);
         for _ in 0..=8 {
-            visited.push(cur_id);
-            if is_direct_lock(cur_id) {
-                return true;
-            }
+            chain.push(cur_id);
             let Some(item) = self.items.get(&cur_id) else {
                 break;
             };
             let next_id = item.location_id;
-            if next_id <= 0 || visited.contains(&next_id) || self.structures.contains_key(&next_id) {
+            if next_id <= 0 || chain.contains(&next_id) || self.structures.contains_key(&next_id) {
                 break;
             }
             cur_id = next_id;
         }
+        chain
+    }
+
+    fn visit_direct_escrow_locks(
+        &self,
+        exempt_trade_id: Option<i64>,
+        mut on_id: impl FnMut(i64) -> bool,
+    ) -> bool {
+        #[derive(serde::Deserialize)]
+        struct TradeRef {
+            #[serde(default)]
+            trade_id: i64,
+            #[serde(default)]
+            char_a: i64,
+            #[serde(default)]
+            char_b: i64,
+            #[serde(default)]
+            station_id: i64,
+            #[serde(default)]
+            items_a: Vec<(i64, i32)>,
+            #[serde(default)]
+            items_b: Vec<(i64, i32)>,
+            #[serde(default)]
+            completed: bool,
+            #[serde(default)]
+            cancelled: bool,
+        }
+        #[derive(serde::Deserialize)]
+        struct RaffleRef {
+            item_id: i64,
+            #[serde(default)]
+            winner_id: Option<i64>,
+            #[serde(default)]
+            expired: bool,
+        }
+        for c in self.contracts.values() {
+            if matches!(c.status.as_str(), "Outstanding" | "InProgress") {
+                for &id in &c.item_ids {
+                    if on_id(id) {
+                        return true;
+                    }
+                }
+            }
+        }
+        for j in self.industry_jobs.values() {
+            if matches!(j.status.as_str(), "Active" | "Paused") && on_id(j.blueprint_item_id) {
+                return true;
+            }
+        }
+        for n in self.owner_notes.values() {
+            match n.character_id {
+                -73 => {
+                    if let Ok(t) = serde_json::from_str::<TradeRef>(&n.note) {
+                        let both_docked = t.station_id <= 0
+                            || (self
+                                .characters
+                                .get(&t.char_a)
+                                .is_none_or(|c| {
+                                    c.station_id.or(c.structure_id) == Some(t.station_id)
+                                })
+                                && self.characters.get(&t.char_b).is_none_or(|c| {
+                                    c.station_id.or(c.structure_id) == Some(t.station_id)
+                                }));
+                        if exempt_trade_id != Some(t.trade_id)
+                            && !t.completed
+                            && !t.cancelled
+                            && both_docked
+                        {
+                            for &(id, _) in &t.items_a {
+                                if on_id(id) {
+                                    return true;
+                                }
+                            }
+                            for &(id, _) in &t.items_b {
+                                if on_id(id) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+                -74 => {
+                    if let Ok(r) = serde_json::from_str::<RaffleRef>(&n.note) {
+                        if !r.expired && r.winner_id.is_none() && on_id(r.item_id) {
+                            return true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         false
+    }
+
+    /// Collects all item IDs directly escrowed in active contracts, industry jobs,
+    /// direct trades (optionally excluding `exempt_trade_id`), or HyperNet raffles in one pass.
+    pub fn direct_escrow_locked_item_ids(&self, exempt_trade_id: Option<i64>) -> HashSet<i64> {
+        let mut locked = HashSet::new();
+        self.visit_direct_escrow_locks(exempt_trade_id, |id| {
+            locked.insert(id);
+            false
+        });
+        locked
+    }
+
+    /// Returns `true` if `item_id` (or an ancestor container up to 8 hops) is escrowed in an active contract, industry job, direct trade (optionally excluding `exempt_trade_id`), or HyperNet raffle.
+    pub fn is_item_locked_excluding_trade(&self, item_id: i64, exempt_trade_id: Option<i64>) -> bool {
+        let chain = self.collect_escrow_ancestor_chain(item_id);
+        self.visit_direct_escrow_locks(exempt_trade_id, |id| chain.contains(&id))
     }
 
     /// Returns `true` if `item_id` is saved in `StructureExtendedState.previous_ship_by_structure`

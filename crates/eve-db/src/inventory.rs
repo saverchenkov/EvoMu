@@ -130,6 +130,32 @@ impl TransferItemSpec {
     }
 }
 
+/// Updated surviving stack produced by [`WorldRepository::stack_all_items`].
+#[derive(Debug, Clone)]
+pub struct StackAllSurvivor {
+    /// Stack quantity prior to merging, passed as `ixStackSize` (`9`) old value in `OnItemChange`.
+    pub old_quantity: i32,
+    pub updated: InventoryItemRecord,
+}
+
+/// Atomic batch outcome returned by [`WorldRepository::stack_all_items`].
+#[derive(Debug, Clone, Default)]
+pub struct StackAllOutcome {
+    pub merged_count: i64,
+    pub deleted_sources: Vec<InventoryItemRecord>,
+    pub survivors: Vec<StackAllSurvivor>,
+}
+
+/// Precomputed per-snapshot lock and container-occupancy sets for O(1) per-item
+/// batch validation in `stack_all_items` and `MultiMerge`.
+#[derive(Debug, Clone, Default)]
+pub struct InventoryLockIndex {
+    pub direct_escrow_locked: HashSet<i64>,
+    pub alsc_locked: HashSet<i64>,
+    pub unpaid_wrap_items: HashSet<i64>,
+    pub non_empty_containers: HashSet<i64>,
+}
+
 impl WorldRepository {
     pub fn get_item(&self, item_id: i64) -> Option<InventoryItemRecord> {
         let guard = self.read_state();
@@ -388,67 +414,82 @@ impl WorldRepository {
                     "Cannot stack fitted modules or non-empty containers".into(),
                 ));
             }
-            if src.singleton
-                || src.is_blueprint_copy
-                || src.blueprint_runs_remaining.is_some()
-                || !src.dynamic_attributes.is_empty()
-                || src.source_mutaplasmid_id.is_some()
-            {
+            if WorldStateSnapshot::has_non_stackable_item_state(&src) {
                 return Err(DbError::ValidationError(
                     "Cannot stack singleton, blueprint copy, or mutated item".into(),
                 ));
             }
-            let tgt = guard
+            let tgt_ref = guard
                 .items
-                .get_mut(&target_item_id)
+                .get(&target_item_id)
                 .ok_or(DbError::ItemNotFound(target_item_id))?;
-            if tgt.owner_id != character_id {
+            if tgt_ref.owner_id != character_id {
                 return Err(DbError::ItemOwnershipViolation {
                     character_id,
                     item_id: target_item_id,
                 });
             }
-            if tgt.singleton
-                || tgt.is_blueprint_copy
-                || tgt.blueprint_runs_remaining.is_some()
-                || !tgt.dynamic_attributes.is_empty()
-                || tgt.source_mutaplasmid_id.is_some()
-            {
+            if WorldStateSnapshot::has_non_stackable_item_state(tgt_ref) {
                 return Err(DbError::ValidationError(
                     "Cannot stack onto a singleton, blueprint copy, or mutated item".into(),
                 ));
             }
-            if tgt.type_id != src.type_id {
+            if tgt_ref.type_id != src.type_id {
                 return Err(DbError::ValidationError(format!(
                     "Cannot stack different item types: {} and {}",
-                    tgt.type_id, src.type_id
+                    tgt_ref.type_id, src.type_id
                 )));
             }
-            let is_courier_cargo = |id: i64| -> bool {
-                guard
-                    .item_custom_names
-                    .get(&id)
-                    .map(|tag| tag.starts_with("courier_cargo:"))
-                    .unwrap_or(false)
-            };
-            if is_courier_cargo(target_item_id) || is_courier_cargo(source_item_id) {
+            if guard.is_courier_cargo_item(target_item_id)
+                || guard.is_courier_cargo_item(source_item_id)
+            {
                 return Err(DbError::ValidationError(
                     "Cannot stack courier mission cargo".into(),
                 ));
             }
-            if tgt.location_id != src.location_id || tgt.flag != src.flag {
+            if tgt_ref.location_id != src.location_id || tgt_ref.flag != src.flag {
                 return Err(DbError::ValidationError(
                     "Cannot stack items at different locations or flags".into(),
                 ));
             }
-            tgt.quantity = tgt.quantity.checked_add(src.quantity).ok_or_else(|| {
+            let new_qty = tgt_ref.quantity.checked_add(src.quantity).ok_or_else(|| {
                 DbError::ValidationError("Stack quantity overflow".into())
             })?;
+            let tgt = guard
+                .items
+                .get_mut(&target_item_id)
+                .ok_or(DbError::ItemNotFound(target_item_id))?;
+            tgt.quantity = new_qty;
             tgt.version += 1;
             let updated = tgt.clone();
 
             guard.items.remove(&source_item_id);
             Ok(updated)
+        })
+    }
+
+    /// Atomically merges all eligible stacks owned by `character_id` at
+    /// `(target_location_id, target_flag)` in a single snapshot transaction.
+    ///
+    /// Precomputes escrow, ALSC, Asset Safety wrap, and container-occupancy sets once per
+    /// call so hangar stacking runs in linear time with at most one SQLite commit.
+    pub fn stack_all_items(
+        &self,
+        character_id: i64,
+        target_location_id: i64,
+        target_flag: InventoryFlag,
+        extra_excluded_item_ids: &HashSet<i64>,
+    ) -> Result<StackAllOutcome, DbError> {
+        if WorldStateSnapshot::is_flag_stack_ineligible(target_flag) {
+            return Ok(StackAllOutcome::default());
+        }
+        self.try_with_mut_snapshot(|guard| {
+            Ok(guard.stack_all_items_in_snap(
+                character_id,
+                target_location_id,
+                target_flag,
+                extra_excluded_item_ids,
+            ))
         })
     }
 
@@ -464,76 +505,7 @@ impl WorldRepository {
                 "Split quantity must be positive".into(),
             ));
         }
-        self.try_with_mut_snapshot(|guard| {
-            if guard.is_item_or_ancestor_locked_or_impounded(item_id) {
-                return Err(DbError::ItemLocked(item_id));
-            }
-            {
-                let item_ref = guard
-                    .items
-                    .get(&item_id)
-                    .ok_or(DbError::ItemNotFound(item_id))?;
-                if item_ref.owner_id != character_id {
-                    return Err(DbError::ItemOwnershipViolation {
-                        character_id,
-                        item_id,
-                    });
-                }
-                if WorldStateSnapshot::is_fitted_slot_flag(item_ref.flag) {
-                    return Err(DbError::ItemLocked(item_id));
-                }
-                if guard.is_container_non_empty(item_id) {
-                    return Err(DbError::ValidationError(
-                        "Cannot split a non-empty container".into(),
-                    ));
-                }
-                if item_ref.singleton
-                    || item_ref.is_blueprint_copy
-                    || item_ref.blueprint_runs_remaining.is_some()
-                    || !item_ref.dynamic_attributes.is_empty()
-                    || item_ref.source_mutaplasmid_id.is_some()
-                {
-                    return Err(DbError::ValidationError(
-                        "Cannot split a singleton, BPC, or mutated item".into(),
-                    ));
-                }
-                if split_quantity >= item_ref.quantity {
-                    return Err(DbError::ValidationError(format!(
-                        "Split quantity {} must be strictly less than item quantity {}",
-                        split_quantity, item_ref.quantity
-                    )));
-                }
-            }
-            let item = guard
-                .items
-                .get_mut(&item_id)
-                .ok_or(DbError::ItemNotFound(item_id))?;
-            item.quantity -= split_quantity;
-            item.version += 1;
-            let updated_orig = item.clone();
-
-            let new_id = guard.alloc_entity_id();
-            let new_item = InventoryItemRecord {
-                item_id: new_id,
-                type_id: updated_orig.type_id,
-                owner_id: character_id,
-                location_id: updated_orig.location_id,
-                flag: updated_orig.flag,
-                quantity: split_quantity,
-                singleton: false,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            };
-            guard.items.insert(new_id, new_item.clone());
-            if let Some(custom_name) = guard.item_custom_names.get(&item_id).cloned() {
-                guard.item_custom_names.insert(new_id, custom_name);
-            }
-            Ok((updated_orig, new_item))
-        })
+        self.try_with_mut_snapshot(|guard| guard.split_stack_in_snap(character_id, item_id, split_quantity))
     }
 
     /// Deletes (trashes) an item and all items contained inside it (`INV-2`).
@@ -685,6 +657,73 @@ impl WorldStateSnapshot {
         )
     }
 
+    /// Returns `true` if `flag` cannot hold stackable inventory items (fitted slots,
+    /// `Locked`, `Impounded`, or `AssetSafety`).
+    pub fn is_flag_stack_ineligible(flag: InventoryFlag) -> bool {
+        Self::is_fitted_slot_flag(flag)
+            || matches!(flag, InventoryFlag::Locked | InventoryFlag::Impounded)
+            || matches!(
+                flag as u16,
+                FLAG_ASSET_SAFETY | FLAG_LOCKED | FLAG_IMPOUNDED
+            )
+    }
+
+    /// Returns `true` if `item` carries a locked/impounded/asset-safety flag or is a sealed wrap type (`3468`, `60`).
+    pub fn has_locked_flag_or_wrap_type(item: &InventoryItemRecord) -> bool {
+        matches!(item.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
+            || matches!(
+                item.flag as u16,
+                FLAG_ASSET_SAFETY | FLAG_LOCKED | FLAG_IMPOUNDED
+            )
+            || item.type_id == TYPE_PLASTIC_WRAP
+            || item.type_id == TYPE_ASSET_SAFETY_WRAP
+    }
+
+    /// Returns `true` if `item` has stack-incompatible intrinsic state
+    /// (`singleton`, blueprint copy / limited-run BP, dynamic attributes, or mutaplasmid source).
+    pub fn has_non_stackable_item_state(item: &InventoryItemRecord) -> bool {
+        item.singleton
+            || item.is_blueprint_copy
+            || item.blueprint_runs_remaining.is_some()
+            || !item.dynamic_attributes.is_empty()
+            || item.source_mutaplasmid_id.is_some()
+    }
+
+    /// Returns `true` if `item_id` is tagged as courier mission cargo (`courier_cargo:`).
+    pub fn is_courier_cargo_item(&self, item_id: i64) -> bool {
+        self.item_custom_names
+            .get(&item_id)
+            .is_some_and(|tag| tag.starts_with("courier_cargo:"))
+    }
+
+    fn is_item_stack_all_candidate(
+        &self,
+        item: &InventoryItemRecord,
+        lock_index: &InventoryLockIndex,
+        extra_excluded_item_ids: &HashSet<i64>,
+    ) -> bool {
+        item.quantity > 0
+            && !Self::has_locked_flag_or_wrap_type(item)
+            && !Self::is_fitted_slot_flag(item.flag)
+            && self.is_clean_stackable_item(item)
+            && !extra_excluded_item_ids.contains(&item.item_id)
+            && !lock_index.direct_escrow_locked.contains(&item.item_id)
+            && !lock_index.alsc_locked.contains(&item.item_id)
+            && !lock_index.unpaid_wrap_items.contains(&item.item_id)
+            && !lock_index.non_empty_containers.contains(&item.item_id)
+    }
+
+    /// Collects IDs of all containers currently holding at least one child item with positive quantity.
+    pub fn non_empty_container_ids(&self) -> HashSet<i64> {
+        let mut non_empty = HashSet::new();
+        for other in self.items.values() {
+            if other.location_id != other.item_id && other.quantity > 0 {
+                non_empty.insert(other.location_id);
+            }
+        }
+        non_empty
+    }
+
     /// Returns `true` if `item_id` contains at least one child item with positive quantity (`Inv 5`).
     pub fn is_container_non_empty(&self, item_id: i64) -> bool {
         self.items
@@ -692,37 +731,35 @@ impl WorldStateSnapshot {
             .any(|other| other.item_id != item_id && other.location_id == item_id && other.quantity > 0)
     }
 
-    /// Returns `true` if `item_id` is locked via ALSC container security (`owner_notes[-8_400_000_000_000]`).
-    pub fn is_item_in_alsc_lock(&self, item_id: i64) -> bool {
+    fn visit_alsc_locked_items(&self, mut on_id: impl FnMut(i64) -> bool) -> bool {
         let Some(note) = self.owner_notes.get(&CONTAINER_SHIP_NOTE_ID) else {
             return false;
         };
         let Ok(val) = serde_json::from_str::<serde_json::Value>(&note.note) else {
             return false;
         };
-        val.get("alsc_locked_items")
-            .and_then(|v| v.as_array())
-            .is_some_and(|arr| arr.iter().any(|entry| entry.as_i64() == Some(item_id)))
+        let Some(arr) = val.get("alsc_locked_items").and_then(|v| v.as_array()) else {
+            return false;
+        };
+        arr.iter().filter_map(|entry| entry.as_i64()).any(&mut on_id)
     }
 
-    /// Returns `true` if `item_id` is an Asset Safety Wrap (`type_id = 60`), carries flag `AssetSafety`
-    /// (`36`), or sits inside an unpaid `asset_safety_wraps` record (`Inv 2`).
-    pub fn is_item_in_active_asset_safety_wrap(&self, item_id: i64) -> bool {
-        if let Some(it) = self.items.get(&item_id) {
-            if it.type_id == TYPE_ASSET_SAFETY_WRAP || (it.flag as u16) == FLAG_ASSET_SAFETY {
-                return true;
-            }
-        }
-        let Some(ext_json) = self.item_custom_names.get(&STRUCTURE_EXT_STATE_KEY) else {
-            return false;
-        };
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(ext_json) else {
-            return false;
-        };
-        let Some(wraps) = val.get("asset_safety_wraps").and_then(|v| v.as_object()) else {
-            return false;
-        };
+    /// Collects all item IDs locked via ALSC container security (`owner_notes[-8_400_000_000_000]`).
+    pub fn alsc_locked_item_ids(&self) -> HashSet<i64> {
+        let mut locked = HashSet::new();
+        self.visit_alsc_locked_items(|id| {
+            locked.insert(id);
+            false
+        });
+        locked
+    }
 
+    /// Returns `true` if `item_id` is locked via ALSC container security (`owner_notes[-8_400_000_000_000]`).
+    pub fn is_item_in_alsc_lock(&self, item_id: i64) -> bool {
+        self.visit_alsc_locked_items(|id| id == item_id)
+    }
+
+    fn collect_wrap_ancestor_chain(&self, item_id: i64) -> Vec<i64> {
         // Collect ancestor item IDs once (self + up to 8 parents) to test against wrap_id / item_ids.
         let mut chain = Vec::with_capacity(9);
         chain.push(item_id);
@@ -734,29 +771,64 @@ impl WorldStateSnapshot {
             chain.push(loc);
             cur = self.items.get(&loc).map(|i| i.location_id);
         }
+        chain
+    }
 
-        wraps.iter().any(|(key_str, wrap_val)| {
+    fn visit_unpaid_asset_safety_wrap_ids(&self, mut on_id: impl FnMut(i64) -> bool) -> bool {
+        let Some(ext_json) = self.item_custom_names.get(&STRUCTURE_EXT_STATE_KEY) else {
+            return false;
+        };
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(ext_json) else {
+            return false;
+        };
+        let Some(wraps) = val.get("asset_safety_wraps").and_then(|v| v.as_object()) else {
+            return false;
+        };
+        for (key_str, wrap_val) in wraps {
             if wrap_val.get("retrieval_fee_paid").and_then(|v| v.as_bool()) == Some(true) {
-                return false;
+                continue;
             }
-            let wrap_id = wrap_val
+            if let Some(wid) = wrap_val
                 .get("wrap_id")
                 .and_then(|v| v.as_i64())
-                .or_else(|| key_str.parse::<i64>().ok());
-            if let Some(wid) = wrap_id {
-                if chain.contains(&wid) {
+                .or_else(|| key_str.parse::<i64>().ok())
+            {
+                if on_id(wid) {
                     return true;
                 }
             }
-            wrap_val
-                .get("item_ids")
-                .and_then(|v| v.as_array())
-                .is_some_and(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_i64())
-                        .any(|iid| chain.contains(&iid))
-                })
-        })
+            if let Some(arr) = wrap_val.get("item_ids").and_then(|v| v.as_array()) {
+                for iid in arr.iter().filter_map(|v| v.as_i64()) {
+                    if on_id(iid) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Collects all wrap and item IDs belonging to unpaid Asset Safety wraps
+    /// (`item_custom_names[-7_700_001]`).
+    pub fn unpaid_asset_safety_wrap_item_ids(&self) -> HashSet<i64> {
+        let mut ids = HashSet::new();
+        self.visit_unpaid_asset_safety_wrap_ids(|id| {
+            ids.insert(id);
+            false
+        });
+        ids
+    }
+
+    /// Returns `true` if `item_id` is an Asset Safety Wrap (`type_id = 60`), carries flag `AssetSafety`
+    /// (`36`), or sits inside an unpaid `asset_safety_wraps` record (`Inv 2`).
+    pub fn is_item_in_active_asset_safety_wrap(&self, item_id: i64) -> bool {
+        if let Some(it) = self.items.get(&item_id) {
+            if it.type_id == TYPE_ASSET_SAFETY_WRAP || (it.flag as u16) == FLAG_ASSET_SAFETY {
+                return true;
+            }
+        }
+        let chain = self.collect_wrap_ancestor_chain(item_id);
+        self.visit_unpaid_asset_safety_wrap_ids(|id| chain.contains(&id))
     }
 
     /// Returns `true` if `item_id` is currently designated as the War HQ of an active war (`Inv 3`).
@@ -788,6 +860,119 @@ impl WorldStateSnapshot {
         }
     }
 
+    fn is_id_or_chain_escrow_locked_with_set(&self, locked: &HashSet<i64>, item_id: i64) -> bool {
+        !locked.is_empty()
+            && self
+                .collect_escrow_ancestor_chain(item_id)
+                .into_iter()
+                .any(|id| locked.contains(&id))
+    }
+
+    fn is_id_or_chain_in_unpaid_wrap(&self, unpaid_wraps: &HashSet<i64>, item_id: i64) -> bool {
+        if let Some(it) = self.items.get(&item_id) {
+            if it.type_id == TYPE_ASSET_SAFETY_WRAP || (it.flag as u16) == FLAG_ASSET_SAFETY {
+                return true;
+            }
+        }
+        !unpaid_wraps.is_empty()
+            && self
+                .collect_wrap_ancestor_chain(item_id)
+                .into_iter()
+                .any(|id| unpaid_wraps.contains(&id))
+    }
+
+    fn is_ancestor_chain_locked(
+        &self,
+        start_loc: i64,
+        check_item: impl Fn(&InventoryItemRecord) -> bool,
+    ) -> bool {
+        let mut cur_loc = start_loc;
+        for _ in 0..8 {
+            let Some(anc) = self.items.get(&cur_loc) else {
+                break;
+            };
+            if check_item(anc) {
+                return true;
+            }
+            cur_loc = anc.location_id;
+        }
+        false
+    }
+
+    fn is_single_item_locked_with_index(
+        &self,
+        index: &InventoryLockIndex,
+        item: &InventoryItemRecord,
+    ) -> bool {
+        Self::has_locked_flag_or_wrap_type(item)
+            || index.alsc_locked.contains(&item.item_id)
+            || self.is_id_or_chain_escrow_locked_with_set(&index.direct_escrow_locked, item.item_id)
+            || self.is_id_or_chain_in_unpaid_wrap(&index.unpaid_wrap_items, item.item_id)
+    }
+
+    /// Builds precomputed per-snapshot lock and container-occupancy sets in a single pass.
+    pub fn build_inventory_lock_index(&self) -> InventoryLockIndex {
+        InventoryLockIndex {
+            direct_escrow_locked: self.direct_escrow_locked_item_ids(None),
+            alsc_locked: self.alsc_locked_item_ids(),
+            unpaid_wrap_items: self.unpaid_asset_safety_wrap_item_ids(),
+            non_empty_containers: self.non_empty_container_ids(),
+        }
+    }
+
+    /// Returns `true` if `location_id` or its ancestor chain locks all direct child items
+    /// at `location_id` under `is_item_or_ancestor_locked_or_impounded`.
+    fn is_location_chain_locked_for_children(
+        &self,
+        index: &InventoryLockIndex,
+        location_id: i64,
+    ) -> bool {
+        if location_id > 0
+            && !self.structures.contains_key(&location_id)
+            && index.direct_escrow_locked.contains(&location_id)
+        {
+            return true;
+        }
+        if index.unpaid_wrap_items.contains(&location_id) {
+            return true;
+        }
+        self.is_ancestor_chain_locked(location_id, |anc| {
+            self.is_single_item_locked_with_index(index, anc)
+        })
+    }
+
+    /// Returns `true` if `item_id` (or an ancestor container up to 8 hops) is directly escrowed
+    /// according to `index.direct_escrow_locked`.
+    pub fn is_item_escrow_locked_with_index(
+        &self,
+        index: &InventoryLockIndex,
+        item_id: i64,
+    ) -> bool {
+        self.is_id_or_chain_escrow_locked_with_set(&index.direct_escrow_locked, item_id)
+    }
+
+    /// Equivalent to [`Self::is_item_or_ancestor_locked_or_impounded`] using a precomputed
+    /// [`InventoryLockIndex`] to avoid repeated full-snapshot scans during batch operations.
+    pub fn is_item_or_ancestor_locked_or_impounded_with_index(
+        &self,
+        index: &InventoryLockIndex,
+        item_id: i64,
+    ) -> bool {
+        if self.is_id_or_chain_escrow_locked_with_set(&index.direct_escrow_locked, item_id)
+            || index.alsc_locked.contains(&item_id)
+            || self.is_id_or_chain_in_unpaid_wrap(&index.unpaid_wrap_items, item_id)
+        {
+            return true;
+        }
+        let Some(item) = self.items.get(&item_id) else {
+            return false;
+        };
+        Self::has_locked_flag_or_wrap_type(item)
+            || self.is_ancestor_chain_locked(item.location_id, |anc| {
+                self.is_single_item_locked_with_index(index, anc)
+            })
+    }
+
     fn is_item_or_ancestor_locked_or_impounded_opt(
         &self,
         item_id: i64,
@@ -802,31 +987,15 @@ impl WorldStateSnapshot {
         let Some(item) = self.items.get(&item_id) else {
             return false;
         };
-        if matches!(item.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
-            || matches!(item.flag as u16, FLAG_ASSET_SAFETY | FLAG_LOCKED | FLAG_IMPOUNDED)
-            || item.type_id == TYPE_PLASTIC_WRAP
-            || item.type_id == TYPE_ASSET_SAFETY_WRAP
-        {
+        if Self::has_locked_flag_or_wrap_type(item) {
             return true;
         }
-        let mut cur_loc = item.location_id;
-        for _ in 0..8 {
-            let Some(anc) = self.items.get(&cur_loc) else {
-                break;
-            };
-            if anc.type_id == TYPE_PLASTIC_WRAP
-                || anc.type_id == TYPE_ASSET_SAFETY_WRAP
+        self.is_ancestor_chain_locked(item.location_id, |anc| {
+            Self::has_locked_flag_or_wrap_type(anc)
                 || self.is_escrow_locked_opt(anc.item_id, exclude_trade_lock_id)
                 || self.is_item_in_alsc_lock(anc.item_id)
                 || self.is_item_in_active_asset_safety_wrap(anc.item_id)
-                || matches!(anc.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
-                || matches!(anc.flag as u16, FLAG_ASSET_SAFETY | FLAG_LOCKED | FLAG_IMPOUNDED)
-            {
-                return true;
-            }
-            cur_loc = anc.location_id;
-        }
-        false
+        })
     }
 
     /// Returns `true` if `item_id` or any ancestor container up its containment chain is locked,
@@ -1172,15 +1341,177 @@ impl WorldStateSnapshot {
     /// Returns `true` if `item` is an unpackaged, non-blueprint-copy, unmodified,
     /// non-courier stack eligible for merging or commodity stacking.
     pub fn is_clean_stackable_item(&self, item: &InventoryItemRecord) -> bool {
-        !item.singleton
-            && !item.is_blueprint_copy
-            && item.blueprint_runs_remaining.is_none()
-            && item.dynamic_attributes.is_empty()
-            && item.source_mutaplasmid_id.is_none()
-            && !self
-                .item_custom_names
-                .get(&item.item_id)
-                .is_some_and(|tag| tag.starts_with("courier_cargo:"))
+        !Self::has_non_stackable_item_state(item) && !self.is_courier_cargo_item(item.item_id)
+    }
+
+    /// Merges all eligible stacks owned by `character_id` at `(target_location_id, target_flag)`
+    /// inside an open mutable snapshot transaction.
+    pub fn stack_all_items_in_snap(
+        &mut self,
+        character_id: i64,
+        target_location_id: i64,
+        target_flag: InventoryFlag,
+        extra_excluded_item_ids: &HashSet<i64>,
+    ) -> StackAllOutcome {
+        if Self::is_flag_stack_ineligible(target_flag) {
+            return StackAllOutcome::default();
+        }
+        let lock_index = self.build_inventory_lock_index();
+        if self.is_location_chain_locked_for_children(&lock_index, target_location_id) {
+            return StackAllOutcome::default();
+        }
+
+        let mut by_type: HashMap<TypeId, Vec<(i64, i32)>> = HashMap::new();
+        for item in self.items.values() {
+            if item.owner_id == character_id
+                && item.location_id == target_location_id
+                && item.flag == target_flag
+                && self.is_item_stack_all_candidate(item, &lock_index, extra_excluded_item_ids)
+            {
+                by_type
+                    .entry(item.type_id)
+                    .or_default()
+                    .push((item.item_id, item.quantity));
+            }
+        }
+
+        let mut type_ids: Vec<TypeId> = by_type.keys().copied().collect();
+        type_ids.sort_unstable();
+
+        struct MergePlan {
+            dst_id: i64,
+            old_dst_qty: i32,
+            new_dst_qty: i32,
+            src_ids: Vec<i64>,
+        }
+        let mut plans = Vec::new();
+        for type_id in type_ids {
+            let Some(group) = by_type.get_mut(&type_id) else {
+                continue;
+            };
+            if group.len() < 2 {
+                continue;
+            }
+            group.sort_unstable_by_key(|&(item_id, _)| item_id);
+            let (dst_id, old_dst_qty) = group[0];
+            let mut cur_qty = old_dst_qty;
+            let mut src_ids = Vec::with_capacity(group.len() - 1);
+            for &(src_id, src_qty) in &group[1..] {
+                let Some(sum) = cur_qty.checked_add(src_qty) else {
+                    continue;
+                };
+                cur_qty = sum;
+                src_ids.push(src_id);
+            }
+            if !src_ids.is_empty() {
+                plans.push(MergePlan {
+                    dst_id,
+                    old_dst_qty,
+                    new_dst_qty: cur_qty,
+                    src_ids,
+                });
+            }
+        }
+
+        if plans.is_empty() {
+            return StackAllOutcome::default();
+        }
+
+        let mut outcome = StackAllOutcome::default();
+        for plan in plans {
+            for src_id in plan.src_ids {
+                if let Some(old_src) = self.remove_system_cleanup_item(src_id) {
+                    outcome.deleted_sources.push(old_src);
+                    outcome.merged_count += 1;
+                }
+            }
+            if let Some(tgt) = self.items.get_mut(&plan.dst_id) {
+                tgt.quantity = plan.new_dst_qty;
+                tgt.version += 1;
+                outcome.survivors.push(StackAllSurvivor {
+                    old_quantity: plan.old_dst_qty,
+                    updated: tgt.clone(),
+                });
+            }
+        }
+        outcome
+    }
+
+    /// Splits `split_quantity` from `item_id` inside an open mutable snapshot transaction (`INV-2`).
+    pub fn split_stack_in_snap(
+        &mut self,
+        character_id: i64,
+        item_id: i64,
+        split_quantity: i32,
+    ) -> Result<(InventoryItemRecord, InventoryItemRecord), DbError> {
+        if split_quantity <= 0 {
+            return Err(DbError::ValidationError(
+                "Split quantity must be positive".into(),
+            ));
+        }
+        if self.is_item_or_ancestor_locked_or_impounded(item_id) {
+            return Err(DbError::ItemLocked(item_id));
+        }
+        {
+            let item_ref = self
+                .items
+                .get(&item_id)
+                .ok_or(DbError::ItemNotFound(item_id))?;
+            if item_ref.owner_id != character_id {
+                return Err(DbError::ItemOwnershipViolation {
+                    character_id,
+                    item_id,
+                });
+            }
+            if Self::is_fitted_slot_flag(item_ref.flag) {
+                return Err(DbError::ItemLocked(item_id));
+            }
+            if self.is_container_non_empty(item_id) {
+                return Err(DbError::ValidationError(
+                    "Cannot split a non-empty container".into(),
+                ));
+            }
+            if Self::has_non_stackable_item_state(item_ref) {
+                return Err(DbError::ValidationError(
+                    "Cannot split a singleton, BPC, or mutated item".into(),
+                ));
+            }
+            if split_quantity >= item_ref.quantity {
+                return Err(DbError::ValidationError(format!(
+                    "Split quantity {} must be strictly less than item quantity {}",
+                    split_quantity, item_ref.quantity
+                )));
+            }
+        }
+        let item = self
+            .items
+            .get_mut(&item_id)
+            .ok_or(DbError::ItemNotFound(item_id))?;
+        item.quantity -= split_quantity;
+        item.version += 1;
+        let updated_orig = item.clone();
+
+        let new_id = self.alloc_entity_id();
+        let new_item = InventoryItemRecord {
+            item_id: new_id,
+            type_id: updated_orig.type_id,
+            owner_id: character_id,
+            location_id: updated_orig.location_id,
+            flag: updated_orig.flag,
+            quantity: split_quantity,
+            singleton: false,
+            version: 1,
+            dynamic_attributes: HashMap::new(),
+            source_mutaplasmid_id: None,
+            insured_payout_isk: 0.0,
+            is_blueprint_copy: false,
+            blueprint_runs_remaining: None,
+        };
+        self.items.insert(new_id, new_item.clone());
+        if let Some(custom_name) = self.item_custom_names.get(&item_id).cloned() {
+            self.item_custom_names.insert(new_id, custom_name);
+        }
+        Ok((updated_orig, new_item))
     }
 
     pub fn validate_item_for_consumption(
