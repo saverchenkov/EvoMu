@@ -655,6 +655,14 @@ fn clear_crash_lost_runtime_maps(ctx: &ServerContext) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clear();
+    ctx.return_warps
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    ctx.pending_warp_finished
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
     ctx.weapon_cycle_state
         .write()
         .unwrap_or_else(|e| e.into_inner())

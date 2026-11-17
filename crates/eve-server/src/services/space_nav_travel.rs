@@ -350,10 +350,7 @@ fn cancel_pending_warp_align_if_needed(
             ..
         }
     ) {
-        ctx.active_warps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&ship_id);
+        crate::services::space_destiny::clear_warp_tracking(ctx, None, ship_id);
     }
 }
 

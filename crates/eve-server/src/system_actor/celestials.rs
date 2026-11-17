@@ -261,6 +261,12 @@ impl SystemHandle {
             let _ = bp.force_stop_warp(ball_id);
             super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         }
+        let tracking = {
+            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+            st.warp_provenance.remove(&ball_id);
+            st.warp_tracking.clone()
+        };
+        clear_shared_warp_tracking(&tracking, ball_id, true);
     }
 
     /// Reads the tracked activation state for stargate `gate_id`, if present (`#1080`).
@@ -1346,6 +1352,13 @@ impl SystemHandle {
         }
         let events = bp.step(dt_sim);
         persist_landed_warps_in_db(&bp, &events, &st.db_opt, &st.ball_space_entry_epochs);
+        let st_mut = &mut *st;
+        clear_landed_warp_tracking_from_events(
+            &bp,
+            &events,
+            &mut st_mut.warp_provenance,
+            &st_mut.warp_tracking,
+        );
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         drop(st);
         let broadcast = self.build_tick_broadcast_for_handle(&mut bp, events);
@@ -1381,6 +1394,53 @@ impl SystemHandle {
             .map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await
             .map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    /// Sets `ball_id` movement mode while atomically recording its [`WarpProvenance`] in actor
+    /// state so concurrent `UpdateStateRequest` calls never misclassify a new player/fleet warp (`#1175`).
+    pub async fn set_warp_movement_mode(
+        &self,
+        ball_id: BallId,
+        mode: MovementMode,
+        provenance: super::WarpProvenance,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_sender()
+            .send(SystemCommand::SetWarpMovementMode {
+                ball_id,
+                mode,
+                provenance,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub fn set_warp_provenance(&self, ball_id: BallId, provenance: super::WarpProvenance) {
+        self.actor_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .warp_provenance
+            .insert(ball_id, provenance);
+    }
+
+    pub fn clear_warp_provenance(&self, ball_id: BallId) {
+        self.actor_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .warp_provenance
+            .remove(&ball_id);
+    }
+
+    pub fn warp_provenance(&self, ball_id: BallId) -> Option<super::WarpProvenance> {
+        self.actor_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .warp_provenance
+            .get(&ball_id)
+            .copied()
     }
 
     pub async fn set_warp_scramble_strength(
@@ -2414,6 +2474,7 @@ impl SystemHandle {
 mod celestials_helpers;
 pub use celestials_helpers::try_remove_ball_for_db;
 pub(crate) use celestials_helpers::{
+    clear_landed_warp_tracking_from_events, clear_shared_warp_tracking,
     collect_all_condition_checkpoint_entries, collect_dirty_condition_checkpoint_entries,
     collect_immediate_armor_hull_checkpoint_entries,
     collect_landed_warp_positions, fast_forward_clock_in_actor_with_epochs,

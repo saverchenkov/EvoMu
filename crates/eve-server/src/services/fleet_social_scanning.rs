@@ -954,7 +954,19 @@ pub(super) async fn handle_scanning_and_wormholes(
             }
             let pocket_pos = ship_ball.position + DVec3::new(500_000.0, 0.0, 0.0);
             let warp_mode = MovementMode::new_warp(ship_ball.position, pocket_pos, 3.0);
-            let _ = sys_handle.set_movement_mode(ship_id, warp_mode).await;
+            if sys_handle
+                .set_warp_movement_mode(
+                    ship_id,
+                    warp_mode,
+                    crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
+                )
+                .await
+                .is_ok()
+            {
+                crate::services::space_destiny::track_player_or_fleet_warp(
+                    ctx, None, ship_id, char_id,
+                );
+            }
 
             Some(Ok(PyRep::keyval([
                 ("success", PyRep::Bool(true)),

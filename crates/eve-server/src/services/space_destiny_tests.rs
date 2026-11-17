@@ -781,3 +781,247 @@ async fn space_destiny_edge_guards_bubble_errors_warp_recovery_and_timers() {
     record_client_session_check_timer(&ctx, 9499, 1_700_020_020, 0, 7, "set_account_key");
     assert!(ctx.drain_notifications_for_char(9499).is_empty());
 }
+
+#[tokio::test]
+async fn update_state_request_respects_warp_provenance_and_clears_landed_or_cancelled_warps() {
+    let ctx = test_ctx();
+    let sys_id = 30000142;
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let bound = bound_sys(sys_id);
+    let kw = HashMap::new();
+    let seed_online_char = |char_id: i64, ship_id: i64| {
+        let uid = char_id as u64;
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut ch = snap.characters[&90_000_001].clone();
+            ch.character_id = char_id;
+            ch.user_id = uid;
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            snap.characters.insert(char_id, ch);
+            snap.accounts.insert(
+                format!("test_u_{uid}"),
+                eve_db::AccountRecord {
+                    user_id: uid,
+                    username: format!("test_u_{uid}"),
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        });
+        ctx.db
+            .acquire_online_lock(uid, uid, Some(char_id), true, 1_700_020_000)
+            .expect("online lock");
+    };
+
+    // 1. DisconnectedEmergencyWarp initialization clears stale active_warps and UpdateStateRequest force-stops
+    //    both explicit emergency warps (even if return_warps holds a stale entry) and untracked warps,
+    //    while preserving ReconnectReturnWarp.
+    let _ = sys_h
+        .spawn_ball(test_ship_ball(88701, 588, DVec3::ZERO))
+        .await;
+    ctx.active_warps.lock().unwrap().insert(88701, 9421);
+    sys_h.prepare_disconnected_warp_sync(
+        88701,
+        588,
+        40.0,
+        1_000_000.0,
+        1.0,
+        300.0,
+        3.0,
+        DVec3::ZERO,
+        DVec3::new(1_000_000.0, 0.0, 0.0),
+    );
+    assert!(
+        !ctx.active_warps.lock().unwrap().contains_key(&88701),
+        "Initializing DisconnectedEmergencyWarp must clear stale active_warps"
+    );
+    assert_eq!(
+        sys_h.warp_provenance(88701),
+        Some(crate::system_actor::WarpProvenance::DisconnectedEmergencyWarp)
+    );
+    ctx.return_warps.lock().unwrap().insert(88701);
+    let mut sess_emerg = make_session(9421, 98000001, Some(sys_id), Some(88701), 0);
+    handle(
+        &ctx,
+        &mut sess_emerg,
+        Some(&bound),
+        "beyonce",
+        "UpdateStateRequest",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, b_emerg) = sys_h.get_ball_snapshot(88701).await.unwrap().unwrap();
+    assert!(matches!(b_emerg.mode, MovementMode::Stop));
+    assert!(!ctx.active_warps.lock().unwrap().contains_key(&88701));
+    assert!(!ctx.return_warps.lock().unwrap().contains(&88701));
+    assert_eq!(sys_h.warp_provenance(88701), None);
+
+    // 1b. ReconnectReturnWarp preserves MovementMode::Warp across UpdateStateRequest.
+    sys_h
+        .set_warp_movement_mode(
+            88701,
+            MovementMode::new_warp(DVec3::ZERO, DVec3::new(50_000_000.0, 0.0, 0.0), 3.0),
+            crate::system_actor::WarpProvenance::ReconnectReturnWarp,
+        )
+        .await
+        .unwrap();
+    handle(
+        &ctx,
+        &mut sess_emerg,
+        Some(&bound),
+        "beyonce",
+        "UpdateStateRequest",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, b_ret) = sys_h.get_ball_snapshot(88701).await.unwrap().unwrap();
+    assert!(matches!(b_ret.mode, MovementMode::Warp { .. }));
+    let _ = sys_h.force_stop_warp(88701);
+    clear_warp_tracking(&ctx, Some(&sys_h), 88701);
+
+    // 2. PlayerOrFleetWarp preserves Warp across UpdateStateRequest even before active_warps sync,
+    //    clears active_warps/provenance immediately on landing, and delivers OnWarpFinished once.
+    let _ = sys_h
+        .spawn_ball(test_ship_ball(88702, 588, DVec3::ZERO))
+        .await;
+    sys_h
+        .set_warp_movement_mode(
+            88702,
+            MovementMode::new_warp(DVec3::ZERO, DVec3::new(50_000_000.0, 0.0, 0.0), 3.0),
+            crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
+        )
+        .await
+        .unwrap();
+    assert!(!ctx.active_warps.lock().unwrap().contains_key(&88702));
+    seed_online_char(9422, 88702);
+    let mut sess_player = make_session(9422, 98000001, Some(sys_id), Some(88702), 0);
+    sess_player.session_id = 9422;
+    sess_player.user_id = Some(9422);
+    handle(
+        &ctx,
+        &mut sess_player,
+        Some(&bound),
+        "beyonce",
+        "UpdateStateRequest",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, b_player_mid) = sys_h.get_ball_snapshot(88702).await.unwrap().unwrap();
+    assert!(matches!(b_player_mid.mode, MovementMode::Warp { .. }));
+
+    track_player_or_fleet_warp(&ctx, None, 88702, 9422);
+    let mut landed = false;
+    for _ in 0..240 {
+        let _ = sys_h.step_manual(1.0).await;
+        let (_, b) = sys_h.get_ball_snapshot(88702).await.unwrap().unwrap();
+        if matches!(b.mode, MovementMode::Stop) {
+            landed = true;
+            break;
+        }
+    }
+    assert!(landed, "Player warp must reach MovementMode::Stop");
+    assert!(!ctx.active_warps.lock().unwrap().contains_key(&88702));
+    assert_eq!(sys_h.warp_provenance(88702), None);
+    assert!(ctx.pending_warp_finished.lock().unwrap().contains(&88702));
+
+    let _ = ctx.drain_notifications_for_char(9422);
+    handle(
+        &ctx,
+        &mut sess_player,
+        Some(&bound),
+        "beyonce",
+        "UpdateStateRequest",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let fin_notes = ctx.drain_notifications_for_char(9422);
+    assert!(fin_notes.iter().any(|n| n.event == "OnWarpFinished"));
+    assert!(!ctx.pending_warp_finished.lock().unwrap().contains(&88702));
+
+    handle(
+        &ctx,
+        &mut sess_player,
+        Some(&bound),
+        "beyonce",
+        "UpdateStateRequest",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        !ctx.drain_notifications_for_char(9422)
+            .iter()
+            .any(|n| n.event == "OnWarpFinished")
+    );
+
+    // 3. Cancelling an aligning warp via CmdStop clears all tracking without pending OnWarpFinished.
+    let _ = sys_h
+        .spawn_ball(test_ship_ball(88703, 588, DVec3::ZERO))
+        .await;
+    sys_h
+        .set_warp_movement_mode(
+            88703,
+            MovementMode::new_warp(DVec3::ZERO, DVec3::new(50_000_000.0, 0.0, 0.0), 3.0),
+            crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
+        )
+        .await
+        .unwrap();
+    track_player_or_fleet_warp(&ctx, None, 88703, 9423);
+    seed_online_char(9423, 88703);
+    let mut sess_cancel = make_session(9423, 98000001, Some(sys_id), Some(88703), 0);
+    sess_cancel.session_id = 9423;
+    sess_cancel.user_id = Some(9423);
+    handle(
+        &ctx,
+        &mut sess_cancel,
+        Some(&bound),
+        "beyonce",
+        "CmdStop",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, b_cancel) = sys_h.get_ball_snapshot(88703).await.unwrap().unwrap();
+    assert!(matches!(b_cancel.mode, MovementMode::Stop));
+    assert!(!ctx.active_warps.lock().unwrap().contains_key(&88703));
+    assert_eq!(sys_h.warp_provenance(88703), None);
+    assert!(!ctx.pending_warp_finished.lock().unwrap().contains(&88703));
+    let _ = ctx.drain_notifications_for_char(9423);
+    handle(
+        &ctx,
+        &mut sess_cancel,
+        Some(&bound),
+        "beyonce",
+        "UpdateStateRequest",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        !ctx.drain_notifications_for_char(9423)
+            .iter()
+            .any(|n| n.event == "OnWarpFinished")
+    );
+}

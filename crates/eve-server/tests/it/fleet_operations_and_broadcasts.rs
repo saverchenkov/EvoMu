@@ -226,3 +226,154 @@ async fn test_fleet_target_tagging_validation_lock_and_destruction() {
     assert_eq!(fs_after.dict_get("targetTags"), Some(&PyRep::Dict(Vec::new())));
 }
 
+#[tokio::test]
+async fn test_fleet_warp_member_update_state_mid_tunnel_preserves_warp_and_clears_on_landing() {
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut s1 = select_pilot(&ctx, 31, "demo", "demo-secret", PILOT_1).await;
+    let mut s2 = select_pilot(&ctx, 32, "other", "other-secret", PILOT_2).await;
+
+    rpc(&ctx, &mut s1, "stationSvc", "Undock", &[]).await.expect("Undock s1");
+    let undock_s2 = rpc(&ctx, &mut s2, "stationSvc", "Undock", &[]).await.expect("Undock s2");
+    let PyRep::KeyVal(ukv2) = undock_s2 else {
+        panic!("Expected KeyVal from Undock");
+    };
+    let s2_beyonce_id = ukv2
+        .get("beyonceBoundID")
+        .and_then(|v| v.as_i64())
+        .expect("beyonceBoundID") as u64;
+
+    let ship1 = s1.ship_id.expect("ship1");
+    let ship2 = s2.ship_id.expect("ship2");
+    form_fleet_with_two(&ctx, &mut s1, &mut s2, PILOT_2).await;
+
+    let sys = ctx.systems.get_or_spawn(JITA_SYS);
+    let (_, b1_start) = sys.get_ball_snapshot(ship1).await.unwrap().unwrap();
+    let dest = b1_start.position + DVec3::new(1_000_000_000.0, 0.0, 0.0);
+
+    let fw_res = rpc(
+        &ctx,
+        &mut s1,
+        "fleetObjectHandler",
+        "FleetWarp",
+        &[
+            PyRep::Real(dest.x),
+            PyRep::Real(dest.y),
+            PyRep::Real(dest.z),
+            PyRep::Real(0.0),
+        ],
+    )
+    .await
+    .expect("FleetWarp");
+    let PyRep::KeyVal(fw_kv) = fw_res else {
+        panic!("Expected KeyVal from FleetWarp");
+    };
+    assert_eq!(fw_kv.get("status").and_then(|s| s.as_str()), Some("FleetWarpInitiated"));
+
+    {
+        let warps = ctx.active_warps.lock().unwrap();
+        assert_eq!(warps.get(&ship1), Some(&PILOT_1));
+        assert_eq!(warps.get(&ship2), Some(&PILOT_2));
+    }
+    assert_eq!(
+        sys.warp_provenance(ship2),
+        Some(eve_server::system_actor::WarpProvenance::PlayerOrFleetWarp)
+    );
+
+    // Mid-tunnel UpdateStateRequest during alignment and cruise must leave wingmate in Warp.
+    ctx.dispatch_rpc(
+        &mut s2,
+        "beyonce",
+        Some(s2_beyonce_id),
+        "UpdateStateRequest",
+        &[],
+        &kw,
+        None,
+    )
+    .await
+    .expect("align UpdateStateRequest");
+    let (_, b2_align) = sys.get_ball_snapshot(ship2).await.unwrap().unwrap();
+    assert!(matches!(b2_align.mode, eve_destiny::MovementMode::Warp { .. }));
+
+    for _ in 0..5 {
+        let _ = sys.step_manual(1.0).await;
+    }
+    let (_, b2_cruise) = sys.get_ball_snapshot(ship2).await.unwrap().unwrap();
+    assert!(matches!(b2_cruise.mode, eve_destiny::MovementMode::Warp { .. }));
+
+    ctx.dispatch_rpc(
+        &mut s2,
+        "beyonce",
+        Some(s2_beyonce_id),
+        "UpdateStateRequest",
+        &[],
+        &kw,
+        None,
+    )
+    .await
+    .expect("cruise UpdateStateRequest");
+    let (_, b2_mid_after_rpc) = sys.get_ball_snapshot(ship2).await.unwrap().unwrap();
+    assert!(
+        matches!(b2_mid_after_rpc.mode, eve_destiny::MovementMode::Warp { .. }),
+        "Wingmate must remain in MovementMode::Warp after mid-tunnel UpdateStateRequest"
+    );
+
+    let mut both_landed = false;
+    for _ in 0..240 {
+        let _ = sys.step_manual(1.0).await;
+        let (_, b1) = sys.get_ball_snapshot(ship1).await.unwrap().unwrap();
+        let (_, b2) = sys.get_ball_snapshot(ship2).await.unwrap().unwrap();
+        if matches!(b1.mode, eve_destiny::MovementMode::Stop)
+            && matches!(b2.mode, eve_destiny::MovementMode::Stop)
+        {
+            both_landed = true;
+            break;
+        }
+    }
+    assert!(both_landed, "Both fleet ships must complete fleet warp and land");
+
+    let (_, b1_landed) = sys.get_ball_snapshot(ship1).await.unwrap().unwrap();
+    let (_, b2_landed) = sys.get_ball_snapshot(ship2).await.unwrap().unwrap();
+    assert!(b1_landed.position.distance(dest) < 25_000.0);
+    assert!(b2_landed.position.distance(dest) < 25_000.0);
+
+    // Active-warp tracking is pruned cleanly immediately upon landing.
+    {
+        let warps = ctx.active_warps.lock().unwrap();
+        assert!(!warps.contains_key(&ship1));
+        assert!(!warps.contains_key(&ship2));
+    }
+    assert_eq!(sys.warp_provenance(ship1), None);
+    assert_eq!(sys.warp_provenance(ship2), None);
+
+    let _ = ctx.drain_notifications_for_char(PILOT_2);
+    ctx.dispatch_rpc(
+        &mut s2,
+        "beyonce",
+        Some(s2_beyonce_id),
+        "UpdateStateRequest",
+        &[],
+        &kw,
+        None,
+    )
+    .await
+    .expect("post-landing UpdateStateRequest");
+    let post_notes = ctx.drain_notifications_for_char(PILOT_2);
+    assert!(post_notes.iter().any(|n| n.event == "OnWarpFinished"));
+    assert!(!ctx.pending_warp_finished.lock().unwrap().contains(&ship2));
+
+    ctx.dispatch_rpc(
+        &mut s2,
+        "beyonce",
+        Some(s2_beyonce_id),
+        "UpdateStateRequest",
+        &[],
+        &kw,
+        None,
+    )
+    .await
+    .expect("second post-landing UpdateStateRequest");
+    let dup_notes = ctx.drain_notifications_for_char(PILOT_2);
+    assert!(!dup_notes.iter().any(|n| n.event == "OnWarpFinished"));
+}
+

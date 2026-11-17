@@ -241,7 +241,7 @@ pub(super) fn build_disconnected_ship_entry_sync(
 
     let committed_warp_dest = sys_handle.and_then(|h| h.committed_warp_destination_sync(ship_id));
     if committed_warp_dest.is_none() {
-        ctx.active_warps.lock().unwrap_or_else(|e| e.into_inner()).remove(&ship_id);
+        crate::services::space_destiny::clear_warp_tracking(ctx, sys_handle, ship_id);
     }
 
     let (emergency_warp_dest, pre_warp_position) = if let Some(committed_dest) = committed_warp_dest
@@ -289,6 +289,10 @@ pub(super) fn build_disconnected_ship_entry_sync(
                     eve_destiny::MovementMode::new_warp(current_pos, dest, warp_speed_au_s),
                 );
             }
+            h.set_warp_provenance(
+                ship_id,
+                crate::system_actor::WarpProvenance::DisconnectedEmergencyWarp,
+            );
         }
         (
             Some([dest.x, dest.y, dest.z]),

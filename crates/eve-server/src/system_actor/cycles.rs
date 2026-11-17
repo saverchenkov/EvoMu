@@ -2337,7 +2337,8 @@ impl SystemHandle {
             fit_projections, weapon_cycle_start_modules,
             module_reload_sim_deadlines, module_reload_sim_remaining,
             pending_missile_launches, pending_missile_deploy_fx,
-            active_guided_missiles, next_missile_ball_id, pending_destroyed_balls, ..
+            active_guided_missiles, next_missile_ball_id, pending_destroyed_balls,
+            warp_provenance, warp_tracking, ..
         } = &mut *st;
         let tidi = self.tidi_factor();
         let dt_sim = if dt > 0.0 && dt.is_finite() {
@@ -2367,6 +2368,12 @@ impl SystemHandle {
         let events = bp.step(dt);
         super::missiles::flush_pending_missile_deploy_fx(&mut bp, pending_missile_deploy_fx);
         super::persist_landed_warps_in_db(&bp, &events, db_opt, ball_space_entry_epochs);
+        super::clear_landed_warp_tracking_from_events(
+            &bp,
+            &events,
+            warp_provenance,
+            warp_tracking,
+        );
         flush_target_lost_notifications(
             &bp,
             &events,
@@ -2605,11 +2612,30 @@ impl SystemHandle {
         let needs_warp_init = bp.balls.get(&ship_id).is_some_and(|b| {
             !matches!(b.mode, MovementMode::Warp { .. }) && (b.position - dest).length() > 5_000.0
         });
-        if needs_warp_init {
+        let warp_started = if needs_warp_init {
             let start_pos = bp.balls.get(&ship_id).map(|b| b.position).unwrap_or(current_pos);
-            let _ = bp.set_mode(ship_id, MovementMode::new_warp(start_pos, dest, warp_speed_au_s.max(1.5)));
-        }
+            let ok = bp
+                .set_mode(ship_id, MovementMode::new_warp(start_pos, dest, warp_speed_au_s.max(1.5)))
+                .is_ok();
+            if ok {
+                if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                    cs.is_emergency_warping = true;
+                }
+            }
+            ok
+        } else {
+            false
+        };
         sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        drop(bp);
+        if warp_started {
+            let tracking = {
+                let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+                st.warp_provenance.insert(ship_id, super::WarpProvenance::DisconnectedEmergencyWarp);
+                st.warp_tracking.clone()
+            };
+            super::clear_shared_warp_tracking(&tracking, ship_id, true);
+        }
     }
 
     pub fn reconcile_disconnected_warp_sync(&self, ship_id: BallId, dest: DVec3) -> (DVec3, bool) {
@@ -2636,6 +2662,15 @@ impl SystemHandle {
         }
         sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         let final_pos = bp.balls.get(&ship_id).map(|b| b.position).unwrap_or(dest);
+        drop(bp);
+        if arrived {
+            let tracking = {
+                let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+                st.warp_provenance.remove(&ship_id);
+                st.warp_tracking.clone()
+            };
+            super::clear_shared_warp_tracking(&tracking, ship_id, false);
+        }
         (final_pos, arrived)
     }
 }
