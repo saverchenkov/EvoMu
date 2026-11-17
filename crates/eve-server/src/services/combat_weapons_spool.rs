@@ -260,49 +260,150 @@ pub async fn handle_ship_or_npc_destruction(
 ) -> ShipOrNpcDestructionResult {
     let mut generated_kill_id: i64 = 0;
     let mut generated_wreck_id: i64 = 0;
-    let mut generated_corpse_id: i64 = 0;
     let generated_km_hash;
 
-    let is_non_ship_space_obj = ctx.db.with_snapshot(|snap| {
-        snap.items.get(&target_ball_id).is_some_and(|it| {
+    let is_active_fighter = ctx.active_fighters.read().is_ok_and(|fighters| {
+        fighters
+            .values()
+            .any(|sq| sq.ball_id == target_ball_id || sq.item_id == target_ball_id)
+    });
+    let ball_cat_id = ctx
+        .sde
+        .types
+        .get(&target_ball.type_id)
+        .map(|t| t.category_id)
+        .unwrap_or(6);
+    let (target_item_cat_id_opt, target_item_owner_opt, target_item_corp_all_opt) =
+        ctx.db.with_snapshot(|snap| {
+            let Some(it) = snap.items.get(&target_ball_id) else {
+                return (None, None, None);
+            };
             let cat_id = ctx
                 .sde
                 .types
                 .get(&it.type_id)
                 .map(|t| t.category_id)
                 .unwrap_or(6);
-            matches!(cat_id, 2 | 18)
-        })
-    });
-    if is_non_ship_space_obj {
-        crate::services::combat_crimewatch::combat_missiles_aoe::cleanup_destroyed_non_ship_ball(
-            ctx,
-            sys_id,
-            target_ball_id,
-        )
-        .await;
+            let corp_all = snap
+                .characters
+                .get(&it.owner_id)
+                .map(|c| (c.corporation_id, c.alliance_id))
+                .or_else(|| {
+                    snap.corporations
+                        .get(&it.owner_id)
+                        .map(|corp| (corp.corporation_id, corp.alliance_id))
+                });
+            (Some(cat_id), Some(it.owner_id), corp_all)
+        });
+    if is_active_fighter
+        || target_item_cat_id_opt.is_some_and(|cat_id| matches!(cat_id, 2 | 8 | 18 | 65))
+    {
+        if is_active_fighter {
+            crate::combat::death_pipeline::cleanup_destroyed_non_ship_ball_sync(
+                ctx,
+                sys_id,
+                target_ball_id,
+            );
+            let _ = sys_handle.remove_ball(target_ball_id).await;
+        } else {
+            crate::services::combat_crimewatch::combat_missiles_aoe::cleanup_destroyed_non_ship_ball(
+                ctx,
+                sys_id,
+                target_ball_id,
+            )
+            .await;
+        }
         return ShipOrNpcDestructionResult::default();
     }
 
     crate::services::doomsday_aoe_ops::cancel_aoe_superweapon_cycles_for_ship(ctx, target_ball_id);
-    let victim_char_opt = player_target_info.and_then(|(vcid, _)| {
+    let already_settled_by_death_pipeline = ctx.db.with_snapshot(|snap| {
+        snap.committed_idempotency_keys
+            .contains(&(target_ball_id, "ship_insurance_payout".to_string()))
+    });
+    if already_settled_by_death_pipeline {
+        return ShipOrNpcDestructionResult::default();
+    }
+    let active_ship_vcid =
         crate::services::combat_crimewatch::combat_missiles_aoe::active_ship_victim_char_id(
             ctx,
             target_ball_id,
-        )
-        .or(Some(vcid).filter(|&id| {
-            ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .get(&id)
-                    .is_some_and(|c| c.active_ship_id == target_ball_id)
-            })
-        }))
-    });
-    let is_pod_target = target_ball.type_id == 670;
+        );
+    if target_item_cat_id_opt == Some(6) {
+        let victim_char_opt = active_ship_vcid.or_else(|| player_target_info.map(|(vcid, _)| vcid));
+        if let Some(vcid) = victim_char_opt {
+            let is_pod_target = target_ball.type_id == 670
+                || target_ball.type_id == 33328
+                || ctx
+                    .sde
+                    .types
+                    .get(&target_ball.type_id)
+                    .is_some_and(|t| t.group_id == 29);
+            return match crate::combat::death_pipeline::execute_death_pipeline(
+                ctx,
+                sys_id,
+                vcid,
+                target_ball_id,
+                attacker_char_id,
+                target_ball.position,
+                0,
+            )
+            .await
+            {
+                Ok(dp) => {
+                    let killmail_hash = with_combat_runtime(ctx, |rt| {
+                        rt.detailed_killmails
+                            .get(&dp.killmail_id)
+                            .map(|k| k.killmail_hash.clone())
+                    })
+                    .unwrap_or_default();
+                    ShipOrNpcDestructionResult {
+                        kill_id: dp.killmail_id,
+                        wreck_id: if is_pod_target { 0 } else { dp.wreck_item_id },
+                        corpse_id: if is_pod_target { dp.wreck_item_id } else { 0 },
+                        killmail_hash,
+                    }
+                }
+                Err(_) => ShipOrNpcDestructionResult::default(),
+            };
+        }
+    }
+
+    let already_cleaned_actor_deployable = target_item_cat_id_opt.is_none()
+        && ball_cat_id == 22
+        && !with_combat_runtime(ctx, |rt| rt.is_recently_destroyed_item_id(target_ball_id));
+    if target_item_cat_id_opt.is_none()
+        && !already_cleaned_actor_deployable
+        && (player_target_info.is_some() || active_ship_vcid.is_some())
+    {
+        return ShipOrNpcDestructionResult::default();
+    }
+
+    let is_non_ship_structure_or_deployable = already_cleaned_actor_deployable
+        || target_item_cat_id_opt.is_some_and(|cat_id| cat_id != 6);
+    if is_non_ship_structure_or_deployable {
+        crate::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(
+            ctx,
+            target_ball_id,
+        );
+        crate::services::notify_emitters_seasons_tactical::on_deployable_deactivated(
+            ctx,
+            None,
+            target_ball_id,
+        );
+    }
+
     let is_abyssal_npc_or_cache =
-        (32_000_000..=32_999_999).contains(&sys_id) && victim_char_opt.is_none();
-    let victim_id = victim_char_opt.unwrap_or(target_ball_id);
-    let wreck_owner_id = if victim_char_opt.is_some() { victim_id } else { attacker_char_id };
+        !is_non_ship_structure_or_deployable && (32_000_000..=32_999_999).contains(&sys_id);
+    let victim_id = if is_non_ship_structure_or_deployable {
+        target_item_owner_opt
+            .or_else(|| player_target_info.map(|(vcid, _)| vcid))
+            .filter(|&id| id > 0)
+            .unwrap_or(target_ball_id)
+    } else {
+        target_ball_id
+    };
+    let wreck_owner_id = attacker_char_id;
     let wreck_type_id = ctx.sde.resolve_wreck_type_id(target_ball.type_id, None).unwrap_or_else(|| {
         match crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype(ctx, target_ball.type_id) {
             "Drifter" => 37531,
@@ -318,42 +419,45 @@ pub async fn handle_ship_or_npc_destruction(
         .map(|f| f.modules.values().map(|m| (m.item_id, m.type_id, m.flag_id)).collect())
         .unwrap_or_default();
     let nested_fitted_mods =
-        crate::combat::death_pipeline::drain_nested_ship_fittings(ctx, target_ball_id, !is_pod_target);
-    let (vic_corp, vic_all, active_implants) = ctx.db.with_snapshot(|snap| {
-        let (c, a) = snap
-            .characters
-            .get(&victim_id)
-            .map(|ch| (ch.corporation_id, ch.alliance_id))
-            .unwrap_or((1_000_125, None));
-        let imps = snap
-            .active_implants
-            .get(&victim_id)
-            .cloned()
-            .unwrap_or_default();
-        (c, a, imps)
-    });
+        crate::combat::death_pipeline::drain_nested_ship_fittings(ctx, target_ball_id, true);
+    let (vic_corp, vic_all) = if let Some((c, a)) = target_item_corp_all_opt {
+        (c, a)
+    } else {
+        ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .get(&victim_id)
+                .map(|ch| (ch.corporation_id, ch.alliance_id))
+                .or_else(|| {
+                    snap.corporations
+                        .get(&victim_id)
+                        .map(|corp| (corp.corporation_id, corp.alliance_id))
+                })
+                .unwrap_or((1_000_125, None))
+        })
+    };
 
     let drop_threshold = crate::services::security_mgr::insurgency_pvp_loot_drop_threshold(
         ctx,
         sys_id,
         attacker_char_id,
-        victim_char_opt.unwrap_or(0),
+        if is_non_ship_structure_or_deployable {
+            player_target_info.map(|(vcid, _)| vcid).unwrap_or(0)
+        } else {
+            0
+        },
         false,
     );
     let mut dropped_entries = Vec::new();
     let mut destroyed_entries = Vec::new();
-    let mut escape_frigate_id: Option<i64> = None;
-    let mut fw_ship_and_fit_isk = 0.0;
-    let mut fw_ins_payout_isk = 0.0;
     ctx.db.with_mut_snapshot(|snap| {
-        if !is_pod_target && !is_abyssal_npc_or_cache {
+        if !is_abyssal_npc_or_cache && !already_cleaned_actor_deployable {
             snap.next_entity_id += 1;
             generated_wreck_id = snap.next_entity_id;
             crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
                 snap,
                 generated_wreck_id,
                 now_unix,
-                victim_char_opt.is_none(),
+                true,
             );
             snap.items.insert(
                 generated_wreck_id,
@@ -430,106 +534,28 @@ pub async fn handle_ship_or_npc_destruction(
             snap.items.remove(&wid);
         }
 
-        // parity: feat:ships.frigate-escape-bay
-        escape_frigate_id = if !is_pod_target {
-            let has_feb = ctx
-                .sde
-                .types
-                .get(&target_ball.type_id)
-                .and_then(|t| t.default_attributes.get(&3020).copied())
-                .unwrap_or(0.0)
-                > 0.0;
-            if has_feb {
-                snap.items
-                    .values()
-                    .find(|i| {
-                        i.location_id == target_ball_id
-                            && i.singleton
-                            && matches!(i.flag as u16, 177 | 179)
-                            && ctx.sde.types.get(&i.type_id).is_some_and(|t| {
-                                matches!(
-                                    t.group_id,
-                                    25 | 324 | 830 | 831 | 834 | 893 | 1283 | 1527 | 2001
-                                )
-                            })
-                    })
-                    .map(|i| i.item_id)
-            } else {
-                None
-            }
+        let hull_isk = ctx.sde.types.get(&target_ball.type_id).map(|t| t.base_price).filter(|&p| p > 0.0).unwrap_or(250_000.0);
+        let items_isk = if already_cleaned_actor_deployable {
+            0.0
         } else {
-            None
-        };
-
-        let hull_isk = ctx.sde.types.get(&target_ball.type_id).map(|t| t.base_price).filter(|&p| p > 0.0).unwrap_or(if is_pod_target { 1_000.0 } else { 250_000.0 });
-        let loot_out = crate::combat::death_pipeline::resolve_destroyed_ship_contents_in_snap(
-            snap,
-            &ctx.sde,
-            target_ball_id,
-            generated_wreck_id,
-            Some(wreck_owner_id),
-            escape_frigate_id,
-            is_pod_target,
-            drop_threshold,
-            |_| true,
-            |iid| {
-                (((now_unix ^ (target_ball_id as u64)).wrapping_add((iid as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))).wrapping_mul(0xBF58_476D_1CE4_E5B9) >> 32) as f64 / 4_294_967_296.0
-            },
-        );
-        let mut items_isk = loot_out.items_isk;
-        let fw_items_isk = loot_out.fw_items_isk;
-        dropped_entries.extend(loot_out.dropped_km);
-        destroyed_entries.extend(loot_out.destroyed_km);
-        if let Some(esc_id) = escape_frigate_id {
-            if let Some(esc_item) = snap.items.get(&esc_id) {
-                // parity: feat:ships.frigate-escape-bay - frigate survives and is recorded on killmail
-                dropped_entries.push(eve_db::KillmailItemEntry {
-                    type_id: esc_item.type_id,
-                    flag: esc_item.flag as u16,
-                    qty_dropped: 0,
-                    qty_destroyed: 0,
-                    singleton: true,
-                });
-            }
-        }
-
-        if !is_pod_target {
-            fw_ship_and_fit_isk = ctx.sde.types.get(&target_ball.type_id).map(|t| t.base_price.max(0.0)).unwrap_or(0.0) + fw_items_isk;
-        }
-        if is_pod_target {
-            let mut imp_tids = active_implants.clone();
-            let char_imp_items: Vec<(i64, u32)> = snap
-                .items
-                .values()
-                .filter(|i| i.location_id == victim_id && i.flag == eve_db::InventoryFlag::Implant)
-                .map(|i| (i.item_id, i.type_id))
-                .collect();
-            for (iid, tid) in char_imp_items {
-                snap.items.remove(&iid);
-                if !imp_tids.contains(&tid) {
-                    imp_tids.push(tid);
-                }
-            }
-            for imp_tid in imp_tids {
-                items_isk += ctx.sde.types.get(&imp_tid).map(|t| t.base_price).filter(|&p| p > 0.0).unwrap_or(1_000.0);
-                destroyed_entries.push(eve_db::KillmailItemEntry { type_id: imp_tid, flag: eve_db::InventoryFlag::Implant as u16, qty_dropped: 0, qty_destroyed: 1, singleton: true });
-            }
-            if let Some(imps) = snap.active_implants.get_mut(&victim_id) {
-                imps.clear();
-            }
-            snap.next_entity_id += 1;
-            generated_corpse_id = snap.next_entity_id;
-            snap.items.insert(
-                generated_corpse_id,
-                eve_db::InventoryItemRecord {
-                    item_id: generated_corpse_id, type_id: 25, owner_id: victim_id, location_id: sys_id as i64,
-                    flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, version: 1,
-                    dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None, insured_payout_isk: 0.0,
-                    is_blueprint_copy: false, blueprint_runs_remaining: None,
+            let loot_out = crate::combat::death_pipeline::resolve_destroyed_ship_contents_in_snap(
+                snap,
+                &ctx.sde,
+                target_ball_id,
+                generated_wreck_id,
+                Some(wreck_owner_id),
+                None,
+                false,
+                drop_threshold,
+                |_| true,
+                |iid| {
+                    (((now_unix ^ (target_ball_id as u64)).wrapping_add((iid as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))).wrapping_mul(0xBF58_476D_1CE4_E5B9) >> 32) as f64 / 4_294_967_296.0
                 },
             );
-            snap.item_positions.insert(generated_corpse_id, [target_ball.position.x, target_ball.position.y, target_ball.position.z]);
-        }
+            dropped_entries.extend(loot_out.dropped_km);
+            destroyed_entries.extend(loot_out.destroyed_km);
+            loot_out.items_isk
+        };
 
         snap.next_entity_id += 1;
         generated_kill_id = snap.next_entity_id;
@@ -541,10 +567,28 @@ pub async fn handle_ship_or_npc_destruction(
             },
             ctx.now_unix(),
         );
+        let remove_target_item = snap.items.get(&target_ball_id).is_some_and(|it| {
+            ctx.sde
+                .types
+                .get(&it.type_id)
+                .is_some_and(|t| t.category_id == 6)
+        }) || is_non_ship_structure_or_deployable;
+        if remove_target_item {
+            snap.items.remove(&target_ball_id);
+            snap.item_positions.remove(&target_ball_id);
+            snap.sp6_lifecycle.space_object_meta.remove(&target_ball_id);
+            snap.sp6_lifecycle.ship_combat_hp.remove(&target_ball_id);
+            crate::services::mobile_deployables::write_deployable_state_snap(snap, |st| {
+                st.deployables.remove(&target_ball_id);
+            });
+            for offices in snap.corp_customs_offices.values_mut() {
+                offices.retain(|o| o.office_id != target_ball_id);
+            }
+        }
     });
 
     let _ = sys_handle.remove_ball(target_ball_id).await;
-    if !is_pod_target && !is_abyssal_npc_or_cache && generated_wreck_id > 0 {
+    if !is_abyssal_npc_or_cache && generated_wreck_id > 0 {
         let _ = sys_handle
             .spawn_ball_with_meta(
                 eve_destiny::Ball {
@@ -563,198 +607,7 @@ pub async fn handle_ship_or_npc_destruction(
         crate::services::combat_crimewatch::register_container_lifetime(ctx, generated_wreck_id, sys_id, wreck_type_id, wreck_owner_id, now_unix, is_crim);
     }
 
-    if is_pod_target {
-        if generated_corpse_id > 0 {
-            let (corpse_grp, corpse_cat) = ctx
-                .sde
-                .types
-                .get(&25)
-                .map(|t| (t.group_id, t.category_id))
-                .unwrap_or((14, 2));
-            let _ = sys_handle
-                .spawn_ball_with_meta(
-                    eve_destiny::Ball {
-                        id: generated_corpse_id, type_id: 25, position: target_ball.position, velocity: DVec3::ZERO,
-                        max_velocity: 0.0, inertia: 1.0, mass: 80.0, radius: 2.0, speed_fraction: 0.0,
-                        mode: eve_destiny::MovementMode::Stop,
-                    },
-                    ctx.build_type_combat_state(25),
-                    eve_destiny::SlimItemMeta {
-                        group_id: corpse_grp, category_id: corpse_cat, owner_id: victim_id, char_id: None,
-                        corp_id: -1, alliance_id: -1, security_status: 0.0, is_cloaked: false, ..Default::default()
-                    },
-                )
-                .await;
-        }
-        if let Some(vcid) = victim_char_opt {
-            let vship_id = target_ball_id;
-            crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, vcid, vship_id, sys_id);
-            crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
-                st.disconnected_ships.remove(&vcid);
-            });
-            let _ = crate::services::combat_crimewatch::claim_player_bounty_on_kill(ctx, attacker_char_id, vcid, 670);
-            crate::services::pvp_filament_mgr::record_proving_grounds_combat_result_if_queued(
-                ctx,
-                attacker_char_id,
-                vcid,
-                sys_id,
-                applied_dmg.max(1000.0), // DERIVED: final-blow damage floor for PG damageDealt stats
-            );
-            let cleared_zarzakh_gate = ctx.db.with_mut_snapshot(|snap| {
-                snap.zarzakh_gate_locks.remove(&vcid).map(|(gid, _)| gid)
-            });
-            if let Some(locked_gate_id) = cleared_zarzakh_gate {
-                crate::services::quasar_sov_services::publish_stargate_lock_deactivated_notice(
-                    &ctx.quasar_gateway,
-                    vcid,
-                    30_100_000,
-                    locked_gate_id,
-                    now_unix,
-                );
-            }
-            crate::services::station_structure::structure_lifecycle::prepare_home_station_respawn(ctx, vcid);
-            let _ = ctx
-                .db
-                .respawn_character_at_home_station(vcid, vship_id, &ctx.sde);
-            let new_sys_id = ctx
-                .db
-                .with_snapshot(|s| s.characters.get(&vcid).map(|c| c.solar_system_id))
-                .unwrap_or(sys_id);
-            crate::services::space_destiny::record_session_change_timer(
-                ctx,
-                vcid,
-                now_unix,
-                new_sys_id,
-                0,
-                "podding",
-            );
-            crate::services::map_service::record_solar_system_visit(ctx, vcid, new_sys_id);
-        }
-    } else if let Some(vcid) = victim_char_opt {
-        let vship_id = target_ball_id;
-        crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space(ctx, vcid, vship_id);
-        crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, vcid, vship_id, sys_id);
-        crate::services::inventory_fitting::fitting_cyno_portal::on_cyno_ship_destroyed(ctx, vship_id);
-        fw_ins_payout_isk = crate::services::combat_crimewatch::combat_wrecks_killmails::process_ship_insurance_payout(ctx, vcid, vship_id, target_ball.type_id, false);
-        let _ = crate::services::combat_crimewatch::claim_player_bounty_on_kill(ctx, attacker_char_id, vcid, target_ball.type_id);
-        crate::services::pvp_filament_mgr::record_proving_grounds_combat_result_if_queued(
-            ctx,
-            attacker_char_id,
-            vcid,
-            sys_id,
-            applied_dmg.max(1000.0), // DERIVED: final-blow damage floor for PG damageDealt stats
-        );
-        let (cap_id, esc_type_id) = ctx.db.with_mut_snapshot(|snap| {
-            let esc_opt = escape_frigate_id.and_then(|esc_id| snap.items.get(&esc_id).map(|i| (i.item_id, i.type_id)));
-            snap.items.remove(&vship_id);
-            snap.item_positions.remove(&vship_id);
-            if let Some((esc_id, esc_tid)) = esc_opt {
-                if let Some(esc_item) = snap.items.get_mut(&esc_id) {
-                    esc_item.location_id = sys_id as i64;
-                    esc_item.flag = eve_db::InventoryFlag::None;
-                    esc_item.owner_id = vcid;
-                    esc_item.version += 1;
-                }
-                snap.item_positions.insert(
-                    esc_id,
-                    [
-                        target_ball.position.x,
-                        target_ball.position.y,
-                        target_ball.position.z,
-                    ],
-                );
-                let _ = crate::router::apply_character_transition_in_snap(
-                    snap,
-                    &ctx.sde,
-                    vcid,
-                    crate::router::TransitionLocation::KeepCurrent,
-                    Some(esc_id),
-                    false,
-                    false,
-                );
-                return (esc_id, esc_tid);
-            }
-            snap.next_entity_id += 1;
-            let cid = snap.next_entity_id;
-            snap.items.insert(
-                cid,
-                eve_db::InventoryItemRecord {
-                    item_id: cid, type_id: 670, owner_id: vcid, location_id: sys_id as i64,
-                    flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, version: 1,
-                    ..Default::default()
-                },
-            );
-            snap.item_positions.insert(
-                cid,
-                [
-                    target_ball.position.x,
-                    target_ball.position.y,
-                    target_ball.position.z,
-                ],
-            );
-            let _ = crate::router::apply_character_transition_in_snap(
-                snap,
-                &ctx.sde,
-                vcid,
-                crate::router::TransitionLocation::KeepCurrent,
-                Some(cid),
-                false,
-                false,
-            );
-            (cid, 670)
-        });
-        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
-            if let Some(disc) = st.disconnected_ships.get_mut(&vcid) {
-                if disc.ship_id == vship_id {
-                    disc.ship_id = cap_id;
-                    disc.ship_type_id = esc_type_id;
-                    disc.emergency_warp_dest = None;
-                    disc.last_position = [target_ball.position.x, target_ball.position.y, target_ball.position.z];
-                }
-            }
-        });
-        let esc_sde = ctx.sde.types.get(&esc_type_id);
-        let esc_grp = esc_sde.map(|t| t.group_id).unwrap_or(29);
-        let _ = sys_handle
-            .spawn_ball_with_meta(
-                eve_destiny::Ball {
-                    id: cap_id,
-                    type_id: esc_type_id,
-                    position: target_ball.position,
-                    velocity: DVec3::ZERO,
-                    max_velocity: esc_sde
-                        .and_then(|t| t.default_attributes.get(&37).copied())
-                        .unwrap_or(335.0),
-                    inertia: esc_sde
-                        .and_then(|t| t.default_attributes.get(&70).copied())
-                        .unwrap_or(0.25),
-                    mass: esc_sde.map(|t| t.mass.max(1_000.0)).unwrap_or(16_000.0),
-                    radius: esc_sde.map(|t| t.radius.max(15.0)).unwrap_or(15.0),
-                    speed_fraction: 0.0,
-                    mode: eve_destiny::MovementMode::Stop,
-                },
-                ctx.build_ship_combat_state(vcid, cap_id, esc_type_id),
-                eve_destiny::SlimItemMeta {
-                    group_id: esc_grp,
-                    category_id: 6,
-                    owner_id: vcid,
-                    char_id: Some(vcid),
-                    corp_id: -1,
-                    alliance_id: -1,
-                    security_status: 0.0,
-                    is_cloaked: false, ..Default::default()
-                },
-            )
-            .await;
-        crate::services::space_destiny::record_session_change_timer(
-            ctx,
-            vcid,
-            now_unix,
-            sys_id,
-            0,
-            "ship_loss",
-        );
-    } else {
+    {
         if (32_000_000..33_000_000).contains(&sys_id) {
             crate::services::pve_special_sites_abyssal::on_abyssal_cache_destroyed_core(
                 &ctx.systems,
@@ -772,17 +625,21 @@ pub async fn handle_ship_or_npc_destruction(
             )
             .await;
         }
-        let npc_arch = crate::services::combat_crimewatch::combat_npc_encounters::populate_npc_wreck_on_turret_kill(
-            ctx,
-            sys_id,
-            target_ball_id,
-            target_ball.type_id,
-            target_ball.position,
-            generated_wreck_id,
-            attacker_char_id,
-            &mut dropped_entries,
-        )
-        .await;
+        let npc_arch = if !is_non_ship_structure_or_deployable && generated_wreck_id > 0 {
+            crate::services::combat_crimewatch::combat_npc_encounters::populate_npc_wreck_on_turret_kill(
+                ctx,
+                sys_id,
+                target_ball_id,
+                target_ball.type_id,
+                target_ball.position,
+                generated_wreck_id,
+                attacker_char_id,
+                &mut dropped_entries,
+            )
+            .await
+        } else {
+            String::new()
+        };
         crate::services::sov_gameplay::on_space_entity_destroyed(
             ctx,
             sys_id,
@@ -812,18 +669,6 @@ pub async fn handle_ship_or_npc_destruction(
             target_ball_id,
             (attacker_char_id > 0).then_some(attacker_char_id),
         );
-        ctx.db.with_mut_snapshot(|snap| {
-            let is_unpiloted_hull = snap.items.get(&target_ball_id).is_some_and(|it| {
-                ctx.sde
-                    .types
-                    .get(&it.type_id)
-                    .is_some_and(|t| t.category_id == 6)
-            });
-            if is_unpiloted_hull {
-                snap.items.remove(&target_ball_id);
-                snap.item_positions.remove(&target_ball_id);
-            }
-        });
         let bounty = if sys_id >= 31_000_000 || npc_arch == "Sleeper" {
             0.0
         } else {
@@ -897,8 +742,17 @@ pub async fn handle_ship_or_npc_destruction(
     }
 
     let valid_assists: Vec<crate::services::combat_crimewatch::AssistLogEntry> = with_mut_combat_runtime(ctx, |rt| {
+        if is_non_ship_structure_or_deployable {
+            rt.container_lifetimes.remove(&target_ball_id);
+            rt.record_destroyed_item_id(target_ball_id);
+        }
+        let assist_keys = if is_non_ship_structure_or_deployable || victim_id == target_ball_id {
+            [target_ball_id, target_ball_id]
+        } else {
+            [target_ball_id, victim_id]
+        };
         let mut out = Vec::new();
-        for key in [target_ball_id, victim_id] {
+        for key in assist_keys {
             if let Some(list) = rt.aggression_assist_log.remove(&key) {
                 for e in list {
                     if now_unix.saturating_sub(e.last_action_unix) <= crate::services::combat_crimewatch::KILLMAIL_ASSIST_WINDOW_SECS
@@ -952,17 +806,10 @@ pub async fn handle_ship_or_npc_destruction(
             },
         );
     });
-    if let Some(vcid) = victim_char_opt {
-        crate::services::fw_gameplay::on_player_ship_destroyed_in_combat_detailed(
-            ctx, sys_id, attacker_char_id, vcid, target_ball.type_id,
-            (fw_ship_and_fit_isk - fw_ins_payout_isk).max(0.0), generated_kill_id,
-        );
-    }
-
     ShipOrNpcDestructionResult {
         kill_id: generated_kill_id,
         wreck_id: generated_wreck_id,
-        corpse_id: generated_corpse_id,
+        corpse_id: 0,
         killmail_hash: generated_km_hash,
     }
 }
@@ -996,13 +843,9 @@ pub async fn step_system_entropic_spools(
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
 
     for (ship_id, module_id) in active_spool_keys {
-        let spool_state = ctx
-            .combat_ephemeral
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .entropic_spools
-            .get(&(ship_id, module_id))
-            .cloned();
+        let spool_state = with_combat_runtime(ctx, |guard| {
+            guard.entropic_spools.get(&(ship_id, module_id)).cloned()
+        });
         let Some(mut state) = spool_state else {
             continue;
         };
@@ -1351,11 +1194,9 @@ pub async fn step_system_entropic_spools(
         }
 
         if !stopped {
-            ctx.combat_ephemeral
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .entropic_spools
-                .insert((ship_id, module_id), state);
+            with_mut_combat_runtime(ctx, |rt| {
+                rt.entropic_spools.insert((ship_id, module_id), state);
+            });
         }
     }
 }

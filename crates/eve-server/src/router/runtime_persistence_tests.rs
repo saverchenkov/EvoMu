@@ -17,7 +17,7 @@ use super::context::{ActiveFighterSquadron, ActiveScannerProbe};
 use super::{BoundObjectEntry, ServerContext};
 use crate::services::combat_crimewatch::{
     flush_combat_runtime_to_db, with_combat_ephemeral, with_mut_combat_ephemeral,
-    CombatRuntimeState, InsuranceContractState, SafetyLevel, SelfDestructCountdown,
+    CombatRuntimeState, SafetyLevel, SelfDestructCountdown,
 };
 use crate::services::mining_cycle::{ActiveMiningCycle, MiningKind};
 use crate::services::quasar_daily_goals::DailyGoalTemplate;
@@ -255,20 +255,6 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
                     detonate_at_unix: 1_700_000_120,
                 },
             );
-            st.insurance_contracts.insert(
-                ship_id,
-                InsuranceContractState {
-                    ship_id,
-                    ship_type_id: 587,
-                    owner_id: cid,
-                    level_name: "Platinum".into(),
-                    level_fraction: 1.0,
-                    cost_isk: 300_000.0,
-                    payout_isk: 1_000_000.0,
-                    start_unix: 1_700_000_000,
-                    end_unix: 1_707_257_600,
-                },
-            );
         });
         flush_combat_runtime_to_db(&ctx);
 
@@ -455,12 +441,6 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
                     .get(&ship_id)
                     .map(|s| s.detonate_at_unix),
                 Some(1_700_000_120)
-            );
-            assert_eq!(
-                st.insurance_contracts
-                    .get(&ship_id)
-                    .map(|c| c.level_name.as_str()),
-                Some("Platinum")
             );
         });
 

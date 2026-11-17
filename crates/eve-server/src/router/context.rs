@@ -759,11 +759,9 @@ impl ServerContext {
                     Arc::clone(&pending_warp_finished),
                 ),
         );
-        let combat_ephemeral = {
-            let mut rt = crate::services::combat_crimewatch::CombatRuntimeState::default();
-            db.with_snapshot(|snap| rt.sync_from_persisted(&snap.combat_crimewatch_state));
-            Arc::new(RankedRwLock::new(rt))
-        };
+        let combat_ephemeral = Arc::new(RankedRwLock::new(
+            crate::services::combat_crimewatch::init_combat_runtime_state(&db),
+        ));
         let quasar_gateway = Arc::new(crate::quasar_gateway::PublicGatewayRouter::new(
             quasar_descriptors,
             Arc::clone(&db),

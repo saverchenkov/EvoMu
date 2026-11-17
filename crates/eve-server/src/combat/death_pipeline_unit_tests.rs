@@ -1,8 +1,9 @@
 //! Unit and mutation-killing tests for `combat::death_pipeline`.
 
 use super::*;
+use crate::formulas::compute_insurance_quote;
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::{AssistLogEntry, InsuranceContractState};
+use crate::services::combat_crimewatch::AssistLogEntry;
 use eve_db::{
     ContractRecord, DisconnectedShipEntry, InventoryFlag, InventoryItemRecord, IskCents,
     PersistedInsurgencyCampaign,
@@ -145,10 +146,10 @@ async fn death_pipeline_rejects_non_ship_and_covers_all_insurance_branches() {
     // 3. Expired rt_contract (end_unix == now) falls back to 40% base quote
     let exp_ship = 100_200_003;
     spawn_ship(&ctx, sys_id, exp_ship, victim, 587, DVec3::ZERO, 0.0);
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.insurance_contracts.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.insurance_contracts.insert(
             exp_ship,
-            InsuranceContractState {
+            eve_db::PersistedInsuranceContractRecord {
                 ship_id: exp_ship,
                 ship_type_id: 587,
                 owner_id: victim,
@@ -173,10 +174,10 @@ async fn death_pipeline_rejects_non_ship_and_covers_all_insurance_branches() {
     let corp_ship = 100_200_004;
     spawn_ship(&ctx, sys_id, corp_ship, victim, 587, DVec3::ZERO, 0.0);
     let corp_bal_before = ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet_balance());
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.insurance_contracts.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.insurance_contracts.insert(
             corp_ship,
-            InsuranceContractState {
+            eve_db::PersistedInsuranceContractRecord {
                 ship_id: corp_ship,
                 ship_type_id: 587,
                 owner_id: corp_id,
@@ -199,28 +200,25 @@ async fn death_pipeline_rejects_non_ship_and_covers_all_insurance_branches() {
         corp_bal_before.checked_add(IskCents::from_f64_isk(750_000.0)).unwrap()
     );
 
-    // 5. Active cs_contract (container_ship_state) pays out cs_contract.payout_isk
+    // 5. Active snap.insurance_contracts with owner_id <= 0 falls back to victim_char_id
     let cs_ship = 100_200_005;
     spawn_ship(&ctx, sys_id, cs_ship, victim, 587, DVec3::ZERO, 0.0);
-    crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
-        &ctx,
-        |st| {
-            st.insurance_contracts.insert(
-                cs_ship,
-                crate::services::inventory_fitting::fitting_containers_ships::InsuranceContractRecord {
-                    ship_id: cs_ship,
-                    ship_type_id: 587,
-                    owner_id: 0, // tests owner_id <= 0 fallback to victim_char_id
-                    level_name: "Gold".into(),
-                    level_fraction: 0.8,
-                    cost_isk: 80_000.0,
-                    payout_isk: 612_345.0,
-                    start_unix: now.saturating_sub(10),
-                    end_unix: now + 100,
-                },
-            );
-        },
-    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.insurance_contracts.insert(
+            cs_ship,
+            eve_db::PersistedInsuranceContractRecord {
+                ship_id: cs_ship,
+                ship_type_id: 587,
+                owner_id: 0, // tests owner_id <= 0 fallback to victim_char_id
+                level_name: "Gold".into(),
+                level_fraction: 0.8,
+                cost_isk: 80_000.0,
+                payout_isk: 612_345.0,
+                start_unix: now.saturating_sub(10),
+                end_unix: now + 100,
+            },
+        );
+    });
     let cs_res =
         execute_death_pipeline_sync(&ctx, sys_id, victim, cs_ship, attacker, DVec3::ZERO, 1)
             .unwrap();
@@ -973,10 +971,10 @@ async fn death_pipeline_escape_bay_pod_implants_insurance_kill_rights_and_struct
         );
     });
     let vic_bal_before = ctx.db.with_snapshot(|s| s.characters[&victim].balance);
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.insurance_contracts.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.insurance_contracts.insert(
             bs_id,
-            InsuranceContractState {
+            eve_db::PersistedInsuranceContractRecord {
                 ship_id: bs_id,
                 ship_type_id: 638,
                 owner_id: victim,
@@ -1070,29 +1068,26 @@ async fn death_pipeline_escape_bay_pod_implants_insurance_kill_rights_and_struct
         assert!(dkm.destroyed_items.iter().any(|i| i.type_id == 10_208));
     });
 
-    // 4. Expired cs_contract falls back to 40% base quote; insured_payout > 0 pays directly when no contract;
+    // 4. Expired contract falls back to 40% base quote; insured_payout > 0 pays directly when no contract;
     //    victim controlling structure suppresses capsule ejection; null-sec skips sec loss & kill rights
     let expired_cs_ship = 200_200_030_i64;
     spawn_ship(&ctx, sys_null, expired_cs_ship, victim, 587, DVec3::ZERO, 0.0);
-    crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
-        &ctx,
-        |st| {
-            st.insurance_contracts.insert(
-                expired_cs_ship,
-                crate::services::inventory_fitting::fitting_containers_ships::InsuranceContractRecord {
-                    ship_id: expired_cs_ship,
-                    ship_type_id: 587,
-                    owner_id: victim,
-                    level_name: "Gold".into(),
-                    level_fraction: 0.8,
-                    cost_isk: 80_000.0,
-                    payout_isk: 999_999.0,
-                    start_unix: now.saturating_sub(100),
-                    end_unix: now,
-                },
-            );
-        },
-    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.insurance_contracts.insert(
+            expired_cs_ship,
+            eve_db::PersistedInsuranceContractRecord {
+                ship_id: expired_cs_ship,
+                ship_type_id: 587,
+                owner_id: victim,
+                level_name: "Gold".into(),
+                level_fraction: 0.8,
+                cost_isk: 80_000.0,
+                payout_isk: 999_999.0,
+                start_unix: now.saturating_sub(100),
+                end_unix: now,
+            },
+        );
+    });
     let base_587 = ctx.sde.types.get(&587).map(|t| t.base_price).unwrap_or(230_000.0);
     let expected_40 = compute_insurance_quote(base_587, 0.40).1;
     let exp_cs_res =
@@ -2222,5 +2217,158 @@ fn transient_items_materialize_only_on_surviving_loot_drop() {
         assert_eq!(snap.items[&drop_mod_id].owner_id, 90_000_001);
         assert!(!snap.is_transient_item(destroy_mod_id));
         assert!(!snap.items.contains_key(&destroy_mod_id), "destroyed transient item must never persist");
+    });
+}
+
+#[tokio::test]
+async fn death_pipeline_insurance_payout_rolls_back_atomically_on_tx_err_and_panic_then_retries_once() {
+    struct FaultResetGuard;
+    impl Drop for FaultResetGuard {
+        fn drop(&mut self) {
+            set_post_insurance_tx_fault(None);
+        }
+    }
+
+    let _guard = FaultResetGuard;
+    let ctx = test_ctx();
+    let sys_id = 30_002_813; // Low-sec
+    let victim = 90_000_001;
+    let attacker = 90_000_002;
+    let ship_id = 200_991_001_i64;
+    let now = ctx.now_unix();
+
+    spawn_ship(&ctx, sys_id, ship_id, victim, 587, DVec3::ZERO, 0.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.insurance_contracts.insert(
+            ship_id,
+            eve_db::PersistedInsuranceContractRecord {
+                ship_id,
+                ship_type_id: 587,
+                owner_id: victim,
+                level_name: "Platinum".into(),
+                level_fraction: 1.0,
+                cost_isk: 200_000.0,
+                payout_isk: 850_000.0,
+                start_unix: now.saturating_sub(100),
+                end_unix: now + 3_600,
+            },
+        );
+    });
+
+    let (bal_before, journal_before, mails_before, km_before) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.characters[&victim].balance,
+            snap.wallet_journal.len(),
+            snap.mails.len(),
+            snap.killmails.len(),
+        )
+    });
+
+    // 1. Mid-tx Err after insurance settlement rolls back wallet, contract, journal, mail, item, and idempotency key.
+    set_post_insurance_tx_fault(Some(PostInsuranceTxFault::Err));
+    let err_res = execute_death_pipeline_sync(&ctx, sys_id, victim, ship_id, attacker, DVec3::ZERO, 1);
+    assert!(err_res.is_err(), "injected mid-tx error must abort death pipeline");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&victim].balance, bal_before);
+        assert!(snap.items.contains_key(&ship_id));
+        assert!(snap.items[&ship_id].insured_payout_isk >= 0.0);
+        assert!(snap.insurance_contracts.contains_key(&ship_id));
+        assert!(!snap
+            .committed_idempotency_keys
+            .contains(&(ship_id, "ship_insurance_payout".to_string())));
+        assert_eq!(snap.wallet_journal.len(), journal_before);
+        assert_eq!(snap.mails.len(), mails_before);
+        assert_eq!(snap.killmails.len(), km_before);
+    });
+
+    // 2. Mid-tx panic after insurance settlement is caught by `ctx.db.tx`, rolls back cleanly without double/phantom payout.
+    set_post_insurance_tx_fault(Some(PostInsuranceTxFault::Panic));
+    let panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        execute_death_pipeline_sync(&ctx, sys_id, victim, ship_id, attacker, DVec3::ZERO, 1)
+    }));
+    assert!(
+        matches!(&panic_res, Err(_) | Ok(Err(_))),
+        "injected mid-tx panic must abort death pipeline cleanly: {panic_res:?}"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&victim].balance, bal_before);
+        assert!(snap.items.contains_key(&ship_id));
+        assert!(snap.items[&ship_id].insured_payout_isk >= 0.0);
+        assert!(snap.insurance_contracts.contains_key(&ship_id));
+        assert!(!snap
+            .committed_idempotency_keys
+            .contains(&(ship_id, "ship_insurance_payout".to_string())));
+        assert_eq!(snap.wallet_journal.len(), journal_before);
+        assert_eq!(snap.mails.len(), mails_before);
+        assert_eq!(snap.killmails.len(), km_before);
+    });
+
+    // 3. Clean retry settles insurance, consumes contract, records idempotency key, and pays exactly once.
+    let ok_res = execute_death_pipeline_sync(&ctx, sys_id, victim, ship_id, attacker, DVec3::ZERO, 1)
+        .expect("clean retry after rollbacks must succeed");
+    assert!((ok_res.insurance_payout_isk - 850_000.0).abs() < 1e-6);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.characters[&victim].balance,
+            bal_before.checked_add(IskCents::from_f64_isk(850_000.0)).unwrap()
+        );
+        assert!(!snap.items.contains_key(&ship_id));
+        assert!(!snap.insurance_contracts.contains_key(&ship_id));
+        assert!(snap
+            .committed_idempotency_keys
+            .contains(&(ship_id, "ship_insurance_payout".to_string())));
+        assert_eq!(snap.wallet_journal.len(), journal_before + 1);
+        assert_eq!(snap.mails.len(), mails_before + 1);
+        assert_eq!(snap.killmails.len(), km_before + 1);
+    });
+
+    // 4. Direct re-settlement check hits idempotency key and negative ship item marker without double-pay.
+    let bal_after_retry = ctx.db.with_snapshot(|s| s.characters[&victim].balance);
+    ctx.db.with_mut_snapshot(|snap| {
+        let dup_via_key =
+            crate::services::combat_crimewatch::combat_wrecks_killmails::settle_ship_insurance_payout_in_snap(
+                snap,
+                &ctx.sde,
+                victim,
+                ship_id,
+                587,
+                false,
+                true,
+                now,
+            );
+        assert_eq!(dup_via_key.payout_isk, 0.0);
+
+        let marked_ship = 200_991_002_i64;
+        snap.items.insert(
+            marked_ship,
+            InventoryItemRecord {
+                item_id: marked_ship,
+                type_id: 587,
+                owner_id: victim,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: -1.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        let dup_via_marker =
+            crate::services::combat_crimewatch::combat_wrecks_killmails::settle_ship_insurance_payout_in_snap(
+                snap,
+                &ctx.sde,
+                victim,
+                marked_ship,
+                587,
+                false,
+                true,
+                now,
+            );
+        assert_eq!(dup_via_marker.payout_isk, 0.0);
+        assert_eq!(snap.characters[&victim].balance, bal_after_retry);
     });
 }

@@ -40,7 +40,7 @@ use crate::services::combat_crimewatch::combat_wrecks_killmails::{
 };
 use crate::services::combat_crimewatch::{
     with_combat_runtime, with_mut_combat_runtime, AssistLogEntry, InFlightMissileState,
-    InsuranceContractState, SafetyLevel,
+    SafetyLevel,
 };
 use crate::services::fitting_cycles_overheat::{
     check_nanite_repair_overheat_lockout, compute_overload_multiplier,
@@ -553,10 +553,10 @@ async fn death_pipeline_self_destruct_insurance_hash_and_loot_edges() {
 
     // 3. Insurance payout edge cases: CONCORD criminal -> 0, Capsule 670 -> 0
     let ins_ship = 500_002_001;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.insurance_contracts.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.insurance_contracts.insert(
             ins_ship,
-            InsuranceContractState {
+            eve_db::PersistedInsuranceContractRecord {
                 ship_id: ins_ship,
                 ship_type_id: 587,
                 owner_id: victim,

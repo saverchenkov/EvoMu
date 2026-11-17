@@ -2,10 +2,9 @@
 
 #![forbid(unsafe_code)]
 
-use crate::formulas::compute_insurance_quote;
 use crate::router::notify_registry::{OnAccountChange, OnDroneControlLost, OnDroneStateChange};
 use crate::router::{NotificationTarget, ServerContext};
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, KillmailRecord};
+use eve_db::{InventoryFlag, InventoryItemRecord, KillmailRecord};
 use eve_destiny::{Ball, MovementMode, SlimItemMeta};
 use glam::DVec3;
 use std::collections::HashMap;
@@ -344,7 +343,7 @@ pub fn execute_death_pipeline_sync_inner(
     rng_seed: u64,
     is_self_destruct: bool,
 ) -> Result<DeathPipelineResult, String> {
-    let (victim_ship_type_id, base_price, insured_payout, victim_char_id, needs_structure_sync) =
+    let (victim_ship_type_id, base_price, victim_char_id, needs_structure_sync) =
         ctx.db.with_snapshot(|snap| {
             let ship = snap
                 .items
@@ -396,7 +395,6 @@ pub fn execute_death_pipeline_sync_inner(
             Ok::<_, String>((
                 ship.type_id,
                 base,
-                ship.insured_payout_isk,
                 resolved_vic,
                 needs_structure_sync,
             ))
@@ -431,37 +429,6 @@ pub fn execute_death_pipeline_sync_inner(
         .get(&victim_char_id)
         .map(|s| s.is_criminal(now_unix))
         .unwrap_or(false);
-    let rt_contract = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        rt.insurance_contracts.get(&victim_ship_id).cloned()
-    });
-    let cs_contract =
-        crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx)
-            .insurance_contracts
-            .get(&victim_ship_id)
-            .cloned();
-    let (calculated_insurance_payout, ins_owner_id, ins_is_corp) = if is_pod || is_criminal || is_self_destruct {
-        (0.0, victim_char_id, false)
-    } else if let Some(c) = rt_contract {
-        if c.end_unix > now_unix {
-            let oid = if c.owner_id > 0 { c.owner_id } else { victim_char_id };
-            let is_corp = ctx.db.with_snapshot(|s| s.corporations.contains_key(&oid));
-            (c.payout_isk, oid, is_corp)
-        } else {
-            (compute_insurance_quote(base_price, 0.40).1, victim_char_id, false)
-        }
-    } else if let Some(c) = cs_contract {
-        if c.end_unix > now_unix {
-            let oid = if c.owner_id > 0 { c.owner_id } else { victim_char_id };
-            let is_corp = ctx.db.with_snapshot(|s| s.corporations.contains_key(&oid));
-            (c.payout_isk, oid, is_corp)
-        } else {
-            (compute_insurance_quote(base_price, 0.40).1, victim_char_id, false)
-        }
-    } else if insured_payout > 0.0 {
-        (insured_payout, victim_char_id, false)
-    } else {
-        (compute_insurance_quote(base_price, 0.40).1, victim_char_id, false)
-    };
     let hull_cs = ctx.build_type_combat_state(victim_ship_type_id);
     let hull_total_hp = (hull_cs.max_shield_hp + hull_cs.max_armor_hp + hull_cs.max_structure_hp).max(1.0);
     let hull_base_isk = if base_price > 0.0 {
@@ -529,6 +496,7 @@ pub fn execute_death_pipeline_sync_inner(
         att_corp,
         att_all,
         att_ship_type_id,
+        calculated_insurance_payout,
         ins_notify,
         victim_piloting_ship,
         nested_ship_ids,
@@ -555,6 +523,16 @@ pub fn execute_death_pipeline_sync_inner(
                     ship.type_id
                 )));
             }
+            let ins_settlement = crate::services::combat_crimewatch::combat_wrecks_killmails::settle_ship_insurance_payout_in_snap(
+                snap,
+                &ctx.sde,
+                victim_char_id,
+                victim_ship_id,
+                ship.type_id,
+                is_pod || is_criminal || is_self_destruct || attacker_char_id == 1_000_125,
+                true,
+                now_unix,
+            );
 
         let victim_piloting_ship = snap
             .characters
@@ -907,50 +885,16 @@ pub fn execute_death_pipeline_sync_inner(
             (None, None)
         };
 
-        let ins_notify = if calculated_insurance_payout > 0.0 {
-            let payout_cents = IskCents::from_f64_isk(calculated_insurance_payout);
-            let (journal_char_id, bal_after) = if ins_is_corp {
-                if let Some(corp) = snap.corporations.get_mut(&ins_owner_id) {
-                    let bal = corp.credit_division(1, payout_cents);
-                    (ins_owner_id, bal)
-                } else {
-                    (ins_owner_id, payout_cents)
-                }
-            } else if let Some(vic) = snap.characters.get_mut(&ins_owner_id) {
-                vic.balance = vic.balance.checked_add(payout_cents).unwrap_or(vic.balance);
-                (ins_owner_id, vic.balance)
-            } else {
-                (ins_owner_id, payout_cents)
-            };
-            snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
-                owner_id: journal_char_id,
-                entry_type: "insurance_payout",
-                amount: payout_cents,
-                balance_after: bal_after,
-                reason: format!("Insurance payout for loss of ship {victim_ship_id}"),
-                meta: eve_db::ledger::JournalMeta::new(
-                    eve_db::ledger::ref_types::INSURANCE,
-                    1_000_132,
-                    journal_char_id,
-                    now_unix,
+        let ins_notify = if ins_settlement.payout_isk > 0.0 {
+            ins_settlement.mail_id.map(|mid| {
+                (
+                    ins_settlement.is_corp,
+                    ins_settlement.credited_owner_id,
+                    ins_settlement.balance_after_isk,
+                    mid,
+                    ins_settlement.mail_subject,
                 )
-                .with_context(eve_db::ledger::JournalContext::Type, i64::from(victim_ship_type_id)),
-            });
-            let mid = snap.alloc_entity_id();
-            let subject = format!("Insurance Payout for Ship {victim_ship_id}");
-            snap.mails.push(eve_db::MailRecord {
-                message_id: mid,
-                sender_id: 1_000_132,
-                recipient_id: victim_char_id,
-                subject: subject.clone(),
-                body: format!(
-                    "Pend Insurance has credited {:.2} ISK to your account following the destruction of ship {}.",
-                    calculated_insurance_payout, victim_ship_id
-                ),
-            });
-            snap.mail_timestamps.insert(mid, now_unix);
-            snap.mail_assigned_labels.insert((victim_char_id, mid), vec![1]);
-            Some((ins_is_corp, journal_char_id, bal_after.to_wire_f64(), mid, subject))
+            })
         } else {
             None
         };
@@ -998,6 +942,17 @@ pub fn execute_death_pipeline_sync_inner(
             destroyed_item_recs,
         };
 
+        #[cfg(test)]
+        if let Some(fault) = take_post_insurance_tx_fault() {
+            match fault {
+                PostInsuranceTxFault::Err => {
+                    return Err(DeathTxErr::User("injected post-insurance death tx failure".into()));
+                }
+                PostInsuranceTxFault::Panic => {
+                    panic!("injected post-insurance death tx panic");
+                }
+            }
+        }
         wtx.effects.on_commit(|_| {});
         Ok::<_, DeathTxErr>((
             wreck_id,
@@ -1013,6 +968,7 @@ pub fn execute_death_pipeline_sync_inner(
             att_c,
             att_a,
             att_stid,
+            ins_settlement.payout_isk,
             ins_notify,
             victim_piloting_ship,
             nested_ship_ids,
@@ -1026,16 +982,9 @@ pub fn execute_death_pipeline_sync_inner(
     })?;
 
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        rt.insurance_contracts.remove(&victim_ship_id);
         rt.self_destruct_countdowns.remove(&victim_ship_id);
         rt.self_destruct_sim_remaining_secs.remove(&victim_ship_id);
     });
-    crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
-        ctx,
-        |st| {
-            st.insurance_contracts.remove(&victim_ship_id);
-        },
-    );
     {
         let mut fittings = ctx
             .ship_fittings
@@ -2040,6 +1989,29 @@ impl SelfDestructManager {
         }
         results
     }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(super) enum PostInsuranceTxFault {
+    Err,
+    Panic,
+}
+
+#[cfg(test)]
+thread_local! {
+    static POST_INSURANCE_TX_FAULT: std::cell::Cell<Option<PostInsuranceTxFault>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn set_post_insurance_tx_fault(fault: Option<PostInsuranceTxFault>) {
+    POST_INSURANCE_TX_FAULT.with(|cell| cell.set(fault));
+}
+
+#[cfg(test)]
+fn take_post_insurance_tx_fault() -> Option<PostInsuranceTxFault> {
+    POST_INSURANCE_TX_FAULT.with(|cell| cell.take())
 }
 
 #[cfg(test)] #[path = "death_pipeline_unit_tests.rs"]

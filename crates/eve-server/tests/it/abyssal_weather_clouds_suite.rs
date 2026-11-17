@@ -620,11 +620,21 @@ async fn test_abyssal_timer_collapse_and_pod_death() {
     }
     let now = ctx.now_unix();
     let initial_balance = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.insurance_contracts.insert(ship_id, eve_server::services::combat_crimewatch::InsuranceContractState {
-            ship_id, ship_type_id: 587, owner_id: char_id, level_name: "Basic".into(), level_fraction: 1.0,
-            cost_isk: 0.0, payout_isk: 10_000_000.0, start_unix: now, end_unix: now + 100_000,
-        });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.insurance_contracts.insert(
+            ship_id,
+            eve_db::PersistedInsuranceContractRecord {
+                ship_id,
+                ship_type_id: 587,
+                owner_id: char_id,
+                level_name: "Basic".into(),
+                level_fraction: 1.0,
+                cost_isk: 0.0,
+                payout_isk: 10_000_000.0,
+                start_unix: now,
+                end_unix: now + 100_000,
+            },
+        );
     });
 
     let dep = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(fil_id)], &kw, None).await.expect("Deploy");
@@ -664,7 +674,7 @@ async fn test_abyssal_timer_collapse_and_pod_death() {
 
     let final_balance = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
     assert_eq!(final_balance, initial_balance, "No insurance payout on Abyssal collapse death");
-    assert!(!eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| rt.insurance_contracts.contains_key(&ship_id)));
+    assert!(!ctx.db.with_snapshot(|s| s.insurance_contracts.contains_key(&ship_id)));
     let kms = ctx.db.with_snapshot(|s| s.killmails.values().filter(|k| k.victim_character_id == char_id).cloned().collect::<Vec<_>>());
     assert_eq!(kms.len(), 2, "Expected 2 killmails (ship and capsule)");
     assert!(kms.iter().all(|k| k.attacker_character_id == 0 && k.attacker_corp_id == 1_000_298), "Death logged to Abyssal Environment");

@@ -53,7 +53,7 @@ use crate::router::{NotificationTarget, ServerContext};
 pub use crate::router::RpcArgs;
 use eve_db::{
     InventoryFlag, InventoryItemRecord, IskCents, KillRightRecord, KillmailRecord,
-    SystemDynamicState, WalletJournalEntry,
+    SystemDynamicState,
 };
 use eve_destiny::DamageVector;
 use eve_machonet::SessionState;
@@ -162,7 +162,7 @@ pub fn schedule_highsec_criminal_concord_if_needed(
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EntropicSpoolState {
     pub target_id: i64,
     pub solar_system_id: u32,
@@ -181,7 +181,7 @@ pub struct EntropicSpoolState {
     pub current_multiplier: f64,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InFlightMissileState {
     pub missile_ball_id: i64,
     pub solar_system_id: u32,
@@ -211,7 +211,7 @@ pub struct InFlightMissileState {
     pub applied_damage: f64,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ActiveBreacherDot {
     pub target_ball_id: i64,
     pub source_char_id: i64,
@@ -224,7 +224,7 @@ pub struct ActiveBreacherDot {
     pub tick_damage: f64,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AssistLogEntry {
     pub attacker_char_id: i64,
     pub corporation_id: i64,
@@ -238,7 +238,7 @@ pub struct AssistLogEntry {
 
 pub use eve_db::{DetailedKillmail, KillmailAttackerEntry, KillmailItemEntry};
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ContainerLifetimeEntry {
     pub item_id: i64,
     pub solar_system_id: u32,
@@ -249,7 +249,7 @@ pub struct ContainerLifetimeEntry {
     pub is_abandoned: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SelfDestructCountdown {
     pub ship_id: i64,
     pub char_id: i64,
@@ -260,7 +260,7 @@ pub struct SelfDestructCountdown {
 
 pub use eve_db::PersistedSecStatusTransaction as SecStatusTransaction;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SentryAggressionState {
     pub solar_system_id: u32,
     pub offender_char_id: i64,
@@ -278,7 +278,7 @@ pub enum SafetyLevel {
     Green = 2,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DroneBehaviorSettings {
     pub aggressive: bool,
     pub focus_fire: bool,
@@ -290,7 +290,7 @@ impl Default for DroneBehaviorSettings {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DroneSpaceState {
     pub ball_id: i64,
     pub drone_item_id: i64,
@@ -352,7 +352,7 @@ pub struct ExtendedNpcEntity {
     pub custom_cargo_loot: Option<(u32, i64)>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EncounterWaveDirector {
     pub encounter_id: u32,
     pub solar_system_id: u32,
@@ -367,25 +367,16 @@ pub struct EncounterWaveDirector {
     pub next_wave_pending: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct InsuranceContractState {
-    pub ship_id: i64,
-    pub ship_type_id: u32,
-    pub owner_id: i64,
-    pub level_name: String,
-    pub level_fraction: f64,
-    pub cost_isk: f64,
-    pub payout_isk: f64,
-    pub start_unix: u64,
-    pub end_unix: u64,
-}
-
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct CombatRuntimeState {
     #[doc(hidden)]
     pub synced_db_epoch: u64,
     #[doc(hidden)]
+    pub synced_runtime_epoch: u64,
+    #[doc(hidden)]
     pub synced_ext_hash: u64,
+    #[doc(hidden)]
+    pub synced_baseline: Option<std::sync::Arc<eve_db::PersistedCombatCrimewatchState>>,
     pub entropic_spools: HashMap<(i64, i64), EntropicSpoolState>,
     pub in_flight_missiles: HashMap<i64, InFlightMissileState>,
     pub active_breacher_dots: HashMap<i64, ActiveBreacherDot>,
@@ -412,7 +403,6 @@ pub struct CombatRuntimeState {
     pub bounty_tick_next_flush_unix: HashMap<(u32, i64), u64>,
     pub pending_bounty_tick_started_unix: HashMap<(u32, i64), u64>,
     pub encounter_waves: HashMap<u32, EncounterWaveDirector>,
-    pub insurance_contracts: HashMap<i64, InsuranceContractState>,
     pub player_bounty_pool: HashMap<i64, f64>,
     pub bounty_contributions: HashMap<i64, Vec<(i64, f64)>>,
     pub bounty_hunter_claimed: HashMap<i64, f64>,
@@ -438,7 +428,7 @@ pub struct CombatRuntimeState {
     pub gm_deadwarps: HashMap<i64, crate::services::gm_soak_commands::GmDeadwarpState>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DroneMiningState {
     pub drone_id: i64,
     pub asteroid_id: i64,
@@ -453,7 +443,7 @@ pub struct DroneMiningState {
     pub destination_flag: eve_db::InventoryFlag,
 }
 
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct PersistedCombatExtendedPayload {
     entropic_spools: Vec<((i64, i64), EntropicSpoolState)>,
@@ -473,7 +463,6 @@ struct PersistedCombatExtendedPayload {
     bounty_tick_next_flush_unix: Vec<((u32, i64), u64)>,
     pending_bounty_tick_started_unix: Vec<((u32, i64), u64)>,
     encounter_waves: HashMap<u32, EncounterWaveDirector>,
-    insurance_contracts: HashMap<i64, InsuranceContractState>,
     fighter_unit_damage_accum: HashMap<i64, f64>,
     fighter_tube_rearm_until: Vec<((i64, usize), u64)>,
     behavior_debugging_active: std::collections::HashSet<i64>,
@@ -506,19 +495,93 @@ impl CombatRuntimeState {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn rehydrate_from_persisted_epochs(
         &mut self,
         p: &eve_db::PersistedCombatCrimewatchState,
         combat_epoch: u64,
+        force_full: bool,
     ) {
         let ext_hash = Self::ext_runtime_hash(p);
-        if self.synced_db_epoch == 0 || self.synced_ext_hash != ext_hash {
+        if force_full || self.synced_db_epoch == 0 || self.synced_ext_hash != ext_hash {
             self.sync_from_persisted(p);
         } else {
             self.sync_core_from_persisted(p);
         }
         self.synced_db_epoch = combat_epoch;
+        self.synced_runtime_epoch = combat_epoch;
         self.synced_ext_hash = ext_hash;
+        self.synced_baseline = Some(std::sync::Arc::new(p.clone()));
+    }
+
+    #[inline]
+    pub(crate) fn is_synced_with_db(&self, combat_epoch: u64, runtime_epoch: u64) -> bool {
+        self.synced_db_epoch != 0
+            && if self.synced_runtime_epoch != 0 {
+                self.synced_runtime_epoch == runtime_epoch
+            } else {
+                self.synced_db_epoch == combat_epoch
+            }
+    }
+
+    fn mark_synced_arc(
+        &mut self,
+        arc: &std::sync::Arc<eve_db::PersistedCombatCrimewatchState>,
+        combat_epoch: u64,
+        runtime_epoch: u64,
+    ) {
+        self.synced_db_epoch = combat_epoch;
+        self.synced_runtime_epoch = runtime_epoch;
+        self.synced_ext_hash = Self::ext_runtime_hash(arc);
+        self.synced_baseline = Some(std::sync::Arc::clone(arc));
+    }
+
+    pub(crate) fn reconcile_with_db_persisted(
+        &mut self,
+        db_arc: &std::sync::Arc<eve_db::PersistedCombatCrimewatchState>,
+        combat_epoch: u64,
+        runtime_epoch: u64,
+        force_full: bool,
+    ) {
+        if force_full || self.synced_db_epoch == 0 {
+            self.sync_from_persisted(db_arc);
+            self.mark_synced_arc(db_arc, combat_epoch, runtime_epoch);
+            return;
+        }
+        if self.synced_runtime_epoch != 0 && self.synced_runtime_epoch == runtime_epoch {
+            self.synced_db_epoch = combat_epoch;
+            return;
+        }
+        if let Some(base_arc) = self.synced_baseline.as_ref().map(std::sync::Arc::clone) {
+            if std::sync::Arc::ptr_eq(&base_arc, db_arc) || *base_arc == **db_arc {
+                self.synced_db_epoch = combat_epoch;
+                self.synced_runtime_epoch = runtime_epoch;
+                return;
+            }
+            let ram = self.to_persisted();
+            if ram == *base_arc {
+                self.sync_from_persisted(db_arc);
+                self.mark_synced_arc(db_arc, combat_epoch, runtime_epoch);
+                return;
+            }
+            let merged = merge_persisted_3way(&base_arc, db_arc, &ram);
+            self.sync_from_persisted(&merged);
+            self.mark_synced_arc(db_arc, combat_epoch, runtime_epoch);
+        } else {
+            let db_ext_hash = Self::ext_runtime_hash(db_arc);
+            if self.synced_ext_hash != 0 && self.synced_ext_hash == db_ext_hash {
+                self.sync_core_from_persisted(db_arc);
+                self.synced_db_epoch = combat_epoch;
+                self.synced_runtime_epoch = runtime_epoch;
+                self.synced_ext_hash = db_ext_hash;
+            } else {
+                let default_base = eve_db::PersistedCombatCrimewatchState::default();
+                let ram = self.to_persisted();
+                let merged = merge_persisted_3way(&default_base, db_arc, &ram);
+                self.sync_from_persisted(&merged);
+                self.mark_synced_arc(db_arc, combat_epoch, runtime_epoch);
+            }
+        }
     }
 
     pub fn has_limited_engagement_with(&self, char_id: i64, target_id: i64, now_unix: u64) -> bool {
@@ -637,7 +700,6 @@ impl CombatRuntimeState {
             self.drone_next_ready_unix.clear();
             self.npc_entities.clear();
             self.encounter_waves.clear();
-            self.insurance_contracts.clear();
             self.fighter_unit_damage_accum.clear();
             self.fighter_tube_rearm_until.clear();
             self.behavior_debugging_active.clear();
@@ -686,7 +748,6 @@ impl CombatRuntimeState {
                     ext.pending_bounty_tick_started_unix.into_iter().collect();
             }
             self.encounter_waves = ext.encounter_waves;
-            self.insurance_contracts = ext.insurance_contracts;
             self.fighter_unit_damage_accum = ext.fighter_unit_damage_accum;
             self.fighter_tube_rearm_until = ext.fighter_tube_rearm_until.into_iter().collect();
             self.behavior_debugging_active = ext.behavior_debugging_active;
@@ -726,7 +787,6 @@ impl CombatRuntimeState {
             || !self.bounty_tick_next_flush_unix.is_empty()
             || !self.pending_bounty_tick_started_unix.is_empty()
             || !self.encounter_waves.is_empty()
-            || !self.insurance_contracts.is_empty()
             || !self.fighter_unit_damage_accum.is_empty()
             || !self.fighter_tube_rearm_until.is_empty()
             || !self.behavior_debugging_active.is_empty()
@@ -784,7 +844,6 @@ impl CombatRuntimeState {
                     .map(|(k, v)| (*k, *v))
                     .collect(),
                 encounter_waves: self.encounter_waves.clone(),
-                insurance_contracts: self.insurance_contracts.clone(),
                 fighter_unit_damage_accum: self.fighter_unit_damage_accum.clone(),
                 fighter_tube_rearm_until: self
                     .fighter_tube_rearm_until
@@ -857,19 +916,260 @@ impl CombatRuntimeState {
     }
 }
 
-/// Rehydrates [`CombatRuntimeState`] from `ctx.db` whenever the repository epoch has changed
-/// (e.g. on startup, database reload, or snapshot replacement) (`#592`).
+fn merge_map_3way<K, V>(
+    base: &HashMap<K, V>,
+    db: &HashMap<K, V>,
+    ram: &HashMap<K, V>,
+) -> HashMap<K, V>
+where
+    K: Eq + std::hash::Hash + Clone,
+    V: PartialEq + Clone,
+{
+    if db == base {
+        return ram.clone();
+    }
+    if ram == base {
+        return db.clone();
+    }
+    let mut out = db.clone();
+    for (k, ram_v) in ram {
+        if db.get(k) == base.get(k) {
+            out.insert(k.clone(), ram_v.clone());
+        }
+    }
+    for k in base.keys() {
+        if !ram.contains_key(k) && db.get(k) == base.get(k) {
+            out.remove(k);
+        }
+    }
+    out
+}
+
+fn merge_set_3way<T>(
+    base: &std::collections::HashSet<T>,
+    db: &std::collections::HashSet<T>,
+    ram: &std::collections::HashSet<T>,
+) -> std::collections::HashSet<T>
+where
+    T: Eq + std::hash::Hash + Clone,
+{
+    if db == base {
+        return ram.clone();
+    }
+    if ram == base {
+        return db.clone();
+    }
+    let mut out = db.clone();
+    for item in ram {
+        if !base.contains(item) {
+            out.insert(item.clone());
+        }
+    }
+    for item in base {
+        if !ram.contains(item) && db.contains(item) {
+            out.remove(item);
+        }
+    }
+    out
+}
+
+fn merge_pair_vec_3way<K, V>(
+    base: &[(K, V)],
+    db: &[(K, V)],
+    ram: &[(K, V)],
+) -> Vec<(K, V)>
+where
+    K: Eq + Ord + std::hash::Hash + Clone,
+    V: PartialEq + Clone,
+{
+    let base_map: HashMap<K, V> = base.iter().cloned().collect();
+    let db_map: HashMap<K, V> = db.iter().cloned().collect();
+    let ram_map: HashMap<K, V> = ram.iter().cloned().collect();
+    let mut out: Vec<(K, V)> = merge_map_3way(&base_map, &db_map, &ram_map)
+        .into_iter()
+        .collect();
+    out.sort_by(|(a, _), (b, _)| a.cmp(b));
+    out
+}
+
+fn merge_pair_set_vec_3way<T>(base: &[T], db: &[T], ram: &[T]) -> Vec<T>
+where
+    T: Eq + Ord + std::hash::Hash + Clone,
+{
+    let base_set: std::collections::HashSet<T> = base.iter().cloned().collect();
+    let db_set: std::collections::HashSet<T> = db.iter().cloned().collect();
+    let ram_set: std::collections::HashSet<T> = ram.iter().cloned().collect();
+    let mut out: Vec<T> = merge_set_3way(&base_set, &db_set, &ram_set)
+        .into_iter()
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+fn merge_recent_ids_3way(
+    base: &VecDeque<i64>,
+    db: &VecDeque<i64>,
+    ram: &VecDeque<i64>,
+) -> VecDeque<i64> {
+    const MAX_RECENTLY_DESTROYED_ITEM_IDS: usize = 1_024;
+    if db == base {
+        return ram.clone();
+    }
+    if ram == base {
+        return db.clone();
+    }
+    let mut out = db.clone();
+    for &id in ram {
+        if !base.contains(&id) && !out.contains(&id) {
+            if out.len() >= MAX_RECENTLY_DESTROYED_ITEM_IDS {
+                out.pop_front();
+            }
+            out.push_back(id);
+        }
+    }
+    out
+}
+
+fn merge_extended_payload_3way(
+    base: &PersistedCombatExtendedPayload,
+    db: &PersistedCombatExtendedPayload,
+    ram: &PersistedCombatExtendedPayload,
+) -> PersistedCombatExtendedPayload {
+    PersistedCombatExtendedPayload {
+        entropic_spools: merge_pair_vec_3way(&base.entropic_spools, &db.entropic_spools, &ram.entropic_spools),
+        in_flight_missiles: merge_map_3way(&base.in_flight_missiles, &db.in_flight_missiles, &ram.in_flight_missiles),
+        active_breacher_dots: merge_map_3way(&base.active_breacher_dots, &db.active_breacher_dots, &ram.active_breacher_dots),
+        aggression_assist_log: merge_map_3way(&base.aggression_assist_log, &db.aggression_assist_log, &ram.aggression_assist_log),
+        container_lifetimes: merge_map_3way(&base.container_lifetimes, &db.container_lifetimes, &ram.container_lifetimes),
+        self_destruct_countdowns: merge_map_3way(&base.self_destruct_countdowns, &db.self_destruct_countdowns, &ram.self_destruct_countdowns),
+        modified_system_securities: merge_map_3way(&base.modified_system_securities, &db.modified_system_securities, &ram.modified_system_securities),
+        sentry_gun_aggression: merge_pair_vec_3way(&base.sentry_gun_aggression, &db.sentry_gun_aggression, &ram.sentry_gun_aggression),
+        crimewatch_timer_states: merge_map_3way(&base.crimewatch_timer_states, &db.crimewatch_timer_states, &ram.crimewatch_timer_states),
+        crimewatch_timer_triggered_at: merge_map_3way(&base.crimewatch_timer_triggered_at, &db.crimewatch_timer_triggered_at, &ram.crimewatch_timer_triggered_at),
+        active_drones_in_space: merge_map_3way(&base.active_drones_in_space, &db.active_drones_in_space, &ram.active_drones_in_space),
+        drone_next_ready_unix: merge_map_3way(&base.drone_next_ready_unix, &db.drone_next_ready_unix, &ram.drone_next_ready_unix),
+        npc_entities: merge_map_3way(&base.npc_entities, &db.npc_entities, &ram.npc_entities),
+        pending_bounty_ticks: merge_pair_vec_3way(&base.pending_bounty_ticks, &db.pending_bounty_ticks, &ram.pending_bounty_ticks),
+        bounty_tick_next_flush_unix: merge_pair_vec_3way(&base.bounty_tick_next_flush_unix, &db.bounty_tick_next_flush_unix, &ram.bounty_tick_next_flush_unix),
+        pending_bounty_tick_started_unix: merge_pair_vec_3way(&base.pending_bounty_tick_started_unix, &db.pending_bounty_tick_started_unix, &ram.pending_bounty_tick_started_unix),
+        encounter_waves: merge_map_3way(&base.encounter_waves, &db.encounter_waves, &ram.encounter_waves),
+        fighter_unit_damage_accum: merge_map_3way(&base.fighter_unit_damage_accum, &db.fighter_unit_damage_accum, &ram.fighter_unit_damage_accum),
+        fighter_tube_rearm_until: merge_pair_vec_3way(&base.fighter_tube_rearm_until, &db.fighter_tube_rearm_until, &ram.fighter_tube_rearm_until),
+        behavior_debugging_active: merge_set_3way(&base.behavior_debugging_active, &db.behavior_debugging_active, &ram.behavior_debugging_active),
+        authorized_shipping_storage: merge_pair_set_vec_3way(&base.authorized_shipping_storage, &db.authorized_shipping_storage, &ram.authorized_shipping_storage),
+        active_drone_miners: merge_map_3way(&base.active_drone_miners, &db.active_drone_miners, &ram.active_drone_miners),
+        ess_main_bank_thefts: merge_map_3way(&base.ess_main_bank_thefts, &db.ess_main_bank_thefts, &ram.ess_main_bank_thefts),
+        ess_reserve_bank_thefts: merge_map_3way(&base.ess_reserve_bank_thefts, &db.ess_reserve_bank_thefts, &ram.ess_reserve_bank_thefts),
+        ess_reserve_unlocked_until: merge_map_3way(&base.ess_reserve_unlocked_until, &db.ess_reserve_unlocked_until, &ram.ess_reserve_unlocked_until),
+        clone_soldier_cooldown_until: merge_map_3way(&base.clone_soldier_cooldown_until, &db.clone_soldier_cooldown_until, &ram.clone_soldier_cooldown_until),
+        bounty_credited_balls: merge_set_3way(&base.bounty_credited_balls, &db.bounty_credited_balls, &ram.bounty_credited_balls),
+        destroyed_npc_cache: merge_map_3way(&base.destroyed_npc_cache, &db.destroyed_npc_cache, &ram.destroyed_npc_cache),
+        ci_sentry_deployed_systems: merge_set_3way(&base.ci_sentry_deployed_systems, &db.ci_sentry_deployed_systems, &ram.ci_sentry_deployed_systems),
+        npc_scrambled_ships: merge_map_3way(&base.npc_scrambled_ships, &db.npc_scrambled_ships, &ram.npc_scrambled_ships),
+        npc_sec_gain_intervals: merge_pair_vec_3way(&base.npc_sec_gain_intervals, &db.npc_sec_gain_intervals, &ram.npc_sec_gain_intervals),
+        recently_destroyed_item_ids: merge_recent_ids_3way(&base.recently_destroyed_item_ids, &db.recently_destroyed_item_ids, &ram.recently_destroyed_item_ids),
+        self_destruct_sim_remaining_secs: merge_map_3way(&base.self_destruct_sim_remaining_secs, &db.self_destruct_sim_remaining_secs, &ram.self_destruct_sim_remaining_secs),
+    }
+}
+
+fn merge_persisted_3way(
+    base: &eve_db::PersistedCombatCrimewatchState,
+    db: &eve_db::PersistedCombatCrimewatchState,
+    ram: &eve_db::PersistedCombatCrimewatchState,
+) -> eve_db::PersistedCombatCrimewatchState {
+    let pending_bounty_ticks = merge_map_3way(&base.pending_bounty_ticks, &db.pending_bounty_ticks, &ram.pending_bounty_ticks);
+    let bounty_tick_next_flush_unix = merge_map_3way(&base.bounty_tick_next_flush_unix, &db.bounty_tick_next_flush_unix, &ram.bounty_tick_next_flush_unix);
+    let pending_bounty_tick_started_unix = merge_map_3way(&base.pending_bounty_tick_started_unix, &db.pending_bounty_tick_started_unix, &ram.pending_bounty_tick_started_unix);
+    let bounty_maps_differ_from_ram = pending_bounty_ticks != ram.pending_bounty_ticks
+        || bounty_tick_next_flush_unix != ram.bounty_tick_next_flush_unix
+        || pending_bounty_tick_started_unix != ram.pending_bounty_tick_started_unix;
+
+    let extended_runtime_json = if db.extended_runtime_json == base.extended_runtime_json
+        && (!bounty_maps_differ_from_ram || ram.extended_runtime_json.is_empty())
+    {
+        ram.extended_runtime_json.clone()
+    } else if ram.extended_runtime_json == base.extended_runtime_json && !bounty_maps_differ_from_ram {
+        db.extended_runtime_json.clone()
+    } else {
+        let parse_ext = |s: &str| -> PersistedCombatExtendedPayload {
+            if s.is_empty() {
+                PersistedCombatExtendedPayload::default()
+            } else {
+                serde_json::from_str(s).unwrap_or_default()
+            }
+        };
+        let mut merged_ext = merge_extended_payload_3way(
+            &parse_ext(&base.extended_runtime_json),
+            &parse_ext(&db.extended_runtime_json),
+            &parse_ext(&ram.extended_runtime_json),
+        );
+        merged_ext.pending_bounty_ticks = pending_bounty_ticks.iter().map(|(k, v)| (*k, *v)).collect();
+        merged_ext.bounty_tick_next_flush_unix = bounty_tick_next_flush_unix.iter().map(|(k, v)| (*k, *v)).collect();
+        merged_ext.pending_bounty_tick_started_unix = pending_bounty_tick_started_unix.iter().map(|(k, v)| (*k, *v)).collect();
+        merged_ext.pending_bounty_ticks.sort_by_key(|(k, _)| *k);
+        merged_ext.bounty_tick_next_flush_unix.sort_by_key(|(k, _)| *k);
+        merged_ext.pending_bounty_tick_started_unix.sort_by_key(|(k, _)| *k);
+        if merged_ext == PersistedCombatExtendedPayload::default() {
+            String::new()
+        } else {
+            serde_json::to_string(&merged_ext).unwrap_or_default()
+        }
+    };
+
+    eve_db::PersistedCombatCrimewatchState {
+        sec_status_transactions: merge_map_3way(&base.sec_status_transactions, &db.sec_status_transactions, &ram.sec_status_transactions),
+        safety_levels: merge_map_3way(&base.safety_levels, &db.safety_levels, &ram.safety_levels),
+        drone_settings: merge_map_3way(&base.drone_settings, &db.drone_settings, &ram.drone_settings),
+        limited_engagements: merge_map_3way(&base.limited_engagements, &db.limited_engagements, &ram.limited_engagements),
+        npc_timers: merge_map_3way(&base.npc_timers, &db.npc_timers, &ram.npc_timers),
+        disapproval_flags: merge_map_3way(&base.disapproval_flags, &db.disapproval_flags, &ram.disapproval_flags),
+        duel_challenges: merge_map_3way(&base.duel_challenges, &db.duel_challenges, &ram.duel_challenges),
+        corp_aggression_settings: merge_map_3way(&base.corp_aggression_settings, &db.corp_aggression_settings, &ram.corp_aggression_settings),
+        player_bounty_pool: merge_map_3way(&base.player_bounty_pool, &db.player_bounty_pool, &ram.player_bounty_pool),
+        bounty_contributions: merge_map_3way(&base.bounty_contributions, &db.bounty_contributions, &ram.bounty_contributions),
+        bounty_hunter_claimed: merge_map_3way(&base.bounty_hunter_claimed, &db.bounty_hunter_claimed, &ram.bounty_hunter_claimed),
+        kill_right_expires_unix: merge_map_3way(&base.kill_right_expires_unix, &db.kill_right_expires_unix, &ram.kill_right_expires_unix),
+        kill_right_restricted_to: merge_map_3way(&base.kill_right_restricted_to, &db.kill_right_restricted_to, &ram.kill_right_restricted_to),
+        detailed_killmails: merge_map_3way(&base.detailed_killmails, &db.detailed_killmails, &ram.detailed_killmails),
+        pending_bounty_ticks,
+        bounty_tick_next_flush_unix,
+        pending_bounty_tick_started_unix,
+        extended_runtime_json,
+    }
+}
+
+/// Rehydrates [`CombatRuntimeState`] from `ctx.db` whenever `combat_crimewatch_state` changed
+/// (e.g. on startup, database reload, or snapshot replacement) (`#592`, `#1238`).
 pub fn sync_combat_runtime_from_db(ctx: &ServerContext) {
     let combat_epoch = ctx.db.combat_state_epoch();
-    let guard_read = ctx
-        .combat_ephemeral
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
-    if guard_read.synced_db_epoch == combat_epoch {
-        return;
+    let runtime_epoch = ctx.db.combat_runtime_epoch();
+    {
+        let guard_read = ctx
+            .combat_ephemeral
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        if guard_read.is_synced_with_db(combat_epoch, runtime_epoch) {
+            return;
+        }
     }
-    drop(guard_read);
     rehydrate_combat_runtime_with_mode(ctx, false);
+}
+
+/// Initializes a fresh [`CombatRuntimeState`] aligned atomically with `db`'s current epochs (`#1238`).
+pub fn init_combat_runtime_state(db: &eve_db::WorldRepository) -> CombatRuntimeState {
+    loop {
+        let cw_before = db.combat_state_epoch();
+        let rt_before = db.combat_runtime_epoch();
+        let persisted_arc = db.with_snapshot(|snap| {
+            std::sync::Arc::clone(snap.combat_crimewatch_state.as_arc())
+        });
+        if db.combat_state_epoch() == cw_before && db.combat_runtime_epoch() == rt_before {
+            let mut rt = CombatRuntimeState::default();
+            rt.sync_from_persisted(&persisted_arc);
+            rt.mark_synced_arc(&persisted_arc, cw_before, rt_before);
+            return rt;
+        }
+    }
 }
 
 /// Unconditionally rehydrates [`CombatRuntimeState`] from the currently published `ctx.db` snapshot.
@@ -878,105 +1178,285 @@ pub fn rehydrate_combat_runtime_from_db_forced(ctx: &ServerContext) {
 }
 
 fn rehydrate_combat_runtime_with_mode(ctx: &ServerContext, force_full: bool) {
-    if ctx.db.is_write_locked_by_current_thread() {
-        return;
-    }
-    ctx.db.with_snapshot(|s| {
-        let mut guard = ctx
-            .combat_ephemeral
+    rehydrate_combat_runtime_with_hook(ctx, force_full, || {});
+}
+
+pub(super) fn rehydrate_combat_runtime_with_hook(
+    ctx: &ServerContext,
+    force_full: bool,
+    after_snapshot_hook: impl FnMut(),
+) {
+    rehydrate_combat_runtime_locks_with_hook(
+        &ctx.db,
+        &*ctx.combat_ephemeral,
+        force_full,
+        after_snapshot_hook,
+    );
+}
+
+pub(crate) fn rehydrate_combat_runtime_locks_with_hook(
+    db: &eve_db::WorldRepository,
+    combat_ephemeral: &dyn eve_db::lock_rank::AnyRwLock<CombatRuntimeState>,
+    force_full: bool,
+    mut after_snapshot_hook: impl FnMut(),
+) {
+    loop {
+        let cw_before = db.combat_state_epoch();
+        let rt_before = db.combat_runtime_epoch();
+        let persisted_arc = db
+            .with_snapshot(|s| std::sync::Arc::clone(s.combat_crimewatch_state.as_arc()));
+        after_snapshot_hook();
+        if db.combat_state_epoch() != cw_before || db.combat_runtime_epoch() != rt_before {
+            continue;
+        }
+        let mut guard = combat_ephemeral
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        let combat_epoch = ctx.db.combat_state_epoch();
-        if force_full {
-            guard.synced_db_epoch = 0;
+        if db.combat_state_epoch() != cw_before || db.combat_runtime_epoch() != rt_before {
+            continue;
         }
-        guard.rehydrate_from_persisted_epochs(&s.combat_crimewatch_state, combat_epoch);
-    });
+        if force_full || !guard.is_synced_with_db(cw_before, rt_before) {
+            guard.reconcile_with_db_persisted(&persisted_arc, cw_before, rt_before, force_full);
+        }
+        break;
+    }
 }
 
 /// Persists the current in-memory [`CombatRuntimeState`] mirror into `ctx.db` (`#592`).
 pub fn flush_combat_runtime_to_db(ctx: &ServerContext) {
-    if ctx.db.is_write_locked_by_current_thread() {
+    flush_combat_runtime_to_db_with_hooks(ctx, || {}, || {});
+}
+
+pub(super) fn flush_combat_runtime_to_db_with_hooks(
+    ctx: &ServerContext,
+    after_read_hook: impl FnMut(),
+    before_stamp_hook: impl FnMut(),
+) {
+    flush_combat_runtime_to_db_locks_with_hooks(
+        &ctx.db,
+        &*ctx.combat_ephemeral,
+        after_read_hook,
+        before_stamp_hook,
+    );
+}
+
+pub(crate) fn flush_combat_runtime_to_db_locks_with_hooks(
+    db: &eve_db::WorldRepository,
+    combat_ephemeral: &dyn eve_db::lock_rank::AnyRwLock<CombatRuntimeState>,
+    mut after_read_hook: impl FnMut(),
+    mut before_stamp_hook: impl FnMut(),
+) {
+    let mut read_hook_ran = false;
+    let mut fast_clean = None;
+    loop {
+        let cw_before = db.combat_state_epoch();
+        let rt_before = db.combat_runtime_epoch();
+        let clean_base = {
+            let guard = combat_ephemeral
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            if guard.is_synced_with_db(cw_before, rt_before) {
+                guard
+                    .synced_baseline
+                    .as_ref()
+                    .filter(|b| guard.to_persisted() == ***b)
+                    .map(std::sync::Arc::clone)
+            } else {
+                None
+            }
+        };
+        let Some(base_arc) = clean_base else {
+            break;
+        };
+        let db_matches = db.with_snapshot(|s| {
+            std::sync::Arc::ptr_eq(s.combat_crimewatch_state.as_arc(), &base_arc)
+                || *s.combat_crimewatch_state == *base_arc
+        });
+        read_hook_ran = true;
+        after_read_hook();
+        if db.combat_state_epoch() != cw_before || db.combat_runtime_epoch() != rt_before {
+            break;
+        }
+        if db_matches {
+            fast_clean = Some((cw_before, rt_before));
+            break;
+        }
+        break;
+    }
+    if let Some((cw_expected, rt_expected)) = fast_clean {
+        before_stamp_hook();
+        if db.combat_state_epoch() == cw_expected && db.combat_runtime_epoch() == rt_expected {
+            return;
+        }
+        rehydrate_combat_runtime_locks_with_hook(db, combat_ephemeral, false, || {});
         return;
     }
-    let (persisted, ext_hash) = {
-        let guard = ctx
-            .combat_ephemeral
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        let p = guard.to_persisted();
-        let h = CombatRuntimeState::ext_runtime_hash(&p);
-        (p, h)
-    };
-    let already_matches = ctx
-        .db
-        .with_snapshot(|s| *s.combat_crimewatch_state == persisted);
-    if !already_matches {
-        ctx.db.with_mut_snapshot(|s| {
-            let mut guard = ctx
-                .combat_ephemeral
+    if !read_hook_ran {
+        after_read_hook();
+    }
+
+    let (staged_next, target_cw, target_rt, pre_ram_p) = db.with_mut_snapshot(|s| {
+        let pre_cw = db.combat_state_epoch();
+        let pre_rt = db.combat_runtime_epoch();
+        let mut guard_copy = {
+            let guard = combat_ephemeral
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
-            s.combat_crimewatch_state = persisted.into();
-            guard.synced_db_epoch = 0;
-        });
+            guard.clone()
+        };
+        let pre_ram_p = guard_copy.to_persisted();
+        guard_copy.reconcile_with_db_persisted(
+            s.combat_crimewatch_state.as_arc(),
+            pre_cw,
+            pre_rt,
+            false,
+        );
+        let next_p = guard_copy.to_persisted();
+        let changed = *s.combat_crimewatch_state != next_p;
+        let (target_cw, target_rt, next_arc) = if changed {
+            let arc = std::sync::Arc::new(next_p);
+            s.combat_crimewatch_state = eve_db::CowCell::from_arc(std::sync::Arc::clone(&arc));
+            (pre_cw.wrapping_add(1), pre_rt.wrapping_add(1), arc)
+        } else {
+            (
+                pre_cw,
+                pre_rt,
+                std::sync::Arc::clone(s.combat_crimewatch_state.as_arc()),
+            )
+        };
+        guard_copy.mark_synced_arc(&next_arc, target_cw, target_rt);
+        (guard_copy, target_cw, target_rt, pre_ram_p)
+    });
+
+    before_stamp_hook();
+    if db.combat_state_epoch() == target_cw && db.combat_runtime_epoch() == target_rt {
+        let mut guard = combat_ephemeral
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if db.combat_state_epoch() == target_cw
+            && db.combat_runtime_epoch() == target_rt
+            && guard.to_persisted() == pre_ram_p
+        {
+            *guard = staged_next;
+            return;
+        }
     }
-    let mut guard = ctx
-        .combat_ephemeral
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-    guard.synced_db_epoch = ctx.db.combat_state_epoch();
-    guard.synced_ext_hash = ext_hash;
+    rehydrate_combat_runtime_locks_with_hook(db, combat_ephemeral, false, || {});
 }
 
 pub fn with_combat_runtime<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&CombatRuntimeState) -> R,
 ) -> R {
-    sync_combat_runtime_from_db(ctx);
-    let guard = ctx
-        .combat_ephemeral
+    with_combat_runtime_with_locks(&ctx.db, &*ctx.combat_ephemeral, f)
+}
+
+pub fn with_combat_runtime_with_locks<R>(
+    db: &eve_db::WorldRepository,
+    combat_ephemeral: &dyn eve_db::lock_rank::AnyRwLock<CombatRuntimeState>,
+    f: impl FnOnce(&CombatRuntimeState) -> R,
+) -> R {
+    let combat_epoch = db.combat_state_epoch();
+    let runtime_epoch = db.combat_runtime_epoch();
+    {
+        let guard = combat_ephemeral
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        if guard.is_synced_with_db(combat_epoch, runtime_epoch) {
+            return f(&guard);
+        }
+    }
+    rehydrate_combat_runtime_locks_with_hook(db, combat_ephemeral, false, || {});
+    let guard = combat_ephemeral
         .read()
         .unwrap_or_else(|e| e.into_inner());
     f(&guard)
+}
+
+/// Mutates persisted combat crimewatch state directly inside an open DB snapshot transaction
+/// (`#1238` EP-12), keeping `ctx.combat_ephemeral` untouched until post-commit rehydration so
+/// aborted or rolled-back transactions never leak partial mutations into runtime memory.
+pub fn with_mut_combat_runtime_in_snap<R>(
+    snap: &mut eve_db::WorldStateSnapshot,
+    f: impl FnOnce(&mut CombatRuntimeState) -> R,
+) -> R {
+    let mut rt = CombatRuntimeState::default();
+    rt.sync_from_persisted(&snap.combat_crimewatch_state);
+    let out = f(&mut rt);
+    snap.combat_crimewatch_state = rt.to_persisted().into();
+    out
 }
 
 pub fn with_mut_combat_runtime<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&mut CombatRuntimeState) -> R,
 ) -> R {
-    if ctx.db.is_write_locked_by_current_thread() {
-        let mut guard = ctx
-            .combat_ephemeral
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let out = f(&mut guard);
-        guard.synced_db_epoch = 0;
-        return out;
-    }
-    let mut ext_hash = 0;
-    let out = ctx.db.with_mut_snapshot(|s| {
-        let mut guard = ctx
-            .combat_ephemeral
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let combat_epoch = ctx.db.combat_state_epoch();
-        if guard.synced_db_epoch != combat_epoch {
-            guard.rehydrate_from_persisted_epochs(&s.combat_crimewatch_state, combat_epoch);
-        }
-        let out = f(&mut guard);
-        let persisted = guard.to_persisted();
-        ext_hash = CombatRuntimeState::ext_runtime_hash(&persisted);
-        s.combat_crimewatch_state = persisted.into();
-        guard.synced_db_epoch = 0;
-        out
+    with_mut_combat_runtime_with_locks(&ctx.db, &*ctx.combat_ephemeral, f)
+}
+
+pub fn with_mut_combat_runtime_with_locks<R>(
+    db: &eve_db::WorldRepository,
+    combat_ephemeral: &dyn eve_db::lock_rank::AnyRwLock<CombatRuntimeState>,
+    f: impl FnOnce(&mut CombatRuntimeState) -> R,
+) -> R {
+    with_mut_combat_runtime_tx_locks(db, combat_ephemeral, |_, rt| f(rt))
+}
+
+pub fn with_mut_combat_runtime_tx_locks<R>(
+    db: &eve_db::WorldRepository,
+    combat_ephemeral: &dyn eve_db::lock_rank::AnyRwLock<CombatRuntimeState>,
+    f: impl FnOnce(&mut eve_db::WorldStateSnapshot, &mut CombatRuntimeState) -> R,
+) -> R {
+    let (out, staged_next, expected_rt, pre_ram_p) = db.with_mut_snapshot(|s| {
+        let pre_cw = db.combat_state_epoch();
+        let pre_rt = db.combat_runtime_epoch();
+        let mut guard_copy = {
+            let guard = combat_ephemeral
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.clone()
+        };
+        let pre_ram_p = guard_copy.to_persisted();
+        guard_copy.reconcile_with_db_persisted(
+            s.combat_crimewatch_state.as_arc(),
+            pre_cw,
+            pre_rt,
+            false,
+        );
+        let out = f(s, &mut guard_copy);
+        let persisted = guard_copy.to_persisted();
+        let changed = *s.combat_crimewatch_state != persisted;
+        let expected_cw = if changed {
+            pre_cw.wrapping_add(1)
+        } else {
+            pre_cw
+        };
+        let (expected_rt, next_arc) = if changed {
+            let arc = std::sync::Arc::new(persisted);
+            s.combat_crimewatch_state = eve_db::CowCell::from_arc(std::sync::Arc::clone(&arc));
+            (pre_rt.wrapping_add(1), arc)
+        } else {
+            (
+                pre_rt,
+                std::sync::Arc::clone(s.combat_crimewatch_state.as_arc()),
+            )
+        };
+        guard_copy.mark_synced_arc(&next_arc, expected_cw, expected_rt);
+        (out, guard_copy, expected_rt, pre_ram_p)
     });
-    let mut guard = ctx
-        .combat_ephemeral
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-    guard.synced_db_epoch = ctx.db.combat_state_epoch();
-    guard.synced_ext_hash = ext_hash;
+    if db.combat_runtime_epoch() == expected_rt {
+        let mut guard = combat_ephemeral
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if db.combat_runtime_epoch() == expected_rt && guard.to_persisted() == pre_ram_p {
+            let cur_cw = db.combat_state_epoch();
+            let mut next = staged_next;
+            next.synced_db_epoch = cur_cw;
+            *guard = next;
+            return out;
+        }
+    }
+    rehydrate_combat_runtime_locks_with_hook(db, combat_ephemeral, false, || {});
     out
 }
 
@@ -1572,6 +2052,84 @@ pub async fn dispatch_combat_rpc(
 }
 
 /// Claims up to 20% of the destroyed ship's reference value from the victim's (and corp/alliance)
+/// Claims up to 20% of `victim_ship_type_id`'s insurance reference value directly inside an open
+/// DB snapshot transaction (`#1238` EP-12).
+pub fn claim_player_bounty_on_kill_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
+    killer_char_id: i64,
+    victim_char_id: i64,
+    victim_ship_type_id: u32,
+) -> (f64, Option<f64>) {
+    if killer_char_id <= 0 || victim_char_id <= 0 || killer_char_id == victim_char_id {
+        return (0.0, None);
+    }
+    let vic_corp = snap
+        .characters
+        .get(&victim_char_id)
+        .map(|c| c.corporation_id)
+        .unwrap_or(0);
+    let vic_all = snap
+        .corporations
+        .get(&vic_corp)
+        .and_then(|co| co.alliance_id)
+        .or_else(|| snap.characters.get(&victim_char_id).and_then(|c| c.alliance_id))
+        .unwrap_or(0);
+    let kil_corp = snap
+        .characters
+        .get(&killer_char_id)
+        .map(|c| c.corporation_id)
+        .unwrap_or(0);
+    let kil_all = snap
+        .corporations
+        .get(&kil_corp)
+        .and_then(|co| co.alliance_id)
+        .or_else(|| snap.characters.get(&killer_char_id).and_then(|c| c.alliance_id))
+        .unwrap_or(0);
+    let ref_val = compute_ship_insurance_reference_value(sde, victim_ship_type_id).max(250_000.0);
+    let max_claim = 0.20 * ref_val;
+    let mut remaining_cap = max_claim;
+    let mut claimed = 0.0;
+    let rt = &mut snap.combat_crimewatch_state;
+    for tid in [victim_char_id, vic_corp, vic_all] {
+        if tid <= 0 || remaining_cap <= 0.0 {
+            continue;
+        }
+        if let Some(pool) = rt.player_bounty_pool.get_mut(&tid) {
+            let take = (*pool).min(remaining_cap);
+            if take > 0.0 {
+                *pool -= take;
+                remaining_cap -= take;
+                claimed += take;
+            }
+            if *pool <= 1e-6 {
+                rt.player_bounty_pool.remove(&tid);
+            }
+        }
+    }
+    if claimed > 0.0 {
+        *rt.bounty_hunter_claimed.entry(killer_char_id).or_insert(0.0) += claimed;
+        if kil_corp > 0 {
+            *rt.bounty_hunter_claimed.entry(kil_corp).or_insert(0.0) += claimed;
+        }
+        if kil_all > 0 {
+            *rt.bounty_hunter_claimed.entry(kil_all).or_insert(0.0) += claimed;
+        }
+    }
+    let bal = if claimed > 0.0 {
+        if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
+            let add = IskCents::from_f64_isk(claimed);
+            ch.balance = ch.balance.checked_add(add).unwrap_or(ch.balance);
+            Some(ch.balance.to_wire_f64())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    (claimed, bal)
+}
+
 /// bounty pool and credits the final-blow killer (`feat:combat.player-bounties`, `feat:combat.bounty-leaderboards`).
 pub fn claim_player_bounty_on_kill(
     ctx: &ServerContext,
@@ -1582,62 +2140,17 @@ pub fn claim_player_bounty_on_kill(
     if killer_char_id <= 0 || victim_char_id <= 0 || killer_char_id == victim_char_id {
         return 0.0;
     }
-    let (vic_corp, vic_all, kil_corp, kil_all) = ctx.db.with_snapshot(|snap| {
-        let vc = snap.characters.get(&victim_char_id).map(|c| c.corporation_id).unwrap_or(0);
-        let va = snap.corporations.get(&vc).and_then(|co| co.alliance_id).or_else(|| snap.characters.get(&victim_char_id).and_then(|c| c.alliance_id)).unwrap_or(0);
-        let kc = snap.characters.get(&killer_char_id).map(|c| c.corporation_id).unwrap_or(0);
-        let ka = snap.corporations.get(&kc).and_then(|co| co.alliance_id).or_else(|| snap.characters.get(&killer_char_id).and_then(|c| c.alliance_id)).unwrap_or(0);
-        (vc, va, kc, ka)
-    });
-    let ref_val = compute_ship_insurance_reference_value(&ctx.sde, victim_ship_type_id).max(250_000.0);
-    let max_claim = 0.20 * ref_val;
     let (claimed_isk, new_bal) = ctx.db.with_mut_snapshot(|snap| {
-        let mut remaining_cap = max_claim;
-        let mut claimed = 0.0;
-        let rt = &mut snap.combat_crimewatch_state;
-        for tid in [victim_char_id, vic_corp, vic_all] {
-            if tid <= 0 || remaining_cap <= 0.0 {
-                continue;
-            }
-            if let Some(pool) = rt.player_bounty_pool.get_mut(&tid) {
-                let take = (*pool).min(remaining_cap);
-                if take > 0.0 {
-                    *pool -= take;
-                    remaining_cap -= take;
-                    claimed += take;
-                }
-                if *pool <= 1e-6 {
-                    rt.player_bounty_pool.remove(&tid);
-                }
-            }
-        }
-        if claimed > 0.0 {
-            *rt.bounty_hunter_claimed.entry(killer_char_id).or_insert(0.0) += claimed;
-            if kil_corp > 0 {
-                *rt.bounty_hunter_claimed.entry(kil_corp).or_insert(0.0) += claimed;
-            }
-            if kil_all > 0 {
-                *rt.bounty_hunter_claimed.entry(kil_all).or_insert(0.0) += claimed;
-            }
-        }
-        let bal = if claimed > 0.0 {
-            if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
-                let add = IskCents::from_f64_isk(claimed);
-                ch.balance = ch.balance.checked_add(add).unwrap_or(ch.balance);
-                Some(ch.balance.to_wire_f64())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let mut guard = ctx.combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-        guard.sync_core_from_persisted(&snap.combat_crimewatch_state);
-        snap.combat_crimewatch_state = guard.to_persisted().into();
-        guard.synced_db_epoch = 0;
-        (claimed, bal)
+        claim_player_bounty_on_kill_in_snap(
+            snap,
+            &ctx.sde,
+            killer_char_id,
+            victim_char_id,
+            victim_ship_type_id,
+        )
     });
     if claimed_isk > 0.0 {
+        sync_combat_runtime_from_db(ctx);
         if let Some(bal) = new_bal {
             let _ = ctx.notify_account_change(killer_char_id, "cash", killer_char_id, bal);
         }
@@ -1711,46 +2224,10 @@ pub fn gm_admin_bounty_action(
         "reimburse" => {
             // Atomize GM bounty pool clearing and contributor wallet refunds under a single database
             // snapshot commit so a crash or persistence failure never leaves money movement half-applied.
-            // Refunds are capped at the remaining bounty pool and scaled pro-rata across contributors
-            // so that bounty ISK is strictly conserved without duplication.
             let total_reimbursed = ctx.db.with_mut_snapshot(|snap| {
-                let (remaining_pool, refunds) = if target_id > 0 {
-                    let pool = snap.combat_crimewatch_state.player_bounty_pool.remove(&target_id).unwrap_or(0.0);
-                    let contribs = snap.combat_crimewatch_state.bounty_contributions.remove(&target_id).unwrap_or_default();
-                    (pool, contribs)
-                } else {
-                    let pool: f64 = snap.combat_crimewatch_state.player_bounty_pool.values().sum();
-                    snap.combat_crimewatch_state.player_bounty_pool.clear();
-                    let all = std::mem::take(&mut snap.combat_crimewatch_state.bounty_contributions);
-                    (pool, all.into_values().flatten().collect())
-                };
-                let total_contrib: f64 = refunds.iter().map(|(_, a)| *a).sum();
-                let scale = if total_contrib > 0.0 && remaining_pool < total_contrib {
-                    (remaining_pool / total_contrib).max(0.0)
-                } else {
-                    1.0
-                };
-                let mut sum = 0.0;
-                for (cid, amt) in refunds {
-                    let refund_amt = amt * scale;
-                    if refund_amt > 0.0 {
-                        let mut entry = None;
-                        if let Some(ch) = snap.characters.get_mut(&cid) {
-                            let add = IskCents::from_f64_isk(refund_amt);
-                            ch.balance = ch.balance.checked_add(add).unwrap_or(ch.balance);
-                            entry = Some((add, ch.balance));
-                            sum += refund_amt;
-                        }
-                        if let Some((add, bal)) = entry {
-                            snap.append_journal(cid, "bounty_reimbursement", add, bal, "bounty_reimbursement");
-                        }
-                    }
-                }
-                let mut guard = ctx.combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-                guard.sync_from_persisted(&snap.combat_crimewatch_state);
-                guard.synced_db_epoch = 0;
-                sum
+                gm_admin_bounty_reimburse_in_snap(snap, target_id)
             });
+            sync_combat_runtime_from_db(ctx);
             Ok(total_reimbursed)
         }
         _ => Err(BridgeRpcError {
@@ -1761,28 +2238,93 @@ pub fn gm_admin_bounty_action(
     }
 }
 
+/// Atomically reimburses `target_id` (or all targets when `target_id <= 0`) pro-rata directly
+/// inside an open DB snapshot transaction (`#1238` EP-12).
+pub fn gm_admin_bounty_reimburse_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    target_id: i64,
+) -> f64 {
+    let (remaining_pool, refunds) = if target_id > 0 {
+        let pool = snap
+            .combat_crimewatch_state
+            .player_bounty_pool
+            .remove(&target_id)
+            .unwrap_or(0.0);
+        let contribs = snap
+            .combat_crimewatch_state
+            .bounty_contributions
+            .remove(&target_id)
+            .unwrap_or_default();
+        (pool, contribs)
+    } else {
+        let pool: f64 = snap.combat_crimewatch_state.player_bounty_pool.values().sum();
+        snap.combat_crimewatch_state.player_bounty_pool.clear();
+        let all = std::mem::take(&mut snap.combat_crimewatch_state.bounty_contributions);
+        (pool, all.into_values().flatten().collect())
+    };
+    let total_contrib: f64 = refunds.iter().map(|(_, a)| *a).sum();
+    let scale = if total_contrib > 0.0 && remaining_pool < total_contrib {
+        (remaining_pool / total_contrib).max(0.0)
+    } else {
+        1.0
+    };
+    let mut sum = 0.0;
+    for (cid, amt) in refunds {
+        let refund_amt = amt * scale;
+        if refund_amt > 0.0 {
+            let mut entry = None;
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                let add = IskCents::from_f64_isk(refund_amt);
+                ch.balance = ch.balance.checked_add(add).unwrap_or(ch.balance);
+                entry = Some((add, ch.balance));
+                sum += refund_amt;
+            }
+            if let Some((add, bal)) = entry {
+                snap.append_journal(
+                    cid,
+                    "bounty_reimbursement",
+                    add,
+                    bal,
+                    "bounty_reimbursement",
+                );
+            }
+        }
+    }
+    sum
+}
+
+/// Creates a kill right directly inside an open DB snapshot transaction (`#1238` EP-12).
+pub fn create_kill_right_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    kr_id: i64,
+    owner_id: i64,
+    target_id: i64,
+    fee_isk: f64,
+    expires_unix: u64,
+) {
+    snap.combat_crimewatch_state
+        .kill_right_expires_unix
+        .insert(kr_id, expires_unix);
+    snap.kill_rights.insert(
+        kr_id,
+        KillRightRecord {
+            kill_right_id: kr_id,
+            owner_id,
+            target_id,
+            activation_fee: IskCents::from_f64_isk(fee_isk.max(0.0)),
+            is_active_suspect: false,
+        },
+    );
+}
+
 /// Creates a kill right from `owner_id` against `target_id` and emits `OnKillRightCreated`.
 pub fn create_kill_right(ctx: &ServerContext, kr_id: i64, owner_id: i64, target_id: i64, fee_isk: f64) {
     let expiry_ft = ctx.now_blueos_filetime_ticks() + (30 * 86_400 * 10_000_000);
     let expires_unix = ctx.now_unix().saturating_add(30 * 86_400);
-    with_mut_combat_runtime(ctx, |rt| {
-        rt.kill_right_expires_unix.insert(kr_id, expires_unix);
-    });
     ctx.db.with_mut_snapshot(|snap| {
-        snap.combat_crimewatch_state
-            .kill_right_expires_unix
-            .insert(kr_id, expires_unix);
-        snap.kill_rights.insert(
-            kr_id,
-            KillRightRecord {
-                kill_right_id: kr_id,
-                owner_id,
-                target_id,
-                activation_fee: IskCents::from_f64_isk(fee_isk.max(0.0)),
-                is_active_suspect: false,
-            },
-        );
+        create_kill_right_in_snap(snap, kr_id, owner_id, target_id, fee_isk, expires_unix);
     });
+    sync_combat_runtime_from_db(ctx);
     let kr_notif = crate::router::notify_registry::OnKillRightCreated {
         kill_right_id: kr_id,
         from_id: owner_id,

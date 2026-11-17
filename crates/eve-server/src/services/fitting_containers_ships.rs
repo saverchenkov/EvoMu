@@ -18,13 +18,6 @@ pub(crate) struct AlscLogEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct InsuranceContractRecord {
-    pub ship_id: i64, pub ship_type_id: u32, pub owner_id: i64,
-    pub level_name: String, pub level_fraction: f64, pub cost_isk: f64,
-    pub payout_isk: f64, pub start_unix: u64, pub end_unix: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ShipAccessConfig {
     pub allow_fleet_smb: bool, pub allow_corp_smb: bool,
     pub allow_fleet_hangar: bool, pub allow_corp_hangar: bool,
@@ -86,7 +79,6 @@ pub(crate) struct ContainerShipRuntimeState {
     pub alsc_logs: HashMap<i64, Vec<AlscLogEntry>>,
     pub ship_configs: HashMap<i64, ShipAccessConfig>,
     pub custom_item_flags: HashMap<i64, u16>,
-    pub insurance_contracts: HashMap<i64, InsuranceContractRecord>,
     #[serde(default)]
     pub ship_passwords: HashMap<i64, String>,
     #[serde(default)]

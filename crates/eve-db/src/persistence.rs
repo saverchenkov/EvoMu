@@ -545,6 +545,7 @@ pub struct WorldRepository {
     pub(crate) pending_wal_records: std::sync::atomic::AtomicUsize,
     pub(crate) state_epoch: std::sync::atomic::AtomicU64,
     pub(crate) combat_state_epoch: std::sync::atomic::AtomicU64,
+    pub(crate) combat_runtime_epoch: std::sync::atomic::AtomicU64,
     pub(crate) tx_commit_count: std::sync::atomic::AtomicU64,
     pub(crate) post_commit_listeners: std::sync::Mutex<Vec<(u64, PostCommitListener)>>,
     pub(crate) next_listener_id: std::sync::atomic::AtomicU64,
@@ -610,6 +611,7 @@ impl WorldRepository {
             pending_wal_records: std::sync::atomic::AtomicUsize::new(0),
             state_epoch: std::sync::atomic::AtomicU64::new(1),
             combat_state_epoch: std::sync::atomic::AtomicU64::new(1),
+            combat_runtime_epoch: std::sync::atomic::AtomicU64::new(1),
             tx_commit_count: std::sync::atomic::AtomicU64::new(0),
             post_commit_listeners: std::sync::Mutex::new(Vec::new()),
             next_listener_id: std::sync::atomic::AtomicU64::new(1),
@@ -635,6 +637,12 @@ impl WorldRepository {
     /// changes on commit or when a snapshot load replaces state (`#592`).
     pub fn combat_state_epoch(&self) -> u64 {
         self.combat_state_epoch.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Returns a monotonic epoch incremented only when `combat_crimewatch_state` itself changes
+    /// on commit or when a snapshot load/restore replaces state (`#1238`).
+    pub fn combat_runtime_epoch(&self) -> u64 {
+        self.combat_runtime_epoch.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Returns the total number of non-empty transactions committed by [`Self::tx`].
@@ -703,6 +711,12 @@ impl WorldRepository {
     #[inline]
     pub(crate) fn bump_combat_state_epoch(&self) {
         self.combat_state_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    #[inline]
+    pub(crate) fn bump_combat_runtime_epoch(&self) {
+        self.combat_runtime_epoch
             .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
@@ -1182,6 +1196,7 @@ impl WorldRepository {
             std::sync::Arc::new(writer.working.clone());
         self.bump_state_epoch();
         self.bump_combat_state_epoch();
+        self.bump_combat_runtime_epoch();
         Ok(())
     }
 
@@ -1430,6 +1445,9 @@ impl WorldRepository {
                         if changes.cold_domains.crimewatch_changed {
                             self.bump_combat_state_epoch();
                         }
+                        if changes.cold_domains.combat_runtime_changed {
+                            self.bump_combat_runtime_epoch();
+                        }
                         if !changes.characters.is_empty() || changes.cold_domains.part1_cold {
                             let _ = self
                                 .entity_ids
@@ -1634,6 +1652,7 @@ impl WorldRepository {
             .store(0, std::sync::atomic::Ordering::SeqCst);
         self.bump_state_epoch();
         self.bump_combat_state_epoch();
+        self.bump_combat_runtime_epoch();
         Ok(())
     }
 }

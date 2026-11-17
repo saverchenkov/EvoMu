@@ -10,7 +10,10 @@
 
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity;
-use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, CombatRuntimeState, EncounterWaveDirector, ExtendedNpcEntity};
+use crate::services::combat_crimewatch::{
+    with_combat_runtime, with_mut_combat_runtime, with_mut_combat_runtime_tx_locks,
+    with_mut_combat_runtime_with_locks, CombatRuntimeState, EncounterWaveDirector, ExtendedNpcEntity,
+};
 use crate::system_actor::SystemRegistry;
 use eve_db::WorldRepository;
 use eve_sde::{SdeRegistry, SolarSystemId};
@@ -196,36 +199,42 @@ pub async fn handle_npc_destroyed_in_space(
     }
 
     // 1. Advance encounter waves if killed_ball_id belongs to an active encounter
-    let triggered_info: Option<(u32, u32, Vec<u32>, DVec3)> = {
-        let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-        let mut spawn_req = None;
-        for enc in rt.encounter_waves.values_mut() {
-            if enc.solar_system_id == solar_system_id && !enc.completed {
-                enc.active_wave_ball_ids.retain(|&id| id != killed_ball_id);
-                let is_trigger = killed_ball_id == enc.trigger_ball_id;
+    let triggered_info: Option<(u32, u32, Vec<u32>, DVec3)> =
+        with_mut_combat_runtime_with_locks(db, combat_ephemeral, |rt| {
+            let mut spawn_req = None;
+            for enc in rt.encounter_waves.values_mut() {
+                if enc.solar_system_id == solar_system_id && !enc.completed {
+                    enc.active_wave_ball_ids.retain(|&id| id != killed_ball_id);
+                    let is_trigger = killed_ball_id == enc.trigger_ball_id;
 
-                if is_trigger || enc.active_wave_ball_ids.is_empty() {
-                    if enc.current_wave < enc.max_waves {
-                        enc.current_wave += 1;
-                        let next_idx = (enc.current_wave - 1) as usize;
-                        let next_types = enc
-                            .wave_npc_types
-                            .get(next_idx)
-                            .cloned()
-                            .unwrap_or_else(|| vec![enc.npc_type_id, enc.npc_type_id]);
-                        spawn_req = Some((enc.encounter_id, enc.current_wave, next_types, enc.origin_position));
-                    } else if enc.active_wave_ball_ids.is_empty() {
-                        enc.completed = true;
+                    if is_trigger || enc.active_wave_ball_ids.is_empty() {
+                        if enc.current_wave < enc.max_waves {
+                            enc.current_wave += 1;
+                            let next_idx = (enc.current_wave - 1) as usize;
+                            let next_types = enc
+                                .wave_npc_types
+                                .get(next_idx)
+                                .cloned()
+                                .unwrap_or_else(|| vec![enc.npc_type_id, enc.npc_type_id]);
+                            spawn_req = Some((
+                                enc.encounter_id,
+                                enc.current_wave,
+                                next_types,
+                                enc.origin_position,
+                            ));
+                        } else if enc.active_wave_ball_ids.is_empty() {
+                            enc.completed = true;
+                        }
                     }
                 }
             }
-        }
-        spawn_req
-    };
+            spawn_req
+        });
 
     if let Some((enc_id, _wave_num, next_types, base_pos)) = triggered_info {
         let handle = systems.get_or_spawn(solar_system_id);
         let mut new_balls = Vec::new();
+        let mut new_entities = Vec::with_capacity(next_types.len());
         for (i, &tid) in next_types.iter().enumerate() {
             let offset = DVec3::new(500.0 + (i as f64) * 1_000.0, 0.0, 0.0);
             let pos = base_pos + offset;
@@ -288,61 +297,55 @@ pub async fn handle_npc_destroyed_in_space(
                 },
             ).await;
 
-            {
-                let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-                rt.npc_entities.insert(
-                    ball_id,
-                    ExtendedNpcEntity {
-                        ball_id,
-                        type_id: tid,
-                        faction_id,
-                        archetype: "BeltRat".into(),
-                        solar_system_id,
-                        spawn_group_id: enc_id,
-                        target_id: None,
-                        aggression_threat: std::collections::HashMap::new(),
-                        threat_table: std::collections::HashMap::new(),
-                        bounty_isk: bounty,
-                        optimal_range: opt_range,
-                        orbit_range: orb_range,
-                        damage_vector,
-                        entropic_cycles: 0,
-                        drifter_overshield_hp: 0.0,
-                        drifter_doomsday_fired: false,
-                        web_speed_factor: 0.0,
-                        web_range: 0.0,
-                        scram_strength: 0.0,
-                        scram_range: 0.0,
-                        neut_amount: 0.0,
-                        ecm_jammed: false,
-                        remote_shield_rep: 0.0,
-                        remote_armor_rep: 0.0,
-                        remote_rep_range: 0.0,
-                        tag_drop_type_id: None,
-                        spawn_position: pos,
-                        sleeper_wh_class: 0,
-                        custom_cargo_loot: None,
-                    },
-                );
-            }
+            new_entities.push(ExtendedNpcEntity {
+                ball_id,
+                type_id: tid,
+                faction_id,
+                archetype: "BeltRat".into(),
+                solar_system_id,
+                spawn_group_id: enc_id,
+                target_id: None,
+                aggression_threat: std::collections::HashMap::new(),
+                threat_table: std::collections::HashMap::new(),
+                bounty_isk: bounty,
+                optimal_range: opt_range,
+                orbit_range: orb_range,
+                damage_vector,
+                entropic_cycles: 0,
+                drifter_overshield_hp: 0.0,
+                drifter_doomsday_fired: false,
+                web_speed_factor: 0.0,
+                web_range: 0.0,
+                scram_strength: 0.0,
+                scram_range: 0.0,
+                neut_amount: 0.0,
+                ecm_jammed: false,
+                remote_shield_rep: 0.0,
+                remote_armor_rep: 0.0,
+                remote_rep_range: 0.0,
+                tag_drop_type_id: None,
+                spawn_position: pos,
+                sleeper_wh_class: 0,
+                custom_cargo_loot: None,
+            });
 
             new_balls.push(ball_id);
         }
 
-        {
-            let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
+        with_mut_combat_runtime_with_locks(db, combat_ephemeral, |rt| {
+            for entity in new_entities {
+                rt.npc_entities.insert(entity.ball_id, entity);
+            }
             if let Some(enc) = rt.encounter_waves.get_mut(&enc_id) {
                 enc.trigger_ball_id = new_balls.first().copied().unwrap_or(0);
                 enc.active_wave_ball_ids.extend(new_balls);
             }
-        }
+        });
     }
 
     // 2. Remove from npc_entities, cache metadata for wreck/loot creation, and award bounty once
-    let npc_opt = {
-        let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-        rt.npc_entities.remove(&killed_ball_id)
-    };
+    let npc_opt =
+        with_mut_combat_runtime_with_locks(db, combat_ephemeral, |rt| rt.npc_entities.remove(&killed_ball_id));
     if let Some(npc) = npc_opt {
         let now = db.now_unix_secs();
         let s_stage = db.with_snapshot(|snap| {
@@ -363,9 +366,7 @@ pub async fn handle_npc_destroyed_in_space(
         if should_credit_bounty {
             // Acquire db snapshot BEFORE combat_ephemeral to match lock hierarchy and persist
             // pending bounty ticks atomically even when killer sec status is already >= 5.0.
-            db.with_mut_snapshot(|snap| {
-                let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-                rt.sync_core_from_persisted(&snap.combat_crimewatch_state);
+            with_mut_combat_runtime_tx_locks(db, combat_ephemeral, |snap, rt| {
                 let credited = rt.bounty_credited_balls.insert(killed_ball_id);
                 if credited {
                     let clock_now = db.clock().now_unix_secs();
@@ -407,13 +408,13 @@ pub async fn handle_npc_destroyed_in_space(
                                 other_type_id: Some(npc_type_id),
                             });
                     }
-                    snap.combat_crimewatch_state = rt.to_persisted().into();
                 }
                 rt.destroyed_npc_cache.insert(killed_ball_id, npc);
             });
         } else {
-            let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-            rt.destroyed_npc_cache.insert(killed_ball_id, npc);
+            with_mut_combat_runtime_with_locks(db, combat_ephemeral, |rt| {
+                rt.destroyed_npc_cache.insert(killed_ball_id, npc);
+            });
         }
         if drop_drifter_sleeper_loot && killer > 0 {
             let _ = crate::services::pve_exploration_sites::drop_sleeper_wreck_core(
@@ -427,14 +428,6 @@ pub async fn handle_npc_destroyed_in_space(
             )
             .await;
         }
-    }
-
-    if !db.is_write_locked_by_current_thread() {
-        db.with_mut_snapshot(|s| {
-            let mut guard = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-            guard.sync_core_from_persisted(&s.combat_crimewatch_state);
-            s.combat_crimewatch_state = guard.to_persisted().into();
-        });
     }
 }
 

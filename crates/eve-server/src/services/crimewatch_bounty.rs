@@ -326,10 +326,6 @@ pub fn handle_bounty_proxy(
                         .kill_right_restricted_to
                         .remove(&kr_id);
                 }
-                ctx.combat_ephemeral
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .sync_core_from_persisted(&snap.combat_crimewatch_state);
                 let fee = kr.activation_fee.to_wire_f64();
                 let restr_rep = match restricted_to {
                     Some(id) if id > 0 => PyRep::Integer(id),
@@ -349,7 +345,10 @@ pub fn handle_bounty_proxy(
                 Ok(item)
             });
             match res {
-                Ok(item) => Some(Ok(PyRep::List(vec![item]))),
+                Ok(item) => {
+                    crate::services::combat_crimewatch::sync_combat_runtime_from_db(ctx);
+                    Some(Ok(PyRep::List(vec![item])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }
@@ -387,14 +386,11 @@ pub fn handle_bounty_proxy(
                 snap.combat_crimewatch_state
                     .kill_right_restricted_to
                     .remove(&kr_id);
-                ctx.combat_ephemeral
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .sync_core_from_persisted(&snap.combat_crimewatch_state);
                 Ok(())
             });
             match res {
                 Ok(()) => {
+                    crate::services::combat_crimewatch::sync_combat_runtime_from_db(ctx);
                     ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
                         OnKillRightSellCancel {
@@ -536,14 +532,13 @@ pub fn handle_bounty_proxy(
                     .or_insert(0.0);
                 *entry += amount_isk;
                 let total = *entry;
-                ctx.combat_ephemeral
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .sync_core_from_persisted(&snap.combat_crimewatch_state);
                 Ok((new_bal.to_wire_f64(), total))
             });
             let (new_bal, total_pool) = match tx_res {
-                Ok(b) => b,
+                Ok(b) => {
+                    crate::services::combat_crimewatch::sync_combat_runtime_from_db(ctx);
+                    b
+                }
                 Err(e) => return Some(Err(e)),
             };
             let _ = ctx.notify_account_change(char_id, "cash", char_id, new_bal);

@@ -163,10 +163,10 @@ async fn npc_ai_ewar_logi_threat_chase_despawn_clone_soldier_and_crimewatch_edge
     let hi_sys = 30_000_142;
     let insured_ship = 100_093_001;
     spawn_ship(&ctx, hi_sys, insured_ship, char2, 587, DVec3::new(1_000.0, 0.0, 0.0));
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.insurance_contracts.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.insurance_contracts.insert(
             insured_ship,
-            crate::services::combat_crimewatch::InsuranceContractState {
+            eve_db::PersistedInsuranceContractRecord {
                 ship_id: insured_ship,
                 ship_type_id: 587,
                 owner_id: char2,

@@ -22,285 +22,275 @@ pub fn compute_ship_insurance_quote_levels(
     (ref_val, levels)
 }
 
-/// Synchronizes `rt.insurance_contracts` with `snap.items` and persisted `snap.insurance_contracts`,
-/// creating 12-week contract records only when no persisted contract exists and voiding contracts
-/// whose ship expired, was repackaged (`!singleton`), destroyed, or transferred/sold
-/// (`feat:ships.ship-insurance-link`, `feat:combat.insurance-contracts`, `#736`).
+/// Synchronizes `snap.insurance_contracts` with `snap.items`, creating 12-week contract
+/// records for insured ships lacking a contract row and voiding contracts whose ship expired,
+/// was repackaged (`!singleton`), destroyed, or transferred/sold
+/// (`feat:ships.ship-insurance-link`, `feat:combat.insurance-contracts`, `#736`, `#1238` EP-13).
 pub fn sync_ship_insurance_contracts(ctx: &ServerContext, owner_id: i64) {
     let now_unix = ctx.now_unix();
-    let (ship_items, persisted_contracts): (
-        Vec<(i64, u32, i64, bool, f64)>,
-        HashMap<i64, eve_db::PersistedInsuranceContractRecord>,
+    let (voided_ship_ids, new_contracts): (
+        Vec<i64>,
+        Vec<(i64, eve_db::PersistedInsuranceContractRecord)>,
     ) = ctx.db.with_snapshot(|snap| {
-        let items = snap
-            .items
-            .values()
-            .filter(|i| {
-                ctx.sde
-                    .types
-                    .get(&i.type_id)
-                    .map(|t| t.category_id == 6)
-                    .unwrap_or(false)
-            })
-            .map(|i| (i.item_id, i.type_id, i.owner_id, i.singleton, i.insured_payout_isk))
-            .collect();
-        (items, snap.insurance_contracts.as_inner().clone())
-    });
-    let container_st =
-        crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx);
-    let mut merged_persisted: HashMap<
-        i64,
-        crate::services::inventory_fitting::fitting_containers_ships::InsuranceContractRecord,
-    > = container_st.insurance_contracts.clone();
-    for (sid, rec) in &persisted_contracts {
-        merged_persisted.insert(
-            *sid,
-            crate::services::inventory_fitting::fitting_containers_ships::InsuranceContractRecord {
-                ship_id: rec.ship_id,
-                ship_type_id: rec.ship_type_id,
-                owner_id: rec.owner_id,
-                level_name: rec.level_name.clone(),
-                level_fraction: rec.level_fraction,
-                cost_isk: rec.cost_isk,
-                payout_isk: rec.payout_isk,
-                start_unix: rec.start_unix,
-                end_unix: rec.end_unix,
-            },
-        );
-    }
-    let mut voided_ship_ids = Vec::new();
-    let mut sync_to_container: Vec<(
-        i64,
-        crate::services::inventory_fitting::fitting_containers_ships::InsuranceContractRecord,
-    )> = Vec::new();
-    let mut sync_to_snap: Vec<(i64, eve_db::PersistedInsuranceContractRecord)> = Vec::new();
-    with_mut_combat_runtime(ctx, |rt| {
-        let prev_rt = std::mem::take(&mut rt.insurance_contracts);
-        for (sid, c) in &merged_persisted {
-            if c.end_unix <= now_unix {
-                voided_ship_ids.push(*sid);
-                continue;
-            }
-            if let Some((_, _, cur_owner, singleton, payout)) =
-                ship_items.iter().find(|(id, _, _, _, _)| *id == *sid)
+        let mut ship_by_id: HashMap<i64, (u32, i64, bool, f64)> = HashMap::new();
+        for it in snap.items.values() {
+            if ctx
+                .sde
+                .types
+                .get(&it.type_id)
+                .is_some_and(|t| t.category_id == 6)
             {
-                if !*singleton || *cur_owner != c.owner_id || *payout <= 0.0 {
-                    voided_ship_ids.push(*sid);
-                    continue;
-                }
-                rt.insurance_contracts.insert(
-                    *sid,
-                    InsuranceContractState {
-                        ship_id: c.ship_id,
-                        ship_type_id: c.ship_type_id,
-                        owner_id: c.owner_id,
-                        level_name: c.level_name.clone(),
-                        level_fraction: c.level_fraction,
-                        cost_isk: c.cost_isk,
-                        payout_isk: c.payout_isk,
-                        start_unix: c.start_unix,
-                        end_unix: c.end_unix,
-                    },
+                ship_by_id.insert(
+                    it.item_id,
+                    (it.type_id, it.owner_id, it.singleton, it.insured_payout_isk),
                 );
-                if !persisted_contracts.contains_key(sid) {
-                    sync_to_snap.push((
-                        *sid,
-                        eve_db::PersistedInsuranceContractRecord {
-                            ship_id: c.ship_id,
-                            ship_type_id: c.ship_type_id,
-                            owner_id: c.owner_id,
-                            level_name: c.level_name.clone(),
-                            level_fraction: c.level_fraction,
-                            cost_isk: c.cost_isk,
-                            payout_isk: c.payout_isk,
-                            start_unix: c.start_unix,
-                            end_unix: c.end_unix,
-                        },
-                    ));
-                }
-                if !container_st.insurance_contracts.contains_key(sid) {
-                    sync_to_container.push((*sid, c.clone()));
-                }
-            } else {
-                voided_ship_ids.push(*sid);
             }
         }
-        for &(sid, type_id, item_owner, singleton, payout_isk) in &ship_items {
+        let mut voided = Vec::new();
+        for (&sid, c) in snap.insurance_contracts.iter() {
+            if c.end_unix <= now_unix {
+                voided.push(sid);
+                continue;
+            }
+            if let Some(&(_, cur_owner, singleton, payout)) = ship_by_id.get(&sid) {
+                if !singleton || cur_owner != c.owner_id || payout <= 0.0 {
+                    voided.push(sid);
+                }
+            } else {
+                voided.push(sid);
+            }
+        }
+        let mut inserted = Vec::new();
+        for (&sid, &(type_id, item_owner, singleton, payout_isk)) in &ship_by_id {
             if singleton
                 && payout_isk > 0.0
                 && (item_owner == owner_id || owner_id == 0)
-                && !rt.insurance_contracts.contains_key(&sid)
-                && !voided_ship_ids.contains(&sid)
+                && !snap.insurance_contracts.contains_key(&sid)
+                && !voided.contains(&sid)
             {
-                let prev_valid = prev_rt
-                    .get(&sid)
-                    .filter(|p| p.owner_id == item_owner && p.end_unix > now_unix);
-                let (level_name, level_fraction, cost_isk, start_unix, end_unix) =
-                    if let Some(p) = prev_valid {
-                        (
-                            p.level_name.clone(),
-                            p.level_fraction,
-                            p.cost_isk,
-                            p.start_unix,
-                            p.end_unix,
-                        )
-                    } else {
-                        let ref_val = compute_ship_insurance_reference_value(&ctx.sde, type_id);
-                        let frac = (payout_isk / ref_val.max(1.0)).clamp(0.4, 1.0);
-                        let (cost_isk, _) = compute_insurance_quote(ref_val, frac);
-                        (
-                            if frac >= 0.99 { "Platinum".into() } else { "Standard".into() },
-                            frac,
-                            cost_isk,
-                            now_unix,
-                            now_unix.saturating_add(INSURANCE_CONTRACT_DURATION_SECS),
-                        )
-                    };
-                let rec = crate::services::inventory_fitting::fitting_containers_ships::InsuranceContractRecord {
-                    ship_id: sid,
-                    ship_type_id: type_id,
-                    owner_id: item_owner,
-                    level_name: level_name.clone(),
-                    level_fraction,
-                    cost_isk,
-                    payout_isk,
-                    start_unix,
-                    end_unix,
+                let ref_val = compute_ship_insurance_reference_value(&ctx.sde, type_id);
+                let frac = (payout_isk / ref_val.max(1.0)).clamp(0.4, 1.0);
+                let (cost_isk, _) = compute_insurance_quote(ref_val, frac);
+                let level_name = if frac >= 0.99 {
+                    "Platinum".to_string()
+                } else {
+                    "Standard".to_string()
                 };
-                sync_to_container.push((sid, rec));
-                sync_to_snap.push((
+                inserted.push((
                     sid,
                     eve_db::PersistedInsuranceContractRecord {
                         ship_id: sid,
                         ship_type_id: type_id,
                         owner_id: item_owner,
-                        level_name: level_name.clone(),
-                        level_fraction,
+                        level_name,
+                        level_fraction: frac,
                         cost_isk,
                         payout_isk,
-                        start_unix,
-                        end_unix,
+                        start_unix: now_unix,
+                        end_unix: now_unix.saturating_add(INSURANCE_CONTRACT_DURATION_SECS),
                     },
                 ));
-                rt.insurance_contracts.insert(
-                    sid,
-                    InsuranceContractState {
-                        ship_id: sid,
-                        ship_type_id: type_id,
-                        owner_id: item_owner,
-                        level_name,
-                        level_fraction,
-                        cost_isk,
-                        payout_isk,
-                        start_unix,
-                        end_unix,
-                    },
-                );
             }
         }
+        (voided, inserted)
     });
-    if !sync_to_container.is_empty() {
-        crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
-            ctx,
-            |st| {
-                for (ship_id, rec) in sync_to_container {
-                    st.insurance_contracts.insert(ship_id, rec);
-                }
-            },
-        );
+    if voided_ship_ids.is_empty() && new_contracts.is_empty() {
+        return;
     }
-    if !sync_to_snap.is_empty() || !voided_ship_ids.is_empty() {
-        ctx.db.with_mut_snapshot(|snap| {
-            for (sid, rec) in sync_to_snap {
-                snap.insurance_contracts.insert(sid, rec);
-            }
-            for &sid in &voided_ship_ids {
-                snap.insurance_contracts.remove(&sid);
-                if let Some(it) = snap.items.get_mut(&sid) {
+    ctx.db.with_mut_snapshot(|snap| {
+        for sid in voided_ship_ids {
+            snap.insurance_contracts.remove(&sid);
+            if let Some(it) = snap.items.get_mut(&sid) {
+                if it.insured_payout_isk > 0.0 {
                     it.insured_payout_isk = 0.0;
                 }
             }
-        });
-    }
-    if !voided_ship_ids.is_empty() {
-        crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
-            ctx,
-            |st| {
-                for sid in voided_ship_ids {
-                    st.insurance_contracts.remove(&sid);
-                }
-            },
-        );
-    }
+        }
+        for (sid, rec) in new_contracts {
+            snap.insurance_contracts.insert(sid, rec);
+        }
+    });
 }
 
 /// Sweeps expired ship insurance contracts on periodic background cluster ticks (`#736`).
 pub fn sweep_expired_insurance_contracts(ctx: &ServerContext, now_unix: u64) {
-    let mut expired_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+    let expired_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
         snap.insurance_contracts
             .iter()
             .filter(|(_, c)| c.end_unix <= now_unix)
             .map(|(&sid, _)| sid)
             .collect()
     });
-    with_combat_runtime(ctx, |rt| {
-        for (&sid, c) in &rt.insurance_contracts {
-            if c.end_unix <= now_unix && !expired_ids.contains(&sid) {
-                expired_ids.push(sid);
-            }
-        }
-    });
-    let container_st =
-        crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx);
-    for (&sid, c) in &container_st.insurance_contracts {
-        if c.end_unix <= now_unix && !expired_ids.contains(&sid) {
-            expired_ids.push(sid);
-        }
-    }
     if expired_ids.is_empty() {
         return;
     }
-    with_mut_combat_runtime(ctx, |rt| {
-        for &sid in &expired_ids {
-            rt.insurance_contracts.remove(&sid);
-        }
-    });
     ctx.db.with_mut_snapshot(|snap| {
         for &sid in &expired_ids {
             snap.insurance_contracts.remove(&sid);
             if let Some(it) = snap.items.get_mut(&sid) {
-                it.insured_payout_isk = 0.0;
+                if it.insured_payout_isk > 0.0 {
+                    it.insured_payout_isk = 0.0;
+                }
             }
         }
     });
-    crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
-        ctx,
-        |st| {
-            for sid in expired_ids {
-                st.insurance_contracts.remove(&sid);
-            }
-        },
-    );
 }
 
 /// Voids an active ship insurance contract when the ship is repackaged, traded, or un-insured (`feat:ships.ship-insurance-link`, `feat:combat.insurance-contracts`).
 pub fn void_ship_insurance_contract(ctx: &ServerContext, ship_id: i64) -> bool {
-    let removed_rt = with_mut_combat_runtime(ctx, |rt| rt.insurance_contracts.remove(&ship_id).is_some());
-    let removed_db = ctx.db.with_mut_snapshot(|snap| {
+    ctx.db.with_mut_snapshot(|snap| {
         let removed_persisted = snap.insurance_contracts.remove(&ship_id).is_some();
         let removed_item = if let Some(it) = snap.items.get_mut(&ship_id) {
             let had = it.insured_payout_isk > 0.0;
-            it.insured_payout_isk = 0.0;
+            if had {
+                it.insured_payout_isk = 0.0;
+            }
             had
         } else {
             false
         };
         removed_persisted || removed_item
+    })
+}
+
+/// Outcome of atomically settling a ship's insurance payout inside a DB transaction (`#1238` EP-13).
+#[derive(Debug, Default)]
+pub(crate) struct ShipInsuranceSettlement {
+    pub payout_isk: f64,
+    pub is_corp: bool,
+    pub credited_owner_id: i64,
+    pub balance_after_isk: f64,
+    pub mail_id: Option<i64>,
+    pub mail_subject: String,
+}
+
+/// Atomically resolves, idempotency-checks, credits, journals, and mails ship insurance inside
+/// an open DB snapshot transaction (`#1238` EP-13).
+pub(crate) fn settle_ship_insurance_payout_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
+    victim_char_id: i64,
+    ship_id: i64,
+    ship_type_id: u32,
+    no_payout: bool,
+    mark_destroyed_marker: bool,
+    now_unix: u64,
+) -> ShipInsuranceSettlement {
+    let idempotency_key = (ship_id, "ship_insurance_payout".to_string());
+    let already_paid = snap.committed_idempotency_keys.contains(&idempotency_key)
+        || snap
+            .items
+            .get(&ship_id)
+            .is_some_and(|it| it.insured_payout_isk < 0.0);
+    let contract_opt = snap.insurance_contracts.remove(&ship_id);
+    if already_paid {
+        return ShipInsuranceSettlement::default();
+    }
+    if no_payout || ship_type_id == 670 {
+        if let Some(it) = snap.items.get_mut(&ship_id) {
+            it.insured_payout_isk = if mark_destroyed_marker { -1.0 } else { 0.0 };
+        }
+        if mark_destroyed_marker {
+            snap.committed_idempotency_keys.insert(idempotency_key);
+        }
+        return ShipInsuranceSettlement::default();
+    }
+    let item_insured_payout = snap
+        .items
+        .get(&ship_id)
+        .map(|it| it.insured_payout_isk.max(0.0))
+        .unwrap_or(0.0);
+    let (payout_isk, contract_owner_id) = match contract_opt {
+        Some(ref c) if c.end_unix > now_unix && c.payout_isk > 0.0 => {
+            (c.payout_isk, (c.owner_id > 0).then_some(c.owner_id))
+        }
+        Some(_) => {
+            let ref_val = compute_ship_insurance_reference_value(sde, ship_type_id);
+            (compute_insurance_quote(ref_val, 0.40).1, None)
+        }
+        None if item_insured_payout > 0.0 => (item_insured_payout, None),
+        None => {
+            let ref_val = compute_ship_insurance_reference_value(sde, ship_type_id);
+            (compute_insurance_quote(ref_val, 0.40).1, None)
+        }
+    };
+    if payout_isk <= 0.0 {
+        if let Some(it) = snap.items.get_mut(&ship_id) {
+            it.insured_payout_isk = if mark_destroyed_marker { -1.0 } else { 0.0 };
+        }
+        if mark_destroyed_marker {
+            snap.committed_idempotency_keys.insert(idempotency_key);
+        }
+        return ShipInsuranceSettlement::default();
+    }
+    let payout_cents = IskCents::from_f64_isk(payout_isk);
+    let mut is_corp = false;
+    let mut bal_after = None;
+    let mut journal_target = None;
+    let allow_victim_fallback = contract_owner_id.is_none() || contract_owner_id == Some(victim_char_id);
+    if let Some(owner_id) = contract_owner_id {
+        if let Some(corp) = snap.corporations.get_mut(&owner_id) {
+            bal_after = Some(corp.credit_division(1, payout_cents));
+            journal_target = Some(owner_id);
+            is_corp = true;
+        }
+    }
+    if journal_target.is_none() && allow_victim_fallback {
+        if let Some(ch) = snap.characters.get_mut(&victim_char_id) {
+            ch.balance = ch.balance.checked_add(payout_cents).unwrap_or(ch.balance);
+            bal_after = Some(ch.balance);
+            journal_target = Some(victim_char_id);
+        }
+    }
+    let (Some(ba), Some(jid_target)) = (bal_after, journal_target) else {
+        if let Some(it) = snap.items.get_mut(&ship_id) {
+            it.insured_payout_isk = if mark_destroyed_marker { -1.0 } else { 0.0 };
+        }
+        if mark_destroyed_marker {
+            snap.committed_idempotency_keys.insert(idempotency_key);
+        }
+        return ShipInsuranceSettlement::default();
+    };
+    if let Some(it) = snap.items.get_mut(&ship_id) {
+        it.insured_payout_isk = -1.0;
+    }
+    snap.committed_idempotency_keys.insert(idempotency_key);
+    snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
+        owner_id: jid_target,
+        entry_type: "insurance_payout",
+        amount: payout_cents,
+        balance_after: ba,
+        reason: format!("Insurance payout for loss of ship {ship_id}"),
+        meta: eve_db::ledger::JournalMeta::new(
+            eve_db::ledger::ref_types::INSURANCE,
+            1_000_132,
+            jid_target,
+            now_unix,
+        )
+        .with_context(eve_db::ledger::JournalContext::Type, i64::from(ship_type_id)),
     });
-    let removed_container = crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(ctx, |st| {
-        st.insurance_contracts.remove(&ship_id).is_some()
+    let mid = snap.alloc_entity_id();
+    let subject = format!("Insurance Payout for Ship {ship_id}");
+    snap.mails.push(eve_db::MailRecord {
+        message_id: mid,
+        sender_id: 1_000_132, // Secure Commerce Commission
+        recipient_id: victim_char_id,
+        subject: subject.clone(),
+        body: format!(
+            "Pend Insurance has credited {:.2} ISK following the destruction of ship {} (type {}).",
+            payout_isk, ship_id, ship_type_id
+        ),
     });
-    removed_rt || removed_db || removed_container
+    snap.mail_timestamps.insert(mid, now_unix);
+    snap.mail_assigned_labels.insert((victim_char_id, mid), vec![1]);
+    ShipInsuranceSettlement {
+        payout_isk,
+        is_corp,
+        credited_owner_id: jid_target,
+        balance_after_isk: ba.to_wire_f64(),
+        mail_id: Some(mid),
+        mail_subject: subject,
+    }
 }
 
 /// Processes ship insurance payout upon destruction (`feat:combat.insurance-payout`).
@@ -313,106 +303,44 @@ pub fn process_ship_insurance_payout(
     ship_type_id: u32,
     concord_killed_criminal: bool,
 ) -> f64 {
-    sync_ship_insurance_contracts(ctx, victim_char_id);
     let now_unix = ctx.now_unix();
-    let contract_opt = with_mut_combat_runtime(ctx, |rt| rt.insurance_contracts.remove(&ship_id));
-    crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(ctx, |st| {
-        st.insurance_contracts.remove(&ship_id);
+    let no_payout = concord_killed_criminal || ship_type_id == 670;
+    let settlement = ctx.db.with_mut_snapshot(|snap| {
+        settle_ship_insurance_payout_in_snap(
+            snap,
+            &ctx.sde,
+            victim_char_id,
+            ship_id,
+            ship_type_id,
+            no_payout,
+            false,
+            now_unix,
+        )
     });
-    let db_payout = ctx.db.with_mut_snapshot(|snap| {
-        snap.insurance_contracts.remove(&ship_id);
-        if let Some(it) = snap.items.get_mut(&ship_id) {
-            let p = it.insured_payout_isk;
-            it.insured_payout_isk = 0.0;
-            p
-        } else {
-            0.0
-        }
-    });
-    if concord_killed_criminal || ship_type_id == 670 {
+    if settlement.payout_isk <= 0.0 {
         return 0.0;
     }
-    let valid_contract = contract_opt.as_ref().filter(|c| c.end_unix > now_unix);
-    let contract_owner_id = valid_contract.as_ref().map(|c| c.owner_id);
-    let contract_payout = match contract_opt {
-        Some(ref c) if c.end_unix > now_unix => c.payout_isk,
-        Some(_) => 0.0,
-        None => db_payout,
-    };
-    let payout_isk = if contract_payout > 0.0 {
-        contract_payout
-    } else {
-        let ref_val = compute_ship_insurance_reference_value(&ctx.sde, ship_type_id);
-        compute_insurance_quote(ref_val, 0.40).1
-    };
-    if payout_isk > 0.0 {
-        let (credited_char, mail_id, credited_any) = ctx.db.with_mut_snapshot(|snap| {
-            let payout_cents = IskCents::from_f64_isk(payout_isk);
-            let mut credited_char = None;
-            let mut bal_after = None;
-            let mut journal_target = None;
-            let is_victim = contract_owner_id.is_none() || contract_owner_id == Some(victim_char_id);
-            if let Some(owner_id) = contract_owner_id {
-                if let Some(corp) = snap.corporations.get_mut(&owner_id) {
-                    bal_after = Some(corp.credit_division(1, payout_cents));
-                    journal_target = Some(owner_id);
-                }
-            }
-            if journal_target.is_none() && is_victim {
-                if let Some(ch) = snap.characters.get_mut(&victim_char_id) {
-                    ch.balance = ch.balance.checked_add(payout_cents).unwrap_or(ch.balance);
-                    bal_after = Some(ch.balance);
-                    credited_char = Some((victim_char_id, ch.balance.to_wire_f64()));
-                    journal_target = Some(victim_char_id);
-                }
-            }
-            let mut mail_id = None;
-            if let (Some(ba), Some(jid_target)) = (bal_after, journal_target) {
-                snap.next_entity_id += 1;
-                let jid = snap.next_entity_id;
-                snap.wallet_journal.push(WalletJournalEntry {
-                    entry_id: jid,
-                    character_id: jid_target,
-                    entry_type: "insurance_payout".to_string(),
-                    amount: payout_cents,
-                    balance_after: ba,
-                    reason: format!("Insurance payout for loss of ship {ship_id}"),
-                });
-                snap.next_entity_id += 1;
-                let mid = snap.next_entity_id;
-                snap.mails.push(eve_db::MailRecord {
-                    message_id: mid,
-                    sender_id: 1_000_132, // Secure Commerce Commission
-                    recipient_id: victim_char_id,
-                    subject: format!("Insurance Payout for Ship {ship_id}"),
-                    body: format!(
-                        "Pend Insurance has credited {:.2} ISK following the destruction of ship {} (type {}).",
-                        payout_isk, ship_id, ship_type_id
-                    ),
-                });
-                snap.mail_timestamps.insert(mid, now_unix);
-                snap.mail_assigned_labels.insert((victim_char_id, mid), vec![1]);
-                mail_id = Some(mid);
-            }
-            let credited_any = journal_target.is_some();
-            (credited_char, mail_id, credited_any)
-        });
-        if !credited_any { return 0.0; }
-        if let Some((cid, bal)) = credited_char {
-            let _ = ctx.notify_account_change(cid, "cash", cid, bal);
-        }
-        if let Some(mid) = mail_id {
-            let title = format!("Insurance Payout for Ship {ship_id}");
-            let sent = crate::services::mail_notify::SentMail {
-                message_id: mid, sender_id: 1_000_132, to_character_ids: &[victim_char_id],
-                to_list_id: None, to_corp_or_alliance_id: None, title: &title,
-                status_mask: crate::services::mail_notify::MAIL_STATUS_AUTOMATED,
-            };
-            crate::services::mail_notify::emit_mail_sent(ctx, &sent, &[victim_char_id]);
-        }
-        return payout_isk;
+    if !settlement.is_corp && settlement.credited_owner_id == victim_char_id {
+        let _ = ctx.notify_account_change(
+            victim_char_id,
+            "cash",
+            victim_char_id,
+            settlement.balance_after_isk,
+        );
     }
-    0.0
+    if let Some(mid) = settlement.mail_id {
+        let sent = crate::services::mail_notify::SentMail {
+            message_id: mid,
+            sender_id: 1_000_132,
+            to_character_ids: &[victim_char_id],
+            to_list_id: None,
+            to_corp_or_alliance_id: None,
+            title: &settlement.mail_subject,
+            status_mask: crate::services::mail_notify::MAIL_STATUS_AUTOMATED,
+        };
+        crate::services::mail_notify::emit_mail_sent(ctx, &sent, &[victim_char_id]);
+    }
+    settlement.payout_isk
 }
 
 pub fn compute_killmail_esi_hash(

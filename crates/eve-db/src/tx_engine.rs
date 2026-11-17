@@ -115,6 +115,7 @@ pub struct ColdDomainDiff {
     pub d6_batch4: bool,
     pub service_domains: bool,
     pub crimewatch_changed: bool,
+    pub combat_runtime_changed: bool,
 }
 
 impl ColdDomainDiff {
@@ -405,9 +406,11 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
     // Family 3 (`social`) now persists via incremental `domain_rows` diffs.
     let d6_social = false;
 
+    let combat_runtime_changed =
+        before.combat_crimewatch_state != after.combat_crimewatch_state;
     let crimewatch_changed = before.crimewatch_states != after.crimewatch_states
         || before.crimewatch_aggressions != after.crimewatch_aggressions
-        || before.combat_crimewatch_state != after.combat_crimewatch_state;
+        || combat_runtime_changed;
 
     // Family 4 (`corp_crimewatch`) now persists via incremental `domain_rows` diffs.
     let d6_corp_crimewatch = false;
@@ -431,6 +434,7 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
         d6_batch4,
         service_domains,
         crimewatch_changed,
+        combat_runtime_changed,
     }
 }
 

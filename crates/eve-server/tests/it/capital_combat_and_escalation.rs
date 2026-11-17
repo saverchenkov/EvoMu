@@ -1225,8 +1225,8 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
             )
             .await
     };
-    let full_payout = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.insurance_contracts.get(&ship_id).map(|c| c.payout_isk).unwrap_or(0.0)
+    let full_payout = ctx.db.with_snapshot(|snap| {
+        snap.insurance_contracts.get(&ship_id).map(|c| c.payout_isk).unwrap_or(0.0)
     });
     assert!(full_payout > 0.0);
 
@@ -1292,7 +1292,7 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
             .call_ok("repackagingSvc", None, "RepackageItems", &[PyRep::List(vec![PyRep::Integer(ship_rep)])], &HashMap::new())
             .await
     };
-    assert!(!eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| rt.insurance_contracts.contains_key(&ship_rep)), "RepackageItems must void active ship insurance contract");
+    assert!(!ctx.db.with_snapshot(|snap| snap.insurance_contracts.contains_key(&ship_rep)), "RepackageItems must void active ship insurance contract");
 }
 
 }

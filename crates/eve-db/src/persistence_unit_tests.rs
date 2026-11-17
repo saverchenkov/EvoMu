@@ -555,6 +555,7 @@ fn run_mut_snapshot_tx_clean_tracked_fastpath_and_persist_error_fp_rollback() {
     assert_eq!(stacked.item_id, created.item_id);
     assert_eq!(stacked.quantity, 15);
 
+    let cw_rt_ep0 = repo.combat_runtime_epoch();
     repo.with_mut_snapshot(|snap| {
         snap.crimewatch_states.insert(
             cid,
@@ -566,6 +567,13 @@ fn run_mut_snapshot_tx_clean_tracked_fastpath_and_persist_error_fp_rollback() {
         );
     });
     assert_eq!(repo.combat_state_epoch(), cw_ep0 + 1);
+    assert_eq!(repo.combat_runtime_epoch(), cw_rt_ep0);
+
+    repo.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state.safety_levels.insert(cid, 1);
+    });
+    assert_eq!(repo.combat_state_epoch(), cw_ep0 + 2);
+    assert_eq!(repo.combat_runtime_epoch(), cw_rt_ep0 + 1);
 
     // 2. Persist error mid-sync leaves `fp` and `published` untouched (`before == published`),
     //    so subsequent mutations to the same character still persist cleanly.

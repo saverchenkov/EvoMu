@@ -616,11 +616,11 @@ async fn safety_level_sec_status_transactions_get_client_states_and_nested_runti
     assert!(matches!(&flags_tuple[1], PyRep::List(v) if v.contains(&PyRep::Integer(susp_id))));
     assert_eq!(cs_parts[3], PyRep::Integer(1));
 
-    // Nested with_mut_combat_runtime inside ctx.db.with_mut_snapshot does not deadlock and updates cleanly.
+    // Explicit `&mut WorldStateSnapshot` runtime mutation inside `ctx.db.with_mut_snapshot` commits cleanly and survives subsequent reads.
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().security_status = 3.5;
-        snap.combat_crimewatch_state.safety_levels.insert(char_id, 0);
-        with_mut_combat_runtime(&ctx, |rt| {
+        snap.combat_crimewatch_state.safety_levels.insert(char_id, 2);
+        with_mut_combat_runtime_in_snap(snap, |rt| {
             rt.safety_levels.insert(char_id, SafetyLevel::Red);
         });
     });

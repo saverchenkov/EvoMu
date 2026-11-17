@@ -313,7 +313,6 @@ async fn death_pipeline_loot_insurance_escape_frigate_kill_rights_and_pod_booste
     use super::death_pipeline::{
         execute_death_pipeline_sync, resolve_destroyed_ship_contents_in_snap,
     };
-    use crate::services::combat_crimewatch::with_mut_combat_runtime;
 
     let mut ctx = test_ctx();
     let sys_id = 30_000_142u32; // high-sec 0.9
@@ -455,13 +454,13 @@ async fn death_pipeline_loot_insurance_escape_frigate_kill_rights_and_pod_booste
     spawn_ship(&ctx, sys_id, corp_ship, vic_char, 587, esc2_pos);
     let _exp_ship = 100_095_202i64;
     spawn_ship(&ctx, sys_id, _exp_ship, vic_char, 587, esc2_pos);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.insurance_contracts.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.insurance_contracts.insert(
             corp_ship,
-            crate::services::combat_crimewatch::InsuranceContractState {
+            eve_db::PersistedInsuranceContractRecord {
                 ship_id: corp_ship,
                 ship_type_id: 587,
-                owner_id: 98_999_999, // missing corp fallback (`L762`)
+                owner_id: 98_999_999, // missing corp (`L762`)
                 level_name: "Platinum".into(),
                 level_fraction: 1.0,
                 cost_isk: 1_000.0,
@@ -470,9 +469,9 @@ async fn death_pipeline_loot_insurance_escape_frigate_kill_rights_and_pod_booste
                 end_unix: now + 3_600,
             },
         );
-        rt.insurance_contracts.insert(
+        snap.insurance_contracts.insert(
             _exp_ship,
-            crate::services::combat_crimewatch::InsuranceContractState {
+            eve_db::PersistedInsuranceContractRecord {
                 ship_id: _exp_ship,
                 ship_type_id: 587,
                 owner_id: vic_char,
@@ -485,25 +484,6 @@ async fn death_pipeline_loot_insurance_escape_frigate_kill_rights_and_pod_booste
             },
         );
     });
-    crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
-        &ctx,
-        |st| {
-            st.insurance_contracts.insert(
-                _exp_ship,
-                crate::services::inventory_fitting::fitting_containers_ships::InsuranceContractRecord {
-                    ship_id: _exp_ship,
-                    ship_type_id: 587,
-                    owner_id: vic_char,
-                    level_name: "Platinum".into(),
-                    level_fraction: 1.0,
-                    cost_isk: 1_000.0,
-                    payout_isk: 250_000.0,
-                    start_unix: now - 5_000,
-                    end_unix: now - 10, // expired (`L433`)
-                },
-            );
-        },
-    );
     // Also spawn pod with Booster item + Implant item + active_implants to hit L645-688
     let _ = execute_death_pipeline_sync(&ctx, sys_id, vic_char, corp_ship, att_char, esc2_pos, 11).unwrap();
     let _ = execute_death_pipeline_sync(&ctx, sys_id, vic_char, _exp_ship, att_char, esc2_pos, 12).unwrap();

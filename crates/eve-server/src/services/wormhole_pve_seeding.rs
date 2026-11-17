@@ -7,7 +7,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::{CombatRuntimeState, ExtendedNpcEntity};
+use crate::services::combat_crimewatch::{with_mut_combat_runtime_with_locks, CombatRuntimeState, ExtendedNpcEntity};
 use crate::services::pve_exploration::{
     next_pve_seq, with_pve_exploration_reg, with_pve_exploration_reg_db, CharacterId,
     PveSiteInstance,
@@ -172,8 +172,9 @@ pub async fn spawn_sleeper_sentry_tower_for_class(
     };
     let sys_handle = systems.get_or_spawn(solar_system_id);
     let _ = sys_handle.spawn_ball_with_meta(ball, cs, sentry_meta).await;
-    let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-    rt.npc_entities.insert(bid, entity);
+    with_mut_combat_runtime_with_locks(db, combat_ephemeral, |rt| {
+        rt.npc_entities.insert(bid, entity);
+    });
     bid
 }
 
