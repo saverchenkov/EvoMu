@@ -497,13 +497,30 @@ impl ServerContext {
         )
         .await;
         let duration = start_time.elapsed();
-        self.flight_recorder
-            .record_rpc_latency(service, method, duration);
+        let resolved_service =
+            bound_id.and_then(|bid| self.owned_bound_service_for_metrics(session, bid));
+        let metric_service = resolved_service.as_deref().unwrap_or(service);
+        let track_individual =
+            self.should_track_rpc_latency_individually(session, metric_service, method, &res);
+        self.flight_recorder.record_rpc_latency_classified(
+            metric_service,
+            method,
+            track_individual,
+            duration,
+        );
         if duration > std::time::Duration::from_millis(crate::flight_recorder::PACKET_PERF_WARN_THRESHOLD_MS)
         {
             let arg_size = crate::flight_recorder::encoded_args_byte_size(args, kwargs);
+            let (perf_service, perf_method) = if track_individual {
+                (metric_service, method)
+            } else {
+                (
+                    crate::flight_recorder::UNKNOWN_RPC_LABEL,
+                    crate::flight_recorder::UNKNOWN_RPC_LABEL,
+                )
+            };
             let is_bootstrap = matches!(
-                (service, method),
+                (perf_service, perf_method),
                 ("charUnboundMgr", "SelectCharacterID")
                     | ("charUnboundMgr", "GetCharacterInfo")
                     | ("character", "GetCharacterSelectionInfo")
@@ -515,8 +532,8 @@ impl ServerContext {
             );
             tracing::warn!(
                 target: "packet_perf",
-                service = %service,
-                method = %method,
+                service = %perf_service,
+                method = %perf_method,
                 arg_size,
                 duration_ms = duration.as_millis() as u64,
                 session_id = session.session_id,
@@ -525,8 +542,8 @@ impl ServerContext {
             );
             self.flight_recorder.record_packet_perf_warning(
                 session.session_id,
-                service,
-                method,
+                perf_service,
+                perf_method,
                 arg_size,
                 duration,
                 is_bootstrap,
@@ -610,13 +627,7 @@ impl ServerContext {
 
         if caller_trace == Some("machoNet:26000") {
             let effective_service = bound_id
-                .and_then(|bid| {
-                    self.bound_objects
-                        .read()
-                        .ok()
-                        .and_then(|m| m.get(&bid).map(|e| e.service.clone()))
-                        .or_else(|| self.transition_grace_service_for_bound_id(session, bid))
-                })
+                .and_then(|bid| self.owned_bound_service_for_metrics(session, bid))
                 .unwrap_or_else(|| service.to_string());
             if effective_service == "scanMgr" && method == "GetSystemScanMgr" {
                 if let Ok(ref rep) = res {
@@ -670,6 +681,99 @@ impl ServerContext {
         }
 
         res
+    }
+
+    /// Internal, test/admin, and Quasar gateway services implemented outside `rpc_service_catalog.json`.
+    const INTERNAL_LATENCY_TRACKED_SERVICES: &'static [&'static str] = &[
+        "cluster",
+        "contractMgr",
+        "fleetSvc",
+        "harness",
+        "incursion",
+        "officeManager",
+        "ownerGroupManager",
+        "publicGatewaySvc",
+        "scanSvc",
+        "sovHubSvc",
+        "structureProfiles",
+        "timeControl",
+    ];
+
+    fn owned_bound_service_for_metrics(
+        &self,
+        session: &SessionState,
+        bound_id: u64,
+    ) -> Option<String> {
+        self.bound_objects
+            .read()
+            .ok()
+            .and_then(|m| {
+                m.get(&bound_id)
+                    .filter(|e| {
+                        e.session_id == session.session_id && Some(e.user_id) == session.user_id
+                    })
+                    .map(|e| e.service.clone())
+            })
+            .or_else(|| self.transition_grace_service_for_bound_id(session, bound_id))
+    }
+
+    fn is_trackable_latency_service(&self, effective_service: &str) -> bool {
+        self.cataloged_services.contains(effective_service)
+            || Self::INTERNAL_LATENCY_TRACKED_SERVICES.contains(&effective_service)
+    }
+
+    fn is_preauth_individual_rpc(effective_service: &str, method: &str) -> bool {
+        matches!(
+            (effective_service, method),
+            ("authentication", "Login" | "Logout" | "Ping")
+                | ("machoNet", "GetTime" | "GetServiceInfo" | "NoBlock")
+                | ("cache", "GetServerVersionAndBuild" | "Rowset" | "Setting")
+        )
+    }
+
+    /// Returns `true` only when `(effective_service, method)` represents a matched/known RPC
+    /// eligible for its own latency bucket rather than collapsing into `<unknown>`.
+    fn should_track_rpc_latency_individually(
+        &self,
+        session: &SessionState,
+        effective_service: &str,
+        method: &str,
+        res: &Result<PyRep, BridgeRpcError>,
+    ) -> bool {
+        if let Err(err) = res {
+            if matches!(
+                err.code.as_str(),
+                "UnimplementedRPC"
+                    | "Unauthorized"
+                    | "AuthenticationRequired"
+                    | "AuthenticationFailed"
+                    | "InvalidLoginArguments"
+                    | "CharacterNotSelected"
+                    | "InsufficientRole"
+                    | "ClusterShuttingDown"
+                    | "UserBanned"
+                    | "AccountSuspended"
+                    | "MultiLoginBlocked"
+                    | "SessionKicked"
+                    | "InvalidBoundObject"
+                    | "BindAuthorizationDenied"
+                    | super::binding::ERR_BOUND_OWNERSHIP
+                    | "FeatureDisabled"
+                    | "UnknownQuasarDomain"
+            ) {
+                return false;
+            }
+        }
+        if !self.is_trackable_latency_service(effective_service) {
+            return false;
+        }
+        if !session.is_authenticated() {
+            return res.is_ok() && Self::is_preauth_individual_rpc(effective_service, method);
+        }
+        if method == "MachoBindObject" {
+            return res.is_ok();
+        }
+        true
     }
 
     #[allow(clippy::too_many_arguments)]

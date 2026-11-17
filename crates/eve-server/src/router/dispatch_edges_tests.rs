@@ -355,3 +355,347 @@ async fn skill_mgr2_get_skills_live_machonet_converts_rowset_to_dict() {
         other => panic!("expected Dict for machoNet:26000 GetSkills, got {other:?}"),
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatch_and_call_req_collapse_unknown_and_preauth_latency_on_ops() {
+    use crate::flight_recorder::UNKNOWN_RPC_LABEL;
+    use crate::router::client_wire::dispatch_call_on_wire;
+    use crate::sso::handle_http_request_with_peer;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let ctx = edge_ctx();
+    let kw = HashMap::new();
+    let mut player = demo_session(&ctx, 41, service_roles::ROLE_PLAYER);
+    let sys_id = player.solar_system_id.expect("demo solar system") as i64;
+
+    // 1. Known V24 RPCs dispatched over the live `CallReq` wire path retain distinct buckets.
+    let known_calls = [
+        ("machoNet", "GetTime", vec![]),
+        ("machoNet", "GetGlobalConfig", vec![]),
+        ("charUnboundMgr", "GetCharactersToSelect", vec![]),
+        ("beyonce", "MachoBindObject", vec![PyRep::Integer(sys_id)]),
+    ];
+    for (svc, meth, args) in &known_calls {
+        let out = dispatch_call_on_wire(&ctx, &mut player, svc, None, meth, args, &kw).await;
+        assert!(
+            out.rpc_result.is_ok(),
+            "known V24 RPC {svc}.{meth} failed: {:?}",
+            out.rpc_result
+        );
+    }
+
+    // 2. Authenticated `CallReq` probes against unknown methods or arbitrary-service universal
+    // hooks must collapse into `("<unknown>", "<unknown>")`.
+    // rpc-lint: allow negative test probes with synthetic service/method names
+    let auth_unknown_calls = [
+        ("evil_wire_svc", "evil_wire_meth"),
+        ("evil_wire_svc", "MachoResolveObject"),
+        ("evil_wire_svc", "ClientHasReleasedTheseObjects"),
+        ("evil_wire_svc", "MachoBindObject"),
+    ];
+    for (svc, meth) in &auth_unknown_calls {
+        let _ = dispatch_call_on_wire(&ctx, &mut player, svc, None, meth, &[], &kw).await;
+    }
+
+    // 3. Unauthenticated flood of 10,000 unknown, 64 KiB, and pre-auth rejected RPCs must all
+    // collapse into one `("<unknown>", "<unknown>")` bucket with zero per-method bloat.
+    let mut unauth_sess = SessionState::new(901);
+    let pad_64k = "z".repeat(65_536);
+    for i in 0..10_000usize {
+        let (svc, meth) = match i % 4 {
+            0 => (format!("unknown_svc_{i}"), format!("{pad_64k}_{i}")),
+            1 => (format!("unknown_svc_{i}"), format!("unknown_meth_{i}")),
+            2 => (
+                "charUnboundMgr".to_string(),
+                "GetCharactersToSelect".to_string(),
+            ),
+            _ => (
+                format!("unknown_rel_{i}"),
+                "ClientHasReleasedTheseObjects".to_string(),
+            ),
+        };
+        let _ = ctx
+            .dispatch_rpc(
+                &mut unauth_sess,
+                &svc,
+                None,
+                &meth,
+                &[],
+                &kw,
+                Some("machoNet:26000"),
+            )
+            .await;
+    }
+
+    // 4. Verify `/ops` JSON exposes the 4 known buckets plus a single `<unknown>` aggregate.
+    ctx.set_gm_ops_enabled(true);
+    let mut headers = HashMap::new();
+    headers.insert("host".into(), "localhost:26004".into());
+    let resp = handle_http_request_with_peer(
+        &ctx,
+        "GET",
+        "/ops",
+        &headers,
+        b"",
+        Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+    );
+    assert_eq!(resp.status_code, 200);
+    let body: serde_json::Value = serde_json::from_slice(&resp.body).expect("parse /ops json");
+    let hist = &body["latency_histograms"];
+    let expected_total = known_calls.len() + auth_unknown_calls.len() + 10_000;
+    assert_eq!(hist["total_calls"].as_u64(), Some(expected_total as u64));
+
+    let methods = hist["methods"].as_array().expect("latency methods array");
+    assert_eq!(methods.len(), known_calls.len() + 1);
+    for (svc, meth, _) in &known_calls {
+        let count = methods
+            .iter()
+            .find(|m| m["service"] == *svc && m["method"] == *meth)
+            .and_then(|m| m["count"].as_u64());
+        assert_eq!(count, Some(1), "missing or wrong count for {svc}.{meth}");
+    }
+    let unknown_count = methods
+        .iter()
+        .find(|m| m["service"] == UNKNOWN_RPC_LABEL && m["method"] == UNKNOWN_RPC_LABEL)
+        .and_then(|m| m["count"].as_u64());
+    assert_eq!(
+        unknown_count,
+        Some((auth_unknown_calls.len() + 10_000) as u64)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forged_bound_id_and_kicked_session_probes_collapse_preserving_preauth_rpcs() {
+    use crate::flight_recorder::{MAX_TRACKED_RPC_METHODS, UNKNOWN_RPC_LABEL};
+
+    let ctx = edge_ctx();
+    let kw = HashMap::new();
+
+    // Victim binds a sub-object before any RPC latency buckets exist.
+    let victim = demo_session(&ctx, 900, service_roles::ROLE_PLAYER);
+    let existing_bid = ctx
+        .bind_verified_sub_object(&victim, "beyonce", 30_000_142)
+        .expect("bind victim beyonce sub-object");
+
+    // Flood MAX_TRACKED_RPC_METHODS + 12 distinct pre-auth forged-bound-id probes, plus
+    // forged-bound-id calls targeting valid pre-auth RPC names and non-allowlisted pre-auth RPCs.
+    let mut unauth = SessionState::new(901);
+    let mut expected_collapsed = 0u64;
+    let flood_count = MAX_TRACKED_RPC_METHODS + 12;
+    for i in 0..flood_count {
+        let svc = format!("probe_svc_{i}");
+        let meth = format!("probe_meth_{i}");
+        let err = ctx
+            .dispatch_rpc(&mut unauth, &svc, Some(existing_bid), &meth, &[], &kw, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err.code.as_str(),
+                "AuthenticationRequired" | "BoundObjectOwnershipViolation"
+            ),
+            "unexpected forged probe error: {err:?}"
+        );
+        expected_collapsed += 1;
+    }
+
+    let forged_preauth_calls: &[(&str, Option<u64>, &str, &[PyRep])] = &[
+        ("machoNet", Some(existing_bid), "GetTime", &[]),
+        (
+            "authentication",
+            Some(existing_bid),
+            "Login",
+            &[
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+        ),
+        (
+            "cache",
+            Some(existing_bid),
+            "Rowset",
+            &[],
+        ),
+        ("charUnboundMgr", None, "GetCharactersToSelect", &[]),
+        ("skillMgr2", None, "GetSkills", &[]),
+    ];
+    for &(svc, bid, meth, args) in forged_preauth_calls {
+        let err = ctx
+            .dispatch_rpc(&mut unauth, svc, bid, meth, args, &kw, None)
+            .await
+            .unwrap_err();
+        if bid == Some(existing_bid) {
+            assert_eq!(err.code, "BoundObjectOwnershipViolation");
+        }
+        expected_collapsed += 1;
+    }
+
+    // Exempt pre-auth `machoNet.GetGlobalConfig` succeeds, yet must collapse to `<unknown>`
+    // because unauthenticated individual tracking only permits `machoNet.{GetTime,GetServiceInfo,NoBlock}`.
+    assert!(ctx
+        .dispatch_rpc(&mut unauth, "machoNet", None, "GetGlobalConfig", &[], &kw, None)
+        .await
+        .is_ok());
+    expected_collapsed += 1;
+
+    // Pre-auth `ClientHasReleasedTheseObjects` with a forged bound_id returns `Ok(None)` early
+    // before ownership check, so latency classification must still collapse it to `<unknown>`.
+    assert!(ctx
+        .dispatch_rpc(
+            &mut unauth,
+            "machoNet",
+            Some(existing_bid),
+            "ClientHasReleasedTheseObjects",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+    expected_collapsed += 1;
+
+    // Authenticated cross-session forged bound_id must collapse to `<unknown>`, not attribute to `beyonce`.
+    let other_uid = ctx
+        .db
+        .provision_player_account("other_probe_hf1184", "other-probe-secret");
+    let mut other_sess = SessionState::new(902);
+    other_sess.user_id = Some(other_uid);
+    other_sess.character_id = Some(90_000_002);
+    other_sess.role = service_roles::ROLE_PLAYER;
+    let cross_err = ctx
+        .dispatch_rpc(
+            &mut other_sess,
+            "beyonce",
+            Some(existing_bid),
+            "GetFormations",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(cross_err.code, "BoundObjectOwnershipViolation");
+    expected_collapsed += 1;
+
+    // Authenticated arbitrary non-cataloged service with universal release method collapses.
+    assert!(ctx
+        .dispatch_rpc(
+            &mut other_sess,
+            "bogus_noncataloged_svc_hf1184",
+            None,
+            "ClientHasReleasedTheseObjects",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+    expected_collapsed += 1;
+
+    // Kicked session probes (both pre-auth `machoNet.GetTime` and bound-object/authed calls) must
+    // return `SessionKicked` and collapse into `<unknown>`.
+    let kicked_uid1 = ctx
+        .db
+        .provision_player_account("kicked_probe1_hf1184", "kicked-probe1-secret");
+    let mut kicked_sess1 = SessionState::new(903);
+    kicked_sess1.user_id = Some(kicked_uid1);
+    kicked_sess1.role = service_roles::ROLE_PLAYER;
+    ctx.db
+        .kick_user(kicked_uid1, "GM kick test", ctx.now_unix());
+    let kicked_time_err = ctx
+        .dispatch_rpc(&mut kicked_sess1, "machoNet", None, "GetTime", &[], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(kicked_time_err.code, "SessionKicked");
+    assert!(!kicked_sess1.is_authenticated());
+    expected_collapsed += 1;
+
+    let kicked_uid2 = ctx
+        .db
+        .provision_player_account("kicked_probe2_hf1184", "kicked-probe2-secret");
+    let mut kicked_sess2 = SessionState::new(904);
+    kicked_sess2.user_id = Some(kicked_uid2);
+    kicked_sess2.character_id = Some(90_000_002);
+    kicked_sess2.role = service_roles::ROLE_PLAYER;
+    let kicked_bid = ctx
+        .bind_verified_sub_object(&kicked_sess2, "beyonce", 30_000_142)
+        .expect("bind kicked_sess2 beyonce");
+    ctx.db
+        .kick_user(kicked_uid2, "GM kick test 2", ctx.now_unix());
+    let kicked_bound_err = ctx
+        .dispatch_rpc(
+            &mut kicked_sess2,
+            "beyonce",
+            Some(kicked_bid),
+            "GetFormations",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(kicked_bound_err.code, "SessionKicked");
+    expected_collapsed += 1;
+
+    // None of the forged bound_id, cross-session, or kicked probes may occupy any individual bucket.
+    let pre_legit = ctx.flight_recorder.latency_histogram_report();
+    assert_eq!(pre_legit.total_calls, expected_collapsed);
+    assert_eq!(pre_legit.methods.len(), 1);
+    assert_eq!(pre_legit.methods[0].service, UNKNOWN_RPC_LABEL);
+    assert_eq!(pre_legit.methods[0].method, UNKNOWN_RPC_LABEL);
+    assert_eq!(pre_legit.methods[0].count, expected_collapsed);
+
+    // Valid pre-auth RPCs (`machoNet.GetTime` and `authentication.Login`) still receive individual buckets.
+    let mut legit_sess = SessionState::new(905);
+    assert!(ctx
+        .dispatch_rpc(&mut legit_sess, "machoNet", None, "GetTime", &[], &kw, None)
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(
+            &mut legit_sess,
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(&mut legit_sess, "authentication", None, "Logout", &[], &kw, None)
+        .await
+        .is_ok());
+
+    let post_legit = ctx.flight_recorder.latency_histogram_report();
+    assert_eq!(post_legit.total_calls, expected_collapsed + 3);
+    assert_eq!(post_legit.methods.len(), 4);
+    for (svc, meth) in [
+        ("machoNet", "GetTime"),
+        ("authentication", "Login"),
+        ("authentication", "Logout"),
+    ] {
+        assert_eq!(
+            post_legit
+                .methods
+                .iter()
+                .find(|m| m.service == svc && m.method == meth)
+                .map(|m| m.count),
+            Some(1),
+            "missing individual bucket for {svc}.{meth}"
+        );
+    }
+    assert_eq!(
+        post_legit
+            .methods
+            .iter()
+            .find(|m| m.service == UNKNOWN_RPC_LABEL && m.method == UNKNOWN_RPC_LABEL)
+            .map(|m| m.count),
+        Some(expected_collapsed)
+    );
+}
+

@@ -19,8 +19,19 @@ pub const PACKET_PERF_WARN_THRESHOLD_MS: u64 = 100;
 const MAX_PACKET_PERF_WARNINGS: usize = 200;
 const MAX_HISTOGRAM_SAMPLES_PER_METHOD: usize = 2048;
 const MAX_GLOBAL_HISTOGRAM_SAMPLES: usize = 4096;
+pub const MAX_TRACKED_RPC_METHODS: usize = 2_048;
+pub const MAX_RPC_LATENCY_KEY_LEN: usize = 128;
+pub const UNKNOWN_RPC_LABEL: &str = "<unknown>";
+const MAX_INDIVIDUAL_RPC_METHODS: usize = MAX_TRACKED_RPC_METHODS.saturating_sub(1);
 const MAX_TRACKED_SESSIONS: usize = 512;
 const MAX_ARGS_REPR_LEN: usize = 160;
+
+fn is_valid_rpc_latency_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment.len() <= MAX_RPC_LATENCY_KEY_LEN
+        && segment != UNKNOWN_RPC_LABEL
+        && !segment.bytes().any(|b| b.is_ascii_control())
+}
 
 fn now_unix_millis() -> u64 {
     SystemTime::now()
@@ -257,7 +268,60 @@ impl MethodLatencyBucket {
 struct LatencyHistogramState {
     total_calls: u64,
     global_samples_micros: VecDeque<u64>,
-    per_method: HashMap<(String, String), MethodLatencyBucket>,
+    per_method: HashMap<String, HashMap<String, MethodLatencyBucket>>,
+    tracked_method_count: usize,
+    unknown_bucket: Option<MethodLatencyBucket>,
+}
+
+impl LatencyHistogramState {
+    fn record_unknown(&mut self, micros: u64) {
+        self.unknown_bucket
+            .get_or_insert_with(MethodLatencyBucket::default)
+            .record(micros);
+    }
+
+    fn record_call(&mut self, service: &str, method: &str, track_individual: bool, micros: u64) {
+        self.total_calls = self.total_calls.saturating_add(1);
+        if self.global_samples_micros.len() >= MAX_GLOBAL_HISTOGRAM_SAMPLES {
+            self.global_samples_micros.pop_front();
+        }
+        self.global_samples_micros.push_back(micros);
+
+        let key_valid = track_individual
+            && is_valid_rpc_latency_segment(service)
+            && is_valid_rpc_latency_segment(method);
+        if !key_valid {
+            self.record_unknown(micros);
+            return;
+        }
+
+        if let Some(bucket) = self
+            .per_method
+            .get_mut(service)
+            .and_then(|methods| methods.get_mut(method))
+        {
+            bucket.record(micros);
+            return;
+        }
+
+        // Reserve one slot for the `<unknown>` bucket so tracked entries stay bounded at
+        // `<= MAX_TRACKED_RPC_METHODS` regardless of call order.
+        if self.tracked_method_count >= MAX_INDIVIDUAL_RPC_METHODS {
+            self.record_unknown(micros);
+            return;
+        }
+
+        let mut bucket = MethodLatencyBucket::default();
+        bucket.record(micros);
+        if let Some(methods) = self.per_method.get_mut(service) {
+            methods.insert(method.to_string(), bucket);
+        } else {
+            let mut methods = HashMap::new();
+            methods.insert(method.to_string(), bucket);
+            self.per_method.insert(service.to_string(), methods);
+        }
+        self.tracked_method_count = self.tracked_method_count.saturating_add(1);
+    }
 }
 
 /// Summary for one `(service, method)` RPC latency histogram (`#1077 §A`).
@@ -507,17 +571,24 @@ impl FlightRecorder {
         queue.iter().rev().take(count).rev().cloned().collect()
     }
 
-    /// Records handler latency in microseconds for `(service, method)` (`#1077 §A`).
+    /// Records handler latency in microseconds for `(service, method)` (`#1077 §A`), enforcing
+    /// key-length and entry-count bounds directly inside `FlightRecorder`.
     pub fn record_rpc_latency(&self, service: &str, method: &str, duration: Duration) {
+        self.record_rpc_latency_classified(service, method, true, duration);
+    }
+
+    /// Records handler latency in microseconds while collapsing unimplemented, rejected,
+    /// invalid, oversized, or over-cap calls into static `("<unknown>", "<unknown>")`.
+    pub fn record_rpc_latency_classified(
+        &self,
+        service: &str,
+        method: &str,
+        track_individual: bool,
+        duration: Duration,
+    ) {
         let micros = duration.as_micros().min(u64::MAX as u128) as u64;
         if let Ok(mut lock) = self.latency_histograms.write() {
-            lock.total_calls = lock.total_calls.saturating_add(1);
-            if lock.global_samples_micros.len() >= MAX_GLOBAL_HISTOGRAM_SAMPLES {
-                lock.global_samples_micros.pop_front();
-            }
-            lock.global_samples_micros.push_back(micros);
-            let key = (service.to_string(), method.to_string());
-            lock.per_method.entry(key).or_default().record(micros);
+            lock.record_call(service, method, track_individual, micros);
         }
     }
 
@@ -534,11 +605,16 @@ impl FlightRecorder {
         let mut global_sorted: Vec<u64> = lock.global_samples_micros.iter().copied().collect();
         global_sorted.sort_unstable();
         let overall_p99_micros = percentile_sorted(&global_sorted, 99, 100);
-        let mut methods: Vec<LatencyHistogramSummary> = lock
-            .per_method
-            .iter()
-            .map(|((svc, meth), bucket)| bucket.summarize(svc, meth))
-            .collect();
+        let mut methods: Vec<LatencyHistogramSummary> =
+            Vec::with_capacity(lock.tracked_method_count + usize::from(lock.unknown_bucket.is_some()));
+        for (svc, svc_methods) in &lock.per_method {
+            for (meth, bucket) in svc_methods {
+                methods.push(bucket.summarize(svc, meth));
+            }
+        }
+        if let Some(unknown) = &lock.unknown_bucket {
+            methods.push(unknown.summarize(UNKNOWN_RPC_LABEL, UNKNOWN_RPC_LABEL));
+        }
         methods.sort_by(|a, b| {
             b.p99_micros
                 .cmp(&a.p99_micros)
