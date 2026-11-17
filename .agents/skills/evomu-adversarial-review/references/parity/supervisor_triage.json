@@ -8393,19 +8393,11 @@
       "disposition": "client_local",
       "evidence": "Client-side attribute access .id on returned planet/colony object (not a remote machoNet RPC method). Scraped from planetMgr usage in V24 client code.ccp."
     },
-    "rpc:posMgr.AnchorOrbital": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
-    },
-    "rpc:posMgr.AnchorStructure": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    "rpc:planetMgr.remoteHandler": {
+      "disposition": "client_local",
+      "evidence": "Client-side attribute self.remoteHandler on ClientPlanet holding moniker.GetPlanet(planetID) in eve/client/script/environment/planet/clientPlanet.pyj (client_expectations.json:117662,117725,117937,118067,118108), mis-scraped from chained self.remoteHandler.<Method>() calls; not a server machoNet RPC."
     },
     "rpc:posMgr.GetMoonProcessInfoForTower": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
-    },
-    "rpc:posMgr.OnlineOrbital": {
       "disposition": "removed_from_live",
       "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
     },
@@ -8414,12 +8406,8 @@
       "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
     },
     "rpc:posMgr.SetSessionCheck": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
-    },
-    "rpc:posMgr.UnanchorOrbital": {
-      "disposition": "removed_from_live",
-      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+      "disposition": "client_local",
+      "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from posMgr usage in V24 client code.ccp."
     },
     "rpc:pvpFilamentMgr.values": {
       "disposition": "client_local",

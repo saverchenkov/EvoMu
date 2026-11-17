@@ -11,9 +11,13 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/remote/michelle.pyj:1581 Ballpark.OnDeactivatingWarp(): invoked by the local C++ destiny.Ballpark physics tick when a ball drops out of warp; never sent by server in DoDestinyUpdate (no Destiny.xmlp packet or evemu_Crucible server literal)."
   },
+  "destiny:OnDockingAccepted": {
+    "disposition": "removed_from_live",
+    "evidence": "V24.02 build 3698585 code.ccp eve/client/script/remote/michelle.pyj contains zero occurrences of OnDockingAccepted (verified across zlib-decompressed michelle.pyj bytecode and CE[destiny] in client_expectations.json); legacy Destiny.xmlp action replaced in V24 by Macho notification notify:OnDockingAccepted(itemID) handled by SpaceMgr.OnDockingAccepted (spaceMgr.pyj), DockingHeroNotificationService.OnDockingAccepted (dockingHeroNotificationService.pyj), and TacticalNavigationService.OnDockingAccepted (tacticalNavigationService.pyj)."
+  },
   "destiny:OnDroneActivityChange": {
     "disposition": "client_local",
-    "evidence": "eve/client/script/remote/michelle.pyj:1488 Ballpark.OnDroneActivityChange(): internal Ballpark helper method; no external caller in client bytecode and no Destiny.xmlp / evemu_Crucible server DoDestinyUpdate action."
+    "evidence": "eve/client/script/remote/michelle.pyj Park.OnDroneActivityChange(droneID, activityID, activity): invoked locally by Michelle.OnDroneActivityChange (registered in Michelle.__notifyevents__, CE[notify][OnDroneActivityChange] in client_expectations.json:26960-26985) when the server sends Macho notification notify:OnDroneActivityChange(droneID, activityID, activity), which simultaneously updates DroneEntry.OnDroneActivityChange (drone.pyj, drones/droneEntry.pyj) and forwards to self.bp.OnDroneActivityChange; not a server DoDestinyUpdate wire action (absent from Destiny.xmlp xmlp_elements)."
   },
   "destiny:OnDroneControlLost": {
     "disposition": "client_local",

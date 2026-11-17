@@ -4,18 +4,18 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 6216 / 6320 ledger rows closed (98.35%)**, 2376 NA, 1739 tagged tests, 7435 passing tests. Flagged fake by the gap auditor: 106.
+**Parity: 6222 / 6320 ledger rows closed (98.45%)**, 2379 NA, 1739 tagged tests, 7445 passing tests. Flagged fake by the gap auditor: 100.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
-| destiny | 52 | 45 | 7 | 0 |
+| destiny | 52 | 43 | 9 | 0 |
 | effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 197 | 0 | 0 |
-| feat | 1604 | 1489 | 94 | 21 |
-| notify | 1311 | 494 | 815 | 2 |
-| plan | 114 | 109 | 0 | 5 |
+| feat | 1604 | 1490 | 94 | 20 |
+| notify | 1311 | 495 | 815 | 1 |
+| plan | 114 | 108 | 0 | 6 |
 | quasar | 1455 | 88 | 1328 | 39 |
-| rpc | 1373 | 1246 | 90 | 37 |
+| rpc | 1373 | 1250 | 91 | 32 |
 | sde | 213 | 171 | 42 | 0 |
 
 **Real-client journeys (supervisor scoreboard, stage `interim_smoke`, build `3698585`):** **0 / 29 verified** (core smoke: **0 / 7**) (8 parked `Phase LW` row(s) excluded from completeness).
@@ -30,16 +30,16 @@ Game features (`feat:` rows) grouped as in `README.md`. **Done** counts rows who
 | Ships, fitting and modules | 262 | 266 | 98% | 0 |
 | Combat | 120 | 120 | 100% | 0 |
 | Accounts, characters and skills | 103 | 104 | 99% | 0 |
-| Inventory, markets and contracts | 82 | 85 | 96% | 0 |
-| Industry and resources | 127 | 129 | 98% | 0 |
-| PvE | 116 | 121 | 96% | 0 |
+| Inventory, markets and contracts | 84 | 85 | 99% | 0 |
+| Industry and resources | 125 | 129 | 97% | 0 |
+| PvE | 117 | 121 | 97% | 0 |
 | Corporations, alliances and fleets | 124 | 124 | 100% | 0 |
 | Structures and territory | 132 | 133 | 99% | 0 |
 | ESI web API | 138 | 138 | 100% | 0 |
 | Quasar gateway services | 28 | 32 | 88% | 94 |
 | Game-master mode and commands | 22 | 22 | 100% | 0 |
 | Sessions and server operations | 114 | 114 | 100% | 0 |
-| **All areas** | **1489** | **1510** | **99%** | 94 |
+| **All areas** | **1490** | **1510** | **99%** | 94 |
 
 Features not yet done, by area:
 
@@ -49,11 +49,11 @@ Features not yet done, by area:
 
 - **Accounts, characters and skills:** `feat:skills.omega-weekly-free-sp (FLAGGED_FAKE)`
 
-- **Inventory, markets and contracts:** `feat:wallet.hypernet-hypercore-sizing-expiry (FLAGGED_FAKE)`, `feat:wallet.hypernet-relay (FLAGGED_FAKE)`, `feat:wallet.nes-store (FLAGGED_FAKE)`
+- **Inventory, markets and contracts:** `feat:wallet.nes-store (FLAGGED_FAKE)`
 
-- **Industry and resources:** `feat:mining.belt-ore-distribution (FLAGGED_FAKE)`, `feat:mining.belts-as-balls (FLAGGED_FAKE)`
+- **Industry and resources:** `feat:mining.belt-ore-distribution (FLAGGED_FAKE)`, `feat:mining.belts-as-balls (FLAGGED_FAKE)`, `feat:pi.expedited-transfer (FLAGGED_FAKE)`, `feat:pi.launch (FLAGGED_FAKE)`
 
-- **PvE:** `feat:pve.air-career-program (FLAGGED_FAKE)`, `feat:pve.daily-goals (FLAGGED_FAKE)`, `feat:pve.login-campaign (FLAGGED_FAKE)`, `feat:pve.mission-complete (FLAGGED_FAKE)`, `feat:pve.mission-lp-isk-reward-formula (FLAGGED_FAKE)`
+- **PvE:** `feat:pve.air-career-program (FLAGGED_FAKE)`, `feat:pve.daily-goals (FLAGGED_FAKE)`, `feat:pve.mission-complete (FLAGGED_FAKE)`, `feat:pve.mission-lp-isk-reward-formula (FLAGGED_FAKE)`
 
 - **Structures and territory:** `feat:sovereignty.skyhook-reagent-maturity (FLAGGED_FAKE)`
 
@@ -195,7 +195,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | E-3 | Contracts | DONE | 15/15 | test_e3_contracts_lifecycle_item_exchange_courier_auction, test_e3_corp_contract_wallet_roles_and_issuer_departure | DONE | Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested. | 02ea9ce13 2026-10-21 |
 | E-4 | Industry | DONE | 33/33 | test_e4_capital_shipyard_restrictions_and_exponential_research, test_e4_industry_jobs_lifecycle_manufacturing_research_a | DONE | Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested. | 958987363 2026-11-06 |
 | E-5 | Agents and missions | FLAGGED_FAKE | 25/26 | agent_mission_completion_isk_lp_standing_and_reload, test_agent_missions_complete_reward_formula_and_storyline_e2e | PARTIAL | Agent finder, conversation, mission offer/accept/decline/quit/complete state machine, dungeon NPC spawns, bonus timer, skill-scaled ISK/LP rewards, standing propagation, and cooldowns verified. | e1cbba77e 2026-11-04 |
-| E-6 | PI basics | DONE | 23/23 | test_e6_pi_extractor_expiry_and_launch_canister | DONE | Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested. | 252371f52 2026-10-27 |
+| E-6 | PI basics | BLOCKED_BY_FEATURES | 21/23 | test_e6_pi_extractor_expiry_and_launch_canister | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested. | 252371f52 2026-10-27 |
 | E-7 | AIR NPE server-side node-graph runner & tutorial pocket orchestrator (user-added… | DONE | 3/3 | air_npe_server_nodegraph_runner_full_tutorial_to_completion | DONE | — | ac4908537 2026-11-02 |
 
 ## Phase 8: Social and exploration
@@ -217,12 +217,12 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Q-1 | Protobuf extraction and codegen. Extract the serialized FileDescriptorProtos emb… | DONE | 0/0 | q1_all_quasar_descriptors_across_domains_load_and_match_manifest, q1_q2_gateway_golden_wire_codec_and_descriptor_accepta | DONE | All 1,455 Quasar FileDescriptorProto definitions loaded from client cache and validated against schema manifest. | 97e3f32c5 2026-10-21 |
 | Q-2 | Gateway transport. Implement the public-gateway request/response/notice framing … | DONE | 0/0 | q1_q2_gateway_golden_wire_codec_and_descriptor_acceptance, q2_gateway_envelope_framing_status_codes_tenancy_and_idempote | DONE | Quasar public gateway framing, RPC dispatch, status codes, tenancy, and idempotency verified. | 97e3f32c5 2026-10-21 |
 | Q-3 | Identity, accounts and entitlements: auth, login, user, entitlement, omega, memb… | DONE | 0/0 | test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch | DONE | Quasar Identity, Account, FastCheckout, Token Purchase, Subscriptions, and Monetization gateway handlers and notices implemented and verified. | 6eb5708a0 2026-11-06 |
-| Q-4 | Character and progression: character, skill, implant, clone-related, career, ach… | DONE | 0/0 | test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch | DONE | Quasar Daily Goals, AIR Career Goals, Achievements, Skill Plans, Tracks, and Goal/Tale notices implemented and verified. | 6eb5708a0 2026-11-06 |
+| Q-4 | Character and progression: character, skill, implant, clone-related, career, ach… | DONE | 0/0 | test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch | PARTIAL | Quasar Daily Goals, AIR Career Goals, Achievements, Skill Plans, Tracks, and Goal/Tale notices wired with V24 client static/localization tables imported into evomu_sde.sqlite (`sde_achievements` 68 /  | ddbd4d872 2026-11-16 |
 | Q-5 | Social and organization: corporation, corporationgoal, freelance, alliance, cont… | DONE | 0/0 | entitlements_serverops_and_sqlite_restart_persistence, test_plan_q5_social_and_organization_quasar_packages, test_quasar | DONE | Quasar Chat, Corporation Goals, Freelance Projects, Alliance, Mail, Calendar, and Social gateway handlers implemented and verified. | 958987363 2026-11-06 |
 | Q-6 | Economy and industry: market, contract, industry, blueprint, asset, assetholding… | FLAGGED_FAKE | 0/0 | entitlements_serverops_and_sqlite_restart_persistence, quasar_economy_industry_h2c_and_persistence_end_to_end, test_plan | PARTIAL | Quasar Market, Contract, Industry, Blueprint, Asset, AssetHolding, Inventory, Container, Accounting, LoyaltyPoints, Planet, PI, Ore, Moon, and AsteroidBelt handlers and h2c persistence verified. | 37721dee9 2026-11-13 |
 | Q-7 | Space and combat: ship, module, fighter, dogma, effect, capacitor, space, spacec… | DONE | 0/0 | test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch | DONE | Quasar Space, Celestials, Navigation, Bubble Presence, Dynamic Bounty System, and Pirate Insurgency gateway handlers implemented and verified. | 911eb8b47 2026-10-21 |
 | Q-8 | Sovereignty, faction warfare and events: sovereignty, factionwarfare, faction, o… | DONE | 0/0 | test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch | DONE | Quasar Sovereignty Hub, Skyhook, Workforce, Upgrades, Mercenary Den, Faction Warfare, and Operations gateway handlers and notices implemented and verified. | 6eb5708a0 2026-11-06 |
-| Q-9 | Cosmetics and app infrastructure: cosmetic (SKINs, SKINR/paragon, emblems, logos… | BLOCKED_BY_FEATURES | 0/0 | test_plan_q9_cosmetics_and_app_infrastructure | PARTIAL | Quasar Ship Cosmetics, SKINR Sequencing, Component/SKIN Market Listings, Achievements, Career Goals, Daily Goals, and App Infrastructure gateway handlers and notices verified. | bb5c2427e 2026-11-09 |
+| Q-9 | Cosmetics and app infrastructure: cosmetic (SKINs, SKINR/paragon, emblems, logos… | BLOCKED_BY_FEATURES | 0/0 | test_plan_q9_cosmetics_and_app_infrastructure | PARTIAL | Quasar Ship Cosmetics, SKINR Sequencing, Component/SKIN Market Listings, Achievements, Career Goals, Daily Goals (with V24 `evomu_sde.sqlite` catalog/localization tables, explicit `DERIVED` server-aut | bb5c2427e 2026-11-09 |
 
 ## Phase ESI: EVE Swagger Interface and SSO
 
@@ -247,17 +247,17 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Z-5 | Close every feat: row, including every row the gap auditor has appended. Fix eve… | DONE | 0/0 | test_rpc_notify_and_feature_dispatch | PARTIAL | Implemented server features verified with live state assertions; 21 open feat rows remain in the parity ledger. | 996cd6d2d 2026-11-12 |
 | Z-6 | Pass all 29 journey: rows as deterministic Rule-2 real-client UI scenarios (#120… | SUPERVISOR_OWNED | 0/0 | — | NOT STARTED | Real-client journeys require execution via the V24 client journey harness. | 8a7bf96e5 2026-11-16 |
 | Z-7 | Reach workspace line coverage ≥ 90%. | SUPERVISOR_OWNED | 0/0 | — | PARTIAL | Coverage and mutation QA harness present; full workspace >=90% coverage and >=85% mutation gate pending. | bb5c2427e 2026-11-09 |
-| Z-8 | Final acceptance. The claims review is PASS and the gap audit is CLEAN on the fi… | BLOCKED_BY_FEATURES | 0/0 | test_parity_plan_z6_z7_z8_journeys_coverage_and_acceptance_gate, test_plan_z7_z8_test_thresholds_and_final_acceptance_ga | PARTIAL | Full canonical ledger, preflight static invariants, and final acceptance gate verification wired; awaits gap-audit clearance of remaining flagged rows. | bb5c2427e 2026-11-09 |
+| Z-8 | Final acceptance. The claims review is PASS and the gap audit is CLEAN on the fi… | BLOCKED_BY_FEATURES | 0/0 | test_parity_plan_z6_z7_z8_journeys_coverage_and_acceptance_gate, test_plan_z7_z8_test_thresholds_and_final_acceptance_ga | PARTIAL | Full canonical ledger, preflight static invariants, and final acceptance gate verification wired; awaits gap-audit clearance of remaining flagged rows. | 7d976fca5 2026-11-16 |
 
 ## Phase LW: Living Universe v3 (PARKED — post-Phase-Z; held pending spec sign-off, do not implement until unparked)
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| LW-1 | Actors, doctrines & config. NPC corps as CorporationRecords + wallets; mutable f… | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): NPC CorporationRecords and wallets, mutable faction relations, Doctrine Library and DoctrineStats cache, layered config soak gate, and livingworld GM. | 88dd0c164 2026-11-13 |
+| LW-1 | Actors, doctrines & config. NPC corps as CorporationRecords + wallets; mutable f… | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): NPC CorporationRecords and wallets, mutable faction relations, Doctrine Library and DoctrineStats cache, layered config soak gate, and livingworld GM. | 7d976fca5 2026-11-16 |
 | LW-2 | Job Engine & attention. Timer-wheel jobs, locations, travel/jump/dock events, re… | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): discrete-event timer-wheel Job Engine, travel/jump/dock events, star-map jump recording, attention hydration/dehydration, and tick governor. | — |
 | LW-3 | Economy. Station stock/recipes; place_order_in_snap; traders/haulers/mining/ice/… | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): station stock and recipes, market orders, trader/hauler/mining/ice/PI jobs, ammo resupply manifests, and IndustryJobRecord hull replacement. | — |
 | LW-4 | Off-grid conflict & piracy. Encounter model, statistical resolver from DoctrineS… | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): off-grid encounter model, DoctrineStats statistical resolver, real killmails/wrecks/loot/BRM, piracy pressure, and navy response. | — |
 | LW-5 | On-grid parity & FX. FittedNpcRuntime from DoctrineStats, NPC-vs-NPC Dogma, ammo… | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): on-grid FittedNpcRuntime from DoctrineStats, NPC-vs-NPC Dogma, ammo/heat/cap/drone rules, SlimItemMeta, OnSpecialFX moduleTypeID, and formations. | — |
 | LW-6 | Conflict engine & structures. Tension/war chest/ladders; FW plexing, sov flips, … | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): conflict engine tension/war chest/ladders, FW/sov/insurgency rungs, NPC POS/Citadel seeding, and lethal structure sieges. | — |
 | LW-7 | Non-market factions & capitals. Drifter wormhole ingress at Jove Observatories, … | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): non-market Drifter wormhole ingress, Rogue Drone infestation, Triglavian stellar targeting, Sansha targeting, and capital staging/doomsday rules. | — |
-| LW-8 | Player hooks. Dynamic agent offers, NPC contracts, Fleet Finder wings, allied ho… | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): dynamic agent offers, NPC contracts, Fleet Finder wings, allied cyno hot-drops, NPC mail digests, vendetta wars, and ransom. | 88dd0c164 2026-11-13 |
+| LW-8 | Player hooks. Dynamic agent offers, NPC contracts, Fleet Finder wings, allied ho… | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): dynamic agent offers, NPC contracts, Fleet Finder wings, allied cyno hot-drops, NPC mail digests, vendetta wars, and ransom. | 7d976fca5 2026-11-16 |
