@@ -1,11 +1,12 @@
 use super::*;
 use crate::accounts::{base64url_encode_no_pad, sha256_bytes};
+use crate::cow::CowMap;
 use crate::durable_domain_types::sorted_set_serde;
 use crate::persistence::WorldStateWalDelta;
 use crate::sqlite_store::fingerprints::canonical_fp;
 use crate::sqlite_store::fingerprints::{fnv1a_hasher, fp_sp6_lifecycle};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::hash::Hasher;
 use std::path::PathBuf;
 
@@ -150,8 +151,8 @@ fn canonical_fp_all_primitives_and_sorted_set_serde() {
 
     let mut sp6 = Sp6PersistedState {
         missions_awaiting_downtime_respawn: vec![(4001, 7)],
-        mission_initial_npc_counts: HashMap::from([("30000142:7".into(), 3)]),
-        mission_initial_npc_types: HashMap::from([("30000142:7".into(), vec![587, 588])]),
+        mission_initial_npc_counts: CowMap::from([("30000142:7".into(), 3)]),
+        mission_initial_npc_types: CowMap::from([("30000142:7".into(), vec![587, 588])]),
         ..Sp6PersistedState::default()
     };
     let fp_a = fp_sp6_lifecycle(&sp6);

@@ -828,6 +828,7 @@ pub(crate) fn fp_skill_queue(q: &[SkillQueueEntry]) -> u64 {
     canonical_fp(q)
 }
 
+#[cfg(test)]
 #[inline]
 pub(crate) fn fp_sp6_lifecycle(st: &crate::Sp6PersistedState) -> u64 {
     canonical_fp(st)
@@ -1038,6 +1039,7 @@ pub fn compute_fingerprints(snap: &WorldStateSnapshot) -> TableFingerprints {
 #[cfg(test)]
 mod tests {
     use super::fp_sp6_lifecycle;
+    use crate::cow::CowMap;
     use crate::{
         AbyssalPersistedSession, DisconnectedShipEntry, PersistedCombatHp,
         PersistedSpaceObjectMeta, SafeLogoffEntry, SelfDestructPersistedEntry, Sp6PersistedState,
@@ -1046,22 +1048,22 @@ mod tests {
 
     fn sample_sp6(keys: &[i64], cap: usize, scramble: bool) -> Sp6PersistedState {
         let mut st = Sp6PersistedState {
-            safe_logoffs: HashMap::with_capacity(cap),
-            disconnected_ships: HashMap::with_capacity(cap),
-            self_destructs: HashMap::with_capacity(cap),
-            abyssal_sessions: HashMap::with_capacity(cap),
-            pvp_timers_until: HashMap::with_capacity(cap),
-            npc_timers_until: HashMap::with_capacity(cap),
-            weapon_timers_until: HashMap::with_capacity(cap),
-            criminal_timers_until: HashMap::with_capacity(cap),
+            safe_logoffs: CowMap::with_capacity(cap),
+            disconnected_ships: CowMap::with_capacity(cap),
+            self_destructs: CowMap::with_capacity(cap),
+            abyssal_sessions: CowMap::with_capacity(cap),
+            pvp_timers_until: CowMap::with_capacity(cap),
+            npc_timers_until: CowMap::with_capacity(cap),
+            weapon_timers_until: CowMap::with_capacity(cap),
+            criminal_timers_until: CowMap::with_capacity(cap),
             last_downtime_day_idx: Some(19_850),
-            ship_combat_hp: HashMap::with_capacity(cap),
-            space_object_meta: HashMap::with_capacity(cap),
+            ship_combat_hp: CowMap::with_capacity(cap),
+            space_object_meta: CowMap::with_capacity(cap),
             missions_awaiting_downtime_respawn: vec![(90_000_001, 42), (90_000_002, 77)],
-            mission_initial_npc_counts: HashMap::with_capacity(cap),
-            mission_initial_npc_types: HashMap::with_capacity(cap),
-            active_scanner_probes: HashMap::with_capacity(cap),
-            item_velocities: HashMap::with_capacity(cap),
+            mission_initial_npc_counts: CowMap::with_capacity(cap),
+            mission_initial_npc_types: CowMap::with_capacity(cap),
+            active_scanner_probes: CowMap::with_capacity(cap),
+            item_velocities: CowMap::with_capacity(cap),
             server_runtime_json: Some("{}".into()),
         };
         if scramble {

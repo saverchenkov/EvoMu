@@ -775,15 +775,17 @@ pub fn retire_legacy_server_runtime_blobs(conn: &Connection) -> Result<usize, St
             .map_err(|e| format!("delete legacy server_runtime_state blob: {e}"))?;
     }
     if sqlite_table_exists(conn, "domain_rows")? {
-        removed += conn
-            .execute(
-                "DELETE FROM domain_rows WHERE domain = ?1 AND key = ?2",
-                params![
-                    super::domain_rows::DOMAIN_CLUSTER_AND_RUNTIME,
-                    "server_runtime_json",
-                ],
-            )
-            .map_err(|e| format!("delete domain_rows server_runtime_json: {e}"))?;
+        for domain in [
+            super::domain_rows::DOMAIN_CLUSTER_AND_RUNTIME,
+            super::domain_rows::DOMAIN_SP6_LIFECYCLE,
+        ] {
+            removed += conn
+                .execute(
+                    "DELETE FROM domain_rows WHERE domain = ?1 AND key = ?2",
+                    params![domain, "server_runtime_json"],
+                )
+                .map_err(|e| format!("delete domain_rows {domain}.server_runtime_json: {e}"))?;
+        }
     }
     if sqlite_table_exists(conn, "service_domain_state")? {
         for (domain_key, json_field) in [
@@ -1055,13 +1057,16 @@ mod tests {
         )
         .expect("create domain_rows");
         conn.execute(
-            "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'server_runtime_json', '\"{}\"')",
-            params![crate::sqlite_store::domain_rows::DOMAIN_CLUSTER_AND_RUNTIME],
+            "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'server_runtime_json', '\"{}\"'), (?2, 'server_runtime_json', '\"{}\"')",
+            params![
+                crate::sqlite_store::domain_rows::DOMAIN_CLUSTER_AND_RUNTIME,
+                crate::sqlite_store::domain_rows::DOMAIN_SP6_LIFECYCLE,
+            ],
         )
         .expect("seed domain_rows server_runtime_json");
         assert_eq!(
             retire_legacy_server_runtime_blobs(&conn).expect("retire domain_rows runtime"),
-            1
+            2
         );
         assert!(read_legacy_server_runtime_blob(&conn)
             .expect("legacy blob removed")

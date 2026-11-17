@@ -3,10 +3,11 @@
 //! and Family 2 (`owner_notes`, `corp_lp_balances`, `char_lp_logs`) `domain_rows` persistence.
 
 use super::domain_rows::{
-    load_notes_lp_domain_rows, sync_notes_lp_domain_rows, DOMAIN_CHAR_LP_LOGS,
-    DOMAIN_CORP_LP_BALANCES, DOMAIN_OWNER_NOTES,
+    load_notes_lp_domain_rows, load_sp6_lifecycle_domain_rows, sync_notes_lp_domain_rows,
+    sync_sp6_lifecycle_domain_rows, DOMAIN_CHAR_LP_LOGS, DOMAIN_CORP_LP_BALANCES,
+    DOMAIN_OWNER_NOTES, LEGACY_SP6_LIFECYCLE_STATE_SQL,
 };
-use super::fingerprints::{fp_sp6_lifecycle, TableFingerprints};
+use super::fingerprints::TableFingerprints;
 use super::notes_lp_sequence_store::{
     apply_d6_migration, compute_d6_fingerprints, load_d6, rollback_d6, sync_d6,
     D6Fingerprints, D6_SCHEMA_VERSION,
@@ -21,7 +22,7 @@ use rusqlite::{params, Connection};
 fn apply_d6_migration_idempotency_and_error_paths() {
     assert_eq!(D6_SCHEMA_VERSION, 3);
 
-    // 1. Read-only connection fails `D6_SCHEMA_SQL` batch execution.
+    // 1. Read-only connection fails D-6 migration.
     let ro_conn = Connection::open_in_memory().unwrap();
     ro_conn.execute_batch("PRAGMA query_only = ON;").unwrap();
     assert!(apply_d6_migration(&ro_conn).is_err());
@@ -129,6 +130,7 @@ fn load_d6_reads_elevated_counters_skips_corrupt_json_and_reconciles_ids() {
         params![DOMAIN_CHAR_LP_LOGS],
     )
     .unwrap();
+    conn.execute_batch(LEGACY_SP6_LIFECYCLE_STATE_SQL).unwrap();
     conn.execute(
         "INSERT OR REPLACE INTO sp6_lifecycle_state (singleton_id, state_json) VALUES (1, '{bad-sp6')",
         [],
@@ -156,7 +158,10 @@ fn load_d6_reads_elevated_counters_skips_corrupt_json_and_reconciles_ids() {
     assert_eq!(snap.corp_lp_balances[&(98_000_010, 1_000_125)], 4_200);
     assert_eq!(snap.char_lp_logs[&90_000_011][0].amount, 850);
     assert!(!snap.char_lp_logs.contains_key(&90_000_099));
-    // Corrupt sp6_lifecycle JSON leaves prior field untouched.
+    // Corrupt legacy JSON must fail closed when quarantine is disabled, keeping prior snapshot intact.
+    let err = load_sp6_lifecycle_domain_rows(&conn, &mut snap, &mut LoadContext::new(false))
+        .unwrap_err();
+    assert!(err.contains("sp6_lifecycle_state"), "unexpected err: {err}");
     assert_eq!(snap.sp6_lifecycle.last_downtime_day_idx, Some(123));
 
     // Verify `reconcile_id_counters()` at the end of `load_d6` advances counters past existing entities.
@@ -281,11 +286,13 @@ fn sync_d6_isolated_change_flags_noop_idempotency_and_sql_errors() {
         tx.commit().unwrap();
     }
 
-    // 4. Isolated `sp6_lifecycle`: update -> true, noop -> false.
+    // 4. Isolated `sp6_lifecycle`: syncs via `domain_rows` (update -> true, noop -> false),
+    //    leaving `D6Fingerprints` scoped to the four `world_meta` sequence counters.
     snap.sp6_lifecycle.pvp_timers_until.insert(90_000_001, 5_000);
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_sp6_lifecycle_domain_rows(&tx, &snap).unwrap());
+        assert!(!sync_sp6_lifecycle_domain_rows(&tx, &snap).unwrap());
         assert!(!sync_d6(&tx, &snap, &mut fp).unwrap());
         tx.commit().unwrap();
     }
@@ -296,11 +303,11 @@ fn sync_d6_isolated_change_flags_noop_idempotency_and_sql_errors() {
             next_corporation_id: snap.next_corporation_id,
             next_notification_id: snap.next_notification_id,
             next_report_id: snap.next_report_id,
-            sp6_lifecycle_fp: fp_sp6_lifecycle(&snap.sp6_lifecycle),
         }
     );
 
-    // 5. SQL error propagation on missing tables for `sync_d6` and `sync_notes_lp_domain_rows`.
+    // 5. SQL error propagation on missing tables for `sync_d6`, `sync_notes_lp_domain_rows`,
+    //    and `sync_sp6_lifecycle_domain_rows`.
     let mut bad_conn = Connection::open_in_memory().unwrap();
     {
         let mut s = snap.clone();
@@ -340,14 +347,13 @@ fn sync_d6_isolated_change_flags_noop_idempotency_and_sql_errors() {
     {
         let mut s = snap.clone();
         s.sp6_lifecycle.last_downtime_day_idx = Some(777);
-        let mut f = fp.clone();
         let tx = bad_conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &s, &mut f).is_err());
+        assert!(sync_sp6_lifecycle_domain_rows(&tx, &s).is_err());
     }
 }
 
 #[test]
-fn rollback_d6_restores_counters_and_sp6_lifecycle() {
+fn rollback_d6_restores_counters_without_touching_lifecycle_state() {
     let mut conn = Connection::open_in_memory().unwrap();
     apply_migrations(&conn).unwrap();
     apply_d6_migration(&conn).unwrap();
@@ -364,71 +370,21 @@ fn rollback_d6_restores_counters_and_sp6_lifecycle() {
     {
         let tx = conn.transaction().unwrap();
         assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_sp6_lifecycle_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
 
-    // 1. When ONLY ID counters are mutated (`!dirty_sp6`), `rollback_d6` restores all 4 counters
-    //    and returns early without reloading `sp6_lifecycle_state`.
+    // Mutate all 4 counters and verify `rollback_d6` restores them cleanly without mutating
+    // `sp6_lifecycle` (which rolls back through `CowCell` / `domain_rows` transaction snapshots).
     snap.next_alliance_id = 1;
     snap.next_corporation_id = 2;
     snap.next_notification_id = 3;
     snap.next_report_id = 4;
+    snap.sp6_lifecycle.last_downtime_day_idx = Some(999);
     rollback_d6(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.next_alliance_id, 99_100_001);
     assert_eq!(snap.next_corporation_id, 98_200_002);
     assert_eq!(snap.next_notification_id, 940_300_003);
     assert_eq!(snap.next_report_id, 400_004);
-
-    // 2. Mutating `sp6_lifecycle` restores it from `sp6_lifecycle_state`.
-    snap.sp6_lifecycle.last_downtime_day_idx = Some(999);
-    rollback_d6(&conn, &mut snap, &fp).unwrap();
-    assert_eq!(snap.sp6_lifecycle.last_downtime_day_idx, Some(42));
-}
-
-#[test]
-fn rollback_d6_fails_closed_without_partial_overwrite_or_counter_drift() {
-    let mut conn = Connection::open_in_memory().unwrap();
-    apply_migrations(&conn).unwrap();
-    apply_d6_migration(&conn).unwrap();
-
-    let mut base = WorldStateSnapshot::default();
-    base.next_alliance_id = 99_100_001;
-    base.next_corporation_id = 98_200_002;
-    base.next_notification_id = 940_300_003;
-    base.next_report_id = 400_004;
-    base.sp6_lifecycle.last_downtime_day_idx = Some(42);
-
-    let mut fp = TableFingerprints::default();
-    {
-        let tx = conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &base, &mut fp).unwrap());
-        tx.commit().unwrap();
-    }
-
-    let mut dirty = base.clone();
-    dirty.next_alliance_id = 777;
-    dirty.next_corporation_id = 888;
-    dirty.sp6_lifecycle.last_downtime_day_idx = Some(999);
-
-    // 1. Corrupt `sp6_lifecycle_state` JSON: must fail closed without touching counters.
-    conn.execute(
-        "UPDATE sp6_lifecycle_state SET state_json = '{corrupt' WHERE singleton_id = 1",
-        [],
-    )
-    .unwrap();
-    let failures_before = crate::persist_failures_total();
-    let err = rollback_d6(&conn, &mut dirty, &fp).unwrap_err();
-    assert!(err.contains("sp6_lifecycle_state"), "unexpected err: {err}");
-    assert!(crate::persist_failures_total() >= failures_before + 1);
-    assert_eq!(dirty.next_alliance_id, 777);
-    assert_eq!(dirty.next_corporation_id, 888);
-    assert_eq!(dirty.sp6_lifecycle.last_downtime_day_idx, Some(999));
-
-    // 2. Delete the `sp6_lifecycle_state` singleton row while dirty: must fail closed.
-    conn.execute("DELETE FROM sp6_lifecycle_state WHERE singleton_id = 1", [])
-        .unwrap();
-    let err2 = rollback_d6(&conn, &mut dirty, &fp).unwrap_err();
-    assert!(err2.contains("sp6_lifecycle_state"), "unexpected err2: {err2}");
-    assert_eq!(dirty.next_alliance_id, 777);
-    assert_eq!(dirty.sp6_lifecycle.last_downtime_day_idx, Some(999));
+    assert_eq!(snap.sp6_lifecycle.last_downtime_day_idx, Some(999));
 }

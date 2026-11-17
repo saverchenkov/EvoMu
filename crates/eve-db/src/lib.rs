@@ -95,7 +95,6 @@ pub use durable_domain_types::{
 pub use types::*;
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -201,37 +200,37 @@ pub struct PersistedScannerProbe {
 #[serde(default)]
 pub struct Sp6PersistedState {
     #[serde(default)]
-    pub safe_logoffs: HashMap<i64, SafeLogoffEntry>,
+    pub safe_logoffs: CowMap<i64, SafeLogoffEntry>,
     #[serde(default)]
-    pub disconnected_ships: HashMap<i64, DisconnectedShipEntry>,
+    pub disconnected_ships: CowMap<i64, DisconnectedShipEntry>,
     #[serde(default)]
-    pub self_destructs: HashMap<i64, SelfDestructPersistedEntry>,
+    pub self_destructs: CowMap<i64, SelfDestructPersistedEntry>,
     #[serde(default)]
-    pub abyssal_sessions: HashMap<i64, AbyssalPersistedSession>,
+    pub abyssal_sessions: CowMap<i64, AbyssalPersistedSession>,
     #[serde(default)]
-    pub pvp_timers_until: HashMap<i64, u64>,
+    pub pvp_timers_until: CowMap<i64, u64>,
     #[serde(default)]
-    pub npc_timers_until: HashMap<i64, u64>,
+    pub npc_timers_until: CowMap<i64, u64>,
     #[serde(default)]
-    pub weapon_timers_until: HashMap<i64, u64>,
+    pub weapon_timers_until: CowMap<i64, u64>,
     #[serde(default)]
-    pub criminal_timers_until: HashMap<i64, u64>,
+    pub criminal_timers_until: CowMap<i64, u64>,
     #[serde(default)]
     pub last_downtime_day_idx: Option<u64>,
     #[serde(default)]
-    pub ship_combat_hp: HashMap<i64, PersistedCombatHp>,
+    pub ship_combat_hp: CowMap<i64, PersistedCombatHp>,
     #[serde(default)]
-    pub space_object_meta: HashMap<i64, PersistedSpaceObjectMeta>,
+    pub space_object_meta: CowMap<i64, PersistedSpaceObjectMeta>,
     #[serde(default)]
     pub missions_awaiting_downtime_respawn: Vec<(i64, u32)>,
     #[serde(default)]
-    pub mission_initial_npc_counts: HashMap<String, u32>,
+    pub mission_initial_npc_counts: CowMap<String, u32>,
     #[serde(default)]
-    pub mission_initial_npc_types: HashMap<String, Vec<u32>>,
+    pub mission_initial_npc_types: CowMap<String, Vec<u32>>,
     #[serde(default)]
-    pub active_scanner_probes: HashMap<i64, PersistedScannerProbe>,
+    pub active_scanner_probes: CowMap<i64, PersistedScannerProbe>,
     #[serde(default)]
-    pub item_velocities: HashMap<i64, [f64; 3]>,
+    pub item_velocities: CowMap<i64, [f64; 3]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_runtime_json: Option<String>,
 }
