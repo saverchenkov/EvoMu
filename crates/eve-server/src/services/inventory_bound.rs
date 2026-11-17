@@ -68,6 +68,12 @@ pub fn handle(
     args: &[PyRep],
     caller_trace: Option<&str>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    if service == "trademgr" && method == "InitiateTrade" {
+        return Some(
+            super::wallet_services_ext::initiate_trade_session(ctx, session, args)
+                .map(|bid| ctx.bound_object_rep(bid, caller_trace)),
+        );
+    }
     // rpc-lint: allow devtools svc_dgmattr.pyj AttributeInspector remote call
     if service == "i2" {
         if !session.has_gm_role() {

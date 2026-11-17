@@ -2446,10 +2446,7 @@ fn normalize_destiny_payload_arg(rep: PyRep) -> PyRep {
                     .into_iter()
                     .filter(|it| {
                         let fname = destiny_entry_func_name(it);
-                        fname != Some("OnDockingAccepted")
-                            && fname != Some("OnClientControllerEvent")
-                            && fname != Some("OnDroneActivityChange")
-                            && !(has_ball_add && fname == Some("OnSlimItemChange"))
+                        !(has_ball_add && fname == Some("OnSlimItemChange"))
                             && !(has_set_state
                                 && matches!(
                                     fname,
@@ -2602,9 +2599,6 @@ pub fn should_suppress_macho_notification(event: &str, args: &[PyRep]) -> bool {
     {
         return true;
     }
-    if event == "OnTradeInitiate" && matches!(args.get(1), Some(PyRep::Integer(_))) {
-        return true;
-    }
     if event == "OnProgressionRoomJoined"
         && args
             .get(1)
@@ -2636,25 +2630,7 @@ pub fn should_suppress_macho_notification(event: &str, args: &[PyRep]) -> bool {
 }
 
 fn normalize_destiny_update_arg(rep: PyRep) -> PyRep {
-    match rep {
-        PyRep::List(items) => {
-            PyRep::List(items.into_iter().map(normalize_destiny_update_arg).collect())
-        }
-        PyRep::Tuple(mut items) => {
-            if items.len() == 2 {
-                if let (Some(name), Some(PyRep::Tuple(ev_args))) = (items[0].as_str(), items.get(1))
-                {
-                    if name == "OnDockingAccepted" && ev_args.len() >= 3 {
-                        let station_id = ev_args[2].clone();
-                        items[1] = PyRep::Tuple(vec![station_id]);
-                        return PyRep::Tuple(items);
-                    }
-                }
-            }
-            PyRep::Tuple(items.into_iter().map(normalize_destiny_update_arg).collect())
-        }
-        other => other,
-    }
+    rep
 }
 
 /// Normalizes MachoNet broadcast notifications for live EVE V24.01 clients.
@@ -2722,49 +2698,6 @@ pub fn normalize_macho_notification_with_sde(
                 }
             }
             args
-        }
-        "OnBeanPrime" => {
-            let dict_to_bean_kv = |entries: Vec<(PyRep, PyRep)>| {
-                let mut map = HashMap::new();
-                for (k, v) in entries {
-                    if let Some(ks) = k.as_str() {
-                        map.insert(ks.to_string(), v);
-                    }
-                }
-                map.entry("errorID".into()).or_insert(PyRep::Integer(0));
-                map.entry("errorKeyHash".into())
-                    .or_insert(PyRep::String(String::new()));
-                map.entry("logMode".into()).or_insert(PyRep::Integer(0));
-                PyRep::KeyVal(map)
-            };
-            let raw_items = if args.len() == 1 {
-                match args.into_iter().next().unwrap() {
-                    PyRep::List(items) => items,
-                    other => vec![other],
-                }
-            } else {
-                args
-            };
-            let beans: Vec<PyRep> = raw_items
-                .into_iter()
-                .filter_map(|a| match a {
-                    PyRep::Integer(err_id) => Some(PyRep::keyval([
-                        ("errorID", PyRep::Integer(err_id)),
-                        ("errorKeyHash", PyRep::String(String::new())),
-                        ("logMode", PyRep::Integer(0)),
-                    ])),
-                    PyRep::Dict(entries) => Some(dict_to_bean_kv(entries)),
-                    PyRep::KeyVal(mut map) => {
-                        map.entry("errorID".into()).or_insert(PyRep::Integer(0));
-                        map.entry("errorKeyHash".into())
-                            .or_insert(PyRep::String(String::new()));
-                        map.entry("logMode".into()).or_insert(PyRep::Integer(0));
-                        Some(PyRep::KeyVal(map))
-                    }
-                    _ => None,
-                })
-                .collect();
-            vec![PyRep::List(beans)]
         }
         "OnCorporationRecruitmentAdChanged" => Vec::new(),
         "OnOrganizationContactsUpdated" => {

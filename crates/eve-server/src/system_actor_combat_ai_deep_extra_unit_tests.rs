@@ -562,9 +562,11 @@ async fn system_registry_actor_commands_tidi_ecm_burst_warp_reconcile_and_hooks(
     let (pos2, arrived2) = handle.reconcile_disconnected_warp_sync(ship_2, far_dest);
     assert!(!arrived2 && (pos2 - pre_warp_pos2).length() < 1e-6);
 
-    // AcceptDocking + RemoveBall preserve queued OnDockingAccepted observer events for departing ships
+    // AcceptDocking preserves already-queued observer events for departing ships without emitting destiny OnDockingAccepted (#1188)
+    handle.emit_observer_destiny_event(ship_1, eve_destiny::DestinyEvent::Stop { ball_id: ship_1 }).await;
     handle.accept_docking(ship_1, 60_003_760, DVec3::ZERO).await.unwrap();
     assert!(handle.remove_ball(ship_2).await.is_some());
     let bcast_after = handle.step_manual(0.1).await.unwrap();
     assert!(bcast_after.observer_events.contains_key(&ship_1));
+    assert!(!bcast_after.observer_events.contains_key(&ship_2));
 }

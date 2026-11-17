@@ -372,6 +372,32 @@ impl ServerContext {
         }
     }
 
+    fn insert_bound_entry_record(&self, entry: BoundObjectEntry) {
+        let mut map = self
+            .bound_objects
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if entry.session_id != 0 {
+            let session_count = map
+                .values()
+                .filter(|e| e.session_id == entry.session_id)
+                .count();
+            if session_count >= MAX_BOUND_OBJECTS_PER_SESSION {
+                let excess = session_count - MAX_BOUND_OBJECTS_PER_SESSION + 1;
+                let mut session_bids: Vec<u64> = map
+                    .values()
+                    .filter(|e| e.session_id == entry.session_id)
+                    .map(|e| e.bound_id)
+                    .collect();
+                session_bids.sort_unstable();
+                for old_bid in session_bids.into_iter().take(excess) {
+                    map.remove(&old_bid);
+                }
+            }
+        }
+        map.insert(entry.bound_id, entry);
+    }
+
     fn insert_bound_entry(
         &self,
         session: &SessionState,
@@ -389,27 +415,60 @@ impl ServerContext {
             service,
             object_id,
         );
-        let mut map = self
-            .bound_objects
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let session_count = map
-            .values()
-            .filter(|e| e.session_id == session.session_id)
-            .count();
-        if session_count >= MAX_BOUND_OBJECTS_PER_SESSION {
-            let excess = session_count - MAX_BOUND_OBJECTS_PER_SESSION + 1;
-            let mut session_bids: Vec<u64> = map
-                .values()
-                .filter(|e| e.session_id == session.session_id)
-                .map(|e| e.bound_id)
-                .collect();
-            session_bids.sort_unstable();
-            for old_bid in session_bids.into_iter().take(excess) {
-                map.remove(&old_bid);
+        self.insert_bound_entry_record(entry);
+    }
+
+    /// Binds a sub-object for `char_id` on their active online session (falling back to
+    /// `fallback_session` or DB character ownership with `session_id = 0` in headless tests),
+    /// returning `(bound_id, bound_object_wire_rep)`.
+    pub fn bind_sub_object_for_notification(
+        &self,
+        char_id: i64,
+        fallback_session: Option<&SessionState>,
+        service: &str,
+        object_id: i64,
+    ) -> Result<(u64, PyRep), BridgeRpcError> {
+        let fallback_pair = fallback_session
+            .filter(|s| s.character_id == Some(char_id))
+            .and_then(|s| s.user_id.map(|uid| (s.session_id, uid)));
+        let online_pair = fallback_pair.or_else(|| {
+            self.db.online_sessions_snapshot().into_iter().find_map(|(uid, sid)| {
+                self.db
+                    .get_online_session(uid)
+                    .filter(|rec| rec.character_id == Some(char_id))
+                    .map(|_| (sid, uid))
+            })
+        });
+        let (session_id, user_id) = match online_pair {
+            Some(pair) => pair,
+            None => {
+                let db_uid = self
+                    .db
+                    .get_character(char_id)
+                    .map(|c| c.user_id)
+                    .map_err(|_| BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: format!("character {char_id} not found for bound notification"),
+                        client_error: None,
+                    })?;
+                (0, db_uid)
             }
-        }
-        map.insert(bound_id, entry);
+        };
+        let bound_id = NEXT_BOUND_ID.fetch_add(1, Ordering::Relaxed);
+        let entry = self.make_bound_object_entry(
+            session_id,
+            bound_id,
+            user_id,
+            char_id,
+            service,
+            object_id,
+        );
+        let wire_rep = PyRep::SubStruct(Box::new(PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+            PyRep::ascii_bytes(entry.oid_str.clone()),
+            PyRep::Integer(entry.ref_id),
+        ])))));
+        self.insert_bound_entry_record(entry);
+        Ok((bound_id, wire_rep))
     }
 
     /// Parses a bound object ID from either an `"N=<nodeID>:<boundID>"` string or an integer `bound_id`.
@@ -555,28 +614,34 @@ impl ServerContext {
         None
     }
 
+    /// Wire form (`SubStruct(SubStream((b"N={nodeID}:{boundID}", refID)))`) of a bound-object
+    /// reference for Macho notifications delivered over `:26000`.
+    pub fn bound_object_wire_rep(&self, bound_id: u64) -> PyRep {
+        let (oid_str, ref_id) = self
+            .bound_objects
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&bound_id)
+            .map(|b| (b.oid_str.clone(), b.ref_id))
+            .unwrap_or_else(|| {
+                (
+                    format!("N={}:{bound_id}", eve_machonet::MACHO_PROXY_NODE_ID),
+                    (self.now_unix() as i64 + 11_644_473_600).saturating_mul(10_000_000),
+                )
+            });
+        PyRep::SubStruct(Box::new(PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+            PyRep::ascii_bytes(oid_str),
+            PyRep::Integer(ref_id),
+        ])))))
+    }
+
     /// Wire form of a bound-object reference. The native client (`caller_trace == "machoNet:26000"`)
     /// gets `SubStruct(SubStream((b"N={nodeID}:{boundID}", refID)))`, which `ObjectCall.GetObjectID`
     /// (`carbon/common/script/net/ObjectCallGPCS.pyj`) / `ParseObjectID` turn into a remote object;
     /// the JSON bridge gets the plain bound ID.
     pub fn bound_object_rep(&self, bound_id: u64, caller_trace: Option<&str>) -> PyRep {
         if caller_trace == Some("machoNet:26000") {
-            let (oid_str, ref_id) = self
-                .bound_objects
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&bound_id)
-                .map(|b| (b.oid_str.clone(), b.ref_id))
-                .unwrap_or_else(|| {
-                    (
-                        format!("N={}:{bound_id}", eve_machonet::MACHO_PROXY_NODE_ID),
-                        (self.now_unix() as i64 + 11_644_473_600).saturating_mul(10_000_000),
-                    )
-                });
-            PyRep::SubStruct(Box::new(PyRep::SubStream(Box::new(PyRep::Tuple(vec![
-                PyRep::ascii_bytes(oid_str),
-                PyRep::Integer(ref_id),
-            ])))))
+            self.bound_object_wire_rep(bound_id)
         } else {
             PyRep::Integer(bound_id as i64)
         }

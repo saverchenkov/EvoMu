@@ -128,7 +128,21 @@ fn station_direct_trade_edge_cases_abort_corrupt_singleton_and_reverse_isk() {
     )
     .unwrap()
     .unwrap();
-    let tid1 = init1.dict_get("tradeContainerID").unwrap().as_i64().unwrap();
+    let tid1_bid = init1.as_i64().unwrap();
+    let tid1 = call_wallet_ext(
+        &ctx,
+        &mut sess_a,
+        "trademgr",
+        "List",
+        &[PyRep::Integer(tid1_bid)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap()
+    .dict_get("tradeContainerID")
+    .unwrap()
+    .as_i64()
+    .unwrap();
 
     // Lookup via trade_id = 0
     let list_zero = call_wallet_ext(&ctx, &mut sess_a, "trademgr", "List", &[PyRep::Integer(0)], &kw)
@@ -166,7 +180,21 @@ fn station_direct_trade_edge_cases_abort_corrupt_singleton_and_reverse_isk() {
     )
     .unwrap()
     .unwrap();
-    let tid2 = init2.dict_get("tradeContainerID").unwrap().as_i64().unwrap();
+    let tid2_bid = init2.as_i64().unwrap();
+    let tid2 = call_wallet_ext(
+        &ctx,
+        &mut sess_a,
+        "trademgr",
+        "List",
+        &[PyRep::Integer(tid2_bid)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap()
+    .dict_get("tradeContainerID")
+    .unwrap()
+    .as_i64()
+    .unwrap();
 
     assert_eq!(
         call_wallet_ext(

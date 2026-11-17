@@ -4335,7 +4335,7 @@ async fn closed_gate_jump_does_not_load_destination() {
 
 #[tokio::test]
 async fn gate_fx_v24_controller_events_and_cloak_isolation() {
-    // parity: feat:navigation.stargate-jump, destiny:OnSpecialFX, destiny:OnClientControllerEvent, destiny:AddBalls2
+    // parity: feat:navigation.stargate-jump, destiny:OnSpecialFX, destiny:AddBalls2
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let gate = pick_non_special_roundtrip_gate(&ctx);

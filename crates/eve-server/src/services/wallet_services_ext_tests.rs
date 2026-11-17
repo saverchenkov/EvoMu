@@ -322,7 +322,21 @@ fn station_direct_trade_lifecycle_and_validation() {
     )
     .unwrap()
     .unwrap();
-    let trade_id = init.dict_get("tradeContainerID").unwrap().as_i64().unwrap();
+    let trade_bid = init.as_i64().unwrap();
+    let trade_id = handle(
+        &ctx,
+        &mut sess_a,
+        "trademgr",
+        "List",
+        &[PyRep::Integer(trade_bid)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap()
+    .dict_get("tradeContainerID")
+    .unwrap()
+    .as_i64()
+    .unwrap();
 
     let mut sess_b = char_session(char_b, 98_000_001);
     sess_b.station_id = Some(station_id);
@@ -482,10 +496,28 @@ fn station_direct_trade_completes_when_current_trade_item_is_escrowed_and_emits_
         .acquire_online_lock(502, 102, Some(char_b), false, ctx.now_unix())
         .unwrap();
 
-    let init = handle(&ctx, &mut sess_a, "trademgr", "InitiateTrade", &[PyRep::Integer(char_b)], &HashMap::new())
+    let init_trade_container_id = |sess: &mut SessionState, target: i64| {
+        let init = handle(
+            &ctx,
+            sess,
+            "trademgr",
+            "InitiateTrade",
+            &[PyRep::Integer(target)],
+            &HashMap::new(),
+        )
         .unwrap()
         .unwrap();
-    let trade_id = init.dict_get("tradeContainerID").unwrap().as_i64().unwrap();
+        let bid = init.as_i64().unwrap();
+        handle(&ctx, sess, "trademgr", "List", &[PyRep::Integer(bid)], &HashMap::new())
+            .unwrap()
+            .unwrap()
+            .dict_get("tradeContainerID")
+            .unwrap()
+            .as_i64()
+            .unwrap()
+    };
+
+    let trade_id = init_trade_container_id(&mut sess_a, char_b);
     let _ = ctx.drain_notifications_for_char(char_a);
     let _ = ctx.drain_notifications_for_char(char_b);
 
@@ -516,10 +548,7 @@ fn station_direct_trade_completes_when_current_trade_item_is_escrowed_and_emits_
     assert!(ctx.drain_notifications_for_char(char_b).iter().any(|n| n.event == "OnItemChange"));
 
     // #848: Abort removes -73 trade note so List returns TradeNotFound
-    let init2 = handle(&ctx, &mut sess_a, "trademgr", "InitiateTrade", &[PyRep::Integer(char_b)], &HashMap::new())
-        .unwrap()
-        .unwrap();
-    let trade_id2 = init2.dict_get("tradeContainerID").unwrap().as_i64().unwrap();
+    let trade_id2 = init_trade_container_id(&mut sess_a, char_b);
     assert!(handle(&ctx, &mut sess_a, "trademgr", "List", &[PyRep::Integer(trade_id2)], &HashMap::new()).unwrap().is_ok());
     handle(&ctx, &mut sess_a, "trademgr", "Abort", &[PyRep::Integer(trade_id2)], &HashMap::new())
         .unwrap()
@@ -528,10 +557,7 @@ fn station_direct_trade_completes_when_current_trade_item_is_escrowed_and_emits_
     assert!(ctx.db.with_snapshot(|s| !s.owner_notes.contains_key(&super::trade_note_id(trade_id2))));
 
     // #848: Logout cancels open trade, unlocks items, and emits OnTradeCancel
-    let init3 = handle(&ctx, &mut sess_a, "trademgr", "InitiateTrade", &[PyRep::Integer(char_b)], &HashMap::new())
-        .unwrap()
-        .unwrap();
-    let trade_id3 = init3.dict_get("tradeContainerID").unwrap().as_i64().unwrap();
+    let trade_id3 = init_trade_container_id(&mut sess_a, char_b);
     handle(&ctx, &mut sess_b, "trademgr", "AddItem", &[PyRep::Integer(trade_id3), PyRep::Integer(item_id), PyRep::Integer(1)], &HashMap::new())
         .unwrap()
         .unwrap();
@@ -546,10 +572,7 @@ fn station_direct_trade_completes_when_current_trade_item_is_escrowed_and_emits_
     // #848: Undocking mid-trade still commits -73 note removal & emits OnTradeCancel while returning NotDockedAtStation
     let _ = ctx.drain_notifications_for_char(char_a);
     let _ = ctx.drain_notifications_for_char(char_b);
-    let init4 = handle(&ctx, &mut sess_a, "trademgr", "InitiateTrade", &[PyRep::Integer(char_b)], &HashMap::new())
-        .unwrap()
-        .unwrap();
-    let trade_id4 = init4.dict_get("tradeContainerID").unwrap().as_i64().unwrap();
+    let trade_id4 = init_trade_container_id(&mut sess_a, char_b);
     ctx.db.with_mut_snapshot(|s| {
         if let Some(cb) = s.characters.get_mut(&char_b) {
             cb.station_id = None;

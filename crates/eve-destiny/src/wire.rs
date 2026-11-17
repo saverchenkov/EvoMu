@@ -1252,41 +1252,6 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
             PyRep::String("OnAudioActivated".into()),
             PyRep::Tuple(Vec::new()),
         ]),
-        DestinyEvent::OnDockingAccepted {
-            start_pos,
-            end_pos,
-            station_id,
-        } => PyRep::Tuple(vec![
-            PyRep::String("OnDockingAccepted".into()),
-            PyRep::Tuple(vec![
-                PyRep::List(vec![
-                    PyRep::Real(start_pos[0]),
-                    PyRep::Real(start_pos[1]),
-                    PyRep::Real(start_pos[2]),
-                ]),
-                PyRep::List(vec![
-                    PyRep::Real(end_pos[0]),
-                    PyRep::Real(end_pos[1]),
-                    PyRep::Real(end_pos[2]),
-                ]),
-                PyRep::Integer(*station_id),
-            ]),
-        ]),
-        DestinyEvent::OnDroneActivityChange {
-            drone_id,
-            activity_state,
-            activity,
-        } => PyRep::Tuple(vec![
-            PyRep::String("OnDroneActivityChange".into()),
-            PyRep::Tuple(vec![
-                PyRep::Integer(*drone_id),
-                PyRep::Integer(*activity_state),
-                activity
-                    .as_deref()
-                    .map(|s| PyRep::String(s.into()))
-                    .unwrap_or(PyRep::None),
-            ]),
-        ]),
         DestinyEvent::OnDroneControlLost { drone_id } => PyRep::Tuple(vec![
             PyRep::String("OnDroneControlLost".into()),
             PyRep::Tuple(vec![PyRep::Integer(*drone_id)]),

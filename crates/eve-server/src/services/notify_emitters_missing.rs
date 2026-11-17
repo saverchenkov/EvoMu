@@ -3,10 +3,10 @@
 #![forbid(unsafe_code)]
 
 use crate::router::notify_registry::{
-    OnBeanPrime, OnClearFetchedData, OnClientEventMarketItemReceived, OnDungeonCameraInterest,
-    OnDungeonTriggerAmbientSound, OnDungeonTriggerAudio, OnDungeonTriggerMessage,
-    OnDungeonTriggerMusic, OnEffectMessage, OnFlaggedListsChange, OnNotificationUndeleted,
-    OnPlexDepositFailed, OnPlexWithdrawFailed,
+    BeanPrimeItem, OnBeanPrime, OnClearFetchedData, OnClientEventMarketItemReceived,
+    OnDungeonCameraInterest, OnDungeonTriggerAmbientSound, OnDungeonTriggerAudio,
+    OnDungeonTriggerMessage, OnDungeonTriggerMusic, OnEffectMessage, OnFlaggedListsChange,
+    OnNotificationUndeleted, OnPlexDepositFailed, OnPlexWithdrawFailed,
 };
 use crate::router::{NotificationTarget, ServerContext};
 use eve_proto::PyRep;
@@ -71,23 +71,9 @@ pub fn emit_plex_withdraw_failed(
 pub fn emit_bean_prime(
     ctx: &ServerContext,
     target: NotificationTarget,
-    beans: Vec<(i64, i64, String)>,
+    beans: Vec<BeanPrimeItem>,
 ) {
-    let dict_entries = beans
-        .into_iter()
-        .map(|(hash, err_id, mode)| {
-            (
-                PyRep::Integer(hash),
-                PyRep::Tuple(vec![PyRep::Integer(err_id), PyRep::String(mode)]),
-            )
-        })
-        .collect();
-    ctx.emit_typed(
-        target,
-        OnBeanPrime {
-            beans: PyRep::Dict(dict_entries),
-        },
-    );
+    ctx.emit_typed(target, OnBeanPrime { beans });
 }
 
 /// Emits `OnClearFetchedData()` (`0` args, cluster broadcast).

@@ -604,8 +604,8 @@ impl SystemHandle {
         rx.await.ok().flatten()
     }
 
-    /// Atomically removes `ship_id` for docking at `station_id` (`#842`, `#917` E-2),
-    /// emitting `OnDockingAccepted` and returning its final `TakenBall` snapshot,
+    /// Atomically removes `ship_id` for docking at `station_id` (`#842`, `#917` E-2, `#1188`),
+    /// preserving any queued observer events and returning its final `TakenBall` snapshot,
     /// or `None` if `ship_id` is not present in space.
     pub async fn take_ball_for_docking(
         &self,

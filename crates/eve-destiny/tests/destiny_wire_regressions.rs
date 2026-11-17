@@ -354,25 +354,7 @@ async fn test_destiny_ballpark_state_events_fleet_and_controllers() {
     assert_eq!(au_action[0].as_str(), Some("OnAudioActivated"));
     assert_eq!(au_action[1], PyRep::Tuple(Vec::new()));
 
-    // 9. OnDockingAccepted
-    let dock_rep = encode_destiny_event(50, &DestinyEvent::OnDockingAccepted {
-        start_pos: [100.0, 200.0, 300.0],
-        end_pos: [0.0, 0.0, 0.0],
-        station_id: 60_003_760,
-    }, Some(&park));
-    let PyRep::Tuple(dk_outer) = &dock_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(dk_action) = &dk_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(dk_action[0].as_str(), Some("OnDockingAccepted"));
-    assert_eq!(
-        dk_action[1],
-        PyRep::Tuple(vec![
-            PyRep::List(vec![PyRep::Real(100.0), PyRep::Real(200.0), PyRep::Real(300.0)]),
-            PyRep::List(vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
-            PyRep::Integer(60_003_760),
-        ])
-    );
-
-    // 10. ScatterEwars
+    // 9. ScatterEwars
     let ewar_data = vec![0xDE, 0xAD, 0xBE, 0xEF];
     let ew_rep = encode_destiny_event(51, &DestinyEvent::ScatterEwars {
         ball_id: ship_id,
@@ -441,42 +423,7 @@ async fn test_destiny_dogma_buffs_dot_and_drone_events() {
     let PyRep::Tuple(dsc2_action) = &dsc2_outer[1] else { panic!("Expected action tuple") };
     assert_eq!(dsc2_action[0].as_str(), Some("OnDroneStateChange2"));
 
-    // 5. OnDroneActivityChange: ("OnDroneActivityChange", (drone_id, activity_state, activity))
-    let dac_rep = encode_destiny_event(64, &DestinyEvent::OnDroneActivityChange {
-        drone_id,
-        activity_state: 4, // Returning
-        activity: Some("returning".into()),
-    }, Some(&park));
-    let PyRep::Tuple(dac_outer) = &dac_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(dac_action) = &dac_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(dac_action[0].as_str(), Some("OnDroneActivityChange"));
-    assert_eq!(
-        dac_action[1],
-        PyRep::Tuple(vec![
-            PyRep::Integer(drone_id),
-            PyRep::Integer(4),
-            PyRep::String("returning".into()),
-        ])
-    );
-
-    let dac_idle_rep = encode_destiny_event(64, &DestinyEvent::OnDroneActivityChange {
-        drone_id,
-        activity_state: 0,
-        activity: None,
-    }, Some(&park));
-    let PyRep::Tuple(dac_idle_outer) = &dac_idle_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(dac_idle_action) = &dac_idle_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(dac_idle_action[0].as_str(), Some("OnDroneActivityChange"));
-    assert_eq!(
-        dac_idle_action[1],
-        PyRep::Tuple(vec![
-            PyRep::Integer(drone_id),
-            PyRep::Integer(0),
-            PyRep::None,
-        ])
-    );
-
-    // 6. OnDroneControlLost: ("OnDroneControlLost", (drone_id,))
+    // 5. OnDroneControlLost: ("OnDroneControlLost", (drone_id,))
     let dcl_rep = encode_destiny_event(65, &DestinyEvent::OnDroneControlLost { drone_id }, Some(&park));
     let PyRep::Tuple(dcl_outer) = &dcl_rep else { panic!("Expected tuple") };
     let PyRep::Tuple(dcl_action) = &dcl_outer[1] else { panic!("Expected action tuple") };

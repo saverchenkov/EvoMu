@@ -387,38 +387,21 @@ fn normalize_notices_covers_all_remaining_event_and_coercion_branches() {
         }
     }
 
-    // 3. OnBeanPrime: single list (Integer, Dict, KeyVal, ignored non-bean), single scalar, multi-arg
-    let bp_list = normalize_macho_notification(
-        "OnBeanPrime",
-        vec![PyRep::List(vec![
-            PyRep::Integer(111),
-            PyRep::Dict(vec![
-                (PyRep::String("errorID".into()), PyRep::Integer(222)),
-                (PyRep::Integer(99), PyRep::Bool(true)),
-            ]),
-            PyRep::keyval([("errorKeyHash", PyRep::String("abc".into()))]),
-            PyRep::None,
-        ])],
+    // 3. OnBeanPrime: client_compat rule removed (#1188); List[KeyVal] and arbitrary args pass through unchanged
+    let bp_input = vec![PyRep::List(vec![PyRep::keyval([
+        ("errorID", PyRep::Integer(222)),
+        ("errorKeyHash", PyRep::Integer(0x4B3A_1122)),
+        ("logMode", PyRep::String("B".into())),
+    ])])];
+    assert_eq!(normalize_macho_notification("OnBeanPrime", bp_input.clone()), bp_input);
+    assert_eq!(
+        normalize_macho_notification("OnBeanPrime", vec![PyRep::Integer(333)]),
+        vec![PyRep::Integer(333)]
     );
-    if let [PyRep::List(beans)] = bp_list.as_slice() {
-        assert_eq!(beans.len(), 3);
-        assert_eq!(beans[0].dict_get("errorID"), Some(&PyRep::Integer(111)));
-        assert_eq!(beans[1].dict_get("errorID"), Some(&PyRep::Integer(222)));
-        assert_eq!(beans[2].dict_get("errorID"), Some(&PyRep::Integer(0)));
-        assert_eq!(
-            beans[2].dict_get("errorKeyHash"),
-            Some(&PyRep::String("abc".into()))
-        );
-    } else {
-        panic!("expected single list of beans");
-    }
-    let bp_single = normalize_macho_notification("OnBeanPrime", vec![PyRep::Integer(333)]);
-    assert!(matches!(bp_single.as_slice(), [PyRep::List(v)] if v.len() == 1));
-    let bp_multi = normalize_macho_notification(
-        "OnBeanPrime",
-        vec![PyRep::Integer(1), PyRep::Integer(2)],
+    assert_eq!(
+        normalize_macho_notification("OnBeanPrime", vec![PyRep::Integer(1), PyRep::Integer(2)]),
+        vec![PyRep::Integer(1), PyRep::Integer(2)]
     );
-    assert!(matches!(bp_multi.as_slice(), [PyRep::List(v)] if v.len() == 2));
 
     // 4. OnOrganizationContactsUpdated: non-list second arg + standing field
     let org_non_list = normalize_macho_notification(

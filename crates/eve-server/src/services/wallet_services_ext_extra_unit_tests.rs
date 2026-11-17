@@ -468,7 +468,20 @@ fn store_handlers_inventory_fields_and_direct_trade_partial_and_full_item_versio
     )
     .unwrap()
     .unwrap();
-    let trade_id = trade.dict_get("tradeContainerID").and_then(|v| v.as_i64()).unwrap();
+    let trade_bid = trade.as_i64().unwrap();
+    let trade_id = call_wallet_ext(
+        &ctx,
+        &mut sess_a,
+        "trademgr",
+        "List",
+        &[PyRep::Integer(trade_bid)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap()
+    .dict_get("tradeContainerID")
+    .and_then(|v| v.as_i64())
+    .unwrap();
     assert!(trade_id > 0);
 
     for (iid, qty) in [(item_a_partial, 3_i64), (item_a_full, 4_i64)] {

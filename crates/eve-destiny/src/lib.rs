@@ -1065,16 +1065,6 @@ pub enum DestinyEvent {
         balls: Vec<Ball>,
     },
     OnAudioActivated,
-    OnDockingAccepted {
-        start_pos: [f64; 3],
-        end_pos: [f64; 3],
-        station_id: i64,
-    },
-    OnDroneActivityChange {
-        drone_id: BallId,
-        activity_state: i64,
-        activity: Option<String>,
-    },
     OnDroneControlLost {
         drone_id: BallId,
     },
@@ -1626,9 +1616,9 @@ impl Ballpark {
         Ok(())
     }
 
-    /// Accepts docking of `ship_id` into `station_id` (`destiny:OnDockingAccepted`), emitting
-    /// `OnDockingAccepted([ship_x, ship_y, ship_z], [station_x, station_y, station_z], stationID)`
-    /// (`Destiny.xmlp:697-715`) to `ship_id` and its grid observers before removing `ship_id` from space.
+    /// Removes `ship_id` from space for docking into `station_id` while preserving any
+    /// already-queued observer events for `ship_id`. The `OnDockingAccepted(itemID)` Macho
+    /// notification is emitted separately by the server (`#1188`).
     pub fn accept_docking(&mut self, ship_id: BallId, station_id: BallId) -> Option<Ball> {
         let station_pos = self
             .balls
@@ -1638,26 +1628,16 @@ impl Ballpark {
         self.accept_docking_at(ship_id, station_id, station_pos)
     }
 
-    /// Accepts docking of `ship_id` into `station_id` at explicit `station_pos` (`destiny:OnDockingAccepted`).
+    /// Removes `ship_id` from space for docking at `station_id` / `station_pos` while preserving
+    /// any already-queued observer events for `ship_id` (`#1188`).
     pub fn accept_docking_at(
         &mut self,
         ship_id: BallId,
         station_id: BallId,
         station_pos: DVec3,
     ) -> Option<Ball> {
-        let ship_pos = self.balls.get(&ship_id)?.position.to_array();
-        let ev = DestinyEvent::OnDockingAccepted {
-            start_pos: ship_pos,
-            end_pos: station_pos.to_array(),
-            station_id,
-        };
-        self.emit_event(Some(ship_id), ev);
-        let saved_obs = self.observer_events.remove(&ship_id).unwrap_or_default();
-        let removed = self.remove_ball(ship_id);
-        if !saved_obs.is_empty() {
-            self.observer_events.insert(ship_id, saved_obs);
-        }
-        removed
+        let _ = (station_id, station_pos);
+        self.remove_ball_preserving_observer_events(ship_id)
     }
 
     /// Updates `ball_id`'s force-field harmonic state and emits [`DestinyEvent::SetBallHarmonic`] (`destiny:SetBallHarmonic`).

@@ -305,12 +305,10 @@ async fn test_destiny_steering_navigation_and_warp() {
 // ============================================================================
 #[tokio::test]
 async fn test_destiny_ballpark_state_events_fleet_and_controllers() {
-    // parity: destiny:OnClientControllerEvent
     // parity: destiny:OnDamageStateChange, destiny:OnFleetDamageStateChange
     // parity: destiny:OnShipStateUpdate, destiny:OnSlimItemChange, destiny:OnSovereigntyChanged
     // parity: destiny:OnSpecialFX
     attest(&[
-        "destiny:OnClientControllerEvent",
         "destiny:OnDamageStateChange",
         "destiny:OnFleetDamageStateChange",
         "destiny:OnShipStateUpdate",
@@ -385,14 +383,7 @@ async fn test_destiny_ballpark_state_events_fleet_and_controllers() {
     assert_eq!(find_args("OnSpecialFX")[0], PyRep::Integer(ship_id));
     assert_eq!(find_args("OnSpecialFX")[1], PyRep::Integer(54_321));
     assert_eq!(find_args("OnSpecialFX")[5], PyRep::String("effects.Laser".into()));
-    assert_eq!(
-        find_act("OnDockingAccepted"),
-        PyRep::Tuple(vec![
-            PyRep::List(vec![PyRep::Real(100.0), PyRep::Real(200.0), PyRep::Real(300.0)]),
-            PyRep::List(vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
-            PyRep::Integer(station_id),
-        ])
-    );
+    assert!(!park.balls.contains_key(&dock_ship_id));
 }
 
 // ============================================================================

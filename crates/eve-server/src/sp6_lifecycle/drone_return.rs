@@ -94,14 +94,6 @@ pub async fn handle_cmd_return_bay(
                     target_id: Some(ship_id),
                 },
             ).await;
-            let _ = sys_handle.emit_destiny_event(
-                d.ball_id,
-                eve_destiny::DestinyEvent::OnDroneActivityChange {
-                    drone_id: d.drone_item_id,
-                    activity_state: 4,
-                    activity: Some("returning".into()),
-                },
-            ).await;
             ctx.emit_typed(
                 NotificationTarget::Character(char_id),
                 OnDroneStateChange {

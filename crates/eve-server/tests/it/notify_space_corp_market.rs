@@ -1440,7 +1440,7 @@ async fn notify_batch9_facilities_industry_trade_and_repackage_errors() {
         }
     });
     sess_a.station_id = Some(JITA_STATION);
-    let trade_res = rpc(
+    let trade_bid = rpc(
         &ctx,
         &mut sess_a,
         "trademgr",
@@ -1448,11 +1448,21 @@ async fn notify_batch9_facilities_industry_trade_and_repackage_errors() {
         &[PyRep::Integer(PILOT_B)],
     )
     .await
-    .expect("InitiateTrade");
-    let trade_id = match trade_res {
-        PyRep::KeyVal(kv) => kv.get("tradeContainerID").and_then(|v| v.as_i64()).unwrap_or(0),
-        _ => 0,
-    };
+    .expect("InitiateTrade")
+    .as_i64()
+    .unwrap_or(0);
+    let trade_id = rpc(
+        &ctx,
+        &mut sess_a,
+        "trademgr",
+        "List",
+        &[PyRep::Integer(trade_bid)],
+    )
+    .await
+    .expect("List trade")
+    .dict_get("tradeContainerID")
+    .and_then(|v| v.as_i64())
+    .unwrap_or(0);
     assert!(trade_id > 0);
     let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
 

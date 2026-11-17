@@ -251,7 +251,8 @@ async fn test_d6_industry_pi_and_market_wallet_history_durable_across_sqlite_res
         call_kw(&ctx, &mut sess_p1, "account", "GiveCashFromCorpAccount", &[PyRep::Integer(P2), PyRep::Real(50_000.0), PyRep::Integer(1000)], &[("reason", PyRep::String("Corp dividend".into()))]).await.expect("GiveCashFromCorpAccount");
 
         let bill_id = eve_server::services::wallet_serverops::create_bill(&ctx, 2, CORP_ID, 1_000_035, 250_000.0, ctx.now_unix() + 86_400, 0.0, JITA_STATION_ID, 0);
-        let trade_id = call(&ctx, &mut sess_p1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)]).await.expect("InitiateTrade").dict_get("tradeContainerID").and_then(|v| v.as_i64()).unwrap();
+        let trade_bid = call(&ctx, &mut sess_p1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)]).await.expect("InitiateTrade").as_i64().unwrap();
+        let trade_id = call(&ctx, &mut sess_p1, "trademgr", "List", &[PyRep::Integer(trade_bid)]).await.expect("List trade").dict_get("tradeContainerID").and_then(|v| v.as_i64()).unwrap();
         call(&ctx, &mut sess_p1, "trademgr", "OfferMoney", &[PyRep::Integer(trade_id), PyRep::Real(125_000.0)]).await.expect("OfferMoney");
         let tr_docked = call(&ctx, &mut sess_p1, "trademgr", "List", &[PyRep::Integer(trade_id)]).await.expect("trademgr.List while docked");
         assert_eq!(tr_docked.dict_get("myMoney").and_then(|v| v.as_f64()), Some(125_000.0));

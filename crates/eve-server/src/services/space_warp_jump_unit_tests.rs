@@ -2281,7 +2281,7 @@ async fn run_stargate_jump_fx_probe(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stargate_jump_never_emits_gate_activity_across_standard_and_damaged_gates() {
-    // parity: feat:navigation.stargate-jump, destiny:OnSpecialFX, destiny:OnClientControllerEvent, destiny:SetState
+    // parity: feat:navigation.stargate-jump, destiny:OnSpecialFX, destiny:SetState
     // Standard Maurasi -> Perimeter stargate (`type_id=16`) and damaged Maurasi -> Jita gate (`type_id=93250`).
     for (gate_id, expected_gate_type_id, ship_id, sess_id) in [
         (50_016_474_i64, 16_u32, 895_451_i64, 98_051_u64),

@@ -123,49 +123,29 @@ fn macho_notifications_docking_destiny_channel_bookmarks_and_beans() {
         vec![PyRep::Integer(1)]
     );
 
-    // DoDestinyUpdate: rewrites nested OnDockingAccepted inside List/Tuple, preserves other entries
-    let destiny = normalize_macho_notification(
-        "DoDestinyUpdate",
-        vec![PyRep::List(vec![
+    // DoDestinyUpdate: rule D01 removed (#1188), so OnDockingAccepted and all other entries pass through unchanged.
+    let destiny_input = vec![PyRep::List(vec![
+        PyRep::Tuple(vec![
+            PyRep::String("OnDockingAccepted".into()),
             PyRep::Tuple(vec![
-                PyRep::String("OnDockingAccepted".into()),
-                PyRep::Tuple(vec![
-                    PyRep::Integer(100),
-                    PyRep::Integer(200),
-                    PyRep::Integer(60_003_760),
-                ]),
+                PyRep::Integer(100),
+                PyRep::Integer(200),
+                PyRep::Integer(60_003_760),
             ]),
-            PyRep::Tuple(vec![
-                PyRep::String("OnDockingAccepted".into()),
-                PyRep::Tuple(vec![PyRep::Integer(1)]),
-            ]),
-            PyRep::Tuple(vec![
-                PyRep::String("AddBalls2".into()),
-                PyRep::Integer(42),
-                PyRep::None,
-            ]),
-            PyRep::Integer(7),
-        ])],
-    );
-    assert_eq!(
-        destiny,
-        vec![PyRep::List(vec![
-            PyRep::Tuple(vec![
-                PyRep::String("OnDockingAccepted".into()),
-                PyRep::Tuple(vec![PyRep::Integer(60_003_760)]),
-            ]),
-            PyRep::Tuple(vec![
-                PyRep::String("OnDockingAccepted".into()),
-                PyRep::Tuple(vec![PyRep::Integer(1)]),
-            ]),
-            PyRep::Tuple(vec![
-                PyRep::String("AddBalls2".into()),
-                PyRep::Integer(42),
-                PyRep::None,
-            ]),
-            PyRep::Integer(7),
-        ])]
-    );
+        ]),
+        PyRep::Tuple(vec![
+            PyRep::String("OnDockingAccepted".into()),
+            PyRep::Tuple(vec![PyRep::Integer(1)]),
+        ]),
+        PyRep::Tuple(vec![
+            PyRep::String("AddBalls2".into()),
+            PyRep::Integer(42),
+            PyRep::None,
+        ]),
+        PyRep::Integer(7),
+    ])];
+    let destiny = normalize_macho_notification("DoDestinyUpdate", destiny_input.clone());
+    assert_eq!(destiny, destiny_input);
 
     // OnChannelJoined: empty vs non-empty
     assert!(normalize_macho_notification("OnChannelJoined", vec![]).is_empty());
@@ -221,39 +201,21 @@ fn macho_notifications_docking_destiny_channel_bookmarks_and_beans() {
     };
     assert_eq!(p2[2], existing_tuple);
 
-    // OnBeanPrime: single list, single scalar, multiple args, Dict/KeyVal/Integer/ignored
-    let bp_list = normalize_macho_notification(
-        "OnBeanPrime",
-        vec![PyRep::List(vec![
-            PyRep::Integer(404),
-            PyRep::Dict(vec![
-                (PyRep::String("errorID".into()), PyRep::Integer(500)),
-                (PyRep::Integer(1), PyRep::String("skip".into())),
-            ]),
-            PyRep::keyval([("logMode", PyRep::Integer(2))]),
-            PyRep::None,
-        ])],
+    // OnBeanPrime: client_compat rule removed (#1188); List[KeyVal] and arbitrary inputs pass through unchanged.
+    let bp_input = vec![PyRep::List(vec![PyRep::keyval([
+        ("errorID", PyRep::Integer(404)),
+        ("errorKeyHash", PyRep::Integer(0x1234)),
+        ("logMode", PyRep::String("B".into())),
+    ])])];
+    assert_eq!(normalize_macho_notification("OnBeanPrime", bp_input.clone()), bp_input);
+    assert_eq!(
+        normalize_macho_notification("OnBeanPrime", vec![PyRep::Integer(7)]),
+        vec![PyRep::Integer(7)]
     );
-    let PyRep::List(beans) = &bp_list[0] else {
-        panic!("expected list");
-    };
-    assert_eq!(beans.len(), 3);
-    assert_eq!(beans[0].dict_get("errorID"), Some(&PyRep::Integer(404)));
-    assert_eq!(beans[1].dict_get("errorID"), Some(&PyRep::Integer(500)));
-    assert_eq!(beans[1].dict_get("logMode"), Some(&PyRep::Integer(0)));
-    assert_eq!(beans[2].dict_get("errorID"), Some(&PyRep::Integer(0)));
-    assert_eq!(beans[2].dict_get("logMode"), Some(&PyRep::Integer(2)));
-
-    let bp_single = normalize_macho_notification("OnBeanPrime", vec![PyRep::Integer(7)]);
-    assert_eq!(bp_single.len(), 1);
-    let bp_multi = normalize_macho_notification(
-        "OnBeanPrime",
-        vec![PyRep::Integer(1), PyRep::Integer(2)],
+    assert_eq!(
+        normalize_macho_notification("OnBeanPrime", vec![PyRep::Integer(1), PyRep::Integer(2)]),
+        vec![PyRep::Integer(1), PyRep::Integer(2)]
     );
-    let PyRep::List(bm) = &bp_multi[0] else {
-        panic!("expected list");
-    };
-    assert_eq!(bm.len(), 2);
 }
 
 #[test]

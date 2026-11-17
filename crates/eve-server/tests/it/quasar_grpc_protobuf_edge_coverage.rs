@@ -458,7 +458,10 @@ async fn quasar_grpc_h2c_transport_auth_compression_and_normalizer_edges() {
         vec![PyRep::Bool(true)]
     );
     assert!(normalize_macho_notification("DoDestinyUpdate", vec![]).is_empty());
-    assert!(normalize_macho_notification("OnBeanPrime", vec![PyRep::None]).len() >= 1);
+    assert_eq!(
+        normalize_macho_notification("OnBeanPrime", vec![PyRep::None]),
+        vec![PyRep::None]
+    );
     assert!(normalize_macho_notification("OnOrganizationContactsUpdated", vec![PyRep::Integer(5)]).len() >= 1);
     assert!(normalize_macho_notification("OnSharedBookmarksFolderUpdated", vec![PyRep::Integer(5)]).len() >= 1);
 

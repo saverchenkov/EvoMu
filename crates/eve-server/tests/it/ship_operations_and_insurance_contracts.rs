@@ -979,7 +979,7 @@ async fn test_r2_track5_economy_market_and_trading() {
     let init_res = ctx.dispatch_rpc(&mut sess, "trademgr", None, "InitiateTrade", &[PyRep::Integer(char_b)], &kw, None).await.unwrap();
     let trade_id = match init_res {
         PyRep::KeyVal(kv) => kv.get("tradeContainerID").or_else(|| kv.get("tradeID")).and_then(|v| v.as_i64()).unwrap_or(0),
-        PyRep::Integer(id) => id,
+        PyRep::Integer(bid) => ctx.dispatch_rpc(&mut sess, "trademgr", None, "List", &[PyRep::Integer(bid)], &kw, None).await.unwrap().dict_get("tradeContainerID").and_then(|v| v.as_i64()).unwrap_or(0),
         _ => 0,
     };
     ctx.db.with_mut_snapshot(|s| {
