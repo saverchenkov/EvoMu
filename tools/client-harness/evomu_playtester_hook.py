@@ -3120,7 +3120,13 @@ def _get_state_snapshot(sm):
     except Exception:
         pass
 
-    inventory_state = {"hangar_item_count": None, "cargo_item_count": None, "ship_hangar_count": None}
+    inventory_state = {
+        "hangar_item_count": None,
+        "hangar_total_quantity": None,
+        "cargo_item_count": None,
+        "cargo_total_quantity": None,
+        "ship_hangar_count": None,
+    }
     try:
         ic_svc = getattr(sm, "services", {}).get("invCache")
         invs = getattr(ic_svc, "inventories", None) if ic_svc is not None else None
@@ -3134,6 +3140,15 @@ def _get_state_snapshot(sm):
                     return int(val) if val is not None else None
                 except Exception:
                     return None
+
+            def _item_qty(rec):
+                val = rec.get("stacksize") if isinstance(rec, dict) else getattr(rec, "stacksize", None)
+                if val is None:
+                    val = rec.get("quantity") if isinstance(rec, dict) else getattr(rec, "quantity", None)
+                try:
+                    return max(0, int(val)) if val is not None else 1
+                except Exception:
+                    return 1
 
             for ik, iv in invs.items():
                 items_attr = getattr(iv, "items", None)
@@ -3154,17 +3169,56 @@ def _get_state_snapshot(sm):
                     is_hangar = loc_k in st_locs and flag_k == 4
                 else:
                     continue
+                item_vals = list(items_attr.values()) if isinstance(items_attr, dict) else (
+                    list(items_attr) if isinstance(items_attr, (list, tuple, set)) else []
+                )
                 if is_cargo:
                     inventory_state["cargo_item_count"] = cnt
+                    if cnt is not None:
+                        inventory_state["cargo_total_quantity"] = sum(_item_qty(it) for it in item_vals)
                 elif is_hangar and cnt is not None:
                     inventory_state["hangar_item_count"] = cnt
-                    item_vals = list(items_attr.values()) if isinstance(items_attr, dict) else (
-                        list(items_attr) if isinstance(items_attr, (list, tuple, set)) else []
-                    )
+                    inventory_state["hangar_total_quantity"] = sum(_item_qty(it) for it in item_vals)
                     ship_cnt = sum(1 for it in item_vals if _item_category_id(it) == 6)
                     if inventory_state["ship_hangar_count"] is None:
                         inventory_state["ship_hangar_count"] = 0
                     inventory_state["ship_hangar_count"] += ship_cnt
+    except Exception:
+        pass
+
+    clone_state = {"home_station_id": None, "jump_clone_count": None}
+    try:
+        svcs_map = getattr(sm, "services", {}) if sm is not None else {}
+        jc_svc = svcs_map.get("jumpCloneSvc") or svcs_map.get("clonejump")
+        if jc_svc is not None:
+            for attr in ("homeStationID", "_homeStationID", "home_station_id"):
+                hv = getattr(jc_svc, attr, None)
+                if hv:
+                    clone_state["home_station_id"] = int(hv)
+                    break
+            c_state = getattr(jc_svc, "cloneState", None) or getattr(jc_svc, "_cloneState", None)
+            if c_state is not None:
+                if clone_state["home_station_id"] is None:
+                    hv = (
+                        c_state.get("homeStationID")
+                        if isinstance(c_state, dict)
+                        else getattr(c_state, "homeStationID", None)
+                    )
+                    if hv:
+                        clone_state["home_station_id"] = int(hv)
+                jc_list = (
+                    c_state.get("clones")
+                    if isinstance(c_state, dict)
+                    else getattr(c_state, "clones", None)
+                )
+                if isinstance(jc_list, (list, tuple, dict, set)):
+                    clone_state["jump_clone_count"] = len(jc_list)
+            if clone_state["jump_clone_count"] is None:
+                for cattr in ("jumpClones", "_jumpClones", "clones", "_clones"):
+                    jc_val = getattr(jc_svc, cattr, None)
+                    if isinstance(jc_val, (list, tuple, dict, set)):
+                        clone_state["jump_clone_count"] = len(jc_val)
+                        break
     except Exception:
         pass
 
@@ -3253,6 +3307,7 @@ def _get_state_snapshot(sm):
         "skills_state": skills_state,
         "wallet_state": wallet_state,
         "inventory_state": inventory_state,
+        "clone_state": clone_state,
         "market_state": market_state,
         "bookmarks_state": bookmarks_state,
         "autopilot_state": autopilot_state,
@@ -3533,6 +3588,215 @@ def _cleanup_utility_windows(sm, keep_chat=True):
     }
 
 
+cmd_map = {
+    "inventory": "OpenInventory",
+    "cargohold": "OpenCargoHoldOfActiveShip",
+    "shiphangar": "OpenShipHangar",
+    "itemhangar": "OpenHangarFloor",
+    "market": "OpenMarket",
+    "marketorders": "OpenMarketOrders",
+    "multibuy": "OpenMultibuy",
+    "charsheet": "OpenCharactersheet",
+    "charactersheet": "OpenCharactersheet",
+    "character": "OpenCharactersheet",
+    "skills": "OpenSkillsWindow",
+    "skillqueue": "OpenSkillsWindow",
+    "skillswindow": "OpenSkillsWindow",
+    "skilltree": "OpenSkillTreeWindow",
+    "skillplan": "OpenSkillsWindow",
+    "skillplans": "OpenSkillsWindow",
+    "nes": "ToggleAurumStore",
+    "newedenstore": "ToggleAurumStore",
+    "plexstore": "ToggleAurumStore",
+    "aurumstore": "ToggleAurumStore",
+    "store": "ToggleAurumStore",
+    "plexvault": "OpenPlexVault",
+    "fitting": "OpenFitting",
+    "fittingmgmt": "OpenFittingMgmt",
+    "contracts": "OpenContracts",
+    "industry": "OpenIndustry",
+    "planets": "OpenPlanets",
+    "pi": "OpenPlanets",
+    "corp": "OpenCorporationPanel",
+    "corporation": "OpenCorporationPanel",
+    "fleet": "OpenFleet",
+    "agency": "OpenAgencyNew",
+    "jobboard": "OpenJobBoardWindow",
+    "opportunities": "OpenJobBoardWindow",
+    "assets": "OpenAssets",
+    "wallet": "OpenWallet",
+    "mail": "OpenMail",
+    "notifications": "OpenNotificationReadingWnd",
+    "notification": "OpenNotificationReadingWnd",
+    "notificationpanel": "OpenNotificationReadingWnd",
+    "map": "CmdToggleMap",
+    "solarsystemmap": "CmdToggleSolarSystemMap",
+    "dscan": "OpenDirectionalScanner",
+    "directionalscanner": "OpenDirectionalScanner",
+    "probe": "OpenProbeScanner",
+    "probescanner": "OpenProbeScanner",
+    "scanner": "OpenProbeScanner",
+    "notepad": "OpenNotepad",
+    "calculator": "OpenCalculator",
+    "calendar": "OpenCalendar",
+    "journal": "OpenJournal",
+    "agentfinder": "OpenAgencyContentGroup",
+    "lpstore": "OpenLpstore",
+    "repair": "OpenRepairshop",
+    "repairshop": "OpenRepairshop",
+    "reprocessing": "OpenReprocessingPlant",
+    "reprocessingplant": "OpenReprocessingPlant",
+    "miningledger": "OpenLedger",
+    "ledger": "OpenLedger",
+    "mininghold": "OpenGeneralMiningHoldOfActiveShip",
+    "orehold": "OpenGeneralMiningHoldOfActiveShip",
+    "mineralhold": "OpenMineralHoldOfActiveShip",
+    "moonmining": "OpenMoonMining",
+    "insurance": "OpenInsurance",
+    "bountyoffice": "OpenBountyOffice",
+    "securityoffice": "OpenSecurityOffice",
+    "militia": "OpenMilitia",
+    "factionalwarfare": "OpenFwWindow",
+    "fw": "OpenFwWindow",
+    "insurgency": "OpenInsurgencyDashboard",
+    "skinr": "OpenShipSKINRWindow",
+    "shipskinr": "OpenShipSKINRWindow",
+    "structurebrowser": "OpenStructureBrowser",
+    "shiptree": "CmdToggleShipTree",
+    "isis": "CmdToggleShipTree",
+    "aircareerprogram": "OpenAchievementsWindow",
+    "acp": "OpenAchievementsWindow",
+    "peopleandplaces": "OpenPeopleAndPlaces",
+    "locations": "OpenLocations",
+    "bookmarks": "OpenLocations",
+    "compare": "OpenCompare",
+    "channels": "OpenChannels",
+    "chat": "OpenChannels",
+    "help": "OpenHelp",
+    "log": "OpenLog",
+}
+
+OPEN_WINDOW_GUARDS = {
+    "moonmining": "structure_control_only",
+    "dscan": "space_only",
+    "directionalscanner": "space_only",
+    "probe": "space_only",
+    "probescanner": "space_only",
+    "scanner": "space_only",
+    "lpstore": "docked_only",
+    "repair": "docked_only",
+    "repairshop": "docked_only",
+    "reprocessing": "docked_only",
+    "reprocessingplant": "docked_only",
+    "insurance": "docked_only",
+}
+
+
+OPEN_WINDOW_CMD_MAP = cmd_map
+
+
+def get_open_window_cmd_map():
+    return dict(cmd_map)
+
+
+def _click_top_tabs_in_window(target="", max_tabs=6):
+    """Click through visible top-level tabs inside the matching (or topmost) open window."""
+    uicore = _get_uicore()
+    reg = getattr(uicore, "registry", None) if uicore is not None else None
+    wins = list(reg.GetWindows() or []) if (reg is not None and hasattr(reg, "GetWindows")) else []
+    t_low = str(target or "").strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+    chosen = None
+    for w in reversed(wins):
+        if w is None or getattr(w, "destroyed", False) or not _is_visible(w):
+            continue
+        if not t_low:
+            chosen = w
+            break
+        wid = _safe_str(getattr(w, "windowID", None) or getattr(w, "name", ""), 64).lower()
+        wcap = _strip_tags(_safe_str(getattr(w, "caption", None) or "", 64)).lower()
+        wcls = w.__class__.__name__.lower()
+        if t_low in wid.replace("_", "") or t_low in wcap.replace(" ", "") or t_low in wcls:
+            chosen = w
+            break
+    if chosen is None and wins:
+        for w in reversed(wins):
+            if w is not None and not getattr(w, "destroyed", False) and _is_visible(w):
+                chosen = w
+                break
+    if chosen is None:
+        return {"ok": True, "tabs_clicked": 0, "clicked_tabs": [], "window": None}
+
+    chosen_id = _safe_str(getattr(chosen, "windowID", None) or getattr(chosen, "name", "") or chosen.__class__.__name__, 64)
+    seen = set()
+    queue = [(chosen, 0)]
+    tab_group = None
+    while queue and len(seen) < 160:
+        node, depth = queue.pop(0)
+        if node is None or id(node) in seen or getattr(node, "destroyed", False):
+            continue
+        seen.add(id(node))
+        if node is not chosen and not _is_visible(node):
+            continue
+        cls_l = node.__class__.__name__.lower()
+        if "tabgroup" in cls_l or (hasattr(node, "SelectByIdx") and isinstance(getattr(node, "tabs", None), (list, tuple))):
+            tab_group = node
+            break
+        if depth < 8:
+            for ch in list(getattr(node, "children", []) or [])[:30]:
+                if id(ch) not in seen:
+                    queue.append((ch, depth + 1))
+
+    if tab_group is None:
+        return {"ok": True, "tabs_clicked": 0, "clicked_tabs": [], "window": chosen_id}
+
+    tabs = list(getattr(tab_group, "tabs", None) or [])
+    if not tabs:
+        tabs = [
+            ch for ch in list(getattr(tab_group, "children", []) or [])
+            if ch is not None and not getattr(ch, "destroyed", False) and _is_visible(ch)
+        ]
+    clicked_tabs = []
+    limit = max(1, int(max_tabs or 6))
+    for idx, tab in enumerate(tabs[:limit]):
+        if tab is None or getattr(tab, "destroyed", False):
+            continue
+        lbl = _strip_tags(
+            _safe_str(
+                getattr(tab, "text", None)
+                or getattr(tab, "label", None)
+                or _extract_widget_label(tab)
+                or getattr(tab, "name", "")
+                or ("tab_%d" % idx),
+                64,
+            )
+        ).strip()
+        try:
+            if callable(getattr(tab, "OnClick", None)) or callable(getattr(tab, "on_click", None)):
+                _invoke_widget_click(tab)
+            elif hasattr(tab_group, "SelectByIdx"):
+                tab_group.SelectByIdx(idx)
+            elif callable(getattr(tab, "Select", None)):
+                tab.Select()
+            else:
+                _invoke_widget_click(tab)
+            H._sleep_ms(120)
+            clicked_tabs.append(lbl or ("tab_%d" % idx))
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": "clicking top tab %r in %r raised: %r" % (lbl, chosen_id, exc),
+                "tabs_clicked": len(clicked_tabs),
+                "clicked_tabs": clicked_tabs,
+                "window": chosen_id,
+            }
+    return {
+        "ok": True,
+        "tabs_clicked": len(clicked_tabs),
+        "clicked_tabs": clicked_tabs,
+        "window": chosen_id,
+    }
+
+
 def _open_client_window(sm, target):
     uicore = _get_uicore()
     layers = getattr(uicore, "layer", None) if uicore is not None else None
@@ -3612,93 +3876,6 @@ def _open_client_window(sm, target):
             except Exception:
                 pass
 
-    cmd_map = {
-        "inventory": "OpenInventory",
-        "cargohold": "OpenCargoHoldOfActiveShip",
-        "shiphangar": "OpenShipHangar",
-        "itemhangar": "OpenHangarFloor",
-        "market": "OpenMarket",
-        "marketorders": "OpenMarketOrders",
-        "multibuy": "OpenMultibuy",
-        "charsheet": "OpenCharactersheet",
-        "charactersheet": "OpenCharactersheet",
-        "character": "OpenCharactersheet",
-        "skills": "OpenSkillsWindow",
-        "skillqueue": "OpenSkillsWindow",
-        "skillswindow": "OpenSkillsWindow",
-        "skilltree": "OpenSkillTreeWindow",
-        "skillplan": "OpenSkillsWindow",
-        "skillplans": "OpenSkillsWindow",
-        "nes": "ToggleAurumStore",
-        "newedenstore": "ToggleAurumStore",
-        "plexstore": "ToggleAurumStore",
-        "aurumstore": "ToggleAurumStore",
-        "store": "ToggleAurumStore",
-        "plexvault": "OpenPlexVault",
-        "fitting": "OpenFitting",
-        "fittingmgmt": "OpenFittingMgmt",
-        "contracts": "OpenContracts",
-        "industry": "OpenIndustry",
-        "planets": "OpenPlanets",
-        "pi": "OpenPlanets",
-        "corp": "OpenCorporationPanel",
-        "corporation": "OpenCorporationPanel",
-        "fleet": "OpenFleet",
-        "agency": "OpenAgencyNew",
-        "jobboard": "OpenJobBoardWindow",
-        "opportunities": "OpenJobBoardWindow",
-        "assets": "OpenAssets",
-        "wallet": "OpenWallet",
-        "mail": "OpenMail",
-        "notifications": "OpenNotificationReadingWnd",
-        "notification": "OpenNotificationReadingWnd",
-        "notificationpanel": "OpenNotificationReadingWnd",
-        "map": "CmdToggleMap",
-        "solarsystemmap": "CmdToggleSolarSystemMap",
-        "dscan": "OpenDirectionalScanner",
-        "directionalscanner": "OpenDirectionalScanner",
-        "probe": "OpenProbeScanner",
-        "probescanner": "OpenProbeScanner",
-        "scanner": "OpenProbeScanner",
-        "notepad": "OpenNotepad",
-        "calculator": "OpenCalculator",
-        "calendar": "OpenCalendar",
-        "journal": "OpenJournal",
-        "agentfinder": "OpenAgencyContentGroup",
-        "lpstore": "OpenLpstore",
-        "repair": "OpenRepairshop",
-        "repairshop": "OpenRepairshop",
-        "reprocessing": "OpenReprocessingPlant",
-        "reprocessingplant": "OpenReprocessingPlant",
-        "miningledger": "OpenLedger",
-        "ledger": "OpenLedger",
-        "mininghold": "OpenGeneralMiningHoldOfActiveShip",
-        "orehold": "OpenGeneralMiningHoldOfActiveShip",
-        "mineralhold": "OpenMineralHoldOfActiveShip",
-        "moonmining": "OpenMoonMining",
-        "insurance": "OpenInsurance",
-        "bountyoffice": "OpenBountyOffice",
-        "securityoffice": "OpenSecurityOffice",
-        "militia": "OpenMilitia",
-        "factionalwarfare": "OpenFwWindow",
-        "fw": "OpenFwWindow",
-        "insurgency": "OpenInsurgencyDashboard",
-        "skinr": "OpenShipSKINRWindow",
-        "shipskinr": "OpenShipSKINRWindow",
-        "structurebrowser": "OpenStructureBrowser",
-        "shiptree": "CmdToggleShipTree",
-        "isis": "CmdToggleShipTree",
-        "aircareerprogram": "OpenAchievementsWindow",
-        "acp": "OpenAchievementsWindow",
-        "peopleandplaces": "OpenPeopleAndPlaces",
-        "locations": "OpenLocations",
-        "bookmarks": "OpenLocations",
-        "compare": "OpenCompare",
-        "channels": "OpenChannels",
-        "chat": "OpenChannels",
-        "help": "OpenHelp",
-        "log": "OpenLog",
-    }
     mname = cmd_map.get(t, raw_target)
     if mname == "OpenMoonMining":
         sess = getattr(__builtin__, "session", None)
@@ -4157,6 +4334,8 @@ def _execute_action(sm, action):
                 _wait_session_settled(timeout_ms=5000, poll_ms=50)
             if atype in (
                 "open_window",
+                "click_top_tabs",
+                "show_info",
                 "close_modal_or_window",
                 "space_command",
                 "station_command",
@@ -4171,7 +4350,56 @@ def _execute_action(sm, action):
                 _dismiss_pinned_tooltip_if_outside(None)
             sess = getattr(__builtin__, "session", None)
             if atype == "open_window":
-                result.update(_open_client_window(sm, target))
+                open_res = _open_client_window(sm, target)
+                result.update(open_res)
+                if open_res.get("ok") and action.get("click_top_tabs"):
+                    tab_res = _click_top_tabs_in_window(target, max_tabs=int(action.get("max_tabs", 6) or 6))
+                    result["tabs"] = tab_res
+                    if not tab_res.get("ok"):
+                        result["ok"] = False
+                        result["error"] = tab_res.get("error") or "click_top_tabs failed"
+
+            elif atype == "click_top_tabs":
+                result.update(_click_top_tabs_in_window(target, max_tabs=int(action.get("max_tabs", 6) or 6)))
+
+            elif atype == "show_info":
+                raw_tid = action.get("type_id")
+                if raw_tid in (None, "") and target and str(target).strip().isdigit():
+                    raw_tid = str(target).strip()
+                try:
+                    tid_int = int(raw_tid or 0)
+                except Exception:
+                    tid_int = 0
+                raw_iid = action.get("item_id")
+                try:
+                    iid_int = int(raw_iid) if raw_iid not in (None, "", 0) else None
+                except Exception:
+                    iid_int = None
+                if tid_int <= 0:
+                    result["ok"] = False
+                    result["error"] = "show_info requires a positive integer type_id (got %r)" % (raw_tid,)
+                else:
+                    svcs_info = getattr(sm, "services", {}) if sm is not None else {}
+                    info_svc = svcs_info.get("info") if isinstance(svcs_info, dict) else None
+                    if info_svc is None and sm is not None and hasattr(sm, "GetService"):
+                        info_svc = sm.GetService("info")
+                    if info_svc is None or not hasattr(info_svc, "ShowInfo"):
+                        result["ok"] = False
+                        result["error"] = "info service does not expose ShowInfo"
+                    else:
+                        if iid_int is not None:
+                            info_svc.ShowInfo(tid_int, itemID=iid_int)
+                        else:
+                            info_svc.ShowInfo(tid_int)
+                        H._sleep_ms(450)
+                        result["show_info_type_id"] = tid_int
+                        result["category"] = _to_utf8(action.get("category") or "")
+                        if action.get("click_top_tabs"):
+                            tab_res = _click_top_tabs_in_window("info", max_tabs=int(action.get("max_tabs", 6) or 6))
+                            result["tabs"] = tab_res
+                            if not tab_res.get("ok"):
+                                result["ok"] = False
+                                result["error"] = tab_res.get("error") or "show_info click_top_tabs failed"
 
             elif atype == "cleanup_utility_windows":
                 result.update(_cleanup_utility_windows(sm, keep_chat=bool(action.get("keep_chat", True))))

@@ -471,7 +471,10 @@ class TestScenarioRunnerFakeHook(unittest.TestCase):
             res1 = json.loads((out1 / "result.json").read_text(encoding="utf-8"))
             res2 = json.loads((out2 / "result.json").read_text(encoding="utf-8"))
             self.assertTrue(res1["journeys"]["mini_inventory"]["passed"])
-            self.assertEqual(res1["client_build"], "9990001")
+            self.assertTrue(res1["journeys"]["mini_inventory"]["ui_scenario"])
+            self.assertEqual(res1["journeys"]["mini_inventory"]["log_errors"], [])
+            self.assertEqual(res1["journeys"]["mini_inventory"]["client_build"], 9990001)
+            self.assertEqual(res1["client_build"], 9990001)
             self.assertEqual(res1["server_commit"], "7e3600c29")
             self.assertEqual(res1["journeys"]["mini_inventory"]["step_rpcs"], res2["journeys"]["mini_inventory"]["step_rpcs"])
 
@@ -1538,7 +1541,9 @@ class TestRound4RpcAndAccountFixes(unittest.TestCase):
                     res = json.loads((out_dir / "result.json").read_text(encoding="utf-8"))
                     j = res["journeys"]["tcp_launch"]
                     self.assertTrue(j["passed"], res)
-                    self.assertEqual(res["client_build"], "2841290")
+                    self.assertTrue(j["ui_scenario"])
+                    self.assertEqual(j["client_build"], 2841290)
+                    self.assertEqual(res["client_build"], 2841290)
                     self.assertIn("charUnboundMgr.GetCharactersToSelect", j["step_rpcs"]["verify_startup_charsel"])
                     self.assertEqual(len(j["steps"]), 2)
                     self.assertEqual(j["steps"][1]["step_id"], "enter_station")
@@ -1552,6 +1557,242 @@ class TestRound4RpcAndAccountFixes(unittest.TestCase):
                     except OSError:
                         pass
                     t.join(timeout=2.0)
+
+
+class Test1202R4And1242Acceptance(unittest.TestCase):
+    def _runner_in_dir(self, root: Path, scen_paths: list) -> playtester.ScenarioRunner:
+        wt = root / "wt"
+        wt.mkdir(parents=True, exist_ok=True)
+        args = playtester.parse_args(["--worktree", str(wt), "--no-hybrid"])
+        return playtester.ScenarioRunner(args, scenario_paths=scen_paths, out_dir=root / "out")
+
+    def test_p1_scenario_gm_never_clobbers_demo_or_starter_state(self):
+        import tomllib
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            # Case A: custom account (`user != "demo"`) with setup=True
+            scen_custom = root / "custom_setup.json"
+            scen_custom.write_text(
+                json.dumps({
+                    "id": "custom_setup",
+                    "starting_state": {
+                        "account": "caldari_pilot",
+                        "password": "secret",
+                        "char_id": 91000011,
+                        "character_name": "Kestrel Starter",
+                        "bloodline_id": 1,
+                        "gender": 0,
+                        "initial_balance_isk": 5500000,
+                    },
+                    "steps": [
+                        {"id": "s1", "setup": True, "action": {"type": "slash_command", "command": "/giveisk 100"}},
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            loaded_custom = playtester.load_scenario_file(scen_custom)
+            runner_c = self._runner_in_dir(root / "c1", [scen_custom])
+            runner_c._active_starting_state = loaded_custom["starting_state"]
+            runner_c._active_declared_setup_steps = loaded_custom["declared_setup_steps"]
+            cfg_c = tomllib.loads(runner_c.write_server_config().read_text(encoding="utf-8"))
+            player_names = [a["username"] for a in cfg_c["player_accounts"]]
+            admin_names = [a["username"] for a in cfg_c.get("admin_accounts", [])]
+            self.assertEqual(player_names, ["caldari_pilot"])
+            self.assertEqual(admin_names, ["evomu_scenario_gm"])
+            self.assertNotIn("caldari_pilot", admin_names)
+            self.assertEqual(cfg_c["player_accounts"][0]["starter_character"]["name"], "Kestrel Starter")
+            self.assertEqual(cfg_c["player_accounts"][0]["starter_character"]["initial_balance_isk"], 5500000)
+
+            # Case B: `demo` account with setup=True -> no [[admin_accounts]] in TOML, EVOMU_ADMIN_TOKEN env used instead
+            scen_demo = root / "demo_setup.json"
+            scen_demo.write_text(
+                json.dumps({
+                    "id": "demo_setup",
+                    "starting_state": {"account": "demo", "char_id": 90000001},
+                    "steps": [
+                        {"id": "s1", "time_control": True, "action": {"type": "advance_server_time", "target": "60"}},
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            loaded_demo = playtester.load_scenario_file(scen_demo)
+            runner_d = self._runner_in_dir(root / "c2", [scen_demo])
+            runner_d._active_starting_state = loaded_demo["starting_state"]
+            runner_d._active_declared_setup_steps = loaded_demo["declared_setup_steps"]
+            cfg_d = tomllib.loads(runner_d.write_server_config().read_text(encoding="utf-8"))
+            self.assertNotIn("admin_accounts", cfg_d)
+            self.assertTrue(cfg_d["feature_flags"]["seed_demo"])
+            self.assertIn("EVOMU_ADMIN_TOKEN", runner_d._scenario_server_extra_env())
+
+    def test_charsel_listed_all_characters_requires_primary_with_extra_characters(self):
+        post_only_extra = {
+            "charsel_state": {"active": True, "names": ["Aura Two"], "slot_count": 1},
+            "session": {},
+        }
+        ok_bad, chk_bad, _ = playtester.evaluate_scenario_checks(
+            {"charsel_listed_all_characters": True},
+            {},
+            post_only_extra,
+            {"action_ok": True, "flight_recorder": {}},
+            context={"primary_character_name": "Demo Pilot", "expected_characters": ["Aura Two"]},
+        )
+        self.assertFalse(ok_bad)
+        self.assertEqual(chk_bad, "charsel_listed_all_characters")
+
+        post_both = {
+            "charsel_state": {"active": True, "names": ["Demo Pilot", "Aura Two"], "slot_count": 2},
+            "session": {},
+        }
+        ok_good, _, _ = playtester.evaluate_scenario_checks(
+            {"charsel_listed_all_characters": True},
+            {},
+            post_both,
+            {"action_ok": True, "flight_recorder": {}},
+            context={"primary_character_name": "Demo Pilot", "expected_characters": ["Aura Two"]},
+        )
+        self.assertTrue(ok_good)
+
+    def test_ui_delta_without_relog_sqlite_parity_pass_and_timeout_fail(self):
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen_path = root / "ui_delta.json"
+            scen_path.write_text(
+                json.dumps({
+                    "id": "ui_delta_check",
+                    "starting_state": {"account": "demo"},
+                    "steps": [
+                        {
+                            "id": "buy_widget",
+                            "action": {"type": "click_widget", "target": "BuyBtn"},
+                            "checks": {"ui_delta_without_relog": True},
+                        }
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            runner = self._runner_in_dir(root, [scen_path])
+            runner.world_dir.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(str(runner.world_db_path)) as conn:
+                conn.execute("CREATE TABLE characters (character_id INTEGER PRIMARY KEY, user_id INTEGER, name TEXT, corporation_id INTEGER, alliance_id INTEGER, station_id INTEGER, structure_id INTEGER, solar_system_id INTEGER, active_ship_id INTEGER, balance_cents INTEGER, activity_status TEXT, version INTEGER, record_json TEXT)")
+                conn.execute("CREATE TABLE items (item_id INTEGER PRIMARY KEY, type_id INTEGER, owner_id INTEGER, location_id INTEGER, flag INTEGER, quantity INTEGER, singleton INTEGER, version INTEGER, record_json TEXT)")
+                conn.execute("CREATE TABLE jump_clones (character_id INTEGER PRIMARY KEY, clones_json TEXT)")
+                conn.execute("INSERT INTO characters VALUES (90000001, 1, 'Demo Pilot', 1000009, NULL, 60003760, NULL, 30000142, 100000001, 150000000, NULL, 1, '{\"home_station_id\": 60003760}')")
+                conn.execute("INSERT INTO items VALUES (2001, 34, 90000001, 60003760, 4, 500, 0, 1, '{}')")
+                conn.execute("INSERT INTO jump_clones VALUES (90000001, '[{\"clone_id\": 1}]')")
+                conn.commit()
+
+            get_state_polls = {"n": 0}
+
+            def _fake_rpc_pass(method, params=None, timeout=15.0):
+                if method == "execute_action":
+                    return {
+                        "action_ok": True,
+                        "post_state": {
+                            "client_build": "3698585",
+                            "session": {"charid": 90000001, "stationid": 60003760, "shipid": 100000001},
+                            "wallet_state": {"isk_balance": 1000000.0},
+                            "inventory_state": {"hangar_item_count": 0, "hangar_total_quantity": 0},
+                            "clone_state": {"home_station_id": 60003760, "jump_clone_count": 1},
+                        },
+                        "flight_recorder": {"macho_calls": []},
+                    }
+                if method == "get_state":
+                    get_state_polls["n"] += 1
+                    return {
+                        "client_build": "3698585",
+                        "session": {"charid": 90000001, "stationid": 60003760, "shipid": 100000001},
+                        "wallet_state": {"isk_balance": 1500000.0},
+                        "inventory_state": {"hangar_item_count": 1, "hangar_total_quantity": 500},
+                        "clone_state": {"home_station_id": 60003760, "jump_clone_count": 1},
+                    }
+                return {"ok": True}
+
+            boot_snap = {"ok": True, "state": {"client_build": "3698585", "client_version": "24.02", "session": {"charid": 90000001}}, "flight_recorder": {"macho_calls": []}}
+            fake_rpc = mock.Mock()
+            fake_rpc.call.side_effect = _fake_rpc_pass
+            runner.rpc = fake_rpc
+            runner.start_server = lambda reset_db=True: True
+            def _boot():
+                runner._last_boot_result = boot_snap
+                return True
+            runner.start_client = _boot
+            runner.stop_client = lambda: None
+            runner.stop_server = lambda: None
+            with mock.patch.object(playtester, "get_git_head", return_value="abc1234"), \
+                 mock.patch.object(runner, "_run_destiny_parity_check", return_value=None):
+                rc_pass = runner.run_scenarios()
+            self.assertEqual(rc_pass, 0)
+            self.assertGreaterEqual(get_state_polls["n"], 1)
+
+            # Now simulate permanent desync (wallet remains stale) -> fails cleanly after 2s window
+            def _fake_rpc_fail(method, params=None, timeout=15.0):
+                return {
+                    "action_ok": True,
+                    "client_build": "3698585",
+                    "session": {"charid": 90000001, "stationid": 60003760},
+                    "wallet_state": {"isk_balance": 999.0},
+                    "post_state": {
+                        "client_build": "3698585",
+                        "session": {"charid": 90000001, "stationid": 60003760},
+                        "wallet_state": {"isk_balance": 999.0},
+                    },
+                    "flight_recorder": {"macho_calls": []},
+                }
+
+            fake_rpc.call.side_effect = _fake_rpc_fail
+            rc_fail = runner.run_scenarios()
+            self.assertEqual(rc_fail, 1)
+            fail_res = json.loads((root / "out" / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(fail_res["journeys"]["ui_delta_check"]["failure"]["failed_check"], "ui_delta_without_relog")
+
+    def test_window_sweep_scenario_validates_against_hook_cmd_map(self):
+        sweep_path = playtester.SCENARIOS_DIR / "window_sweep.json"
+        self.assertTrue(sweep_path.exists(), f"Missing {sweep_path}")
+        loaded = playtester.load_scenario_file(sweep_path)
+        self.assertEqual(loaded["id"], "window_and_showinfo_sweep")
+        self.assertEqual(loaded["declared_setup_steps"], [])
+
+        cmd_map, guards = playtester.load_hook_open_window_tables()
+        opened_targets = [
+            playtester._normalize_window_target_key(st["action"].get("target", ""))
+            for st in loaded["steps"]
+            if st["action"].get("type") == "open_window"
+        ]
+        for tgt in opened_targets:
+            self.assertIn(tgt, cmd_map)
+        expected_cmds = {
+            mname
+            for k, mname in cmd_map.items()
+            if guards.get(k) != "structure_control_only"
+        }
+        covered_cmds = {cmd_map[t] for t in opened_targets}
+        self.assertEqual(covered_cmds, expected_cmds)
+
+        showinfo_cats = [
+            st["action"].get("category")
+            for st in loaded["steps"]
+            if st["action"].get("type") == "show_info"
+        ]
+        self.assertEqual(
+            set(showinfo_cats),
+            {"ship", "turret", "blueprint", "skillbook", "implant", "structure", "filament", "pi_pin", "skin", "corpse"},
+        )
+
+        # Reject invalid open_window target
+        with tempfile.TemporaryDirectory() as td:
+            bad = Path(td) / "bad_win.json"
+            bad.write_text(
+                json.dumps({
+                    "id": "bad_win",
+                    "steps": [{"id": "s1", "action": {"type": "open_window", "target": "nonexistent_bogus_window"}}],
+                }),
+                encoding="utf-8",
+            )
+            with self.assertRaises(playtester.ScenarioValidationError):
+                playtester.load_scenario_file(bad)
 
 
 if __name__ == "__main__":

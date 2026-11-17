@@ -51,6 +51,7 @@ macOS V24.01 EVE.app (exefile) client + Rust eve-server:
 from __future__ import annotations
 
 import argparse
+import ast
 import atexit
 import base64
 import hashlib
@@ -63,6 +64,7 @@ import select
 import shutil
 import signal
 import socket
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -1740,6 +1742,20 @@ ui:
 # Persistent Memory, Persona & Coverage Frontier Manager
 # ---------------------------------------------------------------------------
 
+GM_TESTER_PERSONA: Dict[str, Any] = {
+    "id": "gm_tester",
+    "title": "GM Admin Tester (Opt-In)",
+    "rotate_after_steps": 999999,
+    "description": (
+        "Explicitly opted-in GM diagnostic persona (`--persona gm_tester`). Permitted to issue "
+        "GM slash commands (`/giveisk`, `/createitem`, `/giveskill`, `/advancetime`, `/spawn`) at Step > 0."
+    ),
+    "goals": [
+        "Execute targeted GM diagnostic setup and edge-case verification requested via --persona gm_tester."
+    ],
+}
+
+
 class PlaytesterMemory:
     KNOWN_FEATURE_ALIASES = {
         # Legacy initial_frontier IDs
@@ -2109,6 +2125,14 @@ class PlaytesterMemory:
             return False
         prev_id = str((self.data.get("active_persona") or {}).get("id") or "")
         if force_id:
+            if force_id == GM_TESTER_PERSONA["id"]:
+                self.data["active_persona_index"] = -1
+                self.data["active_persona"] = dict(GM_TESTER_PERSONA)
+                self.data["active_persona_steps"] = 0
+                goals = GM_TESTER_PERSONA.get("goals") or ["Explore EVE Online systems"]
+                self.data["current_goal"] = goals[0]
+                self.save()
+                return force_id != prev_id
             for idx, p in enumerate(personas):
                 if p.get("id") == force_id:
                     self.data["active_persona_index"] = idx
@@ -2120,6 +2144,9 @@ class PlaytesterMemory:
                     return force_id != prev_id
 
         active = self.data.get("active_persona") or personas[0]
+        if str(active.get("id") or "") == GM_TESTER_PERSONA["id"]:
+            # Do not auto-rotate out of an explicit opt-in gm_tester session mid-run.
+            return False
         limit = int(active.get("rotate_after_steps", 45))
         if int(self.data.get("active_persona_steps", 0)) >= limit:
             idx = (int(self.data.get("active_persona_index", 0)) + 1) % len(personas)
@@ -2838,13 +2865,9 @@ Choose your next action in the `action` object according to the required JSON sc
 5. `jump_gate`: Cross-system Stargate jump (`target` = gate `item_id` or gate/destination system substring such as `"Stargate (Perimeter)"` or `"Perimeter"` from `space.nearby_balls`). Automatically warps to the gate if >150 km, approaches <2.5 km, clears session timer, jumps, and awaits `state_diff.solar_system_changed`.
 6. `warp_to` / `approach` / `orbit` / `keep_at_range` / `lock_target` / `activate_module`: In-space navigation, combat, probe launcher/probes (`Core Probe Launcher I` `17938` + `Core Scanner Probe I` `30013`), and mining laser commands.
 7. `train_skill`: Inject and queue a skill (`target` = skill typeID, e.g. `"3386"`, `"3385"`, `"3300"`, `"3327"`).
-8. **GM Timer-Acceleration Actions (Use these to test multi-hour timers immediately without waiting real-time!):**
-   - `complete_skills`: Immediately finishes active skill training (`target` = `"all"` or seconds like `"3600"`).
-   - `advance_upwell_timer`: Fast-forwards Upwell structure anchoring/onlining/reinforcement/unanchoring timers in the solar system (`target` = optional `structureID`).
-   - `complete_industry_jobs`: Fast-forwards active manufacturing/research industry jobs to completion (`target` = optional `jobID`).
-   - `advance_server_time`: Advances virtual server clock by `target` seconds (default `"3600"`), advancing all server lifecycle timers.
-   - `clear_timers`: Clears session-change cooldown, jump fatigue/cooldown, clone jump timer, and crimewatch timers. NEVER emit `wait(10000)` to wait out a session-change timer — use `clear_timers` (`~0.2s`) instead unless specifically testing timer rejection!
-   - `slash_command`: Run any GM slash command (`command` = e.g. `"/"` to list valid server commands, `"/giveisk 100000000"`, `"/createitem 483 1"`, `"/giveskill 3386 5"`, `"/fit me 17938"`, `"/spawn 1230"`, `"/spawnnpc 10035"`, `"/moveme"`). Note: `/help` is NOT a valid server command (`"/"` intentionally returns `UserError('SlashError', reason='Commands: [...]')` which is expected); `/spawn` / `/spawnnpc` propagate via the 1 Hz Destiny tick (`~1-2s`) into `space.nearby_balls` (and `/spawn <ship>` spawns a self-owned hull visible under Overview `All`, whereas `/spawnnpc` spawns an NPC target).
+8. **GM Timer-Acceleration & Setup-Only Slash Policy (`role = 0` for player personas):**
+   - Exploratory player personas run with **`role = 0` (non-GM)**. `slash_command` / `run_slash` (including `/createitem`, `/giveisk`, `/giveskill`, `/spawn`, `/moveme`) are **STRICTLY RESTRICTED** to Step `0` bootstrap or the explicit `--persona gm_tester` mode and are **REJECTED** by the host action validator at Step `> 0` for all normal player personas! Test game flows via real UI actions (Market, Inventory, Fitting, Industry, Quests/Agency) rather than GM slash shortcuts.
+   - `complete_skills` / `advance_upwell_timer` / `complete_industry_jobs` / `advance_server_time` / `clear_timers` are ONLY valid in setup/time-control steps or `--persona gm_tester` mode.
 9. `open_plex_store` / `open_structure_cosmetics`: Direct probes for `#529` and `#527`.
 10. `type_text` / `press_key` / `click_xy` / `drag_widget` / `wait`: Direct UI manipulation.
    - `type_text`: Targets widgets marked `"editable": true` in `clickable_widgets` (or focused field). Append `\n` at the end of `command`/`text` (e.g. `"Tritanium\n"`) to trigger Return/search submission automatically!
@@ -4815,6 +4838,7 @@ class PlaytesterBugOracle:
         "disallow",
         "restrict",
         "invaliditemtypeforhold",
+        "invalidtarget",
         "blocked drop",
     )
 
@@ -4884,6 +4908,7 @@ class PlaytesterBugOracle:
         "unknownslashcommand",
         "invalidslashargument",
         "cannotloadnotenoughcharges",
+        "invalidtarget",
     )
 
     @classmethod
@@ -4947,7 +4972,12 @@ class PlaytesterBugOracle:
             and "activateeffect" in txt
             and any(
                 marker in txt
-                for marker in ("noammoloaded", "insufficientfuel", "notenoughcapacitor")
+                for marker in (
+                    "noammoloaded",
+                    "insufficientfuel",
+                    "notenoughcapacitor",
+                    "invalidtarget",
+                )
             )
         ):
             return False
@@ -5495,6 +5525,263 @@ class PlaytesterBugOracle:
 
         return created_files
 
+    BENIGN_FLIGHT_FLOW_MARKERS = BENIGN_USER_ERROR_MARKERS + (
+        "dockrequested",
+        "sessionchangeinprogress",
+        "shipalreadystopped",
+        "targetalreadylocked",
+        "cantdockwhile",
+        "warpcancelled",
+    )
+
+    @classmethod
+    def analyze_flight_recorder_anomalies(
+        cls,
+        calls: List[Dict[str, Any]],
+        *,
+        min_calls: int = 3,
+        error_rate_threshold: float = 0.80,
+        polling_storm_per_min: float = 200.0,
+    ) -> List[Dict[str, Any]]:
+        """
+        Inspect session flight-recorder RPC calls for:
+        1. High non-OK error rates (`>= min_calls` and `>= error_rate_threshold` excluding benign flow codes).
+        2. Polling-storm dispatch loops (`> polling_storm_per_min` calls/min for a `(service, method)`).
+        Returns deduplicated incident descriptors sorted by `(service, method, anomaly_kind)`.
+        """
+        if not calls:
+            return []
+
+        deduped_calls: List[Dict[str, Any]] = []
+        seen_seqs: set = set()
+        for entry in calls:
+            if not isinstance(entry, dict):
+                continue
+            seq_val = entry.get("seq")
+            if seq_val is not None:
+                if seq_val in seen_seqs:
+                    continue
+                seen_seqs.add(seq_val)
+            deduped_calls.append(entry)
+
+        grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for entry in deduped_calls:
+            svc = str(entry.get("service") or entry.get("svc") or "").strip()
+            meth = str(entry.get("method") or entry.get("call") or "").strip()
+            if not svc and not meth:
+                continue
+            grouped.setdefault((svc or "-", meth or "-"), []).append(entry)
+
+        anomalies: List[Dict[str, Any]] = []
+        for (svc, meth), items in sorted(grouped.items()):
+            total = len(items)
+            unexpected_errors: List[Dict[str, Any]] = []
+            benign_errors = 0
+            timestamps: List[float] = []
+            for item in items:
+                raw_ts = item.get("ts")
+                if raw_ts is None:
+                    raw_ts = item.get("timestamp")
+                if raw_ts is not None:
+                    try:
+                        ts_f = float(raw_ts)
+                        if ts_f > 0:
+                            timestamps.append(ts_f)
+                    except Exception:
+                        pass
+                status_up = str(item.get("status") or "").strip().upper()
+                err_txt = str(item.get("error") or "").strip()
+                is_non_ok = bool(err_txt) or (bool(status_up) and status_up not in ("OK", "SUCCESS"))
+                if not is_non_ok:
+                    continue
+                combined_err = f"{status_up} {err_txt}".lower()
+                if any(tok in combined_err for tok in cls.BENIGN_FLIGHT_FLOW_MARKERS):
+                    benign_errors += 1
+                    continue
+                unexpected_errors.append(item)
+
+            err_count = len(unexpected_errors)
+            effective_total = max(1, total - benign_errors) if benign_errors and err_count > 0 else total
+            err_rate = err_count / float(effective_total) if total > 0 else 0.0
+            has_high_err = (err_count >= min_calls) and (err_rate >= error_rate_threshold)
+
+            max_in_60s = 0
+            rate_per_min = 0.0
+            if len(timestamps) >= 2:
+                timestamps.sort()
+                left = 0
+                for right, ts_r in enumerate(timestamps):
+                    while ts_r - timestamps[left] > 60.0:
+                        left += 1
+                    win_cnt = right - left + 1
+                    if win_cnt > max_in_60s:
+                        max_in_60s = win_cnt
+                span_sec = max(timestamps[-1] - timestamps[0], 0.0)
+                if span_sec >= 10.0 and total >= 35:
+                    rate_per_min = max(rate_per_min, (total / span_sec) * 60.0)
+                rate_per_min = max(rate_per_min, float(max_in_60s))
+            elif total > polling_storm_per_min:
+                max_in_60s = total
+                rate_per_min = float(total)
+
+            has_polling_storm = (max_in_60s > polling_storm_per_min) or (rate_per_min > polling_storm_per_min)
+            if not has_high_err and not has_polling_storm:
+                continue
+
+            sample_errs = []
+            for e_item in unexpected_errors[:5]:
+                et = str(e_item.get("error") or e_item.get("status") or "").strip()
+                if et and et not in sample_errs:
+                    sample_errs.append(et[:180])
+
+            kind_tags = []
+            if has_high_err:
+                kind_tags.append("high_error_rate")
+            if has_polling_storm:
+                kind_tags.append("polling_storm")
+            summary_parts = [f"RPC `{svc}.{meth}` telemetry anomaly ({', '.join(kind_tags)}):"]
+            if has_high_err:
+                summary_parts.append(
+                    f"- Non-OK rate: {err_count}/{total} unexpected failures ({err_rate * 100.0:.1f}%, benign skipped={benign_errors})."
+                )
+            if has_polling_storm:
+                summary_parts.append(
+                    f"- Dispatch rate: peak {max_in_60s} calls/60s ({rate_per_min:.1f} dispatches/min, total={total})."
+                )
+            if sample_errs:
+                summary_parts.append("- Sample errors: " + "; ".join(sample_errs))
+
+            severity = "high" if has_polling_storm or err_count >= 5 else "medium"
+            anomaly_kind = (
+                "flight_recorder_polling_storm"
+                if has_polling_storm and not has_high_err
+                else "flight_recorder_rpc_anomaly"
+            )
+            title_reason = (
+                f"{rate_per_min:.0f}/min polling storm"
+                if has_polling_storm and not has_high_err
+                else f"{err_count}/{total} non-OK"
+            )
+            anomalies.append(
+                {
+                    "kind": anomaly_kind,
+                    "service": svc,
+                    "method": meth,
+                    "total_calls": total,
+                    "non_ok_calls": err_count,
+                    "benign_skipped": benign_errors,
+                    "error_rate": round(err_rate, 4),
+                    "peak_per_min": round(rate_per_min, 2),
+                    "title": f"[Playtester] [FlightRecorder] {svc}.{meth} ({title_reason})",
+                    "severity": severity,
+                    "subsystem": "machonet-rpc" if "." in f"{svc}.{meth}" else "client-rpc",
+                    "summary": "\n".join(summary_parts),
+                    "sample_calls": items[-10:],
+                }
+            )
+        return anomalies
+
+    def record_flight_recorder_anomalies(
+        self,
+        calls: List[Dict[str, Any]],
+        *,
+        step_num: int = 0,
+        git_head: str = "",
+        session: Optional[Dict[str, Any]] = None,
+        min_calls: int = 3,
+        error_rate_threshold: float = 0.80,
+        polling_storm_per_min: float = 200.0,
+    ) -> List[Path]:
+        """Harvest flight-recorder anomalies at session end and write deduplicated bug bundles."""
+        anomalies = self.analyze_flight_recorder_anomalies(
+            calls,
+            min_calls=min_calls,
+            error_rate_threshold=error_rate_threshold,
+            polling_storm_per_min=polling_storm_per_min,
+        )
+        if not anomalies:
+            return []
+
+        created_files: List[Path] = []
+        known = self.memory.data.setdefault("filed_incident_fingerprints", [])
+        sess_raw = dict(session or {})
+        for anom in anomalies:
+            fp_src = f"flight_recorder:{anom['kind']}:{anom['service']}.{anom['method']}"
+            fingerprint = hashlib.sha256(fp_src.encode("utf-8")).hexdigest()[:16]
+            if fingerprint in known:
+                log_info(f"Skipping duplicate flight-recorder anomaly ({fingerprint}): {anom['title']}")
+                continue
+            known.append(fingerprint)
+            self.memory.save()
+
+            self.bug_queue_dir.mkdir(parents=True, exist_ok=True)
+            bundle_path = self.bug_queue_dir / f"playtester_fr_{fingerprint}.json"
+            fp_u64 = int(fingerprint, 16)
+            fp_i64 = fp_u64 - (1 << 64) if fp_u64 >= (1 << 63) else fp_u64
+            fr_calls = [
+                {
+                    "service": mc.get("service", anom["service"]),
+                    "method": mc.get("method", anom["method"]),
+                    "args_summary": mc.get("args", mc.get("args_summary", "()")),
+                    "status": f"{mc.get('status', 'OK')}({mc.get('error') or mc.get('result') or ''})",
+                    "duration_micros": int(float(mc.get("duration_ms", 0) or 0) * 1000),
+                }
+                for mc in anom.get("sample_calls") or []
+                if isinstance(mc, dict)
+            ]
+            bundle = {
+                "fingerprint": fingerprint,
+                "stack_hash": fp_i64,
+                "stack_key": f"playtester:{anom['subsystem']}:{anom['kind']}:{anom['service']}.{anom['method']}",
+                "trace": "",
+                "report_source": "flight_recorder_harvester",
+                "manual_report": {
+                    "report_key": f"playtester_fr_{fingerprint}",
+                    "category_id": anom["subsystem"],
+                    "category_name": anom["kind"],
+                    "title": anom["title"].replace("[Playtester]", "").strip(),
+                    "description": anom["summary"],
+                    "reproduction_steps": (
+                        f"Detected in end-of-session flight-recorder harvest at step {step_num} "
+                        f"({anom['service']}.{anom['method']}: non_ok={anom['non_ok_calls']}/{anom['total_calls']}, "
+                        f"peak_per_min={anom['peak_per_min']})."
+                    ),
+                },
+                "anomaly": {
+                    k: v
+                    for k, v in anom.items()
+                    if k != "sample_calls"
+                },
+                "flight_recorder": fr_calls,
+                "timestamp": utc_now_iso(),
+                "git_head": git_head,
+                "step": step_num,
+                "kind": anom["kind"],
+                "title": anom["title"],
+                "severity": anom["severity"],
+                "subsystem": anom["subsystem"],
+                "summary": anom["summary"],
+                "session": {
+                    "character_id": sess_raw.get("charid"),
+                    "corporation_id": sess_raw.get("corpid"),
+                    "solar_system_id": sess_raw.get("solarsystemid2") or sess_raw.get("solarsystemid"),
+                    "station_id": sess_raw.get("stationid"),
+                    "structure_id": sess_raw.get("structureid"),
+                    "ship_id": sess_raw.get("shipid"),
+                    **sess_raw,
+                },
+            }
+            if self.async_write and self._write_queue is not None:
+                self._write_queue.put((bundle_path, bundle, bool(self.sync_github)))
+            else:
+                bundle_path.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+            created_files.append(bundle_path)
+            log_warn(f"Harvested flight-recorder anomaly -> {bundle_path.name}: {anom['title']}")
+
+        if created_files and self.sync_github and not self.async_write:
+            self._run_sync_script()
+        return created_files
+
 
 # ---------------------------------------------------------------------------
 # Main Continuous Playtester Supervisor
@@ -5519,6 +5806,57 @@ def _detect_corrupted_viewstate_desync(ui_snapshot: Optional[Dict[str, Any]]) ->
         if not nearby_balls and (ego_mode == -1 or ego_type_id == 0):
             return "in_space_empty_ballpark_uninitialized_ego"
     return None
+
+
+def validate_exploratory_action(
+    action: Any,
+    *,
+    step_num: int,
+    persona_id: str = "",
+) -> Tuple[bool, str]:
+    """
+    Enforce setup-only GM slash rules for non-GM exploratory runs (`#1242`):
+    - Step `0` bootstrap and `--persona gm_tester` allow GM/slash setup commands.
+    - For normal player personas (`persona_id != "gm_tester"`) at `step_num > 0`,
+      `slash_command`, `run_slash`, `_SCENARIO_GM_ACTIONS`, time-control actions,
+      and `/` GM commands embedded in `type_text` are rejected before RPC dispatch.
+    """
+    if not isinstance(action, dict):
+        return False, "Action payload must be a JSON object"
+    pid = str(persona_id or "").strip().lower()
+    if int(step_num) <= 0 or pid == GM_TESTER_PERSONA["id"]:
+        return True, ""
+
+    raw_type = str(action.get("type") or "").strip()
+    act_type = _canonicalize_action_type(raw_type, bool(action.get("target")))
+    if act_type in ("slash_command", "run_slash") or raw_type.lower() in ("slash_command", "run_slash"):
+        cmd_preview = _coerce_action_command(action) or str(action.get("target") or "")
+        return (
+            False,
+            f"Setup-only GM enforcement rejected {raw_type!r} ({cmd_preview!r}) at step {step_num} "
+            f"for non-GM persona {persona_id or 'player'!r} (restricted to Step 0 or --persona gm_tester)",
+        )
+    is_gm, is_tc, reason = _is_gm_or_time_control_action(action)
+    if is_gm or is_tc:
+        return (
+            False,
+            f"Setup-only GM enforcement rejected {reason} at step {step_num} "
+            f"for non-GM persona {persona_id or 'player'!r} (restricted to Step 0 or --persona gm_tester)",
+        )
+    if act_type == "type_text":
+        for field in ("command", "slash_cmd", "text", "input", "value"):
+            val = action.get(field)
+            if isinstance(val, str) and val.strip().startswith("/"):
+                first_tok = val.strip().split()[0].lower()
+                if first_tok in _ALL_REMOTE_GM_SLASH_COMMANDS or any(
+                    first_tok.startswith(p) for p in (_GM_SLASH_IN_TEXT_PREFIXES + _TIME_CONTROL_SLASH_PREFIXES)
+                ):
+                    return (
+                        False,
+                        f"Setup-only GM enforcement rejected slash input {first_tok!r} at step {step_num} "
+                        f"for non-GM persona {persona_id or 'player'!r}",
+                    )
+    return True, ""
 
 
 class PlaytesterRunner:
@@ -5590,6 +5928,14 @@ class PlaytesterRunner:
             rotated = self.memory.maybe_rotate_persona(force_id=args.persona)
             if rotated:
                 self.pending_persona_cleanup = True
+        elif str((self.memory.data.get("active_persona") or {}).get("id") or "") == GM_TESTER_PERSONA["id"]:
+            default_personas = self.memory.personas_cfg.get("personas") or []
+            if default_personas:
+                self.memory.maybe_rotate_persona(force_id=str(default_personas[0].get("id") or ""))
+                self.pending_persona_cleanup = True
+
+        self._session_flight_calls: List[Dict[str, Any]] = []
+        self._session_flight_seqs: set = set()
 
         # Hybrid Planner + Executor + Direct Runner batch state
         self.batch_id: int = 0
@@ -5743,52 +6089,103 @@ class PlaytesterRunner:
         )
         return sde_path, qd_path
 
+    def _active_persona_id(self) -> str:
+        return str((self.memory.data.get("active_persona") or {}).get("id") or "")
+
+    def _record_session_flight_calls(self, calls: Any) -> None:
+        if not isinstance(calls, list):
+            return
+        for entry in calls:
+            if not isinstance(entry, dict):
+                continue
+            seq_val = entry.get("seq")
+            if seq_val is not None:
+                if seq_val in self._session_flight_seqs:
+                    continue
+                self._session_flight_seqs.add(seq_val)
+            self._session_flight_calls.append(entry)
+
+    def harvest_flight_recorder_anomalies(
+        self,
+        *,
+        step_num: int = 0,
+        calls_override: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Path]:
+        """Collect all session flight-recorder RPCs and emit deduplicated anomaly bundles."""
+        calls: List[Dict[str, Any]] = []
+        if calls_override is not None:
+            calls = list(calls_override)
+        else:
+            calls.extend(self._session_flight_calls)
+            if getattr(self, "rpc", None) is not None and self.client_proc is not None and self.client_proc.poll() is None:
+                try:
+                    fr_resp = self.rpc.call("get_flight_recorder", {"since_seq": 0}, timeout=5.0) or {}
+                    if isinstance(fr_resp.get("result"), dict):
+                        fr_resp = fr_resp["result"]
+                    self._record_session_flight_calls(fr_resp.get("macho_calls") or [])
+                    calls = list(self._session_flight_calls)
+                except Exception:
+                    pass
+        sess = (self.last_ui_snapshot or {}).get("session") if isinstance(self.last_ui_snapshot, dict) else {}
+        return self.oracle.record_flight_recorder_anomalies(
+            calls,
+            step_num=step_num,
+            git_head=self.cached_git_head,
+            session=sess or {},
+        )
+
     def write_server_config(self) -> Path:
         self.world_dir.mkdir(parents=True, exist_ok=True)
         self.current_run_dir.mkdir(parents=True, exist_ok=True)
         cfg_path = self.runtime_dir / "evomu_playtester_server.toml"
         sde_path, _ = self._resolve_sde_and_quasar_paths()
-        cfg_text = f"""bind_address = "127.0.0.1"
-macho_port = {self.ports['macho']}
-bridge_port = {self.ports['bridge']}
-esi_port = {self.ports['http']}
-quasar_grpc_port = {self.ports['gateway']}
-xmpp_port = {self.ports['xmpp']}
-sde_path = {json.dumps(str(sde_path))}
-world_db_path = {json.dumps(str(self.world_db_path))}
-
-[feature_flags]
-enable_quasar_gateway = true
-enable_esi_http = true
-enable_living_world = true
-seed_demo = true
-free_fast_checkout_plex = true
-starter_plex_balance = 50000
-allow_local_dev_gateway_jwt = true
-gm_mode = true
-
-[[player_accounts]]
-username = "demo"
-password_token = "demo-secret"
-
-[player_accounts.starter_character]
-name = "Demo Pilot"
-bloodline_id = 1
-gender = 1
-ancestry_id = 11
-school_id = 11
-solar_system_id = 30000142
-station_id = 60003760
-initial_balance_isk = 125000000
-initial_balance_plex = 50000
-
-[[admin_accounts]]
-username = "demo"
-password_token = "demo-secret"
-character_id = 90000001
-character_name = "Demo Pilot"
-"""
-        cfg_path.write_text(cfg_text, encoding="utf-8")
+        is_gm_persona = self._active_persona_id() == GM_TESTER_PERSONA["id"]
+        lines = [
+            'bind_address = "127.0.0.1"',
+            f"macho_port = {self.ports['macho']}",
+            f"bridge_port = {self.ports['bridge']}",
+            f"esi_port = {self.ports['http']}",
+            f"quasar_grpc_port = {self.ports['gateway']}",
+            f"xmpp_port = {self.ports['xmpp']}",
+            f"sde_path = {json.dumps(str(sde_path))}",
+            f"world_db_path = {json.dumps(str(self.world_db_path))}",
+            "",
+            "[feature_flags]",
+            "enable_quasar_gateway = true",
+            "enable_esi_http = true",
+            "enable_living_world = true",
+            "seed_demo = true",
+            "free_fast_checkout_plex = true",
+            "starter_plex_balance = 50000",
+            "allow_local_dev_gateway_jwt = true",
+            "gm_mode = true",
+            "",
+            "[[player_accounts]]",
+            'username = "demo"',
+            'password_token = "demo-secret"',
+            "",
+            "[player_accounts.starter_character]",
+            'name = "Demo Pilot"',
+            "bloodline_id = 1",
+            "gender = 1",
+            "ancestry_id = 11",
+            "school_id = 11",
+            "solar_system_id = 30000142",
+            "station_id = 60003760",
+            "initial_balance_isk = 125000000",
+            "initial_balance_plex = 50000",
+        ]
+        # Player personas run with role = 0 (non-GM). Only explicit `--persona gm_tester` gets admin role bits.
+        if is_gm_persona:
+            lines.extend([
+                "",
+                "[[admin_accounts]]",
+                'username = "demo"',
+                'password_token = "demo-secret"',
+                "character_id = 90000001",
+                'character_name = "Demo Pilot"',
+            ])
+        cfg_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return cfg_path
 
     def write_inclient_cfg(self) -> Path:
@@ -5876,6 +6273,10 @@ character_name = "Demo Pilot"
         env["EVOMU_SDE_PATH"] = str(sde_path)
         env["EVOMU_QUASAR_DESCRIPTORS_PATH"] = str(qd_path)
         env.setdefault("RUST_LOG", "info")
+        extra_env_fn = getattr(self, "_scenario_server_extra_env", None)
+        if callable(extra_env_fn):
+            for k, v in (extra_env_fn() or {}).items():
+                env[str(k)] = str(v)
 
         log_info(
             f"Launching eve-server ({get_git_head(self.worktree_dir)}) on "
@@ -6640,10 +7041,27 @@ character_name = "Demo Pilot"
         else:
             rpc_timeout = 20.0
         exec_res: Dict[str, Any] = {}
-        try:
-            exec_res = self.rpc.call("execute_action", {"action": exec_action_payload}, timeout=rpc_timeout)
-        except Exception as exc:
-            exec_res = {"action_ok": False, "action_error": str(exc), "flight_recorder": {}}
+        valid_action, reject_reason = validate_exploratory_action(
+            action,
+            step_num=step_num,
+            persona_id=self._active_persona_id(),
+        )
+        if not valid_action:
+            log_warn(f"Step {step_num}: {reject_reason}")
+            exec_res = {
+                "ok": False,
+                "action_ok": False,
+                "action_error": reject_reason,
+                "rejected_by_validator": True,
+                "flight_recorder": {},
+            }
+        else:
+            try:
+                exec_res = self.rpc.call("execute_action", {"action": exec_action_payload}, timeout=rpc_timeout)
+            except Exception as exc:
+                exec_res = {"action_ok": False, "action_error": str(exc), "flight_recorder": {}}
+        if isinstance(exec_res, dict):
+            self._record_session_flight_calls((exec_res.get("flight_recorder") or {}).get("macho_calls"))
 
         post_state_raw = exec_res.pop("post_state", None) if isinstance(exec_res, dict) else None
         if isinstance(post_state_raw, dict) and post_state_raw:
@@ -6944,6 +7362,10 @@ character_name = "Demo Pilot"
                 if not self.args.continuous and self.args.max_steps <= 0:
                     break
         finally:
+            try:
+                self.harvest_flight_recorder_anomalies(step_num=step_num)
+            except Exception as exc:
+                log_warn(f"Flight-recorder anomaly harvest skipped due to error: {exc}")
             if getattr(self, "agy_pool", None) is not None:
                 try:
                     self.agy_pool.shutdown()
@@ -6978,6 +7400,8 @@ _SCENARIO_ALLOWED_ACTIONS = _DIRECT_NON_WIDGET_ACTIONS | frozenset({
     "drag_widget",
     "type_text",
     "open_window",
+    "click_top_tabs",
+    "show_info",
     "close_modal_or_window",
     "cleanup_utility_windows",
     "station_command",
@@ -7138,6 +7562,7 @@ _SCENARIO_ALLOWED_CHECK_KEYS = frozenset({
     "bookmark_server_check",
     "handshake_server_check",
     "no_server_unimplemented_rpc",
+    "ui_delta_without_relog",
     "state_checks",
 })
 _SCENARIO_ALLOWED_RULE_OPS = frozenset({
@@ -7179,6 +7604,31 @@ _SCENARIO_DESYNC_LINE_RE = re.compile(
 
 class ScenarioValidationError(ValueError):
     """Raised when a scenario file fails schema or GM/time-control policy validation."""
+
+
+def load_hook_open_window_tables(hook_path: Optional[Path] = None) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Read `cmd_map` (`OPEN_WINDOW_CMD_MAP`) and `OPEN_WINDOW_GUARDS` directly from `evomu_playtester_hook.py` AST."""
+    target_path = Path(hook_path) if hook_path is not None else (HARNESS_DIR / "evomu_playtester_hook.py")
+    tree = ast.parse(target_path.read_text(encoding="utf-8"), filename=str(target_path))
+    cmd_map: Dict[str, str] = {}
+    guards: Dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            if node.targets[0].id in ("OPEN_WINDOW_CMD_MAP", "cmd_map") and isinstance(node.value, ast.Dict):
+                val = ast.literal_eval(node.value)
+                if isinstance(val, dict):
+                    cmd_map = {str(k): str(v) for k, v in val.items()}
+            elif node.targets[0].id == "OPEN_WINDOW_GUARDS" and isinstance(node.value, ast.Dict):
+                val = ast.literal_eval(node.value)
+                if isinstance(val, dict):
+                    guards = {str(k): str(v) for k, v in val.items()}
+    if not cmd_map:
+        raise RuntimeError(f"OPEN_WINDOW_CMD_MAP/cmd_map not found in {target_path}")
+    return cmd_map, guards
+
+
+def _normalize_window_target_key(raw_target: str) -> str:
+    return str(raw_target or "").strip().lower().replace("_", "").replace("-", "").replace(" ", "")
 
 
 def _validate_value_rule_dict(rule: Dict[str, Any], ctx_label: str, *, allow_field: bool = False) -> None:
@@ -7315,6 +7765,9 @@ def validate_scenario(spec: Any, source_name: str = "<scenario>") -> Dict[str, A
             "detail": f"Provision {len(extra_chars)} extra character(s) via bridge before client start",
         })
 
+    hook_cmd_map, _ = load_hook_open_window_tables()
+    hook_cmd_methods = set(hook_cmd_map.values())
+
     normalized_steps: List[Dict[str, Any]] = []
     for idx, raw_step in enumerate(steps):
         step_num = idx + 1
@@ -7331,6 +7784,26 @@ def validate_scenario(spec: Any, source_name: str = "<scenario>") -> Dict[str, A
             raise ScenarioValidationError(
                 f"{source_name} step {step_num} ({step_id}): unsupported action type {raw_type!r}"
             )
+        if act_type == "open_window":
+            raw_win_tgt = str(action.get("target") or action.get("command") or action.get("slash_cmd") or "").strip()
+            norm_win_tgt = _normalize_window_target_key(raw_win_tgt)
+            if not norm_win_tgt or (norm_win_tgt not in hook_cmd_map and raw_win_tgt not in hook_cmd_methods):
+                raise ScenarioValidationError(
+                    f"{source_name} step {step_num} ({step_id}): unknown open_window target {raw_win_tgt!r} "
+                    f"(not in evomu_playtester_hook.OPEN_WINDOW_CMD_MAP)"
+                )
+        elif act_type == "show_info":
+            raw_tid = action.get("type_id")
+            if raw_tid in (None, "") and str(action.get("target") or "").strip().isdigit():
+                raw_tid = str(action.get("target")).strip()
+            try:
+                tid_int = int(raw_tid or 0)
+            except Exception:
+                tid_int = 0
+            if tid_int <= 0:
+                raise ScenarioValidationError(
+                    f"{source_name} step {step_num} ({step_id}): show_info requires positive integer type_id"
+                )
 
         is_gm, is_tc, gm_reason = _is_gm_or_time_control_action(action)
         is_setup_declared = bool(raw_step.get("setup", False))
@@ -7843,6 +8316,20 @@ def evaluate_scenario_checks(
                     "charsel_listed_all_characters",
                     f"charsel missing expected character(s) {missing!r} (listed={listed_names!r})",
                 )
+            if not isinstance(charsel_spec, list):
+                primary_name = str(ctx.get("primary_character_name") or "").strip()
+                if primary_name and primary_name.lower() not in listed_low:
+                    return (
+                        False,
+                        "charsel_listed_all_characters",
+                        f"charsel missing primary character {primary_name!r} (listed={listed_names!r})",
+                    )
+                if len(listed_names) < len(expected_names) + 1:
+                    return (
+                        False,
+                        "charsel_listed_all_characters",
+                        f"expected primary + {len(expected_names)} extra character(s), saw {listed_names!r}",
+                    )
         elif len(listed_names) < 2:
             return (
                 False,
@@ -8166,6 +8653,187 @@ _SCENARIO_DEFAULT_ANCESTRY_BY_BLOODLINE: Dict[int, int] = {
 }
 
 
+def _coerce_int_client_build(val: Any) -> int:
+    if isinstance(val, bool):
+        return 0
+    if isinstance(val, int):
+        return val if val > 0 else 0
+    s = str(val or "").strip()
+    if s.isdigit():
+        return int(s)
+    m = re.search(r"\d+", s)
+    return int(m.group(0)) if m else 0
+
+
+def _is_mutating_scenario_step(
+    step: Dict[str, Any],
+    act_type: str,
+    exec_res: Optional[Dict[str, Any]],
+) -> bool:
+    chk = step.get("checks") or {}
+    if chk.get("ui_delta_without_relog") is True:
+        return True
+    if chk.get("ui_delta_without_relog") is False:
+        return False
+    readonly_actions = {
+        "wait",
+        "noop",
+        "open_window",
+        "close_modal_or_window",
+        "cleanup_utility_windows",
+        "click_top_tabs",
+        "show_info",
+        "select_character",
+    }
+    if act_type not in readonly_actions:
+        return True
+    fr = (exec_res or {}).get("flight_recorder") or {}
+    mutating_prefixes = (
+        "buy", "sell", "move", "add", "sethome", "install", "slash", "reprocess",
+        "create", "deliver", "transfer", "give", "train", "inject", "board",
+        "dock", "undock", "jump", "cancel", "accept", "complete", "fit",
+        "online", "offline", "activate", "deactivate", "trash", "split", "merge",
+    )
+    for call in fr.get("macho_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        meth = str(call.get("method") or "").strip().lower()
+        if any(meth.startswith(p) or p in meth for p in mutating_prefixes):
+            return True
+    return False
+
+
+def evaluate_ui_delta_sqlite_parity(
+    world_db_path: Path,
+    state: Dict[str, Any],
+) -> Tuple[bool, str]:
+    """
+    Verify client-cached wallet, invCache, and clone state matches server SQLite (`world_db_path`)
+    without relogging (`#1242`). Any populated (`is not None`) client cache field is compared
+    directly against SQLite truth.
+    """
+    if not world_db_path or not Path(world_db_path).exists():
+        return True, ""
+    sess = (state or {}).get("session") or {}
+    try:
+        char_id = int(sess.get("charid") or 0)
+    except Exception:
+        char_id = 0
+    if char_id <= 0:
+        return True, ""
+
+    wallet = state.get("wallet_state") or {}
+    inv = state.get("inventory_state") or {}
+    clone = state.get("clone_state") or {}
+    has_any_client_cache = any(
+        val is not None
+        for val in (
+            wallet.get("isk_balance"),
+            inv.get("hangar_item_count"),
+            inv.get("hangar_total_quantity"),
+            inv.get("cargo_item_count"),
+            inv.get("cargo_total_quantity"),
+            clone.get("home_station_id"),
+            clone.get("jump_clone_count"),
+        )
+    )
+    if not has_any_client_cache:
+        return True, ""
+
+    try:
+        conn = sqlite3.connect(f"file:{Path(world_db_path).resolve()}?mode=ro", uri=True, timeout=2.0)
+    except Exception:
+        conn = sqlite3.connect(str(world_db_path), timeout=2.0)
+    mismatches: List[str] = []
+    try:
+        cur = conn.cursor()
+        row = cur.execute(
+            "SELECT station_id, structure_id, active_ship_id, balance_cents, record_json "
+            "FROM characters WHERE character_id = ?",
+            (char_id,),
+        ).fetchone()
+        if row is None:
+            return True, ""
+        db_station_id, db_structure_id, db_ship_id, db_balance_cents, raw_rec_json = row
+        if wallet.get("isk_balance") is not None:
+            client_isk = float(wallet["isk_balance"])
+            server_isk = round(float(db_balance_cents) / 100.0, 2)
+            if abs(client_isk - server_isk) > 0.02:
+                mismatches.append(f"wallet.isk_balance client={client_isk:.2f} != sqlite={server_isk:.2f}")
+
+        db_loc_id = db_station_id or db_structure_id
+        if db_loc_id and (inv.get("hangar_item_count") is not None or inv.get("hangar_total_quantity") is not None):
+            h_cnt, h_qty = cur.execute(
+                "SELECT COUNT(*), COALESCE(SUM(quantity), 0) FROM items "
+                "WHERE owner_id = ? AND location_id = ? AND flag = 4",
+                (char_id, int(db_loc_id)),
+            ).fetchone()
+            if inv.get("hangar_item_count") is not None and int(inv["hangar_item_count"]) != int(h_cnt):
+                mismatches.append(
+                    f"invCache.hangar_item_count client={inv['hangar_item_count']} != sqlite={h_cnt} (loc={db_loc_id})"
+                )
+            if inv.get("hangar_total_quantity") is not None and int(inv["hangar_total_quantity"]) != int(h_qty):
+                mismatches.append(
+                    f"invCache.hangar_total_quantity client={inv['hangar_total_quantity']} != sqlite={h_qty} (loc={db_loc_id})"
+                )
+
+        ship_id = sess.get("shipid") or db_ship_id
+        if ship_id and (inv.get("cargo_item_count") is not None or inv.get("cargo_total_quantity") is not None):
+            c_cnt, c_qty = cur.execute(
+                "SELECT COUNT(*), COALESCE(SUM(quantity), 0) FROM items "
+                "WHERE owner_id = ? AND location_id = ? AND flag = 5",
+                (char_id, int(ship_id)),
+            ).fetchone()
+            if inv.get("cargo_item_count") is not None and int(inv["cargo_item_count"]) != int(c_cnt):
+                mismatches.append(
+                    f"invCache.cargo_item_count client={inv['cargo_item_count']} != sqlite={c_cnt} (ship={ship_id})"
+                )
+            if inv.get("cargo_total_quantity") is not None and int(inv["cargo_total_quantity"]) != int(c_qty):
+                mismatches.append(
+                    f"invCache.cargo_total_quantity client={inv['cargo_total_quantity']} != sqlite={c_qty} (ship={ship_id})"
+                )
+
+        if clone.get("home_station_id") is not None:
+            try:
+                rec_obj = json.loads(raw_rec_json) if raw_rec_json else {}
+            except Exception:
+                rec_obj = {}
+            db_home = rec_obj.get("home_station_id") if isinstance(rec_obj, dict) else None
+            if db_home is not None and int(clone["home_station_id"]) != int(db_home):
+                mismatches.append(
+                    f"clone_state.home_station_id client={clone['home_station_id']} != sqlite={db_home}"
+                )
+
+        if clone.get("jump_clone_count") is not None:
+            jc_row = cur.execute(
+                "SELECT clones_json FROM jump_clones WHERE character_id = ?",
+                (char_id,),
+            ).fetchone()
+            if jc_row and jc_row[0]:
+                try:
+                    jc_parsed = json.loads(jc_row[0])
+                    db_jc_count = len(jc_parsed) if isinstance(jc_parsed, (list, dict)) else 0
+                except Exception:
+                    db_jc_count = 0
+            else:
+                db_jc_count = 0
+            if int(clone["jump_clone_count"]) != int(db_jc_count):
+                mismatches.append(
+                    f"clone_state.jump_clone_count client={clone['jump_clone_count']} != sqlite={db_jc_count}"
+                )
+    except sqlite3.OperationalError:
+        return True, ""
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    if mismatches:
+        return False, "; ".join(mismatches)
+    return True, ""
+
+
 def _unwrap_state_payload(payload: Any) -> Dict[str, Any]:
     """Return UI/session state snapshot dict whether already RPC-unwrapped or nested under `state`/`result`."""
     if not isinstance(payload, dict) or not payload:
@@ -8218,6 +8886,12 @@ class ScenarioRunner(PlaytesterRunner):
             int(d.get("step_index", 0) or 0) > 0
             for d in getattr(self, "_active_declared_setup_steps", [])
         )
+
+    def _scenario_server_extra_env(self) -> Dict[str, str]:
+        user, _, _, _ = self._scenario_auth_params()
+        if self._scenario_requires_gm() and user == "demo":
+            return {"EVOMU_ADMIN_TOKEN": "evomu-scenario-gm-secret"}
+        return {}
 
     def write_server_config(self) -> Path:
         self.world_dir.mkdir(parents=True, exist_ok=True)
@@ -8284,14 +8958,18 @@ class ScenarioRunner(PlaytesterRunner):
             f"initial_balance_isk = {initial_isk}",
             f"initial_balance_plex = {initial_plex}",
         ]
-        if requires_gm:
+        # Never share the scenario player's username/char_id with [[admin_accounts]], or
+        # `provision_gm_account` will pre-create a 0-skill character and skip starter_character/seed_demo.
+        # For non-demo accounts, provision a separate helper GM account; for `demo`, pass EVOMU_ADMIN_TOKEN
+        # via `_scenario_server_extra_env` so admin provisioning runs AFTER `populate_demo_snapshot`.
+        if requires_gm and user != "demo":
             lines.extend([
                 "",
                 "[[admin_accounts]]",
-                f"username = {json.dumps(user)}",
-                f"password_token = {json.dumps(password)}",
-                f"character_id = {char_id}",
-                f"character_name = {json.dumps(char_name)}",
+                'username = "evomu_scenario_gm"',
+                'password_token = "evomu-scenario-gm-secret"',
+                "character_id = 90000099",
+                'character_name = "Scenario GM"',
             ])
         cfg_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return cfg_path
@@ -8657,7 +9335,7 @@ class ScenarioRunner(PlaytesterRunner):
         step_rpcs: Dict[str, List[str]] = {}
         failure_info: Optional[Dict[str, Any]] = None
         client_version = ""
-        client_build = _detect_system_eve_build(cache_root=DEFAULT_CACHE_ROOT)
+        client_build = _coerce_int_client_build(_detect_system_eve_build(cache_root=DEFAULT_CACHE_ROOT))
         destiny_cls: Optional[Dict[str, Any]] = None
         log_errors: List[str] = []
         client_logs: List[Path] = []
@@ -8720,7 +9398,7 @@ class ScenarioRunner(PlaytesterRunner):
                         obs = self.rpc.call("get_state", timeout=15.0) or {}
                         boot_state = _unwrap_state_payload(obs)
                     if boot_state.get("client_build"):
-                        client_build = str(boot_state["client_build"])
+                        client_build = _coerce_int_client_build(boot_state["client_build"])
                     if boot_state.get("client_version"):
                         client_version = str(boot_state["client_version"])
 
@@ -8737,6 +9415,11 @@ class ScenarioRunner(PlaytesterRunner):
 
                     pre_state = dict(boot_state)
                     recent_rpcs: List[str] = [_format_rpc_name(c) for c in startup_calls if _format_rpc_name(c)]
+                    user_cfg, _, _, _ = self._scenario_auth_params()
+                    primary_char_name = str(
+                        self._active_starting_state.get("character_name")
+                        or ("Demo Pilot" if user_cfg == "demo" else f"Scenario {user_cfg}")
+                    )
 
                     for idx, step in enumerate(scenario["steps"]):
                         step_num = idx + 1
@@ -8745,6 +9428,7 @@ class ScenarioRunner(PlaytesterRunner):
                         act_type = _canonicalize_action_type(str(act.get("type") or ""), bool(act.get("target")))
                         t_step = time.time()
                         ctx = {
+                            "primary_character_name": primary_char_name,
                             "expected_characters": self._active_expected_characters,
                             "startup_macho_calls": startup_calls if idx == 0 else [],
                             "server_bookmark_exists": self._server_bookmark_exists,
@@ -8790,7 +9474,7 @@ class ScenarioRunner(PlaytesterRunner):
                         if not client_version and isinstance(post_state, dict) and post_state.get("client_version"):
                             client_version = str(post_state["client_version"])
                         if isinstance(post_state, dict) and post_state.get("client_build"):
-                            client_build = str(post_state["client_build"])
+                            client_build = _coerce_int_client_build(post_state["client_build"])
 
                         step_chk_cfg = dict(step.get("checks") or {})
                         ok_step, fail_chk, fail_msg = evaluate_scenario_checks(
@@ -8800,6 +9484,31 @@ class ScenarioRunner(PlaytesterRunner):
                             exec_res,
                             context=ctx,
                         )
+                        if (
+                            ok_step
+                            and self.world_db_path.exists()
+                            and step_chk_cfg.get("ui_delta_without_relog") is not False
+                            and _is_mutating_scenario_step(step, act_type, exec_res)
+                        ):
+                            ok_delta, delta_msg = evaluate_ui_delta_sqlite_parity(self.world_db_path, post_state)
+                            if not ok_delta:
+                                delta_deadline = time.time() + 2.0
+                                while time.time() < delta_deadline:
+                                    time.sleep(min(0.25, max(0.05, delta_deadline - time.time())))
+                                    try:
+                                        obs_delta = self.rpc.call("get_state", timeout=5.0) or {}
+                                        polled_state = _unwrap_state_payload(obs_delta)
+                                        if polled_state:
+                                            post_state = polled_state
+                                    except Exception:
+                                        pass
+                                    ok_delta, delta_msg = evaluate_ui_delta_sqlite_parity(self.world_db_path, post_state)
+                                    if ok_delta:
+                                        break
+                            if not ok_delta:
+                                ok_step = False
+                                fail_chk = "ui_delta_without_relog"
+                                fail_msg = f"Client cache diverged from server SQLite after 2.0s without relog: {delta_msg}"
                         cur_logs, cur_tb_path = _gather_client_logs()
                         step_log_errs = scan_scenario_logs_for_errors(
                             slog_path,
@@ -8888,6 +9597,9 @@ class ScenarioRunner(PlaytesterRunner):
 
         journey_entry = {
             "passed": passed,
+            "ui_scenario": True,
+            "client_build": client_build,
+            "log_errors": list(log_errors),
             "title": scenario["title"],
             "evidence": (
                 f"Scenario {sid!r} completed {len(step_records)} steps in {total_sec:.2f}s cleanly"
@@ -8926,10 +9638,11 @@ class ScenarioRunner(PlaytesterRunner):
         last_server_log = ""
         last_destiny_cls: Optional[Dict[str, Any]] = None
         client_version = ""
-        client_build = ""
+        client_build = 0
 
         for scen in loaded:
             entry, meta = self.run_single_scenario(scen)
+            entry["git_sha"] = server_commit
             journeys[scen["id"]] = entry
             all_client_logs.extend(meta["client_logs"])
             all_log_errors.extend(meta["log_errors"])
@@ -8939,7 +9652,7 @@ class ScenarioRunner(PlaytesterRunner):
             if meta["client_version"]:
                 client_version = meta["client_version"]
             if meta["client_build"]:
-                client_build = meta["client_build"]
+                client_build = _coerce_int_client_build(meta["client_build"])
 
         result_payload = {
             "journeys": journeys,

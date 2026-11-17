@@ -2579,8 +2579,17 @@ class TestPlaytester1199AcceptanceCriteria(unittest.TestCase):
             self.assertGreater(int(sc.get("initial_balance_isk", 0)), 0)
 
         admins = parsed.get("admin_accounts", [])
-        self.assertGreaterEqual(len(admins), 1)
-        for a_acc in admins:
+        self.assertEqual(len(admins), 0, f"Default player persona must run role=0 with no admin_accounts, got {admins}")
+
+        with tempfile.TemporaryDirectory() as td_gm:
+            wt_gm = Path(td_gm)
+            args_gm = playtester.parse_args(["--worktree", str(wt_gm), "--no-hybrid", "--persona", "gm_tester"])
+            runner_gm = playtester.PlaytesterRunner(args_gm)
+            cfg_gm_text = runner_gm.write_server_config().read_text(encoding="utf-8")
+            parsed_gm = tomllib.loads(cfg_gm_text) if tomllib is not None else _parse_simple_toml(cfg_gm_text)
+        admins_gm = parsed_gm.get("admin_accounts", [])
+        self.assertGreaterEqual(len(admins_gm), 1)
+        for a_acc in admins_gm:
             unknown_a = set(a_acc.keys()) - struct_fields["AdminAccountConfig"]
             self.assertEqual(unknown_a, set(), f"Unknown AdminAccountConfig keys: {unknown_a}")
 
@@ -2788,6 +2797,138 @@ class TestPlaytester1200OriginMainCutover(unittest.TestCase):
             self.assertEqual(runner.memory.data["long_term_notes"], ["prior"])
             self.assertEqual(save_calls, [])
 
+    def test_invalid_target_benign_user_error_and_tasklet_classification(self):
+        self.assertIn("invalidtarget", playtester.PlaytesterBugOracle.EXPECTED_USER_ERROR_KEYWORDS)
+        self.assertIn("invalidtarget", playtester.PlaytesterBugOracle.BENIGN_USER_ERROR_MARKERS)
+        oracle = playtester.PlaytesterBugOracle
+        self.assertTrue(
+            oracle.is_expected_user_error(
+                {"error": "UserError('CustomInfo', {'info': 'InvalidTarget: Target is not valid'})"},
+                expected_text="Activate turret",
+            )
+        )
+        tb_invalid_target = (
+            "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x9, ctxt='ModuleButton.OnStateChange'>\",)\n"
+            '  File "eve/client/script/ui/inflight/shipModuleButton/shipmodulebutton.py", line 1630, in OnStateChange\n'
+            '  File "eve/client/script/ui/inflight/shipModuleButton/shipmodulebutton.py", line 1580, in ActivateEffect\n'
+            "UserError: User error, msg=CustomInfo, dict={'info': 'InvalidTarget'}\n"
+        )
+        self.assertFalse(oracle._is_unhandled_tasklet_traceback("Unhandled exception in ModuleButton.OnStateChange", tb_invalid_target))
+        self.assertTrue(oracle.is_ignorable_client_traceback("Unhandled exception in ModuleButton.OnStateChange", tb_invalid_target))
+
+    def test_flight_recorder_anomaly_harvester_high_err_and_polling_storm(self):
+        with tempfile.TemporaryDirectory() as td:
+            wt = Path(td)
+            args = playtester.parse_args(["--worktree", str(wt)])
+            runner = playtester.PlaytesterRunner(args)
+            runner.oracle.async_write = False
+            runner.client_proc = None
+
+            base_ts = 1700000000.0
+            # 1) Benign allowlisted errors (DockRequested / SessionChangeInProgress / InvalidTarget) -> 0 bundles
+            benign_calls = [
+                {"seq": 1, "ts": base_ts + 1, "service": "station", "method": "Dock", "status": "ERR", "error": "UserError('DockRequested')"},
+                {"seq": 2, "ts": base_ts + 2, "service": "station", "method": "Dock", "status": "ERR", "error": "UserError('DockRequested')"},
+                {"seq": 3, "ts": base_ts + 3, "service": "station", "method": "Dock", "status": "ERR", "error": "UserError('DockRequested')"},
+                {"seq": 4, "ts": base_ts + 4, "service": "sessionMgr", "method": "Undock", "status": "ERR", "error": "UserError('SessionChangeInProgress')"},
+                {"seq": 5, "ts": base_ts + 5, "service": "sessionMgr", "method": "Undock", "status": "ERR", "error": "UserError('SessionChangeInProgress')"},
+                {"seq": 6, "ts": base_ts + 6, "service": "sessionMgr", "method": "Undock", "status": "ERR", "error": "UserError('SessionChangeInProgress')"},
+            ]
+            emitted_benign = runner.harvest_flight_recorder_anomalies(step_num=10, calls_override=benign_calls)
+            self.assertEqual(emitted_benign, [])
+
+            # 2) 5/5 unexpected failing RPCs -> emits 1 deduplicated anomaly bundle; second call emits 0
+            err_calls = [
+                {"seq": 100 + i, "ts": base_ts + i, "service": "skillPlanSvc", "method": "GetAllPersonal", "status": "ERR", "error": "InternalError('db timeout')"}
+                for i in range(5)
+            ]
+            emitted_err_1 = runner.harvest_flight_recorder_anomalies(step_num=11, calls_override=err_calls)
+            self.assertEqual(len(emitted_err_1), 1)
+            bundle_err = json.loads(emitted_err_1[0].read_text(encoding="utf-8"))
+            self.assertEqual(bundle_err["report_source"], "flight_recorder_harvester")
+            self.assertEqual(bundle_err["anomaly"]["service"], "skillPlanSvc")
+            self.assertEqual(bundle_err["anomaly"]["non_ok_calls"], 5)
+            self.assertEqual(runner.harvest_flight_recorder_anomalies(step_num=12, calls_override=err_calls), [])
+
+            # 3) 300/min polling loop (300 OK calls inside 60s) -> emits 1 deduplicated polling-storm bundle
+            storm_calls = [
+                {"seq": 1000 + i, "ts": base_ts + (i * 0.19), "service": "marketProxy", "method": "GetRegionBest", "status": "OK", "error": ""}
+                for i in range(300)
+            ]
+            emitted_storm = runner.harvest_flight_recorder_anomalies(step_num=13, calls_override=storm_calls)
+            self.assertEqual(len(emitted_storm), 1)
+            bundle_storm = json.loads(emitted_storm[0].read_text(encoding="utf-8"))
+            self.assertEqual(bundle_storm["kind"], "flight_recorder_polling_storm")
+            self.assertEqual(bundle_storm["anomaly"]["service"], "marketProxy")
+            self.assertGreater(bundle_storm["anomaly"]["peak_per_min"], 200.0)
+            self.assertEqual(runner.harvest_flight_recorder_anomalies(step_num=14, calls_override=storm_calls), [])
+
+    def test_exploratory_validator_rejects_non_gm_slash_at_step_gt_zero(self):
+        # Unit check on validate_exploratory_action
+        slash_create = {"type": "slash_command", "command": "/createitem 34 100"}
+        ok0, _ = playtester.validate_exploratory_action(slash_create, step_num=0, persona_id="open_explorer")
+        self.assertTrue(ok0)
+        ok_gm, _ = playtester.validate_exploratory_action(slash_create, step_num=3, persona_id="gm_tester")
+        self.assertTrue(ok_gm)
+        ok_player, reason_player = playtester.validate_exploratory_action(slash_create, step_num=1, persona_id="open_explorer")
+        self.assertFalse(ok_player)
+        self.assertIn("Setup-only GM enforcement rejected", reason_player)
+
+        ok_text_slash, _ = playtester.validate_exploratory_action(
+            {"type": "type_text", "text": "/createitem 34 50"}, step_num=2, persona_id="market_trader"
+        )
+        self.assertFalse(ok_text_slash)
+
+        # End-to-end execute_step check: execute_action RPC must NOT be dispatched for /createitem at step > 0
+        with tempfile.TemporaryDirectory() as td:
+            wt = Path(td)
+            args = playtester.parse_args(["--worktree", str(wt)])
+            runner = playtester.PlaytesterRunner(args)
+            runner.oracle.async_write = False
+            runner.cached_git_head = "deadbeef"
+            snap = {
+                "active_view": "hangar",
+                "session": {"charid": 90000001, "stationid": 60003760},
+                "ui": {"open_windows": [], "modals": [], "clickable_widgets": []},
+                "open_windows": [],
+                "modals": [],
+                "space": {},
+                "skills_state": {},
+                "wallet_state": {},
+            }
+            rpc_calls = []
+
+            def fake_rpc_call(method, params=None, timeout=15.0):
+                rpc_calls.append(method)
+                if method == "get_state":
+                    return dict(snap)
+                return {"ok": True}
+
+            runner.rpc = mock.Mock()
+            runner.rpc.call.side_effect = fake_rpc_call
+            plan_dec = {
+                "observation": "In hangar",
+                "previous_action_verification": {"expectation_met": True, "discrepancy_summary": ""},
+                "bug_report": {"should_file": False},
+                "current_goal": "Spawn item via /createitem",
+                "memory_update": {},
+                "delegated_plan": {
+                    "plan_goal": "Try GM slash in player persona",
+                    "horizon_rationale": "Test rejection",
+                    "max_batch_steps": 1,
+                    "steps": [
+                        {
+                            "step_number": 1,
+                            "exec_mode": "direct",
+                            "action": {"type": "slash_command", "command": "/createitem 34 100"},
+                        }
+                    ],
+                },
+            }
+            with mock.patch.object(playtester, "capture_window_screenshot", return_value={"ok": False}), \
+                 mock.patch.object(playtester, "invoke_agy_planner", return_value=(plan_dec, "hydrogen-l-tf-medium", 0.5)):
+                runner.execute_step(1, {}, [])
+            self.assertNotIn("execute_action", rpc_calls)
 
 
 if __name__ == "__main__":

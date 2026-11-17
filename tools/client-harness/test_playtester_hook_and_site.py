@@ -3266,6 +3266,55 @@ class TestScenarioHookExtensions(unittest.TestCase):
 
         self.assertEqual(ensured_views, ["inflight", "hangar"])
 
+    def test_show_info_click_top_tabs_and_snapshot_cache_fields(self):
+        hook = _load_hook_with_py2_stubs()
+        self.assertEqual(hook.get_open_window_cmd_map(), hook.cmd_map)
+
+        shown_info_calls = []
+        clicked_tabs_log = []
+        fake_info_svc = types.SimpleNamespace(
+            ShowInfo=lambda tid, itemID=None: shown_info_calls.append((tid, itemID)),
+        )
+        tab_a = types.SimpleNamespace(text="Description", label="Description", name="tab_desc", destroyed=False, display=True, OnClick=lambda *_a: clicked_tabs_log.append("Description"))
+        tab_b = types.SimpleNamespace(text="Attributes", label="Attributes", name="tab_attr", destroyed=False, display=True, OnClick=lambda *_a: clicked_tabs_log.append("Attributes"))
+        fake_tg = types.SimpleNamespace(tabs=[tab_a, tab_b], children=[], destroyed=False, display=True, SelectByIdx=lambda i: None)
+        fake_info_win = types.SimpleNamespace(windowID="InfoWindow", name="InfoWindow", caption="Information", destroyed=False, display=True, children=[fake_tg])
+        fake_reg = types.SimpleNamespace(GetWindows=lambda: [fake_info_win])
+        fake_uicore = types.SimpleNamespace(
+            cmd=None, registry=fake_reg, desktop=types.SimpleNamespace(width=1280, height=800), layer=None,
+        )
+        inv_hangar = types.SimpleNamespace(items={1: {"categoryID": 6, "stacksize": 1}, 2: {"categoryID": 4, "stacksize": 500}})
+        inv_cargo = types.SimpleNamespace(items={3: {"categoryID": 8, "quantity": 120}})
+        fake_inv_cache = types.SimpleNamespace(inventories={(60003760, 4): inv_hangar, (100000001, 5): inv_cargo})
+        fake_jc_svc = types.SimpleNamespace(homeStationID=60003760, jumpClones=[{"cloneID": 1}, {"cloneID": 2}])
+        fake_svcs = {"info": fake_info_svc, "invCache": fake_inv_cache, "jumpCloneSvc": fake_jc_svc}
+        fake_sm = types.SimpleNamespace(services=fake_svcs, GetService=lambda n: fake_svcs.get(n))
+        sess = types.SimpleNamespace(userid=1, charid=90000001, stationid=60003760, structureid=None, shipid=100000001, solarsystemid=None, solarsystemid2=30000142, mutating=0, changing=None)
+
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.dict(builtins.__dict__, {"session": sess, "sm": fake_sm}), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_is_visible", return_value=True), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True):
+            snap = hook._get_state_snapshot(fake_sm)
+            self.assertEqual(snap["inventory_state"]["hangar_item_count"], 2)
+            self.assertEqual(snap["inventory_state"]["hangar_total_quantity"], 501)
+            self.assertEqual(snap["inventory_state"]["cargo_item_count"], 1)
+            self.assertEqual(snap["inventory_state"]["cargo_total_quantity"], 120)
+            self.assertEqual(snap["clone_state"]["home_station_id"], 60003760)
+            self.assertEqual(snap["clone_state"]["jump_clone_count"], 2)
+
+            with mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+                 mock.patch.object(hook, "_install_warp_telemetry"), \
+                 mock.patch.object(hook, "_get_state_snapshot", return_value=snap), \
+                 mock.patch.object(hook, "_settle_after_action", return_value=0), \
+                 mock.patch.object(hook, "_invoke_widget_click", side_effect=lambda w, **_kw: w.OnClick()):
+                res_si = hook._execute_action(fake_sm, {"type": "show_info", "type_id": 587, "category": "ship", "click_top_tabs": True, "wait_ms": 0, "reuse_pre_state": False})
+                self.assertTrue(res_si.get("ok"), res_si)
+                self.assertEqual(shown_info_calls, [(587, None)])
+                self.assertEqual(res_si["tabs"]["tabs_clicked"], 2)
+                self.assertEqual(clicked_tabs_log, ["Description", "Attributes"])
+
 
 if __name__ == "__main__":
     unittest.main()
