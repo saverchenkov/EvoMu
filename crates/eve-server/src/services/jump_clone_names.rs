@@ -917,6 +917,118 @@ pub(crate) fn serialize_doll_pyrep(rep: &PyRep) -> String {
     }
 }
 
+fn lower_first_ascii(s: &str) -> String {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut out = String::with_capacity(s.len());
+    out.push(first.to_ascii_lowercase());
+    out.push_str(chars.as_str());
+    out
+}
+
+fn extract_vec3(rep: &PyRep) -> Option<[f64; 3]> {
+    let items = match rep {
+        PyRep::Tuple(v) | PyRep::List(v) if v.len() == 3 => v,
+        _ => return None,
+    };
+    let mut out = [0.0_f64; 3];
+    for (idx, item) in items.iter().enumerate() {
+        let val = match item {
+            PyRep::Real(v) if v.is_finite() => *v,
+            PyRep::Integer(v) => *v as f64,
+            _ => return None,
+        };
+        out[idx] = val;
+    }
+    Some(out)
+}
+
+fn push_portrait_entry(out: &mut Vec<(String, String)>, key: &str, val: &PyRep) {
+    let norm = lower_first_ascii(key);
+    match norm.as_str() {
+        "cameraPosition" | "cameraPos" => {
+            if let Some([x, y, z]) = extract_vec3(val) {
+                out.push(("cameraX".to_string(), x.to_string()));
+                out.push(("cameraY".to_string(), y.to_string()));
+                out.push(("cameraZ".to_string(), z.to_string()));
+                return;
+            }
+        }
+        "cameraPoi" => {
+            if let Some([x, y, z]) = extract_vec3(val) {
+                out.push(("cameraPoiX".to_string(), x.to_string()));
+                out.push(("cameraPoiY".to_string(), y.to_string()));
+                out.push(("cameraPoiZ".to_string(), z.to_string()));
+                return;
+            }
+        }
+        "headLookTarget" => {
+            if let Some([x, y, z]) = extract_vec3(val) {
+                out.push(("headLookTargetX".to_string(), x.to_string()));
+                out.push(("headLookTargetY".to_string(), y.to_string()));
+                out.push(("headLookTargetZ".to_string(), z.to_string()));
+                return;
+            }
+        }
+        "poseData" => match val {
+            PyRep::KeyVal(inner) => {
+                let mut entries: Vec<(&String, &PyRep)> = inner.iter().collect();
+                entries.sort_by_key(|(k, _)| *k);
+                for (pk, pv) in entries {
+                    push_portrait_entry(out, pk, pv);
+                }
+                return;
+            }
+            PyRep::Dict(inner) => {
+                for (pk, pv) in inner {
+                    let k_str = serialize_doll_pyrep(pk);
+                    push_portrait_entry(out, &k_str, pv);
+                }
+                return;
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+    out.push((norm, serialize_doll_pyrep(val)));
+}
+
+/// Serializes client `portraitInfo` into canonical flat `k=v&...` pairs, preserving flat keys
+/// while unpacking nested `cameraPosition`/`cameraPoi`/`headLookTarget` tuples and `poseData`.
+pub(crate) fn serialize_portrait_pyrep(rep: &PyRep) -> String {
+    match rep {
+        PyRep::KeyVal(map) => {
+            let mut entries: Vec<(&String, &PyRep)> = map.iter().collect();
+            entries.sort_by_key(|(k, _)| *k);
+            let mut pairs = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                push_portrait_entry(&mut pairs, k, v);
+            }
+            pairs.sort_by(|a, b| a.0.cmp(&b.0));
+            pairs
+                .into_iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("&")
+        }
+        PyRep::Dict(entries) => {
+            let mut pairs = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                let k_str = serialize_doll_pyrep(k);
+                push_portrait_entry(&mut pairs, &k_str, v);
+            }
+            pairs
+                .into_iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("&")
+        }
+        _ => serialize_doll_pyrep(rep),
+    }
+}
+
 /// Computes effective character attributes `(charisma, intelligence, memory, perception, willpower)`
 /// combining base/remapped neural attributes + plugged-in implants (`175..=179`) + active cerebral accelerators (`InventoryFlag::Booster`) (`feat:attributes.attributes-base`).
 pub fn effective_character_attributes(

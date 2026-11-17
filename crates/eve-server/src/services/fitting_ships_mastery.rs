@@ -1622,7 +1622,6 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 .station_id
                 .or(session.structure_id)
                 .filter(|&id| id > 0);
-            let first_id = item_ids[0];
             let alsc_locked = read_container_ship_state(ctx)
                 .alsc_locked_items;
             let now_unix = ctx.now_unix();
@@ -1839,11 +1838,8 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     },
                 );
             }
-            Some(Ok(PyRep::keyval([
-                ("itemID", PyRep::Integer(first_id)),
-                ("deleted", PyRep::Bool(true)),
-                ("count", PyRep::Integer(trashed.len() as i64)),
-            ])))
+            // Client `TrashInvItems` expects an empty list on full success and error dialog keys only for failures.
+            Some(Ok(PyRep::List(Vec::new())))
         }
 
         ("ship", "GetDirtTimestamp") => {

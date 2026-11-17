@@ -764,6 +764,10 @@ async fn test_raffle_queries_and_subscriptions() {
     // 4. GetCreatedParticipated & GetMyRaffleHistory
     let PyRep::List(created_participated) = rpc(&ctx, &mut p1, "raffleProxy", "GetCreatedParticipated", &[]).await.expect("GetCreatedParticipated") else { panic!("expected List"); };
     assert!(created_participated.len() >= 2);
-    let PyRep::List(history) = rpc(&ctx, &mut p2, "raffleProxy", "GetMyRaffleHistory", &[]).await.expect("GetMyRaffleHistory") else { panic!("expected List"); };
-    assert!(history.iter().any(|r| matches!(r, PyRep::KeyVal(kv) if kv.get("raffle_id") == Some(&PyRep::Integer(raf_c)))));
+    let PyRep::Tuple(hist_parts) = rpc(&ctx, &mut p2, "raffleProxy", "GetMyRaffleHistory", &[]).await.expect("GetMyRaffleHistory") else { panic!("expected 2-tuple"); };
+    assert_eq!(hist_parts.len(), 2);
+    let PyRep::List(history) = &hist_parts[0] else { panic!("expected List at [0]"); };
+    assert!(history.iter().any(|r| matches!(r, PyRep::KeyVal(kv) if kv.get("raffle_id") == Some(&PyRep::Integer(raf_c)) && kv.get("running_id") == Some(&PyRep::Integer(raf_c)))));
+    let PyRep::Integer(page_size) = hist_parts[1] else { panic!("expected Integer at [1]"); };
+    assert!(page_size > 0);
 }

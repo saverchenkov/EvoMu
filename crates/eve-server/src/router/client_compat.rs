@@ -783,63 +783,6 @@ pub fn normalize_macho_rpc_reply_at(
                 ));
             }
         }
-    } else if service == "invbroker" && method == "ALSCLogGet" {
-        if let Ok(ref rep) = rpc_res {
-            if let Some(entries) = rep.dict_get("entries") {
-                return Ok(entries.clone());
-            }
-        }
-    } else if service == "invbroker" && method == "TrashItems" {
-        if let Ok(rep) = rpc_res {
-            return match rep {
-                PyRep::None => Ok(PyRep::List(Vec::new())),
-                PyRep::KeyVal(_) | PyRep::Dict(_) => Ok(PyRep::List(vec![rep])),
-                other => Ok(other),
-            };
-        }
-    } else if service == "jumpCloneSvc" && method == "GetCloneState" {
-        if let Ok(rep) = rpc_res {
-            let clone_items = rep
-                .dict_get("clones")
-                .map(extract_table_rows)
-                .unwrap_or_default();
-            let clone_rows = clone_items
-                .into_iter()
-                .map(|c| {
-                    vec![
-                        row_field(&c, "jumpCloneID").unwrap_or(PyRep::Integer(0)),
-                        row_field(&c, "locationID").unwrap_or(PyRep::None),
-                        row_field(&c, "cloneName").unwrap_or_else(|| PyRep::String(String::new())),
-                    ]
-                })
-                .collect();
-            let imp_items = rep
-                .dict_get("implants")
-                .map(extract_table_rows)
-                .unwrap_or_default();
-            let imp_rows = imp_items
-                .into_iter()
-                .map(|im| {
-                    vec![
-                        row_field(&im, "jumpCloneID").unwrap_or(PyRep::Integer(0)),
-                        row_field(&im, "implantID").unwrap_or(PyRep::Integer(0)),
-                        row_field(&im, "typeID").unwrap_or(PyRep::Integer(0)),
-                    ]
-                })
-                .collect();
-            let time_last = rep.dict_get("timeLastJump").cloned().unwrap_or(PyRep::None);
-            return Ok(PyRep::keyval([
-                (
-                    "clones",
-                    PyRep::rowset(vec!["jumpCloneID", "locationID", "cloneName"], clone_rows),
-                ),
-                (
-                    "implants",
-                    PyRep::rowset(vec!["jumpCloneID", "implantID", "typeID"], imp_rows),
-                ),
-                ("timeLastJump", time_last),
-            ]));
-        }
     } else if service == "map" && method == "GetConstellationLPData" {
         if let Ok(ref rep) = rpc_res {
             let rows = extract_table_rows(rep)
@@ -916,13 +859,6 @@ pub fn normalize_macho_rpc_reply_at(
                 vec!["solarSystemID", "security", "modifiedSecurity"],
                 rows,
             ));
-        }
-    } else if service == "paperDollServer" && method == "GetPaperDollPortraitDataFor" {
-        if let Ok(rep) = rpc_res {
-            if matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
-                return Ok(PyRep::Tuple(vec![rep.clone(), rep]));
-            }
-            return Ok(rep);
         }
     } else if service == "dogmaIM" && method == "AddTarget" {
         if let Ok(PyRep::KeyVal(map)) = rpc_res {
@@ -1131,23 +1067,6 @@ pub fn normalize_macho_rpc_reply_at(
                 })
                 .collect();
             return Ok(PyRep::List(out));
-        }
-    } else if service == "raffleProxy" && method == "GetMyRaffleHistory" {
-        if let Ok(PyRep::List(items)) = rpc_res {
-            let mut out = Vec::new();
-            for (idx, it) in items.into_iter().enumerate() {
-                if it.dict_get("running_id").is_some() {
-                    out.push(it);
-                } else {
-                    out.push(PyRep::keyval([
-                        ("running_id", PyRep::Integer((idx + 1) as i64)),
-                        ("raffle_id", PyRep::Integer((idx + 1) as i64)),
-                        ("type_id", PyRep::Integer(0)),
-                    ]));
-                }
-            }
-            let total = out.len() as i64;
-            return Ok(PyRep::Tuple(vec![PyRep::List(out), PyRep::Integer(total)]));
         }
     } else if service == "reprocessingSvc" && method == "GetQuotes" {
         match rpc_res {

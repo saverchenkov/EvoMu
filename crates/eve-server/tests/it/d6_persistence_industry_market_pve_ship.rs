@@ -697,7 +697,7 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         assert_eq!(call(&ctx, &mut sess, "invbroker", "ALSCConfigGet", &[PyRep::Integer(alsc_id)]).await.expect("ALSCConfigGet").dict_get("hasPassword").and_then(|v| v.as_bool()), Some(true));
         let locked_dict = call(&ctx, &mut sess, "itemLocking", "GetItemsByLocation", &[PyRep::Integer(alsc_id)]).await.expect("GetItemsByLocation");
         assert!(format!("{locked_dict:?}").contains(&locked_item_id.to_string()));
-        assert!(call_kw(&ctx, &mut sess, "invbroker", "ALSCLogGet", &[PyRep::Integer(alsc_id)], &[("password", PyRep::String("vault-pw-99".into()))]).await.expect("ALSCLogGet").dict_get("logCount").and_then(|v| v.as_i64()).unwrap_or(0) >= 2);
+        assert!(matches!(call_kw(&ctx, &mut sess, "invbroker", "ALSCLogGet", &[PyRep::Integer(alsc_id)], &[("password", PyRep::String("vault-pw-99".into()))]).await.expect("ALSCLogGet"), PyRep::List(ref entries) if entries.len() >= 2));
         assert!(esi_get(&router, &format!("/v3/corporations/{CORP_ID}/containers/logs/"), Some(&token)).as_array().unwrap().iter().any(|l| l["container_id"] == alsc_id && l["action"] == "lock"));
         let ship_cfg = call(&ctx, &mut sess, "ship", "GetShipConfiguration", &[PyRep::Integer(ship_id)]).await.expect("GetShipConfiguration");
         assert_eq!((ship_cfg.dict_get("SMB_AllowFleetAccess").and_then(|v| v.as_bool()), ship_cfg.dict_get("FleetHangar_AllowCorpAccess").and_then(|v| v.as_bool())), (Some(false), Some(false)));

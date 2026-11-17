@@ -418,8 +418,18 @@ async fn test_paperdoll_server_rpcs() {
     )
     .await
     .expect("GetPaperDollPortraitDataFor");
-    assert_eq!(field(&port_rep, "characterID"), &PyRep::Integer(PILOT_1));
-    assert_eq!(field(&port_rep, "portraitInfo"), &PyRep::String("portrait:pilot1_custom".into()));
+    let PyRep::Tuple(port_parts) = port_rep else {
+        panic!("expected 2-tuple from GetPaperDollPortraitDataFor, got {port_rep:?}");
+    };
+    assert_eq!(port_parts.len(), 2);
+    assert_eq!(port_parts[1], PyRep::None);
+    let PyRep::List(port_rows) = &port_parts[0] else {
+        panic!("expected list at [0] of GetPaperDollPortraitDataFor");
+    };
+    assert_eq!(port_rows.len(), 1);
+    assert!(matches!(port_rows[0], PyRep::DBRow { .. }));
+    assert_eq!(port_rows[0].dict_get("backgroundID").and_then(PyRep::as_i64), Some(1));
+    assert!(port_rows[0].dict_get("cameraX").and_then(PyRep::as_f64).is_some());
 
     // 4. paperDollServer.UpdateExistingCharacterLimited: updates paperdoll attributes and wears apparel
     let update_kv = PyRep::keyval([

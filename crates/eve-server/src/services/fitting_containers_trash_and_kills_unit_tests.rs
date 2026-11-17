@@ -207,10 +207,7 @@ async fn launch_from_container_and_trash_items_and_kill_counter_edge_cases() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(
-        trash_jetcan_loot.dict_get("deleted").and_then(PyRep::as_bool),
-        Some(true)
-    );
+    assert_eq!(trash_jetcan_loot, PyRep::List(Vec::new()));
     ctx.db.with_snapshot(|s| {
         assert!(!s.items.contains_key(&jetcan_loot_id));
         assert!(!s.items.contains_key(&jetcan_id));

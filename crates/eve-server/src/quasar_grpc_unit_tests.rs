@@ -153,14 +153,6 @@ fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store(
     .unwrap();
     assert!(matches!(hs, PyRep::List(_)));
 
-    assert_eq!(
-        normalize_macho_rpc_reply("invbroker", "ALSCLogGet", Ok(PyRep::None)).unwrap(),
-        PyRep::None
-    );
-    assert_eq!(
-        normalize_macho_rpc_reply("invbroker", "TrashItems", Ok(PyRep::List(vec![PyRep::Integer(42)]))).unwrap(),
-        PyRep::List(vec![PyRep::Integer(42)])
-    );
     let add_tgt = normalize_macho_rpc_reply(
         "dogmaIM",
         "AddTarget",
@@ -175,12 +167,10 @@ fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store(
         PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())])
     );
 
-    assert!(normalize_macho_rpc_reply("jumpCloneSvc", "GetCloneState", Ok(PyRep::None)).is_ok());
     assert!(normalize_macho_rpc_reply("map", "GetConstellationLPData", Ok(PyRep::None)).is_ok());
     assert!(normalize_macho_rpc_reply("map", "GetCurrentSovData", Ok(PyRep::None)).is_ok());
     assert!(normalize_macho_rpc_reply("map", "GetMyExtraMapInfoAgents", Ok(PyRep::None)).is_ok());
     assert!(normalize_macho_rpc_reply("map", "GetSecurityModifiedSystems", Ok(PyRep::None)).is_ok());
-    assert!(normalize_macho_rpc_reply("paperDollServer", "GetPaperDollPortraitDataFor", Ok(PyRep::None)).is_ok());
 
     let pet = normalize_macho_rpc_reply(
         "petitioner",
@@ -199,7 +189,6 @@ fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store(
 
     assert!(normalize_macho_rpc_reply("planetMgr", "GMGetSynchedServerState", Ok(PyRep::None)).is_ok());
     assert!(normalize_macho_rpc_reply("planetMgr", "GetPlanetsForChar", Ok(PyRep::None)).is_ok());
-    assert!(normalize_macho_rpc_reply("raffleProxy", "GetMyRaffleHistory", Ok(PyRep::List(Vec::new()))).is_ok());
     assert!(normalize_macho_rpc_reply("reprocessingSvc", "GetQuotes", Ok(PyRep::Tuple(vec![PyRep::Real(0.03)]))).is_ok());
     assert_eq!(
         normalize_macho_rpc_reply("scanMgr", "RecoverProbes", Ok(PyRep::Dict(Vec::new()))).unwrap(),

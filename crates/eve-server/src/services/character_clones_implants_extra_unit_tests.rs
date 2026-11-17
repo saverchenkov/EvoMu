@@ -333,7 +333,7 @@ fn sheet_omega_custom_ship_clone_state_rowset_paperdoll_resculpt_and_apparel_une
                 started_at_unix: None,
             }],
         );
-        // Single unnamed jump clone with implants -> triggers direct Rowset return in GetCloneState
+        // Single unnamed jump clone with implants -> returns full GetCloneState KeyVal
         snap.jump_clones.insert(
             cid,
             vec![JumpCloneRecord {
@@ -376,11 +376,28 @@ fn sheet_omega_custom_ship_clone_state_rowset_paperdoll_resculpt_and_apparel_une
     assert_eq!(sheet.dict_get("shipName"), Some(&PyRep::String("Named Ship".into())));
     assert_eq!(sheet.dict_get("trainingSkillTypeID"), Some(&PyRep::Integer(3300)));
 
-    // 2. GetCloneState with 1 unnamed clone + implants returns Rowset directly
+    // 2. GetCloneState with 1 unnamed clone + implants returns full KeyVal with 1 clone row and 1 implant row
     let cs = handle_clones_and_sheet(&ctx, &mut sess, "jumpCloneSvc", "GetCloneState", &[], &kw)
         .unwrap()
         .unwrap();
-    assert!(matches!(cs, PyRep::Rowset { .. }));
+    let Some(PyRep::Rowset {
+        columns: clone_cols,
+        rows: clone_rows,
+    }) = cs.dict_get("clones")
+    else {
+        panic!("expected clones rowset, got {cs:?}");
+    };
+    assert_eq!(clone_cols, &vec!["jumpCloneID", "locationID", "cloneName"]);
+    assert_eq!(clone_rows.len(), 1);
+    let Some(PyRep::Rowset {
+        columns: imp_cols,
+        rows: imp_rows,
+    }) = cs.dict_get("implants")
+    else {
+        panic!("expected implants rowset, got {cs:?}");
+    };
+    assert_eq!(imp_cols, &vec!["jumpCloneID", "implantID", "typeID"]);
+    assert_eq!(imp_rows.len(), 1);
 
     // 3. ListStations includes Upwell structure items
     let st_rs = handle_clones_and_sheet(&ctx, &mut sess, "charUnboundMgr", "ListStations", &[], &kw)

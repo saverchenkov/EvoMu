@@ -662,11 +662,7 @@ async fn test_inv2_stack_split_destroy_inventory() {
         )
         .await
         .expect("TrashItems");
-    let PyRep::KeyVal(des_kv) = destroy_rep else {
-        panic!("Expected KeyVal from TrashItems");
-    };
-    assert_eq!(des_kv.get("deleted"), Some(&PyRep::Bool(true)));
-    assert_eq!(des_kv.get("count"), Some(&PyRep::Integer(1)));
+    assert_eq!(destroy_rep, PyRep::List(Vec::new()));
 
     ctx.db.with_snapshot(|snap| {
         assert!(

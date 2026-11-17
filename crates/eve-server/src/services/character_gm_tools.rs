@@ -2,7 +2,10 @@
 
 #![forbid(unsafe_code)]
 
-use super::{catch_up_skill_queue, is_valid_doll_or_portrait_payload, notify_watchlist_logon, serialize_doll_pyrep};
+use super::{
+    catch_up_skill_queue, is_valid_doll_or_portrait_payload, notify_watchlist_logon,
+    serialize_doll_pyrep, serialize_portrait_pyrep,
+};
 use crate::combat::death_pipeline::execute_death_pipeline;
 use crate::router::notify_registry::{
     OnModuleAttributeChanges, OnModuleFitted, OnRemoteMessage, OnSecurityStatusUpdate,
@@ -302,7 +305,7 @@ pub fn handle_char_unbound(
                 }));
             };
             let doll_str = serialize_doll_pyrep(char_info_rep);
-            let portrait_str = serialize_doll_pyrep(portrait_info_rep);
+            let portrait_str = serialize_portrait_pyrep(portrait_info_rep);
             let is_qa_or_gm = session.has_gm_role()
                 || (session.role
                     & (eve_machonet::service_roles::ROLE_QA

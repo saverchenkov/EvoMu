@@ -564,7 +564,11 @@ fn create_raffle_location_item_hypercore_validation_and_buy_ticket_award_edges()
     )
     .unwrap()
     .unwrap();
-    assert_eq!(hist_after.as_list().unwrap().len(), 1);
+    let PyRep::Tuple(hist_parts) = hist_after else {
+        panic!("expected 2-tuple from GetMyRaffleHistory");
+    };
+    assert_eq!(hist_parts.len(), 2);
+    assert_eq!(hist_parts[0].as_list().unwrap().len(), 1);
 
     // Creator calls AwardItem -> NotRaffleWinner; buyer (sole buyer = winner) calls AwardItem -> succeeds & transfers item
     assert_eq!(

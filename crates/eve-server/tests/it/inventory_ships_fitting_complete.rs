@@ -306,8 +306,8 @@ async fn test_containers_cargo_secure_alsc_station_freight() {
         )
         .await
         .expect("ALSCLogGet");
-    let Some(PyRep::List(logs)) = log_rep.dict_get("entries") else {
-        panic!("Expected entries list from ALSCLogGet");
+    let PyRep::List(logs) = log_rep else {
+        panic!("Expected list from ALSCLogGet, got {log_rep:?}");
     };
     assert!(logs.len() >= 3, "Expected audit log entries for ALSC actions");
 
@@ -436,7 +436,7 @@ async fn test_repackage_assemble_trash_encoded_crystal_and_item_locking() {
         )
         .await
         .expect("TrashItems");
-    assert_eq!(trash_rep.dict_get("deleted").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(trash_rep, PyRep::List(Vec::new()));
 
     let dec_rep = ctx
         .dispatch_rpc(

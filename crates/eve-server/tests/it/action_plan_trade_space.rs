@@ -362,7 +362,7 @@ async fn test_action_plan_s_space_structures_clones_mutations() {
         .dispatch_rpc(&mut sess, "jumpCloneSvc", None, "GetCloneState", &[], &empty_kw, None)
         .await
         .expect("GetCloneState");
-    assert!(matches!(clone_state_before, PyRep::Rowset { .. } | PyRep::KeyVal(_)));
+    assert!(matches!(clone_state_before, PyRep::KeyVal(_)));
 
     // Install clone in station (costs 900,000 ISK, requires Infomorph Psychology level >= 1)
     let install_rep = ctx
@@ -375,14 +375,13 @@ async fn test_action_plan_s_space_structures_clones_mutations() {
         .dispatch_rpc(&mut sess, "jumpCloneSvc", None, "GetCloneState", &[], &empty_kw, None)
         .await
         .expect("GetCloneState after install");
-    let rows = match &clone_state_after {
-        PyRep::Rowset { rows, .. } => rows.clone(),
-        PyRep::KeyVal(map) => match map.get("clones") {
-            Some(PyRep::Rowset { rows, .. }) => rows.clone(),
-            _ => panic!("expected rowset in clones"),
-        },
-        _ => panic!("expected Rowset or KeyVal from GetCloneState"),
+    let PyRep::KeyVal(map) = &clone_state_after else {
+        panic!("expected KeyVal from GetCloneState, got {clone_state_after:?}");
     };
+    let Some(PyRep::Rowset { rows, .. }) = map.get("clones") else {
+        panic!("expected rowset in clones");
+    };
+    let rows = rows.clone();
     assert_eq!(rows.len(), 1, "S-4: Exactly 1 jump clone installed");
     let jc_id = rows[0][0].as_i64().expect("jumpCloneID");
 

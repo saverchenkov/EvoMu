@@ -7,11 +7,17 @@
 #![forbid(unsafe_code)]
 
 use crate::common;
-use eve_db::{InventoryFlag, InventoryItemRecord, StandingTransactionRecord, WorldRepository};
+use eve_db::{
+    InventoryFlag, InventoryItemRecord, JumpCloneRecord, StandingTransactionRecord, WorldRepository,
+};
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
+use eve_server::router::client_wire::ClientWireSession;
 use eve_server::router::ServerContext;
+use eve_testkit::client_contract::{
+    validate_reply_shape_with_metrics, ClientContractRatchet, SemanticLookupContext,
+};
 use eve_testkit::client_harness::{extract_bound_id_from_wire_rep, ClientErrorResponse};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -901,4 +907,668 @@ async fn pin_on_item_change_uses_ix_stack_size_never_ix_quantity() {
     );
 
     eve_testkit::attest(&["notify:OnItemChange"]);
+}
+
+async fn wire_session_call_ok(
+    wire: &mut ClientWireSession<'_>,
+    service: &str,
+    bound_id: Option<u64>,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> PyRep {
+    let out = wire.call_wire(service, bound_id, method, args, kwargs).await;
+    assert!(
+        out.marshal_errors.is_empty(),
+        "{service}.{method} produced wire marshal errors: {:?}",
+        out.marshal_errors
+    );
+    out.rpc_result
+        .unwrap_or_else(|e| panic!("{service}.{method} failed on ClientWireSession: {e:?}"))
+}
+
+fn assert_contract_enforcing(ctx: &ServerContext, rpc_name: &str, rep: &PyRep) {
+    let raw = std::fs::read_to_string(ClientContractRatchet::default_expectations_path())
+        .expect("read client_expectations.json");
+    let root: serde_json::Value =
+        serde_json::from_str(&raw).expect("parse client_expectations.json");
+    let shape = root["rpc"][rpc_name]["reply_shape"]
+        .as_object()
+        .unwrap_or_else(|| panic!("missing reply_shape for {rpc_name}"));
+    let sem = SemanticLookupContext {
+        sde: &ctx.sde,
+        db: &ctx.db,
+    };
+    let outcome = validate_reply_shape_with_metrics(Some(&sem), rpc_name, rep, shape);
+    assert!(
+        outcome.violations.is_empty(),
+        "{rpc_name} contract violations: {:#?}\nreply={rep:?}",
+        outcome.violations
+    );
+    assert!(
+        !outcome.had_unexercised_collection_elements,
+        "{rpc_name} contract check was vacuous (unexercised collection elements); reply={rep:?}"
+    );
+    assert!(
+        outcome.paths_checked > 0,
+        "{rpc_name} contract check checked 0 paths"
+    );
+}
+
+#[tokio::test]
+async fn pin_1187_raffle_history_wire_shape() {
+    // parity: rpc:raffleProxy.GetMyRaffleHistory
+    // Client: packages/raffles/client/raffle_service.pyj:130,136 (get_history).
+    let ctx = fresh_ctx();
+    let mut ship_types: Vec<u32> = ctx
+        .sde
+        .types
+        .iter()
+        .filter(|(&tid, t)| t.published && t.group_id == 25 && tid != 52_568)
+        .map(|(&tid, _)| tid)
+        .collect();
+    ship_types.sort_unstable();
+    let (type_a, type_b) = (
+        ship_types.first().copied().unwrap_or(RIFTER_TYPE_ID),
+        ship_types.get(1).copied().unwrap_or(603),
+    );
+    let (item_a, item_b) = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&DEMO_CHAR_ID) {
+            ch.station_id = Some(JITA_STATION_ID);
+            ch.structure_id = None;
+        }
+        snap.next_entity_id += 1;
+        let id_a = snap.next_entity_id;
+        snap.items.insert(
+            id_a,
+            InventoryItemRecord {
+                item_id: id_a,
+                type_id: type_a,
+                owner_id: DEMO_CHAR_ID,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.next_entity_id += 1;
+        let id_b = snap.next_entity_id;
+        snap.items.insert(
+            id_b,
+            InventoryItemRecord {
+                item_id: id_b,
+                type_id: type_b,
+                owner_id: DEMO_CHAR_ID,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.next_entity_id += 1;
+        let cores_id = snap.next_entity_id;
+        snap.items.insert(
+            cores_id,
+            InventoryItemRecord {
+                item_id: cores_id,
+                type_id: 52_568,
+                owner_id: DEMO_CHAR_ID,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 500,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        (id_a, id_b)
+    });
+
+    let sess = player_sess(
+        87_101,
+        Some(DEMO_CHAR_ID),
+        Some(DEMO_CORP_ID),
+        Some(JITA_SYSTEM_ID),
+        Some(JITA_STATION_ID),
+    );
+    let mut wire = ClientWireSession::from_session(&ctx, sess);
+    let kw = HashMap::new();
+
+    let created_a = wire_session_call_ok(
+        &mut wire,
+        "raffleProxy",
+        None,
+        "CreateRaffle",
+        &[
+            PyRep::Integer(item_a),
+            PyRep::Integer(8),
+            PyRep::Real(100_000.0),
+        ],
+        &kw,
+    )
+    .await;
+    let raffle_id_a = created_a
+        .dict_get("raffle_id")
+        .and_then(PyRep::as_i64)
+        .expect("created raffle A id");
+
+    let created_b = wire_session_call_ok(
+        &mut wire,
+        "raffleProxy",
+        None,
+        "CreateRaffle",
+        &[
+            PyRep::Integer(item_b),
+            PyRep::Integer(8),
+            PyRep::Real(200_000.0),
+        ],
+        &kw,
+    )
+    .await;
+    let raffle_id_b = created_b
+        .dict_get("raffle_id")
+        .and_then(PyRep::as_i64)
+        .expect("created raffle B id");
+
+    let hist_rep = wire_session_call_ok(
+        &mut wire,
+        "raffleProxy",
+        None,
+        "GetMyRaffleHistory",
+        &[],
+        &kw,
+    )
+    .await;
+    let PyRep::Tuple(parts) = &hist_rep else {
+        panic!("GetMyRaffleHistory must return 2-tuple on wire, got {hist_rep:?}");
+    };
+    assert_eq!(parts.len(), 2, "GetMyRaffleHistory must return 2-tuple");
+    let PyRep::List(rows) = &parts[0] else {
+        panic!("GetMyRaffleHistory[0] must be a List, got {:?}", parts[0]);
+    };
+    assert_eq!(rows.len(), 2, "Expected both created raffles in history: {rows:?}");
+    assert!(
+        parts[1].as_i64().is_some_and(|n| n > 0),
+        "GetMyRaffleHistory[1] must be positive page size, got {:?}",
+        parts[1]
+    );
+
+    let got_pairs: Vec<(i64, u32, i64, i64)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.dict_get("raffle_id").and_then(PyRep::as_i64).expect("raffle_id"),
+                r.dict_get("type_id").and_then(PyRep::as_i64).expect("type_id") as u32,
+                r.dict_get("owner_id").and_then(PyRep::as_i64).expect("owner_id"),
+                r.dict_get("running_id").and_then(PyRep::as_i64).expect("running_id"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got_pairs,
+        vec![
+            (raffle_id_b, type_b, DEMO_CHAR_ID, raffle_id_b),
+            (raffle_id_a, type_a, DEMO_CHAR_ID, raffle_id_a),
+        ],
+        "GetMyRaffleHistory must return real created raffles (not stub type_id=0)"
+    );
+    assert_contract_enforcing(&ctx, "raffleProxy.GetMyRaffleHistory", &hist_rep);
+    eve_testkit::attest(&["rpc:raffleProxy.GetMyRaffleHistory"]);
+}
+
+#[tokio::test]
+async fn pin_1187_trash_items_wire_shape() {
+    // parity: rpc:invbroker.TrashItems
+    // Client: eve/client/script/ui/services/menuSvcExtras/invItemFunctions.pyj:641 (TrashInvItems).
+    let ctx = fresh_ctx();
+    let item_id = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&DEMO_CHAR_ID) {
+            ch.station_id = Some(JITA_STATION_ID);
+            ch.structure_id = None;
+        }
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id;
+        snap.items.insert(
+            id,
+            InventoryItemRecord {
+                item_id: id,
+                type_id: TRITANIUM_TYPE_ID,
+                owner_id: DEMO_CHAR_ID,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 25,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        id
+    });
+
+    let sess = player_sess(
+        87_102,
+        Some(DEMO_CHAR_ID),
+        Some(DEMO_CORP_ID),
+        Some(JITA_SYSTEM_ID),
+        Some(JITA_STATION_ID),
+    );
+    let mut wire = ClientWireSession::from_session(&ctx, sess);
+    let kw = HashMap::new();
+
+    let bind_rep = wire_session_call_ok(
+        &mut wire,
+        "invbroker",
+        None,
+        "MachoBindObject",
+        &[
+            PyRep::Tuple(vec![PyRep::Integer(JITA_STATION_ID), PyRep::Integer(15)]),
+            PyRep::None,
+        ],
+        &kw,
+    )
+    .await;
+    let mgr_bid = extract_bound_id_from_wire_rep(&bind_rep).expect("invbroker bound id");
+
+    let trash_rep = wire_session_call_ok(
+        &mut wire,
+        "invbroker",
+        Some(mgr_bid),
+        "TrashItems",
+        &[PyRep::List(vec![PyRep::Integer(item_id)])],
+        &kw,
+    )
+    .await;
+    assert_eq!(
+        trash_rep,
+        PyRep::List(Vec::new()),
+        "TrashItems full success must return empty list [] on the wire (never [KeyVal]): {trash_rep:?}"
+    );
+    assert!(
+        ctx.db.with_snapshot(|snap| !snap.items.contains_key(&item_id)),
+        "Trashed item {item_id} must be removed from inventory"
+    );
+    eve_testkit::attest(&["rpc:invbroker.TrashItems"]);
+}
+
+#[tokio::test]
+async fn pin_1187_jump_clone_state_wire_shape() {
+    // parity: rpc:jumpCloneSvc.GetCloneState
+    // Client: eve/client/script/ui/services/clonejumpsvc.pyj:93 (CloneJump.GetCloneState).
+    let ctx = fresh_ctx();
+    let clone_id = 300_777;
+    let implant_type_id = 9899_u32;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.jump_clones.insert(
+            DEMO_CHAR_ID,
+            vec![JumpCloneRecord {
+                jump_clone_id: clone_id,
+                character_id: DEMO_CHAR_ID,
+                location_id: JITA_STATION_ID,
+                implants: vec![implant_type_id],
+            }],
+        );
+    });
+
+    let sess = player_sess(
+        87_103,
+        Some(DEMO_CHAR_ID),
+        Some(DEMO_CORP_ID),
+        Some(JITA_SYSTEM_ID),
+        Some(JITA_STATION_ID),
+    );
+    let mut wire = ClientWireSession::from_session(&ctx, sess);
+    let kw = HashMap::new();
+
+    let clone_state = wire_session_call_ok(
+        &mut wire,
+        "jumpCloneSvc",
+        None,
+        "GetCloneState",
+        &[],
+        &kw,
+    )
+    .await;
+    let PyRep::KeyVal(kv) = &clone_state else {
+        panic!("GetCloneState must return KeyVal even for 1 unnamed clone + implant, got {clone_state:?}");
+    };
+    let Some(PyRep::Rowset {
+        columns: clone_cols,
+        rows: clone_rows,
+    }) = kv.get("clones")
+    else {
+        panic!("GetCloneState.clones must be Rowset, got {:?}", kv.get("clones"));
+    };
+    assert_eq!(clone_cols, &["jumpCloneID", "locationID", "cloneName"]);
+    assert_eq!(clone_rows.len(), 1);
+    assert_eq!(clone_rows[0][0], PyRep::Integer(clone_id));
+    assert_eq!(clone_rows[0][1], PyRep::Integer(JITA_STATION_ID));
+    assert_eq!(clone_rows[0][2], PyRep::String(String::new()));
+
+    let Some(PyRep::Rowset {
+        columns: imp_cols,
+        rows: imp_rows,
+    }) = kv.get("implants")
+    else {
+        panic!(
+            "GetCloneState.implants must be Rowset, got {:?}",
+            kv.get("implants")
+        );
+    };
+    assert_eq!(imp_cols, &["jumpCloneID", "implantID", "typeID"]);
+    assert_eq!(imp_rows.len(), 1);
+    assert_eq!(imp_rows[0][0], PyRep::Integer(clone_id));
+    assert!(
+        imp_rows[0][1].as_i64().is_some_and(|id| id > 0),
+        "GetCloneState.implants row must have positive implantID, got {:?}",
+        imp_rows[0]
+    );
+    assert_eq!(imp_rows[0][2], PyRep::Integer(i64::from(implant_type_id)));
+    assert!(kv.contains_key("timeLastJump"));
+
+    assert_contract_enforcing(&ctx, "jumpCloneSvc.GetCloneState", &clone_state);
+    eve_testkit::attest(&["rpc:jumpCloneSvc.GetCloneState"]);
+}
+
+#[tokio::test]
+async fn pin_1187_alsc_log_get_wire_shape() {
+    // parity: rpc:invbroker.ALSCLogGet
+    // Client: eve/client/script/ui/shared/AuditLogSecureContainerLogViewer.pyj:147 (ViewLogForContainer).
+    let ctx = fresh_ctx();
+    let (alsc_id, inner_item_id) = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&DEMO_CHAR_ID) {
+            ch.station_id = Some(JITA_STATION_ID);
+            ch.structure_id = None;
+        }
+        snap.next_entity_id += 1;
+        let cid = snap.next_entity_id;
+        snap.items.insert(
+            cid,
+            InventoryItemRecord {
+                item_id: cid,
+                type_id: 17_366, // Audit Log Secure Container
+                owner_id: DEMO_CHAR_ID,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.next_entity_id += 1;
+        let iid = snap.next_entity_id;
+        snap.items.insert(
+            iid,
+            InventoryItemRecord {
+                item_id: iid,
+                type_id: TRITANIUM_TYPE_ID,
+                owner_id: DEMO_CHAR_ID,
+                location_id: cid,
+                flag: InventoryFlag::Cargo,
+                quantity: 42,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        (cid, iid)
+    });
+
+    let sess = player_sess(
+        87_104,
+        Some(DEMO_CHAR_ID),
+        Some(DEMO_CORP_ID),
+        Some(JITA_SYSTEM_ID),
+        Some(JITA_STATION_ID),
+    );
+    let mut wire = ClientWireSession::from_session(&ctx, sess);
+    let kw = HashMap::new();
+
+    let bind_rep = wire_session_call_ok(
+        &mut wire,
+        "invbroker",
+        None,
+        "MachoBindObject",
+        &[
+            PyRep::Tuple(vec![PyRep::Integer(JITA_STATION_ID), PyRep::Integer(15)]),
+            PyRep::None,
+        ],
+        &kw,
+    )
+    .await;
+    let mgr_bid = extract_bound_id_from_wire_rep(&bind_rep).expect("invbroker mgr bound id");
+
+    let cont_inv = wire_session_call_ok(
+        &mut wire,
+        "invbroker",
+        Some(mgr_bid),
+        "GetInventoryFromId",
+        &[PyRep::Integer(alsc_id), PyRep::Bool(false)],
+        &kw,
+    )
+    .await;
+    let alsc_bid = extract_bound_id_from_wire_rep(&cont_inv).expect("ALSC bound id");
+
+    let _lock_rep = wire_session_call_ok(
+        &mut wire,
+        "invbroker",
+        Some(alsc_bid),
+        "ALSCLockItems",
+        &[
+            PyRep::Integer(alsc_id),
+            PyRep::List(vec![PyRep::Integer(inner_item_id)]),
+        ],
+        &kw,
+    )
+    .await;
+
+    let log_rep = wire_session_call_ok(
+        &mut wire,
+        "invbroker",
+        Some(alsc_bid),
+        "ALSCLogGet",
+        &[PyRep::None, PyRep::Integer(1), PyRep::None],
+        &kw,
+    )
+    .await;
+    let PyRep::List(rows) = &log_rep else {
+        panic!("invbroker.ALSCLogGet must return a List of log rows, got {log_rep:?}");
+    };
+    assert_eq!(rows.len(), 1, "Expected 1 audit log entry after locking item: {rows:?}");
+    let row = &rows[0];
+    assert_eq!(row.dict_get("logID").and_then(PyRep::as_i64), Some(1));
+    assert!(
+        row.dict_get("logDate")
+            .and_then(PyRep::as_i64)
+            .is_some_and(|ft| ft >= 100_000_000_000_000),
+        "logDate must be Windows FILETIME ticks: {row:?}"
+    );
+    assert_eq!(row.dict_get("actionID").and_then(PyRep::as_i64), Some(7));
+    assert_eq!(
+        row.dict_get("actorID").and_then(PyRep::as_i64),
+        Some(DEMO_CHAR_ID)
+    );
+    assert_eq!(
+        row.dict_get("arg1").and_then(PyRep::as_i64),
+        Some(i64::from(TRITANIUM_TYPE_ID))
+    );
+    assert_eq!(row.dict_get("arg2").and_then(PyRep::as_i64), Some(42));
+    assert_eq!(row.dict_get("flagID").and_then(PyRep::as_i64), Some(4));
+    assert_eq!(
+        row.dict_get("locationID").and_then(PyRep::as_i64),
+        Some(JITA_STATION_ID)
+    );
+    assert_eq!(
+        row.dict_get("inventoryMgrLocationID")
+            .and_then(PyRep::as_i64),
+        Some(JITA_STATION_ID)
+    );
+    assert_eq!(row.dict_get("status").and_then(PyRep::as_i64), Some(1));
+
+    assert_contract_enforcing(&ctx, "invbroker.ALSCLogGet", &log_rep);
+    eve_testkit::attest(&["rpc:invbroker.ALSCLogGet"]);
+}
+
+#[tokio::test]
+async fn pin_1187_paperdoll_portrait_data_wire_shape() {
+    // parity: rpc:paperDollServer.GetPaperDollPortraitDataFor
+    // Client: eve/client/script/ui/services/ccSvc.pyj:180 (GetPortraitData),
+    //         packages/evephotosvc/scenePortraitRenderer.pyj:61 (GetPortraitSettings).
+    let ctx = fresh_ctx();
+    let sess_pre = player_sess(87_105, None, None, None, None);
+    let mut wire = ClientWireSession::from_session(&ctx, sess_pre);
+    let kw = HashMap::new();
+
+    let doll_kv = PyRep::keyval([
+        ("gender", PyRep::Integer(1)),
+        ("bloodlineID", PyRep::Integer(1)),
+    ]);
+    let portrait_kv = PyRep::keyval([
+        ("backgroundID", PyRep::Integer(42)),
+        ("lightID", PyRep::Integer(10_866)),
+        ("lightColorID", PyRep::Integer(10_868)),
+        ("lightIntensity", PyRep::Real(0.75)),
+        ("portraitPoseNumber", PyRep::Integer(7)),
+        (
+            "cameraPosition",
+            PyRep::Tuple(vec![
+                PyRep::Real(0.11),
+                PyRep::Real(1.55),
+                PyRep::Real(1.31),
+            ]),
+        ),
+        (
+            "cameraPoi",
+            PyRep::Tuple(vec![
+                PyRep::Real(0.02),
+                PyRep::Real(1.62),
+                PyRep::Real(0.05),
+            ]),
+        ),
+        ("cameraFieldOfView", PyRep::Real(0.38)),
+        (
+            "headLookTarget",
+            PyRep::Tuple(vec![
+                PyRep::Real(0.01),
+                PyRep::Real(1.52),
+                PyRep::Real(0.95),
+            ]),
+        ),
+        (
+            "poseData",
+            PyRep::keyval([
+                ("HeadTilt", PyRep::Real(0.25)),
+                ("SmileLeft", PyRep::Real(0.4)),
+            ]),
+        ),
+    ]);
+
+    let new_cid_rep = wire_session_call_ok(
+        &mut wire,
+        "charUnboundMgr",
+        None,
+        "CreateCharacterWithDoll",
+        &[
+            PyRep::String("PortraitPinPilot".into()),
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+            PyRep::Integer(11),
+            doll_kv,
+            portrait_kv,
+            PyRep::Integer(17),
+        ],
+        &kw,
+    )
+    .await;
+    let new_cid = new_cid_rep.as_i64().expect("created character ID");
+
+    let _sel = wire_session_call_ok(
+        &mut wire,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(new_cid)],
+        &kw,
+    )
+    .await;
+
+    // Uploading portrait JPEG bytes must not overwrite saved camera/light portrait metadata.
+    let _upload = wire_session_call_ok(
+        &mut wire,
+        "photoUploadSvc", // rpc-lint: allow legacy Crucible / parity ledger service feat:character.portrait-upload
+        None,
+        "Upload",
+        &[
+            PyRep::Integer(new_cid),
+            PyRep::Bytes(vec![0xFF, 0xD8, 0xFF, 0xE0]),
+        ],
+        &kw,
+    )
+    .await;
+
+    // Case (a): character with stored portrait data returns ([DBRow], None) and passes contract validator.
+    let populated_rep = wire_session_call_ok(
+        &mut wire,
+        "paperDollServer",
+        None,
+        "GetPaperDollPortraitDataFor",
+        &[PyRep::Integer(new_cid)],
+        &kw,
+    )
+    .await;
+    let PyRep::Tuple(parts_a) = &populated_rep else {
+        panic!("GetPaperDollPortraitDataFor must return 2-tuple, got {populated_rep:?}");
+    };
+    assert_eq!(parts_a.len(), 2);
+    let PyRep::List(rows_a) = &parts_a[0] else {
+        panic!("GetPaperDollPortraitDataFor[0] must be List, got {:?}", parts_a[0]);
+    };
+    assert_eq!(rows_a.len(), 1);
+    let PyRep::DBRow { columns, .. } = &rows_a[0] else {
+        panic!("GetPaperDollPortraitDataFor[0][0] must be DBRow, got {:?}", rows_a[0]);
+    };
+    let col = |name: &str| {
+        columns
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| panic!("missing column `{name}` in portrait DBRow"))
+    };
+    assert_eq!(col("backgroundID").as_i64(), Some(42));
+    assert_eq!(col("lightID").as_i64(), Some(10_866));
+    assert_eq!(col("lightColorID").as_i64(), Some(10_868));
+    assert!((col("lightIntensity").as_f64().unwrap() - 0.75).abs() < 1e-6);
+    assert_eq!(col("portraitPoseNumber").as_i64(), Some(7));
+    assert!((col("cameraX").as_f64().unwrap() - 0.11).abs() < 1e-6);
+    assert!((col("cameraPoiY").as_f64().unwrap() - 1.62).abs() < 1e-6);
+    assert!((col("cameraFieldOfView").as_f64().unwrap() - 0.38).abs() < 1e-6);
+    assert!((col("headLookTargetX").as_f64().unwrap() - 0.01).abs() < 1e-6);
+    assert!((col("headTilt").as_f64().unwrap() - 0.25).abs() < 1e-6);
+    assert!((col("smileLeft").as_f64().unwrap() - 0.4).abs() < 1e-6);
+    assert_contract_enforcing(
+        &ctx,
+        "paperDollServer.GetPaperDollPortraitDataFor",
+        &populated_rep,
+    );
+
+    // Case (b): character without stored portrait data returns ([], None).
+    assert!(
+        !ctx.db
+            .with_snapshot(|s| s.character_doll_info.contains_key(&DEMO_CHAR_ID)),
+        "DEMO_CHAR_ID must have no character_doll_info in fresh demo seed"
+    );
+    let empty_rep = wire_session_call_ok(
+        &mut wire,
+        "paperDollServer",
+        None,
+        "GetPaperDollPortraitDataFor",
+        &[PyRep::Integer(DEMO_CHAR_ID)],
+        &kw,
+    )
+    .await;
+    assert_eq!(
+        empty_rep,
+        PyRep::Tuple(vec![PyRep::List(Vec::new()), PyRep::None]),
+        "GetPaperDollPortraitDataFor without stored portrait data must return ([], None)"
+    );
+
+    eve_testkit::attest(&["rpc:paperDollServer.GetPaperDollPortraitDataFor"]);
 }

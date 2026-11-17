@@ -7,7 +7,7 @@ use crate::formulas::clone_jump_cooldown_seconds;
 use crate::router::ServerContext;
 use eve_db::{InventoryFlag, IskCents, JumpCloneRecord};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, DBRowDescriptor, DbColumnType, PyRep};
 use std::collections::HashMap;
 
 /// Canonical jump clone installation fee at NPC stations (`900,000 ISK` per `Jump_clones.md:20, 54`; `R23-P1-2`).
@@ -81,6 +81,115 @@ fn paperdoll_data_keyval(
         ("colors", PyRep::List(Vec::new())),
         ("modifiers", PyRep::List(Vec::new())),
     ]))
+}
+
+/// Builds the V24 `blue.DBRow` returned inside `GetPaperDollPortraitDataFor`'s `(rows, None)`
+/// 2-tuple, matching `paperdoll/common/npc.pyj` (`portrait_params`) and gender defaults
+/// (`PortraitDataMale` / `PortraitDataFemale`), overridden by parsed `k=v&...` portrait metadata.
+fn portrait_dbrow(gender: u32, portrait: &str) -> PyRep {
+    let mut kv: HashMap<String, &str> = HashMap::new();
+    for pair in portrait.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            let k_clean = k.trim().to_ascii_lowercase();
+            let v_clean = v.trim();
+            if !k_clean.is_empty() && !v_clean.is_empty() {
+                kv.insert(k_clean, v_clean);
+            }
+        }
+    }
+    let get_i32 = |key: &str, alias: Option<&str>, default: i32, min_val: i32| -> PyRep {
+        let val = kv
+            .get(&key.to_ascii_lowercase())
+            .or_else(|| alias.and_then(|a| kv.get(&a.to_ascii_lowercase())))
+            .and_then(|s| s.parse::<i64>().ok())
+            .and_then(|v| i32::try_from(v).ok())
+            .filter(|&v| v >= min_val)
+            .unwrap_or(default);
+        PyRep::Integer(i64::from(val))
+    };
+    let get_f64 = |key: &str, default: f64| -> PyRep {
+        let val = kv
+            .get(&key.to_ascii_lowercase())
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+            .unwrap_or(default);
+        PyRep::Real(val)
+    };
+    let is_female = gender == 0;
+    let desc = DBRowDescriptor::new([
+        ("backgroundID", DbColumnType::I4),
+        ("lightID", DbColumnType::I4),
+        ("lightColorID", DbColumnType::I4),
+        ("lightIntensity", DbColumnType::R8),
+        ("portraitPoseNumber", DbColumnType::I4),
+        ("cameraX", DbColumnType::R8),
+        ("cameraY", DbColumnType::R8),
+        ("cameraZ", DbColumnType::R8),
+        ("cameraPoiX", DbColumnType::R8),
+        ("cameraPoiY", DbColumnType::R8),
+        ("cameraPoiZ", DbColumnType::R8),
+        ("cameraFieldOfView", DbColumnType::R8),
+        ("headLookTargetX", DbColumnType::R8),
+        ("headLookTargetY", DbColumnType::R8),
+        ("headLookTargetZ", DbColumnType::R8),
+        ("headTilt", DbColumnType::R8),
+        ("orientChar", DbColumnType::R8),
+        ("browLeftCurl", DbColumnType::R8),
+        ("browLeftTighten", DbColumnType::R8),
+        ("browLeftUpDown", DbColumnType::R8),
+        ("browRightCurl", DbColumnType::R8),
+        ("browRightTighten", DbColumnType::R8),
+        ("browRightUpDown", DbColumnType::R8),
+        ("eyeClose", DbColumnType::R8),
+        ("eyesLookVertical", DbColumnType::R8),
+        ("eyesLookHorizontal", DbColumnType::R8),
+        ("squintLeft", DbColumnType::R8),
+        ("squintRight", DbColumnType::R8),
+        ("jawSideways", DbColumnType::R8),
+        ("jawUp", DbColumnType::R8),
+        ("puckerLips", DbColumnType::R8),
+        ("frownLeft", DbColumnType::R8),
+        ("frownRight", DbColumnType::R8),
+        ("smileLeft", DbColumnType::R8),
+        ("smileRight", DbColumnType::R8),
+    ]);
+    desc.build_dbrow(vec![
+        get_i32("backgroundID", Some("background"), 1, 1),
+        get_i32("lightID", None, 10_866, 1),
+        get_i32("lightColorID", None, 10_866, 1),
+        get_f64("lightIntensity", 0.5),
+        get_i32("portraitPoseNumber", Some("pose"), 0, 0),
+        get_f64("cameraX", if is_female { 0.006534777 } else { 0.09127 }),
+        get_f64("cameraY", if is_female { 1.614088 } else { 1.53818 }),
+        get_f64("cameraZ", if is_female { 1.299908 } else { 1.36897 }),
+        get_f64("cameraPoiX", if is_female { -0.0075 } else { 0.001 }),
+        get_f64("cameraPoiY", if is_female { 1.607588 } else { 1.693813 }),
+        get_f64("cameraPoiZ", if is_female { 0.0 } else { 0.08148827 }),
+        get_f64("cameraFieldOfView", 0.3),
+        get_f64("headLookTargetX", 0.0),
+        get_f64("headLookTargetY", 1.5),
+        get_f64("headLookTargetZ", 1.0),
+        get_f64("headTilt", 0.0),
+        get_f64("orientChar", 0.0),
+        get_f64("browLeftCurl", if is_female { 0.251 } else { 0.5 }),
+        get_f64("browLeftTighten", if is_female { 0.2300002 } else { 0.0 }),
+        get_f64("browLeftUpDown", 0.5),
+        get_f64("browRightCurl", 0.5),
+        get_f64("browRightTighten", 0.0),
+        get_f64("browRightUpDown", 0.5),
+        get_f64("eyeClose", 0.0),
+        get_f64("eyesLookVertical", 0.5),
+        get_f64("eyesLookHorizontal", 0.5),
+        get_f64("squintLeft", 0.0),
+        get_f64("squintRight", 0.0),
+        get_f64("jawSideways", 0.5),
+        get_f64("jawUp", 0.5),
+        get_f64("puckerLips", 0.0),
+        get_f64("frownLeft", 0.0),
+        get_f64("frownRight", 0.0),
+        get_f64("smileLeft", if is_female { 0.5600001 } else { 0.0 }),
+        get_f64("smileRight", if is_female { 0.245 } else { 0.0 }),
+    ])
 }
 
 
@@ -716,9 +825,15 @@ pub fn handle_clones_and_sheet(
                             PyRep::Integer(c.location_id),
                             PyRep::String(crate::services::jump_clone_names::name_of(snap, c.jump_clone_id)),
                         ]);
-                        for &imp_tid in &c.implants {
+                        for (idx, &imp_tid) in c.implants.iter().enumerate() {
+                            let implant_id = c
+                                .jump_clone_id
+                                .max(1)
+                                .saturating_mul(1_000)
+                                .saturating_add((idx as i64) + 1);
                             i_rows.push(vec![
                                 PyRep::Integer(c.jump_clone_id),
+                                PyRep::Integer(implant_id),
                                 PyRep::Integer(imp_tid as i64),
                             ]);
                         }
@@ -734,14 +849,9 @@ pub fn handle_clones_and_sheet(
                 (c_rows, i_rows, last_jump)
             });
             let clones_rs = PyRep::rowset(vec!["jumpCloneID", "locationID", "cloneName"], clone_rows);
-            if let PyRep::Rowset { rows, .. } = &clones_rs {
-                if rows.len() == 1 && !implant_rows.is_empty() && rows[0][2].as_str() == Some("") {
-                    return Some(Ok(clones_rs));
-                }
-            }
             Some(Ok(PyRep::keyval([
                 ("clones", clones_rs),
-                ("implants", PyRep::rowset(vec!["jumpCloneID", "typeID"], implant_rows)),
+                ("implants", PyRep::rowset(vec!["jumpCloneID", "implantID", "typeID"], implant_rows)),
                 ("timeLastJump", last_jump),
             ])))
         }
@@ -1040,33 +1150,25 @@ pub fn handle_clones_and_sheet(
             };
             let res = ctx.db.with_snapshot(|snap| {
                 snap.characters.get(&target_cid).map(|c| {
-                    let (doll, portrait) = snap
+                    let portrait = snap
                         .character_doll_info
                         .get(&target_cid)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            (
-                                format!("bloodline:{}", c.bloodline_id),
-                                format!("portrait:bloodline:{}", c.bloodline_id),
-                            )
-                        });
-                    (c.gender, c.bloodline_id, doll, portrait)
+                        .map(|(_, p)| p.clone())
+                        .filter(|p| !p.trim().is_empty());
+                    (c.gender, portrait)
                 })
             });
-            let Some((gender, bloodline_id, doll_dna, portrait_info)) = res else {
+            let Some((gender, portrait_opt)) = res else {
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotFound".into(),
                     message: format!("Character {target_cid} not found"),
                     client_error: None,
                 }));
             };
-            Some(Ok(PyRep::keyval([
-                ("characterID", PyRep::Integer(target_cid)),
-                ("portraitInfo", PyRep::String(portrait_info)),
-                ("dollDNA", PyRep::String(doll_dna)),
-                ("gender", PyRep::Integer(gender as i64)),
-                ("bloodlineID", PyRep::Integer(bloodline_id as i64)),
-            ])))
+            let rows = portrait_opt
+                .map(|portrait| vec![portrait_dbrow(gender, &portrait)])
+                .unwrap_or_default();
+            Some(Ok(PyRep::Tuple(vec![PyRep::List(rows), PyRep::None])))
         }
 
         ("paperDollServer", "UpdateExistingCharacterFull")
@@ -1098,7 +1200,7 @@ pub fn handle_clones_and_sheet(
             let new_doll_str = super::serialize_doll_pyrep(doll_rep);
             let new_portrait_opt = portrait_arg
                 .filter(|p| !matches!(p, PyRep::None))
-                .map(super::serialize_doll_pyrep);
+                .map(super::serialize_portrait_pyrep);
             let apparel_arg = match doll_rep {
                 PyRep::KeyVal(kv) => kv.get("apparel"),
                 PyRep::Dict(entries) => entries.iter().find(|(k, _)| k.as_str() == Some("apparel")).map(|(_, v)| v),
@@ -1306,7 +1408,11 @@ pub fn handle_clones_and_sheet(
                 worn_types.sort_unstable();
                 let ch = snap.characters.get_mut(&char_id).unwrap();
                 ch.version += 1;
-                let existing_portrait = snap.character_doll_info.get(&char_id).map(|(_, p)| p.clone()).unwrap_or_else(|| format!("portrait:bloodline:{}", ch.bloodline_id));
+                let existing_portrait = snap
+                    .character_doll_info
+                    .get(&char_id)
+                    .map(|(_, p)| p.clone())
+                    .unwrap_or_default();
                 let final_portrait = new_portrait_opt.unwrap_or(existing_portrait);
                 snap.character_doll_info.insert(char_id, (new_doll_str.clone(), final_portrait.clone()));
                 Ok((new_doll_str, final_portrait, worn_types, item_changes))

@@ -578,6 +578,9 @@ pub fn step_segment(val: &PyRep, seg: &str) -> Vec<PyRep> {
             PyRep::ObjectEx { dict, .. } => {
                 vec![PyRep::List(dict.iter().map(|(k, _)| k.clone()).collect())]
             }
+            PyRep::DBRow { columns, .. } => {
+                vec![PyRep::List(columns.iter().map(|(k, _)| PyRep::String(k.clone())).collect())]
+            }
             _ => Vec::new(),
         },
         ".values()" => match &val {
@@ -803,6 +806,22 @@ pub fn get_attr(val: &PyRep, attr: &str) -> Option<PyRep> {
             }
             None
         }
+        PyRep::String(_)
+            if matches!(
+                attr,
+                "replace"
+                    | "split"
+                    | "lower"
+                    | "upper"
+                    | "strip"
+                    | "startswith"
+                    | "endswith"
+                    | "format"
+                    | "join"
+            ) =>
+        {
+            Some(PyRep::String(format!("bound_method:{attr}")))
+        }
         _ => None,
     }
 }
@@ -898,6 +917,10 @@ pub fn get_subscript_int(val: &PyRep, idx: isize) -> Option<PyRep> {
                     .map(|(_, v)| v.clone())
             }
         }
+        PyRep::String(s) => {
+            let len = s.chars().count();
+            resolve_idx(len).and_then(|i| s.chars().nth(i).map(|c| PyRep::String(c.to_string())))
+        }
         _ => None,
     }
 }
@@ -914,6 +937,57 @@ pub fn resolve_path(root: &PyRep, path: &str) -> Vec<PyRep> {
         if current.is_empty() {
             break;
         }
+    }
+    current
+}
+
+fn is_int_subscript_segment(seg: &str) -> bool {
+    seg.strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .and_then(|inner| inner.parse::<isize>().ok())
+        .is_some()
+}
+
+fn resolve_path_with_shape(
+    root: &PyRep,
+    path: &str,
+    reply_shape: &serde_json::Map<String, Value>,
+) -> Vec<PyRep> {
+    let segs = parse_path_segments(path);
+    let mut current = vec![root.clone()];
+    let mut prefix = String::new();
+    for seg in segs {
+        let is_int_subscript = is_int_subscript_segment(&seg);
+        let prefix_key = if prefix.is_empty() { "$" } else { &prefix };
+        let prefix_has_seq_guard = reply_shape
+            .get(prefix_key)
+            .and_then(|v| v.as_array())
+            .is_some_and(|arr| {
+                arr.iter().filter_map(|o| o.as_str()).any(|o| {
+                    matches!(
+                        o,
+                        "isinstance:tuple"
+                            | "isinstance:types.TupleType"
+                            | "isinstance:list"
+                            | "isinstance:types.ListType"
+                    )
+                })
+            });
+        let mut next = Vec::new();
+        for v in &current {
+            if is_int_subscript
+                && prefix_has_seq_guard
+                && matches!(unwrap_envelope(v, false), PyRep::String(_))
+            {
+                continue;
+            }
+            next.extend(step_segment(v, &seg));
+        }
+        current = next;
+        if current.is_empty() {
+            break;
+        }
+        prefix.push_str(&seg);
     }
     current
 }
@@ -1109,6 +1183,69 @@ pub fn augment_reply_shape_with_depth_traces(
     merged
 }
 
+fn is_known_owner_id(ctx: &SemanticLookupContext<'_>, oid: i64) -> bool {
+    oid <= 10_000
+        || (500_000..=4_000_000).contains(&oid)
+        || ctx.sde.factions.contains_key(&(oid as u32))
+        || ctx.sde.npc_corporations.contains_key(&oid)
+        || ctx.sde.agents.contains_key(&oid)
+        || ctx.db.with_snapshot(|snap| {
+            snap.characters.contains_key(&oid)
+                || snap.corporations.contains_key(&oid)
+                || snap.alliances.contains_key(&oid)
+        })
+}
+
+fn validate_alsc_log_arg(
+    lookup: Option<&SemanticLookupContext<'_>>,
+    path: &str,
+    val_idx: usize,
+    val: &PyRep,
+    rows: &[PyRep],
+    violations: &mut Vec<String>,
+) {
+    let action_id = rows
+        .get(val_idx)
+        .and_then(|r| get_attr(r, "actionID"))
+        .and_then(|v| v.as_i64());
+    let PyRep::Integer(n) = *val else {
+        violations.push(format!(
+            "invbroker.ALSCLogGet: path `{path}` expected integer for actionID={action_id:?}, got {val:?}"
+        ));
+        return;
+    };
+    match (path, action_id) {
+        ("[].arg1", Some(1)) => {
+            if n <= 0 || lookup.is_some_and(|ctx| !is_known_owner_id(ctx, n)) {
+                violations.push(format!(
+                    "invbroker.ALSCLogGet: path `{path}` passes invalid ownerID={n} for ALSCActionAssemble"
+                ));
+            }
+        }
+        ("[].arg2", Some(1 | 2)) | ("[].arg1", Some(4 | 6 | 7 | 8)) => {
+            if n <= 0 || lookup.is_some_and(|ctx| !ctx.sde.types.contains_key(&(n as u32))) {
+                violations.push(format!(
+                    "invbroker.ALSCLogGet: path `{path}` passes unknown SDE typeID={n} for actionID={action_id:?}"
+                ));
+            }
+        }
+        ("[].arg1", Some(5 | 9)) => {
+            if !matches!(n, 1 | 2) {
+                violations.push(format!(
+                    "invbroker.ALSCLogGet: path `{path}` passes invalid passwordType={n} for actionID={action_id:?}"
+                ));
+            }
+        }
+        _ => {
+            if n < 0 {
+                violations.push(format!(
+                    "invbroker.ALSCLogGet: path `{path}` has negative argument {n} for actionID={action_id:?}"
+                ));
+            }
+        }
+    }
+}
+
 /// Validates a `PyRep` response against the client's `reply_shape` expectations under strict
 /// `C-1` (`#912`) rules and returns both violations and non-vacuity metrics.
 pub fn validate_reply_shape_with_metrics(
@@ -1156,7 +1293,7 @@ pub fn validate_reply_shape_with_metrics(
             continue;
         };
         let ops: Vec<&str> = ops_arr.iter().filter_map(|v| v.as_str()).collect();
-        let values = resolve_path(&root, path);
+        let values = resolve_path_with_shape(&root, path, reply_shape);
 
         let unpack_arities: Vec<usize> = ops
             .iter()
@@ -1179,7 +1316,15 @@ pub fn validate_reply_shape_with_metrics(
             continue;
         }
 
-        for val in &values {
+        let alsc_rows = if rpc_name == "invbroker.ALSCLogGet"
+            && (path == "[].arg1" || path == "[].arg2")
+        {
+            Some(resolve_path(&root, "[]"))
+        } else {
+            None
+        };
+
+        for (val_idx, val) in values.iter().enumerate() {
             let val = unwrap_envelope(val, preserve_cached);
             if matches!(val, PyRep::None) {
                 if !has_null_guard && ops_dereference_value(path, &ops, reply_shape) {
@@ -1298,6 +1443,9 @@ pub fn validate_reply_shape_with_metrics(
                                 | "get"
                         ) && !ops.contains(&"collected")
                             && !is_mapping_value(&val)
+                            && !(matches!(val, PyRep::DBRow { .. })
+                                && mname == "keys"
+                                && ops.contains(&"attr:__keys__"))
                         {
                             outcome.violations.push(format!(
                                 "{rpc_name}: path `{path}` calls dict method `.{mname}()`, but server returned non-mapping {val:?}"
@@ -1469,6 +1617,10 @@ pub fn validate_reply_shape_with_metrics(
             }
 
             // 4. Phase 2: Semantic foreign-key and unit sink validation (`passed_to:...`)
+            if let Some(rows) = alsc_rows.as_deref() {
+                validate_alsc_log_arg(lookup, path, val_idx, &val, rows, &mut outcome.violations);
+                continue;
+            }
             for op in &ops {
                 let Some(sink) = op.strip_prefix("passed_to:") else {
                     continue;
@@ -1505,22 +1657,13 @@ pub fn validate_reply_shape_with_metrics(
                                     o.starts_with("passed_to:evetypes.")
                                         || o.contains("SolarSystem")
                                 });
-                                let valid_owner = oid <= 10_000
-                                    || (500_000..=4_000_000).contains(&oid)
-                                    || ctx.sde.factions.contains_key(&(oid as u32))
-                                    || ctx.sde.npc_corporations.contains_key(&oid)
-                                    || ctx.sde.agents.contains_key(&oid)
+                                let valid_owner = is_known_owner_id(ctx, oid)
                                     || (is_polymorphic_type_or_sys
                                         && (ctx.sde.types.contains_key(&(oid as u32))
                                             || ctx
                                                 .sde
                                                 .solar_systems
-                                                .contains_key(&(oid as u32))))
-                                    || ctx.db.with_snapshot(|snap| {
-                                        snap.characters.contains_key(&oid)
-                                            || snap.corporations.contains_key(&oid)
-                                            || snap.alliances.contains_key(&oid)
-                                    });
+                                                .contains_key(&(oid as u32))));
                                 if !valid_owner {
                                     outcome.violations.push(format!(
                                         "{rpc_name}: path `{path}` passes unresolvable ownerID={oid} to `{sink}` (not in SDE or WorldRepository)"
@@ -2550,5 +2693,61 @@ mod tests {
         ratchet
             .assert_sweep_report(&report)
             .expect("matching validated set must pass");
+    }
+
+    #[test]
+    fn resolves_string_char_subscript_on_keys_without_breaking_isinstance_tuple_string_unions() {
+        let union_shape = serde_json::json!({
+            "[0]": ["isinstance:basestring", "isinstance:tuple", "subscript[1]"],
+            "[0][1]": ["iter"],
+            "[0][1][]": ["truthy"]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let union_reply = PyRep::Tuple(vec![PyRep::String("hello world".into())]);
+        let union_outcome =
+            validate_reply_shape_with_metrics(None, "agentMgr.DoAction", &union_reply, &union_shape);
+        assert!(
+            union_outcome.violations.is_empty(),
+            "isinstance(tuple|basestring) must not index string as tuple: {:?}",
+            union_outcome.violations
+        );
+
+        let keys_shape = serde_json::json!({
+            "[0].keys()": ["iter"],
+            "[0].keys()[]": ["subscript[0]"],
+            "[0].keys()[][0]": ["method:upper"]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let header = PyRep::ObjectEx {
+            is_type_2: false,
+            header: Box::new(PyRep::None),
+            list: vec![],
+            dict: vec![],
+        };
+        let row = PyRep::DBRow {
+            header: Box::new(header),
+            columns: vec![("cameraX".to_string(), PyRep::Real(1.0))],
+            raw_rle: Vec::new(),
+        };
+        let keys_reply = PyRep::List(vec![row]);
+        let keys_outcome = validate_reply_shape_with_metrics(
+            None,
+            "paperDollServer.GetPaperDollPortraitDataFor",
+            &keys_reply,
+            &keys_shape,
+        );
+        assert!(
+            keys_outcome.violations.is_empty(),
+            "unexpected violations on DBRow.keys()[][0]: {:?}",
+            keys_outcome.violations
+        );
+        assert!(
+            !keys_outcome.had_unexercised_collection_elements,
+            "DBRow.keys()[][0] should exercise string char subscript non-vacuously"
+        );
     }
 }

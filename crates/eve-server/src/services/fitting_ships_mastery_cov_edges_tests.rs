@@ -999,8 +999,7 @@ async fn ships_mastery_launch_corvette_trash_mastery_killcounter_dirt_edge_paths
     .await
     .unwrap()
     .unwrap();
-    let PyRep::KeyVal(mk) = multi else { panic!("expected KeyVal"); };
-    assert!(mk.iter().any(|(k, v)| k == "count" && v == &PyRep::Integer(2)));
+    assert_eq!(multi, PyRep::List(Vec::new()));
 
     // 5. GetDirtTimestamp & ResetDirtTimestamp error & fallback paths + unknown dispatch
     let mut no_ship_dirt = dk_corv.clone();
