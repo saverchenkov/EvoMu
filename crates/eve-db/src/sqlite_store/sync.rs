@@ -53,6 +53,7 @@ pub fn sync_dirty_to_sqlite(
     cold_changed |= super::sync_ext::sync_extension_tables(tx, snap, fp)?;
     cold_changed |= super::domain_rows::sync_ledger_domain_rows(tx, snap)?;
     cold_changed |= super::domain_rows::sync_notes_lp_domain_rows(tx, snap)?;
+    cold_changed |= super::domain_rows::sync_sp6_lifecycle_domain_rows(tx, snap)?;
     cold_changed |= super::domain_rows::sync_service_domains_rows(tx, snap)?;
     cold_changed |= super::notes_lp_sequence_store::sync_d6(tx, snap, fp)?;
     cold_changed |= super::domain_rows::sync_social_domain_rows(tx, snap)?;

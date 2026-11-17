@@ -202,7 +202,8 @@ impl ChangeSet {
             DOMAIN_INSURGENCY_COMPLEX_OPS, DOMAIN_MARKET_TRANSACTIONS, DOMAIN_MINING_AND_ESS_STATE,
             DOMAIN_NODE_GRAPH_STATE, DOMAIN_OWNER_NOTES, DOMAIN_PVE_SPECIAL_SITES,
             DOMAIN_PVP_FILAMENT_STATE, DOMAIN_QUASAR_COMMERCE, DOMAIN_SEASONS_AND_CAMPAIGNS,
-            DOMAIN_SUPERWEAPON_RUNTIME, DOMAIN_TOURNEY_STATE, DOMAIN_WALLET_JOURNAL_META,
+            DOMAIN_SP6_LIFECYCLE, DOMAIN_SUPERWEAPON_RUNTIME, DOMAIN_TOURNEY_STATE,
+            DOMAIN_WALLET_JOURNAL_META,
         };
 
         let meta_changed = before.next_entity_id != after.next_entity_id
@@ -264,6 +265,7 @@ impl ChangeSet {
             quasar_commerce => DOMAIN_QUASAR_COMMERCE,
             fleet_and_social_ops => DOMAIN_FLEET_AND_SOCIAL_OPS,
             cluster_and_runtime => DOMAIN_CLUSTER_AND_RUNTIME,
+            sp6_lifecycle => DOMAIN_SP6_LIFECYCLE,
         );
         crate::sqlite_store::domain_rows::collect_social_domain_row_diffs(
             before,
@@ -393,11 +395,12 @@ fn compute_cold_domain_diff(before: &WorldStateSnapshot, after: &WorldStateSnaps
         || before.skill_history != after.skill_history
         || before.character_doll_info != after.character_doll_info;
 
+    // Family 7 (`sp6_lifecycle`) now persists via incremental `domain_rows` diffs;
+    // only the four `world_meta` sequence counters remain on `D-6`.
     let d6_notes_lp_seq = before.next_alliance_id != after.next_alliance_id
         || before.next_corporation_id != after.next_corporation_id
         || before.next_notification_id != after.next_notification_id
-        || before.next_report_id != after.next_report_id
-        || before.sp6_lifecycle != after.sp6_lifecycle;
+        || before.next_report_id != after.next_report_id;
 
     // Family 3 (`social`) now persists via incremental `domain_rows` diffs.
     let d6_social = false;
@@ -599,11 +602,6 @@ pub fn validate_changeset(
             if before.item_positions.get(k) != Some(v) {
                 validate_row("item_positions", k.to_string(), v, max_row_bytes)?;
             }
-        }
-    }
-    if cd.d6_notes_lp_seq {
-        if before.sp6_lifecycle != after.sp6_lifecycle {
-            validate_row("d6_notes_lp_seq", "sp6_lifecycle".into(), &after.sp6_lifecycle, max_row_bytes)?;
         }
     }
     Ok(())

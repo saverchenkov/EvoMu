@@ -1603,6 +1603,8 @@ pub fn load_snapshot_from_sqlite_with_options(
         super::domain_rows::load_ledger_domain_rows(conn, &mut snap, &mut ctx)?;
     let had_legacy_notes_lp =
         super::domain_rows::load_notes_lp_domain_rows(conn, &mut snap, &mut ctx)?;
+    let had_legacy_sp6_lifecycle =
+        super::domain_rows::load_sp6_lifecycle_domain_rows(conn, &mut snap, &mut ctx)?;
     super::notes_lp_sequence_store::load_d6_checked(conn, &mut snap, &mut ctx)?;
     let had_legacy_social =
         super::social_store::load_social_domain_rows(conn, &mut snap, &mut ctx)?;
@@ -1636,6 +1638,7 @@ pub fn load_snapshot_from_sqlite_with_options(
     let fp = if let Some(mut fp) = pre_migration_fp.take() {
         if had_legacy_ledger
             || had_legacy_notes_lp
+            || had_legacy_sp6_lifecycle
             || had_legacy_social
             || had_legacy_corp_crimewatch
             || had_legacy_industry_market_pve
@@ -1650,6 +1653,9 @@ pub fn load_snapshot_from_sqlite_with_options(
         }
         if had_legacy_notes_lp {
             super::domain_rows::drop_legacy_notes_lp_tables(&tx)?;
+        }
+        if had_legacy_sp6_lifecycle {
+            super::domain_rows::drop_legacy_sp6_lifecycle_table(&tx)?;
         }
         if had_legacy_social {
             super::domain_rows::drop_legacy_social_tables(&tx)?;
@@ -1666,6 +1672,7 @@ pub fn load_snapshot_from_sqlite_with_options(
         if delta.dirty
             || had_legacy_ledger
             || had_legacy_notes_lp
+            || had_legacy_sp6_lifecycle
             || had_legacy_social
             || had_legacy_corp_crimewatch
             || had_legacy_industry_market_pve

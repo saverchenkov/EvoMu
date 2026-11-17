@@ -101,24 +101,27 @@ fn notes_lp_sequence_store_granular_mutations_deletions_and_selective_rollbacks(
         }],
     );
     snap.sp6_lifecycle.last_downtime_day_idx = Some(20_100);
+    snap.next_report_id += 1;
     {
         let tx = conn.transaction().unwrap();
         assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
         assert!(sync_notes_lp_domain_rows(&tx, &snap).unwrap());
         assert!(!sync_notes_lp_domain_rows(&tx, &snap).unwrap());
+        assert!(super::domain_rows::sync_sp6_lifecycle_domain_rows(&tx, &snap).unwrap());
+        assert!(!super::domain_rows::sync_sp6_lifecycle_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
 
-    // 3. Test selective rollback_d6 for `sp6_lifecycle` and verify Family 2 in-place mutations
+    // 3. Test rollback_d6 on sequence counters and verify Family 2 in-place mutations
     //    sync cleanly via `domain_rows` and reload after deletion.
     snap.owner_notes.get_mut(&10).unwrap().note = "ModifiedInPlace".into();
     snap.corp_lp_balances.insert((98_000_001, 1_000_125), 9_999);
     snap.char_lp_logs.get_mut(&90_000_001).unwrap()[0].amount = 9_999;
 
-    // 3d. Only sp6_lifecycle mutated
-    snap.sp6_lifecycle.last_downtime_day_idx = Some(99_999);
+    let expected_report_id = snap.next_report_id;
+    snap.next_report_id += 50;
     rollback_d6(&conn, &mut snap, &fp).unwrap();
-    assert_eq!(snap.sp6_lifecycle.last_downtime_day_idx, Some(20_100));
+    assert_eq!(snap.next_report_id, expected_report_id);
 
     // 4. Delete one key from each collection and verify the other key remains in SQLite
     snap.owner_notes.remove(&10);
@@ -137,6 +140,13 @@ fn notes_lp_sequence_store_granular_mutations_deletions_and_selective_rollbacks(
         &mut LoadContext::quarantine_in_memory(),
     )
     .unwrap();
+    super::domain_rows::load_sp6_lifecycle_domain_rows(
+        &conn,
+        &mut reloaded,
+        &mut LoadContext::quarantine_in_memory(),
+    )
+    .unwrap();
+    assert_eq!(reloaded.sp6_lifecycle.last_downtime_day_idx, Some(20_100));
     assert!(!reloaded.owner_notes.contains_key(&10));
     assert_eq!(reloaded.owner_notes[&20].label, "N2");
     assert!(!reloaded.corp_lp_balances.contains_key(&(98_000_001, 1_000_125)));

@@ -311,12 +311,14 @@ fn notes_lp_sequence_store_sync_load_and_selective_rollback() {
         let tx = conn.transaction().unwrap();
         assert!(notes_lp_sequence_store::sync_d6(&tx, &snap, &mut fp).unwrap());
         assert!(domain_rows::sync_notes_lp_domain_rows(&tx, &snap).unwrap());
+        assert!(domain_rows::sync_sp6_lifecycle_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
     {
         let tx = conn.transaction().unwrap();
         assert!(!notes_lp_sequence_store::sync_d6(&tx, &snap, &mut fp).unwrap());
         assert!(!domain_rows::sync_notes_lp_domain_rows(&tx, &snap).unwrap());
+        assert!(!domain_rows::sync_sp6_lifecycle_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
 
@@ -324,13 +326,17 @@ fn notes_lp_sequence_store_sync_load_and_selective_rollback() {
     assert_eq!(snap.next_alliance_id, 99_000_111);
 
     snap.next_alliance_id = 1;
-    snap.sp6_lifecycle.last_downtime_day_idx = None;
     notes_lp_sequence_store::rollback_d6(&conn, &mut snap, &fp).unwrap();
     assert_eq!(snap.next_alliance_id, 99_000_111);
-    assert_eq!(snap.sp6_lifecycle.last_downtime_day_idx, Some(19_900));
 
     let mut loaded_pop = WorldStateSnapshot::default();
     domain_rows::load_notes_lp_domain_rows(
+        &conn,
+        &mut loaded_pop,
+        &mut quarantine::LoadContext::quarantine_in_memory(),
+    )
+    .unwrap();
+    domain_rows::load_sp6_lifecycle_domain_rows(
         &conn,
         &mut loaded_pop,
         &mut quarantine::LoadContext::quarantine_in_memory(),
@@ -342,6 +348,7 @@ fn notes_lp_sequence_store_sync_load_and_selective_rollback() {
         Some(&4_500)
     );
     assert_eq!(loaded_pop.char_lp_logs.len(), 1);
+    assert_eq!(loaded_pop.sp6_lifecycle.last_downtime_day_idx, Some(19_900));
 
     snap.owner_notes.clear();
     snap.corp_lp_balances.clear();

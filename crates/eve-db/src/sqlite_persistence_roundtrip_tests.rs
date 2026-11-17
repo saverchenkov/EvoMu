@@ -42,7 +42,7 @@ fn populate_all_domains(snap: &mut WorldStateSnapshot, cid: i64, alt_cid: i64, c
         }],
     );
     snap.sp6_lifecycle = Sp6PersistedState {
-        safe_logoffs: HashMap::from([(
+        safe_logoffs: crate::cow::CowMap::from([(
             cid,
             SafeLogoffEntry {
                 char_id: cid,
@@ -53,7 +53,7 @@ fn populate_all_domains(snap: &mut WorldStateSnapshot, cid: i64, alt_cid: i64, c
                 completed: false,
             },
         )]),
-        disconnected_ships: HashMap::from([(
+        disconnected_ships: crate::cow::CowMap::from([(
             cid,
             DisconnectedShipEntry {
                 char_id: cid,
@@ -69,7 +69,7 @@ fn populate_all_domains(snap: &mut WorldStateSnapshot, cid: i64, alt_cid: i64, c
                 pre_warp_position: Some([0.0, 0.0, 0.0]),
             },
         )]),
-        self_destructs: HashMap::from([(
+        self_destructs: crate::cow::CowMap::from([(
             100_000_001,
             SelfDestructPersistedEntry {
                 ship_id: 100_000_001,
@@ -79,7 +79,7 @@ fn populate_all_domains(snap: &mut WorldStateSnapshot, cid: i64, alt_cid: i64, c
                 detonate_at_unix: 1_700_000_777,
             },
         )]),
-        abyssal_sessions: HashMap::from([(
+        abyssal_sessions: crate::cow::CowMap::from([(
             cid,
             AbyssalPersistedSession {
                 char_id: cid,
@@ -90,12 +90,12 @@ fn populate_all_domains(snap: &mut WorldStateSnapshot, cid: i64, alt_cid: i64, c
                 collapse_at_unix: 1_700_001_200,
             },
         )]),
-        pvp_timers_until: HashMap::from([(cid, 1_700_000_900)]),
-        npc_timers_until: HashMap::from([(cid, 1_700_000_300)]),
-        weapon_timers_until: HashMap::from([(cid, 1_700_000_060)]),
-        criminal_timers_until: HashMap::from([(cid, 1_700_000_900)]),
+        pvp_timers_until: crate::cow::CowMap::from([(cid, 1_700_000_900)]),
+        npc_timers_until: crate::cow::CowMap::from([(cid, 1_700_000_300)]),
+        weapon_timers_until: crate::cow::CowMap::from([(cid, 1_700_000_060)]),
+        criminal_timers_until: crate::cow::CowMap::from([(cid, 1_700_000_900)]),
         last_downtime_day_idx: Some(19_723),
-        ship_combat_hp: HashMap::from([(
+        ship_combat_hp: crate::cow::CowMap::from([(
             100_000_001,
             PersistedCombatHp {
                 shield_hp: 400.0,
@@ -103,7 +103,7 @@ fn populate_all_domains(snap: &mut WorldStateSnapshot, cid: i64, alt_cid: i64, c
                 hull_hp: 250.0,
             },
         )]),
-        space_object_meta: HashMap::from([(
+        space_object_meta: crate::cow::CowMap::from([(
             200_050_001,
             PersistedSpaceObjectMeta {
                 created_unix: Some(1_700_000_050),

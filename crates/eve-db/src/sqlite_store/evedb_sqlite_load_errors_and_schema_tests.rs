@@ -10,10 +10,10 @@ use crate::sqlite_store::corp_crimewatch_store::{
 };
 use crate::sqlite_store::domain_rows::{
     load_ledger_domain_rows, load_notes_lp_domain_rows, sync_ledger_domain_rows,
-    sync_notes_lp_domain_rows, DOMAIN_CHAR_LP_LOGS, DOMAIN_CORP_STRUCTURE_AND_KILLMAILS,
-    DOMAIN_CRIMEWATCH, DOMAIN_MARKET_TRANSACTIONS, DOMAIN_SOCIAL_BOOKMARKS,
-    DOMAIN_SOCIAL_CHAT_CALENDAR, DOMAIN_SOCIAL_CONTACTS_NOTES, DOMAIN_SOCIAL_MAIL,
-    DOMAIN_WALLET_JOURNAL_META,
+    sync_notes_lp_domain_rows, sync_sp6_lifecycle_domain_rows, DOMAIN_CHAR_LP_LOGS,
+    DOMAIN_CORP_STRUCTURE_AND_KILLMAILS, DOMAIN_CRIMEWATCH, DOMAIN_MARKET_TRANSACTIONS,
+    DOMAIN_SOCIAL_BOOKMARKS, DOMAIN_SOCIAL_CHAT_CALENDAR, DOMAIN_SOCIAL_CONTACTS_NOTES,
+    DOMAIN_SOCIAL_MAIL, DOMAIN_WALLET_JOURNAL_META,
 };
 use crate::sqlite_store::industry_market_pve_store::{
     load_industry_market_pve_domain_rows, LEGACY_WORLD_KV_BLOBS_SQL,
@@ -373,11 +373,13 @@ fn sqlite_store_schema_and_jwt_secret_error_and_edge_branches() {
         let tx = mut_conn.transaction().expect("begin tx");
         assert!(sync_ledger_domain_rows(&tx, &snap).is_err());
         assert!(sync_notes_lp_domain_rows(&tx, &snap).is_err());
+        assert!(sync_sp6_lifecycle_domain_rows(&tx, &snap).is_err());
         assert!(sync_social_domain_rows(&tx, &snap).is_err());
     }
     mut_conn
-        .execute("DROP TABLE sp6_lifecycle_state", [])
-        .expect("drop sp6_lifecycle_state");
+        .execute("DROP TABLE world_meta", [])
+        .expect("drop world_meta");
+    snap.next_report_id = fp.d6.next_report_id + 1;
     {
         let tx = mut_conn.transaction().expect("begin tx");
         assert!(sync_d6(&tx, &snap, &mut fp).is_err());

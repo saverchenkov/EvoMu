@@ -791,9 +791,12 @@ fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
         assert!(sync_corp_crimewatch_domain_rows(&tx, &cw_pop).is_err());
     }
 
-    // notes_lp_sequence_store & notes_lp domain_rows dropped tables & unknown sequence key
+    // notes_lp_sequence_store & domain_rows dropped tables
     let c_notes = open_migrated_conn();
-    c_notes.execute("INSERT INTO sp6_lifecycle_state (singleton_id, state_json) VALUES (1, '{\"next_alliance_id\":5}')", []).ok();
+    c_notes
+        .execute_batch(crate::sqlite_store::domain_rows::LEGACY_SP6_LIFECYCLE_STATE_SQL)
+        .unwrap();
+    c_notes.execute("INSERT INTO sp6_lifecycle_state (singleton_id, state_json) VALUES (1, '{\"last_downtime_day_idx\":5}')", []).ok();
     c_notes.execute(
         "INSERT INTO domain_rows (domain, key, value) VALUES (?1, '1|2', '10'), (?2, '1', '[]')",
         rusqlite::params![
@@ -809,13 +812,20 @@ fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
         &mut crate::sqlite_store::quarantine::LoadContext::quarantine_in_memory(),
     )
     .unwrap();
-    for t in ["sp6_lifecycle_state"] {
+    assert!(crate::sqlite_store::domain_rows::load_sp6_lifecycle_domain_rows(
+        &c_notes,
+        &mut n_snap,
+        &mut crate::sqlite_store::quarantine::LoadContext::quarantine_in_memory(),
+    )
+    .unwrap());
+    assert_eq!(n_snap.sp6_lifecycle.last_downtime_day_idx, Some(5));
+    {
         let mut c2 = open_migrated_conn();
-        c2.execute(&format!("DROP TABLE {t}"), []).unwrap();
+        c2.execute("DROP TABLE world_meta", []).unwrap();
         let mut s2 = WorldStateSnapshot::default();
         load_d6(&c2, &mut s2);
         let mut pop_n = WorldStateSnapshot::default();
-        pop_n.sp6_lifecycle.last_downtime_day_idx = Some(1);
+        pop_n.next_report_id += 1;
         let mut fp_n = TableFingerprints::default();
         let tx = c2.transaction().unwrap();
         assert!(sync_d6(&tx, &pop_n, &mut fp_n).is_err());
@@ -827,8 +837,10 @@ fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
         pop_n.owner_notes.insert(1, OwnerNoteRecord { note_id: 1, character_id: 1, item_id: 1, label: "L".into(), note: "N".into(), timestamp_unix: 1 });
         pop_n.corp_lp_balances.insert((1, 2), 10);
         pop_n.char_lp_logs.insert(1, vec![]);
+        pop_n.sp6_lifecycle.last_downtime_day_idx = Some(1);
         let tx = c2.transaction().unwrap();
         assert!(crate::sqlite_store::domain_rows::sync_notes_lp_domain_rows(&tx, &pop_n).is_err());
+        assert!(crate::sqlite_store::domain_rows::sync_sp6_lifecycle_domain_rows(&tx, &pop_n).is_err());
     }
 
     // industry_market_pve_store unknown key + dropped tables on load/sync/rollback
