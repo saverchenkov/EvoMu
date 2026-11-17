@@ -445,7 +445,7 @@ fn station_direct_trade_lifecycle_and_validation() {
         .unwrap()
         .unwrap_err()
         .code,
-        "TradeClosed"
+        "CustomInfo"
     );
 }
 

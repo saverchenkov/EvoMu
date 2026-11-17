@@ -1124,7 +1124,7 @@ fn handle_trade_action(
         };
         let Some(note) = snap.owner_notes.get(&nid) else {
             return Err(rpc_err(
-                if trade_id > 0 { "TradeClosed" } else { "TradeNotFound" },
+                if trade_id > 0 { "CustomInfo" } else { "TradeNotFound" },
                 "Trade session is already closed or not found",
             ));
         };
@@ -1370,7 +1370,7 @@ fn handle_trade_action(
             if trade_id > 0 {
                 ctx.release_bound_objects_for_object("trademgr", trade_id);
             }
-            Some(Err(rpc_err("TradeClosed", "Trade session is already closed")))
+            Some(Err(rpc_err("CustomInfo", "Trade session is already closed")))
         }
         Ok(TradeActionOutcome::UndockedCancelled(tr)) => {
             ctx.release_bound_objects_for_object("trademgr", tr.trade_id);
