@@ -387,3 +387,260 @@ fn encode_planet_definitions_and_register_handlers_contract() {
     .expect("GetDefinitionsVersionRequest");
     assert_eq!(ver_resp.value, encoded);
 }
+
+#[test]
+fn modify_reagents_validates_planet_rejects_destroyed_and_syncs_maturity_baseline() {
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let descriptors = Arc::new(QuasarDescriptorRegistry::empty_with_builtins());
+    let router = PublicGatewayRouter::new(descriptors, Arc::clone(&db), Arc::clone(&sde));
+    register_handlers(&router, Arc::clone(&db), Arc::clone(&sde));
+    crate::services::quasar_sov_skyhook::register_query_handlers(
+        &router,
+        Arc::clone(&db),
+        Arc::clone(&sde),
+    );
+
+    let cid = 90_000_001_i64;
+    let corp_id = 98_000_001_i64;
+    let sys_id = 30_000_214_u32; // HE-V4V
+    let lava_planet = sde
+        .celestials_in_system_slice(sys_id)
+        .iter()
+        .find(|c| c.type_id == 2015)
+        .expect("HE-V4V lava planet")
+        .celestial_id;
+    let temp_planet = sde
+        .celestials_in_system_slice(sys_id)
+        .iter()
+        .find(|c| c.type_id == 11)
+        .expect("HE-V4V temperate planet")
+        .celestial_id;
+
+    let sh_lava = 79_600_001_i64;
+    let sh_temp = 79_600_002_i64;
+    let sh_destroyed = 79_600_003_i64;
+
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = sys_id;
+        }
+        let corp = snap.corporations.entry(corp_id).or_default();
+        corp.corporation_id = corp_id;
+        corp.ceo_id = cid;
+        corp.members.insert(cid);
+        corp.member_roles.insert(cid, corp_roles::ROLE_DIRECTOR);
+        for (sh_id, st_state, planet) in [
+            (sh_lava, "ShieldVulnerable", lava_planet),
+            (sh_temp, "ShieldVulnerable", temp_planet),
+            (sh_destroyed, "Destroyed", lava_planet),
+        ] {
+            snap.structures.insert(
+                sh_id,
+                UpwellStructureRecord {
+                    structure_id: sh_id,
+                    type_id: TYPE_ORBITAL_SKYHOOK,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sys_id,
+                    name: format!("Skyhook {sh_id}"),
+                    state: st_state.into(),
+                    ..Default::default()
+                },
+            );
+            snap.sov_runtime.skyhook_planets.insert(sh_id, planet);
+            snap.sov_runtime.skyhook_active.insert(sh_id, true);
+        }
+        // Seed stale harvest & maturity state on sh_lava to verify ModifyReagentsRequest resets them.
+        snap.sov_runtime
+            .skyhook_reagent_bays
+            .insert(sh_lava, (TYPE_MAGMATIC_GAS, 10, 20, 1_000));
+        snap.sov_runtime
+            .skyhook_reagents
+            .insert(sh_lava, (TYPE_MAGMATIC_GAS, 30));
+        snap.sov_runtime.skyhook_last_harvest_unix.insert(sh_lava, 1_000);
+        snap.sov_runtime.skyhook_maturity_rem.insert(sh_lava, (999, 50_000));
+    });
+
+    let handlers = router.handlers.read().unwrap();
+    let dummy_any = GoogleAny::default();
+    let gm_ctx_at = |ts: u64| {
+        let mut c = AuthoritativeContext::for_session_at(
+            Some(1),
+            Some(cid as u32),
+            Some(corp_id as u32),
+            corp_roles::ROLE_DIRECTOR,
+            "tranquility",
+            vec![1],
+            ts,
+        );
+        c.service_role_mask = u64::MAX;
+        c
+    };
+    let make_mod_req = |sh_id: i64, reag_tid: u32, sec: u64, unsec: u64, cycle_ts: Option<u64>| {
+        let mut entry = id_msg(1, i64::from(reag_tid));
+        entry.fields.insert(2, DynamicValue::Uint64(sec));
+        entry.fields.insert(3, DynamicValue::Uint64(unsec));
+        if let Some(t) = cycle_ts {
+            let mut ts_m = DynamicQuasarMessage::new("Timestamp");
+            ts_m.fields.insert(1, DynamicValue::Uint64(t));
+            entry.fields.insert(5, DynamicValue::Message(Box::new(ts_m)));
+        }
+        let mut req = id_msg(1, sh_id);
+        req.fields
+            .insert(2, DynamicValue::Repeated(vec![DynamicValue::Message(Box::new(entry))]));
+        req
+    };
+
+    let ts = 20_000_u64;
+    let ctx_ts = gm_ctx_at(ts);
+
+    // 1. Explicit reagent list on a non-reagent Temperate planet is rejected without mutating state.
+    assert_eq!(
+        handlers["eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest"](
+            &ctx_ts,
+            &dummy_any,
+            &make_mod_req(sh_temp, TYPE_MAGMATIC_GAS, 100, 50, Some(ts)),
+        )
+        .unwrap_err()
+        .0,
+        STATUS_BAD_REQUEST
+    );
+
+    // 2. Explicit mismatched reagent type (Superionic Ice on Lava planet) is rejected without mutating state.
+    assert_eq!(
+        handlers["eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest"](
+            &ctx_ts,
+            &dummy_any,
+            &make_mod_req(sh_lava, TYPE_SUPERIONIC_ICE, 100, 50, Some(ts)),
+        )
+        .unwrap_err()
+        .0,
+        STATUS_BAD_REQUEST
+    );
+
+    // 3. Destroyed skyhook rejects ModifyReagentsRequest & ScheduleTheftVulnerabilityWindowRequest with STATUS_NOT_FOUND.
+    let mut ts_start = DynamicQuasarMessage::new("Timestamp");
+    ts_start.fields.insert(1, DynamicValue::Uint64(ts + 100));
+    let mut ts_end = DynamicQuasarMessage::new("Timestamp");
+    ts_end.fields.insert(1, DynamicValue::Uint64(ts + 3_700));
+    let mut sched_dead = id_msg(1, sh_destroyed);
+    sched_dead
+        .fields
+        .insert(2, DynamicValue::Message(Box::new(ts_start)));
+    sched_dead
+        .fields
+        .insert(3, DynamicValue::Message(Box::new(ts_end)));
+    for (ep, req) in [
+        (
+            "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest",
+            id_msg(1, sh_destroyed),
+        ),
+        (
+            "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest",
+            make_mod_req(sh_destroyed, TYPE_MAGMATIC_GAS, 100, 50, Some(ts)),
+        ),
+        (
+            "eve_public.sovereignty.skyhook.api.admin.ScheduleTheftVulnerabilityWindowRequest",
+            sched_dead,
+        ),
+    ] {
+        assert_eq!(
+            handlers[ep](&ctx_ts, &dummy_any, &req).unwrap_err().0,
+            STATUS_NOT_FOUND,
+            "{ep} must return STATUS_NOT_FOUND on destroyed skyhook"
+        );
+    }
+    assert!(
+        router.pending_notices.read().unwrap().is_empty(),
+        "rejected admin calls must emit zero notices"
+    );
+    db.with_snapshot(|snap| {
+        assert!(!snap.sov_runtime.skyhook_reagents.contains_key(&sh_temp));
+        assert!(!snap.sov_runtime.skyhook_reagent_bays.contains_key(&sh_temp));
+        assert!(!snap.sov_runtime.skyhook_reagents.contains_key(&sh_destroyed));
+        assert!(!snap.sov_runtime.skyhook_reagent_bays.contains_key(&sh_destroyed));
+        assert!(!snap.sov_runtime.skyhook_last_harvest_unix.contains_key(&sh_destroyed));
+        assert!(!snap.sov_runtime.skyhook_maturity_rem.contains_key(&sh_destroyed));
+        assert!(!snap.sov_runtime.skyhook_theft_windows.contains_key(&sh_destroyed));
+        assert_eq!(snap.sov_runtime.skyhook_last_harvest_unix.get(&sh_lava), Some(&1_000));
+        assert_eq!(snap.sov_runtime.skyhook_maturity_rem.get(&sh_lava), Some(&(999, 50_000)));
+    });
+
+    // 4. Valid explicit ModifyReagentsRequest resets harvest/maturity baselines and preserves GetRequest continuity.
+    handlers["eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest"](
+        &ctx_ts,
+        &dummy_any,
+        &make_mod_req(sh_lava, TYPE_MAGMATIC_GAS, 100, 240, Some(ts)),
+    )
+    .expect("valid explicit ModifyReagentsRequest");
+    db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.sov_runtime.skyhook_reagent_bays.get(&sh_lava),
+            Some(&(TYPE_MAGMATIC_GAS, 100, 240, ts))
+        );
+        assert_eq!(
+            snap.sov_runtime.skyhook_reagents.get(&sh_lava),
+            Some(&(TYPE_MAGMATIC_GAS, 340))
+        );
+        assert_eq!(snap.sov_runtime.skyhook_last_harvest_unix.get(&sh_lava), Some(&ts));
+        assert_eq!(snap.sov_runtime.skyhook_maturity_rem.get(&sh_lava), Some(&(240, 0)));
+    });
+
+    // Immediate GetRequest at `ts` must preserve exact set values without retroactive harvest or maturity.
+    handlers["eve_public.sovereignty.skyhook.api.GetRequest"](
+        &ctx_ts,
+        &dummy_any,
+        &id_msg(1, sh_lava),
+    )
+    .expect("immediate skyhook GetRequest");
+    db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.sov_runtime.skyhook_reagent_bays.get(&sh_lava),
+            Some(&(TYPE_MAGMATIC_GAS, 100, 240, ts))
+        );
+    });
+
+    // GetRequest 1h later harvests 1 hour of Lava gas and matures 240 * 3600 / 86400 = 10 units.
+    let hourly = crate::services::quasar_sov_skyhook::planet_hourly_reagent_yield(
+        &sde,
+        Some(lava_planet),
+        Some(sys_id),
+        TYPE_MAGMATIC_GAS,
+    );
+    assert!(hourly > 0);
+    let to_sec = (hourly * REAGENT_SECURED_PERCENTAGE) / 100;
+    let to_insec = hourly - to_sec;
+    let ctx_1h = gm_ctx_at(ts + 3_600);
+    handlers["eve_public.sovereignty.skyhook.api.GetRequest"](
+        &ctx_1h,
+        &dummy_any,
+        &id_msg(1, sh_lava),
+    )
+    .expect("1h skyhook GetRequest");
+    db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.sov_runtime.skyhook_reagent_bays.get(&sh_lava),
+            Some(&(TYPE_MAGMATIC_GAS, 110 + to_sec, 230 + to_insec, ts + 3_600))
+        );
+        assert_eq!(
+            snap.sov_runtime.skyhook_last_harvest_unix.get(&sh_lava),
+            Some(&(ts + 3_600))
+        );
+        assert_eq!(
+            snap.sov_runtime.skyhook_maturity_rem.get(&sh_lava),
+            Some(&(230 + to_insec, 0))
+        );
+    });
+
+    // Setting unsecured_stock = 0 zeroes skyhook_maturity_rem.
+    handlers["eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest"](
+        &ctx_1h,
+        &dummy_any,
+        &make_mod_req(sh_lava, TYPE_MAGMATIC_GAS, 500, 0, Some(ts + 3_600)),
+    )
+    .expect("zero-unsecured ModifyReagentsRequest");
+    db.with_snapshot(|snap| {
+        assert_eq!(snap.sov_runtime.skyhook_maturity_rem.get(&sh_lava), Some(&(0, 0)));
+    });
+}

@@ -538,7 +538,7 @@ async fn test_skyhook_admin_auth_window_and_star_resources() {
     let mut rx = subscribe(&ctx, &mut s).await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(skyhook_id, structure(skyhook_id, 98_000_001, sys_id, TYPE_ORBITAL_SKYHOOK));
-        snap.sov_runtime.skyhook_planets.insert(skyhook_id, 40_009_080); // Jita III (non-first planet)
+        snap.sov_runtime.skyhook_planets.insert(skyhook_id, 40_009_116); // Jita VI (Lava planet, Magmatic Gas)
         snap.structures.insert(1_000_000_052, structure(1_000_000_052, 98_000_002, sys_id, TYPE_ORBITAL_SKYHOOK));
     });
 
@@ -645,7 +645,7 @@ async fn test_skyhook_admin_auth_window_and_star_resources() {
     for (idx, expected_active) in [(0usize, 0u64), (1usize, 1u64)] {
         let body = &act_notices[idx].1;
         assert_eq!(field(body, 1).and_then(|i| varint(&i, 1)), Some(sys_id as u64), "solar_system(1)");
-        assert_eq!(field(body, 2).and_then(|i| varint(&i, 1)), Some(40_009_080), "planet(2) bound Jita III");
+        assert_eq!(field(body, 2).and_then(|i| varint(&i, 1)), Some(40_009_116), "planet(2) bound Jita VI");
         assert_eq!(field(body, 3).and_then(|i| varint(&i, 1)), Some(skyhook_id as u64), "skyhook(3)");
         assert_eq!(varint(body, 4), Some(expected_active), "active(4)");
     }

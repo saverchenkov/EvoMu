@@ -510,10 +510,38 @@ async fn sovereignty_skyhook_reagent_scaling_and_mercenary_den() {
             simulate_den_for_planet(den, &mut rem, Some(&ctx.sde), ctx.now_unix() + 7_200);
             assert!(den.infomorphs > 0);
         }
+        let now = ctx.now_unix();
+        snap.sov_runtime
+            .skyhook_reagent_bays
+            .insert(skyhook_id, (TYPE_MAGMATIC_GAS, 100, 50, now));
+        snap.sov_runtime
+            .skyhook_reagents
+            .insert(skyhook_id, (TYPE_MAGMATIC_GAS, 150));
+        snap.sov_runtime.skyhook_maturity_rem.insert(skyhook_id, (50, 123));
+        snap.sov_runtime.skyhook_last_harvest_unix.insert(skyhook_id, now);
+        snap.sov_runtime
+            .skyhook_theft_windows
+            .insert(skyhook_id, (now, now + 3_600));
+        snap.sov_runtime.skyhook_hackable.insert(skyhook_id, true);
+        snap.sov_runtime
+            .skyhook_silo_links
+            .insert(skyhook_id, (PILOT_ID, PILOT_SHIP, now + 600, 200.0));
         snap.structures.get_mut(&skyhook_id).unwrap().state = "Destroyed".into();
     });
     assert_eq!(
         qrpc(&ctx, &mut dir, "eve_public.sovereignty.skyhook.api.GetRequest", id_req(1, skyhook_id as u64))
+            .await
+            .status_code,
+        STATUS_NOT_FOUND
+    );
+    assert_eq!(
+        qrpc(&ctx, &mut dir, "eve_public.sovereignty.skyhook.api.ActivateRequest", id_req(1, skyhook_id as u64))
+            .await
+            .status_code,
+        STATUS_NOT_FOUND
+    );
+    assert_eq!(
+        qrpc(&ctx, &mut dir, "eve_public.sovereignty.skyhook.api.DeactivateRequest", id_req(1, skyhook_id as u64))
             .await
             .status_code,
         STATUS_NOT_FOUND
@@ -529,6 +557,13 @@ async fn sovereignty_skyhook_reagent_scaling_and_mercenary_den() {
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.sov_runtime.skyhook_planets.contains_key(&skyhook_id));
         assert!(!snap.sov_runtime.skyhook_active.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_reagent_bays.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_reagents.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_maturity_rem.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_last_harvest_unix.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_theft_windows.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_hackable.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_silo_links.contains_key(&skyhook_id));
     });
 }
 

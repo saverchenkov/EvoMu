@@ -361,16 +361,17 @@ async fn test_quasar_sov_hub_skyhook_mercden_and_space_cdn_live() {
     ctx.seed_demo_world_fixtures();
     common::pin_clock(&ctx);
 
-    let (null_sys, planet) = ctx.sde.solar_systems.values()
+    let (null_sys, planet, lava_planet) = ctx.sde.solar_systems.values()
         .filter(|s| s.security_status < 0.0 && eve_server::services::sov_gameplay::is_claimable_nullsec_system(&ctx.sde, s.solar_system_id))
         .find_map(|s| {
-            ctx.sde.celestials_in_system(s.solar_system_id)
-                .into_iter()
-                .find(|c| c.group_id == 7 && c.type_id == 11)
-                .map(|p| (s.solar_system_id, p))
+            let cels = ctx.sde.celestials_in_system(s.solar_system_id);
+            let temp = cels.iter().find(|c| c.group_id == 7 && c.type_id == 11).cloned()?;
+            let lava = cels.iter().find(|c| c.group_id == 7 && c.type_id == 2015).cloned()?;
+            Some((s.solar_system_id, temp, lava))
         })
-        .expect("claimable nullsec with temperate planet");
+        .expect("claimable nullsec with temperate and lava planets");
     let planet_id = planet.celestial_id;
+    let lava_planet_id = lava_planet.celestial_id;
 
     let mut sess = docked_pilot(&ctx, 73_001, PILOT_1).await;
     slash(&ctx, &mut sess, "/giveskill 3363 5").await;
@@ -404,6 +405,11 @@ async fn test_quasar_sov_hub_skyhook_mercden_and_space_cdn_live() {
     slash(&ctx, &mut sess, &format!("/createitem {TYPE_MERC_DEN} 1")).await;
     let md_rep = rpc(&ctx, &mut sess, "structureDeployment", "Anchor", &[PyRep::Integer(TYPE_MERC_DEN), PyRep::Integer(skyhook_id), PyRep::Integer(planet_id)]).await.expect("Anchor MercDen");
     let mercden_id = md_rep.as_i64().or_else(|| md_rep.dict_get("structureID").and_then(|v| v.as_i64())).expect("mercden_id");
+
+    ctx.systems.get_or_spawn(null_sys).set_ball_position(ship_id, lava_planet.position + glam::DVec3::new(10_000.0, 0.0, 0.0)).await;
+    slash(&ctx, &mut sess, &format!("/createitem {TYPE_SKYHOOK} 1")).await;
+    let rsh_rep = rpc(&ctx, &mut sess, "structureDeployment", "Anchor", &[PyRep::Integer(TYPE_SKYHOOK), PyRep::Integer(lava_planet_id), PyRep::String("Reagent Skyhook".into())]).await.expect("Anchor Reagent Skyhook");
+    let reagent_skyhook_id = rsh_rep.as_i64().or_else(|| rsh_rep.dict_get("structureID").and_then(|v| v.as_i64())).expect("reagent_skyhook_id");
     let _ = drain_notices(&mut rx);
 
     // 1. Hub Fuel
@@ -499,27 +505,27 @@ async fn test_quasar_sov_hub_skyhook_mercden_and_space_cdn_live() {
     assert_eq!(pl_cfgs.status_code, STATUS_OK);
     assert!(pl_cfgs.payload.unwrap().value.len() >= 2);
 
-    // 5. Skyhook Admin, Requests & Notices
+    // 5. Skyhook Admin, Requests & Notices (on Lava reagent skyhook)
     let mut reag = Vec::new();
     encode_bytes_field(1, &id_msg(1, u64::from(TYPE_MAGMATIC_GAS))[2..], &mut reag);
     encode_varint_field(2, 1_200, &mut reag);
-    let mut mod_reag = id_msg(1, skyhook_id as u64);
+    let mut mod_reag = id_msg(1, reagent_skyhook_id as u64);
     encode_bytes_field(2, &reag, &mut mod_reag);
     assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest", mod_reag, true).await.status_code, STATUS_OK);
 
     let now = ctx.now_unix();
-    let mut win_req = id_msg(1, skyhook_id as u64);
+    let mut win_req = id_msg(1, reagent_skyhook_id as u64);
     encode_bytes_field(2, &id_msg(1, now + 3_600)[2..], &mut win_req);
     encode_bytes_field(3, &id_msg(1, now + 7_200)[2..], &mut win_req);
     assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.skyhook.api.admin.ScheduleTheftVulnerabilityWindowRequest", win_req, true).await.status_code, STATUS_OK);
-    let sh_get = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.skyhook.api.GetRequest", id_msg(1, skyhook_id as u64), false).await;
+    let sh_get = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.skyhook.api.GetRequest", id_msg(1, reagent_skyhook_id as u64), false).await;
     assert_eq!(sh_get.status_code, STATUS_OK);
     assert!(sh_get.payload.unwrap().value.len() >= 2);
     let sh_corp = quasar_call(&ctx, &mut sess, "eve_public.sovereignty.skyhook.api.GetAllByCorporationRequest", id_msg(1, corp_id as u64), false).await;
     assert_eq!(sh_corp.status_code, STATUS_OK);
     assert!(sh_corp.payload.unwrap().value.len() >= 2);
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.skyhook.api.DeactivateRequest", id_msg(1, skyhook_id as u64), false).await.status_code, STATUS_OK);
-    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.skyhook.api.ActivateRequest", id_msg(1, skyhook_id as u64), false).await.status_code, STATUS_OK);
+    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.skyhook.api.DeactivateRequest", id_msg(1, reagent_skyhook_id as u64), false).await.status_code, STATUS_OK);
+    assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.sovereignty.skyhook.api.ActivateRequest", id_msg(1, reagent_skyhook_id as u64), false).await.status_code, STATUS_OK);
     let sh_notices = drain_notices(&mut rx);
     assert!(sh_notices.iter().any(|n| n.normalized_type_name() == "eve_public.sovereignty.skyhook.api.ReagentSimulationsNotice" && n.value.len() >= 2));
     assert!(sh_notices.iter().any(|n| n.normalized_type_name() == "eve_public.sovereignty.skyhook.api.TheftVulnerabilityWindowScheduledNotice" && n.value.len() >= 2));

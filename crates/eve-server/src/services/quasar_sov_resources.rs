@@ -459,17 +459,19 @@ pub fn register_handlers(
                 let skyhook_id = required_id(dyn_msg, 1, "Skyhook")?;
                 let now = ctx.now_unix();
 
-                let explicit: Option<(u32, u64, u64, u64)> = match dyn_msg.get(2) {
+                let explicit_list: Option<Vec<(u32, u64, u64, u64)>> = match dyn_msg.get(2) {
                     Some(DynamicValue::Repeated(list)) => {
-                        let mut parsed = list
+                        let parsed = list
                             .iter()
                             .map(|item| parse_reagent_state_entry(item, now))
                             .collect::<Result<Vec<_>, _>>()?;
-                        let last = parsed.pop().ok_or((
-                            STATUS_BAD_REQUEST,
-                            "Reagents state list must not be empty".to_string(),
-                        ))?;
-                        Some(last)
+                        if parsed.is_empty() {
+                            return Err((
+                                STATUS_BAD_REQUEST,
+                                "Reagents state list must not be empty".to_string(),
+                            ));
+                        }
+                        Some(parsed)
                     }
                     Some(_) => {
                         return Err((STATUS_BAD_REQUEST, "Malformed reagents field".to_string()));
@@ -480,19 +482,38 @@ pub fn register_handlers(
                 let (sys_id, planet_id, reag_type, sec_qty, unsec_qty, cycle_ts) = transact(&db_mod, |snap| {
                     let sys = authorize_skyhook(ctx, snap, skyhook_id, "modify skyhook reagents")?;
                     let pid = snap.sov_runtime.skyhook_planets.get(&skyhook_id).copied();
-                    let (tid, sec, unsec, ts) = match explicit {
-                        Some(v) => v,
-                        None => {
-                            let default_tid = snap
+                    let planet_reagent = pid
+                        .and_then(|p| sde_mod.celestial(p))
+                        .map(|c| planet_reagent_type(c.type_id));
+                    let (tid, sec, unsec, ts) = match (explicit_list, planet_reagent) {
+                        (_, Some(None)) => {
+                            return Err((
+                                STATUS_BAD_REQUEST,
+                                format!("Skyhook {skyhook_id} planet has no harvestable Colony Reagent"),
+                            ));
+                        }
+                        (Some(mut list), Some(Some(expected))) => {
+                            for &(tid, ..) in &list {
+                                if tid != expected {
+                                    return Err((
+                                        STATUS_BAD_REQUEST,
+                                        format!(
+                                            "Skyhook {skyhook_id} planet requires Colony Reagent type {expected}, got {tid}"
+                                        ),
+                                    ));
+                                }
+                            }
+                            list.pop().expect("non-empty validated reagents list")
+                        }
+                        (Some(mut list), None) => list.pop().expect("non-empty validated reagents list"),
+                        (None, Some(Some(expected))) => (expected, 1_200, 0, now),
+                        (None, None) => {
+                            let existing = snap
                                 .sov_runtime
                                 .skyhook_reagents
                                 .get(&skyhook_id)
-                                .map(|r| r.0)
-                                .or_else(|| {
-                                    pid.and_then(|p| sde_mod.celestial(p))
-                                        .and_then(|c| planet_reagent_type(c.type_id))
-                                });
-                            let tid = match default_tid {
+                                .map(|r| r.0);
+                            let tid = match existing {
                                 Some(t) => t,
                                 None if pid.is_some() => {
                                     return Err((
@@ -514,6 +535,12 @@ pub fn register_handlers(
                     snap.sov_runtime
                         .skyhook_reagents
                         .insert(skyhook_id, (tid, sec.saturating_add(unsec)));
+                    snap.sov_runtime
+                        .skyhook_last_harvest_unix
+                        .insert(skyhook_id, ts);
+                    snap.sov_runtime
+                        .skyhook_maturity_rem
+                        .insert(skyhook_id, (unsec, 0));
                     Ok::<_, (u32, String)>((sys, pid, tid, sec, unsec, ts))
                 })?;
 

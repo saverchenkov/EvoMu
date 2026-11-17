@@ -112,10 +112,14 @@ pub fn next_skyhook_theft_window(
     (start, start.saturating_add(7_200))
 }
 
-/// Clears active planet/workforce/vulnerability/link runtime state when a Skyhook is destroyed.
+/// Clears all per-skyhook planet/reagent/theft/link runtime state when a Skyhook is destroyed.
 pub(crate) fn cleanup_destroyed_skyhook_in_snap(snap: &mut WorldStateSnapshot, skyhook_id: i64) {
     snap.sov_runtime.skyhook_planets.remove(&skyhook_id);
     snap.sov_runtime.skyhook_active.remove(&skyhook_id);
+    snap.sov_runtime.skyhook_reagent_bays.remove(&skyhook_id);
+    snap.sov_runtime.skyhook_reagents.remove(&skyhook_id);
+    snap.sov_runtime.skyhook_maturity_rem.remove(&skyhook_id);
+    snap.sov_runtime.skyhook_last_harvest_unix.remove(&skyhook_id);
     snap.sov_runtime.skyhook_theft_windows.remove(&skyhook_id);
     snap.sov_runtime.skyhook_hackable.remove(&skyhook_id);
     snap.sov_runtime.skyhook_silo_links.remove(&skyhook_id);

@@ -161,7 +161,7 @@ pub(crate) fn owned_structure<'a>(
     let st = snap
         .structures
         .get(&structure_id)
-        .filter(|s| types.contains(&s.type_id))
+        .filter(|s| types.contains(&s.type_id) && !s.state.eq_ignore_ascii_case("destroyed"))
         .ok_or((STATUS_NOT_FOUND, format!("{what} {structure_id} not found")))?;
     if !same_owner(snap, caller, st.owner_corp_id) {
         return Err((

@@ -533,38 +533,45 @@ async fn test_quasar_sov_skyhook_workforce_and_admin_lifecycle() {
     ctx.set_clock(clock.clone());
     let _reg = &ctx.quasar_gateway.descriptors;
 
-    let (sys_id, planet) = ctx
+    let (sys_id, planet, lava_planet) = ctx
         .sde
         .solar_systems
         .values()
         .filter(|s| s.security_status <= 0.0 && s.solar_system_id < 31_000_000)
         .find_map(|s| {
-            ctx.sde
-                .celestials_in_system(s.solar_system_id)
-                .into_iter()
-                .find(|c| c.type_id == 11)
-                .map(|c| (s.solar_system_id, c))
+            let cels = ctx.sde.celestials_in_system(s.solar_system_id);
+            let temp = cels.iter().find(|c| c.type_id == 11).cloned()?;
+            let lava = cels.iter().find(|c| c.type_id == 2015).cloned()?;
+            Some((s.solar_system_id, temp, lava))
         })
-        .expect("nullsec system with Temperate planet");
+        .expect("nullsec system with Temperate and Lava planets");
 
     let cid = 90_000_001u32;
     let corp_id = 98_000_001u32;
     let skyhook_id = 1_000_000_301i64;
+    let reagent_skyhook_id = 1_000_000_302i64;
     ctx.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&(cid as i64)) {
             ch.corporation_id = corp_id as i64;
             ch.solar_system_id = sys_id;
         }
-        let mut st = UpwellStructureRecord::default();
-        st.structure_id = skyhook_id;
-        st.type_id = TYPE_ORBITAL_SKYHOOK;
-        st.owner_corp_id = corp_id as i64;
-        st.solar_system_id = sys_id;
-        st.state = "shield_vulnerable".into();
-        s.structures.insert(skyhook_id, st);
-        s.sov_runtime.skyhook_planets.insert(skyhook_id, planet.celestial_id);
-        s.sov_runtime.skyhook_reagents.insert(skyhook_id, (81_143, 500));
-        s.sov_runtime.skyhook_active.insert(skyhook_id, true);
+        for (sid, pid, with_reagent) in [
+            (skyhook_id, planet.celestial_id, false),
+            (reagent_skyhook_id, lava_planet.celestial_id, true),
+        ] {
+            let mut st = UpwellStructureRecord::default();
+            st.structure_id = sid;
+            st.type_id = TYPE_ORBITAL_SKYHOOK;
+            st.owner_corp_id = corp_id as i64;
+            st.solar_system_id = sys_id;
+            st.state = "shield_vulnerable".into();
+            s.structures.insert(sid, st);
+            s.sov_runtime.skyhook_planets.insert(sid, pid);
+            s.sov_runtime.skyhook_active.insert(sid, true);
+            if with_reagent {
+                s.sov_runtime.skyhook_reagents.insert(sid, (81_143, 500));
+            }
+        }
     });
 
     let mut admin = make_sess(84_001, cid, corp_id, sys_id, true);
@@ -578,13 +585,17 @@ async fn test_quasar_sov_skyhook_workforce_and_admin_lifecycle() {
     let wf_bytes = wm.fields.iter().find(|f| f.field_number == 7).and_then(|f| f.value.as_bytes()).expect("workforce field 7");
     let wf_wm = WireMessage::decode(wf_bytes).expect("decode workforce");
     assert_eq!(wf_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()), Some(expected_wf));
-    let rdef_bytes = wm.fields.iter().find(|f| f.field_number == 4).and_then(|f| f.value.as_bytes()).expect("reagent def field 4");
+
+    let reag_get_rsp = qrpc(&ctx, &mut admin, "eve_public.sovereignty.skyhook.api.GetRequest", req_with_id(reagent_skyhook_id as u64)).await;
+    assert_eq!(reag_get_rsp.status_code, STATUS_OK);
+    let reag_wm = WireMessage::decode(&reag_get_rsp.payload.as_ref().unwrap().value).expect("decode reagent GetResponse wire");
+    let rdef_bytes = reag_wm.fields.iter().find(|f| f.field_number == 4).and_then(|f| f.value.as_bytes()).expect("reagent def field 4");
     let rdef_wm = WireMessage::decode(rdef_bytes).expect("decode reagent def");
     let amt_bytes = rdef_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_bytes()).expect("amt field 2");
     let amt_wm = WireMessage::decode(amt_bytes).expect("decode amt");
     let expected_reagent_rate = eve_server::services::quasar_sov_skyhook::planet_hourly_reagent_yield_for_planet(
-        planet.type_id,
-        planet.radius,
+        lava_planet.type_id,
+        lava_planet.radius,
     );
     assert_eq!(
         amt_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()),
@@ -595,7 +606,7 @@ async fn test_quasar_sov_skyhook_workforce_and_admin_lifecycle() {
     assert_eq!(qrpc(&ctx, &mut admin, "eve_public.sovereignty.skyhook.api.GetAllByCorporationRequest", req_with_id(corp_id as u64)).await.status_code, STATUS_OK);
 
     let mut mod_req = Vec::new();
-    encode_bytes_field(1, &id_msg(skyhook_id as u64), &mut mod_req);
+    encode_bytes_field(1, &id_msg(reagent_skyhook_id as u64), &mut mod_req);
     assert_eq!(qrpc(&ctx, &mut admin, "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest", mod_req).await.status_code, STATUS_OK);
 
     let now = ctx.now_unix();
@@ -604,7 +615,7 @@ async fn test_quasar_sov_skyhook_workforce_and_admin_lifecycle() {
     let mut ts_end = Vec::new();
     encode_varint_field(1, now + 3_660, &mut ts_end);
     let mut sched_req = Vec::new();
-    encode_bytes_field(1, &id_msg(skyhook_id as u64), &mut sched_req);
+    encode_bytes_field(1, &id_msg(reagent_skyhook_id as u64), &mut sched_req);
     encode_bytes_field(2, &ts_start, &mut sched_req);
     encode_bytes_field(3, &ts_end, &mut sched_req);
     assert_eq!(qrpc(&ctx, &mut admin, "eve_public.sovereignty.skyhook.api.admin.ScheduleTheftVulnerabilityWindowRequest", sched_req).await.status_code, STATUS_OK);

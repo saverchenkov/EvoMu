@@ -387,3 +387,134 @@ fn destroyed_skyhook_exclusion_and_lazy_advancement_across_queries() {
     .value;
     assert!(WireMessage::decode(&vuln_in_sys).unwrap().fields.is_empty());
 }
+
+#[test]
+fn destroyed_skyhook_rejects_activation_and_cleanup_prunes_all_runtime_maps() {
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let descriptors = Arc::new(QuasarDescriptorRegistry::empty_with_builtins());
+    let router = PublicGatewayRouter::new(descriptors, Arc::clone(&db), Arc::clone(&sde));
+    crate::services::quasar_sov_services::register_handlers(&router, Arc::clone(&db), Arc::clone(&sde));
+
+    let cid = 90_000_001_i64;
+    let corp_id = 1_000_009_i64;
+    let sys_id = 30_000_142_u32;
+    let sh_live = 79_200_001_i64;
+    let sh_destroyed = 79_200_002_i64;
+    let t0 = 1_850_000_000_u64;
+
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = sys_id;
+        }
+        let corp = snap.corporations.entry(corp_id).or_default();
+        corp.corporation_id = corp_id;
+        corp.ceo_id = cid;
+        corp.members.insert(cid);
+        corp.member_roles.insert(cid, corp_roles::ROLE_DIRECTOR);
+        for (sh_id, state) in [(sh_live, "ShieldVulnerable"), (sh_destroyed, "Destroyed")] {
+            snap.structures.insert(
+                sh_id,
+                UpwellStructureRecord {
+                    structure_id: sh_id,
+                    type_id: TYPE_ORBITAL_SKYHOOK,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sys_id,
+                    name: format!("Skyhook {sh_id}"),
+                    state: state.into(),
+                    ..Default::default()
+                },
+            );
+        }
+        snap.sov_runtime.skyhook_planets.insert(sh_live, 40_009_080);
+        snap.sov_runtime.skyhook_active.insert(sh_live, false);
+
+        snap.sov_runtime.skyhook_planets.insert(sh_destroyed, 40_009_116);
+        snap.sov_runtime.skyhook_active.insert(sh_destroyed, true);
+        snap.sov_runtime
+            .skyhook_reagent_bays
+            .insert(sh_destroyed, (crate::services::sov_services::TYPE_MAGMATIC_GAS, 200, 100, t0));
+        snap.sov_runtime
+            .skyhook_reagents
+            .insert(sh_destroyed, (crate::services::sov_services::TYPE_MAGMATIC_GAS, 300));
+        snap.sov_runtime.skyhook_maturity_rem.insert(sh_destroyed, (100, 50));
+        snap.sov_runtime.skyhook_last_harvest_unix.insert(sh_destroyed, t0);
+        snap.sov_runtime
+            .skyhook_theft_windows
+            .insert(sh_destroyed, (t0, t0 + 3_600));
+        snap.sov_runtime.skyhook_hackable.insert(sh_destroyed, true);
+        snap.sov_runtime
+            .skyhook_silo_links
+            .insert(sh_destroyed, (cid, 80_000_001, t0 + 600, 250.0));
+    });
+
+    let handlers = router.handlers.read().unwrap();
+    let dummy_any = GoogleAny::default();
+    let ctx = AuthoritativeContext::for_session_at(
+        Some(1),
+        Some(cid as u32),
+        Some(corp_id as u32),
+        corp_roles::ROLE_DIRECTOR,
+        "tranquility",
+        vec![1],
+        t0,
+    );
+
+    // Sanity check: director activates live skyhook cleanly.
+    handlers["eve_public.sovereignty.skyhook.api.ActivateRequest"](
+        &ctx,
+        &dummy_any,
+        &id_msg(1, sh_live),
+    )
+    .expect("live skyhook ActivateRequest succeeds");
+    router.pending_notices.write().unwrap().clear();
+
+    // Destroyed skyhook rejects GetRequest, ActivateRequest, and DeactivateRequest with STATUS_NOT_FOUND.
+    for ep in [
+        "eve_public.sovereignty.skyhook.api.GetRequest",
+        "eve_public.sovereignty.skyhook.api.ActivateRequest",
+        "eve_public.sovereignty.skyhook.api.DeactivateRequest",
+    ] {
+        assert_eq!(
+            handlers[ep](&ctx, &dummy_any, &id_msg(1, sh_destroyed))
+                .unwrap_err()
+                .0,
+            STATUS_NOT_FOUND,
+            "{ep} must reject destroyed skyhook with STATUS_NOT_FOUND"
+        );
+    }
+    assert!(
+        router.pending_notices.read().unwrap().is_empty(),
+        "rejected destroyed-skyhook RPCs must emit zero notices"
+    );
+
+    // Cleanup removes all 9 per-skyhook sov_runtime maps and subsequent RPCs do not resurrect them.
+    db.with_mut_snapshot(|snap| {
+        crate::services::sov_gameplay::cleanup_destroyed_skyhook_in_snap(snap, sh_destroyed);
+    });
+    for ep in [
+        "eve_public.sovereignty.skyhook.api.GetRequest",
+        "eve_public.sovereignty.skyhook.api.ActivateRequest",
+        "eve_public.sovereignty.skyhook.api.DeactivateRequest",
+    ] {
+        assert_eq!(
+            handlers[ep](&ctx, &dummy_any, &id_msg(1, sh_destroyed))
+                .unwrap_err()
+                .0,
+            STATUS_NOT_FOUND,
+        );
+    }
+    db.with_snapshot(|snap| {
+        assert!(!snap.sov_runtime.skyhook_planets.contains_key(&sh_destroyed));
+        assert!(!snap.sov_runtime.skyhook_active.contains_key(&sh_destroyed));
+        assert!(!snap.sov_runtime.skyhook_reagent_bays.contains_key(&sh_destroyed));
+        assert!(!snap.sov_runtime.skyhook_reagents.contains_key(&sh_destroyed));
+        assert!(!snap.sov_runtime.skyhook_maturity_rem.contains_key(&sh_destroyed));
+        assert!(!snap.sov_runtime.skyhook_last_harvest_unix.contains_key(&sh_destroyed));
+        assert!(!snap.sov_runtime.skyhook_theft_windows.contains_key(&sh_destroyed));
+        assert!(!snap.sov_runtime.skyhook_hackable.contains_key(&sh_destroyed));
+        assert!(!snap.sov_runtime.skyhook_silo_links.contains_key(&sh_destroyed));
+        assert_eq!(snap.sov_runtime.skyhook_active.get(&sh_live), Some(&true));
+    });
+}
