@@ -606,7 +606,7 @@ def run_early_gate(root, base, added, claims_path, early_only=False):
 
     # 2f. Repo release-hygiene guard (#1077 §F) when tools/release_guard.py is present in the tree
     rg_full = os.path.join(root, "tools", "release_guard.py")
-    if (not early_only or added) and os.path.isfile(rg_full):
+    if not early_only and os.path.isfile(rg_full):
         rc_rg, out_rg = sh([sys.executable, rg_full, "--root", root, "--json"], root, timeout=30)
         if rc_rg != 0:
             try:

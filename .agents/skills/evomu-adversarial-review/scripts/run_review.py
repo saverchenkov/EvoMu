@@ -893,6 +893,8 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
     use_full = full_workspace or os.environ.get("EVOMU_FULL_WORKSPACE_TESTS") == "1"
     raw_cmds = [[cargo, "test", "-j", "4", "--workspace", "--no-fail-fast"]] if use_full else derive_affected_test_commands(root, base, cargo)
     cmds = [_ensure_cargo_j4(c) for c in raw_cmds]
+    if not use_full and any(c and c[-1] in SENTINEL_IT_FILTERS for c in cmds):
+        cmds.insert(0, [cargo, "check", "-j", "4", "--workspace", "--bins"])
     slot_fh = _acquire_cargo_test_slot(root)
     outs = []
     rc = 0
@@ -1739,6 +1741,10 @@ def main():
                 print("[review] code review returned %s; waiting for the test run so this report covers both..."
                       % verdict, flush=True)
             text, tm, wall_test = test_run.join()
+            # Clean transient crate-local `.evomu-bugs` queues created by `alert`/`bugReport` contract tests
+            # when `cargo test -p <crate>` executes with `CARGO_MANIFEST_DIR` as cwd.
+            for bd in glob.glob(os.path.join(root, "crates", "*", ".evomu-bugs")):
+                shutil.rmtree(bd, ignore_errors=True)
             # The tree check is done here, after the tests finished, so files a test creates and deletes again
             # cannot make the review INVALID; files a test (or the reviewer) leaves behind still do.
             tree_after = rl.worktree_fingerprint(root)
