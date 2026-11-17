@@ -817,19 +817,33 @@ async fn update_state_request_respects_warp_provenance_and_clears_landed_or_canc
             .expect("online lock");
     };
 
-    // 1. Explicit DisconnectedEmergencyWarp provenance must force-stop even if active_warps holds a stale entry.
+    // 1. DisconnectedEmergencyWarp initialization clears stale active_warps and UpdateStateRequest force-stops
+    //    both explicit emergency warps (even if return_warps holds a stale entry) and untracked warps,
+    //    while preserving ReconnectReturnWarp.
     let _ = sys_h
         .spawn_ball(test_ship_ball(88701, 588, DVec3::ZERO))
         .await;
-    sys_h
-        .set_warp_movement_mode(
-            88701,
-            MovementMode::new_warp(DVec3::ZERO, DVec3::new(1_000_000.0, 0.0, 0.0), 3.0),
-            crate::system_actor::WarpProvenance::DisconnectedEmergencyWarp,
-        )
-        .await
-        .unwrap();
     ctx.active_warps.lock().unwrap().insert(88701, 9421);
+    sys_h.prepare_disconnected_warp_sync(
+        88701,
+        588,
+        40.0,
+        1_000_000.0,
+        1.0,
+        300.0,
+        3.0,
+        DVec3::ZERO,
+        DVec3::new(1_000_000.0, 0.0, 0.0),
+    );
+    assert!(
+        !ctx.active_warps.lock().unwrap().contains_key(&88701),
+        "Initializing DisconnectedEmergencyWarp must clear stale active_warps"
+    );
+    assert_eq!(
+        sys_h.warp_provenance(88701),
+        Some(crate::system_actor::WarpProvenance::DisconnectedEmergencyWarp)
+    );
+    ctx.return_warps.lock().unwrap().insert(88701);
     let mut sess_emerg = make_session(9421, 98000001, Some(sys_id), Some(88701), 0);
     handle(
         &ctx,
@@ -846,7 +860,34 @@ async fn update_state_request_respects_warp_provenance_and_clears_landed_or_canc
     let (_, b_emerg) = sys_h.get_ball_snapshot(88701).await.unwrap().unwrap();
     assert!(matches!(b_emerg.mode, MovementMode::Stop));
     assert!(!ctx.active_warps.lock().unwrap().contains_key(&88701));
+    assert!(!ctx.return_warps.lock().unwrap().contains(&88701));
     assert_eq!(sys_h.warp_provenance(88701), None);
+
+    // 1b. ReconnectReturnWarp preserves MovementMode::Warp across UpdateStateRequest.
+    sys_h
+        .set_warp_movement_mode(
+            88701,
+            MovementMode::new_warp(DVec3::ZERO, DVec3::new(50_000_000.0, 0.0, 0.0), 3.0),
+            crate::system_actor::WarpProvenance::ReconnectReturnWarp,
+        )
+        .await
+        .unwrap();
+    handle(
+        &ctx,
+        &mut sess_emerg,
+        Some(&bound),
+        "beyonce",
+        "UpdateStateRequest",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, b_ret) = sys_h.get_ball_snapshot(88701).await.unwrap().unwrap();
+    assert!(matches!(b_ret.mode, MovementMode::Warp { .. }));
+    let _ = sys_h.force_stop_warp(88701);
+    clear_warp_tracking(&ctx, Some(&sys_h), 88701);
 
     // 2. PlayerOrFleetWarp preserves Warp across UpdateStateRequest even before active_warps sync,
     //    clears active_warps/provenance immediately on landing, and delivers OnWarpFinished once.

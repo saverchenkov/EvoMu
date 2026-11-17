@@ -2612,14 +2612,29 @@ impl SystemHandle {
         let needs_warp_init = bp.balls.get(&ship_id).is_some_and(|b| {
             !matches!(b.mode, MovementMode::Warp { .. }) && (b.position - dest).length() > 5_000.0
         });
-        if needs_warp_init {
+        let warp_started = if needs_warp_init {
             let start_pos = bp.balls.get(&ship_id).map(|b| b.position).unwrap_or(current_pos);
-            let _ = bp.set_mode(ship_id, MovementMode::new_warp(start_pos, dest, warp_speed_au_s.max(1.5)));
-        }
+            let ok = bp
+                .set_mode(ship_id, MovementMode::new_warp(start_pos, dest, warp_speed_au_s.max(1.5)))
+                .is_ok();
+            if ok {
+                if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                    cs.is_emergency_warping = true;
+                }
+            }
+            ok
+        } else {
+            false
+        };
         sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         drop(bp);
-        if needs_warp_init {
-            self.set_warp_provenance(ship_id, super::WarpProvenance::DisconnectedEmergencyWarp);
+        if warp_started {
+            let tracking = {
+                let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+                st.warp_provenance.insert(ship_id, super::WarpProvenance::DisconnectedEmergencyWarp);
+                st.warp_tracking.clone()
+            };
+            super::clear_shared_warp_tracking(&tracking, ship_id, true);
         }
     }
 

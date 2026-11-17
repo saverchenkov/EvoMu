@@ -949,19 +949,19 @@ pub(crate) async fn handle_update_state_request(
             .ok()
             .and_then(|bp| bp.combat_states.get(&ship_id).map(|cs| cs.is_emergency_warping))
             .unwrap_or(false);
-        let is_explicit_emergency = is_emergency_combat_state
-            || provenance == Some(crate::system_actor::WarpProvenance::DisconnectedEmergencyWarp);
         let in_active_warps = ctx
             .active_warps
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains_key(&ship_id);
-        let is_client_or_fleet_active_warp = !is_explicit_emergency
-            && (in_active_warps
-                || provenance == Some(crate::system_actor::WarpProvenance::PlayerOrFleetWarp));
+        let is_client_or_fleet_active_warp = in_active_warps
+            || (!is_emergency_combat_state
+                && provenance == Some(crate::system_actor::WarpProvenance::PlayerOrFleetWarp));
         if is_client_or_fleet_active_warp {
             return Ok(PyRep::None);
         }
+        let is_explicit_emergency = is_emergency_combat_state
+            || provenance == Some(crate::system_actor::WarpProvenance::DisconnectedEmergencyWarp);
         let in_return_warps = ctx
             .return_warps
             .lock()

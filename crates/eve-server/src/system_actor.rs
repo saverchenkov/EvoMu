@@ -3380,6 +3380,11 @@ fn apply_set_movement_mode_command(
             }
             if is_warp {
                 if let Some(prov) = provenance {
+                    if !matches!(prov, WarpProvenance::DisconnectedEmergencyWarp) {
+                        if let Some(cs) = ballpark.combat_states.get_mut(&ball_id) {
+                            cs.is_emergency_warping = false;
+                        }
+                    }
                     warp_provenance.insert(ball_id, prov);
                     if let Some(ref pending) = warp_tracking.pending_warp_finished {
                         pending
