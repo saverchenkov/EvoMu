@@ -213,6 +213,15 @@ fn multi_merge_all_error_guards_and_in_space_stack_all() {
     let c2 = 1_100_000_021;
     put_item(&ctx, c1, 34, char_id, ship_id, InventoryFlag::Cargo, 30, false);
     put_item(&ctx, c2, 34, char_id, ship_id, InventoryFlag::Cargo, 45, false);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = 30_000_142;
+            ship.flag = InventoryFlag::None;
+        }
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+        }
+    });
     sess.station_id = None;
     let ship_stack = handle_stack_ops(&ctx, &mut sess, None, "invbroker", "StackAll", &[], &kw)
         .unwrap()

@@ -2085,5 +2085,490 @@ fn stack_all_single_commit_and_linear_scaling_over_thousand_items() {
     );
 }
 
+#[test]
+fn stack_all_and_multimerge_enforce_colocation_range_bound_flag_and_structure_acl() {
+    let ctx = test_ctx();
+    let char_id = 92_000_072;
+    let corp_id = 98_000_072;
+    let station_id = 60_003_760;
+    let remote_station = 60_003_761;
+    let sys_id = 30_000_142;
+    let ship_id = 1_000_272_001;
+    let cont_a = 1_000_272_002;
+    let cont_b = 1_000_272_003;
+
+    ensure_char(&ctx, char_id, corp_id, Some(station_id), sys_id, ship_id);
+    insert_item(&ctx, ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, cont_a, 17_366, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, cont_b, 17_366, char_id, station_id, InventoryFlag::Hangar, 1, true);
+
+    let remote_a = 1_000_272_010;
+    let remote_b = 1_000_272_011;
+    let local_a = 1_000_272_012;
+    let local_b = 1_000_272_013;
+    let ca_1 = 1_000_272_014;
+    let ca_2 = 1_000_272_015;
+    insert_item(&ctx, remote_a, 34, char_id, remote_station, InventoryFlag::Hangar, 20, false);
+    insert_item(&ctx, remote_b, 34, char_id, remote_station, InventoryFlag::Hangar, 30, false);
+    insert_item(&ctx, local_a, 34, char_id, station_id, InventoryFlag::Hangar, 20, false);
+    insert_item(&ctx, local_b, 34, char_id, station_id, InventoryFlag::Hangar, 30, false);
+    insert_item(&ctx, ca_1, 34, char_id, cont_a, InventoryFlag::Cargo, 10, false);
+    insert_item(&ctx, ca_2, 34, char_id, cont_a, InventoryFlag::Cargo, 15, false);
+
+    let mut sess = make_session(char_id, corp_id, Some(station_id), Some(sys_id), Some(ship_id));
+    let kw = HashMap::new();
+
+    // 1. Remote station rejected on both StackAll and MultiMerge
+    let mut remote_kw = HashMap::new();
+    remote_kw.insert("locationID".into(), PyRep::Integer(remote_station));
+    assert_eq!(
+        handle_stack_ops(&ctx, &mut sess, None, "invbroker", "StackAll", &[], &remote_kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "DestinationAccessDenied"
+    );
+    let remote_merge = PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::Integer(remote_a),
+        PyRep::Integer(remote_b),
+        PyRep::None,
+    ])]);
+    assert_eq!(
+        handle_stack_ops(&ctx, &mut sess, None, "invbroker", "MultiMerge", &[remote_merge], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "DestinationAccessDenied"
+    );
+
+    // 2. Bound-moniker vs locationID / containerID consistency checks
+    let bound_cont_a = make_bound(cont_a, char_id);
+    let mut kw_cont_b = HashMap::new();
+    kw_cont_b.insert("locationID".into(), PyRep::Integer(cont_b));
+    assert_eq!(
+        handle_stack_ops(&ctx, &mut sess, Some(&bound_cont_a), "invbroker", "StackAll", &[], &kw_cont_b)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InvalidLocation"
+    );
+    let mut kw_station = HashMap::new();
+    kw_station.insert("locationID".into(), PyRep::Integer(station_id));
+    assert_eq!(
+        handle_stack_ops(&ctx, &mut sess, Some(&bound_cont_a), "invbroker", "StackAll", &[], &kw_station)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InvalidLocation"
+    );
+    let merge_ca = PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::Integer(ca_1),
+        PyRep::Integer(ca_2),
+        PyRep::None,
+    ])]);
+    assert_eq!(
+        handle_stack_ops(
+            &ctx,
+            &mut sess,
+            Some(&bound_cont_a),
+            "invbroker",
+            "MultiMerge",
+            &[merge_ca.clone(), PyRep::Integer(station_id)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "StackFailed"
+    );
+    let bound_cont_b = make_bound(cont_b, char_id);
+    assert_eq!(
+        handle_stack_ops(
+            &ctx,
+            &mut sess,
+            Some(&bound_cont_b),
+            "invbroker",
+            "MultiMerge",
+            &[merge_ca.clone()],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "StackFailed"
+    );
+
+    // 3. Flag bounds & solar-system target rejection on StackAll
+    for bad_flag in [
+        PyRep::Integer(65_540),
+        PyRep::Integer(-1),
+        PyRep::String("hangar".into()),
+    ] {
+        assert_eq!(
+            handle_stack_ops(
+                &ctx,
+                &mut sess,
+                Some(&make_bound(station_id, char_id)),
+                "invbroker",
+                "StackAll",
+                &[bad_flag],
+                &kw,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "InvalidInventoryFlag"
+        );
+    }
+    let mut kw_sys = HashMap::new();
+    kw_sys.insert("locationID".into(), PyRep::Integer(i64::from(sys_id)));
+    assert_eq!(
+        handle_stack_ops(&ctx, &mut sess, None, "invbroker", "StackAll", &[], &kw_sys)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InvalidLocation"
+    );
+
+    // 4. Undocked in space: docked hangar rejected, container >2,500m rejected OutOfRange, <=2,500m succeeds
+    let space_ship = 1_000_272_020;
+    let space_cont = 1_000_272_021;
+    let sp_1 = 1_000_272_022;
+    let sp_2 = 1_000_272_023;
+    let sp_3 = 1_000_272_024;
+    insert_item(&ctx, space_ship, 587, char_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, space_cont, 23, char_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, sp_1, 34, char_id, space_cont, InventoryFlag::Cargo, 10, false);
+    insert_item(&ctx, sp_2, 34, char_id, space_cont, InventoryFlag::Cargo, 20, false);
+    insert_item(&ctx, sp_3, 34, char_id, space_cont, InventoryFlag::Cargo, 30, false);
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.station_id = None;
+        ch.active_ship_id = space_ship;
+        snap.item_positions.insert(space_ship, [0.0, 0.0, 0.0]);
+        snap.item_positions.insert(space_cont, [3_200.0, 0.0, 0.0]);
+    });
+    sess.station_id = None;
+    sess.ship_id = Some(space_ship);
+
+    assert_eq!(
+        handle_stack_ops(&ctx, &mut sess, None, "invbroker", "StackAll", &[], &kw_station)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "DestinationAccessDenied"
+    );
+    let merge_local = PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::Integer(local_a),
+        PyRep::Integer(local_b),
+        PyRep::None,
+    ])]);
+    assert_eq!(
+        handle_stack_ops(&ctx, &mut sess, None, "invbroker", "MultiMerge", &[merge_local], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "DestinationAccessDenied"
+    );
+
+    let bound_space_cont = make_bound(space_cont, char_id);
+    assert_eq!(
+        handle_stack_ops(&ctx, &mut sess, Some(&bound_space_cont), "invbroker", "StackAll", &[], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "OutOfRange"
+    );
+    let merge_space_far = PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::Integer(sp_1),
+        PyRep::Integer(sp_2),
+        PyRep::None,
+    ])]);
+    assert_eq!(
+        handle_stack_ops(
+            &ctx,
+            &mut sess,
+            Some(&bound_space_cont),
+            "invbroker",
+            "MultiMerge",
+            &[merge_space_far.clone()],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OutOfRange"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(space_cont, [1_200.0, 0.0, 0.0]);
+    });
+    handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&bound_space_cont),
+        "invbroker",
+        "MultiMerge",
+        &[merge_space_far],
+        &kw,
+    )
+    .unwrap()
+    .expect("in-range MultiMerge must succeed");
+    let space_stack = handle_stack_ops(&ctx, &mut sess, Some(&bound_space_cont), "invbroker", "StackAll", &[], &kw)
+        .unwrap()
+        .expect("in-range StackAll must succeed");
+    assert_eq!(space_stack.dict_get("mergedCount"), Some(&PyRep::Integer(1)));
+
+    // 5. Upwell structure ACL denial, destroyed structure rejection, and allowed ACL success
+    let struct_id = 1_000_272_030;
+    let st_1 = 1_000_272_031;
+    let st_2 = 1_000_272_032;
+    let st_3 = 1_000_272_033;
+    insert_item(&ctx, st_1, 34, char_id, struct_id, InventoryFlag::Hangar, 10, false);
+    insert_item(&ctx, st_2, 34, char_id, struct_id, InventoryFlag::Hangar, 20, false);
+    insert_item(&ctx, st_3, 34, char_id, struct_id, InventoryFlag::Hangar, 30, false);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832,
+                owner_corp_id: 98_000_999,
+                solar_system_id: sys_id,
+                name: "Test Astrahus".into(),
+                position: [10_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.structure_id = Some(struct_id);
+        snap.structure_docking_acl_denied
+            .entry(struct_id)
+            .or_default()
+            .insert(char_id);
+    });
+    sess.structure_id = Some(struct_id);
+    let bound_struct = make_bound(struct_id, char_id);
+    assert_eq!(
+        handle_stack_ops(&ctx, &mut sess, Some(&bound_struct), "invbroker", "StackAll", &[], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "DestinationAccessDenied"
+    );
+    let merge_st = PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::Integer(st_1),
+        PyRep::Integer(st_2),
+        PyRep::None,
+    ])]);
+    assert_eq!(
+        handle_stack_ops(&ctx, &mut sess, Some(&bound_struct), "invbroker", "MultiMerge", &[merge_st.clone()], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "DestinationAccessDenied"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structure_docking_acl_denied.remove(&struct_id);
+        snap.structures.get_mut(&struct_id).unwrap().state = "Destroyed".into();
+    });
+    assert_eq!(
+        handle_stack_ops(&ctx, &mut sess, Some(&bound_struct), "invbroker", "StackAll", &[], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "StructureDestroyed"
+    );
+    assert_eq!(
+        handle_stack_ops(&ctx, &mut sess, Some(&bound_struct), "invbroker", "MultiMerge", &[merge_st.clone()], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "StructureDestroyed"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.structures.get_mut(&struct_id).unwrap();
+        st.state = "ShieldVulnerable".into();
+        st.owner_corp_id = corp_id;
+    });
+    handle_stack_ops(&ctx, &mut sess, Some(&bound_struct), "invbroker", "MultiMerge", &[merge_st], &kw)
+        .unwrap()
+        .expect("MultiMerge with structure ACL must succeed");
+    let st_stack = handle_stack_ops(&ctx, &mut sess, Some(&bound_struct), "invbroker", "StackAll", &[], &kw)
+        .unwrap()
+        .expect("StackAll with structure ACL must succeed");
+    assert_eq!(st_stack.dict_get("mergedCount"), Some(&PyRep::Integer(1)));
+}
+
+#[test]
+fn stack_all_enforces_secure_container_passwords_direct_and_ancestor() {
+    let ctx = test_ctx();
+    let char_id = 92_000_073;
+    let corp_id = 98_000_073;
+    let station_id = 60_003_760;
+    let sys_id = 30_000_142;
+    let ship_id = 1_000_273_001;
+    let outer_cont = 1_000_273_002;
+    let inner_cont = 1_000_273_003;
+
+    ensure_char(&ctx, char_id, corp_id, Some(station_id), sys_id, ship_id);
+    insert_item(&ctx, ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, outer_cont, 17_366, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, inner_cont, 17_366, char_id, outer_cont, InventoryFlag::Cargo, 1, true);
+
+    let o1 = 1_000_273_010;
+    let o2 = 1_000_273_011;
+    let i1 = 1_000_273_012;
+    let i2 = 1_000_273_013;
+    let i3 = 1_000_273_014;
+    insert_item(&ctx, o1, 34, char_id, outer_cont, InventoryFlag::Cargo, 10, false);
+    insert_item(&ctx, o2, 34, char_id, outer_cont, InventoryFlag::Cargo, 20, false);
+    insert_item(&ctx, i1, 35, char_id, inner_cont, InventoryFlag::Cargo, 5, false);
+    insert_item(&ctx, i2, 35, char_id, inner_cont, InventoryFlag::Cargo, 7, false);
+    insert_item(&ctx, i3, 35, char_id, inner_cont, InventoryFlag::Cargo, 9, false);
+
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.container_passwords.insert(outer_cont, "outerpw".into());
+        st.container_passwords.insert(inner_cont, "innerpw".into());
+        save_container_ship_state(&ctx, &st);
+    }
+
+    let mut sess = make_session(char_id, corp_id, Some(station_id), Some(sys_id), Some(ship_id));
+    let kw = HashMap::new();
+    let commits_before = ctx.db.tx_commit_count();
+
+    // Direct locked container rejected with ALSCPasswordRequired and 0 DB commits
+    assert_eq!(
+        handle_stack_ops(
+            &ctx,
+            &mut sess,
+            Some(&make_bound(outer_cont, char_id)),
+            "invbroker",
+            "StackAll",
+            &[PyRep::Integer(InventoryFlag::Cargo as i64)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ALSCPasswordRequired"
+    );
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+
+    // Wrong password on outer container rejected
+    let mut wrong_pw = HashMap::new();
+    wrong_pw.insert("password".into(), PyRep::String("wrong".into()));
+    assert_eq!(
+        handle_stack_ops(
+            &ctx,
+            &mut sess,
+            Some(&make_bound(outer_cont, char_id)),
+            "invbroker",
+            "StackAll",
+            &[PyRep::Integer(InventoryFlag::Cargo as i64)],
+            &wrong_pw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ALSCPasswordRequired"
+    );
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+
+    // Correct password unlocks outer container and merges outer stacks
+    let mut outer_pw = HashMap::new();
+    outer_pw.insert("password".into(), PyRep::String("outerpw".into()));
+    let outer_res = handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&make_bound(outer_cont, char_id)),
+        "invbroker",
+        "StackAll",
+        &[PyRep::Integer(InventoryFlag::Cargo as i64)],
+        &outer_pw,
+    )
+    .unwrap()
+    .expect("outer StackAll with valid password must succeed");
+    assert_eq!(outer_res.dict_get("mergedCount"), Some(&PyRep::Integer(1)));
+
+    // Ancestor outer is now unlocked, but inner still rejects without innerpw
+    assert_eq!(
+        handle_stack_ops(
+            &ctx,
+            &mut sess,
+            Some(&make_bound(inner_cont, char_id)),
+            "invbroker",
+            "StackAll",
+            &[PyRep::Integer(InventoryFlag::Cargo as i64)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ALSCPasswordRequired"
+    );
+
+    // Lock outer again; supplying innerpw when outer is still locked must reject on ancestor container
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.unlocked_containers.remove(&(outer_cont, char_id));
+        save_container_ship_state(&ctx, &st);
+    }
+    let mut inner_pw = HashMap::new();
+    inner_pw.insert("password".into(), PyRep::String("innerpw".into()));
+    assert_eq!(
+        handle_stack_ops(
+            &ctx,
+            &mut sess,
+            Some(&make_bound(inner_cont, char_id)),
+            "invbroker",
+            "StackAll",
+            &[PyRep::Integer(InventoryFlag::Cargo as i64)],
+            &inner_pw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ALSCPasswordRequired"
+    );
+
+    // Unlock outer via unlocked_containers and supply innerpw -> succeeds and records inner_cont unlock
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.unlocked_containers.insert((outer_cont, char_id));
+        save_container_ship_state(&ctx, &st);
+    }
+    let inner_res = handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&make_bound(inner_cont, char_id)),
+        "invbroker",
+        "StackAll",
+        &[PyRep::Integer(InventoryFlag::Cargo as i64)],
+        &inner_pw,
+    )
+    .unwrap()
+    .expect("inner StackAll with valid password and unlocked ancestor must succeed");
+    assert_eq!(inner_res.dict_get("mergedCount"), Some(&PyRep::Integer(2)));
+
+    // Subsequent StackAll on inner_cont succeeds without re-sending password
+    let inner_repeat = handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&make_bound(inner_cont, char_id)),
+        "invbroker",
+        "StackAll",
+        &[PyRep::Integer(InventoryFlag::Cargo as i64)],
+        &kw,
+    )
+    .unwrap()
+    .expect("subsequent StackAll on unlocked inner_cont must succeed");
+    assert_eq!(inner_repeat.dict_get("mergedCount"), Some(&PyRep::Integer(0)));
+}
+
 
 
