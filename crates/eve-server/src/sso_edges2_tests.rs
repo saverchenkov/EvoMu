@@ -415,3 +415,276 @@ async fn sso_tcp_expect_100_continue_non_bug_body_limit_and_mid_body_timeout() {
 
     srv.await.unwrap();
 }
+
+#[tokio::test]
+async fn sso_bug_attachment_total_deadline_concurrency_cap_and_preflight_validation() {
+    struct TempDirCleanup(std::path::PathBuf);
+    impl Drop for TempDirCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    assert_eq!(
+        MAX_BUG_ATTACHMENT_BYTES,
+        crate::bug_reporting::MAX_BUG_ATTACHMENT_BYTES
+    );
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let qdir = std::env::temp_dir().join(format!(
+        "evomu_sso_bug_attach_{}_{}",
+        std::process::id(),
+        nanos
+    ));
+    std::fs::create_dir_all(&qdir).unwrap();
+    let _cleanup = TempDirCleanup(qdir.clone());
+
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    ctx.bug_reporting.set_queue_dir_override(Some(qdir));
+
+    let empty_hdrs = HashMap::new();
+    let issue_payload = serde_json::to_vec(&json!({
+        "categoryID": "Combat",
+        "summary": "Attachment security check",
+        "description": "Verifies HTTP upload caps and deadlines",
+        "reproductionSteps": "1. Upload",
+        "computerInfo": "macOS",
+        "originalReporterId": 1,
+        "Server": "EvoMu-Local",
+        "Build": eve_machonet::V24_BOOT_BUILD,
+        "labels": ["bug"]
+    }))
+    .unwrap();
+    let issue_resp = handle_http_request(&ctx, "POST", "/bugs/api/issue", &empty_hdrs, &issue_payload);
+    assert_eq!(issue_resp.status_code, 201);
+    let issue_json: serde_json::Value = serde_json::from_slice(&issue_resp.body).unwrap();
+    let report_key = issue_json["key"].as_str().unwrap().to_string();
+
+    // 1. Short per-read (80ms) + short total deadline (180ms) listener for trickle & preflight tests.
+    let l1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr1 = l1.local_addr().unwrap();
+    let c1 = Arc::clone(&ctx);
+    let srv1 = tokio::spawn(async move {
+        loop {
+            let Ok((sock, _)) = l1.accept().await else {
+                break;
+            };
+            let cc = Arc::clone(&c1);
+            tokio::spawn(async move {
+                let _ = handle_http_connection_with_deadlines(
+                    sock,
+                    cc,
+                    std::time::Duration::from_millis(80),
+                    std::time::Duration::from_millis(180),
+                )
+                .await;
+            });
+        }
+    });
+
+    // 1a. Oversized Content-Length > 8 MiB -> 413 without Expect: 100-continue.
+    let mut s_big = TcpStream::connect(addr1).await.unwrap();
+    let over = MAX_BUG_ATTACHMENT_BYTES + 1;
+    s_big
+        .write_all(
+            format!(
+                "POST /bugs/api/attachment/{report_key} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: {over}\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut r_big = Vec::new();
+    s_big.read_to_end(&mut r_big).await.unwrap();
+    assert!(String::from_utf8_lossy(&r_big).starts_with("HTTP/1.1 413 Payload Too Large"));
+
+    // 1b. Nonexistent issue ID -> 404 before 100 Continue.
+    let mut s_missing = TcpStream::connect(addr1).await.unwrap();
+    s_missing
+        .write_all(
+            b"POST /bugs/api/attachment/EBR-9999-MISSING HTTP/1.1\r\nHost: 127.0.0.1\r\nExpect: 100-continue\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: 32\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let mut r_missing = Vec::new();
+    s_missing.read_to_end(&mut r_missing).await.unwrap();
+    let r_missing_str = String::from_utf8_lossy(&r_missing);
+    assert!(r_missing_str.starts_with("HTTP/1.1 404 Not Found"));
+    assert!(!r_missing_str.contains("100 Continue"));
+
+    // 1c. Non-multipart Content-Type -> 400 before 100 Continue.
+    let mut s_bad_ct = TcpStream::connect(addr1).await.unwrap();
+    s_bad_ct
+        .write_all(
+            format!(
+                "POST /bugs/api/attachment/{report_key} HTTP/1.1\r\nHost: 127.0.0.1\r\nExpect: 100-continue\r\nContent-Type: application/octet-stream\r\nContent-Length: 32\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut r_bad_ct = Vec::new();
+    s_bad_ct.read_to_end(&mut r_bad_ct).await.unwrap();
+    assert!(String::from_utf8_lossy(&r_bad_ct).starts_with("HTTP/1.1 400 Bad Request"));
+
+    // 1d. Invalid optional Authorization Bearer header -> 401 before 100 Continue.
+    let mut s_bad_auth = TcpStream::connect(addr1).await.unwrap();
+    s_bad_auth
+        .write_all(
+            format!(
+                "POST /bugs/api/attachment/{report_key} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer bad.jwt.token\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: 32\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut r_bad_auth = Vec::new();
+    s_bad_auth.read_to_end(&mut r_bad_auth).await.unwrap();
+    assert!(String::from_utf8_lossy(&r_bad_auth).starts_with("HTTP/1.1 401 Unauthorized"));
+
+    // 1e. Slowloris trickle body (every 25ms < 80ms read_timeout) is still cut off by 180ms total deadline.
+    let mut s_trickle = TcpStream::connect(addr1).await.unwrap();
+    s_trickle
+        .write_all(
+            format!(
+                "POST /bugs/api/attachment/{report_key} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: 4096\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let start = tokio::time::Instant::now();
+    let mut closed_by_deadline = false;
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        if s_trickle.write_all(b"aaaaaaaaaa").await.is_err() {
+            closed_by_deadline = true;
+            break;
+        }
+        let mut probe = [0u8; 32];
+        if let Ok(Ok(0)) = tokio::time::timeout(
+            std::time::Duration::from_millis(2),
+            s_trickle.read(&mut probe),
+        )
+        .await
+        {
+            closed_by_deadline = true;
+            break;
+        }
+    }
+    assert!(
+        closed_by_deadline || start.elapsed() < std::time::Duration::from_millis(450),
+        "trickle attachment upload must hit total request deadline cleanly"
+    );
+    if !closed_by_deadline {
+        let mut leftover = Vec::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            s_trickle.read_to_end(&mut leftover),
+        )
+        .await;
+        assert!(leftover.is_empty());
+    }
+    srv1.abort();
+
+    // 2. Bounded concurrency semaphore (MAX_CONCURRENT_BUG_ATTACHMENTS = 4) -> 5th returns 503,
+    //    then releasing permits allows legitimate unauthenticated multipart uploads -> 201 Created.
+    let l2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = l2.local_addr().unwrap();
+    let c2 = Arc::clone(&ctx);
+    let srv2 = tokio::spawn(async move {
+        loop {
+            let Ok((sock, _)) = l2.accept().await else {
+                break;
+            };
+            let cc = Arc::clone(&c2);
+            tokio::spawn(async move {
+                let _ = handle_http_connection_with_deadlines(
+                    sock,
+                    cc,
+                    std::time::Duration::from_secs(2),
+                    std::time::Duration::from_secs(2),
+                )
+                .await;
+            });
+        }
+    });
+
+    let mut holders = Vec::with_capacity(MAX_CONCURRENT_BUG_ATTACHMENTS);
+    for _ in 0..MAX_CONCURRENT_BUG_ATTACHMENTS {
+        let mut h = TcpStream::connect(addr2).await.unwrap();
+        h.write_all(
+            format!(
+                "POST /bugs/api/attachment/{report_key} HTTP/1.1\r\nHost: 127.0.0.1\r\nExpect: 100-continue\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: 512\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut ack = [0u8; 64];
+        let n = h.read(&mut ack).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&ack[..n]).starts_with("HTTP/1.1 100 Continue"),
+            "holder must acquire attachment permit and receive 100 Continue"
+        );
+        holders.push(h);
+    }
+
+    // 5th concurrent attachment must fail fast with 503 Service Unavailable.
+    let mut s_overflow = TcpStream::connect(addr2).await.unwrap();
+    s_overflow
+        .write_all(
+            format!(
+                "POST /bugs/api/attachment/{report_key} HTTP/1.1\r\nHost: 127.0.0.1\r\nExpect: 100-continue\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: 128\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut r_overflow = Vec::new();
+    s_overflow.read_to_end(&mut r_overflow).await.unwrap();
+    assert!(
+        String::from_utf8_lossy(&r_overflow).starts_with("HTTP/1.1 503 Service Unavailable"),
+        "exceeding concurrent upload cap must return 503, got {}",
+        String::from_utf8_lossy(&r_overflow)
+    );
+
+    // Drop held connections so permits are released cleanly.
+    drop(holders);
+    let mp_body = b"--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"shot.png\"\r\nContent-Type: image/png\r\n\r\nPNGDATA\r\n--B--\r\n";
+    let mut upload_ok = false;
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let mut s_ok = TcpStream::connect(addr2).await.unwrap();
+        s_ok.write_all(
+            format!(
+                "POST /bugs/api/attachment/{report_key} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: {}\r\n\r\n",
+                mp_body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        s_ok.write_all(mp_body).await.unwrap();
+        let mut r_ok = Vec::new();
+        s_ok.read_to_end(&mut r_ok).await.unwrap();
+        let r_str = String::from_utf8_lossy(&r_ok);
+        if r_str.starts_with("HTTP/1.1 201 Created") {
+            upload_ok = true;
+            break;
+        }
+        assert!(
+            r_str.starts_with("HTTP/1.1 503 Service Unavailable"),
+            "unexpected status while waiting for permits to drain: {r_str}"
+        );
+    }
+    assert!(
+        upload_ok,
+        "valid unauthenticated multipart bug attachment upload must succeed once permits release"
+    );
+    srv2.abort();
+}

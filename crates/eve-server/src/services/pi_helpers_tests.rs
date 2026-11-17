@@ -699,3 +699,81 @@ fn test_pi_commodity_type_validation_and_strict_import_consumption() {
         assert_eq!(snap.items[&900_007].quantity, 5);
     });
 }
+
+#[test]
+fn test_pi_extractor_cycle_time_scaling_24h_curve() {
+    let mut sde = SdeRegistry::with_canonical_seed();
+    if let Some(st) = sde.types.get_mut(&2257) {
+        st.capacity = 200_000.0;
+    }
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+    let now = ctx.now_unix();
+    let day = 86_400_u64;
+
+    let run_for_cycle = |cycle_secs: u64| -> u64 {
+        let mut col = PlanetaryColonyRecord {
+            planet_id: 40_009_082,
+            owner_id: 90_000_001,
+            solar_system_id: 30_000_142,
+            command_center_level: 3,
+            pins_count: 2,
+            extracted_commodities: HashMap::new(),
+            last_extracted_unix: now,
+        };
+        let mut net = PiColonyNetworkState {
+            cpu_max: 17_215.0,
+            pg_max: 15_000.0,
+            pins: vec![
+                PiPinState {
+                    pin_id: 10,
+                    type_id: 2848,
+                    extractor_resource_type_id: Some(2268),
+                    extractor_cycle_seconds: cycle_secs,
+                    extractor_head_count: 1,
+                    extractor_head_radius: 0.02,
+                    program_install_unix: now,
+                    expiry_time_unix: Some(now + day),
+                    ..Default::default()
+                },
+                PiPinState {
+                    pin_id: 20,
+                    type_id: 2257,
+                    ..Default::default()
+                },
+            ],
+            links: vec![PiLinkState {
+                source_pin_id: 10,
+                dest_pin_id: 20,
+                level: 1,
+                bandwidth: 1_250.0,
+                ..Default::default()
+            }],
+            routes: vec![PiRouteState {
+                route_id: 1,
+                path: vec![10, 20],
+                commodity_type_id: 2268,
+                quantity: 10_000,
+            }],
+            ..Default::default()
+        };
+        let (ext, _) = advance_colony_simulation(&ctx, &mut col, &mut net, day, now + day);
+        ext
+    };
+
+    let yield_60 = run_for_cycle(60);
+    let yield_900 = run_for_cycle(900);
+    let yield_1800 = run_for_cycle(1800);
+
+    assert!(yield_60 > 25_000, "60s 24h run must not truncate at 200 cycles: {yield_60}");
+    let rel_60_900 = ((yield_60 as f64) - (yield_900 as f64)).abs() / (yield_900 as f64);
+    let rel_60_1800 = ((yield_60 as f64) - (yield_1800 as f64)).abs() / (yield_1800 as f64);
+    assert!(
+        rel_60_900 < 0.015,
+        "60s yield ({yield_60}) must track 900s canonical curve ({yield_900}), rel diff={rel_60_900}"
+    );
+    assert!(
+        rel_60_1800 < 0.015,
+        "60s yield ({yield_60}) must track 1800s canonical curve ({yield_1800}), rel diff={rel_60_1800}"
+    );
+}

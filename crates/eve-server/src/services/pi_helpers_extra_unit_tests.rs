@@ -274,9 +274,10 @@ fn colony_simulation_storage_full_extractor_expiry_and_login_sync() {
         command_center_level: 3,
         pins_count: 2,
         extracted_commodities: HashMap::new(),
-        last_extracted_unix: now - 7200,
+        last_extracted_unix: now - 14_400,
     };
-    // Pin 10: ECU that expires at `now` and deposits into tiny 500 m3 CC pin 20 (type 910_001)
+    // Pin 10: ECU that expires at `now` and deposits into tiny 500 m3 CC pin 20 (type 910_001).
+    // 14,400s at 600s/cycle = 8 canonical 1,800s cycles (~604 m3), filling the 500 m3 pin under canonical scaling.
     let mut net = PiColonyNetworkState {
         pins: vec![
             PiPinState {
@@ -286,7 +287,7 @@ fn colony_simulation_storage_full_extractor_expiry_and_login_sync() {
                 extractor_cycle_seconds: 600,
                 extractor_head_count: 8,
                 extractor_head_radius: 0.05,
-                program_install_unix: now - 7200,
+                program_install_unix: now - 14_400,
                 expiry_time_unix: Some(now),
                 ..Default::default()
             },
@@ -313,7 +314,7 @@ fn colony_simulation_storage_full_extractor_expiry_and_login_sync() {
     };
 
     assert_eq!(advance_colony_simulation(&ctx, &mut col, &mut net, 0, now), (0, 0));
-    let (ext, _) = advance_colony_simulation(&ctx, &mut col, &mut net, 7200, now);
+    let (ext, _) = advance_colony_simulation(&ctx, &mut col, &mut net, 14_400, now);
     assert!(ext > 0);
     // Extractor expired at `now` -> program_install_unix reset to 0 and expiry_time_unix = Some(0)
     assert_eq!(net.pins[0].program_install_unix, 0);

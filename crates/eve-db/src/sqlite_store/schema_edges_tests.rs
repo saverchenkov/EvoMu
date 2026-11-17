@@ -143,3 +143,71 @@ fn load_or_init_jwt_secret_and_save_edges() {
     let regen_nonhex = load_or_init_jwt_secret(&conn, || [0x55; 32]).unwrap();
     assert_eq!(regen_nonhex, [0x55; 32]);
 }
+
+#[test]
+fn apply_migrations_sets_busy_timeout_and_survives_concurrent_write_contention() {
+    struct TempSqliteCleanup(std::path::PathBuf);
+    impl Drop for TempSqliteCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_file(format!("{}-wal", self.0.display()));
+            let _ = std::fs::remove_file(format!("{}-shm", self.0.display()));
+        }
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let db_path = std::env::temp_dir().join(format!(
+        "evomu_schema_busy_timeout_{}_{}.sqlite",
+        std::process::id(),
+        nanos
+    ));
+    let _cleanup = TempSqliteCleanup(db_path.clone());
+
+    let conn1 = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+    )
+    .unwrap();
+    apply_migrations(&conn1).unwrap();
+
+    let busy_ms: i64 = conn1
+        .query_row("PRAGMA busy_timeout;", [], |r| r.get(0))
+        .unwrap();
+    assert!(
+        busy_ms >= 5000,
+        "apply_migrations must configure PRAGMA busy_timeout >= 5000, got {busy_ms}"
+    );
+
+    let conn2 = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+    )
+    .unwrap();
+    apply_migrations(&conn2).unwrap();
+    let busy_ms_2: i64 = conn2
+        .query_row("PRAGMA busy_timeout;", [], |r| r.get(0))
+        .unwrap();
+    assert!(busy_ms_2 >= 5000);
+
+    // Hold a short BEGIN IMMEDIATE write lock on conn1 and verify conn2 waits via busy_timeout instead of failing SQLITE_BUSY.
+    conn1
+        .execute_batch("BEGIN IMMEDIATE; INSERT OR REPLACE INTO world_meta (meta_key, meta_value) VALUES ('lock_holder', 1);")
+        .unwrap();
+    let writer_handle = std::thread::spawn(move || {
+        conn2.execute(
+            "INSERT OR REPLACE INTO world_meta (meta_key, meta_value) VALUES ('contender', 2)",
+            [],
+        )
+    });
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    conn1.execute_batch("COMMIT;").unwrap();
+
+    let write_res = writer_handle.join().expect("contender thread join");
+    assert_eq!(
+        write_res.expect("contender write must wait via busy_timeout and succeed"),
+        1
+    );
+}

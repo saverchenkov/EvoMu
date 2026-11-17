@@ -880,3 +880,275 @@ fn install_job_corp_roles_container_locks_bpc_invention_skills_materials_funds_a
         assert_eq!(snap.items[&bpo_stack_id].quantity, 4);
     });
 }
+
+#[test]
+fn install_job_invention_rejects_runs_exceeding_bpc_licensed_runs_without_mutation() {
+    let ctx = setup_ctx_and_sde();
+    let char_id = 96_910_001_i64;
+    let corp_id = 98_952_i64;
+    let station_id = 60_003_760_i64;
+    let bpo_id = 96_910_100_i64;
+    let bpc_id = 96_910_101_i64;
+    let datacore_id = 96_910_102_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "InvRunsCorp".into();
+        corp.ticker = "IRC".into();
+        corp.ceo_id = char_id;
+        corp.members = HashSet::from([char_id]);
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+
+        let mut ch = snap.characters.values().next().cloned().expect("char");
+        ch.character_id = char_id;
+        ch.corporation_id = corp_id;
+        ch.station_id = Some(station_id);
+        ch.balance = IskCents::from_isk(50_000_000);
+        snap.characters.insert(char_id, ch);
+
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.insert(21790, TrainedSkillRecord { type_id: 21790, level: 5, skill_points: 256_000.0 });
+        sk.insert(3380, TrainedSkillRecord { type_id: 3380, level: 5, skill_points: 256_000.0 });
+
+        snap.items.insert(bpo_id, make_item(bpo_id, 688, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        let mut bpc = make_item(bpc_id, 688, char_id, station_id, InventoryFlag::Hangar, 1, true);
+        bpc.is_blueprint_copy = true;
+        bpc.blueprint_runs_remaining = Some(2);
+        snap.items.insert(bpc_id, bpc);
+        snap.items.insert(datacore_id, make_item(datacore_id, 20424, char_id, station_id, InventoryFlag::Hangar, 100, false));
+    });
+
+    let mut sess = char_session(char_id, corp_id, Some(station_id), None);
+
+    // Explicit BPO must still return InventionRequiresBPC.
+    let err_bpo = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(bpo_id)),
+            ("activityID", PyRep::Integer(8)),
+            ("runs", PyRep::Integer(1)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_bpo.code, "InventionRequiresBPC");
+
+    // 2-run BPC requested with runs = 5 must reject BEFORE snapshot mutation.
+    let err_runs = handle_industry_jobs(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(bpc_id)),
+            ("activityID", PyRep::Integer(8)),
+            ("runs", PyRep::Integer(5)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_runs.code, "InsufficientBlueprintRuns");
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&char_id].balance, IskCents::from_isk(50_000_000));
+        assert_eq!(snap.items[&datacore_id].quantity, 100);
+        assert_eq!(snap.items[&bpc_id].flag, InventoryFlag::Hangar);
+        assert_eq!(snap.items[&bpc_id].blueprint_runs_remaining, Some(2));
+        assert!(snap.industry_jobs.is_empty());
+    });
+}
+
+#[test]
+fn complete_corp_job_enforces_factory_manager_role_and_complete_many_jobs_is_atomic() {
+    let ctx = setup_ctx_and_sde();
+    let clock = Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(1_776_000_000));
+    ctx.set_clock(clock.clone());
+
+    let installer_id = 96_920_001_i64;
+    let member_id = 96_920_002_i64;
+    let manager_id = 96_920_003_i64;
+    let ceo_id = 96_920_099_i64;
+    let corp_id = 98_953_i64;
+    let station_id = 60_003_760_i64;
+    let corp_bpo_id = 96_920_100_i64;
+    let personal_bpo1 = 96_920_101_i64;
+    let personal_bpo2 = 96_920_102_i64;
+    let corp_install_roles = eve_db::corp_roles::ROLE_FACTORY_MANAGER
+        | (1u64 << 13)
+        | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0];
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "CorpDeliveryGate".into();
+        corp.ticker = "CDG".into();
+        corp.ceo_id = ceo_id;
+        corp.members = HashSet::from([ceo_id, installer_id, member_id, manager_id]);
+        corp.member_roles.insert(installer_id, corp_install_roles);
+        corp.member_roles.insert(manager_id, eve_db::corp_roles::ROLE_FACTORY_MANAGER);
+        corp.member_roles.insert(member_id, 0);
+        corp.ensure_wallet_divisions();
+        corp.set_division_balance(1, IskCents::from_isk(50_000_000));
+        snap.corporations.insert(corp_id, corp);
+
+        let template = snap.characters.values().next().cloned().expect("char");
+        for cid in [installer_id, member_id, manager_id, ceo_id] {
+            let mut ch = template.clone();
+            ch.character_id = cid;
+            ch.corporation_id = corp_id;
+            ch.station_id = Some(station_id);
+            ch.balance = IskCents::from_isk(50_000_000);
+            snap.characters.insert(cid, ch);
+            let sk = snap.skills.entry(cid).or_default();
+            for sid in [3380, 3387] {
+                sk.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
+            }
+        }
+
+        snap.items.insert(corp_bpo_id, make_item(corp_bpo_id, 688, corp_id, station_id, InventoryFlag::CorpSAG1, 1, true));
+        snap.items.insert(96_920_200, make_item(96_920_200, 34, corp_id, station_id, InventoryFlag::CorpSAG1, 10_000, false));
+        snap.items.insert(personal_bpo1, make_item(personal_bpo1, 688, installer_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(personal_bpo2, make_item(personal_bpo2, 688, installer_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(96_920_201, make_item(96_920_201, 34, installer_id, station_id, InventoryFlag::Hangar, 20_000, false));
+    });
+
+    let mut inst_sess = char_session(installer_id, corp_id, Some(station_id), None);
+    inst_sess.corp_role = corp_install_roles;
+    let corp_job_rep = handle_industry_jobs(
+        &ctx,
+        &mut inst_sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(corp_bpo_id)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+            ("ownerID", PyRep::Integer(corp_id)),
+            ("inputFlag", PyRep::Integer(InventoryFlag::CorpSAG1 as i64)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let corp_job_id = corp_job_rep.dict_get("jobID").unwrap().as_i64().unwrap();
+
+    // Advance enough for corp_job_id (600s) to finish.
+    eve_db::clock::ServerClock::advance_secs(&*clock, 1_000);
+
+    // Ordinary 0-role non-installer member in same corp must be rejected.
+    let mut member_sess = char_session(member_id, corp_id, Some(station_id), None);
+    let err_member = handle_industry_jobs(
+        &ctx,
+        &mut member_sess,
+        "industryManager",
+        "CompleteJob",
+        &[PyRep::Integer(corp_job_id)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_member.code, "JobOwnershipViolation");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.industry_jobs[&corp_job_id].status, "Active");
+    });
+
+    // Factory Manager in same corp succeeds.
+    let mut mgr_sess = char_session(manager_id, corp_id, Some(station_id), None);
+    mgr_sess.corp_role = eve_db::corp_roles::ROLE_FACTORY_MANAGER;
+    let mgr_ok = handle_industry_jobs(
+        &ctx,
+        &mut mgr_sess,
+        "industryManager",
+        "CompleteJob",
+        &[PyRep::Integer(corp_job_id)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(mgr_ok.dict_get("jobID").and_then(|v| v.as_i64()), Some(corp_job_id));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.industry_jobs[&corp_job_id].status, "Delivered");
+    });
+
+    // Now test CompleteManyJobs rollback atomicity across 2 personal jobs.
+    let j1 = handle_industry_jobs(
+        &ctx,
+        &mut inst_sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(personal_bpo1)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap()
+    .dict_get("jobID")
+    .unwrap()
+    .as_i64()
+    .unwrap();
+    let j2 = handle_industry_jobs(
+        &ctx,
+        &mut inst_sess,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(personal_bpo2)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(5)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap()
+    .dict_get("jobID")
+    .unwrap()
+    .as_i64()
+    .unwrap();
+
+    let rifter_count_before = ctx.db.with_snapshot(|snap| {
+        snap.items.values().filter(|it| it.type_id == 587).count()
+    });
+    // Advance 800s: j1 (600s) is ready, j2 (3000s) is NOT ready yet.
+    eve_db::clock::ServerClock::advance_secs(&*clock, 800);
+    let err_batch = handle_industry_jobs(
+        &ctx,
+        &mut inst_sess,
+        "industryManager",
+        "CompleteManyJobs",
+        &[PyRep::List(vec![PyRep::Integer(j1), PyRep::Integer(j2)])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_batch.code, "JobNotYetComplete");
+
+    // Atomic rollback: j1 was NOT delivered, BPO1 stays Locked, zero new 587 Rifters minted.
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.industry_jobs[&j1].status, "Active");
+        assert_eq!(snap.industry_jobs[&j2].status, "Active");
+        assert_eq!(snap.items[&personal_bpo1].flag, InventoryFlag::Locked);
+        assert_eq!(
+            snap.items.values().filter(|it| it.type_id == 587).count(),
+            rifter_count_before
+        );
+        assert_eq!(
+            snap.items
+                .values()
+                .filter(|it| it.owner_id == installer_id && it.type_id == 587)
+                .count(),
+            0
+        );
+    });
+}

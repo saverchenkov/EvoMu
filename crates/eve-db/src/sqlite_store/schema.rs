@@ -428,7 +428,8 @@ CREATE TABLE IF NOT EXISTS service_domain_blobs (
 
 pub fn apply_migrations(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
+        "PRAGMA busy_timeout = 5000;
+         PRAGMA journal_mode = WAL;
          PRAGMA foreign_keys = ON;
          PRAGMA synchronous = NORMAL;",
     )

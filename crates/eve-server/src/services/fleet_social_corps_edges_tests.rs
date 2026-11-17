@@ -725,3 +725,53 @@ fn applications_invitations_and_cash_transfer_error_edges() {
     assert_eq!(args.dict_get("pendingFriendlyFireLegal"), Some(&PyRep::Bool(false)));
     assert_eq!(args.dict_get("changeAtTime"), Some(&PyRep::Integer(200)));
 }
+
+#[test]
+fn get_members_paged_handles_extreme_i64_max_inputs_without_overflow() {
+    let ctx = test_ctx_with_clock(1_700_000_000);
+    let (mut ceo_sess, _mem_sess) = seed_player_corps(&ctx);
+    let kw = HashMap::new();
+
+    for args in [
+        vec![PyRep::Integer(i64::MAX), PyRep::Integer(i64::MAX)],
+        vec![
+            PyRep::Integer(98_000_001),
+            PyRep::Integer(i64::MAX),
+            PyRep::Integer(i64::MAX),
+        ],
+        vec![
+            PyRep::Integer(98_000_001),
+            PyRep::Integer(-5),
+            PyRep::Integer(0),
+        ],
+    ] {
+        let paged = handle_corps(
+            &ctx,
+            &mut ceo_sess,
+            "corpRegistry",
+            "GetMembersPaged",
+            &args,
+            &kw,
+        )
+        .expect("GetMembersPaged must dispatch")
+        .expect("extreme paging inputs must return clean PagedResultSet without panic");
+        let PyRep::ObjectEx { header, .. } = paged else {
+            panic!("expected PagedResultSet ObjectEx");
+        };
+        let PyRep::Tuple(h) = header.as_ref() else {
+            panic!("expected Tuple header");
+        };
+        let PyRep::Tuple(inner) = &h[1] else {
+            panic!("expected inner tuple");
+        };
+        assert_eq!(inner.len(), 4);
+        let returned_page_size = inner[3].as_i64().unwrap();
+        assert!((1..=1_000).contains(&returned_page_size));
+        if args.iter().any(|a| a.as_i64() == Some(i64::MAX)) {
+            let PyRep::ObjectEx { list, .. } = &inner[0] else {
+                panic!("expected CRowset ObjectEx");
+            };
+            assert!(list.is_empty(), "out-of-range page must yield empty rows");
+        }
+    }
+}
