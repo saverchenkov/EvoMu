@@ -2568,29 +2568,24 @@ impl SystemHandle {
         crate::system_actor::flush_post_unlock_actions(&self.post_unlock_actions);
         self.record_warp_stops_from_events(&broadcast.events);
         let _ = self.event_tx.send(broadcast);
-        if death_futs.is_empty() {
-            if let Some(lease) = destroyed_lease {
-                lease.ack();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            if !death_futs.is_empty() || step_fut.is_some() || destroyed_lease.is_some() {
+                let _ = handle.spawn(async move {
+                    for fut in death_futs {
+                        fut.await;
+                    }
+                    if let Some(sf) = step_fut {
+                        sf.await;
+                    }
+                    if let Some(lease) = destroyed_lease {
+                        lease.ack();
+                    }
+                });
             }
-            if let Some(fut) = step_fut {
-                if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    let _ = handle.spawn(fut);
-                }
-            }
-        } else if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let _ = handle.spawn(async move {
-                for fut in death_futs {
-                    fut.await;
-                }
-                if let Some(lease) = destroyed_lease {
-                    lease.ack();
-                }
-            });
-            if let Some(fut) = step_fut {
-                let _ = handle.spawn(fut);
-            }
-        } else if let Some(lease) = destroyed_lease {
-            lease.ack();
+        } else {
+            // Without an active Tokio runtime we cannot execute downstream async hooks;
+            // drop `destroyed_lease` un-acked so records roll back into `pending_destroyed_balls`.
+            drop(destroyed_lease);
         }
         tick
     }

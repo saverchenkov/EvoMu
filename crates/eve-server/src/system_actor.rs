@@ -915,7 +915,14 @@ impl SystemRegistry {
                     Full(tokio::sync::oneshot::Sender<StepOutput>),
                     TickOnly(tokio::sync::oneshot::Sender<StepOutput>),
                 }
-                let step_delivery_out: Option<(StepReply, StepOutput)> = {
+                enum PendingActorDelivery {
+                    Step(StepReply, StepOutput),
+                    Volley(
+                        tokio::sync::oneshot::Sender<WeaponVolleyOutput>,
+                        WeaponVolleyOutput,
+                    ),
+                }
+                let actor_delivery_out: Option<PendingActorDelivery> = {
                 let mut ballpark = ballpark_actor.write().unwrap_or_else(|e| e.into_inner());
                 let mut actor_st = actor_state_actor.write().unwrap_or_else(|e| e.into_inner());
                 let SystemActorState {
@@ -950,6 +957,10 @@ impl SystemRegistry {
                 {
                     {
                         let mut pending_step: Option<(f64, StepReply)> = None;
+                        let mut pending_volley: Option<(
+                            tokio::sync::oneshot::Sender<WeaponVolleyOutput>,
+                            WeaponVolleyOutput,
+                        )> = None;
                         let mut spawned_checkpoint_ball: Option<BallId> = None;
                         let mut removed_checkpoint_ball: Option<BallId> = None;
                         let mut flush_checkpoint_reply: Option<
@@ -2108,7 +2119,7 @@ impl SystemRegistry {
                                             db_opt,
                                             &mut volley_actions,
                                             &mut volley_destroyed,
-                                            None,
+                                            Some(&pending_destroyed_actor),
                                         );
                                     }
                                     cycles::flush_pending_cycle_damage_notifications_with_ballpark(
@@ -2169,11 +2180,16 @@ impl SystemRegistry {
                                     }
                                     sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 }
-                                if let Err((unsent_destroyed, _)) =
-                                    reply.send((volley_destroyed, volley_actions))
-                                {
-                                    pending_destroyed_actor.record_batch(&unsent_destroyed);
-                                }
+                                let (checked_out_destroyed, destroyed_lease) =
+                                    pending_destroyed_actor.checkout_entries(&volley_destroyed);
+                                pending_volley = Some((
+                                    reply,
+                                    WeaponVolleyOutput {
+                                        destroyed: checked_out_destroyed,
+                                        destroyed_lease,
+                                        actions: volley_actions,
+                                    },
+                                ));
                             }
                             SystemCommand::HasModuleCycle { ship_id, module_id, reply } => {
                                 let exists = active_module_cycles
@@ -2815,7 +2831,7 @@ impl SystemRegistry {
                                 condition_checkpoint,
                                 broadcast: broadcast_opt,
                             };
-                            Some((step_reply, step_out))
+                            Some(PendingActorDelivery::Step(step_reply, step_out))
                         } else {
                             {
                                 let mut mod_guard = active_module_ships_actor.write().unwrap_or_else(|e| e.into_inner());
@@ -2839,12 +2855,14 @@ impl SystemRegistry {
                                 &ballpark,
                                 event_tx_actor.receiver_count(),
                             );
-                            None
+                            pending_volley.map(|(reply, volley_out)| {
+                                PendingActorDelivery::Volley(reply, volley_out)
+                            })
                         }
                     }
                 }
                 };
-                if let Some((step_reply, step_out)) = step_delivery_out {
+                if let Some(actor_delivery) = actor_delivery_out {
                     #[cfg(test)]
                     if panic_after_destruction_actor
                         .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -2861,18 +2879,33 @@ impl SystemRegistry {
                             hook();
                         }
                     }
-                    match step_reply {
-                        StepReply::Full(reply) | StepReply::TickOnly(reply) => {
-                            if let Err(unsent_step_out) = reply.send(step_out) {
-                                let retained_count = unsent_step_out.destroyed_balls.len();
-                                let step_tick = unsent_step_out.tick;
-                                drop(unsent_step_out);
+                    match actor_delivery {
+                        PendingActorDelivery::Step(step_reply, step_out) => match step_reply {
+                            StepReply::Full(reply) | StepReply::TickOnly(reply) => {
+                                if let Err(unsent_step_out) = reply.send(step_out) {
+                                    let retained_count = unsent_step_out.destroyed_balls.len();
+                                    let step_tick = unsent_step_out.tick;
+                                    drop(unsent_step_out);
+                                    if retained_count > 0 {
+                                        tracing::warn!(
+                                            solar_system_id,
+                                            tick = step_tick,
+                                            retained_destroyed_balls = retained_count,
+                                            "SystemActor step reply receiver dropped; destroyed_balls lease rolled back to pending outbox"
+                                        );
+                                    }
+                                }
+                            }
+                        },
+                        PendingActorDelivery::Volley(reply, volley_out) => {
+                            if let Err(unsent_volley_out) = reply.send(volley_out) {
+                                let retained_count = unsent_volley_out.destroyed.len();
+                                drop(unsent_volley_out);
                                 if retained_count > 0 {
                                     tracing::warn!(
                                         solar_system_id,
-                                        tick = step_tick,
                                         retained_destroyed_balls = retained_count,
-                                        "SystemActor step reply receiver dropped; destroyed_balls lease rolled back to pending outbox"
+                                        "SystemActor volley reply receiver dropped; destroyed_balls lease rolled back to pending outbox"
                                     );
                                 }
                             }

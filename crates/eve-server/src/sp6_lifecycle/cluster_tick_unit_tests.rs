@@ -3065,3 +3065,360 @@ async fn seeded_multi_ship_combat_terminal_destruction_matches_committed_deaths_
         kms_0 + victims.len()
     );
 }
+
+#[cfg(test)]
+fn install_gated_step_hook_1168(
+    handle: &crate::system_actor::SystemHandle,
+    orig: crate::system_actor::SystemStepHook,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let entered_slot = Arc::new(std::sync::Mutex::new(Some(entered_tx)));
+    let release_slot = Arc::new(std::sync::Mutex::new(Some(release_rx)));
+    *handle.system_step_hook.write().unwrap() = Some(Arc::new(move |sid, dt, destroyed| {
+        let entered = entered_slot.clone();
+        let release = release_slot.clone();
+        let orig = orig.clone();
+        Box::pin(async move {
+            if !destroyed.is_empty() {
+                let tx_opt = entered.lock().unwrap().take();
+                if let Some(tx) = tx_opt {
+                    let _ = tx.send(());
+                }
+                let rx_opt = release.lock().unwrap().take();
+                if let Some(rx) = rx_opt {
+                    let _ = rx.await;
+                }
+            }
+            orig(sid, dt, destroyed).await;
+        })
+    }));
+    (entered_rx, release_tx)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn try_step_full_tick_rolls_back_without_runtime_and_holds_lease_until_step_hook_finishes_1168() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let sys_id = 30_000_142_u32;
+    let attacker_char = 90_300_001_i64;
+    let attacker_ship = 953_000_001_i64;
+    let victim_a_char = 90_300_002_i64;
+    let victim_a_ship = 953_000_002_i64;
+    let victim_b_char = 90_300_003_i64;
+    let victim_b_ship = 953_000_003_i64;
+    let victim_c_char = 90_300_004_i64;
+    let victim_c_ship = 953_000_004_i64;
+    let ship_type_id = 587_u32;
+
+    seed_combat_ship_1168(&ctx, sys_id, attacker_char, attacker_ship, ship_type_id, glam::DVec3::ZERO);
+    seed_combat_ship_1168(&ctx, sys_id, victim_a_char, victim_a_ship, ship_type_id, glam::DVec3::new(1_000.0, 0.0, 0.0));
+    seed_combat_ship_1168(&ctx, sys_id, victim_b_char, victim_b_ship, ship_type_id, glam::DVec3::new(1_100.0, 0.0, 0.0));
+    seed_combat_ship_1168(&ctx, sys_id, victim_c_char, victim_c_ship, ship_type_id, glam::DVec3::new(1_200.0, 0.0, 0.0));
+
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let wrecks_0 = count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id);
+    let kms_0 = ctx.db.with_snapshot(|s| s.killmails.len());
+
+    // Part A: invoke try_step_full_tick from an OS thread without a Tokio runtime.
+    // The lease must drop un-acked so records roll back into `pending` instead of acking early.
+    handle
+        .add_module_cycle(make_lethal_cycle_1168(
+            attacker_ship,
+            attacker_char,
+            953_000_101,
+            victim_a_ship,
+            4.0,
+            5.0,
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    let h_clone = handle.clone();
+    std::thread::spawn(move || h_clone.try_step_full_tick(1.0))
+        .join()
+        .expect("no-runtime try_step_full_tick thread completed");
+
+    assert!(!handle.ballpark.read().unwrap().balls.contains_key(&victim_a_ship));
+    assert_eq!(handle.pending_destroyed_balls.pending_and_in_flight_counts(), (1, 0));
+    assert!(handle.pending_destroyed_balls.is_non_empty());
+    assert_eq!(count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id), wrecks_0);
+
+    step_active_systems_physics_tick(&ctx, 1).await;
+    assert_eq!(handle.pending_destroyed_balls.pending_and_in_flight_counts(), (0, 0));
+    assert_victim_death_committed_1168(&ctx, &handle, sys_id, victim_a_char, victim_a_ship, ship_type_id);
+
+    // Part B: with active runtime, both `npc_death_hook` (`!death_futs.is_empty()`) and
+    // `system_step_hook` (`step_fut`) must complete sequentially before `lease.ack()`.
+    let orig_step_hook = handle
+        .system_step_hook
+        .read()
+        .unwrap()
+        .clone()
+        .expect("ServerContext attaches system_step_hook");
+    let orig_npc_hook = handle.npc_death_hook.read().unwrap().clone();
+    let npc_hook_done = Arc::new(AtomicBool::new(false));
+    let npc_hook_done_clone = npc_hook_done.clone();
+    let orig_npc_for_wrap = orig_npc_hook.clone();
+    *handle.npc_death_hook.write().unwrap() = Some(Arc::new(move |sid, bid, att| {
+        let done = npc_hook_done_clone.clone();
+        let orig = orig_npc_for_wrap.clone();
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            if let Some(orig_fn) = orig {
+                orig_fn(sid, bid, att).await;
+            }
+            done.store(true, Ordering::SeqCst);
+        })
+    }));
+
+    let (entered_rx_b, release_tx_b) =
+        install_gated_step_hook_1168(&handle, orig_step_hook.clone());
+
+    handle
+        .add_module_cycle(make_lethal_cycle_1168(
+            attacker_ship,
+            attacker_char,
+            953_000_102,
+            victim_b_ship,
+            4.0,
+            5.0,
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    let _ = handle.try_step_full_tick(1.0);
+    tokio::time::timeout(Duration::from_secs(5), entered_rx_b)
+        .await
+        .expect("try_step_full_tick reached system_step_hook")
+        .unwrap();
+    assert!(npc_hook_done.load(Ordering::SeqCst), "death_futs must complete before step_fut");
+    assert_eq!(
+        handle.pending_destroyed_balls.pending_and_in_flight_counts(),
+        (0, 1),
+        "lease must remain in_flight while system_step_hook is still executing"
+    );
+    let _ = release_tx_b.send(());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while handle.pending_destroyed_balls.is_non_empty() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(handle.pending_destroyed_balls.pending_and_in_flight_counts(), (0, 0));
+    assert_victim_death_committed_1168(&ctx, &handle, sys_id, victim_b_char, victim_b_ship, ship_type_id);
+
+    // Part C: with `npc_death_hook = None` (`death_futs.is_empty()`), lease must STILL stay
+    // `in_flight` until `step_fut` finishes instead of acking synchronously.
+    *handle.npc_death_hook.write().unwrap() = None;
+    let (entered_rx_c, release_tx_c) =
+        install_gated_step_hook_1168(&handle, orig_step_hook.clone());
+
+    handle
+        .add_module_cycle(make_lethal_cycle_1168(
+            attacker_ship,
+            attacker_char,
+            953_000_103,
+            victim_c_ship,
+            4.0,
+            5.0,
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    let _ = handle.try_step_full_tick(1.0);
+    tokio::time::timeout(Duration::from_secs(5), entered_rx_c)
+        .await
+        .expect("empty-death_futs try_step_full_tick reached system_step_hook")
+        .unwrap();
+    assert_eq!(
+        handle.pending_destroyed_balls.pending_and_in_flight_counts(),
+        (0, 1),
+        "lease must NOT be acked synchronously when death_futs.is_empty()"
+    );
+    let _ = release_tx_c.send(());
+    let deadline_c = tokio::time::Instant::now() + Duration::from_secs(5);
+    while handle.pending_destroyed_balls.is_non_empty() && tokio::time::Instant::now() < deadline_c {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    *handle.system_step_hook.write().unwrap() = Some(orig_step_hook);
+    *handle.npc_death_hook.write().unwrap() = orig_npc_hook;
+
+    assert_eq!(handle.pending_destroyed_balls.pending_and_in_flight_counts(), (0, 0));
+    assert_eq!(handle.pending_destroyed_balls.totals(), (3, 3));
+    assert_victim_death_committed_1168(&ctx, &handle, sys_id, victim_c_char, victim_c_ship, ship_type_id);
+    assert_eq!(count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id), wrecks_0 + 3);
+    assert_eq!(ctx.db.with_snapshot(|s| s.killmails.len()), kms_0 + 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fire_weapon_cycle_volley_outbox_lease_rollback_and_ack_1168() {
+    use std::time::Duration;
+
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let sys_id = 30_000_142_u32;
+    let attacker_char = 90_400_001_i64;
+    let attacker_ship = 954_000_001_i64;
+    let victims: [(i64, i64, i64); 4] = [
+        (90_400_002, 954_000_002, 954_000_101),
+        (90_400_003, 954_000_003, 954_000_102),
+        (90_400_004, 954_000_004, 954_000_103),
+        (90_400_005, 954_000_005, 954_000_104),
+    ];
+    let ship_type_id = 587_u32;
+
+    seed_combat_ship_1168(&ctx, sys_id, attacker_char, attacker_ship, ship_type_id, glam::DVec3::ZERO);
+    for (idx, &(v_char, v_ship, _)) in victims.iter().enumerate() {
+        seed_combat_ship_1168(
+            &ctx,
+            sys_id,
+            v_char,
+            v_ship,
+            ship_type_id,
+            glam::DVec3::new(1_000.0 + (idx as f64) * 100.0, 0.0, 0.0),
+        );
+    }
+
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let wrecks_0 = count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id);
+    let kms_0 = ctx.db.with_snapshot(|s| s.killmails.len());
+
+    // Subcase A: dropped reply receiver after locks drop before reply.send rolls volley lease back.
+    handle
+        .add_module_cycle(make_lethal_cycle_1168(
+            attacker_ship,
+            attacker_char,
+            victims[0].2,
+            victims[0].1,
+            0.0,
+            5.0,
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+    let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
+    *handle.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+        let _ = arrived_tx.send(());
+        let _ = proceed_rx.recv_timeout(Duration::from_secs(5));
+    }));
+    let rx_a = handle
+        .start_fire_weapon_cycle_volley(attacker_ship, victims[0].2)
+        .await
+        .unwrap();
+    arrived_rx.await.unwrap();
+    // Write guards must already be dropped before reply/hook delivery points.
+    assert!(handle.ballpark.try_read().is_ok(), "ballpark write guard leaked past lock scope");
+    assert!(handle.actor_state.try_read().is_ok(), "actor_state write guard leaked past lock scope");
+    drop(rx_a);
+    let _ = proceed_tx.send(());
+    let _ = handle.list_balls().await.unwrap();
+
+    assert_eq!(handle.pending_destroyed_balls.pending_and_in_flight_counts(), (1, 0));
+    step_active_systems_physics_tick(&ctx, 1).await;
+    assert_eq!(handle.pending_destroyed_balls.pending_and_in_flight_counts(), (0, 0));
+    assert_victim_death_committed_1168(&ctx, &handle, sys_id, victims[0].0, victims[0].1, ship_type_id);
+
+    // Subcase B: post-destruction panic inside actor rolls volley lease back and keeps actor alive.
+    handle
+        .add_module_cycle(make_lethal_cycle_1168(
+            attacker_ship,
+            attacker_char,
+            victims[1].2,
+            victims[1].1,
+            0.0,
+            5.0,
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    handle
+        .panic_after_destruction_for_test
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        handle
+            .fire_weapon_cycle_volley(attacker_ship, victims[1].2)
+            .await
+            .is_err()
+    );
+    let _ = handle.list_balls().await.unwrap();
+    assert_eq!(handle.pending_destroyed_balls.pending_and_in_flight_counts(), (1, 0));
+    step_active_systems_physics_tick(&ctx, 1).await;
+    assert_eq!(handle.pending_destroyed_balls.pending_and_in_flight_counts(), (0, 0));
+    assert_victim_death_committed_1168(&ctx, &handle, sys_id, victims[1].0, victims[1].1, ship_type_id);
+
+    // Subcase C: caller future cancelled mid-`system_step_hook` rolls victim 2 back to `pending`;
+    // subsequent volley on victim 3 checks out and acks ONLY victim 3 while victim 2 stays in
+    // `pending` until the next physics tick drains it cleanly.
+    let orig_step_hook = handle
+        .system_step_hook
+        .read()
+        .unwrap()
+        .clone()
+        .expect("ServerContext attaches system_step_hook");
+    let (hook_entered_rx, _never_release_tx) =
+        install_gated_step_hook_1168(&handle, orig_step_hook.clone());
+
+    handle
+        .add_module_cycle(make_lethal_cycle_1168(
+            attacker_ship,
+            attacker_char,
+            victims[2].2,
+            victims[2].1,
+            0.0,
+            5.0,
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    {
+        let volley_fut = handle.fire_weapon_cycle_volley(attacker_ship, victims[2].2);
+        tokio::pin!(volley_fut);
+        tokio::select! {
+            _ = &mut volley_fut => panic!("blocked volley future should not finish before hook gate"),
+            res = hook_entered_rx => {
+                res.unwrap();
+                assert_eq!(
+                    handle.pending_destroyed_balls.pending_and_in_flight_counts(),
+                    (0, 1),
+                    "volley lease must stay in_flight until hooks complete"
+                );
+            }
+        }
+    }
+    assert_eq!(handle.pending_destroyed_balls.pending_and_in_flight_counts(), (1, 0));
+
+    *handle.system_step_hook.write().unwrap() = Some(orig_step_hook);
+    handle
+        .add_module_cycle(make_lethal_cycle_1168(
+            attacker_ship,
+            attacker_char,
+            victims[3].2,
+            victims[3].1,
+            0.0,
+            5.0,
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    let (destroyed_3, _) = handle
+        .fire_weapon_cycle_volley(attacker_ship, victims[3].2)
+        .await
+        .unwrap();
+    assert_eq!(destroyed_3, vec![(victims[3].1, Some(attacker_char))]);
+    assert_victim_death_committed_1168(&ctx, &handle, sys_id, victims[3].0, victims[3].1, ship_type_id);
+    // Victim 3 is acked while unrelated victim 2 remains queued in `pending`.
+    assert_eq!(handle.pending_destroyed_balls.pending_and_in_flight_counts(), (1, 0));
+
+    step_active_systems_physics_tick(&ctx, 1).await;
+    assert_eq!(handle.pending_destroyed_balls.pending_and_in_flight_counts(), (0, 0));
+    assert_eq!(handle.pending_destroyed_balls.totals(), (4, 4));
+    assert!(!handle.pending_destroyed_balls.is_non_empty());
+    assert_victim_death_committed_1168(&ctx, &handle, sys_id, victims[2].0, victims[2].1, ship_type_id);
+    assert_eq!(count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id), wrecks_0 + 4);
+    assert_eq!(ctx.db.with_snapshot(|s| s.killmails.len()), kms_0 + 4);
+}

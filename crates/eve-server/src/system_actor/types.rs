@@ -455,6 +455,26 @@ impl PendingDestroyedOutbox {
         self.record_entries(entries.iter().copied());
     }
 
+    fn issue_lease_locked(
+        &self,
+        guard: &mut PendingDestroyedJournalInner,
+        batch: Vec<(BallId, Option<CharacterId>)>,
+    ) -> Option<Arc<PendingDestroyedDeliveryGuard>> {
+        if batch.is_empty() {
+            Self::refresh_non_empty(guard, &self.non_empty);
+            return None;
+        }
+        guard.next_delivery_id = guard.next_delivery_id.wrapping_add(1);
+        let delivery_id = guard.next_delivery_id;
+        guard.in_flight.insert(delivery_id, batch);
+        Self::refresh_non_empty(guard, &self.non_empty);
+        Some(Arc::new(PendingDestroyedDeliveryGuard {
+            outbox: self.clone(),
+            delivery_id,
+            acked: AtomicBool::new(false),
+        }))
+    }
+
     /// Drains currently pending destroyed balls into an in-flight lease that rolls back on Drop
     /// unless [`PendingDestroyedDeliveryGuard::ack`] is called after downstream persistence succeeds.
     pub(crate) fn checkout_for_step(
@@ -464,22 +484,32 @@ impl PendingDestroyedOutbox {
         Option<Arc<PendingDestroyedDeliveryGuard>>,
     ) {
         let mut guard = self.journal.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.pending.is_empty() {
-            Self::refresh_non_empty(&guard, &self.non_empty);
+        let batch = std::mem::take(&mut guard.pending);
+        let lease = self.issue_lease_locked(&mut guard, batch.clone());
+        (batch, lease)
+    }
+
+    /// Checks out a specific sub-batch (such as immediate volley deaths) from `pending` into an
+    /// independent in-flight lease without disturbing unrelated pending entries.
+    pub(crate) fn checkout_entries(
+        &self,
+        entries: &[(BallId, Option<CharacterId>)],
+    ) -> (
+        Vec<(BallId, Option<CharacterId>)>,
+        Option<Arc<PendingDestroyedDeliveryGuard>>,
+    ) {
+        if entries.is_empty() {
             return (Vec::new(), None);
         }
-        let batch = std::mem::take(&mut guard.pending);
-        guard.next_delivery_id = guard.next_delivery_id.wrapping_add(1);
-        let delivery_id = guard.next_delivery_id;
-        guard.in_flight.insert(delivery_id, batch.clone());
-        Self::refresh_non_empty(&guard, &self.non_empty);
-        drop(guard);
-        let lease = Arc::new(PendingDestroyedDeliveryGuard {
-            outbox: self.clone(),
-            delivery_id,
-            acked: AtomicBool::new(false),
-        });
-        (batch, Some(lease))
+        let mut guard = self.journal.lock().unwrap_or_else(|e| e.into_inner());
+        let mut checked_out = Vec::with_capacity(entries.len());
+        for &(ball_id, _) in entries {
+            if let Some(pos) = guard.pending.iter().position(|&(bid, _)| bid == ball_id) {
+                checked_out.push(guard.pending.remove(pos));
+            }
+        }
+        let lease = self.issue_lease_locked(&mut guard, checked_out.clone());
+        (checked_out, lease)
     }
 
     #[cfg(test)]
@@ -561,6 +591,14 @@ pub struct StepOutput {
     pub cycle_actions: Vec<PendingCycleAction>,
     pub condition_checkpoint: Option<Vec<ConditionCheckpointEntry>>,
     pub broadcast: Option<TickBroadcast>,
+}
+
+/// Structured actor outbox produced by an immediate [`SystemCommand::FireWeaponCycleVolley`].
+#[derive(Debug, Clone, Default)]
+pub struct WeaponVolleyOutput {
+    pub destroyed: Vec<(BallId, Option<CharacterId>)>,
+    pub(crate) destroyed_lease: Option<Arc<PendingDestroyedDeliveryGuard>>,
+    pub actions: Vec<PendingCycleAction>,
 }
 
 /// Sim-clock state for an active module reload (`#1081`).
@@ -907,7 +945,7 @@ pub enum SystemCommand {
     FireWeaponCycleVolley {
         ship_id: BallId,
         module_id: i64,
-        reply: oneshot::Sender<(Vec<(BallId, Option<CharacterId>)>, Vec<PendingCycleAction>)>,
+        reply: oneshot::Sender<WeaponVolleyOutput>,
     },
     HasModuleCycle {
         ship_id: BallId,

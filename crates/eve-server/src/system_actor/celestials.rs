@@ -1761,6 +1761,47 @@ impl SystemHandle {
         }
     }
 
+    async fn commit_destroyed_ball_hooks(
+        &self,
+        dt_sim: f64,
+        destroyed_balls: &[(BallId, Option<CharacterId>)],
+        destroyed_lease: Option<&std::sync::Arc<super::PendingDestroyedDeliveryGuard>>,
+        run_step_hook_when_empty: bool,
+    ) {
+        if !destroyed_balls.is_empty() {
+            let hook = self
+                .npc_death_hook
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            for &(target_ball_id, owner_char_id) in destroyed_balls {
+                if let Some(fut) = super::on_ball_destroyed_by_damage(
+                    self.solar_system_id,
+                    target_ball_id,
+                    owner_char_id,
+                    hook.as_ref(),
+                ) {
+                    fut.await;
+                }
+            }
+        }
+        if run_step_hook_when_empty || !destroyed_balls.is_empty() {
+            let step_hook = self
+                .system_step_hook
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(hook) = step_hook {
+                hook(self.solar_system_id, dt_sim, destroyed_balls.to_vec()).await;
+            }
+        }
+        // Acknowledge delivery lease only after both `npc_death_hook` and `system_step_hook`
+        // (`on_ball_destroyed_sync`) finish committing downstream artifacts.
+        if let Some(lease) = destroyed_lease {
+            lease.ack();
+        }
+    }
+
     /// Commits a [`super::StepOutput`] produced by this system's actor (`#919` E-4, `#839` B1):
     /// applies any staggered dirty-only condition checkpoint (`T-2`, `T-5`), invokes `npc_death_hook`
     /// for destroyed balls, and executes `system_step_hook` (`T-4` inventory-visible step outputs
@@ -1783,39 +1824,13 @@ impl SystemHandle {
                 }
             }
         }
-        let hook = self
-            .npc_death_hook
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        for &(target_ball_id, owner_char_id) in &output.destroyed_balls {
-            if let Some(fut) = super::on_ball_destroyed_by_damage(
-                self.solar_system_id,
-                target_ball_id,
-                owner_char_id,
-                hook.as_ref(),
-            ) {
-                fut.await;
-            }
-        }
-        let step_hook = self
-            .system_step_hook
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        if let Some(hook) = step_hook {
-            hook(
-                self.solar_system_id,
-                output.dt_sim,
-                output.destroyed_balls.clone(),
-            )
-            .await;
-        }
-        // Acknowledge delivery lease only after both `npc_death_hook` and `system_step_hook`
-        // (`on_ball_destroyed_sync`) finish committing downstream artifacts.
-        if let Some(ref lease) = output.destroyed_lease {
-            lease.ack();
-        }
+        self.commit_destroyed_ball_hooks(
+            output.dt_sim,
+            &output.destroyed_balls,
+            output.destroyed_lease.as_ref(),
+            true,
+        )
+        .await;
     }
 
     /// Steps this system by `dt` seconds and returns the full [`super::StepOutput`] after driver commit (`#919` E-4).
@@ -2025,39 +2040,38 @@ impl SystemHandle {
         rx.await.map_err(|_| "Solar system reply dropped".to_string())
     }
 
+    pub(crate) async fn start_fire_weapon_cycle_volley(
+        &self,
+        ship_id: BallId,
+        module_id: i64,
+    ) -> Result<oneshot::Receiver<super::WeaponVolleyOutput>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_sender()
+            .send(SystemCommand::FireWeaponCycleVolley {
+                ship_id,
+                module_id,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        Ok(rx)
+    }
+
     pub async fn fire_weapon_cycle_volley(
         &self,
         ship_id: BallId,
         module_id: i64,
     ) -> Result<(Vec<(BallId, Option<CharacterId>)>, Vec<super::PendingCycleAction>), String> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_sender()
-            .send(SystemCommand::FireWeaponCycleVolley { ship_id, module_id, reply: tx })
-            .await
-            .map_err(|_| "Solar system actor stopped".to_string())?;
-        let (destroyed, actions) = rx.await.map_err(|_| "Solar system reply dropped".to_string())?;
-        if !destroyed.is_empty() {
-            let hook = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-            for &(target_ball_id, owner_char_id) in &destroyed {
-                if let Some(fut) = super::on_ball_destroyed_by_damage(
-                    self.solar_system_id,
-                    target_ball_id,
-                    owner_char_id,
-                    hook.as_ref(),
-                ) {
-                    let _ = fut.await;
-                }
-            }
-            let step_hook = self
-                .system_step_hook
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            if let Some(hook) = step_hook {
-                hook(self.solar_system_id, 0.0, destroyed.clone()).await;
-            }
-        }
-        Ok((destroyed, actions))
+        let rx = self.start_fire_weapon_cycle_volley(ship_id, module_id).await?;
+        let volley_out = rx.await.map_err(|_| "Solar system reply dropped".to_string())?;
+        self.commit_destroyed_ball_hooks(
+            0.0,
+            &volley_out.destroyed,
+            volley_out.destroyed_lease.as_ref(),
+            false,
+        )
+        .await;
+        Ok((volley_out.destroyed, volley_out.actions))
     }
 
     pub async fn has_module_cycle(&self, ship_id: BallId, module_id: i64) -> bool {
