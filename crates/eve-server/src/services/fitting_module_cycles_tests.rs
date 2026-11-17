@@ -1655,3 +1655,417 @@ async fn cloaking_device_activation_emits_zero_godma_duration_ms() {
     assert_eq!(eff.args.get(7), Some(&PyRep::Real(0.0)));
 }
 
+#[tokio::test]
+async fn titan_civilian_laser_vs_concord_surface_distance_and_miss_logs_1247() {
+    const SYN_AVATAR: u32 = 11_567;
+    const SYN_CIV_PULSE: u32 = 3_634;
+    const SYN_TIGHT_PULSE: u32 = 996_247;
+    const SYN_CONCORD_SWAT: u32 = 10_035;
+
+    let sys_id = 30_000_142_u32;
+    let ctx = seeded_cycles_ctx(|sde| {
+        if let Some(sys_rec) = sde.solar_systems.get_mut(&sys_id) {
+            sys_rec.security_status = -0.17;
+        }
+        let mut avatar = sde.types.get(&587).expect("rifter").clone();
+        avatar.type_id = SYN_AVATAR;
+        avatar.group_id = 30;
+        avatar.category_id = 6;
+        avatar.name = "Avatar".into();
+        avatar.radius = 6_800.0;
+        avatar.mass = 2_400_000_000.0;
+        avatar
+            .default_attributes
+            .retain(|k, _| !matches!(k, 182..=184 | 277..=279));
+        avatar.default_attributes.insert(attr_ids::HI_SLOTS, 8.0);
+        avatar.default_attributes.insert(attr_ids::MED_SLOTS, 6.0);
+        avatar.default_attributes.insert(attr_ids::LOW_SLOTS, 6.0);
+        avatar
+            .default_attributes
+            .insert(attr_ids::TURRET_SLOTS_LEFT, 8.0);
+        avatar.default_attributes.insert(attr_ids::CPU_OUTPUT, 1_000.0);
+        avatar
+            .default_attributes
+            .insert(attr_ids::POWER_OUTPUT, 1_000_000.0);
+        avatar
+            .default_attributes
+            .insert(attr_ids::CAPACITOR_CAPACITY, 10_000.0);
+        avatar
+            .default_attributes
+            .insert(attr_ids::MAX_LOCKED_TARGETS, 7.0);
+        avatar
+            .default_attributes
+            .insert(attr_ids::MAX_TARGET_RANGE, 200_000.0);
+        avatar
+            .default_attributes
+            .insert(attr_ids::SCAN_RESOLUTION, 100.0);
+        avatar
+            .default_attributes
+            .insert(attr_ids::SIGNATURE_RADIUS, 16_000.0);
+        sde.types.insert(SYN_AVATAR, avatar);
+
+        let civ_attrs = [
+            (6_u16, 1.0_f64),
+            (51, 2_000.0),
+            (54, 3_300.0),
+            (64, 1.3),
+            (114, 3.0),
+            (116, 0.0),
+            (117, 0.0),
+            (118, 2.0),
+            (158, 1_000.0),
+            (160, 625.0),
+            (620, 40_000.0),
+            (1795, 0.01),
+        ];
+        let mut civ = custom_inv_type(
+            sde,
+            SYN_CIV_PULSE,
+            53,
+            7,
+            5.0,
+            0.0,
+            "Civilian Gatling Pulse Laser",
+            &civ_attrs,
+        );
+        civ.effect_ids = vec![10, 12, 16, 42];
+        civ.default_effect_id = Some(10);
+        sde.types.insert(SYN_CIV_PULSE, civ);
+
+        let mut tight = custom_inv_type(
+            sde,
+            SYN_TIGHT_PULSE,
+            53,
+            7,
+            5.0,
+            0.0,
+            "Synthetic Zero-Tracking Laser",
+            &[
+                (6, 1.0),
+                (51, 2_000.0),
+                (54, 3_300.0),
+                (64, 1.3),
+                (114, 3.0),
+                (118, 2.0),
+                (158, 1_000.0),
+                (160, 0.0001),
+                (620, 40_000.0),
+                (1795, 0.01),
+            ],
+        );
+        tight.effect_ids = vec![10, 12, 16, 42];
+        tight.default_effect_id = Some(10);
+        sde.types.insert(SYN_TIGHT_PULSE, tight);
+
+        let mut concord_t = sde.types.get(&587).expect("rifter").clone();
+        concord_t.type_id = SYN_CONCORD_SWAT;
+        concord_t.group_id = 182;
+        concord_t.category_id = 11;
+        concord_t.name = "CONCORD SWAT Officer".into();
+        concord_t.radius = 38.0;
+        concord_t
+            .default_attributes
+            .insert(attr_ids::SIGNATURE_RADIUS, 25.0);
+        sde.types.insert(SYN_CONCORD_SWAT, concord_t);
+    });
+
+    let char_id = 97_124_701_i64;
+    let ship_id = 1_124_701_i64;
+    let laser_hit_id = 1_124_710_i64;
+    let laser_miss_id = 1_124_711_i64;
+    let laser_oob_id = 1_124_712_i64;
+    let concord_hit_id = 1_124_720_i64;
+    let concord_miss_id = 1_124_721_i64;
+    let concord_oob_id = 1_124_722_i64;
+
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id);
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, 1, Some(char_id), false, ctx.now_unix());
+    insert_item(
+        &ctx,
+        ship_id,
+        SYN_AVATAR,
+        char_id,
+        sys_id as i64,
+        InventoryFlag::None,
+        1,
+        true,
+    );
+    insert_item(
+        &ctx,
+        laser_hit_id,
+        SYN_CIV_PULSE,
+        char_id,
+        ship_id,
+        InventoryFlag::HiSlot0,
+        1,
+        true,
+    );
+    insert_item(
+        &ctx,
+        laser_miss_id,
+        SYN_TIGHT_PULSE,
+        char_id,
+        ship_id,
+        InventoryFlag::HiSlot1,
+        1,
+        true,
+    );
+    insert_item(
+        &ctx,
+        laser_oob_id,
+        SYN_CIV_PULSE,
+        char_id,
+        ship_id,
+        InventoryFlag::HiSlot2,
+        1,
+        true,
+    );
+
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels
+            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: SYN_AVATAR,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 60.0,
+            inertia: 1.0,
+            mass: 2_400_000_000.0,
+            radius: 6_800.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            shield_hp: 100_000.0,
+            max_shield_hp: 100_000.0,
+            armor_hp: 100_000.0,
+            max_armor_hp: 100_000.0,
+            structure_hp: 100_000.0,
+            max_structure_hp: 100_000.0,
+            capacitor: 10_000.0,
+            max_capacitor: 10_000.0,
+            signature_radius: 16_000.0,
+            ..CombatState::default()
+        },
+        SlimItemMeta {
+            group_id: 30,
+            category_id: 6,
+            owner_id: char_id,
+            char_id: Some(char_id),
+            corp_id: 98_000_001,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    for (tid, pos, vel, inertia) in [
+        (concord_hit_id, DVec3::new(6_855.5, 0.0, 0.0), DVec3::ZERO, 1.0),
+        (
+            concord_miss_id,
+            DVec3::new(6_855.5, 0.0, 0.0),
+            DVec3::new(0.0, 200.0, 0.0),
+            100.0,
+        ),
+        (concord_oob_id, DVec3::new(13_200.0, 0.0, 0.0), DVec3::ZERO, 1.0),
+    ] {
+        sys.spawn_ball_with_meta(
+            Ball {
+                id: tid,
+                type_id: SYN_CONCORD_SWAT,
+                position: pos,
+                velocity: vel,
+                max_velocity: 500.0,
+                inertia,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 500.0,
+                max_shield_hp: 500.0,
+                armor_hp: 550.0,
+                max_armor_hp: 550.0,
+                structure_hp: 500.0,
+                max_structure_hp: 500.0,
+                signature_radius: 25.0,
+                shield_recharge_time_ms: 0.0,
+                capacitor_recharge_time_ms: 0.0,
+                ..CombatState::default()
+            },
+            SlimItemMeta {
+                group_id: 182,
+                category_id: 11,
+                owner_id: 1_000_125,
+                char_id: None,
+                corp_id: 1_000_125,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        sys.add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: tid,
+                lock_time_ms: 100.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(100_000.0),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let kw = HashMap::new();
+    let mut sess = SessionState {
+        user_id: Some(uid),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Hit path: Avatar (r=6800) shooting CONCORD (r=50) at 5.5m surface distance.
+    handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(laser_hit_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(concord_hit_id),
+            PyRep::Integer(1000),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("civilian laser activation on CONCORD at 5.5m surface distance");
+
+    // 2. Miss path: extreme transversal target emits miss log rather than failing silently.
+    handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(laser_miss_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(concord_miss_id),
+            PyRep::Integer(1000),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("zero-tracking laser activation for deterministic miss log test");
+
+    // 3. Out-of-range path: surface distance 6350m (> 6300m optimal+3*falloff cutoff).
+    let _ = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(laser_oob_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(concord_oob_id),
+            PyRep::Integer(1000),
+        ],
+        &kw,
+    )
+    .await;
+
+    let _ = sys.step_manual(2.1).await.unwrap();
+    crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;
+
+    let hit_cs = sys.get_combat_state(concord_hit_id).await.unwrap().unwrap();
+    assert!(
+        hit_cs.shield_hp < 500.0,
+        "CONCORD at 5.5m surface distance must take damage from Titan Civilian Pulse Laser (shield={})",
+        hit_cs.shield_hp
+    );
+    assert!(
+        sys.has_module_cycle(ship_id, laser_hit_id).await,
+        "in-range repeating turret cycle must stay active"
+    );
+
+    let miss_cs = sys.get_combat_state(concord_miss_id).await.unwrap().unwrap();
+    assert_eq!(
+        miss_cs.shield_hp, 500.0,
+        "missed fast target must stay at full shield"
+    );
+
+    let oob_cs = sys.get_combat_state(concord_oob_id).await.unwrap().unwrap();
+    assert_eq!(
+        oob_cs.shield_hp, 500.0,
+        "out-of-range target past 6300m surface distance must stay at full shield"
+    );
+    assert!(
+        !sys.has_module_cycle(ship_id, laser_oob_id).await,
+        "out-of-range turret cycle must not remain active"
+    );
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnDamageMessage"
+                && n.args.first().and_then(|d| d.dict_get("target")).and_then(|v| v.as_i64())
+                    == Some(concord_hit_id)
+                && n.args.first().and_then(|d| d.dict_get("damage")).and_then(|v| v.as_f64())
+                    .is_some_and(|d| d > 0.0)
+        }),
+        "expected OnDamageMessage for CONCORD hit"
+    );
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnDamageMessages"
+                && matches!(n.args.first(), Some(PyRep::List(items)) if items.iter().any(|entry| matches!(
+                    entry,
+                    PyRep::Tuple(pair) if pair.first().and_then(|v| v.as_str()) == Some("AttackHit")
+                )))
+        }),
+        "expected AttackHit OnDamageMessages for CONCORD hit"
+    );
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnDamageMessage"
+                && n.args.first().and_then(|d| d.dict_get("target")).and_then(|v| v.as_i64())
+                    == Some(concord_miss_id)
+                && n.args.first().and_then(|d| d.dict_get("damage")).and_then(|v| v.as_f64())
+                    == Some(0.0)
+                && n.args.first().and_then(|d| d.dict_get("hitQuality")).and_then(|v| v.as_i64())
+                    == Some(0)
+        }),
+        "expected OnDamageMessage (damage=0.0, hitQuality=0) on turret miss"
+    );
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnDamageMessages"
+                && matches!(n.args.first(), Some(PyRep::List(items)) if items.iter().any(|entry| matches!(
+                    entry,
+                    PyRep::Tuple(pair) if pair.first().and_then(|v| v.as_str()) == Some("AttackMiss")
+                )))
+        }),
+        "expected AttackMiss OnDamageMessages on turret miss"
+    );
+}
+
+

@@ -1551,3 +1551,384 @@ fn tethered_ship_without_heat_damage_skips_mut_snapshot_1207() {
         );
     });
 }
+
+#[test]
+fn turret_uses_surface_distance_for_large_titan_hull_and_emits_miss_notifications_1247() {
+    let mut bp = Ballpark::new(30_004_759);
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let sde_opt = Some(make_sde_for_cycles());
+    let db_opt = Some(Arc::clone(&db));
+    let rng = Some(Arc::new(crate::rng::MechanicRng::seeded(7)));
+    let tactical: Arc<RwLock<crate::services::tactical_modules::TacticalModulesState>> =
+        Arc::new(RwLock::new(Default::default()));
+    let q_p: RwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>> =
+        RwLock::new(HashMap::new());
+
+    let char_atk = 90_000_001_i64;
+    let char_fast_vic = 90_000_998_i64;
+    let titan_id = 880_001_i64;
+    let concord_hit_id = 880_002_i64;
+    let concord_miss_id = 880_003_i64;
+    let concord_oob_id = 880_004_i64;
+    let scram_in_range_id = 880_005_i64;
+    let scram_oob_id = 880_006_i64;
+
+    let mut avatar = make_ship(titan_id, 11_567, DVec3::ZERO);
+    avatar.radius = 6_800.0;
+    bp.add_ball(avatar);
+    bp.ball_slim_meta.insert(
+        titan_id,
+        eve_destiny::SlimItemMeta {
+            group_id: 30,
+            category_id: 6,
+            owner_id: char_atk,
+            char_id: Some(char_atk),
+            corp_id: 98_000_001,
+            ..Default::default()
+        },
+    );
+    bp.combat_states.insert(
+        titan_id,
+        CombatState {
+            shield_hp: 100_000.0,
+            max_shield_hp: 100_000.0,
+            capacitor: 10_000.0,
+            max_capacitor: 10_000.0,
+            signature_radius: 16_000.0,
+            ..CombatState::default()
+        },
+    );
+
+    // Target 1: CONCORD SWAT Officer (10035) at 5.5m surface distance (6855.5m center distance).
+    // Previously `sb.position.distance(tb.position)` = 6855.5m exceeded cutoff 6300m -> aborted out-of-range!
+    let mut concord_hit = make_ship(concord_hit_id, 10_035, DVec3::new(6_855.5, 0.0, 0.0));
+    concord_hit.radius = 50.0;
+    bp.add_ball(concord_hit);
+    bp.ball_slim_meta.insert(
+        concord_hit_id,
+        eve_destiny::SlimItemMeta {
+            group_id: 182,
+            category_id: 11,
+            owner_id: 1_000_125,
+            char_id: None,
+            corp_id: 1_000_125,
+            ..Default::default()
+        },
+    );
+    bp.combat_states.insert(
+        concord_hit_id,
+        CombatState {
+            shield_hp: 500.0,
+            max_shield_hp: 500.0,
+            armor_hp: 550.0,
+            max_armor_hp: 550.0,
+            structure_hp: 500.0,
+            max_structure_hp: 500.0,
+            signature_radius: 25.0,
+            shield_recharge_time_ms: 0.0,
+            capacitor_recharge_time_ms: 0.0,
+            ..CombatState::default()
+        },
+    );
+
+    // Target 2: Fast orbiting ship at 5.5m surface distance with extreme transversal -> guaranteed miss.
+    let mut fast_miss = make_ship(concord_miss_id, 587, DVec3::new(6_855.5, 0.0, 0.0));
+    fast_miss.radius = 50.0;
+    fast_miss.inertia = 100.0;
+    fast_miss.velocity = DVec3::new(0.0, 200.0, 0.0);
+    bp.add_ball(fast_miss);
+    bp.ball_slim_meta.insert(
+        concord_miss_id,
+        eve_destiny::SlimItemMeta {
+            group_id: 25,
+            category_id: 6,
+            owner_id: char_fast_vic,
+            char_id: Some(char_fast_vic),
+            corp_id: 98_000_002,
+            ..Default::default()
+        },
+    );
+    bp.combat_states.insert(
+        concord_miss_id,
+        CombatState {
+            shield_hp: 500.0,
+            max_shield_hp: 500.0,
+            signature_radius: 25.0,
+            shield_recharge_time_ms: 0.0,
+            capacitor_recharge_time_ms: 0.0,
+            ..CombatState::default()
+        },
+    );
+
+    // Target 3: Out-of-range target at 6,350m surface distance (13,200m center distance > 6,300m cutoff).
+    let mut concord_oob = make_ship(concord_oob_id, 10_035, DVec3::new(13_200.0, 0.0, 0.0));
+    concord_oob.radius = 50.0;
+    bp.add_ball(concord_oob);
+    bp.combat_states.insert(
+        concord_oob_id,
+        CombatState {
+            shield_hp: 500.0,
+            max_shield_hp: 500.0,
+            signature_radius: 25.0,
+            ..CombatState::default()
+        },
+    );
+
+    let deactivated = Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
+    let deact_clone = Arc::clone(&deactivated);
+    let hook: ModuleDeactivationHook = Arc::new(move |_cid, cycle| {
+        deact_clone.lock().unwrap().push(cycle.module_id);
+    });
+
+    let mod_hit = 980_001_i64;
+    let mod_miss = 980_002_i64;
+    let mod_oob = 980_003_i64;
+    let mut cycles = vec![
+        ActiveModuleCycle {
+            ship_id: titan_id,
+            owner_char_id: Some(char_atk),
+            module_id: mod_hit,
+            module_type_id: 3634,
+            effect_name: "targetAttack".into(),
+            target_id: Some(concord_hit_id),
+            repeat: 1000,
+            duration_s: 2.0,
+            elapsed_s: 0.0,
+            cap_need_per_cycle: 1.0,
+            damage_vector: DamageVector::new(3.9, 2.6, 0.0, 0.0),
+            weapon_is_turret: true,
+            weapon_optimal_m: 3_300.0,
+            weapon_falloff_m: 1_000.0,
+            weapon_tracking_speed: 625.0,
+            weapon_sig_resolution_m: 40_000.0,
+            max_effective_range_m: Some(6_300.0),
+            ..ActiveModuleCycle::default()
+        },
+        ActiveModuleCycle {
+            ship_id: titan_id,
+            owner_char_id: Some(char_atk),
+            module_id: mod_miss,
+            module_type_id: 3634,
+            effect_name: "targetAttack".into(),
+            target_id: Some(concord_miss_id),
+            repeat: 1000,
+            duration_s: 2.0,
+            elapsed_s: 0.0,
+            cap_need_per_cycle: 1.0,
+            damage_vector: DamageVector::new(3.9, 2.6, 0.0, 0.0),
+            weapon_is_turret: true,
+            weapon_optimal_m: 3_300.0,
+            weapon_falloff_m: 1_000.0,
+            weapon_tracking_speed: 0.0001,
+            weapon_sig_resolution_m: 40_000.0,
+            max_effective_range_m: Some(6_300.0),
+            ..ActiveModuleCycle::default()
+        },
+        ActiveModuleCycle {
+            ship_id: titan_id,
+            owner_char_id: Some(char_atk),
+            module_id: mod_oob,
+            module_type_id: 3634,
+            effect_name: "targetAttack".into(),
+            target_id: Some(concord_oob_id),
+            repeat: 1000,
+            duration_s: 2.0,
+            elapsed_s: 0.0,
+            cap_need_per_cycle: 1.0,
+            damage_vector: DamageVector::new(3.9, 2.6, 0.0, 0.0),
+            weapon_is_turret: true,
+            weapon_optimal_m: 3_300.0,
+            weapon_falloff_m: 1_000.0,
+            weapon_tracking_speed: 625.0,
+            weapon_sig_resolution_m: 40_000.0,
+            max_effective_range_m: Some(6_300.0),
+            ..ActiveModuleCycle::default()
+        },
+    ];
+
+    let mut pending_actions = Vec::new();
+    step_cycles_and_capacitor(
+        &mut bp,
+        &mut cycles,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &sde_opt,
+        &db_opt,
+        &rng,
+        &*tactical,
+        &mut pending_actions,
+        2.0,
+        Some(&hook),
+    );
+
+    assert!(
+        cycles.iter().any(|c| c.module_id == mod_hit),
+        "turret at 5.5m surface distance on 6800m Avatar must stay active"
+    );
+    assert!(
+        cycles.iter().any(|c| c.module_id == mod_miss),
+        "turret missing fast orbiter within range must stay active"
+    );
+    assert!(
+        !cycles.iter().any(|c| c.module_id == mod_oob),
+        "turret beyond 6300m surface distance must deactivate out of range"
+    );
+    assert!(deactivated.lock().unwrap().contains(&mod_oob));
+
+    let hit_shield = bp.combat_states[&concord_hit_id].shield_hp;
+    assert!(
+        hit_shield < 500.0,
+        "CONCORD target at 5.5m surface distance must take turret shield damage (shield={hit_shield})"
+    );
+    assert_eq!(
+        bp.combat_states[&concord_miss_id].shield_hp, 500.0,
+        "extreme-transversal target must receive 0 shield damage on miss"
+    );
+    assert_eq!(
+        bp.combat_states[&concord_oob_id].shield_hp, 500.0,
+        "out-of-range target must receive 0 shield damage"
+    );
+
+    assert!(
+        pending_actions.iter().any(|a| matches!(
+            a,
+            PendingCycleAction::CycleWeaponDamage {
+                attacker_char_id: Some(c),
+                target_id,
+                applied_dmg,
+                notified: false,
+                ..
+            } if *c == char_atk && *target_id == concord_hit_id && *applied_dmg > 0.0
+        )),
+        "hit must enqueue unnotified CycleWeaponDamage"
+    );
+    assert!(
+        pending_actions.iter().any(|a| matches!(
+            a,
+            PendingCycleAction::CycleWeaponMiss {
+                attacker_char_id: Some(c),
+                target_id,
+                target_char_id: Some(vc),
+                module_type_id: 3634,
+                notified: false,
+                ..
+            } if *c == char_atk && *target_id == concord_miss_id && *vc == char_fast_vic
+        )),
+        "turret miss must enqueue unnotified CycleWeaponMiss"
+    );
+
+    flush_pending_cycle_damage_notifications(Some(&db), Some(&q_p), None, &mut pending_actions);
+    {
+        let mut q = q_p.write().unwrap();
+        let atk_notifs = q.remove(&char_atk).unwrap_or_default();
+        assert!(
+            atk_notifs.iter().any(|n| {
+                n.event == "OnDamageMessage"
+                    && n.args.first().and_then(|d| d.dict_get("target")).and_then(|v| v.as_i64())
+                        == Some(concord_hit_id)
+                    && n.args.first().and_then(|d| d.dict_get("damage")).and_then(|v| v.as_f64())
+                        .is_some_and(|d| d > 0.0)
+                    && n.args.first().and_then(|d| d.dict_get("hitQuality")).and_then(|v| v.as_i64())
+                        .is_some_and(|hq| hq > 0)
+            }),
+            "attacker must receive hit OnDamageMessage"
+        );
+        assert!(
+            atk_notifs.iter().any(|n| {
+                n.event == "OnDamageMessage"
+                    && n.args.first().and_then(|d| d.dict_get("target")).and_then(|v| v.as_i64())
+                        == Some(concord_miss_id)
+                    && n.args.first().and_then(|d| d.dict_get("damage")).and_then(|v| v.as_f64())
+                        == Some(0.0)
+                    && n.args.first().and_then(|d| d.dict_get("hitQuality")).and_then(|v| v.as_i64())
+                        == Some(0)
+            }),
+            "attacker must receive miss OnDamageMessage with hitQuality=0 and damage=0.0"
+        );
+        assert!(
+            atk_notifs.iter().any(|n| {
+                n.event == "OnDamageMessages"
+                    && matches!(n.args.first(), Some(eve_proto::PyRep::List(items)) if items.iter().any(|entry| matches!(
+                        entry,
+                        eve_proto::PyRep::Tuple(pair) if pair.first().and_then(|v| v.as_str()) == Some("AttackHit")
+                    )))
+            }),
+            "attacker must receive AttackHit OnDamageMessages"
+        );
+        assert!(
+            atk_notifs.iter().any(|n| {
+                n.event == "OnDamageMessages"
+                    && matches!(n.args.first(), Some(eve_proto::PyRep::List(items)) if items.iter().any(|entry| matches!(
+                        entry,
+                        eve_proto::PyRep::Tuple(pair) if pair.first().and_then(|v| v.as_str()) == Some("AttackMiss")
+                    )))
+            }),
+            "attacker must receive AttackMiss OnDamageMessages"
+        );
+        let vic_notifs = q.remove(&char_fast_vic).unwrap_or_default();
+        assert!(
+            vic_notifs.iter().any(|n| {
+                n.event == "OnDamageMessages"
+                    && matches!(n.args.first(), Some(eve_proto::PyRep::List(items)) if items.iter().any(|entry| matches!(
+                        entry,
+                        eve_proto::PyRep::Tuple(pair) if pair.first().and_then(|v| v.as_str()) == Some("AttackMissBy")
+                    )))
+            }),
+            "missed player victim must receive AttackMissBy OnDamageMessages"
+        );
+    }
+
+    // Re-flushing must not duplicate already-notified CycleWeaponDamage / CycleWeaponMiss actions.
+    flush_pending_cycle_damage_notifications(Some(&db), Some(&q_p), None, &mut pending_actions);
+    assert!(
+        q_p.read().unwrap().is_empty(),
+        "second flush must not re-emit notified damage/miss logs"
+    );
+
+    // Tackle reconciliation also uses surface distance on large hulls.
+    let mut t_in = make_ship(scram_in_range_id, 587, DVec3::new(6_855.5, 0.0, 0.0));
+    t_in.radius = 50.0;
+    bp.add_ball(t_in);
+    bp.combat_states.insert(scram_in_range_id, CombatState::default());
+
+    let mut t_oob = make_ship(scram_oob_id, 587, DVec3::new(15_900.0, 0.0, 0.0));
+    t_oob.radius = 50.0;
+    bp.add_ball(t_oob);
+    bp.combat_states.insert(scram_oob_id, CombatState::default());
+
+    let mut tackle_cycles = vec![
+        ActiveModuleCycle {
+            ship_id: titan_id,
+            module_id: 980_010,
+            target_id: Some(scram_in_range_id),
+            warp_scramble_points: 2,
+            max_effective_range_m: Some(9_000.0),
+            duration_s: 5.0,
+            ..ActiveModuleCycle::default()
+        },
+        ActiveModuleCycle {
+            ship_id: titan_id,
+            module_id: 980_011,
+            target_id: Some(scram_oob_id),
+            warp_scramble_points: 2,
+            max_effective_range_m: Some(9_000.0),
+            duration_s: 5.0,
+            ..ActiveModuleCycle::default()
+        },
+    ];
+    crate::system_actor::reconcile_tackle_and_bubbles(
+        &mut bp,
+        &mut tackle_cycles,
+        &HashMap::new(),
+        &HashMap::new(),
+        &None,
+        Some(&hook),
+    );
+    assert!(tackle_cycles.iter().any(|c| c.module_id == 980_010));
+    assert!(!tackle_cycles.iter().any(|c| c.module_id == 980_011));
+}
+

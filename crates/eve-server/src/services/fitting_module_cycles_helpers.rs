@@ -2137,6 +2137,69 @@ pub(crate) fn emit_ship_charge_item_diffs(
     }
 }
 
+fn emit_cycle_weapon_log_pair(
+    ctx: &ServerContext,
+    recipient_cid: i64,
+    msg_key: &str,
+    dict: PyRep,
+) {
+    ctx.emit_typed(
+        crate::router::NotificationTarget::Character(recipient_cid),
+        crate::router::notify_registry::OnDamageMessage {
+            damage_messages_args: dict.clone(),
+        },
+    );
+    ctx.emit_typed(
+        crate::router::NotificationTarget::Character(recipient_cid),
+        crate::router::notify_registry::OnDamageMessages {
+            dmgmsgs: vec![PyRep::Tuple(vec![
+                PyRep::String(msg_key.into()),
+                dict,
+            ])],
+        },
+    );
+}
+
+fn emit_cycle_weapon_log_entries(
+    ctx: &ServerContext,
+    attacker_char_id: Option<i64>,
+    attacker_ship_id: i64,
+    target_id: i64,
+    target_char_id: Option<i64>,
+    module_type_id: u32,
+    hit_damage: Option<f64>,
+) {
+    let (damage, hit_quality, attacker_msg_key, victim_msg_key) = match hit_damage {
+        Some(dmg) => (dmg, 3, "AttackHit", "AttackedBy"),
+        None => (0.0, 0, "AttackMiss", "AttackMissBy"),
+    };
+    let owner_cid = attacker_char_id.unwrap_or(0);
+    if let Some(acid) = attacker_char_id.filter(|&c| c > 0) {
+        let dmg_dict = crate::system_actor::build_cycle_damage_message_dict(
+            damage,
+            attacker_ship_id,
+            target_id,
+            acid,
+            module_type_id,
+            hit_quality,
+            "me",
+        );
+        emit_cycle_weapon_log_pair(ctx, acid, attacker_msg_key, dmg_dict);
+    }
+    if let Some(vcid) = target_char_id.filter(|&c| c > 0 && c != owner_cid) {
+        let vic_dict = crate::system_actor::build_cycle_damage_message_dict(
+            damage,
+            attacker_ship_id,
+            target_id,
+            owner_cid,
+            module_type_id,
+            hit_quality,
+            "other",
+        );
+        emit_cycle_weapon_log_pair(ctx, vcid, victim_msg_key, vic_dict);
+    }
+}
+
 pub(crate) async fn execute_pending_cycle_actions_list(
     ctx: &ServerContext,
     sys_id: u32,
@@ -2379,72 +2442,35 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                             ctx, vcid, target_id, sr, ar, hr,
                         );
                     }
-                    if let Some(acid) = attacker_char_id.filter(|&c| c > 0) {
-                        let dmg_dict = PyRep::Dict(vec![
-                            (PyRep::String("damage".into()), PyRep::Real(applied_dmg)),
-                            (PyRep::String("source".into()), PyRep::Integer(attacker_ship_id)),
-                            (PyRep::String("attackerID".into()), PyRep::Integer(attacker_ship_id)),
-                            (PyRep::String("target".into()), PyRep::Integer(target_id)),
-                            (PyRep::String("target_ID".into()), PyRep::Integer(target_id)),
-                            (
-                                PyRep::String("owner".into()),
-                                PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(acid)]),
-                            ),
-                            (PyRep::String("weapon".into()), PyRep::Integer(module_type_id as i64)),
-                            (PyRep::String("hitQuality".into()), PyRep::Integer(3)),
-                            (PyRep::String("attackType".into()), PyRep::String("me".into())),
-                            (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
-                            (PyRep::String("isBanked".into()), PyRep::Bool(false)),
-                        ]);
-                        ctx.emit_typed(
-                            crate::router::NotificationTarget::Character(acid),
-                            crate::router::notify_registry::OnDamageMessage {
-                                damage_messages_args: dmg_dict.clone(),
-                            },
-                        );
-                        ctx.emit_typed(
-                            crate::router::NotificationTarget::Character(acid),
-                            crate::router::notify_registry::OnDamageMessages {
-                                dmgmsgs: vec![PyRep::Tuple(vec![
-                                    PyRep::String("AttackHit".into()),
-                                    dmg_dict,
-                                ])],
-                            },
-                        );
-                    }
-                    if let Some(vcid) = target_char_id.filter(|&c| c > 0 && c != owner_cid) {
-                        let vic_dict = PyRep::Dict(vec![
-                            (PyRep::String("damage".into()), PyRep::Real(applied_dmg)),
-                            (PyRep::String("source".into()), PyRep::Integer(attacker_ship_id)),
-                            (PyRep::String("attackerID".into()), PyRep::Integer(attacker_ship_id)),
-                            (PyRep::String("target".into()), PyRep::Integer(target_id)),
-                            (PyRep::String("target_ID".into()), PyRep::Integer(target_id)),
-                            (
-                                PyRep::String("owner".into()),
-                                PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(owner_cid)]),
-                            ),
-                            (PyRep::String("weapon".into()), PyRep::Integer(module_type_id as i64)),
-                            (PyRep::String("hitQuality".into()), PyRep::Integer(3)),
-                            (PyRep::String("attackType".into()), PyRep::String("other".into())),
-                            (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
-                            (PyRep::String("isBanked".into()), PyRep::Bool(false)),
-                        ]);
-                        ctx.emit_typed(
-                            crate::router::NotificationTarget::Character(vcid),
-                            crate::router::notify_registry::OnDamageMessage {
-                                damage_messages_args: vic_dict.clone(),
-                            },
-                        );
-                        ctx.emit_typed(
-                            crate::router::NotificationTarget::Character(vcid),
-                            crate::router::notify_registry::OnDamageMessages {
-                                dmgmsgs: vec![PyRep::Tuple(vec![
-                                    PyRep::String("AttackedBy".into()),
-                                    vic_dict,
-                                ])],
-                            },
-                        );
-                    }
+                    emit_cycle_weapon_log_entries(
+                        ctx,
+                        attacker_char_id,
+                        attacker_ship_id,
+                        target_id,
+                        target_char_id,
+                        module_type_id,
+                        Some(applied_dmg),
+                    );
+                }
+            }
+            crate::system_actor::PendingCycleAction::CycleWeaponMiss {
+                attacker_char_id,
+                attacker_ship_id,
+                target_id,
+                target_char_id,
+                module_type_id,
+                notified,
+            } => {
+                if !notified {
+                    emit_cycle_weapon_log_entries(
+                        ctx,
+                        attacker_char_id,
+                        attacker_ship_id,
+                        target_id,
+                        target_char_id,
+                        module_type_id,
+                        None,
+                    );
                 }
             }
             crate::system_actor::PendingCycleAction::RepeatCycleStart {

@@ -1974,3 +1974,256 @@ async fn handle_weapons_and_fastpath_enforce_skill_prereqs_and_gated_autoload_gh
         "bomb 1 -> 0 depletion must emit OnItemChange tombstone"
     );
 }
+
+#[tokio::test]
+async fn handle_weapons_uses_surface_distance_for_non_upwell_titan_vs_concord_1247() {
+    use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+    use eve_sde::attr_ids;
+
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    ctx = ctx.with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+    let kwargs = HashMap::new();
+
+    let mut sde = (*ctx.sde).clone();
+    if let Some(sys_rec) = sde.solar_systems.get_mut(&sys_id) {
+        sys_rec.security_status = -0.17;
+    }
+    let mut avatar = make_fighter_type(
+        11_567,
+        30,
+        6,
+        10_000_000.0,
+        vec![
+            (attr_ids::HI_SLOTS, 8.0),
+            (attr_ids::TURRET_SLOTS_LEFT, 8.0),
+            (attr_ids::CPU_OUTPUT, 10_000.0),
+            (attr_ids::POWER_OUTPUT, 1_000_000.0),
+            (attr_ids::CAPACITOR_CAPACITY, 10_000.0),
+            (attr_ids::MAX_LOCKED_TARGETS, 7.0),
+            (attr_ids::MAX_TARGET_RANGE, 200_000.0),
+            (attr_ids::SIGNATURE_RADIUS, 16_000.0),
+        ],
+    );
+    avatar.radius = 6_800.0;
+    avatar.mass = 2_400_000_000.0;
+    sde.types.insert(11_567, avatar);
+
+    let mut civ_laser = make_fighter_type(
+        3_634,
+        53,
+        7,
+        5.0,
+        vec![
+            (6, 1.0),
+            (51, 2_000.0),
+            (54, 3_300.0),
+            (64, 1.3),
+            (114, 3.0),
+            (116, 0.0),
+            (117, 0.0),
+            (118, 2.0),
+            (158, 1_000.0),
+            (160, 625.0),
+            (620, 40_000.0),
+            (1795, 0.01),
+        ],
+    );
+    civ_laser.capacity = 0.0;
+    civ_laser.effect_ids = vec![10, 12, 16, 42];
+    civ_laser.default_effect_id = Some(10);
+    sde.types.insert(3_634, civ_laser);
+
+    let mut concord_t = make_fighter_type(
+        10_035,
+        182,
+        11,
+        1_000.0,
+        vec![(attr_ids::SIGNATURE_RADIUS, 25.0)],
+    );
+    concord_t.radius = 38.0;
+    sde.types.insert(10_035, concord_t);
+    ctx.sde = std::sync::Arc::new(sde);
+
+    let civ_laser_id = 832_001_i64;
+    let concord_oob_id = 932_001_i64;
+    let concord_hit_id = 932_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items
+            .entry(ship_id)
+            .and_modify(|it| it.type_id = 11_567)
+            .or_insert_with(|| {
+                make_fighter_item(ship_id, 11_567, char_id, sys_id as i64, InventoryFlag::None, 1)
+            });
+        snap.items.insert(
+            civ_laser_id,
+            make_fighter_item(civ_laser_id, 3_634, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let now_unix = ctx.now_unix();
+    let _ = ctx.db.acquire_online_lock(
+        session.user_id.unwrap_or(1),
+        999_247,
+        Some(char_id),
+        true,
+        now_unix,
+    );
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Red);
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: 11_567,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 60.0,
+                inertia: 1.0,
+                mass: 2_400_000_000.0,
+                radius: 6_800.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 100_000.0,
+                max_shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                max_armor_hp: 100_000.0,
+                structure_hp: 100_000.0,
+                max_structure_hp: 100_000.0,
+                capacitor: 10_000.0,
+                max_capacitor: 10_000.0,
+                signature_radius: 16_000.0,
+                ..CombatState::default()
+            },
+            eve_destiny::SlimItemMeta {
+                group_id: 30,
+                category_id: 6,
+                owner_id: char_id,
+                char_id: Some(char_id),
+                corp_id: 98_000_001,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    for (tid, pos) in [
+        (concord_oob_id, DVec3::new(13_300.0, 0.0, 0.0)), // surface = 6,450m > 6,300m
+        (concord_hit_id, DVec3::new(6_855.5, 0.0, 0.0)),  // surface = 5.5m (center = 6,855.5m)
+    ] {
+        sys_handle
+            .spawn_ball_with_meta(
+                Ball {
+                    id: tid,
+                    type_id: 10_035,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 2_500.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    shield_hp: 500.0,
+                    max_shield_hp: 500.0,
+                    armor_hp: 550.0,
+                    max_armor_hp: 550.0,
+                    structure_hp: 500.0,
+                    max_structure_hp: 500.0,
+                    signature_radius: 25.0,
+                    shield_recharge_time_ms: 0.0,
+                    capacitor_recharge_time_ms: 0.0,
+                    ..CombatState::default()
+                },
+                eve_destiny::SlimItemMeta {
+                    group_id: 182,
+                    category_id: 11,
+                    owner_id: 1_000_125,
+                    char_id: None,
+                    corp_id: 1_000_125,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        sys_handle
+            .add_target_lock(
+                ship_id,
+                TargetLock {
+                    target_id: tid,
+                    lock_time_ms: 0.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: Some(100_000.0),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    // 1. Out-of-range beyond surface cutoff 6300m rejects with TargetOutOfRange.
+    let oob_err = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(civ_laser_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(concord_oob_id),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(oob_err.code, "TargetOutOfRange");
+
+    // 2. Non-Upwell CONCORD NPC at 5.5m surface distance on 6800m Titan must hit cleanly.
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let shot = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(civ_laser_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(concord_hit_id),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("shot against CONCORD at 5.5m surface distance must succeed");
+
+    let hit_chance = shot.dict_get("hitChance").and_then(|v| v.as_f64()).unwrap();
+    let applied_dmg = shot.dict_get("appliedDamage").and_then(|v| v.as_f64()).unwrap();
+    assert!(hit_chance > 0.99, "surface distance 5.5m within 3300m optimal must have full hit chance (got {hit_chance})");
+    assert!(applied_dmg > 0.0, "expected positive damage against CONCORD (got {applied_dmg})");
+
+    let hit_cs = sys_handle.get_combat_state(concord_hit_id).await.unwrap().unwrap();
+    assert!(
+        hit_cs.shield_hp < 500.0,
+        "CONCORD target shield must drop after Civilian Pulse Laser hit (shield={})",
+        hit_cs.shield_hp
+    );
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnDamageMessage"),
+        "expected OnDamageMessage notification on handle_weapons hit"
+    );
+    assert!(
+        notifs.iter().any(|n| n.event == "OnDamageMessages"),
+        "expected OnDamageMessages notification on handle_weapons hit"
+    );
+}
+

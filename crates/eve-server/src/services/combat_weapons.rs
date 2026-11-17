@@ -795,11 +795,8 @@ pub async fn handle_weapons(
             let falloff_range = (if falloff_v > 0.0 { falloff_v } else {
                 mod_type.default_attributes.get(&158).copied().unwrap_or(5_000.0)
             }) * dark_mult;
-            let dist = if is_upwell_target {
-                (attacker_ball.position.distance(target_ball.position) - target_ball.radius - attacker_ball.radius).max(0.0)
-            } else {
-                attacker_ball.position.distance(target_ball.position)
-            };
+            // Why: EVE turret range and falloff are always measured surface-to-surface across all target types, not only Upwell structures (#1247).
+            let dist = attacker_ball.surface_distance(&target_ball);
 
             if !is_missile_launcher && dist > optimal_range + 3.0 * falloff_range {
                 return Some(Err(BridgeRpcError::target_out_of_range(

@@ -737,7 +737,8 @@ async fn activate_single_fighter_ability(
                         cap_need_per_cycle: 0.0,
                         repeat: 1_000,
                         warp_scramble_points: scram_pts,
-                        max_effective_range_m: Some(max_range + fighter_ball.radius + target_ball.radius),
+                        // Why: `cycles_tackle::reconcile_tackle_and_bubbles` now compares `Ball::surface_distance`.
+                        max_effective_range_m: Some(max_range),
                         ..Default::default()
                     })
                     .await;

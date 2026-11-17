@@ -1667,22 +1667,19 @@ pub(crate) async fn handle_module_cycles(
             } else {
                 0
             };
-            let mut missile_launch_range_comp_m = 0.0_f64;
             if is_guided_missile {
                 if let Some(tid) = target_id_opt {
                     if let (Ok(Some((_, atk_ball))), Ok(Some((_, tgt_ball)))) = (
                         sys.get_ball_snapshot(ship_id).await,
                         sys.get_ball_snapshot(tid).await,
                     ) {
-                        missile_launch_range_comp_m =
-                            atk_ball.radius.max(0.0) + tgt_ball.radius.max(0.0);
-                        let center_dist = atk_ball.position.distance(tgt_ball.position);
-                        let max_launch_range = weapon_optimal_m + missile_launch_range_comp_m;
-                        if weapon_optimal_m > 0.0 && center_dist > max_launch_range + 1e-6 {
+                        // Why: Both launch-time validation and `cycles.rs` compare `Ball::surface_distance` (#1004, #1247).
+                        let surface_dist = atk_ball.surface_distance(&tgt_ball);
+                        if weapon_optimal_m > 0.0 && surface_dist > weapon_optimal_m + 1e-6 {
                             return Some(Err(BridgeRpcError::target_too_far(
                                 resolve_target_display_name(ctx, tid),
                                 mod_type.type_id as i64,
-                                center_dist,
+                                surface_dist,
                             )));
                         }
                     }
@@ -1846,7 +1843,7 @@ pub(crate) async fn handle_module_cycles(
                         falloff *= dark_mult;
                     }
                     let eff = if is_guided_missile && weapon_optimal_m > 0.0 {
-                        weapon_optimal_m + missile_launch_range_comp_m
+                        weapon_optimal_m
                     } else if opt_range > 0.0 {
                         opt_range + 3.0 * falloff.max(0.0)
                     } else if is_missile_group && weapon_optimal_m > 0.0 {

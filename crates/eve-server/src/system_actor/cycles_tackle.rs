@@ -441,7 +441,8 @@ pub(crate) fn reconcile_tackle_and_bubbles(
                 ballpark.balls.get(&active_module_cycles[idx].ship_id),
                 active_module_cycles[idx].max_effective_range_m,
             ),
-            (Some(tb), Some(sb), Some(max_r)) if (sb.position - tb.position).length() > max_r
+            // Why: EVE module ranges are surface-to-surface; using center-to-center distance breaks large hulls like Titans (#1247).
+            (Some(tb), Some(sb), Some(max_r)) if sb.surface_distance(tb) > max_r
         );
         if out_of_range {
             let shut_down = active_module_cycles.remove(idx);

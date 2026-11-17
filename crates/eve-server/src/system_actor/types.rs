@@ -251,6 +251,14 @@ pub enum PendingCycleAction {
         applied_dmg: f64,
         notified: bool,
     },
+    CycleWeaponMiss {
+        attacker_char_id: Option<CharacterId>,
+        attacker_ship_id: BallId,
+        target_id: BallId,
+        target_char_id: Option<CharacterId>,
+        module_type_id: u32,
+        notified: bool,
+    },
     CycleChargeItemMutations {
         char_id: CharacterId,
         ship_id: BallId,

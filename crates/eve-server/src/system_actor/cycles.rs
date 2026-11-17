@@ -243,6 +243,55 @@ pub(crate) fn compute_missile_effective_damage(
     base_damage.scaled(factor)
 }
 
+fn resolve_cycle_combat_char_ids(
+    ballpark: &Ballpark,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    ship_id: BallId,
+    owner_char_id: Option<CharacterId>,
+    target_id: BallId,
+) -> (Option<CharacterId>, Option<CharacterId>) {
+    let attacker_char_id = owner_char_id
+        .or_else(|| {
+            ballpark
+                .ball_slim_meta
+                .get(&ship_id)
+                .and_then(|m| m.char_id.or(Some(m.owner_id)))
+        })
+        .or_else(|| {
+            db_opt.as_ref().and_then(|db| {
+                db.with_snapshot(|s| {
+                    s.characters
+                        .values()
+                        .find(|c| c.active_ship_id == ship_id)
+                        .map(|c| c.character_id)
+                        .or_else(|| s.items.get(&ship_id).map(|it| it.owner_id))
+                })
+            })
+        });
+    let target_char_id = ballpark
+        .ball_slim_meta
+        .get(&target_id)
+        .and_then(|m| m.char_id)
+        .or_else(|| {
+            db_opt.as_ref().and_then(|db| {
+                db.with_snapshot(|s| {
+                    s.characters
+                        .values()
+                        .find(|c| c.active_ship_id == target_id)
+                        .map(|c| c.character_id)
+                        .or_else(|| {
+                            s.items
+                                .get(&target_id)
+                                .map(|it| it.owner_id)
+                                .filter(|oid| s.characters.contains_key(oid))
+                        })
+                })
+            })
+        })
+        .filter(|&cid| cid > 0 && Some(cid) != attacker_char_id);
+    (attacker_char_id, target_char_id)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_resolved_weapon_damage(
     ship_id: BallId,
@@ -259,6 +308,21 @@ pub(crate) fn apply_resolved_weapon_damage(
     pending_destroyed_outbox: Option<&PendingDestroyedOutbox>,
 ) {
     if effective_damage.total() <= 0.0 {
+        // Why: Turret/weapon shots that miss still emit combat-log miss messages (#1247).
+        if ballpark.balls.contains_key(&target_id) {
+            let (attacker_char_id, target_char_id) =
+                resolve_cycle_combat_char_ids(ballpark, db_opt, ship_id, owner_char_id, target_id);
+            if attacker_char_id.is_some_and(|c| c > 0) || target_char_id.is_some_and(|c| c > 0) {
+                pending_cycle_actions.push(super::PendingCycleAction::CycleWeaponMiss {
+                    attacker_char_id,
+                    attacker_ship_id: ship_id,
+                    target_id,
+                    target_char_id,
+                    module_type_id,
+                    notified: false,
+                });
+            }
+        }
         return;
     }
     let now_unix = db_opt.as_ref().map_or(0, |db| db.clock().now_unix_secs());
@@ -279,45 +343,8 @@ pub(crate) fn apply_resolved_weapon_damage(
     entry[2] += effective_damage.kinetic;
     entry[3] += effective_damage.explosive;
     if let Some((applied_dmg, is_destroyed, _)) = dmg_res {
-        let attacker_char_id = owner_char_id
-            .or_else(|| {
-                ballpark
-                    .ball_slim_meta
-                    .get(&ship_id)
-                    .and_then(|m| m.char_id.or(Some(m.owner_id)))
-            })
-            .or_else(|| {
-                db_opt.as_ref().and_then(|db| {
-                    db.with_snapshot(|s| {
-                        s.characters
-                            .values()
-                            .find(|c| c.active_ship_id == ship_id)
-                            .map(|c| c.character_id)
-                            .or_else(|| s.items.get(&ship_id).map(|it| it.owner_id))
-                    })
-                })
-            });
-        let target_char_id = ballpark
-            .ball_slim_meta
-            .get(&target_id)
-            .and_then(|m| m.char_id)
-            .or_else(|| {
-                db_opt.as_ref().and_then(|db| {
-                    db.with_snapshot(|s| {
-                        s.characters
-                            .values()
-                            .find(|c| c.active_ship_id == target_id)
-                            .map(|c| c.character_id)
-                            .or_else(|| {
-                                s.items
-                                    .get(&target_id)
-                                    .map(|it| it.owner_id)
-                                    .filter(|oid| s.characters.contains_key(oid))
-                            })
-                    })
-                })
-            })
-            .filter(|&cid| cid > 0 && Some(cid) != attacker_char_id);
+        let (attacker_char_id, target_char_id) =
+            resolve_cycle_combat_char_ids(ballpark, db_opt, ship_id, owner_char_id, target_id);
         let attacker_ship_type_id = ballpark
             .balls
             .get(&ship_id)
@@ -368,7 +395,8 @@ pub(crate) fn apply_weapon_cycle_damage(
             ballpark.balls.get(&cycle.ship_id),
             ballpark.balls.get(&target_id),
         ) {
-            let dist = sb.position.distance(tb.position);
+            // Why: EVE turret optimal/falloff are surface-to-surface; center-to-center fails on large ships like Titans (#1247).
+            let dist = sb.surface_distance(tb);
             let angular_vel = eve_destiny::combat::compute_angular_velocity(
                 sb.position,
                 sb.velocity,
@@ -425,7 +453,11 @@ pub(crate) fn apply_weapon_cycle_damage(
                 .get(&cycle.ship_id)
                 .is_some_and(|sb| {
                     cycle.weapon_optimal_m > 0.0
-                        && sb.position.distance(tb.position) > cycle.weapon_optimal_m
+                        && if cycle.weapon_is_guided_missile {
+                            sb.surface_distance(tb) > cycle.weapon_optimal_m
+                        } else {
+                            sb.position.distance(tb.position) > cycle.weapon_optimal_m
+                        }
                 });
             if out_of_range {
                 eve_destiny::DamageVector::default()
@@ -778,7 +810,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                     .get(&target_id)
                     .is_some_and(|cs| cs.structure_hp <= 0.0 || cs.is_cloaked);
             let out_of_range = !cycle.weapon_is_guided_missile
-                && matches!((source_ball, target_ball, cycle.max_effective_range_m), (Some(sb), Some(tb), Some(max_r)) if (sb.position - tb.position).length() > max_r);
+                && matches!((source_ball, target_ball, cycle.max_effective_range_m), (Some(sb), Some(tb), Some(max_r)) if sb.surface_distance(tb) > max_r);
             if target_ball.is_none() || target_warping || target_dead_or_cloaked || out_of_range {
                 finished_indices.push(idx);
                 continue;
@@ -844,7 +876,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                     cycle.target_id.and_then(|tid| ballpark.balls.get(&tid)),
                     cycle.max_effective_range_m,
                 ),
-                (Some(sb), Some(tb), Some(max_r)) if (sb.position - tb.position).length() > max_r
+                (Some(sb), Some(tb), Some(max_r)) if sb.surface_distance(tb) > max_r
             );
             if out_of_range_now {
                 finished_indices.push(idx);
@@ -1225,7 +1257,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                         cycle.target_id.and_then(|tid| ballpark.balls.get(&tid)),
                         cycle.max_effective_range_m,
                     ),
-                    (Some(sb), Some(tb), Some(max_r)) if (sb.position - tb.position).length() > max_r
+                    (Some(sb), Some(tb), Some(max_r)) if sb.surface_distance(tb) > max_r
                 );
             let mut cycle_item_diffs: Vec<(
                 Option<eve_db::InventoryItemRecord>,
@@ -3172,6 +3204,124 @@ pub(crate) fn flush_pending_cycle_damage_notifications_with_ballpark(
     flush_pending_cycle_damage_notifications(db_opt, pending_opt, notify_tx_opt, pending_cycle_actions);
 }
 
+/// Builds the shared V24 `OnDamageMessage` / `OnDamageMessages` payload dictionary.
+pub(crate) fn build_cycle_damage_message_dict(
+    damage: f64,
+    attacker_ship_id: BallId,
+    target_id: BallId,
+    owner_cid: CharacterId,
+    module_type_id: u32,
+    hit_quality: i64,
+    attack_type: &str,
+) -> eve_proto::PyRep {
+    eve_proto::PyRep::Dict(vec![
+        (
+            eve_proto::PyRep::String("damage".into()),
+            eve_proto::PyRep::Real(damage),
+        ),
+        (
+            eve_proto::PyRep::String("source".into()),
+            eve_proto::PyRep::Integer(attacker_ship_id),
+        ),
+        (
+            eve_proto::PyRep::String("attackerID".into()),
+            eve_proto::PyRep::Integer(attacker_ship_id),
+        ),
+        (
+            eve_proto::PyRep::String("target".into()),
+            eve_proto::PyRep::Integer(target_id),
+        ),
+        (
+            eve_proto::PyRep::String("target_ID".into()),
+            eve_proto::PyRep::Integer(target_id),
+        ),
+        (
+            eve_proto::PyRep::String("owner".into()),
+            eve_proto::PyRep::Tuple(vec![
+                eve_proto::PyRep::Integer(2),
+                eve_proto::PyRep::Integer(owner_cid),
+            ]),
+        ),
+        (
+            eve_proto::PyRep::String("weapon".into()),
+            eve_proto::PyRep::Integer(i64::from(module_type_id)),
+        ),
+        (
+            eve_proto::PyRep::String("hitQuality".into()),
+            eve_proto::PyRep::Integer(hit_quality),
+        ),
+        (
+            eve_proto::PyRep::String("attackType".into()),
+            eve_proto::PyRep::String(attack_type.into()),
+        ),
+        (
+            eve_proto::PyRep::String("isWrecking".into()),
+            eve_proto::PyRep::Bool(false),
+        ),
+        (
+            eve_proto::PyRep::String("isBanked".into()),
+            eve_proto::PyRep::Bool(false),
+        ),
+    ])
+}
+
+fn enqueue_cycle_weapon_log_pair(
+    enqueue_notif: &impl Fn(i64, &str, Vec<eve_proto::PyRep>),
+    recipient_cid: CharacterId,
+    msg_key: &str,
+    dict: eve_proto::PyRep,
+) {
+    let msg_tuple = vec![eve_proto::PyRep::String(msg_key.into()), dict.clone()];
+    enqueue_notif(recipient_cid, "OnDamageMessage", vec![dict]);
+    enqueue_notif(
+        recipient_cid,
+        "OnDamageMessages",
+        vec![eve_proto::PyRep::List(vec![eve_proto::PyRep::Tuple(
+            msg_tuple,
+        )])],
+    );
+}
+
+fn flush_cycle_weapon_log_entries(
+    enqueue_notif: &impl Fn(i64, &str, Vec<eve_proto::PyRep>),
+    attacker_char_id: Option<CharacterId>,
+    attacker_ship_id: BallId,
+    target_id: BallId,
+    target_char_id: Option<CharacterId>,
+    module_type_id: u32,
+    hit_damage: Option<f64>,
+) {
+    let (damage, hit_quality, attacker_msg_key, victim_msg_key) = match hit_damage {
+        Some(dmg) => (dmg, 3, "AttackHit", "AttackedBy"),
+        None => (0.0, 0, "AttackMiss", "AttackMissBy"),
+    };
+    let owner_cid = attacker_char_id.unwrap_or(0);
+    if let Some(acid) = attacker_char_id.filter(|&c| c > 0) {
+        let dmg_dict = build_cycle_damage_message_dict(
+            damage,
+            attacker_ship_id,
+            target_id,
+            acid,
+            module_type_id,
+            hit_quality,
+            "me",
+        );
+        enqueue_cycle_weapon_log_pair(enqueue_notif, acid, attacker_msg_key, dmg_dict);
+    }
+    if let Some(vcid) = target_char_id.filter(|&c| c > 0 && c != owner_cid) {
+        let vic_dict = build_cycle_damage_message_dict(
+            damage,
+            attacker_ship_id,
+            target_id,
+            owner_cid,
+            module_type_id,
+            hit_quality,
+            "other",
+        );
+        enqueue_cycle_weapon_log_pair(enqueue_notif, vcid, victim_msg_key, vic_dict);
+    }
+}
+
 pub(crate) fn flush_pending_cycle_damage_notifications(
     db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
     pending_opt: Option<
@@ -3303,133 +3453,39 @@ pub(crate) fn flush_pending_cycle_damage_notifications(
                 continue;
             }
             *notified = true;
-            let owner_cid = attacker_char_id.unwrap_or(0);
-            if let Some(acid) = attacker_char_id.filter(|&c| c > 0) {
-                let dmg_dict = eve_proto::PyRep::Dict(vec![
-                    (
-                        eve_proto::PyRep::String("damage".into()),
-                        eve_proto::PyRep::Real(*applied_dmg),
-                    ),
-                    (
-                        eve_proto::PyRep::String("source".into()),
-                        eve_proto::PyRep::Integer(*attacker_ship_id),
-                    ),
-                    (
-                        eve_proto::PyRep::String("attackerID".into()),
-                        eve_proto::PyRep::Integer(*attacker_ship_id),
-                    ),
-                    (
-                        eve_proto::PyRep::String("target".into()),
-                        eve_proto::PyRep::Integer(*target_id),
-                    ),
-                    (
-                        eve_proto::PyRep::String("target_ID".into()),
-                        eve_proto::PyRep::Integer(*target_id),
-                    ),
-                    (
-                        eve_proto::PyRep::String("owner".into()),
-                        eve_proto::PyRep::Tuple(vec![
-                            eve_proto::PyRep::Integer(2),
-                            eve_proto::PyRep::Integer(acid),
-                        ]),
-                    ),
-                    (
-                        eve_proto::PyRep::String("weapon".into()),
-                        eve_proto::PyRep::Integer(*module_type_id as i64),
-                    ),
-                    (
-                        eve_proto::PyRep::String("hitQuality".into()),
-                        eve_proto::PyRep::Integer(3),
-                    ),
-                    (
-                        eve_proto::PyRep::String("attackType".into()),
-                        eve_proto::PyRep::String("me".into()),
-                    ),
-                    (
-                        eve_proto::PyRep::String("isWrecking".into()),
-                        eve_proto::PyRep::Bool(false),
-                    ),
-                    (
-                        eve_proto::PyRep::String("isBanked".into()),
-                        eve_proto::PyRep::Bool(false),
-                    ),
-                ]);
-                let msg_tuple = vec![
-                    eve_proto::PyRep::String("AttackHit".into()),
-                    dmg_dict.clone(),
-                ];
-                enqueue_notif(acid, "OnDamageMessage", vec![dmg_dict]);
-                enqueue_notif(
-                    acid,
-                    "OnDamageMessages",
-                    vec![eve_proto::PyRep::List(vec![eve_proto::PyRep::Tuple(
-                        msg_tuple,
-                    )])],
-                );
+            flush_cycle_weapon_log_entries(
+                &enqueue_notif,
+                *attacker_char_id,
+                *attacker_ship_id,
+                *target_id,
+                *target_char_id,
+                *module_type_id,
+                Some(*applied_dmg),
+            );
+            continue;
+        }
+        if let super::PendingCycleAction::CycleWeaponMiss {
+            attacker_char_id,
+            attacker_ship_id,
+            target_id,
+            target_char_id,
+            module_type_id,
+            notified,
+        } = action
+        {
+            if *notified {
+                continue;
             }
-            if let Some(vcid) = target_char_id.filter(|&c| c > 0 && c != owner_cid) {
-                let vic_dict = eve_proto::PyRep::Dict(vec![
-                    (
-                        eve_proto::PyRep::String("damage".into()),
-                        eve_proto::PyRep::Real(*applied_dmg),
-                    ),
-                    (
-                        eve_proto::PyRep::String("source".into()),
-                        eve_proto::PyRep::Integer(*attacker_ship_id),
-                    ),
-                    (
-                        eve_proto::PyRep::String("attackerID".into()),
-                        eve_proto::PyRep::Integer(*attacker_ship_id),
-                    ),
-                    (
-                        eve_proto::PyRep::String("target".into()),
-                        eve_proto::PyRep::Integer(*target_id),
-                    ),
-                    (
-                        eve_proto::PyRep::String("target_ID".into()),
-                        eve_proto::PyRep::Integer(*target_id),
-                    ),
-                    (
-                        eve_proto::PyRep::String("owner".into()),
-                        eve_proto::PyRep::Tuple(vec![
-                            eve_proto::PyRep::Integer(2),
-                            eve_proto::PyRep::Integer(owner_cid),
-                        ]),
-                    ),
-                    (
-                        eve_proto::PyRep::String("weapon".into()),
-                        eve_proto::PyRep::Integer(*module_type_id as i64),
-                    ),
-                    (
-                        eve_proto::PyRep::String("hitQuality".into()),
-                        eve_proto::PyRep::Integer(3),
-                    ),
-                    (
-                        eve_proto::PyRep::String("attackType".into()),
-                        eve_proto::PyRep::String("other".into()),
-                    ),
-                    (
-                        eve_proto::PyRep::String("isWrecking".into()),
-                        eve_proto::PyRep::Bool(false),
-                    ),
-                    (
-                        eve_proto::PyRep::String("isBanked".into()),
-                        eve_proto::PyRep::Bool(false),
-                    ),
-                ]);
-                let vic_tuple = vec![
-                    eve_proto::PyRep::String("AttackedBy".into()),
-                    vic_dict.clone(),
-                ];
-                enqueue_notif(vcid, "OnDamageMessage", vec![vic_dict]);
-                enqueue_notif(
-                    vcid,
-                    "OnDamageMessages",
-                    vec![eve_proto::PyRep::List(vec![eve_proto::PyRep::Tuple(
-                        vic_tuple,
-                    )])],
-                );
-            }
+            *notified = true;
+            flush_cycle_weapon_log_entries(
+                &enqueue_notif,
+                *attacker_char_id,
+                *attacker_ship_id,
+                *target_id,
+                *target_char_id,
+                *module_type_id,
+                None,
+            );
         }
     }
 }
