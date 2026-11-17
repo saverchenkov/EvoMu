@@ -733,6 +733,19 @@ async fn create_recruitment_ad_rejects_insufficient_isk_and_emits_account_change
             })
         }));
     });
+    // Canonical 1-arg V24 GetRecruiters(adID) returns [char_id, 90_000_002], and 2-arg remains compatible.
+    assert_eq!(
+        call_gov(
+            &ctx,
+            &mut ceo,
+            "corpRecProxy",
+            "GetRecruiters",
+            vec![PyRep::Integer(ad_v24_id)],
+        )
+        .await
+        .unwrap(),
+        PyRep::List(vec![PyRep::Integer(char_id), PyRep::Integer(90_000_002)])
+    );
     assert_eq!(
         call_gov(
             &ctx,
@@ -746,7 +759,9 @@ async fn create_recruitment_ad_rejects_insufficient_isk_and_emits_account_change
         PyRep::List(vec![PyRep::Integer(char_id), PyRep::Integer(90_000_002)])
     );
 
-    // Canonical V24 8-arg UpdateRecruitmentAd(adID, typeMask, langMask, description, recruiters, title, addedDays, hourMask1)
+    // 4. Canonical V24 8-arg UpdateRecruitmentAd(adID, typeMask, langMask, description, recruiters, title, addedDays, hourMask1):
+    // extending with addedDays > 0 debits active corp wallet division (750k -> 500k), writes journal, emits OnAccountChange,
+    // and caps expiry_unix at now_unix + 28 * 86_400.
     let upd_v24 = call_gov(
         &ctx,
         &mut ceo,
@@ -759,14 +774,28 @@ async fn create_recruitment_ad_rejects_insufficient_isk_and_emits_account_change
             PyRep::String("Updated V24 Desc".into()),
             PyRep::List(vec![PyRep::Integer(90_000_002)]),
             PyRep::String("Updated V24 Title".into()),
-            PyRep::Integer(7),
+            PyRep::Integer(14),
             PyRep::Integer(0),
         ],
     )
     .await
     .unwrap();
     assert_eq!(kv(&upd_v24, "title").as_str(), Some("Updated V24 Title"));
+    let n_ext = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(
+        n_ext
+            .iter()
+            .filter(|n| n.event == "OnAccountChange")
+            .map(|n| n.args.clone())
+            .collect::<Vec<_>>(),
+        vec![vec![
+            PyRep::String("cash2".into()),
+            PyRep::Integer(corp_id),
+            PyRep::Real(500_000.0),
+        ]]
+    );
     ctx.db.with_snapshot(|s| {
+        assert_eq!(s.corporations[&corp_id].division_balance(2), IskCents::from_isk(500_000));
         let stored = s
             .fleet_and_social_ops
             .corp_recruitment_ads
@@ -776,8 +805,156 @@ async fn create_recruitment_ad_rejects_insufficient_isk_and_emits_account_change
         assert_eq!(stored.title, "Updated V24 Title");
         assert_eq!(stored.lang_mask, 16);
         assert_eq!(stored.days, 28);
+        assert_eq!(stored.expiry_unix, 1_700_000_000 + 28 * 86_400);
         assert_eq!(stored.recruiter_id, 90_000_002);
+        let ext_journals = s.corp_wallet_journals.get(&(corp_id, 2)).unwrap();
+        assert_eq!(
+            ext_journals
+                .iter()
+                .filter(|r| r.ref_type == "corp_recruitment_ad_fee")
+                .count(),
+            2
+        );
     });
+
+    // 5. Reject addedDays extension when active division lacks ISK, without mutating ad.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .set_division_balance(2, IskCents::from_isk(100_000));
+    });
+    let err_ext_isk = call_gov(
+        &ctx,
+        &mut ceo,
+        "corpRecProxy",
+        "UpdateRecruitmentAd",
+        vec![
+            PyRep::Integer(ad_v24_id),
+            PyRep::Integer(8),
+            PyRep::Integer(16),
+            PyRep::String("Should not apply".into()),
+            PyRep::List(vec![PyRep::Integer(char_id)]),
+            PyRep::String("Unfunded Ext".into()),
+            PyRep::Integer(7),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_ext_isk.code, "NotEnoughISK");
+    ctx.db.with_snapshot(|s| {
+        let stored = s
+            .fleet_and_social_ops
+            .corp_recruitment_ads
+            .iter()
+            .find(|a| a.ad_id == ad_v24_id)
+            .unwrap();
+        assert_eq!(stored.title, "Updated V24 Title");
+    });
+
+    // 6. Reject non-member recruiter IDs and oversized title/description bounds, allow clearing langMask to 0,
+    // and preserve explicit empty recruiters = [].
+    let err_non_member = call_gov(
+        &ctx,
+        &mut ceo,
+        "corpRecProxy",
+        "UpdateRecruitmentAd",
+        vec![
+            PyRep::Integer(ad_v24_id),
+            PyRep::Integer(8),
+            PyRep::Integer(0),
+            PyRep::String("Bad recruiter".into()),
+            PyRep::List(vec![PyRep::Integer(90_099_999)]),
+            PyRep::String("Reject NonMember".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_non_member.code, "InvalidArgument");
+    let err_non_member_create = call_gov(
+        &ctx,
+        &mut ceo,
+        "corpRecProxy",
+        "CreateRecruitmentAd",
+        vec![
+            PyRep::Integer(7),
+            PyRep::Integer(1),
+            PyRep::Integer(0),
+            PyRep::String("Desc".into()),
+            PyRep::List(vec![PyRep::Integer(90_099_999)]),
+            PyRep::String("Bad Recruiter Create".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_non_member_create.code, "InvalidArgument");
+
+    let err_long_title = call_gov(
+        &ctx,
+        &mut ceo,
+        "corpRecProxy",
+        "UpdateRecruitmentAd",
+        vec![
+            PyRep::Integer(ad_v24_id),
+            PyRep::Integer(8),
+            PyRep::Integer(0),
+            PyRep::String("Desc".into()),
+            PyRep::List(vec![]),
+            PyRep::String("T".repeat(129)),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_long_title.code, "InvalidArgument");
+
+    call_gov(
+        &ctx,
+        &mut ceo,
+        "corpRecProxy",
+        "UpdateRecruitmentAd",
+        vec![
+            PyRep::Integer(ad_v24_id),
+            PyRep::Integer(8),
+            PyRep::Integer(0),
+            PyRep::String("Cleared Lang & Recruiters".into()),
+            PyRep::List(vec![]),
+            PyRep::String("Empty Recruiters".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap();
+    ctx.db.with_snapshot(|s| {
+        let stored = s
+            .fleet_and_social_ops
+            .corp_recruitment_ads
+            .iter()
+            .find(|a| a.ad_id == ad_v24_id)
+            .unwrap();
+        assert_eq!(stored.lang_mask, 0);
+        assert_eq!(stored.recruiter_id, 0);
+    });
+    assert_eq!(
+        call_gov(
+            &ctx,
+            &mut ceo,
+            "corpRecProxy",
+            "GetRecruiters",
+            vec![PyRep::Integer(ad_v24_id)],
+        )
+        .await
+        .unwrap(),
+        PyRep::List(vec![])
+    );
     ceo.corp_account_key = 1000;
 }
 
@@ -886,6 +1063,123 @@ async fn add_corporation_v24_15_args_persists_typeface_friendly_fire_and_lp_tax_
     assert_eq!(kv(&fetched, "loyaltyPointTaxRate").as_f64(), Some(0.22));
     assert_eq!(kv(&fetched, "friendlyFire").as_bool(), Some(true));
     assert_eq!(kv(&fetched, "typeface").as_str(), Some("Futura"));
+
+    // V24 15-arg AddCorporation with args[2] = PyRep::None must STILL parse args[3..=14] and enforce string bounds.
+    let f2_id = 90_000_910_i64;
+    let f2_uid = f2_id as u64;
+    let mut founder2 = founder.clone();
+    founder2.session_id = 910;
+    founder2.character_id = Some(f2_id);
+    founder2.user_id = Some(f2_uid);
+    founder2.corporation_id = Some(1_000_170);
+    founder2.corp_role = 0;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = clone_char_with(snap, f2_id, "Founder910", 1_000_170, 30_000_142, 55_777_910);
+        ch.user_id = f2_uid;
+        ch.station_id = Some(station_id);
+        ch.balance = IskCents::from_isk(5_000_000);
+        snap.characters.insert(f2_id, ch);
+        snap.skills.entry(f2_id).or_default().insert(
+            3363,
+            TrainedSkillRecord {
+                type_id: 3363,
+                skill_points: 100_000.0,
+                level: 2,
+            },
+        );
+        let uname = format!("u{f2_uid}");
+        snap.accounts.insert(
+            uname.clone(),
+            eve_db::AccountRecord {
+                user_id: f2_uid,
+                username: uname,
+                password_token: String::new(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+    });
+    ctx.db
+        .acquire_online_lock(f2_uid, founder2.session_id, Some(f2_id), true, 1_700_000_000)
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(f2_id);
+
+    let err_over_name = call_gov(
+        &ctx,
+        &mut founder2,
+        "corpRegistry",
+        "AddCorporation",
+        vec![PyRep::String("N".repeat(101)), PyRep::String("OVRN".into())],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_over_name.code, "InvalidArgument");
+
+    let err_over_tf = call_gov(
+        &ctx,
+        &mut founder2,
+        "corpRegistry",
+        "AddCorporation",
+        vec![
+            PyRep::String("Bound TF Corp".into()),
+            PyRep::String("BTFC".into()),
+            PyRep::None,
+            PyRep::String("https://ok.example".into()),
+            PyRep::Real(0.10),
+            PyRep::Integer(415),
+            PyRep::Integer(416),
+            PyRep::Integer(417),
+            PyRep::Integer(671),
+            PyRep::Integer(672),
+            PyRep::Integer(673),
+            PyRep::String("F".repeat(65)),
+            PyRep::Bool(true),
+            PyRep::Bool(false),
+            PyRep::Real(0.10),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_over_tf.code, "InvalidArgument");
+
+    let created_none_desc = call_gov(
+        &ctx,
+        &mut founder2,
+        "corpRegistry",
+        "AddCorporation",
+        vec![
+            PyRep::String("None Desc Co".into()),
+            PyRep::String("NDCO".into()),
+            PyRep::None,
+            PyRep::String("https://none-desc.example".into()),
+            PyRep::Real(0.12),
+            PyRep::Integer(415),
+            PyRep::Integer(416),
+            PyRep::Integer(417),
+            PyRep::Integer(671),
+            PyRep::Integer(672),
+            PyRep::Integer(673),
+            PyRep::String("Arial".into()),
+            PyRep::Bool(false),
+            PyRep::Bool(true),
+            PyRep::Real(0.18),
+        ],
+    )
+    .await
+    .unwrap();
+    let none_desc_cid = kv(&created_none_desc, "corporationID").as_i64().unwrap();
+    let fetched2 = call_gov(&ctx, &mut founder2, "corpRegistry", "GetCorporation", vec![])
+        .await
+        .unwrap();
+    assert_eq!(kv(&fetched2, "corporationID").as_i64(), Some(none_desc_cid));
+    assert_eq!(kv(&fetched2, "description").as_str(), Some(""));
+    assert_eq!(kv(&fetched2, "url").as_str(), Some("https://none-desc.example"));
+    assert_eq!(kv(&fetched2, "iskTaxRate").as_f64(), Some(0.12));
+    assert_eq!(kv(&fetched2, "loyaltyPointTaxRate").as_f64(), Some(0.18));
+    assert_eq!(kv(&fetched2, "friendlyFire").as_bool(), Some(true));
+    assert_eq!(kv(&fetched2, "applicationsEnabled").as_bool(), Some(false));
+    assert_eq!(kv(&fetched2, "typeface").as_str(), Some("Arial"));
 }
 
 #[tokio::test]

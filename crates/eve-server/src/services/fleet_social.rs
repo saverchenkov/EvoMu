@@ -197,6 +197,14 @@ pub(super) fn parse_dest_id(args: &[PyRep], kwargs: &HashMap<String, PyRep>) -> 
         .or_else(|| kwargs.get("destinationID").and_then(|a| a.as_i64()))
 }
 
+pub(super) fn active_corp_wallet_div(session: &SessionState) -> (i32, u8) {
+    if (1000..=1006).contains(&session.corp_account_key) {
+        (session.corp_account_key, (session.corp_account_key - 999) as u8)
+    } else {
+        (1000, 1)
+    }
+}
+
 fn office_rental_quote_in_snap(snap: &eve_db::WorldStateSnapshot, station_id: i64, occupied: usize) -> f64 {
     let base = snap
         .station_office_rental_costs
@@ -303,8 +311,10 @@ fn handle_office_manager(
             }
 
             let now_unix = ctx.now_unix();
+            let (account_key, wallet_div) = active_corp_wallet_div(session);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let exists = if station_id >= 1_000_000_000_000 {
+                let is_upwell_structure = station_id >= 1_000_000_000_000;
+                let exists = if is_upwell_structure {
                     snap.structures.contains_key(&station_id)
                 } else {
                     station_id > 0 && ctx.sde.stations.contains_key(&station_id)
@@ -364,12 +374,15 @@ fn handle_office_manager(
                 }
                 let quote = office_rental_quote_in_snap(snap, station_id, occupied);
                 let fee = eve_db::IskCents::from_f64_isk(quote);
+                let structure_owner_id = is_upwell_structure
+                    .then(|| snap.structures.get(&station_id).map(|s| s.owner_corp_id))
+                    .flatten();
                 let creditor_id = ctx
                     .sde
                     .stations
                     .get(&station_id)
                     .map(|s| s.owner_corporation_id)
-                    .or_else(|| snap.structures.get(&station_id).map(|s| s.owner_corp_id))
+                    .or(structure_owner_id)
                     .unwrap_or(1_000_035);
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
                     return Err(BridgeRpcError {
@@ -378,14 +391,14 @@ fn handle_office_manager(
                         client_error: None,
                     });
                 };
-                if corp.debit_division(1, fee).is_none() {
+                if corp.debit_division(wallet_div, fee).is_none() {
                     return Err(BridgeRpcError {
                         code: "NotEnoughISK".into(),
-                        message: "Not enough ISK in corporation master wallet to rent office".into(),
+                        message: "Not enough ISK in active corporation wallet division to rent office".into(),
                         client_error: None,
                     });
                 }
-                let corp_bal_after = corp.division_balance(1);
+                let mut corp_bal_after = corp.division_balance(wallet_div);
                 snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
                     owner_id: corp_id,
                     entry_type: "office_rental_fee",
@@ -393,8 +406,29 @@ fn handle_office_manager(
                     balance_after: corp_bal_after,
                     reason: format!("Corporation office rental fee at station {station_id}"),
                     meta: eve_db::ledger::JournalMeta::new(13, char_id, creditor_id, now_unix)
-                        .with_account_key(1000),
+                        .with_account_key(account_key),
                 });
+                let mut owner_credit: Option<(i64, eve_db::IskCents)> = None;
+                if let Some(owner_corp_id) = structure_owner_id.filter(|_| fee.0 > 0) {
+                    if let Some(owner_corp) = snap.corporations.get_mut(&owner_corp_id) {
+                        owner_corp.credit_division(1, fee);
+                        let cred_bal_after = owner_corp.division_balance(1);
+                        snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
+                            owner_id: owner_corp_id,
+                            entry_type: "office_rental_fee",
+                            amount: fee,
+                            balance_after: cred_bal_after,
+                            reason: format!("Office rental revenue at structure {station_id}"),
+                            meta: eve_db::ledger::JournalMeta::new(13, char_id, corp_id, now_unix)
+                                .with_account_key(1000),
+                        });
+                        if owner_corp_id == corp_id && wallet_div == 1 {
+                            corp_bal_after = cred_bal_after;
+                        } else {
+                            owner_credit = Some((owner_corp_id, cred_bal_after));
+                        }
+                    }
+                }
 
                 let office_id = snap.items.keys().max().copied().unwrap_or(920_000_000).max(920_000_000) + 1;
                 let office_item = eve_db::InventoryItemRecord {
@@ -410,14 +444,17 @@ fn handle_office_manager(
                 };
                 snap.items.insert(office_id, office_item.clone());
                 snap.corp_governance.entry(corp_id).or_default().offices.insert(station_id, office_id);
-                Ok((office_id, station_id, creditor_id, quote, corp_bal_after, office_item))
+                Ok((office_id, station_id, creditor_id, quote, corp_bal_after, owner_credit, office_item))
             });
 
             match res {
-                Ok((office_id, st_id, creditor_id, quote, corp_bal_after, office_item)) => {
+                Ok((office_id, st_id, creditor_id, quote, corp_bal_after, owner_credit, office_item)) => {
                     let due_unix = now_unix.saturating_add(30 * 86_400);
                     let _ = super::wallet_serverops::create_bill(ctx, 2, corp_id, creditor_id, quote, due_unix, 0.0, st_id, 27);
-                    ctx.notify_wallet_balance(true, corp_id, 1, corp_bal_after);
+                    ctx.notify_wallet_balance(true, corp_id, wallet_div, corp_bal_after);
+                    if let Some((owner_corp_id, cred_bal_after)) = owner_credit {
+                        ctx.notify_wallet_balance(true, owner_corp_id, 1, cred_bal_after);
+                    }
                     ctx.emit_item_change_with_target(
                         NotificationTarget::Corporation(corp_id),
                         "corpid",
