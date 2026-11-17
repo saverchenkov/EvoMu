@@ -60,7 +60,7 @@ fn populate_persisted_space_objects_restores_structures_bubbles_wrecks_and_disco
         .map(|t| t.type_id)
         .unwrap_or(22_782);
 
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
             structure_id,
             UpwellStructureRecord {
@@ -118,8 +118,7 @@ fn populate_persisted_space_objects_restores_structures_bubbles_wrecks_and_disco
             snap.item_positions.insert(iid, [1_000.0, 2_000.0, 3_000.0]);
         }
 
-        // Write into st directly (since with_mut_sp6_state overwrites snap.sp6_lifecycle with st)
-        let _ = snap;
+        let st = snap.sp6_lifecycle.as_inner_mut();
         st.space_object_meta.entry(fresh_wreck).or_default().created_unix = Some(now.saturating_sub(100));
         st.space_object_meta.entry(expired_wreck).or_default().created_unix = Some(now.saturating_sub(8_000));
         st.space_object_meta.entry(fresh_jetcan).or_default().created_unix = Some(now.saturating_sub(100));
@@ -298,7 +297,7 @@ async fn on_advance_secs_safe_logoff_disconnect_warp_self_destruct_and_abyssal_c
     // 90_000_002 has an active weapons timer -> safe logoff aborts; 90_000_001 completes safe logoff
     super::super::record_npc_aggression_timer(&ctx, 90_000_002, base_now);
 
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs.insert(
             90_000_001,
             SafeLogoffEntry {
@@ -389,7 +388,7 @@ async fn on_advance_secs_safe_logoff_disconnect_warp_self_destruct_and_abyssal_c
             c.active_ship_id = ab_ship;
         }
     });
-    with_mut_sp6_state(&ctx.db, |st, _| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.abyssal_sessions.insert(
             90_000_001,
             AbyssalPersistedSession {
@@ -416,7 +415,7 @@ async fn restarted_structures_belt_asteroids_wrecks_drones_and_specialized_npcs_
     // 1. Populated SDE asteroid belts + persisted Upwell structure are `MovementMode::Rigid` static balls,
     //    keeping `has_dynamic_balls() == false` so empty systems hibernate at LOD 0.
     let structure_id = 1_070_000_001;
-    with_mut_sp6_state(&ctx.db, |_, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
             structure_id,
             UpwellStructureRecord {
@@ -464,7 +463,7 @@ async fn restarted_structures_belt_asteroids_wrecks_drones_and_specialized_npcs_
     let wreck_id = 1_070_000_010;
     let jetcan_id = 1_070_000_011;
     let drone_id = 1_070_000_012;
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
         for (iid, tid) in [(wreck_id, 26_557), (jetcan_id, 23), (drone_id, 2_454)] {
             snap.items.insert(
                 iid,
@@ -486,8 +485,8 @@ async fn restarted_structures_belt_asteroids_wrecks_drones_and_specialized_npcs_
             );
             snap.item_positions.insert(iid, [2_000.0, 0.0, 0.0]);
         }
-        st.space_object_meta.entry(wreck_id).or_default().created_unix = Some(now);
-        st.space_object_meta.entry(jetcan_id).or_default().created_unix = Some(now);
+        snap.sp6_lifecycle.space_object_meta.entry(wreck_id).or_default().created_unix = Some(now);
+        snap.sp6_lifecycle.space_object_meta.entry(jetcan_id).or_default().created_unix = Some(now);
     });
     let _ = populate_persisted_space_objects(&mut hib_bp, perim_sys, &ctx.sde, &ctx.db);
     assert!(!hib_bp.is_ball_free(wreck_id));
@@ -1357,7 +1356,7 @@ async fn sp6_lifecycle_hp_persistence_unification_filament_gates_logoff_and_reco
 
     // 4. `maybe_abort_safe_logoff_on_action`, `handle_character_logoff_or_disconnect`, `reconnect_character_in_space_sync`
     assert!(!maybe_abort_safe_logoff_on_action(&ctx, char_id, "ModuleActivated"));
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs.insert(
             char_id,
             SafeLogoffEntry {
@@ -1371,7 +1370,7 @@ async fn sp6_lifecycle_hp_persistence_unification_filament_gates_logoff_and_reco
         );
     });
     assert!(!maybe_abort_safe_logoff_on_action(&ctx, char_id, "ModuleActivated"));
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs.insert(
             char_id,
             SafeLogoffEntry {
@@ -1394,7 +1393,7 @@ async fn sp6_lifecycle_hp_persistence_unification_filament_gates_logoff_and_reco
     assert_eq!(disc.ship_id, ship_id);
 
     // Move live ship >10km from pre_warp_position and test reconnect initiates return warp
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         if let Some(d) = st.disconnected_ships.get_mut(&char_id) {
             d.pre_warp_position = Some([0.0, 0.0, 0.0]);
         }

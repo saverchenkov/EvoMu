@@ -68,7 +68,8 @@ async fn downtime_purges_npc_wreck_children_container_lifetimes_and_preserves_pl
         );
     }
 
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.sp6_lifecycle.as_inner_mut();
         snap.active_missions.clear();
         // 1. NPC wreck + child loot inside it (both removed)
         snap.items.insert(
@@ -275,7 +276,7 @@ async fn downtime_purges_npc_wreck_children_container_lifetimes_and_preserves_pl
     });
 
     // Now test spawn_mission_wave_on_pocket_entry_if_needed with empty wave_types Vec -> default_npc_tid
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.mission_initial_npc_types
             .insert(format!("{char_id}:801"), Vec::new());
     });

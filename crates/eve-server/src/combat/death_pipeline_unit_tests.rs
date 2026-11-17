@@ -243,7 +243,7 @@ async fn death_pipeline_rigs_orphans_nested_courier_disconnected_and_lowsec_pod_
     spawn_ship(&ctx, sys_id, ship_id, victim, 587, DVec3::ZERO, 0.0);
 
     // Track ship in sp6 disconnected_ships to verify capsule replacement on ship loss
-    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
+    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
         st.disconnected_ships.insert(
             victim,
             DisconnectedShipEntry {
@@ -328,7 +328,7 @@ async fn death_pipeline_rigs_orphans_nested_courier_disconnected_and_lowsec_pod_
     );
 
     let ejected_pod = res.ejected_capsule_id.expect("capsule ejected");
-    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
+    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
         assert_eq!(st.disconnected_ships[&victim].ship_id, ejected_pod);
         assert_eq!(st.disconnected_ships[&victim].ship_type_id, 670);
     });
@@ -358,7 +358,7 @@ async fn death_pipeline_rigs_orphans_nested_courier_disconnected_and_lowsec_pod_
     assert!(ctx
         .db
         .with_snapshot(|s| s.kill_rights.values().all(|kr| !(kr.owner_id == victim && kr.target_id == attacker))));
-    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
+    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
         assert!(!st.disconnected_ships.contains_key(&victim));
     });
 }

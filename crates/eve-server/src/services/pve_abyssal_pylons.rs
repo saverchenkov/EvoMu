@@ -910,7 +910,7 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
             let mut final_cleanup: Option<(SolarSystemId, Vec<i64>, Vec<i64>)> = None;
             if let Some(db) = db_opt {
                 let now_u = db.clock().now_unix_secs();
-                crate::sp6_lifecycle::with_mut_sp6_state(db, |st, snap| {
+                db.with_mut_snapshot(|snap| {
                     let cid = snap
                         .items
                         .get(&bid)
@@ -927,7 +927,7 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
                     snap.items.remove(&bid);
                     snap.item_positions.remove(&bid);
                     if cid > 0 {
-                        st.abyssal_sessions.remove(&cid);
+                        snap.sp6_lifecycle.abyssal_sessions.remove(&cid);
                         let mut caches_to_purge: Vec<i64> = Vec::new();
                         let p_info = snap.abyssal_state.pockets.get_mut(&cid).map(|p| {
                             p.collapsed_destroyed = true;
@@ -1039,7 +1039,7 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
         }
         let (cap_id, owner_cid) = if let Some(db) = db_opt {
             let now_u = db.clock().now_unix_secs();
-            crate::sp6_lifecycle::with_mut_sp6_state(db, |st, snap| {
+            db.with_mut_snapshot(|snap| {
                 let cid = snap
                     .items
                     .get(&bid)
@@ -1059,7 +1059,7 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
                 snap.items.remove(&bid);
                 snap.item_positions.remove(&bid);
                 snap.module_online_states.remove(&bid);
-                st.ship_combat_hp.remove(&bid);
+                snap.sp6_lifecycle.ship_combat_hp.remove(&bid);
                 snap.items.retain(|_, it| it.location_id != bid);
                 snap.next_entity_id += 1;
                 let cap_id = snap.next_entity_id;
@@ -1258,7 +1258,7 @@ pub(crate) fn on_abyssal_boundary_death_hook(
         return;
     }
     let mut final_cleanup: Option<(SolarSystemId, Vec<i64>, Vec<i64>)> = None;
-    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
         let carried_tick = snap.abyssal_state.boundary_ticks.remove(&-destroyed_ship_id);
         if let (Some(t_count), Some(cap_id)) = (carried_tick, ejected_capsule_id) {
             snap.abyssal_state.boundary_ticks.insert(cap_id, t_count);
@@ -1287,7 +1287,7 @@ pub(crate) fn on_abyssal_boundary_death_hook(
                 other.ship_room.insert(cap_id, rnum);
             }
         } else {
-            st.abyssal_sessions.remove(&victim_char_id);
+            snap.sp6_lifecycle.abyssal_sessions.remove(&victim_char_id);
             let p_info = snap.abyssal_state.pockets.get_mut(&victim_char_id).map(|p| {
                 p.collapsed_destroyed = true;
                 p.completed = true;

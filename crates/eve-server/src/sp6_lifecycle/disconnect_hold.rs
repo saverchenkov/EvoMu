@@ -113,7 +113,7 @@ pub(super) fn collect_expired_disconnected_ships_filtered(
         return Vec::new();
     }
     let mut expired = Vec::new();
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         for (cid, eff_remove) in updates {
             if let Some(d) = st.disconnected_ships.get_mut(&cid) {
                 d.remove_at_unix = d.remove_at_unix.max(eff_remove);

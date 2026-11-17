@@ -1178,7 +1178,7 @@ async fn test_inv3_dna_fitting_string_encoder_decoder() {
     assert_eq!(over_limit_err.unwrap_err().code, "OwnerMaxFittings");
 
     // Verify SQLite persistence across reload
-    let reloaded_db = eve_db::WorldRepository::new_empty_with_snapshot_path(Some(db_path.clone()))
+    let reloaded_db = eve_db::WorldRepository::open_sqlite(&db_path)
         .expect("reopen SQLite");
     reloaded_db.with_snapshot(|snap| {
         let updated = snap.saved_fittings.get(&fid1).expect("fid1 persisted in SQLite");
@@ -1186,5 +1186,8 @@ async fn test_inv3_dna_fitting_string_encoder_decoder() {
         assert_eq!(updated.description, "Updated description");
         assert_eq!(updated.items.len(), 3);
     });
+    drop(reloaded_db);
     let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(db_path.with_extension("sqlite-shm"));
 }

@@ -233,7 +233,7 @@ async fn deep_aggression_timers_and_filament_preconditions() {
     let now_unix = ctx.now_unix();
 
     // Put disconnected ship for victim and verify PvP renews its removal timer while NPC does not
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs.insert(
             attacker,
             SafeLogoffEntry {
@@ -288,7 +288,7 @@ async fn deep_aggression_timers_and_filament_preconditions() {
         let mut cw = ctx.crimewatch.write().unwrap();
         cw.states.clear();
     }
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.pvp_timers_until.clear();
         st.criminal_timers_until.clear();
         st.weapon_timers_until.insert(attacker, now_unix + 30);
@@ -300,7 +300,7 @@ async fn deep_aggression_timers_and_filament_preconditions() {
         "WeaponsTimerActive"
     );
 
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.weapon_timers_until.clear();
         st.safe_logoffs.insert(
             attacker,
@@ -888,7 +888,7 @@ async fn filament_jump_locks_and_reconnect_in_space_sync_pre_warp_and_distance()
     );
 
     let insert_disc = |last: DVec3, pre_warp: Option<DVec3>| {
-        with_mut_sp6_state(&ctx.db, |st, _snap| {
+        with_mut_sp6_state(&ctx.db, |st| {
             st.disconnected_ships.insert(
                 char_id,
                 DisconnectedShipEntry {
@@ -1090,7 +1090,7 @@ async fn filament_gates_safe_logoff_conditions_abandon_all_and_reconnect_edges()
     assert!(err_map.iter().any(|(k, _)| k == &PyRep::String("InsufficientBandwidth".into())));
 
     // 4. reconnect_character_in_space when ship is already in ballpark far from pre_warp_position -> initiates return warp
-    with_mut_sp6_state(&ctx.db, |st, _| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.disconnected_ships.insert(
             char_id,
             DisconnectedShipEntry {

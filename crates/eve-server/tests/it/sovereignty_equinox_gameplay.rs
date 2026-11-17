@@ -224,7 +224,7 @@ pub(crate) fn preseed_fast_account(
 }
 
 pub(crate) fn open_mem_ctx() -> ServerContext {
-    let repo = eve_db::WorldRepository::new_empty_with_snapshot_path(None)
+    let repo = eve_db::WorldRepository::new_in_memory()
         .expect("in-memory WorldRepository");
     repo.with_mut_snapshot(|snap| apply_open_defaults(snap, true));
     let ctx = ServerContext::with_sde_and_repository(cached_sde(), std::sync::Arc::new(repo))
@@ -234,7 +234,7 @@ pub(crate) fn open_mem_ctx() -> ServerContext {
 }
 
 pub(crate) fn fast_demo_ctx() -> ServerContext {
-    let repo = eve_db::WorldRepository::new_empty_with_snapshot_path(None)
+    let repo = eve_db::WorldRepository::new_in_memory()
         .expect("in-memory WorldRepository");
     repo.with_mut_snapshot(|snap| *snap = full_demo_template().clone());
     ServerContext::with_sde_and_repository(cached_sde(), std::sync::Arc::new(repo))

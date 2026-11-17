@@ -48,8 +48,10 @@ async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
     let tmp_roles_db =
         std::env::temp_dir().join(format!("evomu_roles_test_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&tmp_roles_db);
+    let _ = std::fs::remove_file(tmp_roles_db.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(tmp_roles_db.with_extension("sqlite-shm"));
     {
-        let db = eve_db::WorldRepository::new_empty_with_snapshot_path(Some(tmp_roles_db.clone()))
+        let db = eve_db::WorldRepository::open_sqlite(&tmp_roles_db)
             .expect("create SQLite world db for role persistence");
         let pilot_uid = db.provision_player_account("pilot_persisted", "pilot-secret-123");
         db.create_character(
@@ -75,7 +77,7 @@ async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
     }
 
     let reopened_db = Arc::new(
-        eve_db::WorldRepository::new_empty_with_snapshot_path(Some(tmp_roles_db.clone()))
+        eve_db::WorldRepository::open_sqlite(&tmp_roles_db)
             .expect("reopen SQLite world db for role persistence"),
     );
     let ctx = Arc::new(ServerContext::with_repository(reopened_db));
@@ -405,7 +407,7 @@ async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
     );
     assert!(role_cmd_rsp.dict_get("sessionChange").is_some());
 
-    let reopened = eve_db::WorldRepository::new_empty_with_snapshot_path(Some(tmp_roles_db.clone()))
+    let reopened = eve_db::WorldRepository::open_sqlite(&tmp_roles_db)
         .expect("reopen SQLite");
     let updated_acc = reopened
         .with_snapshot(|snap| snap.accounts.get("pilot_persisted").cloned())
@@ -416,7 +418,11 @@ async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
         "Account role updated via /role must persist across SQLite reopen"
     );
 
+    drop(reopened);
+    drop(ctx);
     let _ = std::fs::remove_file(&tmp_roles_db);
+    let _ = std::fs::remove_file(tmp_roles_db.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(tmp_roles_db.with_extension("sqlite-shm"));
 }
 
 async fn connect_loopback_with_retry(addr: std::net::SocketAddr) -> TcpStream {

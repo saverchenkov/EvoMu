@@ -37,7 +37,8 @@ fn populate_persisted_space_objects_materializes_and_prunes_expired_entities() {
         .map(|t| t.type_id)
         .unwrap_or(12198);
 
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.sp6_lifecycle.as_inner_mut();
         snap.structures.insert(
             st_active_id,
             UpwellStructureRecord {
@@ -265,7 +266,8 @@ async fn on_advance_secs_collapse_abyssal_and_tick_background_cluster() {
     let sys_id = 30_000_142;
 
     // 1. Safe logoff completion and Zarzakh gate lock expiry via on_advance_secs
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.sp6_lifecycle.as_inner_mut();
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.station_id = None;
             ch.solar_system_id = sys_id;
@@ -295,7 +297,7 @@ async fn on_advance_secs_collapse_abyssal_and_tick_background_cluster() {
     assert!(lock_cleared);
 
     // 2. collapse_stranded_abyssal_if_needed_sync on Void Space session
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.abyssal_sessions.insert(
             char_id,
             AbyssalPersistedSession {
@@ -316,7 +318,8 @@ async fn on_advance_secs_collapse_abyssal_and_tick_background_cluster() {
 
     // 3. Self-destruct execution on due entry
     let target_ship_id = 830_001;
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.sp6_lifecycle.as_inner_mut();
         snap.items.insert(
             target_ship_id,
             InventoryItemRecord {
@@ -643,14 +646,16 @@ async fn sov_claimed_without_sov_hubs_entry_stays_idle_clean_and_advances_indice
 #[tokio::test]
 async fn idle_1hz_cluster_ticks_do_not_append_wal_snapshots() {
     let dir = std::env::temp_dir();
-    let snap_path = dir.join(format!("evomu_idle_cluster_tick_{}.json", std::process::id()));
-    let wal_path = snap_path.with_extension("json.wal");
-    let _ = std::fs::remove_file(&snap_path);
-    let _ = std::fs::remove_file(&wal_path);
+    let db_path = dir.join(format!("evomu_idle_cluster_tick_{}.sqlite", std::process::id()));
+    let db_wal = std::path::PathBuf::from(format!("{}-wal", db_path.display()));
+    let db_shm = std::path::PathBuf::from(format!("{}-shm", db_path.display()));
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(&db_wal);
+    let _ = std::fs::remove_file(&db_shm);
 
     let repo = Arc::new(
-        eve_db::WorldRepository::new_empty_with_snapshot_path(Some(snap_path.clone()))
-            .expect("init json repo"),
+        eve_db::WorldRepository::open_sqlite(&db_path)
+            .expect("init sqlite repo"),
     );
     let ctx = ServerContext::with_repository(repo);
     let base_unix = 1_770_000_000_u64;
@@ -776,30 +781,31 @@ async fn idle_1hz_cluster_ticks_do_not_append_wal_snapshots() {
         );
     });
 
-    // Run 1 initial cold-boot tick to initialize once-per-boot / once-per-day fields, then checkpoint.
+    // Run 1 initial cold-boot tick to initialize once-per-boot / once-per-day fields before measuring idle ticks.
     tick_background_cluster(&ctx).await;
-    ctx.db.save_snapshot_to_file(&snap_path).expect("checkpoint after cold-boot tick");
-    assert!(!wal_path.exists());
 
+    let commits_after_warmup = ctx.db.tx_commit_count();
     let seq_after_warmup = ctx.db.with_snapshot(|s| s.wal_seq);
     let epoch_after_warmup = ctx.db.state_epoch();
 
-    // Advance 10 consecutive 1 Hz ticks: zero `.json.wal` writes, zero `wal_seq` bumps, zero `state_epoch` bumps.
+    // Advance 10 consecutive 1 Hz ticks: zero SQLite tx commits, zero `wal_seq` bumps, zero `state_epoch` bumps.
     for _ in 0..10 {
         ctx.clock().advance_secs(1);
         tick_background_cluster(&ctx).await;
     }
 
-    assert!(
-        !wal_path.exists(),
-        "idle 1 Hz cluster ticks must not append full-snapshot or no-op records to .json.wal"
+    assert_eq!(
+        ctx.db.tx_commit_count(),
+        commits_after_warmup,
+        "idle 1 Hz cluster ticks must not commit empty or no-op SQLite transactions"
     );
     assert_eq!(ctx.db.with_snapshot(|s| s.wal_seq), seq_after_warmup);
     assert_eq!(ctx.db.state_epoch(), epoch_after_warmup);
 
     drop(ctx);
-    let _ = std::fs::remove_file(&snap_path);
-    let _ = std::fs::remove_file(&wal_path);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(&db_wal);
+    let _ = std::fs::remove_file(&db_shm);
 }
 
 #[tokio::test]
@@ -1042,7 +1048,7 @@ async fn engine_supervision_catch_unwind_system_actor_recovery_and_backlog_cap_8
     let _disc_handle = dedicated_ctx.systems.get_or_spawn(disc_sys);
     let sim_before = dedicated_ctx.systems.get_system_sim_elapsed(disc_sys);
     let now_unix = dedicated_ctx.now_unix();
-    with_mut_sp6_state(&dedicated_ctx.db, |st, _snap| {
+    with_mut_sp6_state(&dedicated_ctx.db, |st| {
         st.disconnected_ships.insert(
             90_000_001,
             DisconnectedShipEntry {
@@ -1486,7 +1492,7 @@ async fn system_step_hook_and_npc_death_hook_use_live_server_context_839() {
         .write()
         .unwrap()
         .insert(probe_id, probe.clone());
-    with_mut_sp6_state(&ctx.db, |st, _| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.active_scanner_probes.insert(probe_id, probe);
     });
 

@@ -470,7 +470,7 @@ async fn hazard_collapse_timer_ship_death_capsule_ejection_and_end_gate_edge_cas
         st.pvp_timer_until_unix = 20_000;
         st.weapon_timer_until_unix = 20_000;
     }
-    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
+    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
         st.pvp_timers_until.insert(c1, 20_000);
         st.weapon_timers_until.insert(c1, 20_000);
     });

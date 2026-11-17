@@ -1021,24 +1021,25 @@ async fn dispatch_box_fut_station_peer_notify_seq_filter_market_cache_and_wal_pr
                 || type_name == "objectCaching.CachedMethodCallResult"
     ));
 
-    // 4. WAL failure drops post-pre_seq notifications and retains <= pre_seq notifications (L213)
+    // 4. SQLite commit failure drops post-pre_seq notifications and retains <= pre_seq notifications (L213)
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let wal_tmp = std::env::temp_dir().join(format!(
-        "evomu_dispatch_wal_deep_{}_{}.json",
+    let wal_db = std::env::temp_dir().join(format!(
+        "evomu_dispatch_wal_deep_{}_{}.sqlite",
         std::process::id(),
         nanos
     ));
-    let wal_dir = wal_tmp.with_extension("json.wal");
-    let _ = std::fs::remove_file(&wal_tmp);
-    let _ = std::fs::remove_dir_all(&wal_dir);
-    let wal_repo = WorldRepository::new_empty_with_snapshot_path(Some(wal_tmp.clone()))
-        .expect("wal repo");
-    std::fs::write(&wal_tmp, b"{}").expect("seed wal json");
+    let wal_db_wal = std::path::PathBuf::from(format!("{}-wal", wal_db.display()));
+    let wal_db_shm = std::path::PathBuf::from(format!("{}-shm", wal_db.display()));
+    let _ = std::fs::remove_file(&wal_db);
+    let _ = std::fs::remove_file(&wal_db_wal);
+    let _ = std::fs::remove_file(&wal_db_shm);
+    let wal_repo = WorldRepository::open_sqlite(&wal_db).expect("sqlite repo");
     let wal_ctx = ServerContext::with_sde_and_repository(Arc::clone(&ctx.sde), Arc::new(wal_repo));
     let ch_seed = ctx.db.get_character(char_a).unwrap();
+    let initial_bal = ch_seed.balance;
     let wal_uid = ch_seed.user_id;
     let wal_acct = ctx.db.with_snapshot(|s| s.accounts.values().find(|a| a.user_id == wal_uid).cloned());
     wal_ctx.db.with_mut_snapshot(|snap| {
@@ -1058,8 +1059,9 @@ async fn dispatch_box_fut_station_peer_notify_seq_filter_market_cache_and_wal_pr
         "charid",
         vec![],
     );
-    let _ = std::fs::remove_file(&wal_dir);
-    std::fs::create_dir_all(&wal_dir).expect("block wal path");
+    wal_ctx
+        .db
+        .set_fault_plan_for_test(eve_db::TxFaultPlan::FailAtCommit);
     let wal_err = wal_ctx
         .dispatch_rpc(
             &mut wal_sess,
@@ -1072,13 +1074,20 @@ async fn dispatch_box_fut_station_peer_notify_seq_filter_market_cache_and_wal_pr
         )
         .await
         .unwrap_err();
-    let _ = std::fs::remove_dir_all(&wal_dir);
-    let _ = std::fs::remove_file(&wal_tmp);
     assert_eq!(wal_err.code, "PersistenceFailure");
+    assert_eq!(
+        wal_ctx.db.with_snapshot(|s| s.characters[&char_a].balance),
+        initial_bal
+    );
     let retained = wal_ctx.pending_notifications.read().unwrap();
     let evs: Vec<&str> = retained
         .get(&char_a)
         .map(|v| v.iter().map(|n| n.event.as_str()).collect())
         .unwrap_or_default();
     assert_eq!(evs, vec!["PreWalRetained"]);
+    drop(retained);
+    drop(wal_ctx);
+    let _ = std::fs::remove_file(&wal_db);
+    let _ = std::fs::remove_file(&wal_db_wal);
+    let _ = std::fs::remove_file(&wal_db_shm);
 }

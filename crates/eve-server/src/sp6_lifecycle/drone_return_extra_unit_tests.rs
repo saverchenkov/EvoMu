@@ -625,11 +625,11 @@ async fn sp6_lifecycle_wave2_mutant_killers_hp_sync_clear_filament_and_reconnect
 
     // `require_ship_ready_for_filament_jump`: Weapons timer, warp-in-progress, scrambled, active cloaking/module
     spawn_ball(&ctx, sys_id, ship_id, 587, DVec3::new(100_000.0, 0.0, 0.0));
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.weapon_timers_until.insert(char_id, now + 60);
     });
     assert!(require_ship_ready_for_filament_jump(&ctx, char_id, ship_id, sys_id).is_err());
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.weapon_timers_until.remove(&char_id);
     });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -648,7 +648,7 @@ async fn sp6_lifecycle_wave2_mutant_killers_hp_sync_clear_filament_and_reconnect
     // (2) pre_warp_position eligible restores pre-warp when disconnected ship still in warp;
     // (3) docked character returns None & cleans stale disconnected_ships (`L1178-1180`)
     sys_handle.try_remove_ball(ship_id);
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.disconnected_ships.insert(
             char_id,
             DisconnectedShipEntry {
@@ -677,7 +677,7 @@ async fn sp6_lifecycle_wave2_mutant_killers_hp_sync_clear_filament_and_reconnect
             ch.station_id = Some(60_003_760);
         }
     });
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.disconnected_ships.insert(
             char_id,
             DisconnectedShipEntry {
@@ -879,7 +879,7 @@ async fn cluster_tick_downtime_probes_bounties_and_cluster_tick_sweeps() {
     assert_eq!(flushed, 1);
 
     // `clear_safe_logoff` & `disconnect_safe_logoff_sessions`
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs.insert(
             char_id,
             SafeLogoffEntry {

@@ -262,7 +262,7 @@ async fn downtime_recover_probes_bounties_safe_logoff_and_courier_mission() {
             ref_id: 1,
         },
     );
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs.insert(
             char_id,
             SafeLogoffEntry {

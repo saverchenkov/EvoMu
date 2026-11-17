@@ -44,23 +44,20 @@ pub(crate) fn persist_and_reopen_sqlite(ctx: &ServerContext, tag: &str) -> Serve
     static NEXT_PERSIST_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let pid = std::process::id();
     let seq = NEXT_PERSIST_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let json_path = std::env::temp_dir().join(format!("evomu_{tag}_{pid}_{seq}.json"));
     let sqlite_path = std::env::temp_dir().join(format!("evomu_{tag}_{pid}_{seq}.sqlite"));
-    let _ = std::fs::remove_file(&json_path);
+    let sqlite_wal = std::path::PathBuf::from(format!("{}-wal", sqlite_path.display()));
+    let sqlite_shm = std::path::PathBuf::from(format!("{}-shm", sqlite_path.display()));
     let _ = std::fs::remove_file(&sqlite_path);
+    let _ = std::fs::remove_file(&sqlite_wal);
+    let _ = std::fs::remove_file(&sqlite_shm);
 
     ctx.db
-        .save_snapshot_to_file(&json_path)
-        .expect("save_snapshot_to_file");
-    {
-        let writer = WorldRepository::open_sqlite(&sqlite_path).expect("open_sqlite writer");
-        writer
-            .load_snapshot_from_file(&json_path)
-            .expect("load_snapshot_from_file into sqlite");
-    }
+        .save_to_sqlite(&sqlite_path)
+        .expect("save_to_sqlite");
     let reopened = Arc::new(WorldRepository::open_sqlite(&sqlite_path).expect("reopen sqlite"));
-    let _ = std::fs::remove_file(&json_path);
     let _ = std::fs::remove_file(&sqlite_path);
+    let _ = std::fs::remove_file(&sqlite_wal);
+    let _ = std::fs::remove_file(&sqlite_shm);
     ServerContext::with_repository(reopened)
 }
 

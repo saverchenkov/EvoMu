@@ -76,7 +76,7 @@ async fn cluster_advance_handles_safe_logoff_abort_scrambled_warp_bounty_concord
         st.pending_concord_arrival = Some((sys_id, base_now + 5, 90_000_001, ship1));
     }
 
-    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
+    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
         st.self_destructs.insert(
             ship1,
             eve_db::SelfDestructPersistedEntry {
@@ -252,7 +252,7 @@ async fn reload_space_objects_and_advance_disconnected_warp_expiry_and_self_dest
         }
     });
 
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.ship_combat_hp.insert(disc_warping_ship, PersistedCombatHp { shield_hp: 123.0, armor_hp: 234.0, hull_hp: 345.0 });
         st.space_object_meta.insert(anchoring_mwd_id, PersistedSpaceObjectMeta {
             created_unix: Some(now), anchor_start_unix: Some(now), anchoring_delay_secs: 90.0,
@@ -284,7 +284,8 @@ async fn reload_space_objects_and_advance_disconnected_warp_expiry_and_self_dest
     assert_eq!(cs.armor_hp, 234.0);
 
     let _sys = ctx.systems.get_or_spawn(sys_id);
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.sp6_lifecycle.as_inner_mut();
         snap.items.insert(
             disc_expired_ship,
             InventoryItemRecord {
@@ -450,7 +451,7 @@ async fn cluster_advance_aborts_blocked_logoff_prunes_docked_disc_and_reload_ski
             },
         );
     });
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.space_object_meta.insert(
             expired_wreck_id,
             PersistedSpaceObjectMeta {

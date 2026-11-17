@@ -2202,7 +2202,7 @@ pub(crate) fn sync_scanner_probes_to_db(ctx: &ServerContext) {
         }
     });
     if probes_differ {
-        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
+        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
             if let Ok(map) = ctx.active_scanner_probes.read() {
                 st.active_scanner_probes = map
                     .iter()

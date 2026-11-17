@@ -444,7 +444,7 @@ fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
     let mut ejected_pods: Vec<(i64, i64, i64)> = Vec::new();
     let mut concluded_matches: Vec<(i64, Vec<i64>)> = Vec::new();
 
-    crate::sp6_lifecycle::with_mut_sp6_state(db, |_sp6, snap| {
+    db.with_mut_snapshot(|snap| {
         let mut store = load_pvp_store(snap);
         if store.active_matches.is_empty() {
             return;
@@ -1193,7 +1193,7 @@ pub async fn handle_pvp_end_gate_activation(
             st.weapon_timer_until_unix = 0;
         }
     }
-    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
+    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
         st.pvp_timers_until.remove(&char_id);
         st.weapon_timers_until.remove(&char_id);
     });

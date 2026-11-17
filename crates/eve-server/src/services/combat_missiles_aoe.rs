@@ -398,7 +398,7 @@ pub async fn step_missiles_and_breachers(
         out
     });
     let due_countdowns: Vec<SelfDestructCountdown> =
-        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
+        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
             for cd in &rt_self_destructs {
                 st.self_destructs
                     .entry(cd.ship_id)

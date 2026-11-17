@@ -1360,7 +1360,7 @@ impl ServerContext {
                 .any(|(id, p)| persisted.get(id) != Some(p))
         });
         if probes_differ {
-            crate::sp6_lifecycle::with_mut_sp6_state(&self.db, |st, _snap| {
+            crate::sp6_lifecycle::with_mut_sp6_state(&self.db, |st| {
                 let map = self
                     .active_scanner_probes
                     .read()

@@ -511,7 +511,7 @@ async fn npc_ai_ball_destructions_drone_disconnected_assist_and_sleeper_interval
         tmpl.active_ship_id = 999_999_001;
         snap.characters.insert(char_item_only, tmpl);
     });
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.disconnected_ships.insert(
             char_disc,
             DisconnectedShipEntry {

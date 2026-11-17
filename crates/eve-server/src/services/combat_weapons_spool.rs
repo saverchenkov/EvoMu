@@ -589,7 +589,7 @@ pub async fn handle_ship_or_npc_destruction(
         if let Some(vcid) = victim_char_opt {
             let vship_id = target_ball_id;
             crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, vcid, vship_id, sys_id);
-            crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
+            crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
                 st.disconnected_ships.remove(&vcid);
             });
             let _ = crate::services::combat_crimewatch::claim_player_bounty_on_kill(ctx, attacker_char_id, vcid, 670);
@@ -703,7 +703,7 @@ pub async fn handle_ship_or_npc_destruction(
             );
             (cid, 670)
         });
-        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
+        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
             if let Some(disc) = st.disconnected_ships.get_mut(&vcid) {
                 if disc.ship_id == vship_id {
                     disc.ship_id = cap_id;
