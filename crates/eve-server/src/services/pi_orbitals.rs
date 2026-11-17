@@ -259,25 +259,17 @@ fn parse_user_launch_commodities_args(
             })?;
             commodities.insert(tid, qty_i32);
         }
-        let explicit_dest = kwargs
+        let raw_dest = kwargs
             .get("destination")
             .and_then(PyRep::as_str)
-            .or_else(|| launch_args.get(2).and_then(PyRep::as_str))
-            .filter(|d| {
-                matches!(
-                    *d,
-                    "ImportToColony"
-                        | "Import"
-                        | "CommandCenterLaunch"
-                        | "CommandCenter"
-                        | "CustomsOffice"
-                        | "Skyhook"
-                        | "Storage"
-                        | "Hangar"
-                )
-            });
-        let destination = explicit_dest.unwrap_or("CommandCenterLaunch").to_string();
-        let is_v24_wire = !matches!(destination.as_str(), "ImportToColony" | "Import");
+            .or_else(|| launch_args.get(2).and_then(PyRep::as_str));
+        let is_import = matches!(raw_dest, Some("ImportToColony" | "Import"));
+        let destination = if is_import {
+            raw_dest.unwrap_or("ImportToColony").to_string()
+        } else {
+            "CommandCenterLaunch".to_string()
+        };
+        let is_v24_wire = !is_import;
         return Ok(ParsedLaunchRequest {
             planet_id,
             launch_pin_id: Some(pin_id),
@@ -344,6 +336,49 @@ fn parse_user_launch_commodities_args(
         destination,
         is_v24_wire: false,
     })
+}
+
+fn is_orbital_or_structure_item(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    it: &eve_db::InventoryItemRecord,
+) -> bool {
+    snap.structures.contains_key(&it.item_id)
+        || matches!(it.type_id, 2233 | 3962 | 4318 | 81080)
+        || ctx
+            .sde
+            .types
+            .get(&it.type_id)
+            .is_some_and(|t| t.category_id == 46 || matches!(t.group_id, 1025 | 1106 | 4736))
+}
+
+fn is_launch_container_type(ctx: &ServerContext, type_id: TypeId) -> bool {
+    matches!(type_id, 23 | 2263 | 72_075)
+        || ctx
+            .sde
+            .types
+            .get(&type_id)
+            .is_some_and(|t| t.category_id == 2 && matches!(t.group_id, 12 | 1975))
+}
+
+fn resolve_planetary_launch_planet(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    it: &eve_db::InventoryItemRecord,
+) -> Option<i64> {
+    if is_orbital_or_structure_item(ctx, snap, it) || !is_launch_container_type(ctx, it.type_id) {
+        return None;
+    }
+    if let Some(pid) = snap
+        .sp6_lifecycle
+        .space_object_meta
+        .get(&it.item_id)
+        .and_then(|m| m.planet_id)
+    {
+        return Some(pid);
+    }
+    (it.flag != InventoryFlag::Hangar && (40_000_000..50_000_000).contains(&it.location_id))
+        .then_some(it.location_id)
 }
 
 fn spawn_pi_launch_canister(
@@ -1019,7 +1054,7 @@ pub fn handle_pi_orbitals(
                     });
                 }
                 if !is_cc
-                    && req.destination != "Hangar"
+                    && (req.is_v24_wire || req.destination != "Hangar")
                     && (session.station_id.is_some() || session.structure_id.is_some())
                 {
                     return Err(BridgeRpcError {
@@ -1186,7 +1221,7 @@ pub fn handle_pi_orbitals(
 
             match res {
                 Ok((routed, export_tax_isk, import_tax_isk, orbital_tid, created_launch_id, col_sys_id, launch_pos)) => {
-                    if created_launch_id > 0 && req.destination != "Hangar" {
+                    if created_launch_id > 0 && (req.is_v24_wire || req.destination != "Hangar") {
                         ctx.emit_typed(
                             crate::router::NotificationTarget::Character(char_id),
                             crate::router::notify_registry::OnPILaunchesChange,
@@ -1263,9 +1298,7 @@ pub fn handle_pi_orbitals(
                             return None;
                         }
                         let meta = snap.sp6_lifecycle.space_object_meta.get(&it.item_id);
-                        let launch_planet = meta
-                            .and_then(|m| m.planet_id)
-                            .or_else(|| (40_000_000..50_000_000).contains(&it.location_id).then_some(it.location_id))?;
+                        let launch_planet = resolve_planetary_launch_planet(ctx, snap, it)?;
                         if filter_planet.is_some_and(|p| launch_planet != p) {
                             return None;
                         }
@@ -1365,19 +1398,22 @@ pub fn handle_pi_orbitals(
                         client_error: None,
                     });
                 }
-                let launch_planet_opt = snap
-                    .sp6_lifecycle
-                    .space_object_meta
-                    .get(&launch_id)
-                    .and_then(|m| m.planet_id)
-                    .or_else(|| (40_000_000..50_000_000).contains(&it.location_id).then_some(it.location_id));
-                let Some(launch_planet) = launch_planet_opt else {
+                let Some(launch_planet) = resolve_planetary_launch_planet(ctx, snap, it) else {
                     return Err(BridgeRpcError {
                         code: "InvalidLaunchID".into(),
                         message: format!("Item {launch_id} is not a planetary launch container (location_id: {})", it.location_id),
                         client_error: None,
                     });
                 };
+                if snap.is_item_or_ancestor_locked_or_impounded(launch_id)
+                    || snap.is_item_locked_in_contract_or_job(launch_id)
+                {
+                    return Err(BridgeRpcError {
+                        code: "ItemLocked".into(),
+                        message: format!("Launch container {launch_id} is locked and cannot be deleted"),
+                        client_error: None,
+                    });
+                }
                 if let Some(bp) = bound_planet {
                     if launch_planet != bp {
                         return Err(BridgeRpcError {

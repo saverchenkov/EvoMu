@@ -1491,8 +1491,8 @@ async fn test_pos_mgr_unanchor_orbital_e2e_lifecycle_and_security() {
     .expect_err("already Unanchored orbital cannot unanchor twice");
     assert_eq!(repeat_err.code, "InvalidOrbitalState");
 
-    // Skyhook (81080, 8,000 m3) unanchors cleanly into Charon cargo as well
-    let skyhook_unanchored = wire_rpc(
+    // Orbital Skyhook (81080, group 4736) is NOT handled by legacy posMgr.UnanchorOrbital
+    let skyhook_err = wire_rpc(
         &ctx,
         &mut dir_sess,
         "posMgr",
@@ -1501,9 +1501,12 @@ async fn test_pos_mgr_unanchor_orbital_e2e_lifecycle_and_security() {
         &[PyRep::Integer(skyhook_id)],
     )
     .await
-    .expect("UnanchorOrbital on Orbital Skyhook 81080");
-    assert_eq!(skyhook_unanchored.dict_get("state"), Some(&PyRep::String("Unanchored".into())));
-    assert_eq!(ctx.db.get_item(skyhook_id).unwrap().location_id, ship_id);
+    .expect_err("posMgr.UnanchorOrbital must reject group 4736 Orbital Skyhook");
+    assert_eq!(skyhook_err.code, "InvalidOrbitalType");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&skyhook_id].state, "ShieldVulnerable");
+        assert_eq!(snap.items[&skyhook_id].location_id, i64::from(RANCER_SYS));
+    });
 
     // 4. Re-anchoring unanchored gantry + OnlineOrbital upgrade to POCO (2233, 100M m3 -> NotEnoughCargoSpace)
     let anchored2 = wire_rpc(
@@ -1561,6 +1564,11 @@ async fn test_pos_mgr_unanchor_orbital_e2e_lifecycle_and_security() {
     assert_eq!(onlined.dict_get("state"), Some(&PyRep::String("ShieldVulnerable".into())));
 
     // Full Customs Office (2233) has 100,000,000 m3 SDE volume and cannot fit in Charon cargo (465,000 m3)
+    assert_eq!(
+        ctx.db.get_item(gantry2_id).unwrap().owner_id,
+        corp_id,
+        "AnchorOrbital/OnlineOrbital must assign and preserve player corp ownership on orbital item"
+    );
     let poco_cap_err = wire_rpc(
         &ctx,
         &mut dir_sess,
@@ -1572,4 +1580,134 @@ async fn test_pos_mgr_unanchor_orbital_e2e_lifecycle_and_security() {
     .await
     .expect_err("100M m3 Customs Office exceeds even Charon cargo hold");
     assert_eq!(poco_cap_err.code, "NotEnoughCargoSpace");
+
+    // Ex-member / lost-roles regression (`BF-1277-R2-01`): anchor gantry at second planet so volume fits,
+    // verify ex-director (role loss or corp departure) cannot unanchor via posMgr or delete via planetMgr,
+    // and verify POCO hangar cargo at planet_id is excluded from GetMyLaunchesDetails & DeleteLaunch.
+    let planet2 = ctx
+        .sde
+        .celestials_in_system(RANCER_SYS)
+        .into_iter()
+        .find(|c| c.group_id == 7 && c.celestial_id != planet.celestial_id)
+        .expect("second Rancer planet");
+    let near_planet2 = planet2.position + glam::DVec3::new(planet2.radius + 5_000.0, 0.0, 0.0);
+    let _ = sys_handle.try_set_ball_position(ship_id, near_planet2);
+    let gantry3_anchored = wire_rpc(
+        &ctx,
+        &mut dir_sess,
+        "posMgr",
+        bound_pos,
+        "AnchorOrbital",
+        &[PyRep::Integer(gantry_id), PyRep::Integer(planet2.celestial_id)],
+    )
+    .await
+    .expect("AnchorOrbital gantry for cross-corp security check");
+    assert_eq!(gantry3_anchored.dict_get("state"), Some(&PyRep::String("Anchored".into())));
+    assert_eq!(ctx.db.get_item(gantry_id).unwrap().owner_id, corp_id);
+
+    let poco_hangar_stack_id = 890_555_301_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            poco_hangar_stack_id,
+            InventoryItemRecord {
+                item_id: poco_hangar_stack_id,
+                type_id: 3645,
+                owner_id: PILOT1,
+                location_id: planet.celestial_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 50,
+                ..Default::default()
+            },
+        );
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.ceo_id = line_char_id;
+            c.member_roles.insert(PILOT1, 0);
+        }
+    });
+    // Stale dir_sess.corp_role = ROLE_DIRECTOR cannot bypass DB role revocation
+    let revoked_err = wire_rpc(
+        &ctx,
+        &mut dir_sess,
+        "posMgr",
+        bound_pos,
+        "UnanchorOrbital",
+        &[PyRep::Integer(gantry_id)],
+    )
+    .await
+    .expect_err("Member with revoked roles cannot unanchor corp gantry even with stale session roles");
+    assert_eq!(revoked_err.code, "RoleNotAuthorized");
+
+    // Pilot leaves Corp A (even keeping stale session.corporation_id or updating to NPC corp / rival Corp B)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT1) {
+            ch.corporation_id = other_corp_id;
+        }
+    });
+    let ex_member_stale_err = wire_rpc(
+        &ctx,
+        &mut dir_sess,
+        "posMgr",
+        bound_pos,
+        "UnanchorOrbital",
+        &[PyRep::Integer(gantry_id)],
+    )
+    .await
+    .expect_err("Ex-member with stale session corp cannot unanchor former corp orbital");
+    assert_eq!(ex_member_stale_err.code, "NotOrbitalOwner");
+
+    dir_sess.corporation_id = Some(other_corp_id);
+    let ex_member_poco_err = wire_rpc(
+        &ctx,
+        &mut dir_sess,
+        "posMgr",
+        bound_pos,
+        "UnanchorOrbital",
+        &[PyRep::Integer(gantry2_id)],
+    )
+    .await
+    .expect_err("Ex-member in rival corp cannot unanchor former corp Customs Office");
+    assert_eq!(ex_member_poco_err.code, "NotOrbitalOwner");
+
+    // Even if an orbital item carried legacy personal owner_id == PILOT1 while st.owner_corp_id == corp_id,
+    // ex-member cannot bypass corp ownership on UnanchorOrbital or delete it via planetMgr.DeleteLaunch.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&gantry_id) {
+            it.owner_id = PILOT1;
+        }
+    });
+    let legacy_owner_bypass_err = wire_rpc(
+        &ctx,
+        &mut dir_sess,
+        "posMgr",
+        bound_pos,
+        "UnanchorOrbital",
+        &[PyRep::Integer(gantry_id)],
+    )
+    .await
+    .expect_err("Legacy personal item.owner_id must not bypass st.owner_corp_id");
+    assert_eq!(legacy_owner_bypass_err.code, "NotOrbitalOwner");
+
+    let launches_rep = rpc(&ctx, &mut dir_sess, "planetMgr", "GetMyLaunchesDetails", &[])
+        .await
+        .expect("GetMyLaunchesDetails");
+    let PyRep::List(launch_items) = launches_rep else {
+        panic!("expected List from GetMyLaunchesDetails");
+    };
+    assert!(
+        launch_items.is_empty(),
+        "Anchored orbitals and POCO Hangar stacks must not appear in GetMyLaunchesDetails: {launch_items:?}"
+    );
+    for (target_id, label) in [
+        (gantry_id, "anchored gantry even with personal item owner"),
+        (poco_hangar_stack_id, "POCO hangar commodity stack"),
+    ] {
+        let del_err = rpc(&ctx, &mut dir_sess, "planetMgr", "DeleteLaunch", &[PyRep::Integer(target_id)])
+            .await
+            .expect_err(&format!("planetMgr.DeleteLaunch must reject {label}"));
+        assert_eq!(del_err.code, "InvalidLaunchID", "{label}");
+    }
+    let del_corp_poco_err = rpc(&ctx, &mut dir_sess, "planetMgr", "DeleteLaunch", &[PyRep::Integer(gantry2_id)])
+        .await
+        .expect_err("planetMgr.DeleteLaunch must reject corp Customs Office");
+    assert_eq!(del_corp_poco_err.code, "LaunchAccessDenied");
 }

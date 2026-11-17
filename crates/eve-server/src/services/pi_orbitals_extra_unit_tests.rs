@@ -310,17 +310,57 @@ fn upgrade_transfer_launch_import_and_delete_launch_edge_cases() {
         for (iid, tid, owner, loc) in [
             (888_101, 27_912, other_char, planet_id),
             (888_102, 34, char_id, 60_003_760),
-            (888_103, 27_912, char_id, other_planet),
+            (888_104, 3645, char_id, planet_id),
         ] {
             snap.items.insert(iid, InventoryItemRecord {
                 item_id: iid, type_id: tid, owner_id: owner, location_id: loc,
                 flag: InventoryFlag::Hangar, quantity: 1, ..Default::default()
             });
         }
+        snap.items.insert(888_103, InventoryItemRecord {
+            item_id: 888_103, type_id: 2263, owner_id: char_id, location_id: i64::from(sys_id),
+            flag: InventoryFlag::None, quantity: 1, ..Default::default()
+        });
+        snap.sp6_lifecycle
+            .space_object_meta
+            .entry(888_103)
+            .or_default()
+            .planet_id = Some(other_planet);
+        snap.items.insert(888_105, InventoryItemRecord {
+            item_id: 888_105, type_id: 2233, owner_id: char_id, location_id: planet_id,
+            flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
+        });
+        snap.structures.insert(
+            888_105,
+            eve_db::UpwellStructureRecord {
+                structure_id: 888_105,
+                type_id: 2233,
+                owner_corp_id: 98_000_001,
+                solar_system_id: sys_id,
+                name: format!("Orbital:{planet_id}"),
+                ..Default::default()
+            },
+        );
+        snap.items.insert(888_106, InventoryItemRecord {
+            item_id: 888_106, type_id: 2263, owner_id: char_id, location_id: i64::from(sys_id),
+            flag: InventoryFlag::Locked, quantity: 1, ..Default::default()
+        });
+        snap.sp6_lifecycle
+            .space_object_meta
+            .entry(888_106)
+            .or_default()
+            .planet_id = Some(planet_id);
     });
     assert_eq!(call_pi(&ctx, &mut sess, "DeleteLaunch", &[PyRep::Integer(888_101)], None).unwrap_err().code, "LaunchAccessDenied");
     assert_eq!(call_pi(&ctx, &mut sess, "DeleteLaunch", &[PyRep::Integer(888_102)], None).unwrap_err().code, "InvalidLaunchID");
     assert_eq!(call_pi(&ctx, &mut sess, "DeleteLaunch", &[PyRep::Integer(888_103)], Some(&bound)).unwrap_err().code, "LaunchNotFound");
+    assert_eq!(call_pi(&ctx, &mut sess, "DeleteLaunch", &[PyRep::Integer(888_104)], Some(&bound)).unwrap_err().code, "InvalidLaunchID");
+    assert_eq!(call_pi(&ctx, &mut sess, "DeleteLaunch", &[PyRep::Integer(888_105)], Some(&bound)).unwrap_err().code, "InvalidLaunchID");
+    assert_eq!(call_pi(&ctx, &mut sess, "DeleteLaunch", &[PyRep::Integer(888_106)], Some(&bound)).unwrap_err().code, "ItemLocked");
+    let launches_bound = call_pi(&ctx, &mut sess, "GetMyLaunchesDetails", &[], Some(&bound)).unwrap();
+    let launches_text = format!("{launches_bound:?}");
+    assert!(!launches_text.contains("888104"), "POCO hangar commodity stack must not appear in GetMyLaunchesDetails");
+    assert!(!launches_text.contains("888105"), "Orbital Customs Office structure must not appear in GetMyLaunchesDetails");
 }
 
 #[test]

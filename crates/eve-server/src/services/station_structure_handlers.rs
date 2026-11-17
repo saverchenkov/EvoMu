@@ -21,6 +21,21 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
+fn is_player_corp_owner(snap: &WorldStateSnapshot, id: i64) -> bool {
+    (98_000_000..99_000_000).contains(&id)
+        || (id >= 98_000_000 && snap.corporations.contains_key(&id))
+}
+
+fn resolve_orbital_corp_owner(
+    snap: &WorldStateSnapshot,
+    st_owner_corp_id: i64,
+    item_owner_id: i64,
+) -> Option<i64> {
+    (st_owner_corp_id >= 98_000_000)
+        .then_some(st_owner_corp_id)
+        .or_else(|| is_player_corp_owner(snap, item_owner_id).then_some(item_owner_id))
+}
+
 pub fn handle_upgrade_gantry(
     ctx: &ServerContext,
     session: &SessionState,
@@ -69,12 +84,12 @@ pub fn handle_upgrade_gantry(
                 client_error: None,
             });
         }
+        let is_player_corp = is_player_corp_owner(snap, char_corp);
         let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
         let (is_ceo, roles) =
             snap.effective_corp_roles_at(char_corp, char_id, None, session.corp_role, ctx.now_unix());
-        let has_role = session.has_gm_role()
-            || is_ceo
-            || (roles & req_roles) != 0;
+        let has_role = (!is_player_corp || snap.corporations.contains_key(&char_corp))
+            && (session.has_gm_role() || is_ceo || (roles & req_roles) != 0);
         if !has_role {
             return Err(BridgeRpcError {
                 code: "CrpAccessDenied".into(),
@@ -102,18 +117,27 @@ pub fn handle_upgrade_gantry(
                     client_error: None,
                 });
             }
-            if it.owner_id != char_corp && it.owner_id != char_id {
+            let st = snap.structures.get(&orbital_id).ok_or_else(|| BridgeRpcError {
+                code: "OrbitalNotAnchored".into(),
+                message: format!("Orbital {orbital_id} is not an anchored structure in space"),
+                client_error: None,
+            })?;
+            let corp_owner = resolve_orbital_corp_owner(snap, st.owner_corp_id, it.owner_id);
+            if let Some(owner_corp) = corp_owner {
+                if char_corp != owner_corp || !snap.corporations.contains_key(&owner_corp) {
+                    return Err(BridgeRpcError {
+                        code: "OrbitalOwnershipDenied".into(),
+                        message: format!("Corporation {char_corp} does not own orbital {orbital_id}"),
+                        client_error: None,
+                    });
+                }
+            } else if it.owner_id != char_corp && it.owner_id != char_id {
                 return Err(BridgeRpcError {
                     code: "OrbitalOwnershipDenied".into(),
                     message: format!("Corporation {char_corp} does not own orbital {orbital_id}"),
                     client_error: None,
                 });
             }
-            let st = snap.structures.get(&orbital_id).ok_or_else(|| BridgeRpcError {
-                code: "OrbitalNotAnchored".into(),
-                message: format!("Orbital {orbital_id} is not an anchored structure in space"),
-                client_error: None,
-            })?;
             if st.type_id != 3962 {
                 return Err(BridgeRpcError {
                     code: "OrbitalAlreadyUpgraded".into(),
@@ -163,6 +187,12 @@ pub fn handle_upgrade_gantry(
             .get(&cur_tid)
             .and_then(|t| t.default_attributes.get(&1771).copied())
             .map(|v| v as u32)
+            .filter(|tid| {
+                ctx.sde
+                    .types
+                    .get(tid)
+                    .is_some_and(|t| t.category_id == 46 && matches!(t.group_id, 1025 | 1106))
+            })
             .unwrap_or(2233);
         let is_valid_upgrade_item = |u: &eve_db::InventoryItemRecord| -> bool {
             (u.type_id == target_tid || u.type_id == 2233 || u.type_id == 3963)
@@ -212,6 +242,10 @@ pub fn handle_upgrade_gantry(
         }
         if let Some(it) = snap.items.get_mut(&orbital_id) {
             it.type_id = target_tid;
+            if char_corp >= 98_000_000 {
+                it.owner_id = char_corp;
+            }
+            it.version += 1;
         }
         if let Some(st) = snap.structures.get_mut(&orbital_id) {
             st.type_id = target_tid;
@@ -271,7 +305,11 @@ pub fn handle_anchor_orbital(
     let is_gantry = ctx.db.with_snapshot(|snap| {
         snap.items.get(&item_id).is_some_and(|it| {
             it.type_id == 3962
-                || ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1106)
+                || ctx
+                    .sde
+                    .types
+                    .get(&it.type_id)
+                    .is_some_and(|t| t.group_id == 1106 && t.category_id == 46)
         })
     });
     if !is_gantry {
@@ -437,9 +475,11 @@ pub fn handle_anchor_orbital(
             });
         }
         let tid = it.type_id;
+        it.owner_id = char_corp;
         it.location_id = planet_id;
         it.flag = eve_db::InventoryFlag::None;
         it.singleton = true;
+        it.version += 1;
         snap.structures.insert(
             item_id,
             eve_db::UpwellStructureRecord {
@@ -525,9 +565,7 @@ pub fn handle_unanchor_orbital(
                     .sde
                     .types
                     .get(&it_snapshot.type_id)
-                    .is_some_and(|t| {
-                        matches!(t.group_id, 1025 | 1106 | 4736) && t.category_id != 9
-                    });
+                    .is_some_and(|t| matches!(t.group_id, 1025 | 1106) && t.category_id == 46);
             if !is_orbital_type {
                 return Err(err(
                     "InvalidOrbitalType",
@@ -598,6 +636,7 @@ pub fn handle_unanchor_orbital(
 
             let st_pos = glam::DVec3::from_array(st.position);
             let st_corp_owner = (st.owner_corp_id >= 98_000_000).then_some(st.owner_corp_id);
+            let corp_owner = resolve_orbital_corp_owner(snap, st.owner_corp_id, it_snapshot.owner_id);
             let planet_opt = st
                 .name
                 .strip_prefix("Orbital:")
@@ -609,18 +648,15 @@ pub fn handle_unanchor_orbital(
                 .map(|c| c.corporation_id)
                 .or(session.corporation_id)
                 .unwrap_or(0);
-            let is_owner = it_snapshot.owner_id == char_id
-                || it_snapshot.owner_id == char_corp
-                || st_corp_owner.is_some_and(|c| c == char_corp);
-            if !is_owner {
-                return Err(err(
-                    "NotOrbitalOwner",
-                    format!("Character {char_id} is not authorized to unanchor orbital {item_id}"),
-                ));
-            }
-            if it_snapshot.owner_id == char_corp || st_corp_owner == Some(char_corp) {
+            if let Some(owner_corp) = corp_owner {
+                if char_corp != owner_corp {
+                    return Err(err(
+                        "NotOrbitalOwner",
+                        format!("Character {char_id} is not authorized to unanchor orbital {item_id}"),
+                    ));
+                }
                 let (is_ceo, roles) = snap.effective_corp_roles_at(
-                    char_corp,
+                    owner_corp,
                     char_id,
                     None,
                     session.corp_role,
@@ -628,7 +664,7 @@ pub fn handle_unanchor_orbital(
                 );
                 let req_roles = eve_db::corp_roles::ROLE_DIRECTOR
                     | eve_db::corp_roles::ROLE_STATION_MANAGER;
-                let has_role = snap.corporations.contains_key(&char_corp)
+                let has_role = snap.corporations.contains_key(&owner_corp)
                     && (is_ceo || (roles & req_roles) != 0);
                 if !has_role {
                     return Err(err(
@@ -636,6 +672,11 @@ pub fn handle_unanchor_orbital(
                         "Unanchoring corporate orbital structures requires Director, Station Manager, or CEO role",
                     ));
                 }
+            } else if it_snapshot.owner_id != char_id {
+                return Err(err(
+                    "NotOrbitalOwner",
+                    format!("Character {char_id} is not authorized to unanchor orbital {item_id}"),
+                ));
             }
 
             let ship_id = ship_id_opt.ok_or_else(|| {

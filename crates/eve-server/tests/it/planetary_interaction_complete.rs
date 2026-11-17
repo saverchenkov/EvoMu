@@ -522,6 +522,27 @@ async fn test_planetary_interaction_launch_commodities_v24() {
     .expect_err("Docked Launchpad/CustomsOffice launch must fail with NotInSpace");
     assert_eq!(err_docked_poco.code, "NotInSpace");
 
+    // V24 dict calls cannot bypass docked Launchpad NotInSpace check by appending "Hangar"/"Storage"/"CustomsOffice"/"Skyhook"
+    for dest_override in ["Hangar", "Storage", "CustomsOffice", "Skyhook"] {
+        let err_override = rpc(
+            &ctx,
+            &mut sess,
+            "planetMgr",
+            "UserLaunchCommodities",
+            &[
+                PyRep::Integer(JITA_PLANET_ID),
+                PyRep::Integer(launch_pin_id),
+                PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(50))]),
+                PyRep::String(dest_override.into()),
+            ],
+        )
+        .await
+        .expect_err(&format!(
+            "Docked V24 Launchpad call with '{dest_override}' override must fail with NotInSpace"
+        ));
+        assert_eq!(err_override.code, "NotInSpace", "{dest_override}");
+    }
+
     // Immediate retry from same pin must fail with 60s LaunchOnCooldown
     let err_cd = rpc(
         &ctx,
@@ -649,4 +670,124 @@ async fn test_planetary_interaction_launch_commodities_v24() {
         assert_eq!(lp.contents.get(&WATER_P1_TYPE_ID).copied(), Some(540));
         assert_eq!(lp.contents.get(&2268).copied(), Some(60));
     });
+
+    // Strict V24 contract sweep across touched PI RPCs:
+    // GetPlanetResourceInfo, GetPlanetsForChar, undocked Launchpad UserLaunchCommodities + OnPILaunchesChange + ball,
+    // GetMyLaunchesDetails, DeleteLaunch
+    let res_info = ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: true,
+    })
+    .with_mode(ContractValidationMode::Strict)
+    .call_ok(
+        "planetMgr",
+        None,
+        "GetPlanetResourceInfo",
+        &[PyRep::Integer(JITA_PLANET_ID)],
+        &HashMap::new(),
+    )
+    .await;
+    assert!(matches!(res_info, PyRep::Dict(ref d) if !d.is_empty()));
+
+    let planets = ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: true,
+    })
+    .with_mode(ContractValidationMode::Strict)
+    .call_ok("planetMgr", None, "GetPlanetsForChar", &[], &HashMap::new())
+    .await;
+    let PyRep::List(ref p_list) = planets else {
+        panic!("GetPlanetsForChar must return List");
+    };
+    assert!(
+        p_list
+            .iter()
+            .any(|p| p.dict_get("planetID").and_then(PyRep::as_i64) == Some(JITA_PLANET_ID))
+    );
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.advance_secs(61);
+    let expected_lp_ft = ctx.now_blueos_filetime_ticks();
+    let lp_launch_rep = ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: true,
+    })
+    .with_mode(ContractValidationMode::Strict)
+    .call_ok(
+        "planetMgr",
+        Some(bound_planet_id),
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(launch_pin_id),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(40))]),
+        ],
+        &HashMap::new(),
+    )
+    .await;
+    assert_eq!(lp_launch_rep.as_i64(), Some(expected_lp_ft));
+    assert!(
+        ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "OnPILaunchesChange"),
+        "Undocked V24 Launchpad launch must emit OnPILaunchesChange"
+    );
+
+    let strict_launches = ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: true,
+    })
+    .with_mode(ContractValidationMode::Strict)
+    .call_ok("planetMgr", None, "GetMyLaunchesDetails", &[], &HashMap::new())
+    .await;
+    let PyRep::List(ref strict_rows) = strict_launches else {
+        panic!("GetMyLaunchesDetails must return List");
+    };
+    let lp_launch_id = strict_rows
+        .iter()
+        .filter_map(|r| r.dict_get("launchID").and_then(PyRep::as_i64))
+        .max()
+        .expect("newly spawned Launchpad canister");
+    let sys_handle = ctx.systems.get_or_spawn(JITA_SOLAR_SYSTEM_ID);
+    assert!(
+        sys_handle
+            .get_ball_snapshot(lp_launch_id)
+            .await
+            .expect("ball query")
+            .is_some(),
+        "V24 Launchpad launch canister must have a live ballpark ball"
+    );
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: true,
+    })
+    .with_mode(ContractValidationMode::Strict)
+    .call_ok(
+        "planetMgr",
+        None,
+        "DeleteLaunch",
+        &[PyRep::Integer(lp_launch_id)],
+        &HashMap::new(),
+    )
+    .await;
+    assert!(
+        ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "OnPILaunchesChange"),
+        "DeleteLaunch must emit OnPILaunchesChange"
+    );
+    assert!(
+        sys_handle
+            .get_ball_snapshot(lp_launch_id)
+            .await
+            .expect("ball query")
+            .is_none(),
+        "DeleteLaunch must remove canister ball from ballpark"
+    );
 }

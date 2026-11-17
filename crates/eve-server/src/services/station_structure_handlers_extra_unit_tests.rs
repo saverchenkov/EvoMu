@@ -696,17 +696,48 @@ async fn mutant_kill_anchor_orbital_and_upgrade_gantry_role_bitmasks_and_outputs
     assert_eq!(npc_upg.dict_get("typeID"), Some(&PyRep::Integer(2_233)));
 
     // 3. CEO, Director (DB-only, sess.corp_role = 0), and StationManager (DB-only, sess.corp_role = 0)
-    // all pass both handle_anchor_orbital and handle_upgrade_gantry with valid return payloads
+    // all pass both handle_anchor_orbital and handle_upgrade_gantry with corp ownership on item & structure
     for cid in [ceo_cid, dir_cid, sm_cid] {
         ctx.db.with_mut_snapshot(|snap| reset_items_and_clear_orbital(snap, cid, player_corp));
         let sess = mk_sess(cid, player_corp, 0);
         let anchored = handle_anchor_orbital(&ctx, &sess, &[PyRep::Integer(gantry_id)]).unwrap();
         assert_eq!(anchored.dict_get("orbitalID"), Some(&PyRep::Integer(gantry_id)));
         assert_eq!(anchored.dict_get("typeID"), Some(&PyRep::Integer(3_962)));
+        assert_eq!(ctx.db.get_item(gantry_id).unwrap().owner_id, player_corp);
         let upg = handle_upgrade_gantry(&ctx, &sess, &[PyRep::Integer(gantry_id)]).unwrap();
         assert_eq!(upg.dict_get("orbitalID"), Some(&PyRep::Integer(gantry_id)));
         assert_eq!(upg.dict_get("typeID"), Some(&PyRep::Integer(2_233)));
+        assert_eq!(ctx.db.get_item(gantry_id).unwrap().owner_id, player_corp);
     }
+
+    // 4. Ex-StationManager who keeps gantry item or leaves player corp cannot unanchor or upgrade
+    ctx.db.with_mut_snapshot(|snap| {
+        reset_items_and_clear_orbital(snap, sm_cid, player_corp);
+    });
+    let sm_sess = mk_sess(sm_cid, player_corp, 0);
+    handle_anchor_orbital(&ctx, &sm_sess, &[PyRep::Integer(gantry_id)]).unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&sm_cid) {
+            ch.corporation_id = npc_corp;
+        }
+    });
+    let ex_sm_stale_sess = mk_sess(sm_cid, player_corp, corp_roles::ROLE_STATION_MANAGER);
+    assert_eq!(
+        handle_upgrade_gantry(&ctx, &ex_sm_stale_sess, &[PyRep::Integer(gantry_id)])
+            .unwrap_err()
+            .code,
+        "OrbitalOwnershipDenied"
+    );
+    assert_eq!(
+        crate::services::station_structure_handlers::handle_unanchor_orbital(
+            &ctx,
+            &ex_sm_stale_sess,
+            &[PyRep::Integer(gantry_id)],
+        )
+        .unwrap_err()
+        .code,
+        "NotOrbitalOwner"
+    );
 }
 
 #[test]
