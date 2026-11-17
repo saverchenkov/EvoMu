@@ -77,6 +77,46 @@ fn parse_strict_str<'a>(rep: &'a PyRep, label: &str) -> Result<&'a str, BridgeRp
         .ok_or_else(|| invalid_arg(format!("Expected string for {label}")))
 }
 
+fn check_str_bounds<'a>(
+    s: &'a str,
+    label: &str,
+    max_chars: usize,
+    max_bytes: usize,
+) -> Result<&'a str, BridgeRpcError> {
+    // Reject oversized UTF-8 payloads in O(1) via byte length before counting Unicode scalars.
+    if s.len() > max_bytes {
+        return Err(invalid_arg(format!(
+            "{label} exceeds maximum byte length ({} > {max_bytes})",
+            s.len()
+        )));
+    }
+    let char_count = s.chars().count();
+    if char_count > max_chars {
+        return Err(invalid_arg(format!(
+            "{label} exceeds maximum character length ({char_count} > {max_chars})"
+        )));
+    }
+    Ok(s)
+}
+
+fn parse_strict_str_max<'a>(
+    rep: &'a PyRep,
+    label: &str,
+    max_chars: usize,
+    max_bytes: usize,
+) -> Result<&'a str, BridgeRpcError> {
+    if let PyRep::Bytes(b) = rep {
+        if b.len() > max_bytes {
+            return Err(invalid_arg(format!(
+                "{label} exceeds maximum byte length ({} > {max_bytes})",
+                b.len()
+            )));
+        }
+    }
+    let s = parse_strict_str(rep, label)?;
+    check_str_bounds(s, label, max_chars, max_bytes)
+}
+
 fn is_set_class_token(rep: &PyRep) -> bool {
     matches!(
         rep.as_str(),
@@ -548,6 +588,36 @@ impl<'a> RpcArgs<'a> {
             return Ok(None);
         };
         parse_strict_str(rep, &arg_label(idx, kw_name)).map(Some)
+    }
+
+    /// Extracts a required string within `max_chars` and `max_bytes` without allocating.
+    pub fn req_str_max(
+        &self,
+        idx: usize,
+        kw_name: &str,
+        max_chars: usize,
+        max_bytes: usize,
+    ) -> Result<&'a str, BridgeRpcError> {
+        let label = arg_label(idx, kw_name);
+        let rep = self
+            .get_raw(idx, kw_name)
+            .ok_or_else(|| invalid_arg(format!("Missing required string {label}")))?;
+        parse_strict_str_max(rep, &label, max_chars, max_bytes)
+    }
+
+    /// Extracts an optional string within `max_chars` and `max_bytes` without allocating;
+    /// returns `Ok(None)` if absent/`None`, or `Err` if malformed or over limit.
+    pub fn opt_str_max(
+        &self,
+        idx: usize,
+        kw_name: &str,
+        max_chars: usize,
+        max_bytes: usize,
+    ) -> Result<Option<&'a str>, BridgeRpcError> {
+        let Some(rep) = self.get_raw(idx, kw_name) else {
+            return Ok(None);
+        };
+        parse_strict_str_max(rep, &arg_label(idx, kw_name), max_chars, max_bytes).map(Some)
     }
 
     /// Extracts a required non-empty, non-whitespace string.
@@ -1110,6 +1180,70 @@ mod tests {
             .req_id_or_id_list(0, "ids")
             .unwrap_err()
             .code,
+            "InvalidArgument"
+        );
+
+        // 8. `req_str_max` / `opt_str_max` character and UTF-8 byte boundary enforcement
+        assert_eq!(RpcArgs::positional(&[]).opt_str_max(0, "memo", 16, 32).unwrap(), None);
+        assert_eq!(only_kw.opt_str_max(0, "noneKw", 16, 32).unwrap(), None);
+        assert_eq!(
+            RpcArgs::positional(&[])
+                .req_str_max(0, "memo", 16, 32)
+                .unwrap_err()
+                .code,
+            "InvalidArgument"
+        );
+        let ascii_64 = "a".repeat(64);
+        assert_eq!(
+            RpcArgs::positional(&[PyRep::String(ascii_64.clone())])
+                .req_str_max(0, "memo", 64, 64)
+                .unwrap(),
+            ascii_64.as_str()
+        );
+        assert_eq!(
+            RpcArgs::positional(&[PyRep::String("a".repeat(65))])
+                .req_str_max(0, "memo", 64, 128)
+                .unwrap_err()
+                .code,
+            "InvalidArgument"
+        );
+        // Multi-byte UTF-8: 10 x 4-byte emoji = 10 chars, 40 bytes (fails max_bytes=32 despite <= 16 chars)
+        let emoji_10 = "🚀".repeat(10);
+        assert_eq!(
+            RpcArgs::positional(&[PyRep::String(emoji_10.clone())])
+                .opt_str_max(0, "memo", 16, 40)
+                .unwrap(),
+            Some(emoji_10.as_str())
+        );
+        assert_eq!(
+            RpcArgs::positional(&[PyRep::String(emoji_10)])
+                .opt_str_max(0, "memo", 16, 32)
+                .unwrap_err()
+                .code,
+            "InvalidArgument"
+        );
+        // Oversized string and oversized raw/non-UTF-8 Bytes rejected cleanly
+        let huge = "X".repeat(10_000);
+        let huge_kw = HashMap::from([("reason".to_string(), PyRep::String(huge.clone()))]);
+        assert_eq!(
+            RpcArgs::new(&[], &huge_kw)
+                .opt_str_max(2, "reason", 256, 512)
+                .unwrap_err()
+                .code,
+            "InvalidArgument"
+        );
+        assert_eq!(
+            RpcArgs::positional(&[PyRep::Bytes(vec![0xff; 10_000])])
+                .opt_str_max(0, "memo", 256, 512)
+                .unwrap_err()
+                .code,
+            "InvalidArgument"
+        );
+        assert_eq!(
+            RpcArgs::positional(&[PyRep::Integer(42)])
+                .opt_str_max(0, "memo", 256, 512)
+                .unwrap_err()
+                .code,
             "InvalidArgument"
         );
     }

@@ -666,3 +666,142 @@ fn pos_mgr_and_cluster_telemetry_handlers_work() {
         "expected OnAccountChange notification for recipient corporation wallet (#862)"
     );
 }
+
+#[test]
+fn give_cash_rejects_subcent_amounts_and_oversized_reason_memos() {
+    let ctx = make_test_context();
+    let char_a = 90_000_001;
+    let char_b = 90_000_002;
+    let corp_id = 98_000_001;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ca) = snap.characters.get_mut(&char_a) {
+            // Zero-ISK sender checks that sub-cent rounding cannot exploit zero-cost journal spam.
+            ca.balance = IskCents(0);
+        }
+        let mut cb = snap.characters[&char_a].clone();
+        cb.character_id = char_b;
+        cb.user_id = 502;
+        cb.name = "Recipient B".into();
+        cb.corporation_id = corp_id;
+        cb.balance = IskCents::from_isk(100);
+        snap.characters.insert(char_b, cb);
+    });
+
+    let mut sess = char_session(char_a, corp_id);
+    let kw_empty = HashMap::new();
+    let commits_before = ctx.db.tx_commit_count();
+    let (wj_before, wjm_before, wjt_before) = ctx.db.with_snapshot(|s| {
+        (
+            s.wallet_journal.len(),
+            s.wallet_journal_meta.len(),
+            s.wallet_journal_timestamps.len(),
+        )
+    });
+
+    for subcent in [0.001, 0.004, 0.0049] {
+        let err = handle(
+            &ctx,
+            &mut sess,
+            "account",
+            "GiveCash",
+            &[PyRep::Integer(char_b), PyRep::Real(subcent), PyRep::String("memo".into())],
+            &kw_empty,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, "InvalidArgument");
+    }
+
+    let huge_reason = "X".repeat(10_000);
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "account",
+            "GiveCash",
+            &[PyRep::Integer(char_b), PyRep::Real(1.0), PyRep::String(huge_reason.clone())],
+            &kw_empty,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidArgument"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "account",
+            "GiveCash",
+            &[PyRep::Integer(char_b), PyRep::Real(1.0)],
+            &HashMap::from([("reason".to_string(), PyRep::String(huge_reason))]),
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidArgument"
+    );
+    // Multi-byte UTF-8 > 512 bytes and ASCII > 256 chars both reject before opening a write tx.
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "account",
+            "GiveCash",
+            &[PyRep::Integer(char_b), PyRep::Real(1.0), PyRep::String("🚀".repeat(129))],
+            &kw_empty,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidArgument"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "account",
+            "GiveCash",
+            &[PyRep::Integer(char_b), PyRep::Real(1.0), PyRep::String("a".repeat(257))],
+            &kw_empty,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidArgument"
+    );
+
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.wallet_journal.len(), wj_before);
+        assert_eq!(s.wallet_journal_meta.len(), wjm_before);
+        assert_eq!(s.wallet_journal_timestamps.len(), wjt_before);
+        assert_eq!(s.characters[&char_a].balance, IskCents(0));
+        assert_eq!(s.characters[&char_b].balance, IskCents::from_isk(100));
+    });
+
+    // Valid 0.01 ISK transfer with a 64-char memo succeeds and records both journals.
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&char_a).unwrap().balance = IskCents::from_isk(10);
+    });
+    let memo_64 = "m".repeat(64);
+    let bal_after = handle(
+        &ctx,
+        &mut sess,
+        "account",
+        "GiveCash",
+        &[PyRep::Integer(char_b), PyRep::Real(0.01), PyRep::String(memo_64.clone())],
+        &kw_empty,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(bal_after.as_f64(), Some(9.99));
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.characters[&char_a].balance, IskCents(999));
+        assert_eq!(s.characters[&char_b].balance, IskCents(10_001));
+        assert_eq!(s.wallet_journal.len(), wj_before + 2);
+        assert!(s.wallet_journal.iter().any(|e| e.character_id == char_a && e.reason.contains(&memo_64)));
+        assert!(s.wallet_journal.iter().any(|e| e.character_id == char_b && e.reason.contains(&memo_64)));
+    });
+}

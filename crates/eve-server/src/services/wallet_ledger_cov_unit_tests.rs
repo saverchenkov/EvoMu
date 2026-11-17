@@ -310,3 +310,167 @@ fn insurance_journal_legacy_non_type_context_falls_back_to_ship_class_type() {
     assert_eq!(ref_for("modern-insurance-type-ctx"), Some(587));
     assert_eq!(ref_for("non-insurance-char-ctx"), Some(90_000_002));
 }
+
+#[test]
+fn give_cash_from_corp_account_rejects_subcent_and_oversized_reason_memos() {
+    let ctx = make_ctx();
+    let char_id = 90_000_001i64;
+    let other_id = 90_000_002i64;
+    let corp_id = 98_000_001i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+        }
+        let mut other = snap.characters[&char_id].clone();
+        other.character_id = other_id;
+        other.user_id = 502;
+        other.name = "Other Pilot".into();
+        other.corporation_id = corp_id;
+        other.balance = IskCents::from_isk(50);
+        snap.characters.insert(other_id, other);
+
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Ledger Guard Corp".into();
+        corp.ticker = "LGC".into();
+        corp.ceo_id = char_id;
+        corp.ensure_wallet_divisions();
+        corp.set_division_balance(3, IskCents::from_isk(100));
+        corp.members.insert(char_id);
+        corp.members.insert(other_id);
+        snap.corporations.insert(corp_id, corp);
+    });
+
+    let mut sess = make_session(char_id, corp_id);
+    let kw_empty = HashMap::new();
+    let commits_before = ctx.db.tx_commit_count();
+    let (wj_before, cwj_before) = ctx.db.with_snapshot(|s| {
+        (
+            s.wallet_journal.len(),
+            s.corp_wallet_journals.get(&(corp_id, 3)).map_or(0, Vec::len),
+        )
+    });
+
+    for subcent in [0.001, 0.004] {
+        assert_eq!(
+            handle(
+                &ctx,
+                &mut sess,
+                "account",
+                "GiveCashFromCorpAccount",
+                &[PyRep::Integer(other_id), PyRep::Real(subcent), PyRep::Integer(1002)],
+                &kw_empty,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "InvalidArgument"
+        );
+    }
+
+    let huge = "X".repeat(10_000);
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "account",
+            "GiveCashFromCorpAccount",
+            &[
+                PyRep::Integer(other_id),
+                PyRep::Real(1.0),
+                PyRep::Integer(1002),
+                PyRep::None,
+                PyRep::String(huge.clone()),
+            ],
+            &kw_empty,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidArgument"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "account",
+            "GiveCashFromCorpAccount",
+            &[PyRep::Integer(other_id), PyRep::Real(1.0), PyRep::Integer(1002)],
+            &HashMap::from([("reason".to_string(), PyRep::String(huge))]),
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidArgument"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "account",
+            "GiveCashFromCorpAccount",
+            &[
+                PyRep::Integer(other_id),
+                PyRep::Real(1.0),
+                PyRep::Integer(1002),
+                PyRep::None,
+                PyRep::String("🚀".repeat(129)),
+            ],
+            &kw_empty,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidArgument"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "account",
+            "GiveCashFromCorpAccount",
+            &[
+                PyRep::Integer(other_id),
+                PyRep::Real(1.0),
+                PyRep::Integer(1002),
+                PyRep::None,
+                PyRep::String("a".repeat(257)),
+            ],
+            &kw_empty,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidArgument"
+    );
+
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.wallet_journal.len(), wj_before);
+        assert_eq!(s.corp_wallet_journals.get(&(corp_id, 3)).map_or(0, Vec::len), cwj_before);
+        assert_eq!(s.corporations[&corp_id].division_balance(3), IskCents::from_isk(100));
+        assert_eq!(s.characters[&other_id].balance, IskCents::from_isk(50));
+    });
+
+    // Valid 0.01 ISK transfer with a 64-char kwarg memo succeeds and appends both journals.
+    let memo_64 = "c".repeat(64);
+    handle(
+        &ctx,
+        &mut sess,
+        "account",
+        "GiveCashFromCorpAccount",
+        &[PyRep::Integer(other_id), PyRep::Real(0.01), PyRep::Integer(1002)],
+        &HashMap::from([("reason".to_string(), PyRep::String(memo_64.clone()))]),
+    )
+    .unwrap()
+    .unwrap();
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.corporations[&corp_id].division_balance(3), IskCents(9_999));
+        assert_eq!(s.characters[&other_id].balance, IskCents(5_001));
+        assert!(s.corp_wallet_journals[&(corp_id, 3)]
+            .iter()
+            .any(|e| e.description == memo_64 && e.reason.as_deref() == Some(memo_64.as_str())));
+        assert!(s.wallet_journal.iter().any(|e| e.character_id == other_id && e.reason == memo_64));
+    });
+}

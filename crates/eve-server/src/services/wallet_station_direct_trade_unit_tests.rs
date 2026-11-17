@@ -261,7 +261,7 @@ fn station_direct_trade_edge_cases_abort_corrupt_singleton_and_reverse_isk() {
         "InsufficientQuantity"
     );
 
-    // OfferMoney validation: negative & NotEnoughMoney, then B offers 15,000 ISK to A
+    // OfferMoney validation: negative, sub-cent, & NotEnoughMoney, 0.0 clear, then B offers 15,000 ISK to A
     assert_eq!(
         call_wallet_ext(
             &ctx,
@@ -276,6 +276,30 @@ fn station_direct_trade_edge_cases_abort_corrupt_singleton_and_reverse_isk() {
         .code,
         "InvalidArgument"
     );
+    assert_eq!(
+        call_wallet_ext(
+            &ctx,
+            &mut sess_b,
+            "trademgr",
+            "OfferMoney",
+            &[PyRep::Integer(tid2), PyRep::Real(0.001)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidArgument"
+    );
+    call_wallet_ext(
+        &ctx,
+        &mut sess_b,
+        "trademgr",
+        "OfferMoney",
+        &[PyRep::Integer(tid2), PyRep::Real(0.0)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(
         call_wallet_ext(
             &ctx,

@@ -572,6 +572,73 @@ fn applications_invitations_and_cash_transfer_error_edges() {
     .unwrap_err();
     assert_eq!(low_funds.code, "InsufficientDivisionFunds");
 
+    let commits_before = ctx.db.tx_commit_count();
+    let (cwj1_before, cwj2_before) = ctx.db.with_snapshot(|s| {
+        (
+            s.corp_wallet_journals.get(&(98_000_001, 1)).map_or(0, Vec::len),
+            s.corp_wallet_journals.get(&(98_000_001, 2)).map_or(0, Vec::len),
+        )
+    });
+    for subcent in [0.001, 0.004] {
+        assert_eq!(
+            handle_corps(
+                &ctx,
+                &mut ceo_sess,
+                "account",
+                "GiveCashFromCorpAccount",
+                &[PyRep::Integer(1), PyRep::Integer(2), PyRep::Real(subcent)],
+                &kw,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "InvalidArgument"
+        );
+    }
+    let kw_huge = HashMap::from([("reason".to_string(), PyRep::String("X".repeat(10_000)))]);
+    assert_eq!(
+        handle_corps(
+            &ctx,
+            &mut ceo_sess,
+            "account",
+            "GiveCashFromCorpAccount",
+            &[PyRep::Integer(1), PyRep::Integer(2), PyRep::Real(1.0)],
+            &kw_huge,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidArgument"
+    );
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.corp_wallet_journals.get(&(98_000_001, 1)).map_or(0, Vec::len), cwj1_before);
+        assert_eq!(s.corp_wallet_journals.get(&(98_000_001, 2)).map_or(0, Vec::len), cwj2_before);
+    });
+    let (div1_before, div2_before) = ctx.db.with_mut_snapshot(|s| {
+        let corp = s.corporations.get_mut(&98_000_001).unwrap();
+        let d1 = corp.division_balance(1);
+        if d1.0 < 1 {
+            corp.set_division_balance(1, IskCents(100));
+        }
+        (corp.division_balance(1), corp.division_balance(2))
+    });
+    handle_corps(
+        &ctx,
+        &mut ceo_sess,
+        "account",
+        "GiveCashFromCorpAccount",
+        &[PyRep::Integer(1), PyRep::Integer(2), PyRep::Real(0.01)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    ctx.db.with_snapshot(|s| {
+        let corp = &s.corporations[&98_000_001];
+        assert_eq!(corp.division_balance(1), IskCents(div1_before.0 - 1));
+        assert_eq!(corp.division_balance(2), IskCents(div2_before.0 + 1));
+    });
+
     // CanBeKickedOut false for CEO
     let kick_ceo = handle_corps(
         &ctx,

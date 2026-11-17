@@ -1375,7 +1375,7 @@ pub fn handle(
             let _ = process_due_automatic_bills(ctx);
             Some(Ok(PyRep::Bool(true)))
         }
-        ("account", "GiveCash") => Some(handle_give_cash(ctx, session, args)),
+        ("account", "GiveCash") => Some(handle_give_cash(ctx, session, args, kwargs)),
         ("account", "SetContactCost") => Some(handle_set_contact_cost(ctx, session, args)),
         ("account", "GetDefaultContactCost") => Some(handle_get_default_contact_cost(ctx, session)),
         ("machoNet", "GetClusterGameStatisticsForClient") => Some(Ok(handle_cluster_statistics(ctx))),
@@ -1449,16 +1449,17 @@ fn handle_give_cash(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let rpc = RpcArgs::positional(args);
+    let rpc = RpcArgs::new(args, kwargs);
     let to_id = rpc.req_positive_i64(0, "toID")?;
     let amount_isk = rpc.req_positive_f64(1, "amount")?;
-    let reason = rpc.opt_str(2, "reason")?.unwrap_or("").to_string();
+    let reason = super::wallet_ledger::extract_wallet_reason(&rpc, 2)?;
     if to_id == char_id {
         return Err(rpc_err("InvalidArgument", "Cannot give ISK to yourself"));
     }
-    let amount = IskCents::from_f64_isk(amount_isk);
+    let amount = super::wallet_ledger::parse_transfer_isk_cents(amount_isk)?;
     let now = ctx.now_unix();
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         let target_is_char = snap.characters.contains_key(&to_id);

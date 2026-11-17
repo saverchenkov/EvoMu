@@ -54,6 +54,33 @@ fn division_of(account_key: i64) -> Option<u8> {
     (1000..=1006).contains(&account_key).then(|| (account_key - 999) as u8)
 }
 
+/// Maximum UTF-8 character count permitted in caller-supplied wallet transfer memos.
+pub(crate) const MAX_WALLET_REASON_CHARS: usize = 256;
+/// Maximum UTF-8 byte count permitted in caller-supplied wallet transfer memos.
+pub(crate) const MAX_WALLET_REASON_BYTES: usize = 512;
+
+/// Validates that a floating-point ISK transfer amount converts to at least one whole cent (`0.01` ISK).
+pub(crate) fn parse_transfer_isk_cents(amount_isk: f64) -> Result<IskCents, BridgeRpcError> {
+    let amount = IskCents::from_f64_isk(amount_isk);
+    if amount.0 <= 0 {
+        return Err(rpc_err(
+            "InvalidArgument",
+            format!("Transfer amount must be at least 0.01 ISK (got {amount_isk})"),
+        ));
+    }
+    Ok(amount)
+}
+
+/// Extracts and validates an optional wallet transfer memo string within character and byte caps.
+pub(crate) fn extract_wallet_reason<'a>(
+    rpc: &RpcArgs<'a>,
+    idx: usize,
+) -> Result<&'a str, BridgeRpcError> {
+    Ok(rpc
+        .opt_str_max(idx, "reason", MAX_WALLET_REASON_CHARS, MAX_WALLET_REASON_BYTES)?
+        .unwrap_or(""))
+}
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -186,10 +213,11 @@ fn give_cash_from_corp(
     let amount_isk = rpc.req_positive_f64(1, "amount")?;
     let from_key = rpc.opt_i64(2, "fromAccountKey")?.unwrap_or(0);
     let to_key = rpc.opt_i64(3, "toAccountKey")?.filter(|k| *k != 0);
-    let reason = rpc.opt_str(4, "reason")?.unwrap_or("").to_string();
+    let reason = extract_wallet_reason(&rpc, 4)?;
     let from_div = division_of(from_key)
         .ok_or_else(|| rpc_err("InvalidAccountKey", format!("fromAccountKey {from_key} is not a corp wallet division")))?;
-    let amount = IskCents::from_f64_isk(amount_isk);
+    let amount = parse_transfer_isk_cents(amount_isk)?;
+    let reason = reason.to_string();
     let now = ctx.now_unix();
     let caller_corp_id = ctx
         .db

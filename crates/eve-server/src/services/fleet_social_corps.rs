@@ -2,7 +2,7 @@
 
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 pub use eve_db::CorpGovState;
-use eve_db::{corp_roles, CorpApplicationRecord, IskCents, MailRecord};
+use eve_db::{corp_roles, CorpApplicationRecord, MailRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, DBRowDescriptor, DbColumnType, PyRep};
 use std::collections::{HashMap, HashSet};
@@ -1813,7 +1813,7 @@ pub(super) fn handle_corps(
                     }))
                 }
             };
-            let rpc = crate::router::RpcArgs::positional(args);
+            let rpc = crate::router::RpcArgs::new(args, kwargs);
             let from_div_i = match rpc.req_i64(0, "fromDivision") {
                 Ok(v) => v,
                 Err(e) => {
@@ -1844,7 +1844,13 @@ pub(super) fn handle_corps(
             if from_div == to_div || !(1..=7).contains(&from_div) || !(1..=7).contains(&to_div) {
                 return Some(Err(BridgeRpcError { code: "InvalidTransferDivision".into(), message: "Source and target wallet divisions must be distinct (1..=7)".into(), client_error: None }));
             }
-            let transfer_amount = IskCents::from_f64_isk(amount_isk);
+            let transfer_amount = match crate::services::wallet_ledger::parse_transfer_isk_cents(amount_isk) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if let Err(e) = crate::services::wallet_ledger::extract_wallet_reason(&rpc, 3) {
+                return Some(Err(e));
+            }
             promote_due_pending_corp_grants(ctx, corp_id);
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
