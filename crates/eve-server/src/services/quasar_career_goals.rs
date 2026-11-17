@@ -578,6 +578,7 @@ pub struct CareerGoalManager {
     pub character_career_goals: RwLock<HashMap<u32, Vec<CharacterCareerGoal>>>,
     pub claimed_milestones: RwLock<HashMap<u32, HashSet<u32>>>,
     pub seen_regions: RwLock<HashMap<u32, HashMap<String, HashSet<u32>>>>,
+    pub seen_sites: RwLock<HashMap<u32, HashSet<(u32, String)>>>,
     pub milestones: Vec<CareerMilestoneDef>,
     db: Option<Arc<WorldRepository>>,
     sde: Option<Arc<eve_sde::SdeRegistry>>,
@@ -654,6 +655,7 @@ fn load_persisted_career_state(
     HashMap<u32, Vec<CharacterCareerGoal>>,
     HashMap<u32, HashSet<u32>>,
     HashMap<u32, HashMap<String, HashSet<u32>>>,
+    HashMap<u32, HashSet<(u32, String)>>,
 ) {
     let defs = snap
         .quasar_state_blobs
@@ -706,7 +708,12 @@ fn load_persisted_career_state(
             serde_json::from_str::<HashMap<u32, HashMap<String, HashSet<u32>>>>(json).ok()
         })
         .unwrap_or_default();
-    (defs, loaded, milestones, seen_regions)
+    let seen_sites = snap
+        .quasar_state_blobs
+        .get("quasar_career_seen_sites")
+        .and_then(|json| serde_json::from_str::<HashMap<u32, HashSet<(u32, String)>>>(json).ok())
+        .unwrap_or_default();
+    (defs, loaded, milestones, seen_regions, seen_sites)
 }
 
 impl CareerGoalManager {
@@ -719,12 +726,13 @@ impl CareerGoalManager {
         sde: Option<Arc<eve_sde::SdeRegistry>>,
     ) -> Self {
         let default_defs = default_career_goal_definitions_for_sde(sde.as_deref());
-        let (defs, loaded, loaded_milestones, loaded_regions) = db
+        let (defs, loaded, loaded_milestones, loaded_regions, loaded_sites) = db
             .as_ref()
             .map(|d| d.with_snapshot(|s| load_persisted_career_state(s, &default_defs)))
             .unwrap_or_else(|| {
                 (
                     default_defs,
+                    HashMap::new(),
                     HashMap::new(),
                     HashMap::new(),
                     HashMap::new(),
@@ -736,6 +744,7 @@ impl CareerGoalManager {
             character_career_goals: RwLock::new(loaded),
             claimed_milestones: RwLock::new(loaded_milestones),
             seen_regions: RwLock::new(loaded_regions),
+            seen_sites: RwLock::new(loaded_sites),
             milestones: default_career_milestones(),
             db,
             sde,
@@ -785,6 +794,7 @@ impl CareerGoalManager {
             let map = self.character_career_goals.read().unwrap_or_else(|e| e.into_inner());
             let cm = self.claimed_milestones.read().unwrap_or_else(|e| e.into_inner());
             let sr = self.seen_regions.read().unwrap_or_else(|e| e.into_inner());
+            let ss = self.seen_sites.read().unwrap_or_else(|e| e.into_inner());
             let defs_json = if defs.is_empty() {
                 None
             } else {
@@ -793,11 +803,13 @@ impl CareerGoalManager {
             let goals_json = serde_json::to_string(&*map).ok();
             let milestones_json = serde_json::to_string(&*cm).ok();
             let regions_json = serde_json::to_string(&*sr).ok();
+            let sites_json = serde_json::to_string(&*ss).ok();
             let already = db.with_snapshot(|snap| {
                 defs_json.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_career_goal_defs") == Some(j))
                     && goals_json.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_career_goals") == Some(j))
                     && milestones_json.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_career_milestones") == Some(j))
                     && regions_json.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_career_seen_regions") == Some(j))
+                    && sites_json.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_career_seen_sites") == Some(j))
             });
             if already {
                 return;
@@ -816,6 +828,9 @@ impl CareerGoalManager {
                 if let Some(r_json) = regions_json {
                     snap.quasar_state_blobs.insert("quasar_career_seen_regions".into(), r_json);
                 }
+                if let Some(s_json) = sites_json {
+                    snap.quasar_state_blobs.insert("quasar_career_seen_sites".into(), s_json);
+                }
                 Ok::<(), String>(())
             });
         }
@@ -824,7 +839,7 @@ impl CareerGoalManager {
     pub fn rehydrate_from_db(&self) {
         let Some(ref db) = self.db else { return };
         let default_defs = default_career_goal_definitions_for_sde(self.sde.as_deref());
-        let (defs, loaded, loaded_milestones, loaded_regions) =
+        let (defs, loaded, loaded_milestones, loaded_regions, loaded_sites) =
             db.with_snapshot(|s| load_persisted_career_state(s, &default_defs));
         *self.definitions.write().unwrap_or_else(|e| e.into_inner()) = defs;
         *self
@@ -836,6 +851,24 @@ impl CareerGoalManager {
             .write()
             .unwrap_or_else(|e| e.into_inner()) = loaded_milestones;
         *self.seen_regions.write().unwrap_or_else(|e| e.into_inner()) = loaded_regions;
+        *self.seen_sites.write().unwrap_or_else(|e| e.into_inner()) = loaded_sites;
+    }
+
+    pub(crate) fn mark_site_visited_once(&self, char_id: u32, sys_id: u32, site_id: &str) -> bool {
+        if char_id == 0 || sys_id == 0 || site_id.is_empty() {
+            return false;
+        }
+        let inserted = {
+            let mut sites = self.seen_sites.write().unwrap_or_else(|e| e.into_inner());
+            sites
+                .entry(char_id)
+                .or_default()
+                .insert((sys_id, site_id.to_string()))
+        };
+        if inserted {
+            self.save_to_db();
+        }
+        inserted
     }
 
     fn ensure_goals_for_list(&self, goals: &mut Vec<CharacterCareerGoal>) {
@@ -1050,6 +1083,10 @@ fn evaluate_career_objective(
         return matches_ship_hull(label, ev.ship_group_id).then_some(CareerObjectiveMatch::AddDelta);
     }
 
+    if ev.activity_kind == "combat" && ev.sub_kind == Some("pvp_kill") {
+        return None;
+    }
+
     if ev.activity_kind == "advanced_travel" {
         let expected_band = match label {
             "ExplorerVisitHisec" => CareerSecBand::HighSec,
@@ -1164,6 +1201,15 @@ impl CareerGoalManager {
         delta: u64,
         gateway: &PublicGatewayRouter,
     ) {
+        if matches!(ev.activity_kind, "hacking" | "advanced_hacking" | "combat_sites")
+            && ev.solar_system_id.is_some_and(|sid| {
+                self.sde
+                    .as_deref()
+                    .is_some_and(|sde| is_career_starter_system(sde, sid))
+            })
+        {
+            return;
+        }
         crate::quasar_gateway::isolate_side_effect("quasar_career_goals.on_gameplay_event", || {
             let now_unix = self
                 .db
@@ -2173,7 +2219,7 @@ pub(crate) fn record_mission_completion_career_goals(
     });
 }
 
-/// Returns `true` when `target_id` is another capsuleer's non-pod ship (excluding NPCs, drones, pods, structures, and self).
+/// Returns `true` when `target_id` is another capsuleer's non-capsule ship (excluding NPCs, drones, pods/capsules `group_id == 29`, structures, and self).
 pub(crate) fn is_capsuleer_ship_ball_target(
     db: &WorldRepository,
     sde: &eve_sde::SdeRegistry,
@@ -2187,15 +2233,21 @@ pub(crate) fn is_capsuleer_ship_ball_target(
         let Some(item) = snap.items.get(&target_id) else {
             return false;
         };
-        if item.owner_id <= 0
-            || item.owner_id == actor_char_id
-            || !snap.characters.contains_key(&item.owner_id)
+        let pilot_char_id = snap
+            .characters
+            .values()
+            .find(|c| c.active_ship_id == target_id)
+            .map(|c| c.character_id)
+            .unwrap_or(item.owner_id);
+        if pilot_char_id <= 0
+            || pilot_char_id == actor_char_id
+            || !snap.characters.contains_key(&pilot_char_id)
         {
             return false;
         }
         sde.types
             .get(&item.type_id)
-            .is_some_and(|t| t.category_id == 6 && item.type_id != 670)
+            .is_some_and(|t| t.category_id == 6 && t.group_id != 29)
     })
 }
 
@@ -2232,7 +2284,7 @@ pub(crate) fn record_ewar_career_seconds(
     record_career_sub_kind(ctx, actor_char_id, "ewar", Some(sub_kind), secs);
 }
 
-/// Records `cap_warfare` (`nosferatu` / `neutralizer`) career GJ against another ship/NPC.
+/// Records `cap_warfare` (`nosferatu` / `neutralizer`) career GJ against another capsuleer's ship.
 pub(crate) fn record_cap_warfare_career(
     ctx: &crate::router::ServerContext,
     actor_char_id: i64,
@@ -2246,6 +2298,7 @@ pub(crate) fn record_cap_warfare_career(
         || target_id == source_ship_id
         || !gj_amount.is_finite()
         || gj_amount <= 0.0
+        || !is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, target_id, actor_char_id)
     {
         return;
     }
@@ -2275,6 +2328,20 @@ pub(crate) fn record_remote_repair_career(
     }
 }
 
+/// Returns `true` when `sys_id` is an official starter school system (`school_id` `11..=22` in SDE).
+pub(crate) fn is_career_starter_system(sde: &eve_sde::SdeRegistry, sys_id: u32) -> bool {
+    sde.schools
+        .values()
+        .any(|s| (11..=22).contains(&s.school_id) && s.solar_system_id == sys_id)
+}
+
+/// Returns `true` when a gas site represents a Gas Training Site (`dungeon_id == 4093` or `"gas training"` name)
+/// which is excluded from AIR `gas_sites` goals.
+pub(crate) fn is_gas_training_site(dungeon_id: Option<u32>, dungeon_name: Option<&str>) -> bool {
+    dungeon_id == Some(4093)
+        || dungeon_name.is_some_and(|n| n.to_ascii_lowercase().contains("gas training"))
+}
+
 /// Returns `true` when an exploration/dungeon site category is a combat site for Career Program tracking.
 pub(crate) fn is_combat_site_category(site_category: &str) -> bool {
     matches!(
@@ -2290,33 +2357,72 @@ pub(crate) fn is_combat_site_category(site_category: &str) -> bool {
     )
 }
 
-/// Dispatches `gas_sites` or `combat_sites` (`enter_combat_site`) career progression on anomaly/signature entry.
+/// Dispatches `gas_sites` or `combat_sites` (`enter_combat_site`) career progression on actual site grid landing / entry,
+/// deduplicating per `(char_id, sys_id, site_id)` and excluding Gas Training Sites and starter systems.
 pub(crate) fn record_site_entry_career_goals(
     ctx: &crate::router::ServerContext,
     char_id: i64,
+    sys_id: u32,
+    site_id: &str,
+    dungeon_id: Option<u32>,
+    dungeon_name: Option<&str>,
     site_category: &str,
 ) {
-    if matches!(site_category, "Gas" | "Gas Site" | "GasSite") {
-        record_career_sub_kind(ctx, char_id, "gas_sites", None, 1);
+    if char_id <= 0 || sys_id == 0 || site_id.is_empty() {
+        return;
+    }
+    let Ok(cid_u32) = u32::try_from(char_id) else {
+        return;
+    };
+    if matches!(site_category, "Gas" | "Gas Site" | "GasSite" | "WormholeGas") {
+        if is_gas_training_site(dungeon_id, dungeon_name) {
+            return;
+        }
+        if ctx
+            .quasar_gateway
+            .progression
+            .career_goals
+            .mark_site_visited_once(cid_u32, sys_id, site_id)
+        {
+            record_career_sub_kind(ctx, char_id, "gas_sites", None, 1);
+        }
     } else if is_combat_site_category(site_category) {
-        record_career_sub_kind(ctx, char_id, "combat_sites", Some("enter_combat_site"), 1);
+        if is_career_starter_system(&ctx.sde, sys_id) {
+            return;
+        }
+        if ctx
+            .quasar_gateway
+            .progression
+            .career_goals
+            .mark_site_visited_once(cid_u32, sys_id, site_id)
+        {
+            let mut ev = solar_system_career_event(&ctx.sde, "combat_sites", sys_id);
+            ev.sub_kind = Some("enter_combat_site");
+            ctx.quasar_gateway
+                .progression
+                .career_goals
+                .on_career_gameplay_event(cid_u32, ev, 1, &ctx.quasar_gateway);
+        }
     }
 }
 
-/// Dispatches `combat_sites` (`complete_combat_site`) career progression when a combat site finishes.
-pub(crate) fn record_combat_site_completion_gateway(
+/// Dispatches `combat_sites` (`complete_combat_site`) career progression when a combat site finishes outside starter systems.
+pub(crate) fn record_combat_site_completion_in_system(
     gateway: &crate::quasar_gateway::PublicGatewayRouter,
+    sde: &eve_sde::SdeRegistry,
+    sys_id: u32,
     char_id: i64,
     site_category: &str,
 ) {
-    if is_combat_site_category(site_category) {
-        record_career_sub_kind_gateway(
-            gateway,
-            char_id,
-            "combat_sites",
-            Some("complete_combat_site"),
-            1,
-        );
+    if is_combat_site_category(site_category) && !is_career_starter_system(sde, sys_id) {
+        if let Ok(cid) = u32::try_from(char_id) {
+            let mut ev = solar_system_career_event(sde, "combat_sites", sys_id);
+            ev.sub_kind = Some("complete_combat_site");
+            gateway
+                .progression
+                .career_goals
+                .on_career_gameplay_event(cid, ev, 1, gateway);
+        }
     }
 }
 

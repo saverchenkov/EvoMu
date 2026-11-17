@@ -2112,14 +2112,16 @@ pub(crate) async fn handle_module_cycles(
                     if let Ok(Some(post_cs)) = sys.get_combat_state(tid).await {
                         if cap_drain_target > 0.0 {
                             let drained = (pre_cs.capacitor - post_cs.capacitor).max(0.0);
-                            crate::services::quasar_career_goals::record_cap_warfare_career(
-                                ctx,
-                                char_id,
-                                ship_id,
-                                tid,
-                                "neutralizer",
-                                drained,
-                            );
+                            if drained > 0.0 {
+                                crate::services::quasar_career_goals::record_cap_warfare_career(
+                                    ctx,
+                                    char_id,
+                                    ship_id,
+                                    tid,
+                                    "neutralizer",
+                                    drained,
+                                );
+                            }
                         }
                         if remote_shield_amount > 0.0 {
                             let boosted = (post_cs.shield_hp - pre_cs.shield_hp).max(0.0);

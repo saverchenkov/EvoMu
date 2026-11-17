@@ -408,7 +408,7 @@ async fn daily_goals_evermark_redemption_and_ai_assistant() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn achievements_cat5_and_live_daily_damage_ships_capsuleer_vs_npc() {
-    let ctx = ServerContext::new();
+    let ctx = Arc::new(ServerContext::new());
     common::pin_clock(&ctx);
 
     let atk_cid = 2_115_200_101i64;
@@ -435,17 +435,106 @@ async fn achievements_cat5_and_live_daily_damage_ships_capsuleer_vs_npc() {
     atk_sess.solar_system_id = Some(low_sys);
     atk_sess.ship_id = Some(atk_ship_id);
 
-    // 1. Achievement Category 5 (Social) query succeeds and CDN definitions build cleanly.
+    // 1. Achievement Category 5 (Social) RPC + CDN FlatBuffer wire bytes decode to real localization IDs.
     let mut cat5_req = Vec::new();
     id_msg(1, 5, &mut cat5_req);
     let cat5_rsp = qrpc(&ctx, &mut atk_sess, "eve_public.achievement.category.api.GetRequest", cat5_req).await;
     assert_eq!(cat5_rsp.status_code, STATUS_OK);
+    let cat5_payload = cat5_rsp.payload.expect("category GetResponse payload");
+    let reg = eve_proto::quasar::QuasarDescriptorRegistry::open_default().expect("QuasarDescriptorRegistry");
+    let dyn_cat5 = reg
+        .decode_dynamic("eve_public.achievement.category.api.GetResponse", &cat5_payload.value)
+        .expect("decode category.api.GetResponse");
     assert_eq!(
-        qrpc(&ctx, &mut atk_sess, "eve_public.achievement.definition.api.cdn.GetLatestRequest", Vec::new())
-            .await
-            .status_code,
-        STATUS_OK
+        dyn_cat5.get(1),
+        Some(&eve_proto::quasar::DynamicValue::Uint32(0)),
+        "category 5 score must start at 0"
     );
+
+    let cdn_rsp = qrpc(
+        &ctx,
+        &mut atk_sess,
+        "eve_public.achievement.definition.api.cdn.GetLatestRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(cdn_rsp.status_code, STATUS_OK);
+    let cdn_bytes = cdn_rsp.payload.expect("cdn GetLatestResponse payload").value;
+    let dyn_cdn = reg
+        .decode_dynamic("eve_public.achievement.definition.api.cdn.GetLatestResponse", &cdn_bytes)
+        .expect("decode GetLatestResponse");
+    assert!(dyn_cdn.get(1).is_some(), "checkpoint field must be present");
+    let cdn_wm = WireMessage::decode(&cdn_bytes).expect("WireMessage decode GetLatestResponse");
+    let cp_bytes = cdn_wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 1)
+        .and_then(|f| f.value.as_bytes())
+        .expect("checkpoint wire bytes");
+    let cp_wm = WireMessage::decode(cp_bytes).expect("WireMessage decode Checkpoint");
+    let cdn_url = cp_wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 1)
+        .and_then(|f| f.value.as_str().ok().flatten())
+        .expect("checkpoint url string");
+    let cdn_path = cdn_url
+        .strip_prefix("http://127.0.0.1:26004")
+        .expect("local CDN HTTP URL");
+
+    let esi = eve_server::esi::EsiRouter::new(Arc::clone(&ctx));
+    let fb_resp = esi.handle_request(&eve_server::esi::EsiHttpRequest::new("GET", cdn_path));
+    assert_eq!(fb_resp.status_code, 200, "CDN FlatBuffer route failed for {cdn_path}");
+    let fb = &fb_resp.body;
+    assert!(fb.len() >= 12 && &fb[4..8] == b"ACHV", "expected ACHV FlatBuffer header");
+
+    let fb_u16 = |off: usize| -> u16 { u16::from_le_bytes(fb[off..off + 2].try_into().unwrap()) };
+    let fb_u32 = |off: usize| -> u32 { u32::from_le_bytes(fb[off..off + 4].try_into().unwrap()) };
+    let fb_i32 = |off: usize| -> i32 { i32::from_le_bytes(fb[off..off + 4].try_into().unwrap()) };
+    let fb_field = |tbl: usize, voff: usize| -> Option<usize> {
+        let vtable = (tbl as isize - fb_i32(tbl) as isize) as usize;
+        let vlen = usize::from(fb_u16(vtable));
+        if voff >= vlen {
+            return None;
+        }
+        let rel = usize::from(fb_u16(vtable + voff));
+        (rel != 0).then_some(tbl + rel)
+    };
+    let fb_tbl = |tbl: usize, voff: usize| -> Option<usize> {
+        let p = fb_field(tbl, voff)?;
+        Some(p + fb_u32(p) as usize)
+    };
+    let fb_str = |tbl: usize, voff: usize| -> Option<&str> {
+        let p = fb_field(tbl, voff)?;
+        let s = p + fb_u32(p) as usize;
+        let len = fb_u32(s) as usize;
+        std::str::from_utf8(&fb[s + 4..s + 4 + len]).ok()
+    };
+    let fb_vec = |tbl: usize, voff: usize| -> Vec<usize> {
+        let Some(p) = fb_field(tbl, voff) else {
+            return Vec::new();
+        };
+        let v = p + fb_u32(p) as usize;
+        let count = fb_u32(v) as usize;
+        (0..count)
+            .map(|i| {
+                let elem = v + 4 + i * 4;
+                elem + fb_u32(elem) as usize
+            })
+            .collect()
+    };
+
+    let root_tbl = fb_u32(0) as usize;
+    let challenges_tbl = fb_tbl(root_tbl, 6).expect("Challenges root category");
+    let cat5_tbl = fb_vec(challenges_tbl, 14)
+        .into_iter()
+        .find(|&t| fb_str(t, 4) == Some("00000000-0000-0000-0000-000000000005"))
+        .expect("Category 5 in CDN FlatBuffer");
+    assert_eq!(fb_str(cat5_tbl, 18), Some("social"));
+    let cat5_name_id = fb_field(cat5_tbl, 6).map(&fb_u32).unwrap_or(0);
+    let cat5_desc_id = fb_field(cat5_tbl, 8).map(&fb_u32).unwrap_or(0);
+    assert_eq!(cat5_name_id, 599_698, "Category 5 (social) name_id");
+    assert_eq!(cat5_desc_id, 582_715, "Category 5 (social) description_id");
 
     // 2. Spawn attacker, defender capsuleer ship, and an NPC ship in lowsec.
     ctx.db.with_mut_snapshot(|snap| {
@@ -851,9 +940,307 @@ async fn career_program_live_rpc_duels_social_fw_and_market() {
     assert_eq!(prog_of(c1, "SofSendMail"), 1);
     assert_eq!(prog_of(c1, "SofSendChatMessage"), 1);
     assert_eq!(prog_of(c1, "SofJoinFW"), 1);
+    assert_eq!(prog_of(c1, "SofJoinCorporation"), 0, "player-corp direct enlist stays in corp");
     assert_eq!(prog_of(c1, "IndustrialistEarnMarketIsk50k"), 50_000);
     assert_eq!(prog_of(c2, "EnforcerSpendMarketIsk50k"), 50_000);
     assert_eq!(prog_of(c1, "SofDuelChallenge"), 1);
     assert_eq!(prog_of(c1, "SofDuelWin1"), 1);
     assert_eq!(prog_of(c2, "SofDuelWin1"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn career_program_warp_arrival_dedup_and_corp_fw_enlist_e2e() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let killer_cid = 2_115_200_301i64;
+    let solo_npc_cid = 2_115_200_302i64;
+    let corp_member_cid = 2_115_200_303i64;
+    let corp_dir_cid = 2_115_200_304i64;
+    let corp_id = 98_152_301i64;
+
+    seed_pilot(&ctx.db, killer_cid, 5501, "ExplorerWarpPilot", 10_000_000_00, 1_000);
+    seed_pilot(&ctx.db, solo_npc_cid, 5502, "SoloNpcCorpPilot", 10_000_000_00, 1_000);
+    seed_pilot(&ctx.db, corp_member_cid, 5503, "FwCorpMember", 10_000_000_00, 1_000);
+    seed_pilot(&ctx.db, corp_dir_cid, 5504, "FwCorpDirector", 10_000_000_00, 1_000);
+
+    let starter_sys = ctx
+        .sde
+        .schools
+        .get(&11)
+        .expect("SDE school 11 starter system")
+        .solar_system_id;
+    let non_starter_sys = JITA_SYS;
+
+    let gas_pos = glam::DVec3::new(150_000_000.0, 0.0, 0.0);
+    let gas_train_pos = glam::DVec3::new(200_000_000.0, 0.0, 0.0);
+    let combat_pos = glam::DVec3::new(0.0, 150_000_000.0, 0.0);
+    let starter_pos = glam::DVec3::new(100_000_000.0, 0.0, 0.0);
+
+    let k_ship_id = killer_cid + 50_000;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&killer_cid) {
+            ch.station_id = None;
+            ch.solar_system_id = non_starter_sys;
+        }
+        if let Some(ship) = snap.items.get_mut(&k_ship_id) {
+            ship.location_id = i64::from(non_starter_sys);
+            ship.flag = InventoryFlag::None;
+        }
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "CareerFwTestCorp".into();
+        corp.ticker = "CFTC".into();
+        corp.ceo_id = corp_dir_cid;
+        corp.tax_rate = 0.05;
+        corp.hq_station_id = Some(JITA_STATION);
+        corp.members = std::collections::HashSet::from([corp_dir_cid, corp_member_cid]);
+        corp.member_roles = HashMap::from([(corp_dir_cid, eve_db::corp_roles::ROLE_DIRECTOR)]);
+        snap.corporations.insert(corp_id, corp);
+        if let Some(ch) = snap.characters.get_mut(&solo_npc_cid) {
+            ch.corporation_id = 1_000_009; // NPC starter corp -> moves to militia NPC corp on direct enlist
+        }
+        for cid in [corp_dir_cid, corp_member_cid] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.corporation_id = corp_id;
+            }
+        }
+        let sigs = snap.cosmic_signatures.entry(non_starter_sys).or_default();
+        sigs.push(eve_db::CosmicSignatureRecord {
+            signature_id: "GAS-E2E-1".into(),
+            solar_system_id: non_starter_sys,
+            sig_group: "Gas".into(),
+            type_name: "Token Barren Perimeter Reservoir".into(),
+            position: gas_pos.to_array(),
+            signal_strength: 1.0,
+            wormhole_type_id: None,
+            destination_system_id: None,
+            created_unix: 1_700_000_000,
+            lifetime_seconds: 86_400,
+            max_mass_kg: 0.0,
+            remaining_mass_kg: 0.0,
+            max_jump_mass_kg: 0.0,
+            collapsed: false,
+        });
+        sigs.push(eve_db::CosmicSignatureRecord {
+            signature_id: "GAS-TRAIN-E2E".into(),
+            solar_system_id: non_starter_sys,
+            sig_group: "Gas".into(),
+            type_name: "Gas Training Site".into(),
+            position: gas_train_pos.to_array(),
+            signal_strength: 1.0,
+            wormhole_type_id: None,
+            destination_system_id: None,
+            created_unix: 1_700_000_000,
+            lifetime_seconds: 86_400,
+            max_mass_kg: 0.0,
+            remaining_mass_kg: 0.0,
+            max_jump_mass_kg: 0.0,
+            collapsed: false,
+        });
+        snap.cosmic_anomalies
+            .entry(non_starter_sys)
+            .or_default()
+            .push(eve_db::CosmicAnomalyRecord {
+                anomaly_id: "CMBT-E2E-1".into(),
+                solar_system_id: non_starter_sys,
+                name: "Serpentis Hideaway".into(),
+                anomaly_type: "Combat".into(),
+                position: combat_pos.to_array(),
+                signal_strength: 1.0,
+                ore_types: Vec::new(),
+                remaining_volume: 0.0,
+                created_unix: 1_700_000_000,
+                lifetime_seconds: 86_400,
+                cleared: false,
+            });
+        snap.cosmic_anomalies
+            .entry(starter_sys)
+            .or_default()
+            .push(eve_db::CosmicAnomalyRecord {
+                anomaly_id: "STRT-E2E-1".into(),
+                solar_system_id: starter_sys,
+                name: "Starter Anomaly".into(),
+                anomaly_type: "Combat".into(),
+                position: starter_pos.to_array(),
+                signal_strength: 1.0,
+                ore_types: Vec::new(),
+                remaining_volume: 0.0,
+                created_unix: 1_700_000_000,
+                lifetime_seconds: 86_400,
+                cleared: false,
+            });
+    });
+
+    let prog_of = |cid: i64, lbl: &str| -> u64 {
+        ctx.quasar_gateway
+            .progression
+            .career_goals
+            .get_or_init_goals(cid as u32)
+            .into_iter()
+            .find(|g| g.def.goal_label == lbl)
+            .unwrap_or_else(|| panic!("missing goal {lbl}"))
+            .progress
+    };
+
+    // 1. Warp initiation + CmdStop cancel MUST NOT credit gas_sites or combat_sites.
+    let sys_h = ctx.systems.get_or_spawn(non_starter_sys);
+    let _ = sys_h
+        .spawn_ball_with_meta(
+            eve_destiny::Ball {
+                id: k_ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_067_000.0,
+                radius: 400.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(killer_cid, k_ship_id, 587),
+            ctx.build_ship_slim_meta(killer_cid, 587),
+        )
+        .await;
+    let mut k_sess = sess(41, 5501, killer_cid, service_roles::ROLE_PLAYER_DEFAULT);
+    k_sess.station_id = None;
+    k_sess.solar_system_id = Some(non_starter_sys);
+    k_sess.ship_id = Some(k_ship_id);
+    let kw = HashMap::new();
+
+    let bind_res = ctx
+        .dispatch_rpc(
+            &mut k_sess,
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(i64::from(non_starter_sys)), PyRep::None],
+            &kw,
+            None,
+        )
+        .await
+        .expect("MachoBindObject beyonce");
+    let beyonce_oid = match &bind_res {
+        PyRep::Tuple(outer) => outer[0].as_i64().expect("beyonce bound_id integer") as u64,
+        PyRep::Integer(oid) => *oid as u64,
+        other => panic!("unexpected MachoBindObject response: {other:?}"),
+    };
+
+    ctx.dispatch_rpc(
+        &mut k_sess,
+        "beyonce",
+        Some(beyonce_oid),
+        "CmdWarpToStuff",
+        &[PyRep::String("scan".into()), PyRep::String("GAS-E2E-1".into()), PyRep::Real(0.0)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CmdWarpToStuff gas");
+    ctx.dispatch_rpc(
+        &mut k_sess,
+        "beyonce",
+        Some(beyonce_oid),
+        "CmdStop",
+        &[],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CmdStop gas warp");
+    let _ = ctx
+        .dispatch_rpc(
+            &mut k_sess,
+            "beyonce",
+            Some(beyonce_oid),
+            "UpdateStateRequest",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(prog_of(killer_cid, "ExplorerEnterGasSites1"), 0, "cancelled warp must not credit gas site");
+
+    // 2. Actual warp landing credits once, duplicate landing on same site is deduplicated, starter system stays 0.
+    eve_server::services::pve_dungeon_runtime::on_warp_landed_at_dungeon_pocket_if_present(
+        &ctx,
+        killer_cid,
+        non_starter_sys,
+        gas_pos.to_array(),
+    )
+    .await;
+    eve_server::services::pve_dungeon_runtime::on_warp_landed_at_dungeon_pocket_if_present(
+        &ctx,
+        killer_cid,
+        non_starter_sys,
+        gas_train_pos.to_array(),
+    )
+    .await;
+    eve_server::services::pve_dungeon_runtime::on_warp_landed_at_dungeon_pocket_if_present(
+        &ctx,
+        killer_cid,
+        non_starter_sys,
+        gas_pos.to_array(),
+    )
+    .await;
+    eve_server::services::pve_dungeon_runtime::on_warp_landed_at_dungeon_pocket_if_present(
+        &ctx,
+        killer_cid,
+        non_starter_sys,
+        combat_pos.to_array(),
+    )
+    .await;
+    eve_server::services::pve_dungeon_runtime::on_warp_landed_at_dungeon_pocket_if_present(
+        &ctx,
+        killer_cid,
+        non_starter_sys,
+        combat_pos.to_array(),
+    )
+    .await;
+    eve_server::services::pve_dungeon_runtime::on_warp_landed_at_dungeon_pocket_if_present(
+        &ctx,
+        killer_cid,
+        starter_sys,
+        starter_pos.to_array(),
+    )
+    .await;
+    assert_eq!(prog_of(killer_cid, "ExplorerEnterGasSites1"), 1);
+    assert_eq!(prog_of(killer_cid, "ExplorerEnterCombatSites1"), 1);
+
+    // 3. Direct FW enlistment from an NPC corp moves to militia corp and credits both SofJoinFW and SofJoinCorporation.
+    let mut solo_sess = sess(43, 5502, solo_npc_cid, service_roles::ROLE_PLAYER_DEFAULT);
+    solo_sess.corporation_id = Some(1_000_009);
+    ctx.dispatch_rpc(
+        &mut solo_sess,
+        "fwCharacterEnlistmentMgr",
+        None,
+        "CreateMyDirectEnlistment",
+        &[PyRep::Integer(500_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("solo NPC CreateMyDirectEnlistment");
+    assert_eq!(prog_of(solo_npc_cid, "SofJoinFW"), 1);
+    assert_eq!(prog_of(solo_npc_cid, "SofJoinCorporation"), 1);
+
+    // 4. Corp FW enlistment credits corp member in addition to director.
+    let mut dir_sess = sess(42, 5504, corp_dir_cid, service_roles::ROLE_PLAYER_DEFAULT);
+    dir_sess.corporation_id = Some(corp_id);
+    dir_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    ctx.dispatch_rpc(
+        &mut dir_sess,
+        "facWarMgr",
+        None,
+        "JoinFactionAsCorporation",
+        &[PyRep::Integer(500_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("JoinFactionAsCorporation");
+    assert_eq!(prog_of(corp_dir_cid, "SofJoinFW"), 1);
+    assert_eq!(prog_of(corp_member_cid, "SofJoinFW"), 1);
 }

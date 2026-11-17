@@ -681,8 +681,10 @@ pub async fn handle_pve_site_npc_destruction(
         let (cat, did) = pve_site_category_and_dungeon_id(&ctx.db, now, solar_system_id, sid);
         ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(solar_system_id, &cat, did, 1, now, &ctx.quasar_gateway);
         crate::quasar_gateway::isolate_side_effect("pve_exploration.career_combat_site_done", || {
-            crate::services::quasar_career_goals::record_combat_site_completion_gateway(
+            crate::services::quasar_career_goals::record_combat_site_completion_in_system(
                 &ctx.quasar_gateway,
+                &ctx.sde,
+                solar_system_id,
                 killer_char_id,
                 &cat,
             );
@@ -939,8 +941,10 @@ pub async fn advance_site_wave_or_complete(
             solar_system_id, &site_category, dungeon_id, 1, ctx.now_unix(), &ctx.quasar_gateway,
         );
         crate::quasar_gateway::isolate_side_effect("pve_exploration.advance_career_combat_site", || {
-            crate::services::quasar_career_goals::record_combat_site_completion_gateway(
+            crate::services::quasar_career_goals::record_combat_site_completion_in_system(
                 &ctx.quasar_gateway,
+                &ctx.sde,
+                solar_system_id,
                 char_id,
                 &site_category,
             );

@@ -928,8 +928,10 @@ impl ServerContext {
                         if let Some(ref sid) = clr {
                             let (cat, did) = crate::services::pve_exploration::pve_site_category_and_dungeon_id(db, now_s, sys_id, sid);
                             ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(sys_id, &cat, did, 1, now_s, &ctx.quasar_gateway);
-                            crate::services::quasar_career_goals::record_combat_site_completion_gateway(
+                            crate::services::quasar_career_goals::record_combat_site_completion_in_system(
                                 &ctx.quasar_gateway,
+                                sde,
+                                sys_id,
                                 kid,
                                 &cat,
                             );

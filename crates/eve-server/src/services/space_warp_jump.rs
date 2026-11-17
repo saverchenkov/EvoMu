@@ -300,7 +300,6 @@ async fn handle_cmd_warp_to_stuff(
 
     let mut resolved_pos: Option<DVec3> = None;
     let mut fleet_ship_ball_id: Option<i64> = None;
-    let mut warped_site_category: Option<String> = None;
     match stuff_type {
         "bookmark" => {
             if sys_id == SOLAR_SYSTEM_ZARZAKH {
@@ -358,7 +357,6 @@ async fn handle_cmd_warp_to_stuff(
                     if let Some(anoms) = snap.cosmic_anomalies.get(&sys_id) {
                         for a in anoms {
                             if target_str_opt == Some(a.anomaly_id.as_str()) && !a.cleared {
-                                warped_site_category = Some(a.anomaly_type.clone());
                                 return Some(DVec3::from_array(a.position));
                             }
                         }
@@ -371,7 +369,6 @@ async fn handle_cmd_warp_to_stuff(
                                 && eff_strength >= 1.0
                                 && !s.collapsed
                             {
-                                warped_site_category = Some(s.sig_group.clone());
                                 return Some(
                                     crate::services::space_destiny::space_pochven_wormholes::pochven_wormhole_ball_position(
                                         &ctx.sde, s,
@@ -465,7 +462,6 @@ async fn handle_cmd_warp_to_stuff(
                                     && eff_strength >= 1.0))
                                 && !s.collapsed
                             {
-                                warped_site_category = Some(s.sig_group.clone());
                                 let base_pos = crate::services::space_destiny::space_pochven_wormholes::pochven_wormhole_ball_position(&ctx.sde, s);
                                 if crate::services::wormhole_lifecycle_ops::is_drifter_wormhole(&ctx.sde, s) {
                                     return Some(base_pos + DVec3::new(80_000.0, 0.0, 0.0));
@@ -477,7 +473,6 @@ async fn handle_cmd_warp_to_stuff(
                     if let Some(anoms) = snap.cosmic_anomalies.get(&sys_id) {
                         for a in anoms {
                             if target_str_opt == Some(a.anomaly_id.as_str()) && !a.cleared {
-                                warped_site_category = Some(a.anomaly_type.clone());
                                 return Some(DVec3::from_array(a.position));
                             }
                         }
@@ -724,15 +719,6 @@ async fn handle_cmd_warp_to_stuff(
             );
             crate::services::space_destiny::track_player_or_fleet_warp(ctx, None, ship_id, char_id);
             record_warp_progression(ctx, char_id);
-            if let Some(ref site_cat) = warped_site_category {
-                crate::quasar_gateway::isolate_side_effect("space_warp_jump.CmdWarpToStuff.career_site_entry", || {
-                    crate::services::quasar_career_goals::record_site_entry_career_goals(
-                        ctx,
-                        char_id,
-                        site_cat,
-                    );
-                });
-            }
             Ok(PyRep::Integer(tick as i64))
         }
         Err(e) => {

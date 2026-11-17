@@ -1185,15 +1185,17 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                         src_cs.capacitor =
                             (src_cs.capacitor + nos_transferred).min(src_cs.max_capacitor);
                     }
-                    if let Some(cid) = cycle.owner_char_id {
-                        pending_cycle_actions.push(PendingCycleAction::CareerProgressEvent {
-                            char_id: cid,
-                            source_ship_id: cycle.ship_id,
-                            target_id,
-                            activity_kind: "cap_warfare",
-                            sub_kind: "nosferatu",
-                            amount: nos_transferred,
-                        });
+                    if !is_sleeper_target {
+                        if let Some(cid) = cycle.owner_char_id {
+                            pending_cycle_actions.push(PendingCycleAction::CareerProgressEvent {
+                                char_id: cid,
+                                source_ship_id: cycle.ship_id,
+                                target_id,
+                                activity_kind: "cap_warfare",
+                                sub_kind: "nosferatu",
+                                amount: nos_transferred,
+                            });
+                        }
                     }
                 }
                 if remote_armor_repaired > 0.0 {

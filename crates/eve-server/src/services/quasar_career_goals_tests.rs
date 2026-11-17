@@ -1243,19 +1243,89 @@ fn career_dispatcher_helpers_cover_market_lp_standings_missions_combat_and_sites
     assert_eq!(prog_of(buyer_id, "EnforcerEpicArcComplete"), 1);
 
     // EWAR / Cap Warfare / Remote Repair capsuleer & self guards.
+    let genolution_pod_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 29 && t.type_id != 670)
+        .expect("SDE non-default capsule type in group 29")
+        .type_id;
+    let genolution_pod_id = 91_100_005_i64;
+    let corp_ship_id = 91_100_006_i64;
+    let third_pilot_id = 91_000_003_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            genolution_pod_id,
+            eve_db::InventoryItemRecord {
+                item_id: genolution_pod_id,
+                type_id: genolution_pod_tid,
+                owner_id: seller_id,
+                location_id: 30_000_142,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        // Corp-owned ship piloted by third_pilot_id via active_ship_id.
+        let mut ch3 = snap.characters[&seller_id].clone();
+        ch3.character_id = third_pilot_id;
+        ch3.user_id = third_pilot_id as u64;
+        ch3.name = "CorpShipPilot".into();
+        ch3.active_ship_id = corp_ship_id;
+        snap.characters.insert(third_pilot_id, ch3);
+        snap.items.insert(
+            corp_ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: corp_ship_id,
+                type_id: 587,
+                owner_id: 98_000_001,
+                location_id: 30_000_142,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+
     assert!(is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, seller_ship_id, buyer_id));
+    assert!(is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, corp_ship_id, buyer_id));
     assert!(!is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, buyer_ship_id, buyer_id));
     assert!(!is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, pod_id, buyer_id));
+    assert!(!is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, genolution_pod_id, buyer_id));
     assert!(!is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, npc_ship_id, buyer_id));
 
     record_ewar_career_seconds(&ctx, buyer_id, seller_ship_id, "webify", 10.0);
     record_ewar_career_seconds(&ctx, buyer_id, npc_ship_id, "webify", 50.0);
     record_ewar_career_seconds(&ctx, buyer_id, pod_id, "webify", 50.0);
+    record_ewar_career_seconds(&ctx, buyer_id, genolution_pod_id, "webify", 50.0);
     assert_eq!(prog_of(buyer_id, "SofWebify"), 10);
 
-    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, seller_ship_id, "nosferatu", 80.0);
+    // NPC, capsules (670 and variant), self, and zero GJ MUST NOT progress cap warfare.
     record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, npc_ship_id, "neutralizer", 90.0);
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, npc_ship_id, "nosferatu", 80.0);
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, pod_id, "neutralizer", 90.0);
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, genolution_pod_id, "neutralizer", 90.0);
     record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, buyer_ship_id, "neutralizer", 90.0);
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, seller_ship_id, "neutralizer", 0.0);
+    assert_eq!(prog_of(buyer_id, "SofNeutralizeCapacitor100"), 0);
+    assert_eq!(prog_of(buyer_id, "SofDrainCapacitor50"), 0);
+
+    // Live capsuleer ship cap warfare (personal + corp-owned active ship) increments cleanly.
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, seller_ship_id, "nosferatu", 80.0);
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, seller_ship_id, "neutralizer", 80.0);
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, corp_ship_id, "neutralizer", 10.0);
     assert_eq!(prog_of(buyer_id, "EnforcerEarnLp500"), 350);
     assert_eq!(prog_of(buyer_id, "SofNeutralizeCapacitor100"), 90);
 
@@ -1299,9 +1369,74 @@ fn career_dispatcher_helpers_cover_market_lp_standings_missions_combat_and_sites
         .filter(|g| g.def.goal_label.starts_with("SofRemoteBoostShieldHp"))
         .all(|g| g.progress == 0));
 
-    // Site entry & combat site completion.
-    record_site_entry_career_goals(&ctx, buyer_id, "CombatAnomaly");
-    record_combat_site_completion_gateway(&ctx.quasar_gateway, buyer_id, "WormholeCombat");
+    // Site entry, deduplication, Gas Training Site & starter-system exclusions, and combat PvP/NPC hull split.
+    let starter_sys = ctx
+        .sde
+        .schools
+        .get(&11)
+        .expect("SDE school 11 starter system")
+        .solar_system_id;
+    let non_starter_sys = 30_000_142_u32; // Jita (school 23, not starter 11..=22)
+    assert!(is_career_starter_system(&ctx.sde, starter_sys));
+    assert!(!is_career_starter_system(&ctx.sde, non_starter_sys));
+
+    record_site_entry_career_goals(&ctx, buyer_id, starter_sys, "STARTER-ANOM", None, None, "CombatAnomaly");
+    record_combat_site_completion_in_system(&ctx.quasar_gateway, &ctx.sde, starter_sys, buyer_id, "CombatAnomaly");
+    record_site_entry_career_goals(&ctx, buyer_id, non_starter_sys, "GAS-TRAIN-1", Some(4093), Some("Gas Training Site"), "Gas");
+    assert_eq!(prog_of(buyer_id, "ExplorerEnterCombatSites1"), 0);
+    assert_eq!(prog_of(buyer_id, "EnforcerCompleteCombatSites5"), 0);
+    assert_eq!(prog_of(buyer_id, "ExplorerEnterGasSites1"), 0);
+
+    record_site_entry_career_goals(&ctx, buyer_id, non_starter_sys, "ANOM-1", None, None, "CombatAnomaly");
+    record_site_entry_career_goals(&ctx, buyer_id, non_starter_sys, "ANOM-1", None, None, "CombatAnomaly");
+    record_site_entry_career_goals(&ctx, buyer_id, non_starter_sys, "GAS-1", None, Some("Ordinary Perimeter Reservoir"), "WormholeGas");
+    record_site_entry_career_goals(&ctx, buyer_id, non_starter_sys, "GAS-1", None, Some("Ordinary Perimeter Reservoir"), "WormholeGas");
+    record_combat_site_completion_in_system(&ctx.quasar_gateway, &ctx.sde, non_starter_sys, buyer_id, "WormholeCombat");
     assert_eq!(prog_of(buyer_id, "ExplorerEnterCombatSites1"), 1);
+    assert_eq!(prog_of(buyer_id, "ExplorerEnterGasSites1"), 1);
     assert_eq!(prog_of(buyer_id, "EnforcerCompleteCombatSites5"), 1);
+
+    let enforcer_before = prog_of(buyer_id, "EnforcerDestroyNpc100");
+    ctx.quasar_gateway.progression.career_goals.on_career_gameplay_event(
+        buyer_id as u32,
+        super::CareerGameplayEvent {
+            activity_kind: "combat",
+            ship_group_id: Some(25),
+            sub_kind: Some("pvp_kill"),
+            ..Default::default()
+        },
+        1,
+        &ctx.quasar_gateway,
+    );
+    assert_eq!(prog_of(buyer_id, "SofDestroyNpcInFrigate"), 1);
+    assert_eq!(prog_of(buyer_id, "EnforcerDestroyNpc100"), enforcer_before);
+
+    // Non-FW killer killing an FW pilot in a non-capsule ship credits SofKillFwCapsuleeer1 & Frigate hull kill (not capsule / Enforcer NPC).
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&seller_id) {
+            ch.war_faction_id = Some(500_001);
+        }
+    });
+    crate::services::fw_gameplay::fw_gameplay_rpc::on_player_ship_destroyed_in_combat_detailed(
+        &ctx,
+        non_starter_sys,
+        buyer_id,
+        seller_id,
+        genolution_pod_tid,
+        0.0,
+        0,
+    );
+    assert_eq!(prog_of(buyer_id, "SofKillFwCapsuleeer1"), 0);
+    crate::services::fw_gameplay::fw_gameplay_rpc::on_player_ship_destroyed_in_combat_detailed(
+        &ctx,
+        non_starter_sys,
+        buyer_id,
+        seller_id,
+        587,
+        1_000_000.0,
+        0,
+    );
+    assert_eq!(prog_of(buyer_id, "SofKillFwCapsuleeer1"), 1);
+    assert_eq!(prog_of(buyer_id, "SofDestroyNpcInFrigate"), 2);
+    assert_eq!(prog_of(buyer_id, "EnforcerDestroyNpc100"), enforcer_before);
 }
