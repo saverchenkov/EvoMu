@@ -1723,7 +1723,9 @@ async fn contracts_and_wallet_division_bill_trade_errors() {
     )
     .await
     .unwrap_err();
-    assert_eq!(err.code, "MustBeDockedAtStartStation");
+    // CCP V24 allows remote CreateContract from another station, so valid start/end locations
+    // with neither itemList nor requestedItems proceed to ContractRequiresItem.
+    assert_eq!(err.code, "ContractRequiresItem");
 
     let err = rpc(
         &ctx,
@@ -2440,4 +2442,187 @@ async fn mail_lists_chat_calendar_notifications_and_contacts_errors() {
         .await
         .unwrap_err();
     assert_eq!(err.code, "ContactNotFound");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_contract_creation_while_undocked_and_cross_station() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+
+    let mut s1 = grant_gm_and_setup(&ctx, "demo", "demo-secret", 500_000_000, false).await;
+    let mut s2 = grant_gm_and_setup(&ctx, "other", "other-secret", 500_000_000, false).await;
+    assert_eq!(s1.station_id, Some(JITA_44));
+    assert_eq!(s2.station_id, Some(JITA_44));
+
+    let jita_item = create_item(&ctx, &mut s1, 34, 1).await;
+    let wrong_loc_item = create_item(&ctx, &mut s1, 34, 1).await;
+    let amarr_item = create_item(&ctx, &mut s2, 34, 10).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        let it = snap.items.get_mut(&amarr_item).expect("amarr_item exists");
+        it.location_id = AMARR_8;
+        it.flag = eve_db::InventoryFlag::Hangar;
+        it.version += 1;
+    });
+
+    // Undock P1 into space (#1275 reproduction condition: station_id = None, structure_id = None).
+    ctx.advance_secs(12);
+    rpc(&ctx, &mut s1, "stationSvc", "Undock", &[])
+        .await
+        .expect("Undock P1");
+    assert!(s1.station_id.is_none() && s1.structure_id.is_none(), "caller must be undocked in space");
+
+    // Negative: undocked CreateContract omitting/zeroing startStationID fails with InvalidContractStation.
+    let err_missing_station = rpc(
+        &ctx,
+        &mut s1,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::Integer(1)),
+            ("startStationID", PyRep::Integer(0)),
+            ("endStationID", PyRep::Integer(JITA_44)),
+            ("itemList", PyRep::List(vec![PyRep::List(vec![PyRep::Integer(jita_item), PyRep::Integer(1)])])),
+        ])],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_missing_station.code, "InvalidContractStation");
+
+    // Negative: undocked CreateContract claiming startStationID=AMARR_8 for a JITA_44 item fails ownership/location check.
+    let err_wrong_loc = rpc(
+        &ctx,
+        &mut s1,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::Integer(1)),
+            ("startStationID", PyRep::Integer(AMARR_8)),
+            ("destinationID", PyRep::Integer(AMARR_8)),
+            ("itemList", PyRep::List(vec![PyRep::List(vec![PyRep::Integer(wrong_loc_item), PyRep::Integer(1)])])),
+        ])],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_wrong_loc.code, "ContractItemOwnershipOrLocationInvalid");
+
+    // Positive (#1275): while undocked, inspect remote Jita hangar and create ItemExchange contract there.
+    let dock_items = rpc(
+        &ctx,
+        &mut s1,
+        "contractProxy",
+        "GetItemsInDockableLocation",
+        &[PyRep::Integer(JITA_44), PyRep::Bool(false)],
+    )
+    .await
+    .expect("GetItemsInDockableLocation from space");
+    let PyRep::List(dock_list) = dock_items else {
+        panic!("expected list from GetItemsInDockableLocation");
+    };
+    assert!(
+        dock_list
+            .iter()
+            .any(|row| row.dict_get("itemID") == Some(&PyRep::Integer(jita_item))),
+        "remote station hangar item should appear in GetItemsInDockableLocation while undocked"
+    );
+
+    let created = rpc(
+        &ctx,
+        &mut s1,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::Integer(1)),
+            ("availability", PyRep::Integer(0)),
+            ("assignedToID", PyRep::None),
+            ("minutesExpire", PyRep::Integer(1440)),
+            ("numDays", PyRep::Integer(1)),
+            ("startStationID", PyRep::Integer(JITA_44)),
+            ("destinationID", PyRep::Integer(JITA_44)),
+            ("price", PyRep::Real(10_000.0)),
+            ("reward", PyRep::Real(0.0)),
+            ("collateral", PyRep::Real(0.0)),
+            ("itemList", PyRep::List(vec![PyRep::List(vec![PyRep::Integer(jita_item), PyRep::Integer(1)])])),
+            ("requestItemTypeList", PyRep::List(vec![])),
+            ("forCorp", PyRep::Integer(0)),
+            ("title", PyRep::String(String::new())),
+        ])],
+    )
+    .await
+    .expect("remote ItemExchange CreateContract from space must succeed");
+    let PyRep::List(created_ids) = created else {
+        panic!("expected [contractID], got {created:?}");
+    };
+    let cid = created_ids.first().and_then(|v| v.as_i64()).expect("contractID");
+
+    let detail = rpc(&ctx, &mut s1, "contractProxy", "GetContract", &[PyRep::Integer(cid)])
+        .await
+        .expect("GetContract");
+    assert_eq!(detail.dict_get("contractID").and_then(|v| v.as_i64()), Some(cid));
+    assert_eq!(detail.dict_get("startStationID").and_then(|v| v.as_i64()), Some(JITA_44));
+    assert_eq!(detail.dict_get("endStationID").and_then(|v| v.as_i64()), Some(JITA_44));
+    assert_eq!(detail.dict_get("status").and_then(|v| v.as_i64()), Some(0));
+    ctx.db.with_snapshot(|snap| {
+        let c = &snap.contracts[&cid];
+        assert_eq!(c.issuer_id, P1);
+        assert_eq!(c.start_station_id, JITA_44);
+        assert_eq!(c.end_station_id, JITA_44);
+        assert_eq!(c.status, "Outstanding");
+        assert_eq!(c.item_ids, vec![jita_item]);
+        let it = &snap.items[&jita_item];
+        assert_eq!(it.location_id, cid);
+        assert_eq!(it.flag, eve_db::InventoryFlag::Locked);
+    });
+
+    // Positive cross-station: P2 docked at JITA_44 creates remote Courier contract AMARR_8 -> JITA_44.
+    let courier_created = rpc(
+        &ctx,
+        &mut s2,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::Integer(3)),
+            ("availability", PyRep::Integer(0)),
+            ("minutesExpire", PyRep::Integer(1440)),
+            ("numDays", PyRep::Integer(3)),
+            ("startStationID", PyRep::Integer(AMARR_8)),
+            ("destinationID", PyRep::Integer(JITA_44)),
+            ("reward", PyRep::Real(250_000.0)),
+            ("collateral", PyRep::Real(1_000_000.0)),
+            ("itemList", PyRep::List(vec![PyRep::List(vec![PyRep::Integer(amarr_item), PyRep::Integer(10)])])),
+        ])],
+    )
+    .await
+    .expect("cross-station Courier CreateContract must succeed");
+    let PyRep::List(courier_ids) = courier_created else {
+        panic!("expected [contractID], got {courier_created:?}");
+    };
+    let courier_cid = courier_ids.first().and_then(|v| v.as_i64()).expect("courier contractID");
+    ctx.db.with_snapshot(|snap| {
+        let c = &snap.contracts[&courier_cid];
+        assert_eq!(c.issuer_id, P2);
+        assert_eq!(c.contract_type, "Courier");
+        assert_eq!(c.start_station_id, AMARR_8);
+        assert_eq!(c.end_station_id, JITA_44);
+        assert_eq!(c.status, "Outstanding");
+        assert_eq!(snap.items[&amarr_item].location_id, courier_cid);
+        assert_eq!(snap.items[&amarr_item].flag, eve_db::InventoryFlag::Locked);
+    });
+
+    // AcceptContract still enforces MustBeDockedAtStartStation for an undocked caller.
+    let accept_err = rpc(&ctx, &mut s1, "contractProxy", "AcceptContract", &[PyRep::Integer(courier_cid)])
+        .await
+        .unwrap_err();
+    assert_eq!(accept_err.code, "MustBeDockedAtStartStation");
+
+    // Docked P2 at JITA_44 can accept the ItemExchange contract created by P1 from space.
+    let accepted = rpc(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(cid)])
+        .await
+        .expect("P2 docked at JITA_44 accepts P1 space-created contract");
+    assert_eq!(accepted.dict_get("status").and_then(|v| v.as_str()), Some("Completed"));
+    ctx.db.with_snapshot(|snap| {
+        let it = &snap.items[&jita_item];
+        assert_eq!(it.owner_id, P2);
+        assert_eq!(it.location_id, JITA_44);
+        assert_eq!(it.flag, eve_db::InventoryFlag::Hangar);
+    });
 }

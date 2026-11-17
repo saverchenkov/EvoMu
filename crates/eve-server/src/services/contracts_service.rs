@@ -274,6 +274,24 @@ fn contract_location_ids(
     (i64::from(sys_id), region_id)
 }
 
+/// Returns `true` when `location_id` resolves to an SDE NPC station or a non-destroyed Upwell structure.
+fn is_valid_contract_location(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    location_id: i64,
+) -> bool {
+    ctx.sde.stations.contains_key(&location_id)
+        || ctx
+            .sde
+            .solar_systems
+            .values()
+            .any(|s| s.stations.iter().any(|st| st.station_id == location_id))
+        || snap
+            .structures
+            .get(&location_id)
+            .is_some_and(|st| st.state != "Destroyed")
+}
+
 fn contract_type_code(contract_type: &str) -> i64 {
     match contract_type {
         "ItemExchange" | "item_exchange" => 1,
@@ -1061,12 +1079,16 @@ pub fn handle(
                 .and_then(|a| a.as_i64())
                 .filter(|&m| m > 0)
             { ((exp_min as u64).saturating_mul(60)).clamp(60, 2_419_200) } else { 86_400 };
-            let Some(start_station_id) = p_field_some("startStationID").or_else(|| args.get(5)).and_then(|a| a.as_i64()).filter(|&id| id > 0)
-                .or(session.station_id).or(session.structure_id)
+            let Some(start_station_id) = p_field_some("startStationID")
+                .or_else(|| args.get(5))
+                .and_then(|a| a.as_i64())
+                .filter(|&id| id > 0)
+                .or(session.station_id)
+                .or(session.structure_id)
             else {
                 return Some(Err(rpc_err(
-                    "MustBeDockedAtStartStation",
-                    "Caller must be docked at start_station_id to create a contract",
+                    "InvalidContractStation",
+                    "Contract requires a valid startStationID when caller is not docked",
                 )));
             };
             let end_station_id = match p_field_some("endStationID")
@@ -1145,13 +1167,6 @@ pub fn handle(
                 match rpc.opt_bool(15, "forCorp") { Ok(v) => v.unwrap_or(false), Err(e) => return Some(Err(e)) }
             };
 
-            if session.station_id.or(session.structure_id) != Some(start_station_id) {
-                return Some(Err(rpc_err(
-                    "MustBeDockedAtStartStation",
-                    format!("Caller must be docked at start_station_id {start_station_id}"),
-                )));
-            }
-
             if matches!(contract_type, "ItemExchange" | "Auction") {
                 if end_station_id != start_station_id {
                     return Some(Err(rpc_err(
@@ -1198,10 +1213,6 @@ pub fn handle(
                 )));
             }
 
-            let start_sde_valid = ctx.sde.solar_systems.values()
-                .any(|s| s.stations.iter().any(|st| st.station_id == start_station_id));
-            let end_sde_valid = ctx.sde.solar_systems.values()
-                .any(|s| s.stations.iter().any(|st| st.station_id == end_station_id));
             let now_unix = ctx.now_unix();
             let active_ship = session.ship_id;
             let acct_div_idx = active_corp_acct_div(session);
@@ -1218,14 +1229,18 @@ pub fn handle(
             let cs_state = crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx);
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let start_valid = start_sde_valid
-                    || snap.structures.get(&start_station_id).map(|st| st.state != "Destroyed").unwrap_or(false);
-                let end_valid = end_sde_valid
-                    || snap.structures.get(&end_station_id).map(|st| st.state != "Destroyed").unwrap_or(false);
-                if !start_valid || !end_valid {
+                if !is_valid_contract_location(ctx, snap, start_station_id)
+                    || !is_valid_contract_location(ctx, snap, end_station_id)
+                {
                     return Err(rpc_err(
                         "InvalidContractStation",
                         format!("Invalid start {start_station_id} or destination {end_station_id}"),
+                    ));
+                }
+                if item_ids_req.is_empty() && !snap.has_structure_acl_access(start_station_id, char_id) {
+                    return Err(rpc_err(
+                        "StructureAccessDenied",
+                        format!("Character {char_id} lacks access to structure {start_station_id}"),
                     ));
                 }
 
