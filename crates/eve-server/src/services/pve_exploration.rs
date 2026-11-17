@@ -1308,6 +1308,7 @@ async fn handle_activate_acceleration_gate(
         Err(e) => return Some(Err(e)),
     };
     if site_id.starts_with("INC-") {
+        crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(ctx, sys_id).await;
         let res = crate::services::pve_incursion_sites::process_incursion_site_completion_and_payout(
             ctx, session.character_id, session.fleet_id, sys_id, &site_id, None,
         ).await.map(|r| {

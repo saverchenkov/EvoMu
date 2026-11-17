@@ -16,7 +16,7 @@ use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 use eve_sde::TypeId;
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ClientError, PyRep};
 use glam::DVec3;
 
 const BEYONCE_SVC: &str = "beyonce";
@@ -1802,17 +1802,24 @@ fn validate_planned_reprocess_capacities(
                 cap_m3,
             } => {
                 if let Some(ship_type) = sde.types.get(&ship_type_id) {
-                    for mat in &p.outputs {
-                        let Some(mat_type) = sde.types.get(&mat.type_id) else {
-                            return Err(BridgeRpcError::user_error("InvalidItemTypeForHold"));
-                        };
-                        if !crate::services::fitting_saved_apply::is_item_allowed_in_ship_hold(
-                            flag as u16,
-                            mat_type,
-                            ship_type,
-                        ) {
-                            return Err(BridgeRpcError::user_error("InvalidItemTypeForHold"));
-                        }
+                    if let Some(invalid_mat) = p.outputs.iter().find(|mat| {
+                        !sde.types.get(&mat.type_id).is_some_and(|mat_type| {
+                            crate::services::fitting_saved_apply::is_item_allowed_in_ship_hold(
+                                flag as u16,
+                                mat_type,
+                                ship_type,
+                            )
+                        })
+                    }) {
+                        let msg = format!(
+                            "Reprocessing output type {} cannot be stored in ship hold flag {flag:?}",
+                            invalid_mat.type_id
+                        );
+                        return Err(BridgeRpcError::with_client_error(
+                            "InvalidItemTypeForHold",
+                            msg.clone(),
+                            ClientError::CustomInfo(msg),
+                        ));
                     }
                 }
                 let entry = ship_holds.entry((ship_id, flag)).or_insert(DestVolAccum {
