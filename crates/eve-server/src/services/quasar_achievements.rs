@@ -80,37 +80,50 @@ pub fn achievement_reward_uuid(achievement_id: u32, milestone_id: u32) -> [u8; 1
     uuid
 }
 
-fn classify_achievement_category(
-    id: u32,
-    info: &eve_sde::AchievementInfo,
-    conditions: &[AchievementConditionDef],
-) -> u32 {
-    let mut hay = info.name.to_ascii_lowercase();
-    hay.push(' ');
-    hay.push_str(&info.description.to_ascii_lowercase());
-    for c in conditions {
-        hay.push(' ');
-        hay.push_str(&c.event_name.to_ascii_lowercase());
-    }
-    if hay.contains("kill") || hay.contains("damage") || hay.contains("combat") || hay.contains("destroy") || hay.contains("bounty") || hay.contains("weapon") {
-        1
-    } else if hay.contains("scan") || hay.contains("hack") || hay.contains("explor") || hay.contains("wormhole") || hay.contains("jump") || hay.contains("gate") || hay.contains("warp") {
-        2
-    } else if hay.contains("mine") || hay.contains("ore") || hay.contains("manufactur") || hay.contains("industr") || hay.contains("blueprint") || hay.contains("reprocess") {
-        3
-    } else if hay.contains("market") || hay.contains("trade") || hay.contains("contract") || hay.contains("wallet") || hay.contains("isk") || hay.contains("plex") {
-        4
-    } else if hay.contains("fleet") || hay.contains("corp") || hay.contains("mission") || hay.contains("loyalty") || hay.contains("social") || hay.contains("agent") {
-        5
-    } else {
-        (id % 5) + 1
-    }
-}
-
 fn build_definitions_from_sde(
     sde: &eve_sde::SdeRegistry,
 ) -> (Vec<AchievementDef>, HashSet<String>, usize, String, Vec<u8>, Vec<u8>) {
-    let Ok(achs) = sde.load_achievements() else {
+    // Prefer V24 SQLite SDE tables (`sde_achievements` + `sde_achievement_events`); fall back to
+    // reading `res:/staticdata/achievements.static` directly only for synthetic in-memory registries.
+    let static_rows: Vec<eve_sde::AchievementStaticDef> = if !sde.achievements_static.is_empty() {
+        sde.achievements_static.clone()
+    } else if let Ok(achs) = sde.load_achievements() {
+        let cfsd_events = sde
+            .load_cfsd_table("res:/staticdata/achievementevents.fsdbinary")
+            .unwrap_or_default();
+        achs.into_values()
+            .map(|info| {
+                let simple_conditions = info
+                    .conditions
+                    .iter()
+                    .map(|c| eve_sde::AchievementConditionDef {
+                        condition_index: c.condition_id,
+                        statistic: c.statistic_event_id,
+                        target_value: (c.target_value as u64).max(1),
+                    })
+                    .collect();
+                let primary_event_id = info
+                    .conditions
+                    .first()
+                    .map_or(0, |c| c.statistic_event_id);
+                let _ = &cfsd_events;
+                eve_sde::AchievementStaticDef {
+                    achievement_id: info.achievement_id,
+                    name_id: info.name_id,
+                    name: info.name,
+                    description_id: info.description_id,
+                    description: info.description,
+                    notification_text_id: info.notification_text_id,
+                    notification_text: info.notification_text,
+                    is_client_achievement: info.is_client_achievement,
+                    is_enabled: info.is_enabled,
+                    simple_conditions,
+                    target_value: info.target_value as u64,
+                    primary_event_id,
+                }
+            })
+            .collect()
+    } else {
         let empty = b"[]".to_vec();
         let empty_fb = super::quasar_achievements_flatbuffer::encode_achievement_data_flatbuffer(
             &[],
@@ -125,80 +138,92 @@ fn build_definitions_from_sde(
             empty_fb,
         );
     };
-    let events = sde
-        .load_cfsd_table("res:/staticdata/achievementevents.fsdbinary")
-        .unwrap_or_default();
-    let server_eids: HashSet<u32> = achs
-        .values()
+
+    let event_names: HashMap<u32, String> = if !sde.achievement_events_static.is_empty() {
+        sde.achievement_events_static
+            .iter()
+            .map(|(&eid, ev)| (eid, ev.name.clone()))
+            .collect()
+    } else {
+        sde.load_cfsd_table("res:/staticdata/achievementevents.fsdbinary")
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(eid_i64, row)| {
+                let eid = u32::try_from(eid_i64).ok()?;
+                let name = row.str("name").unwrap_or("").trim().to_string();
+                Some((eid, name))
+            })
+            .collect()
+    };
+
+    let server_eids: HashSet<u32> = static_rows
+        .iter()
         .filter(|i| !i.is_client_achievement)
-        .flat_map(|i| i.conditions.iter().map(|c| c.statistic_event_id))
+        .flat_map(|i| i.simple_conditions.iter().map(|c| c.statistic))
         .collect();
-    let client_eids: HashSet<u32> = achs
-        .values()
+    let client_eids: HashSet<u32> = static_rows
+        .iter()
         .filter(|i| i.is_enabled && i.is_client_achievement)
-        .flat_map(|i| i.conditions.iter().map(|c| c.statistic_event_id))
+        .flat_map(|i| i.simple_conditions.iter().map(|c| c.statistic))
         .collect();
     let mut allowed_client_keys = HashSet::new();
     for &eid in &client_eids {
         allowed_client_keys.insert(eid.to_string());
     }
-    for (&eid_i64, row) in &events {
-        let Ok(eid) = u32::try_from(eid_i64) else { continue };
-        let name = row.str("name").unwrap_or("").trim();
-        if client_eids.contains(&eid) || (name.starts_with("client_") && !server_eids.contains(&eid)) {
+    for (&eid, name) in &event_names {
+        let trimmed = name.trim();
+        if client_eids.contains(&eid) || (trimmed.starts_with("client_") && !server_eids.contains(&eid)) {
             allowed_client_keys.insert(eid.to_string());
-            if !name.is_empty() {
-                allowed_client_keys.insert(name.to_string());
+            if !trimmed.is_empty() {
+                allowed_client_keys.insert(trimmed.to_string());
             }
         }
     }
 
-    let mut ids: Vec<u32> = achs.values().filter(|i| i.is_enabled).map(|i| i.achievement_id).collect();
-    ids.sort_unstable();
-    let count = ids.len();
+    let mut enabled_rows: Vec<&eve_sde::AchievementStaticDef> =
+        static_rows.iter().filter(|i| i.is_enabled).collect();
+    enabled_rows.sort_by_key(|i| i.achievement_id);
+    let count = enabled_rows.len();
 
-    let mut defs = Vec::with_capacity(ids.len());
-    let mut loc_ids: HashMap<u32, (u32, u32)> = HashMap::with_capacity(ids.len());
-    for id in ids {
-        let Some(info) = achs.get(&id).filter(|info| info.is_enabled) else { continue };
+    let mut defs = Vec::with_capacity(count);
+    let mut loc_ids: HashMap<u32, (u32, u32)> = HashMap::with_capacity(count);
+    for info in enabled_rows {
+        let id = info.achievement_id;
         loc_ids.insert(id, (info.name_id, info.description_id));
         let conditions: Vec<AchievementConditionDef> = info
-            .conditions
+            .simple_conditions
             .iter()
             .map(|c| {
-                let event_name = events.get(&i64::from(c.statistic_event_id)).and_then(|r| r.str("name")).unwrap_or("").to_string();
+                let event_name = event_names.get(&c.statistic).cloned().unwrap_or_default();
                 AchievementConditionDef {
-                    condition_id: c.condition_id,
-                    target_value: (c.target_value as u64).max(1),
-                    statistic_event_id: c.statistic_event_id,
+                    condition_id: c.condition_index,
+                    target_value: c.target_value.max(1),
+                    statistic_event_id: c.statistic,
                     event_name,
                 }
             })
             .collect();
         let target = if conditions.is_empty() {
-            (info.target_value as u64).max(1)
+            info.target_value.max(1)
         } else {
             conditions.iter().map(|c| c.target_value).sum::<u64>().max(1)
         };
 
-        let category_id = classify_achievement_category(id, info, &conditions);
-        let score = ((id % 5) + 1) * 10;
-        let milestone_targets = if target >= 4 { vec![target / 2, target] } else { Vec::new() };
-        let reward_isk = ((target.min(500)) as i64 * 10_000).clamp(100_000, 1_000_000);
-        let reward_sp = ((target.min(500)) as i64 * 50).clamp(2_500, 10_000);
+        // Client `achievements.static` omits server-authored CDN category trees, score weights,
+        // milestone checkpoints, and ISK/SP payouts; keep them 0 / empty unless operator-configured.
         defs.push(AchievementDef {
             id,
             is_client_achievement: info.is_client_achievement,
-            category_id,
+            category_id: 0,
             name: info.name.clone(),
             description: info.description.clone(),
             notification_text: info.notification_text.clone(),
             target,
-            score,
-            milestone_targets,
+            score: 0,
+            milestone_targets: Vec::new(),
             conditions,
-            reward_isk,
-            reward_sp,
+            reward_isk: 0,
+            reward_sp: 0,
         });
     }
     let json_bytes = serde_json::to_vec(&defs).unwrap_or_else(|_| b"[]".to_vec());
@@ -206,6 +231,37 @@ fn build_definitions_from_sde(
     let fb_bytes =
         super::quasar_achievements_flatbuffer::encode_achievement_data_flatbuffer(&defs, &loc_ids);
     (defs, allowed_client_keys, count, hash, json_bytes, fb_bytes)
+}
+
+fn advance_achievement_milestones_and_completion(
+    a: &mut CharacterAchievement,
+    now_unix: u64,
+) -> (bool, Vec<u32>) {
+    let has_configured_payout = a.def.reward_isk > 0 || a.def.reward_sp > 0;
+    let mut new_milestones = Vec::new();
+    for (idx, target) in a.def.milestone_targets.iter().enumerate() {
+        let m_id = (idx + 1) as u32;
+        if a.progress >= *target && !a.reached_milestones.contains(&m_id) {
+            a.reached_milestones.push(m_id);
+            if has_configured_payout {
+                a.unclaimed_reward_count += 1;
+            }
+            new_milestones.push(m_id);
+        }
+    }
+    let prev_completed = a.completed;
+    if a.progress >= a.def.target && !a.completed {
+        a.completed = true;
+        a.completed_date = Some(now_unix);
+        if a.def.milestone_targets.is_empty()
+            && has_configured_payout
+            && !a.reached_milestones.contains(&1)
+        {
+            a.reached_milestones.push(1);
+            a.unclaimed_reward_count += 1;
+        }
+    }
+    (!prev_completed && a.completed, new_milestones)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -513,7 +569,6 @@ impl AchievementManager {
 
         for a in list.iter_mut() {
             if a.def.id == achievement_id {
-                let prev_completed = a.completed;
                 a.progress = a.progress.saturating_add(delta);
                 let mut rem = a.progress;
                 for cond in &a.def.conditions {
@@ -522,21 +577,8 @@ impl AchievementManager {
                     rem = rem.saturating_sub(take);
                 }
 
-                let mut new_milestones = Vec::new();
-                for (idx, target) in a.def.milestone_targets.iter().enumerate() {
-                    let m_id = (idx + 1) as u32;
-                    if a.progress >= *target && !a.reached_milestones.contains(&m_id) {
-                        a.reached_milestones.push(m_id);
-                        a.unclaimed_reward_count += 1;
-                        new_milestones.push(m_id);
-                    }
-                }
-
-                if a.progress >= a.def.target && !a.completed {
-                    a.completed = true;
-                    a.completed_date = Some(now_unix);
-                }
-                let just_completed = !prev_completed && a.completed;
+                let (just_completed, new_milestones) =
+                    advance_achievement_milestones_and_completion(a, now_unix);
                 return Some((a.clone(), just_completed, new_milestones));
             }
         }
@@ -601,23 +643,11 @@ impl AchievementManager {
                 .iter()
                 .map(|c| a.condition_progress.get(&c.condition_id).copied().unwrap_or(0).min(c.target_value))
                 .sum();
-            let prev_completed = a.completed;
             a.progress = a.progress.max(total_cond_progress);
 
-            let mut new_milestones = Vec::new();
-            for (idx, target) in a.def.milestone_targets.iter().enumerate() {
-                let m_id = (idx + 1) as u32;
-                if a.progress >= *target && !a.reached_milestones.contains(&m_id) {
-                    a.reached_milestones.push(m_id);
-                    a.unclaimed_reward_count += 1;
-                    new_milestones.push(m_id);
-                }
-            }
-            if a.progress >= a.def.target && !a.completed {
-                a.completed = true;
-                a.completed_date = Some(now_unix);
-            }
-            updates.push((a.clone(), !prev_completed && a.completed, new_milestones));
+            let (just_completed, new_milestones) =
+                advance_achievement_milestones_and_completion(a, now_unix);
+            updates.push((a.clone(), just_completed, new_milestones));
         }
         updates
     }
@@ -811,22 +841,7 @@ impl AchievementManager {
                 for cond in &a.def.conditions {
                     a.condition_progress.insert(cond.condition_id, cond.target_value);
                 }
-                a.completed = true;
-                a.completed_date = Some(now_unix);
-                for (idx, _) in a.def.milestone_targets.iter().enumerate() {
-                    let m_id = (idx + 1) as u32;
-                    if !a.reached_milestones.contains(&m_id) {
-                        a.reached_milestones.push(m_id);
-                        a.unclaimed_reward_count += 1;
-                    }
-                }
-                if a.def.milestone_targets.is_empty()
-                    && (a.def.reward_isk > 0 || a.def.reward_sp > 0)
-                    && !a.reached_milestones.contains(&1)
-                {
-                    a.reached_milestones.push(1);
-                    a.unclaimed_reward_count += 1;
-                }
+                let _ = advance_achievement_milestones_and_completion(a, now_unix);
                 return Ok(a.clone());
             }
         }
@@ -922,7 +937,9 @@ impl AchievementManager {
             };
 
             for a in list.iter_mut() {
-                if a.unclaimed_reward_count == 0 {
+                if a.unclaimed_reward_count == 0
+                    || (a.def.reward_isk <= 0 && a.def.reward_sp <= 0)
+                {
                     continue;
                 }
                 if let Some(req_aid) = filter.achievement_id {

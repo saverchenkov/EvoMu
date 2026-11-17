@@ -298,7 +298,7 @@ fn build_achievement_table(
             let m_id = (idx as u32) + 1;
             let m_id_off = fb.create_string(&uuid_bytes_to_hyphenated_string(u32_to_uuid(m_id)));
             let total_milestones = (def.milestone_targets.len() as u32).max(1);
-            let category_points = (def.score / total_milestones).max(1);
+            let category_points = def.score / total_milestones;
             // AchievementMilestone (6 slots):
             // 0: Id, 1: Target, 2: CategoryPoints, 3: Rewards, 4: InternalName, 5: Presentation
             let mut m_tbl = fb.start_table(6);

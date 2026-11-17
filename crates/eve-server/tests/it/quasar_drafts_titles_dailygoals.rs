@@ -486,8 +486,14 @@ async fn quasar_daily_goals_configurable_and_admin_targeting() {
 
     // Target char (session 2) receives ProgressedNotice with progress = 2
     let notices2 = drain_notices(&mut stream_rx2);
-    let prog_notice = notices2.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("ProgressedNotice")).unwrap_or(false));
-    assert!(prog_notice.is_some(), "Target character must receive ProgressedNotice");
+    let prog_notice = notices2
+        .iter()
+        .find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("ProgressedNotice")).unwrap_or(false))
+        .expect("Target character must receive ProgressedNotice");
+    let prog_wm = WireMessage::decode(&prog_notice.payload.as_ref().unwrap().value).expect("decode ProgressedNotice");
+    let prog_id_wm = WireMessage::decode(prog_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(prog_id_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()), Some(custom_uuid.as_slice()));
+    assert_eq!(prog_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(2));
 
     // Session 1 should NOT have received notices for char 2's goal
     let notices1 = drain_notices(&mut stream_rx1);
@@ -499,8 +505,13 @@ async fn quasar_daily_goals_configurable_and_admin_targeting() {
     assert_eq!(prog_rsp2.status_code, STATUS_OK);
 
     let notices2_complete = drain_notices(&mut stream_rx2);
-    let comp_notice = notices2_complete.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("CompletedNotice")).unwrap_or(false));
-    assert!(comp_notice.is_some(), "Target character must receive CompletedNotice upon completion");
+    let comp_notice = notices2_complete
+        .iter()
+        .find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("CompletedNotice")).unwrap_or(false))
+        .expect("Target character must receive CompletedNotice upon completion");
+    let comp_wm = WireMessage::decode(&comp_notice.payload.as_ref().unwrap().value).expect("decode CompletedNotice");
+    let comp_id_wm = WireMessage::decode(comp_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(comp_id_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()), Some(custom_uuid.as_slice()));
 
     // ========================================================================
     // 3. Pay-for-Completion with Real Notice Emissions & Custom Cost
@@ -513,10 +524,19 @@ async fn quasar_daily_goals_configurable_and_admin_targeting() {
     assert_eq!(pay_rsp.payload.unwrap().normalized_type_name(), "eve_public.dailygoal.api.PayForCompletionResponse");
 
     let pay_notices = drain_notices(&mut stream_rx1);
-    let pay_prog = pay_notices.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("ProgressedNotice")).unwrap_or(false));
-    let pay_comp = pay_notices.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("CompletedNotice")).unwrap_or(false));
-    assert!(pay_prog.is_some(), "Pay-for-completion must emit ProgressedNotice");
-    assert!(pay_comp.is_some(), "Pay-for-completion must emit CompletedNotice");
+    let pay_prog = pay_notices
+        .iter()
+        .find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("ProgressedNotice")).unwrap_or(false))
+        .expect("Pay-for-completion must emit ProgressedNotice");
+    let pay_prog_wm = WireMessage::decode(&pay_prog.payload.as_ref().unwrap().value).expect("decode pay ProgressedNotice");
+    assert_eq!(pay_prog_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(3));
+    let pay_comp = pay_notices
+        .iter()
+        .find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("CompletedNotice")).unwrap_or(false))
+        .expect("Pay-for-completion must emit CompletedNotice");
+    let pay_comp_wm = WireMessage::decode(&pay_comp.payload.as_ref().unwrap().value).expect("decode pay CompletedNotice");
+    let pay_comp_id_wm = WireMessage::decode(pay_comp_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(pay_comp_id_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()), Some(custom_uuid.as_slice()));
 
     // Paying again must fail because it's already completed
     let double_pay = quasar_rpc(&ctx, &mut sess1, "eve_public.dailygoal.api.PayForCompletionRequest", make_uuid_request(custom_uuid)).await;

@@ -64,8 +64,8 @@ fn make_multi_condition_manager(db: Arc<WorldRepository>) -> AchievementManager 
                     event_name: "client_zoom_out".into(),
                 },
             ],
-            reward_isk: 0,
-            reward_sp: 0,
+            reward_isk: 5_000,
+            reward_sp: 250,
         },
         AchievementDef {
             id: 303,
@@ -83,8 +83,8 @@ fn make_multi_condition_manager(db: Arc<WorldRepository>) -> AchievementManager 
                 statistic_event_id: 901,
                 event_name: "ev_uncat".into(),
             }],
-            reward_isk: 0,
-            reward_sp: 0,
+            reward_isk: 5_000,
+            reward_sp: 250,
         },
     ];
     mgr.allowed_client_counter_keys

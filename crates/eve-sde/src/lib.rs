@@ -794,6 +794,105 @@ pub struct CareerGoalTemplate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AchievementConditionDef {
+    pub condition_index: u32,
+    pub statistic: u32,
+    pub target_value: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AchievementStaticDef {
+    pub achievement_id: u32,
+    pub name_id: u32,
+    pub name: String,
+    pub description_id: u32,
+    pub description: String,
+    pub notification_text_id: u32,
+    pub notification_text: String,
+    pub is_client_achievement: bool,
+    pub is_enabled: bool,
+    pub simple_conditions: Vec<AchievementConditionDef>,
+    pub target_value: u64,
+    pub primary_event_id: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AchievementEventDef {
+    pub event_id: u32,
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AchievementCategoryLabel {
+    pub message_id: u32,
+    pub label: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CareerPathDef {
+    pub career_path_id: u32,
+    pub internal_name: String,
+    pub name_id: u32,
+    pub name: String,
+    pub description_id: u32,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CareerGoalDefinitionDef {
+    pub goal_id: u32,
+    pub career_path: String,
+    pub career_id: u32,
+    pub career_order: u8,
+    pub label: String,
+    pub activity_group_key: String,
+    pub activity_name: String,
+    pub activity_kind: String,
+    pub name: String,
+    pub description: String,
+    pub target_progress: u64,
+    pub sp_reward: u64,
+    pub name_message_id: u32,
+    pub description_message_id: u32,
+    pub aura_text_id: u32,
+    pub aura_text: String,
+    pub agency_link_text_id: u32,
+    pub agency_link_text: String,
+    pub sort_order: u32,
+    pub goal_uuid: [u8; 16],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContributionMethodDef {
+    pub method_key: String,
+    pub name: String,
+    pub title_id: u32,
+    pub title: String,
+    pub description_id: u32,
+    pub description: String,
+    pub progress_description_id: u32,
+    pub progress_description: String,
+    pub rewarding_description_id: u32,
+    pub rewarding_description: String,
+    pub target_value_description_id: u32,
+    pub target_value_description: String,
+    pub icon: String,
+    pub unit: i64,
+    pub content_tags: Vec<String>,
+    pub parameters_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyGoalCatalogEntry {
+    pub message_id: u32,
+    pub full_path: String,
+    pub label: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StationOperationInfo {
     pub operation_id: u32,
     pub name: String,
@@ -1072,6 +1171,20 @@ pub struct SdeRegistry {
     pub epic_arcs: HashMap<u32, EpicArcTemplate>,
     pub node_graphs: HashMap<u32, NodeGraphTemplate>,
     pub career_goals: HashMap<u32, CareerGoalTemplate>,
+    #[serde(default)]
+    pub achievements_static: Vec<AchievementStaticDef>,
+    #[serde(default)]
+    pub achievement_events_static: HashMap<u32, AchievementEventDef>,
+    #[serde(default)]
+    pub achievement_category_labels: Vec<AchievementCategoryLabel>,
+    #[serde(default)]
+    pub career_paths_static: Vec<CareerPathDef>,
+    #[serde(default)]
+    pub career_goal_definitions: Vec<CareerGoalDefinitionDef>,
+    #[serde(default)]
+    pub contribution_methods: HashMap<String, ContributionMethodDef>,
+    #[serde(default)]
+    pub daily_goal_catalog: Vec<DailyGoalCatalogEntry>,
     #[serde(default)]
     pub station_operations: HashMap<u32, StationOperationInfo>,
     #[serde(default)]
@@ -1757,6 +1870,13 @@ mod tests {
         assert_eq!(jita_star.solar_system_id, 30000142);
         assert_eq!(sde.celestial(jita_star.star_id).unwrap().solar_system_id, 30000142);
         assert_eq!(sde.career_goals.len(), 188);
+        assert_eq!(sde.career_goal_definitions.len(), 188);
+        assert_eq!(sde.achievements_static.len(), 68);
+        assert_eq!(sde.achievement_events_static.len(), 131);
+        assert_eq!(sde.achievement_category_labels.len(), 54);
+        assert_eq!(sde.career_paths_static.len(), 4);
+        assert_eq!(sde.contribution_methods.len(), 22);
+        assert!(!sde.daily_goal_catalog.is_empty());
         assert_eq!(sde.industry_activities.len(), 6);
         assert_eq!(sde.industry_modifier_sources.len(), 220);
         assert_eq!(sde.industry_target_filters.len(), 18);

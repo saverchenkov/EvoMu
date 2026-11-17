@@ -5,7 +5,7 @@ use crate::common;
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, EvePublicNotice,
-    EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarMessage,
+    EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarMessage, WireMessage,
     TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
@@ -565,12 +565,30 @@ async fn test_quasar_achievements_progression_and_claims() {
 
     flush_pending_notices(&ctx);
     let ach_notices = drain_notices(&mut notice_rx);
-    assert!(ach_notices.iter().any(|n| n.payload.as_ref().map(|p| p.type_url.contains("achievement.api.ProgressedNotice")).unwrap_or(false)));
+    let prog_notice = ach_notices
+        .iter()
+        .find(|n| n.payload.as_ref().is_some_and(|p| p.normalized_type_name() == "eve_public.achievement.api.ProgressedNotice"))
+        .expect("achievement.api.ProgressedNotice");
+    let prog_wm = WireMessage::decode(&prog_notice.payload.as_ref().unwrap().value).expect("decode ProgressedNotice");
+    let prog_ach_id = prog_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).expect("achievement ident");
+    let prog_ach_id_wm = WireMessage::decode(prog_ach_id).expect("decode ident");
+    let mut expected_ach2_uuid = [0u8; 16];
+    expected_ach2_uuid[12..16].copy_from_slice(&2_u32.to_be_bytes());
+    assert_eq!(
+        prog_ach_id_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()),
+        Some(expected_ach2_uuid.as_slice())
+    );
+    assert_eq!(
+        prog_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()),
+        Some(10)
+    );
 
-    // 6. Reward GetUnclaimedRequest -> has unclaimed rewards
+    // 6. Reward GetUnclaimedRequest -> returns empty when achievement has no configured ISK/SP payout
     let unclaim_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.GetUnclaimedRequest", vec![]).await;
     assert_eq!(unclaim_rsp.status_code, STATUS_OK);
     assert_eq!(unclaim_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve_public.achievement.reward.api.GetUnclaimedResponse");
+    let unclaim_wm = WireMessage::decode(&unclaim_rsp.payload.as_ref().unwrap().value).expect("decode GetUnclaimedResponse");
+    assert!(unclaim_wm.fields.is_empty(), "Unconfigured SDE achievement must yield 0 unclaimed rewards");
 
     // 7. Claim reward: ClaimRequest fails closed with DATA GAP (no ISK/SP minted)
     let (bal_before, sp_before) = ctx.db.with_snapshot(|snap| {
@@ -598,7 +616,17 @@ async fn test_quasar_achievements_progression_and_claims() {
 
     flush_pending_notices(&ctx);
     let comp_notices = drain_notices(&mut notice_rx);
-    assert!(comp_notices.iter().any(|n| n.payload.as_ref().map(|p| p.type_url.contains("achievement.api.CompletedNotice")).unwrap_or(false)));
+    let comp_notice = comp_notices
+        .iter()
+        .find(|n| n.payload.as_ref().is_some_and(|p| p.normalized_type_name() == "eve_public.achievement.api.CompletedNotice"))
+        .expect("achievement.api.CompletedNotice");
+    let comp_wm = WireMessage::decode(&comp_notice.payload.as_ref().unwrap().value).expect("decode CompletedNotice");
+    let comp_ach_id = comp_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).expect("achievement ident");
+    let comp_ach_id_wm = WireMessage::decode(comp_ach_id).expect("decode ident");
+    assert_eq!(
+        comp_ach_id_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()),
+        Some(expected_ach2_uuid.as_slice())
+    );
 
     // 9. Showcase score query reflects updated points and cross-character score query
     let score2_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.showcase.api.GetCharacterScoreRequest", vec![]).await;
@@ -646,7 +674,7 @@ async fn test_quasar_achievements_progression_and_claims() {
     let achs_reloaded = mgr_reloaded.get_or_init_achievements(cid);
     let a2_reloaded = achs_reloaded.iter().find(|a| a.def.id == 2).expect("a2 on reloaded ctx");
     assert!(a2_reloaded.completed, "Achievement 2 completed state must persist across SQLite reload");
-    assert_eq!(a2_reloaded.unclaimed_reward_count, 1, "Achievement 2 unclaimed reward count must persist across SQLite reload");
+    assert_eq!(a2_reloaded.unclaimed_reward_count, 0, "Unconfigured SDE achievement 2 has 0 unclaimed rewards across SQLite reload");
 
     let _ = std::fs::remove_file(&tmp_db);
     let _ = std::fs::remove_file(tmp_db.with_extension("sqlite-wal"));

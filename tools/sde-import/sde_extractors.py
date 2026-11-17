@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pickle
+import re
 import sqlite3
 import struct
 import subprocess
@@ -735,6 +736,88 @@ for mid, d in dia_raw.iteritems():
         'attribute_ranges': attr_ranges,
     })
 
+def _utf8(v):
+    if v is None:
+        return ''
+    if isinstance(v, unicode):
+        return v.encode('utf-8')
+    return str(v)
+
+# Achievements (`res:/staticdata/achievements.static`), events (`achievementevents.fsdbinary`),
+# career paths (`careerpaths.fsdbinary`), and contribution methods (`contributionmethods.fsdbinary`).
+if 'res:/staticdata/achievements.schema' in rfi:
+    ach_raw = load_static_with_schema('achievements')
+else:
+    ach_raw = binaryLoader.LoadFromString(open(os.path.join(res_dir, cat_map['res:/staticdata/achievements.static']), 'rb').read())
+achievements = []
+for aid, a in sorted(ach_raw.iteritems(), key=lambda kv: int(kv[0])):
+    conds = []
+    sc_map = getattr(a, 'simpleConditions', None)
+    if sc_map:
+        for ck, cv in sorted(sc_map.iteritems(), key=lambda kv: int(kv[0])):
+            conds.append({
+                'condition_index': int(ck),
+                'statistic': int(getattr(cv, 'statistic', 0) or 0),
+                'target_value': int(getattr(cv, 'targetValue', 0) or 0),
+            })
+    achievements.append({
+        'achievement_id': int(getattr(a, 'achievementID', aid) or aid),
+        'name_id': int(getattr(a, 'nameID', 0) or 0),
+        'description_id': int(getattr(a, 'descriptionID', 0) or 0),
+        'notification_text_id': int(getattr(a, 'notificationTextID', 0) or 0),
+        'is_client_achievement': int(bool(getattr(a, 'isClientAchievement', False))),
+        'is_enabled': int(bool(getattr(a, 'isEnabled', False))),
+        'simple_conditions': conds,
+    })
+
+aev_raw = load_fsd('achievementevents')
+achievement_events = []
+for eid, ev in sorted(aev_raw.iteritems(), key=lambda kv: int(kv[0])):
+    achievement_events.append({
+        'event_id': int(eid),
+        'name': _utf8(getattr(ev, 'name', '')),
+        'description': _utf8(getattr(ev, 'description', '')),
+    })
+
+cp_raw = load_fsd('careerpaths')
+career_paths = []
+for pid, cp in sorted(cp_raw.iteritems(), key=lambda kv: int(kv[0])):
+    career_paths.append({
+        'career_path_id': int(pid),
+        'internal_name': _utf8(getattr(cp, 'internalName', '')),
+        'name_id': int(getattr(cp, 'nameID', 0) or 0),
+        'description_id': int(getattr(cp, 'descriptionID', 0) or 0),
+    })
+
+cm_raw = load_fsd('contributionmethods')
+contribution_methods = []
+for mkey, cm in sorted(cm_raw.iteritems(), key=lambda kv: str(kv[0])):
+    params = []
+    for p in (getattr(cm, 'parameters', None) or []):
+        params.append({
+            'parameterKey': _utf8(getattr(p, 'parameterKey', '')),
+            'parameterType': _utf8(getattr(p, 'parameterType', '')),
+            'title': _utf8(getattr(p, 'title', '')),
+            'info': _utf8(getattr(p, 'info', '')),
+            'icon': _utf8(getattr(p, 'icon', '')),
+            'isRequired': int(bool(getattr(p, 'isRequired', 0))),
+            'maxEntries': int(getattr(p, 'maxEntries', 0) or 0),
+        })
+    tags = [_utf8(t) for t in (getattr(cm, 'contentTags', None) or [])]
+    contribution_methods.append({
+        'method_key': _utf8(mkey),
+        'name': _utf8(getattr(cm, 'name', '')),
+        'title_id': int(getattr(cm, 'titleID', 0) or 0),
+        'description_id': int(getattr(cm, 'descriptionID', 0) or 0),
+        'progress_description_id': int(getattr(cm, 'progressDescriptionID', 0) or 0),
+        'rewarding_description_id': int(getattr(cm, 'rewardingDescriptionID', 0) or 0),
+        'target_value_description_id': int(getattr(cm, 'targetValueDescriptionID', 0) or 0),
+        'icon': _utf8(getattr(cm, 'icon', '')),
+        'unit': int(getattr(cm, 'unit', 0) or 0),
+        'content_tags': tags,
+        'parameters': params,
+    })
+
 out = {
     'resource_counts': resource_counts,
     'categories': categories,
@@ -770,6 +853,10 @@ out = {
     'dungeon_asteroid_counts': dungeon_asteroid_counts,
     'dungeon_gas_types': dungeon_gas_types,
     'dynamic_item_attributes': dynamic_item_attributes,
+    'achievements': achievements,
+    'achievement_events': achievement_events,
+    'career_paths': career_paths,
+    'contribution_methods': contribution_methods,
 }
 json.dump(out, open(out_json_path, 'wb'))
 """
@@ -1181,3 +1268,310 @@ def extract_system_asteroid_types(raw: bytes) -> list[tuple[int, list[int]]]:
         out.append((int(sys_id), clean_tids))
     out.sort(key=lambda pair: pair[0])
     return out
+
+
+_CAREER_GOAL_EXTRACTION_SPECS: list[tuple[str, int, int, list[tuple[str, str, list[str]]]]] = [
+    (
+        "Enforcer",
+        3,
+        1,
+        [
+            ("Combat", "combat", ["EnforcerDestroyNpc"]),
+            ("CareerAgentMissions", "career_missions", ["EnforcerCareerAgentMission"]),
+            ("SecurityAgent", "combat_missions", ["EnforcerLevel1SecurityMissions"]),
+            (
+                "AbyssalDeadspace",
+                "abyssal",
+                ["EnforcerEnterTier0Abyss", "EnforcerCompleteTier0Abyss", "EnforcerKillTriglavians"],
+            ),
+            ("Bounties", "bounties", ["EnforcerEarnBountyIsk"]),
+            ("CombatSites", "combat_sites", ["EnforcerCompleteCombatSites"]),
+            ("EpicArc", "epic_arc", ["EnforcerEpicArc"]),
+            ("Market", "market", ["EnforcerSpendMarketIsk"]),
+            ("Standings", "standings", ["EnforcerGetStandingTo"]),
+            ("LoyaltyPoints", "loyalty_points", ["EnforcerEarnLp", "EnforcerSpendLp"]),
+        ],
+    ),
+    (
+        "Explorer",
+        1,
+        2,
+        [
+            ("Scanning", "exploration", ["ExplorerScanSignature"]),
+            ("CareerAgentMissions", "career_missions", ["ExplorerCareerAgentMission"]),
+            ("Hacking", "hacking", ["ExplorerHackContainer"]),
+            ("AdvancedHacking", "advanced_hacking", ["ExplorerHackLowsec", "ExplorerHackNullsec", "ExplorerHackWh"]),
+            ("Wormholes", "wormholes", ["ExplorerScanWormholes"]),
+            ("GasSites", "gas_sites", ["ExplorerEnterGasSites"]),
+            ("CombatSites", "combat_sites", ["ExplorerEnterCombatSites"]),
+            ("Navigation", "travel", ["ExplorerGateJumps"]),
+            ("AdvancedNavigation", "advanced_travel", ["ExplorerVisit"]),
+            ("ProjectDiscovery", "project_discovery", ["ExplorerProjectDiscovery"]),
+        ],
+    ),
+    (
+        "Industrialist",
+        2,
+        3,
+        [
+            ("ResourceHarvesting", "mining", ["IndustrialistMine"]),
+            ("Manufacturing", "manufacturing", ["IndustrialistManufacture"]),
+            (
+                "IndustrialistCareerAgentsMissions",
+                "career_missions",
+                ["IndustrialistEntrepreneurCareerAgentMission", "IndustrialistProducerCareerAgentMission"],
+            ),
+            ("Market", "market", ["IndustrialistEarnMarketIsk"]),
+            ("Salvage", "salvage", ["IndustrialistSalvage"]),
+            ("Refining", "refining", ["IndustrialistReprocess"]),
+            ("DistributionAgent", "distribution_missions", ["IndustrialistCourierMissions"]),
+            ("MiningAgent", "mining_missions", ["IndustrialistMiningMissions"]),
+            (
+                "Research",
+                "research",
+                ["IndustrialistBuyBlueprint", "IndustrialistCopyBlueprint", "IndustrialistResearchBlueprint"],
+            ),
+        ],
+    ),
+    (
+        "SoldierOfFortune",
+        4,
+        4,
+        [
+            ("CareerAgentMissions", "career_missions", ["SofCareerAgentMission"]),
+            ("Social", "social", ["SofSendChat", "SofJoinFleet", "SofJoinCorporation", "SofSendMail", "SofAddContact"]),
+            (
+                "ElectronicWarfare",
+                "ewar",
+                ["SofWebify", "SofTargetPaint", "SofWarpDisrupt", "SofWarpScramble", "SofWeaponDisrupt"],
+            ),
+            ("Combat", "combat", ["SofDestroyNpc"]),
+            ("PvP", "pvp", ["SofKillCapsuleers"]),
+            ("CapacitorWarfare", "cap_warfare", ["SofDrainCapacitor", "SofNeutralizeCapacitor"]),
+            ("FactionWarfare", "faction_warfare", ["SofJoinFW", "SofKillFw", "SofLevel1Fw", "SofDefendFw", "SofCaptureFw"]),
+            ("Support", "remote_repair", ["SofRemoteBoost", "SofRemoteRep"]),
+            ("Destruction", "destruction", ["SofLoseShip"]),
+            ("Duels", "duels", ["SofDuel"]),
+        ],
+    ),
+]
+
+
+def _clean_loc_text(raw: str | None) -> str:
+    if not raw:
+        return ""
+    return raw.replace("\xa0", " ").strip()
+
+
+def _parse_v24_career_goal_target(label: str, text: str) -> int:
+    t = _clean_loc_text(text)
+    if "GetStandingTo" in label:
+        return 1
+    m_millions = re.search(r"\b(\d+(?:,\d+)*)\s*M\s+ISK\b", t)
+    if m_millions:
+        return int(m_millions.group(1).replace(",", "")) * 1_000_000
+    m_gj = re.search(r"\b(\d+(?:,\d+)*)\s*GJ\b", t)
+    if m_gj:
+        return int(m_gj.group(1).replace(",", ""))
+    if any(
+        t.startswith(prefix)
+        for prefix in (
+            "Scan a ",
+            "Complete a ",
+            "Complete an ",
+            "Manufacture a ",
+            "Enter a ",
+            "Hack a ",
+            "Submit a ",
+            "Send ",
+            "Join ",
+            "Add a ",
+            "Buy a ",
+            "Challenge ",
+        )
+    ):
+        return 1
+    if "Security Agent" in t or "Distribution Agent" in t or "Mining Agent" in t:
+        m_cnt = re.search(r"Complete\s+(\d+)\s+", t)
+        return int(m_cnt.group(1)) if m_cnt else 1
+    if "Research a Blueprint" in t:
+        m_pct = re.search(r"(\d+)%", t)
+        return int(m_pct.group(1)) if m_pct else 1
+    m_num = re.search(r"(\d+(?:,\d+)*)", t)
+    return int(m_num.group(1).replace(",", "")) if m_num else 1
+
+
+def extract_v24_achievement_career_daily_catalogs(
+    main_pickle_bytes: bytes,
+    en_labels: dict[int, str],
+    fsd_data: dict[str, object],
+) -> dict[str, list[tuple]]:
+    """Extracts V24 Achievement, Career Goal, and Daily Goal rows from FSD static tables and `localization_fsd_main.pickle`."""
+    main_p = pickle.loads(main_pickle_bytes, encoding="utf-8")
+    labels_meta = main_p.get("labels", {}) if isinstance(main_p, dict) else {}
+
+    achievement_categories: list[tuple[int, str, str]] = []
+    career_goal_catalog: list[tuple[int, str, str, str, str, str]] = []
+    daily_goal_catalog: list[tuple[int, str, str, str]] = []
+
+    career_buckets: dict[tuple[str, str], dict[str, tuple[int, str]]] = {}
+    for mid_raw, meta in sorted(labels_meta.items(), key=lambda kv: int(kv[0])):
+        mid = int(mid_raw)
+        if not isinstance(meta, dict):
+            continue
+        fp = str(meta.get("FullPath") or "")
+        lbl = str(meta.get("label") or "")
+        txt = _clean_loc_text(en_labels.get(mid, ""))
+        if fp == "UI/Achievements/Definitions/Categories":
+            achievement_categories.append((mid, lbl, txt))
+        elif fp.startswith("Character/CareerGoals/"):
+            parts = fp.split("/")
+            career_key = parts[2] if len(parts) > 2 else ""
+            sub_kind = parts[3] if len(parts) > 3 else ""
+            career_goal_catalog.append((mid, fp, career_key, sub_kind, lbl, txt))
+            if career_key in {"Enforcer", "Explorer", "Industrialist", "SoldierOfFortune"} and sub_kind:
+                career_buckets.setdefault((career_key, sub_kind), {})[lbl] = (mid, txt)
+        elif fp.startswith("UI/DailyGoals/") or fp.startswith("Notifications/DailyGoals"):
+            daily_goal_catalog.append((mid, fp, lbl, txt))
+
+    achievements_rows: list[tuple] = []
+    for a in fsd_data.get("achievements", []):
+        aid = int(a["achievement_id"])
+        nid = int(a["name_id"])
+        did = int(a["description_id"])
+        ntid = int(a["notification_text_id"])
+        conds = list(a.get("simple_conditions") or [])
+        target_value = sum(int(c.get("target_value") or 0) for c in conds) if conds else 1
+        if target_value <= 0:
+            target_value = 1
+        primary_event_id = int(conds[0].get("statistic") or 0) if conds else 0
+        achievements_rows.append(
+            (
+                aid,
+                nid,
+                _clean_loc_text(en_labels.get(nid, "")),
+                did,
+                _clean_loc_text(en_labels.get(did, "")),
+                ntid,
+                _clean_loc_text(en_labels.get(ntid, "")),
+                int(a["is_client_achievement"]),
+                int(a["is_enabled"]),
+                json.dumps(conds, separators=(",", ":")),
+                target_value,
+                primary_event_id,
+            )
+        )
+
+    achievement_events_rows: list[tuple] = [
+        (int(ev["event_id"]), str(ev["name"]), str(ev["description"]))
+        for ev in fsd_data.get("achievement_events", [])
+    ]
+
+    career_path_rows: list[tuple] = []
+    for cp in fsd_data.get("career_paths", []):
+        pid = int(cp["career_path_id"])
+        nid = int(cp["name_id"])
+        did = int(cp["description_id"])
+        career_path_rows.append(
+            (
+                pid,
+                str(cp["internal_name"]),
+                nid,
+                _clean_loc_text(en_labels.get(nid, "")),
+                did,
+                _clean_loc_text(en_labels.get(did, "")),
+            )
+        )
+
+    career_goal_rows: list[tuple] = []
+    for cp_name, career_id, career_order, groups in _CAREER_GOAL_EXTRACTION_SPECS:
+        names = {
+            lbl: vals
+            for lbl, vals in career_buckets.get((cp_name, "Names"), {}).items()
+            if "Graduation" not in lbl and "Graduate" not in lbl
+        }
+        descs = career_buckets.get((cp_name, "Descriptions"), {})
+        auras = career_buckets.get((cp_name, "AuraHints"), {})
+        links = career_buckets.get((cp_name, "AgencyLinks"), {})
+        group_names = career_buckets.get((cp_name, "GroupNames"), {})
+        seen_labels: set[str] = set()
+        idx = 0
+        for gkey, akind, prefixes in groups:
+            activity_name = group_names[gkey][1] if gkey in group_names else gkey
+            matched = sorted(
+                [(mid, lbl, txt) for lbl, (mid, txt) in names.items() if any(lbl.startswith(p) for p in prefixes)],
+                key=lambda item: item[0],
+            )
+            for sort_order, (name_id, lbl, name_txt) in enumerate(matched, start=1):
+                if lbl in seen_labels:
+                    continue
+                seen_labels.add(lbl)
+                idx += 1
+                desc_id, desc_txt = descs.get(lbl, (0, ""))
+                aura_id, aura_txt = auras.get(lbl, (0, ""))
+                link_id, link_txt = links.get(lbl, (0, ""))
+                target_progress = _parse_v24_career_goal_target(lbl, name_txt)
+                uuid_bytes = bytes([0x43, 0x47, career_order, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, idx])
+                career_goal_rows.append(
+                    (
+                        name_id,
+                        cp_name,
+                        career_id,
+                        career_order,
+                        lbl,
+                        gkey,
+                        activity_name,
+                        akind,
+                        name_txt,
+                        desc_txt,
+                        target_progress,
+                        0,
+                        name_id,
+                        desc_id,
+                        aura_id,
+                        aura_txt,
+                        link_id,
+                        link_txt,
+                        sort_order,
+                        uuid_bytes.hex(),
+                    )
+                )
+
+    contribution_method_rows: list[tuple] = []
+    for cm in fsd_data.get("contribution_methods", []):
+        tid = int(cm["title_id"])
+        did = int(cm["description_id"])
+        pdid = int(cm["progress_description_id"])
+        rdid = int(cm["rewarding_description_id"])
+        tvdid = int(cm["target_value_description_id"])
+        contribution_method_rows.append(
+            (
+                str(cm["method_key"]),
+                str(cm["name"]),
+                tid,
+                _clean_loc_text(en_labels.get(tid, "")),
+                did,
+                _clean_loc_text(en_labels.get(did, "")),
+                pdid,
+                _clean_loc_text(en_labels.get(pdid, "")),
+                rdid,
+                _clean_loc_text(en_labels.get(rdid, "")),
+                tvdid,
+                _clean_loc_text(en_labels.get(tvdid, "")),
+                str(cm["icon"]),
+                int(cm["unit"]),
+                json.dumps(cm.get("content_tags") or [], separators=(",", ":")),
+                json.dumps(cm.get("parameters") or [], separators=(",", ":")),
+            )
+        )
+
+    return {
+        "achievements": achievements_rows,
+        "achievement_events": achievement_events_rows,
+        "achievement_categories": achievement_categories,
+        "career_paths": career_path_rows,
+        "career_goal_catalog": career_goal_catalog,
+        "career_goals": career_goal_rows,
+        "contribution_methods": contribution_method_rows,
+        "daily_goal_catalog": daily_goal_catalog,
+    }

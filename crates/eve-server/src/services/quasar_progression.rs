@@ -71,7 +71,7 @@ pub fn new_progression_managers(
     let corp_state = QuasarCorpState::from_db(Arc::clone(&db));
     Arc::new(ProgressionManagers {
         daily_goals: Arc::new(DailyGoalManager::new_with_sde(Some(Arc::clone(&db)), Some(Arc::clone(&sde)))),
-        career_goals: Arc::new(CareerGoalManager::new(Some(Arc::clone(&db)))),
+        career_goals: Arc::new(CareerGoalManager::new_with_sde(Some(Arc::clone(&db)), Some(Arc::clone(&sde)))),
         achievements: Arc::new(AchievementManager::new_with_sde(Some(Arc::clone(&db)), Some(Arc::clone(&sde)))),
         skill_plans: Arc::new(SkillPlanManager::new_with_db(Some(Arc::clone(&db)))),
         extra: Arc::new(ProgressionExtraManager::new_with_sde(

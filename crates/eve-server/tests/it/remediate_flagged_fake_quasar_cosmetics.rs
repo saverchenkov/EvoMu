@@ -1469,15 +1469,11 @@ async fn air_achievements_grpc_and_sqlite_reload() {
         let _ = plr_sess;
 
         let ach_mgr = AchievementManager::new_with_sde(None, Some(Arc::clone(&ctx.sde)));
-        let sample = ach_mgr
-            .definitions
-            .iter()
-            .find(|d| d.score > 0 && d.milestone_targets.iter().copied().max().unwrap_or(0) > 1)
-            .unwrap_or_else(|| ach_mgr.definitions.first().expect("SDE achievements"));
+        let sample = ach_mgr.definitions.first().expect("SDE achievements");
         let ach_id = sample.id;
-        let ach_cat_id = sample.category_id;
+        let ach_cat_id = sample.category_id.max(1);
         let ach_score = sample.score;
-        let target_max = sample.milestone_targets.iter().copied().max().unwrap_or(1).max(1) as u64;
+        let target_max = sample.target.max(1);
 
         let mut gm_client = GrpcClient::connect(Arc::clone(&ctx), "ach_gm", "gm-pass", gm_cid, 0x31).await;
         gm_client.open_notice_stream().await;
@@ -1561,13 +1557,25 @@ async fn air_achievements_grpc_and_sqlite_reload() {
             .await;
 
         let notices = gm_client.drain_notices(150).await;
-        assert!(
-            notices.iter().any(|(n, _)| n.payload.as_ref().is_some_and(|p| p.type_url.contains("achievement.api.ProgressedNotice"))),
-            "Expected achievement.api.ProgressedNotice"
+        let (_, prog_dyn) = notices
+            .iter()
+            .find(|(n, _)| n.payload.as_ref().is_some_and(|p| p.type_url.contains("achievement.api.ProgressedNotice")))
+            .expect("Expected achievement.api.ProgressedNotice");
+        assert_eq!(
+            prog_dyn.get(1).and_then(dyn_msg).and_then(|id| id.get(1)).and_then(dyn_bytes),
+            Some(aid_be.as_slice()),
+            "ProgressedNotice achievement uuid must match"
         );
-        assert!(
-            notices.iter().any(|(n, _)| n.payload.as_ref().is_some_and(|p| p.type_url.contains("achievement.api.CompletedNotice"))),
-            "Expected achievement.api.CompletedNotice"
+        assert_eq!(prog_dyn.get(2).and_then(dyn_u64), Some(target_max));
+
+        let (_, comp_dyn) = notices
+            .iter()
+            .find(|(n, _)| n.payload.as_ref().is_some_and(|p| p.type_url.contains("achievement.api.CompletedNotice")))
+            .expect("Expected achievement.api.CompletedNotice");
+        assert_eq!(
+            comp_dyn.get(1).and_then(dyn_msg).and_then(|id| id.get(1)).and_then(dyn_bytes),
+            Some(aid_be.as_slice()),
+            "CompletedNotice achievement uuid must match"
         );
 
         // 5. Verify GetRequest, category GetRequest, showcase GetCharacterScoreRequest, and reward GetUnclaimedRequest
@@ -1584,19 +1592,22 @@ async fn air_achievements_grpc_and_sqlite_reload() {
         let (_, cat_dyn) = gm_client
             .send_ok_dyn("eve_public.achievement.category.api.GetRequest", cat_req)
             .await;
-        assert!(cat_dyn.get(1).and_then(dyn_u64).unwrap_or(0) >= u64::from(ach_score));
+        assert_eq!(cat_dyn.get(1).and_then(dyn_u64).unwrap_or(0), u64::from(ach_score));
 
         let (_, showcase_dyn) = gm_client
             .send_ok_dyn("eve_public.achievement.showcase.api.GetCharacterScoreRequest", Vec::new())
             .await;
-        assert!(showcase_dyn.get(1).and_then(dyn_u64).unwrap_or(0) >= u64::from(ach_score));
+        assert_eq!(showcase_dyn.get(1).and_then(dyn_u64).unwrap_or(0), u64::from(ach_score));
 
         let (_, unclaimed_dyn) = gm_client
             .send_ok_dyn("eve_public.achievement.reward.api.GetUnclaimedRequest", Vec::new())
             .await;
-        assert!(!unclaimed_dyn.get(1).map(dyn_repeated).unwrap_or(&[]).is_empty(), "Completed achievement must appear unclaimed");
+        assert!(
+            unclaimed_dyn.get(1).map(dyn_repeated).unwrap_or(&[]).is_empty(),
+            "Client achievements.static omits payouts so unconfigured achievement has no unclaimed rewards"
+        );
 
-        // 6. Reward ClaimRequest fails closed cleanly (412 DATA GAP) without minting ISK/SP
+        // 6. Reward ClaimRequest fails closed cleanly (412 PRECONDITION_FAILED) without minting ISK/SP
         let isk_before = ctx.db.get_character(i64::from(gm_cid)).unwrap().balance.0;
         let claim_rsp = gm_client.send_raw("eve_public.achievement.reward.api.ClaimRequest", Vec::new()).await;
         assert_eq!(claim_rsp.status_code, STATUS_PRECONDITION_FAILED);
@@ -1607,7 +1618,7 @@ async fn air_achievements_grpc_and_sqlite_reload() {
         (ach_id, ach_cat_id, ach_score, target_max)
     };
 
-    // SQLite reload verification + category reset persistence check
+    // SQLite reload verification + reset persistence check
     let ctx2 = boot_sqlite_ctx(&sqlite.path, base_unix + 60);
     let mut gm2 = GrpcClient::connect(Arc::clone(&ctx2), "ach_gm", "gm-pass", gm_cid, 0x33).await;
 
@@ -1621,17 +1632,21 @@ async fn air_achievements_grpc_and_sqlite_reload() {
     let (_, showcase2) = gm2
         .send_ok_dyn("eve_public.achievement.showcase.api.GetCharacterScoreRequest", Vec::new())
         .await;
-    assert!(showcase2.get(1).and_then(dyn_u64).unwrap_or(0) >= u64::from(ach_score));
+    assert_eq!(showcase2.get(1).and_then(dyn_u64).unwrap_or(0), u64::from(ach_score));
 
-    // Category reset must zero category score and survive another reload
+    // Category reset + achievement reset must both succeed and zero achievement progress
     let mut cat_be = [0u8; 16];
     cat_be[12..16].copy_from_slice(&ach_cat_id.to_be_bytes());
     let mut cat_reset_req = Vec::new();
     encode_bytes_field(1, &encode_uuid_ident(&cat_be), &mut cat_reset_req);
     gm2.send_ok_empty("eve_public.achievement.category.api.admin.ResetRequest", cat_reset_req)
         .await;
+    let mut ach_reset_req = Vec::new();
+    encode_bytes_field(1, &encode_uuid_ident(&aid_be), &mut ach_reset_req);
+    gm2.send_ok_empty("eve_public.achievement.api.admin.ResetRequest", ach_reset_req)
+        .await;
     let (_, reset_ach) = gm2.send_ok_dyn("eve_public.achievement.api.GetRequest", get_req).await;
-    assert_eq!(reset_ach.get(3).and_then(dyn_u64).unwrap_or(0), 0, "Category reset must zero achievement progress");
+    assert_eq!(reset_ach.get(3).and_then(dyn_u64).unwrap_or(0), 0, "Reset must zero achievement progress");
     gm2.close();
 }
 
@@ -1679,7 +1694,7 @@ async fn air_career_and_daily_goals_grpc_and_sqlite_reload() {
             .send_ok_dyn("eve_public.career.goal.api.GetDefinitionsRequest", Vec::new())
             .await;
         let def_entries = defs_dyn.get(1).map(dyn_repeated).expect("career definitions");
-        assert!(!def_entries.is_empty(), "Career definitions must load from air_career_goals.json");
+        assert!(!def_entries.is_empty(), "Career definitions must load from evomu_sde.sqlite");
 
         let (_, all_career_dyn) = gm_client
             .send_ok_dyn("eve_public.career.goal.api.GetAllRequest", Vec::new())
@@ -1724,8 +1739,23 @@ async fn air_career_and_daily_goals_grpc_and_sqlite_reload() {
             .send_ok_empty("eve_public.career.goal.api.admin.ProgressRequest", career_prog_req)
             .await;
         let c_notices = gm_client.drain_notices(150).await;
-        assert!(c_notices.iter().any(|(n, _)| n.payload.as_ref().is_some_and(|p| p.type_url.contains("career.goal.api.ProgressedNotice"))));
-        assert!(c_notices.iter().any(|(n, _)| n.payload.as_ref().is_some_and(|p| p.type_url.contains("career.goal.api.CompletedNotice"))));
+        let (_, c_prog_dyn) = c_notices
+            .iter()
+            .find(|(n, _)| n.payload.as_ref().is_some_and(|p| p.type_url.contains("career.goal.api.ProgressedNotice")))
+            .expect("career.goal.api.ProgressedNotice");
+        assert_eq!(
+            c_prog_dyn.get(1).and_then(dyn_msg).and_then(|id| id.get(1)).and_then(dyn_bytes),
+            Some(chosen_career_uuid.as_slice())
+        );
+        assert_eq!(c_prog_dyn.get(2).and_then(dyn_u64), Some(chosen_career_target));
+        let (_, c_comp_dyn) = c_notices
+            .iter()
+            .find(|(n, _)| n.payload.as_ref().is_some_and(|p| p.type_url.contains("career.goal.api.CompletedNotice")))
+            .expect("career.goal.api.CompletedNotice");
+        assert_eq!(
+            c_comp_dyn.get(1).and_then(dyn_msg).and_then(|id| id.get(1)).and_then(dyn_bytes),
+            Some(chosen_career_uuid.as_slice())
+        );
 
         // Claim career goal reward & verify duplicate claim rejected
         let mut claim_c_req = Vec::new();
@@ -1774,6 +1804,15 @@ async fn air_career_and_daily_goals_grpc_and_sqlite_reload() {
         gm_client
             .send_ok_dyn("eve_public.dailygoal.api.PayForCompletionRequest", pay_req)
             .await;
+        let pay_notices = gm_client.drain_notices(150).await;
+        let (_, pay_comp_dyn) = pay_notices
+            .iter()
+            .find(|(n, _)| n.payload.as_ref().is_some_and(|p| p.type_url.contains("dailygoal.api.CompletedNotice")))
+            .expect("PayForCompletion dailygoal.api.CompletedNotice");
+        assert_eq!(
+            pay_comp_dyn.get(1).and_then(dyn_msg).and_then(|id| id.get(1)).and_then(dyn_bytes),
+            Some(daily_uuid_paid.as_slice())
+        );
 
         // Progress daily goal 1 cleanly via admin.ProgressRequest (after verifying non-GM rejected)
         let mut get_d1 = Vec::new();
@@ -1792,8 +1831,23 @@ async fn air_career_and_daily_goals_grpc_and_sqlite_reload() {
         gm_client.send_ok_dyn("eve_public.dailygoal.api.admin.ProgressRequest", d_prog_req).await;
 
         let d_notices = gm_client.drain_notices(150).await;
-        assert!(d_notices.iter().any(|(n, _)| n.payload.as_ref().is_some_and(|p| p.type_url.contains("dailygoal.api.ProgressedNotice"))));
-        assert!(d_notices.iter().any(|(n, _)| n.payload.as_ref().is_some_and(|p| p.type_url.contains("dailygoal.api.CompletedNotice"))));
+        let (_, d_prog_dyn) = d_notices
+            .iter()
+            .find(|(n, _)| n.payload.as_ref().is_some_and(|p| p.type_url.contains("dailygoal.api.ProgressedNotice")))
+            .expect("dailygoal.api.ProgressedNotice");
+        assert_eq!(
+            d_prog_dyn.get(1).and_then(dyn_msg).and_then(|id| id.get(1)).and_then(dyn_bytes),
+            Some(daily_uuid_prog.as_slice())
+        );
+        assert_eq!(d_prog_dyn.get(2).and_then(dyn_u64), Some(d1_target));
+        let (_, d_comp_dyn) = d_notices
+            .iter()
+            .find(|(n, _)| n.payload.as_ref().is_some_and(|p| p.type_url.contains("dailygoal.api.CompletedNotice")))
+            .expect("dailygoal.api.CompletedNotice");
+        assert_eq!(
+            d_comp_dyn.get(1).and_then(dyn_msg).and_then(|id| id.get(1)).and_then(dyn_bytes),
+            Some(daily_uuid_prog.as_slice())
+        );
 
         let (_, with_rew_dyn) = gm_client
             .send_ok_dyn("eve_public.dailygoal.api.GetAllWithRewardsRequest", Vec::new())
@@ -1812,7 +1866,14 @@ async fn air_career_and_daily_goals_grpc_and_sqlite_reload() {
         assert!(isk_post_redeem > isk_pre_redeem, "Redeeming daily goal must credit ISK");
 
         let r_notices = gm_client.drain_notices(150).await;
-        assert!(r_notices.iter().any(|(n, _)| n.payload.as_ref().is_some_and(|p| p.type_url.contains("dailygoal.api.RedeemedNotice"))));
+        let (_, r_dyn) = r_notices
+            .iter()
+            .find(|(n, _)| n.payload.as_ref().is_some_and(|p| p.type_url.contains("dailygoal.api.RedeemedNotice")))
+            .expect("dailygoal.api.RedeemedNotice");
+        assert_eq!(
+            r_dyn.get(1).and_then(dyn_msg).and_then(|id| id.get(1)).and_then(dyn_bytes),
+            Some(daily_uuid_paid.as_slice())
+        );
 
         // Duplicate redeem fails
         assert_eq!(

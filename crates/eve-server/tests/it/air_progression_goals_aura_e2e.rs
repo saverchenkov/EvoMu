@@ -137,11 +137,11 @@ async fn subscribe(ctx: &ServerContext, s: &mut SessionState) -> Receiver<EvePub
     ctx.quasar_gateway.take_stream_receiver(s.session_id).expect("stream rx")
 }
 
-fn drain_notices(rx: &mut Receiver<EvePublicNotice>) -> Vec<String> {
+fn drain_notices(rx: &mut Receiver<EvePublicNotice>) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
     while let Ok(n) = rx.try_recv() {
         if let Some(p) = n.payload {
-            out.push(p.normalized_type_name().to_string());
+            out.push((p.normalized_type_name().to_string(), p.value));
         }
     }
     out
@@ -186,9 +186,13 @@ async fn achievements_sde_rewards_showcase_and_admin_progression() {
 
     let achs = ctx.quasar_gateway.progression.achievements.get_or_init_achievements(cid as u32);
     assert!(!achs.is_empty(), "achievement manager must populate SDE definitions");
-    let rewarded = achs.iter().find(|a| a.def.reward_isk > 0 || a.def.reward_sp > 0).expect("SDE achievement with positive reward");
-    let aid = rewarded.def.id;
-    let cat_id = rewarded.def.category_id.max(1);
+    assert!(
+        achs.iter().all(|a| a.def.reward_isk == 0 && a.def.reward_sp == 0 && a.def.score == 0 && a.def.category_id == 0),
+        "default client achievements.static definitions must omit fabricated categories, scores, and rewards"
+    );
+    let sample = &achs[0];
+    let aid = sample.def.id;
+    let cat_id = sample.def.category_id.max(1);
 
     assert_eq!(qrpc(&ctx, &mut player, "eve_public.achievement.definition.api.cdn.GetLatestRequest", Vec::new()).await.status_code, STATUS_OK);
     let mut get_ach = Vec::new();
@@ -221,7 +225,7 @@ async fn achievements_sde_rewards_showcase_and_admin_progression() {
     let score_after_rsp = qrpc(&ctx, &mut player, "eve_public.achievement.showcase.api.GetCharacterScoreRequest", Vec::new()).await;
     let score_after_wm = WireMessage::decode(&score_after_rsp.payload.unwrap().value).unwrap();
     let total_score = score_after_wm.fields.iter().find_map(|f| f.value.as_varint()).unwrap_or(0);
-    assert!(total_score >= 1, "completed achievement must contribute positive showcase score, got {total_score}");
+    assert_eq!(total_score, 0, "default unconfigured achievement must contribute 0 showcase score");
 
     assert_eq!(
         qrpc(&ctx, &mut player, "eve_public.achievement.reward.api.ClaimRequest", Vec::new()).await.status_code,
@@ -231,10 +235,11 @@ async fn achievements_sde_rewards_showcase_and_admin_progression() {
     let isk_before = db.with_snapshot(|s| s.characters[&cid].balance.0);
     let sp_before = db.with_snapshot(|s| s.characters[&cid].free_skill_points);
     let claimed = ctx.quasar_gateway.progression.achievements.claim_rewards(cid as u32, &db);
-    assert!(claimed >= 1);
+    assert_eq!(claimed, 0, "unrewarded client achievement must fail closed without phantom payout");
     let isk_after = db.with_snapshot(|s| s.characters[&cid].balance.0);
     let sp_after = db.with_snapshot(|s| s.characters[&cid].free_skill_points);
-    assert!(isk_after > isk_before || sp_after > sp_before, "reward claim must credit ISK or SP");
+    assert_eq!(isk_after, isk_before, "unrewarded achievement must not alter ISK");
+    assert_eq!(sp_after, sp_before, "unrewarded achievement must not alter SP");
 
     let _ = drain_notices(&mut rx);
 
@@ -301,7 +306,23 @@ async fn air_career_program_and_campaign_definitions_sde() {
     assert_ne!(dup_code, 200);
 
     let notices = drain_notices(&mut rx);
-    assert!(notices.iter().any(|n| n.contains("career.goal.api.")), "expected career goal notice, got {notices:?}");
+    let cg_prog_bytes = notices
+        .iter()
+        .find(|(t, _)| t == "eve_public.career.goal.api.ProgressedNotice")
+        .map(|(_, v)| v.as_slice())
+        .expect("expected career.goal.api.ProgressedNotice");
+    let cg_prog_wm = WireMessage::decode(cg_prog_bytes).expect("decode career ProgressedNotice");
+    let cg_prog_id = WireMessage::decode(cg_prog_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(cg_prog_id.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()), Some(goal_uuid.as_slice()));
+    assert_eq!(cg_prog_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(target));
+    let cg_comp_bytes = notices
+        .iter()
+        .find(|(t, _)| t == "eve_public.career.goal.api.CompletedNotice")
+        .map(|(_, v)| v.as_slice())
+        .expect("expected career.goal.api.CompletedNotice");
+    let cg_comp_wm = WireMessage::decode(cg_comp_bytes).expect("decode career CompletedNotice");
+    let cg_comp_id = WireMessage::decode(cg_comp_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(cg_comp_id.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()), Some(goal_uuid.as_slice()));
 
     let cm_rsp = qrpc(&ctx, &mut player, "eve_public.campaign.contributionmethod.definition.api.GetAllRequest", Vec::new()).await;
     assert_eq!(cm_rsp.status_code, STATUS_OK);
@@ -360,7 +381,22 @@ async fn daily_goals_evermark_redemption_and_ai_assistant() {
     }
 
     let notices = drain_notices(&mut rx);
-    assert!(notices.iter().any(|n| n.contains("dailygoal.api.")), "expected daily goal notice, got {notices:?}");
+    let dg_comp_bytes = notices
+        .iter()
+        .find(|(t, _)| t == "eve_public.dailygoal.api.CompletedNotice")
+        .map(|(_, v)| v.as_slice())
+        .expect("expected dailygoal.api.CompletedNotice");
+    let dg_comp_wm = WireMessage::decode(dg_comp_bytes).expect("decode dailygoal CompletedNotice");
+    let dg_comp_id = WireMessage::decode(dg_comp_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(dg_comp_id.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()), Some(g_uuid.as_slice()));
+    let dg_red_bytes = notices
+        .iter()
+        .find(|(t, _)| t == "eve_public.dailygoal.api.RedeemedNotice")
+        .map(|(_, v)| v.as_slice())
+        .expect("expected dailygoal.api.RedeemedNotice");
+    let dg_red_wm = WireMessage::decode(dg_red_bytes).expect("decode dailygoal RedeemedNotice");
+    let dg_red_id = WireMessage::decode(dg_red_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(dg_red_id.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()), Some(g_uuid.as_slice()));
 
     assert_eq!(qrpc(&ctx, &mut player, "eve_public.ai.assistant.chat.api.QueryRequest", Vec::new()).await.status_code, STATUS_BAD_REQUEST);
     let mut ai_req = Vec::new();

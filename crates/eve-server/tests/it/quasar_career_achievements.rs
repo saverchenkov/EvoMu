@@ -371,10 +371,11 @@ async fn test_authentic_achievements_and_cdn_metadata() {
     let ach2 = ach_defs.iter().find(|d| d.id == 2).expect("SDE achievement 2");
     assert_eq!(ach2.name, "Mine Ore", "SDE achievement 2 localized name must be 'Mine Ore'");
     assert_eq!(ach2.target, 3, "SDE achievement 2 authentic target condition must be 3");
-    assert!((1..=5).contains(&ach2.category_id), "SDE achievement 2 category_id must be classified");
-    assert!(ach2.score > 0, "SDE achievement 2 score must be positive");
-    assert!(ach2.reward_isk >= 100_000, "SDE achievement 2 reward_isk must be populated");
-    assert!(ach2.reward_sp >= 2_500, "SDE achievement 2 reward_sp must be populated");
+    assert_eq!(ach2.category_id, 0, "Client achievements.static omits category assignment");
+    assert_eq!(ach2.score, 0, "Client achievements.static omits score weights");
+    assert!(ach2.milestone_targets.is_empty(), "Client achievements.static omits milestone checkpoints");
+    assert_eq!(ach2.reward_isk, 0, "Client achievements.static omits ISK payouts");
+    assert_eq!(ach2.reward_sp, 0, "Client achievements.static omits SP payouts");
     assert!(!ach2.description.is_empty(), "SDE achievement 2 description must be resolved from localization pickle");
 
     let ach60 = ach_defs.iter().find(|d| d.id == 60).expect("SDE achievement 60");

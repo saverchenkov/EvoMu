@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import pickle
 import sqlite3
 import struct
 import subprocess
@@ -24,6 +25,7 @@ from import_sde import (  # noqa: E402
     resolve_quasar_out_path,
     verify_sde_db,
 )
+from sde_extractors import extract_v24_achievement_career_daily_catalogs  # noqa: E402
 
 
 def _create_sample_sde(db_path: Path, manifest_path: Path, build: str = "3698585") -> None:
@@ -213,6 +215,102 @@ class TestStaticImportManifestVerification(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(help_res.returncode, 0, msg=help_res.stderr)
+
+    def test_extract_v24_achievement_career_daily_catalogs(self) -> None:
+        main_pickle = pickle.dumps(
+            {
+                "labels": {
+                    1001: {"FullPath": "UI/Achievements/Definitions/Categories", "label": "Combat_Name"},
+                    2001: {"FullPath": "Character/CareerGoals/Enforcer/GroupNames", "label": "Combat"},
+                    2002: {"FullPath": "Character/CareerGoals/Enforcer/GroupNames", "label": "Market"},
+                    2010: {"FullPath": "Character/CareerGoals/Enforcer/Names", "label": "EnforcerDestroyNpc100"},
+                    2011: {"FullPath": "Character/CareerGoals/Enforcer/Descriptions", "label": "EnforcerDestroyNpc100"},
+                    2012: {"FullPath": "Character/CareerGoals/Enforcer/AuraHints", "label": "EnforcerDestroyNpc100"},
+                    2013: {"FullPath": "Character/CareerGoals/Enforcer/AgencyLinks", "label": "EnforcerDestroyNpc100"},
+                    2020: {"FullPath": "Character/CareerGoals/Enforcer/Names", "label": "EnforcerSpendMarketIsk1m"},
+                    2021: {"FullPath": "Character/CareerGoals/Enforcer/Descriptions", "label": "EnforcerSpendMarketIsk1m"},
+                    2022: {"FullPath": "Character/CareerGoals/Enforcer/AuraHints", "label": "EnforcerSpendMarketIsk1m"},
+                    2030: {"FullPath": "Character/CareerGoals/Explorer/GroupNames", "label": "Scanning"},
+                    2031: {"FullPath": "Character/CareerGoals/Explorer/Names", "label": "ExplorerScanSignature1"},
+                    2032: {"FullPath": "Character/CareerGoals/Explorer/Descriptions", "label": "ExplorerScanSignature1"},
+                    2033: {"FullPath": "Character/CareerGoals/Explorer/AuraHints", "label": "ExplorerScanSignature1"},
+                    3001: {"FullPath": "UI/DailyGoals/Names", "label": "DailyCompletionBonus"},
+                    3002: {"FullPath": "Notifications/DailyGoals", "label": "GoalCompleted"},
+                }
+            }
+        )
+        en_labels = {
+            1001: "Combat",
+            2001: "Combat",
+            2002: "Market",
+            2010: "Destroy 100 enemy ships",
+            2011: "Desc 100",
+            2012: "Aura 100",
+            2013: "Agency Link",
+            2020: "Spend 1M\xa0ISK on the Market",
+            2021: "Desc 1M",
+            2022: "Aura 1M",
+            2030: "Scanning",
+            2031: "Scan a Cosmic Signature to 100%",
+            2032: "Desc Scan",
+            2033: "Aura Scan",
+            3001: "Daily Completion Bonus",
+            3002: "Daily Goal Completed",
+            4001: "Ach Name",
+            4002: "Ach Desc",
+            4003: "Ach Notice",
+            5001: "Enforcer",
+            5002: "Enforcer Desc",
+            6001: "Scan Title",
+            6002: "Scan Desc",
+            6003: "Scan Prog",
+            6004: "Scan Rew",
+            6005: "Scan Tgt",
+        }
+        fsd_data = {
+            "achievements": [
+                {
+                    "achievement_id": 60,
+                    "name_id": 4001,
+                    "description_id": 4002,
+                    "notification_text_id": 4003,
+                    "is_client_achievement": 1,
+                    "is_enabled": 1,
+                    "simple_conditions": [{"condition_index": 0, "statistic": 138, "target_value": 3}],
+                }
+            ],
+            "achievement_events": [{"event_id": 138, "name": "testEvent", "description": "Test desc"}],
+            "career_paths": [
+                {"career_path_id": 6, "internal_name": "Enforcer", "name_id": 5001, "description_id": 5002}
+            ],
+            "contribution_methods": [
+                {
+                    "method_key": "ScanSignature",
+                    "name": "Scan Signature",
+                    "title_id": 6001,
+                    "description_id": 6002,
+                    "progress_description_id": 6003,
+                    "rewarding_description_id": 6004,
+                    "target_value_description_id": 6005,
+                    "icon": "scanning",
+                    "unit": 0,
+                    "content_tags": ["career_path_explorer"],
+                    "parameters": [],
+                }
+            ],
+        }
+        out = extract_v24_achievement_career_daily_catalogs(main_pickle, en_labels, fsd_data)
+        self.assertEqual(len(out["achievements"]), 1)
+        self.assertEqual(out["achievements"][0][10], 3)
+        self.assertEqual(out["achievements"][0][11], 138)
+        self.assertEqual(len(out["achievement_categories"]), 1)
+        self.assertEqual(len(out["career_paths"]), 1)
+        self.assertEqual(len(out["daily_goal_catalog"]), 2)
+        self.assertEqual(len(out["career_goals"]), 3)
+        goals_by_label = {row[4]: row for row in out["career_goals"]}
+        self.assertEqual(goals_by_label["EnforcerDestroyNpc100"][10], 100)
+        self.assertEqual(goals_by_label["EnforcerSpendMarketIsk1m"][10], 1_000_000)
+        self.assertEqual(goals_by_label["ExplorerScanSignature1"][10], 1)
 
 
 if __name__ == "__main__":

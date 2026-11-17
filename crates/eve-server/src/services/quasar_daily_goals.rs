@@ -352,76 +352,186 @@ pub fn default_daily_bonus_template() -> DailyGoalTemplate {
     }
 }
 
+fn daily_goal_catalog_message_id(
+    catalog: &HashMap<&str, u32>,
+    label: &str,
+) -> Option<u32> {
+    catalog.get(label).copied().filter(|&id| id > 0)
+}
+
+/// Builds the daily bonus template using client localization IDs from `sde.daily_goal_catalog`.
+pub fn default_daily_bonus_template_for_sde(sde: &eve_sde::SdeRegistry) -> DailyGoalTemplate {
+    let catalog: HashMap<&str, u32> = sde
+        .daily_goal_catalog
+        .iter()
+        .map(|entry| (entry.label.as_str(), entry.message_id))
+        .collect();
+    let mut tpl = default_daily_bonus_template();
+    if let Some(id) = daily_goal_catalog_message_id(&catalog, "DailyCompletionBonus_name") {
+        tpl.name_message_id = id;
+    }
+    if let Some(id) = daily_goal_catalog_message_id(&catalog, "DailyCompletionBonus_description") {
+        tpl.description_message_id = id;
+    }
+    if let Some(id) = daily_goal_catalog_message_id(&catalog, "DailyCompletionBonus_help") {
+        tpl.help_text_message_id = id;
+    }
+    tpl
+}
+
+/// Builds the active daily goal templates from V24 client tables (`sde_daily_goal_catalog`
+/// and `sde_contribution_methods` in `evomu_sde.sqlite`) plus operator-configurable target,
+/// ISK/SP payout, and `PRICE_FIRST_COMPLETION` defaults (targets, payouts, and daily rotation
+/// do not exist in V24 client static files).
 pub fn build_sde_daily_goal_templates(sde: &eve_sde::SdeRegistry) -> Vec<DailyGoalTemplate> {
-    let methods = sde.contribution_methods().unwrap_or_default();
-    // DERIVED: Only localization message IDs come from `res:/staticdata/contributionmethods.fsdbinary`.
-    // Canonical targets (25, 2_000, 5, 3, 1), individual ISK rewards (500_000, 0.0 individual SP, +500 EverMarks char & corp),
-    // and progressive EverMark completion costs (2_500 -> 4_500 EM) align with `AIR_Daily_Goals.md` & `dailygoals/client/job.pyj`;
-    // 10_000 SP + monthly progress step come from completing 2+ goals (`DailyBonus`).
-    let specs: [(&str, u32, u32, u64, i64, f64, Option<i64>, Option<i64>, u32, u32, u32); 5] = [
-        ("KillNPC", 1, 3, 25, 500_000, 0.0, None, Some(2_500), 659_195, 696_251, 659_196),
-        ("MineOre", 2, 2, 2_000, 500_000, 0.0, None, Some(2_500), 659_218, 696_247, 659_219),
-        ("ScanSignature", 3, 1, 5, 500_000, 0.0, None, Some(2_500), 665_435, 696_245, 665_436),
-        ("SpaceJump", 4, 4, 3, 500_000, 0.0, None, Some(2_500), 541_824, 1_041_584, 1_004_955),
-        ("ManufactureItem", 5, 2, 1, 500_000, 0.0, None, Some(2_500), 665_394, 696_246, 665_412),
+    let catalog: HashMap<&str, u32> = sde
+        .daily_goal_catalog
+        .iter()
+        .map(|entry| (entry.label.as_str(), entry.message_id))
+        .collect();
+    let cfsd_methods = sde.contribution_methods().unwrap_or_default();
+    struct DailyGoalSpec {
+        method_key: &'static str,
+        name_label: &'static str,
+        desc_label: &'static str,
+        help_label: &'static str,
+        category: u32,
+        career: u32,
+        target: u64,
+        isk_reward: i64,
+        sp_reward: f64,
+        completion_cost_isk: Option<i64>,
+        completion_cost_evermarks: Option<i64>,
+    }
+    // Operator-configurable defaults aligned with V24 UI/DailyGoals/Names strings (25, 2_000, 5, 3, 1)
+    // and dailygoals/client/const.pyc PRICE_FIRST_COMPLETION (2_500 EverMarks).
+    let specs: [DailyGoalSpec; 5] = [
+        DailyGoalSpec {
+            method_key: "KillNPC",
+            name_label: "DestroyNoncapsuleers_name",
+            desc_label: "DestroyNon-capsuleers_description",
+            help_label: "DestroyNoncapsuleers_help",
+            category: 1,
+            career: 3,
+            target: 25,
+            isk_reward: 500_000,
+            sp_reward: 0.0,
+            completion_cost_isk: None,
+            completion_cost_evermarks: Some(2_500),
+        },
+        DailyGoalSpec {
+            method_key: "MineOre",
+            name_label: "MineOre_name",
+            desc_label: "Mine2000Ore_description",
+            help_label: "MineOre_help",
+            category: 2,
+            career: 2,
+            target: 2_000,
+            isk_reward: 500_000,
+            sp_reward: 0.0,
+            completion_cost_isk: None,
+            completion_cost_evermarks: Some(2_500),
+        },
+        DailyGoalSpec {
+            method_key: "ScanSignature",
+            name_label: "ScanSignatures_name",
+            desc_label: "Scan15_description",
+            help_label: "ScanSignatures_help",
+            category: 3,
+            career: 1,
+            target: 5,
+            isk_reward: 500_000,
+            sp_reward: 0.0,
+            completion_cost_isk: None,
+            completion_cost_evermarks: Some(2_500),
+        },
+        DailyGoalSpec {
+            method_key: "SpaceJump",
+            name_label: "JumpGoal_name",
+            desc_label: "JumpGoal_description",
+            help_label: "JumpGoal_help",
+            category: 4,
+            career: 4,
+            target: 3,
+            isk_reward: 500_000,
+            sp_reward: 0.0,
+            completion_cost_isk: None,
+            completion_cost_evermarks: Some(2_500),
+        },
+        DailyGoalSpec {
+            method_key: "ManufactureItem",
+            name_label: "ManufactureItem_name",
+            desc_label: "ManufactureItem_description",
+            help_label: "ManufactureItem_help",
+            category: 5,
+            career: 2,
+            target: 1,
+            isk_reward: 500_000,
+            sp_reward: 0.0,
+            completion_cost_isk: None,
+            completion_cost_evermarks: Some(2_500),
+        },
     ];
     specs
         .into_iter()
-        .map(
-            |(
-                method_key,
-                category,
-                career,
-                target,
-                isk_reward,
-                sp_reward,
-                completion_cost_isk,
-                completion_cost_evermarks,
-                fb_title_id,
-                fb_prog_desc_id,
-                fb_desc_id,
-            )| {
-                let m = methods.get(method_key);
-                let title_id = m
-                    .and_then(|v| v.get("titleID"))
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u32)
-                    .filter(|&v| v > 0)
-                    .unwrap_or(fb_title_id);
-                let prog_desc_id = m
-                    .and_then(|v| v.get("progressDescriptionID"))
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u32)
-                    .filter(|&v| v > 0)
-                    .unwrap_or(fb_prog_desc_id);
-                let desc_id = m
-                    .and_then(|v| v.get("descriptionID"))
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u32)
-                    .filter(|&v| v > 0)
-                    .unwrap_or(fb_desc_id);
-                let mut uuid = [0u8; 16];
-                uuid[0..5].copy_from_slice(b"SDEDG");
-                uuid[15] = category as u8;
-                DailyGoalTemplate {
-                    uuid,
-                    name_message: method_key.to_string(),
-                    description_message: format!("{method_key}_daily"),
-                    category,
-                    career,
-                    target,
-                    isk_reward,
-                    sp_reward,
-                    completion_cost_isk,
-                    completion_cost_evermarks,
-                    name_message_id: title_id,
-                    description_message_id: prog_desc_id,
-                    help_text_message_id: desc_id,
-                    assigner_corporation_id: 1_000_419,
-                }
-            },
-        )
-        .chain(std::iter::once(default_daily_bonus_template()))
+        .map(|spec| {
+            let sqlite_m = sde.contribution_methods.get(spec.method_key);
+            let cfsd_m = cfsd_methods.get(spec.method_key);
+            let name_id = daily_goal_catalog_message_id(&catalog, spec.name_label)
+                .or_else(|| sqlite_m.map(|m| m.title_id).filter(|&id| id > 0))
+                .or_else(|| {
+                    cfsd_m
+                        .and_then(|v| v.get("titleID"))
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32)
+                        .filter(|&id| id > 0)
+                })
+                .unwrap_or(0);
+            let desc_id = daily_goal_catalog_message_id(&catalog, spec.desc_label)
+                .or_else(|| {
+                    sqlite_m
+                        .map(|m| m.progress_description_id)
+                        .filter(|&id| id > 0)
+                })
+                .or_else(|| {
+                    cfsd_m
+                        .and_then(|v| v.get("progressDescriptionID"))
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32)
+                        .filter(|&id| id > 0)
+                })
+                .unwrap_or(0);
+            let help_id = daily_goal_catalog_message_id(&catalog, spec.help_label)
+                .or_else(|| sqlite_m.map(|m| m.description_id).filter(|&id| id > 0))
+                .or_else(|| {
+                    cfsd_m
+                        .and_then(|v| v.get("descriptionID"))
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32)
+                        .filter(|&id| id > 0)
+                })
+                .unwrap_or(0);
+            let mut uuid = [0u8; 16];
+            uuid[0..5].copy_from_slice(b"SDEDG");
+            uuid[15] = spec.category as u8;
+            DailyGoalTemplate {
+                uuid,
+                name_message: spec.method_key.to_string(),
+                description_message: format!("{}_daily", spec.method_key),
+                category: spec.category,
+                career: spec.career,
+                target: spec.target,
+                isk_reward: spec.isk_reward,
+                sp_reward: spec.sp_reward,
+                completion_cost_isk: spec.completion_cost_isk,
+                completion_cost_evermarks: spec.completion_cost_evermarks,
+                name_message_id: name_id,
+                description_message_id: desc_id,
+                help_text_message_id: help_id,
+                assigner_corporation_id: 1_000_419,
+            }
+        })
+        .chain(std::iter::once(default_daily_bonus_template_for_sde(sde)))
         .collect()
 }
 
@@ -479,7 +589,11 @@ impl DailyGoalManager {
         if !store.templates.is_empty()
             && !store.templates.iter().any(|t| t.effective_goal_category() == 2)
         {
-            store.templates.push(default_daily_bonus_template());
+            let bonus = sde
+                .as_ref()
+                .map(|r| default_daily_bonus_template_for_sde(r))
+                .unwrap_or_else(default_daily_bonus_template);
+            store.templates.push(bonus);
         }
 
         let mut character_goals = store.character_goals;

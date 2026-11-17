@@ -123,7 +123,30 @@ async fn quasar_achievements_categories_scores_and_claims() {
     assert_eq!(comp_rsp.status_code, STATUS_OK);
 
     let notifs = drain_notices(&mut stream_rx);
-    assert!(!notifs.is_empty(), "Achievement notices should be emitted");
+    let prog_not = notifs
+        .iter()
+        .find(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.achievement.api.ProgressedNotice")))
+        .expect("achievement ProgressedNotice emitted");
+    let prog_wm = WireMessage::decode(&prog_not.payload.as_ref().unwrap().value).expect("decode achievement ProgressedNotice");
+    let prog_id_wm = WireMessage::decode(
+        prog_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).expect("achievement identifier"),
+    )
+    .expect("decode achievement Identifier");
+    let prog_uuid = prog_id_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).expect("uuid");
+    assert_eq!(u32::from_be_bytes(prog_uuid[12..16].try_into().unwrap()), 2);
+    assert_eq!(prog_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(1));
+
+    let comp_not = notifs
+        .iter()
+        .find(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.achievement.api.CompletedNotice")))
+        .expect("achievement CompletedNotice emitted");
+    let comp_wm = WireMessage::decode(&comp_not.payload.as_ref().unwrap().value).expect("decode achievement CompletedNotice");
+    let comp_id_wm = WireMessage::decode(
+        comp_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).expect("achievement identifier"),
+    )
+    .expect("decode CompletedNotice Identifier");
+    let comp_uuid = comp_id_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).expect("uuid");
+    assert_eq!(u32::from_be_bytes(comp_uuid[12..16].try_into().unwrap()), 2);
 
     let score_rsp = quasar_rpc(
         &ctx,
@@ -140,7 +163,7 @@ async fn quasar_achievements_categories_scores_and_claims() {
         .iter()
         .find(|f| f.field_number == 1)
         .and_then(|f| f.value.as_varint());
-    assert_eq!(total_score.unwrap_or(0), 30, "Completed achievement 2 contributes authentic score ((2 % 5) + 1) * 10 = 30");
+    assert_eq!(total_score.unwrap_or(0), 0, "Client achievements.static omits score weights so default showcase score is 0");
 
     let unclaimed_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.GetUnclaimedRequest", Vec::new()).await;
     assert_eq!(unclaimed_rsp.status_code, STATUS_OK);

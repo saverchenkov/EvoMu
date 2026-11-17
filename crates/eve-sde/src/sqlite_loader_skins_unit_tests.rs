@@ -406,11 +406,11 @@ fn test_issue_426_default_required_skill_level_1_and_safe_fsd_helpers() {
 }
 
 #[test]
-fn load_career_goals_table_sqlite_and_json_fallback() {
+fn load_career_goals_table_sqlite_without_json_fallback() {
     let conn = Connection::open_in_memory().unwrap();
-    // Without sde_career_goals table -> falls back to embedded air_career_goals.json
-    let fallback = load_career_goals_table(&conn).expect("json fallback");
-    assert!(!fallback.is_empty());
+    // Without sde_career_goals table in minimal synthetic test DB -> returns empty map (no embedded JSON fallback)
+    let missing = load_career_goals_table(&conn).expect("empty map when table absent");
+    assert!(missing.is_empty());
 
     // With sde_career_goals table -> reads directly from SQLite and clamps negative values to 0
     conn.execute_batch(
@@ -581,13 +581,55 @@ fn skin_tables_and_celestial_queries_handle_missing_tables_and_bad_dbs() {
 }
 
 #[test]
-fn load_career_goals_json_fallback_and_all_stars_edge_branches() {
-    // Missing sde_career_goals table triggers air_career_goals.json fallback:
-    // First goal has uuid[2] == 1, uuid[15] == 1 -> goal_id = 10_001 (kills + -> - at 319:53)
+fn load_v24_progression_tables_and_all_stars_edge_branches() {
     let empty_conn = Connection::open_in_memory().unwrap();
-    let goals = load_career_goals_table(&empty_conn).unwrap();
-    assert!(goals.contains_key(&10_001));
-    assert!(!goals.contains_key(&9_999));
+    assert!(load_career_goals_table(&empty_conn).unwrap().is_empty());
+    let (ach, ev, cat, cp, cgd, cm, dg) = load_v24_progression_tables(&empty_conn).unwrap();
+    assert!(ach.is_empty() && ev.is_empty() && cat.is_empty() && cp.is_empty() && cgd.is_empty() && cm.is_empty() && dg.is_empty());
+
+    empty_conn
+        .execute_batch(
+            "CREATE TABLE sde_achievements (
+                achievement_id INTEGER PRIMARY KEY,
+                name_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                description_id INTEGER NOT NULL,
+                description TEXT NOT NULL,
+                notification_text_id INTEGER NOT NULL,
+                notification_text TEXT NOT NULL,
+                is_client_achievement INTEGER NOT NULL,
+                is_enabled INTEGER NOT NULL,
+                conditions_json TEXT NOT NULL,
+                target_value INTEGER NOT NULL,
+                primary_event_id INTEGER NOT NULL
+             );
+             INSERT INTO sde_achievements VALUES (2, 502374, 'Mine Ore', 502373, 'Desc', 505218, 'Done', 0, 1, '[{\"condition_index\":0,\"statistic\":86,\"target_value\":3}]', 3, 86);
+             CREATE TABLE sde_contribution_methods (
+                method_key TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                title_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description_id INTEGER NOT NULL,
+                description TEXT NOT NULL,
+                progress_description_id INTEGER NOT NULL,
+                progress_description TEXT NOT NULL,
+                rewarding_description_id INTEGER NOT NULL,
+                rewarding_description TEXT NOT NULL,
+                target_value_description_id INTEGER NOT NULL,
+                target_value_description TEXT NOT NULL,
+                icon TEXT NOT NULL,
+                unit INTEGER NOT NULL,
+                content_tags_json TEXT NOT NULL,
+                parameters_json TEXT NOT NULL
+             );
+             INSERT INTO sde_contribution_methods VALUES ('ScanSignature', 'Scan Signature', 665435, 'Scan', 665436, 'Desc', 696245, 'Prog', 695580, 'Rew', 695581, 'Tgt', 'scanning', 0, '[\"career_path_explorer\"]', '[]');",
+        )
+        .unwrap();
+    let (ach2, _, _, _, _, cm2, _) = load_v24_progression_tables(&empty_conn).unwrap();
+    assert_eq!(ach2.len(), 1);
+    assert_eq!(ach2[0].target_value, 3);
+    assert_eq!(ach2[0].primary_event_id, 86);
+    assert_eq!(cm2["ScanSignature"].title_id, 665435);
 
     // all_stars: prefers non-empty `self.stars` sorted by ID, ignoring `celestials_by_system`
     let mut sde = SdeRegistry::default();

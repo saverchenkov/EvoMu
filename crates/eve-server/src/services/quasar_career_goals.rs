@@ -32,11 +32,10 @@ pub const CAREER_PATH_MESSAGE_IDS: [(u32, u32, u32); 4] = [
     (4, 582_522, 582_523),
 ];
 
-/// Authentic V24 AIR Career Program goal definitions. Career path IDs (`1..=4`), activity groups,
-/// targets, career points, ISK/SP rewards, and authentic V24.01 localization message IDs
-/// (`name_message_id` `601356..601543`, `description_message_id` `601544..601731`,
-/// `aura_text_id` `601732..601919`, `agency_link_text_id` `601920..602107`) come from
-/// `data/air_career_goals.json`, verified against `localization_fsd_en-us.pickle` and `careerpaths.fsdbinary`.
+/// V24 AIR Career Program goal definitions loaded from `evomu_sde.sqlite` (`sde_career_goals`,
+/// `sde_career_paths`), sourced from client `res:/staticdata/careerpaths.fsdbinary` and
+/// `Character/CareerGoals/*` localization. Per-goal CP and ISK payout defaults are server-authoritative /
+/// operator-configurable (not shipped in client static files).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CareerGoalDef {
     pub uuid: [u8; 16],
@@ -100,6 +99,52 @@ impl CareerGoalDef {
 
     /// Returns the canonical V24 `CAREER_PATH_GROUPS` activity group annotation key (`ui_annotations["group"]`).
     pub fn effective_group(&self) -> &'static str {
+        const EXPLORER_GROUPS: &[(&str, &str, &str)] = &[
+            ("scanning", "exploration", "Scanning"),
+            ("hacking", "hacking", "Hacking"),
+            ("advancedhacking", "advanced_hacking", "AdvancedHacking"),
+            ("wormholes", "wormholes", "Wormholes"),
+            ("gassites", "gas_sites", "GasSites"),
+            ("combatsites", "combat_sites", "CombatSites"),
+            ("navigation", "travel", "Navigation"),
+            ("advancednavigation", "advanced_travel", "AdvancedNavigation"),
+            ("projectdiscovery", "project_discovery", "ProjectDiscovery"),
+        ];
+        const INDUSTRIALIST_GROUPS: &[(&str, &str, &str)] = &[
+            ("market", "market", "Market"),
+            ("salvage", "salvage", "Salvage"),
+            ("resourceharvesting", "mining", "ResourceHarvesting"),
+            ("refining", "refining", "Refining"),
+            ("manufacturing", "manufacturing", "Manufacturing"),
+            ("distributionagent", "distribution_missions", "DistributionAgent"),
+            ("miningagent", "mining_missions", "MiningAgent"),
+            ("research", "research", "Research"),
+        ];
+        const ENFORCER_GROUPS: &[(&str, &str, &str)] = &[
+            ("securityagent", "combat_missions", "SecurityAgent"),
+            ("abyssaldeadspace", "abyssal", "AbyssalDeadspace"),
+            ("combat", "combat", "Combat"),
+            ("bounties", "bounties", "Bounties"),
+            ("combatsites", "combat_sites", "CombatSites"),
+            ("epicarc", "epic_arc", "EpicArc"),
+            ("market", "market", "Market"),
+            ("standings", "standings", "Standings"),
+            ("loyaltypoints", "loyalty_points", "LoyaltyPoints"),
+        ];
+        const SOLDIER_GROUPS: &[(&str, &str, &str)] = &[
+            ("social", "social", "Social"),
+            ("electronicwarfare", "ewar", "ElectronicWarfare"),
+            ("combat", "combat", "Combat"),
+            ("pvp", "pvp", "PvP"),
+            ("capacitorwarfare", "cap_warfare", "CapacitorWarfare"),
+            ("factionwarfare", "faction_warfare", "FactionWarfare"),
+            ("support", "remote_repair", "Support"),
+            ("destruction", "destruction", "Destruction"),
+            ("duels", "duels", "Duels"),
+        ];
+        const DEFAULT_CAREER_GROUP: &str = "CareerAgentMissions";
+        const INDUSTRIALIST_DEFAULT_GROUP: &str = "IndustrialistCareerAgentsMissions";
+
         let norm: String = self
             .activity_name
             .chars()
@@ -107,55 +152,17 @@ impl CareerGoalDef {
             .collect::<String>()
             .to_ascii_lowercase();
         let kind = self.activity_kind.to_ascii_lowercase();
-        match self.career_id.clamp(1, 4) {
-            1 => match (norm.as_str(), kind.as_str()) {
-                ("scanning", _) | (_, "exploration") => "Scanning",
-                ("hacking", _) | (_, "hacking") => "Hacking",
-                ("advancedhacking", _) | (_, "advanced_hacking") => "AdvancedHacking",
-                ("wormholes", _) | (_, "wormholes") => "Wormholes",
-                ("gassites", _) | (_, "gas_sites") => "GasSites",
-                ("combatsites", _) | (_, "combat_sites") => "CombatSites",
-                ("navigation", _) | (_, "travel") => "Navigation",
-                ("advancednavigation", _) | (_, "advanced_travel") => "AdvancedNavigation",
-                ("projectdiscovery", _) | (_, "project_discovery") => "ProjectDiscovery",
-                _ => "CareerAgentMissions",
-            },
-            2 => match (norm.as_str(), kind.as_str()) {
-                ("market", _) | (_, "market") => "Market",
-                ("salvage", _) | (_, "salvage") => "Salvage",
-                ("resourceharvesting", _) | (_, "mining") => "ResourceHarvesting",
-                ("refining", _) | (_, "refining") => "Refining",
-                ("manufacturing", _) | (_, "manufacturing") => "Manufacturing",
-                ("distributionagent", _) | (_, "distribution_missions") => "DistributionAgent",
-                ("miningagent", _) | (_, "mining_missions") => "MiningAgent",
-                ("research", _) | (_, "research") => "Research",
-                _ => "IndustrialistCareerAgentsMissions",
-            },
-            3 => match (norm.as_str(), kind.as_str()) {
-                ("securityagent", _) | (_, "combat_missions") => "SecurityAgent",
-                ("abyssaldeadspace", _) | (_, "abyssal") => "AbyssalDeadspace",
-                ("combat", _) | (_, "combat") => "Combat",
-                ("bounties", _) | (_, "bounties") => "Bounties",
-                ("combatsites", _) | (_, "combat_sites") => "CombatSites",
-                ("epicarc", _) | (_, "epic_arc") => "EpicArc",
-                ("market", _) | (_, "market") => "Market",
-                ("standings", _) | (_, "standings") => "Standings",
-                ("loyaltypoints", _) | (_, "loyalty_points") => "LoyaltyPoints",
-                _ => "CareerAgentMissions",
-            },
-            _ => match (norm.as_str(), kind.as_str()) {
-                ("social", _) | (_, "social") => "Social",
-                ("electronicwarfare", _) | (_, "ewar") => "ElectronicWarfare",
-                ("combat", _) | (_, "combat") => "Combat",
-                ("pvp", _) | (_, "pvp") => "PvP",
-                ("capacitorwarfare", _) | (_, "cap_warfare") => "CapacitorWarfare",
-                ("factionwarfare", _) | (_, "faction_warfare") => "FactionWarfare",
-                ("support", _) | (_, "remote_repair") => "Support",
-                ("destruction", _) | (_, "destruction") => "Destruction",
-                ("duels", _) | (_, "duels") => "Duels",
-                _ => "CareerAgentMissions",
-            },
-        }
+        let (table, fallback): (&[(&str, &str, &str)], &'static str) = match self.career_id.clamp(1, 4) {
+            1 => (EXPLORER_GROUPS, DEFAULT_CAREER_GROUP),
+            2 => (INDUSTRIALIST_GROUPS, INDUSTRIALIST_DEFAULT_GROUP),
+            3 => (ENFORCER_GROUPS, DEFAULT_CAREER_GROUP),
+            _ => (SOLDIER_GROUPS, DEFAULT_CAREER_GROUP),
+        };
+        table
+            .iter()
+            .find(|&&(n, k, _)| norm == n || kind == k)
+            .map(|&(_, _, out)| out)
+            .unwrap_or(fallback)
     }
 
     /// Returns the goal threat level (`1..=3` for `Attributes.threat`).
@@ -289,14 +296,65 @@ pub fn default_career_milestones() -> Vec<CareerMilestoneDef> {
     ]
 }
 
-/// DERIVED: Authentic AIR Career Program goal definitions loaded from static definitions.
-/// Synthesized 16-byte UUIDs provide deterministic identifiers matching client wire schemas,
-/// and individual goal sp_reward values are 0.0 per ~/ai/eve-wiki/articles/AIR_Career_Program.md
-/// because all 750,000 Skill Points are awarded exclusively via career graduation (4 x 100k SP)
-/// and overall career point milestones (50k, 75k, 100k, 125k SP).
+/// Operator-configurable default per-goal career points & ISK payouts for V24 `sde_career_goals`
+/// rows (client `careerpaths.fsdbinary` / localization pickles contain goal titles, descriptions,
+/// Aura hints, and group labels, while dynamic CP & ISK payouts live server-side in Quasar).
+fn career_goal_def_from_sde(row: &eve_sde::CareerGoalDefinitionDef) -> CareerGoalDef {
+    let career_points = 15 + row.sort_order.saturating_sub(1).min(5) * 5;
+    let isk_reward = i64::from(career_points) * 2_500;
+    let threat = if career_points <= 15 {
+        1
+    } else if career_points <= 25 {
+        2
+    } else {
+        3
+    };
+    CareerGoalDef {
+        uuid: row.goal_uuid,
+        career_id: row.career_id,
+        activity_name: row.activity_name.clone(),
+        activity_kind: row.activity_kind.clone(),
+        name: row.name.clone(),
+        description: row.description.clone(),
+        target: row.target_progress.max(1),
+        career_points,
+        isk_reward,
+        sp_reward: row.sp_reward as f64,
+        name_message_id: row.name_message_id,
+        description_message_id: row.description_message_id,
+        threat,
+        duration: Some(career_points * 2),
+        aura_text_id: (row.aura_text_id > 0).then_some(row.aura_text_id),
+        agency_link_text_id: (row.agency_link_text_id > 0).then_some(row.agency_link_text_id),
+        agency_screen: Some("HOMEPAGE".into()),
+        order: Some(row.sort_order.max(1)),
+        _provenance: Some(
+            "V24 client Character/CareerGoals/* + careerpaths.fsdbinary in evomu_sde.sqlite; per-goal CP and ISK reward defaults are operator-configurable".into(),
+        ),
+    }
+}
+
+pub fn default_career_goal_definitions_for_sde(sde: Option<&eve_sde::SdeRegistry>) -> Vec<CareerGoalDef> {
+    if let Some(reg) = sde {
+        return reg
+            .career_goal_definitions
+            .iter()
+            .map(career_goal_def_from_sde)
+            .collect();
+    }
+    eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path())
+        .ok()
+        .map(|reg| {
+            reg.career_goal_definitions
+                .iter()
+                .map(career_goal_def_from_sde)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn default_career_goal_definitions() -> Vec<CareerGoalDef> {
-    const RAW_JSON: &str = include_str!("../../../../data/air_career_goals.json");
-    serde_json::from_str(RAW_JSON).unwrap_or_else(|_| Vec::new())
+    default_career_goal_definitions_for_sde(None)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -316,6 +374,7 @@ pub struct CareerGoalManager {
     pub claimed_milestones: RwLock<HashMap<u32, HashSet<u32>>>,
     pub milestones: Vec<CareerMilestoneDef>,
     db: Option<Arc<WorldRepository>>,
+    sde: Option<Arc<eve_sde::SdeRegistry>>,
 }
 
 fn is_stale_synthesized_loc_id(def: &CareerGoalDef) -> bool {
@@ -369,7 +428,14 @@ fn ensure_character_career_goals_with_defs(
 
 impl CareerGoalManager {
     pub fn new(db: Option<Arc<WorldRepository>>) -> Self {
-        let default_defs = default_career_goal_definitions();
+        Self::new_with_sde(db, None)
+    }
+
+    pub fn new_with_sde(
+        db: Option<Arc<WorldRepository>>,
+        sde: Option<Arc<eve_sde::SdeRegistry>>,
+    ) -> Self {
+        let default_defs = default_career_goal_definitions_for_sde(sde.as_deref());
         let defs = db
             .as_ref()
             .and_then(|d| {
@@ -442,13 +508,14 @@ impl CareerGoalManager {
             claimed_milestones: RwLock::new(loaded_milestones),
             milestones: default_career_milestones(),
             db,
+            sde,
         }
     }
 
     pub fn load_definitions(&self) -> Vec<CareerGoalDef> {
         let defs = self.definitions.read().unwrap_or_else(|e| e.into_inner());
         if defs.is_empty() {
-            default_career_goal_definitions()
+            default_career_goal_definitions_for_sde(self.sde.as_deref())
         } else {
             defs.clone()
         }
@@ -458,7 +525,7 @@ impl CareerGoalManager {
         let defs = {
             let mut d = self.definitions.write().unwrap_or_else(|e| e.into_inner());
             if d.is_empty() {
-                *d = default_career_goal_definitions();
+                *d = default_career_goal_definitions_for_sde(self.sde.as_deref());
             }
             if let Some(existing) = d.iter_mut().find(|x| x.uuid == def.uuid) {
                 *existing = def;
@@ -525,7 +592,7 @@ impl CareerGoalManager {
                 .quasar_state_blobs
                 .get("quasar_career_goal_defs")
                 .and_then(|json| serde_json::from_str::<Vec<CareerGoalDef>>(json).ok())
-                .unwrap_or_else(default_career_goal_definitions);
+                .unwrap_or_else(|| default_career_goal_definitions_for_sde(self.sde.as_deref()));
             let loaded = s
                 .quasar_state_blobs
                 .get("quasar_career_goals")

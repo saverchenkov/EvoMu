@@ -192,10 +192,21 @@ async fn test_quasar_achievements_admin_notices_and_queries() {
     assert_eq!(comp_rsp.status_code, STATUS_OK);
 
     let notices2 = drain_notices(&mut stream_rx);
-    assert!(
-        notices2.iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.achievement.api.CompletedNotice"))),
-        "CompletedNotice must be emitted"
-    );
+    let comp_not = notices2
+        .iter()
+        .find(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.achievement.api.CompletedNotice")))
+        .expect("CompletedNotice must be emitted");
+    let dyn_comp = reg
+        .decode_dynamic("eve_public.achievement.api.CompletedNotice", &comp_not.payload.as_ref().expect("CompletedNotice payload").value)
+        .expect("decode CompletedNotice");
+    let comp_uuid = match dyn_comp.get(1) {
+        Some(DynamicValue::Message(id_m)) => match id_m.get(1) {
+            Some(DynamicValue::Bytes(b)) => b.as_slice(),
+            _ => panic!("expected achievement uuid bytes in CompletedNotice"),
+        },
+        other => panic!("expected achievement identifier in CompletedNotice, got {other:?}"),
+    };
+    assert_eq!(u32::from_be_bytes(comp_uuid[12..16].try_into().unwrap()), 2);
 
     let get_rsp2 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", make_u32_ident_req(2), b"a-07").await;
     assert_eq!(get_rsp2.status_code, STATUS_OK);
@@ -341,10 +352,21 @@ async fn test_quasar_career_goals_requests_admin_and_notices() {
     let comp_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.admin.CompleteRequest", comp_req, b"c-06").await;
     assert_eq!(comp_rsp.status_code, STATUS_OK);
     let notices2 = drain_notices(&mut stream_rx);
-    assert!(
-        notices2.iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.career.goal.api.CompletedNotice"))),
-        "CompletedNotice must be emitted"
-    );
+    let comp_not = notices2
+        .iter()
+        .find(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.career.goal.api.CompletedNotice")))
+        .expect("CompletedNotice must be emitted");
+    let dyn_comp = reg
+        .decode_dynamic("eve_public.career.goal.api.CompletedNotice", &comp_not.payload.as_ref().expect("CompletedNotice payload").value)
+        .expect("decode career CompletedNotice");
+    let comp_uuid = match dyn_comp.get(1) {
+        Some(DynamicValue::Message(id_m)) => match id_m.get(1) {
+            Some(DynamicValue::Bytes(b)) => b.as_slice(),
+            _ => panic!("expected career goal uuid bytes in CompletedNotice"),
+        },
+        other => panic!("expected career goal identifier in CompletedNotice, got {other:?}"),
+    };
+    assert_eq!(comp_uuid, goal_uuid.as_slice());
 
     // 4. ClaimRewardRequest -> credits ISK
     let bal_before = ctx.db.with_snapshot(|snap| snap.characters.get(&91_000_002).expect("char 91000002").balance);
