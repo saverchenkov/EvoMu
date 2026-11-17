@@ -2023,6 +2023,11 @@ async fn handle_slash_teleport(
                 .is_some_and(|(_, b)| matches!(b.mode, MovementMode::Warp { .. }));
             if removed_active || removed_return || ball_warping {
                 let _ = pre_handle.force_stop_warp(ship_id);
+                crate::services::space_destiny::clear_warp_tracking(
+                    ctx,
+                    Some(&pre_handle),
+                    ship_id,
+                );
                 stopped_mid_warp = true;
                 if !same_sys_in_space {
                     // #994: For cross-system teleports, flush Stop + effects.Warping(0) in a

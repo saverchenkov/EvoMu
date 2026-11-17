@@ -653,10 +653,11 @@ pub async fn handle(
                 if let Ok(Some((_, ball))) = handle.get_ball_snapshot(ship_id).await {
                     if matches!(ball.mode, eve_destiny::MovementMode::Warp { .. }) {
                         let _ = handle.force_stop_warp(ship_id);
-                        ctx.active_warps
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .remove(&ship_id);
+                        crate::services::space_destiny::clear_warp_tracking(
+                            ctx,
+                            Some(&handle),
+                            ship_id,
+                        );
                     }
                 }
                 handle.clear_warp_stopped_at(ship_id);

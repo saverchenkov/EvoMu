@@ -119,6 +119,8 @@ pub struct SystemRegistry {
     unrebased_clock_offset_secs: Arc<std::sync::atomic::AtomicU64>,
     /// Per-system in-flight physics-step atomic flags preventing a wedged system from accumulating overlapping ticks (`#1208`).
     physics_step_flags: RankedMutex<HashMap<SolarSystemId, Arc<std::sync::atomic::AtomicBool>>, RANK_LEAF>,
+    /// Shared `ServerContext` active-warp tracking tables wired into spawned system actors (`#1175`).
+    warp_tracking: types::SharedWarpTracking,
 }
 
 /// Lock-free RAII guard releasing a system's in-flight physics-step slot upon completion or panic.
@@ -160,6 +162,7 @@ impl SystemRegistry {
             lazy_stargate_activation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unrebased_clock_offset_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             physics_step_flags: RankedMutex::new(HashMap::new()),
+            warp_tracking: types::SharedWarpTracking::default(),
         }
     }
 
@@ -390,6 +393,21 @@ impl SystemRegistry {
         unrebased_clock_offset_secs: Arc<std::sync::atomic::AtomicU64>,
     ) -> Self {
         self.unrebased_clock_offset_secs = unrebased_clock_offset_secs;
+        self
+    }
+
+    /// Shares `ServerContext` warp-tracking tables with [`SystemRegistry`] so landed warps clear cleanly (`#1175`).
+    pub fn with_warp_tracking(
+        mut self,
+        active_warps: Arc<RankedMutex<HashMap<i64, i64>, RANK_LEAF>>,
+        return_warps: Arc<RankedMutex<std::collections::HashSet<i64>, RANK_LEAF>>,
+        pending_warp_finished: Arc<RankedMutex<std::collections::HashSet<i64>, RANK_LEAF>>,
+    ) -> Self {
+        self.warp_tracking = types::SharedWarpTracking {
+            active_warps: Some(active_warps),
+            return_warps: Some(return_warps),
+            pending_warp_finished: Some(pending_warp_finished),
+        };
         self
     }
 
@@ -826,6 +844,7 @@ impl SystemRegistry {
             idle_ticks: Arc::clone(&idle_ticks),
             dynamic_ball_count: Arc::clone(&dynamic_ball_count),
             pending_destroyed_balls: pending_destroyed_balls.clone(),
+            warp_tracking: self.warp_tracking.clone(),
             ..Default::default()
         };
         if db_read_safe {
@@ -952,6 +971,8 @@ impl SystemRegistry {
                     pending_missile_deploy_fx,
                     active_guided_missiles,
                     next_missile_ball_id,
+                    warp_provenance,
+                    warp_tracking,
                     ..
                 } = &mut *actor_st;
                 {
@@ -969,6 +990,11 @@ impl SystemRegistry {
                         match cmd {
                             SystemCommand::SpawnBall { ball, reply } => {
                                 let ball_id = ball.id;
+                                let was_warping = matches!(
+                                    ballpark.balls.get(&ball_id).map(|b| &b.mode),
+                                    Some(eve_destiny::MovementMode::Warp { .. })
+                                );
+                                let is_warp = matches!(ball.mode, eve_destiny::MovementMode::Warp { .. });
                                 let existing_meta = ballpark.ball_slim_meta.get(&ball_id).cloned();
                                 if ballpark.balls.contains_key(&ball_id) {
                                     let _ = ballpark.remove_ball(ball_id);
@@ -982,6 +1008,10 @@ impl SystemRegistry {
                                     ballpark.mark_ball_non_free(ball_id, false);
                                 }
                                 ballpark.add_ball(ball);
+                                if was_warping && !is_warp {
+                                    warp_provenance.remove(&ball_id);
+                                    celestials::clear_shared_warp_tracking(warp_tracking, ball_id, true);
+                                }
                                 spawned_checkpoint_ball = Some(ball_id);
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(Ok(ballpark.current_tick));
@@ -998,6 +1028,11 @@ impl SystemRegistry {
                                 reply,
                             } => {
                                 let ball_id = ball.id;
+                                let was_warping = matches!(
+                                    ballpark.balls.get(&ball_id).map(|b| &b.mode),
+                                    Some(eve_destiny::MovementMode::Warp { .. })
+                                );
+                                let is_warp = matches!(ball.mode, eve_destiny::MovementMode::Warp { .. });
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                 let tick = cycles_tackle::spawn_ball_with_combat_in_actor(
                                     &mut ballpark,
@@ -1011,6 +1046,10 @@ impl SystemRegistry {
                                     combat_state,
                                     None,
                                 );
+                                if was_warping && !is_warp {
+                                    warp_provenance.remove(&ball_id);
+                                    celestials::clear_shared_warp_tracking(warp_tracking, ball_id, true);
+                                }
                                 spawned_checkpoint_ball = Some(ball_id);
                                 cycles_tackle::snapshot_active_tackle_totals(&ballpark, active_module_cycles, &mut last_active_totals);
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
@@ -1023,6 +1062,11 @@ impl SystemRegistry {
                                 reply,
                             } => {
                                 let ball_id = ball.id;
+                                let was_warping = matches!(
+                                    ballpark.balls.get(&ball_id).map(|b| &b.mode),
+                                    Some(eve_destiny::MovementMode::Warp { .. })
+                                );
+                                let is_warp = matches!(ball.mode, eve_destiny::MovementMode::Warp { .. });
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                 let tick = cycles_tackle::spawn_ball_with_combat_in_actor(
                                     &mut ballpark,
@@ -1036,6 +1080,10 @@ impl SystemRegistry {
                                     combat_state,
                                     Some(slim_meta),
                                 );
+                                if was_warping && !is_warp {
+                                    warp_provenance.remove(&ball_id);
+                                    celestials::clear_shared_warp_tracking(warp_tracking, ball_id, true);
+                                }
                                 spawned_checkpoint_ball = Some(ball_id);
                                 cycles_tackle::snapshot_active_tackle_totals(&ballpark, active_module_cycles, &mut last_active_totals);
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
@@ -1271,6 +1319,8 @@ impl SystemRegistry {
                             } => {
                                 if !ballpark.balls.contains_key(&ball_id) {
                                     let _ = ballpark.remove_ball(ball_id);
+                                    warp_provenance.remove(&ball_id);
+                                    celestials::clear_shared_warp_tracking(warp_tracking, ball_id, true);
                                     let _ = reply.send(None);
                                     return;
                                 }
@@ -1385,84 +1435,53 @@ impl SystemRegistry {
                                 let _ = reply.send(known);
                             }
                             SystemCommand::SetMovementMode { ball_id, mode, reply } => {
-                                if ballpark.balls.contains_key(&ball_id) {
-                                    let is_stop = matches!(mode, eve_destiny::MovementMode::Stop);
-                                    let pre_ev_len = ballpark.pending_events.len();
-                                    match ballpark.set_mode(ball_id, mode) {
-                                        Ok(()) => {
-                                            if ballpark.pending_events.len() > pre_ev_len {
-                                                let new_evs: Vec<DestinyEvent> =
-                                                    ballpark.pending_events[pre_ev_len..].to_vec();
-                                                let deact_guard = module_deactivation_hook_actor
-                                                    .read()
-                                                    .unwrap_or_else(|e| e.into_inner())
-                                                    .clone();
-                                                for ev in &new_evs {
-                                                    if let DestinyEvent::OnTarget {
-                                                        mode: m,
-                                                        source_id,
-                                                        target_id,
-                                                    } = ev
-                                                    {
-                                                        if m == "lost" {
-                                                            on_target_unlocked_in_actor(
-                                                                &mut ballpark,
-                                                                active_module_cycles,
-                                                                &base_scramble_strengths,
-                                                                &base_core_strengths,
-                                                                &db_opt,
-                                                                *source_id,
-                                                                Some(*target_id),
-                                                                deact_guard.as_ref(),
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                                cycles::flush_target_lost_notifications(
-                                                    &ballpark,
-                                                    &new_evs,
-                                                    db_opt.as_ref(),
-                                                    pending_notifications_opt
-                                                        .as_deref()
-                                                        .map(|r| r as &dyn AnyRwLock<_>),
-                                                    notify_tx_opt.as_ref(),
-                                                );
-                                                let mut idx = pre_ev_len;
-                                                while idx < ballpark.pending_events.len() {
-                                                    let drop_ev = matches!(
-                                                        &ballpark.pending_events[idx],
-                                                        DestinyEvent::TargetLockFailed { .. }
-                                                    ) || matches!(
-                                                        &ballpark.pending_events[idx],
-                                                        DestinyEvent::OnTarget { mode, .. } if mode == "lost"
-                                                    );
-                                                    if drop_ev {
-                                                        ballpark.pending_events.remove(idx);
-                                                    } else {
-                                                        idx += 1;
-                                                    }
-                                                }
-                                            }
-                                            if is_stop && active_module_cycles.iter().any(|c| c.ship_id == ball_id) {
-                                                let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
-                                                reconcile_tackle_and_bubbles(&mut ballpark, active_module_cycles, &base_scramble_strengths, &base_core_strengths, &db_opt, deact_guard.as_ref());
-                                                sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                            }
-                                            persist_ball_positions_in_db(
-                                                &ballpark,
-                                                &[ball_id],
-                                                &db_opt,
-                                                ball_space_entry_epochs,
-                                            );
-                                            let _ = reply.send(Ok(ballpark.current_tick));
-                                        }
-                                        Err(e) => {
-                                            let _ = reply.send(Err(e));
-                                        }
-                                    }
-                                } else {
-                                    let _ = reply.send(Err(format!("Ball {ball_id} not in system {solar_system_id}")));
-                                }
+                                apply_set_movement_mode_command(
+                                    solar_system_id,
+                                    &mut ballpark,
+                                    ball_id,
+                                    mode,
+                                    None,
+                                    reply,
+                                    active_module_cycles,
+                                    base_scramble_strengths,
+                                    base_core_strengths,
+                                    db_opt,
+                                    &module_deactivation_hook_actor,
+                                    pending_notifications_opt,
+                                    notify_tx_opt,
+                                    &ball_positions_actor,
+                                    &scrambled_balls_actor,
+                                    ball_space_entry_epochs,
+                                    warp_provenance,
+                                    warp_tracking,
+                                );
+                            }
+                            SystemCommand::SetWarpMovementMode {
+                                ball_id,
+                                mode,
+                                provenance,
+                                reply,
+                            } => {
+                                apply_set_movement_mode_command(
+                                    solar_system_id,
+                                    &mut ballpark,
+                                    ball_id,
+                                    mode,
+                                    Some(provenance),
+                                    reply,
+                                    active_module_cycles,
+                                    base_scramble_strengths,
+                                    base_core_strengths,
+                                    db_opt,
+                                    &module_deactivation_hook_actor,
+                                    pending_notifications_opt,
+                                    notify_tx_opt,
+                                    &ball_positions_actor,
+                                    &scrambled_balls_actor,
+                                    ball_space_entry_epochs,
+                                    warp_provenance,
+                                    warp_tracking,
+                                );
                             }
                             SystemCommand::SetWarpScrambleStrength { ball_id, strength, reply } => {
                                 if ballpark.set_warp_scramble_strength(ball_id, strength) {
@@ -2294,7 +2313,20 @@ impl SystemRegistry {
                                     ballpark.balls.get(&ship_id).map(|b| &b.mode),
                                     Some(eve_destiny::MovementMode::Warp { .. })
                                 );
-                                fast_forward_clock_in_actor_with_epochs(solar_system_id, &mut ballpark, ship_id, secs, sim_elapsed_secs, &db_opt, ball_space_entry_epochs, &ball_positions_actor, &scrambled_balls_actor, &event_tx_actor);
+                                fast_forward_clock_in_actor_with_epochs(
+                                    solar_system_id,
+                                    &mut ballpark,
+                                    ship_id,
+                                    secs,
+                                    sim_elapsed_secs,
+                                    &db_opt,
+                                    ball_space_entry_epochs,
+                                    &ball_positions_actor,
+                                    &scrambled_balls_actor,
+                                    &event_tx_actor,
+                                    warp_provenance,
+                                    warp_tracking,
+                                );
                                 sim_elapsed_secs_bits_actor.store(
                                     sim_elapsed_secs.to_bits(),
                                     std::sync::atomic::Ordering::Release,
@@ -2548,6 +2580,12 @@ impl SystemRegistry {
                                 &events,
                                 &db_opt,
                                 ball_space_entry_epochs,
+                            );
+                            celestials::clear_landed_warp_tracking_from_events(
+                                &ballpark,
+                                &events,
+                                warp_provenance,
+                                warp_tracking,
                             );
                             cycles::flush_target_lost_notifications(
                                 &ballpark,
@@ -3231,6 +3269,136 @@ pub(crate) fn flush_post_unlock_actions(
         };
         for action in batch {
             action();
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_set_movement_mode_command(
+    solar_system_id: SolarSystemId,
+    ballpark: &mut Ballpark,
+    ball_id: BallId,
+    mode: eve_destiny::MovementMode,
+    provenance: Option<WarpProvenance>,
+    reply: tokio::sync::oneshot::Sender<Result<u64, String>>,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    base_scramble_strengths: &mut HashMap<BallId, i32>,
+    base_core_strengths: &mut HashMap<BallId, i32>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    module_deactivation_hook_actor: &Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    pending_notifications_opt: &Option<
+        Arc<RankedRwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>, RANK_LEAF>>,
+    >,
+    notify_tx_opt: &Option<
+        tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>,
+    >,
+    ball_positions_actor: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    scrambled_balls_actor: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+    ball_space_entry_epochs: &HashMap<BallId, u64>,
+    warp_provenance: &mut HashMap<BallId, WarpProvenance>,
+    warp_tracking: &SharedWarpTracking,
+) {
+    if !ballpark.balls.contains_key(&ball_id) {
+        let _ = reply.send(Err(format!("Ball {ball_id} not in system {solar_system_id}")));
+        return;
+    }
+    let is_stop = matches!(mode, eve_destiny::MovementMode::Stop);
+    let is_warp = matches!(mode, eve_destiny::MovementMode::Warp { .. });
+    let was_warping = matches!(
+        ballpark.balls.get(&ball_id).map(|b| &b.mode),
+        Some(eve_destiny::MovementMode::Warp { .. })
+    );
+    let pre_ev_len = ballpark.pending_events.len();
+    match ballpark.set_mode(ball_id, mode) {
+        Ok(()) => {
+            if ballpark.pending_events.len() > pre_ev_len {
+                let new_evs: Vec<DestinyEvent> = ballpark.pending_events[pre_ev_len..].to_vec();
+                let deact_guard = module_deactivation_hook_actor
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                for ev in &new_evs {
+                    if let DestinyEvent::OnTarget {
+                        mode: m,
+                        source_id,
+                        target_id,
+                    } = ev
+                    {
+                        if m == "lost" {
+                            on_target_unlocked_in_actor(
+                                ballpark,
+                                active_module_cycles,
+                                base_scramble_strengths,
+                                base_core_strengths,
+                                db_opt,
+                                *source_id,
+                                Some(*target_id),
+                                deact_guard.as_ref(),
+                            );
+                        }
+                    }
+                }
+                cycles::flush_target_lost_notifications(
+                    ballpark,
+                    &new_evs,
+                    db_opt.as_ref(),
+                    pending_notifications_opt
+                        .as_deref()
+                        .map(|r| r as &dyn AnyRwLock<_>),
+                    notify_tx_opt.as_ref(),
+                );
+                let mut idx = pre_ev_len;
+                while idx < ballpark.pending_events.len() {
+                    let drop_ev = matches!(
+                        &ballpark.pending_events[idx],
+                        DestinyEvent::TargetLockFailed { .. }
+                    ) || matches!(
+                        &ballpark.pending_events[idx],
+                        DestinyEvent::OnTarget { mode, .. } if mode == "lost"
+                    );
+                    if drop_ev {
+                        ballpark.pending_events.remove(idx);
+                    } else {
+                        idx += 1;
+                    }
+                }
+            }
+            if is_stop && active_module_cycles.iter().any(|c| c.ship_id == ball_id) {
+                let deact_guard = module_deactivation_hook_actor
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                reconcile_tackle_and_bubbles(
+                    ballpark,
+                    active_module_cycles,
+                    base_scramble_strengths,
+                    base_core_strengths,
+                    db_opt,
+                    deact_guard.as_ref(),
+                );
+                sync_ball_positions(ballpark, ball_positions_actor, scrambled_balls_actor);
+            }
+            if is_warp {
+                if let Some(prov) = provenance {
+                    warp_provenance.insert(ball_id, prov);
+                    if let Some(ref pending) = warp_tracking.pending_warp_finished {
+                        pending
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&ball_id);
+                    }
+                } else {
+                    warp_provenance.remove(&ball_id);
+                }
+            } else {
+                warp_provenance.remove(&ball_id);
+                celestials::clear_shared_warp_tracking(warp_tracking, ball_id, was_warping);
+            }
+            persist_ball_positions_in_db(ballpark, &[ball_id], db_opt, ball_space_entry_epochs);
+            let _ = reply.send(Ok(ballpark.current_tick));
+        }
+        Err(e) => {
+            let _ = reply.send(Err(e));
         }
     }
 }

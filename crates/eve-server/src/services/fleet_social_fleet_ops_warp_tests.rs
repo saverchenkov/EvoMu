@@ -670,3 +670,156 @@ async fn wave2_fleet_warp_bookmarks_expiry_station_fallback_warp_to_member_and_v
     let _ = fleet_id;
 }
 
+#[tokio::test]
+async fn fleet_warp_tracks_members_in_active_warps_preserves_mid_tunnel_update_state_and_prunes_on_land() {
+    let ctx = test_ctx_with_clock(1_800_000_900);
+    let (fleet_id, mut fc_sess) = seed_multi_member_fleet(&ctx).await;
+    let kw = HashMap::new();
+    let _ = fleet_id;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(m) = snap
+            .fleets
+            .get_mut(&fleet_id)
+            .and_then(|f| f.member_details.get_mut(&90_000_004))
+        {
+            m.takes_fleet_warp = false;
+        }
+    });
+
+    let dest = DVec3::new(1_000_000_000.0, 0.0, 0.0);
+    let fw_res = handle_fleet_ops(
+        &ctx,
+        &mut fc_sess,
+        "fleetObjectHandler",
+        "FleetWarp",
+        &[
+            PyRep::Real(dest.x),
+            PyRep::Real(dest.y),
+            PyRep::Real(dest.z),
+            PyRep::Real(0.0),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let PyRep::KeyVal(fw_kv) = fw_res else { panic!() };
+    assert_eq!(fw_kv.get("status").and_then(|s| s.as_str()), Some("FleetWarpInitiated"));
+
+    let sys = ctx.systems.get_or_spawn(30_000_142);
+    {
+        let warps = ctx.active_warps.lock().unwrap();
+        assert_eq!(warps.get(&100_000_001), Some(&90_000_001));
+        assert_eq!(warps.get(&100_000_002), Some(&90_000_002));
+        assert_eq!(warps.get(&100_000_003), Some(&90_000_003));
+        assert!(!warps.contains_key(&100_000_004));
+        assert!(!warps.contains_key(&100_000_005));
+    }
+    assert_eq!(
+        sys.warp_provenance(100_000_002),
+        Some(crate::system_actor::WarpProvenance::PlayerOrFleetWarp)
+    );
+
+    let mut wingmate_sess = SessionState::new(30_002);
+    wingmate_sess.user_id = Some(90_000_002);
+    wingmate_sess.character_id = Some(90_000_002);
+    wingmate_sess.solar_system_id = Some(30_000_142);
+    wingmate_sess.ship_id = Some(100_000_002);
+    wingmate_sess.fleet_id = Some(fleet_id);
+    mark_online(&ctx, 90_000_002, wingmate_sess.session_id, 1_800_000_900);
+
+    assert_eq!(
+        crate::services::space_destiny::handle(
+            &ctx,
+            &mut wingmate_sess,
+            None,
+            "beyonce",
+            "UpdateStateRequest",
+            &[],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        PyRep::None
+    );
+    let (_, b2_align) = sys.get_ball_snapshot(100_000_002).await.unwrap().unwrap();
+    assert!(matches!(b2_align.mode, eve_destiny::MovementMode::Warp { .. }));
+
+    for _ in 0..5 {
+        let _ = sys.step_manual(1.0).await;
+    }
+    let (_, b2_cruise) = sys.get_ball_snapshot(100_000_002).await.unwrap().unwrap();
+    assert!(matches!(b2_cruise.mode, eve_destiny::MovementMode::Warp { .. }));
+
+    assert_eq!(
+        crate::services::space_destiny::handle(
+            &ctx,
+            &mut wingmate_sess,
+            None,
+            "beyonce",
+            "UpdateStateRequest",
+            &[],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        PyRep::None
+    );
+    let (_, b2_after_mid) = sys.get_ball_snapshot(100_000_002).await.unwrap().unwrap();
+    assert!(
+        matches!(b2_after_mid.mode, eve_destiny::MovementMode::Warp { .. }),
+        "Mid-tunnel UpdateStateRequest must not force-stop fleet-warped wingmate"
+    );
+
+    let mut landed = false;
+    for _ in 0..240 {
+        let _ = sys.step_manual(1.0).await;
+        let (_, b1) = sys.get_ball_snapshot(100_000_001).await.unwrap().unwrap();
+        let (_, b2) = sys.get_ball_snapshot(100_000_002).await.unwrap().unwrap();
+        let (_, b3) = sys.get_ball_snapshot(100_000_003).await.unwrap().unwrap();
+        if matches!(b1.mode, eve_destiny::MovementMode::Stop)
+            && matches!(b2.mode, eve_destiny::MovementMode::Stop)
+            && matches!(b3.mode, eve_destiny::MovementMode::Stop)
+        {
+            landed = true;
+            break;
+        }
+    }
+    assert!(landed, "Fleet-warped ships must complete warp and reach MovementMode::Stop");
+
+    let (_, b2_landed) = sys.get_ball_snapshot(100_000_002).await.unwrap().unwrap();
+    assert!(
+        b2_landed.position.distance(dest) < 25_000.0,
+        "Wingmate must land at destination grid, dist={}",
+        b2_landed.position.distance(dest)
+    );
+    {
+        let warps = ctx.active_warps.lock().unwrap();
+        assert!(!warps.contains_key(&100_000_001));
+        assert!(!warps.contains_key(&100_000_002));
+        assert!(!warps.contains_key(&100_000_003));
+    }
+    assert_eq!(sys.warp_provenance(100_000_002), None);
+    assert!(ctx.pending_warp_finished.lock().unwrap().contains(&100_000_002));
+
+    let _ = ctx.drain_notifications_for_char(90_000_002);
+    crate::services::space_destiny::handle(
+        &ctx,
+        &mut wingmate_sess,
+        None,
+        "beyonce",
+        "UpdateStateRequest",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let notes = ctx.drain_notifications_for_char(90_000_002);
+    assert!(notes.iter().any(|n| n.event == "OnWarpFinished"));
+    assert!(!ctx.pending_warp_finished.lock().unwrap().contains(&100_000_002));
+}
+

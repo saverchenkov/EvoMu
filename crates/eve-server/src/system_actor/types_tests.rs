@@ -392,6 +392,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::AcceptDocking { .. } => "AcceptDocking",
             SystemCommand::EmitPackagedActions { .. } => "EmitPackagedActions",
             SystemCommand::SetMovementMode { .. } => "SetMovementMode",
+            SystemCommand::SetWarpMovementMode { .. } => "SetWarpMovementMode",
             SystemCommand::SetWarpScrambleStrength { .. } => "SetWarpScrambleStrength",
             SystemCommand::SetWarpCoreStrength { .. } => "SetWarpCoreStrength",
             SystemCommand::AddWarpBubble { .. } => "AddWarpBubble",
@@ -497,6 +498,7 @@ fn system_command_all_variants_construct_and_match() {
         SystemCommand::AcceptDocking { ship_id: 1, station_id: 60_003_760, station_pos: DVec3::ZERO, reply: oneshot::channel().0 },
         SystemCommand::EmitPackagedActions { ball_id: 1, events: vec![], reply: oneshot::channel().0 },
         SystemCommand::SetMovementMode { ball_id: 1, mode: MovementMode::Stop, reply: oneshot::channel().0 },
+        SystemCommand::SetWarpMovementMode { ball_id: 1, mode: MovementMode::Stop, provenance: super::WarpProvenance::PlayerOrFleetWarp, reply: oneshot::channel().0 },
         SystemCommand::SetWarpScrambleStrength { ball_id: 1, strength: 2, reply: oneshot::channel().0 },
         SystemCommand::SetWarpCoreStrength { ball_id: 1, strength: 3, reply: oneshot::channel().0 },
         SystemCommand::AddWarpBubble { id: 10, position: DVec3::ZERO, radius: 20_000.0, reply: oneshot::channel().0 },
@@ -559,11 +561,11 @@ fn system_command_all_variants_construct_and_match() {
         },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 71);
+    assert_eq!(tags.len(), 72);
     assert_eq!(tags[0], "SpawnBall");
-    assert_eq!(tags[68], "FlushPeerObserverUpdates");
-    assert_eq!(tags[69], "FlushConditionCheckpoint");
-    assert_eq!(tags[70], "RepairCombatState");
+    assert_eq!(tags[69], "FlushPeerObserverUpdates");
+    assert_eq!(tags[70], "FlushConditionCheckpoint");
+    assert_eq!(tags[71], "RepairCombatState");
 }
 
 #[test]

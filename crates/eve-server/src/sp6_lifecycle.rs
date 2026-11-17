@@ -1933,6 +1933,10 @@ pub fn handle_character_logoff_or_disconnect_sync(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&ship_id);
+    ctx.pending_warp_finished
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&ship_id);
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
         rt.authorized_shipping_storage.retain(|&(_, c)| c != char_id);
     });
@@ -2112,7 +2116,7 @@ pub fn reconnect_character_in_space_sync(
     let keep_client_warp =
         pre_warp_pos_opt.is_none() && sys_handle.committed_warp_destination_sync(ship_id).is_some();
     if !keep_client_warp {
-        ctx.active_warps.lock().unwrap_or_else(|e| e.into_inner()).remove(&ship_id);
+        crate::services::space_destiny::clear_warp_tracking(ctx, Some(&sys_handle), ship_id);
     }
     let (group_id, category_id, mass, radius, max_vel, inertia, warp_speed) =
         sde_ship_physics(&ctx.sde, ship_type_id);
@@ -2163,22 +2167,30 @@ pub fn reconnect_character_in_space_sync(
             }
         }
         if started_return_warp {
+            sys_handle.set_warp_provenance(
+                ship_id,
+                crate::system_actor::WarpProvenance::ReconnectReturnWarp,
+            );
             ctx.return_warps
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(ship_id);
         } else {
+            if !keep_client_warp {
+                sys_handle.clear_warp_provenance(ship_id);
+            }
             ctx.return_warps
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&ship_id);
         }
         if keep_client_warp {
-            ctx.active_warps
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .entry(ship_id)
-                .or_insert(char_id);
+            crate::services::space_destiny::track_player_or_fleet_warp(
+                ctx,
+                Some(&sys_handle),
+                ship_id,
+                char_id,
+            );
         }
         let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
             snap.item_positions
@@ -2241,11 +2253,16 @@ pub fn reconnect_character_in_space_sync(
         }
     }
     if started_return_warp {
+        sys_handle.set_warp_provenance(
+            ship_id,
+            crate::system_actor::WarpProvenance::ReconnectReturnWarp,
+        );
         ctx.return_warps
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(ship_id);
     } else {
+        sys_handle.clear_warp_provenance(ship_id);
         ctx.return_warps
             .lock()
             .unwrap_or_else(|e| e.into_inner())

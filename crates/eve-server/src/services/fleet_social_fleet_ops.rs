@@ -391,7 +391,22 @@ pub(super) async fn handle_fleet_ops(
                 }
             }
             let warp_mode = MovementMode::new_warp(caller_ball.position, dest, 3.0);
-            let _ = sys.set_movement_mode(caller_ship_id, warp_mode).await;
+            if sys
+                .set_warp_movement_mode(
+                    caller_ship_id,
+                    warp_mode,
+                    crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
+                )
+                .await
+                .is_ok()
+            {
+                crate::services::space_destiny::track_player_or_fleet_warp(
+                    ctx,
+                    None,
+                    caller_ship_id,
+                    char_id,
+                );
+            }
 
             Some(Ok(PyRep::keyval([
                 ("status", PyRep::String("Warping".into())),
@@ -1315,7 +1330,21 @@ pub(crate) async fn handle_fleet_warp(
                     }
                 }
                 let warp_mode = MovementMode::new_warp(ball.position, landing, 3.0);
-                if sys.set_movement_mode(ship_id, warp_mode).await.is_ok() {
+                if sys
+                    .set_warp_movement_mode(
+                        ship_id,
+                        warp_mode,
+                        crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
+                    )
+                    .await
+                    .is_ok()
+                {
+                    crate::services::space_destiny::track_player_or_fleet_warp(
+                        ctx,
+                        None,
+                        ship_id,
+                        member_char_id,
+                    );
                     warped_members.push(PyRep::Integer(member_char_id));
                     landing_positions.push(PyRep::Tuple(vec![
                         PyRep::Integer(member_char_id),

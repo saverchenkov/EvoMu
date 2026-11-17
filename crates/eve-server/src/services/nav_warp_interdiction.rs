@@ -627,7 +627,14 @@ pub(crate) async fn execute_agency_content_warp(
         .await;
     }
     let mode = MovementMode::new_warp(current_ball.position, dest_pos, warp_speed);
-    if let Err(e) = sys_handle.set_movement_mode(ship_id, mode).await {
+    if let Err(e) = sys_handle
+        .set_warp_movement_mode(
+            ship_id,
+            mode,
+            crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
+        )
+        .await
+    {
         let code = if e.contains("WarpScrambled") {
             "WarpScrambled"
         } else if e.contains("CloakedCannotWarp") {
@@ -642,10 +649,7 @@ pub(crate) async fn execute_agency_content_warp(
         });
     }
     on_warp_initiated_hooks(ctx, sys_handle, char_id, ship_id, sys_id).await;
-    ctx.active_warps
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(ship_id, char_id);
+    crate::services::space_destiny::track_player_or_fleet_warp(ctx, None, ship_id, char_id);
     Ok(())
 }
 
@@ -917,7 +921,14 @@ pub async fn handle_use_warp_vector(
         .await;
     }
     let warp_mode = MovementMode::new_warp(ship_ball.position, dest_pos, warp_speed);
-    if let Err(e) = sys_handle.set_movement_mode(ship_id, warp_mode).await {
+    if let Err(e) = sys_handle
+        .set_warp_movement_mode(
+            ship_id,
+            warp_mode,
+            crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
+        )
+        .await
+    {
         rollback_warp_vector_reservation(ctx, char_id, target_id, prev_item, prev_cd_until);
         return Err(BridgeRpcError {
             code: "WarpFailed".into(),
@@ -927,10 +938,7 @@ pub async fn handle_use_warp_vector(
     }
     on_warp_initiated_hooks(ctx, &sys_handle, char_id, ship_id, sys_id).await;
 
-    ctx.active_warps
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(ship_id, char_id);
+    crate::services::space_destiny::track_player_or_fleet_warp(ctx, None, ship_id, char_id);
 
     let align_dir = (dest_pos - ship_ball.position).normalize_or_zero();
     let entry_speed = (ship_ball.max_velocity * 0.75).max(1.0);

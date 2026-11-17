@@ -11,10 +11,29 @@ use eve_proto::PyRep;
 use eve_sde::{SdeRegistry, SolarSystemId};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::oneshot;
+
+/// Origin classification of an active ship warp (`#1175`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarpProvenance {
+    /// Solo player warp or fleet warp initiated via client or fleet RPCs.
+    PlayerOrFleetWarp,
+    /// SP-6 outbound emergency warp triggered on mid-space disconnect.
+    DisconnectedEmergencyWarp,
+    /// SP-6 return warp restoring a reconnecting pilot to pre-disconnect coordinates.
+    ReconnectReturnWarp,
+}
+
+/// Shared `ServerContext` warp-tracking tables wired into spawned solar systems (`#1175`).
+#[derive(Clone, Default)]
+pub(crate) struct SharedWarpTracking {
+    pub active_warps: Option<Arc<RankedMutex<HashMap<i64, i64>, RANK_LEAF>>>,
+    pub return_warps: Option<Arc<RankedMutex<HashSet<i64>, RANK_LEAF>>>,
+    pub pending_warp_finished: Option<Arc<RankedMutex<HashSet<i64>, RANK_LEAF>>>,
+}
 
 /// State of an individual harvestable asteroid entity in space (`SP-4`, `MN-01`, `MN-02`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -644,6 +663,8 @@ pub(crate) struct SystemActorState {
     pub active_guided_missiles: Vec<ActiveGuidedMissile>,
     pub next_missile_ball_id: i64,
     pub(crate) pending_destroyed_balls: PendingDestroyedOutbox,
+    pub(crate) warp_provenance: HashMap<BallId, WarpProvenance>,
+    pub(crate) warp_tracking: SharedWarpTracking,
 }
 
 /// Atomic snapshot of a ball removed from a solar system (`#842`, `#917` E-2).
@@ -761,6 +782,12 @@ pub enum SystemCommand {
     SetMovementMode {
         ball_id: BallId,
         mode: MovementMode,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
+    SetWarpMovementMode {
+        ball_id: BallId,
+        mode: MovementMode,
+        provenance: WarpProvenance,
         reply: oneshot::Sender<Result<u64, String>>,
     },
     SetWarpScrambleStrength {

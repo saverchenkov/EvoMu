@@ -712,10 +712,6 @@ async fn handle_deadwarp_cmd(
                 .map(|s| (s.solar_system_id, s.ship_id))
                 .unwrap_or((caller_sys, caller_ship));
             if target_sys > 0 && target_ship > 0 {
-                ctx.active_warps
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&target_ship);
                 let sys_handle = ctx.systems.get_or_spawn(target_sys);
                 if let Ok(mut bp) = sys_handle.ballpark.write() {
                     let _ = bp.set_mode(target_ship, MovementMode::Stop);
@@ -725,6 +721,11 @@ async fn handle_deadwarp_cmd(
                         &sys_handle.scrambled_balls,
                     );
                 };
+                crate::services::space_destiny::clear_warp_tracking(
+                    ctx,
+                    Some(&sys_handle),
+                    target_ship,
+                );
             }
             return Ok(deadwarp_status_pyrep(
                 cmd,
@@ -762,17 +763,21 @@ async fn handle_deadwarp_cmd(
             .max(1.5);
     let mode = MovementMode::new_warp(origin_pos, anchor_pos, warp_speed);
 
-    if let Err(reason) = sys_handle.set_movement_mode(ship_id, mode).await {
+    if let Err(reason) = sys_handle
+        .set_warp_movement_mode(
+            ship_id,
+            mode,
+            crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
+        )
+        .await
+    {
         return Err(err(
             "DestinyCommandFailed",
             format!("/deadwarp outbound warp failed: {reason}"),
         ));
     }
 
-    ctx.active_warps
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(ship_id, cid);
+    crate::services::space_destiny::track_player_or_fleet_warp(ctx, None, ship_id, cid);
 
     let state = GmDeadwarpState {
         char_id: cid,
@@ -1888,16 +1893,14 @@ fn step_deadwarps_for_system(ctx: &ServerContext, solar_system_id: u32) {
     }
 
     let mut returned_ok: Vec<i64> = Vec::new();
+    let mut returned_pairs: Vec<(i64, i64)> = Vec::new();
     if !launch_returns.is_empty() {
         if let Ok(mut bp) = sys_handle.ballpark.write() {
             for (ship_id, char_id, curr_pos, origin, warp_speed) in launch_returns {
                 let mode = MovementMode::new_warp(curr_pos, origin, warp_speed);
                 if bp.set_mode(ship_id, mode).is_ok() {
                     returned_ok.push(ship_id);
-                    ctx.active_warps
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(ship_id, char_id);
+                    returned_pairs.push((ship_id, char_id));
                 } else {
                     to_remove.push(ship_id);
                 }
@@ -1906,6 +1909,14 @@ fn step_deadwarps_for_system(ctx: &ServerContext, solar_system_id: u32) {
                 &bp,
                 &sys_handle.ball_positions,
                 &sys_handle.scrambled_balls,
+            );
+        }
+        for (ship_id, char_id) in returned_pairs {
+            crate::services::space_destiny::track_player_or_fleet_warp(
+                ctx,
+                Some(&sys_handle),
+                ship_id,
+                char_id,
             );
         }
     }
@@ -1918,11 +1929,8 @@ fn step_deadwarps_for_system(ctx: &ServerContext, solar_system_id: u32) {
         });
     }
 
-    if !to_remove.is_empty() {
-        let mut warps = ctx.active_warps.lock().unwrap_or_else(|e| e.into_inner());
-        for &ship_id in &to_remove {
-            warps.remove(&ship_id);
-        }
+    for &ship_id in &to_remove {
+        crate::services::space_destiny::clear_warp_tracking(ctx, Some(&sys_handle), ship_id);
     }
 
     if !to_remove.is_empty() || !to_delay.is_empty() || !returned_ok.is_empty() {

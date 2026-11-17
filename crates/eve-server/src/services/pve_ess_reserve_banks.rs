@@ -769,7 +769,17 @@ pub async fn try_activate_ess_acceleration_gate(
     if let MovementMode::Warp { ref mut phase, .. } = warp_mode {
         *phase = eve_destiny::WarpPhase::Accelerating;
     }
-    let _ = sys_handle.set_movement_mode(ship_id, warp_mode).await;
+    if sys_handle
+        .set_warp_movement_mode(
+            ship_id,
+            warp_mode,
+            crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
+        )
+        .await
+        .is_ok()
+    {
+        crate::services::space_destiny::track_player_or_fleet_warp(ctx, None, ship_id, char_id);
+    }
     Some(Ok(PyRep::keyval([
         ("success", PyRep::Bool(true)),
         ("gateID", PyRep::Integer(gate_id)),

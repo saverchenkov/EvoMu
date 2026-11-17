@@ -690,7 +690,14 @@ async fn handle_cmd_warp_to_stuff(
     if target_belt_id.is_some() {
         let _ = handle.populate_asteroid_belt_entities().await;
     }
-    match handle.set_movement_mode(ship_id, mode).await {
+    match handle
+        .set_warp_movement_mode(
+            ship_id,
+            mode,
+            crate::system_actor::WarpProvenance::PlayerOrFleetWarp,
+        )
+        .await
+    {
         Ok(tick) => {
             if stuff_type == "item" && target_id > 0 {
                 let _ = ctx.systems.ensure_stargate_destination_loaded_for_intent(
@@ -710,10 +717,7 @@ async fn handle_cmd_warp_to_stuff(
             crate::services::pve_dungeon_runtime::on_warp_start_leave_dungeon_if_needed(
                 ctx, char_id, sys_id, current_ball.position.to_array(), dest_pos.to_array(),
             );
-            ctx.active_warps
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(ship_id, char_id);
+            crate::services::space_destiny::track_player_or_fleet_warp(ctx, None, ship_id, char_id);
             record_warp_progression(ctx, char_id);
             Ok(PyRep::Integer(tick as i64))
         }
@@ -967,10 +971,7 @@ async fn handle_cmd_stargate_jump(
         .await;
     if arrived_at_warp_dest {
         let _ = old_handle.force_stop_warp(ship_id);
-        ctx.active_warps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&ship_id);
+        crate::services::space_destiny::clear_warp_tracking(ctx, Some(&old_handle), ship_id);
     }
     let Some(taken) = old_handle.take_ball(ship_id).await else {
         return Err(BridgeRpcError {
@@ -1871,10 +1872,7 @@ pub(crate) fn stop_arriving_warp_for_dock(
         _ => None,
     };
     let _ = handle.finish_warp_for_dock(ball.id, landing_pos);
-    ctx.active_warps
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&ball.id);
+    crate::services::space_destiny::clear_warp_tracking(ctx, Some(handle), ball.id);
 }
 
 fn resolve_dock_target_for_settle(
@@ -1968,10 +1966,7 @@ pub(crate) async fn prepare_dock_warp_settle(
         }
         if matches!(ball.mode, MovementMode::Warp { .. }) {
             let _ = handle.force_stop_warp(ship_id);
-            ctx.active_warps
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&ship_id);
+            crate::services::space_destiny::clear_warp_tracking(ctx, Some(&handle), ship_id);
             true
         } else {
             false
