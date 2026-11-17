@@ -1932,3 +1932,253 @@ fn turret_uses_surface_distance_for_large_titan_hull_and_emits_miss_notification
     assert!(!tackle_cycles.iter().any(|c| c.module_id == 980_011));
 }
 
+#[test]
+fn cycle_damage_skips_oor_turret_and_npc_corp_ids_do_not_queue_notifications_1247() {
+    let mut bp = Ballpark::new(30_004_759);
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let sde_opt = Some(make_sde_for_cycles());
+    let db_opt = Some(Arc::clone(&db));
+    let rng = Some(Arc::new(crate::rng::MechanicRng::seeded(11)));
+    let tactical: Arc<RwLock<crate::services::tactical_modules::TacticalModulesState>> =
+        Arc::new(RwLock::new(Default::default()));
+    let q_p: RwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>> =
+        RwLock::new(HashMap::new());
+
+    let player_char = 90_000_001_i64;
+    let player_ship = 885_001_i64;
+    let npc_attacker_id = 885_002_i64;
+    let npc_concord_id = 885_003_i64;
+
+    let mut p_ship = make_ship(player_ship, 587, DVec3::new(0.0, 0.0, 0.0));
+    p_ship.radius = 50.0;
+    bp.add_ball(p_ship);
+    bp.ball_slim_meta.insert(
+        player_ship,
+        eve_destiny::SlimItemMeta {
+            group_id: 25,
+            category_id: 6,
+            owner_id: player_char,
+            char_id: Some(player_char),
+            corp_id: 98_000_001,
+            ..Default::default()
+        },
+    );
+    bp.combat_states.insert(
+        player_ship,
+        CombatState {
+            shield_hp: 500.0,
+            max_shield_hp: 500.0,
+            armor_hp: 500.0,
+            max_armor_hp: 500.0,
+            structure_hp: 500.0,
+            max_structure_hp: 500.0,
+            signature_radius: 120.0,
+            ..CombatState::default()
+        },
+    );
+
+    // NPC pirate + CONCORD NPC: no `char_id`, NPC corp/faction `owner_id` (1_000_125 / 500_001), plus NPC item rows in DB.
+    for (id, owner_id, corp_id, x) in [
+        (npc_attacker_id, 500_001_i64, 1_000_125_i64, 1_000.0),
+        (npc_concord_id, 1_000_125_i64, 1_000_125_i64, 1_200.0),
+    ] {
+        let mut b = make_ship(id, 10_035, DVec3::new(x, 0.0, 0.0));
+        b.radius = 50.0;
+        bp.add_ball(b);
+        bp.ball_slim_meta.insert(
+            id,
+            eve_destiny::SlimItemMeta {
+                group_id: 182,
+                category_id: 11,
+                owner_id,
+                char_id: None,
+                corp_id,
+                ..Default::default()
+            },
+        );
+        bp.combat_states.insert(
+            id,
+            CombatState {
+                shield_hp: 500.0,
+                max_shield_hp: 500.0,
+                armor_hp: 500.0,
+                max_armor_hp: 500.0,
+                structure_hp: 500.0,
+                max_structure_hp: 500.0,
+                signature_radius: 120.0,
+                ..CombatState::default()
+            },
+        );
+        db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                id,
+                eve_db::InventoryItemRecord {
+                    item_id: id,
+                    type_id: 10_035,
+                    owner_id,
+                    location_id: 30_004_759,
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        });
+    }
+
+    // 1. Direct `apply_weapon_cycle_damage` guard rejects turret past `max_effective_range_m` with no damage and no miss log.
+    let mut direct_actions = Vec::new();
+    let mut destroyed = Vec::new();
+    let oor_cycle = ActiveModuleCycle {
+        ship_id: player_ship,
+        owner_char_id: Some(player_char),
+        module_id: 985_001,
+        module_type_id: 3634,
+        effect_name: "targetAttack".into(),
+        target_id: Some(npc_concord_id),
+        repeat: 1,
+        duration_s: 2.0,
+        damage_vector: DamageVector::new(100.0, 100.0, 0.0, 0.0),
+        weapon_is_turret: true,
+        weapon_optimal_m: 300.0,
+        weapon_falloff_m: 100.0,
+        weapon_tracking_speed: 625.0,
+        weapon_sig_resolution_m: 40_000.0,
+        max_effective_range_m: Some(600.0),
+        ..ActiveModuleCycle::default()
+    };
+    let mut rah = HashMap::new();
+    apply_weapon_cycle_damage(
+        &oor_cycle,
+        &mut bp,
+        &mut rah,
+        &sde_opt,
+        &db_opt,
+        &mut direct_actions,
+        &mut destroyed,
+        None,
+    );
+    assert_eq!(bp.combat_states[&npc_concord_id].shield_hp, 500.0);
+    assert!(
+        direct_actions.is_empty(),
+        "out-of-range turret volley must not queue hit or miss log actions"
+    );
+
+    // 2. NPC-vs-CONCORD hit AND miss: zero `pending_actions` and zero notifications under NPC corp/faction IDs.
+    let mut npc_cycles = vec![
+        ActiveModuleCycle {
+            ship_id: npc_attacker_id,
+            owner_char_id: None,
+            module_id: 985_010,
+            module_type_id: 3634,
+            effect_name: "targetAttack".into(),
+            target_id: Some(npc_concord_id),
+            repeat: 1,
+            duration_s: 1.0,
+            damage_vector: DamageVector::new(50.0, 0.0, 0.0, 0.0),
+            weapon_is_turret: true,
+            weapon_optimal_m: 10_000.0,
+            weapon_falloff_m: 5_000.0,
+            weapon_tracking_speed: 100.0,
+            weapon_sig_resolution_m: 40.0,
+            max_effective_range_m: Some(25_000.0),
+            ..ActiveModuleCycle::default()
+        },
+        ActiveModuleCycle {
+            ship_id: npc_attacker_id,
+            owner_char_id: None,
+            module_id: 985_011,
+            module_type_id: 3634,
+            effect_name: "targetAttack".into(),
+            target_id: Some(npc_concord_id),
+            repeat: 1,
+            duration_s: 1.0,
+            damage_vector: DamageVector::default(),
+            weapon_is_turret: true,
+            weapon_optimal_m: 10_000.0,
+            weapon_falloff_m: 5_000.0,
+            weapon_tracking_speed: 0.0001,
+            weapon_sig_resolution_m: 40_000.0,
+            max_effective_range_m: Some(25_000.0),
+            ..ActiveModuleCycle::default()
+        },
+    ];
+    let mut npc_actions = Vec::new();
+    step_cycles_and_capacitor(
+        &mut bp,
+        &mut npc_cycles,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &sde_opt,
+        &db_opt,
+        &rng,
+        &*tactical,
+        &mut npc_actions,
+        1.0,
+        None,
+    );
+    assert!(
+        bp.combat_states[&npc_concord_id].shield_hp < 500.0,
+        "NPC-vs-CONCORD damage must still apply to combat state"
+    );
+    assert!(
+        npc_actions.is_empty(),
+        "NPC-vs-CONCORD shots must not queue CycleWeaponDamage or CycleWeaponMiss actions: {:?}",
+        npc_actions.len()
+    );
+    flush_pending_cycle_damage_notifications(Some(&db), Some(&q_p), None, &mut npc_actions);
+    {
+        let g = q_p.read().unwrap();
+        assert!(g.is_empty(), "NPC-vs-CONCORD must queue zero pending_notifications");
+    }
+
+    // 3. NPC shooting a player queues notification ONLY for the player victim, never NPC corp/faction IDs.
+    let mut npc_vs_player = vec![ActiveModuleCycle {
+        ship_id: npc_attacker_id,
+        owner_char_id: None,
+        module_id: 985_012,
+        module_type_id: 3634,
+        effect_name: "targetAttack".into(),
+        target_id: Some(player_ship),
+        repeat: 1,
+        duration_s: 1.0,
+        damage_vector: DamageVector::new(25.0, 0.0, 0.0, 0.0),
+        weapon_is_turret: true,
+        weapon_optimal_m: 10_000.0,
+        weapon_falloff_m: 5_000.0,
+        weapon_tracking_speed: 100.0,
+        weapon_sig_resolution_m: 40.0,
+        max_effective_range_m: Some(25_000.0),
+        ..ActiveModuleCycle::default()
+    }];
+    step_cycles_and_capacitor(
+        &mut bp,
+        &mut npc_vs_player,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &sde_opt,
+        &db_opt,
+        &rng,
+        &*tactical,
+        &mut npc_actions,
+        1.0,
+        None,
+    );
+    flush_pending_cycle_damage_notifications(Some(&db), Some(&q_p), None, &mut npc_actions);
+    let g = q_p.read().unwrap();
+    assert!(!g.contains_key(&1_000_125), "NPC corp ID 1_000_125 must never receive notifications");
+    assert!(!g.contains_key(&500_001), "NPC faction ID 500_001 must never receive notifications");
+    assert!(
+        g.get(&player_char).is_some_and(|v| v.iter().any(|n| n.event == "OnDamageMessage")),
+        "player victim must still receive OnDamageMessage from NPC hit"
+    );
+}
+

@@ -1635,7 +1635,7 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
             sys.get_ball_snapshot(ship_id).await,
             sys.get_ball_snapshot(target_id).await,
         ) {
-            distance_m = (ship_ball.position - target_ball.position).length();
+            distance_m = ship_ball.surface_distance(&target_ball);
         }
         let target_type_id_opt = ctx
             .db

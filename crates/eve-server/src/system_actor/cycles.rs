@@ -250,45 +250,37 @@ fn resolve_cycle_combat_char_ids(
     owner_char_id: Option<CharacterId>,
     target_id: BallId,
 ) -> (Option<CharacterId>, Option<CharacterId>) {
+    // Why: Never fall back to `m.owner_id` or unfiltered `items.owner_id`; NPC corp/faction IDs
+    // (e.g. CONCORD 1_000_125 or faction 500_001) are not characters and would accumulate
+    // undrained `pending_notifications` (#1247).
+    let resolve_ball_char = |ball_id: BallId| {
+        ballpark
+            .ball_slim_meta
+            .get(&ball_id)
+            .and_then(|m| m.char_id)
+            .filter(|&cid| cid > 0)
+            .or_else(|| {
+                db_opt.as_ref().and_then(|db| {
+                    db.with_snapshot(|s| {
+                        s.characters
+                            .values()
+                            .find(|c| c.active_ship_id == ball_id)
+                            .map(|c| c.character_id)
+                            .or_else(|| {
+                                s.items
+                                    .get(&ball_id)
+                                    .map(|it| it.owner_id)
+                                    .filter(|oid| *oid > 0 && s.characters.contains_key(oid))
+                            })
+                    })
+                })
+            })
+            .filter(|&cid| cid > 0)
+    };
     let attacker_char_id = owner_char_id
-        .or_else(|| {
-            ballpark
-                .ball_slim_meta
-                .get(&ship_id)
-                .and_then(|m| m.char_id.or(Some(m.owner_id)))
-        })
-        .or_else(|| {
-            db_opt.as_ref().and_then(|db| {
-                db.with_snapshot(|s| {
-                    s.characters
-                        .values()
-                        .find(|c| c.active_ship_id == ship_id)
-                        .map(|c| c.character_id)
-                        .or_else(|| s.items.get(&ship_id).map(|it| it.owner_id))
-                })
-            })
-        });
-    let target_char_id = ballpark
-        .ball_slim_meta
-        .get(&target_id)
-        .and_then(|m| m.char_id)
-        .or_else(|| {
-            db_opt.as_ref().and_then(|db| {
-                db.with_snapshot(|s| {
-                    s.characters
-                        .values()
-                        .find(|c| c.active_ship_id == target_id)
-                        .map(|c| c.character_id)
-                        .or_else(|| {
-                            s.items
-                                .get(&target_id)
-                                .map(|it| it.owner_id)
-                                .filter(|oid| s.characters.contains_key(oid))
-                        })
-                })
-            })
-        })
-        .filter(|&cid| cid > 0 && Some(cid) != attacker_char_id);
+        .filter(|&cid| cid > 0)
+        .or_else(|| resolve_ball_char(ship_id));
+    let target_char_id = resolve_ball_char(target_id).filter(|&cid| Some(cid) != attacker_char_id);
     (attacker_char_id, target_char_id)
 }
 
@@ -397,6 +389,10 @@ pub(crate) fn apply_weapon_cycle_damage(
         ) {
             // Why: EVE turret optimal/falloff are surface-to-surface; center-to-center fails on large ships like Titans (#1247).
             let dist = sb.surface_distance(tb);
+            // Why: Out-of-range turrets must not roll wrecking hits or emit spurious miss logs (#1247).
+            if cycle.max_effective_range_m.is_some_and(|max_r| dist > max_r) {
+                return;
+            }
             let angular_vel = eve_destiny::combat::compute_angular_velocity(
                 sb.position,
                 sb.velocity,
@@ -823,7 +819,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                             .and_then(|sde| sde.types.get(&cycle.module_type_id))
                             .is_some_and(|t| t.group_id == 1672);
                     if is_grappler {
-                        let dist = (sb.position - tb.position).length();
+                        let dist = sb.surface_distance(tb);
                         let sde_mt = sde_opt.as_ref().and_then(|sde| sde.types.get(&cycle.module_type_id));
                         let opt = if cycle.grappler_optimal_m > 0.0 {
                             cycle.grappler_optimal_m
@@ -1145,7 +1141,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                         let mut att = 1.0;
                         if cycle.remote_falloff > 0.0 || cycle.remote_optimal > 0.0 {
                             if let (Some(sb), Some(tb)) = (ballpark.balls.get(&cycle.ship_id), ballpark.balls.get(&target_id)) {
-                                let dist = (sb.position - tb.position).length();
+                                let dist = sb.surface_distance(tb);
                                 att = eve_dogma::compute_falloff_with_cutoff(dist, cycle.remote_optimal, cycle.remote_falloff);
                             }
                         }
@@ -1169,7 +1165,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                         let mut att = 1.0;
                         if cycle.remote_falloff > 0.0 || cycle.remote_optimal > 0.0 {
                             if let (Some(sb), Some(tb)) = (ballpark.balls.get(&cycle.ship_id), ballpark.balls.get(&target_id)) {
-                                let dist = (sb.position - tb.position).length();
+                                let dist = sb.surface_distance(tb);
                                 att = eve_dogma::compute_falloff_with_cutoff(dist, cycle.remote_optimal, cycle.remote_falloff);
                             }
                         }
@@ -1832,7 +1828,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                             let mut att = 1.0;
                             if cycle.remote_falloff > 0.0 || cycle.remote_optimal > 0.0 {
                                 if let (Some(sb), Some(tb)) = (ballpark.balls.get(&cycle.ship_id), ballpark.balls.get(&target_id)) {
-                                    let dist = (sb.position - tb.position).length();
+                                    let dist = sb.surface_distance(tb);
                                     att = eve_dogma::compute_falloff_with_cutoff(dist, cycle.remote_optimal, cycle.remote_falloff);
                                 }
                             }

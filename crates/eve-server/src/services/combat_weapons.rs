@@ -388,7 +388,7 @@ pub async fn handle_weapons(
                 // If Target Painter (379), also register projected EWAR on target ship so signature radius blooms
                 if mod_type.group_id == 379 {
                     let dist = if let Ok(Some((_, tb))) = sys_handle.get_ball_snapshot(tid).await {
-                        attacker_ball.position.distance(tb.position)
+                        attacker_ball.surface_distance(&tb)
                     } else {
                         5_000.0
                     };

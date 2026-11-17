@@ -613,3 +613,121 @@ async fn entropic_spool_rejects_untrained_charge_on_activation_and_step_gh1124()
         assert!(!snap.module_active_states.contains(&mod1), "untrained spool step must stop module");
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn step_system_entropic_spools_uses_surface_distance_on_capital_hull_1247() {
+    let (mut ctx, _, char_id, ship_id, sys_id) = make_spool_test_ctx();
+    {
+        let sde = Arc::make_mut(&mut ctx.sde);
+        if let Some(disint) = sde.types.get_mut(&47_240) {
+            disint.default_attributes.insert(54, 10_000.0);
+            disint.default_attributes.insert(158, 1_000.0);
+        }
+    }
+    let target_id = 300_000_090i64;
+    let mod1 = 740_090i64;
+    let ammo1 = 740_091i64;
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    // Capital hull radius 6,800m at origin + target radius 40m at x=15,000m:
+    // center distance = 15,000m (> 13,000m cutoff), surface distance = 8,160m (< 10,000m optimal).
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 47_271,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 100.0,
+                inertia: 1.0,
+                mass: 1_000_000_000.0,
+                radius: 6_800.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 10_000.0,
+                max_shield_hp: 10_000.0,
+                armor_hp: 10_000.0,
+                max_armor_hp: 10_000.0,
+                structure_hp: 10_000.0,
+                max_structure_hp: 10_000.0,
+                capacitor: 5_000.0,
+                max_capacitor: 5_000.0,
+                signature_radius: 10_000.0,
+                base_signature_radius: Some(10_000.0),
+                ..CombatState::default()
+            },
+        )
+        .await
+        .unwrap();
+    spawn_spool_ball(&ctx, sys_id, target_id, 587, DVec3::new(15_000.0, 0.0, 0.0), 3_000.0, 1_000.0, 1_000.0, 500.0).await;
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            TargetLock {
+                target_id,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(50_000.0),
+            },
+        )
+        .await
+        .unwrap();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            12_210,
+            eve_db::TrainedSkillRecord {
+                type_id: 12_210,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+        snap.items.insert(mod1, make_fighter_item(mod1, 47_240, char_id, ship_id, InventoryFlag::HiSlot0, 1));
+        let mut ammo_rec = make_fighter_item(ammo1, 47_245, char_id, ship_id, InventoryFlag::HiSlot0, 5);
+        ammo_rec.singleton = false;
+        snap.items.insert(ammo1, ammo_rec);
+        snap.module_active_states.insert(mod1);
+        snap.module_active_charges.insert(mod1, 47_245);
+    });
+
+    let disint_t = ctx.sde.types.get(&47_240).unwrap();
+    handle_entropic_activation(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        mod1,
+        target_id,
+        disint_t,
+        Some(ammo1),
+        DamageVector::new(0.0, 300.0, 0.0, 0.0),
+        40.0,
+        3.0,
+    )
+    .unwrap();
+
+    step_system_entropic_spools(&ctx, sys_id, 3.1).await;
+    assert!(
+        get_entropic_spool_multiplier(&ctx, ship_id, mod1) > 1.0,
+        "entropic spool must ramp at 8,160m surface distance on 6,800m hull despite 15,000m center distance"
+    );
+    assert!(
+        sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp < 3_000.0,
+        "entropic spool must apply shield damage within surface range"
+    );
+    assert!(
+        ctx.db.with_snapshot(|s| s.module_active_states.contains(&mod1)),
+        "in-range surface-distance spool must remain active"
+    );
+
+    // Move target to x=20,000m -> surface distance = 13,160m > 13,000m cutoff -> spool stops cleanly.
+    let _ = sys_handle.set_ball_position(target_id, DVec3::new(20_000.0, 0.0, 0.0)).await;
+    step_system_entropic_spools(&ctx, sys_id, 3.1).await;
+    assert!(
+        !ctx.db.with_snapshot(|s| s.module_active_states.contains(&mod1)),
+        "out-of-range spool past 13,000m surface distance must stop cleanly"
+    );
+}

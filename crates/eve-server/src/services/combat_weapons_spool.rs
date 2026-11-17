@@ -1102,12 +1102,8 @@ pub async fn step_system_entropic_spools(
                     break;
                 }
             };
-            // Pre-validate range
-            let dist = if is_upwell {
-                (attacker_ball.position.distance(target_ball.position) - target_ball.radius - attacker_ball.radius).max(0.0)
-            } else {
-                attacker_ball.position.distance(target_ball.position)
-            };
+            // Pre-validate range using surface-to-surface distance for all hulls (#1247).
+            let dist = attacker_ball.surface_distance(&target_ball);
             if dist > optimal_range + 3.0 * falloff_range {
                 stop_entropic_spool_and_deactivate(ctx, state.attacker_char_id, ship_id, module_id);
                 stopped = true;

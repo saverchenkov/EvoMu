@@ -888,7 +888,7 @@ pub(crate) fn handle_add_module_cycle(
             let mut att = 1.0;
             if cycle.remote_falloff > 0.0 || cycle.remote_optimal > 0.0 {
                 if let (Some(sb), Some(tb)) = (ballpark.balls.get(&cycle.ship_id), ballpark.balls.get(&target_id)) {
-                    let dist = (sb.position - tb.position).length();
+                    let dist = sb.surface_distance(tb);
                     att = eve_dogma::compute_falloff_with_cutoff(dist, cycle.remote_optimal, cycle.remote_falloff);
                 }
             }
@@ -1212,7 +1212,7 @@ pub(crate) fn apply_overload_transition_to_cycle(
                         Some(c.grappler_optimal_m + 3.0 * c.grappler_falloff_m.max(0.0));
                     if let Some(tid) = c.target_id {
                         if let (Some(sb), Some(tb)) = (ballpark.balls.get(&ship_id), ballpark.balls.get(&tid)) {
-                            let dist = (sb.position - tb.position).length();
+                            let dist = sb.surface_distance(tb);
                             let att = eve_dogma::compute_falloff_attenuation(
                                 dist,
                                 c.grappler_optimal_m,

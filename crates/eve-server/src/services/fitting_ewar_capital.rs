@@ -631,7 +631,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     };
                     let mut dist_m = 0.0;
                     if let (Ok(Some((_, sb))), Ok(Some((_, tb)))) = (sys.get_ball_snapshot(ship_id).await, sys.get_ball_snapshot(tid).await) {
-                        dist_m = (sb.position - tb.position).length();
+                        dist_m = sb.surface_distance(&tb);
                     }
                     let optimal = mod_state.get_attribute(54, &ctx.sde);
                     let falloff = mod_state.get_attribute(2044, &ctx.sde);
@@ -887,7 +887,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         sys.get_ball_snapshot(ship_id).await,
                         sys.get_ball_snapshot(target_id).await,
                     ) {
-                        let dist = (ship_ball.position - target_ball.position).length();
+                        let dist = ship_ball.surface_distance(&target_ball);
                         if dist > max_range {
                             return Some(Err(BridgeRpcError::target_out_of_range(
                                 crate::services::inventory_fitting::resolve_target_display_name(
@@ -974,7 +974,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                             sys.get_ball_snapshot(ship_id).await,
                             sys.get_ball_snapshot(target_id).await,
                         ) {
-                            let dist = (ship_ball.position - target_ball.position).length();
+                            let dist = ship_ball.surface_distance(&target_ball);
                             if dist > scripted_max_range {
                                 return Some(Err(BridgeRpcError::target_out_of_range(
                                     crate::services::inventory_fitting::resolve_target_display_name(
@@ -1048,7 +1048,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         sys.get_ball_snapshot(ship_id).await,
                         sys.get_ball_snapshot(target_id).await,
                     ) {
-                        distance_m = (ship_ball.position - target_ball.position).length();
+                        distance_m = ship_ball.surface_distance(&target_ball);
                     }
                     let mut proj_mod_state = mod_state.clone();
                     let mut proj_source_tid = m.type_id;
@@ -1173,7 +1173,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         sys.get_ball_snapshot(ship_id).await,
                         sys.get_ball_snapshot(target_id).await,
                     ) {
-                        let dist = (ship_ball.position - target_ball.position).length();
+                        let dist = ship_ball.surface_distance(&target_ball);
                         if falloff <= 0.0 && dist > max_range && max_range > 0.0 {
                             return Some(Err(BridgeRpcError::target_out_of_range(
                                 crate::services::inventory_fitting::resolve_target_display_name(
