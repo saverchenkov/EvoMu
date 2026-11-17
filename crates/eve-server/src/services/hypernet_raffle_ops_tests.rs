@@ -248,7 +248,14 @@ fn hypernet_raffle_helpers_and_rpc_mutations() {
     let hist = handle(&ctx, &mut sess, "raffleProxy", "GetMyRaffleHistory", &[], &kw)
         .unwrap()
         .unwrap();
-    assert!(!hist.as_list().unwrap().is_empty());
+    let PyRep::Tuple(hist_parts) = hist else {
+        panic!("expected 2-tuple from GetMyRaffleHistory");
+    };
+    assert_eq!(hist_parts.len(), 2);
+    let rows = hist_parts[0].as_list().expect("history list at [0]");
+    assert!(!rows.is_empty());
+    assert!(rows[0].dict_get("running_id").and_then(PyRep::as_i64).is_some());
+    assert!(hist_parts[1].as_i64().unwrap_or(0) > 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

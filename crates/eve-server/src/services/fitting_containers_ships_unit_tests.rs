@@ -412,7 +412,11 @@ async fn container_and_bay_move_validation_and_rpc_handlers() {
     .await
     .unwrap()
     .unwrap();
-    assert!(log_res.dict_get("logCount").and_then(|v| v.as_i64()).unwrap_or(0) >= 2);
+    let PyRep::List(entries) = log_res else {
+        panic!("expected List from ALSCLogGet");
+    };
+    assert!(entries.len() >= 2);
+    assert!(entries[0].dict_get("actionID").and_then(PyRep::as_i64).is_some());
 }
 
 #[tokio::test]

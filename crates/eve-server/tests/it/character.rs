@@ -286,10 +286,14 @@ async fn test_phase_0_s4_split_shared_handlers_and_jump_clones() {
         )
         .await
         .expect("GetCloneState");
-    let PyRep::Rowset { rows: all_rows, .. } = state_all else {
-        panic!("Expected Rowset from GetCloneState");
+    let Some(PyRep::Rowset { rows: all_rows, .. }) = state_all.dict_get("clones") else {
+        panic!("Expected clones Rowset inside GetCloneState KeyVal: {state_all:?}");
     };
     assert_eq!(all_rows.len(), 1);
+    let Some(PyRep::Rowset { rows: imp_rows, .. }) = state_all.dict_get("implants") else {
+        panic!("Expected implants Rowset inside GetCloneState KeyVal: {state_all:?}");
+    };
+    assert_eq!(imp_rows.len(), 1);
     let state_station = ctx
         .dispatch_rpc(
             &mut sess,

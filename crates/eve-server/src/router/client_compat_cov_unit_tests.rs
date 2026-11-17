@@ -229,36 +229,6 @@ fn normalize_contract_corp_devindex_dogma_fw_homestation_inv_and_clones() {
     )
     .expect("home station");
     assert!(matches!(hs, PyRep::List(l) if l.len() == 2));
-
-    let alsc = normalize_macho_rpc_reply(
-        "invbroker",
-        "ALSCLogGet",
-        Ok(PyRep::keyval([("entries", PyRep::List(vec![PyRep::Integer(8)]))])),
-    )
-    .expect("alsc");
-    assert_eq!(alsc, PyRep::List(vec![PyRep::Integer(8)]));
-
-    assert_eq!(
-        normalize_macho_rpc_reply("invbroker", "TrashItems", Ok(PyRep::None)).expect("trash none"),
-        PyRep::List(Vec::new())
-    );
-    assert!(matches!(
-        normalize_macho_rpc_reply("invbroker", "TrashItems", Ok(PyRep::Dict(Vec::new())))
-            .expect("trash dict"),
-        PyRep::List(l) if l.len() == 1
-    ));
-
-    let jc = normalize_macho_rpc_reply(
-        "jumpCloneSvc",
-        "GetCloneState",
-        Ok(PyRep::keyval([
-            ("clones", PyRep::List(vec![PyRep::keyval([("jumpCloneID", PyRep::Integer(1))])])),
-            ("implants", PyRep::List(vec![PyRep::keyval([("implantID", PyRep::Integer(2))])])),
-        ])),
-    )
-    .expect("clone state");
-    assert!(jc.dict_get("clones").is_some());
-    assert!(jc.dict_get("implants").is_some());
 }
 
 #[test]
@@ -301,11 +271,7 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
         PyRep::Rowset { .. }
     ));
 
-    // paperDollServer, dogmaIM.AddTarget, peaceTreatyMgr
-    assert!(matches!(
-        normalize_macho_rpc_reply("paperDollServer", "GetPaperDollPortraitDataFor", Ok(PyRep::Dict(Vec::new()))).expect("pd"),
-        PyRep::Tuple(t) if t.len() == 2
-    ));
+    // dogmaIM.AddTarget, peaceTreatyMgr
     assert_eq!(
         normalize_macho_rpc_reply(
             "dogmaIM",
@@ -412,17 +378,6 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
     )
     .expect("towers");
     assert!(matches!(towers, PyRep::List(l) if l.len() == 2));
-
-    let raffles = normalize_macho_rpc_reply(
-        "raffleProxy",
-        "GetMyRaffleHistory",
-        Ok(PyRep::List(vec![
-            PyRep::keyval([("running_id", PyRep::Integer(99))]),
-            PyRep::keyval([("type_id", PyRep::Integer(587))]),
-        ])),
-    )
-    .expect("raffle");
-    assert!(matches!(raffles, PyRep::Tuple(t) if t.len() == 2));
 
     let quotes = normalize_macho_rpc_reply(
         "reprocessingSvc",

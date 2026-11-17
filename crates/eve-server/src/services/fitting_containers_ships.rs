@@ -1306,12 +1306,52 @@ pub(crate) async fn handle_containers_ships_and_fitting(
         ("invbroker", "ALSCLogGet") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = crate::router::RpcArgs::new(args, kwargs);
-            let container_id = match rpc.opt_positive_i64(0, "containerID") {
-                Ok(v) => v.or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0),
-                Err(e) => return Some(Err(e)),
+            // Client `AuditLogSecureContainerLogViewer.pyj` calls on a bound container moniker:
+            // `ALSCLogGet(fromDate=None, fromLogID=1, forward=None)`.
+            // Server/test callers pass `containerID` via `kwargs["containerID"]` or `args[0]`
+            // (with `bound_entry` unset or pointing at the station/hangar inventory manager).
+            let is_bound_client_call = bound_entry.is_some()
+                && !kwargs.contains_key("containerID")
+                && (kwargs.contains_key("fromDate")
+                    || kwargs.contains_key("fromLogID")
+                    || kwargs.contains_key("forward")
+                    || args.is_empty()
+                    || args.first().is_some_and(|v| {
+                        matches!(v, PyRep::None)
+                            || v.as_i64().is_some_and(|n| n >= 10_000_000_000_000_000)
+                    }));
+            let container_id = if is_bound_client_call {
+                bound_entry.map(|b| b.object_id).unwrap_or(0)
+            } else {
+                match rpc.opt_positive_i64(0, "containerID") {
+                    Ok(v) => v.or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0),
+                    Err(e) => return Some(Err(e)),
+                }
             };
-            let auth_ok = ctx.db.with_snapshot(|snap| {
-                if let Some(cont) = snap.items.get(&container_id) {
+            let from_date = if is_bound_client_call {
+                kwargs.get("fromDate").or_else(|| args.first())
+            } else {
+                kwargs.get("fromDate")
+            }
+            .and_then(|v| if matches!(v, PyRep::None) { None } else { v.as_i64() });
+            let from_log_id = if is_bound_client_call {
+                kwargs.get("fromLogID").or_else(|| args.get(1))
+            } else {
+                kwargs.get("fromLogID")
+            }
+            .and_then(|v| if matches!(v, PyRep::None) { None } else { v.as_i64() });
+            let forward = if is_bound_client_call {
+                kwargs.get("forward").or_else(|| args.get(2))
+            } else {
+                kwargs.get("forward")
+            }
+            .and_then(|v| match v {
+                PyRep::Bool(b) => Some(*b),
+                PyRep::Integer(n) => Some(*n != 0),
+                _ => None,
+            });
+            let (auth_ok, flag_id, location_id, container_owner_id) = ctx.db.with_snapshot(|snap| {
+                let auth_ok = if let Some(cont) = snap.items.get(&container_id) {
                     let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                     // Owner, corp-owned container member, or a corp-mate of the owning pilot (who
                     // must still pass the ALSC password check below); outsiders are denied outright.
@@ -1319,7 +1359,41 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                     cont.owner_id == char_id || (corp_id > 0 && (cont.owner_id == corp_id || owner_corp == corp_id))
                 } else {
                     true
+                };
+                let cont = snap.items.get(&container_id);
+                let flag_id = cont.map(|c| c.flag as i64).unwrap_or(4);
+                let container_owner_id = cont
+                    .map(|c| c.owner_id)
+                    .filter(|&o| o > 0)
+                    .unwrap_or(char_id);
+                let mut loc = cont.map(|c| c.location_id).unwrap_or(0);
+                for _ in 0..16 {
+                    if loc <= 0 {
+                        break;
+                    }
+                    if ctx.sde.stations.contains_key(&loc)
+                        || snap.structures.contains_key(&loc)
+                        || u32::try_from(loc).is_ok_and(|id| ctx.sde.solar_systems.contains_key(&id))
+                    {
+                        break;
+                    }
+                    let Some(parent) = snap.items.get(&loc) else {
+                        break;
+                    };
+                    if parent.location_id <= 0 || parent.location_id == loc {
+                        break;
+                    }
+                    loc = parent.location_id;
                 }
+                if loc <= 0 {
+                    loc = snap
+                        .characters
+                        .get(&char_id)
+                        .and_then(|c| c.station_id.or(Some(i64::from(c.solar_system_id))))
+                        .filter(|&v| v > 0)
+                        .unwrap_or_else(|| container_id.max(1));
+                }
+                (auth_ok, flag_id, loc, container_owner_id)
             });
             if !auth_ok {
                 return Some(Err(BridgeRpcError { code: "ALSCAccessDenied".into(), message: format!("Not authorized to view audit log for container {container_id}"), client_error: None }));
@@ -1329,7 +1403,15 @@ pub(crate) async fn handle_containers_ships_and_fitting(
             let need_check = cfg.password_per_action || !st.unlocked_containers.contains(&(container_id, char_id));
             if let Some(req_pw) = st.container_passwords.get(&container_id).cloned() {
                 if !req_pw.is_empty() && need_check {
-                    let provided = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.get(1).and_then(|a| a.as_str())).unwrap_or("");
+                    let provided = kwargs
+                        .get("password")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| {
+                            (!is_bound_client_call)
+                                .then(|| args.get(1).and_then(|a| a.as_str()))
+                                .flatten()
+                        })
+                        .unwrap_or("");
                     let now_unix = ctx.now_unix_secs();
                     let tid = ctx.db.with_snapshot(|s| s.items.get(&container_id).map(|i| i.type_id)).unwrap_or(0);
                     if provided != req_pw {
@@ -1342,9 +1424,76 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                     save_container_ship_state(ctx, &st);
                 }
             }
-            let entries: Vec<PyRep> = st.alsc_logs.get(&container_id).cloned().unwrap_or_default().into_iter()
-                .map(|e| PyRep::keyval([("timestampUnix", PyRep::Integer(e.timestamp_unix as i64)), ("actorID", PyRep::Integer(e.actor_id)), ("action", PyRep::String(e.action)), ("itemID", PyRep::Integer(e.item_id)), ("typeID", PyRep::Integer(e.item_type_id as i64)), ("quantity", PyRep::Integer(e.quantity as i64))])).collect();
-            Some(Ok(PyRep::keyval([("containerID", PyRep::Integer(container_id)), ("logCount", PyRep::Integer(entries.len() as i64)), ("entries", PyRep::List(entries))])))
+            const ALSC_PAGE_LIMIT: usize = 50;
+            let raw_logs = st.alsc_logs.get(&container_id).cloned().unwrap_or_default();
+            let mut filtered: Vec<(i64, i64, AlscLogEntry)> = raw_logs
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, e)| {
+                    let log_id = (idx as i64) + 1;
+                    let log_date = ((e.timestamp_unix as i64).saturating_add(11_644_473_600))
+                        .saturating_mul(10_000_000);
+                    if let Some(fd) = from_date {
+                        if log_date < fd {
+                            return None;
+                        }
+                    }
+                    match (forward, from_log_id) {
+                        (Some(true), Some(fl)) if log_id <= fl => return None,
+                        (Some(false), Some(fl)) if log_id >= fl => return None,
+                        _ => {}
+                    }
+                    Some((log_id, log_date, e))
+                })
+                .collect();
+            if forward == Some(false) || forward.is_none() {
+                if filtered.len() > ALSC_PAGE_LIMIT {
+                    filtered.drain(..filtered.len() - ALSC_PAGE_LIMIT);
+                }
+            } else {
+                filtered.truncate(ALSC_PAGE_LIMIT);
+            }
+            let entries: Vec<PyRep> = filtered
+                .into_iter()
+                .map(|(log_id, log_date, e)| {
+                    let tid = i64::from(e.item_type_id);
+                    let qty = i64::from(e.quantity.max(0));
+                    let (action_id, status, arg1, arg2) = match e.action.as_str() {
+                        "ALSCActionAssemble" => (
+                            1,
+                            1,
+                            if e.actor_id > 0 { e.actor_id } else { container_owner_id.max(1) },
+                            tid,
+                        ),
+                        "ALSCActionRepackage" => (2, 1, 0, tid),
+                        "ALSCActionRename" | "ALSCActionSetName" => (3, 1, 0, 0),
+                        "ALSCActionTake" | "ALSCActionMove" => (4, 1, tid, qty),
+                        "ALSCActionSetPassword" | "ALSCActionRetrievePassword" => (5, 1, 1, 0),
+                        "ALSCActionAdd" => (6, 1, tid, qty),
+                        "ALSCActionLock" => (7, 1, tid, qty),
+                        "ALSCActionUnlock" => (8, 1, tid, qty),
+                        "ALSCActionPasswordFailure" => (9, 0, 1, 0),
+                        "ALSCActionOpen" | "ALSCActionPasswordSuccess" | "ALSCActionEnterPassword" => {
+                            (9, 1, 1, 0)
+                        }
+                        "ALSCActionConfigChange" | "ALSCActionConfigure" => (10, 1, 0, 0),
+                        _ => (0, 1, tid, qty),
+                    };
+                    PyRep::keyval([
+                        ("logID", PyRep::Integer(log_id)),
+                        ("logDate", PyRep::Integer(log_date)),
+                        ("actionID", PyRep::Integer(action_id)),
+                        ("actorID", PyRep::Integer(e.actor_id)),
+                        ("arg1", PyRep::Integer(arg1)),
+                        ("arg2", PyRep::Integer(arg2)),
+                        ("flagID", PyRep::Integer(flag_id)),
+                        ("locationID", PyRep::Integer(location_id)),
+                        ("inventoryMgrLocationID", PyRep::Integer(location_id)),
+                        ("status", PyRep::Integer(status)),
+                    ])
+                })
+                .collect();
+            Some(Ok(PyRep::List(entries)))
         }
 
         ("invbroker", "GetDamageForCrystals") => {

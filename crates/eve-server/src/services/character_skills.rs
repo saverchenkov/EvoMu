@@ -35,7 +35,8 @@ pub use super::jump_clone_names::{
 };
 pub(crate) use super::jump_clone_names::{
     effective_skill_queue_entry_duration_seconds, is_valid_doll_or_portrait_payload,
-    serialize_doll_pyrep, skill_queue_entry_duration_with_attrs, skill_queue_rowset,
+    serialize_doll_pyrep, serialize_portrait_pyrep, skill_queue_entry_duration_with_attrs,
+    skill_queue_rowset,
 };
 
 /// Validates that `skill_type_id` exists in `sde` as a published skill (`category_id == 16`).

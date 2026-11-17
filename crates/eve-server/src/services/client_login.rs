@@ -815,7 +815,10 @@ pub async fn handle(
                     snap.cluster_and_runtime.portraits.remove(&format!("{char_id}:{sz}"));
                 }
                 snap.cluster_and_runtime.portraits.insert(char_id.to_string(), hex_str);
-                snap.character_doll_info.entry(char_id).or_default().1 = format!("portrait:{char_id}");
+                let doll_entry = snap.character_doll_info.entry(char_id).or_default();
+                if doll_entry.1.trim().is_empty() {
+                    doll_entry.1 = format!("portrait:{char_id}");
+                }
             });
             Some(Ok(PyRep::Bool(true)))
         }

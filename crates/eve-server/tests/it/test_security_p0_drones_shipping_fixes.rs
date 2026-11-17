@@ -626,8 +626,8 @@ async fn test_shipping_storage_proximity_and_fleetmate_transfer() {
         .dispatch_rpc(&mut owner_sess, "invbroker", None, "ALSCLogGet", &[PyRep::Integer(alsc_id)], &kw, None)
         .await
         .expect("owner ALSCLogGet");
-    let Some(PyRep::List(entries)) = log_res.dict_get("entries") else { panic!("expected entries list"); };
-    assert!(entries.iter().any(|e| e.dict_get("action").and_then(|v| v.as_str()) == Some("ALSCActionTake") && e.dict_get("actorID").and_then(|v| v.as_i64()) == Some(char_id)));
+    let PyRep::List(entries) = log_res else { panic!("expected list from ALSCLogGet, got {log_res:?}"); };
+    assert!(entries.iter().any(|e| e.dict_get("actionID").and_then(|v| v.as_i64()) == Some(4) && e.dict_get("actorID").and_then(|v| v.as_i64()) == Some(char_id)));
 
     // NF-FLEET-SHIP-CARGO-THEFT: Fleetmate cannot steal cargo from fleetmate ship (flag 5)
     let alt_cargo_item = 892_012i64;

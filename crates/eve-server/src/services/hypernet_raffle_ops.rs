@@ -155,6 +155,7 @@ pub fn raffle_to_keyval(r: &RaffleStateRecord) -> PyRep {
     PyRep::keyval([
         ("raffle_id", PyRep::Integer(r.raffle_id)),
         ("raffleID", PyRep::Integer(r.raffle_id)),
+        ("running_id", PyRep::Integer(r.raffle_id)),
         ("owner_id", PyRep::Integer(r.creator_id)),
         ("location_id", PyRep::Integer(r.station_id)),
         ("item_id", PyRep::Integer(r.item_id)),
@@ -900,11 +901,52 @@ pub fn handle(
         }
         (
             "raffleProxy",
+            "GetMyRaffleHistory",
+        ) => {
+            const DEFAULT_HISTORY_PAGE_SIZE: usize = 100;
+            let char_id = session.character_id.unwrap_or(0);
+            let _ = sweep_expired_raffles(ctx);
+            let cursor_running_id = kwargs
+                .get("running_id")
+                .or_else(|| kwargs.get("runningID"))
+                .or_else(|| args.first())
+                .and_then(|v| v.as_i64())
+                .filter(|&id| id > 0);
+            let page_size = kwargs
+                .get("size")
+                .or_else(|| kwargs.get("page_size"))
+                .or_else(|| args.get(1))
+                .and_then(|v| v.as_i64())
+                .filter(|&n| n > 0)
+                .map(|n| (n as usize).clamp(1, 500))
+                .unwrap_or(DEFAULT_HISTORY_PAGE_SIZE);
+            let page = ctx.db.with_snapshot(|snap| {
+                let mut recs: Vec<RaffleStateRecord> = snap
+                    .owner_notes
+                    .values()
+                    .filter(|n| n.character_id == -74)
+                    .filter_map(|n| serde_json::from_str::<RaffleStateRecord>(&n.note).ok())
+                    .filter(|r| {
+                        let is_mine = r.creator_id == char_id
+                            || r.sold_tickets.values().any(|&cid| cid == char_id);
+                        is_mine && cursor_running_id.is_none_or(|cur| r.raffle_id < cur)
+                    })
+                    .collect();
+                recs.sort_by(|a, b| b.raffle_id.cmp(&a.raffle_id));
+                recs.truncate(page_size);
+                recs.into_iter().map(|r| raffle_to_keyval(&r)).collect()
+            });
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::List(page),
+                PyRep::Integer(page_size as i64),
+            ])))
+        }
+        (
+            "raffleProxy",
             "Grab"
             | "FilteredGrab"
             | "GetCreatedParticipated"
-            | "GetMyActiveTickets"
-            | "GetMyRaffleHistory",
+            | "GetMyActiveTickets",
         ) => {
             let char_id = session.character_id.unwrap_or(0);
             let _ = sweep_expired_raffles(ctx);

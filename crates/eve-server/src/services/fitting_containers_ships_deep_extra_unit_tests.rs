@@ -418,8 +418,7 @@ async fn alsc_assemble_passwords_lock_unlock_and_audit_log_work_end_to_end() {
 
     handle_containers_ships_and_fitting(&ctx, &mut session, None, "invbroker", "ALSCUnlock", &[PyRep::Integer(cont_id), PyRep::List(vec![PyRep::Integer(item_inside_id)])], &kw).await.unwrap().unwrap();
     let log_rep = handle_containers_ships_and_fitting(&ctx, &mut session, None, "invbroker", "ALSCLogGet", &[PyRep::Integer(cont_id)], &kw).await.unwrap().unwrap();
-    let entries = dict_get(&log_rep, "entries").expect("alsc entries");
-    assert!(matches!(entries, PyRep::List(l) if l.len() >= 2));
+    assert!(matches!(log_rep, PyRep::List(ref l) if l.len() >= 2));
 }
 
 #[tokio::test]
@@ -744,6 +743,8 @@ async fn mutants_cov_stub_type_alsc_lock_config_log_and_can_open() {
     .await
     .unwrap()
     .expect("ALSCLogGet");
-    assert_eq!(dict_get(&log_rep, "containerID"), Some(&PyRep::Integer(cont_id)));
-    assert!(dict_get(&log_rep, "logCount").and_then(|v| v.as_i64()).unwrap_or(0) >= 2);
+    let PyRep::List(entries) = log_rep else {
+        panic!("expected List from ALSCLogGet");
+    };
+    assert!(entries.len() >= 2);
 }

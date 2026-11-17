@@ -102,7 +102,7 @@ async fn test_audit_log_container_events_and_protection() {
 
     // 7. Owner retrieves logs
     let logs_rep = rpc_kw(&ctx, &mut sess1, "invbroker", "ALSCLogGet", &[PyRep::Integer(alsc_id)], &[("password", PyRep::String("alsc-secret-pw".into()))]).await.expect("ALSCLogGet");
-    let PyRep::List(entries) = logs_rep.dict_get("entries").expect("entries list") else { panic!("expected list"); };
+    let PyRep::List(entries) = logs_rep else { panic!("expected list, got {logs_rep:?}"); };
     assert!(entries.len() >= 4, "Must have recorded config changes, renames, locks, password failure");
 
     // 8. Containers with log entries younger than 3 weeks cannot be repackaged, reprocessed, or trashed

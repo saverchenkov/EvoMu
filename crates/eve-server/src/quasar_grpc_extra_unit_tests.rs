@@ -121,20 +121,6 @@ fn normalize_macho_rpc_reply_covers_raffle_skill_station_and_store_variants() {
         ])
     );
 
-    // raffleProxy.GetMyRaffleHistory with pre-populated running_id vs raw item
-    let raf = normalize_macho_rpc_reply(
-        "raffleProxy",
-        "GetMyRaffleHistory",
-        Ok(PyRep::List(vec![
-            PyRep::keyval([("running_id", PyRep::Integer(88))]),
-            PyRep::Integer(0),
-        ])),
-    )
-    .unwrap();
-    if let PyRep::Tuple(parts) = raf {
-        assert_eq!(parts[1], PyRep::Integer(2));
-    }
-
     // skillMgr2.GetSkillQueueAndFreePoints with empty queue preserves empty queue
     let sq_empty = normalize_macho_rpc_reply(
         "skillMgr2",

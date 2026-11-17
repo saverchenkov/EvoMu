@@ -323,7 +323,6 @@
     "invbroker.Reprocess",
     "invbroker.StackAll",
     "invbroker.StripFitting",
-    "invbroker.TrashItems",
     "invbroker.ValidateItemCanBeOpened",
     "jumpCloneSvc.GetNumClonesInPilotsStructure",
     "jumpCloneSvc.GetPriceForClone",

@@ -585,7 +585,18 @@ fn standing_mgr_and_paper_doll_server_handle_queries_and_apparel() {
     )
     .expect("handled")
     .expect("GetPaperDollPortraitDataFor ok");
-    assert_eq!(kv_get(&portrait, "characterID").and_then(PyRep::as_i64), Some(char_id));
+    let PyRep::Tuple(parts) = portrait else {
+        panic!("expected 2-tuple from GetPaperDollPortraitDataFor");
+    };
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[1], PyRep::None);
+    let PyRep::List(rows) = &parts[0] else {
+        panic!("expected list at [0]");
+    };
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(rows[0], PyRep::DBRow { .. }));
+    assert!(rows[0].dict_get("backgroundID").is_some());
+    assert!(rows[0].dict_get("cameraX").is_some());
 }
 
 #[cfg(test)]

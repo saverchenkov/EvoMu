@@ -89,35 +89,6 @@ fn test_402_quasar_normalization_preserves_authoritative_backend_replies_and_not
     assert_eq!(q_entries.len(), 1);
     assert_eq!(q_entries[0].0, PyRep::Integer(777_001));
 
-    let clone_state = PyRep::keyval([
-        (
-            "clones",
-            PyRep::rowset(
-                vec!["jumpCloneID", "locationID", "cloneName"],
-                vec![vec![
-                    PyRep::Integer(444_001),
-                    PyRep::Integer(60_005_123),
-                    PyRep::String("CustomClone".into()),
-                ]],
-            ),
-        ),
-        ("implants", PyRep::rowset(vec!["jumpCloneID", "implantID", "typeID"], vec![])),
-        ("timeLastJump", PyRep::None),
-    ]);
-    assert_eq!(
-        normalize_macho_rpc_reply("jumpCloneSvc", "GetCloneState", Ok(clone_state.clone())).unwrap(),
-        clone_state
-    );
-
-    let alsc = normalize_macho_rpc_reply(
-        "invbroker",
-        "ALSCLogGet",
-        Ok(PyRep::keyval([("entries", PyRep::List(vec![PyRep::keyval([("actorID", PyRep::Integer(90_000_555))])]))])),
-    )
-    .unwrap();
-    let PyRep::List(alsc_rows) = alsc else { panic!("expected list"); };
-    assert_eq!(alsc_rows[0].dict_get("actorID"), Some(&PyRep::Integer(90_000_555)));
-
     let fit = normalize_macho_rpc_reply(
         "ship",
         "GetShipFittingInfo",

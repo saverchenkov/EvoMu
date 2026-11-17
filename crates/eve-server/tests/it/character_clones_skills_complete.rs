@@ -339,15 +339,13 @@ async fn test_jump_clone_state_clones_implants_and_timers() {
     let Some(PyRep::Rowset { columns: i_cols, rows: i_rows }) = state.dict_get("implants") else {
         panic!("expected implants rowset in GetCloneState: {state:?}");
     };
-    assert_eq!(i_cols, &vec!["jumpCloneID".to_string(), "typeID".to_string()]);
-    assert_eq!(
-        i_rows,
-        &vec![
-            vec![PyRep::Integer(8001), PyRep::Integer(10216)],
-            vec![PyRep::Integer(8001), PyRep::Integer(13219)],
-            vec![PyRep::Integer(8002), PyRep::Integer(9941)],
-        ]
-    );
+    assert_eq!(i_cols, &vec!["jumpCloneID".to_string(), "implantID".to_string(), "typeID".to_string()]);
+    let pairs: Vec<(Option<i64>, Option<i64>)> = i_rows
+        .iter()
+        .map(|r| (r[0].as_i64(), r[2].as_i64()))
+        .collect();
+    assert_eq!(pairs, vec![(Some(8001), Some(10216)), (Some(8001), Some(13219)), (Some(8002), Some(9941))]);
+    assert!(i_rows.iter().all(|r| r[1].as_i64().unwrap_or(0) > 0));
 
     // 2. GetStationCloneState returns only clones located at the currently docked station (60_003_760).
     let st_state = rpc(&ctx, &mut s, "jumpCloneSvc", "GetStationCloneState", vec![]).await.expect("GetStationCloneState");
@@ -382,7 +380,7 @@ async fn test_jump_clone_state_clones_implants_and_timers() {
         panic!("expected implants rowset after jump");
     };
     // Clone 8002 (now left behind at 60_003_760) holds the old body's implant 9899, while active body holds 9941.
-    assert!(after_i_rows.contains(&vec![PyRep::Integer(8002), PyRep::Integer(9899)]));
+    assert!(after_i_rows.iter().any(|r| r[0] == PyRep::Integer(8002) && r[2] == PyRep::Integer(9899)));
 }
 
 fn ship_attr(all_info: &PyRep, attr_id: i64) -> f64 {

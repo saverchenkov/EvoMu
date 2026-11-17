@@ -181,7 +181,7 @@ async fn test_r8_487_split_stack_locks_passwords_plastic_wrap_tubes_colocation_a
         .await
         .expect("ALSCLogGet must return container lock logs");
     assert!(
-        matches!(alsc_logs.dict_get("entries"), Some(PyRep::List(entries)) if !entries.is_empty()),
+        matches!(alsc_logs, PyRep::List(ref entries) if !entries.is_empty()),
         "ALSC container lock must record an audit log entry"
     );
 

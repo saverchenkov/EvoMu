@@ -864,7 +864,7 @@ async fn test_containers_secure_alsc_and_station_containers() {
     );
     call(&ctx, &mut s1, "invbroker", "ALSCUnlockItems", vec![PyRep::Integer(730_020), PyRep::List(vec![PyRep::Integer(730_021)])]).await.unwrap();
     let logs = call(&ctx, &mut s1, "invbroker", "ALSCLogGet", vec![PyRep::Integer(730_020)]).await.unwrap();
-    assert!(matches!(logs.dict_get("entries"), Some(PyRep::List(l)) if l.len() >= 3));
+    assert!(matches!(logs, PyRep::List(ref l) if l.len() >= 3));
 
     // 3. Station container (17366: 1M m3 capacity, 2M m3 volume) & Freight container (24445: no password).
     seed(&ctx, 730_030, 17366, C1, JITA44, InventoryFlag::Hangar, 1, true);
