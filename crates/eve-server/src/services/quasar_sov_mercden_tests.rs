@@ -91,11 +91,146 @@ fn mercenary_den_formulas_simulation_and_activity_completion() {
 
     db.with_mut_snapshot(|snap| {
         snap.sov_runtime.mercenary_dens.insert(den.den_id, den.clone());
+        // Sub-max Development (23 < 100): completing MTO grants +10 Development (23 -> 33),
+        // -10 Anarchy (15 -> 5), and 0 bonus Encrypted Infomorphs (`Mercenary_Tactical_Operation.md:24`).
         complete_mercenary_activity_in_snap(snap, &pending, None, &act, den.den_id, den.solar_system_id);
         let updated = &snap.sov_runtime.mercenary_dens[&den.den_id];
         assert_eq!(updated.development_level, 33);
         assert_eq!(updated.anarchy_level, 5);
-        assert_eq!(updated.infomorphs, 24 * 65 + 350);
+        assert_eq!(updated.infomorphs, 24 * 65);
+    });
+}
+
+#[test]
+fn mercenary_den_mto_exclusivity_clamped_notice_deltas_and_refresh_template_impacts() {
+    let reg = QuasarDescriptorRegistry::open_default().expect("open default descriptor DB");
+    let db = WorldRepository::with_demo_seed();
+    let pending: PendingNotices = Arc::new(std::sync::RwLock::new(Vec::new()));
+    let sys_id = 30_000_142_u32;
+
+    db.with_mut_snapshot(|snap| {
+        let den_sub = PersistedMercenaryDen {
+            den_id: 91_000_801,
+            owner_char_id: 90_000_001,
+            skyhook_id: 79_000_801,
+            solar_system_id: sys_id,
+            planet_id: 40_009_080,
+            type_id: crate::services::sov_gameplay::TYPE_MERCENARY_DEN,
+            enabled: true,
+            cargo_extraction_enabled: true,
+            development_level: 95,
+            anarchy_level: 3,
+            infomorphs: 120,
+            simulated_at_unix: 10_000,
+            next_activity_generation_unix: 10_000,
+        };
+        let den_max = PersistedMercenaryDen {
+            den_id: 91_000_802,
+            development_level: MAX_LEVEL,
+            anarchy_level: 25,
+            infomorphs: 120,
+            ..den_sub.clone()
+        };
+        snap.sov_runtime.mercenary_dens.insert(den_sub.den_id, den_sub.clone());
+        snap.sov_runtime.mercenary_dens.insert(den_max.den_id, den_max.clone());
+
+        // Generated templates reflect development_level < MAX_LEVEL vs == MAX_LEVEL
+        refresh_activities(snap, &pending, den_sub.den_id, 10_000);
+        refresh_activities(snap, &pending, den_max.den_id, 10_000);
+        let sub_acts: Vec<_> = snap.sov_runtime.mercenary_activities.values().filter(|a| a.den_id == den_sub.den_id).collect();
+        let max_acts: Vec<_> = snap.sov_runtime.mercenary_activities.values().filter(|a| a.den_id == den_max.den_id).collect();
+        assert!(!sub_acts.is_empty());
+        assert!(!max_acts.is_empty());
+        assert!(sub_acts.iter().all(|a| a.development_impact == 10 && a.infomorph_bonus == 0 && a.anarchy_impact == -10));
+        assert!(max_acts.iter().all(|a| a.development_impact == 0 && a.infomorph_bonus == 350 && a.anarchy_impact == -10));
+
+        // 1. Sub-max completion with dev 95 -> 100 and anarchy 3 -> 0, unset impacts -> default +10 / -10 clamped to (+5, -3, 0 infomorphs)
+        pending.write().unwrap().clear();
+        let act_sub = PersistedMercenaryActivity {
+            uuid: vec![0xD1; 16],
+            den_id: den_sub.den_id,
+            solar_system_id: sys_id,
+            dungeon_id: 1,
+            started: true,
+            started_by: 90_000_001,
+            expiry_unix: 15_000,
+            development_impact: 0,
+            anarchy_impact: 0,
+            infomorph_bonus: 350,
+        };
+        complete_mercenary_activity_in_snap(snap, &pending, None, &act_sub, den_sub.den_id, sys_id);
+        let d_sub_after = &snap.sov_runtime.mercenary_dens[&den_sub.den_id];
+        assert_eq!(d_sub_after.development_level, MAX_LEVEL);
+        assert_eq!(d_sub_after.anarchy_level, 0);
+        assert_eq!(d_sub_after.infomorphs, 120, "sub-max MTO completion must grant 0 bonus infomorphs");
+        let completed_desc = reg
+            .get_message("eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice")
+            .expect("CompletedNotice descriptor");
+        let completed_field_num = |field_name: &str| {
+            completed_desc
+                .fields
+                .iter()
+                .find(|f| f.name == field_name)
+                .unwrap_or_else(|| panic!("missing CompletedNotice field {field_name}"))
+                .number
+        };
+        let as_i64 = |v: Option<&DynamicValue>| -> Option<i64> {
+            match v? {
+                DynamicValue::Int32(x) => Some(i64::from(*x)),
+                DynamicValue::Int64(x) => Some(*x),
+                DynamicValue::Uint32(x) => Some(i64::from(*x)),
+                DynamicValue::Uint64(x) => i64::try_from(*x).ok(),
+                _ => None,
+            }
+        };
+        let dev_field = completed_field_num("development_impact");
+        let anarchy_field = completed_field_num("anarchy_impact");
+        let bonus_field = completed_field_num("infomorph_bonus");
+
+        let n_sub = pending
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(_, a)| a.type_url.ends_with("mercenaryden.activity.api.CompletedNotice"))
+            .expect("CompletedNotice emitted for sub-max")
+            .1
+            .clone();
+        let dec_sub = reg.decode_dynamic("eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice", &n_sub.value).unwrap();
+        assert_eq!(as_i64(dec_sub.get(dev_field)), Some(5));
+        assert_eq!(as_i64(dec_sub.get(anarchy_field)), Some(-3));
+        assert_eq!(as_i64(dec_sub.get(bonus_field)), Some(0));
+
+        // 2. Max-level completion (pre_dev == 100): grants +350 infomorphs, 0 dev delta, -10 anarchy delta
+        pending.write().unwrap().clear();
+        let act_max = PersistedMercenaryActivity {
+            uuid: vec![0xD2; 16],
+            den_id: den_max.den_id,
+            solar_system_id: sys_id,
+            dungeon_id: 1,
+            started: true,
+            started_by: 90_000_001,
+            expiry_unix: 15_000,
+            development_impact: 10,
+            anarchy_impact: 0,
+            infomorph_bonus: 0,
+        };
+        complete_mercenary_activity_in_snap(snap, &pending, None, &act_max, den_max.den_id, sys_id);
+        let d_max_after = &snap.sov_runtime.mercenary_dens[&den_max.den_id];
+        assert_eq!(d_max_after.development_level, MAX_LEVEL);
+        assert_eq!(d_max_after.anarchy_level, 15);
+        assert_eq!(d_max_after.infomorphs, 120 + 350);
+        let n_max = pending
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(_, a)| a.type_url.ends_with("mercenaryden.activity.api.CompletedNotice"))
+            .expect("CompletedNotice emitted for max")
+            .1
+            .clone();
+        let dec_max = reg.decode_dynamic("eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice", &n_max.value).unwrap();
+        assert_eq!(as_i64(dec_max.get(dev_field)), Some(0));
+        assert_eq!(as_i64(dec_max.get(anarchy_field)), Some(-10));
+        assert_eq!(as_i64(dec_max.get(bonus_field)), Some(350));
     });
 }
 

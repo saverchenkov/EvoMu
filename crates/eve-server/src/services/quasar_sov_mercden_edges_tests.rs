@@ -217,7 +217,7 @@ fn complete_mercenary_activity_in_snap_handles_fallback_owner_zero_impacts_cap_a
     let den_after = snap.sov_runtime.mercenary_dens.get(&den_id).unwrap();
     assert_eq!(den_after.development_level, 60);
     assert_eq!(den_after.anarchy_level, 40);
-    assert!(den_after.infomorphs > 10);
+    assert_eq!(den_after.infomorphs, 10);
     assert!(!snap.sov_runtime.mto_site_balls.contains_key(&matching_ball));
     assert!(!snap.items.contains_key(&matching_ball));
     assert!(!snap.item_positions.contains_key(&matching_ball));

@@ -641,3 +641,412 @@ async fn pirate_insurgency_corruption_suppression_and_space_cdn() {
     assert!(cdn_url.contains("/maptags/v24.2."));
     assert!(cdn_url.ends_with("/universe.fb"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn skyhook_live_combat_destruction_lifecycle_and_hub_reconciliation() {
+    use eve_db::{PersistedHubUpgrade, PersistedSovHubData, PersistedWorkforceMode};
+    use eve_destiny::{Ball, DamageVector, MovementMode};
+    use eve_server::services::quasar_sov_hub::{planet_yield_for_planet, star_power_for_system};
+    use eve_server::services::quasar_sov_workforce::exported_amount;
+    use eve_server::services::sov_gameplay::sov_gameplay_skyhook::{
+        SKYHOOK_BASE_ARMOR_HP, SKYHOOK_BASE_HULL_HP, SKYHOOK_BASE_SHIELD_HP,
+    };
+    use eve_server::services::station_structure::structure_lifecycle_rpc::apply_live_combat_damage_to_upwell_structure;
+    use glam::DVec3;
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let (sys_a, planet_id, _planet_wf, sys_b) = std::iter::once(SYS_A)
+        .chain(systems_within_jumps(&ctx.sde, SYS_A, 6).into_keys())
+        .filter(|&sa| star_power_for_system(&ctx.sde, sa) >= 250)
+        .find_map(|sa| {
+            let planet = ctx
+                .sde
+                .celestials_in_system_slice(sa)
+                .iter()
+                .filter(|c| c.group_id == 7)
+                .find_map(|c| {
+                    let (_, wf) = planet_yield_for_planet(c.type_id, c.radius);
+                    (wf >= 3_000).then_some((c.celestial_id, wf))
+                })?;
+            let nb = systems_within_jumps(&ctx.sde, sa, 1)
+                .into_iter()
+                .find(|&(sb, hops)| {
+                    hops == 1 && sb != sa && star_power_for_system(&ctx.sde, sb) >= 250
+                })?
+                .0;
+            Some((sa, planet.0, planet.1, nb))
+        })
+        .expect("null-sec system pair with >=3000 workforce planet and neighbor");
+
+    let attacker_id = PILOT_ID + 2;
+    let skyhook_id = 1_000_950_001_i64;
+    let hub_a = 1_000_950_010_i64;
+    let hub_b = 1_000_950_011_i64;
+    let export_amt = 1_500_u64;
+    let pos = [200_000.0, 0.0, 0.0];
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let now = ctx.now_unix();
+        for (cid, corp, sys) in [
+            (PILOT_ID, CORP_ID, sys_a),
+            (attacker_id, OTHER_CORP, sys_a),
+        ] {
+            snap.characters.insert(
+                cid,
+                CharacterRecord {
+                    character_id: cid,
+                    user_id: cid as u64,
+                    name: format!("Pilot {cid}"),
+                    corporation_id: corp,
+                    solar_system_id: sys,
+                    constellation_id: 20_000_097,
+                    region_id: 10_000_007,
+                    active_ship_id: PILOT_SHIP + cid - PILOT_ID,
+                    balance: IskCents(10_000_000_00),
+                    security_status: 0.0,
+                    clone_grade: 2,
+                    home_station_id: 60_003_760,
+                    race_id: 1,
+                    bloodline_id: 1,
+                    ancestry_id: 11,
+                    school_id: 17,
+                    neural: NeuralAttributes::default(),
+                    skill_points: 5_000_000.0,
+                    create_date_unix: 1_704_067_200,
+                    version: 1,
+                    system_epoch: 1,
+                    ..Default::default()
+                },
+            );
+            snap.corporations.entry(corp).or_default().corporation_id = corp;
+            snap.corporations.entry(corp).or_default().ceo_id = cid;
+            snap.corporations.entry(corp).or_default().members.insert(cid);
+            snap.corporations
+                .entry(corp)
+                .or_default()
+                .member_roles
+                .insert(cid, corp_roles::ROLE_DIRECTOR);
+        }
+
+        let mut sh = structure(skyhook_id, CORP_ID, sys_a, TYPE_SKYHOOK);
+        sh.position = pos;
+        sh.shield_hp = SKYHOOK_BASE_SHIELD_HP;
+        sh.armor_hp = SKYHOOK_BASE_ARMOR_HP;
+        sh.hull_hp = SKYHOOK_BASE_HULL_HP;
+        snap.structures.insert(skyhook_id, sh);
+        snap.structures
+            .insert(hub_a, structure(hub_a, CORP_ID, sys_a, TYPE_SOV_HUB));
+        snap.structures
+            .insert(hub_b, structure(hub_b, CORP_ID, sys_b, TYPE_SOV_HUB));
+
+        snap.sov_runtime.skyhook_planets.insert(skyhook_id, planet_id);
+        snap.sov_runtime.skyhook_active.insert(skyhook_id, true);
+        snap.sov_runtime
+            .skyhook_reagent_bays
+            .insert(skyhook_id, (TYPE_MAGMATIC_GAS, 100, 50, now));
+        snap.sov_runtime
+            .skyhook_reagents
+            .insert(skyhook_id, (TYPE_MAGMATIC_GAS, 150));
+        snap.sov_runtime.skyhook_maturity_rem.insert(skyhook_id, (25, 10));
+        snap.sov_runtime.skyhook_last_harvest_unix.insert(skyhook_id, now);
+        snap.sov_runtime
+            .skyhook_theft_windows
+            .insert(skyhook_id, (now + 50_000, now + 57_200));
+        snap.sov_runtime.skyhook_hackable.insert(skyhook_id, false);
+        snap.sov_runtime
+            .skyhook_silo_links
+            .insert(skyhook_id, (attacker_id, PILOT_SHIP + 2, now + 600, 1_000.0));
+
+        snap.sov_runtime.sov_hubs.insert(
+            hub_a,
+            PersistedSovHubData {
+                hub_id: hub_a,
+                workforce: PersistedWorkforceMode::Export {
+                    destination: Some(sys_b),
+                    amount: export_amt,
+                },
+                upgrades: vec![PersistedHubUpgrade {
+                    type_id: 81_615,
+                    online: true,
+                    low_power: false,
+                }],
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.sov_hubs.insert(
+            hub_b,
+            PersistedSovHubData {
+                hub_id: hub_b,
+                workforce: PersistedWorkforceMode::Import {
+                    sources: vec![sys_a],
+                },
+                upgrades: vec![PersistedHubUpgrade {
+                    type_id: 81_615,
+                    online: true,
+                    low_power: false,
+                }],
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys_h = ctx.systems.get_or_spawn(sys_a);
+    let _ = sys_h
+        .spawn_ball_with_meta(
+            Ball {
+                id: skyhook_id,
+                type_id: TYPE_SKYHOOK,
+                position: DVec3::from_array(pos),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 0.0,
+                mass: 1.0e8,
+                radius: 500.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Rigid,
+            },
+            ctx.build_type_combat_state(TYPE_SKYHOOK),
+            eve_destiny::SlimItemMeta::default(),
+        )
+        .await;
+
+    let mut dir = sess(40, PILOT_ID, CORP_ID, sys_a, corp_roles::ROLE_DIRECTOR);
+    let mut rx = subscribe(&ctx, &mut dir).await;
+    drain_notices(&mut rx);
+
+    // 1. Deplete shield outside theft window -> ArmorReinforced; further hit rejected.
+    let s_hit = apply_live_combat_damage_to_upwell_structure(
+        &ctx,
+        &sys_h,
+        sys_a,
+        attacker_id,
+        skyhook_id,
+        DamageVector {
+            em: 20_000.0,
+            thermal: 0.0,
+            kinetic: 0.0,
+            explosive: 0.0,
+        },
+        1.0,
+        ctx.now_unix(),
+    )
+    .await
+    .expect("shield combat hit")
+    .expect("skyhook outcome");
+    assert!(!s_hit.destroyed);
+    assert!(s_hit.became_invulnerable);
+    assert_eq!(s_hit.shield_ratio, 0.0);
+    assert_eq!(s_hit.armor_ratio, 1.0);
+    assert_eq!(s_hit.hull_ratio, 1.0);
+    assert!(s_hit.applied_damage > 0.0);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&skyhook_id].state, "ArmorReinforced");
+    });
+    assert_eq!(
+        apply_live_combat_damage_to_upwell_structure(
+            &ctx,
+            &sys_h,
+            sys_a,
+            attacker_id,
+            skyhook_id,
+            DamageVector {
+                em: 1_000.0,
+                thermal: 0.0,
+                kinetic: 0.0,
+                explosive: 0.0,
+            },
+            1.0,
+            ctx.now_unix(),
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "StructureInvulnerable"
+    );
+
+    // 2. Advance past 24h reinforcement -> partial armor damage, then armor depletion -> HullVulnerable.
+    ctx.advance_secs(86_400);
+    let a_hit_1 = apply_live_combat_damage_to_upwell_structure(
+        &ctx,
+        &sys_h,
+        sys_a,
+        attacker_id,
+        skyhook_id,
+        DamageVector {
+            em: 5_000.0,
+            thermal: 0.0,
+            kinetic: 0.0,
+            explosive: 0.0,
+        },
+        1.0,
+        ctx.now_unix(),
+    )
+    .await
+    .expect("armor hit 1")
+    .expect("armor outcome 1");
+    assert!(!a_hit_1.destroyed);
+    assert!(!a_hit_1.became_invulnerable);
+    assert_eq!(a_hit_1.shield_ratio, 0.0);
+    assert!(a_hit_1.armor_ratio > 0.0 && a_hit_1.armor_ratio < 1.0);
+    assert_eq!(a_hit_1.hull_ratio, 1.0);
+    assert!(a_hit_1.applied_damage > 0.0);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&skyhook_id].state, "ArmorVulnerable");
+    });
+
+    let a_hit_2 = apply_live_combat_damage_to_upwell_structure(
+        &ctx,
+        &sys_h,
+        sys_a,
+        attacker_id,
+        skyhook_id,
+        DamageVector {
+            em: 50_000.0,
+            thermal: 0.0,
+            kinetic: 0.0,
+            explosive: 0.0,
+        },
+        1.0,
+        ctx.now_unix(),
+    )
+    .await
+    .expect("armor hit 2")
+    .expect("armor outcome 2");
+    assert!(!a_hit_2.destroyed);
+    assert_eq!(a_hit_2.armor_ratio, 0.0);
+    assert_eq!(a_hit_2.hull_ratio, 1.0);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&skyhook_id].state, "HullVulnerable");
+    });
+
+    // 3. Partial hull damage then lethal hull damage -> Destroyed + wreck + killmail + Hub/workforce cascade.
+    let h_hit_1 = apply_live_combat_damage_to_upwell_structure(
+        &ctx,
+        &sys_h,
+        sys_a,
+        attacker_id,
+        skyhook_id,
+        DamageVector {
+            em: 4_000.0,
+            thermal: 0.0,
+            kinetic: 0.0,
+            explosive: 0.0,
+        },
+        1.0,
+        ctx.now_unix(),
+    )
+    .await
+    .expect("hull hit 1")
+    .expect("hull outcome 1");
+    assert!(!h_hit_1.destroyed);
+    assert_eq!(h_hit_1.armor_ratio, 0.0);
+    assert!(h_hit_1.hull_ratio > 0.0 && h_hit_1.hull_ratio < 1.0);
+
+    drain_notices(&mut rx);
+    let h_kill = apply_live_combat_damage_to_upwell_structure(
+        &ctx,
+        &sys_h,
+        sys_a,
+        attacker_id,
+        skyhook_id,
+        DamageVector {
+            em: 50_000.0,
+            thermal: 0.0,
+            kinetic: 0.0,
+            explosive: 0.0,
+        },
+        1.0,
+        ctx.now_unix(),
+    )
+    .await
+    .expect("lethal hull hit")
+    .expect("kill outcome");
+    assert!(h_kill.destroyed);
+    assert!(h_kill.became_invulnerable);
+    assert_eq!(h_kill.shield_ratio, 0.0);
+    assert_eq!(h_kill.armor_ratio, 0.0);
+    assert_eq!(h_kill.hull_ratio, 0.0);
+    assert!(h_kill.applied_damage > 0.0);
+
+    let balls = sys_h.list_balls().await.expect("list balls");
+    assert!(
+        !balls.iter().any(|b| b.id == skyhook_id),
+        "destroyed Skyhook ball must leave space"
+    );
+    let expected_wreck_type = ctx
+        .sde
+        .resolve_wreck_type_id(TYPE_SKYHOOK, None)
+        .unwrap_or(26557);
+    ctx.db.with_snapshot(|snap| {
+        let st = &snap.structures[&skyhook_id];
+        assert_eq!(st.state, "Destroyed");
+        assert_eq!(st.shield_hp, 0.0);
+        assert_eq!(st.armor_hp, 0.0);
+        assert_eq!(st.hull_hp, 0.0);
+
+        assert!(!snap.sov_runtime.skyhook_planets.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_active.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_reagent_bays.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_reagents.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_maturity_rem.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_last_harvest_unix.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_theft_windows.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_hackable.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_silo_links.contains_key(&skyhook_id));
+
+        assert!(
+            snap.killmails.values().any(|km| km.ship_type_id == TYPE_SKYHOOK
+                && km.attacker_character_id == attacker_id
+                && km.victim_corp_id == CORP_ID),
+            "destroyed Skyhook must emit a killmail"
+        );
+        let wreck_item = snap
+            .items
+            .values()
+            .find(|it| it.type_id == expected_wreck_type && it.location_id == i64::from(sys_a))
+            .expect("Skyhook wreck item spawned in system");
+        assert!(
+            balls.iter().any(|b| b.id == wreck_item.item_id),
+            "Skyhook wreck ball must exist in space"
+        );
+
+        assert!(snap.sov_runtime.sov_hubs[&hub_a].upgrades[0].low_power);
+        assert_eq!(exported_amount(snap, hub_a), 0);
+        assert!(snap.sov_runtime.sov_hubs[&hub_b].upgrades[0].low_power);
+    });
+
+    let notices = drain_notices(&mut rx);
+    assert!(notices
+        .iter()
+        .any(|n| n == "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice"));
+    assert!(notices
+        .iter()
+        .any(|n| n == "eve_public.sovereignty.hub.api.ResourcesSimulatedNotice"));
+    assert!(notices
+        .iter()
+        .any(|n| n == "eve_public.sovereignty.resource.transfer.workforce.api.StateChangedNotice"));
+
+    assert_eq!(
+        apply_live_combat_damage_to_upwell_structure(
+            &ctx,
+            &sys_h,
+            sys_a,
+            attacker_id,
+            skyhook_id,
+            DamageVector {
+                em: 1_000.0,
+                thermal: 0.0,
+                kinetic: 0.0,
+                explosive: 0.0,
+            },
+            1.0,
+            ctx.now_unix(),
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "StructureAlreadyDestroyed"
+    );
+}

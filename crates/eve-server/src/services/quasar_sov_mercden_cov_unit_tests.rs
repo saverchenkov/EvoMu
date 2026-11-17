@@ -180,7 +180,7 @@ fn owned_den_disabled_reinforcement_activity_completion_and_partial_refresh() {
         let act_sub100 = mk_act(vec![0xA9; 16], den_id, sys, true, cid, 9_000, 15, -25, 10);
         complete_mercenary_activity_in_snap(snap, &pending, None, &act_sub100, den_id, sys);
         let d = &snap.sov_runtime.mercenary_dens[&den_id];
-        assert_eq!((d.development_level, d.anarchy_level, d.infomorphs), (25, 0, 100));
+        assert_eq!((d.development_level, d.anarchy_level, d.infomorphs), (25, 0, 50));
 
         let before_bal = snap.characters[&cid].balance;
         complete_mercenary_activity_in_snap(snap, &pending, None, &act_sub100, 999_999_999, sys);

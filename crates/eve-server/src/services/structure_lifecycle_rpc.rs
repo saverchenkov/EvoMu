@@ -622,21 +622,54 @@ pub async fn apply_live_combat_damage_to_upwell_structure(
         }));
     }
     if st_type == Some(crate::services::sov_services::TYPE_ORBITAL_SKYHOOK) {
-        let rep = crate::services::sov_gameplay::sov_gameplay_skyhook::apply_skyhook_weapon_damage_typed(ctx, target_ball_id, dmg.em, dmg.thermal, dmg.kinetic, dmg.explosive)?;
-        let (dest, s_r, a_r, h_r, inv) = ctx.db.with_snapshot(|snap| {
+        let rep = crate::services::sov_gameplay::sov_gameplay_skyhook::apply_skyhook_weapon_damage_with_attacker(
+            ctx,
+            target_ball_id,
+            dmg.em,
+            dmg.thermal,
+            dmg.kinetic,
+            dmg.explosive,
+            attacker_char_id,
+        )?;
+        let applied = rep
+            .dict_get("appliedDamage")
+            .and_then(eve_proto::PyRep::as_f64)
+            .unwrap_or(0.0);
+        let (dest, s_r, a_r, h_r, inv, s_hp, a_hp, h_hp) = ctx.db.with_snapshot(|snap| {
             if let Some(st) = snap.structures.get(&target_ball_id) {
-                let dest = st.state == "Destroyed";
+                let dest = st.state.eq_ignore_ascii_case("destroyed");
                 let inv = dest || st.state == "ArmorReinforced";
-                let s_r = (st.shield_hp / crate::services::sov_gameplay::sov_gameplay_skyhook::SKYHOOK_BASE_SHIELD_HP).clamp(0.0, 1.0);
-                let a_r = 1.0;
-                let h_r = 1.0;
-                (dest, s_r, a_r, h_r, inv)
+                let s_r = (st.shield_hp
+                    / crate::services::sov_gameplay::sov_gameplay_skyhook::SKYHOOK_BASE_SHIELD_HP)
+                    .clamp(0.0, 1.0);
+                let a_r = (st.armor_hp
+                    / crate::services::sov_gameplay::sov_gameplay_skyhook::SKYHOOK_BASE_ARMOR_HP)
+                    .clamp(0.0, 1.0);
+                let h_r = (st.hull_hp
+                    / crate::services::sov_gameplay::sov_gameplay_skyhook::SKYHOOK_BASE_HULL_HP)
+                    .clamp(0.0, 1.0);
+                (dest, s_r, a_r, h_r, inv, st.shield_hp, st.armor_hp, st.hull_hp)
             } else {
-                (true, 0.0, 0.0, 0.0, true)
+                (true, 0.0, 0.0, 0.0, true, 0.0, 0.0, 0.0)
             }
         });
+        if !dest {
+            if let Ok(mut bp) = sys_handle.ballpark.write() {
+                if let Some(cs) = bp.combat_states.get_mut(&target_ball_id) {
+                    cs.shield_hp = s_hp;
+                    cs.max_shield_hp =
+                        crate::services::sov_gameplay::sov_gameplay_skyhook::SKYHOOK_BASE_SHIELD_HP;
+                    cs.armor_hp = a_hp;
+                    cs.max_armor_hp =
+                        crate::services::sov_gameplay::sov_gameplay_skyhook::SKYHOOK_BASE_ARMOR_HP;
+                    cs.structure_hp = h_hp;
+                    cs.max_structure_hp =
+                        crate::services::sov_gameplay::sov_gameplay_skyhook::SKYHOOK_BASE_HULL_HP;
+                }
+            }
+        }
         return Ok(Some(UpwellCombatDamageOutcome {
-            applied_damage: rep.dict_get("appliedDamage").and_then(eve_proto::PyRep::as_f64).unwrap_or(dmg.total()),
+            applied_damage: applied,
             destroyed: dest,
             shield_ratio: s_r,
             armor_ratio: a_r,

@@ -11,7 +11,8 @@
 use super::quasar_sov_hub::{
     caller, compute_hub_resources, corp_owned_structure, emit_hub_diffs, encode_hub_upgrades,
     enforce_hub_power_overload, hub_views, owned_structure, push_notice, required_id,
-    require_caller_roles, run_simulation, same_owner, transact, Caller, RpcError, HUB_MANAGER_ROLES,
+    require_caller_roles, run_simulation, same_owner, transact, Caller, HubView, PendingNotices,
+    RpcError, HUB_MANAGER_ROLES,
 };
 use super::quasar_space_services::{get_identifier_or_int, get_int_field};
 use super::sov_services::TYPE_SOVEREIGNTY_HUB;
@@ -419,6 +420,140 @@ fn apply_configuration(
     Ok((sys, old))
 }
 
+/// Reconciles upgrade power/workforce overload and workforce export clamping across all hubs to a
+/// fixed point, emitting `HubUpgradesSimulatedNotice`, `ResourcesSimulatedNotice`, and workforce
+/// `StateChangedNotice` for every hub whose observable state changed relative to `before`.
+pub(crate) fn reconcile_hub_workforce_network_and_emit(
+    snap: &mut WorldStateSnapshot,
+    sde: &SdeRegistry,
+    pending: &PendingNotices,
+    before: &std::collections::BTreeMap<i64, HubView>,
+    extra: &[i64],
+) {
+    // Enforce upgrade power/workforce overload to a network-wide fixed point across all hubs
+    // so severing `Transit` / `Export` / `Import` links or deactivating/destroying a Skyhook
+    // immediately drops starved upgrades into `POWER_STATE_LOW` (`Sovereignty.md:38,147`).
+    let all_hub_ids: std::collections::BTreeSet<i64> = snap
+        .sov_runtime
+        .sov_hubs
+        .keys()
+        .copied()
+        .chain(extra.iter().copied())
+        .collect();
+    let prev_upgrades: std::collections::BTreeMap<i64, _> = all_hub_ids
+        .iter()
+        .filter_map(|&id| {
+            snap.sov_runtime
+                .sov_hubs
+                .get(&id)
+                .map(|h| (id, h.upgrades.clone()))
+        })
+        .collect();
+    for _ in 0..all_hub_ids.len().saturating_add(1) {
+        let mut changed_in_pass = false;
+        for &id in &all_hub_ids {
+            if enforce_hub_power_overload(snap, sde, id) {
+                changed_in_pass = true;
+            }
+            if let Some(exported) = snap.sov_runtime.sov_hubs.get(&id).and_then(|h| {
+                match h.workforce {
+                    PersistedWorkforceMode::Export { amount, .. } if amount > 0 => Some(amount),
+                    _ => None,
+                }
+            }) {
+                if let Some(r) = compute_hub_resources(snap, sde, id) {
+                    let imported_sum: u64 = imports(snap, sde, id).iter().map(|s| s.1).sum();
+                    let base_w = (r.workforce_local + imported_sum).saturating_sub(exported);
+                    let produced_w = r.workforce_available.saturating_sub(base_w);
+                    let max_exportable = (r.workforce_local + imported_sum + produced_w)
+                        .saturating_sub(r.workforce_allocated);
+                    if exported > max_exportable {
+                        if let Some(h) = snap.sov_runtime.sov_hubs.get_mut(&id) {
+                            if let PersistedWorkforceMode::Export { amount, .. } = &mut h.workforce {
+                                *amount = max_exportable;
+                                changed_in_pass = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !changed_in_pass {
+            break;
+        }
+    }
+    for &id in &all_hub_ids {
+        let changed = snap
+            .sov_runtime
+            .sov_hubs
+            .get(&id)
+            .is_some_and(|h| prev_upgrades.get(&id) != Some(&h.upgrades));
+        if changed {
+            if let Some(h_sys) = hub_sys(snap, id) {
+                if let Some(sim_n) = crate::quasar_gateway::pb_encode_or_log(
+                    "quasar_sov_workforce.reconcile.upgrades_simulated",
+                    pb::message(
+                        "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
+                    )
+                    .set_raw_message(
+                        "hub_upgrades",
+                        encode_hub_upgrades(sde, id, snap.sov_runtime.sov_hubs.get(&id)),
+                    ),
+                ) {
+                    push_notice(
+                        pending,
+                        h_sys,
+                        "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
+                        sim_n,
+                    );
+                }
+            }
+        }
+    }
+    emit_hub_diffs(pending, before, &hub_views(snap, sde, extra));
+}
+
+/// Runs `mutate` inside a system Sov Hub network snapshot-reconcile bracket so mutations affecting
+/// local planetary power/workforce (e.g. Skyhook activation, deactivation, or destruction)
+/// immediately overload/clamp local and downstream hubs and publish Quasar notices.
+pub(crate) fn with_system_hub_network_reconcile<T, E>(
+    snap: &mut WorldStateSnapshot,
+    sde: &SdeRegistry,
+    pending: &PendingNotices,
+    sys_id: u32,
+    now_unix: u64,
+    mutate: impl FnOnce(&mut WorldStateSnapshot) -> Result<T, E>,
+) -> Result<T, E> {
+    let local_hub_ids: Vec<i64> = snap
+        .structures
+        .iter()
+        .filter(|(_, s)| {
+            s.solar_system_id == sys_id
+                && s.type_id == TYPE_SOVEREIGNTY_HUB
+                && !s.state.eq_ignore_ascii_case("destroyed")
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    for &hid in &local_hub_ids {
+        run_simulation(snap, sde, pending, hid, now_unix);
+    }
+    let mut extra: Vec<i64> = Vec::new();
+    for &hid in &local_hub_ids {
+        if !extra.contains(&hid) {
+            extra.push(hid);
+        }
+        for (other_id, _) in networkable_hubs(snap, sde, hid) {
+            if !extra.contains(&other_id) {
+                extra.push(other_id);
+            }
+        }
+    }
+    let before = hub_views(snap, sde, &extra);
+    let result = mutate(snap)?;
+    reconcile_hub_workforce_network_and_emit(snap, sde, pending, &before, &extra);
+    Ok(result)
+}
+
 /// Registers `eve_public.sovereignty.hub.workforce.api` handlers.
 pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>, sde: Arc<SdeRegistry>) {
     {
@@ -479,66 +614,6 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                             extra.push(other_id);
                         }
                     }
-                    // Enforce upgrade power/workforce overload to a network-wide fixed point across
-                    // `hub_id` and all linked hubs so severing `Transit` / `Export` / `Import` links
-                    // immediately drops starved upgrades into `POWER_STATE_LOW` (`Sovereignty.md:38,147`).
-                    let all_hub_ids: std::collections::BTreeSet<i64> = snap
-                        .sov_runtime
-                        .sov_hubs
-                        .keys()
-                        .copied()
-                        .chain(extra.iter().copied())
-                        .collect();
-                    let prev_upgrades: std::collections::BTreeMap<i64, _> = all_hub_ids
-                        .iter()
-                        .filter_map(|&id| {
-                            snap.sov_runtime
-                                .sov_hubs
-                                .get(&id)
-                                .map(|h| (id, h.upgrades.clone()))
-                        })
-                        .collect();
-                    for _ in 0..all_hub_ids.len().saturating_add(1) {
-                        let mut changed_in_pass = false;
-                        for &id in &all_hub_ids {
-                            if enforce_hub_power_overload(snap, &sde, id) {
-                                changed_in_pass = true;
-                            }
-                            if let Some(exported) = snap.sov_runtime.sov_hubs.get(&id).and_then(|h| {
-                                match h.workforce {
-                                    PersistedWorkforceMode::Export { amount, .. } if amount > 0 => {
-                                        Some(amount)
-                                    }
-                                    _ => None,
-                                }
-                            }) {
-                                if let Some(r) = compute_hub_resources(snap, &sde, id) {
-                                    let imported_sum: u64 =
-                                        imports(snap, &sde, id).iter().map(|s| s.1).sum();
-                                    let base_w =
-                                        (r.workforce_local + imported_sum).saturating_sub(exported);
-                                    let produced_w = r.workforce_available.saturating_sub(base_w);
-                                    let max_exportable = (r.workforce_local
-                                        + imported_sum
-                                        + produced_w)
-                                        .saturating_sub(r.workforce_allocated);
-                                    if exported > max_exportable {
-                                        if let Some(h) = snap.sov_runtime.sov_hubs.get_mut(&id) {
-                                            if let PersistedWorkforceMode::Export { amount, .. } =
-                                                &mut h.workforce
-                                            {
-                                                *amount = max_exportable;
-                                                changed_in_pass = true;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if !changed_in_pass {
-                            break;
-                        }
-                    }
                     if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
                         "quasar_sov_workforce.configure.configured",
                         pb::message(CONFIGURED_NOTICE)
@@ -549,35 +624,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                     ) {
                         push_notice(&pending, sys, CONFIGURED_NOTICE, n);
                     }
-                    for &id in &all_hub_ids {
-                        let changed = snap
-                            .sov_runtime
-                            .sov_hubs
-                            .get(&id)
-                            .is_some_and(|h| prev_upgrades.get(&id) != Some(&h.upgrades));
-                        if changed {
-                            if let Some(h_sys) = hub_sys(snap, id) {
-                                if let Some(sim_n) = crate::quasar_gateway::pb_encode_or_log(
-                                    "quasar_sov_workforce.configure.upgrades_simulated",
-                                    pb::message(
-                                        "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
-                                    )
-                                    .set_raw_message(
-                                        "hub_upgrades",
-                                        encode_hub_upgrades(&sde, id, snap.sov_runtime.sov_hubs.get(&id)),
-                                    ),
-                                ) {
-                                    push_notice(
-                                        &pending,
-                                        h_sys,
-                                        "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
-                                        sim_n,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    emit_hub_diffs(&pending, &before, &hub_views(snap, &sde, &extra));
+                    reconcile_hub_workforce_network_and_emit(snap, &sde, &pending, &before, &extra);
                     Ok(())
                 })?;
                 pb::message("eve_public.sovereignty.hub.workforce.api.ConfigureResponse")

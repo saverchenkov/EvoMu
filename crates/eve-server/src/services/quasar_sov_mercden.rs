@@ -498,6 +498,7 @@ pub(crate) fn complete_mercenary_activity_in_snap(
     solar_system_id: u32,
 ) {
     let mut applied_dev_impact = 0i32;
+    let mut applied_anarchy_impact = 0i32;
     let mut applied_infomorph_bonus = 0u32;
     let mut reward_char_id = a.started_by;
     if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
@@ -505,24 +506,23 @@ pub(crate) fn complete_mercenary_activity_in_snap(
             reward_char_id = den_mut.owner_char_id;
         }
         // Wiki (`Mercenary_Tactical_Operation.md:24`): completing an MTO increases Development
-        // by +10 points (or grants +350 bonus Encrypted Infomorphs into den cargo at max Development 100)
-        // and reduces Anarchy, awarding infomorph and ISK rewards.
-        applied_infomorph_bonus = if den_mut.development_level >= MAX_LEVEL {
-            a.infomorph_bonus.max(350)
+        // by +10 points (or grants +350 bonus Encrypted Infomorphs into den cargo if already
+        // at max Development 100) and reduces Anarchy, awarding infomorph and ISK rewards.
+        let pre_dev = den_mut.development_level;
+        if pre_dev >= MAX_LEVEL {
+            applied_infomorph_bonus = a.infomorph_bonus.max(350);
+            let cap = den_cargo_capacity(sde);
+            den_mut.infomorphs = den_mut.infomorphs.saturating_add(applied_infomorph_bonus).min(cap);
         } else {
-            a.infomorph_bonus.max(50)
-        };
-        let cap = den_cargo_capacity(sde);
-        den_mut.infomorphs = den_mut.infomorphs.saturating_add(applied_infomorph_bonus).min(cap);
-
-        if den_mut.development_level < MAX_LEVEL {
-            applied_dev_impact = if a.development_impact != 0 { a.development_impact } else { 10 };
-            den_mut.development_level = (den_mut.development_level as i32 + applied_dev_impact)
-                .clamp(0, MAX_LEVEL as i32) as u32;
+            let raw_dev = if a.development_impact != 0 { a.development_impact } else { 10 };
+            den_mut.development_level = (pre_dev as i32 + raw_dev).clamp(0, MAX_LEVEL as i32) as u32;
+            applied_dev_impact = den_mut.development_level as i32 - pre_dev as i32;
         }
-        let applied_anarchy = if a.anarchy_impact != 0 { a.anarchy_impact } else { -10 };
+        let pre_anarchy = den_mut.anarchy_level;
+        let raw_anarchy = if a.anarchy_impact != 0 { a.anarchy_impact } else { -10 };
         den_mut.anarchy_level =
-            (den_mut.anarchy_level as i32 + applied_anarchy).clamp(0, MAX_LEVEL as i32) as u32;
+            (pre_anarchy as i32 + raw_anarchy).clamp(0, MAX_LEVEL as i32) as u32;
+        applied_anarchy_impact = den_mut.anarchy_level as i32 - pre_anarchy as i32;
         push_evolution_notice(pending, den_mut);
     }
     // Award MTO ISK reward to completing pilot
@@ -560,7 +560,7 @@ pub(crate) fn complete_mercenary_activity_in_snap(
         den_id,
         &a.uuid,
         applied_dev_impact,
-        a.anarchy_impact,
+        applied_anarchy_impact,
         applied_infomorph_bonus,
     );
 }
@@ -618,6 +618,13 @@ pub(crate) fn refresh_activities_with_sde(
         let seq = snap.sov_runtime.next_mercenary_activity_seq;
         let mut uuid = (den_id as u64).to_be_bytes().to_vec();
         uuid.extend_from_slice(&seq.to_be_bytes());
+        // `Mercenary_Tactical_Operation.md:24`: +10 Development while below max level 4 (`MAX_LEVEL`),
+        // or +350 bonus Encrypted Infomorphs if already at max Development.
+        let (development_impact, infomorph_bonus) = if den.development_level >= MAX_LEVEL {
+            (0, 350)
+        } else {
+            (10, 0)
+        };
         let a = PersistedMercenaryActivity {
             uuid: uuid.clone(),
             den_id,
@@ -626,10 +633,10 @@ pub(crate) fn refresh_activities_with_sde(
             started: false,
             started_by: 0,
             expiry_unix: now + ACTIVITY_LIFETIME_SECS,
-            development_impact: 10,
+            development_impact,
             // DERIVED: MTO completion reduces Anarchy by 10 points (`Mercenary_Tactical_Operation.md`)
             anarchy_impact: -10,
-            infomorph_bonus: 350,
+            infomorph_bonus,
         };
         if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
             "quasar_sov_mercden.refresh_activities.added",

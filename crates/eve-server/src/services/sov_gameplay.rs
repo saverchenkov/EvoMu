@@ -1171,7 +1171,16 @@ pub async fn dispatch_special_structure_attack(
     let rep = if st_type_id == TYPE_MERCENARY_DEN {
         apply_mercenary_den_weapon_damage(ctx, structure_id, volley_dmg).await?
     } else if st_type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK {
-        apply_skyhook_weapon_damage(ctx, structure_id, volley_dmg)?
+        let q = volley_dmg.max(0.0) * 0.25;
+        sov_gameplay_skyhook::apply_skyhook_weapon_damage_with_attacker(
+            ctx,
+            structure_id,
+            q,
+            q,
+            q,
+            q,
+            char_id,
+        )?
     } else if is_fw_ins {
         crate::services::fw_gameplay::apply_fw_or_insurgency_structure_damage(ctx, char_id, structure_id, volley_dmg).await?
     } else {

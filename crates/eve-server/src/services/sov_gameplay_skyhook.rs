@@ -42,6 +42,10 @@ pub const SKYHOOK_SILO_LINK_RANGE_M: f64 = 15_000.0;
 pub const SKYHOOK_SILO_LINK_MAX_SPEED_MS: f64 = 1_000.0;
 /// Base shield HP assigned to an anchored Orbital Skyhook (`10%` threshold = `1,000.0` HP).
 pub const SKYHOOK_BASE_SHIELD_HP: f64 = 10_000.0;
+/// Base armor HP assigned to an anchored Orbital Skyhook.
+pub const SKYHOOK_BASE_ARMOR_HP: f64 = SKYHOOK_BASE_SHIELD_HP;
+/// Base hull HP assigned to an anchored Orbital Skyhook.
+pub const SKYHOOK_BASE_HULL_HP: f64 = SKYHOOK_BASE_SHIELD_HP;
 
 /// Maps SDE planet type to extracted Colony Reagent (`orbitalSkyhook/const.pyj`):
 /// ONLY Ice (`12`) -> Superionic Ice (`81144`) and Lava (`2015`) -> Magmatic Gas (`81143`).
@@ -110,6 +114,19 @@ pub fn next_skyhook_theft_window(
         }
     }
     (start, start.saturating_add(7_200))
+}
+
+fn has_skyhook_runtime_state(snap: &WorldStateSnapshot, skyhook_id: i64) -> bool {
+    let rt = &snap.sov_runtime;
+    rt.skyhook_planets.contains_key(&skyhook_id)
+        || rt.skyhook_active.contains_key(&skyhook_id)
+        || rt.skyhook_reagent_bays.contains_key(&skyhook_id)
+        || rt.skyhook_reagents.contains_key(&skyhook_id)
+        || rt.skyhook_maturity_rem.contains_key(&skyhook_id)
+        || rt.skyhook_last_harvest_unix.contains_key(&skyhook_id)
+        || rt.skyhook_theft_windows.contains_key(&skyhook_id)
+        || rt.skyhook_hackable.contains_key(&skyhook_id)
+        || rt.skyhook_silo_links.contains_key(&skyhook_id)
 }
 
 /// Clears all per-skyhook planet/reagent/theft/link runtime state when a Skyhook is destroyed.
@@ -529,8 +546,8 @@ pub async fn handle_anchor_skyhook_rpc(
                 quantum_core_installed: true,
                 fuel_blocks: 200,
                 shield_hp: SKYHOOK_BASE_SHIELD_HP,
-                armor_hp: SKYHOOK_BASE_SHIELD_HP,
-                hull_hp: SKYHOOK_BASE_SHIELD_HP,
+                armor_hp: SKYHOOK_BASE_ARMOR_HP,
+                hull_hp: SKYHOOK_BASE_HULL_HP,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
                 last_damage_unix: 0,
@@ -588,9 +605,7 @@ pub async fn handle_anchor_skyhook_rpc(
     ]))
 }
 
-/// Returns `[em, thermal, kinetic, explosive]` shield damage resonances (`0.0..=1.0`) for
-/// `TYPE_ORBITAL_SKYHOOK` (`81080`) from SDE attributes `271, 274, 273, 272` (default `0.8`).
-pub fn skyhook_shield_resonances(sde: &eve_sde::SdeRegistry) -> [f64; 4] {
+fn skyhook_layer_resonances(sde: &eve_sde::SdeRegistry, attr_ids: [u16; 4]) -> [f64; 4] {
     let attrs = sde
         .types
         .get(&TYPE_ORBITAL_SKYHOOK)
@@ -602,15 +617,64 @@ pub fn skyhook_shield_resonances(sde: &eve_sde::SdeRegistry) -> [f64; 4] {
             .clamp(0.0, 1.0)
     };
     [
-        get(eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE),
-        get(eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE),
-        get(eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE),
-        get(eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE),
+        get(attr_ids[0]),
+        get(attr_ids[1]),
+        get(attr_ids[2]),
+        get(attr_ids[3]),
     ]
 }
 
+fn effective_layer_damage(res: [f64; 4], em: f64, th: f64, ki: f64, ex: f64) -> f64 {
+    em.max(0.0) * res[0]
+        + th.max(0.0) * res[1]
+        + ki.max(0.0) * res[2]
+        + ex.max(0.0) * res[3]
+}
+
+/// Returns `[em, thermal, kinetic, explosive]` shield damage resonances (`0.0..=1.0`) for
+/// `TYPE_ORBITAL_SKYHOOK` (`81080`) from SDE attributes `271, 274, 273, 272` (default `0.8`).
+pub fn skyhook_shield_resonances(sde: &eve_sde::SdeRegistry) -> [f64; 4] {
+    skyhook_layer_resonances(
+        sde,
+        [
+            eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE,
+            eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE,
+            eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE,
+            eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE,
+        ],
+    )
+}
+
+/// Returns `[em, thermal, kinetic, explosive]` armor damage resonances (`0.0..=1.0`) for
+/// `TYPE_ORBITAL_SKYHOOK` (`81080`) from SDE attributes `267, 270, 269, 268` (default `0.8`).
+pub fn skyhook_armor_resonances(sde: &eve_sde::SdeRegistry) -> [f64; 4] {
+    skyhook_layer_resonances(
+        sde,
+        [
+            eve_sde::attr_ids::ARMOR_EM_DAMAGE_RESONANCE,
+            eve_sde::attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE,
+            eve_sde::attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE,
+            eve_sde::attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE,
+        ],
+    )
+}
+
+/// Returns `[em, thermal, kinetic, explosive]` hull damage resonances (`0.0..=1.0`) for
+/// `TYPE_ORBITAL_SKYHOOK` (`81080`) from SDE attributes `113, 110, 109, 111` (default `0.8`).
+pub fn skyhook_hull_resonances(sde: &eve_sde::SdeRegistry) -> [f64; 4] {
+    skyhook_layer_resonances(
+        sde,
+        [
+            eve_sde::attr_ids::EM_DAMAGE_RESONANCE,
+            eve_sde::attr_ids::THERMAL_DAMAGE_RESONANCE,
+            eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE,
+            eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE,
+        ],
+    )
+}
+
 /// Applies omni weapon damage (`damage` split evenly across `[EM, Thermal, Kinetic, Explosive]`)
-/// against an Orbital Skyhook's shield using SDE shield damage resonances.
+/// against an Orbital Skyhook using SDE layer damage resonances.
 pub fn apply_skyhook_weapon_damage(
     ctx: &ServerContext,
     skyhook_id: i64,
@@ -628,8 +692,8 @@ pub fn apply_skyhook_weapon_damage(
 }
 
 /// Applies typed live weapon damage (`[em, thermal, kinetic, explosive]`) to an Orbital Skyhook's
-/// shield/silo via SDE shield resonances, emitting `OnSkyhookSiloDamageUpdated` and exposing it for
-/// ship-link theft once shield drops `<= 10%` inside an open theft vulnerability window.
+/// active defense layer (`ShieldVulnerable` -> `ArmorReinforced` -> `ArmorVulnerable` ->
+/// `HullVulnerable` -> `Destroyed`) via SDE layer resonances.
 pub fn apply_skyhook_weapon_damage_typed(
     ctx: &ServerContext,
     skyhook_id: i64,
@@ -638,6 +702,22 @@ pub fn apply_skyhook_weapon_damage_typed(
     kinetic: f64,
     explosive: f64,
 ) -> Result<PyRep, BridgeRpcError> {
+    apply_skyhook_weapon_damage_with_attacker(ctx, skyhook_id, em, thermal, kinetic, explosive, 0)
+}
+
+/// Applies typed live weapon damage (`[em, thermal, kinetic, explosive]`) with `attacker_char_id`
+/// attribution across the Skyhook lifecycle (`ShieldVulnerable` -> `ArmorReinforced` ->
+/// `ArmorVulnerable` -> `HullVulnerable` -> `Destroyed`), destroying the structure with wreck/killmail
+/// generation and Sov Hub network reconciliation when hull reaches `0.0`.
+pub(crate) fn apply_skyhook_weapon_damage_with_attacker(
+    ctx: &ServerContext,
+    skyhook_id: i64,
+    em: f64,
+    thermal: f64,
+    kinetic: f64,
+    explosive: f64,
+    attacker_char_id: i64,
+) -> Result<PyRep, BridgeRpcError> {
     if !em.is_finite() || !thermal.is_finite() || !kinetic.is_finite() || !explosive.is_finite() {
         return Err(BridgeRpcError {
             code: "InvalidDamage".into(),
@@ -645,22 +725,66 @@ pub fn apply_skyhook_weapon_damage_typed(
             client_error: None,
         });
     }
-    let [r_em, r_th, r_ki, r_ex] = skyhook_shield_resonances(&ctx.sde);
-    let effective_damage = em.max(0.0) * r_em
-        + thermal.max(0.0) * r_th
-        + kinetic.max(0.0) * r_ki
-        + explosive.max(0.0) * r_ex;
+    let eff_shield = effective_layer_damage(
+        skyhook_shield_resonances(&ctx.sde),
+        em,
+        thermal,
+        kinetic,
+        explosive,
+    );
+    let eff_armor = effective_layer_damage(
+        skyhook_armor_resonances(&ctx.sde),
+        em,
+        thermal,
+        kinetic,
+        explosive,
+    );
+    let eff_hull = effective_layer_damage(
+        skyhook_hull_resonances(&ctx.sde),
+        em,
+        thermal,
+        kinetic,
+        explosive,
+    );
     let now = ctx.now_unix();
-    let (sys_id, shield_hp, shield_pct, applied_dmg, hackable_now, newly_hackable, state_str) =
-        ctx.db.try_with_mut_snapshot(|snap| {
-            let window = snap.sov_runtime.skyhook_theft_windows.get(&skyhook_id).copied();
-            let in_window = window.is_some_and(|(s, e)| s <= now && now < e);
+    let pending: crate::services::quasar_sov_hub::PendingNotices =
+        std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+    let (
+        sys_id,
+        shield_hp,
+        armor_hp,
+        hull_hp,
+        shield_pct,
+        armor_pct,
+        hull_pct,
+        applied_dmg,
+        hackable_now,
+        newly_hackable,
+        state_str,
+        state_changed,
+        destroyed_now,
+        pending_sig,
+    ) = ctx.db.try_with_mut_snapshot(|snap| {
+        let window = snap.sov_runtime.skyhook_theft_windows.get(&skyhook_id).copied();
+        let in_window = window.is_some_and(|(s, e)| s <= now && now < e);
+        let (
+            sys_id,
+            prev_state,
+            mut state_changed,
+            destroyed_now,
+            applied,
+            s_hp,
+            a_hp,
+            h_hp,
+            hackable,
+            newly_hackable,
+        ) = {
             let st = snap.structures.get_mut(&skyhook_id).ok_or_else(|| BridgeRpcError {
                 code: "StructureNotFound".into(),
                 message: format!("Orbital Skyhook {skyhook_id} not found"),
                 client_error: None,
             })?;
-            if st.state == "Destroyed" {
+            if st.state.eq_ignore_ascii_case("destroyed") {
                 return Err(BridgeRpcError {
                     code: "StructureDestroyed".into(),
                     message: format!("Orbital Skyhook {skyhook_id} is destroyed"),
@@ -674,45 +798,166 @@ pub fn apply_skyhook_weapon_damage_typed(
                     client_error: None,
                 });
             }
-            st.last_damage_unix = now;
-            let prev_hp = st.shield_hp;
-            if st.shield_hp > 0.0 {
-                st.shield_hp = (st.shield_hp - effective_damage).max(0.0);
-                // If inside the reagent theft window, keep the Skyhook in ShieldVulnerable at >= 1 HP
-                // until a separate hull/armor siege occurs, or transition to ArmorReinforced if 0 HP outside window.
-                if st.shield_hp <= 0.0 && !in_window {
-                    st.state = "ArmorReinforced".into();
-                    st.reinforced_until_unix = now + 86_400;
-                }
+            let prev_state = st.state.clone();
+            let mut state_changed = false;
+            if st.state == "ArmorReinforced"
+                && st.reinforced_until_unix > 0
+                && st.shield_hp <= 0.0
+            {
+                st.state = "ArmorVulnerable".into();
+                st.reinforced_until_unix = 0;
+                state_changed = true;
             }
-            let applied = (prev_hp - st.shield_hp).max(0.0);
-            let sys_id = st.solar_system_id;
+            st.last_damage_unix = now;
+            let mut destroyed_now = false;
+            let applied = match st.state.as_str() {
+                "HullVulnerable" => {
+                    let prev_hp = st.hull_hp;
+                    st.hull_hp = (st.hull_hp - eff_hull).max(0.0);
+                    destroyed_now = st.hull_hp <= 0.0;
+                    (prev_hp - st.hull_hp).max(0.0)
+                }
+                "ArmorVulnerable" => {
+                    let prev_hp = st.armor_hp;
+                    st.armor_hp = (st.armor_hp - eff_armor).max(0.0);
+                    if st.armor_hp <= 0.0 {
+                        st.state = "HullVulnerable".into();
+                        state_changed = true;
+                    }
+                    (prev_hp - st.armor_hp).max(0.0)
+                }
+                _ => {
+                    let prev_hp = st.shield_hp;
+                    if st.shield_hp > 0.0 {
+                        st.shield_hp = (st.shield_hp - eff_shield).max(0.0);
+                        // If inside the reagent theft window, keep the Skyhook in ShieldVulnerable
+                        // so ship-link theft remains possible; outside the window, 0 HP enters
+                        // a 24h ArmorReinforced timer before armor/hull siege (`Orbital_Skyhook.md`).
+                        if st.shield_hp <= 0.0 && !in_window {
+                            st.state = "ArmorReinforced".into();
+                            st.reinforced_until_unix = now + 86_400;
+                            state_changed = true;
+                        }
+                    }
+                    (prev_hp - st.shield_hp).max(0.0)
+                }
+            };
             let s_hp = st.shield_hp;
-            let s_pct = (s_hp / SKYHOOK_BASE_SHIELD_HP).clamp(0.0, 1.0);
-            let st_s = st.state.clone();
-            let hackable = in_window && st_s != "Destroyed" && s_pct <= 0.10 + 1e-9;
+            let a_hp = st.armor_hp;
+            let h_hp = st.hull_hp;
+            let sys_id = st.solar_system_id;
+            let hackable = in_window
+                && !destroyed_now
+                && !st.state.eq_ignore_ascii_case("destroyed")
+                && (s_hp / SKYHOOK_BASE_SHIELD_HP).clamp(0.0, 1.0) <= 0.10 + 1e-9;
             let was_hackable = snap
                 .sov_runtime
                 .skyhook_hackable
                 .insert(skyhook_id, hackable)
                 .unwrap_or(false);
-            Ok((
+            if st.state != prev_state {
+                state_changed = true;
+            }
+            (
                 sys_id,
-                s_hp,
-                s_pct,
+                prev_state,
+                state_changed,
+                destroyed_now,
                 applied,
+                s_hp,
+                a_hp,
+                h_hp,
                 hackable,
                 hackable && !was_hackable,
-                st_s,
-            ))
-        })?;
+            )
+        };
 
+        if attacker_char_id > 0 && applied > 0.0 {
+            let mut ds =
+                crate::services::structure_acl_defense_rules::load_defense_settings(snap, skyhook_id);
+            ds.record_attacker(attacker_char_id, now);
+            crate::services::structure_acl_defense_rules::save_defense_settings(snap, &ds);
+        }
+
+        let mut pending_sig = Vec::new();
+        let mut final_s_hp = s_hp;
+        let mut final_a_hp = a_hp;
+        let mut final_h_hp = h_hp;
+        let mut final_state = snap
+            .structures
+            .get(&skyhook_id)
+            .map(|s| s.state.clone())
+            .unwrap_or(prev_state);
+        if destroyed_now {
+            let mut ext =
+                crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+            let outcome = crate::services::quasar_sov_workforce::with_system_hub_network_reconcile(
+                snap,
+                &ctx.sde,
+                &pending,
+                sys_id,
+                now,
+                |snap| {
+                    let out =
+                        crate::services::station_structure::structure_lifecycle::destroy_structure(
+                            ctx,
+                            snap,
+                            &mut ext,
+                            skyhook_id,
+                            attacker_char_id,
+                            now,
+                        );
+                    cleanup_destroyed_skyhook_in_snap(snap, skyhook_id);
+                    Ok::<_, BridgeRpcError>(out)
+                },
+            )?;
+            crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+            pending_sig = outcome.pending_signal_tracker_notifs;
+            final_s_hp = 0.0;
+            final_a_hp = 0.0;
+            final_h_hp = 0.0;
+            final_state =
+                crate::services::station_structure::structure_lifecycle::STATE_DESTROYED.into();
+            state_changed = true;
+        }
+
+        let s_pct = (final_s_hp / SKYHOOK_BASE_SHIELD_HP).clamp(0.0, 1.0);
+        let a_pct = (final_a_hp / SKYHOOK_BASE_ARMOR_HP).clamp(0.0, 1.0);
+        let h_pct = (final_h_hp / SKYHOOK_BASE_HULL_HP).clamp(0.0, 1.0);
+        Ok((
+            sys_id,
+            final_s_hp,
+            final_a_hp,
+            final_h_hp,
+            s_pct,
+            a_pct,
+            h_pct,
+            applied,
+            hackable,
+            newly_hackable,
+            final_state,
+            state_changed,
+            destroyed_now,
+            pending_sig,
+        ))
+    })?;
+
+    if !pending_sig.is_empty() {
+        crate::services::fleet_social::fleet_social_scanning::dispatch_signal_tracker_notifications(
+            ctx,
+            pending_sig,
+        );
+    }
+    crate::services::sov_gameplay::flush_pending_quasar(ctx, &pending, now);
     ctx.emit_typed(
         NotificationTarget::SolarSystem(sys_id),
         crate::router::notify_registry::OnSkyhookSiloDamageUpdated {
             shield_percentage: shield_pct,
         },
     );
+    if state_changed {
+        crate::services::sov_services::emit_sov_structures_updated(ctx, sys_id, &[skyhook_id]);
+    }
     if newly_hackable || hackable_now {
         crate::services::sov_services::emit_skyhook_can_be_hacked(ctx, sys_id, skyhook_id);
     }
@@ -720,9 +965,14 @@ pub fn apply_skyhook_weapon_damage_typed(
         ("structureID", PyRep::Integer(skyhook_id)),
         ("state", PyRep::String(state_str)),
         ("shieldHP", PyRep::Real(shield_hp)),
+        ("armorHP", PyRep::Real(armor_hp)),
+        ("hullHP", PyRep::Real(hull_hp)),
         ("shieldPct", PyRep::Real(shield_pct)),
+        ("armorPct", PyRep::Real(armor_pct)),
+        ("hullPct", PyRep::Real(hull_pct)),
         ("appliedDamage", PyRep::Real(applied_dmg)),
         ("hackable", PyRep::Bool(hackable_now)),
+        ("destroyed", PyRep::Bool(destroyed_now)),
     ]))
 }
 
@@ -1059,16 +1309,31 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
         return;
     }
 
+    let pending: crate::services::quasar_sov_hub::PendingNotices =
+        std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
     let (newly_hackable, reinf_expired): (Vec<(u32, i64)>, Vec<(u32, i64)>) = ctx.db.with_mut_snapshot(|snap| {
         let mut opened = Vec::new();
         let mut expired_reinf = Vec::new();
         for id in skyhook_ids {
-            if snap
+            if let Some(sys_id) = snap
                 .structures
                 .get(&id)
-                .is_some_and(|s| s.state.eq_ignore_ascii_case("destroyed"))
+                .filter(|s| s.state.eq_ignore_ascii_case("destroyed"))
+                .map(|s| s.solar_system_id)
             {
-                cleanup_destroyed_skyhook_in_snap(snap, id);
+                if has_skyhook_runtime_state(snap, id) {
+                    let _ = crate::services::quasar_sov_workforce::with_system_hub_network_reconcile(
+                        snap,
+                        &ctx.sde,
+                        &pending,
+                        sys_id,
+                        now_unix,
+                        |snap| {
+                            cleanup_destroyed_skyhook_in_snap(snap, id);
+                            Ok::<_, ()>(())
+                        },
+                    );
+                }
                 continue;
             }
             if let Some(st) = snap.structures.get_mut(&id) {
@@ -1114,6 +1379,7 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
         }
         (opened, expired_reinf)
     });
+    crate::services::sov_gameplay::flush_pending_quasar(ctx, &pending, now_unix);
     for (sys_id, sh_id) in reinf_expired {
         crate::services::sov_services::emit_sov_structures_updated(ctx, sys_id, &[sh_id]);
     }

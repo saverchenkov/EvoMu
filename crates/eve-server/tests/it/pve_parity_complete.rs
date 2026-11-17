@@ -5372,17 +5372,13 @@ async fn test_pve_mercenary_tactical_operations_infomorph_and_isk() {
     });
     assert!(has_mto_journal, "Journal entry for MercenaryDenReward must be recorded");
 
-    // 4. Verify Infomorph reward credited to mercenary den cargo
-    assert!(
-        den_post.infomorphs > den_pre.infomorphs,
-        "Den infomorphs must increase upon MTO completion (was {}, now {})",
+    // 4. Below max Development (20 < 100), completing an MTO awards +10 Dev, -10 Anarchy,
+    // and 0 bonus infomorphs (`Mercenary_Tactical_Operation.md:24`).
+    assert_eq!(
+        den_post.infomorphs, den_pre.infomorphs,
+        "Den below MAX_LEVEL must not gain bonus infomorphs (was {}, now {})",
         den_pre.infomorphs,
         den_post.infomorphs
-    );
-    assert_eq!(
-        den_post.infomorphs - den_pre.infomorphs,
-        50,
-        "Den must gain +50 infomorphs"
     );
 
     // 5. Verify development level increased (+10) and anarchy reduced (-10)
@@ -5395,6 +5391,47 @@ async fn test_pve_mercenary_tactical_operations_infomorph_and_isk() {
             && !snap.sov_runtime.mercenary_activities.contains_key(&hex_str(&mto_uuid))
     });
     assert!(mto_ball_removed, "MTO site ball and activity must be removed after completion");
+
+    // 7. At max Development (100), completing an MTO awards +350 bonus infomorphs instead of +Dev.
+    let mto_max_ball_id = 1_892_200_002_i64;
+    let mto_max_uuid = vec![0x22; 16];
+    let max_hex = hex_str(&mto_max_uuid);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.sov_runtime.mercenary_dens.get_mut(&den_id).unwrap().development_level = 100;
+        snap.items.insert(
+            mto_max_ball_id,
+            InventoryItemRecord {
+                item_id: mto_max_ball_id,
+                type_id: 24_690,
+                owner_id: 500_010,
+                location_id: JITA as i64,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(mto_max_ball_id, [1.0, 2.0, 3.0]);
+        snap.sov_runtime.mercenary_activities.insert(
+            max_hex.clone(),
+            PersistedMercenaryActivity {
+                uuid: mto_max_uuid.clone(),
+                den_id,
+                solar_system_id: JITA,
+                dungeon_id: 4_500,
+                started: true,
+                started_by: PILOT_A,
+                expiry_unix: ctx.now_unix() + 1_800,
+                development_impact: 0,
+                anarchy_impact: -10,
+                infomorph_bonus: 350,
+            },
+        );
+        snap.sov_runtime.mto_site_balls.insert(mto_max_ball_id, max_hex);
+    });
+    on_space_entity_destroyed_ext(&ctx, JITA, Some(PILOT_A), mto_max_ball_id, 24_690, true);
+    let den_max_post = ctx.db.with_snapshot(|s| s.sov_runtime.mercenary_dens[&den_id].clone());
+    assert_eq!(den_max_post.development_level, 100);
+    assert_eq!(den_max_post.infomorphs - den_post.infomorphs, 350, "Max-development MTO must grant +350 bonus infomorphs");
     let _ = ship_id;
 }
 
