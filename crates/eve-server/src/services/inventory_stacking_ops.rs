@@ -4,9 +4,7 @@
 
 use crate::router::{context::BoundObjectEntry, ServerContext};
 use crate::services::inventory_bound;
-use crate::services::inventory_fitting::{
-    fitting_containers_ships, get_effective_corp_roles_at_location,
-};
+use crate::services::inventory_fitting::fitting_containers_ships;
 use eve_db::InventoryFlag;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -284,7 +282,13 @@ fn enforce_container_chain_policies(
         {
             let div_idx = (anc.flag as u16 - 116) as usize;
             let (is_ceo, role_mask) =
-                get_effective_corp_roles_at_location(ctx, corp_id, char_id, Some(anc.location_id));
+                crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap_at(
+                    snap,
+                    corp_id,
+                    char_id,
+                    Some(anc.location_id),
+                    ctx.now_unix(),
+                );
             let container_take = eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[div_idx];
             if !is_ceo
                 && !eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_DIRECTOR)
@@ -360,6 +364,7 @@ fn validate_location_reachability_in_snap(
     char_id: i64,
     pre_balls: &HashMap<i64, (glam::DVec3, f64)>,
     target_loc: i64,
+    target_bay_flag: Option<InventoryFlag>,
     chain: &ContainerChainInfo,
     access_err_code: &'static str,
     range_err_code: &'static str,
@@ -408,8 +413,9 @@ fn validate_location_reachability_in_snap(
 
     let is_in_space_root = (30_000_000..=39_999_999).contains(&chain.root_loc)
         && !snap.structures.contains_key(&chain.root_loc);
+    let container_hops = &chain.chain_locs[..chain.chain_locs.len().saturating_sub(1)];
     if check_container_owner || !is_in_space_root {
-        for &anc_id in &chain.chain_locs[..chain.chain_locs.len().saturating_sub(1)] {
+        for &anc_id in container_hops {
             if let Some(node) = snap.items.get(&anc_id) {
                 let allowed_container = session.has_gm_role()
                     || node.owner_id == char_id
@@ -417,6 +423,58 @@ fn validate_location_reachability_in_snap(
                     || (is_in_space_root && node.type_id == 23)
                     || (ch.corporation_id > 0 && node.owner_id == ch.corporation_id);
                 if !allowed_container {
+                    return Err(BridgeRpcError {
+                        code: access_err_code.into(),
+                        message: format!(
+                            "Character {char_id} cannot access inventory {target_loc}"
+                        ),
+                        client_error: None,
+                    });
+                }
+            }
+        }
+    } else if let Some(&root_obj_id) = container_hops.last() {
+        if let Some(root_item) = snap.items.get(&root_obj_id) {
+            let is_foreign_ship = root_item.owner_id != char_id
+                && root_item.owner_id != 0
+                && !session.has_gm_role()
+                && ctx
+                    .sde
+                    .types
+                    .get(&root_item.type_id)
+                    .is_some_and(|t| t.category_id == 6);
+            if is_foreign_ship {
+                let cs_state = fitting_containers_ships::read_container_ship_state_snap(snap);
+                let cfg = cs_state
+                    .ship_configs
+                    .get(&root_obj_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let in_same_fleet = snap.fleets.values().any(|fl| {
+                    fl.members.contains(&char_id) && fl.members.contains(&root_item.owner_id)
+                });
+                let same_corp = ch.corporation_id > 0
+                    && (root_item.owner_id == ch.corporation_id
+                        || snap
+                            .characters
+                            .get(&root_item.owner_id)
+                            .is_some_and(|rc| rc.corporation_id == ch.corporation_id));
+                let root_bay_flag = container_hops
+                    .len()
+                    .checked_sub(2)
+                    .and_then(|idx| snap.items.get(&container_hops[idx]).map(|c| c.flag))
+                    .or(target_bay_flag);
+                let bay_shared = match root_bay_flag {
+                    Some(InventoryFlag::FleetHangar) => {
+                        (in_same_fleet && cfg.allow_fleet_hangar)
+                            || (same_corp && cfg.allow_corp_hangar)
+                    }
+                    Some(InventoryFlag::ShipHangar) => {
+                        (in_same_fleet && cfg.allow_fleet_smb) || (same_corp && cfg.allow_corp_smb)
+                    }
+                    _ => false,
+                };
+                if !bay_shared {
                     return Err(BridgeRpcError {
                         code: access_err_code.into(),
                         message: format!(
@@ -594,6 +652,7 @@ fn execute_split_stack_in_tx(
             char_id,
             &pre_balls,
             item.location_id,
+            Some(item.flag),
             &chain,
             "SplitFailed",
             "SplitFailed",
@@ -911,7 +970,7 @@ pub(in crate::services) fn handle_stack_ops(
                         "StackFailed",
                         &format!("Items {src_id}/{dst_id}"),
                     )?;
-                    if checked_reachability.insert(src.location_id) {
+                    if checked_reachability.insert((src.location_id, src.flag as u16)) {
                         validate_location_reachability_in_snap(
                             ctx,
                             guard,
@@ -920,6 +979,7 @@ pub(in crate::services) fn handle_stack_ops(
                             char_id,
                             &pre_balls,
                             src.location_id,
+                            Some(src.flag),
                             &chain,
                             "DestinationAccessDenied",
                             "OutOfRange",
@@ -1012,7 +1072,7 @@ pub(in crate::services) fn handle_stack_ops(
                             reject_sealed_wrap: true,
                             reject_alsc_locked: true,
                             reject_locked_or_escrow: false,
-                            check_corp_take_role: false,
+                            check_corp_take_role: true,
                             locked_err_code: "StackFailed",
                         },
                     )?;
@@ -1252,6 +1312,7 @@ pub(in crate::services) fn handle_stack_ops(
                     char_id,
                     &pre_balls,
                     target_loc,
+                    Some(target_flag),
                     &chain,
                     "DestinationAccessDenied",
                     "OutOfRange",

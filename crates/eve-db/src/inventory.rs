@@ -1420,7 +1420,7 @@ impl WorldStateSnapshot {
         let mut outcome = StackAllOutcome::default();
         for plan in plans {
             for src_id in plan.src_ids {
-                if let Some(old_src) = self.items.remove(&src_id) {
+                if let Some(old_src) = self.remove_system_cleanup_item(src_id) {
                     outcome.deleted_sources.push(old_src);
                     outcome.merged_count += 1;
                 }

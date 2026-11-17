@@ -2720,7 +2720,7 @@ fn stack_ops_reject_auth_colocation_acl_before_password_oracle_and_run_atomicall
         );
     }
 
-    // 4. Corp container take role is validated before container password
+    // 4. Corp container take role is validated before container password across StackAll, MultiMerge, and SplitStack
     for pw in ["wrong", "corppw"] {
         let mut kw = HashMap::new();
         kw.insert("locationID".into(), PyRep::Integer(corp_cont));
@@ -2732,7 +2732,60 @@ fn stack_ops_reject_auth_colocation_acl_before_password_oracle_and_run_atomicall
                 .code,
             "CorpRoleDenied"
         );
+
+        let mut kw_pw = HashMap::new();
+        kw_pw.insert("password".into(), PyRep::String(pw.into()));
+        let merge_corp = PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(c_1),
+            PyRep::Integer(c_2),
+            PyRep::None,
+        ])]);
+        assert_eq!(
+            handle_stack_ops(
+                &ctx,
+                &mut mate_sess,
+                Some(&make_bound(station_a, corp_mate_id)),
+                "invbroker",
+                "MultiMerge",
+                &[merge_corp],
+                &kw_pw,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "CorpRoleDenied"
+        );
+        assert_eq!(
+            handle_stack_ops(
+                &ctx,
+                &mut mate_sess,
+                Some(&make_bound(station_a, corp_mate_id)),
+                "invbroker",
+                "SplitStack",
+                &[
+                    PyRep::Integer(station_a),
+                    PyRep::Integer(c_1),
+                    PyRep::Integer(5),
+                ],
+                &kw_pw,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "CorpRoleDenied"
+        );
     }
+    let st_after_corp_denied = read_container_ship_state(&ctx);
+    assert!(!st_after_corp_denied
+        .unlocked_containers
+        .contains(&(corp_cont, corp_mate_id)));
+    assert!(!st_after_corp_denied
+        .unlocked_containers
+        .contains(&(corp_mate_id, corp_cont)));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&c_1).map(|i| i.quantity), Some(10));
+        assert_eq!(snap.items.get(&c_2).map(|i| i.quantity), Some(12));
+    });
 
     // 5. Failed SplitStack with matching password MUST NOT persist unlocked_containers
     let commits_before_fail_split = ctx.db.tx_commit_count();
@@ -2963,6 +3016,325 @@ fn get_inventory_mgr_bound_split_stack_works_when_docked_in_upwell_structure() {
     .expect("GetInventoryMgr-bound SplitStack inside Upwell container with ACL+pw must succeed");
     assert_eq!(split_cont.dict_get("originalQuantity"), Some(&PyRep::Integer(40)));
     assert_eq!(split_cont.dict_get("newQuantity"), Some(&PyRep::Integer(20)));
+}
+
+#[test]
+fn corp_container_stack_ops_evaluate_due_pending_role_grants_without_reentrant_lock() {
+    let ctx = test_ctx();
+    let grantee_id = 92_000_078;
+    let unmatured_id = 92_000_079;
+    let corp_id = 98_000_078;
+    let station_id = 60_003_760;
+    let sys_id = 30_000_142;
+    let ship_a = 1_000_278_001;
+    let ship_b = 1_000_278_002;
+    let corp_cont = 1_000_278_010;
+    let g_1 = 1_000_278_020;
+    let g_2 = 1_000_278_021;
+    let g_3 = 1_000_278_022;
+    let u_1 = 1_000_278_030;
+    let u_2 = 1_000_278_031;
+
+    ensure_char(&ctx, grantee_id, corp_id, Some(station_id), sys_id, ship_a);
+    ensure_char(&ctx, unmatured_id, corp_id, Some(station_id), sys_id, ship_b);
+    insert_item(&ctx, ship_a, 587, grantee_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, ship_b, 587, unmatured_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, corp_cont, 17_366, corp_id, station_id, InventoryFlag::CorpSAG1, 1, true);
+
+    insert_item(&ctx, g_1, 34, grantee_id, corp_cont, InventoryFlag::Cargo, 20, false);
+    insert_item(&ctx, g_2, 34, grantee_id, corp_cont, InventoryFlag::Cargo, 30, false);
+    insert_item(&ctx, g_3, 34, grantee_id, corp_cont, InventoryFlag::Cargo, 50, false);
+    insert_item(&ctx, u_1, 34, unmatured_id, corp_cont, InventoryFlag::Cargo, 12, false);
+    insert_item(&ctx, u_2, 34, unmatured_id, corp_cont, InventoryFlag::Cargo, 18, false);
+
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Grant Test Corp".into();
+        corp.ticker = "GTC".into();
+        corp.ceo_id = 92_000_999;
+        corp.members = HashSet::from([92_000_999, grantee_id, unmatured_id]);
+        snap.corporations.insert(corp_id, corp);
+        let gov = snap.corp_governance.entry(corp_id).or_default();
+        // Matured (due) pending grant exercises the `has_due == true` path without 40->40 deadlock.
+        gov.pending_role_grants
+            .insert(grantee_id, (eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[0], 1));
+        gov.pending_role_grants.insert(
+            unmatured_id,
+            (eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[0], now + 86_400),
+        );
+        // Also seed metadata on g_2/g_3 to confirm remove_system_cleanup_item cleanup on StackAll.
+        snap.item_custom_names.insert(g_2, "Old Stack Label".into());
+        snap.item_positions.insert(g_2, [1.0, 2.0, 3.0]);
+        snap.item_custom_names.insert(g_3, "Old Stack Label 3".into());
+        snap.item_positions.insert(g_3, [4.0, 5.0, 6.0]);
+    });
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.container_passwords.insert(corp_cont, "grantpw".into());
+        save_container_ship_state(&ctx, &st);
+    }
+
+    let mut grantee_sess =
+        make_session(grantee_id, corp_id, Some(station_id), Some(sys_id), Some(ship_a));
+    let mut unmatured_sess =
+        make_session(unmatured_id, corp_id, Some(station_id), Some(sys_id), Some(ship_b));
+    let mut kw_pw = HashMap::new();
+    kw_pw.insert("password".into(), PyRep::String("grantpw".into()));
+
+    // 1. Unmatured grant still denies SplitStack/MultiMerge/StackAll with CorpRoleDenied and no deadlock
+    let commits_unmatured = ctx.db.tx_commit_count();
+    assert_eq!(
+        handle_stack_ops(
+            &ctx,
+            &mut unmatured_sess,
+            Some(&make_bound(station_id, unmatured_id)),
+            "invbroker",
+            "SplitStack",
+            &[
+                PyRep::Integer(station_id),
+                PyRep::Integer(u_1),
+                PyRep::Integer(4),
+            ],
+            &kw_pw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+    let merge_u = PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::Integer(u_1),
+        PyRep::Integer(u_2),
+        PyRep::None,
+    ])]);
+    assert_eq!(
+        handle_stack_ops(
+            &ctx,
+            &mut unmatured_sess,
+            Some(&make_bound(station_id, unmatured_id)),
+            "invbroker",
+            "MultiMerge",
+            &[merge_u],
+            &kw_pw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        handle_stack_ops(
+            &ctx,
+            &mut unmatured_sess,
+            Some(&make_bound(corp_cont, unmatured_id)),
+            "invbroker",
+            "StackAll",
+            &[PyRep::Integer(InventoryFlag::Cargo as i64)],
+            &kw_pw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(ctx.db.tx_commit_count(), commits_unmatured);
+
+    // 2. Matured (due) grant succeeds across SplitStack, MultiMerge, and StackAll in single txs
+    let split_res = handle_stack_ops(
+        &ctx,
+        &mut grantee_sess,
+        Some(&make_bound(station_id, grantee_id)),
+        "invbroker",
+        "SplitStack",
+        &[
+            PyRep::Integer(station_id),
+            PyRep::Integer(g_1),
+            PyRep::Integer(5),
+        ],
+        &kw_pw,
+    )
+    .unwrap()
+    .expect("due pending role grant must allow SplitStack without re-entrant lock panic");
+    assert_eq!(split_res.dict_get("originalQuantity"), Some(&PyRep::Integer(15)));
+
+    let mut st = read_container_ship_state(&ctx);
+    st.unlocked_containers.clear();
+    save_container_ship_state(&ctx, &st);
+
+    let merge_g = PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::Integer(g_2),
+        PyRep::Integer(g_1),
+        PyRep::None,
+    ])]);
+    handle_stack_ops(
+        &ctx,
+        &mut grantee_sess,
+        Some(&make_bound(station_id, grantee_id)),
+        "invbroker",
+        "MultiMerge",
+        &[merge_g],
+        &kw_pw,
+    )
+    .unwrap()
+    .expect("due pending role grant must allow MultiMerge without re-entrant lock panic");
+
+    let mut st2 = read_container_ship_state(&ctx);
+    st2.unlocked_containers.clear();
+    save_container_ship_state(&ctx, &st2);
+
+    let stack_res = handle_stack_ops(
+        &ctx,
+        &mut grantee_sess,
+        Some(&make_bound(corp_cont, grantee_id)),
+        "invbroker",
+        "StackAll",
+        &[PyRep::Integer(InventoryFlag::Cargo as i64)],
+        &kw_pw,
+    )
+    .unwrap()
+    .expect("due pending role grant must allow StackAll without re-entrant lock panic");
+    assert_eq!(stack_res.dict_get("mergedCount"), Some(&PyRep::Integer(2)));
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&g_3));
+        assert!(!snap.item_custom_names.contains_key(&g_3));
+        assert!(!snap.item_positions.contains_key(&g_3));
+    });
+}
+
+#[test]
+fn in_space_foreign_ship_nested_container_rejects_before_password_oracle() {
+    let ctx = test_ctx();
+    let attacker_id = 92_000_080;
+    let victim_id = 92_000_081;
+    let corp_a = 98_000_080;
+    let corp_v = 98_000_081;
+    let sys_id = 30_000_142;
+    let attacker_ship = 1_000_280_001;
+    let victim_ship = 1_000_280_002;
+    let nested_cont = 1_000_280_010;
+    let s_1 = 1_000_280_020;
+    let s_2 = 1_000_280_021;
+
+    ensure_char(&ctx, attacker_id, corp_a, None, sys_id, attacker_ship);
+    ensure_char(&ctx, victim_id, corp_v, None, sys_id, victim_ship);
+    insert_item(&ctx, attacker_ship, 587, attacker_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, victim_ship, 587, victim_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, nested_cont, 17_366, victim_id, victim_ship, InventoryFlag::Cargo, 1, true);
+    insert_item(&ctx, s_1, 34, attacker_id, nested_cont, InventoryFlag::Cargo, 20, false);
+    insert_item(&ctx, s_2, 34, attacker_id, nested_cont, InventoryFlag::Cargo, 30, false);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(attacker_ship, [0.0, 0.0, 0.0]);
+        snap.item_positions.insert(victim_ship, [500.0, 0.0, 0.0]);
+    });
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.container_passwords.insert(nested_cont, "shippw".into());
+        save_container_ship_state(&ctx, &st);
+    }
+
+    let mut attacker_sess =
+        make_session(attacker_id, corp_a, None, Some(sys_id), Some(attacker_ship));
+
+    // 1. Unshared foreign ship hull within 2_500m must reject before container password oracle
+    for pw in ["wrong", "shippw"] {
+        let mut kw = HashMap::new();
+        kw.insert("password".into(), PyRep::String(pw.into()));
+        assert_eq!(
+            handle_stack_ops(
+                &ctx,
+                &mut attacker_sess,
+                Some(&make_bound(nested_cont, attacker_id)),
+                "invbroker",
+                "SplitStack",
+                &[
+                    PyRep::Integer(nested_cont),
+                    PyRep::Integer(s_1),
+                    PyRep::Integer(5),
+                ],
+                &kw,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "SplitFailed"
+        );
+        let merge_nested = PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(s_1),
+            PyRep::Integer(s_2),
+            PyRep::None,
+        ])]);
+        assert_eq!(
+            handle_stack_ops(
+                &ctx,
+                &mut attacker_sess,
+                Some(&make_bound(nested_cont, attacker_id)),
+                "invbroker",
+                "MultiMerge",
+                &[merge_nested],
+                &kw,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "DestinationAccessDenied"
+        );
+    }
+
+    // 2. Move nested_cont into shared FleetHangar and add fleet membership -> reaches container pw check
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&nested_cont).unwrap().flag = InventoryFlag::FleetHangar;
+        snap.fleets.insert(
+            777_001,
+            eve_db::FleetRecord {
+                fleet_id: 777_001,
+                boss_id: victim_id,
+                members: vec![victim_id, attacker_id],
+                ..Default::default()
+            },
+        );
+    });
+    let mut kw_wrong = HashMap::new();
+    kw_wrong.insert("password".into(), PyRep::String("wrong".into()));
+    assert_eq!(
+        handle_stack_ops(
+            &ctx,
+            &mut attacker_sess,
+            Some(&make_bound(nested_cont, attacker_id)),
+            "invbroker",
+            "SplitStack",
+            &[
+                PyRep::Integer(nested_cont),
+                PyRep::Integer(s_1),
+                PyRep::Integer(5),
+            ],
+            &kw_wrong,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ALSCPasswordRequired"
+    );
+    let mut kw_right = HashMap::new();
+    kw_right.insert("password".into(), PyRep::String("shippw".into()));
+    let ok_split = handle_stack_ops(
+        &ctx,
+        &mut attacker_sess,
+        Some(&make_bound(nested_cont, attacker_id)),
+        "invbroker",
+        "SplitStack",
+        &[
+            PyRep::Integer(nested_cont),
+            PyRep::Integer(s_1),
+            PyRep::Integer(5),
+        ],
+        &kw_right,
+    )
+    .unwrap()
+    .expect("shared fleet hangar nested container with valid password must allow SplitStack");
+    assert_eq!(ok_split.dict_get("originalQuantity"), Some(&PyRep::Integer(15)));
 }
 
 
