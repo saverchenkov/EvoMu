@@ -153,6 +153,11 @@ async fn fit_and_load_turrets(
     gun_ids
 }
 
+/// Lock `target_id` from `attacker`'s current position.
+///
+/// Preserves explicit ball placement so locking a distant object (e.g., a gate
+/// gun within target lock range) does not silently move `attacker` out of
+/// weapon range of other targets.
 async fn lock_target_wire(
     ctx: &ServerContext,
     attacker: &mut LivePilot,
@@ -160,16 +165,6 @@ async fn lock_target_wire(
     target_id: i64,
 ) {
     let sys = ctx.systems.get_or_spawn(sys_id);
-    if let (Some((_, a)), Some((_, b))) = (
-        sys.get_ball_snapshot(attacker.ship_id).await.unwrap(),
-        sys.get_ball_snapshot(target_id).await.unwrap(),
-    ) {
-        if a.position.distance(b.position) > 3_500.0 {
-            sys.set_ball_position(attacker.ship_id, b.position + DVec3::new(2_000.0, 0.0, 0.0))
-                .await;
-            sys.step_manual(0.1).await.unwrap();
-        }
-    }
     let d_oid = wire_bind_oid(ctx, &mut attacker.sess, "dogmaIM", PyRep::Integer(attacker.ship_id)).await;
     wire_ok(ctx, &mut attacker.sess, "dogmaIM", Some(d_oid), "AddTarget", &[PyRep::Integer(target_id)]).await;
     for _ in 0..20 {
@@ -196,6 +191,16 @@ async fn shoot_target_until_destroyed(
     target_id: i64,
 ) {
     let sys = ctx.systems.get_or_spawn(sys_id);
+    if let (Some((_, a)), Some((_, b))) = (
+        sys.get_ball_snapshot(attacker.ship_id).await.unwrap(),
+        sys.get_ball_snapshot(target_id).await.unwrap(),
+    ) {
+        if a.position.distance(b.position) > 3_500.0 {
+            sys.set_ball_position(attacker.ship_id, b.position + DVec3::new(2_000.0, 0.0, 0.0))
+                .await;
+            sys.step_manual(0.1).await.unwrap();
+        }
+    }
     lock_target_wire(ctx, attacker, sys_id, target_id).await;
     for _ in 0..300 {
         if sys.get_ball_snapshot(target_id).await.unwrap().is_none() {
