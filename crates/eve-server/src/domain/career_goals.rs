@@ -36,7 +36,9 @@ pub fn credit_character_reward_in_snap(
         }
         (next_bal, ch.free_skill_points, ch.corporation_id)
     };
-    if evermarks > 0 && char_corp > 0 {
+    // Per AIR Daily Goals wiki semantics, EverMarks earned by a pilot are also mirrored
+    // to their corporation only when in a player corporation (>= 98_000_000), never an NPC corp.
+    if evermarks > 0 && char_corp >= 98_000_000 {
         let corp_em = snap.corp_lp_balances.entry((char_corp, 1_000_419)).or_insert(0);
         *corp_em = corp_em.saturating_add(evermarks);
     }

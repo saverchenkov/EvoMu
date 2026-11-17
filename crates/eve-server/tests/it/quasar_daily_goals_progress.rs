@@ -96,6 +96,12 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
     common::pin_clock(&ctx);
 
     let char_id = 90_000_001u32;
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters
+            .get_mut(&(char_id as i64))
+            .expect("char 90_000_001")
+            .corporation_id = 98_000_001;
+    });
     let mut sess = SessionState::new(11_101);
     sess.user_id = Some(1);
     sess.character_id = Some(char_id as i64);
@@ -104,18 +110,18 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
     sess.station_id = Some(60_003_760);
     sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
 
-    // 1. Out-of-the-box ServerContext seeds all 5 V24 AIR Daily Operations from contributionmethods.fsdbinary
+    // 1. Out-of-the-box ServerContext seeds all 6 V24 AIR Daily Operations from contributionmethods.fsdbinary
     let methods = ctx
         .sde
         .contribution_methods()
         .expect("SDE contribution_methods must load from contributionmethods.fsdbinary");
-    let mut expected_titles = Vec::new();
     for key in [
         "KillNPC",
         "MineOre",
         "ScanSignature",
         "SpaceJump",
         "ManufactureItem",
+        "DamageShip",
     ] {
         let entry = methods.get(key).unwrap_or_else(|| {
             panic!(
@@ -123,48 +129,116 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
                 methods.keys().collect::<Vec<_>>()
             )
         });
-        let title_id = entry
-            .get("titleID")
-            .and_then(|v| v.as_u64())
-            .filter(|&v| v > 0)
-            .unwrap_or_else(|| panic!("SDE contribution_methods[{key}] missing positive titleID")) as u32;
-        expected_titles.push(title_id);
+        assert!(
+            entry.get("titleID").and_then(|v| v.as_u64()).unwrap_or(0) > 0,
+            "SDE contribution_methods[{key}] missing positive titleID"
+        );
     }
+    let catalog_ids: HashMap<&str, u32> = ctx
+        .sde
+        .daily_goal_catalog
+        .iter()
+        .map(|entry| (entry.label.as_str(), entry.message_id))
+        .collect();
+    let expected_titles: Vec<u32> = [
+        "DestroyNoncapsuleers_name",
+        "MineOre_name",
+        "ScanSignatures_name",
+        "JumpGoal_name",
+        "ManufactureItem_name",
+        "DamageCapsuleers_name",
+        "DailyCompletionBonus_name",
+    ]
+    .into_iter()
+    .map(|label| {
+        *catalog_ids
+            .get(label)
+            .unwrap_or_else(|| panic!("SDE daily_goal_catalog missing {label}"))
+    })
+    .collect();
+
+    let (initial_isk, initial_sp, initial_em, initial_corp_em) = ctx.db.with_snapshot(|s| {
+        let ch = &s.characters[&(char_id as i64)];
+        (
+            ch.balance.0,
+            ch.free_skill_points,
+            ch.loyalty_points.get(&1_000_419).copied().unwrap_or(0),
+            s.corp_lp_balances.get(&(98_000_001, 1_000_419)).copied().unwrap_or(0),
+        )
+    });
+
+    let inspect_active_day = |ctx_ref: &ServerContext, fields: &[&WireField], seen_titles: &mut Vec<u32>| {
+        // Inspect active daily goals via local manager + wire responses cleanly.
+        let goals = ctx_ref.quasar_gateway.progression.daily_goals.get_or_init_goals_at(char_id, ctx_ref.now_unix());
+        assert_eq!(fields.len(), 6, "Must expose 5 regular goals (4 career paths + 1 General) + 1 DailyBonus");
+        assert_eq!(goals.len(), 6);
+        let mut reg_careers: Vec<u32> = goals.iter().filter(|g| g.template.category != 6).map(|g| g.template.career).collect();
+        reg_careers.sort_unstable();
+        assert_eq!(reg_careers, vec![0, 1, 2, 3, 4], "Regular daily goals must cover careers 0..=4 without duplicates");
+        let _ = seen_titles;
+        goals
+    };
 
     let day0_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetAllCurrentRequest", Vec::new()).await;
     assert_eq!(day0_rsp.status_code, STATUS_OK);
     let day0_wm = WireMessage::decode(&day0_rsp.payload.unwrap().value).expect("decode day0 GetAllCurrentResponse");
     let day0_fields: Vec<&WireField> = day0_wm.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(day0_fields.len(), 5, "ServerContext must seed 4 rotating SDE daily goals + 1 daily bonus goal without manual setup");
 
     let mut seen_title_ids = Vec::new();
-    for f in &day0_fields {
-        let goal_dyn = reg
-            .decode_dynamic("eve_public.dailygoal.api.GetAllCurrentResponse.Goal", f.value.as_bytes().unwrap())
-            .expect("decode Day 0 Goal");
-        let Some(DynamicValue::Message(id_dyn)) = goal_dyn.get(1) else { panic!("missing Goal.id"); };
-        let Some(DynamicValue::Bytes(b)) = id_dyn.get(1) else { panic!("missing uuid bytes"); };
-        let mut arr = [0u8; 16];
-        arr.copy_from_slice(b);
-        let get_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetRequest", make_uuid_request(arr)).await;
+    let day0_goals = inspect_active_day(&ctx, &day0_fields, &mut seen_title_ids);
+    assert!(day0_goals.iter().any(|g| g.template.category == 2), "Day 0 (even day_bucket) must activate MineOre");
+    assert!(day0_goals.iter().any(|g| g.template.category == 7), "Day 0 must include DamageShip (Soldier of Fortune)");
+    for g in &day0_goals {
+        let get_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetRequest", make_uuid_request(g.uuid)).await;
         assert_eq!(get_rsp.status_code, STATUS_OK);
-        let get_dyn = reg.decode_dynamic("eve_public.dailygoal.api.GetResponse", &get_rsp.payload.unwrap().value).expect("decode GetResponse");
+        let get_dyn = reg.decode_dynamic("eve_public.dailygoal.api.GetResponse", &get_rsp.payload.unwrap().value).expect("decode Day 0 GetResponse");
         if let Some(DynamicValue::Message(attrs)) = get_dyn.get(1) {
             if let Some(DynamicValue::Message(name_msg)) = attrs.get(1) {
                 if let Some(DynamicValue::Uint32(title_id)) = name_msg.get(1) {
                     seen_title_ids.push(*title_id);
                 }
             }
+            if g.template.category == 3 {
+                if let Some(DynamicValue::Message(desc_msg)) = attrs.get(2) {
+                    assert_ne!(
+                        desc_msg.get(1),
+                        Some(&DynamicValue::Uint32(697_689)),
+                        "ScanSignature must not carry Scan15_description"
+                    );
+                }
+            }
         }
+        let expected_earnings = if g.template.category == 6 { 1 } else { 2 };
+        assert!(
+            matches!(get_dyn.get(4), Some(DynamicValue::Repeated(v)) if v.len() == expected_earnings),
+            "Daily goal category {} must carry {expected_earnings} Earning entries (ISK+EM for regular, SP for bonus)",
+            g.template.category
+        );
     }
 
-    // Advance one day so SpaceJump (Day 0) + ScanSignature (Day 1) both appear across consecutive days
+    // Complete MineOre on Day 0 when MineOre is the active Industrialist slot
+    eve_server::services::space_mining_harvest::dispatch_mining_gameplay_events(
+        &ctx,
+        char_id as i64,
+        2_000,
+        30_000_142,
+        1230,
+    );
+    let day0_after_mine = ctx.quasar_gateway.progression.daily_goals.get_or_init_goals_at(char_id, ctx.now_unix());
+    assert!(
+        day0_after_mine.iter().find(|g| g.template.category == 2).unwrap().completed,
+        "MineOre must complete via live mining event on Day 0"
+    );
+
+    // Advance one day (Day 1, odd day_bucket) so Industrialist rotates cleanly to ManufactureItem
     ctx.advance_virtual_clock(86_400);
     let all_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetAllCurrentRequest", Vec::new()).await;
     assert_eq!(all_rsp.status_code, STATUS_OK);
     let wm = WireMessage::decode(&all_rsp.payload.unwrap().value).expect("decode GetAllCurrentResponse");
     let goal_fields: Vec<&WireField> = wm.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(goal_fields.len(), 5, "ServerContext must seed 4 rotating SDE daily goals + 1 daily bonus goal without manual setup");
+    let day1_goals = inspect_active_day(&ctx, &goal_fields, &mut seen_title_ids);
+    assert!(day1_goals.iter().any(|g| g.template.category == 5), "Day 1 (odd day_bucket) must activate ManufactureItem");
+    assert!(!day1_goals.iter().any(|g| g.template.category == 2), "MineOre must rotate out on Day 1 when ManufactureItem is active");
 
     let mut uuids = Vec::new();
     for f in &goal_fields {
@@ -185,7 +259,7 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
         uuids.push(arr);
     }
 
-    // Verify GetRequest decodes real SDE contributionmethods.fsdbinary titleIDs & Paragon assigner 1_000_419
+    // Verify GetRequest decodes real V24 localization titleIDs & Paragon assigner 1_000_419
     for uuid in &uuids {
         let get_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetRequest", make_uuid_request(*uuid)).await;
         assert_eq!(get_rsp.status_code, STATUS_OK);
@@ -206,12 +280,11 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
             panic!("missing assigner");
         };
         assert_eq!(assigner_msg.get(1), Some(&DynamicValue::Uint32(1_000_419)));
-        assert!(matches!(get_dyn.get(4), Some(DynamicValue::Repeated(v)) if v.len() == 1));
     }
     for expected_title in expected_titles {
         assert!(
             seen_title_ids.contains(&expected_title),
-            "Missing SDE contributionmethod titleID {expected_title} in {seen_title_ids:?}"
+            "Missing SDE daily goal titleID {expected_title} in {seen_title_ids:?}"
         );
     }
 
@@ -225,12 +298,7 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
         .expect("take_stream_receiver");
     let _ = drain_notices(&mut rx);
 
-    let (initial_isk, initial_sp) = ctx.db.with_snapshot(|s| {
-        let ch = &s.characters[&(char_id as i64)];
-        (ch.balance.0, ch.free_skill_points)
-    });
-
-    // 2. Trigger real gameplay pathways across all 5 daily goal categories:
+    // 2. Trigger real gameplay pathways on Day 1:
     // (a) ScanSignature (target = 5)
     for sig_id in 800_001..=800_005 {
         ctx.mark_signature_scanned(char_id as i64, 30_000_142, sig_id);
@@ -249,17 +317,7 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
         "Completing ScanSignature target must emit CompletedNotice"
     );
 
-    // (b) MineAsteroid (target = 2,000 units)
-    eve_server::services::space_mining_harvest::dispatch_mining_gameplay_events(
-        &ctx,
-        char_id as i64,
-        2_000,
-        30_000_142,
-        1230,
-    );
-    let _ = drain_notices(&mut rx);
-
-    // (c) ManufactureItem (target = 1 job delivered via industryManager.CompleteJob)
+    // (b) ManufactureItem (target = 1 job delivered via industryManager.CompleteJob)
     let now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
@@ -305,7 +363,7 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
     .expect("CompleteJob manufacturing");
     let _ = drain_notices(&mut rx);
 
-    // (d) DestroyNPC (1 NPC kill -> partial progress 1/25)
+    // (c) DestroyNPC (1 NPC kill -> partial progress 1/25)
     let npc_ball = eve_server::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(
         &ctx,
         30_000_142,
@@ -324,7 +382,7 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
     .await;
     let _ = drain_notices(&mut rx);
 
-    // 3. Verify 3 completed goals (ScanSignature, MineAsteroid, ManufactureItem) and 1 incomplete goal (DestroyNPC)
+    // 3. Verify 3 completed goals on Day 1 (ScanSignature, ManufactureItem, DailyBonus) and 1 incomplete goal (DestroyNPC)
     let comp_rsp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -334,7 +392,7 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
     .await;
     assert_eq!(comp_rsp.status_code, STATUS_OK);
     let comp_wm = WireMessage::decode(&comp_rsp.payload.unwrap().value).expect("decode completed");
-    assert_eq!(comp_wm.fields.iter().filter(|f| f.field_number == 1).count(), 4);
+    assert_eq!(comp_wm.fields.iter().filter(|f| f.field_number == 1).count(), 3);
 
     let goals_now = ctx.quasar_gateway.progression.daily_goals.get_or_init_goals(char_id);
     let combat_goal = goals_now.iter().find(|g| g.template.category == 1).unwrap();
@@ -353,7 +411,7 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
     .await;
     assert_eq!(bad_redeem.status_code, STATUS_FORBIDDEN);
 
-    // Positive RedeemRequest on ScanSignature -> credits ISK & SP and emits RedeemedNotice
+    // Positive RedeemRequest on ScanSignature -> credits ISK & EverMarks and emits RedeemedNotice
     let redeem_rsp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -380,16 +438,23 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
     .await;
     assert_eq!(dup_redeem.status_code, STATUS_FORBIDDEN);
 
-    // RedeemAllRequest claims the remaining 2 completed goals (MineAsteroid + ManufactureItem)
+    // RedeemAllRequest claims the remaining completed goals (ManufactureItem + DailyBonus)
     let redeem_all_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.RedeemAllRequest", Vec::new()).await;
     assert_eq!(redeem_all_rsp.status_code, STATUS_OK);
 
-    let (after_isk, after_sp) = ctx.db.with_snapshot(|s| {
+    let (after_isk, after_sp, after_em, after_corp_em) = ctx.db.with_snapshot(|s| {
         let ch = &s.characters[&(char_id as i64)];
-        (ch.balance.0, ch.free_skill_points)
+        (
+            ch.balance.0,
+            ch.free_skill_points,
+            ch.loyalty_points.get(&1_000_419).copied().unwrap_or(0),
+            s.corp_lp_balances.get(&(98_000_001, 1_000_419)).copied().unwrap_or(0),
+        )
     });
-    // 3 individual goals x 500,000 ISK = 1,500,000 ISK; DailyBonus awards 10,000 SP (0 ISK).
-    assert_eq!(after_isk, initial_isk + IskCents::from_isk(1_500_000).0);
+    // 2 individual goals on Day 1 x (500,000 ISK + 500 EM) = 1,000,000 ISK + 1,000 EM; DailyBonus awards 10,000 SP (0 ISK/0 EM).
+    assert_eq!(after_isk, initial_isk + IskCents::from_isk(1_000_000).0);
+    assert_eq!(after_em, initial_em + 1_000);
+    assert_eq!(after_corp_em, initial_corp_em + 1_000);
     assert!((after_sp - (initial_sp + 10_000.0)).abs() < 1e-6);
     assert_eq!(
         ctx.quasar_gateway
@@ -403,7 +468,7 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
     // 4. Advance virtual clock by 86,400s (next 11:00 UTC downtime bucket) -> daily goals reset cleanly
     ctx.advance_virtual_clock(86_400);
     let next_day_goals = ctx.quasar_gateway.progression.daily_goals.get_or_init_goals(char_id);
-    assert_eq!(next_day_goals.len(), 5);
+    assert_eq!(next_day_goals.len(), 6);
     assert!(next_day_goals
         .iter()
         .all(|g| g.current_progress == 0 && !g.completed && !g.claimed));
@@ -432,7 +497,7 @@ async fn test_daily_goals_reset_at_1100_utc_downtime_not_midnight() {
         .progression
         .daily_goals
         .get_or_init_goals_at(char_id, ctx.now_unix());
-    assert_eq!(goals_init.len(), 5);
+    assert_eq!(goals_init.len(), 6);
     let scan_uuid = goals_init.iter().find(|g| g.template.category == 3).unwrap().uuid;
 
     // Progress & claim ScanSignature at 23:59 UTC
@@ -448,6 +513,18 @@ async fn test_daily_goals_reset_at_1100_utc_downtime_not_midnight() {
     )
     .await;
     assert_eq!(redeem_rsp.status_code, STATUS_OK);
+    // char 90_000_002 belongs to NPC corp 1_000_045 (< 98_000_000): pilot keeps 500 EM, NPC corp stays 0 EM
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(
+            s.characters[&(char_id as i64)]
+                .loyalty_points
+                .get(&1_000_419)
+                .copied()
+                .unwrap_or(0),
+            500
+        );
+        assert_eq!(s.corp_lp_balances.get(&(1_000_045, 1_000_419)).copied().unwrap_or(0), 0);
+    });
 
     // Advance 120s to 00:01 UTC (2026-01-02 00:01:00 UTC): must NOT reset across 00:00 UTC
     ctx.advance_virtual_clock(120);

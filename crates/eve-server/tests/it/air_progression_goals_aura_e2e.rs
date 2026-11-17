@@ -187,12 +187,12 @@ async fn achievements_sde_rewards_showcase_and_admin_progression() {
     let achs = ctx.quasar_gateway.progression.achievements.get_or_init_achievements(cid as u32);
     assert!(!achs.is_empty(), "achievement manager must populate SDE definitions");
     assert!(
-        achs.iter().all(|a| a.def.reward_isk == 0 && a.def.reward_sp == 0 && a.def.score == 0 && a.def.category_id == 0),
-        "default client achievements.static definitions must omit fabricated categories, scores, and rewards"
+        achs.iter().all(|a| a.def.reward_isk == 0 && a.def.reward_sp == 0 && a.def.score == 0 && (1..=5).contains(&a.def.category_id)),
+        "default client achievements.static definitions assign DERIVED categories 1..=5 while omitting scores and rewards"
     );
     let sample = &achs[0];
     let aid = sample.def.id;
-    let cat_id = sample.def.category_id.max(1);
+    let cat_id = sample.def.category_id;
 
     assert_eq!(qrpc(&ctx, &mut player, "eve_public.achievement.definition.api.cdn.GetLatestRequest", Vec::new()).await.status_code, STATUS_OK);
     let mut get_ach = Vec::new();

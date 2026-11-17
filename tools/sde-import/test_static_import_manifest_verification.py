@@ -230,6 +230,12 @@ class TestStaticImportManifestVerification(unittest.TestCase):
                     2020: {"FullPath": "Character/CareerGoals/Enforcer/Names", "label": "EnforcerSpendMarketIsk1m"},
                     2021: {"FullPath": "Character/CareerGoals/Enforcer/Descriptions", "label": "EnforcerSpendMarketIsk1m"},
                     2022: {"FullPath": "Character/CareerGoals/Enforcer/AuraHints", "label": "EnforcerSpendMarketIsk1m"},
+                    2023: {"FullPath": "Character/CareerGoals/Enforcer/Names", "label": "EnforcerGetStandingTo01"},
+                    2024: {"FullPath": "Character/CareerGoals/Enforcer/Names", "label": "EnforcerGetStandingTo025"},
+                    2025: {"FullPath": "Character/CareerGoals/Enforcer/Names", "label": "EnforcerGetStandingTo05"},
+                    2026: {"FullPath": "Character/CareerGoals/Enforcer/Names", "label": "EnforcerGetStandingToMissionsLevel2"},
+                    2027: {"FullPath": "Character/CareerGoals/Enforcer/Names", "label": "EnforcerCareerAgentMission4"},
+                    2028: {"FullPath": "Character/CareerGoals/Industrialist/Names", "label": "IndustrialistProducerCareerAgentMission8"},
                     2030: {"FullPath": "Character/CareerGoals/Explorer/GroupNames", "label": "Scanning"},
                     2031: {"FullPath": "Character/CareerGoals/Explorer/Names", "label": "ExplorerScanSignature1"},
                     2032: {"FullPath": "Character/CareerGoals/Explorer/Descriptions", "label": "ExplorerScanSignature1"},
@@ -250,6 +256,12 @@ class TestStaticImportManifestVerification(unittest.TestCase):
             2020: "Spend 1M\xa0ISK on the Market",
             2021: "Desc 1M",
             2022: "Aura 1M",
+            2023: "Increase your Standings with a Corporation to 0.1",
+            2024: "Increase your Standings with a Corporation to 0.25",
+            2025: "Increase your Standings with a Corporation to 0.5",
+            2026: "Increase your Standings with a Corporation to 1.0",
+            2027: "Complete Mission 4",
+            2028: "Complete Producer Mission 8",
             2030: "Scanning",
             2031: "Scan a Cosmic Signature to 100%",
             2032: "Desc Scan",
@@ -306,10 +318,16 @@ class TestStaticImportManifestVerification(unittest.TestCase):
         self.assertEqual(len(out["achievement_categories"]), 1)
         self.assertEqual(len(out["career_paths"]), 1)
         self.assertEqual(len(out["daily_goal_catalog"]), 2)
-        self.assertEqual(len(out["career_goals"]), 3)
+        self.assertEqual(len(out["career_goals"]), 9)
         goals_by_label = {row[4]: row for row in out["career_goals"]}
         self.assertEqual(goals_by_label["EnforcerDestroyNpc100"][10], 100)
         self.assertEqual(goals_by_label["EnforcerSpendMarketIsk1m"][10], 1_000_000)
+        self.assertEqual(goals_by_label["EnforcerGetStandingTo01"][10], 10)
+        self.assertEqual(goals_by_label["EnforcerGetStandingTo025"][10], 25)
+        self.assertEqual(goals_by_label["EnforcerGetStandingTo05"][10], 50)
+        self.assertEqual(goals_by_label["EnforcerGetStandingToMissionsLevel2"][10], 100)
+        self.assertEqual(goals_by_label["EnforcerCareerAgentMission4"][10], 1)
+        self.assertEqual(goals_by_label["IndustrialistProducerCareerAgentMission8"][10], 1)
         self.assertEqual(goals_by_label["ExplorerScanSignature1"][10], 1)
 
 

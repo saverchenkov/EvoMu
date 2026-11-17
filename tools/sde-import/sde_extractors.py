@@ -1366,6 +1366,16 @@ def _clean_loc_text(raw: str | None) -> str:
 def _parse_v24_career_goal_target(label: str, text: str) -> int:
     t = _clean_loc_text(text)
     if "GetStandingTo" in label:
+        # DERIVED: FSD names hold decimal thresholds ("to 0.1", "to 0.25",
+        # "to 0.5", "to 1.0") whereas career-goal progress is integer; scale
+        # to standing basis points (10, 25, 50, 100) matching domain reporting.
+        m_standing = re.search(r"\bto\s+(\d+(?:\.\d+)?)\b", t)
+        if m_standing:
+            return max(1, round(float(m_standing.group(1)) * 100))
+        return 10
+    if "CareerAgentMission" in label:
+        # DERIVED: Career Agent mission goals track completing one specific
+        # mission step (progress 0 -> 1); the trailing N is the mission ordinal.
         return 1
     m_millions = re.search(r"\b(\d+(?:,\d+)*)\s*M\s+ISK\b", t)
     if m_millions:
@@ -1511,6 +1521,8 @@ def extract_v24_achievement_career_daily_catalogs(
                 aura_id, aura_txt = auras.get(lbl, (0, ""))
                 link_id, link_txt = links.get(lbl, (0, ""))
                 target_progress = _parse_v24_career_goal_target(lbl, name_txt)
+                # DERIVED: V24 FSD does not distribute Quasar career-goal UUIDs;
+                # assign a deterministic server UUID keyed by (career_order, idx).
                 uuid_bytes = bytes([0x43, 0x47, career_order, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, idx])
                 career_goal_rows.append(
                     (

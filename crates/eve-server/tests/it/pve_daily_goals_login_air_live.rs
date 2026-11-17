@@ -127,7 +127,7 @@ async fn test_live_pve_daily_goals_and_air_career_program() {
         .progression
         .daily_goals
         .get_or_init_goals(char_id as u32);
-    assert_eq!(goals_init.len(), 5, "Must seed 4 rotating category goals + 1 DailyBonus milestone");
+    assert_eq!(goals_init.len(), 6, "Must seed 5 regular career/general goals + 1 DailyBonus milestone");
 
     let combat_goal = goals_init
         .iter()

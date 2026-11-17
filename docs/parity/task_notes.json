@@ -300,8 +300,8 @@
     "note": "Quasar Identity, Account, FastCheckout, Token Purchase, Subscriptions, and Monetization gateway handlers and notices implemented and verified."
   },
   "Q-4": {
-    "assessment": "DONE",
-    "note": "Quasar Daily Goals, AIR Career Goals, Achievements, Skill Plans, Tracks, and Goal/Tale notices imported from V24 client static files (evomu_sde.sqlite: sde_achievements 68 / 60 enabled, sde_achievement_events 131, sde_achievement_categories 54, sde_career_paths 4, sde_career_goals 188, sde_career_goal_catalog 758, sde_contribution_methods 22, sde_daily_goal_catalog 110; dailygoals/client/const.pyc constants) with /cdn/achievements/v24.1.<count>/<hash>.fb FlatBuffer serving aligned. Genuine external-server boundaries verified absent in V24 code.ccp/ResFiles: achievement category membership, showcase score weights, milestones, and ISK/SP payouts default unconfigured (0/empty, ClaimRequest fail-closed) unless operator-configured; AIR career goal targets/CP/ISK payouts and daily goal targets/rotation/payouts live server-side in Quasar and use operator-configurable defaults aligned with V24 localization strings and const.pyc completion costs (2500/4500 EM, 12-step track)."
+    "assessment": "PARTIAL",
+    "note": "Quasar Daily Goals, AIR Career Goals, Achievements, Skill Plans, Tracks, and Goal/Tale notices wired with V24 client static/localization tables imported into evomu_sde.sqlite (`sde_achievements` 68 / 60 enabled, `sde_achievement_events` 131, `sde_achievement_categories` 54, `sde_career_paths` 4, `sde_career_goals` 188, `sde_career_goal_catalog` 758, `sde_contribution_methods` 22, `sde_daily_goal_catalog` 110; `dailygoals/client/const.pyc` constants) and `/cdn/achievements/v24.1.<count>/<hash>.fb` FlatBuffer serving. Server-side items absent from V24 `code.ccp`/`ResFiles` remain explicitly DERIVED (synthesized `[0x43, 0x47, ...]` / `b\"SDEDG\"` UUIDs, wiki-aligned 1,000 CP/career and 5-goal/day schedule, `DamageShip` 2,000 threshold, and derived achievement category buckets 1..=5). 18 achievement/career/dailygoal `FLAGGED_FAKE` rows remain open pending independent gap audit."
   },
   "Q-5": {
     "assessment": "DONE",
@@ -321,7 +321,7 @@
   },
   "Q-9": {
     "assessment": "PARTIAL",
-    "note": "Quasar Ship Cosmetics, SKINR Sequencing, Component/SKIN Market Listings, Achievements, Career Goals, Daily Goals (with V24 evomu_sde.sqlite catalog/localization tables, honest unconfigured server-authoritative payout boundaries, and decoded notice protobuf assertions), and App Infrastructure gateway handlers and notices verified."
+    "note": "Quasar Ship Cosmetics, SKINR Sequencing, Component/SKIN Market Listings, Achievements, Career Goals, Daily Goals (with V24 `evomu_sde.sqlite` catalog/localization tables, explicit `DERIVED` server-authoritative schedules/CP/ISK/EverMarks/UUIDs, and decoded notice protobuf assertions), and App Infrastructure gateway handlers and notices; achievement/career/dailygoal `FLAGGED_FAKE` rows remain open pending gap audit."
   },
   "S-1": {
     "assessment": "DONE",

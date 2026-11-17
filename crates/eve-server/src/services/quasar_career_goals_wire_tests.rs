@@ -10,6 +10,7 @@ fn career_goal_wire_encoders_and_extractors() {
 
     let def = CareerGoalDef {
         uuid,
+        goal_label: String::new(),
         career_id: 2,
         activity_name: "Salvage".into(),
         activity_kind: "salvage".into(),

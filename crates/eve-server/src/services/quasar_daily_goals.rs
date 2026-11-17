@@ -44,10 +44,16 @@ pub struct DailyGoalTemplate {
     pub uuid: [u8; 16],
     pub name_message: String,
     pub description_message: String,
-    pub category: u32, // 1: Combat, 2: Mining, 3: Exploration, 4: Navigation, 5: Manufacturing
-    pub career: u32,   // 1: Explorer, 2: Industrialist, 3: Enforcer, 4: Soldier of Fortune
+    /// Internal contribution method tag (`1`: KillNPC, `2`: MineOre, `3`: ScanSignature,
+    /// `4`: SpaceJump, `5`: ManufactureItem, `6`: DailyBonus, `7`: DamageShip).
+    pub category: u32,
+    /// `eve_public.career.Path` (`0`: Unspecified/General, `1`: Explorer, `2`: Industrialist,
+    /// `3`: Enforcer, `4`: Soldier of Fortune).
+    pub career: u32,
     pub target: u64,
     pub isk_reward: i64,
+    #[serde(default)]
+    pub evermarks_reward: i64,
     pub sp_reward: f64,
     #[serde(default)]
     pub completion_cost_isk: Option<i64>,
@@ -72,6 +78,21 @@ impl DailyGoalTemplate {
             1
         }
     }
+
+    /// Returns the effective EverMark reward (500 EM on regular `SDEDG` goals by default, 0 on DailyBonus).
+    pub fn effective_evermarks_reward(&self) -> i64 {
+        if self.category == 6 {
+            0
+        } else if self.evermarks_reward > 0 {
+            self.evermarks_reward
+        } else if self.uuid.starts_with(b"SDEDG") {
+            // Legacy persisted SDE daily goals without `evermarks_reward` field retain 500 EM.
+            500
+        } else {
+            0
+        }
+    }
+
     /// Returns the `res:/staticdata/contributionmethods.fsdbinary` `titleID` or configured message ID.
     pub fn effective_name_message_id(&self) -> u32 {
         if self.name_message_id > 0 {
@@ -84,6 +105,7 @@ impl DailyGoalTemplate {
             4 => 541_824, // Jump through Stargate
             5 => 665_394, // Manufacture
             6 => 722_674, // Daily Bonus
+            7 => 659_201, // Damage Ship
             _ => 582_520, // Enforcer careerPath nameID
         }
     }
@@ -100,6 +122,7 @@ impl DailyGoalTemplate {
             4 => 1_041_584, // Jump through a Stargate into a different Solar System
             5 => 696_246, // Items manufactured
             6 => 698_433, // Daily Bonus Rewards
+            7 => 696_243, // Ship damage inflicted
             _ => 582_521, // Enforcer careerPath descriptionID
         }
     }
@@ -116,6 +139,7 @@ impl DailyGoalTemplate {
             4 => 1_004_955, // You will earn progress towards this goal whenever you complete a jump between solar systems...
             5 => 665_412,   // Install manufacturing jobs for items of a specific type.
             6 => 698_433,   // Daily Bonus Rewards
+            7 => 659_202,   // Inflict damage to another capsuleer's ship.
             _ => 582_521,
         }
     }
@@ -259,6 +283,25 @@ fn is_sde_rotating_regular_template(tpl: &DailyGoalTemplate) -> bool {
     tpl.uuid.starts_with(b"SDEDG") && tpl.category != 6
 }
 
+fn active_sde_regular_uuids(templates: &[DailyGoalTemplate], day_bucket: u64) -> Vec<[u8; 16]> {
+    // DERIVED daily schedule (absent from V24 client static files): per AIR Daily Goals semantics,
+    // select at most 1 regular SDE goal per career bucket (0 = General/Unspecified + 1..=4 Career Paths),
+    // rotating deterministically across `day_bucket` when multiple SDE templates share a career slot
+    // (e.g. Industrialist career 2 alternates MineOre vs ManufactureItem across days).
+    let mut by_career: std::collections::BTreeMap<u32, Vec<[u8; 16]>> =
+        std::collections::BTreeMap::new();
+    for tpl in templates.iter().filter(|t| is_sde_rotating_regular_template(t)) {
+        by_career.entry(tpl.career.min(4)).or_default().push(tpl.uuid);
+    }
+    by_career
+        .into_values()
+        .filter_map(|group| {
+            let idx = (day_bucket as usize) % group.len();
+            group.get(idx).copied()
+        })
+        .collect()
+}
+
 fn ensure_character_daily_goals_with_templates(
     goals: &mut Vec<CharacterDailyGoal>,
     templates: &[DailyGoalTemplate],
@@ -270,20 +313,13 @@ fn ensure_character_daily_goals_with_templates(
     } else {
         goals.iter().map(|g| g.day_bucket).max().unwrap_or(0)
     };
-    let sde_regular_uuids: Vec<[u8; 16]> = templates
-        .iter()
-        .filter(|t| is_sde_rotating_regular_template(t))
-        .map(|t| t.uuid)
-        .collect();
-    // AIR Daily Goals selects 4 rotating regular goals per downtime day + DailyBonus (= 5 active).
-    let omitted_sde_uuid = if sde_regular_uuids.len() > 4 {
-        let idx = (day_bucket as usize) % sde_regular_uuids.len();
-        Some(sde_regular_uuids[idx])
-    } else {
-        None
-    };
+    let active_sde_regular = active_sde_regular_uuids(templates, day_bucket);
     for tpl in templates {
-        let is_active_today = omitted_sde_uuid != Some(tpl.uuid);
+        let is_active_today = if is_sde_rotating_regular_template(tpl) {
+            active_sde_regular.contains(&tpl.uuid)
+        } else {
+            true
+        };
         if let Some(existing) = goals.iter_mut().find(|g| g.uuid == tpl.uuid) {
             existing.template = tpl.clone();
             if existing.day_bucket > 0 && day_bucket > existing.day_bucket {
@@ -331,6 +367,8 @@ fn ensure_character_daily_goals_with_templates(
 }
 
 pub fn default_daily_bonus_template() -> DailyGoalTemplate {
+    // DERIVED deterministic server UUID (`b"SDEDG..."`): V24 client files contain localization/method
+    // definitions but not server-issued daily goal instance UUIDs.
     let mut uuid = [0u8; 16];
     uuid[0..5].copy_from_slice(b"SDEDG");
     uuid[15] = 6;
@@ -339,9 +377,10 @@ pub fn default_daily_bonus_template() -> DailyGoalTemplate {
         name_message: "DailyBonus".to_string(),
         description_message: "DailyBonus_daily".to_string(),
         category: 6,
-        career: 1,
+        career: 0,
         target: 2,
         isk_reward: 0,
+        evermarks_reward: 0,
         sp_reward: 10_000.0,
         completion_cost_isk: None,
         completion_cost_evermarks: None,
@@ -379,10 +418,11 @@ pub fn default_daily_bonus_template_for_sde(sde: &eve_sde::SdeRegistry) -> Daily
     tpl
 }
 
-/// Builds the active daily goal templates from V24 client tables (`sde_daily_goal_catalog`
-/// and `sde_contribution_methods` in `evomu_sde.sqlite`) plus operator-configurable target,
-/// ISK/SP payout, and `PRICE_FIRST_COMPLETION` defaults (targets, payouts, and daily rotation
-/// do not exist in V24 client static files).
+/// Builds daily goal templates combining V24 client tables (`sde_daily_goal_catalog` and
+/// `sde_contribution_methods` in `evomu_sde.sqlite`) with **DERIVED** server policy defaults
+/// (`b"SDEDG..."` deterministic UUIDs, targets, 500,000 ISK + 500 EM payouts per `AIR_Daily_Goals.md`,
+/// `PRICE_FIRST_COMPLETION = 2,500` EM, and per-career daily slot rotation; targets, payouts, UUIDs,
+/// and daily schedule do not exist in V24 client static files).
 pub fn build_sde_daily_goal_templates(sde: &eve_sde::SdeRegistry) -> Vec<DailyGoalTemplate> {
     let catalog: HashMap<&str, u32> = sde
         .daily_goal_catalog
@@ -399,22 +439,24 @@ pub fn build_sde_daily_goal_templates(sde: &eve_sde::SdeRegistry) -> Vec<DailyGo
         career: u32,
         target: u64,
         isk_reward: i64,
+        evermarks_reward: i64,
         sp_reward: f64,
         completion_cost_isk: Option<i64>,
         completion_cost_evermarks: Option<i64>,
     }
-    // Operator-configurable defaults aligned with V24 UI/DailyGoals/Names strings (25, 2_000, 5, 3, 1)
-    // and dailygoals/client/const.pyc PRICE_FIRST_COMPLETION (2_500 EverMarks).
-    let specs: [DailyGoalSpec; 5] = [
+    // Localization IDs come from V24 `UI/DailyGoals` & `contributionmethods.fsdbinary`;
+    // targets (`25, 2_000, 5, 3, 1, 2_000`), payouts (`500_000 ISK + 500 EM`), and daily rotation are DERIVED.
+    let specs: [DailyGoalSpec; 6] = [
         DailyGoalSpec {
             method_key: "KillNPC",
             name_label: "DestroyNoncapsuleers_name",
             desc_label: "DestroyNon-capsuleers_description",
             help_label: "DestroyNoncapsuleers_help",
             category: 1,
-            career: 3,
+            career: 3, // Enforcer
             target: 25,
             isk_reward: 500_000,
+            evermarks_reward: 500,
             sp_reward: 0.0,
             completion_cost_isk: None,
             completion_cost_evermarks: Some(2_500),
@@ -425,9 +467,10 @@ pub fn build_sde_daily_goal_templates(sde: &eve_sde::SdeRegistry) -> Vec<DailyGo
             desc_label: "Mine2000Ore_description",
             help_label: "MineOre_help",
             category: 2,
-            career: 2,
+            career: 2, // Industrialist (alternates daily with ManufactureItem)
             target: 2_000,
             isk_reward: 500_000,
+            evermarks_reward: 500,
             sp_reward: 0.0,
             completion_cost_isk: None,
             completion_cost_evermarks: Some(2_500),
@@ -435,12 +478,14 @@ pub fn build_sde_daily_goal_templates(sde: &eve_sde::SdeRegistry) -> Vec<DailyGo
         DailyGoalSpec {
             method_key: "ScanSignature",
             name_label: "ScanSignatures_name",
-            desc_label: "Scan15_description",
+            // Omit `Scan15_description` (`Scan 15 signatures`) since target = 5; fall back cleanly to `Signatures scanned`.
+            desc_label: "",
             help_label: "ScanSignatures_help",
             category: 3,
-            career: 1,
+            career: 1, // Explorer
             target: 5,
             isk_reward: 500_000,
+            evermarks_reward: 500,
             sp_reward: 0.0,
             completion_cost_isk: None,
             completion_cost_evermarks: Some(2_500),
@@ -451,9 +496,10 @@ pub fn build_sde_daily_goal_templates(sde: &eve_sde::SdeRegistry) -> Vec<DailyGo
             desc_label: "JumpGoal_description",
             help_label: "JumpGoal_help",
             category: 4,
-            career: 4,
+            career: 0, // General (`CAREER_UNSPECIFIED`)
             target: 3,
             isk_reward: 500_000,
+            evermarks_reward: 500,
             sp_reward: 0.0,
             completion_cost_isk: None,
             completion_cost_evermarks: Some(2_500),
@@ -464,9 +510,25 @@ pub fn build_sde_daily_goal_templates(sde: &eve_sde::SdeRegistry) -> Vec<DailyGo
             desc_label: "ManufactureItem_description",
             help_label: "ManufactureItem_help",
             category: 5,
-            career: 2,
+            career: 2, // Industrialist (alternates daily with MineOre)
             target: 1,
             isk_reward: 500_000,
+            evermarks_reward: 500,
+            sp_reward: 0.0,
+            completion_cost_isk: None,
+            completion_cost_evermarks: Some(2_500),
+        },
+        DailyGoalSpec {
+            method_key: "DamageShip",
+            name_label: "DamageCapsuleers_name",
+            desc_label: "DamageCapsuleers_description",
+            help_label: "DamageCapsuleers_help",
+            category: 7,
+            career: 4, // Soldier of Fortune
+            // DERIVED server threshold (absent from V24 client FSD).
+            target: 2_000,
+            isk_reward: 500_000,
+            evermarks_reward: 500,
             sp_reward: 0.0,
             completion_cost_isk: None,
             completion_cost_evermarks: Some(2_500),
@@ -511,6 +573,7 @@ pub fn build_sde_daily_goal_templates(sde: &eve_sde::SdeRegistry) -> Vec<DailyGo
                         .filter(|&id| id > 0)
                 })
                 .unwrap_or(0);
+            // DERIVED synthetic deterministic UUID (`b"SDEDG..."`): not sourced from V24 client files.
             let mut uuid = [0u8; 16];
             uuid[0..5].copy_from_slice(b"SDEDG");
             uuid[15] = spec.category as u8;
@@ -522,6 +585,7 @@ pub fn build_sde_daily_goal_templates(sde: &eve_sde::SdeRegistry) -> Vec<DailyGo
                 career: spec.career,
                 target: spec.target,
                 isk_reward: spec.isk_reward,
+                evermarks_reward: spec.evermarks_reward,
                 sp_reward: spec.sp_reward,
                 completion_cost_isk: spec.completion_cost_isk,
                 completion_cost_evermarks: spec.completion_cost_evermarks,
@@ -997,7 +1061,7 @@ impl DailyGoalManager {
         };
 
         let reward_cents = IskCents::from_isk(isk);
-        let evermarks_reward = if res_goal.template.category == 6 { 0 } else { 500 };
+        let evermarks_reward = res_goal.template.effective_evermarks_reward();
         let credit_res = db.try_with_mut_snapshot(|snap| {
             crate::domain::career_goals::credit_character_reward_in_snap(
                 snap,
@@ -1318,6 +1382,13 @@ fn fill_contribution_configuration(cfg: ProtoBuilder, category: u32) -> ProtoBui
                     .set("daily_goal_category.category", 1i32)
             })
         }),
+        7 => cfg.set_with("damage_ship", |k| {
+            k.add_with("contribution_methods", |m| {
+                m.set("solar_system.any", true)
+                    .set("ship_type.any", true)
+                    .set("identity.any", true)
+            })
+        }),
         _ => cfg.set_with("space_jump", |m| m),
     }
 }
@@ -1364,7 +1435,8 @@ fn build_daily_goal_attributes(
         .set_with("contribution_configuration", |cfg| {
             fill_contribution_configuration(cfg, tpl.category)
         })
-        .set("career", tpl.career.clamp(1, 4) as i32);
+        // Keep career=0 (`CAREER_UNSPECIFIED`) for General daily goals and DailyBonus.
+        .set("career", tpl.career.min(4) as i32);
 
     if tpl.isk_reward > 0 {
         let mut asset_uuid = tpl.uuid;
@@ -1382,6 +1454,20 @@ fn build_daily_goal_attributes(
             p.set("asset.uuid", asset_uuid)
                 .set("period", 1i32) // PAYMENT_PERIOD_COMPLETION
                 .set("unit.sp.amount", tpl.sp_reward as u32)
+        });
+    }
+    let effective_em = tpl.effective_evermarks_reward();
+    if effective_em > 0 {
+        let mut asset_uuid = tpl.uuid;
+        asset_uuid[14] = 3;
+        b = b.add_with("payment", |p| {
+            p.set("asset.uuid", asset_uuid)
+                .set("period", 1i32) // PAYMENT_PERIOD_COMPLETION
+                .set("unit.lp.amount.amount", effective_em as u64)
+                .set(
+                    "unit.lp.amount.associated_corporation.sequential",
+                    1_000_419u32,
+                )
         });
     }
 
@@ -1441,6 +1527,16 @@ fn add_daily_goal_earnings(mut builder: ProtoBuilder, tpl: &DailyGoalTemplate) -
             e.set("unit.sp.amount", tpl.sp_reward as u32)
         });
     }
+    let effective_em = tpl.effective_evermarks_reward();
+    if effective_em > 0 {
+        builder = builder.add_with("earnings", |e| {
+            e.set("unit.lp.amount.amount", effective_em as u64)
+                .set(
+                    "unit.lp.amount.associated_corporation.sequential",
+                    1_000_419u32,
+                )
+        });
+    }
     builder
 }
 
@@ -1464,6 +1560,23 @@ pub fn encode_goal_earnings(tpl: &DailyGoalTemplate, field_num: u32, out: &mut V
             "quasar_daily_goals.encode_goal_earnings.sp",
             pb::message("eve_public.dailygoal.api.Earning")
                 .set("unit.sp.amount", tpl.sp_reward as u32),
+        ) {
+            fields.push(WireField {
+                field_number: field_num,
+                value: WireValue::LengthDelimited(bytes),
+            });
+        }
+    }
+    let effective_em = tpl.effective_evermarks_reward();
+    if effective_em > 0 {
+        if let Some(bytes) = crate::quasar_gateway::pb_encode_or_log(
+            "quasar_daily_goals.encode_goal_earnings.lp",
+            pb::message("eve_public.dailygoal.api.Earning")
+                .set("unit.lp.amount.amount", effective_em as u64)
+                .set(
+                    "unit.lp.amount.associated_corporation.sequential",
+                    1_000_419u32,
+                ),
         ) {
             fields.push(WireField {
                 field_number: field_num,

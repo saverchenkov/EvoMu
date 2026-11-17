@@ -115,11 +115,14 @@ fn achievements_mutant_killers_locks_rehydrate_partial_claims_and_notices() {
     use crate::quasar_gateway::NoticeScope;
     use eve_proto::quasar::{DynamicQuasarMessage, WireMessage};
 
-    // 1. Default SDE definitions load strictly from client static data without synthetic score/category/reward fabrication
+    // 1. Default SDE definitions load from client static data with DERIVED non-zero category IDs (1..=5)
+    // and without synthetic score/milestone/reward fabrication.
     let sde_mgr = AchievementManager::new(None);
     assert!(!sde_mgr.definitions.is_empty());
+    let mut seen_cats = std::collections::HashSet::new();
     for d in &sde_mgr.definitions {
-        assert_eq!(d.category_id, 0);
+        assert!((1..=5).contains(&d.category_id), "expected DERIVED category 1..=5 for {}, got {}", d.id, d.category_id);
+        seen_cats.insert(d.category_id);
         assert_eq!(d.score, 0);
         assert!(d.milestone_targets.is_empty());
         assert_eq!(d.reward_isk, 0);
@@ -127,6 +130,7 @@ fn achievements_mutant_killers_locks_rehydrate_partial_claims_and_notices() {
         assert!(!d.name.is_empty());
         assert!(d.target >= 1);
     }
+    assert_eq!(seen_cats.len(), 5, "all 5 DERIVED achievement categories should be populated");
 
     // 2. Multi-condition clamping, a.progress.max(total_cond), client-id enforcement, and mark_completed no-reward edge
     let (ctx, _clock) = test_ctx_and_clock(1_750_000_000);

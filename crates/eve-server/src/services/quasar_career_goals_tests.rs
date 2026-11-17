@@ -805,3 +805,188 @@ fn career_goal_gateway_handlers_aliases_and_varint_edges() {
     super::sync_def_localization_from(&mut stale_def, &fresh_def);
     assert_eq!(stale_def.description_message_id, 700_002);
 }
+
+#[test]
+fn derived_wiki_career_points_and_objective_predicates() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let mgr = Arc::new(CareerGoalManager::new_with_sde(
+        Some(Arc::clone(&ctx.db)),
+        Some(Arc::clone(&ctx.sde)),
+    ));
+    let defs = mgr.load_definitions();
+    assert_eq!(defs.len(), 188);
+
+    // Every career path sums to 1,000 CP and 2,500,000 ISK (`5..=50 CP`, `ISK = CP * 2,500`).
+    for cid in 1..=4 {
+        let career_defs: Vec<&CareerGoalDef> =
+            defs.iter().filter(|d| d.career_id == cid).collect();
+        let cp_sum: u32 = career_defs.iter().map(|d| d.career_points).sum();
+        let isk_sum: i64 = career_defs.iter().map(|d| d.isk_reward).sum();
+        assert_eq!(cp_sum, 1_000, "career {cid} CP sum mismatch");
+        assert_eq!(isk_sum, 2_500_000, "career {cid} ISK sum mismatch");
+        for d in &career_defs {
+            assert!(
+                (5..=50).contains(&d.career_points),
+                "unexpected CP {} on {}",
+                d.career_points,
+                d.goal_label
+            );
+            assert_eq!(d.isk_reward, i64::from(d.career_points) * 2_500);
+            assert_eq!(
+                super::derived_wiki_career_goal_points(&d.goal_label),
+                Some(d.career_points),
+                "missing wiki CP mapping for {}",
+                d.goal_label
+            );
+        }
+    }
+
+    // Standings & Career Agent mission targets parsed cleanly.
+    let by_label = |lbl: &str| -> CareerGoalDef {
+        defs.iter()
+            .find(|d| d.goal_label == lbl)
+            .unwrap_or_else(|| panic!("missing goal {lbl}"))
+            .clone()
+    };
+    assert_eq!(by_label("EnforcerGetStandingTo01").target, 10);
+    assert_eq!(by_label("EnforcerGetStandingTo025").target, 25);
+    assert_eq!(by_label("EnforcerGetStandingTo05").target, 50);
+    assert_eq!(by_label("EnforcerGetStandingToMissionsLevel2").target, 100);
+    assert_eq!(by_label("EnforcerCareerAgentMission8").target, 1);
+    assert_eq!(by_label("IndustrialistProducerCareerAgentMission10").target, 1);
+
+    let ch = 90_000_001_u32;
+    let prog_of = |lbl: &str| -> u64 {
+        mgr.get_or_init_goals(ch)
+            .into_iter()
+            .find(|g| g.def.goal_label == lbl)
+            .unwrap()
+            .progress
+    };
+
+    // 1. Ore filter: Veldspar (group 462) only advances IndustrialistMineVeldspar.
+    mgr.on_career_gameplay_event(
+        ch,
+        super::CareerGameplayEvent {
+            activity_kind: "mining",
+            group_id: Some(462),
+            ..Default::default()
+        },
+        120,
+        &ctx.quasar_gateway,
+    );
+    assert_eq!(prog_of("IndustrialistMineVeldspar"), 120);
+    assert_eq!(prog_of("IndustrialistMineScordite"), 0);
+    assert_eq!(prog_of("IndustrialistMineKernite"), 0);
+
+    // 2. Manufacturing ship hull filter: Frigate (group 25) only advances Frigate.
+    mgr.on_career_gameplay_event(
+        ch,
+        super::CareerGameplayEvent {
+            activity_kind: "manufacturing",
+            group_id: Some(25),
+            ..Default::default()
+        },
+        1,
+        &ctx.quasar_gateway,
+    );
+    assert_eq!(prog_of("IndustrialistManufactureFrigate"), 1);
+    assert_eq!(prog_of("IndustrialistManufactureShuttle"), 0);
+    assert_eq!(prog_of("IndustrialistManufactureDestroyer"), 0);
+    assert_eq!(prog_of("IndustrialistManufactureCruiser"), 0);
+
+    // 3. Ship-class NPC kill filter: Cruiser kill advances Enforcer + Cruiser, NOT Frigate/Destroyer.
+    mgr.on_career_gameplay_event(
+        ch,
+        super::CareerGameplayEvent {
+            activity_kind: "combat",
+            ship_group_id: Some(26),
+            ..Default::default()
+        },
+        1,
+        &ctx.quasar_gateway,
+    );
+    assert_eq!(prog_of("EnforcerDestroyNpc100"), 1);
+    assert_eq!(prog_of("SofDestroyNpcInCruiser"), 1);
+    assert_eq!(prog_of("SofDestroyNpcInFrigate"), 0);
+    assert_eq!(prog_of("SofDestroyNpcInDestroyer"), 0);
+
+    // 4. Distinct region + sec band filter for ExplorerVisitHisec.
+    for rid in [10_000_002_u32, 10_000_002, 10_000_030, 10_000_043] {
+        mgr.on_career_gameplay_event(
+            ch,
+            super::CareerGameplayEvent {
+                activity_kind: "advanced_travel",
+                region_id: Some(rid),
+                security_status: Some(0.9),
+                is_wormhole: Some(false),
+                ..Default::default()
+            },
+            1,
+            &ctx.quasar_gateway,
+        );
+    }
+    assert_eq!(prog_of("ExplorerVisitHisec"), 3, "duplicate region 10_000_002 must count once");
+    assert_eq!(prog_of("ExplorerVisitLowsec"), 0);
+    assert_eq!(prog_of("ExplorerVisitNullsec"), 0);
+
+    // 5. Career Agent mission (division + ordinal) & standings threshold & market sub-kind.
+    mgr.on_career_gameplay_event(
+        ch,
+        super::CareerGameplayEvent {
+            activity_kind: "career_missions",
+            mission_division: Some("enforcer"),
+            mission_ordinal: Some(4),
+            ..Default::default()
+        },
+        1,
+        &ctx.quasar_gateway,
+    );
+    assert_eq!(prog_of("EnforcerCareerAgentMission4"), 1);
+    assert_eq!(prog_of("EnforcerCareerAgentMission1"), 0);
+    assert_eq!(prog_of("SofCareerAgentMission4"), 0);
+
+    mgr.on_career_gameplay_event(
+        ch,
+        super::CareerGameplayEvent {
+            activity_kind: "standings",
+            standing_bps: Some(30),
+            ..Default::default()
+        },
+        1,
+        &ctx.quasar_gateway,
+    );
+    assert_eq!(prog_of("EnforcerGetStandingTo01"), 10);
+    assert_eq!(prog_of("EnforcerGetStandingTo025"), 25);
+    assert_eq!(prog_of("EnforcerGetStandingTo05"), 30);
+    assert_eq!(prog_of("EnforcerGetStandingToMissionsLevel2"), 30);
+
+    mgr.on_career_gameplay_event(
+        ch,
+        super::CareerGameplayEvent {
+            activity_kind: "market",
+            sub_kind: Some("spend_isk"),
+            ..Default::default()
+        },
+        50_000,
+        &ctx.quasar_gateway,
+    );
+    assert_eq!(prog_of("EnforcerSpendMarketIsk50k"), 50_000);
+    assert_eq!(prog_of("IndustrialistEarnMarketIsk50k"), 0);
+
+    // Reloading from DB preserves seen_regions idempotency.
+    mgr.rehydrate_from_db();
+    mgr.on_career_gameplay_event(
+        ch,
+        super::CareerGameplayEvent {
+            activity_kind: "advanced_travel",
+            region_id: Some(10_000_002),
+            security_status: Some(0.9),
+            is_wormhole: Some(false),
+            ..Default::default()
+        },
+        1,
+        &ctx.quasar_gateway,
+    );
+    assert_eq!(prog_of("ExplorerVisitHisec"), 3, "rehydrated seen_regions must stay deduplicated");
+}

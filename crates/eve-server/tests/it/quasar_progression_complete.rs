@@ -140,9 +140,9 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     let mut sess = build_sess(10_001, 90_000_001, 98_000_001);
     let empty_kw = HashMap::new();
 
-    // ServerContext seeds 5 SDE-backed AIR Daily Goals + 1 DailyBonus from evomu_sde.sqlite out of the box
+    // ServerContext seeds 6 SDE-backed AIR Daily Operations + 1 DailyBonus from evomu_sde.sqlite out of the box
     let sde_tpls = ctx.quasar_gateway.progression.daily_goals.get_templates();
-    assert_eq!(sde_tpls.len(), 6, "ServerContext must seed 5 SDE daily goals + 1 daily bonus goal");
+    assert_eq!(sde_tpls.len(), 7, "ServerContext must seed 6 SDE daily operations + 1 daily bonus goal");
     assert!(sde_tpls.iter().all(|t| t.name_message_id > 0 && t.description_message_id > 0));
 
     // Subscribe session to publicGatewaySvc for notice delivery
@@ -167,12 +167,15 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
 
     let wm = WireMessage::decode(&payload.value).expect("decode WireMessage");
     let goal_entries: Vec<&WireField> = wm.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(goal_entries.len(), 5, "5 active SDE daily goals (4 rotating daily + 1 bonus) must populate on startup");
+    assert_eq!(goal_entries.len(), 6, "6 active SDE daily goals (5 per-career/general daily + 1 bonus) must populate on startup");
 
-    // Target SDE combat daily goal (#1 KillNPC) and second active SDE goal (#2 MineOre)
-    let target_uuid = sde_tpls[0].uuid;
-    let target_goal_count = sde_tpls[0].target;
-    let second_uuid = sde_tpls[1].uuid;
+    // Target active combat daily goal (#1 KillNPC) and active mining goal (#2 MineOre on pinned even day_bucket)
+    let active_goals = ctx.quasar_gateway.progression.daily_goals.get_or_init_goals(90_000_001);
+    let target_tpl = &active_goals.iter().find(|g| g.template.category == 1).expect("active KillNPC goal").template;
+    let second_tpl = &active_goals.iter().find(|g| g.template.category == 2).expect("active MineOre goal on even day").template;
+    let target_uuid = target_tpl.uuid;
+    let target_goal_count = target_tpl.target;
+    let second_uuid = second_tpl.uuid;
     assert!(goal_entries.iter().any(|f| {
         reg.decode_dynamic(
             "eve_public.dailygoal.api.GetAllCurrentResponse.Goal",
@@ -193,7 +196,7 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     let get_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetRequest", make_uuid_request(target_uuid)).await;
     assert_eq!(get_rsp.status_code, STATUS_OK);
     let get_dyn = reg.decode_dynamic("eve_public.dailygoal.api.GetResponse", &get_rsp.payload.unwrap().value).expect("decode GetResponse");
-    assert!(matches!(get_dyn.get(4), Some(eve_proto::quasar::DynamicValue::Repeated(items)) if items.len() == 1), "Regular goal GetResponse carries ISK Earning entry");
+    assert!(matches!(get_dyn.get(4), Some(eve_proto::quasar::DynamicValue::Repeated(items)) if items.len() == 2), "Regular goal GetResponse carries ISK + EverMarks Earning entries");
     let bonus_uuid = eve_server::services::quasar_daily_goals::default_daily_bonus_template().uuid;
     let bonus_get_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetRequest", make_uuid_request(bonus_uuid)).await;
     assert_eq!(bonus_get_rsp.status_code, STATUS_OK);
@@ -367,8 +370,7 @@ async fn quasar_career_goals_paths_and_milestones() {
     let reg = eve_proto::quasar::QuasarDescriptorRegistry::open_default().expect("descriptor registry");
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    // Shift +1 day (day_bucket 20833 -> 20835 after +100_000s) so MineOre/ManufactureItem/ScanSignature stay active across both days of the 4-of-5 rotation.
-    ctx.advance_secs(86_400);
+    // Start on Day 0 (day_bucket 20832, even: MineOre active) so step 6 mines on Day 0 before step 7 advances +86_400s to Day 1 (odd: ManufactureItem active).
     let mut sess = build_sess(10_002, 90_000_001, 98_000_001);
     let empty_kw = HashMap::new();
 
@@ -523,10 +525,14 @@ async fn quasar_career_goals_paths_and_milestones() {
         }
         0
     };
-    let mfg_goal_uuid = [0x43, 0x47, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6];
+    let scordite_goal_uuid = [0x43, 0x47, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+    let shuttle_goal_uuid = [0x43, 0x47, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6];
+    let mfg_goal_uuid = [0x43, 0x47, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7];
     let scan_goal_uuid = [0x43, 0x47, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
-    assert_eq!(find_goal_prog(&after_mine_wm, &mining_goal_uuid), 3, "Mining goal must have progress 3");
+    assert_eq!(find_goal_prog(&after_mine_wm, &mining_goal_uuid), 3, "Veldspar mining must progress Veldspar goal");
+    assert_eq!(find_goal_prog(&after_mine_wm, &scordite_goal_uuid), 0, "Veldspar mining must NOT progress Scordite goal");
     assert_eq!(find_goal_prog(&after_mine_wm, &mfg_goal_uuid), 0, "Manufacturing goal must not advance from mining");
+    assert_eq!(find_goal_prog(&after_mine_wm, &shuttle_goal_uuid), 0, "Shuttle goal must not advance from mining");
 
     // 7. Manufacturing job install must NOT advance manufacturing goals; job completion MUST advance both daily and career goals
     sess.station_id = Some(60_003_760);
@@ -536,7 +542,7 @@ async fn quasar_career_goals_paths_and_milestones() {
     let after_inst_wm = WireMessage::decode(&quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.GetAllRequest", Vec::new()).await.payload.unwrap().value).unwrap();
     assert_eq!(find_goal_prog(&after_inst_wm, &mfg_goal_uuid), 0, "InstallJob must not advance manufacturing goal");
 
-    ctx.advance_secs(100_000);
+    ctx.advance_secs(86_400);
     ctx.dispatch_rpc(&mut sess, "industryManager", None, "CompleteJob", &[PyRep::Integer(job_id)], &HashMap::new(), None).await.unwrap();
     let mfg_notifs = drain_notices(&mut stream_rx);
     let mfg_cg_not = mfg_notifs
@@ -556,7 +562,8 @@ async fn quasar_career_goals_paths_and_milestones() {
     assert_eq!(mfg_dg_id_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap().len(), 16);
     assert_eq!(mfg_dg_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(1));
     let after_comp_wm = WireMessage::decode(&quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.GetAllRequest", Vec::new()).await.payload.unwrap().value).unwrap();
-    assert_eq!(find_goal_prog(&after_comp_wm, &mfg_goal_uuid), 1, "CompleteJob must advance manufacturing goal to 1");
+    assert_eq!(find_goal_prog(&after_comp_wm, &mfg_goal_uuid), 1, "CompleteJob for Rifter (Frigate) must advance ManufactureFrigate to 1");
+    assert_eq!(find_goal_prog(&after_comp_wm, &shuttle_goal_uuid), 0, "CompleteJob for Rifter must NOT advance ManufactureShuttle");
     assert_eq!(find_goal_prog(&after_comp_wm, &scan_goal_uuid), 0, "Exploration goal starts at 0 before scanning");
 
     // 8. Cosmic signature scan (100% probe resolution) advances Explorer daily and career goals (idempotent per signature), even if legacy persisted activity_kind was empty

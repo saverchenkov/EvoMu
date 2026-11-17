@@ -298,6 +298,22 @@ mod domain_error_and_career_goals_tests {
             .expect("ledger metadata recorded");
         assert_eq!(meta.ref_type_id, 10);
         assert_eq!(meta.first_party_id, 4242);
+
+        // 4. NPC corporation pilots keep personal EverMarks without crediting NPC corp balances.
+        let npc_cid = 91_000_009i64;
+        let npc_corp = 1_000_166i64;
+        snap.characters.insert(npc_cid, make_char(npc_cid, 1, npc_corp, None, 0));
+        credit_character_reward_in_snap(
+            &mut snap,
+            npc_cid,
+            IskCents::from_isk(500),
+            0.0,
+            500,
+            None,
+        )
+        .unwrap();
+        assert_eq!(snap.characters[&npc_cid].loyalty_points[&EVERMARKS_CORP_ID], 500);
+        assert!(!snap.corp_lp_balances.contains_key(&(npc_corp, EVERMARKS_CORP_ID)));
     }
 
     #[test]

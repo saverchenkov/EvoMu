@@ -445,6 +445,7 @@ async fn quasar_daily_goals_configurable_and_admin_targeting() {
         career: 1,   // Enforcer
         target: 3,
         isk_reward: 1_000_000,
+        evermarks_reward: 500,
         sp_reward: 10_000.0,
         completion_cost_isk: None,
         completion_cost_evermarks: Some(2_500),

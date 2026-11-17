@@ -34,12 +34,19 @@ pub const CAREER_PATH_MESSAGE_IDS: [(u32, u32, u32); 4] = [
 
 /// V24 AIR Career Program goal definitions loaded from `evomu_sde.sqlite` (`sde_career_goals`,
 /// `sde_career_paths`), sourced from client `res:/staticdata/careerpaths.fsdbinary` and
-/// `Character/CareerGoals/*` localization. Per-goal CP and ISK payout defaults are server-authoritative /
-/// operator-configurable (not shipped in client static files).
+/// `Character/CareerGoals/*` localization.
+///
+/// DERIVED elements (not present in V24 client local static files):
+/// - Deterministic server UUIDs `[0x43, 0x47, career_order, ..., idx]` (not V24 catalog UUIDs).
+/// - Per-goal Career Points (`5..=50`, `1,000 CP` total per career) and ISK payouts (`CP * 2,500 ISK`),
+///   derived from `~/ai/eve-wiki/articles/AIR_Career_Program.md`.
+/// - Standing target basis points (`10, 25, 50, 100`) and Career Agent mission ordinals (`1`).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CareerGoalDef {
     pub uuid: [u8; 16],
     pub career_id: u32, // 1: Explorer, 2: Industrialist, 3: Enforcer, 4: Soldier of Fortune (Attributes.Career)
+    #[serde(default)]
+    pub goal_label: String,
     #[serde(default)]
     pub activity_name: String,
     #[serde(default)]
@@ -296,11 +303,208 @@ pub fn default_career_milestones() -> Vec<CareerMilestoneDef> {
     ]
 }
 
-/// Operator-configurable default per-goal career points & ISK payouts for V24 `sde_career_goals`
-/// rows (client `careerpaths.fsdbinary` / localization pickles contain goal titles, descriptions,
-/// Aura hints, and group labels, while dynamic CP & ISK payouts live server-side in Quasar).
+/// DERIVED per-goal AIR Career Program points from `~/ai/eve-wiki/articles/AIR_Career_Program.md`
+/// (`5..=50 CP` per goal, `1,000 CP` total per career path, `ISK = CP * 2,500`), because client
+/// local `careerpaths.fsdbinary` and localization pickles do not carry per-goal CP or ISK rewards.
+pub fn derived_wiki_career_goal_points(label: &str) -> Option<u32> {
+    Some(match label {
+        // Explorer (40 goals, 1,000 CP)
+        "ExplorerCareerAgentMission1"
+        | "ExplorerCareerAgentMission2"
+        | "ExplorerCareerAgentMission3"
+        | "ExplorerCareerAgentMission4"
+        | "ExplorerCareerAgentMission5" => 15,
+        "ExplorerScanSignature1" => 10,
+        "ExplorerScanSignature10" => 15,
+        "ExplorerScanSignature25" => 25,
+        "ExplorerScanSignature50" => 50,
+        "ExplorerHackContainer1" => 10,
+        "ExplorerHackContainer5" => 15,
+        "ExplorerHackContainer10" => 25,
+        "ExplorerHackContainer15" => 30,
+        "ExplorerHackContainer25" => 50,
+        "ExplorerHackLowsecContainer20"
+        | "ExplorerHackNullsecContainer20"
+        | "ExplorerHackWhContainer20" => 50,
+        "ExplorerScanWormholes1" => 10,
+        "ExplorerScanWormholes5" => 15,
+        "ExplorerScanWormholes10" => 20,
+        "ExplorerScanWormholes15" => 30,
+        "ExplorerEnterGasSites1" => 10,
+        "ExplorerEnterGasSites5" => 15,
+        "ExplorerEnterGasSites10" => 20,
+        "ExplorerEnterGasSites15" => 30,
+        "ExplorerEnterCombatSites1" => 10,
+        "ExplorerEnterCombatSites5" => 15,
+        "ExplorerEnterCombatSites10" => 20,
+        "ExplorerEnterCombatSites15" => 30,
+        "ExplorerGateJumps25" => 10,
+        "ExplorerGateJumps50" => 20,
+        "ExplorerGateJumps100" => 40,
+        "ExplorerVisitHisec" => 30,
+        "ExplorerVisitLowsec" => 40,
+        "ExplorerVisitNullsec" => 50,
+        "ExplorerProjectDiscoverySamples1" => 10,
+        "ExplorerProjectDiscoverySamples5" => 15,
+        "ExplorerProjectDiscoverySamples10" => 20,
+        "ExplorerProjectDiscoverySamples25" => 35,
+        "ExplorerProjectDiscoverySamples50" => 50,
+
+        // Industrialist (46 goals, 1,000 CP)
+        "IndustrialistEntrepreneurCareerAgentMission2"
+        | "IndustrialistEntrepreneurCareerAgentMission4"
+        | "IndustrialistEntrepreneurCareerAgentMission6"
+        | "IndustrialistEntrepreneurCareerAgentMission8"
+        | "IndustrialistEntrepreneurCareerAgentMission10"
+        | "IndustrialistProducerCareerAgentMission2"
+        | "IndustrialistProducerCareerAgentMission4"
+        | "IndustrialistProducerCareerAgentMission6"
+        | "IndustrialistProducerCareerAgentMission8"
+        | "IndustrialistProducerCareerAgentMission10" => 20,
+        "IndustrialistEarnMarketIsk50k" => 10,
+        "IndustrialistEarnMarketIsk100k" => 15,
+        "IndustrialistEarnMarketIsk250k" => 20,
+        "IndustrialistEarnMarketIsk500k" => 25,
+        "IndustrialistEarnMarketIsk1m" => 50,
+        "IndustrialistSalvageWrecks10" => 10,
+        "IndustrialistSalvageWrecks25" => 25,
+        "IndustrialistSalvageWrecks50" => 50,
+        "IndustrialistMineVeldspar"
+        | "IndustrialistMineScordite"
+        | "IndustrialistMinePyroxeres"
+        | "IndustrialistMinePlagioclase" => 25,
+        "IndustrialistMineKernite" => 50,
+        "IndustrialistReprocessVeldspar" | "IndustrialistReprocessScordite" => 10,
+        "IndustrialistReprocessPyroxeres" | "IndustrialistReprocessPlagioclase" => 15,
+        "IndustrialistReprocessKernite" => 25,
+        "IndustrialistManufactureShuttle" => 10,
+        "IndustrialistManufactureFrigate" => 15,
+        "IndustrialistManufactureDestroyer" => 25,
+        "IndustrialistManufactureCruiser" => 50,
+        "IndustrialistCourierMissions1" => 10,
+        "IndustrialistCourierMissions5" => 15,
+        "IndustrialistCourierMissions10" => 20,
+        "IndustrialistCourierMissions15" => 25,
+        "IndustrialistCourierMissions20" => 30,
+        "IndustrialistMiningMissions1" => 10,
+        "IndustrialistMiningMissions5" => 15,
+        "IndustrialistMiningMissions10" => 20,
+        "IndustrialistMiningMissions15" => 25,
+        "IndustrialistMiningMissions20" => 30,
+        "IndustrialistBuyBlueprint" | "IndustrialistCopyBlueprint" => 10,
+        "IndustrialistResearchBlueprintME" | "IndustrialistResearchBlueprintTE" => 25,
+
+        // Enforcer (49 goals, 1,000 CP)
+        "EnforcerCareerAgentMission1"
+        | "EnforcerCareerAgentMission2"
+        | "EnforcerCareerAgentMission3"
+        | "EnforcerCareerAgentMission4"
+        | "EnforcerCareerAgentMission5"
+        | "EnforcerCareerAgentMission6"
+        | "EnforcerCareerAgentMission7"
+        | "EnforcerCareerAgentMission8"
+        | "EnforcerCareerAgentMission9"
+        | "EnforcerCareerAgentMission10" => 10,
+        "EnforcerLevel1SecurityMissions1" => 10,
+        "EnforcerLevel1SecurityMissions5" => 15,
+        "EnforcerLevel1SecurityMissions10" => 20,
+        "EnforcerLevel1SecurityMissions15" => 25,
+        "EnforcerLevel1SecurityMissions20" => 30,
+        "EnforcerEnterTier0Abyss" => 10,
+        "EnforcerCompleteTier0Abyss1" => 20,
+        "EnforcerCompleteTier0Abyss5" => 25,
+        "EnforcerKillTriglavians30" => 30,
+        "EnforcerDestroyNpc100" => 10,
+        "EnforcerDestroyNpc150" => 20,
+        "EnforcerDestroyNpc200" => 30,
+        "EnforcerDestroyNpc250" => 40,
+        "EnforcerDestroyNpc300" => 50,
+        "EnforcerEarnBountyIsk250k" => 10,
+        "EnforcerEarnBountyIsk500k" => 20,
+        "EnforcerEarnBountyIsk1m" => 30,
+        "EnforcerEarnBountyIsk5m" => 50,
+        "EnforcerCompleteCombatSites5" => 10,
+        "EnforcerCompleteCombatSites15" => 25,
+        "EnforcerCompleteCombatSites25" => 50,
+        "EnforcerEpicArcMissions1" => 5,
+        "EnforcerEpicArcMissions5" => 10,
+        "EnforcerEpicArcMissions10" => 15,
+        "EnforcerEpicArcMissions20" => 20,
+        "EnforcerEpicArcComplete" => 50,
+        "EnforcerSpendMarketIsk50k" => 5,
+        "EnforcerSpendMarketIsk250k" => 15,
+        "EnforcerSpendMarketIsk500k" => 25,
+        "EnforcerSpendMarketIsk1m" => 50,
+        "EnforcerGetStandingTo01" => 10,
+        "EnforcerGetStandingTo025" => 15,
+        "EnforcerGetStandingTo05" => 25,
+        "EnforcerGetStandingToMissionsLevel2" => 30,
+        "EnforcerEarnLp50" => 10,
+        "EnforcerEarnLp100" => 15,
+        "EnforcerEarnLp250" => 20,
+        "EnforcerEarnLp500" => 25,
+        "EnforcerSpendLp300" => 25,
+
+        // Soldier of Fortune (53 goals, 1,000 CP)
+        "SofCareerAgentMission1"
+        | "SofCareerAgentMission2"
+        | "SofCareerAgentMission3"
+        | "SofCareerAgentMission4"
+        | "SofCareerAgentMission5"
+        | "SofCareerAgentMission6"
+        | "SofCareerAgentMission7"
+        | "SofCareerAgentMission8"
+        | "SofCareerAgentMission9"
+        | "SofCareerAgentMission10" => 10,
+        "SofSendChatMessage" => 10,
+        "SofJoinFleet" => 25,
+        "SofJoinCorporation" => 30,
+        "SofSendMail" => 10,
+        "SofAddContact" => 10,
+        "SofWebify"
+        | "SofTargetPaint"
+        | "SofWarpDisrupt"
+        | "SofWarpScramble"
+        | "SofWeaponDisrupt" => 20,
+        "SofDestroyNpcInFrigate" => 20,
+        "SofDestroyNpcInDestroyer" => 30,
+        "SofDestroyNpcInCruiser" => 40,
+        "SofKillCapsuleers2" => 20,
+        "SofKillCapsuleers3" => 30,
+        "SofKillCapsuleers4" => 40,
+        "SofKillCapsuleers5" => 50,
+        "SofDrainCapacitor50" => 10,
+        "SofDrainCapacitor100" => 20,
+        "SofDrainCapacitor250" => 30,
+        "SofNeutralizeCapacitor100" => 10,
+        "SofNeutralizeCapacitor500" => 20,
+        "SofNeutralizeCapacitor2000" => 30,
+        "SofJoinFW" => 10,
+        "SofKillFwCapsuleeer1" => 25,
+        "SofLevel1FwMission1" => 10,
+        "SofDefendFwComplexNovice" => 30,
+        "SofCaptureFwComplexNovice" => 30,
+        "SofRemoteBoostShieldHp500" => 10,
+        "SofRemoteBoostShieldHp1000" => 15,
+        "SofRemoteBoostShieldHp2500" => 25,
+        "SofRemoteRepArmorHp500" => 10,
+        "SofRemoteRepArmorHp1000" => 15,
+        "SofRemoteRepArmorHp2500" => 25,
+        "SofLoseShip1" => 5,
+        "SofLoseShip5" => 10,
+        "SofLoseShip10" => 15,
+        "SofLoseShip15" => 25,
+        "SofLoseShip20" => 30,
+        "SofDuelChallenge" => 5,
+        "SofDuelWin1" => 10,
+        "SofDuelWin3" => 20,
+        "SofDuelWin5" => 40,
+        _ => return None,
+    })
+}
+
 fn career_goal_def_from_sde(row: &eve_sde::CareerGoalDefinitionDef) -> CareerGoalDef {
-    let career_points = 15 + row.sort_order.saturating_sub(1).min(5) * 5;
+    let career_points = derived_wiki_career_goal_points(&row.label).unwrap_or(15);
     let isk_reward = i64::from(career_points) * 2_500;
     let threat = if career_points <= 15 {
         1
@@ -312,6 +516,7 @@ fn career_goal_def_from_sde(row: &eve_sde::CareerGoalDefinitionDef) -> CareerGoa
     CareerGoalDef {
         uuid: row.goal_uuid,
         career_id: row.career_id,
+        goal_label: row.label.clone(),
         activity_name: row.activity_name.clone(),
         activity_kind: row.activity_kind.clone(),
         name: row.name.clone(),
@@ -329,7 +534,7 @@ fn career_goal_def_from_sde(row: &eve_sde::CareerGoalDefinitionDef) -> CareerGoa
         agency_screen: Some("HOMEPAGE".into()),
         order: Some(row.sort_order.max(1)),
         _provenance: Some(
-            "V24 client Character/CareerGoals/* + careerpaths.fsdbinary in evomu_sde.sqlite; per-goal CP and ISK reward defaults are operator-configurable".into(),
+            "V24 client Character/CareerGoals/* + careerpaths.fsdbinary in evomu_sde.sqlite; synthesized [0x43, 0x47, ...] UUIDs, standing/mission target scaling, and per-goal CP/ISK payouts (5..=50 CP, CP*2500 ISK) are DERIVED".into(),
         ),
     }
 }
@@ -372,6 +577,7 @@ pub struct CareerGoalManager {
     pub definitions: RwLock<Vec<CareerGoalDef>>,
     pub character_career_goals: RwLock<HashMap<u32, Vec<CharacterCareerGoal>>>,
     pub claimed_milestones: RwLock<HashMap<u32, HashSet<u32>>>,
+    pub seen_regions: RwLock<HashMap<u32, HashMap<String, HashSet<u32>>>>,
     pub milestones: Vec<CareerMilestoneDef>,
     db: Option<Arc<WorldRepository>>,
     sde: Option<Arc<eve_sde::SdeRegistry>>,
@@ -397,6 +603,19 @@ fn sync_def_localization_from(dst: &mut CareerGoalDef, src: &CareerGoalDef) {
     dst._provenance = src._provenance.clone();
 }
 
+fn sync_def_derived_fields_from(dst: &mut CareerGoalDef, src: &CareerGoalDef) {
+    if dst.goal_label.is_empty() && !src.goal_label.is_empty() {
+        dst.goal_label = src.goal_label.clone();
+    }
+    if !src.goal_label.is_empty() && dst.goal_label == src.goal_label {
+        dst.target = src.target;
+        dst.career_points = src.career_points;
+        dst.isk_reward = src.isk_reward;
+        dst.threat = src.threat;
+        dst.duration = src.duration;
+    }
+}
+
 fn ensure_character_career_goals_with_defs(
     goals: &mut Vec<CharacterCareerGoal>,
     defs: &[CareerGoalDef],
@@ -407,6 +626,7 @@ fn ensure_character_career_goals_with_defs(
             if g.def.activity_kind.is_empty() {
                 g.def.activity_kind = def.activity_kind.clone();
             }
+            sync_def_derived_fields_from(&mut g.def, def);
             if is_stale_synthesized_loc_id(&g.def) && !is_stale_synthesized_loc_id(def) {
                 sync_def_localization_from(&mut g.def, def);
             }
@@ -426,6 +646,69 @@ fn ensure_character_career_goals_with_defs(
     }
 }
 
+fn load_persisted_career_state(
+    snap: &eve_db::WorldStateSnapshot,
+    default_defs: &[CareerGoalDef],
+) -> (
+    Vec<CareerGoalDef>,
+    HashMap<u32, Vec<CharacterCareerGoal>>,
+    HashMap<u32, HashSet<u32>>,
+    HashMap<u32, HashMap<String, HashSet<u32>>>,
+) {
+    let defs = snap
+        .quasar_state_blobs
+        .get("quasar_career_goal_defs")
+        .and_then(|json| serde_json::from_str::<Vec<CareerGoalDef>>(json).ok())
+        .map(|mut loaded_defs| {
+            for def in &mut loaded_defs {
+                if let Some(auth) = default_defs.iter().find(|d| d.uuid == def.uuid) {
+                    sync_def_derived_fields_from(def, auth);
+                    if is_stale_synthesized_loc_id(def) {
+                        sync_def_localization_from(def, auth);
+                    }
+                }
+            }
+            loaded_defs
+        })
+        .unwrap_or_else(|| default_defs.to_vec());
+    let mut loaded = snap
+        .quasar_state_blobs
+        .get("quasar_career_goals")
+        .and_then(|json| {
+            serde_json::from_str::<HashMap<u32, Vec<CharacterCareerGoal>>>(json).ok()
+        })
+        .unwrap_or_default();
+    for goals in loaded.values_mut() {
+        ensure_character_career_goals_with_defs(goals, &defs);
+    }
+    let mut milestones = snap
+        .quasar_state_blobs
+        .get("quasar_career_milestones")
+        .and_then(|json| serde_json::from_str::<HashMap<u32, HashSet<u32>>>(json).ok())
+        .unwrap_or_default();
+    let valid_mids: HashSet<u32> = default_career_milestones()
+        .into_iter()
+        .map(|m| m.milestone_id)
+        .collect();
+    for (&cid, npe) in &snap.npe_progress {
+        if let Ok(u32_cid) = u32::try_from(cid) {
+            for &gid in &npe.claimed_goals {
+                if valid_mids.contains(&gid) {
+                    milestones.entry(u32_cid).or_default().insert(gid);
+                }
+            }
+        }
+    }
+    let seen_regions = snap
+        .quasar_state_blobs
+        .get("quasar_career_seen_regions")
+        .and_then(|json| {
+            serde_json::from_str::<HashMap<u32, HashMap<String, HashSet<u32>>>>(json).ok()
+        })
+        .unwrap_or_default();
+    (defs, loaded, milestones, seen_regions)
+}
+
 impl CareerGoalManager {
     pub fn new(db: Option<Arc<WorldRepository>>) -> Self {
         Self::new_with_sde(db, None)
@@ -436,76 +719,23 @@ impl CareerGoalManager {
         sde: Option<Arc<eve_sde::SdeRegistry>>,
     ) -> Self {
         let default_defs = default_career_goal_definitions_for_sde(sde.as_deref());
-        let defs = db
+        let (defs, loaded, loaded_milestones, loaded_regions) = db
             .as_ref()
-            .and_then(|d| {
-                d.with_snapshot(|s| {
-                    s.quasar_state_blobs
-                        .get("quasar_career_goal_defs")
-                        .and_then(|json| serde_json::from_str::<Vec<CareerGoalDef>>(json).ok())
-                })
-            })
-            .map(|mut loaded_defs| {
-                for def in &mut loaded_defs {
-                    if is_stale_synthesized_loc_id(def) {
-                        if let Some(auth) = default_defs.iter().find(|d| d.uuid == def.uuid) {
-                            sync_def_localization_from(def, auth);
-                        }
-                    }
-                }
-                loaded_defs
-            })
-            .unwrap_or(default_defs);
-        let mut loaded = db
-            .as_ref()
-            .map(|d| {
-                d.with_snapshot(|s| {
-                    s.quasar_state_blobs
-                        .get("quasar_career_goals")
-                        .and_then(|json| {
-                            serde_json::from_str::<HashMap<u32, Vec<CharacterCareerGoal>>>(json)
-                                .ok()
-                        })
-                        .unwrap_or_default()
-                })
-            })
-            .unwrap_or_default();
-        for goals in loaded.values_mut() {
-            ensure_character_career_goals_with_defs(goals, &defs);
-        }
-        let loaded_milestones = db
-            .as_ref()
-            .map(|d| {
-                d.with_snapshot(|s| {
-                    let mut out = s
-                        .quasar_state_blobs
-                        .get("quasar_career_milestones")
-                        .and_then(|json| {
-                            serde_json::from_str::<HashMap<u32, HashSet<u32>>>(json).ok()
-                        })
-                        .unwrap_or_default();
-                    let valid_mids: HashSet<u32> = default_career_milestones()
-                        .into_iter()
-                        .map(|m| m.milestone_id)
-                        .collect();
-                    for (&cid, npe) in &s.npe_progress {
-                        if let Ok(u32_cid) = u32::try_from(cid) {
-                            for &gid in &npe.claimed_goals {
-                                if valid_mids.contains(&gid) {
-                                    out.entry(u32_cid).or_default().insert(gid);
-                                }
-                            }
-                        }
-                    }
-                    out
-                })
-            })
-            .unwrap_or_default();
+            .map(|d| d.with_snapshot(|s| load_persisted_career_state(s, &default_defs)))
+            .unwrap_or_else(|| {
+                (
+                    default_defs,
+                    HashMap::new(),
+                    HashMap::new(),
+                    HashMap::new(),
+                )
+            });
 
         Self {
             definitions: RwLock::new(defs),
             character_career_goals: RwLock::new(loaded),
             claimed_milestones: RwLock::new(loaded_milestones),
+            seen_regions: RwLock::new(loaded_regions),
             milestones: default_career_milestones(),
             db,
             sde,
@@ -554,6 +784,7 @@ impl CareerGoalManager {
             let defs = self.definitions.read().unwrap_or_else(|e| e.into_inner());
             let map = self.character_career_goals.read().unwrap_or_else(|e| e.into_inner());
             let cm = self.claimed_milestones.read().unwrap_or_else(|e| e.into_inner());
+            let sr = self.seen_regions.read().unwrap_or_else(|e| e.into_inner());
             let defs_json = if defs.is_empty() {
                 None
             } else {
@@ -561,10 +792,12 @@ impl CareerGoalManager {
             };
             let goals_json = serde_json::to_string(&*map).ok();
             let milestones_json = serde_json::to_string(&*cm).ok();
+            let regions_json = serde_json::to_string(&*sr).ok();
             let already = db.with_snapshot(|snap| {
                 defs_json.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_career_goal_defs") == Some(j))
                     && goals_json.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_career_goals") == Some(j))
                     && milestones_json.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_career_milestones") == Some(j))
+                    && regions_json.as_ref().is_none_or(|j| snap.quasar_state_blobs.get("quasar_career_seen_regions") == Some(j))
             });
             if already {
                 return;
@@ -580,6 +813,9 @@ impl CareerGoalManager {
                 if let Some(m_json) = milestones_json {
                     snap.quasar_state_blobs.insert("quasar_career_milestones".into(), m_json);
                 }
+                if let Some(r_json) = regions_json {
+                    snap.quasar_state_blobs.insert("quasar_career_seen_regions".into(), r_json);
+                }
                 Ok::<(), String>(())
             });
         }
@@ -587,42 +823,9 @@ impl CareerGoalManager {
 
     pub fn rehydrate_from_db(&self) {
         let Some(ref db) = self.db else { return };
-        let (defs, mut loaded, loaded_milestones) = db.with_snapshot(|s| {
-            let defs = s
-                .quasar_state_blobs
-                .get("quasar_career_goal_defs")
-                .and_then(|json| serde_json::from_str::<Vec<CareerGoalDef>>(json).ok())
-                .unwrap_or_else(|| default_career_goal_definitions_for_sde(self.sde.as_deref()));
-            let loaded = s
-                .quasar_state_blobs
-                .get("quasar_career_goals")
-                .and_then(|json| {
-                    serde_json::from_str::<HashMap<u32, Vec<CharacterCareerGoal>>>(json).ok()
-                })
-                .unwrap_or_default();
-            let mut out = s
-                .quasar_state_blobs
-                .get("quasar_career_milestones")
-                .and_then(|json| serde_json::from_str::<HashMap<u32, HashSet<u32>>>(json).ok())
-                .unwrap_or_default();
-            let valid_mids: HashSet<u32> = default_career_milestones()
-                .into_iter()
-                .map(|m| m.milestone_id)
-                .collect();
-            for (&cid, npe) in &s.npe_progress {
-                if let Ok(u32_cid) = u32::try_from(cid) {
-                    for &gid in &npe.claimed_goals {
-                        if valid_mids.contains(&gid) {
-                            out.entry(u32_cid).or_default().insert(gid);
-                        }
-                    }
-                }
-            }
-            (defs, loaded, out)
-        });
-        for goals in loaded.values_mut() {
-            ensure_character_career_goals_with_defs(goals, &defs);
-        }
+        let default_defs = default_career_goal_definitions_for_sde(self.sde.as_deref());
+        let (defs, loaded, loaded_milestones, loaded_regions) =
+            db.with_snapshot(|s| load_persisted_career_state(s, &default_defs));
         *self.definitions.write().unwrap_or_else(|e| e.into_inner()) = defs;
         *self
             .character_career_goals
@@ -632,6 +835,7 @@ impl CareerGoalManager {
             .claimed_milestones
             .write()
             .unwrap_or_else(|e| e.into_inner()) = loaded_milestones;
+        *self.seen_regions.write().unwrap_or_else(|e| e.into_inner()) = loaded_regions;
     }
 
     fn ensure_goals_for_list(&self, goals: &mut Vec<CharacterCareerGoal>) {
@@ -663,11 +867,300 @@ impl CareerGoalManager {
             .map(|g| g.def.career_points)
             .sum()
     }
+}
 
+/// Structured gameplay event context for evaluating AIR Career Program objective predicates.
+#[derive(Debug, Clone, Default)]
+pub struct CareerGameplayEvent<'a> {
+    pub activity_kind: &'a str,
+    /// Item or product `type_id` (harvested ore, manufactured item, reprocessed ore).
+    pub type_id: Option<u32>,
+    /// Item/ore/ship SDE `group_id` (e.g. `462` Veldspar, `25` Frigate).
+    pub group_id: Option<u32>,
+    /// Pilot active ship `group_id` when destroying an NPC (ship-class kill goals).
+    pub ship_group_id: Option<u32>,
+    pub solar_system_id: Option<u32>,
+    pub region_id: Option<u32>,
+    pub security_status: Option<f64>,
+    pub is_wormhole: Option<bool>,
+    /// Effective corporation standing in basis points (`0.1` -> `10`, `1.0` -> `100`).
+    pub standing_bps: Option<u64>,
+    /// Career Agent division (`"explorer"`, `"entrepreneur"`, `"producer"`, `"enforcer"`, `"soldier_of_fortune"`).
+    pub mission_division: Option<&'a str>,
+    /// Career Agent mission ordinal (`1..=10`).
+    pub mission_ordinal: Option<u32>,
+    /// Discriminator within shared `activity_kind` buckets (`"earn_isk"`, `"spend_isk"`, etc.).
+    pub sub_kind: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CareerSecBand {
+    HighSec,
+    LowSec,
+    NullSec,
+    Wormhole,
+}
+
+enum CareerObjectiveMatch {
+    AddDelta,
+    DistinctRegion(u32),
+    Threshold(u64),
+}
+
+fn event_sec_band(ev: &CareerGameplayEvent<'_>) -> Option<CareerSecBand> {
+    if ev.is_wormhole == Some(true) || ev.solar_system_id.is_some_and(|id| id >= 31_000_000) {
+        return Some(CareerSecBand::Wormhole);
+    }
+    let sec = ev.security_status?;
+    if sec >= 0.45 {
+        Some(CareerSecBand::HighSec)
+    } else if sec > 0.0 {
+        Some(CareerSecBand::LowSec)
+    } else {
+        Some(CareerSecBand::NullSec)
+    }
+}
+
+fn required_ore_group(label: &str) -> Option<u32> {
+    const ORE_GROUPS: &[(&str, u32)] = &[
+        ("Veldspar", 462),
+        ("Scordite", 460),
+        ("Pyroxeres", 459),
+        ("Plagioclase", 458),
+        ("Kernite", 457),
+    ];
+    ORE_GROUPS
+        .iter()
+        .find(|&&(suffix, _)| label.ends_with(suffix))
+        .map(|&(_, gid)| gid)
+}
+
+fn matches_ship_hull(label: &str, group_id: Option<u32>) -> bool {
+    const SHUTTLE_GROUPS: &[u32] = &[31];
+    const FRIGATE_GROUPS: &[u32] = &[25, 324, 830, 831, 834, 893, 1022, 1283, 1527];
+    const DESTROYER_GROUPS: &[u32] = &[420, 541, 1305, 1534];
+    const CRUISER_GROUPS: &[u32] = &[26, 358, 832, 833, 894, 906, 963, 1972];
+    let Some(gid) = group_id else {
+        return false;
+    };
+    let allowed = if label.ends_with("Shuttle") {
+        SHUTTLE_GROUPS
+    } else if label.ends_with("Frigate") {
+        FRIGATE_GROUPS
+    } else if label.ends_with("Destroyer") {
+        DESTROYER_GROUPS
+    } else if label.ends_with("Cruiser") {
+        CRUISER_GROUPS
+    } else {
+        return false;
+    };
+    allowed.contains(&gid)
+}
+
+fn parse_career_mission_predicate(label: &str) -> Option<(&'static str, u32)> {
+    const PREFIXES: &[(&str, &str)] = &[
+        ("ExplorerCareerAgentMission", "explorer"),
+        ("IndustrialistEntrepreneurCareerAgentMission", "entrepreneur"),
+        ("IndustrialistProducerCareerAgentMission", "producer"),
+        ("EnforcerCareerAgentMission", "enforcer"),
+        ("SofCareerAgentMission", "soldier_of_fortune"),
+    ];
+    for &(prefix, division) in PREFIXES {
+        if let Some(rest) = label.strip_prefix(prefix) {
+            if let Ok(ord) = rest.parse::<u32>() {
+                return Some((division, ord));
+            }
+        }
+    }
+    None
+}
+
+fn required_sub_kind(label: &str) -> Option<&'static str> {
+    Some(match label {
+        "IndustrialistBuyBlueprint" => "buy_blueprint",
+        "IndustrialistCopyBlueprint" => "copy_blueprint",
+        "IndustrialistResearchBlueprintME" => "research_me",
+        "IndustrialistResearchBlueprintTE" => "research_te",
+        "EnforcerEnterTier0Abyss" => "enter_tier0",
+        "EnforcerCompleteTier0Abyss1" | "EnforcerCompleteTier0Abyss5" => "complete_tier0",
+        "EnforcerKillTriglavians30" => "kill_triglavians",
+        "ExplorerEnterCombatSites1"
+        | "ExplorerEnterCombatSites5"
+        | "ExplorerEnterCombatSites10"
+        | "ExplorerEnterCombatSites15" => "enter_combat_site",
+        "EnforcerCompleteCombatSites5"
+        | "EnforcerCompleteCombatSites15"
+        | "EnforcerCompleteCombatSites25" => "complete_combat_site",
+        "EnforcerEpicArcMissions1"
+        | "EnforcerEpicArcMissions5"
+        | "EnforcerEpicArcMissions10"
+        | "EnforcerEpicArcMissions20" => "epic_arc_mission",
+        "EnforcerEpicArcComplete" => "epic_arc_complete",
+        l if l.starts_with("IndustrialistEarnMarketIsk") => "earn_isk",
+        l if l.starts_with("EnforcerSpendMarketIsk") => "spend_isk",
+        l if l.starts_with("EnforcerEarnLp") => "earn_lp",
+        "EnforcerSpendLp300" => "spend_lp",
+        "SofSendChatMessage" => "chat_message",
+        "SofJoinFleet" => "join_fleet",
+        "SofJoinCorporation" => "join_corp",
+        "SofSendMail" => "send_mail",
+        "SofAddContact" => "add_contact",
+        "SofWebify" => "webify",
+        "SofTargetPaint" => "target_paint",
+        "SofWarpDisrupt" => "warp_disrupt",
+        "SofWarpScramble" => "warp_scramble",
+        "SofWeaponDisrupt" => "weapon_disrupt",
+        l if l.starts_with("SofDrainCapacitor") => "nosferatu",
+        l if l.starts_with("SofNeutralizeCapacitor") => "neutralizer",
+        "SofJoinFW" => "join_fw",
+        "SofKillFwCapsuleeer1" => "kill_fw_capsuleer",
+        "SofLevel1FwMission1" => "level1_fw_mission",
+        "SofDefendFwComplexNovice" => "defend_scout_complex",
+        "SofCaptureFwComplexNovice" => "capture_scout_complex",
+        l if l.starts_with("SofRemoteBoostShieldHp") => "shield_boost",
+        l if l.starts_with("SofRemoteRepArmorHp") => "armor_repair",
+        "SofDuelChallenge" => "challenge_duel",
+        "SofDuelWin1" | "SofDuelWin3" | "SofDuelWin5" => "participate_duel",
+        _ => return None,
+    })
+}
+
+fn evaluate_career_objective(
+    goal: &CharacterCareerGoal,
+    ev: &CareerGameplayEvent<'_>,
+) -> Option<CareerObjectiveMatch> {
+    if goal.def.activity_kind != ev.activity_kind || goal.completed {
+        return None;
+    }
+    let label = goal.def.goal_label.as_str();
+    if label.is_empty() {
+        return Some(CareerObjectiveMatch::AddDelta);
+    }
+
+    if matches!(ev.activity_kind, "mining" | "refining") {
+        let req_gid = required_ore_group(label)?;
+        return (ev.group_id == Some(req_gid)).then_some(CareerObjectiveMatch::AddDelta);
+    }
+
+    if ev.activity_kind == "manufacturing" {
+        return matches_ship_hull(label, ev.group_id).then_some(CareerObjectiveMatch::AddDelta);
+    }
+
+    if label.starts_with("SofDestroyNpcIn") {
+        return matches_ship_hull(label, ev.ship_group_id).then_some(CareerObjectiveMatch::AddDelta);
+    }
+
+    if ev.activity_kind == "advanced_travel" {
+        let expected_band = match label {
+            "ExplorerVisitHisec" => CareerSecBand::HighSec,
+            "ExplorerVisitLowsec" => CareerSecBand::LowSec,
+            "ExplorerVisitNullsec" => CareerSecBand::NullSec,
+            _ => return None,
+        };
+        if event_sec_band(ev) != Some(expected_band) {
+            return None;
+        }
+        let region_id = ev.region_id?;
+        return Some(CareerObjectiveMatch::DistinctRegion(region_id));
+    }
+
+    if ev.activity_kind == "advanced_hacking" {
+        let expected_band = match label {
+            "ExplorerHackLowsecContainer20" => CareerSecBand::LowSec,
+            "ExplorerHackNullsecContainer20" => CareerSecBand::NullSec,
+            "ExplorerHackWhContainer20" => CareerSecBand::Wormhole,
+            _ => return None,
+        };
+        return (event_sec_band(ev) == Some(expected_band))
+            .then_some(CareerObjectiveMatch::AddDelta);
+    }
+
+    if ev.activity_kind == "standings" {
+        let bps = ev.standing_bps?;
+        return Some(CareerObjectiveMatch::Threshold(bps));
+    }
+
+    if let Some((exp_div, exp_ord)) = parse_career_mission_predicate(label) {
+        let div_ok = ev
+            .mission_division
+            .is_some_and(|d| d.eq_ignore_ascii_case(exp_div));
+        return (div_ok && ev.mission_ordinal == Some(exp_ord))
+            .then_some(CareerObjectiveMatch::AddDelta);
+    }
+
+    if let Some(req_sub) = required_sub_kind(label) {
+        return (ev.sub_kind == Some(req_sub)).then_some(CareerObjectiveMatch::AddDelta);
+    }
+
+    Some(CareerObjectiveMatch::AddDelta)
+}
+
+/// Resolves solar system metadata (`region_id`, `security_status`, `is_wormhole`) from SDE into
+/// a [`CareerGameplayEvent`].
+pub(crate) fn solar_system_career_event<'a>(
+    sde: &eve_sde::SdeRegistry,
+    activity_kind: &'a str,
+    sys_id: u32,
+) -> CareerGameplayEvent<'a> {
+    let sys_opt = sde.solar_systems.get(&sys_id);
+    let is_wh = sys_id >= 31_000_000
+        || sys_opt.is_some_and(|s| {
+            s.wormhole_class_id
+                .or_else(|| {
+                    sde.constellations
+                        .get(&s.constellation_id)
+                        .and_then(|c| c.wormhole_class_id)
+                })
+                .or_else(|| sde.regions.get(&s.region_id).and_then(|r| r.wormhole_class_id))
+                .is_some()
+        });
+    CareerGameplayEvent {
+        activity_kind,
+        solar_system_id: Some(sys_id),
+        region_id: sys_opt.map(|s| s.region_id),
+        security_status: sys_opt.map(|s| s.security_status),
+        is_wormhole: Some(is_wh),
+        ..Default::default()
+    }
+}
+
+/// Resolves a character's currently active ship SDE `group_id`, if mounted in a valid ship.
+pub(crate) fn character_active_ship_group_id(
+    db: &WorldRepository,
+    sde: &eve_sde::SdeRegistry,
+    char_id: i64,
+) -> Option<u32> {
+    let ship_type_id = db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&char_id)?;
+        (ch.active_ship_id > 0)
+            .then(|| snap.items.get(&ch.active_ship_id).map(|it| it.type_id))?
+    })?;
+    sde.types.get(&ship_type_id).map(|t| t.group_id)
+}
+
+impl CareerGoalManager {
     pub fn on_gameplay_event(
         &self,
         char_id: u32,
         activity_kind: &str,
+        delta: u64,
+        gateway: &PublicGatewayRouter,
+    ) {
+        self.on_career_gameplay_event(
+            char_id,
+            CareerGameplayEvent {
+                activity_kind,
+                ..Default::default()
+            },
+            delta,
+            gateway,
+        );
+    }
+
+    pub fn on_career_gameplay_event(
+        &self,
+        char_id: u32,
+        ev: CareerGameplayEvent<'_>,
         delta: u64,
         gateway: &PublicGatewayRouter,
     ) {
@@ -683,23 +1176,64 @@ impl CareerGoalManager {
                     .character_career_goals
                     .write()
                     .unwrap_or_else(|e| e.into_inner());
+                let mut seen_regions = self
+                    .seen_regions
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
                 let goals = map.entry(char_id).or_default();
                 self.ensure_goals_for_list(goals);
 
                 for g in goals.iter_mut() {
-                    if g.def.activity_kind == activity_kind && !g.completed {
-                        let prev = g.completed;
-                        g.progress = g.progress.saturating_add(delta);
-                        if g.progress >= g.def.target {
-                            g.completed = true;
-                            g.completed_time = Some(now_unix);
+                    let Some(how) = evaluate_career_objective(g, &ev) else {
+                        continue;
+                    };
+                    let prev = g.completed;
+                    let prev_progress = g.progress;
+                    match how {
+                        CareerObjectiveMatch::AddDelta => {
+                            if delta == 0 {
+                                continue;
+                            }
+                            g.progress = g.progress.saturating_add(delta);
                         }
-                        let just_completed = !prev && g.completed;
-                        progressed.push((g.uuid, g.progress, just_completed));
+                        CareerObjectiveMatch::DistinctRegion(region_id) => {
+                            let label_key = if g.def.goal_label.is_empty() {
+                                format!("{:032x}", u128::from_be_bytes(g.uuid))
+                            } else {
+                                g.def.goal_label.clone()
+                            };
+                            let visited = seen_regions
+                                .entry(char_id)
+                                .or_default()
+                                .entry(label_key)
+                                .or_default();
+                            if !visited.insert(region_id) {
+                                continue;
+                            }
+                            g.progress = (visited.len() as u64).min(g.def.target);
+                        }
+                        CareerObjectiveMatch::Threshold(bps) => {
+                            let next = g.progress.max(bps.min(g.def.target));
+                            if next <= g.progress {
+                                continue;
+                            }
+                            g.progress = next;
+                        }
                     }
+                    if g.progress == prev_progress {
+                        continue;
+                    }
+                    if g.progress >= g.def.target {
+                        g.completed = true;
+                        g.completed_time = Some(now_unix);
+                    }
+                    let just_completed = !prev && g.completed;
+                    progressed.push((g.uuid, g.progress, just_completed));
                 }
             }
-            self.save_to_db();
+            if !progressed.is_empty() {
+                self.save_to_db();
+            }
 
             for (uuid, new_progress, just_completed) in progressed {
                 let _ = gateway.publish_pb_notice(

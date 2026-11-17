@@ -80,6 +80,51 @@ pub fn achievement_reward_uuid(achievement_id: u32, milestone_id: u32) -> [u8; 1
     uuid
 }
 
+/// DERIVED server category bucketing (`1=combat, 2=exploration, 3=industry, 4=economy/goals, 5=social`):
+/// `achievements.static` omits server-authored CDN category trees, so each achievement's primary
+/// statistic event deterministically selects a non-zero category bucket so category APIs (`GetRequest`,
+/// `category.api.admin.ResetRequest`) operate independently per category.
+fn derived_achievement_category_id(
+    primary_event_id: u32,
+    conditions: &[AchievementConditionDef],
+) -> u32 {
+    let eid = if primary_event_id != 0 {
+        primary_event_id
+    } else {
+        conditions.first().map_or(0, |c| c.statistic_event_id)
+    };
+    match eid {
+        // 1: Combat
+        1 | 18 | 102 | 103 | 112 | 113 | 115 => 1,
+        // 2: Exploration & Navigation
+        15 | 34 | 74 | 90 | 95 | 110 | 123 | 124 | 127 | 128 | 129 | 138 | 139 | 142 | 146 | 149
+        | 150 | 151 | 152 | 153 => 2,
+        // 3: Industry, Mining, Reprocessing & Salvage
+        59 | 86 | 104 | 107 | 116 | 118 | 119 | 120 | 125 | 145 | 148 => 3,
+        // 4: Goals, Missions, Market, Fitting & Skills
+        11 | 45 | 92 | 93 | 96 | 97 | 99 | 106 | 117 | 122 | 130 | 135 | 136 | 137 | 154 => 4,
+        // 5: Social, Contacts, Chat & Corporations
+        101 | 126 | 131 | 140 | 147 => 5,
+        _ => {
+            let name = conditions
+                .first()
+                .map_or("", |c| c.event_name.as_str())
+                .to_ascii_lowercase();
+            if name.contains("hostile") || name.contains("gun") || name.contains("combat") || name.contains("loss") {
+                1
+            } else if name.contains("probe") || name.contains("wormhole") || name.contains("warp") || name.contains("jump") || name.contains("dock") || name.contains("map") {
+                2
+            } else if name.contains("mine") || name.contains("asteroid") || name.contains("industry") || name.contains("refine") || name.contains("salvage") || name.contains("blueprint") || name.contains("loot") {
+                3
+            } else if name.contains("chat") || name.contains("convo") || name.contains("corp") || name.contains("contact") {
+                5
+            } else {
+                4
+            }
+        }
+    }
+}
+
 fn build_definitions_from_sde(
     sde: &eve_sde::SdeRegistry,
 ) -> (Vec<AchievementDef>, HashSet<String>, usize, String, Vec<u8>, Vec<u8>) {
@@ -128,6 +173,7 @@ fn build_definitions_from_sde(
         let empty_fb = super::quasar_achievements_flatbuffer::encode_achievement_data_flatbuffer(
             &[],
             &HashMap::new(),
+            &sde.achievement_category_labels,
         );
         return (
             Vec::new(),
@@ -209,12 +255,14 @@ fn build_definitions_from_sde(
             conditions.iter().map(|c| c.target_value).sum::<u64>().max(1)
         };
 
-        // Client `achievements.static` omits server-authored CDN category trees, score weights,
-        // milestone checkpoints, and ISK/SP payouts; keep them 0 / empty unless operator-configured.
+        // Client `achievements.static` omits server-authored CDN score weights, milestone checkpoints,
+        // and ISK/SP payouts; keep those 0 / empty unless operator-configured, while bucketing each
+        // achievement into a DERIVED non-zero category (1..=5) so category reset/query APIs work.
+        let category_id = derived_achievement_category_id(info.primary_event_id, &conditions);
         defs.push(AchievementDef {
             id,
             is_client_achievement: info.is_client_achievement,
-            category_id: 0,
+            category_id,
             name: info.name.clone(),
             description: info.description.clone(),
             notification_text: info.notification_text.clone(),
@@ -228,8 +276,11 @@ fn build_definitions_from_sde(
     }
     let json_bytes = serde_json::to_vec(&defs).unwrap_or_else(|_| b"[]".to_vec());
     let hash = sha256_hex(&json_bytes)[..16].to_string();
-    let fb_bytes =
-        super::quasar_achievements_flatbuffer::encode_achievement_data_flatbuffer(&defs, &loc_ids);
+    let fb_bytes = super::quasar_achievements_flatbuffer::encode_achievement_data_flatbuffer(
+        &defs,
+        &loc_ids,
+        &sde.achievement_category_labels,
+    );
     (defs, allowed_client_keys, count, hash, json_bytes, fb_bytes)
 }
 
@@ -360,6 +411,7 @@ impl AchievementManager {
                     super::quasar_achievements_flatbuffer::encode_achievement_data_flatbuffer(
                         &[],
                         &HashMap::new(),
+                        &[],
                     );
                 (
                     Vec::new(),
@@ -437,9 +489,14 @@ impl AchievementManager {
             || self.sde_definitions_flatbuffer.is_empty()
             || self.definitions.len() != self.sde_achievement_count
         {
+            let cat_labels = self
+                .sde
+                .as_ref()
+                .map_or(&[][..], |s| s.achievement_category_labels.as_slice());
             return super::quasar_achievements_flatbuffer::encode_achievement_data_flatbuffer(
                 &self.definitions,
                 &HashMap::new(),
+                cat_labels,
             );
         }
         self.sde_definitions_flatbuffer.clone()

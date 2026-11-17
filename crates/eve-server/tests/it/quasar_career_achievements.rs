@@ -355,7 +355,7 @@ async fn test_authentic_campaign_definitions() {
 
 #[tokio::test]
 async fn test_authentic_achievements_and_cdn_metadata() {
-    // DATA GAP: Achievement showcase scores, category bucketing, and milestone reward amounts are server-authored CDN Checkpoint data in V24 and not present in res:/staticdata/achievements.static.
+    // DATA GAP: Achievement showcase scores and milestone reward amounts are server-authored CDN Checkpoint data in V24 and not present in res:/staticdata/achievements.static (categories 1..=5 are DERIVED buckets for category reset isolation).
 
     let ctx = std::sync::Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
@@ -371,7 +371,7 @@ async fn test_authentic_achievements_and_cdn_metadata() {
     let ach2 = ach_defs.iter().find(|d| d.id == 2).expect("SDE achievement 2");
     assert_eq!(ach2.name, "Mine Ore", "SDE achievement 2 localized name must be 'Mine Ore'");
     assert_eq!(ach2.target, 3, "SDE achievement 2 authentic target condition must be 3");
-    assert_eq!(ach2.category_id, 0, "Client achievements.static omits category assignment");
+    assert_eq!(ach2.category_id, 3, "Mine Ore carries DERIVED Resource/Industry category 3");
     assert_eq!(ach2.score, 0, "Client achievements.static omits score weights");
     assert!(ach2.milestone_targets.is_empty(), "Client achievements.static omits milestone checkpoints");
     assert_eq!(ach2.reward_isk, 0, "Client achievements.static omits ISK payouts");

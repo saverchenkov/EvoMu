@@ -1634,20 +1634,24 @@ async fn air_achievements_grpc_and_sqlite_reload() {
         .await;
     assert_eq!(showcase2.get(1).and_then(dyn_u64).unwrap_or(0), u64::from(ach_score));
 
-    // Category reset + achievement reset must both succeed and zero achievement progress
+    // Category reset alone must succeed and zero its category's achievement progress across SQLite reload
+    assert!(ach_cat_id > 0, "SDE achievement must map to a non-zero DERIVED category");
     let mut cat_be = [0u8; 16];
     cat_be[12..16].copy_from_slice(&ach_cat_id.to_be_bytes());
     let mut cat_reset_req = Vec::new();
     encode_bytes_field(1, &encode_uuid_ident(&cat_be), &mut cat_reset_req);
     gm2.send_ok_empty("eve_public.achievement.category.api.admin.ResetRequest", cat_reset_req)
         .await;
-    let mut ach_reset_req = Vec::new();
-    encode_bytes_field(1, &encode_uuid_ident(&aid_be), &mut ach_reset_req);
-    gm2.send_ok_empty("eve_public.achievement.api.admin.ResetRequest", ach_reset_req)
-        .await;
-    let (_, reset_ach) = gm2.send_ok_dyn("eve_public.achievement.api.GetRequest", get_req).await;
-    assert_eq!(reset_ach.get(3).and_then(dyn_u64).unwrap_or(0), 0, "Reset must zero achievement progress");
+    let (_, reset_ach) = gm2.send_ok_dyn("eve_public.achievement.api.GetRequest", get_req.clone()).await;
+    assert_eq!(reset_ach.get(3).and_then(dyn_u64).unwrap_or(0), 0, "Category reset alone must zero achievement progress");
+    assert_eq!(reset_ach.get(4).and_then(dyn_u64).unwrap_or(0), 0, "Category reset alone must clear completed status");
     gm2.close();
+
+    let ctx3 = boot_sqlite_ctx(&sqlite.path, base_unix + 120);
+    let mut gm3 = GrpcClient::connect(Arc::clone(&ctx3), "ach_gm", "gm-pass", gm_cid, 0x34).await;
+    let (_, reloaded_reset_ach) = gm3.send_ok_dyn("eve_public.achievement.api.GetRequest", get_req).await;
+    assert_eq!(reloaded_reset_ach.get(3).and_then(dyn_u64).unwrap_or(0), 0, "Category reset must persist across SQLite reload");
+    gm3.close();
 }
 
 // ============================================================================

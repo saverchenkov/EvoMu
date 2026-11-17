@@ -1198,7 +1198,29 @@ async fn handle_cmd_stargate_jump(
             ctx.quasar_gateway
                 .progression
                 .career_goals
-                .on_gameplay_event(char_id as u32, "travel", 1, &ctx.quasar_gateway);
+                .on_career_gameplay_event(
+                    char_id as u32,
+                    crate::services::quasar_career_goals::solar_system_career_event(
+                        &ctx.sde,
+                        "travel",
+                        dest_sys_id,
+                    ),
+                    1,
+                    &ctx.quasar_gateway,
+                );
+            ctx.quasar_gateway
+                .progression
+                .career_goals
+                .on_career_gameplay_event(
+                    char_id as u32,
+                    crate::services::quasar_career_goals::solar_system_career_event(
+                        &ctx.sde,
+                        "advanced_travel",
+                        dest_sys_id,
+                    ),
+                    1,
+                    &ctx.quasar_gateway,
+                );
             ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["stargateJumps"], 1, now_unix, &ctx.quasar_gateway);
         },
     );
