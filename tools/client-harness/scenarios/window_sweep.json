@@ -1,0 +1,2087 @@
+{
+  "id": "window_and_showinfo_sweep",
+  "title": "Sweep All Valid Neocom/Utility Windows (Docked & Space) + 10 Show Info Categories",
+  "starting_state": {
+    "account": "demo",
+    "password": "demo-secret",
+    "char_id": 90000001
+  },
+  "steps": [
+    {
+      "id": "open_inventory",
+      "description": "Open Neocom/utility window 'inventory' (OpenInventory) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "inventory",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'inventory' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_inventory",
+      "description": "Close window/drawer after 'inventory'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "inventory",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_cargohold",
+      "description": "Open Neocom/utility window 'cargohold' (OpenCargoHoldOfActiveShip) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "cargohold",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'cargohold' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_cargohold",
+      "description": "Close window/drawer after 'cargohold'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "cargohold",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_shiphangar",
+      "description": "Open Neocom/utility window 'shiphangar' (OpenShipHangar) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "shiphangar",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'shiphangar' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_shiphangar",
+      "description": "Close window/drawer after 'shiphangar'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "shiphangar",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_itemhangar",
+      "description": "Open Neocom/utility window 'itemhangar' (OpenHangarFloor) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "itemhangar",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'itemhangar' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_itemhangar",
+      "description": "Close window/drawer after 'itemhangar'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "itemhangar",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_market",
+      "description": "Open Neocom/utility window 'market' (OpenMarket) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "market",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'market' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_market",
+      "description": "Close window/drawer after 'market'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "market",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_marketorders",
+      "description": "Open Neocom/utility window 'marketorders' (OpenMarketOrders) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "marketorders",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'marketorders' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_marketorders",
+      "description": "Close window/drawer after 'marketorders'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "marketorders",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_multibuy",
+      "description": "Open Neocom/utility window 'multibuy' (OpenMultibuy) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "multibuy",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'multibuy' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_multibuy",
+      "description": "Close window/drawer after 'multibuy'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "multibuy",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_charsheet",
+      "description": "Open Neocom/utility window 'charsheet' (OpenCharactersheet) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "charsheet",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'charsheet' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_charsheet",
+      "description": "Close window/drawer after 'charsheet'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "charsheet",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_skills",
+      "description": "Open Neocom/utility window 'skills' (OpenSkillsWindow) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "skills",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'skills' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_skills",
+      "description": "Close window/drawer after 'skills'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "skills",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_skilltree",
+      "description": "Open Neocom/utility window 'skilltree' (OpenSkillTreeWindow) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "skilltree",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'skilltree' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_skilltree",
+      "description": "Close window/drawer after 'skilltree'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "skilltree",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_nes",
+      "description": "Open Neocom/utility surface 'nes' without clicking window TabGroup",
+      "action": {
+        "type": "open_window",
+        "target": "nes",
+        "click_top_tabs": false,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'nes' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_nes",
+      "description": "Close window/drawer after 'nes'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "nes",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_plexvault",
+      "description": "Open Neocom/utility window 'plexvault' (OpenPlexVault) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "plexvault",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'plexvault' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_plexvault",
+      "description": "Close window/drawer after 'plexvault'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "plexvault",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_fitting",
+      "description": "Open Neocom/utility window 'fitting' (OpenFitting) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "fitting",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'fitting' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_fitting",
+      "description": "Close window/drawer after 'fitting'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "fitting",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_fittingmgmt",
+      "description": "Open Neocom/utility window 'fittingmgmt' (OpenFittingMgmt) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "fittingmgmt",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'fittingmgmt' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_fittingmgmt",
+      "description": "Close window/drawer after 'fittingmgmt'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "fittingmgmt",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_contracts",
+      "description": "Open Neocom/utility window 'contracts' (OpenContracts) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "contracts",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'contracts' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_contracts",
+      "description": "Close window/drawer after 'contracts'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "contracts",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_industry",
+      "description": "Open Neocom/utility window 'industry' (OpenIndustry) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "industry",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'industry' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_industry",
+      "description": "Close window/drawer after 'industry'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "industry",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_planets",
+      "description": "Open Neocom/utility window 'planets' (OpenPlanets) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "planets",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'planets' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_planets",
+      "description": "Close window/drawer after 'planets'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "planets",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_corp",
+      "description": "Open Neocom/utility window 'corp' (OpenCorporationPanel) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "corp",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'corp' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_corp",
+      "description": "Close window/drawer after 'corp'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "corp",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_fleet",
+      "description": "Open Neocom/utility window 'fleet' (OpenFleet) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "fleet",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'fleet' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_fleet",
+      "description": "Close window/drawer after 'fleet'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "fleet",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_agency",
+      "description": "Open Neocom/utility window 'agency' (OpenAgencyNew) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "agency",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'agency' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_agency",
+      "description": "Close window/drawer after 'agency'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "agency",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_jobboard",
+      "description": "Open Neocom/utility window 'jobboard' (OpenJobBoardWindow) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "jobboard",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'jobboard' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_jobboard",
+      "description": "Close window/drawer after 'jobboard'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "jobboard",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_assets",
+      "description": "Open Neocom/utility window 'assets' (OpenAssets) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "assets",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'assets' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_assets",
+      "description": "Close window/drawer after 'assets'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "assets",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_wallet",
+      "description": "Open Neocom/utility window 'wallet' (OpenWallet) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "wallet",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'wallet' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_wallet",
+      "description": "Close window/drawer after 'wallet'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "wallet",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_mail",
+      "description": "Open Neocom/utility window 'mail' (OpenMail) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "mail",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'mail' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_mail",
+      "description": "Close window/drawer after 'mail'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "mail",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_notifications",
+      "description": "Open Neocom/utility surface 'notifications' without clicking window TabGroup",
+      "action": {
+        "type": "open_window",
+        "target": "notifications",
+        "click_top_tabs": false,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'notifications' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_notifications",
+      "description": "Close window/drawer after 'notifications'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "notifications",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_map",
+      "description": "Open Neocom/utility surface 'map' without clicking window TabGroup",
+      "action": {
+        "type": "open_window",
+        "target": "map",
+        "click_top_tabs": false,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'map' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_map",
+      "description": "Close window/drawer after 'map'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "map",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_solarsystemmap",
+      "description": "Open Neocom/utility surface 'solarsystemmap' without clicking window TabGroup",
+      "action": {
+        "type": "open_window",
+        "target": "solarsystemmap",
+        "click_top_tabs": false,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'solarsystemmap' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_solarsystemmap",
+      "description": "Close window/drawer after 'solarsystemmap'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "solarsystemmap",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_notepad",
+      "description": "Open Neocom/utility window 'notepad' (OpenNotepad) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "notepad",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'notepad' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_notepad",
+      "description": "Close window/drawer after 'notepad'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "notepad",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_calculator",
+      "description": "Open Neocom/utility window 'calculator' (OpenCalculator) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "calculator",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'calculator' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_calculator",
+      "description": "Close window/drawer after 'calculator'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "calculator",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_calendar",
+      "description": "Open Neocom/utility window 'calendar' (OpenCalendar) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "calendar",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'calendar' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_calendar",
+      "description": "Close window/drawer after 'calendar'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "calendar",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_journal",
+      "description": "Open Neocom/utility window 'journal' (OpenJournal) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "journal",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'journal' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_journal",
+      "description": "Close window/drawer after 'journal'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "journal",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_agentfinder",
+      "description": "Open Neocom/utility window 'agentfinder' (OpenAgencyContentGroup) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "agentfinder",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'agentfinder' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_agentfinder",
+      "description": "Close window/drawer after 'agentfinder'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "agentfinder",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_lpstore",
+      "description": "Open Neocom/utility window 'lpstore' (OpenLpstore) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "lpstore",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'lpstore' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_lpstore",
+      "description": "Close window/drawer after 'lpstore'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "lpstore",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_repair",
+      "description": "Open Neocom/utility window 'repair' (OpenRepairshop) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "repair",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'repair' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_repair",
+      "description": "Close window/drawer after 'repair'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "repair",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_reprocessing",
+      "description": "Open Neocom/utility window 'reprocessing' (OpenReprocessingPlant) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "reprocessing",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'reprocessing' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_reprocessing",
+      "description": "Close window/drawer after 'reprocessing'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "reprocessing",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_miningledger",
+      "description": "Open Neocom/utility window 'miningledger' (OpenLedger) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "miningledger",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'miningledger' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_miningledger",
+      "description": "Close window/drawer after 'miningledger'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "miningledger",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_mininghold",
+      "description": "Open Neocom/utility window 'mininghold' (OpenGeneralMiningHoldOfActiveShip) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "mininghold",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'mininghold' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_mininghold",
+      "description": "Close window/drawer after 'mininghold'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "mininghold",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_mineralhold",
+      "description": "Open Neocom/utility window 'mineralhold' (OpenMineralHoldOfActiveShip) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "mineralhold",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'mineralhold' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_mineralhold",
+      "description": "Close window/drawer after 'mineralhold'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "mineralhold",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_insurance",
+      "description": "Open Neocom/utility window 'insurance' (OpenInsurance) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "insurance",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'insurance' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_insurance",
+      "description": "Close window/drawer after 'insurance'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "insurance",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_bountyoffice",
+      "description": "Open Neocom/utility window 'bountyoffice' (OpenBountyOffice) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "bountyoffice",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'bountyoffice' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_bountyoffice",
+      "description": "Close window/drawer after 'bountyoffice'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "bountyoffice",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_securityoffice",
+      "description": "Open Neocom/utility window 'securityoffice' (OpenSecurityOffice) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "securityoffice",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'securityoffice' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_securityoffice",
+      "description": "Close window/drawer after 'securityoffice'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "securityoffice",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_militia",
+      "description": "Open Neocom/utility window 'militia' (OpenMilitia) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "militia",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'militia' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_militia",
+      "description": "Close window/drawer after 'militia'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "militia",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_factionalwarfare",
+      "description": "Open Neocom/utility window 'factionalwarfare' (OpenFwWindow) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "factionalwarfare",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'factionalwarfare' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_factionalwarfare",
+      "description": "Close window/drawer after 'factionalwarfare'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "factionalwarfare",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_insurgency",
+      "description": "Open Neocom/utility window 'insurgency' (OpenInsurgencyDashboard) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "insurgency",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'insurgency' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_insurgency",
+      "description": "Close window/drawer after 'insurgency'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "insurgency",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_skinr",
+      "description": "Open Neocom/utility window 'skinr' (OpenShipSKINRWindow) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "skinr",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'skinr' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_skinr",
+      "description": "Close window/drawer after 'skinr'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "skinr",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_structurebrowser",
+      "description": "Open Neocom/utility window 'structurebrowser' (OpenStructureBrowser) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "structurebrowser",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'structurebrowser' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_structurebrowser",
+      "description": "Close window/drawer after 'structurebrowser'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "structurebrowser",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_shiptree",
+      "description": "Open Neocom/utility surface 'shiptree' without clicking window TabGroup",
+      "action": {
+        "type": "open_window",
+        "target": "shiptree",
+        "click_top_tabs": false,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'shiptree' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_shiptree",
+      "description": "Close window/drawer after 'shiptree'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "shiptree",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_aircareerprogram",
+      "description": "Open Neocom/utility window 'aircareerprogram' (OpenAchievementsWindow) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "aircareerprogram",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'aircareerprogram' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_aircareerprogram",
+      "description": "Close window/drawer after 'aircareerprogram'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "aircareerprogram",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_peopleandplaces",
+      "description": "Open Neocom/utility window 'peopleandplaces' (OpenPeopleAndPlaces) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "peopleandplaces",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'peopleandplaces' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_peopleandplaces",
+      "description": "Close window/drawer after 'peopleandplaces'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "peopleandplaces",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_locations",
+      "description": "Open Neocom/utility window 'locations' (OpenLocations) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "locations",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'locations' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_locations",
+      "description": "Close window/drawer after 'locations'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "locations",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_compare",
+      "description": "Open Neocom/utility window 'compare' (OpenCompare) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "compare",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'compare' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_compare",
+      "description": "Close window/drawer after 'compare'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "compare",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_channels",
+      "description": "Open Neocom/utility window 'channels' (OpenChannels) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "channels",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'channels' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_channels",
+      "description": "Close window/drawer after 'channels'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "channels",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_help",
+      "description": "Open Neocom/utility window 'help' (OpenHelp) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "help",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'help' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_help",
+      "description": "Close window/drawer after 'help'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "help",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_log",
+      "description": "Open Neocom/utility window 'log' (OpenLog) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "log",
+        "click_top_tabs": true,
+        "wait_ms": 250,
+        "expected_ui_and_state_change": "Window 'log' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_log",
+      "description": "Close window/drawer after 'log'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "log",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "showinfo_ship_587",
+      "description": "Open Show Info for ship (Rifter, typeID=587) and cycle top tabs",
+      "action": {
+        "type": "show_info",
+        "type_id": 587,
+        "category": "ship",
+        "click_top_tabs": true,
+        "wait_ms": 300,
+        "expected_ui_and_state_change": "Info window opens cleanly for Rifter (587)"
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
+      }
+    },
+    {
+      "id": "close_showinfo_ship",
+      "description": "Close Show Info window for ship",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "info",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "showinfo_turret_450",
+      "description": "Open Show Info for turret (Gatling Pulse Laser I, typeID=450) and cycle top tabs",
+      "action": {
+        "type": "show_info",
+        "type_id": 450,
+        "category": "turret",
+        "click_top_tabs": true,
+        "wait_ms": 300,
+        "expected_ui_and_state_change": "Info window opens cleanly for Gatling Pulse Laser I (450)"
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
+      }
+    },
+    {
+      "id": "close_showinfo_turret",
+      "description": "Close Show Info window for turret",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "info",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "showinfo_blueprint_683",
+      "description": "Open Show Info for blueprint (Bantam Blueprint, typeID=683) and cycle top tabs",
+      "action": {
+        "type": "show_info",
+        "type_id": 683,
+        "category": "blueprint",
+        "click_top_tabs": true,
+        "wait_ms": 300,
+        "expected_ui_and_state_change": "Info window opens cleanly for Bantam Blueprint (683)"
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
+      }
+    },
+    {
+      "id": "close_showinfo_blueprint",
+      "description": "Close Show Info window for blueprint",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "info",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "showinfo_skillbook_2403",
+      "description": "Open Show Info for skillbook (Advanced Planetology, typeID=2403) and cycle top tabs",
+      "action": {
+        "type": "show_info",
+        "type_id": 2403,
+        "category": "skillbook",
+        "click_top_tabs": true,
+        "wait_ms": 300,
+        "expected_ui_and_state_change": "Info window opens cleanly for Advanced Planetology (2403)"
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
+      }
+    },
+    {
+      "id": "close_showinfo_skillbook",
+      "description": "Close Show Info window for skillbook",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "info",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "showinfo_implant_2082",
+      "description": "Open Show Info for implant (Genolution Core Augmentation CA-1, typeID=2082) and cycle top tabs",
+      "action": {
+        "type": "show_info",
+        "type_id": 2082,
+        "category": "implant",
+        "click_top_tabs": true,
+        "wait_ms": 300,
+        "expected_ui_and_state_change": "Info window opens cleanly for Genolution Core Augmentation CA-1 (2082)"
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
+      }
+    },
+    {
+      "id": "close_showinfo_implant",
+      "description": "Close Show Info window for implant",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "info",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "showinfo_structure_35825",
+      "description": "Open Show Info for structure (Raitaru, typeID=35825) and cycle top tabs",
+      "action": {
+        "type": "show_info",
+        "type_id": 35825,
+        "category": "structure",
+        "click_top_tabs": true,
+        "wait_ms": 300,
+        "expected_ui_and_state_change": "Info window opens cleanly for Raitaru (35825)"
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
+      }
+    },
+    {
+      "id": "close_showinfo_structure",
+      "description": "Close Show Info window for structure",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "info",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "showinfo_filament_47761",
+      "description": "Open Show Info for filament (Calm Exotic Filament, typeID=47761) and cycle top tabs",
+      "action": {
+        "type": "show_info",
+        "type_id": 47761,
+        "category": "filament",
+        "click_top_tabs": true,
+        "wait_ms": 300,
+        "expected_ui_and_state_change": "Info window opens cleanly for Calm Exotic Filament (47761)"
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
+      }
+    },
+    {
+      "id": "close_showinfo_filament",
+      "description": "Close Show Info window for filament",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "info",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "showinfo_pi_pin_2254",
+      "description": "Open Show Info for pi_pin (Temperate Command Center, typeID=2254) and cycle top tabs",
+      "action": {
+        "type": "show_info",
+        "type_id": 2254,
+        "category": "pi_pin",
+        "click_top_tabs": true,
+        "wait_ms": 300,
+        "expected_ui_and_state_change": "Info window opens cleanly for Temperate Command Center (2254)"
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
+      }
+    },
+    {
+      "id": "close_showinfo_pi_pin",
+      "description": "Close Show Info window for pi_pin",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "info",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "showinfo_skin_34599",
+      "description": "Open Show Info for skin (Apocalypse Kador SKIN, typeID=34599) and cycle top tabs",
+      "action": {
+        "type": "show_info",
+        "type_id": 34599,
+        "category": "skin",
+        "click_top_tabs": true,
+        "wait_ms": 300,
+        "expected_ui_and_state_change": "Info window opens cleanly for Apocalypse Kador SKIN (34599)"
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
+      }
+    },
+    {
+      "id": "close_showinfo_skin",
+      "description": "Close Show Info window for skin",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "info",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "showinfo_corpse_10041",
+      "description": "Open Show Info for corpse (Frozen Corpse, typeID=10041) and cycle top tabs",
+      "action": {
+        "type": "show_info",
+        "type_id": 10041,
+        "category": "corpse",
+        "click_top_tabs": true,
+        "wait_ms": 300,
+        "expected_ui_and_state_change": "Info window opens cleanly for Frozen Corpse (10041)"
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
+      }
+    },
+    {
+      "id": "close_showinfo_corpse",
+      "description": "Close Show Info window for corpse",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "info",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "undock_for_space_windows",
+      "description": "Undock active ship into space to verify space-only windows (dscan, probe)",
+      "action": {
+        "type": "station_command",
+        "target": "undock",
+        "wait_ms": 500,
+        "expected_ui_and_state_change": "Ship exits station into Jita space"
+      },
+      "wait_until": {
+        "timeout_ms": 35000,
+        "poll_interval_ms": 1000,
+        "checks": {
+          "expect_session_field": "stationid==None",
+          "state_checks": [
+            {
+              "field": "active_view",
+              "equals": "inflight"
+            }
+          ],
+          "ship_mode": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          "ship_shown": true
+        }
+      },
+      "checks": {
+        "expect_session_field": "stationid==None",
+        "state_checks": [
+          {
+            "field": "active_view",
+            "equals": "inflight"
+          }
+        ],
+        "ship_mode": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "ship_shown": true,
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "open_dscan_space",
+      "description": "Open space-only window 'dscan' (OpenDirectionalScanner) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "dscan",
+        "click_top_tabs": true,
+        "wait_ms": 300,
+        "expected_ui_and_state_change": "Space window 'dscan' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_dscan_space",
+      "description": "Close space window 'dscan'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "dscan",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "open_probe_space",
+      "description": "Open space-only window 'probe' (OpenProbeScanner) and click top-level tabs",
+      "action": {
+        "type": "open_window",
+        "target": "probe",
+        "click_top_tabs": true,
+        "wait_ms": 300,
+        "expected_ui_and_state_change": "Space window 'probe' opens without client exception or RPC error",
+        "require_window_open": true
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_probe_space",
+      "description": "Close space window 'probe'",
+      "action": {
+        "type": "close_modal_or_window",
+        "target": "probe",
+        "wait_ms": 100
+      },
+      "checks": {
+        "no_error_reply": true,
+        "no_client_exception": true
+      }
+    },
+    {
+      "id": "dock_back_jita",
+      "description": "Dock back at Jita IV - Moon 4 Caldari Navy Assembly Plant cleanly after space window sweep",
+      "action": {
+        "type": "dock",
+        "target": "60003760",
+        "item_id": 60003760,
+        "expected_ui_and_state_change": "Ship docks back into Jita IV - Moon 4 station hangar cleanly"
+      },
+      "wait_until": {
+        "timeout_ms": 60000,
+        "poll_interval_ms": 1500,
+        "checks": {
+          "expect_session_field": "stationid==60003760",
+          "state_checks": [
+            {
+              "field": "active_view",
+              "equals": "hangar"
+            }
+          ]
+        }
+      },
+      "checks": {
+        "expect_session_field": "stationid==60003760",
+        "state_checks": [
+          {
+            "field": "active_view",
+            "equals": "hangar"
+          }
+        ],
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
+      }
+    }
+  ]
+}

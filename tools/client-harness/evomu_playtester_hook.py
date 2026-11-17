@@ -3120,7 +3120,17 @@ def _get_state_snapshot(sm):
     except Exception:
         pass
 
-    inventory_state = {"hangar_item_count": None, "cargo_item_count": None, "ship_hangar_count": None}
+    inventory_state = {
+        "hangar_item_count": None,
+        "hangar_total_quantity": None,
+        "hangar_non_ship_count": None,
+        "hangar_non_ship_total_quantity": None,
+        "cargo_item_count": None,
+        "cargo_total_quantity": None,
+        "ship_hangar_count": None,
+        "ship_hangar_total_quantity": None,
+        "hangar_containers_seen": None,
+    }
     try:
         ic_svc = getattr(sm, "services", {}).get("invCache")
         invs = getattr(ic_svc, "inventories", None) if ic_svc is not None else None
@@ -3135,6 +3145,39 @@ def _get_state_snapshot(sm):
                 except Exception:
                     return None
 
+            def _item_flag_id(rec):
+                val = rec.get("flagID") if isinstance(rec, dict) else getattr(rec, "flagID", None)
+                if val is None:
+                    val = rec.get("flag") if isinstance(rec, dict) else getattr(rec, "flag", None)
+                try:
+                    return int(val) if val is not None else None
+                except Exception:
+                    return None
+
+            def _item_id(rec):
+                val = rec.get("itemID") if isinstance(rec, dict) else getattr(rec, "itemID", None)
+                try:
+                    return int(val) if val is not None else None
+                except Exception:
+                    return None
+
+            def _item_qty(rec):
+                val = rec.get("stacksize") if isinstance(rec, dict) else getattr(rec, "stacksize", None)
+                if val is None:
+                    val = rec.get("quantity") if isinstance(rec, dict) else getattr(rec, "quantity", None)
+                try:
+                    return max(0, int(val)) if val is not None else 1
+                except Exception:
+                    return 1
+
+            explicit_cargo_seen = False
+            explicit_cargo_items = []
+            unified_cargo_seen = False
+            unified_cargo_items = []
+            hangar_seen = False
+            hangar_items = []
+            hangar_containers = set()
+
             for ik, iv in invs.items():
                 items_attr = getattr(iv, "items", None)
                 cnt = len(items_attr) if isinstance(items_attr, (dict, list, tuple, set)) else None
@@ -3143,28 +3186,107 @@ def _get_state_snapshot(sm):
                 if isinstance(ik, tuple) and len(ik) >= 1:
                     loc_k = ik[0]
                     flag_k = ik[1] if len(ik) > 1 else None
-                    is_cargo = loc_k == ship_id_i and flag_k in (5, None)
-                    is_hangar = loc_k in st_locs and flag_k == 4
                 elif hasattr(iv, "itemID"):
                     loc_k = getattr(iv, "itemID", None)
                     flag_k = getattr(iv, "flag", None)
                     if flag_k is None:
                         flag_k = getattr(iv, "locationFlag", None)
-                    is_cargo = loc_k == ship_id_i
-                    is_hangar = loc_k in st_locs and flag_k == 4
                 else:
                     continue
-                if is_cargo:
-                    inventory_state["cargo_item_count"] = cnt
-                elif is_hangar and cnt is not None:
-                    inventory_state["hangar_item_count"] = cnt
-                    item_vals = list(items_attr.values()) if isinstance(items_attr, dict) else (
-                        list(items_attr) if isinstance(items_attr, (list, tuple, set)) else []
+                item_vals = list(items_attr.values()) if isinstance(items_attr, dict) else (
+                    list(items_attr) if isinstance(items_attr, (list, tuple, set)) else []
+                )
+                if ship_id_i is not None and loc_k == ship_id_i:
+                    if flag_k == 5:
+                        explicit_cargo_seen = True
+                        for it in item_vals:
+                            if _item_flag_id(it) in (None, 5):
+                                explicit_cargo_items.append(it)
+                    elif flag_k is None:
+                        unified_cargo_seen = True
+                        for it in item_vals:
+                            if _item_flag_id(it) == 5:
+                                unified_cargo_items.append(it)
+                elif (loc_k in st_locs or loc_k == 10004) and flag_k in (4, None):
+                    hangar_seen = True
+                    if loc_k == 10004:
+                        hangar_containers.add("StationItems")
+                    if loc_k in st_locs:
+                        hangar_containers.add("StationHangar")
+                    for it in item_vals:
+                        if flag_k == 4 and _item_flag_id(it) in (None, 4):
+                            hangar_items.append(it)
+                        elif flag_k is None and _item_flag_id(it) == 4:
+                            hangar_items.append(it)
+
+            def _dedup_inv_items(raw_list):
+                deduped = []
+                seen_ids = set()
+                for it in raw_list:
+                    iid = _item_id(it)
+                    if iid is not None:
+                        if iid in seen_ids:
+                            continue
+                        seen_ids.add(iid)
+                    deduped.append(it)
+                return deduped
+
+            if explicit_cargo_seen:
+                cargo_list = _dedup_inv_items(explicit_cargo_items)
+                inventory_state["cargo_item_count"] = len(cargo_list)
+                inventory_state["cargo_total_quantity"] = sum(_item_qty(it) for it in cargo_list)
+            elif unified_cargo_seen:
+                cargo_list = _dedup_inv_items(unified_cargo_items)
+                inventory_state["cargo_item_count"] = len(cargo_list)
+                inventory_state["cargo_total_quantity"] = sum(_item_qty(it) for it in cargo_list)
+
+            if hangar_seen:
+                hangar_list = _dedup_inv_items(hangar_items)
+                non_ship_list = [it for it in hangar_list if _item_category_id(it) != 6]
+                ship_list = [it for it in hangar_list if _item_category_id(it) == 6]
+                inventory_state["hangar_item_count"] = len(hangar_list)
+                inventory_state["hangar_total_quantity"] = sum(_item_qty(it) for it in hangar_list)
+                inventory_state["hangar_non_ship_count"] = len(non_ship_list)
+                inventory_state["hangar_non_ship_total_quantity"] = sum(_item_qty(it) for it in non_ship_list)
+                inventory_state["ship_hangar_count"] = len(ship_list)
+                inventory_state["ship_hangar_total_quantity"] = sum(_item_qty(it) for it in ship_list)
+                inventory_state["hangar_containers_seen"] = sorted(hangar_containers)
+    except Exception:
+        pass
+
+    clone_state = {"home_station_id": None, "jump_clone_count": None}
+    try:
+        svcs_map = getattr(sm, "services", {}) if sm is not None else {}
+        jc_svc = svcs_map.get("jumpCloneSvc") or svcs_map.get("clonejump")
+        if jc_svc is not None:
+            for attr in ("homeStationID", "_homeStationID", "home_station_id"):
+                hv = getattr(jc_svc, attr, None)
+                if hv:
+                    clone_state["home_station_id"] = int(hv)
+                    break
+            c_state = getattr(jc_svc, "cloneState", None) or getattr(jc_svc, "_cloneState", None)
+            if c_state is not None:
+                if clone_state["home_station_id"] is None:
+                    hv = (
+                        c_state.get("homeStationID")
+                        if isinstance(c_state, dict)
+                        else getattr(c_state, "homeStationID", None)
                     )
-                    ship_cnt = sum(1 for it in item_vals if _item_category_id(it) == 6)
-                    if inventory_state["ship_hangar_count"] is None:
-                        inventory_state["ship_hangar_count"] = 0
-                    inventory_state["ship_hangar_count"] += ship_cnt
+                    if hv:
+                        clone_state["home_station_id"] = int(hv)
+                jc_list = (
+                    c_state.get("clones")
+                    if isinstance(c_state, dict)
+                    else getattr(c_state, "clones", None)
+                )
+                if isinstance(jc_list, (list, tuple, dict, set)):
+                    clone_state["jump_clone_count"] = len(jc_list)
+            if clone_state["jump_clone_count"] is None:
+                for cattr in ("jumpClones", "_jumpClones", "clones", "_clones"):
+                    jc_val = getattr(jc_svc, cattr, None)
+                    if isinstance(jc_val, (list, tuple, dict, set)):
+                        clone_state["jump_clone_count"] = len(jc_val)
+                        break
     except Exception:
         pass
 
@@ -3253,6 +3375,7 @@ def _get_state_snapshot(sm):
         "skills_state": skills_state,
         "wallet_state": wallet_state,
         "inventory_state": inventory_state,
+        "clone_state": clone_state,
         "market_state": market_state,
         "bookmarks_state": bookmarks_state,
         "autopilot_state": autopilot_state,
@@ -3400,6 +3523,42 @@ def _compute_state_diff(pre, post, scatters, target_item_id=None):
     }
 
 
+_CORE_HUD_PRESERVE_TOKENS = (
+    "lobby",
+    "l_shipui",
+    "shipui",
+    "overview",
+    "selecteditem",
+    "droneview",
+    "target",
+    "neocom",
+    "sidepanel",
+    "infopanel",
+    "activeitem",
+    "stationservice",
+)
+_CHAT_WINDOW_TOKENS = ("chatchannel", "xmppchat", "lscchannel", "channelwindow")
+
+
+def _is_preserved_chrome_window(w, keep_chat=True):
+    if w is None:
+        return False
+    try:
+        wid = _safe_str(getattr(w, "windowID", None) or getattr(w, "name", ""), 64)
+        if isinstance(wid, tuple):
+            wid = _safe_str(wid[0], 64)
+        wname = _safe_str(getattr(w, "name", ""), 64)
+        wcls = w.__class__.__name__
+        combined = ("%s %s %s" % (wid, wname, wcls)).lower()
+        if any(tok in combined for tok in _CORE_HUD_PRESERVE_TOKENS):
+            return True
+        if keep_chat and any(tok in combined for tok in _CHAT_WINDOW_TOKENS):
+            return True
+    except Exception:
+        return False
+    return False
+
+
 def _cleanup_utility_windows(sm, keep_chat=True):
     """Deterministically close non-core utility windows and secondary views on persona rotation
     while preserving error modals (so BugOracle inspects them), station lobby, ship HUD, Overview,
@@ -3414,22 +3573,6 @@ def _cleanup_utility_windows(sm, keep_chat=True):
             for ch in list(getattr(lobj, "children", []) or []):
                 if ch not in wins and not getattr(ch, "destroyed", False) and _is_visible(ch):
                     wins.append(ch)
-
-    preserve_tokens = (
-        "lobby",
-        "l_shipui",
-        "shipui",
-        "overview",
-        "selecteditem",
-        "droneview",
-        "target",
-        "neocom",
-        "sidepanel",
-        "infopanel",
-        "activeitem",
-        "stationservice",
-    )
-    chat_tokens = ("chatchannel", "xmppchat", "lscchannel", "channelwindow")
 
     closed = []
     kept = []
@@ -3455,10 +3598,7 @@ def _cleanup_utility_windows(sm, keep_chat=True):
             if is_mod:
                 kept.append(wid or wcls)
                 continue
-            if any(tok in combined for tok in preserve_tokens):
-                kept.append(wid or wcls)
-                continue
-            if keep_chat and any(tok in combined for tok in chat_tokens):
+            if _is_preserved_chrome_window(w, keep_chat=keep_chat):
                 kept.append(wid or wcls)
                 continue
 
@@ -3533,7 +3673,433 @@ def _cleanup_utility_windows(sm, keep_chat=True):
     }
 
 
-def _open_client_window(sm, target):
+cmd_map = {
+    "inventory": "OpenInventory",
+    "cargohold": "OpenCargoHoldOfActiveShip",
+    "shiphangar": "OpenShipHangar",
+    "itemhangar": "OpenHangarFloor",
+    "market": "OpenMarket",
+    "marketorders": "OpenMarketOrders",
+    "multibuy": "OpenMultibuy",
+    "charsheet": "OpenCharactersheet",
+    "charactersheet": "OpenCharactersheet",
+    "character": "OpenCharactersheet",
+    "skills": "OpenSkillsWindow",
+    "skillqueue": "OpenSkillsWindow",
+    "skillswindow": "OpenSkillsWindow",
+    "skilltree": "OpenSkillTreeWindow",
+    "skillplan": "OpenSkillsWindow",
+    "skillplans": "OpenSkillsWindow",
+    "nes": "ToggleAurumStore",
+    "newedenstore": "ToggleAurumStore",
+    "plexstore": "ToggleAurumStore",
+    "aurumstore": "ToggleAurumStore",
+    "store": "ToggleAurumStore",
+    "plexvault": "OpenPlexVault",
+    "fitting": "OpenFitting",
+    "fittingmgmt": "OpenFittingMgmt",
+    "contracts": "OpenContracts",
+    "industry": "OpenIndustry",
+    "planets": "OpenPlanets",
+    "pi": "OpenPlanets",
+    "corp": "OpenCorporationPanel",
+    "corporation": "OpenCorporationPanel",
+    "fleet": "OpenFleet",
+    "agency": "OpenAgencyNew",
+    "jobboard": "OpenJobBoardWindow",
+    "opportunities": "OpenJobBoardWindow",
+    "assets": "OpenAssets",
+    "wallet": "OpenWallet",
+    "mail": "OpenMail",
+    "notifications": "OpenNotificationReadingWnd",
+    "notification": "OpenNotificationReadingWnd",
+    "notificationpanel": "OpenNotificationReadingWnd",
+    "map": "CmdToggleMap",
+    "solarsystemmap": "CmdToggleSolarSystemMap",
+    "dscan": "OpenDirectionalScanner",
+    "directionalscanner": "OpenDirectionalScanner",
+    "probe": "OpenProbeScanner",
+    "probescanner": "OpenProbeScanner",
+    "scanner": "OpenProbeScanner",
+    "notepad": "OpenNotepad",
+    "calculator": "OpenCalculator",
+    "calendar": "OpenCalendar",
+    "journal": "OpenJournal",
+    "agentfinder": "OpenAgencyContentGroup",
+    "lpstore": "OpenLpstore",
+    "repair": "OpenRepairshop",
+    "repairshop": "OpenRepairshop",
+    "reprocessing": "OpenReprocessingPlant",
+    "reprocessingplant": "OpenReprocessingPlant",
+    "miningledger": "OpenLedger",
+    "ledger": "OpenLedger",
+    "mininghold": "OpenGeneralMiningHoldOfActiveShip",
+    "orehold": "OpenGeneralMiningHoldOfActiveShip",
+    "mineralhold": "OpenMineralHoldOfActiveShip",
+    "moonmining": "OpenMoonMining",
+    "insurance": "OpenInsurance",
+    "bountyoffice": "OpenBountyOffice",
+    "securityoffice": "OpenSecurityOffice",
+    "militia": "OpenMilitia",
+    "factionalwarfare": "OpenFwWindow",
+    "fw": "OpenFwWindow",
+    "insurgency": "OpenInsurgencyDashboard",
+    "skinr": "OpenShipSKINRWindow",
+    "shipskinr": "OpenShipSKINRWindow",
+    "structurebrowser": "OpenStructureBrowser",
+    "shiptree": "CmdToggleShipTree",
+    "isis": "CmdToggleShipTree",
+    "aircareerprogram": "OpenAchievementsWindow",
+    "acp": "OpenAchievementsWindow",
+    "peopleandplaces": "OpenPeopleAndPlaces",
+    "locations": "OpenLocations",
+    "bookmarks": "OpenLocations",
+    "compare": "OpenCompare",
+    "channels": "OpenChannels",
+    "chat": "OpenChannels",
+    "help": "OpenHelp",
+    "log": "OpenLog",
+}
+
+OPEN_WINDOW_GUARDS = {
+    "moonmining": "structure_control_only",
+    "dscan": "space_only",
+    "directionalscanner": "space_only",
+    "probe": "space_only",
+    "probescanner": "space_only",
+    "scanner": "space_only",
+    "lpstore": "docked_only",
+    "repair": "docked_only",
+    "repairshop": "docked_only",
+    "reprocessing": "docked_only",
+    "reprocessingplant": "docked_only",
+    "insurance": "docked_only",
+}
+
+
+OPEN_WINDOW_CMD_MAP = cmd_map
+
+_WINDOW_TARGET_ALIASES = {
+    "inventory": ("inventory", "inventoryprimary", "inventorywnd"),
+    "cargohold": ("cargohold", "inventory", "activeshipcargo", "shipcargo"),
+    "shiphangar": ("shiphangar", "inventory", "stationships"),
+    "itemhangar": ("itemhangar", "inventory", "stationitems"),
+    "market": ("market", "regionalmarket"),
+    "marketorders": ("marketorders", "personalmarketorders"),
+    "multibuy": ("multibuy", "multibuywnd"),
+    "charsheet": ("charsheet", "charactersheet"),
+    "charactersheet": ("charsheet", "charactersheet"),
+    "character": ("charsheet", "charactersheet"),
+    "skills": ("skills", "skillplan", "skillplandockablepanel", "skill_plan"),
+    "skillqueue": ("skills", "skillqueue", "skillplan", "skillplandockablepanel", "skill_plan"),
+    "skillswindow": ("skills", "skillplan", "skillplandockablepanel", "skill_plan"),
+    "skillplan": ("skillplan", "skillplandockablepanel", "skills", "skill_plan"),
+    "skillplans": ("skillplan", "skillplandockablepanel", "skills", "skill_plan"),
+    "skillplanwindow": ("skillplan", "skillplandockablepanel", "skills", "skill_plan"),
+    "skilltree": ("skilltree", "skill_tree", "skillplan", "skills"),
+    "nes": ("aurumstore", "newedenstore", "virtualgoodsstore", "virtual_goods_store", "nes", "store"),
+    "newedenstore": ("aurumstore", "newedenstore", "virtualgoodsstore", "virtual_goods_store", "nes"),
+    "plexstore": ("aurumstore", "newedenstore", "virtualgoodsstore", "virtual_goods_store", "nes"),
+    "aurumstore": ("aurumstore", "newedenstore", "virtualgoodsstore", "virtual_goods_store", "nes"),
+    "store": ("aurumstore", "newedenstore", "virtualgoodsstore", "virtual_goods_store", "nes", "store"),
+    "plexvault": ("plexvault",),
+    "fitting": ("fitting", "fittingwindow"),
+    "fittingmgmt": ("fittingmgmt", "fittingmanagement"),
+    "contracts": ("contracts", "contractswindow"),
+    "industry": ("industry", "industrywnd"),
+    "planets": ("planets", "planet", "planetary"),
+    "pi": ("planets", "planet", "planetary"),
+    "corp": ("corp", "corporation"),
+    "corporation": ("corp", "corporation"),
+    "fleet": ("fleet", "fleetwindow"),
+    "agency": ("agency", "agencywnd"),
+    "jobboard": ("jobboard", "opportunities"),
+    "opportunities": ("jobboard", "opportunities"),
+    "assets": ("assets", "assetswindow"),
+    "wallet": ("wallet", "walletwindow"),
+    "mail": ("mail", "mailwindow"),
+    "notifications": ("notification", "notifications", "notificationcenter", "notificationreading"),
+    "notification": ("notification", "notifications", "notificationcenter", "notificationreading"),
+    "notificationpanel": ("notification", "notifications", "notificationcenter", "notificationreading"),
+    "notificationfeed": ("notification", "notifications", "notificationcenter", "notificationreading"),
+    "notificationcenter": ("notification", "notifications", "notificationcenter", "notificationreading"),
+    "notificationreading": ("notification", "notifications", "notificationcenter", "notificationreading"),
+    "map": ("map", "starmap", "starmap_new", "mapbrowser"),
+    "solarsystemmap": ("solarsystemmap", "systemmap", "systemmap_new"),
+    "dscan": ("dscan", "directionalscanner"),
+    "directionalscanner": ("dscan", "directionalscanner"),
+    "probe": ("probe", "probescanner", "scanner"),
+    "probescanner": ("probe", "probescanner", "scanner"),
+    "scanner": ("probe", "probescanner", "scanner"),
+    "notepad": ("notepad",),
+    "calculator": ("calculator",),
+    "calendar": ("calendar",),
+    "journal": ("journal",),
+    "agentfinder": ("agentfinder", "agency", "agencywnd"),
+    "lpstore": ("lpstore", "loyaltypointstore"),
+    "repair": ("repair", "repairshop"),
+    "repairshop": ("repair", "repairshop"),
+    "reprocessing": ("reprocessing", "reprocessingplant"),
+    "reprocessingplant": ("reprocessing", "reprocessingplant"),
+    "miningledger": ("miningledger", "ledger"),
+    "ledger": ("miningledger", "ledger"),
+    "mininghold": ("mininghold", "orehold", "inventory"),
+    "orehold": ("mininghold", "orehold", "inventory"),
+    "mineralhold": ("mineralhold", "inventory"),
+    "insurance": ("insurance", "insurancewindow"),
+    "bountyoffice": ("bountyoffice", "bounty"),
+    "securityoffice": ("securityoffice", "security"),
+    "militia": ("militia", "factionalwarfare", "fw"),
+    "factionalwarfare": ("factionalwarfare", "factionwarfare", "fw", "militia"),
+    "fw": ("factionalwarfare", "factionwarfare", "fw", "militia"),
+    "insurgency": ("insurgency", "pirateinsurgency"),
+    "skinr": ("skinr", "shipskinr", "ship_skinr", "paint_tool", "painttool"),
+    "shipskinr": ("skinr", "shipskinr", "ship_skinr", "paint_tool", "painttool"),
+    "structurebrowser": ("structurebrowser",),
+    "shiptree": ("shiptree", "isis"),
+    "isis": ("shiptree", "isis"),
+    "aircareerprogram": ("aircareerprogram", "career_portal", "careerportal", "achievements", "achievement"),
+    "acp": ("aircareerprogram", "career_portal", "careerportal", "achievements", "achievement"),
+    "peopleandplaces": ("peopleandplaces", "addressbook"),
+    "locations": ("locations", "bookmarks"),
+    "bookmarks": ("locations", "bookmarks"),
+    "compare": ("compare", "typecompare"),
+    "channels": ("channels", "channel"),
+    "chat": ("channels", "chat"),
+    "help": ("help", "helpwindow"),
+    "log": ("log", "logger", "logwindow"),
+    "info": ("info", "infowindow"),
+}
+
+
+def _normalize_window_tok(val):
+    return str(val or "").strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+
+
+def _window_target_tokens(t_norm):
+    base = _WINDOW_TARGET_ALIASES.get(t_norm, (t_norm,) if t_norm else ())
+    out = []
+    for tok in base:
+        nt = _normalize_window_tok(tok)
+        if nt and nt not in out:
+            out.append(nt)
+    return tuple(out)
+
+
+def _target_matches_window(t_norm, wid, wcap, wcls):
+    tokens = _window_target_tokens(t_norm)
+    if not tokens:
+        return True
+    wid_n = _normalize_window_tok(wid)
+    wcap_n = _normalize_window_tok(wcap)
+    wcls_n = _normalize_window_tok(wcls)
+    return any((tok in wid_n or tok in wcap_n or tok in wcls_n) for tok in tokens)
+
+
+def _target_matches_view(t_norm, view_name):
+    if not t_norm or not view_name:
+        return False
+    vn = _normalize_window_tok(view_name)
+    return any((tok in vn or vn in tok) for tok in _window_target_tokens(t_norm))
+
+
+_PRIMARY_VIEW_NAMES = ("", "hangar", "inflight", "charsel", "station", "login", "intro")
+
+
+def _current_secondary_view_name(sm):
+    if sm is None:
+        return ""
+    try:
+        svcs = getattr(sm, "services", None)
+        vs_cur = svcs.get("viewState") if isinstance(svcs, dict) else None
+        if vs_cur is None and hasattr(sm, "GetService"):
+            vs_cur = sm.GetService("viewState")
+        if vs_cur is None:
+            return ""
+        sec_cur = getattr(vs_cur, "secondaryInfo", None)
+        if sec_cur is not None and getattr(sec_cur, "name", None):
+            sec_name = _safe_str(getattr(sec_cur, "name", "") or "", 48)
+            if sec_name.strip().lower() not in _PRIMARY_VIEW_NAMES:
+                return sec_name
+        if hasattr(vs_cur, "GetCurrentViewInfo"):
+            vi_cur = vs_cur.GetCurrentViewInfo()
+            vi_name = _safe_str(getattr(vi_cur, "name", "") or "", 48)
+            if vi_name.strip().lower() not in _PRIMARY_VIEW_NAMES:
+                return vi_name
+    except Exception:
+        pass
+    return ""
+
+
+def _find_matching_secondary_or_drawer_container(sm, t_norm):
+    if not t_norm:
+        return None, None, None
+    tokens = _window_target_tokens(t_norm)
+    svcs = getattr(sm, "services", {}) if sm is not None else {}
+    if any(tok in ("notification", "notifications", "notificationcenter", "notificationreading") for tok in tokens):
+        n_ui = svcs.get("notificationUIService") if isinstance(svcs, dict) else None
+        if n_ui is None and sm is not None and hasattr(sm, "GetService"):
+            try:
+                n_ui = sm.GetService("notificationUIService")
+            except Exception:
+                n_ui = None
+        nc = getattr(n_ui, "notificationCenter", None) if n_ui is not None else None
+        if nc is not None:
+            nc_cont = getattr(nc, "notificationContainer", None) or getattr(nc, "drawer", None) or nc
+            if getattr(nc, "isShowingDrawer", False) or (nc_cont is not nc and _is_visible(nc_cont)):
+                return nc_cont, "notifications", "drawer"
+    if any(tok in ("skills", "skillplan", "skillplandockablepanel", "skillqueue") for tok in tokens):
+        try:
+            from eve.client.script.ui.skillPlan.skillPlanDockablePanel import SkillPlanDockablePanel
+            sp_wnd = SkillPlanDockablePanel.GetIfOpen()
+            if sp_wnd is not None and not getattr(sp_wnd, "destroyed", False) and _is_visible(sp_wnd):
+                return sp_wnd, "SkillPlanDockablePanel", "dockable_panel"
+        except Exception:
+            pass
+    sec_name = _current_secondary_view_name(sm)
+    if sec_name and _target_matches_view(t_norm, sec_name):
+        vs = svcs.get("viewState") if isinstance(svcs, dict) else None
+        if vs is None and sm is not None and hasattr(sm, "GetService"):
+            try:
+                vs = sm.GetService("viewState")
+            except Exception:
+                vs = None
+        if vs is not None:
+            try:
+                sec_view = getattr(vs, "activeView", None)
+                sec_layer = getattr(sec_view, "layer", None) if sec_view is not None else None
+                return (sec_layer or sec_view), sec_name, "secondary_view"
+            except Exception:
+                pass
+    return None, None, None
+
+
+def get_open_window_cmd_map():
+    return dict(cmd_map)
+
+
+def _click_top_tabs_in_window(target="", max_tabs=6, require_match=False):
+    """Click through visible top-level tabs inside the matching (or topmost) open window/panel."""
+    uicore = _get_uicore()
+    reg = getattr(uicore, "registry", None) if uicore is not None else None
+    wins = list(reg.GetWindows() or []) if (reg is not None and hasattr(reg, "GetWindows")) else []
+    t_norm = _normalize_window_tok(target)
+    is_explicit_chrome = bool(t_norm and any(tok == t_norm or (len(t_norm) >= 5 and tok in t_norm) for tok in (_CORE_HUD_PRESERVE_TOKENS + _CHAT_WINDOW_TOKENS)))
+    chosen = None
+    surface_type = "window"
+    chosen_id = ""
+    for w in reversed(wins):
+        if w is None or getattr(w, "destroyed", False) or not _is_visible(w):
+            continue
+        if not t_norm:
+            if not _is_preserved_chrome_window(w, keep_chat=True):
+                chosen = w
+                break
+            continue
+        if not is_explicit_chrome and _is_preserved_chrome_window(w, keep_chat=True):
+            continue
+        wid = _safe_str(getattr(w, "windowID", None) or getattr(w, "name", ""), 64)
+        wcap = _strip_tags(_safe_str(getattr(w, "caption", None) or "", 64))
+        wcls = w.__class__.__name__
+        if _target_matches_window(t_norm, wid, wcap, wcls):
+            chosen = w
+            break
+    if chosen is None and t_norm:
+        sm_obj = getattr(__builtin__, "sm", None)
+        sec_cont, sec_id, sec_stype = _find_matching_secondary_or_drawer_container(sm_obj, t_norm)
+        if sec_id:
+            chosen = sec_cont
+            chosen_id = sec_id
+            surface_type = sec_stype or "secondary_view"
+    if chosen is None and not chosen_id and wins and not (require_match and t_norm):
+        for w in reversed(wins):
+            if w is not None and not getattr(w, "destroyed", False) and _is_visible(w):
+                if not is_explicit_chrome and _is_preserved_chrome_window(w, keep_chat=True):
+                    continue
+                chosen = w
+                break
+    if chosen is None and not chosen_id:
+        return {
+            "ok": False,
+            "error": "no visible open window found for click_top_tabs (target=%r)" % (target,),
+            "tabs_clicked": 0,
+            "clicked_tabs": [],
+            "window": None,
+        }
+
+    if not chosen_id:
+        chosen_id = _safe_str(getattr(chosen, "windowID", None) or getattr(chosen, "name", "") or chosen.__class__.__name__, 64)
+    seen = set()
+    queue = [(chosen, 0)] if chosen is not None else []
+    tab_group = None
+    while queue and len(seen) < 160:
+        node, depth = queue.pop(0)
+        if node is None or id(node) in seen or getattr(node, "destroyed", False):
+            continue
+        seen.add(id(node))
+        if node is not chosen and not _is_visible(node):
+            continue
+        cls_l = node.__class__.__name__.lower()
+        if "tabgroup" in cls_l or (hasattr(node, "SelectByIdx") and isinstance(getattr(node, "tabs", None), (list, tuple))):
+            tab_group = node
+            break
+        if depth < 8:
+            for ch in list(getattr(node, "children", []) or [])[:30]:
+                if id(ch) not in seen:
+                    queue.append((ch, depth + 1))
+
+    if tab_group is None:
+        return {"ok": True, "tabs_clicked": 0, "clicked_tabs": [], "window": chosen_id, "surface_type": surface_type}
+
+    tabs = list(getattr(tab_group, "tabs", None) or [])
+    if not tabs:
+        tabs = [
+            ch for ch in list(getattr(tab_group, "children", []) or [])
+            if ch is not None and not getattr(ch, "destroyed", False) and _is_visible(ch)
+        ]
+    clicked_tabs = []
+    limit = max(1, int(max_tabs or 6))
+    for idx, tab in enumerate(tabs[:limit]):
+        if tab is None or getattr(tab, "destroyed", False):
+            continue
+        lbl = _strip_tags(
+            _safe_str(
+                getattr(tab, "text", None)
+                or getattr(tab, "label", None)
+                or _extract_widget_label(tab)
+                or getattr(tab, "name", "")
+                or ("tab_%d" % idx),
+                64,
+            )
+        ).strip()
+        try:
+            if callable(getattr(tab, "OnClick", None)) or callable(getattr(tab, "on_click", None)):
+                _invoke_widget_click(tab)
+            elif hasattr(tab_group, "SelectByIdx"):
+                tab_group.SelectByIdx(idx)
+            elif callable(getattr(tab, "Select", None)):
+                tab.Select()
+            else:
+                _invoke_widget_click(tab)
+            H._sleep_ms(120)
+            clicked_tabs.append(lbl or ("tab_%d" % idx))
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": "clicking top tab %r in %r raised: %r" % (lbl, chosen_id, exc),
+                "tabs_clicked": len(clicked_tabs),
+                "clicked_tabs": clicked_tabs,
+                "window": chosen_id,
+            }
+    return {
+        "ok": True,
+        "tabs_clicked": len(clicked_tabs),
+        "clicked_tabs": clicked_tabs,
+        "window": chosen_id,
+    }
+
+
+def _open_client_window(sm, target, require_open=False):
     uicore = _get_uicore()
     layers = getattr(uicore, "layer", None) if uicore is not None else None
     menu_layer = getattr(layers, "menu", None) if layers is not None else None
@@ -3556,7 +4122,42 @@ def _open_client_window(sm, target):
             cmd_svc = None
 
     raw_target = str(target or "").strip()
-    t = raw_target.lower().replace("_", "").replace("-", "").replace(" ", "")
+    t = _normalize_window_tok(raw_target)
+    reg = getattr(uicore, "registry", None) if uicore is not None else None
+
+    def _current_sec_view():
+        return _current_secondary_view_name(sm)
+
+    pre_sec_view = _current_sec_view()
+
+    def _verify_matching_surface_open(pre_sec_view="", opened_vis_ids=None):
+        post_sec_view = _current_sec_view()
+        if post_sec_view and (
+            (t and _target_matches_view(t, post_sec_view))
+            or post_sec_view != pre_sec_view
+        ):
+            return True
+        if opened_vis_ids:
+            return True
+        sec_cont, sec_id, _ = _find_matching_secondary_or_drawer_container(sm, t)
+        if sec_id and (sec_cont is None or _is_visible(sec_cont) or sec_id == "notifications"):
+            return True
+        if reg is not None and hasattr(reg, "GetWindows"):
+            is_explicit_chrome = bool(t and any(tok == t or (len(t) >= 5 and tok in t) for tok in (_CORE_HUD_PRESERVE_TOKENS + _CHAT_WINDOW_TOKENS)))
+            try:
+                for rw in list(reg.GetWindows() or []):
+                    if rw is None or getattr(rw, "destroyed", False) or not _is_visible(rw):
+                        continue
+                    if not is_explicit_chrome and _is_preserved_chrome_window(rw, keep_chat=True):
+                        continue
+                    wid_s = _safe_str(getattr(rw, "windowID", None) or getattr(rw, "name", ""), 64)
+                    wcap_s = _strip_tags(_safe_str(getattr(rw, "caption", None) or "", 64))
+                    wcls_s = rw.__class__.__name__
+                    if t and _target_matches_window(t, wid_s, wcap_s, wcls_s):
+                        return True
+            except Exception:
+                pass
+        return False
 
     if t in ("skills", "skillqueue", "skillswindow", "skillplan", "skillplans", "skillplanwindow"):
         try:
@@ -3568,6 +4169,14 @@ def _open_client_window(sm, target):
             if wnd is not None and hasattr(wnd, "IsMinimized") and wnd.IsMinimized() and hasattr(wnd, "Maximize"):
                 wnd.Maximize()
             H._sleep_ms(500)
+            if wnd is None:
+                wnd = SkillPlanDockablePanel.GetIfOpen()
+            sp_visible = bool(wnd is not None and not getattr(wnd, "destroyed", False) and _is_visible(wnd))
+            if require_open and not sp_visible and not _verify_matching_surface_open(pre_sec_view=pre_sec_view):
+                return {
+                    "ok": False,
+                    "error": "open_window %r produced no visible SkillPlanDockablePanel" % (raw_target,),
+                }
             return {"ok": True, "opened_via": "SkillPlanDockablePanel.Open"}
         except Exception:
             pass
@@ -3587,12 +4196,19 @@ def _open_client_window(sm, target):
                     n_ui._ConstructNotificationCenter()
                     nc = getattr(n_ui, "notificationCenter", None)
                 if nc is not None:
-                    if not getattr(nc, "isShowingDrawer", False) and hasattr(nc, "OpenDrawer"):
+                    already_showing = bool(getattr(nc, "isShowingDrawer", False))
+                    if not already_showing and hasattr(nc, "OpenDrawer"):
                         nc.OpenDrawer()
                         H._sleep_ms(500)
-                        return {"ok": True, "opened_via": "notificationUIService.notificationCenter.OpenDrawer"}
-                    if getattr(nc, "isShowingDrawer", False):
-                        return {"ok": True, "opened_via": "notificationUIService.notificationCenter (already open)"}
+                    nc_cont = getattr(nc, "notificationContainer", None) or getattr(nc, "drawer", None)
+                    drawer_open = bool(getattr(nc, "isShowingDrawer", False) or (nc_cont is not None and _is_visible(nc_cont)))
+                    if drawer_open or not require_open:
+                        via_n = (
+                            "notificationUIService.notificationCenter (already open)"
+                            if already_showing
+                            else "notificationUIService.notificationCenter.OpenDrawer"
+                        )
+                        return {"ok": True, "opened_via": via_n}
             except Exception:
                 pass
         n_svc = svcs.get("notificationSvc")
@@ -3608,97 +4224,15 @@ def _open_client_window(sm, target):
                 if hasattr(n_svc, "OpenNotificationReadingWnd"):
                     n_svc.OpenNotificationReadingWnd()
                     H._sleep_ms(500)
-                    return {"ok": True, "opened_via": "notificationSvc.OpenNotificationReadingWnd"}
+                    if not require_open or _verify_matching_surface_open(pre_sec_view=pre_sec_view):
+                        return {"ok": True, "opened_via": "notificationSvc.OpenNotificationReadingWnd"}
+                    return {
+                        "ok": False,
+                        "error": "open_window %r produced no visible notification drawer or window" % (raw_target,),
+                    }
             except Exception:
                 pass
 
-    cmd_map = {
-        "inventory": "OpenInventory",
-        "cargohold": "OpenCargoHoldOfActiveShip",
-        "shiphangar": "OpenShipHangar",
-        "itemhangar": "OpenHangarFloor",
-        "market": "OpenMarket",
-        "marketorders": "OpenMarketOrders",
-        "multibuy": "OpenMultibuy",
-        "charsheet": "OpenCharactersheet",
-        "charactersheet": "OpenCharactersheet",
-        "character": "OpenCharactersheet",
-        "skills": "OpenSkillsWindow",
-        "skillqueue": "OpenSkillsWindow",
-        "skillswindow": "OpenSkillsWindow",
-        "skilltree": "OpenSkillTreeWindow",
-        "skillplan": "OpenSkillsWindow",
-        "skillplans": "OpenSkillsWindow",
-        "nes": "ToggleAurumStore",
-        "newedenstore": "ToggleAurumStore",
-        "plexstore": "ToggleAurumStore",
-        "aurumstore": "ToggleAurumStore",
-        "store": "ToggleAurumStore",
-        "plexvault": "OpenPlexVault",
-        "fitting": "OpenFitting",
-        "fittingmgmt": "OpenFittingMgmt",
-        "contracts": "OpenContracts",
-        "industry": "OpenIndustry",
-        "planets": "OpenPlanets",
-        "pi": "OpenPlanets",
-        "corp": "OpenCorporationPanel",
-        "corporation": "OpenCorporationPanel",
-        "fleet": "OpenFleet",
-        "agency": "OpenAgencyNew",
-        "jobboard": "OpenJobBoardWindow",
-        "opportunities": "OpenJobBoardWindow",
-        "assets": "OpenAssets",
-        "wallet": "OpenWallet",
-        "mail": "OpenMail",
-        "notifications": "OpenNotificationReadingWnd",
-        "notification": "OpenNotificationReadingWnd",
-        "notificationpanel": "OpenNotificationReadingWnd",
-        "map": "CmdToggleMap",
-        "solarsystemmap": "CmdToggleSolarSystemMap",
-        "dscan": "OpenDirectionalScanner",
-        "directionalscanner": "OpenDirectionalScanner",
-        "probe": "OpenProbeScanner",
-        "probescanner": "OpenProbeScanner",
-        "scanner": "OpenProbeScanner",
-        "notepad": "OpenNotepad",
-        "calculator": "OpenCalculator",
-        "calendar": "OpenCalendar",
-        "journal": "OpenJournal",
-        "agentfinder": "OpenAgencyContentGroup",
-        "lpstore": "OpenLpstore",
-        "repair": "OpenRepairshop",
-        "repairshop": "OpenRepairshop",
-        "reprocessing": "OpenReprocessingPlant",
-        "reprocessingplant": "OpenReprocessingPlant",
-        "miningledger": "OpenLedger",
-        "ledger": "OpenLedger",
-        "mininghold": "OpenGeneralMiningHoldOfActiveShip",
-        "orehold": "OpenGeneralMiningHoldOfActiveShip",
-        "mineralhold": "OpenMineralHoldOfActiveShip",
-        "moonmining": "OpenMoonMining",
-        "insurance": "OpenInsurance",
-        "bountyoffice": "OpenBountyOffice",
-        "securityoffice": "OpenSecurityOffice",
-        "militia": "OpenMilitia",
-        "factionalwarfare": "OpenFwWindow",
-        "fw": "OpenFwWindow",
-        "insurgency": "OpenInsurgencyDashboard",
-        "skinr": "OpenShipSKINRWindow",
-        "shipskinr": "OpenShipSKINRWindow",
-        "structurebrowser": "OpenStructureBrowser",
-        "shiptree": "CmdToggleShipTree",
-        "isis": "CmdToggleShipTree",
-        "aircareerprogram": "OpenAchievementsWindow",
-        "acp": "OpenAchievementsWindow",
-        "peopleandplaces": "OpenPeopleAndPlaces",
-        "locations": "OpenLocations",
-        "bookmarks": "OpenLocations",
-        "compare": "OpenCompare",
-        "channels": "OpenChannels",
-        "chat": "OpenChannels",
-        "help": "OpenHelp",
-        "log": "OpenLog",
-    }
     mname = cmd_map.get(t, raw_target)
     if mname == "OpenMoonMining":
         sess = getattr(__builtin__, "session", None)
@@ -3718,8 +4252,6 @@ def _open_client_window(sm, target):
         if sess is None or (getattr(sess, "stationid", None) is None and getattr(sess, "structureid", None) is None):
             return {"ok": False, "error": "%s requires being docked at a station or structure; call dock first" % (mname,)}
     if cmd_svc is not None and hasattr(cmd_svc, mname):
-        reg = getattr(uicore, "registry", None) if uicore is not None else None
-
         def _reg_window_vis_map():
             snap = {}
             if reg is None or not hasattr(reg, "GetWindows"):
@@ -3760,20 +4292,47 @@ def _open_client_window(sm, target):
         post_snap = _reg_window_vis_map()
         closed_ids = [wid for wid in pre_snap if wid not in post_snap]
         opened_vis_ids = [wid for wid, vis in post_snap.items() if wid not in pre_snap and vis]
-        if closed_ids and not opened_vis_ids:
+        post_sec_view = _current_sec_view()
+        sec_toggled_closed = bool(
+            pre_sec_view
+            and _target_matches_view(t, pre_sec_view)
+            and post_sec_view != pre_sec_view
+            and not _target_matches_view(t, post_sec_view)
+        )
+        retried = False
+        if (closed_ids and not opened_vis_ids) or sec_toggled_closed:
             # ToggleOpenClose-style commands (e.g. OpenLedger / CmdToggleMap) close an already-open
-            # window or an invisible zombie left by an earlier ApplyAttributes exception; re-invoke
-            # once so open_neocom guarantees opening (or surfacing the real init exception).
+            # window, secondary view, or zombie; re-invoke once so open_window guarantees opening.
             fn(*cmd_args)
             H._sleep_ms(500)
-            return {"ok": True, "opened_via": "uicore.cmd.%s (retried after toggle-close)" % mname}
-        return {"ok": True, "opened_via": "uicore.cmd.%s" % mname}
+            retried = True
+            post_snap = _reg_window_vis_map()
+            opened_vis_ids = [wid for wid, vis in post_snap.items() if wid not in pre_snap and vis]
+
+        if require_open and not _verify_matching_surface_open(pre_sec_view=pre_sec_view, opened_vis_ids=opened_vis_ids):
+            return {
+                "ok": False,
+                "error": "open_window %r produced no visible window or secondary view (cmd=%s)" % (raw_target, mname),
+            }
+
+        via_msg = "uicore.cmd.%s (retried after toggle-close)" % mname if retried else "uicore.cmd.%s" % mname
+        return {"ok": True, "opened_via": via_msg, "opened_window_count": len(opened_vis_ids)}
 
     if t in ("nes", "newedenstore", "plexstore", "aurumstore", "store"):
         try:
             vs = sm.GetService("viewState")
             vs.ToggleSecondaryView("aurumstore")
             H._sleep_ms(600)
+            post_sec = _current_sec_view()
+            if require_open and pre_sec_view and _target_matches_view(t, pre_sec_view) and not _target_matches_view(t, post_sec):
+                vs.ToggleSecondaryView("aurumstore")
+                H._sleep_ms(600)
+                post_sec = _current_sec_view()
+            if require_open and not _verify_matching_surface_open(pre_sec_view=pre_sec_view):
+                return {
+                    "ok": False,
+                    "error": "open_window %r did not open aurumstore secondary view (current=%r)" % (raw_target, post_sec),
+                }
             return {"ok": True, "opened_via": "viewState.ToggleSecondaryView(aurumstore)"}
         except Exception as exc:
             return {"ok": False, "error": "aurumstore open failed: %r" % (exc,)}
@@ -4157,6 +4716,8 @@ def _execute_action(sm, action):
                 _wait_session_settled(timeout_ms=5000, poll_ms=50)
             if atype in (
                 "open_window",
+                "click_top_tabs",
+                "show_info",
                 "close_modal_or_window",
                 "space_command",
                 "station_command",
@@ -4171,7 +4732,83 @@ def _execute_action(sm, action):
                 _dismiss_pinned_tooltip_if_outside(None)
             sess = getattr(__builtin__, "session", None)
             if atype == "open_window":
-                result.update(_open_client_window(sm, target))
+                req_open = bool(action.get("require_window_open"))
+                open_res = _open_client_window(sm, target, require_open=req_open)
+                result.update(open_res)
+                if open_res.get("ok") and action.get("click_top_tabs"):
+                    tab_res = _click_top_tabs_in_window(
+                        target,
+                        max_tabs=int(action.get("max_tabs", 6) or 6),
+                        require_match=True,
+                    )
+                    result["tabs"] = tab_res
+                    if not tab_res.get("ok"):
+                        result["ok"] = False
+                        result["error"] = tab_res.get("error") or "click_top_tabs failed"
+
+            elif atype == "click_top_tabs":
+                result.update(_click_top_tabs_in_window(target, max_tabs=int(action.get("max_tabs", 6) or 6)))
+
+            elif atype == "show_info":
+                raw_tid = action.get("type_id")
+                if raw_tid in (None, "") and target and str(target).strip().isdigit():
+                    raw_tid = str(target).strip()
+                try:
+                    tid_int = int(raw_tid or 0)
+                except Exception:
+                    tid_int = 0
+                raw_iid = action.get("item_id")
+                try:
+                    iid_int = int(raw_iid) if raw_iid not in (None, "", 0) else None
+                except Exception:
+                    iid_int = None
+                if tid_int <= 0:
+                    result["ok"] = False
+                    result["error"] = "show_info requires a positive integer type_id (got %r)" % (raw_tid,)
+                else:
+                    svcs_info = getattr(sm, "services", {}) if sm is not None else {}
+                    info_svc = svcs_info.get("info") if isinstance(svcs_info, dict) else None
+                    if info_svc is None and sm is not None and hasattr(sm, "GetService"):
+                        info_svc = sm.GetService("info")
+                    if info_svc is None or not hasattr(info_svc, "ShowInfo"):
+                        result["ok"] = False
+                        result["error"] = "info service does not expose ShowInfo"
+                    else:
+                        if iid_int is not None:
+                            info_svc.ShowInfo(tid_int, itemID=iid_int)
+                        else:
+                            info_svc.ShowInfo(tid_int)
+                        H._sleep_ms(450)
+                        result["show_info_type_id"] = tid_int
+                        result["category"] = _to_utf8(action.get("category") or "")
+                        reg_si = getattr(uicore, "registry", None) if uicore is not None else None
+                        if reg_si is not None and hasattr(reg_si, "GetWindows"):
+                            found_info_wid = None
+                            for rw in reversed(list(reg_si.GetWindows() or [])):
+                                if rw is None or getattr(rw, "destroyed", False) or not _is_visible(rw):
+                                    continue
+                                wid_si = _safe_str(getattr(rw, "windowID", None) or getattr(rw, "name", ""), 64)
+                                wcap_si = _strip_tags(_safe_str(getattr(rw, "caption", None) or "", 64))
+                                wcls_si = rw.__class__.__name__
+                                hay_si = (wid_si + " " + wcap_si + " " + wcls_si).lower()
+                                if "info" in hay_si:
+                                    found_info_wid = wid_si or wcls_si
+                                    break
+                            if found_info_wid is None:
+                                result["ok"] = False
+                                result["error"] = "show_info did not open a visible InfoWindow (type_id=%d)" % tid_int
+                            else:
+                                result["opened_window"] = found_info_wid
+                        if result.get("ok", True) and action.get("click_top_tabs"):
+                            tab_res = _click_top_tabs_in_window(
+                                "info",
+                                max_tabs=int(action.get("max_tabs", 6) or 6),
+                                require_match=True,
+                            )
+                            result["tabs"] = tab_res
+                            if not tab_res.get("ok"):
+                                result["ok"] = False
+                                result["error"] = tab_res.get("error") or "show_info click_top_tabs failed"
 
             elif atype == "cleanup_utility_windows":
                 result.update(_cleanup_utility_windows(sm, keep_chat=bool(action.get("keep_chat", True))))
@@ -4447,6 +5084,8 @@ def _execute_action(sm, action):
                             elif ch not in wins:
                                 wins.append(ch)
                 t_low = target.lower() if target else ""
+                t_norm = _normalize_window_tok(target)
+                is_explicit_chrome = bool(t_norm and any(tok == t_norm or (len(t_norm) >= 5 and tok in t_norm) for tok in (_CORE_HUD_PRESERVE_TOKENS + _CHAT_WINDOW_TOKENS)))
                 has_visible_modal = any(
                     not getattr(w, "destroyed", False)
                     and _is_visible(w)
@@ -4473,10 +5112,13 @@ def _execute_action(sm, action):
                         or "Popup" in wcls
                         or "Dialog" in wcls
                     )
+                    if not is_mod and not is_explicit_chrome and _is_preserved_chrome_window(w, keep_chat=True):
+                        continue
                     if not t_low and has_visible_modal and not is_mod:
                         continue
                     match = (
                         not t_low
+                        or _target_matches_window(t_norm, wid, wname + " " + wcap, wcls)
                         or t_low in wid.lower()
                         or t_low in wname.lower()
                         or t_low in wcap.lower()
@@ -4551,25 +5193,25 @@ def _execute_action(sm, action):
                         except Exception:
                             pass
                 if not (not t_low and has_visible_modal):
+                    if not t_norm or _target_matches_window(t_norm, "SkillPlanDockablePanel", "skills", "SkillPlanDockablePanel"):
+                        try:
+                            from eve.client.script.ui.skillPlan.skillPlanDockablePanel import SkillPlanDockablePanel
+                            sp_open = SkillPlanDockablePanel.GetIfOpen()
+                            if sp_open is not None and not getattr(sp_open, "destroyed", False) and _is_visible(sp_open):
+                                SkillPlanDockablePanel.CloseIfOpen()
+                                closed.append("SkillPlanDockablePanel")
+                        except Exception:
+                            pass
                     try:
                         vs = sm.GetService("viewState") if sm is not None else None
-                        cur_vi = vs.GetCurrentViewInfo() if (vs is not None and hasattr(vs, "GetCurrentViewInfo")) else None
+                        sec_vi = getattr(vs, "secondaryInfo", None) if vs is not None else None
+                        cur_vi = sec_vi or (vs.GetCurrentViewInfo() if (vs is not None and hasattr(vs, "GetCurrentViewInfo")) else None)
                         cur_vname = _safe_str(getattr(cur_vi, "name", ""), 48)
                         if cur_vname in ("paint_tool", "ship_skinr", "virtual_goods_store", "aurumstore", "starmap_new", "starmap", "systemmap", "systemmap_new", "planet", "shiptree", "career_portal", "skill_plan", "skill_tree", "omega_upsell", "achievements") and (
                             not t_low
-                            or "paint" in t_low
-                            or "skinr" in t_low
-                            or "store" in t_low
-                            or "nes" in t_low
-                            or "map" in t_low
-                            or "planet" in t_low
-                            or "tree" in t_low
-                            or "career" in t_low
-                            or "skill" in t_low
-                            or "omega" in t_low
-                            or "achiev" in t_low
+                            or _target_matches_view(t_norm, cur_vname)
                             or not closed
-                            or any(("paint" in c.lower() or "skinr" in c.lower() or "map" in c.lower() or "store" in c.lower() or "tree" in c.lower() or "career" in c.lower() or "skill" in c.lower() or "omega" in c.lower() or "achiev" in c.lower()) for c in closed)
+                            or any(_target_matches_view(_normalize_window_tok(c), cur_vname) for c in closed)
                         ):
                             if cur_vname == "skill_plan" or "skill" in t_low:
                                 try:
@@ -4592,7 +5234,7 @@ def _execute_action(sm, action):
                     except Exception:
                         pass
                 try:
-                    if not t_low or "notif" in t_low:
+                    if not t_low or "notif" in t_low or _target_matches_window(t_norm, "notifications", "NotificationCenter", "NotificationCenter"):
                         svcs_c = getattr(sm, "services", {}) if sm is not None else {}
                         n_ui_c = svcs_c.get("notificationUIService")
                         nc_c = getattr(n_ui_c, "notificationCenter", None) if n_ui_c is not None else None

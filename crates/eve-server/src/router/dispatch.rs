@@ -1102,9 +1102,45 @@ impl ServerContext {
                 Some(PyRep::Integer(i)) => *i as u64,
                 _ => 12,
             };
+            let explicit_target_cid = match args.get(1) {
+                None | Some(PyRep::None) => None,
+                Some(PyRep::Integer(id)) if *id > 0 => Some(*id),
+                _ => {
+                    return Err(BridgeRpcError {
+                        code: "InvalidArgument".into(),
+                        message: "AdvanceClock target_char_id must be a positive integer".into(),
+                        client_error: None,
+                    });
+                }
+            };
+            let target_space = if let Some(target_cid) = explicit_target_cid {
+                let resolved = self.db.with_snapshot(|snap| {
+                    snap.characters.get(&target_cid).map(|ch| {
+                        if ch.station_id.is_none()
+                            && ch.structure_id.is_none()
+                            && ch.solar_system_id > 0
+                            && ch.active_ship_id > 0
+                        {
+                            Some((ch.solar_system_id, ch.active_ship_id))
+                        } else {
+                            None
+                        }
+                    })
+                });
+                resolved.ok_or_else(|| BridgeRpcError {
+                    code: "CharacterNotFound".into(),
+                    message: format!("Character {target_cid} not found"),
+                    client_error: None,
+                })?
+            } else {
+                match (session.solar_system_id, session.ship_id) {
+                    (Some(sys_id), Some(ship_id)) => Some((sys_id, ship_id)),
+                    _ => None,
+                }
+            };
             self.advance_secs_without_sim_clock_rebase(secs);
             if secs > 0 {
-                if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+                if let Some((sys_id, ship_id)) = target_space {
                     let sys_h = self.systems.get_or_spawn(sys_id);
                     let _ = sys_h.fast_forward_clock(ship_id, secs).await;
                 }
@@ -1125,7 +1161,28 @@ impl ServerContext {
                     client_error: None,
                 });
             }
-            if let Some(cid) = session.character_id {
+            let target_cid = match args.first() {
+                None | Some(PyRep::None) => session.character_id,
+                Some(PyRep::Integer(id)) if *id > 0 => {
+                    let cid = *id;
+                    if !self.db.with_snapshot(|snap| snap.characters.contains_key(&cid)) {
+                        return Err(BridgeRpcError {
+                            code: "CharacterNotFound".into(),
+                            message: format!("Character {cid} not found"),
+                            client_error: None,
+                        });
+                    }
+                    Some(cid)
+                }
+                _ => {
+                    return Err(BridgeRpcError {
+                        code: "InvalidArgument".into(),
+                        message: format!("{method} target_char_id must be a positive integer"),
+                        client_error: None,
+                    });
+                }
+            };
+            if let Some(cid) = target_cid {
                 crate::services::space_destiny::clear_session_change_timer(self, cid);
             }
             return Ok(PyRep::Bool(true));

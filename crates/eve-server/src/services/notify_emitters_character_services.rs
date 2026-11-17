@@ -774,6 +774,73 @@ pub fn emit_milestone_timer_started(ctx: &ServerContext, char_id: i64, time_left
     );
 }
 
+const CHAR_ID_PREFIX_MIN: i64 = 3_000_000;
+const UPWELL_STRUCTURE_ID_MIN: i64 = 1_000_000_000_000;
+
+fn resolve_optional_target_char<'a, 'b>(
+    ctx: &ServerContext,
+    caller_cid: i64,
+    args: &'a [&'b str],
+    cmd_head: &str,
+) -> Result<(i64, &'a [&'b str]), BridgeRpcError> {
+    let Some(first) = args.first().copied() else {
+        return Ok((caller_cid, args));
+    };
+    if first.eq_ignore_ascii_case("me") || first.eq_ignore_ascii_case("self") {
+        return Ok((caller_cid, &args[1..]));
+    }
+    if let Ok(parsed) = first.parse::<i64>() {
+        if parsed > 0 {
+            let (is_char, is_known_domain_id) = ctx.db.with_snapshot(|s| {
+                let is_char = parsed == caller_cid || s.characters.contains_key(&parsed);
+                let is_known_domain_id = match cmd_head {
+                    "/upwelltimer" | "/structuretimer" | "/finishstructure" => {
+                        parsed >= UPWELL_STRUCTURE_ID_MIN || s.structures.contains_key(&parsed)
+                    }
+                    "/completeindustry" | "/finishjobs" | "/industrytimer" => {
+                        s.industry_jobs.contains_key(&parsed)
+                    }
+                    _ => false,
+                };
+                (is_char, is_known_domain_id)
+            });
+            if is_char {
+                return Ok((parsed, &args[1..]));
+            }
+            if parsed >= CHAR_ID_PREFIX_MIN && !is_known_domain_id {
+                return Err(BridgeRpcError {
+                    code: "CharacterNotFound".into(),
+                    message: format!("Character {parsed} not found"),
+                    client_error: None,
+                });
+            }
+        }
+    }
+    Ok((caller_cid, args))
+}
+
+fn resolve_target_solar_system(
+    ctx: &ServerContext,
+    caller_cid: i64,
+    caller_sys: Option<u32>,
+    target_cid: i64,
+) -> u32 {
+    if target_cid != caller_cid {
+        ctx.db
+            .with_snapshot(|s| s.characters.get(&target_cid).map(|c| c.solar_system_id))
+            .filter(|&s| s > 0)
+            .or(caller_sys)
+            .unwrap_or(0)
+    } else {
+        caller_sys
+            .or_else(|| {
+                ctx.db
+                    .with_snapshot(|s| s.characters.get(&caller_cid).map(|c| c.solar_system_id))
+            })
+            .unwrap_or(0)
+    }
+}
+
 /// Handles Batch 3 GM/QA slash commands (`/achievements reset`, `/chatban`, `/chatunban`,
 /// `/campaign enroll`, `/shutdown cancel`, `/fastcheckout`, `/fwcapture`, `/spawnanomaly`,
 /// and timer acceleration commands `/advancetime`, `/completeskills`, `/upwelltimer`,
@@ -1079,10 +1146,16 @@ pub fn handle_batch3_gm_slash_cmd(
             Some(Ok(PyRep::Bool(enabled)))
         }
         "/spawnanomaly" => {
-            let sys_id = caller_sys
-                .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&caller_cid).map(|c| c.solar_system_id)))
-                .unwrap_or(0);
-            let dungeon_id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(10_001);
+            let (target_cid, rem) =
+                match resolve_optional_target_char(ctx, caller_cid, &parts[1..], head.as_str()) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+            let sys_id = resolve_target_solar_system(ctx, caller_cid, caller_sys, target_cid);
+            let dungeon_id = rem
+                .first()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(10_001);
             let (anom_id, inst_id) =
                 super::notify_emitters_space_dungeons::spawn_and_emit_cosmic_anomaly(ctx, sys_id, dungeon_id);
             Some(Ok(PyRep::keyval([
@@ -1109,23 +1182,62 @@ pub fn handle_batch3_gm_slash_cmd(
             ])))
         }
         "/advancetime" | "/fastforward" | "/ff" => {
-            let secs = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(3600);
+            let (target_cid, secs) = {
+                let (mut cid_res, rem) =
+                    match resolve_optional_target_char(ctx, caller_cid, &parts[1..], head.as_str()) {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
+                let mut parsed_secs: Option<u64> = None;
+                for tok in rem {
+                    if tok.eq_ignore_ascii_case("me") || tok.eq_ignore_ascii_case("self") {
+                        continue;
+                    }
+                    if cid_res == caller_cid {
+                        if let Ok(parsed) = tok.parse::<i64>() {
+                            if parsed > 0
+                                && (parsed == caller_cid
+                                    || ctx.db.with_snapshot(|s| s.characters.contains_key(&parsed)))
+                            {
+                                cid_res = parsed;
+                                continue;
+                            }
+                            if parsed >= CHAR_ID_PREFIX_MIN {
+                                return Some(Err(BridgeRpcError {
+                                    code: "CharacterNotFound".into(),
+                                    message: format!("Character {parsed} not found"),
+                                    client_error: None,
+                                }));
+                            }
+                        }
+                    }
+                    if parsed_secs.is_none() {
+                        if let Ok(s) = tok.parse::<u64>() {
+                            parsed_secs = Some(s);
+                        }
+                    }
+                }
+                (cid_res, parsed_secs.unwrap_or(3600))
+            };
             // #1005 / #1015: Advance server timers without emitting `DoSimClockRebase` so live
             // client `Ballpark.AdjustTimes` and `blue.os` clocks are not pushed into the future
             // (`router/dispatch.rs` `timeControl.AdvanceClock` parity).
             ctx.advance_secs_without_sim_clock_rebase(secs);
-            crate::services::space_destiny::clear_session_change_timer(ctx, caller_cid);
+            crate::services::space_destiny::clear_session_change_timer(ctx, target_cid);
             Some(Ok(PyRep::keyval([
                 ("command", PyRep::String(cmd.to_string())),
+                ("characterID", PyRep::Integer(target_cid)),
                 ("advancedSeconds", PyRep::Integer(secs as i64)),
                 ("nowUnix", PyRep::Integer(ctx.now_unix() as i64)),
             ])))
         }
         "/completeskills" | "/trainskills" | "/finishskills" => {
-            let arg = parts.get(1).copied().unwrap_or("all");
+            let (target_cid, rem) =
+                match resolve_optional_target_char(ctx, caller_cid, &parts[1..], head.as_str()) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+            let arg = rem.first().copied().unwrap_or("all");
             let advance_s: f64 = if arg.eq_ignore_ascii_case("all") {
                 31_536_000.0 * 5.0
             } else if let Ok(secs) = arg.parse::<u64>() {
@@ -1135,11 +1247,11 @@ pub fn handle_batch3_gm_slash_cmd(
             };
             let (pre_queue_len, pre_skill_state): (usize, Vec<(u32, u8, f64)>) =
                 ctx.db.with_mut_snapshot(|snap| {
-                    snap.paused_skill_queues.remove(&caller_cid);
+                    snap.paused_skill_queues.remove(&target_cid);
                     let mut tids = Vec::new();
                     let qlen = snap
                         .skill_queues
-                        .get(&caller_cid)
+                        .get(&target_cid)
                         .map(|q| {
                             for e in q {
                                 if !tids.contains(&e.type_id) {
@@ -1149,7 +1261,7 @@ pub fn handle_batch3_gm_slash_cmd(
                             q.len()
                         })
                         .unwrap_or(0);
-                    let skills = snap.skills.get(&caller_cid);
+                    let skills = snap.skills.get(&target_cid);
                     let state = tids
                         .into_iter()
                         .map(|tid| {
@@ -1166,15 +1278,15 @@ pub fn handle_batch3_gm_slash_cmd(
             let (rem_q, total_sp, completed_any, partial_tids) = ctx.db.with_snapshot(|snap| {
                 let qlen = snap
                     .skill_queues
-                    .get(&caller_cid)
+                    .get(&target_cid)
                     .map(|q| q.len())
                     .unwrap_or(0);
                 let sp = snap
                     .characters
-                    .get(&caller_cid)
+                    .get(&target_cid)
                     .map(|c| c.skill_points)
                     .unwrap_or(0.0);
-                let skills = snap.skills.get(&caller_cid);
+                let skills = snap.skills.get(&target_cid);
                 let mut completed_any = qlen < pre_queue_len;
                 let mut partial_tids = Vec::new();
                 for (tid, prev_lvl, prev_sp) in &pre_skill_state {
@@ -1194,28 +1306,32 @@ pub fn handle_batch3_gm_slash_cmd(
                 if !partial_tids.is_empty() {
                     crate::services::jump_clone_names::emit_server_skills_changed(
                         ctx,
-                        caller_cid,
+                        target_cid,
                         &partial_tids,
                         Some("SkillTrained"),
                     );
                 }
                 let _ = ctx.notify_new_skill_queue_saved(
-                    caller_cid,
-                    crate::services::jump_clone_names::skill_queue_rowset(ctx, caller_cid),
+                    target_cid,
+                    crate::services::jump_clone_names::skill_queue_rowset(ctx, target_cid),
                 );
             }
             Some(Ok(PyRep::keyval([
                 ("command", PyRep::String(cmd.to_string())),
+                ("characterID", PyRep::Integer(target_cid)),
                 ("remainingQueueLen", PyRep::Integer(rem_q as i64)),
                 ("totalSkillPoints", PyRep::Real(total_sp)),
             ])))
         }
         "/upwelltimer" | "/structuretimer" | "/finishstructure" => {
-            let target_sid_opt = parts.get(1).and_then(|s| s.parse::<i64>().ok());
+            let (target_cid, rem) =
+                match resolve_optional_target_char(ctx, caller_cid, &parts[1..], head.as_str()) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+            let target_sid_opt = rem.first().and_then(|s| s.parse::<i64>().ok());
             let now = ctx.now_unix();
-            let sys_id = caller_sys
-                .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&caller_cid).map(|c| c.solar_system_id)))
-                .unwrap_or(0);
+            let sys_id = resolve_target_solar_system(ctx, caller_cid, caller_sys, target_cid);
             let matched_ids: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
                 let mut sids: Vec<i64> = snap
                     .structures
@@ -1311,11 +1427,16 @@ pub fn handle_batch3_gm_slash_cmd(
             }
         }
         "/completeindustry" | "/finishjobs" | "/industrytimer" => {
-            let target_job = parts.get(1).and_then(|s| s.parse::<i64>().ok());
+            let (target_cid, rem) =
+                match resolve_optional_target_char(ctx, caller_cid, &parts[1..], head.as_str()) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+            let target_job = rem.first().and_then(|s| s.parse::<i64>().ok());
             let now = ctx.now_unix();
             let corp_id = ctx
                 .db
-                .with_snapshot(|s| s.characters.get(&caller_cid).map(|c| c.corporation_id))
+                .with_snapshot(|s| s.characters.get(&target_cid).map(|c| c.corporation_id))
                 .unwrap_or(0);
             let completed_jobs: Vec<(i64, i64, i64, i64, u32)> = ctx.db.with_mut_snapshot(|snap| {
                 let mut matched = Vec::new();
@@ -1325,7 +1446,7 @@ pub fn handle_batch3_gm_slash_cmd(
                     }
                     let matches = match target_job {
                         Some(jid) => job.job_id == jid,
-                        None => job.installer_id == caller_cid || job.installer_id == corp_id,
+                        None => job.installer_id == target_cid || job.installer_id == corp_id,
                     };
                     if matches {
                         job.status = "Ready".into();
@@ -1355,10 +1476,10 @@ pub fn handle_batch3_gm_slash_cmd(
                     3,
                     *runs as i64,
                 );
-                if caller_cid != *installer_id {
+                if target_cid != *installer_id {
                     crate::services::industry_pi::emit_industry_job(
                         ctx,
-                        caller_cid,
+                        target_cid,
                         *owner_id,
                         *jid,
                         *bp_iid,
@@ -1370,6 +1491,7 @@ pub fn handle_batch3_gm_slash_cmd(
             let completed_ids: Vec<i64> = completed_jobs.into_iter().map(|(jid, _, _, _, _)| jid).collect();
             Some(Ok(PyRep::keyval([
                 ("command", PyRep::String(cmd.to_string())),
+                ("characterID", PyRep::Integer(target_cid)),
                 ("readyJobCount", PyRep::Integer(completed_ids.len() as i64)),
                 (
                     "jobIDs",
@@ -1378,20 +1500,32 @@ pub fn handle_batch3_gm_slash_cmd(
             ])))
         }
         "/cleartimers" => {
+            let (target_cid, rem) =
+                match resolve_optional_target_char(ctx, caller_cid, &parts[1..], head.as_str()) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+            if let Some(bad_tok) = rem.first() {
+                return Some(Err(BridgeRpcError {
+                    code: "CharacterNotFound".into(),
+                    message: format!("Character '{bad_tok}' not found for /cleartimers"),
+                    client_error: None,
+                }));
+            }
             let now_unix = ctx.now_unix();
-            crate::services::space_destiny::clear_session_change_timer(ctx, caller_cid);
+            crate::services::space_destiny::clear_session_change_timer(ctx, target_cid);
             ctx.db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&caller_cid) {
+                if let Some(ch) = snap.characters.get_mut(&target_cid) {
                     ch.last_clone_jump_unix = 0;
                     ch.jump_fatigue_minutes = 0.0;
                     ch.jump_cooldown_until_unix = 0;
                     ch.jump_fatigue_until_unix = 0;
                 }
-                snap.item_custom_names.remove(&(-8_800_000 - caller_cid));
+                snap.item_custom_names.remove(&(-8_800_000 - target_cid));
             });
             {
                 let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-                if let Some(pst) = cw.states.get_mut(&caller_cid) {
+                if let Some(pst) = cw.states.get_mut(&target_cid) {
                     pst.weapon_timer_until_unix = 0;
                     pst.pvp_timer_until_unix = 0;
                     pst.suspect_flag_until_unix = 0;
@@ -1401,38 +1535,39 @@ pub fn handle_batch3_gm_slash_cmd(
             }
             let cleared_engagements: Vec<i64> =
                 crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-                    rt.npc_timers.remove(&caller_cid);
-                    rt.disapproval_flags.remove(&caller_cid);
+                    rt.npc_timers.remove(&target_cid);
+                    rt.disapproval_flags.remove(&target_cid);
                     let mut targets: Vec<i64> = rt
                         .limited_engagements
-                        .remove(&caller_cid)
+                        .remove(&target_cid)
                         .map(|m| m.into_keys().collect())
                         .unwrap_or_default();
                     for other_map in rt.limited_engagements.values_mut() {
-                        other_map.remove(&caller_cid);
+                        other_map.remove(&target_cid);
                     }
                     targets.sort_unstable();
                     targets
                 });
             crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications(
                 ctx,
-                caller_cid,
+                target_cid,
                 now_unix,
             );
             for target_id in cleared_engagements {
                 ctx.emit_typed(
-                    NotificationTarget::Character(caller_cid),
+                    NotificationTarget::Character(target_cid),
                     OnCrimewatchEngagementEnded {
                         other_char_id: target_id,
                     },
                 );
             }
             crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-                rt.crimewatch_timer_states.remove(&caller_cid);
-                rt.crimewatch_timer_triggered_at.remove(&caller_cid);
+                rt.crimewatch_timer_states.remove(&target_cid);
+                rt.crimewatch_timer_triggered_at.remove(&target_cid);
             });
             Some(Ok(PyRep::keyval([
                 ("command", PyRep::String(cmd.to_string())),
+                ("characterID", PyRep::Integer(target_cid)),
                 ("cleared", PyRep::Bool(true)),
             ])))
         }

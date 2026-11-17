@@ -547,6 +547,47 @@ fn is_me_or_myship(tok: &str) -> bool {
     tok.eq_ignore_ascii_case("me") || tok.eq_ignore_ascii_case("myship")
 }
 
+fn resolve_item_or_char_active_ship(
+    snap: &eve_db::WorldStateSnapshot,
+    cid: i64,
+    item_tok: &str,
+) -> Option<i64> {
+    if is_me_or_myship(item_tok) || item_tok.eq_ignore_ascii_case("self") {
+        return snap.characters.get(&cid).map(|c| c.active_ship_id);
+    }
+    let parsed = item_tok.parse::<i64>().ok()?;
+    if snap.items.contains_key(&parsed) {
+        Some(parsed)
+    } else if let Some(ch) = snap.characters.get(&parsed) {
+        Some(ch.active_ship_id)
+    } else {
+        Some(parsed)
+    }
+}
+
+fn resolve_gm_char_prefix<'a>(
+    ctx: &ServerContext,
+    cid: i64,
+    tokens: &'a [String],
+    require_min_remaining: usize,
+) -> (i64, &'a [String]) {
+    if tokens.len() <= require_min_remaining {
+        return (cid, tokens);
+    }
+    let first = &tokens[0];
+    if is_me_or_myship(first) || first.eq_ignore_ascii_case("self") {
+        return (cid, &tokens[1..]);
+    }
+    if let Ok(parsed) = first.parse::<i64>() {
+        if parsed > 0
+            && (parsed == cid || ctx.db.with_snapshot(|s| s.characters.contains_key(&parsed)))
+        {
+            return (parsed, &tokens[1..]);
+        }
+    }
+    (cid, tokens)
+}
+
 /// Handles GM slash commands added in `CH-5`:
 /// `/heal [target_id]`, `/spawn <type_id> [qty]`, `/unspawn <id>`, `/setattr <item_id> <attr_id> <val>`,
 /// `/getattr <item_id> <attr_id>`, `/fit [ship_id|"me"] <type_id> [flag]`, `/load [target|"me"] <type_id> [qty]`,
@@ -994,10 +1035,11 @@ pub async fn handle_gm_slash_ext(
 
     if let Some(rest) = cmd.strip_prefix("/spawn ") {
         let tokens = parse_slash_tokens(rest);
-        let Some(type_id) = tokens.first().and_then(|s| s.parse::<u32>().ok()) else {
-            return Some(Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /spawn <type_id> [quantity]".into(), client_error: None }));
+        let (target_cid, arg_tokens) = resolve_gm_char_prefix(ctx, cid, &tokens, 1);
+        let Some(type_id) = arg_tokens.first().and_then(|s| s.parse::<u32>().ok()) else {
+            return Some(Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /spawn [char_id] <type_id> [quantity]".into(), client_error: None }));
         };
-        let qty = tokens.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(1);
+        let qty = arg_tokens.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(1);
         if !(1..=100).contains(&qty) {
             return Some(Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Quantity for /spawn must be between 1 and 100".into(), client_error: None }));
         }
@@ -1006,10 +1048,18 @@ pub async fn handle_gm_slash_ext(
         };
         let (db_sys_id, db_ship_id) = ctx
             .db
-            .with_snapshot(|snap| snap.characters.get(&cid).map(|c| (c.solar_system_id, c.active_ship_id)))
+            .with_snapshot(|snap| snap.characters.get(&target_cid).map(|c| (c.solar_system_id, c.active_ship_id)))
             .unwrap_or((0, 0));
-        let sys_id = session.solar_system_id.filter(|&s| s > 0).unwrap_or(db_sys_id);
-        let ship_id = session.ship_id.filter(|&id| id > 0).unwrap_or(db_ship_id);
+        let sys_id = if target_cid != cid {
+            db_sys_id
+        } else {
+            session.solar_system_id.filter(|&s| s > 0).unwrap_or(db_sys_id)
+        };
+        let ship_id = if target_cid != cid {
+            db_ship_id
+        } else {
+            session.ship_id.filter(|&id| id > 0).unwrap_or(db_ship_id)
+        };
 
         let handle = ctx.systems.get_or_spawn(sys_id);
         let origin = if ship_id > 0 {
@@ -1028,7 +1078,7 @@ pub async fn handle_gm_slash_ext(
             };
             let is_celestial_or_asteroid = matches!(inv_type.category_id, 2 | 25);
             // Asteroids/celestials belong to ownerSystem (1) with no player corp/char so bracket/standing UI stays neutral.
-            let spawn_owner_id = if is_celestial_or_asteroid { 1 } else { cid };
+            let spawn_owner_id = if is_celestial_or_asteroid { 1 } else { target_cid };
             let entity_id = ctx.db.with_mut_snapshot(|snap| {
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
@@ -1207,7 +1257,7 @@ pub async fn handle_gm_slash_ext(
                     mode: MovementMode::Stop,
                 };
                 let combat = ctx.build_type_combat_state(type_id);
-                let mut meta = ctx.build_ship_slim_meta(cid, type_id);
+                let mut meta = ctx.build_ship_slim_meta(target_cid, type_id);
                 meta.char_id = None;
                 let res = handle.spawn_ball_with_meta(ball, combat, meta).await;
                 if res.is_ok() && inv_type.category_id == 6 {
@@ -1312,17 +1362,12 @@ pub async fn handle_gm_slash_ext(
 
         let now_ft = ctx.now_blueos_filetime_ticks();
         let res = ctx.db.try_with_mut_snapshot(|snap| {
-            let item_id = if is_me_or_myship(item_tok) {
-                snap.characters
-                    .get(&cid)
-                    .map(|c| c.active_ship_id)
-                    .unwrap_or(0)
-            } else {
-                item_tok.parse::<i64>().map_err(|_| BridgeRpcError {
+            let Some(item_id) = resolve_item_or_char_active_ship(snap, cid, item_tok) else {
+                return Err(BridgeRpcError {
                     code: "InvalidSlashArgument".into(),
                     message: format!("Invalid item_id '{item_tok}' for /setattr"),
                     client_error: None,
-                })?
+                });
             };
             let Some(item) = snap.items.get_mut(&item_id) else {
                 return Err(BridgeRpcError {
@@ -1382,14 +1427,7 @@ pub async fn handle_gm_slash_ext(
             }));
         };
         let res = ctx.db.with_snapshot(|snap| {
-            let item_id = if is_me_or_myship(item_tok) {
-                snap.characters
-                    .get(&cid)
-                    .map(|c| c.active_ship_id)
-                    .unwrap_or(0)
-            } else {
-                item_tok.parse::<i64>().unwrap_or(0)
-            };
+            let item_id = resolve_item_or_char_active_ship(snap, cid, item_tok).unwrap_or(0);
             let item = snap.items.get(&item_id)?;
             let val = item
                 .dynamic_attributes
@@ -1450,17 +1488,23 @@ pub async fn handle_gm_slash_ext(
             (caller_ship_id, tid, flg)
         } else if tokens.len() >= 2 {
             let first_i64 = tokens[0].parse::<i64>().unwrap_or(0);
-            let is_known_ship = ctx.db.with_snapshot(|snap| {
-                snap.items
+            let matched_target_ship = ctx.db.with_snapshot(|snap| {
+                if snap
+                    .items
                     .get(&first_i64)
                     .and_then(|i| ctx.sde.types.get(&i.type_id))
                     .is_some_and(|t| matches!(t.category_id, 6 | 65))
+                {
+                    Some(first_i64)
+                } else {
+                    snap.characters.get(&first_i64).map(|c| c.active_ship_id)
+                }
             });
-            if is_known_ship {
+            if let Some(target_ship_id) = matched_target_ship {
                 let Some(tid) = tokens.get(1).and_then(|s| s.parse::<u32>().ok()) else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
-                        message: "Usage: /fit <ship_id> <type_id> [flag_id]".into(),
+                        message: "Usage: /fit <ship_id|char_id> <type_id> [flag_id]".into(),
                         client_error: None,
                     }));
                 };
@@ -1468,7 +1512,7 @@ pub async fn handle_gm_slash_ext(
                     .get(2)
                     .and_then(|s| s.parse::<u16>().ok())
                     .map(InventoryFlag::from_u16);
-                (first_i64, tid, flg)
+                (target_ship_id, tid, flg)
             } else {
                 let Some(tid) = tokens[0].parse::<u32>().ok() else {
                     return Some(Err(BridgeRpcError {
@@ -2422,9 +2466,16 @@ pub async fn handle_gm_slash_ext(
     }
     if let Some(rest) = cmd.strip_prefix("/energy ") {
         let parts: Vec<&str> = rest.split_whitespace().collect();
+        let resolve_cid_arg = |s: &str| -> Option<i64> {
+            if is_me_or_myship(s) || s.eq_ignore_ascii_case("self") {
+                Some(cid)
+            } else {
+                s.parse::<i64>().ok()
+            }
+        };
         let (target_cid, new_energy) = match parts.as_slice() {
             [val_s] => (Some(cid), val_s.parse::<i64>().ok()),
-            [cid_s, val_s] => (cid_s.parse::<i64>().ok(), val_s.parse::<i64>().ok()),
+            [cid_s, val_s] => (resolve_cid_arg(cid_s), val_s.parse::<i64>().ok()),
             _ => (None, None),
         };
         let (Some(target_cid), Some(energy_val)) = (target_cid.filter(|&id| id > 0), new_energy) else {
@@ -2439,9 +2490,16 @@ pub async fn handle_gm_slash_ext(
     }
     if let Some(rest) = cmd.strip_prefix("/secstatus ") {
         let parts: Vec<&str> = rest.split_whitespace().collect();
+        let resolve_cid_arg = |s: &str| -> Option<i64> {
+            if is_me_or_myship(s) || s.eq_ignore_ascii_case("self") {
+                Some(cid)
+            } else {
+                s.parse::<i64>().ok()
+            }
+        };
         let (target_cid, new_sec) = match parts.as_slice() {
             [val_s] => (Some(cid), val_s.parse::<f64>().ok()),
-            [cid_s, val_s] => (cid_s.parse::<i64>().ok(), val_s.parse::<f64>().ok()),
+            [cid_s, val_s] => (resolve_cid_arg(cid_s), val_s.parse::<f64>().ok()),
             _ => (None, None),
         };
         let (Some(target_cid), Some(sec_val)) = (target_cid.filter(|&id| id > 0), new_sec.filter(|v| v.is_finite())) else {
@@ -2471,6 +2529,43 @@ pub async fn handle_gm_slash_ext(
         return Some(crate::services::gm_soak_commands::handle_session_cmd(
             ctx, session, cid, cmd,
         ));
+    }
+
+    if cmd == "/spawnwreck" || cmd.starts_with("/spawnwreck ") {
+        let tokens = parse_slash_tokens(cmd.strip_prefix("/spawnwreck").unwrap_or(""));
+        let (target_cid, arg_tokens) = resolve_gm_char_prefix(ctx, cid, &tokens, 1);
+        let tail = arg_tokens.join(" ");
+        let forwarded_cmd = if arg_tokens.len() < tokens.len() {
+            if tail.is_empty() {
+                "/spawnwreck".to_string()
+            } else {
+                format!("/spawnwreck {tail}")
+            }
+        } else {
+            cmd.to_string()
+        };
+        let mut target_session = session.clone();
+        if target_cid != cid {
+            ctx.db.with_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get(&target_cid) {
+                    target_session.character_id = Some(target_cid);
+                    target_session.solar_system_id = Some(ch.solar_system_id);
+                    target_session.station_id = ch.station_id;
+                    target_session.structure_id = ch.structure_id;
+                    target_session.ship_id = Some(ch.active_ship_id);
+                }
+            });
+        }
+        if let Some(res) = crate::services::gm_soak_commands::handle_gm_soak_slash_cmd(
+            ctx,
+            &target_session,
+            target_cid,
+            &forwarded_cmd,
+        )
+        .await
+        {
+            return Some(res);
+        }
     }
 
     if let Some(res) =

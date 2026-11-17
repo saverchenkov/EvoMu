@@ -1368,3 +1368,251 @@ fn cleartimers_removes_corvette_cooldown_and_structure_state_slash_updates_state
         assert_eq!(st.armor_hp, 0.0);
     });
 }
+
+#[test]
+fn gm_bridge_batch3_slash_commands_target_explicit_player_char_id() {
+    let (ctx, player_cid) = make_ctx();
+    let gm_cid = 90_000_003_i64;
+    let gm_sys = 30_000_142_u32;
+    let player_sys = 30_002_187_u32;
+    let gm_corp = 98_000_901_i64;
+    let player_corp = 98_000_902_i64;
+    let gm_sid = 1_000_992_001_i64;
+    let player_sid = 1_000_992_002_i64;
+    let gm_job = 810_001_i64;
+    let player_job = 810_002_i64;
+    let now = ctx.now_unix();
+    let skill_tid = 3402_u32;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut gm_ch = snap.characters[&player_cid].clone();
+        gm_ch.character_id = gm_cid;
+        gm_ch.name = "Admin GM".into();
+        gm_ch.solar_system_id = gm_sys;
+        gm_ch.corporation_id = gm_corp;
+        snap.characters.insert(gm_cid, gm_ch);
+
+        if let Some(ch) = snap.characters.get_mut(&player_cid) {
+            ch.solar_system_id = player_sys;
+            ch.corporation_id = player_corp;
+            ch.clone_grade = 2;
+            ch.skill_points = 0.0;
+            ch.last_clone_jump_unix = now;
+            ch.jump_fatigue_minutes = 50.0;
+            ch.jump_cooldown_until_unix = now + 600;
+            ch.jump_fatigue_until_unix = now + 3_600;
+        }
+        if let Some(ch) = snap.characters.get_mut(&gm_cid) {
+            ch.last_clone_jump_unix = now;
+            ch.jump_cooldown_until_unix = now + 600;
+        }
+
+        for (cid_k, paused_sp) in [(gm_cid, 0.0_f64), (player_cid, 0.0_f64)] {
+            snap.skills.entry(cid_k).or_default().insert(
+                skill_tid,
+                eve_db::TrainedSkillRecord {
+                    type_id: skill_tid,
+                    level: 0,
+                    skill_points: paused_sp,
+                },
+            );
+            snap.paused_skill_queues.insert(cid_k);
+            snap.skill_queues.insert(
+                cid_k,
+                vec![eve_db::SkillQueueEntry {
+                    type_id: skill_tid,
+                    target_level: 1,
+                    start_sp: 0.0,
+                    end_sp: 250.0,
+                    duration_seconds: 500.0,
+                    started_at_unix: Some(now),
+                }],
+            );
+        }
+
+        for (jid, installer) in [(gm_job, gm_cid), (player_job, player_cid)] {
+            snap.industry_jobs.insert(
+                jid,
+                eve_db::IndustryJobRecord {
+                    job_id: jid,
+                    installer_id: installer,
+                    facility_id: 60_003_760,
+                    blueprint_item_id: 700_000 + jid,
+                    blueprint_type_id: 587,
+                    activity_id: 1,
+                    runs: 1,
+                    product_type_id: 587,
+                    status: "Active".into(),
+                    duration_seconds: 3_600,
+                    start_unix: now,
+                    blueprint_location_id: 60_003_760,
+                    output_location_id: 60_003_760,
+                    cost: Some(1_000.0),
+                    licensed_runs: None,
+                    probability: None,
+                    completed_unix: None,
+                    completed_character_id: None,
+                },
+            );
+        }
+
+        for (sid_k, owner_corp, sys_k, name) in [
+            (gm_sid, gm_corp, gm_sys, "GM Sys Citadel"),
+            (player_sid, player_corp, player_sys, "Player Sys Citadel"),
+        ] {
+            snap.structures.insert(
+                sid_k,
+                UpwellStructureRecord {
+                    structure_id: sid_k,
+                    type_id: 35_832,
+                    owner_corp_id: owner_corp,
+                    solar_system_id: sys_k,
+                    name: name.into(),
+                    position: [1_500_000.0, 0.0, 0.0],
+                    state: "ArmorReinforced".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 100,
+                    shield_hp: 0.0,
+                    armor_hp: 10_000.0,
+                    hull_hp: 10_000.0,
+                    reinforced_until_unix: now + 86_400,
+                    last_damage_tick: 0,
+                    last_damage_unix: 0,
+                    self_destruct_at_unix: None,
+                },
+            );
+        }
+        snap.item_custom_names
+            .insert(-8_800_000_i64 - player_cid, (now + 120).to_string());
+        snap.item_custom_names
+            .insert(-8_800_000_i64 - gm_cid, (now + 120).to_string());
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(2, 502, Some(gm_cid), true, now);
+    crate::services::space_destiny::record_session_change_timer(&ctx, gm_cid, now, gm_sys, 0, "gm");
+    crate::services::space_destiny::record_session_change_timer(&ctx, player_cid, now, player_sys, 0, "pl");
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.npc_timers.insert(player_cid, now + 300);
+        rt.npc_timers.insert(gm_cid, now + 300);
+    });
+    let _ = ctx.drain_notifications_for_char(gm_cid);
+    let _ = ctx.drain_notifications_for_char(player_cid);
+
+    let sk_res = handle_batch3_gm_slash_cmd(
+        &ctx,
+        gm_cid,
+        Some(gm_sys),
+        &format!("/completeskills {player_cid} all"),
+    )
+    .expect("handled")
+    .expect("completeskills target player");
+    assert_eq!(sk_res.dict_get("remainingQueueLen"), Some(&PyRep::Integer(0)));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.skills[&player_cid][&skill_tid].level, 1);
+        assert!(snap.paused_skill_queues.contains(&gm_cid));
+        assert_eq!(snap.skills[&gm_cid][&skill_tid].level, 0);
+    });
+
+    let ind_res = handle_batch3_gm_slash_cmd(
+        &ctx,
+        gm_cid,
+        Some(gm_sys),
+        &format!("/completeindustry {player_cid}"),
+    )
+    .expect("handled")
+    .expect("completeindustry target player");
+    assert_eq!(ind_res.dict_get("readyJobCount"), Some(&PyRep::Integer(1)));
+    assert_eq!(
+        ind_res.dict_get("jobIDs"),
+        Some(&PyRep::List(vec![PyRep::Integer(player_job)]))
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.industry_jobs[&player_job].status, "Ready");
+        assert_eq!(snap.industry_jobs[&gm_job].status, "Active");
+    });
+
+    let up_res = handle_batch3_gm_slash_cmd(
+        &ctx,
+        gm_cid,
+        Some(gm_sys),
+        &format!("/upwelltimer {player_cid}"),
+    )
+    .expect("handled")
+    .expect("upwelltimer target player");
+    assert_eq!(up_res.dict_get("updatedCount"), Some(&PyRep::Integer(1)));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&player_sid].state, "ArmorVulnerable");
+        assert_eq!(snap.structures[&gm_sid].state, "ArmorReinforced");
+    });
+
+    let clr_res = handle_batch3_gm_slash_cmd(
+        &ctx,
+        gm_cid,
+        Some(gm_sys),
+        &format!("/cleartimers {player_cid}"),
+    )
+    .expect("handled")
+    .expect("cleartimers target player");
+    assert_eq!(clr_res.dict_get("cleared"), Some(&PyRep::Bool(true)));
+    assert!(crate::services::space_destiny::get_session_change_timer(&ctx, player_cid).is_none());
+    assert!(crate::services::space_destiny::get_session_change_timer(&ctx, gm_cid).is_some());
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&player_cid].jump_cooldown_until_unix, 0);
+        assert!(!snap.item_custom_names.contains_key(&(-8_800_000_i64 - player_cid)));
+        assert_eq!(snap.characters[&gm_cid].jump_cooldown_until_unix, now + 600);
+        assert!(snap.item_custom_names.contains_key(&(-8_800_000_i64 - gm_cid)));
+    });
+    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.npc_timers.contains_key(&player_cid));
+        assert!(rt.npc_timers.contains_key(&gm_cid));
+    });
+
+    let anom_res = handle_batch3_gm_slash_cmd(
+        &ctx,
+        gm_cid,
+        Some(gm_sys),
+        &format!("/spawnanomaly {player_cid} 10001"),
+    )
+    .expect("handled")
+    .expect("spawnanomaly target player");
+    assert_eq!(
+        anom_res.dict_get("solarSystemID"),
+        Some(&PyRep::Integer(i64::from(player_sys)))
+    );
+
+    crate::services::space_destiny::record_session_change_timer(&ctx, player_cid, now, player_sys, 0, "pl2");
+    let adv_res = handle_batch3_gm_slash_cmd(
+        &ctx,
+        gm_cid,
+        Some(gm_sys),
+        &format!("/advancetime {player_cid} 60"),
+    )
+    .expect("handled")
+    .expect("advancetime target player");
+    assert_eq!(adv_res.dict_get("advancedSeconds"), Some(&PyRep::Integer(60)));
+    assert_eq!(adv_res.dict_get("characterID"), Some(&PyRep::Integer(player_cid)));
+    assert!(crate::services::space_destiny::get_session_change_timer(&ctx, player_cid).is_none());
+    assert!(crate::services::space_destiny::get_session_change_timer(&ctx, gm_cid).is_some());
+
+    // Fail closed with CharacterNotFound on explicit character-range IDs (>= 3_000_000) absent
+    // from snap.characters rather than falling back to caller_cid and parsing them as secs/dungeon_id.
+    let pre_unknown_now = ctx.now_unix();
+    let unknown_cid = 99_999_999_i64;
+    for bad_cmd in [
+        format!("/advancetime {unknown_cid} 60"),
+        format!("/advancetime 60 {unknown_cid}"),
+        format!("/completeskills {unknown_cid} 10"),
+        format!("/spawnanomaly {unknown_cid}"),
+        format!("/upwelltimer {unknown_cid}"),
+        format!("/completeindustry {unknown_cid}"),
+        format!("/cleartimers {unknown_cid}"),
+    ] {
+        let err = handle_batch3_gm_slash_cmd(&ctx, gm_cid, Some(gm_sys), &bad_cmd)
+            .expect("handled")
+            .expect_err("unknown explicit char_id must fail closed");
+        assert_eq!(err.code, "CharacterNotFound", "for command {bad_cmd}");
+    }
+    assert_eq!(ctx.now_unix(), pre_unknown_now);
+    assert!(crate::services::space_destiny::get_session_change_timer(&ctx, gm_cid).is_some());
+}

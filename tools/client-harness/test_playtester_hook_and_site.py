@@ -3266,6 +3266,311 @@ class TestScenarioHookExtensions(unittest.TestCase):
 
         self.assertEqual(ensured_views, ["inflight", "hangar"])
 
+    def test_show_info_click_top_tabs_and_snapshot_cache_fields(self):
+        hook = _load_hook_with_py2_stubs()
+        self.assertEqual(hook.get_open_window_cmd_map(), hook.cmd_map)
+
+        shown_info_calls = []
+        clicked_tabs_log = []
+        fake_info_svc = types.SimpleNamespace(
+            ShowInfo=lambda tid, itemID=None: shown_info_calls.append((tid, itemID)),
+        )
+        tab_a = types.SimpleNamespace(text="Description", label="Description", name="tab_desc", destroyed=False, display=True, OnClick=lambda *_a: clicked_tabs_log.append("Description"))
+        tab_b = types.SimpleNamespace(text="Attributes", label="Attributes", name="tab_attr", destroyed=False, display=True, OnClick=lambda *_a: clicked_tabs_log.append("Attributes"))
+        fake_tg = types.SimpleNamespace(tabs=[tab_a, tab_b], children=[], destroyed=False, display=True, SelectByIdx=lambda i: None)
+        fake_info_win = types.SimpleNamespace(windowID="InfoWindow", name="InfoWindow", caption="Information", destroyed=False, display=True, children=[fake_tg])
+        fake_reg = types.SimpleNamespace(GetWindows=lambda: [fake_info_win])
+        fake_uicore = types.SimpleNamespace(
+            cmd=None, registry=fake_reg, desktop=types.SimpleNamespace(width=1280, height=800), layer=None,
+        )
+        inv_hangar = types.SimpleNamespace(items={1: {"categoryID": 6, "stacksize": 1}, 2: {"categoryID": 4, "stacksize": 500}})
+        inv_cargo = types.SimpleNamespace(items={3: {"categoryID": 8, "quantity": 120}})
+        fake_inv_cache = types.SimpleNamespace(inventories={(60003760, 4): inv_hangar, (100000001, 5): inv_cargo})
+        fake_jc_svc = types.SimpleNamespace(homeStationID=60003760, jumpClones=[{"cloneID": 1}, {"cloneID": 2}])
+        fake_svcs = {"info": fake_info_svc, "invCache": fake_inv_cache, "jumpCloneSvc": fake_jc_svc}
+        fake_sm = types.SimpleNamespace(services=fake_svcs, GetService=lambda n: fake_svcs.get(n))
+        sess = types.SimpleNamespace(userid=1, charid=90000001, stationid=60003760, structureid=None, shipid=100000001, solarsystemid=None, solarsystemid2=30000142, mutating=0, changing=None)
+
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.dict(builtins.__dict__, {"session": sess, "sm": fake_sm}), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_is_visible", return_value=True), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True):
+            snap = hook._get_state_snapshot(fake_sm)
+            self.assertEqual(snap["inventory_state"]["hangar_item_count"], 2)
+            self.assertEqual(snap["inventory_state"]["hangar_total_quantity"], 501)
+            self.assertEqual(snap["inventory_state"]["cargo_item_count"], 1)
+            self.assertEqual(snap["inventory_state"]["cargo_total_quantity"], 120)
+            self.assertEqual(snap["clone_state"]["home_station_id"], 60003760)
+            self.assertEqual(snap["clone_state"]["jump_clone_count"], 2)
+
+            with mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+                 mock.patch.object(hook, "_install_warp_telemetry"), \
+                 mock.patch.object(hook, "_get_state_snapshot", return_value=snap), \
+                 mock.patch.object(hook, "_settle_after_action", return_value=0), \
+                 mock.patch.object(hook, "_invoke_widget_click", side_effect=lambda w, **_kw: w.OnClick()):
+                res_si = hook._execute_action(fake_sm, {"type": "show_info", "type_id": 587, "category": "ship", "click_top_tabs": True, "wait_ms": 0, "reuse_pre_state": False})
+                self.assertTrue(res_si.get("ok"), res_si)
+                self.assertEqual(shown_info_calls, [(587, None)])
+                self.assertEqual(res_si["tabs"]["tabs_clicked"], 2)
+                self.assertEqual(clicked_tabs_log, ["Description", "Attributes"])
+
+    def test_inventory_state_filters_cargo_flag_5_and_tracks_hangar_containers(self):
+        hook = _load_hook_with_py2_stubs()
+        fake_sess = types.SimpleNamespace(
+            userid=1, charid=90000001, stationid=60003760, structureid=None,
+            solarsystemid=None, solarsystemid2=30000142, shipid=100000001,
+        )
+        # Unified (ship_id, None) contains fitted HiSlot0 (flag 27), DroneBay (flag 87), and Cargo (flag 5).
+        # Separate (ship_id, 87) DroneBay hold must NEVER pollute cargo_item_count.
+        unified_ship = types.SimpleNamespace(items={
+            201: {"itemID": 201, "flagID": 27, "categoryID": 7, "stacksize": 1},
+            202: {"itemID": 202, "flagID": 87, "categoryID": 18, "stacksize": 5},
+            301: {"itemID": 301, "flagID": 5, "categoryID": 8, "stacksize": 40},
+        })
+        drone_hold = types.SimpleNamespace(items={
+            202: {"itemID": 202, "flagID": 87, "categoryID": 18, "stacksize": 5},
+        })
+        station_items_10004 = types.SimpleNamespace(items={
+            401: {"itemID": 401, "flagID": 4, "categoryID": 4, "stacksize": 500},
+        })
+        fake_inv_cache = types.SimpleNamespace(inventories={
+            (100000001, None): unified_ship,
+            (100000001, 87): drone_hold,
+            (10004, 4): station_items_10004,
+        })
+        fake_sm = types.SimpleNamespace(
+            services={"invCache": fake_inv_cache},
+            GetService=lambda n: fake_sm.services.get(n),
+        )
+        with mock.patch.dict(builtins.__dict__, {"session": fake_sess, "sm": fake_sm}), \
+             mock.patch.object(hook, "_ensure_windowed_mode"), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_inspect_uicore_tree", return_value={"open_windows": [], "modals": []}):
+            snap = hook._get_state_snapshot(fake_sm)
+            inv = snap["inventory_state"]
+            self.assertEqual(inv["cargo_item_count"], 1)
+            self.assertEqual(inv["cargo_total_quantity"], 40)
+            self.assertEqual(inv["hangar_containers_seen"], ["StationItems"])
+            self.assertEqual(inv["hangar_non_ship_count"], 1)
+            self.assertEqual(inv["hangar_non_ship_total_quantity"], 500)
+            self.assertEqual(inv["ship_hangar_count"], 0)
+
+            # When explicit (ship_id, 5) and (station_id, 4) StationHangar are also cached,
+            # (ship_id, 5) stays authoritative and StationShips separates cleanly.
+            fake_inv_cache.inventories[(100000001, 5)] = types.SimpleNamespace(items={
+                301: {"itemID": 301, "flagID": 5, "categoryID": 8, "stacksize": 40},
+                302: {"itemID": 302, "flagID": 5, "categoryID": 8, "stacksize": 20},
+            })
+            fake_inv_cache.inventories[(60003760, 4)] = types.SimpleNamespace(items={
+                501: {"itemID": 501, "flagID": 4, "categoryID": 6, "stacksize": 1},
+            })
+            snap2 = hook._get_state_snapshot(fake_sm)
+            inv2 = snap2["inventory_state"]
+            self.assertEqual(inv2["cargo_item_count"], 2)
+            self.assertEqual(inv2["cargo_total_quantity"], 60)
+            self.assertEqual(inv2["hangar_containers_seen"], ["StationHangar", "StationItems"])
+            self.assertEqual(inv2["hangar_non_ship_count"], 1)
+            self.assertEqual(inv2["ship_hangar_count"], 1)
+            self.assertEqual(inv2["hangar_item_count"], 2)
+            self.assertEqual(inv2["hangar_total_quantity"], 501)
+
+    def test_window_open_and_show_info_fail_when_expected_window_missing(self):
+        hook = _load_hook_with_py2_stubs()
+        fake_info_svc = types.SimpleNamespace(ShowInfo=lambda *_a, **_kw: None)
+        fake_svcs = {"info": fake_info_svc}
+        fake_sm = types.SimpleNamespace(services=fake_svcs, GetService=lambda n: fake_svcs.get(n))
+        fake_cmd = types.SimpleNamespace(CmdOpenFleetFinderWindow=lambda: None)
+        unrelated_win = types.SimpleNamespace(windowID="WalletWindow", name="WalletWindow", caption="Wallet", destroyed=False, display=True, children=[])
+        fake_reg = types.SimpleNamespace(GetWindows=lambda: [unrelated_win])
+        fake_uicore = types.SimpleNamespace(
+            cmd=fake_cmd, registry=fake_reg, desktop=types.SimpleNamespace(width=1280, height=800), layer=None,
+        )
+        sess = types.SimpleNamespace(userid=1, charid=90000001, stationid=60003760, structureid=None, shipid=100000001, solarsystemid=None, solarsystemid2=30000142, mutating=0, changing=None)
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.dict(builtins.__dict__, {"session": sess, "sm": fake_sm}), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_is_visible", return_value=True), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value={"session": {"charid": 90000001}, "open_windows": []}), \
+             mock.patch.object(hook, "_settle_after_action", return_value=0), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True):
+            res_ow = hook._execute_action(fake_sm, {
+                "type": "open_window", "target": "fleet_finder", "require_window_open": True, "wait_ms": 0, "reuse_pre_state": False,
+            })
+            self.assertFalse(res_ow.get("action_ok"))
+            self.assertFalse(res_ow.get("ok"))
+
+            res_si = hook._execute_action(fake_sm, {
+                "type": "show_info", "type_id": 587, "category": "ship", "wait_ms": 0, "reuse_pre_state": False,
+            })
+            self.assertFalse(res_si.get("action_ok"))
+            self.assertFalse(res_si.get("ok"))
+
+            res_tabs = hook._click_top_tabs_in_window("info", max_tabs=3, require_match=True)
+            self.assertFalse(res_tabs.get("ok"))
+
+    def test_window_sweep_chrome_protection_secondary_views_and_require_open(self):
+        hook = _load_hook_with_py2_stubs()
+        closed_wins = []
+
+        def _make_win(wid, name=None, caption=None):
+            w = types.SimpleNamespace(
+                windowID=wid,
+                name=name or wid,
+                caption=caption or wid,
+                destroyed=False,
+                display=True,
+                children=[],
+            )
+            def _close_win(win=w, win_id=wid):
+                win.destroyed = True
+                closed_wins.append(win_id)
+            w.Close = _close_win
+            return w
+
+        lobby = _make_win("lobbyWnd", "lobbyWnd", "Station")
+        neocom = _make_win("neocom", "neocom", "Neocom")
+        sidepanel = _make_win("sidepanel", "sidepanel", "InfoPanel")
+        chat = _make_win("chatchannel_local", "chatchannel_local", "Local")
+        overview = _make_win("OverviewWindow", "OverviewWindow", "Overview")
+        shipui = _make_win("ShipUI", "ShipUI", "ShipUI")
+        infopanel = _make_win("InfoPanelLocations", "InfoPanelLocations", "Route")
+        transient = _make_win("WalletWindow", "WalletWindow", "Wallet")
+        windows = [lobby, neocom, sidepanel, chat, overview, shipui, infopanel, transient]
+
+        fake_reg = types.SimpleNamespace(
+            GetWindows=lambda: list(windows),
+            GetModalWindow=lambda: None,
+            modals=[],
+        )
+        fake_cmd = types.SimpleNamespace(
+            CmdOpenNewEdenStore=lambda: None,
+            CmdOpenSkillQueueWindow=lambda: None,
+            CmdToggleShipTree=lambda: None,
+        )
+        fake_uicore = types.SimpleNamespace(
+            cmd=fake_cmd,
+            registry=fake_reg,
+            layer=types.SimpleNamespace(modal=None, abovemain=None, main=None),
+            desktop=types.SimpleNamespace(width=1280, height=800),
+        )
+        cur_view_state = {
+            "secondary": types.SimpleNamespace(name="starmap_new"),
+            "current": types.SimpleNamespace(name="starmap_new"),
+        }
+        fake_viewstate = types.SimpleNamespace(
+            secondaryInfo=cur_view_state["secondary"],
+            activeView=types.SimpleNamespace(
+                layer=types.SimpleNamespace(name="l_starmap", display=True, destroyed=False, children=[])
+            ),
+            GetCurrentViewInfo=lambda: cur_view_state["current"],
+            ToggleSecondaryView=lambda *_a, **_kw: None,
+            CloseSecondaryView=lambda *_a, **_kw: None,
+        )
+        fake_notif_center = types.SimpleNamespace(
+            isShowingDrawer=False,
+            drawer=types.SimpleNamespace(name="NotificationCenterDrawer", display=False, destroyed=True, children=[]),
+            OpenDrawer=lambda: None,
+            CloseDrawer=lambda: None,
+        )
+        fake_skill_panel_cls = type(
+            "SkillPlanDockablePanel",
+            (),
+            {"Open": staticmethod(lambda: None), "GetIfOpen": staticmethod(lambda: None)},
+        )
+        fake_skill_panel_mod = types.ModuleType("eve.client.script.ui.skillPlan.skillPlanDockablePanel")
+        fake_skill_panel_mod.SkillPlanDockablePanel = fake_skill_panel_cls
+        fake_eve_pkg = types.ModuleType("eve")
+        fake_client_pkg = types.ModuleType("eve.client")
+        fake_script_pkg = types.ModuleType("eve.client.script")
+        fake_ui_pkg = types.ModuleType("eve.client.script.ui")
+        fake_sp_pkg = types.ModuleType("eve.client.script.ui.skillPlan")
+        fake_svcs = {
+            "viewState": fake_viewstate,
+            "notificationUIService": types.SimpleNamespace(notificationCenter=fake_notif_center),
+            "notificationSvc": types.SimpleNamespace(
+                GetAllFormattedNotifications=lambda: [],
+                OpenNotificationReadingWnd=lambda: None,
+            ),
+            "skillPlanSvc": types.SimpleNamespace(GetAllPersonal=lambda: []),
+            "aurumstore": types.SimpleNamespace(),
+            "skills": types.SimpleNamespace(),
+        }
+        fake_sm = types.SimpleNamespace(services=fake_svcs, GetService=lambda n: fake_svcs.get(n))
+        sess = types.SimpleNamespace(
+            userid=1, charid=90000001, stationid=60003760, structureid=None,
+            shipid=100000001, solarsystemid=None, solarsystemid2=30000142, mutating=0, changing=None,
+        )
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "uthread": None,
+                "eve": fake_eve_pkg,
+                "eve.client": fake_client_pkg,
+                "eve.client.script": fake_script_pkg,
+                "eve.client.script.ui": fake_ui_pkg,
+                "eve.client.script.ui.skillPlan": fake_sp_pkg,
+                "eve.client.script.ui.skillPlan.skillPlanDockablePanel": fake_skill_panel_mod,
+            },
+        ), \
+             mock.patch.dict(builtins.__dict__, {"session": sess, "sm": fake_sm}), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_is_visible", side_effect=lambda obj: bool(getattr(obj, "display", True) and not getattr(obj, "destroyed", False))), \
+             mock.patch.object(hook, "_close_context_menus_if_outside"), \
+             mock.patch.object(hook, "_dismiss_pinned_tooltip_if_outside"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value={"session": {"charid": 90000001}, "open_windows": []}), \
+             mock.patch.object(hook, "_settle_after_action", return_value=0), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True):
+            # Generic close (target="") closes transient WalletWindow, preserving all HUD/lobby/chat/overview/infopanel
+            res_empty = hook._execute_action(fake_sm, {"type": "close_modal_or_window", "target": "", "wait_ms": 0})
+            self.assertTrue(res_empty.get("action_ok"), res_empty)
+            self.assertEqual(closed_wins, ["WalletWindow"])
+
+            # Target "info" must NOT close InfoPanelLocations when no InfoWnd is open
+            closed_wins[:] = []
+            res_info = hook._execute_action(fake_sm, {"type": "close_modal_or_window", "target": "info", "wait_ms": 0})
+            self.assertTrue(res_info.get("action_ok"), res_info)
+            self.assertEqual(closed_wins, [])
+
+            # Secondary view without TabGroup ("map" -> currentSecondaryView="starmap_new") succeeds gracefully with tabs_clicked=0
+            tab_map = hook._click_top_tabs_in_window("map", max_tabs=4, require_match=True)
+            self.assertTrue(tab_map.get("ok"), tab_map)
+            self.assertEqual(tab_map.get("tabs_clicked"), 0)
+
+            # Secondary view NOT open ("shiptree" while "starmap_new" is open) must fail when require_match=True
+            tab_tree = hook._click_top_tabs_in_window("shiptree", max_tabs=4, require_match=True)
+            self.assertFalse(tab_tree.get("ok"), tab_tree)
+
+            # With unrelated secondary view ("starmap_new") already open, no-op opens must still fail closed under require_open=True
+            res_skills_sec = hook._open_client_window(fake_sm, "skills", require_open=True)
+            self.assertFalse(res_skills_sec.get("ok"), res_skills_sec)
+            res_notif_sec = hook._open_client_window(fake_sm, "notifications", require_open=True)
+            self.assertFalse(res_notif_sec.get("ok"), res_notif_sec)
+            res_tree_sec = hook._open_client_window(fake_sm, "shiptree", require_open=True)
+            self.assertFalse(res_tree_sec.get("ok"), res_tree_sec)
+            fake_uicore.cmd = types.SimpleNamespace()  # force aurumstore fallback
+            res_nes_sec = hook._open_client_window(fake_sm, "nes", require_open=True)
+            self.assertFalse(res_nes_sec.get("ok"), res_nes_sec)
+
+            # With only primary view ("hangar") and secondaryInfo=None, no-op opens must never report ok via GetCurrentViewInfo()=="hangar"
+            fake_uicore.cmd = fake_cmd
+            fake_viewstate.secondaryInfo = None
+            cur_view_state["current"] = types.SimpleNamespace(name="hangar")
+            res_skills_pri = hook._open_client_window(fake_sm, "skills", require_open=True)
+            self.assertFalse(res_skills_pri.get("ok"), res_skills_pri)
+            res_notif_pri = hook._open_client_window(fake_sm, "notifications", require_open=True)
+            self.assertFalse(res_notif_pri.get("ok"), res_notif_pri)
+            res_tree_pri = hook._open_client_window(fake_sm, "shiptree", require_open=True)
+            self.assertFalse(res_tree_pri.get("ok"), res_tree_pri)
+            fake_uicore.cmd = types.SimpleNamespace()
+            res_nes_pri = hook._open_client_window(fake_sm, "nes", require_open=True)
+            self.assertFalse(res_nes_pri.get("ok"), res_nes_pri)
+
 
 if __name__ == "__main__":
     unittest.main()

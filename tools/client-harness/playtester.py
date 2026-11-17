@@ -51,6 +51,7 @@ macOS V24.01 EVE.app (exefile) client + Rust eve-server:
 from __future__ import annotations
 
 import argparse
+import ast
 import atexit
 import base64
 import hashlib
@@ -63,6 +64,7 @@ import select
 import shutil
 import signal
 import socket
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -1740,6 +1742,22 @@ ui:
 # Persistent Memory, Persona & Coverage Frontier Manager
 # ---------------------------------------------------------------------------
 
+PLAYTESTER_GM_ADMIN_SECRET = "evomu-scenario-gm-secret"
+
+GM_TESTER_PERSONA: Dict[str, Any] = {
+    "id": "gm_tester",
+    "title": "GM Admin Tester (Opt-In)",
+    "rotate_after_steps": 999999,
+    "description": (
+        "Explicitly opted-in GM diagnostic persona (`--persona gm_tester`). Permitted to issue "
+        "GM slash commands (`/giveisk`, `/createitem`, `/giveskill`, `/advancetime`, `/spawn`) at Step > 0."
+    ),
+    "goals": [
+        "Execute targeted GM diagnostic setup and edge-case verification requested via --persona gm_tester."
+    ],
+}
+
+
 class PlaytesterMemory:
     KNOWN_FEATURE_ALIASES = {
         # Legacy initial_frontier IDs
@@ -2109,6 +2127,14 @@ class PlaytesterMemory:
             return False
         prev_id = str((self.data.get("active_persona") or {}).get("id") or "")
         if force_id:
+            if force_id == GM_TESTER_PERSONA["id"]:
+                self.data["active_persona_index"] = -1
+                self.data["active_persona"] = dict(GM_TESTER_PERSONA)
+                self.data["active_persona_steps"] = 0
+                goals = GM_TESTER_PERSONA.get("goals") or ["Explore EVE Online systems"]
+                self.data["current_goal"] = goals[0]
+                self.save()
+                return force_id != prev_id
             for idx, p in enumerate(personas):
                 if p.get("id") == force_id:
                     self.data["active_persona_index"] = idx
@@ -2120,6 +2146,9 @@ class PlaytesterMemory:
                     return force_id != prev_id
 
         active = self.data.get("active_persona") or personas[0]
+        if str(active.get("id") or "") == GM_TESTER_PERSONA["id"]:
+            # Do not auto-rotate out of an explicit opt-in gm_tester session mid-run.
+            return False
         limit = int(active.get("rotate_after_steps", 45))
         if int(self.data.get("active_persona_steps", 0)) >= limit:
             idx = (int(self.data.get("active_persona_index", 0)) + 1) % len(personas)
@@ -2612,6 +2641,35 @@ def _format_compact_widgets(raw_widgets: List[Any], limit: int = 95) -> str:
     return "\n".join(lines)
 
 
+def _prompt_allows_gm_actions(step_num: int, persona_id: str) -> bool:
+    return int(step_num) <= 0 or str(persona_id or "").strip().lower() == GM_TESTER_PERSONA["id"]
+
+
+def _prompt_action_types_doc(allow_gm: bool, include_widget_actions: bool = False) -> str:
+    widget_head = ["click_widget"] if include_widget_actions else []
+    widget_tail = ["type_text", "click_xy", "drag_widget"] if include_widget_actions else []
+    base_actions = [
+        "open_neocom", "close_window", "undock", "dock", "jump_gate", "warp_to",
+        "approach", "orbit", "keep_at_range", "lock_target", "activate_module",
+    ]
+    gm_actions = (
+        [
+            "train_skill", "complete_skills", "advance_upwell_timer",
+            "complete_industry_jobs", "advance_server_time", "clear_timers", "slash_command",
+        ]
+        if allow_gm
+        else []
+    )
+    end_actions = (
+        ["open_plex_store"]
+        + (["open_structure_cosmetics"] if allow_gm else [])
+        + ["press_key"]
+        + widget_tail
+        + ["wait"]
+    )
+    return ", ".join(f"`{a}`" for a in (widget_head + base_actions + gm_actions + end_actions))
+
+
 def build_reasoning_prompt(
     step_num: int,
     screenshot_path: Optional[Path],
@@ -2625,6 +2683,7 @@ def build_reasoning_prompt(
     mem = memory.data
     persona = mem.get("active_persona") or {}
     persona_id = str(persona.get("id") or "")
+    allow_gm_prompt = _prompt_allows_gm_actions(step_num, persona_id)
     all_frontier = [x for x in (mem.get("coverage_frontier") or []) if isinstance(x, dict)]
     persona_pending = [
         x for x in all_frontier
@@ -2748,8 +2807,39 @@ def build_reasoning_prompt(
         if benign_macho:
             prompt_flight_recorder["benign_macho_exceptions"] = benign_macho
 
+    role_summary_line = (
+        "Your character has full **GM / QA / Admin role access** (`0x7FFFFFFFFFFFFFFF`) so you can both interact with the UI like a player AND invoke GM timer-acceleration commands to test multi-hour gameplay loops (skill training, Upwell structure timers, industry jobs, cooldowns) immediately without waiting real-time."
+        if allow_gm_prompt
+        else "You are controlling a **standard player character (`role = 0`)**. Interact through real game UI actions (Market, Inventory, Fitting, Industry, Skills window, Agency); setup/GM shortcuts and timer-acceleration actions are restricted to Step `0` or `--persona gm_tester`."
+    )
+    skill_section_doc = (
+        "1. **Skill Training & Skill Queue (`skills`, `skill_plans`, `train_skill`, `complete_skills`):**\n"
+        "   - Adding/starting a skill (`train_skill` or clicking Train in UI) MUST emit `OnNewSkillQueueSaved` / `OnSkillQueueChanged` and increase `skills_state.queue_len > 0` in the live snapshot and Skill Queue UI bar.\n"
+        "   - Running `complete_skills` (`/completeskills all`) MUST immediately finish queued skills without waiting real-time, emit `OnSkillTrained` + `OnServerSkillsChanged` + `OnNewSkillQueueSaved`, increase `skills_state.total_sp`, and update the trained skill level in the Character Sheet / Skills window live without requiring a relog.\n"
+        "   - If `queue_len` or `total_sp` or the Skills window UI fails to update after `train_skill` or `complete_skills`, set `previous_action_verification.expectation_met = false` and file a `ui_state_desync` bug!"
+        if allow_gm_prompt
+        else "1. **Skill Training & Skill Queue (`skills`, `skill_plans`):**\n"
+        "   - Adding/starting a skill by clicking Train in UI MUST emit `OnNewSkillQueueSaved` / `OnSkillQueueChanged` and increase `skills_state.queue_len > 0` in the live snapshot and Skill Queue UI bar.\n"
+        "   - If `queue_len` or the Skills window UI fails to update after queueing a skill in UI, set `previous_action_verification.expectation_met = false` and file a `ui_state_desync` bug!"
+    )
+    quasar_windows_doc = (
+        "7. **Quasar Windows (`open_plex_store`, `skill_plans`, `open_structure_cosmetics`, `agency`, `corporation`):**"
+        if allow_gm_prompt
+        else "7. **Quasar Windows (`open_plex_store`, `skill_plans`, `agency`, `corporation`):**"
+    )
+    catalog_skill_line = (
+        '7. `train_skill`: Inject and queue a skill (`target` = skill typeID, e.g. `"3386"`, `"3385"`, `"3300"`, `"3327"`).'
+        if allow_gm_prompt
+        else '7. **Skill Training (`open_neocom` `"skills"` / `click_widget`):** Open the Skills window and manage or queue skills via player UI controls.'
+    )
+    catalog_probe_line = (
+        "9. `open_plex_store` / `open_structure_cosmetics`: Direct probes for `#529` and `#527`."
+        if allow_gm_prompt
+        else "9. `open_plex_store`: Direct probe for `#529`."
+    )
+
     prompt = f"""You are the Autonomous EvoMu Live Client Playtester playing the real macOS EVE Online V24.01 client (`EVE.app`) connected to `eve-server` (commit `{git_head}`).
-Your character has full **GM / QA / Admin role access** (`0x7FFFFFFFFFFFFFFF`) so you can both interact with the UI like a player AND invoke GM timer-acceleration commands to test multi-hour gameplay loops (skill training, Upwell structure timers, industry jobs, cooldowns) immediately without waiting real-time.
+{role_summary_line}
 
 ### Step {step_num} Perception Bundle
 {screen_line}
@@ -2797,10 +2887,7 @@ Your character has full **GM / QA / Admin role access** (`0x7FFFFFFFFFFFFFFF`) s
 
 ### Expected EVE Online Mechanics & UI-State Reference Contract
 Use these ground-truth EVE Online V24.01 expectations to judge whether the game and UI updated properly after your previous action (even when no Python exception was raised!):
-1. **Skill Training & Skill Queue (`skills`, `skill_plans`, `train_skill`, `complete_skills`):**
-   - Adding/starting a skill (`train_skill` or clicking Train in UI) MUST emit `OnNewSkillQueueSaved` / `OnSkillQueueChanged` and increase `skills_state.queue_len > 0` in the live snapshot and Skill Queue UI bar.
-   - Running `complete_skills` (`/completeskills all`) MUST immediately finish queued skills without waiting real-time, emit `OnSkillTrained` + `OnServerSkillsChanged` + `OnNewSkillQueueSaved`, increase `skills_state.total_sp`, and update the trained skill level in the Character Sheet / Skills window live without requiring a relog.
-   - If `queue_len` or `total_sp` or the Skills window UI fails to update after `train_skill` or `complete_skills`, set `previous_action_verification.expectation_met = false` and file a `ui_state_desync` bug!
+{skill_section_doc}
 2. **Upwell Structures & Timers (`advance_upwell_timer` / `/upwelltimer`):**
    - **Key Upwell typeIDs:** Citadels: `Astrahus` (`35832`, Quantum Core `56201`), `Fortizar` (`35833`, Quantum Core `56202`), `Keepstar` (`35834`, Quantum Core `56203`); Engineering Complexes: `Raitaru` (`35825`, Quantum Core `56204`), `Azbel` (`35826`, Quantum Core `56205`), `Sotiyo` (`35827`, Quantum Core `56206`); Refineries: `Athanor` (`35835`, Quantum Core `56207`), `Tatara` (`35836`, Quantum Core `56208`); FLEX: `Ansiblex Jump Gate` (`35841`), `Pharolux Cyno Beacon` (`35840`), `Tenebrex Cyno Jammer` (`37534`); Standup Service Modules: `Standup Cloning Center I` (`35894`), `Standup Market Hub I` (`35892`), `Standup Manufacturing Plant I` (`35878`), `Standup Reprocessing Facility I` (`35899`); Fuel Blocks: `Helium Fuel Block` (`4051`), `Nitrogen Fuel Block` (`4247`); Skills: `Anchoring` (`3443`), `Corporation Management` (`3731`).
    - **Anchoring Prerequisites:** Pilot MUST belong to a player corporation (with Director/Station Manager/CEO role), be in space `> 1,000 km` from stations/stargates/structures and `> 5 km` from asteroids/NPCs (note: `/tr` only accepts `[me|<char_id>] <location_id>`, never `pos x y z`; to get clean deep space, warp toward a distant planet/stargate and press Stop Ship `CTRL+SPACE` mid-warp), and have the structure item in active ship cargo. Right-click structure in cargo -> `Launch for Corporation` (`structureDeployment.Anchor`).
@@ -2817,7 +2904,7 @@ Use these ground-truth EVE Online V24.01 expectations to judge whether the game 
    - `undock` MUST transition `active_view` from `hangar` to `inflight` (`space.in_space == true`) and populate `space.nearby_balls`.
    - `warp_to` MUST enter `ball.mode == 3` (`WARP`), activate `effects.Warping` tunnel FX (`warp_telemetry.saw_mode3 == true` and `saw_fx_warping == true`), and move the ship to the destination.
    - `approach` / `orbit` MUST transition `space.ego.mode` to `1` (`FOLLOW`) or `4` (`ORBIT`) and increase `speed_mps > 0`.
-7. **Quasar Windows (`open_plex_store`, `skill_plans`, `open_structure_cosmetics`, `agency`, `corporation`):**
+{quasar_windows_doc}
    - Opening these windows MUST populate their UI content without `TimeoutException`, `SkillPlanConnectionError`, or permanently blank/spinning panels.
 8. **Mining, Asteroid Harvesting, Mining Ledger & Ore Reprocessing (`mining`, `miningledger`, `reprocessing`, `mininghold`):**
    - Key mining typeIDs: Skills `Mining` (`3386`), `Astrogeology` (`3410`), `Mining Frigate` (`32918`), `Reprocessing` (`3385`); Modules `Miner I` (`483`), `Civilian Miner` (`3651`), `Miner II` (`482`); Ship `Venture` (`32880`); Asteroid ores `Veldspar` (`1230`), `Scordite` (`1228`), `Pyroxeres` (`1224`), `Plagioclase` (`18`); Reprocessed mineral `Tritanium` (`34`).
@@ -2837,15 +2924,11 @@ Choose your next action in the `action` object according to the required JSON sc
 4. `undock` / `dock`: Undock into space or dock at a station (`target` optional station item_id).
 5. `jump_gate`: Cross-system Stargate jump (`target` = gate `item_id` or gate/destination system substring such as `"Stargate (Perimeter)"` or `"Perimeter"` from `space.nearby_balls`). Automatically warps to the gate if >150 km, approaches <2.5 km, clears session timer, jumps, and awaits `state_diff.solar_system_changed`.
 6. `warp_to` / `approach` / `orbit` / `keep_at_range` / `lock_target` / `activate_module`: In-space navigation, combat, probe launcher/probes (`Core Probe Launcher I` `17938` + `Core Scanner Probe I` `30013`), and mining laser commands.
-7. `train_skill`: Inject and queue a skill (`target` = skill typeID, e.g. `"3386"`, `"3385"`, `"3300"`, `"3327"`).
-8. **GM Timer-Acceleration Actions (Use these to test multi-hour timers immediately without waiting real-time!):**
-   - `complete_skills`: Immediately finishes active skill training (`target` = `"all"` or seconds like `"3600"`).
-   - `advance_upwell_timer`: Fast-forwards Upwell structure anchoring/onlining/reinforcement/unanchoring timers in the solar system (`target` = optional `structureID`).
-   - `complete_industry_jobs`: Fast-forwards active manufacturing/research industry jobs to completion (`target` = optional `jobID`).
-   - `advance_server_time`: Advances virtual server clock by `target` seconds (default `"3600"`), advancing all server lifecycle timers.
-   - `clear_timers`: Clears session-change cooldown, jump fatigue/cooldown, clone jump timer, and crimewatch timers. NEVER emit `wait(10000)` to wait out a session-change timer — use `clear_timers` (`~0.2s`) instead unless specifically testing timer rejection!
-   - `slash_command`: Run any GM slash command (`command` = e.g. `"/"` to list valid server commands, `"/giveisk 100000000"`, `"/createitem 483 1"`, `"/giveskill 3386 5"`, `"/fit me 17938"`, `"/spawn 1230"`, `"/spawnnpc 10035"`, `"/moveme"`). Note: `/help` is NOT a valid server command (`"/"` intentionally returns `UserError('SlashError', reason='Commands: [...]')` which is expected); `/spawn` / `/spawnnpc` propagate via the 1 Hz Destiny tick (`~1-2s`) into `space.nearby_balls` (and `/spawn <ship>` spawns a self-owned hull visible under Overview `All`, whereas `/spawnnpc` spawns an NPC target).
-9. `open_plex_store` / `open_structure_cosmetics`: Direct probes for `#529` and `#527`.
+{catalog_skill_line}
+8. **GM Timer-Acceleration & Setup-Only Slash Policy (`role = 0` for player personas):**
+   - Exploratory player personas run with **`role = 0` (non-GM)**. `slash_command` / `run_slash` (including `/createitem`, `/giveisk`, `/giveskill`, `/spawn`, `/moveme`) are **STRICTLY RESTRICTED** to Step `0` bootstrap or the explicit `--persona gm_tester` mode and are **REJECTED** by the host action validator at Step `> 0` for all normal player personas! Test game flows via real UI actions (Market, Inventory, Fitting, Industry, Quests/Agency) rather than GM slash shortcuts.
+   - `complete_skills` / `advance_upwell_timer` / `complete_industry_jobs` / `advance_server_time` / `clear_timers` are ONLY valid in setup/time-control steps or `--persona gm_tester` mode.
+{catalog_probe_line}
 10. `type_text` / `press_key` / `click_xy` / `drag_widget` / `wait`: Direct UI manipulation.
    - `type_text`: Targets widgets marked `"editable": true` in `clickable_widgets` (or focused field). Append `\n` at the end of `command`/`text` (e.g. `"Tritanium\n"`) to trigger Return/search submission automatically!
    - `press_key`: Supports `RETURN`/`ENTER`, `TAB`, `SHIFT+TAB`, `ESCAPE`, `CTRL+SPACE` (Stop Ship), `F1`–`F10`, and shortcuts (`ALT+P` Probe Scanner, `ALT+D` D-Scan, `ALT+W` Wallet, `ALT+N` Notepad, `ALT+F` Fitting, `ALT+C` Cargo, `ALT+R` Market, `ALT+G` Corp, `ALT+T` Assets, `ALT+M` Journal, `ALT+X` Skills).
@@ -2935,6 +3018,14 @@ Exact top-level JSON structure:
 When reporting a real bug (`bug_report.should_file = true`), include `"category"`, `"title"`, `"severity"`, `"subsystem"`, `"expected_behavior"`, `"actual_behavior"`, `"reproduction_steps"` inside `"bug_report"`.
 """
 
+    planner_persona_id = str(((memory.data.get("active_persona") or {}).get("id")) or "")
+    allow_gm_prompt = _prompt_allows_gm_actions(step_num, planner_persona_id)
+    planner_direct_actions_doc = _prompt_action_types_doc(allow_gm_prompt, include_widget_actions=False)
+    planner_batch_example_doc = (
+        "`clear_timers` + slash setup -> `open_neocom` -> `click_widget` -> `type_text` -> `close_window`"
+        if allow_gm_prompt
+        else "`open_neocom` -> `click_widget` -> `type_text` -> `close_window`"
+    )
     planner_instructions = f"""{escalation_section}
 ### Hybrid Planner-Executor Architecture (YOUR ROLE: STRATEGIC PARENT PLANNER)
 You are the **Strategic Parent Planner**. You audit prior outcomes and formulate `delegated_plan` (`1..10` concrete steps) executed at high speed by the **Deterministic Python Batch Runner (`~0.2s`/step)** with warm Fast Executor (`{DEFAULT_EXECUTOR_MODEL_CHAIN[0]}`) fallback for dynamic UI:
@@ -2944,12 +3035,12 @@ You are the **Strategic Parent Planner**. You audit prior outcomes and formulate
 2. **Delegate an Executable Tactical Plan (`delegated_plan`):**
    - **Step 1 executes immediately from your `delegated_plan.steps[0]` WITHOUT another LLM call** when `exec_mode = "direct"`, and every subsequent `"direct"` step executes at `~0.2s` in Python unless a selector misses or an anomaly triggers escalation.
    - **Choose `exec_mode` per step:**
-     - `"direct"` (`~75-85%` of steps): Provide `action_type_hint` AND a concrete `"action"` object (`type`, `target`/`command`, optional `wait_ms` `250`-`500`) for `slash_command`, `open_neocom`, `close_window`, `undock`, `dock`, `warp_to`, `jump_gate`, `approach`, `orbit`, `keep_at_range`, `lock_target`, `activate_module`, `train_skill`, `complete_skills`, `advance_upwell_timer`, `complete_industry_jobs`, `advance_server_time`, `clear_timers`, `press_key`, `wait`, `open_plex_store`, `open_structure_cosmetics`, AND for `click_widget`/`type_text`/`drag_widget` when the widget name/path/label is known from `clickable_widgets` or predictable (`context_menu_*`, `yes_dialog_button`, `ok_dialog_button`, `cancelBtn`, `quickFilterInputBox`, `OverviewTab_*`).
+     - `"direct"` (`~75-85%` of steps): Provide `action_type_hint` AND a concrete `"action"` object (`type`, `target`/`command`, optional `wait_ms` `250`-`500`) for {planner_direct_actions_doc}, AND for `click_widget`/`type_text`/`drag_widget` when the widget name/path/label is known from `clickable_widgets` or predictable (`context_menu_*`, `yes_dialog_button`, `ok_dialog_button`, `cancelBtn`, `quickFilterInputBox`, `OverviewTab_*`).
      - `"llm"`: Provide `action_type_hint` (`"click_widget"`, etc.); use `"llm"` ONLY when a previous step in the same batch will open an unfamiliar window/dialog whose child widget names are not known yet (`action` may be omitted).
    - **Optional `"assertions"` (`expect_window_open`, `expect_window_closed`, `expect_modal_absent`, `expect_context_menu_item`, `expect_ball_present`, `expect_session_field`):** All keys are OPTIONAL — ONLY include `expect_modal_absent: true` when no confirmation popup (`Delete`, `Yes/No`) is expected! Keep `capture_screenshot: false` (default) on routine `"direct"` steps.
    - **Choose `max_batch_steps` (`6–10` steps strongly preferred for routine multi-step workflows!)** and explain briefly in `horizon_rationale`:
      - Use **`1–2` steps** only for high-risk/bug-prone probes or escalation diagnosis.
-     - Use **`6–10` steps** for normal setup -> UI -> gameplay sequences (e.g. `clear_timers` + slash setup -> `open_neocom` -> `click_widget` -> `type_text` -> `close_window`, or `undock` -> `warp_to` -> `wait` -> `lock_target` -> `activate_module` -> `dock`). Never emit `wait(10000)` for session-change timers (`clear_timers` takes `~0.2s`).
+     - Use **`6–10` steps** for normal gameplay sequences (e.g. {planner_batch_example_doc}, or `undock` -> `warp_to` -> `wait` -> `lock_target` -> `activate_module` -> `dock`). Never emit `wait(10000)` for session-change timers (`wait(10000)` if unavoidable).
      - Note: Only `{max(1, int((memory.data.get('active_persona') or {}).get('rotate_after_steps', 25)) - int(memory.data.get('active_persona_steps', 0)))}` steps remain before persona rotation.
    - **Keep `memory_update` coverage frontier clean & annotate Fix Verifications:**
      - Only reference canonical `feature_id`s from Coverage Frontier (or short snake_case slugs when genuinely new). Never emit long prose sentences as feature IDs.
@@ -3028,6 +3119,11 @@ Omit null/false action fields (`command`, `dest_x`, `dest_y`, `right_click`, `do
     _sep = (",", ":") if use_compact_json_contract else None
     _ind = None if use_compact_json_contract else 2
 
+    exec_persona_id = str(((memory.data.get("active_persona") or {}).get("id")) or "")
+    exec_actions_doc = _prompt_action_types_doc(
+        _prompt_allows_gm_actions(step_num, exec_persona_id),
+        include_widget_actions=True,
+    )
     if batch_step_idx <= 1:
         return f"""You are the **Fast Tactical Playtester Executor** (`{DEFAULT_EXECUTOR_MODEL_CHAIN[0]}`) operating the live macOS EVE Online V24.01 client (`EVE.app`).
 You are executing **Batch #{batch_id} (Step {batch_step_idx} of {max_steps})** delegated to you by the Strategic Parent Planner (`{DEFAULT_MODEL_CHAIN[0]}`).
@@ -3058,7 +3154,7 @@ You are executing **Batch #{batch_id} (Step {batch_step_idx} of {max_steps})** d
 1. **Batch Step 1 Verification:** Since the Parent Planner just audited the pre-batch state, set `previous_action_verification.expectation_met = true` and `discrepancy_summary = ""` on Batch Step 1 unless an unexpected error modal is already blocking the screen.
 2. **Map the Planned Step to a Concrete Action:**
    - Match `target_or_command_hint` (or `action.target`) from Batch Step {batch_step_idx} against live `clickable_widgets`, `open_windows`, `context_menu`, `modals`, or `space.nearby_balls`.
-   - Valid `action.type` values: `click_widget`, `open_neocom`, `close_window`, `undock`, `dock`, `jump_gate`, `warp_to`, `approach`, `orbit`, `keep_at_range`, `lock_target`, `activate_module`, `train_skill`, `complete_skills`, `advance_upwell_timer`, `complete_industry_jobs`, `advance_server_time`, `clear_timers`, `slash_command`, `open_plex_store`, `open_structure_cosmetics`, `press_key`, `type_text`, `click_xy`, `drag_widget`, `wait`.
+   - Valid `action.type` values: {exec_actions_doc}.
    - Note: `type_text` MUST set `target` to the editable widget path (or `""` if already focused) AND `command` to the non-empty text string to type (append `\n` to submit); `press_key` supports `RETURN`, `ENTER`, `TAB`, `SHIFT+TAB`, `ESCAPE`, `CTRL+SPACE`, `F1`–`F10`, and `ALT+P/D/W/N/F/C/R/G/T/M/X`; `click_widget` with `"double_click": true` works on both `eveui` cards and legacy rows.
 3. **Choosing `batch_status`:**
    - Set `batch_status = "completed"` if `max_batch_steps == 1` OR this action completes the final step of `delegated_plan`.
@@ -4656,13 +4752,36 @@ class PlaytesterBugOracle:
     _TB_EXC_LINE_RE = re.compile(
         r"^[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning|Exit|Interrupt|Iteration|Failure)(?:\s*:.*)?$"
     )
+    _BUILD_PATH_PREFIX_RE = re.compile(
+        r"(?:/Users/[^/]+/(?:[^\"'\s]+/)?)?(?:work/[0-9a-fA-F]+/)?eve/release/V\d+\.\d+/",
+        re.IGNORECASE,
+    )
+    _TB_FILE_FRAME_RE = re.compile(
+        r'File\s+"([^"]+)",\s+line\s+(\d+)(?:,\s+in\s+(\S+))?'
+    )
+
+    @classmethod
+    def _strip_build_path_prefix(cls, text: str) -> str:
+        return cls._BUILD_PATH_PREFIX_RE.sub("", str(text or ""))
+
+    @classmethod
+    def _format_concise_frame(cls, frame_line: str) -> str:
+        norm = cls._strip_build_path_prefix(frame_line).strip()
+        m = cls._TB_FILE_FRAME_RE.search(norm)
+        if m:
+            fpath, lineno, func = m.group(1), m.group(2), m.group(3) or "?"
+            # Preserve the meaningful relative module path (or last 3 path parts)
+            parts = [p for p in fpath.replace("\\", "/").split("/") if p]
+            short_path = "/".join(parts[-4:]) if len(parts) > 4 else "/".join(parts)
+            return f'File "{short_path}", line {lineno}, in {func}'
+        return norm
 
     @staticmethod
     def _is_tb_noise_line(ln: str) -> bool:
         s = str(ln or "").strip()
         if not s:
             return True
-        if s in ("EXCEPTION END", "Traceback (most recent call last):"):
+        if s in ("EXCEPTION END", "Traceback (most recent call last):", "STACKTRACE", "STACKTRACE:"):
             return True
         if s.startswith(("EXCEPTION #", "Common path prefix =", "Reported from", "Local variables", "Thread Locals")):
             return True
@@ -4672,22 +4791,36 @@ class PlaytesterBugOracle:
 
     @classmethod
     def _extract_tb_headline(cls, tb_txt: str, default: str = "Unhandled client Python exception") -> str:
-        lines = [ln.strip() for ln in str(tb_txt or "").splitlines() if ln.strip()]
-        non_noise = [ln for ln in lines if not cls._is_tb_noise_line(ln) and "logmodule" not in ln]
+        lines = [
+            cls._strip_build_path_prefix(ln.strip())
+            for ln in str(tb_txt or "").splitlines()
+            if ln.strip()
+        ]
+        non_noise = [
+            ln for ln in lines
+            if not cls._is_tb_noise_line(ln)
+            and "logmodule" not in ln
+            and not ln.startswith("STACKTRACE")
+        ]
         for ln in reversed(non_noise):
             if cls._TB_EXC_LINE_RE.match(ln):
                 return ln[:200]
         for ln in reversed(non_noise):
             if "Error:" in ln or "Exception:" in ln:
                 return ln[:200]
-        return non_noise[-1][:200] if non_noise else default
+        if non_noise:
+            tail = non_noise[-1]
+            if 'File "' in tail:
+                return cls._format_concise_frame(tail)[:200]
+            return tail[:200]
+        return default
 
     _STDLOG_FRAME_RE = re.compile(r"\.py[cwj]?\(\d+\)\s+\S+")
 
     @classmethod
     def _extract_tb_frames(cls, tb_txt: str) -> Tuple[List[str], List[str]]:
         raw_frames = [
-            ln.strip()
+            cls._strip_build_path_prefix(ln.strip())
             for ln in str(tb_txt or "").splitlines()
             if 'File "' in ln or cls._STDLOG_FRAME_RE.search(ln)
         ]
@@ -4711,16 +4844,33 @@ class PlaytesterBugOracle:
     def _tb_frame_sig(cls, tb_txt: str) -> str:
         raw_frames, game_frames = cls._extract_tb_frames(tb_txt)
         chosen = game_frames or raw_frames
-        if chosen:
-            return "|".join(chosen[-2:])
-        lines = [
-            ln.strip()
+        exc_lines = [
+            cls._strip_build_path_prefix(ln.strip())
             for ln in str(tb_txt or "").splitlines()
             if ln.strip()
             and not cls._is_tb_noise_line(ln)
             and (cls._TB_EXC_LINE_RE.match(ln.strip()) or "Error:" in ln or "Exception:" in ln)
         ]
-        return lines[-1][:140] if lines else str(tb_txt or "").strip()[:140]
+        exc_tail = exc_lines[-1][:140] if exc_lines else ""
+        if chosen:
+            frame_part = "|".join(chosen[-2:])
+            if exc_tail and exc_tail not in frame_part:
+                return f"{frame_part}|{exc_tail}"
+            return frame_part
+        if exc_tail:
+            return exc_tail
+        return cls._strip_build_path_prefix(str(tb_txt or "")).strip()[:140]
+
+    @classmethod
+    def _format_tb_summary(cls, headline: str, tb_txt: str) -> str:
+        hl = cls._strip_build_path_prefix(str(headline or "")).strip()
+        raw_frames, game_frames = cls._extract_tb_frames(tb_txt)
+        chosen = game_frames or raw_frames
+        if chosen:
+            tail_frame = cls._format_concise_frame(chosen[-1])
+            if tail_frame and tail_frame not in hl:
+                return f"{hl} ({tail_frame})" if hl else tail_frame
+        return hl
 
     @classmethod
     def parse_tb_blocks(cls, raw_tb: str) -> List[Dict[str, str]]:
@@ -4733,6 +4883,7 @@ class PlaytesterBugOracle:
         for ln in raw_tb.splitlines():
             s = ln.strip()
             s_hdr = ln[len("[evomu_site] "):] if ln.startswith("[evomu_site] ") else ln
+            cur_has_frames = any('File "' in x or cls._STDLOG_FRAME_RE.search(x) for x in cur)
             is_header = (
                 s_hdr.startswith("log.Log")
                 or s_hdr.startswith("logmodule.")
@@ -4743,6 +4894,7 @@ class PlaytesterBugOracle:
                 or s_hdr.startswith("Action tasklet exception")
                 or s_hdr.startswith("schedule_startup failed:")
                 or s_hdr.startswith("EXCEPTION #")
+                or (s_hdr.startswith("STACKTRACE") and cur_has_frames)
                 or (ended_prev and bool(s))
             )
             if is_header and cur:
@@ -4815,6 +4967,7 @@ class PlaytesterBugOracle:
         "disallow",
         "restrict",
         "invaliditemtypeforhold",
+        "invalidtarget",
         "blocked drop",
     )
 
@@ -4884,6 +5037,7 @@ class PlaytesterBugOracle:
         "unknownslashcommand",
         "invalidslashargument",
         "cannotloadnotenoughcharges",
+        "invalidtarget",
     )
 
     @classmethod
@@ -4947,7 +5101,12 @@ class PlaytesterBugOracle:
             and "activateeffect" in txt
             and any(
                 marker in txt
-                for marker in ("noammoloaded", "insufficientfuel", "notenoughcapacitor")
+                for marker in (
+                    "noammoloaded",
+                    "insufficientfuel",
+                    "notenoughcapacitor",
+                    "invalidtarget",
+                )
             )
         ):
             return False
@@ -5051,35 +5210,48 @@ class PlaytesterBugOracle:
         if fr_log_excs:
             seen_item_keys = set()
             for e in fr_log_excs[:8]:
-                sig = ""
                 if isinstance(e, dict):
-                    sig = self._tb_frame_sig(str(e.get("trace") or e.get("headline") or ""))
-                    if sig:
-                        self._seen_tb_sigs.add(sig)
                     hl = str(e.get("headline") or "").strip()
                     tr = str(e.get("trace") or "").strip() or (new_tb if len(fr_log_excs) == 1 else "")
                 else:
-                    hl = str(e).strip()
-                    tr = new_tb if len(fr_log_excs) == 1 else ""
-                if self._is_tb_noise_line(hl):
+                    raw_s = str(e).strip()
+                    if "\n" in raw_s or raw_s.startswith(("STACKTRACE", "Traceback (most recent call last)")):
+                        hl = ""
+                        tr = raw_s
+                    else:
+                        hl = raw_s
+                        tr = new_tb if len(fr_log_excs) == 1 else ""
+                full_tb = tr or hl or new_tb
+                sig = self._tb_frame_sig(full_tb)
+                if sig:
+                    self._seen_tb_sigs.add(sig)
+                if (
+                    self._is_tb_noise_line(hl)
+                    or "\n" in hl
+                    or hl.startswith(("STACKTRACE", "Traceback (most recent call last)"))
+                ):
                     hl = ""
+                if hl:
+                    hl = self._strip_build_path_prefix(hl)
+                    if 'File "' in hl:
+                        hl = self._format_concise_frame(hl)
                 if not hl:
-                    hl = self._extract_tb_headline(tr or new_tb)
-                full_tb = tr or new_tb
+                    hl = self._extract_tb_headline(full_tb)
                 if self.is_ignorable_client_traceback(hl, full_tb, expected_text):
                     continue
                 item_key = (hl[:120], sig)
                 if item_key in seen_item_keys:
                     continue
                 seen_item_keys.add(item_key)
+                clean_tb = self._strip_build_path_prefix(tr or (json.dumps(e, indent=2) if isinstance(e, dict) else raw_s))
                 incidents.append(
                     {
                         "kind": "client_traceback",
                         "title": f"[Playtester] Client exception: {hl[:90]}",
                         "severity": "high",
                         "subsystem": "client-python",
-                        "summary": hl,
-                        "traceback": tr or json.dumps(e, indent=2),
+                        "summary": self._format_tb_summary(hl, full_tb),
+                        "traceback": clean_tb,
                         "action_error": str(exec_res.get("action_error") or "").strip() if isinstance(exec_res, dict) else "",
                     }
                 )
@@ -5101,8 +5273,8 @@ class PlaytesterBugOracle:
                             "title": f"[Playtester] Client exception: {u['headline'][:90]}",
                             "severity": "high",
                             "subsystem": "client-python",
-                            "summary": u["headline"],
-                            "traceback": u["trace"],
+                            "summary": self._format_tb_summary(u["headline"], u["trace"]),
+                            "traceback": self._strip_build_path_prefix(u["trace"]),
                             "action_error": str(exec_res.get("action_error") or "").strip() if isinstance(exec_res, dict) else "",
                         }
                     )
@@ -5380,14 +5552,19 @@ class PlaytesterBugOracle:
         created_files: List[Path] = []
         for inc in incidents:
             act_err_txt = str(inc.get("action_error") or "").strip()
-            fp_src = f"{inc['kind']}:{inc['subsystem']}:{inc['title'][:180]}:{act_err_txt[:80]}"
-            fingerprint = hashlib.sha256(fp_src.encode("utf-8")).hexdigest()[:16]
             tb_txt = str(inc.get("traceback") or "")
             raw_frames, game_frames = self._extract_tb_frames(tb_txt)
             chosen_frames = game_frames or raw_frames
+            tb_sig = self._tb_frame_sig(tb_txt) if tb_txt else ""
+            norm_title = self._strip_build_path_prefix(str(inc.get("title") or ""))[:180]
+            if tb_sig:
+                fp_src = f"{inc['kind']}:{inc['subsystem']}:{tb_sig}:{norm_title}:{act_err_txt[:80]}"
+            else:
+                fp_src = f"{inc['kind']}:{inc['subsystem']}:{norm_title}:{act_err_txt[:80]}"
+            fingerprint = hashlib.sha256(fp_src.encode("utf-8")).hexdigest()[:16]
             tb_fp = ""
             if chosen_frames:
-                tail_sig = "|".join(chosen_frames[-2:]) + f"|{act_err_txt[:120]}"
+                tail_sig = f"{tb_sig}|{act_err_txt[:120]}" if tb_sig else ("|".join(chosen_frames[-2:]) + f"|{act_err_txt[:120]}")
                 tb_fp = "tb:" + hashlib.sha256(tail_sig.encode("utf-8")).hexdigest()[:16]
             err_fp = ""
             if act_err_txt:
@@ -5495,6 +5672,263 @@ class PlaytesterBugOracle:
 
         return created_files
 
+    BENIGN_FLIGHT_FLOW_MARKERS = BENIGN_USER_ERROR_MARKERS + (
+        "dockrequested",
+        "sessionchangeinprogress",
+        "shipalreadystopped",
+        "targetalreadylocked",
+        "cantdockwhile",
+        "warpcancelled",
+    )
+
+    @classmethod
+    def analyze_flight_recorder_anomalies(
+        cls,
+        calls: List[Dict[str, Any]],
+        *,
+        min_calls: int = 3,
+        error_rate_threshold: float = 0.80,
+        polling_storm_per_min: float = 200.0,
+    ) -> List[Dict[str, Any]]:
+        """
+        Inspect session flight-recorder RPC calls for:
+        1. High non-OK error rates (`>= min_calls` and `>= error_rate_threshold` excluding benign flow codes).
+        2. Polling-storm dispatch loops (`> polling_storm_per_min` calls/min for a `(service, method)`).
+        Returns deduplicated incident descriptors sorted by `(service, method, anomaly_kind)`.
+        """
+        if not calls:
+            return []
+
+        deduped_calls: List[Dict[str, Any]] = []
+        seen_seqs: set = set()
+        for entry in calls:
+            if not isinstance(entry, dict):
+                continue
+            seq_val = entry.get("seq")
+            if seq_val is not None:
+                if seq_val in seen_seqs:
+                    continue
+                seen_seqs.add(seq_val)
+            deduped_calls.append(entry)
+
+        grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for entry in deduped_calls:
+            svc = str(entry.get("service") or entry.get("svc") or "").strip()
+            meth = str(entry.get("method") or entry.get("call") or "").strip()
+            if not svc and not meth:
+                continue
+            grouped.setdefault((svc or "-", meth or "-"), []).append(entry)
+
+        anomalies: List[Dict[str, Any]] = []
+        for (svc, meth), items in sorted(grouped.items()):
+            total = len(items)
+            unexpected_errors: List[Dict[str, Any]] = []
+            benign_errors = 0
+            timestamps: List[float] = []
+            for item in items:
+                raw_ts = item.get("ts")
+                if raw_ts is None:
+                    raw_ts = item.get("timestamp")
+                if raw_ts is not None:
+                    try:
+                        ts_f = float(raw_ts)
+                        if ts_f > 0:
+                            timestamps.append(ts_f)
+                    except Exception:
+                        pass
+                status_up = str(item.get("status") or "").strip().upper()
+                err_txt = str(item.get("error") or "").strip()
+                is_non_ok = bool(err_txt) or (bool(status_up) and status_up not in ("OK", "SUCCESS"))
+                if not is_non_ok:
+                    continue
+                combined_err = f"{status_up} {err_txt}".lower()
+                if any(tok in combined_err for tok in cls.BENIGN_FLIGHT_FLOW_MARKERS):
+                    benign_errors += 1
+                    continue
+                unexpected_errors.append(item)
+
+            err_count = len(unexpected_errors)
+            effective_total = max(1, total - benign_errors) if benign_errors and err_count > 0 else total
+            err_rate = err_count / float(effective_total) if total > 0 else 0.0
+            has_high_err = (err_count >= min_calls) and (err_rate >= error_rate_threshold)
+
+            max_in_60s = 0
+            rate_per_min = 0.0
+            if len(timestamps) >= 2:
+                timestamps.sort()
+                left = 0
+                for right, ts_r in enumerate(timestamps):
+                    while ts_r - timestamps[left] > 60.0:
+                        left += 1
+                    win_cnt = right - left + 1
+                    if win_cnt > max_in_60s:
+                        max_in_60s = win_cnt
+                span_sec = max(timestamps[-1] - timestamps[0], 0.0)
+                if span_sec >= 10.0 and total >= 35:
+                    rate_per_min = max(rate_per_min, (total / span_sec) * 60.0)
+                rate_per_min = max(rate_per_min, float(max_in_60s))
+            elif total > polling_storm_per_min:
+                max_in_60s = total
+                rate_per_min = float(total)
+
+            has_polling_storm = (max_in_60s > polling_storm_per_min) or (rate_per_min > polling_storm_per_min)
+            if not has_high_err and not has_polling_storm:
+                continue
+
+            sample_errs = []
+            for e_item in unexpected_errors[:5]:
+                et = str(e_item.get("error") or e_item.get("status") or "").strip()
+                if et and et not in sample_errs:
+                    sample_errs.append(et[:180])
+
+            kind_tags = []
+            if has_high_err:
+                kind_tags.append("high_error_rate")
+            if has_polling_storm:
+                kind_tags.append("polling_storm")
+            summary_parts = [f"RPC `{svc}.{meth}` telemetry anomaly ({', '.join(kind_tags)}):"]
+            if has_high_err:
+                summary_parts.append(
+                    f"- Non-OK rate: {err_count}/{total} unexpected failures ({err_rate * 100.0:.1f}%, benign skipped={benign_errors})."
+                )
+            if has_polling_storm:
+                summary_parts.append(
+                    f"- Dispatch rate: peak {max_in_60s} calls/60s ({rate_per_min:.1f} dispatches/min, total={total})."
+                )
+            if sample_errs:
+                summary_parts.append("- Sample errors: " + "; ".join(sample_errs))
+
+            severity = "high" if has_polling_storm or err_count >= 5 else "medium"
+            anomaly_kind = (
+                "flight_recorder_polling_storm"
+                if has_polling_storm and not has_high_err
+                else "flight_recorder_rpc_anomaly"
+            )
+            title_reason = (
+                f"{rate_per_min:.0f}/min polling storm"
+                if has_polling_storm and not has_high_err
+                else f"{err_count}/{total} non-OK"
+            )
+            anomalies.append(
+                {
+                    "kind": anomaly_kind,
+                    "service": svc,
+                    "method": meth,
+                    "total_calls": total,
+                    "non_ok_calls": err_count,
+                    "benign_skipped": benign_errors,
+                    "error_rate": round(err_rate, 4),
+                    "peak_per_min": round(rate_per_min, 2),
+                    "title": f"[Playtester] [FlightRecorder] {svc}.{meth} ({title_reason})",
+                    "severity": severity,
+                    "subsystem": "machonet-rpc" if "." in f"{svc}.{meth}" else "client-rpc",
+                    "summary": "\n".join(summary_parts),
+                    "sample_calls": items[-10:],
+                }
+            )
+        return anomalies
+
+    def record_flight_recorder_anomalies(
+        self,
+        calls: List[Dict[str, Any]],
+        *,
+        step_num: int = 0,
+        git_head: str = "",
+        session: Optional[Dict[str, Any]] = None,
+        min_calls: int = 3,
+        error_rate_threshold: float = 0.80,
+        polling_storm_per_min: float = 200.0,
+    ) -> List[Path]:
+        """Harvest flight-recorder anomalies at session end and write deduplicated bug bundles."""
+        anomalies = self.analyze_flight_recorder_anomalies(
+            calls,
+            min_calls=min_calls,
+            error_rate_threshold=error_rate_threshold,
+            polling_storm_per_min=polling_storm_per_min,
+        )
+        if not anomalies:
+            return []
+
+        created_files: List[Path] = []
+        known = self.memory.data.setdefault("filed_incident_fingerprints", [])
+        sess_raw = dict(session or {})
+        for anom in anomalies:
+            fp_src = f"flight_recorder:{anom['kind']}:{anom['service']}.{anom['method']}"
+            fingerprint = hashlib.sha256(fp_src.encode("utf-8")).hexdigest()[:16]
+            if fingerprint in known:
+                log_info(f"Skipping duplicate flight-recorder anomaly ({fingerprint}): {anom['title']}")
+                continue
+            known.append(fingerprint)
+            self.memory.save()
+
+            self.bug_queue_dir.mkdir(parents=True, exist_ok=True)
+            bundle_path = self.bug_queue_dir / f"playtester_fr_{fingerprint}.json"
+            fp_u64 = int(fingerprint, 16)
+            fp_i64 = fp_u64 - (1 << 64) if fp_u64 >= (1 << 63) else fp_u64
+            fr_calls = [
+                {
+                    "service": mc.get("service", anom["service"]),
+                    "method": mc.get("method", anom["method"]),
+                    "args_summary": mc.get("args", mc.get("args_summary", "()")),
+                    "status": f"{mc.get('status', 'OK')}({mc.get('error') or mc.get('result') or ''})",
+                    "duration_micros": int(float(mc.get("duration_ms", 0) or 0) * 1000),
+                }
+                for mc in anom.get("sample_calls") or []
+                if isinstance(mc, dict)
+            ]
+            bundle = {
+                "fingerprint": fingerprint,
+                "stack_hash": fp_i64,
+                "stack_key": f"playtester:{anom['subsystem']}:{anom['kind']}:{anom['service']}.{anom['method']}",
+                "trace": "",
+                "report_source": "flight_recorder_harvester",
+                "manual_report": {
+                    "report_key": f"playtester_fr_{fingerprint}",
+                    "category_id": anom["subsystem"],
+                    "category_name": anom["kind"],
+                    "title": anom["title"].replace("[Playtester]", "").strip(),
+                    "description": anom["summary"],
+                    "reproduction_steps": (
+                        f"Detected in end-of-session flight-recorder harvest at step {step_num} "
+                        f"({anom['service']}.{anom['method']}: non_ok={anom['non_ok_calls']}/{anom['total_calls']}, "
+                        f"peak_per_min={anom['peak_per_min']})."
+                    ),
+                },
+                "anomaly": {
+                    k: v
+                    for k, v in anom.items()
+                    if k != "sample_calls"
+                },
+                "flight_recorder": fr_calls,
+                "timestamp": utc_now_iso(),
+                "git_head": git_head,
+                "step": step_num,
+                "kind": anom["kind"],
+                "title": anom["title"],
+                "severity": anom["severity"],
+                "subsystem": anom["subsystem"],
+                "summary": anom["summary"],
+                "session": {
+                    "character_id": sess_raw.get("charid"),
+                    "corporation_id": sess_raw.get("corpid"),
+                    "solar_system_id": sess_raw.get("solarsystemid2") or sess_raw.get("solarsystemid"),
+                    "station_id": sess_raw.get("stationid"),
+                    "structure_id": sess_raw.get("structureid"),
+                    "ship_id": sess_raw.get("shipid"),
+                    **sess_raw,
+                },
+            }
+            if self.async_write and self._write_queue is not None:
+                self._write_queue.put((bundle_path, bundle, bool(self.sync_github)))
+            else:
+                bundle_path.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+            created_files.append(bundle_path)
+            log_warn(f"Harvested flight-recorder anomaly -> {bundle_path.name}: {anom['title']}")
+
+        if created_files and self.sync_github and not self.async_write:
+            self._run_sync_script()
+        return created_files
+
 
 # ---------------------------------------------------------------------------
 # Main Continuous Playtester Supervisor
@@ -5519,6 +5953,56 @@ def _detect_corrupted_viewstate_desync(ui_snapshot: Optional[Dict[str, Any]]) ->
         if not nearby_balls and (ego_mode == -1 or ego_type_id == 0):
             return "in_space_empty_ballpark_uninitialized_ego"
     return None
+
+
+def validate_exploratory_action(
+    action: Any,
+    *,
+    step_num: int,
+    persona_id: str = "",
+) -> Tuple[bool, str]:
+    """
+    Enforce setup-only GM slash rules for non-GM exploratory runs (`#1242`):
+    - Step `0` bootstrap and `--persona gm_tester` allow GM/slash setup commands.
+    - For normal player personas (`persona_id != "gm_tester"`) at `step_num > 0`,
+      `slash_command`, `run_slash`, `_SCENARIO_GM_ACTIONS`, time-control actions,
+      and `/` GM commands embedded in `type_text` are rejected before RPC dispatch.
+    """
+    if not isinstance(action, dict):
+        return False, "Action payload must be a JSON object"
+    if _prompt_allows_gm_actions(step_num, persona_id):
+        return True, ""
+
+    raw_type = str(action.get("type") or "").strip()
+    act_type = _canonicalize_action_type(raw_type, bool(action.get("target")))
+    if act_type in ("slash_command", "run_slash") or raw_type.lower() in ("slash_command", "run_slash"):
+        cmd_preview = _coerce_action_command(action) or str(action.get("target") or "")
+        return (
+            False,
+            f"Setup-only GM enforcement rejected {raw_type!r} ({cmd_preview!r}) at step {step_num} "
+            f"for non-GM persona {persona_id or 'player'!r} (restricted to Step 0 or --persona gm_tester)",
+        )
+    is_gm, is_tc, reason = _is_gm_or_time_control_action(action)
+    if is_gm or is_tc:
+        return (
+            False,
+            f"Setup-only GM enforcement rejected {reason} at step {step_num} "
+            f"for non-GM persona {persona_id or 'player'!r} (restricted to Step 0 or --persona gm_tester)",
+        )
+    if act_type == "type_text":
+        for field in ("command", "slash_cmd", "text", "input", "value"):
+            val = action.get(field)
+            if isinstance(val, str) and val.strip().startswith("/"):
+                first_tok = val.strip().split()[0].lower()
+                if first_tok in _ALL_REMOTE_GM_SLASH_COMMANDS or any(
+                    first_tok.startswith(p) for p in (_GM_SLASH_IN_TEXT_PREFIXES + _TIME_CONTROL_SLASH_PREFIXES)
+                ):
+                    return (
+                        False,
+                        f"Setup-only GM enforcement rejected slash input {first_tok!r} at step {step_num} "
+                        f"for non-GM persona {persona_id or 'player'!r}",
+                    )
+    return True, ""
 
 
 class PlaytesterRunner:
@@ -5590,6 +6074,16 @@ class PlaytesterRunner:
             rotated = self.memory.maybe_rotate_persona(force_id=args.persona)
             if rotated:
                 self.pending_persona_cleanup = True
+        elif str((self.memory.data.get("active_persona") or {}).get("id") or "") == GM_TESTER_PERSONA["id"]:
+            default_personas = self.memory.personas_cfg.get("personas") or []
+            if default_personas:
+                self.memory.maybe_rotate_persona(force_id=str(default_personas[0].get("id") or ""))
+                self.pending_persona_cleanup = True
+
+        self._session_flight_calls: List[Dict[str, Any]] = []
+        self._session_flight_seqs: set = set()
+        self._gm_bridge_conn: Any = None
+        self._gm_bridge_sm: Any = None
 
         # Hybrid Planner + Executor + Direct Runner batch state
         self.batch_id: int = 0
@@ -5743,53 +6237,485 @@ class PlaytesterRunner:
         )
         return sde_path, qd_path
 
+    def _active_persona_id(self) -> str:
+        return str((self.memory.data.get("active_persona") or {}).get("id") or "")
+
+    def _record_session_flight_calls(self, calls: Any) -> None:
+        if not isinstance(calls, list):
+            return
+        for entry in calls:
+            if not isinstance(entry, dict):
+                continue
+            seq_val = entry.get("seq")
+            if seq_val is not None:
+                if seq_val in self._session_flight_seqs:
+                    continue
+                self._session_flight_seqs.add(seq_val)
+            self._session_flight_calls.append(entry)
+
+    def harvest_flight_recorder_anomalies(
+        self,
+        *,
+        step_num: int = 0,
+        calls_override: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Path]:
+        """Collect all session flight-recorder RPCs and emit deduplicated anomaly bundles."""
+        calls: List[Dict[str, Any]] = []
+        if calls_override is not None:
+            calls = list(calls_override)
+        else:
+            calls.extend(self._session_flight_calls)
+            if getattr(self, "rpc", None) is not None and self.client_proc is not None and self.client_proc.poll() is None:
+                try:
+                    fr_resp = self.rpc.call("get_flight_recorder", {"since_seq": 0}, timeout=5.0) or {}
+                    if isinstance(fr_resp.get("result"), dict):
+                        fr_resp = fr_resp["result"]
+                    self._record_session_flight_calls(fr_resp.get("macho_calls") or [])
+                    calls = list(self._session_flight_calls)
+                except Exception:
+                    pass
+        sess = (self.last_ui_snapshot or {}).get("session") if isinstance(self.last_ui_snapshot, dict) else {}
+        return self.oracle.record_flight_recorder_anomalies(
+            calls,
+            step_num=step_num,
+            git_head=self.cached_git_head,
+            session=sess or {},
+        )
+
     def write_server_config(self) -> Path:
         self.world_dir.mkdir(parents=True, exist_ok=True)
         self.current_run_dir.mkdir(parents=True, exist_ok=True)
         cfg_path = self.runtime_dir / "evomu_playtester_server.toml"
         sde_path, _ = self._resolve_sde_and_quasar_paths()
-        cfg_text = f"""bind_address = "127.0.0.1"
-macho_port = {self.ports['macho']}
-bridge_port = {self.ports['bridge']}
-esi_port = {self.ports['http']}
-quasar_grpc_port = {self.ports['gateway']}
-xmpp_port = {self.ports['xmpp']}
-sde_path = {json.dumps(str(sde_path))}
-world_db_path = {json.dumps(str(self.world_db_path))}
-
-[feature_flags]
-enable_quasar_gateway = true
-enable_esi_http = true
-enable_living_world = true
-seed_demo = true
-free_fast_checkout_plex = true
-starter_plex_balance = 50000
-allow_local_dev_gateway_jwt = true
-gm_mode = true
-
-[[player_accounts]]
-username = "demo"
-password_token = "demo-secret"
-
-[player_accounts.starter_character]
-name = "Demo Pilot"
-bloodline_id = 1
-gender = 1
-ancestry_id = 11
-school_id = 11
-solar_system_id = 30000142
-station_id = 60003760
-initial_balance_isk = 125000000
-initial_balance_plex = 50000
-
-[[admin_accounts]]
-username = "demo"
-password_token = "demo-secret"
-character_id = 90000001
-character_name = "Demo Pilot"
-"""
-        cfg_path.write_text(cfg_text, encoding="utf-8")
+        is_gm_persona = self._active_persona_id() == GM_TESTER_PERSONA["id"]
+        lines = [
+            'bind_address = "127.0.0.1"',
+            f"macho_port = {self.ports['macho']}",
+            f"bridge_port = {self.ports['bridge']}",
+            f"esi_port = {self.ports['http']}",
+            f"quasar_grpc_port = {self.ports['gateway']}",
+            f"xmpp_port = {self.ports['xmpp']}",
+            f"sde_path = {json.dumps(str(sde_path))}",
+            f"world_db_path = {json.dumps(str(self.world_db_path))}",
+            "",
+            "[feature_flags]",
+            "enable_quasar_gateway = true",
+            "enable_esi_http = true",
+            "enable_living_world = true",
+            "seed_demo = true",
+            "free_fast_checkout_plex = true",
+            "starter_plex_balance = 50000",
+            "allow_local_dev_gateway_jwt = true",
+            "gm_mode = true",
+            "",
+            "[[player_accounts]]",
+            'username = "demo"',
+            'password_token = "demo-secret"',
+            "",
+            "[player_accounts.starter_character]",
+            'name = "Demo Pilot"',
+            "bloodline_id = 1",
+            "gender = 1",
+            "ancestry_id = 11",
+            "school_id = 11",
+            "solar_system_id = 30000142",
+            "station_id = 60003760",
+            "initial_balance_isk = 125000000",
+            "initial_balance_plex = 50000",
+        ]
+        # Never emit `[[admin_accounts]]` in TOML: `provision_gm_account` inserts a character before
+        # `seed_demo` / `populate_demo_snapshot`, which would clobber `demo` (90000001) on fresh DBs.
+        # Keep `demo` at role = 0 with its seeded state intact; `--persona gm_tester` instead sets
+        # `EVOMU_ADMIN_TOKEN` via `_server_extra_env()` so `admin` (90000003) provisions post-seed
+        # and executes GM actions over the host-side GM bridge (`BF-1242-R1-03`).
+        _ = is_gm_persona
+        cfg_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return cfg_path
+
+    def _server_extra_env(self) -> Dict[str, str]:
+        if self._active_persona_id() == GM_TESTER_PERSONA["id"]:
+            return {"EVOMU_ADMIN_TOKEN": PLAYTESTER_GM_ADMIN_SECRET}
+        return {}
+
+    def _default_target_char_id(self) -> int:
+        return 90000001
+
+    def _gm_bridge_credentials(self) -> Tuple[str, str, int]:
+        return "admin", PLAYTESTER_GM_ADMIN_SECRET, 90000003
+
+    def _connect_gm_bridge(self) -> Tuple[Any, Any]:
+        bridge_dir = str(CLIENT_BRIDGE_DIR)
+        if bridge_dir not in sys.path:
+            sys.path.insert(0, bridge_dir)
+        import evomu_bridge  # type: ignore
+
+        gm_user, gm_password, gm_char_id = self._gm_bridge_credentials()
+
+        class _GmBridgeLog:
+            def info(self, msg: str) -> None:
+                log_info(f"[gm-bridge] {msg}")
+
+            def warn(self, msg: str) -> None:
+                log_warn(f"[gm-bridge] {msg}")
+
+            def error(self, msg: str) -> None:
+                log_err(f"[gm-bridge] {msg}")
+
+        class _GmBridgeSM:
+            def __init__(self) -> None:
+                self.services: Dict[str, Any] = {}
+                self.logger = _GmBridgeLog()
+
+            def ScatterEvent(self, *_args: Any, **_kw: Any) -> None:
+                pass
+
+        gm_sm = _GmBridgeSM()
+        bridge_conn = evomu_bridge.install_service_manager_hook(
+            gm_sm,
+            host="127.0.0.1",
+            port=self.ports["bridge"],
+        )
+        try:
+            gm_sm.RemoteSvc("authentication").Login(gm_user, gm_password)
+            chars = gm_sm.RemoteSvc("charUnboundMgr").GetCharactersToSelect() or []
+            sel_cid = gm_char_id
+            avail_ids: List[int] = []
+            for ch in chars:
+                cid_raw = getattr(ch, "characterID", None) if not isinstance(ch, dict) else ch.get("characterID")
+                if cid_raw is not None:
+                    avail_ids.append(int(cid_raw))
+            if avail_ids and gm_char_id not in avail_ids:
+                sel_cid = avail_ids[0]
+            gm_sm.RemoteSvc("charUnboundMgr").SelectCharacterID(sel_cid)
+        except Exception:
+            try:
+                bridge_conn.close()
+            except Exception:
+                pass
+            raise
+        return bridge_conn, gm_sm
+
+    def _ensure_gm_bridge(self) -> Any:
+        if (
+            self._gm_bridge_sm is not None
+            and self._gm_bridge_conn is not None
+            and getattr(self._gm_bridge_conn, "connected", True)
+        ):
+            return self._gm_bridge_sm
+        self._close_gm_bridge()
+        conn, gm_sm = self._connect_gm_bridge()
+        self._gm_bridge_conn = conn
+        self._gm_bridge_sm = gm_sm
+        return gm_sm
+
+    def _close_gm_bridge(self) -> None:
+        conn = getattr(self, "_gm_bridge_conn", None)
+        self._gm_bridge_conn = None
+        self._gm_bridge_sm = None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _looks_like_char_id_token(tok: str, target_char_id: int) -> bool:
+        t = str(tok or "").strip()
+        if not t or not t.isdigit():
+            return False
+        n = int(t)
+        return n == int(target_char_id) or (90_000_000 <= n < 1_000_000_000)
+
+    @staticmethod
+    def _looks_like_entity_or_location_token(tok: str, target_char_id: int) -> bool:
+        t = str(tok or "").strip()
+        if not t or not t.isdigit():
+            return False
+        n = int(t)
+        return (
+            n == int(target_char_id)
+            or (60_000_000 <= n < 70_000_000)
+            or (90_000_000 <= n < 1_000_000_000)
+            or n >= 1_000_000_000
+        )
+
+    @classmethod
+    def _rewrite_gm_slash_for_target(cls, cmd: str, target_char_id: int) -> str:
+        raw = str(cmd or "").strip()
+        if not raw.startswith("/") or target_char_id <= 0:
+            return raw
+        parts = raw.split()
+        verb = parts[0].lower()
+        rest = parts[1:]
+        tgt_s = str(int(target_char_id))
+        me_tokens = ("me", "myship", "self")
+
+        if verb == "/giveisk":
+            if len(rest) == 1:
+                return f"/giveisk {tgt_s} {rest[0]}"
+            if len(rest) >= 2 and rest[0].lower() in ("me", "self"):
+                return " ".join(["/giveisk", tgt_s] + rest[1:])
+        elif verb in ("/giveskill", "/setskill"):
+            if len(rest) == 2:
+                return f"{parts[0]} {tgt_s} {rest[0]} {rest[1]}"
+            if len(rest) >= 3 and rest[0].lower() in ("me", "self"):
+                return " ".join([parts[0], tgt_s] + rest[1:])
+        elif verb == "/heal":
+            if not rest or rest[0].lower() in ("me", "self"):
+                return f"/heal {tgt_s}"
+        elif verb in ("/teleport", "/tr", "/translocate", "/moveme"):
+            noblock_tokens = [t for t in rest if t.lower() == "noblock"]
+            non_noblock = [t for t in rest if t.lower() != "noblock"]
+            if len(non_noblock) == 1:
+                return " ".join([parts[0], tgt_s, non_noblock[0]] + noblock_tokens)
+            if len(non_noblock) == 2:
+                if non_noblock[0].lower() in me_tokens:
+                    return " ".join([parts[0], tgt_s, non_noblock[1]] + noblock_tokens)
+                if non_noblock[1].lower() in me_tokens:
+                    return " ".join([parts[0], tgt_s, non_noblock[0]] + noblock_tokens)
+        elif verb in ("/giveitem", "/createitem", "/spawn", "/spawnnpc", "/spawnwreck", "/spawnanomaly"):
+            if not rest:
+                return f"{parts[0]} {tgt_s}"
+            if rest[0].lower() in me_tokens:
+                return " ".join([parts[0], tgt_s] + rest[1:])
+            if not cls._looks_like_char_id_token(rest[0], target_char_id):
+                return " ".join([parts[0], tgt_s] + rest)
+        elif verb in ("/load", "/fit"):
+            if len(rest) >= 2 and rest[0].lower() in me_tokens:
+                return " ".join([parts[0], tgt_s] + rest[1:])
+            if rest and not cls._looks_like_entity_or_location_token(rest[0], target_char_id):
+                return " ".join([parts[0], tgt_s] + rest)
+        elif verb == "/setattr":
+            if len(rest) >= 3 and rest[0].lower() in me_tokens:
+                return " ".join([parts[0], tgt_s] + rest[1:])
+            if len(rest) == 2 and not cls._looks_like_entity_or_location_token(rest[0], target_char_id):
+                return " ".join([parts[0], tgt_s] + rest)
+        elif verb == "/getattr":
+            if len(rest) >= 2 and rest[0].lower() in me_tokens:
+                return " ".join([parts[0], tgt_s] + rest[1:])
+            if len(rest) == 1 and not cls._looks_like_entity_or_location_token(rest[0], target_char_id):
+                return " ".join([parts[0], tgt_s] + rest)
+        elif verb in ("/energy", "/secstatus"):
+            if len(rest) == 1:
+                return f"{parts[0]} {tgt_s} {rest[0]}"
+            if len(rest) >= 2 and rest[0].lower() in ("me", "self"):
+                return " ".join([parts[0], tgt_s] + rest[1:])
+        elif verb == "/cleartimers":
+            if not rest or rest[0].lower() in ("me", "self"):
+                return f"{parts[0]} {tgt_s}"
+        elif verb in ("/completeskills", "/trainskills", "/finishskills"):
+            if not rest:
+                return f"{parts[0]} {tgt_s} all"
+            if rest[0].lower() in ("me", "self"):
+                return " ".join([parts[0], tgt_s] + (rest[1:] or ["all"]))
+            if not cls._looks_like_char_id_token(rest[0], target_char_id):
+                return " ".join([parts[0], tgt_s] + rest)
+        elif verb in (
+            "/completeindustry",
+            "/finishjobs",
+            "/industrytimer",
+            "/upwelltimer",
+            "/structuretimer",
+            "/finishstructure",
+        ):
+            if not rest:
+                return f"{parts[0]} {tgt_s}"
+            if rest[0].lower() in ("me", "self"):
+                return " ".join([parts[0], tgt_s] + rest[1:])
+            if not cls._looks_like_char_id_token(rest[0], target_char_id):
+                return " ".join([parts[0], tgt_s] + rest)
+        elif verb in ("/advancetime", "/fastforward", "/ff"):
+            if not rest:
+                return f"{parts[0]} {tgt_s}"
+            if rest[0].lower() in ("me", "self"):
+                return " ".join([parts[0], tgt_s] + rest[1:])
+            if len(rest) >= 2 and rest[-1].lower() in ("me", "self"):
+                return " ".join([parts[0], tgt_s] + rest[:-1])
+            if not any(cls._looks_like_char_id_token(t, target_char_id) for t in rest):
+                return " ".join([parts[0], tgt_s] + rest)
+        return raw
+
+    @staticmethod
+    def _should_dispatch_via_gm_bridge(act: Dict[str, Any], act_type: str) -> bool:
+        if act_type in _SCENARIO_TIME_CONTROL_ACTIONS:
+            return True
+        if act_type in ("slash_command", "run_slash", "train_skill"):
+            return True
+        if act_type == "station_command" and str(act.get("target") or "").strip().lower() == "inject_and_train_skill":
+            return True
+        if act_type == "type_text" and any(_is_gm_or_time_control_action(act)[:2]):
+            return True
+        return False
+
+    def _advance_clock_via_gm_bridge(self, secs: int = 12, target_char_id: int = 0) -> Optional[Dict[str, Any]]:
+        tgt = int(target_char_id or self._default_target_char_id() or 0)
+        try:
+            gm_sm = self._ensure_gm_bridge()
+            if tgt > 0:
+                gm_sm.RemoteSvc("timeControl").AdvanceClock(max(0, int(secs)), tgt)
+            else:
+                gm_sm.RemoteSvc("timeControl").AdvanceClock(max(0, int(secs)))
+            return {
+                "seq": 0,
+                "service": "timeControl",
+                "method": "AdvanceClock",
+                "ok": True,
+                "via": "gm_bridge",
+                "target_char_id": tgt,
+            }
+        except Exception as exc:
+            log_warn(f"GM bridge AdvanceClock({secs}) failed: {exc}")
+            return None
+
+    def _execute_gm_or_time_control_via_bridge(
+        self,
+        act: Dict[str, Any],
+        act_type: str,
+        target_char_id: int,
+    ) -> Dict[str, Any]:
+        tgt = int(target_char_id or self._default_target_char_id() or 0)
+        calls_recorded: List[Dict[str, Any]] = []
+        try:
+            gm_sm = self._ensure_gm_bridge()
+            gm_res: Any = None
+            if act_type == "advance_server_time":
+                raw_sec = act.get("seconds")
+                if raw_sec in (None, ""):
+                    raw_sec = act.get("target")
+                if raw_sec in (None, ""):
+                    raw_sec = act.get("amount")
+                if raw_sec in (None, ""):
+                    raw_sec = act.get("command")
+                try:
+                    secs = max(0, int(str(raw_sec).strip())) if raw_sec not in (None, "") else 12
+                except Exception:
+                    secs = 12
+                if tgt > 0:
+                    gm_res = gm_sm.RemoteSvc("timeControl").AdvanceClock(secs, tgt)
+                else:
+                    gm_res = gm_sm.RemoteSvc("timeControl").AdvanceClock(secs)
+                calls_recorded.append({
+                    "seq": 0,
+                    "service": "timeControl",
+                    "method": "AdvanceClock",
+                    "ok": True,
+                    "via": "gm_bridge",
+                    "target_char_id": tgt,
+                })
+            elif act_type == "clear_timers":
+                if tgt > 0:
+                    gm_sm.RemoteSvc("timeControl").ClearSessionTimer(tgt)
+                else:
+                    gm_sm.RemoteSvc("timeControl").ClearSessionTimer()
+                calls_recorded.append({
+                    "seq": 0,
+                    "service": "timeControl",
+                    "method": "ClearSessionTimer",
+                    "ok": True,
+                    "via": "gm_bridge",
+                    "target_char_id": tgt,
+                })
+                clear_cmd = f"/cleartimers {tgt}" if tgt > 0 else "/cleartimers"
+                gm_res = gm_sm.RemoteSvc("slash").SlashCmd(clear_cmd)
+                calls_recorded.append({
+                    "seq": 0,
+                    "service": "slash",
+                    "method": "SlashCmd",
+                    "command": clear_cmd,
+                    "ok": True,
+                    "via": "gm_bridge",
+                    "target_char_id": tgt,
+                })
+            elif act_type in ("complete_skills", "advance_upwell_timer", "complete_industry_jobs"):
+                slash_map = {
+                    "complete_skills": ("/completeskills", "all"),
+                    "advance_upwell_timer": ("/upwelltimer", ""),
+                    "complete_industry_jobs": ("/completeindustry", ""),
+                }
+                base_cmd, default_arg = slash_map[act_type]
+                arg = str(act.get("target") or act.get("command") or default_arg).strip()
+                raw_cmd = arg if arg.startswith("/") else f"{base_cmd} {arg}".strip()
+                cmd = self._rewrite_gm_slash_for_target(raw_cmd, tgt)
+                gm_res = gm_sm.RemoteSvc("slash").SlashCmd(cmd)
+                calls_recorded.append({
+                    "seq": 0,
+                    "service": "slash",
+                    "method": "SlashCmd",
+                    "command": cmd,
+                    "ok": True,
+                    "via": "gm_bridge",
+                    "target_char_id": tgt,
+                })
+            elif act_type == "train_skill" or (
+                act_type == "station_command"
+                and str(act.get("target") or "").strip().lower() == "inject_and_train_skill"
+            ):
+                tid_raw = act.get("type_id")
+                if tid_raw in (None, ""):
+                    cand_t = str(act.get("target") or "").strip()
+                    if cand_t.isdigit():
+                        tid_raw = int(cand_t)
+                if tid_raw in (None, ""):
+                    cand_c = str(act.get("command") or "").strip()
+                    if cand_c.isdigit():
+                        tid_raw = int(cand_c)
+                tid = int(tid_raw or 0)
+                if tid <= 0:
+                    raise ValueError(f"train_skill missing numeric type_id: {act!r}")
+                lvl = max(1, min(5, int(act.get("level", 1) or 1)))
+                cmd = f"/giveskill {tgt} {tid} {lvl}"
+                gm_res = gm_sm.RemoteSvc("slash").SlashCmd(cmd)
+                calls_recorded.append({
+                    "seq": 0,
+                    "service": "slash",
+                    "method": "SlashCmd",
+                    "command": cmd,
+                    "ok": True,
+                    "via": "gm_bridge",
+                    "target_char_id": tgt,
+                })
+            else:
+                raw_cmd = (
+                    _coerce_action_command(act)
+                    or str(act.get("slash_cmd") or act.get("target") or act.get("text") or act.get("input") or "").strip()
+                )
+                cmd = self._rewrite_gm_slash_for_target(raw_cmd, tgt)
+                gm_res = gm_sm.RemoteSvc("slash").SlashCmd(cmd)
+                calls_recorded.append({
+                    "seq": 0,
+                    "service": "slash",
+                    "method": "SlashCmd",
+                    "command": cmd,
+                    "ok": True,
+                    "via": "gm_bridge",
+                    "target_char_id": tgt,
+                })
+
+            return {
+                "action_ok": True,
+                "via": "gm_bridge",
+                "gm_result": gm_res,
+                "flight_recorder": {
+                    "macho_calls": calls_recorded,
+                    "scatters_observed": [],
+                    "log_exceptions": [],
+                    "quasar_errors": [],
+                    "macho_exceptions": [],
+                },
+            }
+        except Exception as exc:
+            return {
+                "action_ok": False,
+                "action_error": f"gm_bridge {type(exc).__name__}: {exc}",
+                "via": "gm_bridge",
+                "flight_recorder": {
+                    "macho_calls": calls_recorded,
+                    "scatters_observed": [],
+                    "log_exceptions": [],
+                    "quasar_errors": [],
+                    "macho_exceptions": [],
+                },
+            }
 
     def write_inclient_cfg(self) -> Path:
         self.current_run_dir.mkdir(parents=True, exist_ok=True)
@@ -5876,6 +6802,10 @@ character_name = "Demo Pilot"
         env["EVOMU_SDE_PATH"] = str(sde_path)
         env["EVOMU_QUASAR_DESCRIPTORS_PATH"] = str(qd_path)
         env.setdefault("RUST_LOG", "info")
+        extra_env_fn = getattr(self, "_server_extra_env", None)
+        if callable(extra_env_fn):
+            for k, v in (extra_env_fn() or {}).items():
+                env[str(k)] = str(v)
 
         log_info(
             f"Launching eve-server ({get_git_head(self.worktree_dir)}) on "
@@ -5921,6 +6851,7 @@ character_name = "Demo Pilot"
         return False
 
     def stop_server(self) -> None:
+        self._close_gm_bridge()
         if self.server_proc and self.server_proc.poll() is None:
             log_info(f"Stopping eve-server (PID {self.server_proc.pid})...")
             try:
@@ -6640,10 +7571,53 @@ character_name = "Demo Pilot"
         else:
             rpc_timeout = 20.0
         exec_res: Dict[str, Any] = {}
-        try:
-            exec_res = self.rpc.call("execute_action", {"action": exec_action_payload}, timeout=rpc_timeout)
-        except Exception as exc:
-            exec_res = {"action_ok": False, "action_error": str(exc), "flight_recorder": {}}
+        valid_action, reject_reason = validate_exploratory_action(
+            action,
+            step_num=step_num,
+            persona_id=self._active_persona_id(),
+        )
+        if not valid_action:
+            log_warn(f"Step {step_num}: {reject_reason}")
+            exec_res = {
+                "ok": False,
+                "action_ok": False,
+                "action_error": reject_reason,
+                "rejected_by_validator": True,
+                "flight_recorder": {},
+            }
+        else:
+            canon_act_type = _canonicalize_action_type(
+                str(exec_action_payload.get("type") or ""),
+                bool(exec_action_payload.get("target")),
+            )
+            if self._should_dispatch_via_gm_bridge(exec_action_payload, canon_act_type):
+                try:
+                    target_cid = int(
+                        ((ui_snapshot or {}).get("session") or {}).get("charid")
+                        or self._default_target_char_id()
+                        or 90000001
+                    )
+                except Exception:
+                    target_cid = self._default_target_char_id() or 90000001
+                exec_res = self._execute_gm_or_time_control_via_bridge(
+                    exec_action_payload,
+                    canon_act_type,
+                    target_cid,
+                )
+                try:
+                    obs = self.rpc.call("get_state", timeout=15.0) or {}
+                    refreshed = _unwrap_state_payload(obs)
+                    if refreshed:
+                        exec_res["post_state"] = refreshed
+                except Exception:
+                    pass
+            else:
+                try:
+                    exec_res = self.rpc.call("execute_action", {"action": exec_action_payload}, timeout=rpc_timeout)
+                except Exception as exc:
+                    exec_res = {"action_ok": False, "action_error": str(exc), "flight_recorder": {}}
+        if isinstance(exec_res, dict):
+            self._record_session_flight_calls((exec_res.get("flight_recorder") or {}).get("macho_calls"))
 
         post_state_raw = exec_res.pop("post_state", None) if isinstance(exec_res, dict) else None
         if isinstance(post_state_raw, dict) and post_state_raw:
@@ -6944,6 +7918,10 @@ character_name = "Demo Pilot"
                 if not self.args.continuous and self.args.max_steps <= 0:
                     break
         finally:
+            try:
+                self.harvest_flight_recorder_anomalies(step_num=step_num)
+            except Exception as exc:
+                log_warn(f"Flight-recorder anomaly harvest skipped due to error: {exc}")
             if getattr(self, "agy_pool", None) is not None:
                 try:
                     self.agy_pool.shutdown()
@@ -6953,6 +7931,7 @@ character_name = "Demo Pilot"
                 self.oracle.flush(timeout=10.0)
             except Exception:
                 pass
+            self._close_gm_bridge()
             self.stop_client()
             self.stop_server()
             DEFAULT_PID_FILE.unlink(missing_ok=True)
@@ -6978,6 +7957,8 @@ _SCENARIO_ALLOWED_ACTIONS = _DIRECT_NON_WIDGET_ACTIONS | frozenset({
     "drag_widget",
     "type_text",
     "open_window",
+    "click_top_tabs",
+    "show_info",
     "close_modal_or_window",
     "cleanup_utility_windows",
     "station_command",
@@ -7138,6 +8119,7 @@ _SCENARIO_ALLOWED_CHECK_KEYS = frozenset({
     "bookmark_server_check",
     "handshake_server_check",
     "no_server_unimplemented_rpc",
+    "ui_delta_without_relog",
     "state_checks",
 })
 _SCENARIO_ALLOWED_RULE_OPS = frozenset({
@@ -7179,6 +8161,31 @@ _SCENARIO_DESYNC_LINE_RE = re.compile(
 
 class ScenarioValidationError(ValueError):
     """Raised when a scenario file fails schema or GM/time-control policy validation."""
+
+
+def load_hook_open_window_tables(hook_path: Optional[Path] = None) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Read `cmd_map` (`OPEN_WINDOW_CMD_MAP`) and `OPEN_WINDOW_GUARDS` directly from `evomu_playtester_hook.py` AST."""
+    target_path = Path(hook_path) if hook_path is not None else (HARNESS_DIR / "evomu_playtester_hook.py")
+    tree = ast.parse(target_path.read_text(encoding="utf-8"), filename=str(target_path))
+    cmd_map: Dict[str, str] = {}
+    guards: Dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            if node.targets[0].id in ("OPEN_WINDOW_CMD_MAP", "cmd_map") and isinstance(node.value, ast.Dict):
+                val = ast.literal_eval(node.value)
+                if isinstance(val, dict):
+                    cmd_map = {str(k): str(v) for k, v in val.items()}
+            elif node.targets[0].id == "OPEN_WINDOW_GUARDS" and isinstance(node.value, ast.Dict):
+                val = ast.literal_eval(node.value)
+                if isinstance(val, dict):
+                    guards = {str(k): str(v) for k, v in val.items()}
+    if not cmd_map:
+        raise RuntimeError(f"OPEN_WINDOW_CMD_MAP/cmd_map not found in {target_path}")
+    return cmd_map, guards
+
+
+def _normalize_window_target_key(raw_target: str) -> str:
+    return str(raw_target or "").strip().lower().replace("_", "").replace("-", "").replace(" ", "")
 
 
 def _validate_value_rule_dict(rule: Dict[str, Any], ctx_label: str, *, allow_field: bool = False) -> None:
@@ -7226,6 +8233,20 @@ def _validate_scenario_checks_dict(checks: Dict[str, Any], ctx_label: str) -> No
         unknown_wc = sorted(set(wc.keys()) - _SCENARIO_ALLOWED_WARP_COMPLETED_KEYS)
         if unknown_wc:
             raise ScenarioValidationError(f"{ctx_label}.warp_completed: unsupported key(s) {unknown_wc!r}")
+    if "ship_mode" in checks and checks["ship_mode"] is not None:
+        sm_val = checks["ship_mode"]
+        valid_sm = (
+            (isinstance(sm_val, int) and not isinstance(sm_val, bool))
+            or (
+                isinstance(sm_val, list)
+                and len(sm_val) > 0
+                and all(isinstance(v, int) and not isinstance(v, bool) for v in sm_val)
+            )
+        )
+        if not valid_sm:
+            raise ScenarioValidationError(
+                f"{ctx_label}.ship_mode must be an int or non-empty list of ints (Destiny MovementMode), got {sm_val!r}"
+            )
 
 
 def _is_gm_or_time_control_action(action: Dict[str, Any]) -> Tuple[bool, bool, str]:
@@ -7315,6 +8336,9 @@ def validate_scenario(spec: Any, source_name: str = "<scenario>") -> Dict[str, A
             "detail": f"Provision {len(extra_chars)} extra character(s) via bridge before client start",
         })
 
+    hook_cmd_map, _ = load_hook_open_window_tables()
+    hook_cmd_methods = set(hook_cmd_map.values())
+
     normalized_steps: List[Dict[str, Any]] = []
     for idx, raw_step in enumerate(steps):
         step_num = idx + 1
@@ -7331,6 +8355,26 @@ def validate_scenario(spec: Any, source_name: str = "<scenario>") -> Dict[str, A
             raise ScenarioValidationError(
                 f"{source_name} step {step_num} ({step_id}): unsupported action type {raw_type!r}"
             )
+        if act_type == "open_window":
+            raw_win_tgt = str(action.get("target") or action.get("command") or action.get("slash_cmd") or "").strip()
+            norm_win_tgt = _normalize_window_target_key(raw_win_tgt)
+            if not norm_win_tgt or (norm_win_tgt not in hook_cmd_map and raw_win_tgt not in hook_cmd_methods):
+                raise ScenarioValidationError(
+                    f"{source_name} step {step_num} ({step_id}): unknown open_window target {raw_win_tgt!r} "
+                    f"(not in evomu_playtester_hook.OPEN_WINDOW_CMD_MAP)"
+                )
+        elif act_type == "show_info":
+            raw_tid = action.get("type_id")
+            if raw_tid in (None, "") and str(action.get("target") or "").strip().isdigit():
+                raw_tid = str(action.get("target")).strip()
+            try:
+                tid_int = int(raw_tid or 0)
+            except Exception:
+                tid_int = 0
+            if tid_int <= 0:
+                raise ScenarioValidationError(
+                    f"{source_name} step {step_num} ({step_id}): show_info requires positive integer type_id"
+                )
 
         is_gm, is_tc, gm_reason = _is_gm_or_time_control_action(action)
         is_setup_declared = bool(raw_step.get("setup", False))
@@ -7843,6 +8887,20 @@ def evaluate_scenario_checks(
                     "charsel_listed_all_characters",
                     f"charsel missing expected character(s) {missing!r} (listed={listed_names!r})",
                 )
+            if not isinstance(charsel_spec, list):
+                primary_name = str(ctx.get("primary_character_name") or "").strip()
+                if primary_name and primary_name.lower() not in listed_low:
+                    return (
+                        False,
+                        "charsel_listed_all_characters",
+                        f"charsel missing primary character {primary_name!r} (listed={listed_names!r})",
+                    )
+                if len(listed_names) < len(expected_names) + 1:
+                    return (
+                        False,
+                        "charsel_listed_all_characters",
+                        f"expected primary + {len(expected_names)} extra character(s), saw {listed_names!r}",
+                    )
         elif len(listed_names) < 2:
             return (
                 False,
@@ -8166,6 +9224,347 @@ _SCENARIO_DEFAULT_ANCESTRY_BY_BLOODLINE: Dict[int, int] = {
 }
 
 
+def _coerce_int_client_build(val: Any) -> int:
+    if isinstance(val, bool):
+        return 0
+    if isinstance(val, int):
+        return val if val > 0 else 0
+    s = str(val or "").strip()
+    if s.isdigit():
+        return int(s)
+    m = re.search(r"\d+", s)
+    return int(m.group(0)) if m else 0
+
+
+def _is_mutating_scenario_step(
+    step: Dict[str, Any],
+    act_type: str,
+    exec_res: Optional[Dict[str, Any]],
+) -> bool:
+    chk = step.get("checks") or {}
+    if chk.get("ui_delta_without_relog") is True:
+        return True
+    if chk.get("ui_delta_without_relog") is False:
+        return False
+    readonly_actions = {
+        "wait",
+        "noop",
+        "open_window",
+        "close_modal_or_window",
+        "cleanup_utility_windows",
+        "click_top_tabs",
+        "show_info",
+        "select_character",
+    }
+    if act_type not in readonly_actions:
+        return True
+    fr = (exec_res or {}).get("flight_recorder") or {}
+    mutating_prefixes = (
+        "buy", "sell", "move", "add", "sethome", "install", "slash", "reprocess",
+        "create", "deliver", "transfer", "give", "train", "inject", "board",
+        "dock", "undock", "jump", "cancel", "accept", "complete", "fit",
+        "online", "offline", "activate", "deactivate", "trash", "split", "merge",
+    )
+    for call in fr.get("macho_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        meth = str(call.get("method") or "").strip().lower()
+        if any(meth.startswith(p) or p in meth for p in mutating_prefixes):
+            return True
+    return False
+
+
+def _lookup_sde_type_categories(
+    sde_path: Optional[Path],
+    type_ids: List[int],
+    world_db_path: Optional[Path] = None,
+) -> Dict[int, int]:
+    """Return `{type_id: category_id}` from `sde_types` when an SDE SQLite db is available."""
+    tids = sorted({int(t) for t in type_ids if t is not None and int(t) > 0})
+    if not tids:
+        return {}
+    candidates: List[Path] = []
+    if sde_path is not None:
+        candidates.append(Path(sde_path))
+    else:
+        env_sde = os.environ.get("EVOMU_SDE_PATH", "").strip()
+        if env_sde:
+            candidates.append(Path(env_sde))
+        if world_db_path is not None:
+            w_path = Path(world_db_path).resolve()
+            for idx in range(min(4, len(w_path.parents))):
+                candidates.append(w_path.parents[idx] / "data" / "evomu_sde.sqlite")
+        candidates.append(REPO_ROOT / "data" / "evomu_sde.sqlite")
+        candidates.append(REPO_ROOT.parent / "EvoMu" / "data" / "evomu_sde.sqlite")
+
+    resolved_sde = next(
+        (p for p in candidates if p.exists() and p.is_file() and p.stat().st_size > 0),
+        None,
+    )
+    if resolved_sde is None:
+        return {}
+    conn = None
+    out: Dict[int, int] = {}
+    try:
+        conn = sqlite3.connect(f"file:{resolved_sde.resolve()}?mode=ro", uri=True, timeout=2.0)
+        for i in range(0, len(tids), 500):
+            chunk = tids[i:i + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"SELECT type_id, category_id FROM sde_types WHERE type_id IN ({placeholders})",
+                tuple(chunk),
+            ).fetchall()
+            for tid, cat in rows:
+                if cat is not None:
+                    out[int(tid)] = int(cat)
+    except Exception:
+        return {}
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return out
+
+
+def _evaluate_hangar_parity(
+    cur: sqlite3.Cursor,
+    char_id: int,
+    db_loc_id: int,
+    inv: Dict[str, Any],
+    sde_path: Optional[Path],
+    world_db_path: Path,
+) -> List[str]:
+    """Reconcile client StationItems / StationShips / unified hangar caches against SQLite `flag = 4`."""
+    c_total_cnt = inv.get("hangar_item_count")
+    c_total_qty = inv.get("hangar_total_quantity")
+    c_ns_cnt = inv.get("hangar_non_ship_count")
+    c_ns_qty = inv.get("hangar_non_ship_total_quantity")
+    c_sh_cnt = inv.get("ship_hangar_count")
+    c_sh_qty = inv.get("ship_hangar_total_quantity")
+    if all(v is None for v in (c_total_cnt, c_total_qty, c_ns_cnt, c_ns_qty, c_sh_cnt, c_sh_qty)):
+        return []
+
+    h_rows = cur.execute(
+        "SELECT type_id, quantity FROM items "
+        "WHERE owner_id = ? AND location_id = ? AND flag = 4",
+        (char_id, int(db_loc_id)),
+    ).fetchall()
+    h_cnt = len(h_rows)
+    h_qty = sum(max(0, int(q or 0)) for _, q in h_rows)
+    sde_cats = _lookup_sde_type_categories(
+        sde_path,
+        [int(tid) for tid, _ in h_rows],
+        world_db_path=world_db_path,
+    )
+    have_sde_split = (not h_rows) or any(int(tid) in sde_cats for tid, _ in h_rows)
+    mismatches: List[str] = []
+
+    if not have_sde_split:
+        if c_total_cnt is not None and int(c_total_cnt) != h_cnt:
+            mismatches.append(f"invCache.hangar_item_count client={c_total_cnt} != sqlite={h_cnt} (loc={db_loc_id})")
+        if c_total_qty is not None and int(c_total_qty) != h_qty:
+            mismatches.append(f"invCache.hangar_total_quantity client={c_total_qty} != sqlite={h_qty} (loc={db_loc_id})")
+        return mismatches
+
+    ns_rows = [(tid, q) for tid, q in h_rows if sde_cats.get(int(tid)) != 6]
+    sh_rows = [(tid, q) for tid, q in h_rows if sde_cats.get(int(tid)) == 6]
+    ns_cnt = len(ns_rows)
+    ns_qty = sum(max(0, int(q or 0)) for _, q in ns_rows)
+    sh_cnt = len(sh_rows)
+    sh_qty = sum(max(0, int(q or 0)) for _, q in sh_rows)
+    containers_seen = {str(x) for x in (inv.get("hangar_containers_seen") or []) if x}
+
+    only_items_container = (
+        (containers_seen == {"StationItems"} and c_sh_cnt in (None, 0))
+        or (
+            not containers_seen
+            and sh_cnt > 0
+            and c_sh_cnt == 0
+            and (c_ns_cnt is None or int(c_ns_cnt) == ns_cnt)
+            and (c_ns_cnt is not None or (c_total_cnt is not None and int(c_total_cnt) == ns_cnt))
+            and (c_ns_qty is None or int(c_ns_qty) == ns_qty)
+            and (c_total_cnt is None or int(c_total_cnt) == ns_cnt)
+        )
+    )
+    only_ships_container = (
+        (
+            containers_seen == {"StationHangar"}
+            and c_ns_cnt in (None, 0)
+            and sh_cnt > 0
+            and int(c_sh_cnt or c_total_cnt or 0) > 0
+        )
+        or (
+            not containers_seen
+            and ns_cnt > 0
+            and c_ns_cnt == 0
+            and c_sh_cnt == sh_cnt
+            and (c_sh_qty is None or int(c_sh_qty) == sh_qty)
+            and (c_total_cnt is None or int(c_total_cnt) == sh_cnt)
+        )
+    )
+
+    if only_items_container:
+        if c_ns_cnt is not None and int(c_ns_cnt) != ns_cnt:
+            mismatches.append(f"invCache.hangar_non_ship_count client={c_ns_cnt} != sqlite={ns_cnt} (loc={db_loc_id})")
+        if c_ns_qty is not None and int(c_ns_qty) != ns_qty:
+            mismatches.append(f"invCache.hangar_non_ship_total_quantity client={c_ns_qty} != sqlite={ns_qty} (loc={db_loc_id})")
+        if c_total_cnt is not None and int(c_total_cnt) != ns_cnt:
+            mismatches.append(f"invCache.hangar_item_count(StationItems) client={c_total_cnt} != sqlite={ns_cnt} (loc={db_loc_id})")
+        if c_total_qty is not None and int(c_total_qty) != ns_qty:
+            mismatches.append(f"invCache.hangar_total_quantity(StationItems) client={c_total_qty} != sqlite={ns_qty} (loc={db_loc_id})")
+    elif only_ships_container:
+        if c_sh_cnt is not None and int(c_sh_cnt) != sh_cnt:
+            mismatches.append(f"invCache.ship_hangar_count client={c_sh_cnt} != sqlite={sh_cnt} (loc={db_loc_id})")
+        if c_sh_qty is not None and int(c_sh_qty) != sh_qty:
+            mismatches.append(f"invCache.ship_hangar_total_quantity client={c_sh_qty} != sqlite={sh_qty} (loc={db_loc_id})")
+        if c_total_cnt is not None and int(c_total_cnt) != sh_cnt:
+            mismatches.append(f"invCache.hangar_item_count(StationShips) client={c_total_cnt} != sqlite={sh_cnt} (loc={db_loc_id})")
+        if c_total_qty is not None and int(c_total_qty) != sh_qty:
+            mismatches.append(f"invCache.hangar_total_quantity(StationShips) client={c_total_qty} != sqlite={sh_qty} (loc={db_loc_id})")
+    else:
+        if c_ns_cnt is not None and int(c_ns_cnt) != ns_cnt:
+            mismatches.append(f"invCache.hangar_non_ship_count client={c_ns_cnt} != sqlite={ns_cnt} (loc={db_loc_id})")
+        if c_ns_qty is not None and int(c_ns_qty) != ns_qty:
+            mismatches.append(f"invCache.hangar_non_ship_total_quantity client={c_ns_qty} != sqlite={ns_qty} (loc={db_loc_id})")
+        if c_sh_cnt is not None and int(c_sh_cnt) != sh_cnt:
+            mismatches.append(f"invCache.ship_hangar_count client={c_sh_cnt} != sqlite={sh_cnt} (loc={db_loc_id})")
+        if c_sh_qty is not None and int(c_sh_qty) != sh_qty:
+            mismatches.append(f"invCache.ship_hangar_total_quantity client={c_sh_qty} != sqlite={sh_qty} (loc={db_loc_id})")
+        if c_total_cnt is not None and int(c_total_cnt) != h_cnt:
+            mismatches.append(f"invCache.hangar_item_count client={c_total_cnt} != sqlite={h_cnt} (loc={db_loc_id})")
+        if c_total_qty is not None and int(c_total_qty) != h_qty:
+            mismatches.append(f"invCache.hangar_total_quantity client={c_total_qty} != sqlite={h_qty} (loc={db_loc_id})")
+    return mismatches
+
+
+def evaluate_ui_delta_sqlite_parity(
+    world_db_path: Path,
+    state: Dict[str, Any],
+    sde_path: Optional[Path] = None,
+) -> Tuple[bool, str]:
+    """
+    Verify client-cached wallet, invCache, and clone state matches server SQLite (`world_db_path`)
+    without relogging (`#1242`). Any populated (`is not None`) client cache field is compared
+    directly against SQLite truth.
+    """
+    if not world_db_path or not Path(world_db_path).exists():
+        return True, ""
+    sess = (state or {}).get("session") or {}
+    try:
+        char_id = int(sess.get("charid") or 0)
+    except Exception:
+        char_id = 0
+    if char_id <= 0:
+        return True, ""
+
+    wallet = state.get("wallet_state") or {}
+    inv = state.get("inventory_state") or {}
+    clone = state.get("clone_state") or {}
+    has_any_client_cache = any(
+        val is not None
+        for val in (
+            wallet.get("isk_balance"),
+            inv.get("hangar_item_count"),
+            inv.get("hangar_total_quantity"),
+            inv.get("hangar_non_ship_count"),
+            inv.get("hangar_non_ship_total_quantity"),
+            inv.get("ship_hangar_count"),
+            inv.get("ship_hangar_total_quantity"),
+            inv.get("cargo_item_count"),
+            inv.get("cargo_total_quantity"),
+            clone.get("home_station_id"),
+            clone.get("jump_clone_count"),
+        )
+    )
+    if not has_any_client_cache:
+        return True, ""
+
+    try:
+        conn = sqlite3.connect(f"file:{Path(world_db_path).resolve()}?mode=ro", uri=True, timeout=2.0)
+    except Exception:
+        conn = sqlite3.connect(str(world_db_path), timeout=2.0)
+    mismatches: List[str] = []
+    try:
+        cur = conn.cursor()
+        row = cur.execute(
+            "SELECT station_id, structure_id, active_ship_id, balance_cents, record_json "
+            "FROM characters WHERE character_id = ?",
+            (char_id,),
+        ).fetchone()
+        if row is None:
+            return True, ""
+        db_station_id, db_structure_id, db_ship_id, db_balance_cents, raw_rec_json = row
+        if wallet.get("isk_balance") is not None:
+            client_isk = float(wallet["isk_balance"])
+            server_isk = round(float(db_balance_cents) / 100.0, 2)
+            if abs(client_isk - server_isk) > 0.02:
+                mismatches.append(f"wallet.isk_balance client={client_isk:.2f} != sqlite={server_isk:.2f}")
+
+        db_loc_id = db_station_id or db_structure_id
+        if db_loc_id:
+            mismatches.extend(
+                _evaluate_hangar_parity(cur, char_id, int(db_loc_id), inv, sde_path, Path(world_db_path))
+            )
+
+        ship_id = sess.get("shipid") or db_ship_id
+        if ship_id and (inv.get("cargo_item_count") is not None or inv.get("cargo_total_quantity") is not None):
+            c_cnt, c_qty = cur.execute(
+                "SELECT COUNT(*), COALESCE(SUM(quantity), 0) FROM items "
+                "WHERE owner_id = ? AND location_id = ? AND flag = 5",
+                (char_id, int(ship_id)),
+            ).fetchone()
+            if inv.get("cargo_item_count") is not None and int(inv["cargo_item_count"]) != int(c_cnt):
+                mismatches.append(
+                    f"invCache.cargo_item_count client={inv['cargo_item_count']} != sqlite={c_cnt} (ship={ship_id})"
+                )
+            if inv.get("cargo_total_quantity") is not None and int(inv["cargo_total_quantity"]) != int(c_qty):
+                mismatches.append(
+                    f"invCache.cargo_total_quantity client={inv['cargo_total_quantity']} != sqlite={c_qty} (ship={ship_id})"
+                )
+
+        if clone.get("home_station_id") is not None:
+            try:
+                rec_obj = json.loads(raw_rec_json) if raw_rec_json else {}
+            except Exception:
+                rec_obj = {}
+            db_home = rec_obj.get("home_station_id") if isinstance(rec_obj, dict) else None
+            if db_home is not None and int(clone["home_station_id"]) != int(db_home):
+                mismatches.append(
+                    f"clone_state.home_station_id client={clone['home_station_id']} != sqlite={db_home}"
+                )
+
+        if clone.get("jump_clone_count") is not None:
+            jc_row = cur.execute(
+                "SELECT clones_json FROM jump_clones WHERE character_id = ?",
+                (char_id,),
+            ).fetchone()
+            if jc_row and jc_row[0]:
+                try:
+                    jc_parsed = json.loads(jc_row[0])
+                    db_jc_count = len(jc_parsed) if isinstance(jc_parsed, (list, dict)) else 0
+                except Exception:
+                    db_jc_count = 0
+            else:
+                db_jc_count = 0
+            if int(clone["jump_clone_count"]) != int(db_jc_count):
+                mismatches.append(
+                    f"clone_state.jump_clone_count client={clone['jump_clone_count']} != sqlite={db_jc_count}"
+                )
+    except sqlite3.OperationalError:
+        return True, ""
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    if mismatches:
+        return False, "; ".join(mismatches)
+    return True, ""
+
+
 def _unwrap_state_payload(payload: Any) -> Dict[str, Any]:
     """Return UI/session state snapshot dict whether already RPC-unwrapped or nested under `state`/`result`."""
     if not isinstance(payload, dict) or not payload:
@@ -8213,11 +9612,29 @@ class ScenarioRunner(PlaytesterRunner):
         defer_cs = bool(st.get("defer_char_select", False))
         return user, password, char_id, defer_cs
 
+    def _default_target_char_id(self) -> int:
+        return int(self._scenario_auth_params()[2] or 90000001)
+
     def _scenario_requires_gm(self) -> bool:
         return any(
             int(d.get("step_index", 0) or 0) > 0
             for d in getattr(self, "_active_declared_setup_steps", [])
         )
+
+    def _scenario_server_extra_env(self) -> Dict[str, str]:
+        user, _, _, _ = self._scenario_auth_params()
+        if self._scenario_requires_gm() and user == "demo":
+            return {"EVOMU_ADMIN_TOKEN": PLAYTESTER_GM_ADMIN_SECRET}
+        return {}
+
+    def _server_extra_env(self) -> Dict[str, str]:
+        return self._scenario_server_extra_env()
+
+    def _gm_bridge_credentials(self) -> Tuple[str, str, int]:
+        user, _, _, _ = self._scenario_auth_params()
+        if user == "demo":
+            return "admin", PLAYTESTER_GM_ADMIN_SECRET, 90000003
+        return "evomu_scenario_gm", PLAYTESTER_GM_ADMIN_SECRET, 90000099
 
     def write_server_config(self) -> Path:
         self.world_dir.mkdir(parents=True, exist_ok=True)
@@ -8284,14 +9701,18 @@ class ScenarioRunner(PlaytesterRunner):
             f"initial_balance_isk = {initial_isk}",
             f"initial_balance_plex = {initial_plex}",
         ]
-        if requires_gm:
+        # Never share the scenario player's username/char_id with [[admin_accounts]], or
+        # `provision_gm_account` will pre-create a 0-skill character and skip starter_character/seed_demo.
+        # For non-demo accounts, provision a separate helper GM account; for `demo`, pass EVOMU_ADMIN_TOKEN
+        # via `_scenario_server_extra_env` so admin provisioning runs AFTER `populate_demo_snapshot`.
+        if requires_gm and user != "demo":
             lines.extend([
                 "",
                 "[[admin_accounts]]",
-                f"username = {json.dumps(user)}",
-                f"password_token = {json.dumps(password)}",
-                f"character_id = {char_id}",
-                f"character_name = {json.dumps(char_name)}",
+                'username = "evomu_scenario_gm"',
+                'password_token = "evomu-scenario-gm-secret"',
+                "character_id = 90000099",
+                'character_name = "Scenario GM"',
             ])
         cfg_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return cfg_path
@@ -8562,7 +9983,20 @@ class ScenarioRunner(PlaytesterRunner):
             if ok_init:
                 return latest_res, latest_state
 
+        use_tc_bridge = bool(step.get("time_control", False))
         while True:
+            if use_tc_bridge and str((step.get("action") or {}).get("type") or "") != "advance_server_time":
+                try:
+                    wait_target_cid = int(
+                        (latest_state.get("session") or {}).get("charid")
+                        or (step_pre_state.get("session") or {}).get("charid")
+                        or self._default_target_char_id()
+                    )
+                except Exception:
+                    wait_target_cid = self._default_target_char_id()
+                gm_tick_call = self._advance_clock_via_gm_bridge(12, target_char_id=wait_target_cid)
+                if gm_tick_call is not None:
+                    all_calls.append(gm_tick_call)
             tick_res = self.rpc.call(
                 "execute_action",
                 {
@@ -8570,7 +10004,7 @@ class ScenarioRunner(PlaytesterRunner):
                         "type": "wait",
                         "wait_ms": poll_ms,
                         "scenario_mode": True,
-                        "time_control": bool(step.get("time_control", False)),
+                        "time_control": False,
                     }
                 },
                 timeout=max(20.0, (poll_ms / 1000.0) + 15.0),
@@ -8657,7 +10091,7 @@ class ScenarioRunner(PlaytesterRunner):
         step_rpcs: Dict[str, List[str]] = {}
         failure_info: Optional[Dict[str, Any]] = None
         client_version = ""
-        client_build = _detect_system_eve_build(cache_root=DEFAULT_CACHE_ROOT)
+        client_build = _coerce_int_client_build(_detect_system_eve_build(cache_root=DEFAULT_CACHE_ROOT))
         destiny_cls: Optional[Dict[str, Any]] = None
         log_errors: List[str] = []
         client_logs: List[Path] = []
@@ -8720,7 +10154,7 @@ class ScenarioRunner(PlaytesterRunner):
                         obs = self.rpc.call("get_state", timeout=15.0) or {}
                         boot_state = _unwrap_state_payload(obs)
                     if boot_state.get("client_build"):
-                        client_build = str(boot_state["client_build"])
+                        client_build = _coerce_int_client_build(boot_state["client_build"])
                     if boot_state.get("client_version"):
                         client_version = str(boot_state["client_version"])
 
@@ -8737,6 +10171,11 @@ class ScenarioRunner(PlaytesterRunner):
 
                     pre_state = dict(boot_state)
                     recent_rpcs: List[str] = [_format_rpc_name(c) for c in startup_calls if _format_rpc_name(c)]
+                    user_cfg, _, _, _ = self._scenario_auth_params()
+                    primary_char_name = str(
+                        self._active_starting_state.get("character_name")
+                        or ("Demo Pilot" if user_cfg == "demo" else f"Scenario {user_cfg}")
+                    )
 
                     for idx, step in enumerate(scenario["steps"]):
                         step_num = idx + 1
@@ -8745,6 +10184,7 @@ class ScenarioRunner(PlaytesterRunner):
                         act_type = _canonicalize_action_type(str(act.get("type") or ""), bool(act.get("target")))
                         t_step = time.time()
                         ctx = {
+                            "primary_character_name": primary_char_name,
                             "expected_characters": self._active_expected_characters,
                             "startup_macho_calls": startup_calls if idx == 0 else [],
                             "server_bookmark_exists": self._server_bookmark_exists,
@@ -8754,11 +10194,32 @@ class ScenarioRunner(PlaytesterRunner):
                         }
                         if act_type == "wait" and step.get("wait_until"):
                             exec_res, post_state = self._execute_wait_until(step, pre_state, ctx)
+                        elif self._should_dispatch_via_gm_bridge(act, act_type):
+                            try:
+                                target_cid = int(
+                                    (pre_state.get("session") or {}).get("charid")
+                                    or (boot_state.get("session") or {}).get("charid")
+                                    or self._scenario_auth_params()[2]
+                                    or 90000001
+                                )
+                            except Exception:
+                                target_cid = int(self._scenario_auth_params()[2] or 90000001)
+                            exec_res = self._execute_gm_or_time_control_via_bridge(act, act_type, target_cid)
+                            try:
+                                obs = self.rpc.call("get_state", timeout=15.0) or {}
+                                post_state = _unwrap_state_payload(obs)
+                            except Exception:
+                                post_state = {}
+                            if step.get("wait_until"):
+                                exec_res, post_state = self._execute_wait_until(
+                                    step, pre_state, ctx, initial_res=exec_res, initial_state=post_state
+                                )
                         else:
                             payload = dict(act)
                             payload["type"] = act_type
                             payload["scenario_mode"] = True
-                            payload["time_control"] = bool(step.get("time_control", False))
+                            # Player session always stays role = 0; never invoke timeControl.* on it.
+                            payload["time_control"] = False
                             try:
                                 exec_res = self.rpc.call(
                                     "execute_action",
@@ -8790,7 +10251,7 @@ class ScenarioRunner(PlaytesterRunner):
                         if not client_version and isinstance(post_state, dict) and post_state.get("client_version"):
                             client_version = str(post_state["client_version"])
                         if isinstance(post_state, dict) and post_state.get("client_build"):
-                            client_build = str(post_state["client_build"])
+                            client_build = _coerce_int_client_build(post_state["client_build"])
 
                         step_chk_cfg = dict(step.get("checks") or {})
                         ok_step, fail_chk, fail_msg = evaluate_scenario_checks(
@@ -8800,6 +10261,36 @@ class ScenarioRunner(PlaytesterRunner):
                             exec_res,
                             context=ctx,
                         )
+                        if (
+                            ok_step
+                            and self.world_db_path.exists()
+                            and step_chk_cfg.get("ui_delta_without_relog") is not False
+                            and _is_mutating_scenario_step(step, act_type, exec_res)
+                        ):
+                            scenario_sde_path, _ = self._resolve_sde_and_quasar_paths()
+                            ok_delta, delta_msg = evaluate_ui_delta_sqlite_parity(
+                                self.world_db_path, post_state, sde_path=scenario_sde_path
+                            )
+                            if not ok_delta:
+                                delta_deadline = time.time() + 2.0
+                                while time.time() < delta_deadline:
+                                    time.sleep(min(0.25, max(0.05, delta_deadline - time.time())))
+                                    try:
+                                        obs_delta = self.rpc.call("get_state", timeout=5.0) or {}
+                                        polled_state = _unwrap_state_payload(obs_delta)
+                                        if polled_state:
+                                            post_state = polled_state
+                                    except Exception:
+                                        pass
+                                    ok_delta, delta_msg = evaluate_ui_delta_sqlite_parity(
+                                        self.world_db_path, post_state, sde_path=scenario_sde_path
+                                    )
+                                    if ok_delta:
+                                        break
+                            if not ok_delta:
+                                ok_step = False
+                                fail_chk = "ui_delta_without_relog"
+                                fail_msg = f"Client cache diverged from server SQLite after 2.0s without relog: {delta_msg}"
                         cur_logs, cur_tb_path = _gather_client_logs()
                         step_log_errs = scan_scenario_logs_for_errors(
                             slog_path,
@@ -8852,6 +10343,7 @@ class ScenarioRunner(PlaytesterRunner):
                             break
                         pre_state = dict(post_state) if isinstance(post_state, dict) else pre_state
         finally:
+            self._close_gm_bridge()
             self.stop_client()
             self.stop_server()
 
@@ -8888,6 +10380,9 @@ class ScenarioRunner(PlaytesterRunner):
 
         journey_entry = {
             "passed": passed,
+            "ui_scenario": True,
+            "client_build": client_build,
+            "log_errors": list(log_errors),
             "title": scenario["title"],
             "evidence": (
                 f"Scenario {sid!r} completed {len(step_records)} steps in {total_sec:.2f}s cleanly"
@@ -8926,10 +10421,11 @@ class ScenarioRunner(PlaytesterRunner):
         last_server_log = ""
         last_destiny_cls: Optional[Dict[str, Any]] = None
         client_version = ""
-        client_build = ""
+        client_build = 0
 
         for scen in loaded:
             entry, meta = self.run_single_scenario(scen)
+            entry["git_sha"] = server_commit
             journeys[scen["id"]] = entry
             all_client_logs.extend(meta["client_logs"])
             all_log_errors.extend(meta["log_errors"])
@@ -8939,7 +10435,7 @@ class ScenarioRunner(PlaytesterRunner):
             if meta["client_version"]:
                 client_version = meta["client_version"]
             if meta["client_build"]:
-                client_build = meta["client_build"]
+                client_build = _coerce_int_client_build(meta["client_build"])
 
         result_payload = {
             "journeys": journeys,

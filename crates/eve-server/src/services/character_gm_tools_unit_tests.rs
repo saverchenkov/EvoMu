@@ -1631,3 +1631,200 @@ async fn spawn_multi_npc_rollback_cleans_db_ballpark_and_npc_runtime_state() {
         "rollback must clean combat_runtime.npc_entities for prior and failed NPCs"
     );
 }
+
+#[tokio::test]
+async fn gm_bridge_slash_commands_target_explicit_player_across_systems() {
+    let ctx = test_ctx();
+    let gm_cid = 90_000_003_i64;
+    let player_cid = 90_000_001_i64;
+    let gm_sys = 30_000_142_u32;
+    let gm_station = 60_003_760_i64;
+    let player_sys = 30_002_187_u32;
+    let gm_ship_id = 1_000_992_101_i64;
+    let player_ship_id = 1_000_992_102_i64;
+
+    let target_ship_tid = if ctx.sde.types.contains_key(&32880) && ctx.sde.types.contains_key(&483) {
+        32880_u32
+    } else {
+        587_u32
+    };
+    let turret_tid = if target_ship_tid == 32880 { 483_u32 } else { 484_u32 };
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut gm_ch = snap.characters[&player_cid].clone();
+        gm_ch.character_id = gm_cid;
+        gm_ch.name = "Admin GM".into();
+        gm_ch.solar_system_id = gm_sys;
+        gm_ch.station_id = Some(gm_station);
+        gm_ch.structure_id = None;
+        gm_ch.active_ship_id = gm_ship_id;
+        snap.characters.insert(gm_cid, gm_ch);
+
+        if let Some(pch) = snap.characters.get_mut(&player_cid) {
+            pch.solar_system_id = player_sys;
+            pch.station_id = None;
+            pch.structure_id = None;
+            pch.active_ship_id = player_ship_id;
+            pch.security_status = 0.0;
+        }
+        snap.items.insert(
+            gm_ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: gm_ship_id,
+                type_id: target_ship_tid,
+                owner_id: gm_cid,
+                location_id: gm_station,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            player_ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: player_ship_id,
+                type_id: target_ship_tid,
+                owner_id: player_cid,
+                location_id: player_sys as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let sk_map = snap.skills.entry(player_cid).or_default();
+        for sk in [3300_u32, 3301, 3302, 3386, 3392, 3426] {
+            sk_map.insert(
+                sk,
+                eve_db::TrainedSkillRecord {
+                    type_id: sk,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+    });
+
+    let player_handle = ctx.systems.get_or_spawn(player_sys);
+    let ship_ball = Ball {
+        id: player_ship_id,
+        type_id: target_ship_tid,
+        position: DVec3::new(10_000.0, 20_000.0, 30_000.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 50.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let ship_combat = ctx.build_type_combat_state(target_ship_tid);
+    let ship_meta = ctx.build_ship_slim_meta(player_cid, target_ship_tid);
+    player_handle
+        .spawn_ball_with_meta(ship_ball, ship_combat, ship_meta)
+        .await
+        .expect("spawn player ship ball");
+
+    let mut gm_sess = gm_session(gm_cid, gm_ship_id);
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 501, Some(player_cid), true, ctx.now_unix());
+
+    let spawn_res = handle_gm_slash_ext(&ctx, &mut gm_sess, gm_cid, &format!("/spawn {player_cid} 587 1"))
+        .await
+        .expect("handled")
+        .expect("/spawn target player");
+    assert_eq!(
+        spawn_res.dict_get("solarSystemID"),
+        Some(&PyRep::Integer(i64::from(player_sys)))
+    );
+    let spawned_id = spawn_res.dict_get("spawnedID").and_then(|v| v.as_i64()).unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&spawned_id].owner_id, player_cid);
+        assert_eq!(snap.items[&spawned_id].location_id, i64::from(player_sys));
+    });
+    assert!(player_handle.get_ball_snapshot(spawned_id).await.ok().flatten().is_some());
+
+    let wreck_res = handle_gm_slash_ext(
+        &ctx,
+        &mut gm_sess,
+        gm_cid,
+        &format!("/spawnwreck {player_cid} 587 1"),
+    )
+    .await
+    .expect("handled")
+    .expect("/spawnwreck target player");
+    assert_eq!(
+        wreck_res.dict_get("solarSystemID"),
+        Some(&PyRep::Integer(i64::from(player_sys)))
+    );
+
+    let fit_res = handle_gm_slash_ext(
+        &ctx,
+        &mut gm_sess,
+        gm_cid,
+        &format!("/fit {player_cid} {turret_tid}"),
+    )
+    .await
+    .expect("handled")
+    .expect("/fit target player");
+    assert_eq!(fit_res.dict_get("shipID"), Some(&PyRep::Integer(player_ship_id)));
+    let fitted_id = fit_res.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&fitted_id].owner_id, player_cid);
+        assert_eq!(snap.items[&fitted_id].location_id, player_ship_id);
+    });
+
+    let setattr_res = handle_gm_slash_ext(
+        &ctx,
+        &mut gm_sess,
+        gm_cid,
+        &format!("/setattr {player_cid} 37 777"),
+    )
+    .await
+    .expect("handled")
+    .expect("/setattr target player");
+    assert_eq!(setattr_res.dict_get("itemID"), Some(&PyRep::Integer(player_ship_id)));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&player_ship_id].dynamic_attributes.get(&37), Some(&777.0));
+        assert!(!snap.items[&gm_ship_id].dynamic_attributes.contains_key(&37));
+    });
+
+    let load_res = handle_gm_slash_ext(
+        &ctx,
+        &mut gm_sess,
+        gm_cid,
+        &format!("/load {player_cid} 34 250"),
+    )
+    .await
+    .expect("handled")
+    .expect("/load target player");
+    let loaded_id = match &load_res {
+        PyRep::List(items) => items[0].as_i64().unwrap(),
+        other => panic!("expected /load List reply, got {other:?}"),
+    };
+    ctx.db.with_snapshot(|snap| {
+        let rec = &snap.items[&loaded_id];
+        assert_eq!(rec.owner_id, player_cid);
+        assert_eq!(rec.location_id, player_ship_id);
+        assert_eq!(rec.flag, eve_db::InventoryFlag::Cargo);
+        assert_eq!(rec.quantity, 250);
+    });
+
+    handle_gm_slash_ext(&ctx, &mut gm_sess, gm_cid, &format!("/energy {player_cid} 42"))
+        .await
+        .expect("handled")
+        .expect("/energy target player");
+    let sec_res = handle_gm_slash_ext(&ctx, &mut gm_sess, gm_cid, &format!("/secstatus {player_cid} -2.5"))
+        .await
+        .expect("handled")
+        .expect("/secstatus target player");
+    assert_eq!(sec_res, PyRep::Real(-2.5));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&player_cid].security_status, -2.5);
+        assert_ne!(snap.characters[&gm_cid].security_status, -2.5);
+    });
+}
