@@ -3123,9 +3123,13 @@ def _get_state_snapshot(sm):
     inventory_state = {
         "hangar_item_count": None,
         "hangar_total_quantity": None,
+        "hangar_non_ship_count": None,
+        "hangar_non_ship_total_quantity": None,
         "cargo_item_count": None,
         "cargo_total_quantity": None,
         "ship_hangar_count": None,
+        "ship_hangar_total_quantity": None,
+        "hangar_containers_seen": None,
     }
     try:
         ic_svc = getattr(sm, "services", {}).get("invCache")
@@ -3141,6 +3145,22 @@ def _get_state_snapshot(sm):
                 except Exception:
                     return None
 
+            def _item_flag_id(rec):
+                val = rec.get("flagID") if isinstance(rec, dict) else getattr(rec, "flagID", None)
+                if val is None:
+                    val = rec.get("flag") if isinstance(rec, dict) else getattr(rec, "flag", None)
+                try:
+                    return int(val) if val is not None else None
+                except Exception:
+                    return None
+
+            def _item_id(rec):
+                val = rec.get("itemID") if isinstance(rec, dict) else getattr(rec, "itemID", None)
+                try:
+                    return int(val) if val is not None else None
+                except Exception:
+                    return None
+
             def _item_qty(rec):
                 val = rec.get("stacksize") if isinstance(rec, dict) else getattr(rec, "stacksize", None)
                 if val is None:
@@ -3150,6 +3170,14 @@ def _get_state_snapshot(sm):
                 except Exception:
                     return 1
 
+            explicit_cargo_seen = False
+            explicit_cargo_items = []
+            unified_cargo_seen = False
+            unified_cargo_items = []
+            hangar_seen = False
+            hangar_items = []
+            hangar_containers = set()
+
             for ik, iv in invs.items():
                 items_attr = getattr(iv, "items", None)
                 cnt = len(items_attr) if isinstance(items_attr, (dict, list, tuple, set)) else None
@@ -3158,31 +3186,71 @@ def _get_state_snapshot(sm):
                 if isinstance(ik, tuple) and len(ik) >= 1:
                     loc_k = ik[0]
                     flag_k = ik[1] if len(ik) > 1 else None
-                    is_cargo = loc_k == ship_id_i and flag_k in (5, None)
-                    is_hangar = loc_k in st_locs and flag_k == 4
                 elif hasattr(iv, "itemID"):
                     loc_k = getattr(iv, "itemID", None)
                     flag_k = getattr(iv, "flag", None)
                     if flag_k is None:
                         flag_k = getattr(iv, "locationFlag", None)
-                    is_cargo = loc_k == ship_id_i
-                    is_hangar = loc_k in st_locs and flag_k == 4
                 else:
                     continue
                 item_vals = list(items_attr.values()) if isinstance(items_attr, dict) else (
                     list(items_attr) if isinstance(items_attr, (list, tuple, set)) else []
                 )
-                if is_cargo:
-                    inventory_state["cargo_item_count"] = cnt
-                    if cnt is not None:
-                        inventory_state["cargo_total_quantity"] = sum(_item_qty(it) for it in item_vals)
-                elif is_hangar and cnt is not None:
-                    inventory_state["hangar_item_count"] = cnt
-                    inventory_state["hangar_total_quantity"] = sum(_item_qty(it) for it in item_vals)
-                    ship_cnt = sum(1 for it in item_vals if _item_category_id(it) == 6)
-                    if inventory_state["ship_hangar_count"] is None:
-                        inventory_state["ship_hangar_count"] = 0
-                    inventory_state["ship_hangar_count"] += ship_cnt
+                if ship_id_i is not None and loc_k == ship_id_i:
+                    if flag_k == 5:
+                        explicit_cargo_seen = True
+                        for it in item_vals:
+                            if _item_flag_id(it) in (None, 5):
+                                explicit_cargo_items.append(it)
+                    elif flag_k is None:
+                        unified_cargo_seen = True
+                        for it in item_vals:
+                            if _item_flag_id(it) == 5:
+                                unified_cargo_items.append(it)
+                elif (loc_k in st_locs or loc_k == 10004) and flag_k in (4, None):
+                    hangar_seen = True
+                    if loc_k == 10004:
+                        hangar_containers.add("StationItems")
+                    if loc_k in st_locs:
+                        hangar_containers.add("StationHangar")
+                    for it in item_vals:
+                        if flag_k == 4 and _item_flag_id(it) in (None, 4):
+                            hangar_items.append(it)
+                        elif flag_k is None and _item_flag_id(it) == 4:
+                            hangar_items.append(it)
+
+            def _dedup_inv_items(raw_list):
+                deduped = []
+                seen_ids = set()
+                for it in raw_list:
+                    iid = _item_id(it)
+                    if iid is not None:
+                        if iid in seen_ids:
+                            continue
+                        seen_ids.add(iid)
+                    deduped.append(it)
+                return deduped
+
+            if explicit_cargo_seen:
+                cargo_list = _dedup_inv_items(explicit_cargo_items)
+                inventory_state["cargo_item_count"] = len(cargo_list)
+                inventory_state["cargo_total_quantity"] = sum(_item_qty(it) for it in cargo_list)
+            elif unified_cargo_seen:
+                cargo_list = _dedup_inv_items(unified_cargo_items)
+                inventory_state["cargo_item_count"] = len(cargo_list)
+                inventory_state["cargo_total_quantity"] = sum(_item_qty(it) for it in cargo_list)
+
+            if hangar_seen:
+                hangar_list = _dedup_inv_items(hangar_items)
+                non_ship_list = [it for it in hangar_list if _item_category_id(it) != 6]
+                ship_list = [it for it in hangar_list if _item_category_id(it) == 6]
+                inventory_state["hangar_item_count"] = len(hangar_list)
+                inventory_state["hangar_total_quantity"] = sum(_item_qty(it) for it in hangar_list)
+                inventory_state["hangar_non_ship_count"] = len(non_ship_list)
+                inventory_state["hangar_non_ship_total_quantity"] = sum(_item_qty(it) for it in non_ship_list)
+                inventory_state["ship_hangar_count"] = len(ship_list)
+                inventory_state["ship_hangar_total_quantity"] = sum(_item_qty(it) for it in ship_list)
+                inventory_state["hangar_containers_seen"] = sorted(hangar_containers)
     except Exception:
         pass
 
@@ -3699,7 +3767,7 @@ def get_open_window_cmd_map():
     return dict(cmd_map)
 
 
-def _click_top_tabs_in_window(target="", max_tabs=6):
+def _click_top_tabs_in_window(target="", max_tabs=6, require_match=False):
     """Click through visible top-level tabs inside the matching (or topmost) open window."""
     uicore = _get_uicore()
     reg = getattr(uicore, "registry", None) if uicore is not None else None
@@ -3718,13 +3786,19 @@ def _click_top_tabs_in_window(target="", max_tabs=6):
         if t_low in wid.replace("_", "") or t_low in wcap.replace(" ", "") or t_low in wcls:
             chosen = w
             break
-    if chosen is None and wins:
+    if chosen is None and wins and not (require_match and t_low):
         for w in reversed(wins):
             if w is not None and not getattr(w, "destroyed", False) and _is_visible(w):
                 chosen = w
                 break
     if chosen is None:
-        return {"ok": True, "tabs_clicked": 0, "clicked_tabs": [], "window": None}
+        return {
+            "ok": False,
+            "error": "no visible open window found for click_top_tabs (target=%r)" % (target,),
+            "tabs_clicked": 0,
+            "clicked_tabs": [],
+            "window": None,
+        }
 
     chosen_id = _safe_str(getattr(chosen, "windowID", None) or getattr(chosen, "name", "") or chosen.__class__.__name__, 64)
     seen = set()
@@ -3797,7 +3871,7 @@ def _click_top_tabs_in_window(target="", max_tabs=6):
     }
 
 
-def _open_client_window(sm, target):
+def _open_client_window(sm, target, require_open=False):
     uicore = _get_uicore()
     layers = getattr(uicore, "layer", None) if uicore is not None else None
     menu_layer = getattr(layers, "menu", None) if layers is not None else None
@@ -3914,7 +3988,16 @@ def _open_client_window(sm, target):
                 pass
             return snap
 
+        def _current_sec_view():
+            try:
+                vs_cur = sm.GetService("viewState") if sm is not None else None
+                vi_cur = vs_cur.GetCurrentViewInfo() if (vs_cur is not None and hasattr(vs_cur, "GetCurrentViewInfo")) else None
+                return _safe_str(getattr(vi_cur, "name", "") or "", 48)
+            except Exception:
+                return ""
+
         pre_snap = _reg_window_vis_map()
+        pre_sec_view = _current_sec_view()
         fn = getattr(cmd_svc, mname)
         cmd_args = ()
         if mname == "OpenAgencyContentGroup" and t == "agentfinder":
@@ -3937,14 +4020,50 @@ def _open_client_window(sm, target):
         post_snap = _reg_window_vis_map()
         closed_ids = [wid for wid in pre_snap if wid not in post_snap]
         opened_vis_ids = [wid for wid, vis in post_snap.items() if wid not in pre_snap and vis]
+        retried = False
         if closed_ids and not opened_vis_ids:
             # ToggleOpenClose-style commands (e.g. OpenLedger / CmdToggleMap) close an already-open
             # window or an invisible zombie left by an earlier ApplyAttributes exception; re-invoke
             # once so open_neocom guarantees opening (or surfacing the real init exception).
             fn(*cmd_args)
             H._sleep_ms(500)
-            return {"ok": True, "opened_via": "uicore.cmd.%s (retried after toggle-close)" % mname}
-        return {"ok": True, "opened_via": "uicore.cmd.%s" % mname}
+            retried = True
+            post_snap = _reg_window_vis_map()
+            opened_vis_ids = [wid for wid, vis in post_snap.items() if wid not in pre_snap and vis]
+
+        if require_open and reg is not None and hasattr(reg, "GetWindows"):
+            post_sec_view = _current_sec_view()
+            sec_opened = bool(
+                post_sec_view
+                and (
+                    post_sec_view != pre_sec_view
+                    or post_sec_view in _ASYNC_SECONDARY_VIEWS
+                    or post_sec_view in ("skill_plan", "starmap_new", "systemmap_new", "planet", "shiptree", "paint_tool", "virtual_goods_store", "aurumstore", "career_portal")
+                )
+            )
+            matching_visible = False
+            try:
+                for rw in list(reg.GetWindows() or []):
+                    if rw is None or getattr(rw, "destroyed", False) or not _is_visible(rw):
+                        continue
+                    wid_s = _safe_str(getattr(rw, "windowID", None) or getattr(rw, "name", ""), 64).lower()
+                    wcap_s = _strip_tags(_safe_str(getattr(rw, "caption", None) or "", 64)).lower()
+                    wcls_s = rw.__class__.__name__.lower()
+                    if any(sys_tok in wid_s for sys_tok in ("neocom", "chatchannel", "l_main")):
+                        continue
+                    if t and (t in wid_s.replace("_", "") or t in wcap_s.replace(" ", "") or t in wcls_s):
+                        matching_visible = True
+                        break
+            except Exception:
+                pass
+            if not opened_vis_ids and not matching_visible and not sec_opened:
+                return {
+                    "ok": False,
+                    "error": "open_window %r produced no visible window or secondary view (cmd=%s)" % (raw_target, mname),
+                }
+
+        via_msg = "uicore.cmd.%s (retried after toggle-close)" % mname if retried else "uicore.cmd.%s" % mname
+        return {"ok": True, "opened_via": via_msg, "opened_window_count": len(opened_vis_ids)}
 
     if t in ("nes", "newedenstore", "plexstore", "aurumstore", "store"):
         try:
@@ -4350,7 +4469,8 @@ def _execute_action(sm, action):
                 _dismiss_pinned_tooltip_if_outside(None)
             sess = getattr(__builtin__, "session", None)
             if atype == "open_window":
-                open_res = _open_client_window(sm, target)
+                req_open = bool(action.get("require_window_open"))
+                open_res = _open_client_window(sm, target, require_open=req_open)
                 result.update(open_res)
                 if open_res.get("ok") and action.get("click_top_tabs"):
                     tab_res = _click_top_tabs_in_window(target, max_tabs=int(action.get("max_tabs", 6) or 6))
@@ -4394,8 +4514,30 @@ def _execute_action(sm, action):
                         H._sleep_ms(450)
                         result["show_info_type_id"] = tid_int
                         result["category"] = _to_utf8(action.get("category") or "")
-                        if action.get("click_top_tabs"):
-                            tab_res = _click_top_tabs_in_window("info", max_tabs=int(action.get("max_tabs", 6) or 6))
+                        reg_si = getattr(uicore, "registry", None) if uicore is not None else None
+                        if reg_si is not None and hasattr(reg_si, "GetWindows"):
+                            found_info_wid = None
+                            for rw in reversed(list(reg_si.GetWindows() or [])):
+                                if rw is None or getattr(rw, "destroyed", False) or not _is_visible(rw):
+                                    continue
+                                wid_si = _safe_str(getattr(rw, "windowID", None) or getattr(rw, "name", ""), 64)
+                                wcap_si = _strip_tags(_safe_str(getattr(rw, "caption", None) or "", 64))
+                                wcls_si = rw.__class__.__name__
+                                hay_si = (wid_si + " " + wcap_si + " " + wcls_si).lower()
+                                if "info" in hay_si:
+                                    found_info_wid = wid_si or wcls_si
+                                    break
+                            if found_info_wid is None:
+                                result["ok"] = False
+                                result["error"] = "show_info did not open a visible InfoWindow (type_id=%d)" % tid_int
+                            else:
+                                result["opened_window"] = found_info_wid
+                        if result.get("ok", True) and action.get("click_top_tabs"):
+                            tab_res = _click_top_tabs_in_window(
+                                "info",
+                                max_tabs=int(action.get("max_tabs", 6) or 6),
+                                require_match=True,
+                            )
                             result["tabs"] = tab_res
                             if not tab_res.get("ok"):
                                 result["ok"] = False

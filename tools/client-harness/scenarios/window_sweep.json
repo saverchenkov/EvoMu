@@ -15,7 +15,8 @@
         "target": "inventory",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'inventory' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'inventory' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -44,7 +45,8 @@
         "target": "cargohold",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'cargohold' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'cargohold' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -73,7 +75,8 @@
         "target": "shiphangar",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'shiphangar' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'shiphangar' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -102,7 +105,8 @@
         "target": "itemhangar",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'itemhangar' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'itemhangar' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -131,7 +135,8 @@
         "target": "market",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'market' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'market' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -160,7 +165,8 @@
         "target": "marketorders",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'marketorders' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'marketorders' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -189,7 +195,8 @@
         "target": "multibuy",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'multibuy' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'multibuy' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -218,7 +225,8 @@
         "target": "charsheet",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'charsheet' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'charsheet' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -247,7 +255,8 @@
         "target": "skills",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'skills' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'skills' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -276,7 +285,8 @@
         "target": "skilltree",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'skilltree' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'skilltree' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -305,7 +315,8 @@
         "target": "nes",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'nes' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'nes' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -334,7 +345,8 @@
         "target": "plexvault",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'plexvault' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'plexvault' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -363,7 +375,8 @@
         "target": "fitting",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'fitting' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'fitting' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -392,7 +405,8 @@
         "target": "fittingmgmt",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'fittingmgmt' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'fittingmgmt' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -421,7 +435,8 @@
         "target": "contracts",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'contracts' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'contracts' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -450,7 +465,8 @@
         "target": "industry",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'industry' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'industry' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -479,7 +495,8 @@
         "target": "planets",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'planets' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'planets' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -508,7 +525,8 @@
         "target": "corp",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'corp' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'corp' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -537,7 +555,8 @@
         "target": "fleet",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'fleet' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'fleet' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -566,7 +585,8 @@
         "target": "agency",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'agency' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'agency' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -595,7 +615,8 @@
         "target": "jobboard",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'jobboard' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'jobboard' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -624,7 +645,8 @@
         "target": "assets",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'assets' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'assets' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -653,7 +675,8 @@
         "target": "wallet",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'wallet' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'wallet' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -682,7 +705,8 @@
         "target": "mail",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'mail' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'mail' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -711,7 +735,8 @@
         "target": "notifications",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'notifications' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'notifications' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -740,7 +765,8 @@
         "target": "map",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'map' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'map' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -769,7 +795,8 @@
         "target": "solarsystemmap",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'solarsystemmap' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'solarsystemmap' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -798,7 +825,8 @@
         "target": "notepad",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'notepad' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'notepad' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -827,7 +855,8 @@
         "target": "calculator",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'calculator' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'calculator' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -856,7 +885,8 @@
         "target": "calendar",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'calendar' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'calendar' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -885,7 +915,8 @@
         "target": "journal",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'journal' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'journal' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -914,7 +945,8 @@
         "target": "agentfinder",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'agentfinder' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'agentfinder' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -943,7 +975,8 @@
         "target": "lpstore",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'lpstore' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'lpstore' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -972,7 +1005,8 @@
         "target": "repair",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'repair' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'repair' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1001,7 +1035,8 @@
         "target": "reprocessing",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'reprocessing' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'reprocessing' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1030,7 +1065,8 @@
         "target": "miningledger",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'miningledger' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'miningledger' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1059,7 +1095,8 @@
         "target": "mininghold",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'mininghold' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'mininghold' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1088,7 +1125,8 @@
         "target": "mineralhold",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'mineralhold' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'mineralhold' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1117,7 +1155,8 @@
         "target": "insurance",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'insurance' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'insurance' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1146,7 +1185,8 @@
         "target": "bountyoffice",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'bountyoffice' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'bountyoffice' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1175,7 +1215,8 @@
         "target": "securityoffice",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'securityoffice' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'securityoffice' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1204,7 +1245,8 @@
         "target": "militia",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'militia' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'militia' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1233,7 +1275,8 @@
         "target": "factionalwarfare",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'factionalwarfare' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'factionalwarfare' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1262,7 +1305,8 @@
         "target": "insurgency",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'insurgency' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'insurgency' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1291,7 +1335,8 @@
         "target": "skinr",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'skinr' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'skinr' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1320,7 +1365,8 @@
         "target": "structurebrowser",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'structurebrowser' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'structurebrowser' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1349,7 +1395,8 @@
         "target": "shiptree",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'shiptree' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'shiptree' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1378,7 +1425,8 @@
         "target": "aircareerprogram",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'aircareerprogram' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'aircareerprogram' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1407,7 +1455,8 @@
         "target": "peopleandplaces",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'peopleandplaces' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'peopleandplaces' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1436,7 +1485,8 @@
         "target": "locations",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'locations' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'locations' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1465,7 +1515,8 @@
         "target": "compare",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'compare' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'compare' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1494,7 +1545,8 @@
         "target": "channels",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'channels' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'channels' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1523,7 +1575,8 @@
         "target": "help",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'help' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'help' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1552,7 +1605,8 @@
         "target": "log",
         "click_top_tabs": true,
         "wait_ms": 250,
-        "expected_ui_and_state_change": "Window 'log' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Window 'log' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1587,7 +1641,8 @@
       "checks": {
         "no_error_reply": true,
         "no_client_exception": true,
-        "no_server_unimplemented_rpc": true
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
       }
     },
     {
@@ -1617,7 +1672,8 @@
       "checks": {
         "no_error_reply": true,
         "no_client_exception": true,
-        "no_server_unimplemented_rpc": true
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
       }
     },
     {
@@ -1647,7 +1703,8 @@
       "checks": {
         "no_error_reply": true,
         "no_client_exception": true,
-        "no_server_unimplemented_rpc": true
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
       }
     },
     {
@@ -1677,7 +1734,8 @@
       "checks": {
         "no_error_reply": true,
         "no_client_exception": true,
-        "no_server_unimplemented_rpc": true
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
       }
     },
     {
@@ -1707,7 +1765,8 @@
       "checks": {
         "no_error_reply": true,
         "no_client_exception": true,
-        "no_server_unimplemented_rpc": true
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
       }
     },
     {
@@ -1737,7 +1796,8 @@
       "checks": {
         "no_error_reply": true,
         "no_client_exception": true,
-        "no_server_unimplemented_rpc": true
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
       }
     },
     {
@@ -1767,7 +1827,8 @@
       "checks": {
         "no_error_reply": true,
         "no_client_exception": true,
-        "no_server_unimplemented_rpc": true
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
       }
     },
     {
@@ -1797,7 +1858,8 @@
       "checks": {
         "no_error_reply": true,
         "no_client_exception": true,
-        "no_server_unimplemented_rpc": true
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
       }
     },
     {
@@ -1827,7 +1889,8 @@
       "checks": {
         "no_error_reply": true,
         "no_client_exception": true,
-        "no_server_unimplemented_rpc": true
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
       }
     },
     {
@@ -1857,7 +1920,8 @@
       "checks": {
         "no_error_reply": true,
         "no_client_exception": true,
-        "no_server_unimplemented_rpc": true
+        "no_server_unimplemented_rpc": true,
+        "expect_window_open": "info"
       }
     },
     {
@@ -1886,12 +1950,39 @@
         "timeout_ms": 35000,
         "poll_interval_ms": 1000,
         "checks": {
-          "ship_mode": "space",
+          "expect_session_field": "stationid==None",
+          "state_checks": [
+            {
+              "field": "active_view",
+              "equals": "inflight"
+            }
+          ],
+          "ship_mode": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
           "ship_shown": true
         }
       },
       "checks": {
-        "ship_mode": "space",
+        "expect_session_field": "stationid==None",
+        "state_checks": [
+          {
+            "field": "active_view",
+            "equals": "inflight"
+          }
+        ],
+        "ship_mode": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "ship_shown": true,
         "no_error_reply": true,
         "no_client_exception": true,
         "no_server_unimplemented_rpc": true
@@ -1905,7 +1996,8 @@
         "target": "dscan",
         "click_top_tabs": true,
         "wait_ms": 300,
-        "expected_ui_and_state_change": "Space window 'dscan' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Space window 'dscan' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1934,7 +2026,8 @@
         "target": "probe",
         "click_top_tabs": true,
         "wait_ms": 300,
-        "expected_ui_and_state_change": "Space window 'probe' opens without client exception or RPC error"
+        "expected_ui_and_state_change": "Space window 'probe' opens without client exception or RPC error",
+        "require_window_open": true
       },
       "checks": {
         "no_error_reply": true,
@@ -1953,6 +2046,41 @@
       "checks": {
         "no_error_reply": true,
         "no_client_exception": true
+      }
+    },
+    {
+      "id": "dock_back_jita",
+      "description": "Dock back at Jita IV - Moon 4 Caldari Navy Assembly Plant cleanly after space window sweep",
+      "action": {
+        "type": "dock",
+        "target": "60003760",
+        "item_id": 60003760,
+        "expected_ui_and_state_change": "Ship docks back into Jita IV - Moon 4 station hangar cleanly"
+      },
+      "wait_until": {
+        "timeout_ms": 60000,
+        "poll_interval_ms": 1500,
+        "checks": {
+          "expect_session_field": "stationid==60003760",
+          "state_checks": [
+            {
+              "field": "active_view",
+              "equals": "hangar"
+            }
+          ]
+        }
+      },
+      "checks": {
+        "expect_session_field": "stationid==60003760",
+        "state_checks": [
+          {
+            "field": "active_view",
+            "equals": "hangar"
+          }
+        ],
+        "no_error_reply": true,
+        "no_client_exception": true,
+        "no_server_unimplemented_rpc": true
       }
     }
   ]

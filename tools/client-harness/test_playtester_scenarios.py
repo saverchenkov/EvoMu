@@ -1129,7 +1129,8 @@ class TestScenarioReviewFixes(unittest.TestCase):
             self.assertTrue(seen_payloads[0].get("scenario_mode"))
             self.assertFalse(seen_payloads[0].get("time_control"))
             self.assertTrue(seen_payloads[1].get("scenario_mode"))
-            self.assertTrue(seen_payloads[1].get("time_control"))
+            # BF-1242-02: player session stays role = 0 so execute_action never enables client-side time_control
+            self.assertFalse(seen_payloads[1].get("time_control"))
 
     def test_mid_run_per_step_log_offsets_fail_at_offending_step(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1793,6 +1794,274 @@ class Test1202R4And1242Acceptance(unittest.TestCase):
             )
             with self.assertRaises(playtester.ScenarioValidationError):
                 playtester.load_scenario_file(bad)
+
+        undock_step = next(st for st in loaded["steps"] if st["id"] == "undock_for_space_windows")
+        self.assertEqual(undock_step["checks"]["state_checks"], [{"field": "active_view", "equals": "inflight"}])
+        self.assertEqual(undock_step["checks"]["ship_mode"], [0, 1, 2, 3, 4])
+        self.assertEqual(loaded["steps"][-1]["id"], "dock_back_jita")
+        self.assertEqual(loaded["steps"][-1]["action"]["type"], "dock")
+        open_steps = [st for st in loaded["steps"] if st["action"].get("type") == "open_window"]
+        self.assertEqual(len(open_steps), 56)
+        self.assertTrue(all(st["action"].get("require_window_open") is True for st in open_steps))
+        si_steps = [st for st in loaded["steps"] if st["action"].get("type") == "show_info"]
+        self.assertEqual(len(si_steps), 10)
+        self.assertTrue(all(st["checks"].get("expect_window_open") == "info" for st in si_steps))
+
+    def test_validate_scenario_rejects_string_or_bool_ship_mode(self):
+        for bad_mode in ("space", True, [], [1, "space"]):
+            with self.assertRaises(playtester.ScenarioValidationError):
+                playtester.validate_scenario({
+                    "id": "bad_sm",
+                    "steps": [{
+                        "id": "s1",
+                        "action": {"type": "undock"},
+                        "checks": {"ship_mode": bad_mode},
+                    }],
+                })
+        ok_int = playtester.validate_scenario({
+            "id": "ok_sm_int",
+            "steps": [{"id": "s1", "action": {"type": "undock"}, "checks": {"ship_mode": 1}}],
+        })
+        self.assertEqual(ok_int["steps"][0]["checks"]["ship_mode"], 1)
+        ok_list = playtester.validate_scenario({
+            "id": "ok_sm_list",
+            "steps": [{"id": "s1", "action": {"type": "undock"}, "checks": {"ship_mode": [0, 1, 2, 3, 4]}}],
+        })
+        self.assertEqual(ok_list["steps"][0]["checks"]["ship_mode"], [0, 1, 2, 3, 4])
+
+    def test_ui_delta_sqlite_parity_reconciles_station_items_and_station_ships(self):
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            world_db = root / "world.sqlite"
+            sde_db = root / "sde.sqlite"
+            sde_conn = sqlite3.connect(str(sde_db))
+            try:
+                sde_conn.execute("CREATE TABLE sde_types (type_id INTEGER PRIMARY KEY, category_id INTEGER)")
+                sde_conn.execute("INSERT INTO sde_types VALUES (34, 4)")
+                sde_conn.execute("INSERT INTO sde_types VALUES (587, 6)")
+                sde_conn.commit()
+            finally:
+                sde_conn.close()
+            w_conn = sqlite3.connect(str(world_db))
+            try:
+                w_conn.execute("CREATE TABLE characters (character_id INTEGER PRIMARY KEY, station_id INTEGER, structure_id INTEGER, active_ship_id INTEGER, balance_cents INTEGER, record_json TEXT)")
+                w_conn.execute("CREATE TABLE items (item_id INTEGER PRIMARY KEY, type_id INTEGER, owner_id INTEGER, location_id INTEGER, flag INTEGER, quantity INTEGER, singleton INTEGER, version INTEGER, record_json TEXT)")
+                w_conn.execute("INSERT INTO characters VALUES (90000001, 60003760, NULL, 100000001, 10000000, '{}')")
+                w_conn.execute("INSERT INTO items VALUES (100000001, 587, 90000001, 60003760, 4, 1, 1, 1, '{}')")
+                w_conn.execute("INSERT INTO items VALUES (2001, 34, 90000001, 60003760, 4, 500, 0, 1, '{}')")
+                w_conn.commit()
+            finally:
+                w_conn.close()
+
+            # Client only cached StationItems (10004, 4): 1 non-ship qty 500, 0 ships
+            ok_items, msg_items = playtester.evaluate_ui_delta_sqlite_parity(
+                world_db,
+                {
+                    "session": {"charid": 90000001, "stationid": 60003760},
+                    "inventory_state": {
+                        "hangar_containers_seen": ["StationItems"],
+                        "hangar_item_count": 1,
+                        "hangar_total_quantity": 500,
+                        "hangar_non_ship_count": 1,
+                        "hangar_non_ship_total_quantity": 500,
+                        "ship_hangar_count": 0,
+                        "ship_hangar_total_quantity": 0,
+                    },
+                },
+                sde_path=sde_db,
+            )
+            self.assertTrue(ok_items, msg_items)
+
+            # Client cached unified StationItems + StationHangar: 1 non-ship + 1 ship
+            ok_both, msg_both = playtester.evaluate_ui_delta_sqlite_parity(
+                world_db,
+                {
+                    "session": {"charid": 90000001, "stationid": 60003760},
+                    "inventory_state": {
+                        "hangar_containers_seen": ["StationHangar", "StationItems"],
+                        "hangar_item_count": 2,
+                        "hangar_total_quantity": 501,
+                        "hangar_non_ship_count": 1,
+                        "hangar_non_ship_total_quantity": 500,
+                        "ship_hangar_count": 1,
+                        "ship_hangar_total_quantity": 1,
+                    },
+                },
+                sde_path=sde_db,
+            )
+            self.assertTrue(ok_both, msg_both)
+
+            # StationHangar WAS loaded but ship disappeared -> must fail
+            ok_miss_ship, msg_miss_ship = playtester.evaluate_ui_delta_sqlite_parity(
+                world_db,
+                {
+                    "session": {"charid": 90000001, "stationid": 60003760},
+                    "inventory_state": {
+                        "hangar_containers_seen": ["StationHangar", "StationItems"],
+                        "hangar_item_count": 1,
+                        "hangar_total_quantity": 500,
+                        "hangar_non_ship_count": 1,
+                        "hangar_non_ship_total_quantity": 500,
+                        "ship_hangar_count": 0,
+                        "ship_hangar_total_quantity": 0,
+                    },
+                },
+                sde_path=sde_db,
+            )
+            self.assertFalse(ok_miss_ship)
+            self.assertIn("ship_hangar_count", msg_miss_ship)
+
+            # StationItems WAS loaded but non-ship item disappeared -> must fail
+            ok_miss_item, msg_miss_item = playtester.evaluate_ui_delta_sqlite_parity(
+                world_db,
+                {
+                    "session": {"charid": 90000001, "stationid": 60003760},
+                    "inventory_state": {
+                        "hangar_containers_seen": ["StationItems"],
+                        "hangar_item_count": 0,
+                        "hangar_total_quantity": 0,
+                        "hangar_non_ship_count": 0,
+                        "hangar_non_ship_total_quantity": 0,
+                        "ship_hangar_count": 0,
+                    },
+                },
+                sde_path=sde_db,
+            )
+            self.assertFalse(ok_miss_item)
+            self.assertIn("hangar_non_ship_count", msg_miss_item)
+
+    def test_scenario_gm_and_time_control_route_via_gm_bridge_keeping_player_role_zero(self):
+        import types
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for label, acct, exp_gm_user, exp_gm_cid, target_cid in (
+                ("custom", "caldari_pilot", "evomu_scenario_gm", 90000099, 91000011),
+                ("demo", "demo", "admin", 90000003, 90000001),
+            ):
+                scen_path = root / f"{label}_gm_bridge.json"
+                scen_path.write_text(
+                    json.dumps({
+                        "id": f"{label}_gm_bridge",
+                        "starting_state": {"account": acct, "password": "pw", "char_id": target_cid},
+                        "steps": [
+                            {
+                                "id": "gm_giveisk",
+                                "setup": True,
+                                "action": {"type": "slash_command", "command": "/giveisk 5000000"},
+                                "checks": {"rpc_sent": ["slash.SlashCmd"]},
+                            },
+                            {
+                                "id": "gm_advance",
+                                "time_control": True,
+                                "action": {"type": "advance_server_time", "target": "60"},
+                                "checks": {"rpc_sent": ["timeControl.AdvanceClock"]},
+                            },
+                            {
+                                "id": "player_undock",
+                                "time_control": True,
+                                "action": {"type": "undock"},
+                                "wait_until": {"timeout_ms": 5000, "poll_interval_ms": 250, "checks": {"state_checks": [{"field": "active_view", "equals": "inflight"}]}},
+                                "checks": {"state_checks": [{"field": "active_view", "equals": "inflight"}]},
+                            },
+                        ],
+                    }),
+                    encoding="utf-8",
+                )
+                runner = self._runner_in_dir(root / label, [scen_path])
+                gm_events = []
+                player_exec_actions = []
+                view_state = {"view": "hangar", "poll": 0}
+
+                class _FakeGmConn:
+                    def __init__(self):
+                        self.connected = True
+                    def close(self):
+                        self.connected = False
+                        gm_events.append(("close",))
+
+                class _FakeSvc:
+                    def __init__(self, svc_name):
+                        self.svc_name = svc_name
+                    def Login(self, u, pw):
+                        gm_events.append(("Login", u, pw))
+                        return True
+                    def GetCharactersToSelect(self):
+                        return [{"characterID": exp_gm_cid}]
+                    def SelectCharacterID(self, cid):
+                        gm_events.append(("SelectCharacterID", cid))
+                        return True
+                    def SlashCmd(self, cmd):
+                        gm_events.append(("SlashCmd", cmd))
+                        return {"ok": True}
+                    def AdvanceClock(self, secs):
+                        gm_events.append(("AdvanceClock", secs))
+                        return True
+                    def ClearSessionTimer(self):
+                        gm_events.append(("ClearSessionTimer",))
+                        return True
+
+                fake_bridge = types.ModuleType("evomu_bridge")
+                def _install_hook(sm, host="127.0.0.1", port=26000):
+                    sm.RemoteSvc = lambda name: _FakeSvc(name)
+                    return _FakeGmConn()
+                fake_bridge.install_service_manager_hook = _install_hook
+
+                def _fake_rpc_call(method, params=None, timeout=15.0):
+                    if method == "execute_action":
+                        act = (params or {}).get("action") or {}
+                        player_exec_actions.append(dict(act))
+                        if act.get("type") == "wait":
+                            view_state["poll"] += 1
+                            if view_state["poll"] >= 1:
+                                view_state["view"] = "inflight"
+                        return {
+                            "action_ok": True,
+                            "post_state": {
+                                "client_build": "3698585",
+                                "active_view": view_state["view"],
+                                "session": {"charid": target_cid, "solarsystemid2": 30000142},
+                            },
+                            "flight_recorder": {"macho_calls": []},
+                        }
+                    if method == "get_state":
+                        return {
+                            "client_build": "3698585",
+                            "active_view": view_state["view"],
+                            "session": {"charid": target_cid, "solarsystemid2": 30000142},
+                        }
+                    return {"ok": True}
+
+                runner.rpc = mock.Mock()
+                runner.rpc.call.side_effect = _fake_rpc_call
+                runner.start_server = lambda reset_db=True: True
+                def _boot():
+                    runner._last_boot_result = {
+                        "ok": True,
+                        "state": {"client_build": "3698585", "active_view": "hangar", "session": {"charid": target_cid}},
+                        "flight_recorder": {"macho_calls": []},
+                    }
+                    return True
+                runner.start_client = _boot
+                runner.stop_client = lambda: None
+                runner.stop_server = lambda: None
+
+                with mock.patch.dict(sys.modules, {"evomu_bridge": fake_bridge}), \
+                     mock.patch.object(playtester, "get_git_head", return_value="abc1234"), \
+                     mock.patch.object(runner, "_run_destiny_parity_check", return_value=None):
+                    rc = runner.run_scenarios()
+                self.assertEqual(rc, 0, gm_events)
+                self.assertIn(("Login", exp_gm_user, "evomu-scenario-gm-secret"), gm_events)
+                self.assertIn(("SelectCharacterID", exp_gm_cid), gm_events)
+                self.assertIn(("SlashCmd", f"/giveisk {target_cid} 5000000"), gm_events)
+                self.assertIn(("AdvanceClock", 60), gm_events)
+                self.assertIn(("AdvanceClock", 12), gm_events)
+                self.assertIn(("close",), gm_events)
+                # Player session (role = 0) never receives slash_command / advance_server_time or time_control=True
+                self.assertTrue(all(a.get("time_control") is False for a in player_exec_actions), player_exec_actions)
+                self.assertFalse(any(a.get("type") in ("slash_command", "advance_server_time") for a in player_exec_actions))
 
 
 if __name__ == "__main__":

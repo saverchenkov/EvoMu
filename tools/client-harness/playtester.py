@@ -4679,13 +4679,36 @@ class PlaytesterBugOracle:
     _TB_EXC_LINE_RE = re.compile(
         r"^[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning|Exit|Interrupt|Iteration|Failure)(?:\s*:.*)?$"
     )
+    _BUILD_PATH_PREFIX_RE = re.compile(
+        r"(?:/Users/[^/]+/(?:[^\"'\s]+/)?)?(?:work/[0-9a-fA-F]+/)?eve/release/V\d+\.\d+/",
+        re.IGNORECASE,
+    )
+    _TB_FILE_FRAME_RE = re.compile(
+        r'File\s+"([^"]+)",\s+line\s+(\d+)(?:,\s+in\s+(\S+))?'
+    )
+
+    @classmethod
+    def _strip_build_path_prefix(cls, text: str) -> str:
+        return cls._BUILD_PATH_PREFIX_RE.sub("", str(text or ""))
+
+    @classmethod
+    def _format_concise_frame(cls, frame_line: str) -> str:
+        norm = cls._strip_build_path_prefix(frame_line).strip()
+        m = cls._TB_FILE_FRAME_RE.search(norm)
+        if m:
+            fpath, lineno, func = m.group(1), m.group(2), m.group(3) or "?"
+            # Preserve the meaningful relative module path (or last 3 path parts)
+            parts = [p for p in fpath.replace("\\", "/").split("/") if p]
+            short_path = "/".join(parts[-4:]) if len(parts) > 4 else "/".join(parts)
+            return f'File "{short_path}", line {lineno}, in {func}'
+        return norm
 
     @staticmethod
     def _is_tb_noise_line(ln: str) -> bool:
         s = str(ln or "").strip()
         if not s:
             return True
-        if s in ("EXCEPTION END", "Traceback (most recent call last):"):
+        if s in ("EXCEPTION END", "Traceback (most recent call last):", "STACKTRACE", "STACKTRACE:"):
             return True
         if s.startswith(("EXCEPTION #", "Common path prefix =", "Reported from", "Local variables", "Thread Locals")):
             return True
@@ -4695,22 +4718,36 @@ class PlaytesterBugOracle:
 
     @classmethod
     def _extract_tb_headline(cls, tb_txt: str, default: str = "Unhandled client Python exception") -> str:
-        lines = [ln.strip() for ln in str(tb_txt or "").splitlines() if ln.strip()]
-        non_noise = [ln for ln in lines if not cls._is_tb_noise_line(ln) and "logmodule" not in ln]
+        lines = [
+            cls._strip_build_path_prefix(ln.strip())
+            for ln in str(tb_txt or "").splitlines()
+            if ln.strip()
+        ]
+        non_noise = [
+            ln for ln in lines
+            if not cls._is_tb_noise_line(ln)
+            and "logmodule" not in ln
+            and not ln.startswith("STACKTRACE")
+        ]
         for ln in reversed(non_noise):
             if cls._TB_EXC_LINE_RE.match(ln):
                 return ln[:200]
         for ln in reversed(non_noise):
             if "Error:" in ln or "Exception:" in ln:
                 return ln[:200]
-        return non_noise[-1][:200] if non_noise else default
+        if non_noise:
+            tail = non_noise[-1]
+            if 'File "' in tail:
+                return cls._format_concise_frame(tail)[:200]
+            return tail[:200]
+        return default
 
     _STDLOG_FRAME_RE = re.compile(r"\.py[cwj]?\(\d+\)\s+\S+")
 
     @classmethod
     def _extract_tb_frames(cls, tb_txt: str) -> Tuple[List[str], List[str]]:
         raw_frames = [
-            ln.strip()
+            cls._strip_build_path_prefix(ln.strip())
             for ln in str(tb_txt or "").splitlines()
             if 'File "' in ln or cls._STDLOG_FRAME_RE.search(ln)
         ]
@@ -4734,16 +4771,33 @@ class PlaytesterBugOracle:
     def _tb_frame_sig(cls, tb_txt: str) -> str:
         raw_frames, game_frames = cls._extract_tb_frames(tb_txt)
         chosen = game_frames or raw_frames
-        if chosen:
-            return "|".join(chosen[-2:])
-        lines = [
-            ln.strip()
+        exc_lines = [
+            cls._strip_build_path_prefix(ln.strip())
             for ln in str(tb_txt or "").splitlines()
             if ln.strip()
             and not cls._is_tb_noise_line(ln)
             and (cls._TB_EXC_LINE_RE.match(ln.strip()) or "Error:" in ln or "Exception:" in ln)
         ]
-        return lines[-1][:140] if lines else str(tb_txt or "").strip()[:140]
+        exc_tail = exc_lines[-1][:140] if exc_lines else ""
+        if chosen:
+            frame_part = "|".join(chosen[-2:])
+            if exc_tail and exc_tail not in frame_part:
+                return f"{frame_part}|{exc_tail}"
+            return frame_part
+        if exc_tail:
+            return exc_tail
+        return cls._strip_build_path_prefix(str(tb_txt or "")).strip()[:140]
+
+    @classmethod
+    def _format_tb_summary(cls, headline: str, tb_txt: str) -> str:
+        hl = cls._strip_build_path_prefix(str(headline or "")).strip()
+        raw_frames, game_frames = cls._extract_tb_frames(tb_txt)
+        chosen = game_frames or raw_frames
+        if chosen:
+            tail_frame = cls._format_concise_frame(chosen[-1])
+            if tail_frame and tail_frame not in hl:
+                return f"{hl} ({tail_frame})" if hl else tail_frame
+        return hl
 
     @classmethod
     def parse_tb_blocks(cls, raw_tb: str) -> List[Dict[str, str]]:
@@ -4756,6 +4810,7 @@ class PlaytesterBugOracle:
         for ln in raw_tb.splitlines():
             s = ln.strip()
             s_hdr = ln[len("[evomu_site] "):] if ln.startswith("[evomu_site] ") else ln
+            cur_has_frames = any('File "' in x or cls._STDLOG_FRAME_RE.search(x) for x in cur)
             is_header = (
                 s_hdr.startswith("log.Log")
                 or s_hdr.startswith("logmodule.")
@@ -4766,6 +4821,7 @@ class PlaytesterBugOracle:
                 or s_hdr.startswith("Action tasklet exception")
                 or s_hdr.startswith("schedule_startup failed:")
                 or s_hdr.startswith("EXCEPTION #")
+                or (s_hdr.startswith("STACKTRACE") and cur_has_frames)
                 or (ended_prev and bool(s))
             )
             if is_header and cur:
@@ -5081,35 +5137,48 @@ class PlaytesterBugOracle:
         if fr_log_excs:
             seen_item_keys = set()
             for e in fr_log_excs[:8]:
-                sig = ""
                 if isinstance(e, dict):
-                    sig = self._tb_frame_sig(str(e.get("trace") or e.get("headline") or ""))
-                    if sig:
-                        self._seen_tb_sigs.add(sig)
                     hl = str(e.get("headline") or "").strip()
                     tr = str(e.get("trace") or "").strip() or (new_tb if len(fr_log_excs) == 1 else "")
                 else:
-                    hl = str(e).strip()
-                    tr = new_tb if len(fr_log_excs) == 1 else ""
-                if self._is_tb_noise_line(hl):
+                    raw_s = str(e).strip()
+                    if "\n" in raw_s or raw_s.startswith(("STACKTRACE", "Traceback (most recent call last)")):
+                        hl = ""
+                        tr = raw_s
+                    else:
+                        hl = raw_s
+                        tr = new_tb if len(fr_log_excs) == 1 else ""
+                full_tb = tr or hl or new_tb
+                sig = self._tb_frame_sig(full_tb)
+                if sig:
+                    self._seen_tb_sigs.add(sig)
+                if (
+                    self._is_tb_noise_line(hl)
+                    or "\n" in hl
+                    or hl.startswith(("STACKTRACE", "Traceback (most recent call last)"))
+                ):
                     hl = ""
+                if hl:
+                    hl = self._strip_build_path_prefix(hl)
+                    if 'File "' in hl:
+                        hl = self._format_concise_frame(hl)
                 if not hl:
-                    hl = self._extract_tb_headline(tr or new_tb)
-                full_tb = tr or new_tb
+                    hl = self._extract_tb_headline(full_tb)
                 if self.is_ignorable_client_traceback(hl, full_tb, expected_text):
                     continue
                 item_key = (hl[:120], sig)
                 if item_key in seen_item_keys:
                     continue
                 seen_item_keys.add(item_key)
+                clean_tb = self._strip_build_path_prefix(tr or (json.dumps(e, indent=2) if isinstance(e, dict) else raw_s))
                 incidents.append(
                     {
                         "kind": "client_traceback",
                         "title": f"[Playtester] Client exception: {hl[:90]}",
                         "severity": "high",
                         "subsystem": "client-python",
-                        "summary": hl,
-                        "traceback": tr or json.dumps(e, indent=2),
+                        "summary": self._format_tb_summary(hl, full_tb),
+                        "traceback": clean_tb,
                         "action_error": str(exec_res.get("action_error") or "").strip() if isinstance(exec_res, dict) else "",
                     }
                 )
@@ -5131,8 +5200,8 @@ class PlaytesterBugOracle:
                             "title": f"[Playtester] Client exception: {u['headline'][:90]}",
                             "severity": "high",
                             "subsystem": "client-python",
-                            "summary": u["headline"],
-                            "traceback": u["trace"],
+                            "summary": self._format_tb_summary(u["headline"], u["trace"]),
+                            "traceback": self._strip_build_path_prefix(u["trace"]),
                             "action_error": str(exec_res.get("action_error") or "").strip() if isinstance(exec_res, dict) else "",
                         }
                     )
@@ -5410,14 +5479,19 @@ class PlaytesterBugOracle:
         created_files: List[Path] = []
         for inc in incidents:
             act_err_txt = str(inc.get("action_error") or "").strip()
-            fp_src = f"{inc['kind']}:{inc['subsystem']}:{inc['title'][:180]}:{act_err_txt[:80]}"
-            fingerprint = hashlib.sha256(fp_src.encode("utf-8")).hexdigest()[:16]
             tb_txt = str(inc.get("traceback") or "")
             raw_frames, game_frames = self._extract_tb_frames(tb_txt)
             chosen_frames = game_frames or raw_frames
+            tb_sig = self._tb_frame_sig(tb_txt) if tb_txt else ""
+            norm_title = self._strip_build_path_prefix(str(inc.get("title") or ""))[:180]
+            if tb_sig:
+                fp_src = f"{inc['kind']}:{inc['subsystem']}:{tb_sig}:{norm_title}:{act_err_txt[:80]}"
+            else:
+                fp_src = f"{inc['kind']}:{inc['subsystem']}:{norm_title}:{act_err_txt[:80]}"
+            fingerprint = hashlib.sha256(fp_src.encode("utf-8")).hexdigest()[:16]
             tb_fp = ""
             if chosen_frames:
-                tail_sig = "|".join(chosen_frames[-2:]) + f"|{act_err_txt[:120]}"
+                tail_sig = f"{tb_sig}|{act_err_txt[:120]}" if tb_sig else ("|".join(chosen_frames[-2:]) + f"|{act_err_txt[:120]}")
                 tb_fp = "tb:" + hashlib.sha256(tail_sig.encode("utf-8")).hexdigest()[:16]
             err_fp = ""
             if act_err_txt:
@@ -7676,6 +7750,20 @@ def _validate_scenario_checks_dict(checks: Dict[str, Any], ctx_label: str) -> No
         unknown_wc = sorted(set(wc.keys()) - _SCENARIO_ALLOWED_WARP_COMPLETED_KEYS)
         if unknown_wc:
             raise ScenarioValidationError(f"{ctx_label}.warp_completed: unsupported key(s) {unknown_wc!r}")
+    if "ship_mode" in checks and checks["ship_mode"] is not None:
+        sm_val = checks["ship_mode"]
+        valid_sm = (
+            (isinstance(sm_val, int) and not isinstance(sm_val, bool))
+            or (
+                isinstance(sm_val, list)
+                and len(sm_val) > 0
+                and all(isinstance(v, int) and not isinstance(v, bool) for v in sm_val)
+            )
+        )
+        if not valid_sm:
+            raise ScenarioValidationError(
+                f"{ctx_label}.ship_mode must be an int or non-empty list of ints (Destiny MovementMode), got {sm_val!r}"
+            )
 
 
 def _is_gm_or_time_control_action(action: Dict[str, Any]) -> Tuple[bool, bool, str]:
@@ -8703,9 +8791,175 @@ def _is_mutating_scenario_step(
     return False
 
 
+def _lookup_sde_type_categories(
+    sde_path: Optional[Path],
+    type_ids: List[int],
+    world_db_path: Optional[Path] = None,
+) -> Dict[int, int]:
+    """Return `{type_id: category_id}` from `sde_types` when an SDE SQLite db is available."""
+    tids = sorted({int(t) for t in type_ids if t is not None and int(t) > 0})
+    if not tids:
+        return {}
+    candidates: List[Path] = []
+    if sde_path is not None:
+        candidates.append(Path(sde_path))
+    else:
+        env_sde = os.environ.get("EVOMU_SDE_PATH", "").strip()
+        if env_sde:
+            candidates.append(Path(env_sde))
+        if world_db_path is not None:
+            w_path = Path(world_db_path).resolve()
+            for idx in range(min(4, len(w_path.parents))):
+                candidates.append(w_path.parents[idx] / "data" / "evomu_sde.sqlite")
+        candidates.append(REPO_ROOT / "data" / "evomu_sde.sqlite")
+        candidates.append(REPO_ROOT.parent / "EvoMu" / "data" / "evomu_sde.sqlite")
+
+    resolved_sde = next(
+        (p for p in candidates if p.exists() and p.is_file() and p.stat().st_size > 0),
+        None,
+    )
+    if resolved_sde is None:
+        return {}
+    conn = None
+    out: Dict[int, int] = {}
+    try:
+        conn = sqlite3.connect(f"file:{resolved_sde.resolve()}?mode=ro", uri=True, timeout=2.0)
+        for i in range(0, len(tids), 500):
+            chunk = tids[i:i + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"SELECT type_id, category_id FROM sde_types WHERE type_id IN ({placeholders})",
+                tuple(chunk),
+            ).fetchall()
+            for tid, cat in rows:
+                if cat is not None:
+                    out[int(tid)] = int(cat)
+    except Exception:
+        return {}
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return out
+
+
+def _evaluate_hangar_parity(
+    cur: sqlite3.Cursor,
+    char_id: int,
+    db_loc_id: int,
+    inv: Dict[str, Any],
+    sde_path: Optional[Path],
+    world_db_path: Path,
+) -> List[str]:
+    """Reconcile client StationItems / StationShips / unified hangar caches against SQLite `flag = 4`."""
+    c_total_cnt = inv.get("hangar_item_count")
+    c_total_qty = inv.get("hangar_total_quantity")
+    c_ns_cnt = inv.get("hangar_non_ship_count")
+    c_ns_qty = inv.get("hangar_non_ship_total_quantity")
+    c_sh_cnt = inv.get("ship_hangar_count")
+    c_sh_qty = inv.get("ship_hangar_total_quantity")
+    if all(v is None for v in (c_total_cnt, c_total_qty, c_ns_cnt, c_ns_qty, c_sh_cnt, c_sh_qty)):
+        return []
+
+    h_rows = cur.execute(
+        "SELECT type_id, quantity FROM items "
+        "WHERE owner_id = ? AND location_id = ? AND flag = 4",
+        (char_id, int(db_loc_id)),
+    ).fetchall()
+    h_cnt = len(h_rows)
+    h_qty = sum(max(0, int(q or 0)) for _, q in h_rows)
+    sde_cats = _lookup_sde_type_categories(
+        sde_path,
+        [int(tid) for tid, _ in h_rows],
+        world_db_path=world_db_path,
+    )
+    have_sde_split = (not h_rows) or any(int(tid) in sde_cats for tid, _ in h_rows)
+    mismatches: List[str] = []
+
+    if not have_sde_split:
+        if c_total_cnt is not None and int(c_total_cnt) != h_cnt:
+            mismatches.append(f"invCache.hangar_item_count client={c_total_cnt} != sqlite={h_cnt} (loc={db_loc_id})")
+        if c_total_qty is not None and int(c_total_qty) != h_qty:
+            mismatches.append(f"invCache.hangar_total_quantity client={c_total_qty} != sqlite={h_qty} (loc={db_loc_id})")
+        return mismatches
+
+    ns_rows = [(tid, q) for tid, q in h_rows if sde_cats.get(int(tid)) != 6]
+    sh_rows = [(tid, q) for tid, q in h_rows if sde_cats.get(int(tid)) == 6]
+    ns_cnt = len(ns_rows)
+    ns_qty = sum(max(0, int(q or 0)) for _, q in ns_rows)
+    sh_cnt = len(sh_rows)
+    sh_qty = sum(max(0, int(q or 0)) for _, q in sh_rows)
+    containers_seen = {str(x) for x in (inv.get("hangar_containers_seen") or []) if x}
+
+    only_items_container = (
+        (containers_seen == {"StationItems"} and c_sh_cnt in (None, 0))
+        or (
+            not containers_seen
+            and sh_cnt > 0
+            and c_sh_cnt == 0
+            and (c_ns_cnt is None or int(c_ns_cnt) == ns_cnt)
+            and (c_ns_cnt is not None or (c_total_cnt is not None and int(c_total_cnt) == ns_cnt))
+            and (c_ns_qty is None or int(c_ns_qty) == ns_qty)
+            and (c_total_cnt is None or int(c_total_cnt) == ns_cnt)
+        )
+    )
+    only_ships_container = (
+        (
+            containers_seen == {"StationHangar"}
+            and c_ns_cnt in (None, 0)
+            and sh_cnt > 0
+            and int(c_sh_cnt or c_total_cnt or 0) > 0
+        )
+        or (
+            not containers_seen
+            and ns_cnt > 0
+            and c_ns_cnt == 0
+            and c_sh_cnt == sh_cnt
+            and (c_sh_qty is None or int(c_sh_qty) == sh_qty)
+            and (c_total_cnt is None or int(c_total_cnt) == sh_cnt)
+        )
+    )
+
+    if only_items_container:
+        if c_ns_cnt is not None and int(c_ns_cnt) != ns_cnt:
+            mismatches.append(f"invCache.hangar_non_ship_count client={c_ns_cnt} != sqlite={ns_cnt} (loc={db_loc_id})")
+        if c_ns_qty is not None and int(c_ns_qty) != ns_qty:
+            mismatches.append(f"invCache.hangar_non_ship_total_quantity client={c_ns_qty} != sqlite={ns_qty} (loc={db_loc_id})")
+        if c_total_cnt is not None and int(c_total_cnt) != ns_cnt:
+            mismatches.append(f"invCache.hangar_item_count(StationItems) client={c_total_cnt} != sqlite={ns_cnt} (loc={db_loc_id})")
+        if c_total_qty is not None and int(c_total_qty) != ns_qty:
+            mismatches.append(f"invCache.hangar_total_quantity(StationItems) client={c_total_qty} != sqlite={ns_qty} (loc={db_loc_id})")
+    elif only_ships_container:
+        if c_sh_cnt is not None and int(c_sh_cnt) != sh_cnt:
+            mismatches.append(f"invCache.ship_hangar_count client={c_sh_cnt} != sqlite={sh_cnt} (loc={db_loc_id})")
+        if c_sh_qty is not None and int(c_sh_qty) != sh_qty:
+            mismatches.append(f"invCache.ship_hangar_total_quantity client={c_sh_qty} != sqlite={sh_qty} (loc={db_loc_id})")
+        if c_total_cnt is not None and int(c_total_cnt) != sh_cnt:
+            mismatches.append(f"invCache.hangar_item_count(StationShips) client={c_total_cnt} != sqlite={sh_cnt} (loc={db_loc_id})")
+        if c_total_qty is not None and int(c_total_qty) != sh_qty:
+            mismatches.append(f"invCache.hangar_total_quantity(StationShips) client={c_total_qty} != sqlite={sh_qty} (loc={db_loc_id})")
+    else:
+        if c_ns_cnt is not None and int(c_ns_cnt) != ns_cnt:
+            mismatches.append(f"invCache.hangar_non_ship_count client={c_ns_cnt} != sqlite={ns_cnt} (loc={db_loc_id})")
+        if c_ns_qty is not None and int(c_ns_qty) != ns_qty:
+            mismatches.append(f"invCache.hangar_non_ship_total_quantity client={c_ns_qty} != sqlite={ns_qty} (loc={db_loc_id})")
+        if c_sh_cnt is not None and int(c_sh_cnt) != sh_cnt:
+            mismatches.append(f"invCache.ship_hangar_count client={c_sh_cnt} != sqlite={sh_cnt} (loc={db_loc_id})")
+        if c_sh_qty is not None and int(c_sh_qty) != sh_qty:
+            mismatches.append(f"invCache.ship_hangar_total_quantity client={c_sh_qty} != sqlite={sh_qty} (loc={db_loc_id})")
+        if c_total_cnt is not None and int(c_total_cnt) != h_cnt:
+            mismatches.append(f"invCache.hangar_item_count client={c_total_cnt} != sqlite={h_cnt} (loc={db_loc_id})")
+        if c_total_qty is not None and int(c_total_qty) != h_qty:
+            mismatches.append(f"invCache.hangar_total_quantity client={c_total_qty} != sqlite={h_qty} (loc={db_loc_id})")
+    return mismatches
+
+
 def evaluate_ui_delta_sqlite_parity(
     world_db_path: Path,
     state: Dict[str, Any],
+    sde_path: Optional[Path] = None,
 ) -> Tuple[bool, str]:
     """
     Verify client-cached wallet, invCache, and clone state matches server SQLite (`world_db_path`)
@@ -8731,6 +8985,10 @@ def evaluate_ui_delta_sqlite_parity(
             wallet.get("isk_balance"),
             inv.get("hangar_item_count"),
             inv.get("hangar_total_quantity"),
+            inv.get("hangar_non_ship_count"),
+            inv.get("hangar_non_ship_total_quantity"),
+            inv.get("ship_hangar_count"),
+            inv.get("ship_hangar_total_quantity"),
             inv.get("cargo_item_count"),
             inv.get("cargo_total_quantity"),
             clone.get("home_station_id"),
@@ -8762,20 +9020,10 @@ def evaluate_ui_delta_sqlite_parity(
                 mismatches.append(f"wallet.isk_balance client={client_isk:.2f} != sqlite={server_isk:.2f}")
 
         db_loc_id = db_station_id or db_structure_id
-        if db_loc_id and (inv.get("hangar_item_count") is not None or inv.get("hangar_total_quantity") is not None):
-            h_cnt, h_qty = cur.execute(
-                "SELECT COUNT(*), COALESCE(SUM(quantity), 0) FROM items "
-                "WHERE owner_id = ? AND location_id = ? AND flag = 4",
-                (char_id, int(db_loc_id)),
-            ).fetchone()
-            if inv.get("hangar_item_count") is not None and int(inv["hangar_item_count"]) != int(h_cnt):
-                mismatches.append(
-                    f"invCache.hangar_item_count client={inv['hangar_item_count']} != sqlite={h_cnt} (loc={db_loc_id})"
-                )
-            if inv.get("hangar_total_quantity") is not None and int(inv["hangar_total_quantity"]) != int(h_qty):
-                mismatches.append(
-                    f"invCache.hangar_total_quantity client={inv['hangar_total_quantity']} != sqlite={h_qty} (loc={db_loc_id})"
-                )
+        if db_loc_id:
+            mismatches.extend(
+                _evaluate_hangar_parity(cur, char_id, int(db_loc_id), inv, sde_path, Path(world_db_path))
+            )
 
         ship_id = sess.get("shipid") or db_ship_id
         if ship_id and (inv.get("cargo_item_count") is not None or inv.get("cargo_total_quantity") is not None):
@@ -8872,6 +9120,8 @@ class ScenarioRunner(PlaytesterRunner):
         self._active_expected_characters: List[str] = []
         self._last_boot_result: Dict[str, Any] = {}
         self._client_launch_server_log_offset: int = 0
+        self._gm_bridge_conn: Any = None
+        self._gm_bridge_sm: Any = None
 
     def _scenario_auth_params(self) -> Tuple[str, str, int, bool]:
         st = self._active_starting_state
@@ -8892,6 +9142,281 @@ class ScenarioRunner(PlaytesterRunner):
         if self._scenario_requires_gm() and user == "demo":
             return {"EVOMU_ADMIN_TOKEN": "evomu-scenario-gm-secret"}
         return {}
+
+    def _gm_bridge_credentials(self) -> Tuple[str, str, int]:
+        user, _, _, _ = self._scenario_auth_params()
+        if user == "demo":
+            return "admin", "evomu-scenario-gm-secret", 90000003
+        return "evomu_scenario_gm", "evomu-scenario-gm-secret", 90000099
+
+    def _connect_gm_bridge(self) -> Tuple[Any, Any]:
+        bridge_dir = str(CLIENT_BRIDGE_DIR)
+        if bridge_dir not in sys.path:
+            sys.path.insert(0, bridge_dir)
+        import evomu_bridge  # type: ignore
+
+        gm_user, gm_password, gm_char_id = self._gm_bridge_credentials()
+
+        class _GmBridgeLog:
+            def info(self, msg: str) -> None:
+                log_info(f"[scenario-gm-bridge] {msg}")
+
+            def warn(self, msg: str) -> None:
+                log_warn(f"[scenario-gm-bridge] {msg}")
+
+            def error(self, msg: str) -> None:
+                log_err(f"[scenario-gm-bridge] {msg}")
+
+        class _GmBridgeSM:
+            def __init__(self) -> None:
+                self.services: Dict[str, Any] = {}
+                self.logger = _GmBridgeLog()
+
+            def ScatterEvent(self, *_args: Any, **_kw: Any) -> None:
+                pass
+
+        gm_sm = _GmBridgeSM()
+        bridge_conn = evomu_bridge.install_service_manager_hook(
+            gm_sm,
+            host="127.0.0.1",
+            port=self.ports["bridge"],
+        )
+        try:
+            gm_sm.RemoteSvc("authentication").Login(gm_user, gm_password)
+            chars = gm_sm.RemoteSvc("charUnboundMgr").GetCharactersToSelect() or []
+            sel_cid = gm_char_id
+            avail_ids: List[int] = []
+            for ch in chars:
+                cid_raw = getattr(ch, "characterID", None) if not isinstance(ch, dict) else ch.get("characterID")
+                if cid_raw is not None:
+                    avail_ids.append(int(cid_raw))
+            if avail_ids and gm_char_id not in avail_ids:
+                sel_cid = avail_ids[0]
+            gm_sm.RemoteSvc("charUnboundMgr").SelectCharacterID(sel_cid)
+        except Exception:
+            try:
+                bridge_conn.close()
+            except Exception:
+                pass
+            raise
+        return bridge_conn, gm_sm
+
+    def _ensure_gm_bridge(self) -> Any:
+        if (
+            self._gm_bridge_sm is not None
+            and self._gm_bridge_conn is not None
+            and getattr(self._gm_bridge_conn, "connected", True)
+        ):
+            return self._gm_bridge_sm
+        self._close_gm_bridge()
+        conn, gm_sm = self._connect_gm_bridge()
+        self._gm_bridge_conn = conn
+        self._gm_bridge_sm = gm_sm
+        return gm_sm
+
+    def _close_gm_bridge(self) -> None:
+        conn = getattr(self, "_gm_bridge_conn", None)
+        self._gm_bridge_conn = None
+        self._gm_bridge_sm = None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _rewrite_gm_slash_for_target(cmd: str, target_char_id: int) -> str:
+        raw = str(cmd or "").strip()
+        if not raw.startswith("/") or target_char_id <= 0:
+            return raw
+        parts = raw.split()
+        verb = parts[0].lower()
+        rest = parts[1:]
+        tgt_s = str(int(target_char_id))
+
+        if verb == "/giveisk":
+            if len(rest) == 1:
+                return f"/giveisk {tgt_s} {rest[0]}"
+            if len(rest) >= 2 and rest[0].lower() in ("me", "self"):
+                return " ".join(["/giveisk", tgt_s] + rest[1:])
+        elif verb in ("/giveskill", "/setskill"):
+            if len(rest) == 2:
+                return f"{parts[0]} {tgt_s} {rest[0]} {rest[1]}"
+            if len(rest) >= 3 and rest[0].lower() in ("me", "self"):
+                return " ".join([parts[0], tgt_s] + rest[1:])
+        elif verb == "/heal":
+            if not rest or rest[0].lower() in ("me", "self"):
+                return f"/heal {tgt_s}"
+        elif verb in ("/teleport", "/tr", "/translocate", "/moveme"):
+            if len(rest) == 1:
+                return f"{parts[0]} {tgt_s} {rest[0]}"
+            if len(rest) >= 2 and rest[0].lower() in ("me", "myship", "self"):
+                return " ".join([parts[0], tgt_s] + rest[1:])
+        return raw
+
+    @staticmethod
+    def _should_dispatch_via_gm_bridge(act: Dict[str, Any], act_type: str) -> bool:
+        if act_type in _SCENARIO_TIME_CONTROL_ACTIONS:
+            return True
+        if act_type in ("slash_command", "run_slash", "train_skill"):
+            return True
+        if act_type == "station_command" and str(act.get("target") or "").strip().lower() == "inject_and_train_skill":
+            return True
+        if act_type == "type_text" and any(_is_gm_or_time_control_action(act)[:2]):
+            return True
+        return False
+
+    def _advance_clock_via_gm_bridge(self, secs: int = 12) -> Optional[Dict[str, Any]]:
+        try:
+            gm_sm = self._ensure_gm_bridge()
+            gm_sm.RemoteSvc("timeControl").AdvanceClock(max(0, int(secs)))
+            return {
+                "seq": 0,
+                "service": "timeControl",
+                "method": "AdvanceClock",
+                "ok": True,
+                "via": "gm_bridge",
+            }
+        except Exception as exc:
+            log_warn(f"GM bridge AdvanceClock({secs}) failed: {exc}")
+            return None
+
+    def _execute_gm_or_time_control_via_bridge(
+        self,
+        act: Dict[str, Any],
+        act_type: str,
+        target_char_id: int,
+    ) -> Dict[str, Any]:
+        calls_recorded: List[Dict[str, Any]] = []
+        try:
+            gm_sm = self._ensure_gm_bridge()
+            gm_res: Any = None
+            if act_type == "advance_server_time":
+                raw_sec = act.get("seconds")
+                if raw_sec in (None, ""):
+                    raw_sec = act.get("target")
+                if raw_sec in (None, ""):
+                    raw_sec = act.get("amount")
+                if raw_sec in (None, ""):
+                    raw_sec = act.get("command")
+                try:
+                    secs = max(0, int(str(raw_sec).strip())) if raw_sec not in (None, "") else 12
+                except Exception:
+                    secs = 12
+                gm_res = gm_sm.RemoteSvc("timeControl").AdvanceClock(secs)
+                calls_recorded.append({
+                    "seq": 0,
+                    "service": "timeControl",
+                    "method": "AdvanceClock",
+                    "ok": True,
+                    "via": "gm_bridge",
+                    "target_char_id": target_char_id,
+                })
+            elif act_type == "clear_timers":
+                gm_sm.RemoteSvc("timeControl").ClearSessionTimer()
+                calls_recorded.append({
+                    "seq": 0,
+                    "service": "timeControl",
+                    "method": "ClearSessionTimer",
+                    "ok": True,
+                    "via": "gm_bridge",
+                    "target_char_id": target_char_id,
+                })
+                gm_res = gm_sm.RemoteSvc("slash").SlashCmd("/cleartimers")
+                calls_recorded.append({
+                    "seq": 0,
+                    "service": "slash",
+                    "method": "SlashCmd",
+                    "ok": True,
+                    "via": "gm_bridge",
+                    "target_char_id": target_char_id,
+                })
+            elif act_type in ("complete_skills", "advance_upwell_timer", "complete_industry_jobs"):
+                slash_map = {
+                    "complete_skills": ("/completeskills", "all"),
+                    "advance_upwell_timer": ("/upwelltimer", ""),
+                    "complete_industry_jobs": ("/completeindustry", ""),
+                }
+                base_cmd, default_arg = slash_map[act_type]
+                arg = str(act.get("target") or act.get("command") or default_arg).strip()
+                cmd = arg if arg.startswith("/") else f"{base_cmd} {arg}".strip()
+                gm_res = gm_sm.RemoteSvc("slash").SlashCmd(cmd)
+                calls_recorded.append({
+                    "seq": 0,
+                    "service": "slash",
+                    "method": "SlashCmd",
+                    "ok": True,
+                    "via": "gm_bridge",
+                    "target_char_id": target_char_id,
+                })
+            elif act_type == "train_skill" or (
+                act_type == "station_command"
+                and str(act.get("target") or "").strip().lower() == "inject_and_train_skill"
+            ):
+                tid_raw = act.get("type_id")
+                if tid_raw in (None, ""):
+                    cand_t = str(act.get("target") or "").strip()
+                    if cand_t.isdigit():
+                        tid_raw = int(cand_t)
+                if tid_raw in (None, ""):
+                    cand_c = str(act.get("command") or "").strip()
+                    if cand_c.isdigit():
+                        tid_raw = int(cand_c)
+                tid = int(tid_raw or 0)
+                if tid <= 0:
+                    raise ValueError(f"train_skill missing numeric type_id: {act!r}")
+                lvl = max(1, min(5, int(act.get("level", 1) or 1)))
+                cmd = f"/giveskill {int(target_char_id)} {tid} {lvl}"
+                gm_res = gm_sm.RemoteSvc("slash").SlashCmd(cmd)
+                calls_recorded.append({
+                    "seq": 0,
+                    "service": "slash",
+                    "method": "SlashCmd",
+                    "ok": True,
+                    "via": "gm_bridge",
+                    "target_char_id": target_char_id,
+                })
+            else:
+                raw_cmd = (
+                    _coerce_action_command(act)
+                    or str(act.get("slash_cmd") or act.get("target") or act.get("text") or act.get("input") or "").strip()
+                )
+                cmd = self._rewrite_gm_slash_for_target(raw_cmd, int(target_char_id))
+                gm_res = gm_sm.RemoteSvc("slash").SlashCmd(cmd)
+                calls_recorded.append({
+                    "seq": 0,
+                    "service": "slash",
+                    "method": "SlashCmd",
+                    "ok": True,
+                    "via": "gm_bridge",
+                    "target_char_id": target_char_id,
+                })
+
+            return {
+                "action_ok": True,
+                "via": "gm_bridge",
+                "gm_result": gm_res,
+                "flight_recorder": {
+                    "macho_calls": calls_recorded,
+                    "scatters_observed": [],
+                    "log_exceptions": [],
+                    "quasar_errors": [],
+                    "macho_exceptions": [],
+                },
+            }
+        except Exception as exc:
+            return {
+                "action_ok": False,
+                "action_error": f"gm_bridge {type(exc).__name__}: {exc}",
+                "via": "gm_bridge",
+                "flight_recorder": {
+                    "macho_calls": calls_recorded,
+                    "scatters_observed": [],
+                    "log_exceptions": [],
+                    "quasar_errors": [],
+                    "macho_exceptions": [],
+                },
+            }
 
     def write_server_config(self) -> Path:
         self.world_dir.mkdir(parents=True, exist_ok=True)
@@ -9240,7 +9765,12 @@ class ScenarioRunner(PlaytesterRunner):
             if ok_init:
                 return latest_res, latest_state
 
+        use_tc_bridge = bool(step.get("time_control", False))
         while True:
+            if use_tc_bridge and str((step.get("action") or {}).get("type") or "") != "advance_server_time":
+                gm_tick_call = self._advance_clock_via_gm_bridge(12)
+                if gm_tick_call is not None:
+                    all_calls.append(gm_tick_call)
             tick_res = self.rpc.call(
                 "execute_action",
                 {
@@ -9248,7 +9778,7 @@ class ScenarioRunner(PlaytesterRunner):
                         "type": "wait",
                         "wait_ms": poll_ms,
                         "scenario_mode": True,
-                        "time_control": bool(step.get("time_control", False)),
+                        "time_control": False,
                     }
                 },
                 timeout=max(20.0, (poll_ms / 1000.0) + 15.0),
@@ -9438,11 +9968,32 @@ class ScenarioRunner(PlaytesterRunner):
                         }
                         if act_type == "wait" and step.get("wait_until"):
                             exec_res, post_state = self._execute_wait_until(step, pre_state, ctx)
+                        elif self._should_dispatch_via_gm_bridge(act, act_type):
+                            try:
+                                target_cid = int(
+                                    (pre_state.get("session") or {}).get("charid")
+                                    or (boot_state.get("session") or {}).get("charid")
+                                    or self._scenario_auth_params()[2]
+                                    or 90000001
+                                )
+                            except Exception:
+                                target_cid = int(self._scenario_auth_params()[2] or 90000001)
+                            exec_res = self._execute_gm_or_time_control_via_bridge(act, act_type, target_cid)
+                            try:
+                                obs = self.rpc.call("get_state", timeout=15.0) or {}
+                                post_state = _unwrap_state_payload(obs)
+                            except Exception:
+                                post_state = {}
+                            if step.get("wait_until"):
+                                exec_res, post_state = self._execute_wait_until(
+                                    step, pre_state, ctx, initial_res=exec_res, initial_state=post_state
+                                )
                         else:
                             payload = dict(act)
                             payload["type"] = act_type
                             payload["scenario_mode"] = True
-                            payload["time_control"] = bool(step.get("time_control", False))
+                            # Player session always stays role = 0; never invoke timeControl.* on it.
+                            payload["time_control"] = False
                             try:
                                 exec_res = self.rpc.call(
                                     "execute_action",
@@ -9490,7 +10041,10 @@ class ScenarioRunner(PlaytesterRunner):
                             and step_chk_cfg.get("ui_delta_without_relog") is not False
                             and _is_mutating_scenario_step(step, act_type, exec_res)
                         ):
-                            ok_delta, delta_msg = evaluate_ui_delta_sqlite_parity(self.world_db_path, post_state)
+                            scenario_sde_path, _ = self._resolve_sde_and_quasar_paths()
+                            ok_delta, delta_msg = evaluate_ui_delta_sqlite_parity(
+                                self.world_db_path, post_state, sde_path=scenario_sde_path
+                            )
                             if not ok_delta:
                                 delta_deadline = time.time() + 2.0
                                 while time.time() < delta_deadline:
@@ -9502,7 +10056,9 @@ class ScenarioRunner(PlaytesterRunner):
                                             post_state = polled_state
                                     except Exception:
                                         pass
-                                    ok_delta, delta_msg = evaluate_ui_delta_sqlite_parity(self.world_db_path, post_state)
+                                    ok_delta, delta_msg = evaluate_ui_delta_sqlite_parity(
+                                        self.world_db_path, post_state, sde_path=scenario_sde_path
+                                    )
                                     if ok_delta:
                                         break
                             if not ok_delta:
@@ -9561,6 +10117,7 @@ class ScenarioRunner(PlaytesterRunner):
                             break
                         pre_state = dict(post_state) if isinstance(post_state, dict) else pre_state
         finally:
+            self._close_gm_bridge()
             self.stop_client()
             self.stop_server()
 

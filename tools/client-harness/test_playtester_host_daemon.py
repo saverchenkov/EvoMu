@@ -2930,6 +2930,106 @@ class TestPlaytester1200OriginMainCutover(unittest.TestCase):
                 runner.execute_step(1, {}, [])
             self.assertNotIn("execute_action", rpc_calls)
 
+    def test_client_traceback_v24_build_path_stripped_no_fingerprint_collision_1141(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            qdir = root / "queue"
+            sdir = root / "step_50"
+            qdir.mkdir()
+            sdir.mkdir()
+            shot = root / "shot.png"
+            shot.write_bytes(b"png")
+            tb = root / "tb.log"
+            tb.write_text("", encoding="utf-8")
+            srv = root / "srv.log"
+            srv.write_text("", encoding="utf-8")
+            mem = playtester.PlaytesterMemory(root, git_head="deadbeef")
+            oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False)
+
+            build_root = "/" + "Users" + "/buildagentA/buildAgentFull"
+            exc_a = (
+                "STACKTRACE: Traceback (most recent call last):\n"
+                f'  File "{build_root}/work/d50fcc72fcb6ee81/eve/release/V24.02/'
+                'eve/client/script/ui/shared/market/marketWindow.py", line 412, in LoadMarketOrders\n'
+                f'  File "{build_root}/work/d50fcc72fcb6ee81/eve/release/V24.02/'
+                'packages/carbonui/control/scroll.py", line 188, in Reload\n'
+                "KeyError: 'marketGroupID'"
+            )
+            exc_b = (
+                "STACKTRACE: Traceback (most recent call last):\n"
+                f'  File "{build_root}/work/deadbeefcafebabe/eve/release/V24.02/'
+                'eve/client/script/ui/shared/agencyNew/ui/contentCards.py", line 91, in ConstructCard\n'
+                "AttributeError: 'NoneType' object has no attribute 'agencyContentType'"
+            )
+            self.assertNotEqual(oracle._tb_frame_sig(exc_a), oracle._tb_frame_sig(exc_b))
+            self.assertIn("scroll.py", oracle._tb_frame_sig(exc_a))
+            self.assertIn("KeyError", oracle._tb_frame_sig(exc_a))
+            self.assertNotIn(build_root, oracle._extract_tb_headline(exc_a))
+            self.assertIn("KeyError", oracle._extract_tb_headline(exc_a))
+
+            # Frame-only V24.02 lines (previous root cause of colliding on .../eve/clien)
+            frame_only_a = (
+                f'File "{build_root}/work/d50fcc72fcb6ee81/eve/release/V24.02/'
+                'eve/client/script/ui/shared/market/marketWindow.py", line 412, in LoadMarketOrders'
+            )
+            frame_only_b = (
+                f'File "{build_root}/work/d50fcc72fcb6ee81/eve/release/V24.02/'
+                'eve/client/script/ui/shared/agencyNew/ui/contentCards.py", line 91, in ConstructCard'
+            )
+            self.assertIn("marketWindow.py", oracle._extract_tb_headline(frame_only_a))
+            self.assertNotIn(build_root, oracle._extract_tb_headline(frame_only_a))
+            self.assertNotEqual(oracle._extract_tb_headline(frame_only_a), oracle._extract_tb_headline(frame_only_b))
+
+            fr_a = {
+                "log_exceptions": [exc_a],
+                "suppressed_log_exceptions": [],
+                "macho_exceptions": [],
+                "quasar_errors": [],
+            }
+            fr_b = {
+                "log_exceptions": [exc_b],
+                "suppressed_log_exceptions": [],
+                "macho_exceptions": [],
+                "quasar_errors": [],
+            }
+            paths_a = oracle.evaluate_step(
+                step_num=50,
+                git_head="deadbeef",
+                decision={"action": {"type": "click_widget", "target": "MarketBtn"}, "bug_report": {"should_file": False}},
+                exec_res={"action_ok": True, "flight_recorder": fr_a},
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder=fr_a,
+            )
+            paths_b = oracle.evaluate_step(
+                step_num=51,
+                git_head="deadbeef",
+                decision={"action": {"type": "click_widget", "target": "AgencyBtn"}, "bug_report": {"should_file": False}},
+                exec_res={"action_ok": True, "flight_recorder": fr_b},
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder=fr_b,
+            )
+            self.assertEqual(len(paths_a), 1)
+            self.assertEqual(len(paths_b), 1)
+            bundle_a = json.loads(Path(paths_a[0]).read_text(encoding="utf-8"))
+            bundle_b = json.loads(Path(paths_b[0]).read_text(encoding="utf-8"))
+            self.assertNotEqual(bundle_a["fingerprint"], bundle_b["fingerprint"])
+            self.assertNotEqual(bundle_a["fingerprint"], "997f1f2ca1a786b9")
+            self.assertNotEqual(bundle_b["fingerprint"], "997f1f2ca1a786b9")
+            self.assertNotIn(build_root, bundle_a["manual_report"]["title"])
+            self.assertNotIn(build_root, bundle_b["manual_report"]["title"])
+            self.assertIn("scroll.py", bundle_a["manual_report"]["description"])
+            self.assertIn("contentCards.py", bundle_b["manual_report"]["description"])
+
 
 if __name__ == "__main__":
     unittest.main()

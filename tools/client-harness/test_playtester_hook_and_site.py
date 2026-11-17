@@ -3315,6 +3315,103 @@ class TestScenarioHookExtensions(unittest.TestCase):
                 self.assertEqual(res_si["tabs"]["tabs_clicked"], 2)
                 self.assertEqual(clicked_tabs_log, ["Description", "Attributes"])
 
+    def test_inventory_state_filters_cargo_flag_5_and_tracks_hangar_containers(self):
+        hook = _load_hook_with_py2_stubs()
+        fake_sess = types.SimpleNamespace(
+            userid=1, charid=90000001, stationid=60003760, structureid=None,
+            solarsystemid=None, solarsystemid2=30000142, shipid=100000001,
+        )
+        # Unified (ship_id, None) contains fitted HiSlot0 (flag 27), DroneBay (flag 87), and Cargo (flag 5).
+        # Separate (ship_id, 87) DroneBay hold must NEVER pollute cargo_item_count.
+        unified_ship = types.SimpleNamespace(items={
+            201: {"itemID": 201, "flagID": 27, "categoryID": 7, "stacksize": 1},
+            202: {"itemID": 202, "flagID": 87, "categoryID": 18, "stacksize": 5},
+            301: {"itemID": 301, "flagID": 5, "categoryID": 8, "stacksize": 40},
+        })
+        drone_hold = types.SimpleNamespace(items={
+            202: {"itemID": 202, "flagID": 87, "categoryID": 18, "stacksize": 5},
+        })
+        station_items_10004 = types.SimpleNamespace(items={
+            401: {"itemID": 401, "flagID": 4, "categoryID": 4, "stacksize": 500},
+        })
+        fake_inv_cache = types.SimpleNamespace(inventories={
+            (100000001, None): unified_ship,
+            (100000001, 87): drone_hold,
+            (10004, 4): station_items_10004,
+        })
+        fake_sm = types.SimpleNamespace(
+            services={"invCache": fake_inv_cache},
+            GetService=lambda n: fake_sm.services.get(n),
+        )
+        with mock.patch.dict(builtins.__dict__, {"session": fake_sess, "sm": fake_sm}), \
+             mock.patch.object(hook, "_ensure_windowed_mode"), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_inspect_uicore_tree", return_value={"open_windows": [], "modals": []}):
+            snap = hook._get_state_snapshot(fake_sm)
+            inv = snap["inventory_state"]
+            self.assertEqual(inv["cargo_item_count"], 1)
+            self.assertEqual(inv["cargo_total_quantity"], 40)
+            self.assertEqual(inv["hangar_containers_seen"], ["StationItems"])
+            self.assertEqual(inv["hangar_non_ship_count"], 1)
+            self.assertEqual(inv["hangar_non_ship_total_quantity"], 500)
+            self.assertEqual(inv["ship_hangar_count"], 0)
+
+            # When explicit (ship_id, 5) and (station_id, 4) StationHangar are also cached,
+            # (ship_id, 5) stays authoritative and StationShips separates cleanly.
+            fake_inv_cache.inventories[(100000001, 5)] = types.SimpleNamespace(items={
+                301: {"itemID": 301, "flagID": 5, "categoryID": 8, "stacksize": 40},
+                302: {"itemID": 302, "flagID": 5, "categoryID": 8, "stacksize": 20},
+            })
+            fake_inv_cache.inventories[(60003760, 4)] = types.SimpleNamespace(items={
+                501: {"itemID": 501, "flagID": 4, "categoryID": 6, "stacksize": 1},
+            })
+            snap2 = hook._get_state_snapshot(fake_sm)
+            inv2 = snap2["inventory_state"]
+            self.assertEqual(inv2["cargo_item_count"], 2)
+            self.assertEqual(inv2["cargo_total_quantity"], 60)
+            self.assertEqual(inv2["hangar_containers_seen"], ["StationHangar", "StationItems"])
+            self.assertEqual(inv2["hangar_non_ship_count"], 1)
+            self.assertEqual(inv2["ship_hangar_count"], 1)
+            self.assertEqual(inv2["hangar_item_count"], 2)
+            self.assertEqual(inv2["hangar_total_quantity"], 501)
+
+    def test_window_open_and_show_info_fail_when_expected_window_missing(self):
+        hook = _load_hook_with_py2_stubs()
+        fake_info_svc = types.SimpleNamespace(ShowInfo=lambda *_a, **_kw: None)
+        fake_svcs = {"info": fake_info_svc}
+        fake_sm = types.SimpleNamespace(services=fake_svcs, GetService=lambda n: fake_svcs.get(n))
+        fake_cmd = types.SimpleNamespace(CmdOpenFleetFinderWindow=lambda: None)
+        unrelated_win = types.SimpleNamespace(windowID="WalletWindow", name="WalletWindow", caption="Wallet", destroyed=False, display=True, children=[])
+        fake_reg = types.SimpleNamespace(GetWindows=lambda: [unrelated_win])
+        fake_uicore = types.SimpleNamespace(
+            cmd=fake_cmd, registry=fake_reg, desktop=types.SimpleNamespace(width=1280, height=800), layer=None,
+        )
+        sess = types.SimpleNamespace(userid=1, charid=90000001, stationid=60003760, structureid=None, shipid=100000001, solarsystemid=None, solarsystemid2=30000142, mutating=0, changing=None)
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.dict(builtins.__dict__, {"session": sess, "sm": fake_sm}), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_is_visible", return_value=True), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value={"session": {"charid": 90000001}, "open_windows": []}), \
+             mock.patch.object(hook, "_settle_after_action", return_value=0), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True):
+            res_ow = hook._execute_action(fake_sm, {
+                "type": "open_window", "target": "fleet_finder", "require_window_open": True, "wait_ms": 0, "reuse_pre_state": False,
+            })
+            self.assertFalse(res_ow.get("action_ok"))
+            self.assertFalse(res_ow.get("ok"))
+
+            res_si = hook._execute_action(fake_sm, {
+                "type": "show_info", "type_id": 587, "category": "ship", "wait_ms": 0, "reuse_pre_state": False,
+            })
+            self.assertFalse(res_si.get("action_ok"))
+            self.assertFalse(res_si.get("ok"))
+
+            res_tabs = hook._click_top_tabs_in_window("info", max_tabs=3, require_match=True)
+            self.assertFalse(res_tabs.get("ok"))
+
 
 if __name__ == "__main__":
     unittest.main()
