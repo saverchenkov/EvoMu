@@ -950,7 +950,8 @@ pub fn require_structure_service_access_in_snap(
                 .get(&char_id)
                 .map(|c| c.corporation_id)
                 .unwrap_or(0);
-            if st.owner_corp_id != 0 && char_corp != st.owner_corp_id {
+            // Reject unowned (`owner_corp_id <= 0`) structures rather than treating missing ownership as open access.
+            if st.owner_corp_id <= 0 || char_corp != st.owner_corp_id {
                 return Err(err(
                     "StructureOwnershipViolation",
                     "Caller does not belong to the owning corporation",

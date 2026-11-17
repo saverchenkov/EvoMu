@@ -1719,3 +1719,308 @@ async fn test_fw_enlistment_warzone_insurgency_and_sov_ops() {
     );
     assert_eq!(skyhooks_rsp.status_code, 200, "{}", skyhooks_rsp.status_message);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_set_facility_taxes_npc_station_denied_and_upwell_rbac_persists_across_reload() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let mut demo = setup_demo_pilot(&ctx, 118_201).await;
+    assert!(!demo.has_gm_role());
+
+    // 1. Non-GM player (even if session carries ROLE_DIRECTOR) calling SetFacilityTaxes(60003760, {1: 0.0})
+    //    must be denied with FacilityPermissionDenied and leave NPC taxes untouched.
+    demo.corp_role = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
+    let npc_deny_err = rpc(
+        &ctx,
+        &mut demo,
+        "facilityManager",
+        "SetFacilityTaxes",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Real(0.0))]),
+        ],
+    )
+    .await
+    .expect_err("non-GM player cannot overwrite NPC station facility taxes");
+    assert_eq!(npc_deny_err.code, "FacilityPermissionDenied");
+    demo.corp_role = 0;
+
+    // Grant demo Corp Management + Industry/Science skills plus a Rifter BPO & materials at Jita 4-4.
+    let rifter_bp = ctx
+        .sde
+        .blueprints
+        .get(&RIFTER_BP_TYPE_ID)
+        .expect("Rifter BP")
+        .clone();
+    let bpo_id = ctx.db.with_mut_snapshot(|snap| {
+        let sk = snap.skills.entry(DEMO_CHAR_ID).or_default();
+        for sid in [3363_u32, 3380, 3402] {
+            sk.insert(
+                sid,
+                eve_db::TrainedSkillRecord {
+                    type_id: sid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+        snap.next_entity_id += 1;
+        let bpo_item_id = snap.next_entity_id;
+        snap.items.insert(
+            bpo_item_id,
+            eve_db::InventoryItemRecord {
+                item_id: bpo_item_id,
+                type_id: RIFTER_BP_TYPE_ID,
+                owner_id: DEMO_CHAR_ID,
+                location_id: JITA_STATION_ID,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                is_blueprint_copy: false,
+                ..Default::default()
+            },
+        );
+        for mat in &rifter_bp.materials {
+            snap.next_entity_id += 1;
+            let mat_id = snap.next_entity_id;
+            snap.items.insert(
+                mat_id,
+                eve_db::InventoryItemRecord {
+                    item_id: mat_id,
+                    type_id: mat.type_id,
+                    owner_id: DEMO_CHAR_ID,
+                    location_id: JITA_STATION_ID,
+                    flag: eve_db::InventoryFlag::Hangar,
+                    quantity: (mat.quantity as i32) * 5,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+        }
+        bpo_item_id
+    });
+
+    // Create a player corporation for demo (clear the 10s login session-change timer) -> still cannot mutate NPC station taxes.
+    ctx.advance_secs(12);
+    rpc(
+        &ctx,
+        &mut demo,
+        "corpRegistry",
+        "AddCorporation",
+        &[
+            PyRep::String("HF1182 Tax Audit Corp".into()),
+            PyRep::String("HF82".into()),
+        ],
+    )
+    .await
+    .expect("AddCorporation");
+    let corp_id = demo.corporation_id.expect("player corp_id");
+    assert!(corp_id >= 98_000_000);
+
+    let corp_dir_npc_err = rpc(
+        &ctx,
+        &mut demo,
+        "facilityManager",
+        "SetFacilityTaxes",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Real(0.0))]),
+        ],
+    )
+    .await
+    .expect_err("player corp CEO/Director cannot overwrite NPC station facility taxes");
+    assert_eq!(corp_dir_npc_err.code, "FacilityPermissionDenied");
+
+    // Seed a player-owned Raitaru (35825) for corp_id and add pilot 90_000_002 as an unroled member.
+    let raitaru_id = 1_091_182_000_001_i64;
+    let member_id = 90_000_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            raitaru_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: raitaru_id,
+                type_id: RAITARU_TYPE_ID,
+                owner_corp_id: corp_id,
+                solar_system_id: PERIMETER_SYSTEM_ID,
+                name: "HF1182 Test Raitaru".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&member_id) {
+            ch.corporation_id = corp_id;
+        }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.members.insert(member_id);
+            corp.member_roles.insert(member_id, 0);
+        }
+    });
+
+    // 2. Persist to SQLite and reload in a fresh ServerContext:
+    //    default NPC tax (0.0025) must still hold in GetFacilityTaxes and industryManager.InstallJob.
+    let reloaded = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "hf_1182_npc_tax");
+    common::pin_clock(&reloaded);
+
+    let mut demo_re = setup_demo_pilot(&reloaded, 118_202).await;
+    assert!(!demo_re.has_gm_role());
+
+    let jita_taxes_re = rpc(
+        &reloaded,
+        &mut demo_re,
+        "facilityManager",
+        "GetFacilityTaxes",
+        &[PyRep::Integer(JITA_STATION_ID)],
+    )
+    .await
+    .expect("GetFacilityTaxes Jita after reload");
+    let tax_rate_field = jita_taxes_re
+        .dict_get("tax")
+        .and_then(|v| v.as_f64())
+        .expect("tax field");
+    let act1_tax_field = jita_taxes_re
+        .dict_get("1")
+        .and_then(|v| v.as_f64())
+        .expect("activity 1 tax field");
+    assert!(
+        (tax_rate_field - 0.0025).abs() < 1e-6,
+        "NPC station default tax must remain 0.0025 after reload, got {tax_rate_field}"
+    );
+    assert!(
+        (act1_tax_field - 0.0025).abs() < 1e-6,
+        "NPC station activity 1 tax must remain 0.0025 after reload, got {act1_tax_field}"
+    );
+
+    let job_rep = rpc(
+        &reloaded,
+        &mut demo_re,
+        "industryManager",
+        "InstallJob",
+        &[
+            PyRep::Integer(bpo_id),
+            PyRep::Integer(i64::from(RIFTER_BP_TYPE_ID)),
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+            PyRep::Integer(JITA_STATION_ID),
+        ],
+    )
+    .await
+    .expect("InstallJob at Jita after reload");
+    let charged_rate = job_rep
+        .dict_get("facilityTaxRate")
+        .and_then(|v| v.as_f64())
+        .expect("facilityTaxRate");
+    let eiv_isk = job_rep
+        .dict_get("estimatedItemValueISK")
+        .and_then(|v| v.as_f64())
+        .expect("estimatedItemValueISK");
+    let charged_isk = job_rep
+        .dict_get("facilityTaxISK")
+        .and_then(|v| v.as_f64())
+        .expect("facilityTaxISK");
+    assert!(
+        (charged_rate - 0.0025).abs() < 1e-6,
+        "InstallJob must charge 0.25% NPC station tax after reload, got {charged_rate}"
+    );
+    assert!(eiv_isk > 0.0 && charged_isk > 0.0);
+    let exp_isk = (eiv_isk * 0.0025 * 100.0).round() / 100.0;
+    assert!(
+        (charged_isk - exp_isk).abs() < 0.02,
+        "facilityTaxISK mismatch: got {charged_isk}, expected {exp_isk}"
+    );
+
+    // 3. Upwell Raitaru RBAC checks:
+    //    - Non-member gets FacilityPermissionDenied
+    //    - Unroled corp member gets InsufficientCorpRoles
+    //    - Owning corp Station Manager / Director succeeds
+    let (mut outsider_re, _outsider_id) =
+        setup_fresh_player_pilot(&reloaded, 118_203, "hf1182_outsider", "HF1182 Outsider").await;
+    let outsider_err = rpc(
+        &reloaded,
+        &mut outsider_re,
+        "facilityManager",
+        "SetFacilityTaxes",
+        &[
+            PyRep::Integer(raitaru_id),
+            PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Real(0.04))]),
+        ],
+    )
+    .await
+    .expect_err("non-member cannot set Upwell facility taxes");
+    assert_eq!(outsider_err.code, "FacilityPermissionDenied");
+
+    let mut member_re = SessionState::new(118_204);
+    common::login_pilot(&reloaded, &mut member_re, "other", "other-secret").await;
+    rpc(
+        &reloaded,
+        &mut member_re,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(member_id)],
+    )
+    .await
+    .expect("SelectCharacterID other");
+    let unroled_err = rpc(
+        &reloaded,
+        &mut member_re,
+        "facilityManager",
+        "SetFacilityTaxes",
+        &[
+            PyRep::Integer(raitaru_id),
+            PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Real(0.04))]),
+        ],
+    )
+    .await
+    .expect_err("unroled corp member cannot set Upwell facility taxes");
+    assert_eq!(unroled_err.code, "InsufficientCorpRoles");
+
+    reloaded.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles
+                .insert(member_id, eve_db::corp_roles::ROLE_STATION_MANAGER);
+        }
+    });
+    let mgr_set = rpc(
+        &reloaded,
+        &mut member_re,
+        "facilityManager",
+        "SetFacilityTaxes",
+        &[
+            PyRep::Integer(raitaru_id),
+            PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Real(0.04))]),
+        ],
+    )
+    .await
+    .expect("Station Manager can set Upwell facility taxes");
+    assert_eq!(mgr_set.dict_get("1").and_then(|v| v.as_f64()), Some(0.04));
+
+    let raitaru_taxes = rpc(
+        &reloaded,
+        &mut demo_re,
+        "facilityManager",
+        "GetFacilityTaxes",
+        &[PyRep::Integer(raitaru_id)],
+    )
+    .await
+    .expect("GetFacilityTaxes Raitaru");
+    assert_eq!(raitaru_taxes.dict_get("1").and_then(|v| v.as_f64()), Some(0.04));
+
+    // 4. Explicit GM override on NPC station succeeds when session.has_gm_role() is true.
+    let mut gm_re = setup_gm_pilot(&reloaded, 118_205, 91_182_009).await;
+    assert!(gm_re.has_gm_role());
+    let gm_set = rpc(
+        &reloaded,
+        &mut gm_re,
+        "facilityManager",
+        "SetFacilityTaxes",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Real(0.015))]),
+        ],
+    )
+    .await
+    .expect("GM role may override NPC station taxes");
+    assert_eq!(gm_set.dict_get("1").and_then(|v| v.as_f64()), Some(0.015));
+}

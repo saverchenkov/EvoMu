@@ -993,6 +993,39 @@ async fn mutants_cov_ext_state_safety_roles_and_profile_managers() {
         s_plain.corp_role = 0;
         assert!(require_structure_corp_manager(snap, &s_plain, char_id, sid).is_err());
 
+        // Unowned (`corp_id == 0` / `owner_corp_id == 0`) must fail even with ROLE_DIRECTOR
+        s_plain.corp_role = ROLE_DIRECTOR;
+        assert_eq!(
+            require_corp_profile_manager(snap, &s_plain, char_id, 0)
+                .unwrap_err()
+                .code,
+            "StructureOwnershipViolation"
+        );
+        let zero_sid = 9_999_888_777_i64;
+        let mut zero_st = snap.structures[&sid].clone();
+        zero_st.structure_id = zero_sid;
+        zero_st.owner_corp_id = 0;
+        snap.structures.insert(zero_sid, zero_st);
+        assert_eq!(
+            require_structure_corp_manager(snap, &s_plain, char_id, zero_sid)
+                .unwrap_err()
+                .code,
+            "StructureOwnershipViolation"
+        );
+        assert_eq!(
+            crate::services::structure_profile_services::require_structure_service_access_in_snap(
+                None,
+                snap,
+                zero_sid,
+                char_id,
+                crate::services::structure_profile_services::StructureServiceKind::CorpManagement,
+                0,
+            )
+            .unwrap_err()
+            .code,
+            "StructureOwnershipViolation"
+        );
+
         // 5. credit_structure_owner_corp_div1 (0 cents noop vs >0 appends wallet_journal entry & updates div1 balance)
         let before_bal = snap.corporations[&corp_id].division_balance(1);
         let before_j = snap.wallet_journal.len();

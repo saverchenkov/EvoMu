@@ -422,3 +422,137 @@ fn facility_manager_get_facilities_populates_service_access_docked_and_undocked(
         }
     }
 }
+
+#[test]
+fn set_facility_taxes_denies_npc_stations_and_npc_corp_structures_without_gm_role() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let jita_st = 60_003_760_i64;
+    let npc_struct_id = 1_000_000_992_001_i64;
+    let zero_owner_struct_id = 1_000_000_992_002_i64;
+    let personal_item_struct_id = 1_000_000_992_003_i64;
+    let npc_corp_id = 1_000_009_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = npc_corp_id;
+        }
+        snap.structures.insert(
+            npc_struct_id,
+            UpwellStructureRecord {
+                structure_id: npc_struct_id,
+                type_id: 35825,
+                owner_corp_id: npc_corp_id,
+                solar_system_id: 30_000_142,
+                name: "NPC Owned Raitaru".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            zero_owner_struct_id,
+            UpwellStructureRecord {
+                structure_id: zero_owner_struct_id,
+                type_id: 35825,
+                owner_corp_id: 0,
+                solar_system_id: 30_000_142,
+                name: "Unowned Raitaru".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            personal_item_struct_id,
+            InventoryItemRecord {
+                item_id: personal_item_struct_id,
+                type_id: 35825,
+                owner_id: char_id,
+                location_id: jita_st,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut sess = char_session(char_id, Some(jita_st));
+    sess.corporation_id = Some(npc_corp_id);
+    sess.corp_role = corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_STATION_MANAGER;
+
+    // Non-GM player (even with Director/Station Manager bits) cannot alter NPC station taxes.
+    assert_eq!(
+        call_ind_bps(
+            &ctx,
+            &mut sess,
+            "facilityManager",
+            "SetFacilityTaxes",
+            &[
+                PyRep::Integer(jita_st),
+                PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Real(0.0))]),
+            ],
+            &kw,
+        )
+        .unwrap_err()
+        .code,
+        "FacilityPermissionDenied"
+    );
+    let jita_taxes = call_ind_bps(
+        &ctx,
+        &mut sess,
+        "facilityManager",
+        "GetFacilityTaxes",
+        &[PyRep::Integer(jita_st)],
+        &kw,
+    )
+    .unwrap();
+    assert_eq!(jita_taxes.dict_get("1").and_then(|v| v.as_f64()), Some(0.0025));
+
+    // Non-GM player cannot alter NPC-corp, unowned (owner_corp_id == 0), or personal-item structures.
+    for fac_id in [npc_struct_id, zero_owner_struct_id, personal_item_struct_id] {
+        assert_eq!(
+            call_ind_bps(
+                &ctx,
+                &mut sess,
+                "facilityManager",
+                "SetFacilityTaxes",
+                &[PyRep::Integer(fac_id), PyRep::Real(0.01)],
+                &kw,
+            )
+            .unwrap_err()
+            .code,
+            "FacilityPermissionDenied",
+            "expected FacilityPermissionDenied for facility {fac_id}"
+        );
+    }
+
+    // Explicit GM role is permitted to adjust NPC station taxes.
+    sess.role |= eve_machonet::service_roles::ROLE_GMH;
+    let gm_set = call_ind_bps(
+        &ctx,
+        &mut sess,
+        "facilityManager",
+        "SetFacilityTaxes",
+        &[
+            PyRep::Integer(jita_st),
+            PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Real(0.01))]),
+        ],
+        &kw,
+    )
+    .unwrap();
+    assert_eq!(gm_set.dict_get("1").and_then(|v| v.as_f64()), Some(0.01));
+    let jita_taxes_after_gm = call_ind_bps(
+        &ctx,
+        &mut sess,
+        "facilityManager",
+        "GetFacilityTaxes",
+        &[PyRep::Integer(jita_st)],
+        &kw,
+    )
+    .unwrap();
+    assert_eq!(
+        jita_taxes_after_gm.dict_get("1").and_then(|v| v.as_f64()),
+        Some(0.01)
+    );
+}
