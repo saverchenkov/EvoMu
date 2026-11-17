@@ -174,6 +174,19 @@ async fn test_ch1_skill_training_queue_engine() {
         // For 20 Per / 20 Wil:
         // Omega: 20 + 10 = 30 SP/min = 0.5 SP/sec
         // Alpha: 0.5 * 30 = 15 SP/min = 0.25 SP/sec
+        for (cid, tids) in [(omega_char_id, &[3300_u32, 3301_u32][..]), (alpha_char_id, &[3300_u32][..])] {
+            let smap = snap.skills.entry(cid).or_default();
+            for &tid in tids {
+                smap.insert(
+                    tid,
+                    eve_db::TrainedSkillRecord {
+                        type_id: tid,
+                        level: 0,
+                        skill_points: 0.0,
+                    },
+                );
+            }
+        }
         snap.skill_queues.insert(
             omega_char_id,
             vec![SkillQueueEntry {
@@ -331,6 +344,14 @@ async fn test_ch1_skill_training_queue_engine() {
                     remap_cooldown_until_unix: None,
                 },
                 home_station_id: 60003760,
+            },
+        );
+        snap.skills.entry(alpha_cap_id).or_default().insert(
+            3300,
+            eve_db::TrainedSkillRecord {
+                type_id: 3300,
+                level: 0,
+                skill_points: 0.0,
             },
         );
         snap.skill_queues.insert(

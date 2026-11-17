@@ -1848,6 +1848,21 @@ async fn test_skills_clones_implants_and_certificates_edges() {
     );
 
     // Prerequisite not met
+    ctx.db.with_mut_snapshot(|snap| {
+        let smap = snap.skills.entry(alpha_cid).or_default();
+        smap.entry(prereq_skill).or_insert(eve_db::TrainedSkillRecord {
+            type_id: prereq_skill,
+            level: 0,
+            skill_points: 0.0,
+        });
+        if let Some(om_tid) = omega_skill {
+            smap.entry(om_tid).or_insert(eve_db::TrainedSkillRecord {
+                type_id: om_tid,
+                level: 0,
+                skill_points: 0.0,
+            });
+        }
+    });
     assert_eq!(
         rpc(
             &ctx,

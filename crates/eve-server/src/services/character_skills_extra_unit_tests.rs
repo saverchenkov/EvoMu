@@ -406,8 +406,17 @@ fn save_new_queue_accepts_v24_dict_payload_activate_flag_and_paused_timestamps()
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.clone_grade = 2;
         }
-        snap.skills.entry(char_id).or_default().remove(&base_sk);
-        snap.skills.entry(char_id).or_default().remove(&adv_sk);
+        let smap = snap.skills.entry(char_id).or_default();
+        for tid in [base_sk, adv_sk] {
+            smap.insert(
+                tid,
+                TrainedSkillRecord {
+                    type_id: tid,
+                    level: 0,
+                    skill_points: 0.0,
+                },
+            );
+        }
         snap.skill_queues.remove(&char_id);
         snap.paused_skill_queues.remove(&char_id);
     });

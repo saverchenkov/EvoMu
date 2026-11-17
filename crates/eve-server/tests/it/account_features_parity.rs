@@ -226,6 +226,9 @@ async fn test_feat_account_multi_char_training() {
         ch2.character_id = pilot2_id;
         ch2.name = "SecondPilotTraining".into();
         snap.characters.insert(pilot2_id, ch2);
+        if let Some(p1_skills) = snap.skills.get(&PILOT_1).cloned() {
+            snap.skills.insert(pilot2_id, p1_skills);
+        }
     });
     let mut sess2 = login_and_select(&ctx, 60_005, "demo", "demo-secret", pilot2_id).await;
 

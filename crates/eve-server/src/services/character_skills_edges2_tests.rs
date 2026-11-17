@@ -179,6 +179,17 @@ fn catch_up_skill_queue_omega_lapse_paused_empty_future_and_midqueue_caps() {
 
     // 4. Multi-entry queue where elapsed time completes entry 1, partially trains entry 2, leaves entry 3 untouched
     ctx.db.with_mut_snapshot(|snap| {
+        let sk_map = snap.skills.entry(char_id).or_default();
+        for tid in [sk_a, sk_b, sk_c] {
+            sk_map.insert(
+                tid,
+                TrainedSkillRecord {
+                    type_id: tid,
+                    level: 0,
+                    skill_points: 0.0,
+                },
+            );
+        }
         snap.skill_queues.insert(
             char_id,
             vec![
@@ -227,7 +238,7 @@ fn catch_up_skill_queue_omega_lapse_paused_empty_future_and_midqueue_caps() {
         .keys()
         .copied()
         .find(|&tid| {
-            ctx.sde.types.get(&tid).is_some_and(|t| t.category_id == 16)
+            ctx.sde.types.get(&tid).is_some_and(|t| t.category_id == 16 && t.published)
                 && alpha_skill_cap_for_character(&ctx.sde, 1, tid) < 5
         });
     if let Some(capped_tid) = cap5_tid {
@@ -239,6 +250,14 @@ fn catch_up_skill_queue_omega_lapse_paused_empty_future_and_midqueue_caps() {
             ch.skill_points = 100_000.0;
             ch.free_skill_points = 0.0;
             snap.paused_skill_queues.remove(&char_id);
+            snap.skills.entry(char_id).or_default().insert(
+                capped_tid,
+                TrainedSkillRecord {
+                    type_id: capped_tid,
+                    level: 0,
+                    skill_points: 0.0,
+                },
+            );
             snap.skill_queues.insert(
                 char_id,
                 vec![
@@ -369,7 +388,18 @@ fn skill_queries_save_shapes_and_end_of_training_edge_cases() {
     // SaveSkillQueue: KeyVal payload ordering & prerequisite satisfied within same batch
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().clone_grade = 2;
-        snap.skills.entry(char_id).or_default().clear();
+        let sk_map = snap.skills.entry(char_id).or_default();
+        sk_map.clear();
+        for tid in [prereq_tid, child_tid] {
+            sk_map.insert(
+                tid,
+                TrainedSkillRecord {
+                    type_id: tid,
+                    level: 0,
+                    skill_points: 0.0,
+                },
+            );
+        }
         snap.skill_queues.remove(&char_id);
         snap.paused_skill_queues.remove(&char_id);
     });
@@ -874,5 +904,454 @@ fn mutant_kill_dispatch_unknown_save_new_queue_and_inject_ship_cargo() {
         assert!(snap.skill_history[&char_id]
             .iter()
             .any(|h| h.event_type_id == 36 && h.skill_type_id == sk_cargo));
+    });
+}
+
+#[test]
+fn skill_queue_requires_injected_and_published_skills_and_guards_catchup() {
+    let mut ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let st_id = 60_003_760_i64;
+    let mut sess = char_session(char_id, st_id);
+    let kw = HashMap::new();
+
+    let sk_prereq = 990_781_u32;
+    let sk_uninjected_pub = 990_782_u32;
+    let sk_unpub = 990_783_u32;
+    let sk_valid = 990_784_u32;
+    seed_skill_type(&mut ctx.sde, sk_prereq, 1.0, None);
+    seed_skill_type(&mut ctx.sde, sk_uninjected_pub, 1.0, Some((sk_prereq, 1)));
+    seed_skill_type(&mut ctx.sde, sk_unpub, 1.0, None);
+    seed_skill_type(&mut ctx.sde, sk_valid, 1.0, None);
+    std::sync::Arc::make_mut(&mut ctx.sde)
+        .types
+        .get_mut(&sk_unpub)
+        .expect("seeded unpublished skill")
+        .published = false;
+
+    let unpub_book_id = 991_783_001_i64;
+    let valid_book_id = 991_782_001_i64;
+    let base_entry = SkillQueueEntry {
+        type_id: sk_valid,
+        target_level: 1,
+        start_sp: 0.0,
+        end_sp: sp_for_skill_level(1.0, 1),
+        duration_seconds: 60.0,
+        started_at_unix: None,
+    };
+    let mut initial_hist_len = 0_usize;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.clone_grade = 2;
+        ch.station_id = Some(st_id);
+        ch.solar_system_id = 30_000_142;
+        ch.free_skill_points = 50_000.0;
+
+        let skills = snap.skills.entry(char_id).or_default();
+        skills.clear();
+        skills.insert(
+            sk_prereq,
+            TrainedSkillRecord {
+                type_id: sk_prereq,
+                level: 1,
+                skill_points: sp_for_skill_level(1.0, 1),
+            },
+        );
+        skills.insert(
+            sk_valid,
+            TrainedSkillRecord {
+                type_id: sk_valid,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
+
+        snap.skill_queues.insert(char_id, vec![base_entry.clone()]);
+        snap.paused_skill_queues.insert(char_id);
+        initial_hist_len = snap.skill_history.get(&char_id).map(|h| h.len()).unwrap_or(0);
+
+        for (item_id, type_id) in [(unpub_book_id, sk_unpub), (valid_book_id, sk_uninjected_pub)] {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id: char_id,
+                    location_id: st_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    // SaveSkillQueue & SaveNewQueue reject uninjected published skills (even with met prerequisites) atomically
+    for method in ["SaveSkillQueue", "SaveNewQueue"] {
+        let err = handle(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            method,
+            &[PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Integer(i64::from(sk_valid)), PyRep::Integer(1)]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(i64::from(sk_uninjected_pub)),
+                    PyRep::Integer(1),
+                ]),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, "SkillNotInjected", "{method} must reject uninjected skill");
+
+        let err_unpub = handle(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            method,
+            &[PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(i64::from(sk_unpub)),
+                PyRep::Integer(1),
+            ])])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err_unpub.code, "InvalidSkillType", "{method} must reject unpublished skill");
+    }
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.skill_queues.get(&char_id), Some(&vec![base_entry.clone()]));
+        assert!(snap.paused_skill_queues.contains(&char_id));
+        assert_eq!(
+            snap.skill_history.get(&char_id).map(|h| h.len()).unwrap_or(0),
+            initial_hist_len
+        );
+        assert!(!snap.skills[&char_id].contains_key(&sk_uninjected_pub));
+        assert!(!snap.skills[&char_id].contains_key(&sk_unpub));
+    });
+
+    // InjectSkillIntoBrain, ApplyFreeSkillPoints (2-arg), CharStartTrainingSkill reject unpublished skills
+    let inj_unpub = handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "InjectSkillIntoBrain",
+        &[PyRep::Integer(unpub_book_id)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(inj_unpub.code, "InvalidSkillType");
+    assert_eq!(ctx.db.get_item(unpub_book_id).unwrap().quantity, 1);
+
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "ApplyFreeSkillPoints",
+            &[PyRep::Integer(i64::from(sk_unpub)), PyRep::Real(250.0)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidSkillType"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "CharStartTrainingSkill",
+            &[PyRep::Integer(i64::from(sk_unpub))],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidSkillType"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "CharStartTrainingSkill",
+            &[PyRep::Integer(i64::from(sk_uninjected_pub))],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "SkillNotInjected"
+    );
+
+    // Even if an unpublished skill exists in snap.skills (legacy/forged state), queue & SP endpoints reject it
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            sk_unpub,
+            TrainedSkillRecord {
+                type_id: sk_unpub,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
+    });
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "SaveSkillQueue",
+            &[PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(i64::from(sk_unpub)),
+                PyRep::Integer(1),
+            ])])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidSkillType"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "ApplyFreeSkillPoints",
+            &[PyRep::Integer(i64::from(sk_unpub)), PyRep::Real(250.0)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidSkillType"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "ApplyFreeSkillPointsToSkills",
+            &[PyRep::Dict(vec![(PyRep::Integer(i64::from(sk_unpub)), PyRep::Integer(1))])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidSkillType"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "skillMgr2",
+            "CharStartTrainingSkill",
+            &[PyRep::Integer(i64::from(sk_unpub))],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidSkillType"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().remove(&sk_unpub);
+    });
+
+    // Guarded queue advancement & queue free-SP application skip & strip forged uninjected/unpublished entries
+    let forged_uninjected = SkillQueueEntry {
+        type_id: sk_uninjected_pub,
+        target_level: 1,
+        start_sp: 0.0,
+        end_sp: sp_for_skill_level(1.0, 1),
+        duration_seconds: 1.0,
+        started_at_unix: Some(ctx.now_unix()),
+    };
+    let forged_unpub = SkillQueueEntry {
+        type_id: sk_unpub,
+        target_level: 1,
+        start_sp: 0.0,
+        end_sp: sp_for_skill_level(1.0, 1),
+        duration_seconds: 1.0,
+        started_at_unix: Some(ctx.now_unix()),
+    };
+    let valid_lvl2 = SkillQueueEntry {
+        type_id: sk_valid,
+        target_level: 2,
+        start_sp: sp_for_skill_level(1.0, 1),
+        end_sp: sp_for_skill_level(1.0, 2),
+        duration_seconds: 60.0,
+        started_at_unix: None,
+    };
+    let valid_lvl3 = SkillQueueEntry {
+        type_id: sk_valid,
+        target_level: 3,
+        start_sp: sp_for_skill_level(1.0, 2),
+        end_sp: sp_for_skill_level(1.0, 3),
+        duration_seconds: 60.0,
+        started_at_unix: None,
+    };
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.paused_skill_queues.remove(&char_id);
+        snap.skill_queues.insert(
+            char_id,
+            vec![
+                forged_uninjected.clone(),
+                forged_unpub.clone(),
+                SkillQueueEntry {
+                    started_at_unix: Some(ctx.now_unix()),
+                    ..base_entry.clone()
+                },
+            ],
+        );
+    });
+    let est_q = handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "GetFreeSkillPointsAppliedToQueue",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        matches!(est_q, PyRep::Dict(ref entries) if entries.len() == 1 && entries[0].0 == PyRep::Integer(i64::from(sk_valid))),
+        "GetFreeSkillPointsAppliedToQueue must ignore forged uninjected/unpublished entries: {est_q:?}"
+    );
+    assert!(handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "ApplyFreeSkillPointsToQueue",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .is_ok());
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.skills[&char_id].contains_key(&sk_uninjected_pub));
+        assert!(!snap.skills[&char_id].contains_key(&sk_unpub));
+        assert_eq!(snap.skills[&char_id][&sk_valid].level, 1);
+        assert!(snap.skill_queues.get(&char_id).map(|q| q.is_empty()).unwrap_or(true));
+        assert!((snap.characters[&char_id].free_skill_points - 49_750.0).abs() < 1e-6);
+    });
+
+    // ApplyFreeSkillPoints (1-arg) ignores & strips forged entries while advancing valid queued skill
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skill_queues.insert(
+            char_id,
+            vec![
+                forged_uninjected.clone(),
+                forged_unpub.clone(),
+                valid_lvl2.clone(),
+            ],
+        );
+    });
+    let total_sp_before = ctx.db.with_snapshot(|snap| snap.characters[&char_id].skill_points);
+    let sp_needed_lvl2 = sp_for_skill_level(1.0, 2) - sp_for_skill_level(1.0, 1);
+    let total_sp_after_1arg = handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "ApplyFreeSkillPoints",
+        &[PyRep::Real(sp_needed_lvl2 + 5.0)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap()
+    .as_f64()
+    .unwrap();
+    assert!((total_sp_after_1arg - (total_sp_before + sp_needed_lvl2)).abs() < 1e-3);
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.skills[&char_id].contains_key(&sk_uninjected_pub));
+        assert!(!snap.skills[&char_id].contains_key(&sk_unpub));
+        assert_eq!(snap.skills[&char_id][&sk_valid].level, 2);
+        assert!(snap.skill_queues.get(&char_id).map(|q| q.is_empty()).unwrap_or(true));
+    });
+
+    // catch_up_skill_queue and advance_skill_queues skip & strip forged entries without granting them
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skill_queues.insert(
+            char_id,
+            vec![
+                SkillQueueEntry {
+                    started_at_unix: Some(ctx.now_unix().saturating_sub(86_400)),
+                    ..forged_uninjected.clone()
+                },
+                forged_unpub.clone(),
+                valid_lvl3.clone(),
+            ],
+        );
+    });
+    catch_up_skill_queue(&ctx, char_id);
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.skills[&char_id].contains_key(&sk_uninjected_pub));
+        assert!(!snap.skills[&char_id].contains_key(&sk_unpub));
+        assert_eq!(snap.skills[&char_id][&sk_valid].level, 3);
+        assert!(snap.skill_queues.get(&char_id).map(|q| q.is_empty()).unwrap_or(true));
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skill_queues.insert(
+            char_id,
+            vec![
+                SkillQueueEntry {
+                    started_at_unix: Some(ctx.now_unix()),
+                    ..forged_uninjected.clone()
+                },
+                forged_unpub.clone(),
+            ],
+        );
+    });
+    ctx.advance_skill_queues(86_400.0);
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.skills[&char_id].contains_key(&sk_uninjected_pub));
+        assert!(!snap.skills[&char_id].contains_key(&sk_unpub));
+        assert!(snap.skill_queues.get(&char_id).map(|q| q.is_empty()).unwrap_or(true));
+    });
+
+    // Positive flow: InjectSkillIntoBrain -> SaveNewQueue -> catch_up_skill_queue completes level 1
+    let inj_ok = handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "InjectSkillIntoBrain",
+        &[PyRep::Integer(valid_book_id)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        inj_ok.dict_get("typeID").and_then(|v| v.as_i64()),
+        Some(i64::from(sk_uninjected_pub))
+    );
+    assert!(handle(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "SaveNewQueue",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(i64::from(sk_uninjected_pub)),
+            PyRep::Integer(1),
+        ])])],
+        &kw,
+    )
+    .unwrap()
+    .is_ok());
+    ctx.advance_secs(7200);
+    catch_up_skill_queue(&ctx, char_id);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.skills[&char_id][&sk_uninjected_pub].level, 1);
     });
 }

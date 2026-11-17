@@ -147,7 +147,14 @@ async fn test_sp7_unobserved_system_simulation_and_background_cluster_tick() {
             max_mass_kg: 0.0, remaining_mass_kg: 0.0, max_jump_mass_kg: 0.0, collapsed: false,
         });
         snap.characters.get_mut(&90_000_001).unwrap().clone_grade = 2;
-        snap.skills.entry(90_000_001).or_default().remove(&3_300);
+        snap.skills.entry(90_000_001).or_default().insert(
+            3_300,
+            eve_db::TrainedSkillRecord {
+                type_id: 3_300,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
         snap.skill_queues.insert(90_000_001, vec![SkillQueueEntry {
             type_id: 3_300, target_level: 1, start_sp: 249.9, end_sp: 250.0,
             duration_seconds: 1.0, started_at_unix: Some(now0),

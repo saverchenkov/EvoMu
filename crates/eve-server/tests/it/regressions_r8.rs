@@ -1283,7 +1283,16 @@ pub(crate) async fn run_fitting_and_combat_regressions(
 
     // R14-P1-1: SaveSkillQueue rejects skills with unmet prerequisites (Torpedo Specialization 20213 requires Torpedoes 3325 V)
     ctx.db.with_mut_snapshot(|snap| {
-        snap.skills.entry(90_000_002).or_default().remove(&3325);
+        let smap = snap.skills.entry(90_000_002).or_default();
+        smap.remove(&3325);
+        smap.insert(
+            20213,
+            eve_db::TrainedSkillRecord {
+                type_id: 20213,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
     });
     let unmet_prereq_queue = ctx
         .dispatch_rpc(
@@ -1309,7 +1318,14 @@ pub(crate) async fn run_fitting_and_combat_regressions(
         if let Some(ch) = snap.characters.get_mut(&90_000_002) {
             ch.free_skill_points = 500.0;
         }
-        snap.skills.entry(90_000_002).or_default().remove(&3449);
+        snap.skills.entry(90_000_002).or_default().insert(
+            3449,
+            eve_db::TrainedSkillRecord {
+                type_id: 3449,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
         snap.skill_queues.entry(90_000_002).or_default().clear();
     });
     // Queue Navigation (3449, rank 1, requires Spaceship Command 3327 I which 90_000_002 has at level 3) to level 1 (needs 250 SP)

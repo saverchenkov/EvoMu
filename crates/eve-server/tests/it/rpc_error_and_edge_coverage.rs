@@ -539,6 +539,17 @@ async fn test_station_clones_certificates_and_skills_edge_paths() {
         "InvalidSkillType"
     );
     // Unmet prerequisite: Capital Ships (20533) requires Advanced Spaceship Command V + Spaceship Command V
+    ctx.db.with_mut_snapshot(|snap| {
+        let fresh_cid = fresh_sess.character_id.unwrap();
+        snap.skills.entry(fresh_cid).or_default().insert(
+            20_533,
+            eve_db::TrainedSkillRecord {
+                type_id: 20_533,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
+    });
     assert_eq!(
         rpc(
             &ctx,

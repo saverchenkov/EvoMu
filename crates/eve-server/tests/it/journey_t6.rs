@@ -443,6 +443,14 @@ async fn test_journey_08_skills_training() {
     rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.unwrap();
 
     ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(90_000_001).or_default().insert(
+            3402,
+            eve_db::TrainedSkillRecord {
+                type_id: 3402,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
         snap.skill_queues.entry(90_000_001).or_default().push(SkillQueueEntry {
             type_id: 3402,
             target_level: 2,

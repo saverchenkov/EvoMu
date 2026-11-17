@@ -126,6 +126,22 @@ async fn test_ch1_skill_training_engine_and_caps() {
         // Skill 3300 (Gunnery): rank 1, Primary Perception(20), Secondary Willpower(20)
         // Omega: 20 + 10 = 30 SP/min = 0.5 SP/sec
         // Alpha: 0.5 * 30 = 15 SP/min = 0.25 SP/sec
+        for (cid, tids) in [
+            (omega_char_id, &[3300_u32, 3301_u32, 3302_u32][..]),
+            (alpha_char_id, &[3300_u32][..]),
+        ] {
+            let smap = snap.skills.entry(cid).or_default();
+            for &tid in tids {
+                smap.insert(
+                    tid,
+                    TrainedSkillRecord {
+                        type_id: tid,
+                        level: 0,
+                        skill_points: 0.0,
+                    },
+                );
+            }
+        }
         snap.skill_queues.insert(
             omega_char_id,
             vec![SkillQueueEntry {
@@ -229,6 +245,14 @@ async fn test_ch1_skill_training_engine_and_caps() {
             alpha_cap_id,
             seed_test_character(alpha_cap_id, 3, "Alpha Cap Pilot", 1, 4_999_960.0, 100_000),
         );
+        snap.skills.entry(alpha_cap_id).or_default().insert(
+            3300,
+            TrainedSkillRecord {
+                type_id: 3300,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
         snap.skill_queues.insert(
             alpha_cap_id,
             vec![SkillQueueEntry {
@@ -283,6 +307,14 @@ async fn test_ch1_skill_training_engine_and_caps() {
                 type_id: 11579,
                 level: 4,
                 skill_points: 271_530.0,
+            },
+        );
+        skills.insert(
+            3402,
+            TrainedSkillRecord {
+                type_id: 3402,
+                level: 0,
+                skill_points: 0.0,
             },
         );
     });
@@ -570,8 +602,17 @@ async fn test_ch2_skill_handling_and_prerequisites() {
     // Small Hybrid Turret (type 3301) requires Gunnery (type 3300) level 1.
     // Try to queue Small Hybrid Turret without Gunnery:
     ctx.db.with_mut_snapshot(|snap| {
-        snap.skills.entry(char_id).or_default().remove(&3300);
-        snap.skills.entry(char_id).or_default().remove(&3301);
+        let sk_map = snap.skills.entry(char_id).or_default();
+        for tid in [3300_u32, 3301_u32] {
+            sk_map.insert(
+                tid,
+                TrainedSkillRecord {
+                    type_id: tid,
+                    level: 0,
+                    skill_points: 0.0,
+                },
+            );
+        }
         snap.skill_queues.insert(char_id, Vec::new());
     });
 
@@ -684,7 +725,14 @@ async fn test_ch2_skill_handling_and_prerequisites() {
                 blueprint_runs_remaining: None,
             },
         );
-        snap.skills.entry(char_id).or_default().remove(&3300);
+        snap.skills.entry(char_id).or_default().insert(
+            3300,
+            TrainedSkillRecord {
+                type_id: 3300,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
         snap.skills.entry(char_id).or_default().remove(&3301);
         snap.skills.entry(char_id).or_default().remove(&3302);
     });

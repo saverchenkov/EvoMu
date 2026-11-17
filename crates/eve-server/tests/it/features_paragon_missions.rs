@@ -223,6 +223,15 @@ async fn complete_op_authoritatively(ctx: &ServerContext, sess: &mut SessionStat
             }
             "skillTrainingStarted" => {
                 let sk_tid = conds.get("typeID").and_then(|v| v.first()).and_then(|s| s.parse::<u32>().ok()).unwrap_or(3_300);
+                ctx.db.with_mut_snapshot(|snap| {
+                    snap.skills.entry(char_id).or_default().entry(sk_tid).or_insert(
+                        eve_db::TrainedSkillRecord {
+                            type_id: sk_tid,
+                            level: 0,
+                            skill_points: 0.0,
+                        },
+                    );
+                });
                 rpc(ctx, sess, "skillMgr2", "SaveSkillQueue", &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(i64::from(sk_tid)), PyRep::Integer(5)])])]).await.unwrap();
             }
             "timesWarped" | "warpToLocation" => {

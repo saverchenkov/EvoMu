@@ -353,6 +353,14 @@ async fn context_advance_secs_and_skill_queues_omega_lapse_alpha_caps_and_partia
                 },
             );
         }
+        snap.skills.entry(char_omega_lapsing).or_default().insert(
+            skill_tid,
+            eve_db::TrainedSkillRecord {
+                type_id: skill_tid,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
         snap.skill_queues.insert(char_omega_lapsing, vec![SkillQueueEntry {
             type_id: skill_tid, target_level: 5, start_sp: 0.0, end_sp: 50_000.0,
             started_at_unix: Some(base), duration_seconds: 50_000.0,
@@ -362,6 +370,14 @@ async fn context_advance_secs_and_skill_queues_omega_lapse_alpha_caps_and_partia
             ch2.clone_grade = 1;
             ch2.skill_points = 5_000_100.0;
         }
+        snap.skills.entry(char_alpha_capped).or_default().insert(
+            skill_tid,
+            eve_db::TrainedSkillRecord {
+                type_id: skill_tid,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
         snap.skill_queues.insert(char_alpha_capped, vec![SkillQueueEntry {
             type_id: skill_tid, target_level: 1, start_sp: 0.0, end_sp: 250.0,
             started_at_unix: None, duration_seconds: 100.0,
@@ -373,6 +389,14 @@ async fn context_advance_secs_and_skill_queues_omega_lapse_alpha_caps_and_partia
         ch3.clone_grade = 2;
         ch3.skill_points = 0.0;
         snap.characters.insert(char_partial, ch3);
+        snap.skills.entry(char_partial).or_default().insert(
+            skill_tid,
+            eve_db::TrainedSkillRecord {
+                type_id: skill_tid,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
         snap.skill_queues.insert(char_partial, vec![SkillQueueEntry {
             type_id: skill_tid, target_level: 3, start_sp: 0.0, end_sp: lvl3_sp,
             started_at_unix: None, duration_seconds: 10_000.0,
