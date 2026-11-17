@@ -147,7 +147,12 @@ async fn test_spewed_cans_ded_wrecks_and_sleeper_waves() {
     )
     .await;
     assert_eq!(w3_balls.len(), 3);
-    assert_eq!(combat_rt.read().unwrap().npc_entities.len(), 3);
+    {
+        let rt = combat_rt.read().unwrap();
+        // `w1` (4) + `w2` (3) were persisted to `&ctx.db` and rehydrated when `w3` (3) ran.
+        assert_eq!(rt.npc_entities.len(), w1_balls.len() + w2_balls.len() + w3_balls.len());
+        assert!(w1_balls.iter().chain(w2_balls.iter()).chain(w3_balls.iter()).all(|bid| rt.npc_entities.contains_key(bid)));
+    }
 
     let sw_id = drop_sleeper_wreck_core(
         &ctx.db,
