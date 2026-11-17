@@ -40,6 +40,7 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
             "modularHangarCapitalBehaviours",
             "wreck",
             "slotsContainer",
+            "sensorGfxHandler",
         })
 
     def tearDown(self):
@@ -770,6 +771,261 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
         builtins.session = types.SimpleNamespace(stationid=60003760, structureid=None, shipid=200)
         self.assertFalse(BaseHangarShipBehaviour().SetShipDamage(100, object()))
         self.assertIsNone(ModularCapitalHangarShipBehaviour(100).ProcessSkinChange(object()))
+
+    def _make_fake_gfxhandler_cls(self, recycle_fn):
+        class GfxHandler(object):
+            def __init__(self, scene_mgr):
+                self.sceneManager = scene_mgr
+                self.gfxSensorSwipe = None
+                self.gfxSwipeThread = "active-thread"
+
+            def StartGfxSwipe(self, viewAngleInPlane):
+                if self.gfxSensorSwipe is None:
+                    self.gfxSensorSwipe = recycle_fn("res:/fisfx/scanner/background.red")
+                return ("started", viewAngleInPlane, self.gfxSensorSwipe)
+
+            def _GfxSwipeThread(self, viewAngleInPlane):
+                try:
+                    return self.StartGfxSwipe(viewAngleInPlane)
+                finally:
+                    self.gfxSwipeThread = None
+
+        return GfxHandler
+
+    def test_1292_sensor_gfx_swipe_happy_path_and_transition_skips(self):
+        recycle_calls = []
+
+        def recycle(path):
+            recycle_calls.append(path)
+            return {"loaded": path}
+
+        gfx_mod = types.ModuleType("sensorsuite.overlay.gfxhandler")
+        GfxHandler = self._make_fake_gfxhandler_cls(recycle)
+        gfx_mod.GfxHandler = GfxHandler
+        sys.modules["sensorsuite.overlay.gfxhandler"] = gfx_mod
+
+        self.assertTrue(evomu_site._install_sensor_suite_gfx_guard())
+
+        in_jump = [False]
+        builtins.sm = types.SimpleNamespace(
+            IsServiceRunning=lambda name: name == "subway",
+            GetService=lambda name: types.SimpleNamespace(InJump=lambda: in_jump[0]),
+        )
+        default_scene = [object()]
+        scene_mgr = types.SimpleNamespace(GetRegisteredScene=lambda name: default_scene[0] if name == "default" else None)
+
+        # Valid in-space state executes StartGfxSwipe and _GfxSwipeThread normally.
+        builtins.session = types.SimpleNamespace(solarsystemid=30000144, stationid=None, structureid=None, mutating=False)
+        handler = GfxHandler(scene_mgr)
+        res = handler._GfxSwipeThread(-2.906)
+        self.assertEqual(res, ("started", -2.906, {"loaded": "res:/fisfx/scanner/background.red"}))
+        self.assertIsNone(handler.gfxSwipeThread)
+        self.assertEqual(len(recycle_calls), 1)
+
+        # Each jump / dock / teardown / missing-scene condition skips BEFORE calling RecycleOrLoad.
+        blocked_cases = [
+            (types.SimpleNamespace(solarsystemid=None, stationid=None, structureid=None, mutating=False), False, object(), scene_mgr),
+            (types.SimpleNamespace(solarsystemid=30000144, stationid=60003760, structureid=None, mutating=False), False, object(), scene_mgr),
+            (types.SimpleNamespace(solarsystemid=30000144, stationid=None, structureid=1001, mutating=False), False, object(), scene_mgr),
+            (types.SimpleNamespace(solarsystemid=30000144, stationid=None, structureid=None, mutating=True), False, object(), scene_mgr),
+            (types.SimpleNamespace(solarsystemid=30000144, stationid=None, structureid=None, mutating=False), True, object(), scene_mgr),
+            (types.SimpleNamespace(solarsystemid=30000144, stationid=None, structureid=None, mutating=False), False, None, scene_mgr),
+            (types.SimpleNamespace(solarsystemid=30000144, stationid=None, structureid=None, mutating=False), False, None, None),
+        ]
+        for sess, jumping, scene_obj, mgr in blocked_cases:
+            builtins.session = sess
+            in_jump[0] = jumping
+            default_scene[0] = scene_obj
+            h = GfxHandler(mgr)
+            self.assertIsNone(h.StartGfxSwipe(-1.5))
+            self.assertIsNone(h._GfxSwipeThread(-1.5))
+            self.assertIsNone(h.gfxSensorSwipe)
+            self.assertIsNone(h.gfxSwipeThread)
+        self.assertEqual(len(recycle_calls), 1)
+
+    def test_1292_1293_sensor_gfx_swipe_absorbs_couldnt_get_object_when_none_and_propagates_real_errors(self):
+        exc_to_raise = [RuntimeError("Couldn't get object")]
+
+        def fake_recycle(_path):
+            raise exc_to_raise[0]
+
+        gfx_mod = types.ModuleType("sensorsuite.overlay.gfxhandler")
+
+        class GfxHandler(object):
+            def __init__(self):
+                self.sceneManager = types.SimpleNamespace(GetRegisteredScene=lambda _name: object())
+                self.gfxSensorSwipe = None
+                self.gfxSwipeThread = "active-thread"
+                self.loaded_err = None
+
+            def StartGfxSwipe(self, _viewAngleInPlane):
+                if self.gfxSensorSwipe is None:
+                    self.gfxSensorSwipe = fake_recycle("res:/fisfx/scanner/background.red")
+                if self.loaded_err is not None:
+                    raise self.loaded_err
+
+            def _GfxSwipeThread(self, viewAngleInPlane):
+                return self.StartGfxSwipe(viewAngleInPlane)
+
+            def _DirectRecycleInThread(self):
+                return fake_recycle("res:/fisfx/scanner/background.red")
+
+        gfx_mod.GfxHandler = GfxHandler
+        sys.modules["sensorsuite.overlay.gfxhandler"] = gfx_mod
+        self.assertTrue(evomu_site._install_sensor_suite_gfx_guard())
+
+        builtins.sm = types.SimpleNamespace(IsServiceRunning=lambda _name: False)
+        builtins.session = types.SimpleNamespace(solarsystemid=30000144, stationid=None, structureid=None, mutating=False)
+
+        # Mid-reload RuntimeError("Couldn't get object") when gfxSensorSwipe is None is absorbed cleanly.
+        h = GfxHandler()
+        self.assertIsNone(h.StartGfxSwipe(-2.9))
+        self.assertIsNone(h._GfxSwipeThread(-2.9))
+        self.assertIsNone(h.gfxSensorSwipe)
+        self.assertIsNone(h.gfxSwipeThread)
+
+        # Direct wrapper test on _GfxSwipeThread in case an error surfaces inside the thread body itself.
+        h_thread_direct = GfxHandler()
+        direct_wrapped = evomu_site._make_sensor_gfx_swipe_thread_guard(GfxHandler._DirectRecycleInThread)
+        self.assertIsNone(direct_wrapped(h_thread_direct))
+        self.assertIsNone(h_thread_direct.gfxSensorSwipe)
+        self.assertIsNone(h_thread_direct.gfxSwipeThread)
+
+        # Unrelated RuntimeError when gfxSensorSwipe is None must still propagate.
+        exc_to_raise[0] = RuntimeError("unexpected gfx failure")
+        with self.assertRaises(RuntimeError):
+            GfxHandler().StartGfxSwipe(0.0)
+        with self.assertRaises(RuntimeError):
+            GfxHandler()._GfxSwipeThread(0.0)
+
+        # Non-RuntimeError must still propagate even if message resembles recycler error.
+        exc_to_raise[0] = ValueError("Couldn't get object")
+        with self.assertRaises(ValueError):
+            GfxHandler().StartGfxSwipe(0.0)
+
+        # If gfxSensorSwipe was already populated, RuntimeError("Couldn't get object") still propagates.
+        h_loaded = GfxHandler()
+        h_loaded.gfxSensorSwipe = object()
+        h_loaded.loaded_err = RuntimeError("Couldn't get object")
+        with self.assertRaises(RuntimeError):
+            h_loaded.StartGfxSwipe(0.0)
+        with self.assertRaises(RuntimeError):
+            h_loaded._GfxSwipeThread(0.0)
+
+    def test_1292_late_import_via_meta_hook_guards_sensor_gfx_handler(self):
+        evomu_site._install_live_client_sync_guards()
+        self.assertNotIn("sensorGfxHandler", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+
+        def fail_recycle(_path):
+            raise RuntimeError("Couldn't get object")
+
+        gfx_mod = types.ModuleType("sensorsuite.overlay.gfxhandler")
+        gfx_mod.GfxHandler = self._make_fake_gfxhandler_cls(fail_recycle)
+        sys.modules["sensorsuite.overlay.gfxhandler"] = gfx_mod
+
+        evomu_site._EvomuMetaHook().find_module("sensorsuite.overlay.gfxhandler")
+        self.assertIn("sensorGfxHandler", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+
+        builtins.session = types.SimpleNamespace(solarsystemid=30000144, stationid=None, structureid=None, mutating=False)
+        builtins.sm = types.SimpleNamespace(IsServiceRunning=lambda _name: False)
+        handler = gfx_mod.GfxHandler(types.SimpleNamespace(GetRegisteredScene=lambda _n: object()))
+        self.assertIsNone(handler._GfxSwipeThread(-2.906))
+        self.assertIsNone(handler.gfxSensorSwipe)
+        self.assertIsNone(handler.gfxSwipeThread)
+
+    def test_1218_1254_live_client_chains_regression_verification(self):
+        # #1218: ModularCapitalHangarShipBehaviour inherits ModularHangarShipBehaviour.CleanScene and GetCamera()->None.
+        mhb_mod = types.ModuleType("eve.client.script.ui.view.hangarBehaviours.modularHangarBehaviours")
+
+        class ModularHangarShipBehaviour(object):
+            def __init__(self):
+                self.smallDocks = []
+                self.bigDocks = []
+                self.hangarScene = "scene"
+                self.isInitialized = True
+                self.cam_obj = None
+                self.raise_unrelated = False
+
+            def GetCamera(self):
+                return self.cam_obj
+
+            def CleanScene(self):
+                self.GetCamera().ClearRefs()
+                if self.raise_unrelated:
+                    raise AttributeError("unexpected cleanup failure")
+                self.hangarScene = None
+                self.isInitialized = False
+
+        class ModularCapitalHangarShipBehaviour(ModularHangarShipBehaviour):
+            def GetCamera(self):
+                return self.cam_obj
+
+        mhb_mod.ModularHangarShipBehaviour = ModularHangarShipBehaviour
+        sys.modules["eve.client.script.ui.view.hangarBehaviours.modularHangarBehaviours"] = mhb_mod
+
+        hv_mod = types.ModuleType("eve.client.script.ui.view.hangarView")
+
+        class HangarView(object):
+            def __init__(self, behaviour):
+                self.shipBehaviour = behaviour
+
+            def ClearScene(self):
+                self.shipBehaviour.CleanScene()
+                self.shipBehaviour = None
+
+        hv_mod.HangarView = HangarView
+        sys.modules["eve.client.script.ui.view.hangarView"] = hv_mod
+
+        self.assertTrue(evomu_site._install_hangar_view_teardown_guard())
+        cap_beh = ModularCapitalHangarShipBehaviour()
+        view = HangarView(cap_beh)
+        view.ClearScene()
+        self.assertIsNone(view.shipBehaviour)
+        self.assertIsNone(cap_beh.hangarScene)
+        self.assertFalse(cap_beh.isInitialized)
+
+        # Unrelated AttributeError on a valid camera still propagates.
+        valid_beh = ModularCapitalHangarShipBehaviour()
+        valid_beh.cam_obj = types.SimpleNamespace(ClearRefs=lambda: None)
+        valid_beh.raise_unrelated = True
+        with self.assertRaises(AttributeError):
+            valid_beh.CleanScene()
+
+        # #1254: Real EvaluateFit -> GetFittingDictForActiveShip chain returns None on shipid=None without invCache(None).
+        builtins.session = types.SimpleNamespace(shipid=None, stationid=60003760)
+        inv_calls = []
+        fsvc_mod = types.ModuleType("eve.client.script.environment.fittingSvc")
+        fsvc_mod.eveCfg = types.SimpleNamespace(GetActiveShip=lambda: builtins.session.shipid)
+
+        class fittingSvc(object):
+            def GetFittingDictForActiveShip(self, putModuleAmmoInCargo=False):
+                inv_calls.append(fsvc_mod.eveCfg.GetActiveShip())
+                if inv_calls[-1] is None:
+                    raise IndexError("Thou shalt not send None in as itemid to GetInventoryFromId")
+                return (587, [], [])
+
+        fsvc_mod.fittingSvc = fittingSvc
+        sys.modules["eve.client.script.environment.fittingSvc"] = fsvc_mod
+
+        svc_inst = fittingSvc()
+        fw_mod = types.ModuleType("shipfitting.fittingWarnings")
+
+        def EvaluateFit(_fittingController):
+            try:
+                fit = svc_inst.GetFittingDictForActiveShip()
+            except (RuntimeError, AttributeError):
+                return None
+            return {"ship": fit[0]}
+
+        fw_mod.EvaluateFit = EvaluateFit
+        sys.modules["shipfitting.fittingWarnings"] = fw_mod
+
+        self.assertTrue(evomu_site._install_fitting_active_ship_guard())
+        self.assertIsNone(fw_mod.EvaluateFit(object()))
+        self.assertEqual(inv_calls, [])
+        builtins.session.shipid = 1897500001
+        self.assertEqual(fw_mod.EvaluateFit(object()), {"ship": 587})
+        self.assertEqual(inv_calls, [1897500001])
 
 
 if __name__ == "__main__":
