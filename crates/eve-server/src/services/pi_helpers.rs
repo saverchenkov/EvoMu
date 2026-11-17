@@ -41,6 +41,8 @@ pub struct PiPinState {
     pub contents: HashMap<TypeId, u64>,
     #[serde(default)]
     pub last_cycle_unix: Option<u64>,
+    #[serde(default)]
+    pub extractor_depletion_cycles: f64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -77,6 +79,37 @@ pub struct PiColonyNetworkState {
     pub pending_login_extracted: u64,
     #[serde(default)]
     pub pending_login_processed: u64,
+    #[serde(default)]
+    pub resource_depletion_cycles: HashMap<TypeId, f64>,
+}
+
+/// Canonical PI extractor reference cycle length (30 minutes) used for depletion decay and yield scaling.
+pub const CANONICAL_EXTRACTOR_CYCLE_SECS: f64 = 1_800.0;
+
+fn is_extractor_pin(ctx: &ServerContext, pin: &PiPinState) -> bool {
+    pin.type_id == 2848
+        || pin.type_id == 3060
+        || ctx
+            .sde
+            .types
+            .get(&pin.type_id)
+            .map(|t| t.group_id == 1026 || t.group_id == 1063)
+            .unwrap_or(false)
+}
+
+/// Returns elapsed decay progress (in canonical 1,800s cycles) for an active extractor program up to `up_to_unix`.
+pub fn extractor_elapsed_canonical_cycles(pin: &PiPinState, up_to_unix: u64) -> f64 {
+    if pin.program_install_unix == 0 || pin.extractor_cycle_seconds == 0 {
+        return 0.0;
+    }
+    let effective_exp = pin
+        .expiry_time_unix
+        .unwrap_or_else(|| pin.program_install_unix.saturating_add(86_400));
+    if effective_exp == 0 || up_to_unix <= pin.program_install_unix {
+        return 0.0;
+    }
+    let end_ts = up_to_unix.min(effective_exp);
+    end_ts.saturating_sub(pin.program_install_unix) as f64 / CANONICAL_EXTRACTOR_CYCLE_SECS
 }
 
 pub fn cc_level_info(level: u8) -> (f64, f64, f64) {
@@ -595,30 +628,35 @@ pub fn advance_colony_simulation(
     let mut extracted_batches: Vec<(i64, TypeId, u64, f64)> = Vec::new();
     let sim_start = now_unix.saturating_sub(elapsed_sec);
     for pin in &net.pins {
-        let is_ext = pin.type_id == 2848
-            || pin.type_id == 3060
-            || ctx.sde.types.get(&pin.type_id).map(|t| t.group_id == 1026 || t.group_id == 1063).unwrap_or(false);
-        if is_ext && pin.extractor_cycle_seconds > 0 && pin.extractor_head_count > 0 {
+        if is_extractor_pin(ctx, pin) && pin.extractor_cycle_seconds > 0 && pin.extractor_head_count > 0 {
             let cyc_secs = pin.extractor_cycle_seconds.max(60);
             let install_ts = if pin.program_install_unix > 0 {
-                pin.program_install_unix.min(sim_start)
+                pin.program_install_unix
             } else {
                 sim_start
             };
             let expiry = pin
                 .expiry_time_unix
                 .unwrap_or_else(|| install_ts.saturating_add(86_400));
-            if expiry == 0 || sim_start >= expiry {
+            let effective_start = sim_start.max(install_ts);
+            let effective_end = now_unix.min(expiry);
+            if expiry == 0 || effective_start >= effective_end {
                 continue;
             }
-            let effective_end = now_unix.min(expiry);
-            let prev_completed = sim_start.saturating_sub(install_ts) / cyc_secs;
+            let max_cycles_cap = ((14 * 86_400) / cyc_secs).saturating_add(1).max(200);
+            let prev_completed = effective_start.saturating_sub(install_ts) / cyc_secs;
             let total_completed = effective_end.saturating_sub(install_ts) / cyc_secs;
-            let cycles = total_completed.saturating_sub(prev_completed).min(200);
+            let cycles = total_completed.saturating_sub(prev_completed).min(max_cycles_cap);
             if cycles == 0 {
                 continue;
             }
             let p0_tid = pin.extractor_resource_type_id.unwrap_or(default_p0);
+            let prior_depl_cycles = pin.extractor_depletion_cycles.max(
+                net.resource_depletion_cycles
+                    .get(&p0_tid)
+                    .copied()
+                    .unwrap_or(0.0),
+            );
             let heads = u64::from(pin.extractor_head_count.clamp(1, 10));
             let overlap = extractor_overlap_factor(&pin.extractor_heads, pin.extractor_head_radius.max(0.02));
             let valid_route = net
@@ -633,10 +671,17 @@ pub fn advance_colony_simulation(
                 .and_then(|r| r.path.last().copied())
                 .unwrap_or(pin.pin_id);
             let p0_vol_per_unit = ctx.sde.types.get(&p0_tid).map(|t| t.volume.max(0.01)).unwrap_or(0.38);
+            let cycle_scale = (cyc_secs as f64) / CANONICAL_EXTRACTOR_CYCLE_SECS;
+            let min_batch = ((10.0 * cycle_scale).round() as u64).max(1);
+            let mut pin_batch_total = 0_u64;
             for c in 0..cycles {
-                let decay = (-0.015 * ((prev_completed + c) as f64)).exp();
-                let batch = ((1_000.0 * (heads as f64) * overlap * decay).round() as u64).max(10);
-                extracted_batches.push((target_pin_id, p0_tid, batch, p0_vol_per_unit));
+                let cycle_pos = prior_depl_cycles + ((prev_completed + c) as f64) * cycle_scale;
+                let decay = (-0.015 * cycle_pos).exp();
+                let batch = ((1_000.0 * (heads as f64) * overlap * cycle_scale * decay).round() as u64).max(min_batch);
+                pin_batch_total = pin_batch_total.saturating_add(batch);
+            }
+            if pin_batch_total > 0 {
+                extracted_batches.push((target_pin_id, p0_tid, pin_batch_total, p0_vol_per_unit));
             }
         }
     }
@@ -797,14 +842,19 @@ pub fn advance_colony_simulation(
     // Check for extractor program completion or expiry
     let mut finished_extractors: Vec<i64> = Vec::new();
     for pin in net.pins.iter_mut() {
-        let is_ext = pin.type_id == 2848
-            || pin.type_id == 3060
-            || ctx.sde.types.get(&pin.type_id).map(|t| t.group_id == 1026 || t.group_id == 1063).unwrap_or(false);
+        let is_ext = is_extractor_pin(ctx, pin);
         let effective_exp = pin.expiry_time_unix.or_else(|| {
             (pin.program_install_unix > 0 && pin.extractor_cycle_seconds > 0)
                 .then(|| pin.program_install_unix.saturating_add(86_400))
         });
         if is_ext && effective_exp.is_some_and(|exp| exp > 0 && now_unix >= exp) {
+            let elapsed_depl = extractor_elapsed_canonical_cycles(pin, effective_exp.unwrap_or(now_unix));
+            if elapsed_depl > 0.0 {
+                let p0_tid = pin.extractor_resource_type_id.unwrap_or(default_p0);
+                pin.extractor_depletion_cycles += elapsed_depl;
+                let entry = net.resource_depletion_cycles.entry(p0_tid).or_insert(0.0);
+                *entry = (*entry).max(pin.extractor_depletion_cycles);
+            }
             finished_extractors.push(pin.pin_id);
             pin.program_install_unix = 0;
             pin.expiry_time_unix = Some(0);

@@ -9,7 +9,7 @@ use crate::types::{
 };
 use rusqlite::{params, Connection, Transaction};
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -711,7 +711,8 @@ pub type PostCommitListener = Arc<dyn Fn(&WorldStateSnapshot, &ChangeSet, &Effec
 pub struct EntityIdAllocator {
     next: AtomicI64,
     persisted_high_water: AtomicI64,
-    referenced_ids: Mutex<HashSet<i64>>,
+    /// Only retains out-of-order referenced IDs strictly above `next`.
+    referenced_ids: Mutex<BTreeSet<i64>>,
 }
 
 impl EntityIdAllocator {
@@ -722,32 +723,56 @@ impl EntityIdAllocator {
         Self {
             next: AtomicI64::new(floor),
             persisted_high_water: AtomicI64::new(persisted_high_water.max(200_000_000)),
-            referenced_ids: Mutex::new(HashSet::new()),
+            referenced_ids: Mutex::new(BTreeSet::new()),
         }
     }
 
-    /// Replaces the tracked cross-table referenced ID set on boot or snapshot reload (`#1087`).
+    fn prune_referenced_locked(guard: &mut BTreeSet<i64>, watermark: i64) {
+        while guard.first().is_some_and(|&v| v <= watermark) {
+            guard.pop_first();
+        }
+    }
+
+    fn claim_next_candidate(&self) -> i64 {
+        let mut guard = self
+            .referenced_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        loop {
+            let id = self.next.fetch_add(1, Ordering::AcqRel) + 1;
+            let hit = guard.remove(&id);
+            Self::prune_referenced_locked(&mut guard, id);
+            if hit {
+                continue;
+            }
+            return id;
+        }
+    }
+
+    /// Replaces the tracked cross-table referenced ID set on boot or snapshot reload (`#1087`),
+    /// retaining only IDs strictly above the monotonic `next` watermark.
     pub fn replace_referenced_ids(&self, ids: HashSet<i64>) {
+        let wm = self.next.load(Ordering::Acquire);
         *self
             .referenced_ids
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = ids;
+            .unwrap_or_else(|e| e.into_inner()) = ids.into_iter().filter(|&id| id > wm).collect();
     }
 
-    /// Adds additional referenced IDs to the cross-table skip set (`#1087`).
+    /// Adds additional referenced IDs strictly above `next` to the cross-table skip set (`#1087`).
     pub fn seed_referenced_ids(&self, ids: impl IntoIterator<Item = i64>) {
         let mut guard = self
             .referenced_ids
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let wm = self.next.load(Ordering::Acquire);
+        Self::prune_referenced_locked(&mut guard, wm);
         for id in ids {
-            if id > 0 {
-                guard.insert(id);
-            }
+            self.mark_referenced_locked(&mut guard, id);
         }
     }
 
-    /// Returns `true` if `candidate` is recorded in the cross-table referenced ID set (`#1087`).
+    /// Returns `true` if `candidate` is recorded in the out-of-order referenced ID set (`#1087`).
     #[inline]
     pub fn is_referenced(&self, candidate: i64) -> bool {
         self.referenced_ids
@@ -756,11 +781,73 @@ impl EntityIdAllocator {
             .contains(&candidate)
     }
 
-    fn mark_referenced(&self, id: i64) {
-        self.referenced_ids
+    fn mark_referenced_locked(&self, guard: &mut BTreeSet<i64>, id: i64) {
+        let mut wm = self.next.load(Ordering::Acquire);
+        Self::prune_referenced_locked(guard, wm);
+        if id <= wm {
+            return;
+        }
+        if id == wm + 1 {
+            loop {
+                match self.next.compare_exchange(
+                    wm,
+                    wm + 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        let mut new_wm = wm + 1;
+                        while let Some(&first) = guard.first() {
+                            if first <= new_wm {
+                                guard.pop_first();
+                            } else if first == new_wm + 1 {
+                                if self
+                                    .next
+                                    .compare_exchange(
+                                        new_wm,
+                                        new_wm + 1,
+                                        Ordering::AcqRel,
+                                        Ordering::Acquire,
+                                    )
+                                    .is_ok()
+                                {
+                                    guard.pop_first();
+                                    new_wm += 1;
+                                } else {
+                                    new_wm = self.next.load(Ordering::Acquire);
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        return;
+                    }
+                    Err(observed) => {
+                        wm = observed;
+                        Self::prune_referenced_locked(guard, wm);
+                        if id <= wm {
+                            return;
+                        }
+                        if id > wm + 1 {
+                            guard.insert(id);
+                            return;
+                        }
+                    }
+                }
+            }
+        } else {
+            guard.insert(id);
+        }
+    }
+
+    /// Records a referenced ID in `O(1)` memory: ignores IDs already covered by `next`, advances
+    /// `next` directly for contiguous IDs, and only stores out-of-order IDs above `next + 1`.
+    pub fn mark_referenced(&self, id: i64) {
+        let mut guard = self
+            .referenced_ids
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id);
+            .unwrap_or_else(|e| e.into_inner());
+        self.mark_referenced_locked(&mut guard, id);
     }
 
     /// Returns the most recently allocated (or initialized) ID counter without incrementing it.
@@ -777,9 +864,15 @@ impl EntityIdAllocator {
 
     /// Resets in-memory allocator bounds (used when loading a full snapshot file into memory).
     pub(crate) fn reset_from_load(&self, next: i64, persisted_high_water: i64) {
-        self.next.store(next.max(200_000_000), Ordering::Release);
+        let bounded = next.max(200_000_000);
+        let mut guard = self
+            .referenced_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.next.store(bounded, Ordering::Release);
         self.persisted_high_water
             .store(persisted_high_water.max(200_000_000), Ordering::Release);
+        Self::prune_referenced_locked(&mut guard, bounded);
     }
 
     /// Allocates a strictly monotonic entity ID, skipping any candidate still referenced in
@@ -787,14 +880,10 @@ impl EntityIdAllocator {
     /// next block of [`ENTITY_ID_BLOCK_SIZE`] into `world_meta.next_entity_block` in autocommit mode.
     pub fn alloc_with_conn(&self, conn: &Connection) -> Result<i64, String> {
         loop {
-            let id = self.next.fetch_add(1, Ordering::AcqRel) + 1;
-            if self.is_referenced(id)
-                || crate::sqlite_store::sqlite_entity_id_exists(conn, id)?
-            {
-                self.mark_referenced(id);
+            let id = self.claim_next_candidate();
+            if crate::sqlite_store::sqlite_entity_id_exists(conn, id)? {
                 continue;
             }
-            self.mark_referenced(id);
             self.ensure_block_persisted(conn, id)?;
             return Ok(id);
         }
@@ -808,12 +897,10 @@ impl EntityIdAllocator {
         snap: &WorldStateSnapshot,
     ) -> Result<i64, String> {
         loop {
-            let id = self.next.fetch_add(1, Ordering::AcqRel) + 1;
-            if self.is_referenced(id) || snap.is_entity_id_referenced(id) {
-                self.mark_referenced(id);
+            let id = self.claim_next_candidate();
+            if snap.is_entity_id_referenced(id) {
                 continue;
             }
-            self.mark_referenced(id);
             self.ensure_block_persisted(conn, id)?;
             return Ok(id);
         }
@@ -836,6 +923,13 @@ impl EntityIdAllocator {
             }
         }
         let committed = self.next.load(Ordering::Acquire).max(floor);
+        {
+            let mut guard = self
+                .referenced_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            Self::prune_referenced_locked(&mut guard, committed);
+        }
         let block = self
             .persisted_high_water
             .load(Ordering::Acquire)
@@ -874,6 +968,14 @@ impl EntityIdAllocator {
                 Ok(_) => break,
                 Err(observed) => cur = observed,
             }
+        }
+        {
+            let wm = self.next.load(Ordering::Acquire);
+            let mut guard = self
+                .referenced_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            Self::prune_referenced_locked(&mut guard, wm);
         }
         self.ensure_block_persisted(conn, floor)
     }
@@ -2480,5 +2582,56 @@ mod tests {
             .expect("read world_meta");
         assert!(meta_id >= reopened.read_state().next_entity_id);
         assert!(meta_block >= meta_id);
+    }
+
+    #[test]
+    fn entity_id_allocator_keeps_bounded_memory_across_one_million_sequential_allocations() {
+        let conn = Connection::open_in_memory().expect("open_in_memory");
+        crate::sqlite_store::apply_migrations(&conn).expect("apply_migrations");
+        let alloc = EntityIdAllocator::new(200_000_000, 200_000_000);
+        let snap = WorldStateSnapshot::default();
+
+        let mut last = 200_000_000_i64;
+        for _ in 0..1_000_000 {
+            let id = alloc
+                .alloc_with_conn_and_snap(&conn, &snap)
+                .expect("sequential alloc_with_conn_and_snap");
+            assert_eq!(id, last + 1);
+            last = id;
+        }
+        assert_eq!(alloc.current(), 201_000_000);
+        assert_eq!(
+            alloc.referenced_ids.lock().unwrap().len(),
+            0,
+            "sequential allocations must not grow referenced_ids in memory"
+        );
+
+        // Stale / covered IDs at or below watermark must not be retained.
+        alloc.mark_referenced(200_000_500);
+        alloc.mark_referenced(201_000_000);
+        assert_eq!(alloc.referenced_ids.lock().unwrap().len(), 0);
+        assert_eq!(alloc.current(), 201_000_000);
+
+        // Contiguous ID right above watermark advances `next` directly with O(1) set storage.
+        alloc.mark_referenced(201_000_001);
+        assert_eq!(alloc.current(), 201_000_001);
+        assert_eq!(alloc.referenced_ids.lock().unwrap().len(), 0);
+
+        // Out-of-order ID strictly above watermark is retained until allocated past, then pruned.
+        alloc.mark_referenced(201_000_005);
+        assert!(alloc.is_referenced(201_000_005));
+        assert_eq!(alloc.referenced_ids.lock().unwrap().len(), 1);
+        assert_eq!(alloc.alloc_with_conn_and_snap(&conn, &snap).unwrap(), 201_000_002);
+        assert_eq!(alloc.alloc_with_conn_and_snap(&conn, &snap).unwrap(), 201_000_003);
+        assert_eq!(alloc.alloc_with_conn_and_snap(&conn, &snap).unwrap(), 201_000_004);
+        assert_eq!(alloc.alloc_with_conn_and_snap(&conn, &snap).unwrap(), 201_000_006);
+        assert_eq!(alloc.referenced_ids.lock().unwrap().len(), 0);
+
+        // Bridging a gap via contiguous mark_referenced collapses retained entries into `next`.
+        alloc.mark_referenced(201_000_008);
+        assert_eq!(alloc.referenced_ids.lock().unwrap().len(), 1);
+        alloc.mark_referenced(201_000_007);
+        assert_eq!(alloc.current(), 201_000_008);
+        assert_eq!(alloc.referenced_ids.lock().unwrap().len(), 0);
     }
 }

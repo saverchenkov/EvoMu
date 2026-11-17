@@ -90,6 +90,82 @@ fn add_non_singleton_stacks(
     created
 }
 
+struct CompletedJobCommit {
+    job_id: i64,
+    prod_item_id: i64,
+    prod_type: TypeId,
+    job: eve_db::IndustryJobRecord,
+    bp_pre: Option<InventoryItemRecord>,
+    bp_post: Option<InventoryItemRecord>,
+    created_items: Vec<InventoryItemRecord>,
+}
+
+/// Verifies caller authorization over a personal or corporate industry job (`CancelJob` / `CompleteJob`).
+#[allow(clippy::too_many_arguments)]
+fn verify_industry_job_actor_authority(
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    job_id: i64,
+    installer_id: i64,
+    facility_id: i64,
+    use_corp: bool,
+    owner_id: i64,
+    allowed_corp_roles: u64,
+    action_verb: &str,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    let char_corp = snap
+        .characters
+        .get(&char_id)
+        .map(|c| c.corporation_id)
+        .or(session.corporation_id)
+        .unwrap_or(0);
+    if use_corp && owner_id > 0 {
+        if char_corp != owner_id {
+            return Err(BridgeRpcError {
+                code: "JobOwnershipViolation".into(),
+                message: format!(
+                    "Industry job {job_id} belongs to corporation {owner_id} and cannot be {action_verb} by ex-member {char_id}"
+                ),
+                client_error: None,
+            });
+        }
+        if installer_id != char_id {
+            let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+                char_corp,
+                char_id,
+                Some(facility_id),
+                session.corp_role,
+                now_unix,
+            );
+            let authorized = session.has_gm_role()
+                || is_ceo
+                || (eff_roles & allowed_corp_roles) != 0;
+            if !authorized {
+                return Err(BridgeRpcError {
+                    code: "JobOwnershipViolation".into(),
+                    message: format!(
+                        "Industry job {job_id} belongs to corporation {owner_id} and cannot be {action_verb} by character {char_id} without required corporate roles"
+                    ),
+                    client_error: None,
+                });
+            }
+        }
+        return Ok(());
+    }
+    if installer_id != char_id {
+        return Err(BridgeRpcError {
+            code: "JobOwnershipViolation".into(),
+            message: format!(
+                "Industry job {job_id} does not belong to character {char_id}"
+            ),
+            client_error: None,
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn handle_cancel_or_complete_industry_job(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -115,50 +191,22 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                     });
                 };
                 let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
-                let char_corp = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.corporation_id)
-                    .or(session.corporation_id)
-                    .unwrap_or(0);
-                if meta.use_corp && meta.owner_id > 0 && char_corp != meta.owner_id {
-                    return Err(BridgeRpcError {
-                        code: "JobOwnershipViolation".into(),
-                        message: format!(
-                            "Industry job {job_id} belongs to corporation {} and cannot be cancelled by ex-member {char_id}",
-                            meta.owner_id
-                        ),
-                        client_error: None,
-                    });
-                }
-                if job.installer_id != char_id {
-                    let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
-                        char_corp,
-                        char_id,
-                        Some(job.facility_id),
-                        session.corp_role,
-                        now_unix,
-                    );
-                    let can_cancel_corp = meta.use_corp
-                        && meta.owner_id == char_corp
-                        && (session.has_gm_role()
-                            || is_ceo
-                            || (eff_roles
-                                & (eve_db::corp_roles::ROLE_DIRECTOR
-                                    | eve_db::corp_roles::ROLE_FACTORY_MANAGER
-                                    | eve_db::corp_roles::ROLE_RENT_FACTORY_FACILITY
-                                    | eve_db::corp_roles::ROLE_RENT_RESEARCH_FACILITY))
-                                != 0);
-                    if !can_cancel_corp {
-                        return Err(BridgeRpcError {
-                            code: "JobOwnershipViolation".into(),
-                            message: format!(
-                                "Industry job {job_id} does not belong to character {char_id}"
-                            ),
-                            client_error: None,
-                        });
-                    }
-                }
+                verify_industry_job_actor_authority(
+                    snap,
+                    session,
+                    char_id,
+                    job.job_id,
+                    job.installer_id,
+                    job.facility_id,
+                    meta.use_corp,
+                    meta.owner_id,
+                    eve_db::corp_roles::ROLE_DIRECTOR
+                        | eve_db::corp_roles::ROLE_FACTORY_MANAGER
+                        | eve_db::corp_roles::ROLE_RENT_FACTORY_FACILITY
+                        | eve_db::corp_roles::ROLE_RENT_RESEARCH_FACILITY,
+                    "cancelled",
+                    now_unix,
+                )?;
                 if !matches!(job.status.as_str(), "Active" | "Paused" | "Ready") {
                     return Err(BridgeRpcError {
                         code: "InvalidJobState".into(),
@@ -241,10 +289,10 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                 job_ids.push(0);
             }
             let now_unix = ctx.now_unix();
-            let mut completed_kvs = Vec::with_capacity(job_ids.len());
-            for job_id in job_ids {
-                let res = ctx.db.try_with_mut_snapshot(|snap| {
-                    sync_industry_job_pause_states(snap, now_unix);
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<Vec<CompletedJobCommit>, BridgeRpcError> {
+                sync_industry_job_pause_states(snap, now_unix);
+                let mut completed_commits = Vec::with_capacity(job_ids.len());
+                for &job_id in &job_ids {
                     let Some(job) = snap.industry_jobs.get(&job_id).cloned() else {
                         return Err(BridgeRpcError {
                             code: "JobNotFound".into(),
@@ -253,31 +301,20 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                         });
                     };
                     let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
-                    let char_corp = snap
-                        .characters
-                        .get(&char_id)
-                        .map(|c| c.corporation_id)
-                        .unwrap_or(0);
-                    if meta.use_corp && meta.owner_id > 0 {
-                        if char_corp != meta.owner_id {
-                            return Err(BridgeRpcError {
-                                code: "JobOwnershipViolation".into(),
-                                message: format!(
-                                    "Industry job {job_id} belongs to corporation {} and cannot be delivered by ex-member {char_id}",
-                                    meta.owner_id
-                                ),
-                                client_error: None,
-                            });
-                        }
-                    } else if job.installer_id != char_id {
-                        return Err(BridgeRpcError {
-                            code: "JobOwnershipViolation".into(),
-                            message: format!(
-                                "Industry job {job_id} does not belong to character {char_id}"
-                            ),
-                            client_error: None,
-                        });
-                    }
+                    verify_industry_job_actor_authority(
+                        snap,
+                        session,
+                        char_id,
+                        job.job_id,
+                        job.installer_id,
+                        job.facility_id,
+                        meta.use_corp,
+                        meta.owner_id,
+                        eve_db::corp_roles::ROLE_DIRECTOR
+                            | eve_db::corp_roles::ROLE_FACTORY_MANAGER,
+                        "delivered",
+                        now_unix,
+                    )?;
                     if job.status == "Paused" {
                         return Err(BridgeRpcError {
                             code: "FacilityServiceOffline".into(),
@@ -417,7 +454,16 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                             fail_meta.completed_character_id = Some(char_id);
                             save_job_cost_meta(snap, job_id, &fail_meta);
                             let bp_post = snap.items.get(&job.blueprint_item_id).cloned();
-                            return Ok(Ok((0, 0, job, bp_pre, bp_post, created_items)));
+                            completed_commits.push(CompletedJobCommit {
+                                job_id,
+                                prod_item_id: 0,
+                                prod_type: 0,
+                                job,
+                                bp_pre,
+                                bp_post,
+                                created_items,
+                            });
+                            continue;
                         }
                         if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
                             j_mut.status = "Delivered".into();
@@ -468,7 +514,16 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                         snap.items.insert(bpc_item_id, created_bpc.clone());
                         created_items.push(created_bpc);
                         let bp_post = snap.items.get(&job.blueprint_item_id).cloned();
-                        return Ok(Ok((bpc_item_id, t2_bpc_type_id, job, bp_pre, bp_post, created_items)));
+                        completed_commits.push(CompletedJobCommit {
+                            job_id,
+                            prod_item_id: bpc_item_id,
+                            prod_type: t2_bpc_type_id,
+                            job,
+                            bp_pre,
+                            bp_post,
+                            created_items,
+                        });
+                        continue;
                     }
 
                     if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
@@ -568,7 +623,15 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                             .map(|item| item.item_id)
                             .unwrap_or(job.blueprint_item_id);
                         created_items.extend(delivered);
-                        Ok(Ok((prod_item_id, job.product_type_id, job, bp_pre, bp_post, created_items)))
+                        completed_commits.push(CompletedJobCommit {
+                            job_id,
+                            prod_item_id,
+                            prod_type: job.product_type_id,
+                            job,
+                            bp_pre,
+                            bp_post,
+                            created_items,
+                        });
                     } else if job.activity_id == 5 {
                         let copy_runs = i32::try_from(job.licensed_runs.unwrap_or(1).max(1))
                             .unwrap_or(i32::MAX);
@@ -598,35 +661,59 @@ pub(super) fn handle_cancel_or_complete_industry_job(
                             snap.items.insert(copy_item_id, created_copy.clone());
                             created_items.push(created_copy);
                         }
-                        Ok(Ok((first_copy_id, job.blueprint_type_id, job, bp_pre, bp_post, created_items)))
+                        completed_commits.push(CompletedJobCommit {
+                            job_id,
+                            prod_item_id: first_copy_id,
+                            prod_type: job.blueprint_type_id,
+                            job,
+                            bp_pre,
+                            bp_post,
+                            created_items,
+                        });
                     } else {
-                        Ok(Ok((job.blueprint_item_id, job.blueprint_type_id, job, bp_pre, bp_post, created_items)))
-                    }
-                });
-                match res {
-                    Ok(Ok((prod_item_id, prod_type, job, bp_pre, bp_post, created_items))) => {
-                        ctx.notify_item_mutation(char_id, bp_pre.as_ref(), bp_post.as_ref());
-                        for created in &created_items {
-                            ctx.emit_item_change_routed(
-                                char_id,
-                                created,
-                                vec![(3, PyRep::Integer(6)), (4, PyRep::Integer(0))],
-                            );
-                        }
-                        match finalize_completed_industry_job_response(
-                            ctx,
-                            char_id,
-                            method,
+                        let prod_type = job.blueprint_type_id;
+                        let prod_item_id = job.blueprint_item_id;
+                        completed_commits.push(CompletedJobCommit {
                             job_id,
                             prod_item_id,
                             prod_type,
-                            &job,
-                        ) {
-                            Ok(kv) => completed_kvs.push(kv),
-                            Err(e) => return Some(Err(e)),
-                        }
+                            job,
+                            bp_pre,
+                            bp_post,
+                            created_items,
+                        });
                     }
-                    Ok(Err(inv_err)) => return Some(Err(inv_err)),
+                }
+                Ok(completed_commits)
+            });
+            let commits = match res {
+                Ok(commits) => commits,
+                Err(e) => return Some(Err(e)),
+            };
+            let mut completed_kvs = Vec::with_capacity(commits.len());
+            for commit in commits {
+                ctx.notify_item_mutation(
+                    char_id,
+                    commit.bp_pre.as_ref(),
+                    commit.bp_post.as_ref(),
+                );
+                for created in &commit.created_items {
+                    ctx.emit_item_change_routed(
+                        char_id,
+                        created,
+                        vec![(3, PyRep::Integer(6)), (4, PyRep::Integer(0))],
+                    );
+                }
+                match finalize_completed_industry_job_response(
+                    ctx,
+                    char_id,
+                    method,
+                    commit.job_id,
+                    commit.prod_item_id,
+                    commit.prod_type,
+                    &commit.job,
+                ) {
+                    Ok(kv) => completed_kvs.push(kv),
                     Err(e) => return Some(Err(e)),
                 }
             }

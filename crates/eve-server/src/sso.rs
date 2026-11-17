@@ -22,8 +22,12 @@ use tokio::net::TcpStream;
 
 /// Maximum HTTP request size accepted by the SSO/ESI listener (256 KiB).
 pub const MAX_HTTP_REQUEST_BYTES: usize = 256 * 1024;
-/// Maximum HTTP body size accepted for `POST /bugs/api/attachment/{id}` (32 MiB for screenshots + `igbr.zip`).
-pub const MAX_BUG_ATTACHMENT_BYTES: usize = 32 * 1024 * 1024;
+/// Maximum HTTP body size accepted for `POST /bugs/api/attachment/{id}` (matches `bug_reporting`, 8 MiB).
+pub const MAX_BUG_ATTACHMENT_BYTES: usize = crate::bug_reporting::MAX_BUG_ATTACHMENT_BYTES;
+/// Maximum total time (headers + body) allowed for a single HTTP request before closing.
+const HTTP_TOTAL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Maximum concurrent `POST /bugs/api/attachment/{id}` uploads buffered per `ServerContext`.
+pub(crate) const MAX_CONCURRENT_BUG_ATTACHMENTS: usize = 4;
 
 /// Structured HTTP response produced by the SSO/ESI HTTP handler.
 #[derive(Debug, Clone)]
@@ -81,23 +85,167 @@ impl HttpResponse {
 
 const HTTP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Handles a single HTTP/1.1 connection on the SSO/ESI listener (`ESI-1`).
-pub async fn handle_http_connection(stream: TcpStream, ctx: Arc<ServerContext>) -> Result<()> {
-    handle_http_connection_with_timeout(stream, ctx, HTTP_READ_TIMEOUT).await
+#[derive(Default)]
+struct BugAttachmentSemaphoreRegistry {
+    entries: HashMap<usize, (std::sync::Weak<ServerContext>, Arc<tokio::sync::Semaphore>)>,
 }
 
+static BUG_ATTACHMENT_SEMAPHORES: OnceLock<Mutex<BugAttachmentSemaphoreRegistry>> =
+    OnceLock::new();
+
+fn bug_attachment_semaphore_for(ctx: &Arc<ServerContext>) -> Arc<tokio::sync::Semaphore> {
+    let registry = BUG_ATTACHMENT_SEMAPHORES
+        .get_or_init(|| Mutex::new(BugAttachmentSemaphoreRegistry::default()));
+    let mut guard = registry.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .entries
+        .retain(|_, (weak, _)| weak.strong_count() > 0);
+    let key = Arc::as_ptr(ctx) as usize;
+    if let Some((weak, sem)) = guard.entries.get(&key) {
+        if weak.upgrade().is_some_and(|strong| Arc::ptr_eq(&strong, ctx)) {
+            return Arc::clone(sem);
+        }
+    }
+    let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BUG_ATTACHMENTS));
+    guard
+        .entries
+        .insert(key, (Arc::downgrade(ctx), Arc::clone(&sem)));
+    sem
+}
+
+fn is_safe_bug_report_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 64
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn has_valid_multipart_header(headers: &HashMap<String, String>) -> bool {
+    let Some(ct) = headers.get("content-type") else {
+        return false;
+    };
+    let mut parts = ct.split(';').map(str::trim);
+    let Some(media_type) = parts.next() else {
+        return false;
+    };
+    if !media_type.eq_ignore_ascii_case("multipart/form-data") {
+        return false;
+    }
+    parts.any(|param| {
+        param
+            .split_once('=')
+            .is_some_and(|(k, v)| {
+                k.trim().eq_ignore_ascii_case("boundary")
+                    && !v.trim().trim_matches('"').is_empty()
+            })
+    })
+}
+
+fn validate_bug_attachment_preflight(
+    ctx: &ServerContext,
+    target: &str,
+    headers: &HashMap<String, String>,
+    content_length: usize,
+) -> std::result::Result<(), HttpResponse> {
+    let (path, _) = target.split_once('?').unwrap_or((target, ""));
+    let issue_id = path
+        .trim_end_matches('/')
+        .strip_prefix("/bugs/api/attachment/")
+        .unwrap_or("");
+    if !is_safe_bug_report_key(issue_id) {
+        return Err(HttpResponse::json(
+            400,
+            "Bad Request",
+            json!({ "error": "invalid_issue_id", "error_description": "Invalid bug report key" }),
+        ));
+    }
+    if headers.contains_key("authorization") {
+        verify_esi_bearer_token(ctx, headers, None)?;
+    }
+    if ctx.bug_reporting.lookup_report_path(issue_id).is_none() {
+        return Err(HttpResponse::json(
+            404,
+            "Not Found",
+            json!({ "error": "issue_not_found", "error_description": format!("Unknown bug report {issue_id}") }),
+        ));
+    }
+    if headers.contains_key("transfer-encoding")
+        || content_length == 0
+        || !has_valid_multipart_header(headers)
+    {
+        return Err(HttpResponse::json(
+            400,
+            "Bad Request",
+            json!({
+                "error": "invalid_multipart",
+                "error_description": "Expected Content-Length and multipart/form-data file upload"
+            }),
+        ));
+    }
+    Ok(())
+}
+
+async fn read_with_deadlines(
+    stream: &mut TcpStream,
+    chunk: &mut [u8],
+    read_timeout: std::time::Duration,
+    overall_deadline: tokio::time::Instant,
+) -> Result<Option<usize>> {
+    let now = tokio::time::Instant::now();
+    let Some(remaining) = overall_deadline.checked_duration_since(now) else {
+        return Ok(None);
+    };
+    let step_timeout = read_timeout.min(remaining);
+    if step_timeout.is_zero() {
+        return Ok(None);
+    }
+    match tokio::time::timeout(step_timeout, stream.read(chunk)).await {
+        Ok(res) => Ok(Some(res?)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Handles a single HTTP/1.1 connection on the SSO/ESI listener (`ESI-1`).
+pub async fn handle_http_connection(stream: TcpStream, ctx: Arc<ServerContext>) -> Result<()> {
+    handle_http_connection_with_deadlines(
+        stream,
+        ctx,
+        HTTP_READ_TIMEOUT,
+        HTTP_TOTAL_REQUEST_TIMEOUT,
+    )
+    .await
+}
+
+#[cfg(test)]
 pub(crate) async fn handle_http_connection_with_timeout(
-    mut stream: TcpStream,
+    stream: TcpStream,
     ctx: Arc<ServerContext>,
     read_timeout: std::time::Duration,
 ) -> Result<()> {
+    let total_timeout = if read_timeout >= HTTP_READ_TIMEOUT {
+        HTTP_TOTAL_REQUEST_TIMEOUT
+    } else {
+        read_timeout.saturating_mul(10).max(read_timeout)
+    };
+    handle_http_connection_with_deadlines(stream, ctx, read_timeout, total_timeout).await
+}
+
+pub(crate) async fn handle_http_connection_with_deadlines(
+    mut stream: TcpStream,
+    ctx: Arc<ServerContext>,
+    read_timeout: std::time::Duration,
+    total_timeout: std::time::Duration,
+) -> Result<()> {
+    let overall_deadline = tokio::time::Instant::now() + total_timeout;
     let mut buf = Vec::with_capacity(4096);
     let mut chunk = [0u8; 4096];
     let header_end = loop {
-        let Ok(read_res) = tokio::time::timeout(read_timeout, stream.read(&mut chunk)).await else {
+        let Some(n) =
+            read_with_deadlines(&mut stream, &mut chunk, read_timeout, overall_deadline).await?
+        else {
             return Ok(());
         };
-        let n = read_res?;
         if n == 0 {
             return Ok(());
         }
@@ -135,12 +283,35 @@ pub(crate) async fn handle_http_connection_with_timeout(
         }
     }
 
-    let content_length = headers
-        .get("content-length")
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(0);
+    let raw_cl = headers.get("content-length").map(|v| v.trim());
     let is_bug_attachment_upload =
         method == "POST" && target.starts_with("/bugs/api/attachment/");
+    let content_length = match raw_cl {
+        None => 0,
+        Some(v) => match v.parse::<usize>() {
+            Ok(len) => len,
+            Err(_) => {
+                if is_bug_attachment_upload {
+                    let resp = if v.bytes().all(|b| b.is_ascii_digit()) {
+                        HttpResponse::json(
+                            413,
+                            "Payload Too Large",
+                            json!({"error": "invalid_request", "error_description": "Request body too large"}),
+                        )
+                    } else {
+                        HttpResponse::json(
+                            400,
+                            "Bad Request",
+                            json!({"error": "invalid_request", "error_description": "Invalid Content-Length header"}),
+                        )
+                    };
+                    stream.write_all(&resp.to_wire_bytes()).await?;
+                    return Ok(());
+                }
+                0
+            }
+        },
+    };
     let max_body_bytes = if is_bug_attachment_upload {
         MAX_BUG_ATTACHMENT_BYTES
     } else {
@@ -156,6 +327,34 @@ pub(crate) async fn handle_http_connection_with_timeout(
         return Ok(());
     }
 
+    let _attachment_permit = if is_bug_attachment_upload {
+        if let Err(err_resp) =
+            validate_bug_attachment_preflight(&ctx, &target, &headers, content_length)
+        {
+            stream.write_all(&err_resp.to_wire_bytes()).await?;
+            stream.flush().await?;
+            return Ok(());
+        }
+        match bug_attachment_semaphore_for(&ctx).try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                let busy = HttpResponse::json(
+                    503,
+                    "Service Unavailable",
+                    json!({
+                        "error": "server_busy",
+                        "error_description": "Too many concurrent bug attachment uploads"
+                    }),
+                );
+                stream.write_all(&busy.to_wire_bytes()).await?;
+                stream.flush().await?;
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+
     if headers
         .get("expect")
         .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"))
@@ -164,18 +363,20 @@ pub(crate) async fn handle_http_connection_with_timeout(
         stream.flush().await?;
     }
 
-    while buf.len() < header_end + content_length {
-        let Ok(read_res) = tokio::time::timeout(read_timeout, stream.read(&mut chunk)).await else {
+    let target_len = header_end.saturating_add(content_length);
+    while buf.len() < target_len {
+        let Some(n) =
+            read_with_deadlines(&mut stream, &mut chunk, read_timeout, overall_deadline).await?
+        else {
             return Ok(());
         };
-        let n = read_res?;
         if n == 0 {
             break;
         }
         buf.extend_from_slice(&chunk[..n]);
     }
 
-    let body_end = (header_end + content_length).min(buf.len());
+    let body_end = target_len.min(buf.len());
     let body = &buf[header_end..body_end];
 
     let peer_ip = stream.peer_addr().ok().map(|addr| addr.ip());

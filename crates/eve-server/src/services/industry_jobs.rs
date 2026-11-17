@@ -932,14 +932,26 @@ pub fn handle_industry_jobs(
                             message: format!("No ancient relic stack with {runs} units available"),
                             client_error: None,
                         })?,
-                    8 => matching_bps
-                        .into_iter()
-                        .find(|i| i.is_blueprint_copy && i.blueprint_runs_remaining.unwrap_or(0) >= 1)
-                        .ok_or_else(|| BridgeRpcError {
-                            code: "InventionRequiresBPC".into(),
-                            message: "T2 Invention requires a BPC with at least 1 remaining run".into(),
-                            client_error: None,
-                        })?,
+                    8 => {
+                        let any_valid_bpc = matching_bps
+                            .iter()
+                            .any(|i| i.is_blueprint_copy && i.blueprint_runs_remaining.unwrap_or(0) >= 1);
+                        if !any_valid_bpc {
+                            return Err(BridgeRpcError {
+                                code: "InventionRequiresBPC".into(),
+                                message: "T2 Invention requires a BPC with at least 1 remaining run".into(),
+                                client_error: None,
+                            });
+                        }
+                        matching_bps
+                            .into_iter()
+                            .find(|i| i.is_blueprint_copy && i.blueprint_runs_remaining.unwrap_or(0) >= runs_i32)
+                            .ok_or_else(|| BridgeRpcError {
+                                code: "InsufficientBlueprintRuns".into(),
+                                message: format!("No BPC with {runs} remaining runs available for invention"),
+                                client_error: None,
+                            })?
+                    }
                     _ => matching_bps
                         .into_iter()
                         .find(|i| !i.is_blueprint_copy || i.blueprint_runs_remaining.unwrap_or(0) >= runs_i32)

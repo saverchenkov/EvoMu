@@ -389,10 +389,30 @@ fn handle_get_members_paged(
     session: &mut SessionState,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (target_cid, page, page_size) = if let Some(cid) = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id)) {
-        (Some(cid), args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as usize, args.get(2).and_then(|a| a.as_i64()).unwrap_or(50).max(1) as usize)
+    const DEFAULT_MEMBER_PAGE_SIZE: i64 = 50;
+    const MAX_MEMBER_PAGE_SIZE: usize = 1_000;
+    let first_arg_is_corp_id = |id: i64| -> bool {
+        (1_000_000..2_000_000).contains(&id)
+            || (98_000_000..2_000_000_000).contains(&id)
+            || (id >= 98_000_000 && ctx.db.with_snapshot(|s| s.corporations.contains_key(&id)))
+    };
+    let parse_page_arg = |rep: Option<&PyRep>| -> usize {
+        let raw = rep.and_then(|a| a.as_i64()).unwrap_or(1).max(1);
+        usize::try_from(raw).unwrap_or(usize::MAX)
+    };
+    let parse_page_size_arg = |rep: Option<&PyRep>| -> usize {
+        rep.and_then(|a| a.as_i64())
+            .unwrap_or(DEFAULT_MEMBER_PAGE_SIZE)
+            .clamp(1, MAX_MEMBER_PAGE_SIZE as i64) as usize
+    };
+    let (target_cid, page, page_size) = if let Some(cid) = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .filter(|&id| first_arg_is_corp_id(id) || args.len() >= 3)
+    {
+        (Some(cid), parse_page_arg(args.get(1)), parse_page_size_arg(args.get(2)))
     } else {
-        (None, args.first().and_then(|a| a.as_i64()).unwrap_or(1).max(1) as usize, args.get(1).and_then(|a| a.as_i64()).unwrap_or(50).max(1) as usize)
+        (None, parse_page_arg(args.first()), parse_page_size_arg(args.get(1)))
     };
     let (corp_id, viewer_id, has_director) = match require_corp_caller(ctx, session, target_cid) {
         Ok(v) => v,
@@ -400,8 +420,19 @@ fn handle_get_members_paged(
     };
     let members = get_corp_member_snapshot(ctx, corp_id, viewer_id, has_director);
     let total_count = members.len();
-    let offset = (page.saturating_sub(1)) * page_size;
-    let rows: Vec<Vec<PyRep>> = members.iter().skip(offset).take(page_size).map(member_row_rep).collect();
+    let offset = page
+        .saturating_sub(1)
+        .checked_mul(page_size)
+        .unwrap_or(usize::MAX);
+    let rows: Vec<Vec<PyRep>> = if offset >= total_count {
+        Vec::new()
+    } else {
+        members[offset..]
+            .iter()
+            .take(page_size)
+            .map(member_row_rep)
+            .collect()
+    };
     let crowset = DBRowDescriptor::new([
         ("characterID", DbColumnType::I8),
         ("name", DbColumnType::WStr),
@@ -429,6 +460,8 @@ fn handle_get_members_paged(
         ("blocksRoles", DbColumnType::I4),
     ])
     .build_crowset(rows);
+    let page_idx_0based = i64::try_from(page.saturating_sub(1)).unwrap_or(i64::MAX);
+    let page_size_i64 = i64::try_from(page_size).unwrap_or(MAX_MEMBER_PAGE_SIZE as i64);
     Some(Ok(PyRep::ObjectEx {
         is_type_2: false,
         header: Box::new(PyRep::Tuple(vec![
@@ -436,8 +469,8 @@ fn handle_get_members_paged(
             PyRep::Tuple(vec![
                 crowset,
                 PyRep::Integer(total_count as i64),
-                PyRep::Integer(page.saturating_sub(1) as i64),
-                PyRep::Integer(page_size as i64),
+                PyRep::Integer(page_idx_0based),
+                PyRep::Integer(page_size_i64),
             ]),
         ])),
         list: Vec::new(),

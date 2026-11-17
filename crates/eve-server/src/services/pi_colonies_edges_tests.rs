@@ -5,7 +5,7 @@
 use super::*;
 use crate::router::{BoundObjectEntry, ServerContext};
 use crate::services::account_services::account_services_tests::{auth_session, test_ctx};
-use eve_db::clock::VirtualServerClock;
+use eve_db::clock::{ServerClock, VirtualServerClock};
 use eve_db::{
     AccountRecord, CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents,
     PlanetaryColonyRecord, TrainedSkillRecord, WorldRepository,
@@ -985,4 +985,184 @@ fn handle_pi_colonies_unknown_returns_none_and_user_update_network_dispatches_ki
     assert!(ctx
         .db
         .with_snapshot(|s| s.planetary_colonies.contains_key(&(cid, planet_id))));
+}
+
+#[test]
+fn test_pi_extractor_reinstall_preserves_planetary_depletion_state() {
+    let (ctx, clock) = make_pi_ctx();
+    let (sys_id, planet_id, cc_tid, _, _, _, ecu_tid, storage_tid, p0_res) =
+        find_sde_pi_fixtures(&ctx);
+    let cid = 90_712_001_i64;
+    let ship_id = 1_712_001_i64;
+    seed_char(&ctx, cid, sys_id, ship_id, 10_000_000, 3, 5);
+    let mut sess = auth_session(cid as u64, cid, 98_000_001, sys_id);
+    sess.ship_id = Some(ship_id);
+    let kw = HashMap::new();
+
+    let t0 = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            950_011,
+            InventoryItemRecord {
+                item_id: 950_011,
+                type_id: cc_tid,
+                owner_id: cid,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        let mut depl = load_planet_depletion(snap, planet_id);
+        depl.planet_id = planet_id;
+        depl.resource_depletion.insert(p0_res, 0.20);
+        depl.nugget_layers.push(PiNuggetLayer {
+            resource_type_id: p0_res,
+            latitude: 0.05,
+            longitude: 0.05,
+            radius: 0.15,
+            boost: 0.10,
+        });
+        save_planet_depletion(snap, &depl);
+    });
+
+    handle_pi_colonies(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(planet_id),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Integer(101),
+                    PyRep::Integer(i64::from(cc_tid)),
+                    PyRep::Real(0.0),
+                    PyRep::Real(0.0),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Integer(102),
+                    PyRep::Integer(i64::from(ecu_tid)),
+                    PyRep::Real(0.05),
+                    PyRep::Real(0.05),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Integer(103),
+                    PyRep::Integer(i64::from(storage_tid)),
+                    PyRep::Real(0.07),
+                    PyRep::Real(0.05),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(3),
+                    PyRep::Integer(102),
+                    PyRep::Integer(103),
+                    PyRep::Integer(0),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(6),
+                    PyRep::Integer(500),
+                    PyRep::List(vec![PyRep::Integer(102), PyRep::Integer(103)]),
+                    PyRep::Integer(i64::from(p0_res)),
+                    PyRep::Integer(10),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(10),
+                    PyRep::Integer(102),
+                    PyRep::Integer(i64::from(p0_res)),
+                    PyRep::Integer(900),
+                    PyRep::Integer(1),
+                    PyRep::List(vec![PyRep::Tuple(vec![PyRep::Real(0.06), PyRep::Real(0.06)])]),
+                    PyRep::Integer(86_400),
+                ]),
+            ]),
+        ],
+        &kw,
+        None,
+    )
+    .expect("UserUpdateNetwork must return Some")
+    .expect("initial colony and program setup must succeed");
+
+    let initial_net = ctx.db.with_snapshot(|s| load_pi_network(s, cid, planet_id, 0));
+    let ecu_id = initial_net.pins[1].pin_id;
+
+    // Simulate first 6 hours (12 canonical cycles) on run #1.
+    let first_half = ctx.db.with_mut_snapshot(|snap| {
+        let mut col = snap.planetary_colonies.get(&(cid, planet_id)).cloned().unwrap();
+        let mut net = load_pi_network(snap, cid, planet_id, col.command_center_level);
+        let (ext, _) = advance_colony_simulation(&ctx, &mut col, &mut net, 21_600, t0 + 21_600);
+        snap.planetary_colonies.insert((cid, planet_id), col);
+        save_pi_network(snap, cid, planet_id, &net);
+        ext
+    });
+    assert!(first_half > 0);
+
+    // Re-install the extractor program after 6 hours; depletion state must persist & advance monotonically.
+    clock.advance_secs(21_600);
+    handle_pi_colonies(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(planet_id),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(10),
+                PyRep::Integer(ecu_id),
+                PyRep::Integer(i64::from(p0_res)),
+                PyRep::Integer(900),
+                PyRep::Integer(1),
+                PyRep::List(vec![PyRep::Tuple(vec![PyRep::Real(0.06), PyRep::Real(0.06)])]),
+                PyRep::Integer(86_400),
+            ])]),
+        ],
+        &kw,
+        None,
+    )
+    .expect("UserUpdateNetwork must return Some")
+    .expect("extractor reinstall succeeds");
+
+    let (post_reinstall_net, depl_after) = ctx.db.with_snapshot(|s| {
+        (
+            load_pi_network(s, cid, planet_id, 0),
+            load_planet_depletion(s, planet_id),
+        )
+    });
+    assert!(
+        post_reinstall_net.pins[1].extractor_depletion_cycles >= 11.9,
+        "pin must retain canonical depletion cycles across reinstall, got {}",
+        post_reinstall_net.pins[1].extractor_depletion_cycles
+    );
+    assert!(
+        post_reinstall_net
+            .resource_depletion_cycles
+            .get(&p0_res)
+            .copied()
+            .unwrap_or(0.0)
+            >= 11.9
+    );
+    assert!(
+        depl_after.resource_depletion.get(&p0_res).copied().unwrap_or(0.0) > 0.20,
+        "planetary resource depletion must remain preserved and advance across reinstall"
+    );
+    assert_eq!(depl_after.nugget_layers.len(), 1);
+    assert!(!depl_after.local_depletion.is_empty());
+
+    // Simulate 6 hours on the reinstalled program; depleted curve must yield less than fresh run #1.
+    let second_half = ctx.db.with_mut_snapshot(|snap| {
+        let mut col = snap.planetary_colonies.get(&(cid, planet_id)).cloned().unwrap();
+        let mut net = load_pi_network(snap, cid, planet_id, col.command_center_level);
+        // Clear storage contents so storage cap never masks yield comparison.
+        for p in &mut net.pins {
+            p.contents.clear();
+        }
+        let (ext, _) = advance_colony_simulation(&ctx, &mut col, &mut net, 21_600, t0 + 43_200);
+        ext
+    });
+    assert!(
+        second_half < first_half,
+        "reinstalled program yield ({second_half}) must reflect prior planetary depletion (< {first_half})"
+    );
 }

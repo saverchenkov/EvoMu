@@ -433,6 +433,8 @@ pub fn handle_pi_colonies(
                 let prev_layout = snap.planetary_colony_layouts.get(&(char_id, planet_id)).cloned();
                 let net_nid = pi_network_note_id(char_id, planet_id);
                 let prev_note = snap.owner_notes.get(&net_nid).cloned();
+                let depl_nid = pi_depletion_note_id(planet_id);
+                let prev_depl_note = snap.owner_notes.get(&depl_nid).cloned();
                 let prev_balance = snap.characters.get(&char_id).map(|c| c.balance);
                 let prev_journal_len = snap.wallet_journal.len();
                 let mut consumed_cc_items: Vec<InventoryItemRecord> = Vec::new();
@@ -451,7 +453,13 @@ pub fn handle_pi_colonies(
                                     1 => vec![PyRep::Integer(1), kv.get("pinID").cloned().unwrap_or(PyRep::Integer(0)), kv.get("typeID").cloned().unwrap_or(PyRep::Integer(0)), kv.get("latitude").cloned().unwrap_or(PyRep::Real(0.0)), kv.get("longitude").cloned().unwrap_or(PyRep::Real(0.0))],
                                     3 | 5 => vec![PyRep::Integer(cid), kv.get("endpoint1").or_else(|| kv.get("sourcePinID")).cloned().unwrap_or(PyRep::Integer(0)), kv.get("endpoint2").or_else(|| kv.get("destPinID")).cloned().unwrap_or(PyRep::Integer(0)), kv.get("level").cloned().unwrap_or(PyRep::Integer(0))],
                                     9 => vec![PyRep::Integer(9), kv.get("pinID").cloned().unwrap_or(PyRep::Integer(1)), kv.get("level").or_else(|| kv.get("targetLevel")).cloned().unwrap_or(PyRep::Integer(1))],
-                                    10 => vec![PyRep::Integer(10), kv.get("pinID").cloned().unwrap_or(PyRep::Integer(0)), kv.get("resourceTypeID").cloned().unwrap_or(PyRep::Integer(0)), kv.get("cycleTimeSeconds").cloned().unwrap_or(PyRep::Integer(300)), kv.get("headCount").cloned().unwrap_or(PyRep::Integer(1))],
+                                    10 => vec![
+                                        PyRep::Integer(10),
+                                        kv.get("pinID").cloned().unwrap_or(PyRep::Integer(0)),
+                                        kv.get("resourceTypeID").cloned().unwrap_or(PyRep::Integer(0)),
+                                        kv.get("cycleTimeSeconds").or_else(|| kv.get("cycleTime")).cloned().unwrap_or(PyRep::Integer(300)),
+                                        kv.get("headCount").cloned().unwrap_or(PyRep::Integer(1)),
+                                    ],
                                     _ => vec![PyRep::Integer(cid)],
                                 }
                             }
@@ -1122,8 +1130,13 @@ pub fn handle_pi_colonies(
                                 if res_tid > 0 {
                                     let _ = resolve_sde_planet_p0_extraction(ctx, sys_id, planet_id, Some(res_tid))?;
                                 }
+                                const MAX_EXTRACTOR_PROGRAM_SECS: u64 = 14 * 86_400;
                                 let head_radius = els.get(3).and_then(|v| v.as_f64()).filter(|&r| r > 0.0 && r < 1.0).unwrap_or(0.02);
-                                let cyc_secs = els.get(3).and_then(|v| v.as_i64()).unwrap_or(300).max(60) as u64;
+                                let cyc_secs = els
+                                    .get(3)
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(300)
+                                    .clamp(60, MAX_EXTRACTOR_PROGRAM_SECS as i64) as u64;
                                 let parsed_heads: Option<Vec<(i64, f64, f64)>> = els.get(5).or_else(|| els.get(4)).and_then(|rep| match rep {
                                     PyRep::List(list) | PyRep::Tuple(list) => Some(
                                         list.iter()
@@ -1184,12 +1197,41 @@ pub fn handle_pi_colonies(
                                     }
                                     pin.extractor_heads = heads;
                                 }
+                                let actual_res_tid = if res_tid > 0 { res_tid } else { 2268 };
+                                let prev_res_tid = pin.extractor_resource_type_id.unwrap_or(actual_res_tid);
+                                let prev_elapsed = extractor_elapsed_canonical_cycles(pin, now_unix);
+                                let mut deferred_depl_update: Option<(TypeId, f64, f64, f64, Vec<(i64, f64, f64)>, f64)> = None;
+                                if prev_elapsed > 0.0 {
+                                    pin.extractor_depletion_cycles += prev_elapsed;
+                                    let entry = net.resource_depletion_cycles.entry(prev_res_tid).or_insert(0.0);
+                                    *entry = (*entry).max(pin.extractor_depletion_cycles);
+                                    deferred_depl_update = Some((
+                                        prev_res_tid,
+                                        prev_elapsed,
+                                        pin.latitude,
+                                        pin.longitude,
+                                        pin.extractor_heads.clone(),
+                                        pin.extractor_head_radius.max(0.02),
+                                    ));
+                                }
+                                pin.extractor_depletion_cycles = if actual_res_tid == prev_res_tid {
+                                    pin.extractor_depletion_cycles.max(
+                                        net.resource_depletion_cycles
+                                            .get(&actual_res_tid)
+                                            .copied()
+                                            .unwrap_or(0.0),
+                                    )
+                                } else {
+                                    net.resource_depletion_cycles
+                                        .get(&actual_res_tid)
+                                        .copied()
+                                        .unwrap_or(0.0)
+                                };
                                 pin.extractor_head_radius = head_radius;
-                                pin.extractor_resource_type_id = Some(if res_tid > 0 { res_tid } else { 2268 });
+                                pin.extractor_resource_type_id = Some(actual_res_tid);
                                 pin.extractor_cycle_seconds = cyc_secs;
                                 pin.extractor_head_count = head_cnt_raw as u8;
                                 pin.program_install_unix = now_unix;
-                                const MAX_EXTRACTOR_PROGRAM_SECS: u64 = 14 * 86_400;
                                 let requested_dur = els
                                     .get(6)
                                     .and_then(|v| v.as_i64())
@@ -1206,6 +1248,38 @@ pub fn handle_pi_colonies(
                                     .unwrap_or(86_400);
                                 let prog_dur = requested_dur.clamp(cyc_secs, MAX_EXTRACTOR_PROGRAM_SECS);
                                 pin.expiry_time_unix = Some(now_unix.saturating_add(prog_dur));
+                                if let Some((depl_tid, elapsed_c, plat, plon, heads, rad)) = deferred_depl_update {
+                                    let mut depl_state = load_planet_depletion(snap, planet_id);
+                                    depl_state.planet_id = planet_id;
+                                    let res_depl = depl_state.resource_depletion.entry(depl_tid).or_insert(0.0);
+                                    let depl_delta = (0.015 * elapsed_c * 0.25).min(0.45);
+                                    *res_depl = (*res_depl + depl_delta).min(0.90);
+                                    let spot_amt = (0.01 * elapsed_c).min(0.25);
+                                    if !heads.is_empty() {
+                                        for &(_, hlat, hlon) in &heads {
+                                            depl_state.local_depletion.push(PiDepletionSpot {
+                                                latitude: hlat,
+                                                longitude: hlon,
+                                                radius: rad,
+                                                resource_type_id: depl_tid,
+                                                amount_depleted: spot_amt,
+                                            });
+                                        }
+                                    } else {
+                                        depl_state.local_depletion.push(PiDepletionSpot {
+                                            latitude: plat,
+                                            longitude: plon,
+                                            radius: rad,
+                                            resource_type_id: depl_tid,
+                                            amount_depleted: spot_amt,
+                                        });
+                                    }
+                                    if depl_state.local_depletion.len() > 64 {
+                                        let excess = depl_state.local_depletion.len() - 64;
+                                        depl_state.local_depletion.drain(0..excess);
+                                    }
+                                    save_planet_depletion(snap, &depl_state);
+                                }
                                 if let Some(col_mut) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) {
                                     if col_mut.last_extracted_unix == 0 {
                                         col_mut.last_extracted_unix = now_unix;
@@ -1285,6 +1359,10 @@ pub fn handle_pi_colonies(
                         match prev_note {
                             Some(n) => { snap.owner_notes.insert(net_nid, n); }
                             None => { snap.owner_notes.remove(&net_nid); }
+                        }
+                        match prev_depl_note {
+                            Some(n) => { snap.owner_notes.insert(depl_nid, n); }
+                            None => { snap.owner_notes.remove(&depl_nid); }
                         }
                         if let (Some(bal), Some(ch)) = (prev_balance, snap.characters.get_mut(&char_id)) {
                             ch.balance = bal;
