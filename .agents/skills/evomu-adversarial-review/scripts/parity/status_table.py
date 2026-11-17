@@ -145,6 +145,16 @@ def main():
          "| Category | Total | DONE | NA | Open |", "|---|---|---|---|---|"]
     for k, c in sorted(summ["categories"].items()):
         L.append("| %s | %d | %d | %d | %d |" % (k, c["total"], c["DONE"], c["NA"], c["open"]))
+    js = summ.get("journeys")
+    if isinstance(js, dict):
+        L += [
+            "",
+            "**Real-client journeys (supervisor scoreboard, stage `%s`, build `%s`):** **%d / %d verified** "
+            "(core smoke: **%d / %d**)."
+            % (js.get("stage", "interim_smoke"), js.get("expected_client_build", "—"),
+               int(js.get("DONE", 0)), int(js.get("total", 29)),
+               int(js.get("smoke_DONE", 0)), int(js.get("smoke_total", 7))),
+        ]
     areas_path = os.path.join(root, "docs", "parity", "feature_areas.json")
     if os.path.exists(areas_path):
         L += feature_area_lines(json.load(open(areas_path, encoding="utf-8"))["areas"], prow)
@@ -161,7 +171,7 @@ def main():
                 st = "FLAGGED_FAKE"
             fs = feats_by_task.get(tid, [])
             closed = sum(1 for f in fs if (prow.get(f) or {}).get("status") in ("DONE", "NA"))
-            tests = ", ".join(pr.get("tests") or [])[:120] or "—"
+            tests = ", ".join(pr.get("tests") or pr.get("attested_by") or [])[:120] or "—"
             n = notes.get(tid) or {}
             assess = str(n.get("assessment", "")).upper() or "—"
             if assess == "DONE" and st != "DONE":

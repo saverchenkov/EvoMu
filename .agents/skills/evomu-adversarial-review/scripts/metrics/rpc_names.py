@@ -47,13 +47,27 @@ def repo_root():
                           cwd=os.getcwd()).stdout.strip()
 
 
+def _shared_cache_paths(root):
+    paths = [os.path.join(root, ".evomu-reviews", "client_identifiers.json")]
+    common = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"], cwd=root, capture_output=True, text=True
+    )
+    if common.returncode == 0 and common.stdout.strip():
+        main_root = os.path.dirname(os.path.abspath(os.path.join(root, common.stdout.strip())))
+        shared = os.path.join(main_root, ".evomu-reviews", "client_identifiers.json")
+        if shared not in paths:
+            paths.insert(0, shared)
+    return paths
+
+
 def client_identifiers(root, ccp):
-    cache = os.path.join(root, ".evomu-reviews", "client_identifiers.json")
-    try:
-        if os.path.exists(cache) and os.path.exists(ccp) and os.path.getmtime(cache) >= os.path.getmtime(ccp):
-            return set(json.load(open(cache)))
-    except (OSError, ValueError):
-        pass
+    caches = _shared_cache_paths(root)
+    for cache in caches:
+        try:
+            if os.path.exists(cache) and os.path.exists(ccp) and os.path.getmtime(cache) >= os.path.getmtime(ccp):
+                return set(json.load(open(cache)))
+        except (OSError, ValueError):
+            pass
     if not os.path.exists(ccp):
         return None
     ident = re.compile(rb"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -75,8 +89,13 @@ def client_identifiers(root, ccp):
                 s = b[k + 5:k + 5 + ln]
                 if ident.match(s):
                     ids.add(s.decode())
-    os.makedirs(os.path.dirname(cache), exist_ok=True)
-    json.dump(sorted(ids), open(cache, "w", encoding="utf-8"))
+    sorted_ids = sorted(ids)
+    for cache in caches:
+        try:
+            os.makedirs(os.path.dirname(cache), exist_ok=True)
+            json.dump(sorted_ids, open(cache, "w", encoding="utf-8"))
+        except OSError:
+            pass
     return ids
 
 
@@ -140,8 +159,8 @@ def scan_file(path, methods, notes, ids):
     return uniq
 
 
-def run(files=None, code_ccp=None):
-    root = repo_root()
+def run(files=None, code_ccp=None, root=None):
+    root = root or repo_root()
     rpc = json.load(open(os.path.join(SRC, "rpc_service_catalog.json")))
     methods = {s: set(v.get("v24_client_candidate_methods") or []) for s, v in rpc.items()}
     notes = set(json.load(open(os.path.join(SRC, "client_notifications.json"))))

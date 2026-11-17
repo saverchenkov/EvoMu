@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "stage": "interim_smoke",
+  "git_sha": null,
+  "client_version": "V24.02",
+  "client_build": 3698585,
+  "real": false,
+  "recorded_at": null,
+  "result_dir": null,
+  "log_errors": [],
+  "smoke_required": [
+    "launch_login",
+    "station_ui",
+    "undock_navigate",
+    "market_trade",
+    "mining_loop",
+    "pve_combat",
+    "skills_training"
+  ],
+  "scenarios": {},
+  "journeys": {}
+}
