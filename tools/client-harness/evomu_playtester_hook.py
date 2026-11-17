@@ -6128,7 +6128,7 @@ def _execute_action(sm, action):
             42.0
             if raw_atype == "jump_gate"
             else (
-                32.0
+                38.0
                 if raw_atype == "dock"
                 else (
                     25.0
@@ -6511,10 +6511,15 @@ class PlaytesterRpcServer(object):
             }
         if cmd == "get_flight_recorder":
             since_seq = int(params.get("since_seq", 0) or 0)
-            return {
-                "ok": True,
+            fr_payload = {
                 "macho_calls": [e for e in _FLIGHT_RECORDER if int(e.get("seq", 0) or 0) > since_seq][-120:],
                 "scatters_observed": [s.get("event") for s in _RECENT_SCATTERS[-60:]],
+            }
+            return {
+                "ok": True,
+                "result": fr_payload,
+                "macho_calls": fr_payload["macho_calls"],
+                "scatters_observed": fr_payload["scatters_observed"],
             }
         if cmd in ("get_state", "observe"):
             st = _get_state_snapshot(self.sm)

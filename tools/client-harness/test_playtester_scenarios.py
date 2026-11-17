@@ -1203,5 +1203,356 @@ class TestScenarioReviewFixes(unittest.TestCase):
             self.assertEqual(res_ds["journeys"]["three_steps"]["failure"]["failed_check"], "destiny_desync")
 
 
+class TestRound4RpcAndAccountFixes(unittest.TestCase):
+    @staticmethod
+    def _load_hook_with_py2_stubs():
+        import builtins
+        import importlib.util
+        import types
+
+        hook_path = HARNESS_DIR / "evomu_playtester_hook.py"
+        orig_builtin = sys.modules.get("__builtin__")
+        orig_helpers = sys.modules.get("evomu_inclient_helpers")
+        sys.modules["__builtin__"] = builtins
+        fake_helpers = types.ModuleType("evomu_inclient_helpers")
+        fake_helpers._wait_for_session = lambda *_a, **_kw: 90000001
+        fake_helpers._sleep_ms = lambda _ms: None
+        sys.modules["evomu_inclient_helpers"] = fake_helpers
+        try:
+            spec = importlib.util.spec_from_file_location("_evomu_playtester_hook_r4_test", str(hook_path))
+            mod = importlib.util.module_from_spec(spec)
+            assert spec is not None and spec.loader is not None
+            mod.__dict__.setdefault("unicode", type("_Py2UnicodeStub", (), {}))
+            mod.__dict__.setdefault("basestring", str)
+            spec.loader.exec_module(mod)
+            return mod
+        finally:
+            if orig_builtin is not None:
+                sys.modules["__builtin__"] = orig_builtin
+            else:
+                sys.modules.pop("__builtin__", None)
+            if orig_helpers is not None:
+                sys.modules["evomu_inclient_helpers"] = orig_helpers
+            else:
+                sys.modules.pop("evomu_inclient_helpers", None)
+
+    def test_validation_rejects_gm_slash_in_slash_cmd_without_setup_flag(self):
+        bad_scen = {
+            "id": "slash_cmd_gm_reject",
+            "title": "Reject /giveisk hidden in slash_cmd",
+            "steps": [
+                {
+                    "id": "sneak_gm",
+                    "action": {
+                        "type": "type_text",
+                        "target": "chat_input",
+                        "slash_cmd": "/giveisk 5000000",
+                        "submit": True,
+                    },
+                }
+            ],
+        }
+        with self.assertRaises(playtester.ScenarioValidationError) as ctx:
+            playtester.validate_scenario(bad_scen)
+        self.assertIn("/giveisk", str(ctx.exception).lower())
+
+        self.assertEqual(
+            playtester._is_gm_or_time_control_action({"type": "type_text", "slash_cmd": "/advancetime 60"})[:2],
+            (False, True),
+        )
+        self.assertEqual(
+            playtester._is_gm_or_time_control_action({"type": "type_text", "input": "/clearsessiontimer"})[:2],
+            (True, False),
+        )
+        self.assertEqual(
+            playtester._is_gm_or_time_control_action({"type": "type_text", "text": "/spawn 123"})[:2],
+            (True, False),
+        )
+        self.assertEqual(
+            playtester._is_gm_or_time_control_action({"type": "type_text", "slash_cmd": "o7 local"})[:2],
+            (False, False),
+        )
+
+        setup_ok = {
+            "id": "slash_cmd_gm_setup_ok",
+            "title": "Declared setup step allowed",
+            "steps": [
+                {
+                    "id": "setup_step",
+                    "setup": True,
+                    "action": {"type": "type_text", "target": "chat_input", "slash_cmd": "/giveisk 5000000", "submit": True},
+                }
+            ],
+        }
+        validated_setup = playtester.validate_scenario(setup_ok)
+        self.assertEqual(len(validated_setup["declared_setup_steps"]), 1)
+
+    def test_write_server_config_non_demo_defaults_and_zero_preservation(self):
+        import tomllib
+        import types
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen = root / "s.json"
+            scen.write_text(
+                json.dumps({"id": "s", "steps": [{"id": "w", "action": {"type": "wait", "wait_ms": 10}}]}),
+                encoding="utf-8",
+            )
+            args = _fake_scenario_args(root, [scen], root / "out")
+            runner = playtester.ScenarioRunner(args)
+            with mock.patch.object(
+                runner,
+                "_resolve_sde_and_quasar_paths",
+                return_value=(root / "evomu_sde.sqlite", root / "quasar_descriptors.sqlite"),
+            ):
+                runner._active_starting_state = {
+                    "account": "pilot_custom",
+                    "password": "pw",
+                    "char_id": 92000010,
+                    "bloodline_id": 1,
+                    "gender": 0,
+                    "initial_balance_isk": 0,
+                    "initial_balance_plex": 0,
+                }
+                cfg = tomllib.loads(runner.write_server_config().read_text(encoding="utf-8"))
+                self.assertFalse(cfg["feature_flags"]["seed_demo"])
+                self.assertFalse(cfg["feature_flags"]["gm_mode"])
+                self.assertNotIn("admin_accounts", cfg)
+                self.assertEqual(cfg["player_accounts"][0]["username"], "pilot_custom")
+                starter = cfg["player_accounts"][0]["starter_character"]
+                self.assertEqual(starter["bloodline_id"], 1)
+                self.assertEqual(starter["gender"], 0)
+                self.assertEqual(starter["ancestry_id"], 11)
+                self.assertEqual(starter["school_id"], 17)
+                self.assertEqual(starter["initial_balance_isk"], 0)
+                self.assertEqual(starter["initial_balance_plex"], 0)
+
+                runner._active_starting_state = {"account": "pilot_amarr", "bloodline_id": 5}
+                cfg_amarr = tomllib.loads(runner.write_server_config().read_text(encoding="utf-8"))
+                self.assertEqual(cfg_amarr["player_accounts"][0]["starter_character"]["ancestry_id"], 1)
+                self.assertEqual(cfg_amarr["player_accounts"][0]["starter_character"]["school_id"], 11)
+
+                runner._active_starting_state = {"account": "demo"}
+                cfg_demo = tomllib.loads(runner.write_server_config().read_text(encoding="utf-8"))
+                self.assertTrue(cfg_demo["feature_flags"]["seed_demo"])
+
+            created_calls = []
+
+            class _FakeUnboundMgr:
+                def GetCharactersToSelect(self):
+                    return []
+
+                def CreateCharacterWithDoll(self, name, bloodline_id, gender, ancestry_id, appearance, portrait, school_id):
+                    created_calls.append((name, bloodline_id, gender, ancestry_id, school_id))
+
+            fake_bridge = types.ModuleType("evomu_bridge")
+
+            def _install_hook(sm, host="127.0.0.1", port=26000):
+                sm.RemoteSvc = lambda svc: _FakeUnboundMgr() if svc == "charUnboundMgr" else mock.MagicMock()
+                return mock.MagicMock()
+
+            fake_bridge.install_service_manager_hook = _install_hook
+            runner._active_starting_state = {"account": "pilot_custom"}
+            with mock.patch.dict(sys.modules, {"evomu_bridge": fake_bridge}):
+                names = runner._provision_extra_characters([
+                    {"name": "Alt Caldari"},
+                    {"name": "Alt Gallente", "bloodline_id": 7, "gender": 1},
+                ])
+            self.assertEqual(names, ["Alt Caldari", "Alt Gallente"])
+            self.assertEqual(
+                created_calls,
+                [
+                    ("Alt Caldari", 1, 0, 11, 17),
+                    ("Alt Gallente", 7, 1, 13, 20),
+                ],
+            )
+
+    def test_loopback_tcp_bridge_and_dispatch_end_to_end(self):
+        import os
+        import socket
+        import threading
+
+        hook = self._load_hook_with_py2_stubs()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.bind(("127.0.0.1", 0))
+            free_port = probe.getsockname()[1]
+            probe.close()
+
+            hook._FLIGHT_RECORDER = [
+                {"seq": 1, "service": "charUnboundMgr", "method": "GetCharactersToSelect", "ok": True},
+            ]
+            hook._RECENT_SCATTERS = [{"seq": 1, "event": "OnClientReady"}]
+
+            live_state = {
+                "client_build": "2841290",
+                "client_version": "24.02",
+                "active_view": "charsel",
+                "session": {"charid": None, "solarsystemid2": 30000142},
+                "open_windows": [{"window_id": "CharacterSelectionWindow", "name": "CharacterSelectionWindow"}],
+                "modals": [],
+                "ui": {"clickable_widgets": [{"name": "EnterGameBtn", "role": "button"}]},
+            }
+
+            def _fake_snapshot(_sm):
+                return json.loads(json.dumps(live_state))
+
+            def _fake_exec(_sm, act):
+                if act.get("type") == "click_widget":
+                    live_state["active_view"] = "station"
+                    live_state["session"]["charid"] = 90000001
+                    live_state["open_windows"] = [{"window_id": "InventoryWindow", "name": "InventoryWindow"}]
+                    return {
+                        "ok": True,
+                        "action_ok": True,
+                        "action": act,
+                        "post_state": json.loads(json.dumps(live_state)),
+                        "flight_recorder": {
+                            "macho_calls": [{"seq": 2, "service": "charUnboundMgr", "method": "SelectCharacterID", "ok": True}],
+                            "scatters_observed": ["OnSessionChanged"],
+                            "log_exceptions": [],
+                            "quasar_errors": [],
+                            "macho_exceptions": [],
+                        },
+                    }
+                return {
+                    "ok": True,
+                    "action_ok": True,
+                    "action": act,
+                    "flight_recorder": {
+                        "macho_calls": [],
+                        "scatters_observed": [],
+                        "log_exceptions": [],
+                        "quasar_errors": [],
+                        "macho_exceptions": [],
+                    },
+                }
+
+            stop_flag = threading.Event()
+            with mock.patch.dict(os.environ, {"EVOMU_PLAYTESTER_PORT": ""}, clear=False), \
+                 mock.patch.object(hook, "_ensure_windowed_mode", lambda *_a, **_kw: None), \
+                 mock.patch.object(hook, "_install_flight_recorder_hooks", lambda *_a, **_kw: None), \
+                 mock.patch.object(hook, "_install_warp_telemetry", lambda *_a, **_kw: None), \
+                 mock.patch.object(hook, "_get_state_snapshot", _fake_snapshot), \
+                 mock.patch.object(hook, "_execute_action", _fake_exec):
+                srv = hook.PlaytesterRpcServer(
+                    {"playtester_port": free_port, "run_dir": str(root), "scenario_mode": True},
+                    mock.MagicMock(),
+                )
+                srv.sock.settimeout(0.1)
+
+                def _serve_loop():
+                    while not stop_flag.is_set() and srv.running:
+                        try:
+                            conn, _ = srv.sock.accept()
+                        except socket.timeout:
+                            continue
+                        except OSError:
+                            break
+                        try:
+                            conn.setblocking(1)
+                            conn.settimeout(5.0)
+                            rfile = conn.makefile("r", encoding="utf-8")
+                            line = rfile.readline()
+                            if line:
+                                req = json.loads(line)
+                                resp = srv._dispatch(req)
+                                conn.sendall((json.dumps(hook._json_safe(resp)) + "\n").encode("utf-8"))
+                            rfile.close()
+                        finally:
+                            conn.close()
+
+                t = threading.Thread(target=_serve_loop, daemon=True)
+                t.start()
+                try:
+                    bridge = playtester.InClientRpcBridge("127.0.0.1", srv.port, timeout=5.0)
+                    boot = bridge.call("bootstrap_session", {"timeout_ms": 1000})
+                    self.assertEqual(boot["client_build"], "2841290")
+                    self.assertEqual(boot["active_view"], "charsel")
+
+                    fr = bridge.call("get_flight_recorder", {"since_seq": 0})
+                    self.assertEqual(len(fr["macho_calls"]), 1)
+                    self.assertEqual(fr["macho_calls"][0]["method"], "GetCharactersToSelect")
+                    self.assertEqual(fr["scatters_observed"], ["OnClientReady"])
+
+                    st_now = bridge.call("get_state")
+                    self.assertEqual(st_now["open_windows"][0]["window_id"], "CharacterSelectionWindow")
+
+                    scen_path = root / "tcp_launch.json"
+                    scen_path.write_text(
+                        json.dumps({
+                            "id": "tcp_launch",
+                            "title": "TCP Launch E2E",
+                            "steps": [
+                                {
+                                    "id": "verify_startup_charsel",
+                                    "action": {"type": "wait", "wait_ms": 10},
+                                    "checks": {
+                                        "include_startup_rpcs": True,
+                                        "rpc_sent": ["charUnboundMgr.GetCharactersToSelect"],
+                                        "state_checks": [{"field": "active_view", "equals": "charsel"}],
+                                    },
+                                },
+                                {
+                                    "id": "enter_station",
+                                    "action": {"type": "click_widget", "target": "EnterGameBtn"},
+                                    "checks": {
+                                        "expect_window_open": "InventoryWindow",
+                                        "expect_session_field": "charid==90000001",
+                                        "state_checks": [{"field": "active_view", "equals": "station"}],
+                                    },
+                                },
+                            ],
+                        }),
+                        encoding="utf-8",
+                    )
+
+                    out_dir = root / "out_tcp"
+                    args = _fake_scenario_args(root, [scen_path], out_dir)
+                    runner = playtester.ScenarioRunner(args)
+
+                    def _fake_start_server(reset_db=False):
+                        runner.current_run_dir.mkdir(parents=True, exist_ok=True)
+                        (runner.current_run_dir / "server.log").write_text(
+                            "2026-11-16T00:00:00Z INFO Listening on Native machoNet / GPSTransport TCP\n",
+                            encoding="utf-8",
+                        )
+                        return True
+
+                    def _fake_start_client():
+                        with (runner.current_run_dir / "server.log").open("a", encoding="utf-8") as sf:
+                            sf.write("2026-11-16T00:00:01Z INFO Accepted native machoNet connection peer=127.0.0.1:50000\n")
+                            sf.write("2026-11-16T00:00:01Z INFO Dispatching RPC call user_id=Some(1) service=charUnboundMgr method=GetCharacterSelectionData\n")
+                        runner.rpc = playtester.InClientRpcBridge("127.0.0.1", srv.port, timeout=5.0)
+                        runner._last_boot_result = runner.rpc.call("bootstrap_session", {"timeout_ms": 1000})
+                        return True
+
+                    with mock.patch.object(runner, "start_server", _fake_start_server), \
+                         mock.patch.object(runner, "start_client", _fake_start_client), \
+                         mock.patch.object(runner, "stop_client", lambda: None), \
+                         mock.patch.object(runner, "stop_server", lambda: None):
+                        rc = runner.run_scenarios()
+
+                    self.assertEqual(rc, 0)
+                    res = json.loads((out_dir / "result.json").read_text(encoding="utf-8"))
+                    j = res["journeys"]["tcp_launch"]
+                    self.assertTrue(j["passed"], res)
+                    self.assertEqual(res["client_build"], "2841290")
+                    self.assertIn("charUnboundMgr.GetCharactersToSelect", j["step_rpcs"]["verify_startup_charsel"])
+                    self.assertEqual(len(j["steps"]), 2)
+                    self.assertEqual(j["steps"][1]["step_id"], "enter_station")
+                    self.assertTrue(j["steps"][1]["passed"])
+                    self.assertEqual(bridge.call("get_state")["session"]["charid"], 90000001)
+                finally:
+                    stop_flag.set()
+                    srv.running = False
+                    try:
+                        srv.sock.close()
+                    except OSError:
+                        pass
+                    t.join(timeout=2.0)
+
+
 if __name__ == "__main__":
     unittest.main()

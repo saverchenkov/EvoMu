@@ -3081,6 +3081,21 @@ class TestScenarioHookExtensions(unittest.TestCase):
             self.assertFalse(res.get("ok"), f"{atype} unexpectedly succeeded: {res}")
             self.assertIn("timed out after 26.0s", res.get("error", ""), f"{atype}: {res}")
 
+        # dock uses a 38.0s tasklet ceiling (> 35.0s scenario_mode warp budget, < 45.0s RPC socket timeout):
+        # a worker finishing at 34.0s succeeds rather than timing out at the old 32.0s limit, while 38.5s times out.
+        dock_seq = iter([0.0, 0.0, 34.0, 39.0, 39.0, 39.0])
+        with mock.patch.dict(sys.modules, {"uthread": fake_uthread}), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value=snap_base), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_settle_after_action", return_value=0), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook.time, "time", side_effect=lambda s=dock_seq: next(s, 39.0)):
+            dock_res = hook._execute_action(fake_sm, {"type": "dock", "target": "60003760", "wait_ms": 0, "reuse_pre_state": False})
+        self.assertFalse(dock_res.get("ok"), dock_res)
+        self.assertIn("timed out after 39.0s", dock_res.get("error", ""), dock_res)
+
     def test_helpers_suppress_time_control_when_disabled(self):
         helpers = _load_helpers_with_py2_stubs()
         tc_calls = []

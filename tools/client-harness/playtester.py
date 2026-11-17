@@ -3993,11 +3993,11 @@ def _resolve_wait_action_ms(
 
 
 def _coerce_action_command(act: Dict[str, Any]) -> Any:
-    """Resolve `command` from explicit field or common LLM aliases (`text`, `input`, `value`)."""
+    """Resolve `command` from explicit field or common LLM/hook aliases (`slash_cmd`, `text`, `input`, `value`)."""
     cmd = act.get("command")
     if cmd not in (None, ""):
         return cmd
-    for alias in ("text", "input", "value"):
+    for alias in ("slash_cmd", "text", "input", "value"):
         alt = act.get(alias)
         if alt not in (None, ""):
             return alt
@@ -4740,6 +4740,8 @@ class PlaytesterBugOracle:
                 or s_hdr.startswith("blue.pyos.exceptionHandler:")
                 or s_hdr.startswith("stdlogutils.")
                 or s_hdr.startswith("sys.excepthook:")
+                or s_hdr.startswith("Action tasklet exception")
+                or s_hdr.startswith("schedule_startup failed:")
                 or s_hdr.startswith("EXCEPTION #")
                 or (ended_prev and bool(s))
             )
@@ -4936,12 +4938,17 @@ class PlaytesterBugOracle:
             )
         ):
             return False
-        # Pre-queued module activation on target lock fires out of ModuleButton.OnStateChange
-        # and shows a benign Information modal when no ammo is loaded or in cargo.
+        # Pre-queued module activation on target lock / UI triggers fires out of
+        # ModuleButton.OnStateChange -> ActivateEffect and shows a benign Information modal
+        # on rule rejections like NoAmmoLoaded, InsufficientFuel (#1230), or NotEnoughCapacitor (#1231).
         if (
-            "modulebutton.onstatechange" in txt
+            "usererror" in txt
+            and "modulebutton.onstatechange" in txt
             and "activateeffect" in txt
-            and "noammoloaded" in txt
+            and any(
+                marker in txt
+                for marker in ("noammoloaded", "insufficientfuel", "notenoughcapacitor")
+            )
         ):
             return False
         # Vanilla V24 ModuleButton/ModuleController AutoReload raises UserError(CannotLoadNotEnoughCharges)
@@ -6062,7 +6069,8 @@ character_name = "Demo Pilot"
 
         ok, _, err_tail = compile_eve_server(self.worktree_dir)
         if not ok:
-            log_err(f"Hot-reload build failed; keeping previous binary if present:\n{err_tail}")
+            log_err(f"Hot-reload build failed; keeping previous binary and running server/client:\n{err_tail}")
+            return False
 
         self.stop_client()
         self.stop_server()
@@ -7225,8 +7233,6 @@ def _is_gm_or_time_control_action(action: Dict[str, Any]) -> Tuple[bool, bool, s
     raw_type = str(action.get("type") or "").strip()
     target = str(action.get("target") or "").strip()
     act_type = _canonicalize_action_type(raw_type, bool(target))
-    cmd_val = _coerce_action_command(action)
-    cmd_str = str(cmd_val).strip() if isinstance(cmd_val, str) else ""
 
     if act_type in _SCENARIO_TIME_CONTROL_ACTIONS:
         return False, True, f"time-control action {act_type!r}"
@@ -7235,16 +7241,37 @@ def _is_gm_or_time_control_action(action: Dict[str, Any]) -> Tuple[bool, bool, s
     if act_type == "station_command" and target.lower() in ("inject_and_train_skill", "buy_free_plex_pack"):
         return True, False, f"GM/setup station command {target.lower()!r}"
 
-    slash_candidates = []
-    if cmd_str.startswith("/"):
-        slash_candidates.append(cmd_str)
+    text_candidates: List[str] = []
+    for val in (
+        _coerce_action_command(action),
+        action.get("command"),
+        action.get("slash_cmd"),
+        action.get("text"),
+        action.get("input"),
+        action.get("value"),
+    ):
+        if isinstance(val, str):
+            s = val.strip()
+            if s and s not in text_candidates:
+                text_candidates.append(s)
+
+    slash_candidates: List[str] = []
+    for cand_s in text_candidates:
+        if act_type == "type_text":
+            c_low_txt = cand_s.lower()
+            first_tok = c_low_txt.split(None, 1)[0] if c_low_txt else ""
+            if (
+                first_tok in _ALL_REMOTE_GM_SLASH_COMMANDS
+                or first_tok in _TIME_CONTROL_SLASH_PREFIXES
+                or c_low_txt.startswith(_GM_SLASH_IN_TEXT_PREFIXES)
+                or c_low_txt.startswith(_TIME_CONTROL_SLASH_PREFIXES)
+            ):
+                slash_candidates.append(cand_s)
+        elif cand_s.startswith("/"):
+            slash_candidates.append(cand_s)
+
     if act_type not in ("click_widget", "drag_widget", "type_text") and target.startswith("/"):
         slash_candidates.append(target)
-    if act_type == "type_text":
-        c_low_txt = cmd_str.lower()
-        first_tok = c_low_txt.split(None, 1)[0] if c_low_txt else ""
-        if first_tok in _ALL_REMOTE_GM_SLASH_COMMANDS or c_low_txt.startswith(_GM_SLASH_IN_TEXT_PREFIXES):
-            slash_candidates.append(cmd_str)
 
     for cand in slash_candidates:
         c_low = cand.lower()
@@ -8126,6 +8153,36 @@ def scan_scenario_logs_for_errors(
     return errors
 
 
+_SCENARIO_DEFAULT_SCHOOL_BY_BLOODLINE: Dict[int, int] = {
+    1: 17, 2: 17, 11: 17,   # Caldari -> State War Academy
+    3: 14, 4: 14, 14: 14,   # Minmatar -> Republic Military School
+    5: 11, 6: 11, 13: 11,   # Amarr -> Imperial Academy
+    7: 20, 8: 20, 12: 20,   # Gallente -> Federal Navy Academy
+    9: 23, 10: 23, 19: 23,  # Jove -> Society of Conscious Thought
+}
+_SCENARIO_DEFAULT_ANCESTRY_BY_BLOODLINE: Dict[int, int] = {
+    1: 11, 2: 7, 3: 19, 4: 22, 5: 1, 6: 4, 7: 13, 8: 16,
+    9: 25, 10: 28, 11: 31, 12: 34, 13: 37, 14: 40, 19: 64,
+}
+
+
+def _unwrap_state_payload(payload: Any) -> Dict[str, Any]:
+    """Return UI/session state snapshot dict whether already RPC-unwrapped or nested under `state`/`result`."""
+    if not isinstance(payload, dict) or not payload:
+        return {}
+    for key in ("state", "result"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            if nested:
+                return nested
+            if not any(
+                k in payload
+                for k in ("player", "session", "space", "ui", "active_view", "client_build", "open_windows")
+            ):
+                return {}
+    return payload
+
+
 class ScenarioRunner(PlaytesterRunner):
     """Deterministic zero-LLM scripted UI runner executing scenario files end-to-end."""
 
@@ -8170,14 +8227,27 @@ class ScenarioRunner(PlaytesterRunner):
         user, password, char_id, _ = self._scenario_auth_params()
         st = self._active_starting_state
         requires_gm = self._scenario_requires_gm()
+        seed_demo_flag = "true" if user == "demo" else "false"
         char_name = str(
             st.get("character_name")
             or ("Demo Pilot" if user == "demo" else f"Scenario {user}")
         )
+        bloodline_id = int(st["bloodline_id"]) if st.get("bloodline_id") is not None else 1
+        gender = int(st["gender"]) if st.get("gender") is not None else 1
+        ancestry_id = (
+            int(st["ancestry_id"])
+            if st.get("ancestry_id") is not None
+            else _SCENARIO_DEFAULT_ANCESTRY_BY_BLOODLINE.get(bloodline_id, 11)
+        )
+        school_id = (
+            int(st["school_id"])
+            if st.get("school_id") is not None
+            else _SCENARIO_DEFAULT_SCHOOL_BY_BLOODLINE.get(bloodline_id, 17)
+        )
         solar_system_id = int(st.get("solar_system_id", 30000142) or 30000142)
         station_id = int(st.get("station_id", 60003760) or 60003760)
-        initial_isk = int(st.get("initial_balance_isk", 125000000) or 125000000)
-        initial_plex = int(st.get("initial_balance_plex", 50000) or 50000)
+        initial_isk = int(st["initial_balance_isk"]) if st.get("initial_balance_isk") is not None else 125000000
+        initial_plex = int(st["initial_balance_plex"]) if st.get("initial_balance_plex") is not None else 50000
         gm_flag = "true" if requires_gm else "false"
         lines = [
             'bind_address = "127.0.0.1"',
@@ -8193,7 +8263,7 @@ class ScenarioRunner(PlaytesterRunner):
             "enable_quasar_gateway = true",
             "enable_esi_http = true",
             "enable_living_world = true",
-            "seed_demo = true",
+            f"seed_demo = {seed_demo_flag}",
             "free_fast_checkout_plex = true",
             f"starter_plex_balance = {initial_plex}",
             "allow_local_dev_gateway_jwt = true",
@@ -8205,10 +8275,10 @@ class ScenarioRunner(PlaytesterRunner):
             "",
             "[player_accounts.starter_character]",
             f"name = {json.dumps(char_name)}",
-            f"bloodline_id = {int(st.get('bloodline_id', 1) or 1)}",
-            f"gender = {int(st.get('gender', 1) or 1)}",
-            f"ancestry_id = {int(st.get('ancestry_id', 11) or 11)}",
-            f"school_id = {int(st.get('school_id', 11) or 11)}",
+            f"bloodline_id = {bloodline_id}",
+            f"gender = {gender}",
+            f"ancestry_id = {ancestry_id}",
+            f"school_id = {school_id}",
             f"solar_system_id = {solar_system_id}",
             f"station_id = {station_id}",
             f"initial_balance_isk = {initial_isk}",
@@ -8358,14 +8428,26 @@ class ScenarioRunner(PlaytesterRunner):
                 cname = str(spec.get("name") or "Scenario Pilot Two").strip()
                 if cname.lower() in existing_low:
                     continue
+                b_id = int(spec["bloodline_id"]) if spec.get("bloodline_id") is not None else 1
+                g_id = int(spec["gender"]) if spec.get("gender") is not None else 0
+                a_id = (
+                    int(spec["ancestry_id"])
+                    if spec.get("ancestry_id") is not None
+                    else _SCENARIO_DEFAULT_ANCESTRY_BY_BLOODLINE.get(b_id, 11)
+                )
+                s_id = (
+                    int(spec["school_id"])
+                    if spec.get("school_id") is not None
+                    else _SCENARIO_DEFAULT_SCHOOL_BY_BLOODLINE.get(b_id, 17)
+                )
                 sm_tmp.RemoteSvc("charUnboundMgr").CreateCharacterWithDoll(
                     cname,
-                    int(spec.get("bloodline_id", 1)),
-                    int(spec.get("gender", 0)),
-                    int(spec.get("ancestry_id", 11)),
+                    b_id,
+                    g_id,
+                    a_id,
                     dict(spec.get("appearance") or {"hair": "short"}),
                     dict(spec.get("portrait") or {"poseID": 1}),
-                    int(spec.get("school_id", 17)),
+                    s_id,
                 )
                 names.append(cname)
                 existing_low.add(cname.lower())
@@ -8633,10 +8715,10 @@ class ScenarioRunner(PlaytesterRunner):
                         "screenshot": self._capture_failure_screenshot(scen_dir / "failure_start_client.png"),
                     }
                 else:
-                    boot_state = (self._last_boot_result.get("state") or self._last_boot_result.get("result") or {})
-                    if not isinstance(boot_state, dict) or not boot_state:
+                    boot_state = _unwrap_state_payload(self._last_boot_result)
+                    if not boot_state:
                         obs = self.rpc.call("get_state", timeout=15.0) or {}
-                        boot_state = obs.get("state") or obs.get("result") or {}
+                        boot_state = _unwrap_state_payload(obs)
                     if boot_state.get("client_build"):
                         client_build = str(boot_state["client_build"])
                     if boot_state.get("client_version"):
@@ -8647,6 +8729,8 @@ class ScenarioRunner(PlaytesterRunner):
                     if not startup_calls:
                         try:
                             fr_resp = self.rpc.call("get_flight_recorder", {"since_seq": 0}, timeout=8.0) or {}
+                            if isinstance(fr_resp.get("result"), dict):
+                                fr_resp = fr_resp["result"]
                             startup_calls = list(fr_resp.get("macho_calls") or [])
                         except Exception:
                             startup_calls = []
@@ -8683,11 +8767,11 @@ class ScenarioRunner(PlaytesterRunner):
                                 ) or {}
                             except Exception as exc:
                                 exec_res = {"action_ok": False, "action_error": str(exc), "flight_recorder": {}}
-                            post_state = exec_res.get("post_state")
-                            if not isinstance(post_state, dict) or not post_state:
+                            post_state = _unwrap_state_payload(exec_res.get("post_state"))
+                            if not post_state:
                                 try:
                                     obs = self.rpc.call("get_state", timeout=15.0) or {}
-                                    post_state = obs.get("state") or obs.get("result") or {}
+                                    post_state = _unwrap_state_payload(obs)
                                 except Exception:
                                     post_state = {}
                             if step.get("wait_until"):
