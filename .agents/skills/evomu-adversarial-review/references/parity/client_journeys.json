@@ -1,6 +1,17 @@
 {
   "version": 1,
-  "client": "EVE Online V24.01 (build 3619879), the real client at ~/Library/Application Support/EVE Online/SharedCache/tq/EVE.app",
+  "client": "EVE Online V24.02 (build 3698585), the real client at ~/Library/Application Support/EVE Online/SharedCache/tq/EVE.app",
+  "expected_client_version": "V24.02",
+  "expected_client_build": 3698585,
+  "smoke_scenarios": [
+    "launch_login",
+    "station_ui",
+    "undock_navigate",
+    "market_trade",
+    "mining_loop",
+    "pve_combat",
+    "skills_training"
+  ],
   "rules": [
     "Every journey drives the REAL client against a locally started EvoMu server. Mocks, replayed packets, and server-side shortcuts don't count.",
     "Automation may use in-client Python (client-bridge) or OS-level UI automation, but every game action must go through the client's own UI or service calls, exactly as a player's would.",

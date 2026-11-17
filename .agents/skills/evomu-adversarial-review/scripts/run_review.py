@@ -11,7 +11,9 @@ quota/capacity; nothing was reviewed; see AGENTS.md "Reviewer unavailable").
 """
 import argparse
 import datetime
+import glob
 import json
+import math
 import os
 import re
 import shutil
@@ -288,50 +290,379 @@ def _release_cargo_test_slot(fh):
         pass
 
 
-def derive_affected_test_commands(root, base, cargo):
-    """Derive targeted `cargo test` commands covering only the crates/modules/tests touched between `base` and `HEAD`.
-    Keeps `run_review.py` fast (~15-60s instead of running all 7,182 workspace tests on every commit)."""
+SENTINEL_IT_FILTERS = (
+    "rpc_client_contracts",
+    "login_space_bootstrap_sequence",
+    "client_harness",
+)
+SENTINEL_LIB_FILTER = "macho_listener"
+MAX_AFFECTED_IT_FILTERS = 12
+MAX_AFFECTED_LIB_FILTERS = 6
+REV_DEP_CACHE_FILENAME = "reverse_dep_index_v2.json"
+_REV_DEP_MEM_CACHE = {}
+
+_USE_MOD_RE = re.compile(
+    r"\b(?:eve_server|crate|super)::(?:services::|router::|combat::|esi::|system_actor::|sp6_lifecycle::)?([A-Za-z_][A-Za-z0-9_]*)"
+)
+_ANY_QUAL_SYM_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)::([A-Za-z_][A-Za-z0-9_]{4,})\b")
+_FN_DEF_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:const\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]{3,})\b")
+_PATH_MOD_RE = re.compile(r'#\[path\s*=\s*"([A-Za-z0-9_./]+)\.rs"\s*\]')
+_ON_NOTIF_RE = re.compile(r'"(On[A-Z][A-Za-z0-9_]{2,})"|\b(On[A-Z][A-Za-z0-9_]{2,})\b')
+_FX_RE = re.compile(r'"(effects\.[A-Za-z0-9_]+)"')
+_QUOTED_IDENT_RE = re.compile(r'"([A-Za-z_][A-Za-z0-9_]{2,})"')
+_IT_HELPER_RE = re.compile(r"\bcrate::([A-Za-z_][A-Za-z0-9_]*)")
+_STRIP_TEST_SUFFIXES = (
+    "_deep_extra_unit_tests",
+    "_extra_unit_tests",
+    "_cov_unit_tests",
+    "_gap_unit_tests",
+    "_edges2_tests",
+    "_edges_b4_tests",
+    "_edge_tests",
+    "_edges_tests",
+    "_extra_tests",
+    "_unit_tests",
+    "_cov_tests",
+    "_tests",
+)
+_DEP_STOP_WORDS = frozenset({
+    "test", "tests", "complete", "live", "suite", "parity", "edge", "coverage", "features", "rpcs",
+    "shard", "regressions", "handle", "check", "update", "state", "items", "player", "system",
+    "character", "server", "client", "error", "value", "apply", "build", "create", "delete",
+    "remove", "resolve", "parse", "fetch", "query", "with", "from", "into", "async", "await",
+    "default", "clone", "write", "unwrap", "expect", "assert", "insert", "entry", "filter",
+    "active", "ship", "ships", "module", "modules", "solar", "station", "world", "record",
+    "activate", "sync", "stop", "start", "push", "pull", "load", "save", "read", "send", "emit",
+})
+
+
+def _ensure_cargo_j4(cmd):
+    """Ensure every `cargo test` invocation passes `-j 4` (if not already present) per Workspace Rule 3."""
+    out = list(cmd)
+    if len(out) >= 2 and out[1] == "test":
+        has_jobs = any(
+            a in ("-j", "--jobs") or a.startswith("-j") or a.startswith("--jobs=")
+            for a in out[2:]
+        )
+        if not has_jobs:
+            out[2:2] = ["-j", "4"]
+    return out
+
+
+def _norm_src_stem(rel_unix):
+    parts = rel_unix.replace("\\", "/").split("/")
+    stem = os.path.splitext(parts[-1])[0]
+    for suf in _STRIP_TEST_SUFFIXES:
+        if stem.endswith(suf) and len(stem) > len(suf):
+            stem = stem[:-len(suf)]
+            break
+    if stem == "mod" and len(parts) >= 2:
+        stem = parts[-2]
+    return stem
+
+
+def _load_rpc_catalog_names(root):
+    services = set()
+    methods = set()
+    cands = (
+        os.path.join(PARITY_DIR, "sources", "rpc_service_catalog.json"),
+        os.path.join(root, "docs", "index", "rpc_service_catalog.json"),
+    )
+    for cp in cands:
+        if os.path.isfile(cp):
+            try:
+                cat = json.load(open(cp, encoding="utf-8"))
+                svcs = cat.get("services") if isinstance(cat.get("services"), dict) else cat
+                if isinstance(svcs, dict):
+                    for svc, info in svcs.items():
+                        if isinstance(info, dict):
+                            services.add(svc)
+                            for m in (info.get("v24_client_candidate_methods") or []) + (
+                                info.get("evomu_implemented_methods") or []
+                            ):
+                                methods.add(m if isinstance(m, str) else m.get("name", ""))
+                break
+            except (OSError, ValueError):
+                pass
+    services.discard("")
+    methods -= {"", "List", "Add", "Get", "Remove", "Update", "Delete", "Close", "Open", "Init", "Ping"}
+    return services, methods
+
+
+def _load_or_build_reverse_dep_index(root):
+    """Build or load cached reverse-import / RPC-service / notification / symbol index from
+    `crates/eve-server/src` and `crates/eve-server/tests/it/*.rs`."""
+    src_dir = os.path.join(root, "crates", "eve-server", "src")
+    it_dir = os.path.join(root, "crates", "eve-server", "tests", "it")
+    src_files = sorted(glob.glob(os.path.join(src_dir, "**", "*.rs"), recursive=True)) if os.path.isdir(src_dir) else []
+    it_files = sorted(glob.glob(os.path.join(it_dir, "*.rs"))) if os.path.isdir(it_dir) else []
+
+    src_max_m = max((os.stat(p).st_mtime_ns for p in src_files), default=0)
+    it_max_m = max((os.stat(p).st_mtime_ns for p in it_files), default=0)
+    sig = "%d:%d:%d:%d" % (len(src_files), src_max_m, len(it_files), it_max_m)
+
+    mem = _REV_DEP_MEM_CACHE.get(root)
+    if mem and mem.get("sig") == sig:
+        return mem
+
+    cache_path = None
+    try:
+        cache_path = os.path.join(rl.state_dir(root), REV_DEP_CACHE_FILENAME)
+    except BaseException:  # noqa: BLE001
+        cache_path = None
+
+    if cache_path and os.path.isfile(cache_path):
+        try:
+            with open(cache_path, encoding="utf-8") as fh:
+                disk = json.load(fh)
+            if isinstance(disk, dict) and disk.get("sig") == sig:
+                disk["services"] = set(disk.get("services", ()))
+                disk["methods"] = set(disk.get("methods", ()))
+                disk["known_src_mods"] = set(disk.get("known_src_mods", ()))
+                disk["reverse_src"] = {k: set(v) for k, v in disk.get("reverse_src", {}).items()}
+                disk["src_parent"] = {k: set(v) for k, v in disk.get("src_parent", {}).items()}
+                disk["lib_notif_mods"] = {k: set(v) for k, v in disk.get("lib_notif_mods", {}).items()}
+                disk["it_tokens"] = {k: set(v) for k, v in disk.get("it_tokens", {}).items()}
+                _REV_DEP_MEM_CACHE[root] = disk
+                return disk
+        except (OSError, ValueError, TypeError):
+            pass
+
+    services, methods = _load_rpc_catalog_names(root)
+    known_src_mods = set()
+    reverse_src = {}
+    src_parent = {}
+    lib_notif_mods = {}
+
+    for p in src_files:
+        rel = os.path.relpath(p, src_dir).replace("\\", "/")
+        fname = rel.rsplit("/", 1)[-1]
+        is_test_f = rel.startswith("tests/") or "/tests/" in rel or fname == "tests.rs" or fname.endswith(("_tests.rs", "_test.rs"))
+        stem = _norm_src_stem(rel)
+        with open(p, encoding="utf-8", errors="replace") as fh:
+            txt = fh.read()
+        if is_test_f:
+            for m1, m2 in _ON_NOTIF_RE.findall(txt):
+                ev = m1 or m2
+                if stem not in ("tests", SENTINEL_LIB_FILTER):
+                    lib_notif_mods.setdefault(ev, set()).add(stem)
+            continue
+        known_src_mods.add(stem)
+        parts = rel.split("/")
+        if len(parts) >= 2 and parts[0] not in ("services", "router", "esi", "combat"):
+            src_parent.setdefault(stem, set()).add(parts[0])
+            known_src_mods.add(parts[0])
+        ci = txt.find("#[cfg(test)]")
+        prod = txt if ci < 0 else txt[:ci]
+        imps = set(_USE_MOD_RE.findall(prod)) - {stem, "self", "super", "crate"}
+        for imp in imps:
+            reverse_src.setdefault(imp, set()).add(stem)
+        for pm in _PATH_MOD_RE.findall(prod):
+            child = os.path.splitext(os.path.basename(pm))[0]
+            if not child.endswith(("_tests", "_test")):
+                src_parent.setdefault(child, set()).add(stem)
+
+    skip_it = {"main", "mod", "common"} | set(SENTINEL_IT_FILTERS)
+    raw_it = {}
+    it_reverse_helper = {}
+    qual_prefixes = known_src_mods | {"eve_server", "services", "router", "sp6_lifecycle", "system_actor", "combat"}
+
+    for p in it_files:
+        mod_name = os.path.splitext(os.path.basename(p))[0]
+        with open(p, encoding="utf-8", errors="replace") as fh:
+            txt = fh.read()
+        toks = set()
+        for m in _USE_MOD_RE.findall(txt):
+            if m not in _DEP_STOP_WORDS:
+                toks.add("mod:" + m)
+        for lhs, rhs in _ANY_QUAL_SYM_RE.findall(txt):
+            if lhs in qual_prefixes and rhs not in _DEP_STOP_WORDS and (rhs[0].islower() or rhs.isupper()):
+                toks.add("sym:" + rhs)
+        for m1, m2 in _ON_NOTIF_RE.findall(txt):
+            toks.add("on:" + (m1 or m2))
+        for fx in _FX_RE.findall(txt):
+            toks.add("fx:" + fx)
+        for q in _QUOTED_IDENT_RE.findall(txt):
+            if q in services:
+                toks.add("svc:" + q)
+            elif q in methods:
+                toks.add("rpc:" + q)
+        for w in mod_name.split("_"):
+            if len(w) >= 4 and w not in _DEP_STOP_WORDS:
+                toks.add("kw:" + w)
+        raw_it[mod_name] = toks
+        for h in _IT_HELPER_RE.findall(txt):
+            if h not in ("common", "main", mod_name):
+                it_reverse_helper.setdefault(h, set()).add(mod_name)
+
+    it_tokens = {m: set(t) for m, t in raw_it.items() if m not in skip_it}
+    for h, users in it_reverse_helper.items():
+        htoks = {t for t in raw_it.get(h, set()) if not t.startswith("kw:")}
+        for u in users:
+            if u in it_tokens:
+                it_tokens[u].update(htoks)
+
+    token_df = {}
+    for toks in it_tokens.values():
+        for t in toks:
+            token_df[t] = token_df.get(t, 0) + 1
+
+    n_it = max(1, len(it_tokens))
+    avg_len = (sum(len(t) for t in it_tokens.values()) / float(n_it)) if it_tokens else 1.0
+
+    serializable = {
+        "sig": sig,
+        "services": sorted(services),
+        "methods": sorted(methods),
+        "known_src_mods": sorted(known_src_mods),
+        "reverse_src": {k: sorted(v) for k, v in reverse_src.items()},
+        "src_parent": {k: sorted(v) for k, v in src_parent.items()},
+        "lib_notif_mods": {k: sorted(v) for k, v in lib_notif_mods.items()},
+        "it_tokens": {k: sorted(v) for k, v in it_tokens.items()},
+        "token_df": token_df,
+        "n_it": n_it,
+        "avg_len": avg_len,
+    }
+    if cache_path:
+        try:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            tmp = cache_path + ".tmp.%d" % os.getpid()
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(serializable, fh)
+            os.replace(tmp, cache_path)
+        except OSError:
+            pass
+
+    mem_obj = dict(
+        serializable,
+        services=services,
+        methods=methods,
+        known_src_mods=known_src_mods,
+        reverse_src=reverse_src,
+        src_parent=src_parent,
+        lib_notif_mods=lib_notif_mods,
+        it_tokens=it_tokens,
+    )
+    _REV_DEP_MEM_CACHE[root] = mem_obj
+    return mem_obj
+
+
+def _enclosing_fns_at_ref(root, ref, rel_path, line_nums):
+    raw = ""
+    if ref == "HEAD":
+        fp = os.path.join(root, rel_path)
+        if os.path.isfile(fp):
+            try:
+                raw = open(fp, encoding="utf-8", errors="replace").read()
+            except OSError:
+                raw = ""
+    if not raw:
+        proc = subprocess.run(["git", "show", "%s:%s" % (ref, rel_path)], cwd=root, capture_output=True, text=True)
+        raw = proc.stdout if proc.returncode == 0 else ""
+    if not raw:
+        return set()
+    lines = raw.splitlines()
+    ci = next((i for i, l in enumerate(lines) if "#[cfg(test)]" in l), len(lines))
+    out = set()
+    for ln in line_nums:
+        if ln > ci:
+            continue
+        for j in range(min(max(ln - 1, 0), len(lines) - 1), -1, -1):
+            m = _FN_DEF_RE.match(lines[j])
+            if m:
+                fn = m.group(1)
+                out.add(fn)
+                for suf in ("_sync", "_async", "_inner", "_impl", "_in_snap"):
+                    if fn.endswith(suf) and len(fn) > len(suf) + 3:
+                        out.add(fn[:-len(suf)])
+                break
+    return out
+
+
+def derive_affected_test_commands(root, base, cargo, head="HEAD"):
+    """Derive targeted `cargo test -j 4` commands covering:
+    1. Always-on fast wire/bootstrap sentinel (`rpc_client_contracts`, `login_space_bootstrap_sequence`,
+       `client_harness`, and `--lib macho_listener`) whenever any `.rs`/`.json`/`.txt` under `crates/` changes.
+    2. Reverse-import / RPC-service / `On*`-notification / symbol affected `tests/it/*.rs` (bounded to
+       <= 12 integration test filters + sentinel set) and `--lib` modules (including `crates/eve-quasar/`)."""
     diff_base = base
-    mb_proc = subprocess.run(["git", "merge-base", "main", "HEAD"], cwd=root, capture_output=True, text=True)
-    head_proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True)
-    if mb_proc.returncode == 0 and head_proc.returncode == 0:
-        mb_sha = mb_proc.stdout.strip()
-        head_sha = head_proc.stdout.strip()
-        if mb_sha and mb_sha != head_sha:
-            if subprocess.run(["git", "merge-base", "--is-ancestor", diff_base, mb_sha], cwd=root).returncode == 0:
-                diff_base = mb_sha
-    _, diff_files_out = sh(["git", "diff", "--name-only", diff_base, "HEAD", "--", "crates/"], root)
-    changed_files = [l.strip() for l in diff_files_out.splitlines() if l.strip().endswith(".rs")]
+    if head == "HEAD":
+        for trunk_ref in ("main", "origin/main"):
+            mb_proc = subprocess.run(["git", "merge-base", trunk_ref, "HEAD"], cwd=root, capture_output=True, text=True)
+            head_proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True)
+            if mb_proc.returncode == 0 and head_proc.returncode == 0:
+                mb_sha = mb_proc.stdout.strip()
+                head_sha = head_proc.stdout.strip()
+                if mb_sha and mb_sha != head_sha:
+                    if subprocess.run(["git", "merge-base", "--is-ancestor", diff_base, mb_sha], cwd=root).returncode == 0:
+                        diff_base = mb_sha
+                    break
+
+    _, diff_files_out = sh(["git", "diff", "--name-only", diff_base, head, "--", "crates/"], root)
+    changed_all = [l.strip() for l in diff_files_out.splitlines() if l.strip()]
+    changed_crates = [f for f in changed_all if f.endswith((".rs", ".json", ".txt", ".toml", ".proto"))]
+    include_sentinel = any(f.endswith((".rs", ".json", ".txt")) for f in changed_all)
+
     lib_filters_by_crate = {}
     whole_lib_crates = set()
-    integ_targets = []  # list of (crate, bin, optional_filter)
+    non_server_integ = []
+    direct_server_it = []
+    changed_server_stems = set()
+    quasar_crate_touched = False
 
-    strip_suffixes = (
-        "_deep_extra_unit_tests",
-        "_extra_unit_tests",
-        "_cov_unit_tests",
-        "_gap_unit_tests",
-        "_edges_b4_tests",
-        "_edges_tests",
-        "_extra_tests",
-        "_unit_tests",
-        "_cov_tests",
-        "_tests",
-    )
+    skip_server_it = {"main", "mod", "common"} | set(SENTINEL_IT_FILTERS)
 
-    for rel in changed_files:
+    for rel in changed_crates:
         parts = rel.replace("\\", "/").split("/")
         if len(parts) < 3 or parts[0] != "crates":
             continue
         crate = parts[1]
+        if crate == "eve-quasar":
+            quasar_crate_touched = True
+            if os.path.isfile(os.path.join(root, "crates", "eve-quasar", "Cargo.toml")):
+                if len(parts) >= 4 and parts[2] == "src" and rel.endswith(".rs"):
+                    st = _norm_src_stem("/".join(parts[3:]))
+                    if st in ("lib", "main"):
+                        whole_lib_crates.add("eve-quasar")
+                    else:
+                        lib_filters_by_crate.setdefault("eve-quasar", set()).add(st)
+                else:
+                    whole_lib_crates.add("eve-quasar")
+            lib_filters_by_crate.setdefault("eve-server", set()).update(("quasar_gateway", "quasar_grpc"))
+            changed_server_stems.update(("quasar_gateway", "quasar_grpc"))
+            continue
+
+        if rel.endswith((".json", ".txt")):
+            fname = parts[-1]
+            if crate == "eve-proto":
+                whole_lib_crates.add("eve-proto")
+            elif crate == "eve-testkit":
+                whole_lib_crates.add("eve-testkit")
+                if "notify" in fname:
+                    lib_filters_by_crate.setdefault("eve-server", set()).add("notify_registry")
+                if "quasar_tap" in fname and "quasar_tap" not in direct_server_it:
+                    direct_server_it.append("quasar_tap")
+            elif crate == "eve-db":
+                lib_filters_by_crate.setdefault("eve-db", set()).add("lock_rank")
+            elif crate != "eve-server":
+                whole_lib_crates.add(crate)
+            continue
+
+        if not rel.endswith(".rs"):
+            continue
+
         if parts[2] == "tests":
-            if len(parts) == 4:
+            if crate == "eve-server" and len(parts) >= 5 and parts[3] == "it":
+                submod = os.path.splitext(parts[-1])[0]
+                if submod not in skip_server_it and submod not in direct_server_it:
+                    direct_server_it.append(submod)
+            elif len(parts) == 4:
                 bin_name = os.path.splitext(parts[3])[0]
-                integ_targets.append((crate, bin_name, None))
+                non_server_integ.append((crate, bin_name, None))
             elif len(parts) >= 5:
                 bin_name = parts[3]
                 submod = os.path.splitext(parts[-1])[0]
-                integ_targets.append((crate, bin_name, submod))
+                non_server_integ.append((crate, bin_name, submod))
         elif parts[2] == "src":
             stem = os.path.splitext(parts[-1])[0]
             if stem == "mod" and len(parts) >= 5:
@@ -342,27 +673,185 @@ def derive_affected_test_commands(root, base, cargo):
                 else:
                     lib_filters_by_crate.setdefault(crate, set()).add("config::tests")
                 continue
-            base_stem = stem
-            for suf in strip_suffixes:
-                if base_stem.endswith(suf) and len(base_stem) > len(suf):
-                    base_stem = base_stem[:-len(suf)]
+            base_stem = _norm_src_stem("/".join(parts[3:]))
+            if not ( crate == "eve-server" and base_stem == SENTINEL_LIB_FILTER ):
+                lib_filters_by_crate.setdefault(crate, set()).add(base_stem)
+            if crate == "eve-server":
+                rel_in_src = "/".join(parts[3:])
+                fname = parts[-1]
+                if not (rel_in_src.startswith("tests/") or "/tests/" in rel_in_src
+                        or fname == "tests.rs" or fname.endswith(("_tests.rs", "_test.rs"))):
+                    changed_server_stems.add(base_stem)
+        else:
+            if crate != "eve-server":
+                whole_lib_crates.add(crate)
+
+    # Reverse-import / RPC-service / On*-notification / symbol test selection for `eve-server`
+    selected_server_it = []
+    if changed_server_stems or direct_server_it or quasar_crate_touched or "eve-server" in lib_filters_by_crate:
+        _, diff_src = sh(["git", "diff", "-U0", diff_base, head, "--", "crates/eve-server/src/"], root)
+        all_added_src = "\n".join(
+            ln[1:] for ln in diff_src.splitlines() if ln.startswith("+") and not ln.startswith("+++")
+        )
+        if re.search(r"\bencode_(?:varint|bytes|string|fixed32|fixed64)_field\s*\(", all_added_src):
+            lib_filters_by_crate.setdefault("eve-proto", set()).add("pb")
+        if re.search(
+            r"\.(?:notify|push_notification|notify_remote_message)\s*\(|\b(?:build_macho_notification_packet|notify_char)\s*\(",
+            all_added_src,
+        ):
+            lib_filters_by_crate.setdefault("eve-server", set()).add("notify_registry")
+
+    if changed_server_stems or direct_server_it or quasar_crate_touched:
+        idx = _load_or_build_reverse_dep_index(root)
+        it_tokens = idx["it_tokens"]
+        if it_tokens:
+            if head == "HEAD":
+                head_it = set(it_tokens.keys())
+            else:
+                ls_proc = subprocess.run(
+                    ["git", "ls-tree", "--name-only", head, "crates/eve-server/tests/it/"],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                )
+                head_it = {
+                    os.path.splitext(os.path.basename(l.strip()))[0]
+                    for l in ls_proc.stdout.splitlines()
+                    if l.strip().endswith(".rs")
+                } or set(it_tokens.keys())
+
+            for par_s in list(changed_server_stems):
+                changed_server_stems.update(idx["src_parent"].get(par_s, ()))
+
+            hop1_stems = set()
+            for st in changed_server_stems:
+                rset = idx["reverse_src"].get(st, set())
+                if len(rset) <= 35:
+                    for r in rset:
+                        hop1_stems.add(r)
+                        hop1_stems.update(idx["src_parent"].get(r, ()))
+            hop1_stems -= changed_server_stems
+
+            # Propagate up to 2 downstream `--lib` test modules for changed `src` modules / notifications
+            ev_lib_set = lib_filters_by_crate.setdefault("eve-server", set())
+            for h_st in sorted(hop1_stems):
+                if len(ev_lib_set) >= MAX_AFFECTED_LIB_FILTERS:
                     break
-            lib_filters_by_crate.setdefault(crate, set()).add(base_stem)
+                if h_st not in ("tests", SENTINEL_LIB_FILTER):
+                    ev_lib_set.add(h_st)
+
+            file_lines = {}
+            cur_f = None
+            in_prod = False
+            prod_lines = []
+            for ln in diff_src.splitlines():
+                if ln.startswith("+++ b/"):
+                    cur_f = ln[6:]
+                    in_prod = not (cur_f.endswith(("_tests.rs", "_test.rs")) or os.path.basename(cur_f) == "tests.rs")
+                elif ln.startswith("@@") and cur_f and in_prod:
+                    m = re.search(r"\+(\d+)(?:,(\d+))?", ln)
+                    if m:
+                        a0 = int(m.group(1))
+                        cnt = int(m.group(2)) if m.group(2) is not None else 1
+                        file_lines.setdefault(cur_f, set()).update(range(max(1, a0), max(1, a0) + max(1, min(cnt, 40))))
+                elif in_prod and (ln.startswith("+") or ln.startswith("-")) and not ln.startswith(("+++", "---")):
+                    prod_lines.append(ln[1:])
+            changed_blob = "\n".join(prod_lines)
+
+            enc_fns = set()
+            for rf, lns in file_lines.items():
+                enc_fns |= _enclosing_fns_at_ref(root, head, rf, lns)
+
+            qw = {}
+            if quasar_crate_touched:
+                qw["kw:quasar"] = 24.0
+            for st in changed_server_stems:
+                qw["mod:" + st] = max(qw.get("mod:" + st, 0.0), 22.0)
+            for st in hop1_stems:
+                qw["mod:" + st] = max(qw.get("mod:" + st, 0.0), 8.0)
+            for fn in enc_fns:
+                if fn not in _DEP_STOP_WORDS:
+                    qw["sym:" + fn] = max(qw.get("sym:" + fn, 0.0), 34.0)
+                    for w in fn.split("_"):
+                        if len(w) >= 4 and w not in _DEP_STOP_WORDS:
+                            qw["kw:" + w] = max(qw.get("kw:" + w, 0.0), 18.0)
+            for lhs, rhs in _ANY_QUAL_SYM_RE.findall(changed_blob):
+                if lhs in idx["known_src_mods"] and rhs not in _DEP_STOP_WORDS and rhs[0].islower():
+                    qw["sym:" + rhs] = max(qw.get("sym:" + rhs, 0.0), 24.0)
+            for m1, m2 in _ON_NOTIF_RE.findall(changed_blob):
+                ev = m1 or m2
+                qw["on:" + ev] = max(qw.get("on:" + ev, 0.0), 14.0)
+                for lmod in sorted(idx["lib_notif_mods"].get(ev, ())):
+                    if len(ev_lib_set) < MAX_AFFECTED_LIB_FILTERS:
+                        ev_lib_set.add(lmod)
+            for fx in _FX_RE.findall(changed_blob):
+                qw["fx:" + fx] = max(qw.get("fx:" + fx, 0.0), 18.0)
+            for q in _QUOTED_IDENT_RE.findall(changed_blob):
+                if q in idx["services"]:
+                    qw["svc:" + q] = max(qw.get("svc:" + q, 0.0), 10.0)
+                elif q in idx["methods"]:
+                    qw["rpc:" + q] = max(qw.get("rpc:" + q, 0.0), 16.0)
+
+            n_it = idx["n_it"]
+            avg_len = idx["avg_len"]
+            token_df = idx["token_df"]
+            rem_weights = {}
+            for tok, w in qw.items():
+                df = token_df.get(tok, 0)
+                if 1 <= df <= 45:
+                    rem_weights[tok] = w * math.log((n_it + 1.0) / (df + 0.5))
+
+            selected_server_it = [s for s in direct_server_it if s in head_it][:4]
+            for m in selected_server_it:
+                for tok in it_tokens.get(m, ()):
+                    if tok in rem_weights:
+                        rem_weights[tok] *= 0.25
+
+            candidates = [m for m in sorted(it_tokens) if m in head_it and m not in selected_server_it]
+            while len(selected_server_it) < MAX_AFFECTED_IT_FILTERS and candidates:
+                best_m, best_sc = None, 0.0
+                for m in candidates:
+                    toks = it_tokens[m]
+                    sc = sum(rem_weights.get(t, 0.0) for t in toks)
+                    if sc > 0:
+                        sc /= (0.6 + 0.4 * (len(toks) / avg_len))
+                        if sc > best_sc:
+                            best_m, best_sc = m, sc
+                if not best_m or best_sc <= 0:
+                    break
+                selected_server_it.append(best_m)
+                candidates.remove(best_m)
+                for tok in it_tokens[best_m]:
+                    if tok in rem_weights:
+                        rem_weights[tok] *= 0.2
+        else:
+            selected_server_it = list(direct_server_it[:MAX_AFFECTED_IT_FILTERS])
 
     cmds = []
+    if include_sentinel:
+        for sflt in SENTINEL_IT_FILTERS:
+            cmds.append(_ensure_cargo_j4([cargo, "test", "-p", "eve-server", "--test", "it", sflt]))
+        cmds.append(_ensure_cargo_j4([cargo, "test", "-p", "eve-server", "--lib", SENTINEL_LIB_FILTER]))
+
     for crate in sorted(whole_lib_crates):
-        cmds.append([cargo, "test", "-p", crate, "--lib"])
+        cmds.append(_ensure_cargo_j4([cargo, "test", "-p", crate, "--lib"]))
     for crate, filters in sorted(lib_filters_by_crate.items()):
-        if crate in whole_lib_crates:
+        if crate in whole_lib_crates or not filters:
             continue
         cleaned = [f for f in sorted(filters) if f != "tests"] or sorted(filters)
-        for flt in cleaned[:4]:
-            cmds.append([cargo, "test", "-p", crate, "--lib", flt])
+        if "notify_registry" in cleaned:
+            cleaned = ["notify_registry"] + [f for f in cleaned if f != "notify_registry"]
+        cap = MAX_AFFECTED_LIB_FILTERS if crate == "eve-server" else 4
+        for flt in cleaned[:cap]:
+            cmds.append(_ensure_cargo_j4([cargo, "test", "-p", crate, "--lib", flt]))
 
-    non_root_integ = {(c, b) for c, b, s in integ_targets if s and s not in ("main", "mod")}
+    for submod in selected_server_it[:MAX_AFFECTED_IT_FILTERS]:
+        cmds.append(_ensure_cargo_j4([cargo, "test", "-p", "eve-server", "--test", "it", submod]))
+
+    non_root_integ = {(c, b) for c, b, s in non_server_integ if s and s not in ("main", "mod")}
     seen_integ = set()
     integ_per_bin = {}
-    for crate, bin_name, submod in integ_targets:
+    for crate, bin_name, submod in non_server_integ:
         if (crate, bin_name, None) in seen_integ:
             continue
         if submod in ("main", "mod") and (crate, bin_name) in non_root_integ:
@@ -375,12 +864,12 @@ def derive_affected_test_commands(root, base, cargo):
         seen_integ.add(key)
         integ_per_bin[(crate, bin_name)] = integ_per_bin.get((crate, bin_name), 0) + 1
         if submod and submod not in ("main", "mod"):
-            cmds.append([cargo, "test", "-p", crate, "--test", bin_name, submod])
+            cmds.append(_ensure_cargo_j4([cargo, "test", "-p", crate, "--test", bin_name, submod]))
         else:
-            cmds.append([cargo, "test", "-p", crate, "--test", bin_name, "smoke"])
+            cmds.append(_ensure_cargo_j4([cargo, "test", "-p", crate, "--test", bin_name, "smoke"]))
 
     if not cmds:
-        cmds.append([cargo, "test", "-p", "eve-server", "--lib", "config::tests"])
+        cmds.append(_ensure_cargo_j4([cargo, "test", "-p", "eve-server", "--lib", "config::tests"]))
     return cmds
 
 
@@ -389,10 +878,10 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
     # Isolated from agent artifacts. Disable incremental cache (~7.5 GiB/slot) so 5 concurrent review slots stay lean.
     env["CARGO_TARGET_DIR"] = os.environ.get("EVOMU_REVIEW_TARGET_DIR") or os.path.join(sdir, "target")
     env["CARGO_INCREMENTAL"] = "0"
-    # Cap both rustc build jobs and runtime libtest threads per slot so concurrent test runs
-    # do not spawn 4..5 x 16 = 64..80 WorldState/EveDb test threads at once and exhaust macOS swap.
-    env["CARGO_BUILD_JOBS"] = os.environ.get("CARGO_BUILD_JOBS", "4")
-    env["RUST_TEST_THREADS"] = os.environ.get("RUST_TEST_THREADS", "4")
+    # Strictly enforce Workspace Rule 3 (`-j 4`, `RUST_TEST_THREADS=4`) on every child `cargo test`
+    # so 5 concurrent review slots never spawn 64..80 WorldState/EveDb threads and exhaust swap.
+    env["CARGO_BUILD_JOBS"] = "4"
+    env["RUST_TEST_THREADS"] = "4"
     # Reuse sccache for fast compilation when available.
     if os.path.exists("/opt/homebrew/bin/sccache"):
         env["RUSTC_WRAPPER"] = "/opt/homebrew/bin/sccache"
@@ -402,7 +891,8 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
         env["EVOMU_PARITY_ATTEST_DIR"] = attest_dir
     cargo = shutil.which("cargo", path=env.get("PATH")) or "/opt/homebrew/bin/cargo"
     use_full = full_workspace or os.environ.get("EVOMU_FULL_WORKSPACE_TESTS") == "1"
-    cmds = [[cargo, "test", "--workspace", "--no-fail-fast"]] if use_full else derive_affected_test_commands(root, base, cargo)
+    raw_cmds = [[cargo, "test", "-j", "4", "--workspace", "--no-fail-fast"]] if use_full else derive_affected_test_commands(root, base, cargo)
+    cmds = [_ensure_cargo_j4(c) for c in raw_cmds]
     slot_fh = _acquire_cargo_test_slot(root)
     outs = []
     rc = 0
@@ -417,7 +907,7 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
         if not use_full and rc == 0:
             passed_so_far = sum(int(m) for m in re.findall(r"test result: \w+\. (\d+) passed", out))
             if passed_so_far == 0:
-                fallback_cmd = [cargo, "test", "-p", "eve-server", "--lib", "config::tests"]
+                fallback_cmd = _ensure_cargo_j4([cargo, "test", "-j", "4", "-p", "eve-server", "--lib", "config::tests"])
                 c_rc, c_out = sh(fallback_cmd, root, env=env, timeout=timeout)
                 outs.append("$ %s\n%s" % (" ".join(fallback_cmd), c_out))
                 out = "\n\n".join(outs)

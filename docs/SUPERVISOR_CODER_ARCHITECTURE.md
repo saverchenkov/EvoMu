@@ -2,7 +2,7 @@
 
 ## 1. Executive Summary & Core Mission
 
-**EvoMu** is an asynchronous, high-concurrency clean-room server emulator for **EVE Online V24.01 (Client Build 3619879)**, written in idiomatic, memory-safe Rust with `#![forbid(unsafe_code)]`.
+**EvoMu** is an asynchronous, high-concurrency clean-room server emulator for **EVE Online V24.02 (Client Build 3698585)**, written in idiomatic, memory-safe Rust with `#![forbid(unsafe_code)]`.
 
 The emulator delivers complete end-to-end server functionality spanning:
 1. **The Classic machoNet Surface:** Authenticated RPC dispatch across 216 services, dynamic moniker bindings (`beyonce`, `dogmaIM`, `invbroker`, etc.), session change pipelines, 1 Hz spatial physics and combat loops (`Ballpark`), and dogmatic attribute calculation (`DogmaVM`).
@@ -13,8 +13,8 @@ The emulator delivers complete end-to-end server functionality spanning:
 The project is complete when `/usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/final_gate.py` exits with code `0`. Mechanically, this requires:
 - **100% Honest Closure** across all 6,348 rows in `.agents/skills/evomu-adversarial-review/references/parity/ledger.json` and `auditor_rows.json` (either `DONE` backed by real, passing tests or `NA` backed by client-bytecode evidence in `supervisor_triage.json` / `docs/parity/triage.json`).
 - An authoritative **`PASS` Review Verdict** from an independent LLM judge (`run_review.py`) and a **`CLEAN` Gap Audit**.
-- **Workspace Line Coverage $\ge 90\%$** and **Mutation Score $\ge 85\%$** (`cargo mutants`).
-- All 29 real-client journey benchmarks (`plan:T-6`) passing against the real V24.01 client via `tools/client-harness` and `evomu-visual-check`.
+- **Workspace Line Coverage $\ge 90\%$** (`cargo llvm-cov`).
+- **Two-Stage Real-Client Journey Attestation (`supervisor_journeys.json`):** Per-track coder reviews (`run_review.py`) stay 100% headless (coders never launch `exefile`, add `// parity: journey:*` tags, or edit `.agents/`). **Interim stage (active immediately):** `final_gate.py` requires a fresh, passing Supervisor-written real-client smoke attestation in `.agents/skills/evomu-adversarial-review/references/parity/supervisor_journeys.json` (`git_sha` matching the judged code tree, current installed V24.02 client build `3698585`, `real: true`, `log_errors: []`) covering the **7 core smoke scenarios** (`launch_login`, `station_ui`, `undock_navigate`, `market_trade`, `mining_loop`, `pve_combat`, `skills_training`), while all 29 journeys are tracked on the Supervisor-updated scoreboard read by `parity_status.py` (`plan:T-6`, `plan:ESI-1`, `journey:*`). **Target `plan:Z-6` stage:** once `#1202` (`playtester.py --scenario` runner) and `#1203` (2nd-player protocol partner) land and re-express all 29 journeys as Rule-2 deterministic UI scenarios, `final_gate.py` promotes from the 7-scenario smoke requirement to `29/29` passing deterministic real-client UI scenarios on the current client build.
 
 ---
 

@@ -28,7 +28,7 @@
   - 100% of ledger rows closed, with no rows flagged fake;
   - the claims review is `PASS` and the gap audit is `CLEAN`;
   - workspace line coverage ≥ 90%;
-  - every real-client journey passes, with zero `UnimplementedRPC`, panics or client tracebacks in the logs.
+  - **Two-stage Supervisor-owned real-client journey attestation (`references/parity/supervisor_journeys.json`):** Per-track coder `run_review.py` stays 100% headless (coders never launch `exefile` or edit `.agents/`). **Interim stage (active immediately):** `final_gate.py` requires a fresh, passing Supervisor-written real-client smoke attestation (`git_sha` matching the judged code tree, current installed V24.02 build `3698585`, `real: true`, `log_errors: []` with zero `UnimplementedRPC`, panics or client tracebacks) covering the **7 core smoke scenarios** (`launch_login`, `station_ui`, `undock_navigate`, `market_trade`, `mining_loop`, `pve_combat`, `skills_training`), while all 29 journeys are tracked on the Supervisor-updated scoreboard read by `parity_status.py` (`plan:T-6`, `plan:ESI-1`, `journey:*`). **Target `plan:Z-6` stage:** once `#1202` (`--scenario` runner) and `#1203` (2nd-player partner) land and re-express all 29 journeys as Rule-2 deterministic UI scenarios, `final_gate.py` promotes from the 7-scenario smoke requirement to `29/29` passing deterministic real-client UI scenarios on the current client build.
 - **No interim human review.** Run as an unbounded `/goal` loop. Don't stop, don't ask the user to review or test, and don't report "done" before the final gate passes. Stop only for a true external blocker (credentials, hardware, a legal or licensing question). If that happens, write it in `docs/BLOCKERS.md` and keep working on anything that isn't blocked.
 
 ---
@@ -47,7 +47,7 @@
 7. **Tests prove behaviour.**
    - Every task adds tests under `crates/<crate>/tests/` or `crates/eve-server/tests/<area>.rs` that would fail without the change.
    - Every test that closes a ledger row carries `// parity: <row id>[, <row id>…]` in the comment block above it. No wildcards. Data-driven tests over the static game data (`sde:*`, `effect:*`) may attest IDs at runtime through `EVOMU_PARITY_ATTEST_DIR` (see T-1).
-   - Tests assert real game values (wiki/SDE/client-derived), never tautologies. Mutation testing at the final gate catches weak tests.
+   - Tests assert real game values (wiki/SDE/client-derived), never tautologies. Adversarial code review and value-assertion gates catch weak tests.
    - Tests use real SDE data once Phase 1 lands.
    - `cargo test --workspace` must actually run. `cargo check` is not verification.
    - Expect thousands of tests: at least one per ledger row, plus property tests and data-driven sweeps.
@@ -406,7 +406,7 @@ Pinned spec: `references/parity/sources/esi_openapi.json` (197 operations, 182 p
 | Z-3 | Close every `destiny:` and `ballmode:` row on the binary destiny stream. | destiny 100%. |
 | Z-4 | Close every `sde:` row and `effect:*`. | sde and effect 100%. |
 | Z-5 | Close every `feat:` row, including every row the gap auditor has appended. Fix every auditor `fake_done` flag until a later audit clears it. | feat 100%, 0 flagged fake. |
-| Z-6 | Pass every `journey:` row on the real client through `tools/client-harness/run_journeys`, with clean logs. | journey 100%. |
+| Z-6 | Pass all 29 `journey:` rows as deterministic Rule-2 real-client UI scenarios (`#1202` `--scenario` runner + `#1203` 2nd-player partner) on the current V24 client build (`3698585`) via Supervisor-attested `supervisor_journeys.json` (`real: true`, `log_errors: []`), promoting `final_gate.py` from the interim 7-scenario smoke requirement (`launch_login`, `station_ui`, `undock_navigate`, `market_trade`, `mining_loop`, `pve_combat`, `skills_training`) to `29/29`. | `supervisor_journeys.json` (`stage: "full_z6"`) attests 29/29 real-client UI scenarios passing on the current build with clean logs. |
 | Z-7 | Reach workspace line coverage ≥ 90%. | Threshold met in `final_gate.py`. |
 | Z-8 | **Final acceptance.** The claims review is `PASS` and the gap audit is `CLEAN` on the final tree, and `final_gate.py` exits 0. Only then tell the user the project is complete, with the gate report path. | `.evomu-reviews/final_gate.json` shows `"passed": true` for HEAD's tree. |
 

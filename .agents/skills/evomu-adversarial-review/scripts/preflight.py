@@ -35,6 +35,7 @@ import datetime
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import review_lib as rl  # noqa: E402
+import ratchet_checks  # noqa: E402
 
 PARITY_STATUS = os.path.join(HERE, "parity", "parity_status.py")
 sys.path.insert(0, os.path.join(HERE, "metrics"))
@@ -517,14 +518,26 @@ def lint_merge_conflicts_and_docs(root, added):
     return out
 
 
-def run_early_gate(root, base, added, claims_path):
+def run_early_gate(root, base, added, claims_path, early_only=False):
     violations = []
 
     # 0. Merge conflict markers and contradictory S-10 doc counts
     violations += lint_merge_conflicts_and_docs(root, added)
 
+    # 0b. Zero-cargo (< 1s) workspace source ratchets (raw_encode_field, raw_notify, raw_dispatch,
+    #     lock_rank_ratchet.txt, and conditional client_compat / arch_debt ratchets)
+    violations += ratchet_checks.check_all_ratchets(root)
+
+    # 0c. Review-branch commit-message guard: block Fixes/Closes/Resolves on open RFC/umbrella issues
+    #     or non-zero ratchet owning_issues, and cap closing issues per commit at <= 5
+    violations += ratchet_checks.lint_branch_commit_issue_closures(root, claims_path=claims_path)
+
     # 1. RPC-name check (names must exist in the real client)
-    all_viol, have_client = rpc_names.run()
+    if early_only:
+        changed_rs = [f for f in sorted(added) if f.endswith(".rs")]
+        all_viol, have_client = rpc_names.run(files=changed_rs, root=root) if changed_rs else ([], True)
+    else:
+        all_viol, have_client = rpc_names.run(root=root)
     hard_all = [v for v in all_viol if v["kind"] == "NOT_IN_CLIENT"]
     rpc_block = [v for v in hard_all if v["file"] in added and (added[v["file"]] is None or v["line"] in added[v["file"]])]
     for v in rpc_block:
@@ -591,6 +604,21 @@ def run_early_gate(root, base, added, claims_path):
                            "client_expectations.json is missing from references/parity/sources/",
                            exp_json_full, 1))
 
+    # 2f. Repo release-hygiene guard (#1077 §F) when tools/release_guard.py is present in the tree
+    rg_full = os.path.join(root, "tools", "release_guard.py")
+    if (not early_only or added) and os.path.isfile(rg_full):
+        rc_rg, out_rg = sh([sys.executable, rg_full, "--root", root, "--json"], root, timeout=30)
+        if rc_rg != 0:
+            try:
+                rg_data = json.loads(out_rg.split("\n[stderr]")[0])
+                for v in rg_data.get("violations", []):
+                    violations.append(("RELEASE_GUARD", "%s: %s" % (v.get("rule"), v.get("detail")),
+                                       v.get("path"), v.get("line")))
+                if not rg_data.get("violations"):
+                    violations.append(("RELEASE_GUARD", rg_data.get("error", out_rg[-300:]), "tools/release_guard.py", 1))
+            except Exception:  # noqa: BLE001
+                violations.append(("RELEASE_GUARD", out_rg[-300:], "tools/release_guard.py", 1))
+
     # 3. Claims citations & quotes check (if draft claims provided)
     if claims_path and os.path.exists(claims_path):
         claims_text = open(claims_path, errors="replace").read()
@@ -648,7 +676,9 @@ def main():
     # Early Sanity Gate: detect P0 violations in < 1 second BEFORE running 30+ minutes of cargo test
     base = find_base(root)
     added = collect_added_lines(root, base)
-    rpc_block, hard_all, all_viol, have_client, early_violations = run_early_gate(root, base, added, a.claims)
+    rpc_block, hard_all, all_viol, have_client, early_violations = run_early_gate(
+        root, base, added, a.claims, early_only=a.early_only
+    )
     skip_early = a.skip_early_fail or bool(os.environ.get("EVOMU_PREFLIGHT_SKIP_EARLY_FAIL"))
 
     if early_violations:
@@ -685,11 +715,13 @@ def main():
         os.makedirs(attest, exist_ok=True)
         env = {k: v for k, v in os.environ.items() if k not in WRAPPER_ENV}
         env["CARGO_TARGET_DIR"] = os.path.join(sdir, "target")
+        env["CARGO_BUILD_JOBS"] = "4"
+        env["RUST_TEST_THREADS"] = "4"
         env["EVOMU_PARITY_ATTEST_DIR"] = attest
         cargo = shutil.which("cargo", path=env.get("PATH")) or "/opt/homebrew/bin/cargo"
-        safe_print("[preflight] cargo test --workspace --no-fail-fast ...", flush=True)
+        safe_print("[preflight] cargo test -j 4 --workspace --no-fail-fast ...", flush=True)
         t0 = time.time()
-        rc, out = sh([cargo, "test", "--workspace", "--no-fail-fast"], root, env=env, timeout=a.test_timeout)
+        rc, out = sh([cargo, "test", "-j", "4", "--workspace", "--no-fail-fast"], root, env=env, timeout=a.test_timeout)
         wall = time.time() - t0
         open(tests_txt, "w", encoding="utf-8").write("exit=%d\n%s" % (rc, out))
         record_timing(root, wall, out)
@@ -742,13 +774,26 @@ def main():
     except ValueError:
         pass
 
+    lat_suffix = ""
+    for lat_cand in (os.path.join(pdir, "latency_histogram.json"), os.path.join(sdir, "latency_histogram.json")):
+        if os.path.isfile(lat_cand):
+            try:
+                with open(lat_cand, encoding="utf-8") as fh:
+                    lat_d = json.load(fh)
+                if "overall_p99_ms" in lat_d:
+                    lat_suffix = " | handler p99 %.3f ms (%d calls)" % (
+                        float(lat_d["overall_p99_ms"]), int(lat_d.get("total_calls", 0)))
+                    break
+            except Exception:  # noqa: BLE001
+                pass
+
     L = ["# Pre-flight numbers (authoritative; paste, don't type)", "",
          "- Tests: **%d passed, %d failed, %d ignored**, cargo exit %d%s%s" % (
              passed, failed, ignored, test_exit, " (COMPILE ERROR)" if compile_err else "",
              " (A TEST BINARY ABORTED: some tests never ran: %s)" % aborted[0][:160] if aborted else ""),
          "- Parity: **%d / %d rows closed (%.2f%%)**, %d NA, %d tagged tests" % (
              summ["closed_rows"], summ["total_rows"], summ["percent_closed"], summ["na_rows"], summ["tagged_tests"]),
-         "- Test loop: %s" % timing_line(root),
+         "- Test loop: %s%s" % (timing_line(root), lat_suffix),
          "- Baseline for the diff below: last review %s" % (prev_ts or "(none)"), "",
          "| Category | Total | DONE | NA | Open |", "|---|---|---|---|---|"]
     for k, c in sorted(summ["categories"].items()):

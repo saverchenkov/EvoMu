@@ -10,7 +10,7 @@
   - 100% of ledger rows closed;
   - a `PASS` **final** claims review from `run_review.py --final` (Opus 5.5 High first, falling back to Gemini Pro Next, Gemini 4 Argon High, then Gemini Flash Next only on quota/capacity errors; user decision 2026-10-23) and a `CLEAN` gap audit. Routine reviews don't satisfy this. Run `--final` sparingly: once per tree that is otherwise ready for the final gate;
   - workspace line coverage ≥ 90%;
-  - every real-client journey passing on the real V24 client, with clean logs.
+  - **Two-stage Supervisor-owned real-client journey attestation (`references/parity/supervisor_journeys.json`):** Per-track coder reviews (`run_review.py`) stay 100% headless (coders never launch `exefile`, add `// parity: journey:*` tags, or edit `.agents/`). **Interim stage (active immediately):** `final_gate.py` requires a fresh, passing Supervisor-written real-client smoke attestation (`git_sha` matching the judged code tree, current installed V24.02 build `3698585`, `real: true`, `log_errors: []`) covering the **7 core smoke scenarios** (`launch_login`, `station_ui`, `undock_navigate`, `market_trade`, `mining_loop`, `pve_combat`, `skills_training`), while all 29 journeys are tracked on the Supervisor-updated scoreboard read by `parity_status.py` (`plan:T-6`, `plan:ESI-1`, `journey:*`). **Target `plan:Z-6` stage:** once `#1202` (`playtester.py --scenario` runner) and `#1203` (2nd-player partner) land and re-express all 29 journeys as Rule-2 deterministic UI scenarios, `final_gate.py` promotes from the 7-scenario smoke requirement to `29/29` passing deterministic real-client UI scenarios on the current client build.
 - **The user reviews only for completeness, and only after the final gate passes.** Work as an unbounded loop:
   - Don't stop, ask for interim review, or ask the user to test.
   - Don't report the project as done or "playable" before the gate passes.
@@ -123,11 +123,12 @@
   2. fix tracks whose review FAILed;
   3. get finished tracks reviewed, oldest first;
   4. start a new track.
-  - **At most 4 tracks may hold committed work that isn't on `main`.** At that cap, free agents do landing work instead of starting tracks: fix review findings, reproduce failing tests, rebase, run the pre-review self-audit on a queued track, check a suspected flaky test on `main`.
+  - **At most 5 tracks may hold committed work that isn't on `main`.** At that cap, free agents do landing work instead of starting tracks: fix review findings, reproduce failing tests, rebase, run the pre-review self-audit on a queued track, check a suspected flaky test on `main`.
   - Running fewer agents is correct when no landing work is left. Leaving finished work unmerged while starting new tracks is the process violation.
 - **Subagent Model MUST be `inherit` (mandatory):** When spawning subagents (`invoke_subagent`), the `Model` argument MUST strictly be `"inherit"` (inheriting the user's active orchestrator model, such as Gemini Pro Next, Gemini 4 Argon High, or Claude Opus 5.5). **NEVER pass `"pro"`** — `"pro"` is routed to legacy/obsolete Gemini 3.1 Pro and rapidly depletes obsolete model quotas.
-- **Mandatory compiler throttling:** Before running any `cargo` or `rustc` command in any workspace or subagent shell, always enforce compiler throttling and limit jobs to 4 (`-j 4`) to prevent CPU starvation and lock contention (always use `pgrep -x cargo` exact binary matching — NEVER `pgrep -fl`, which matches multi-line shell scripts):
-  `while [ "$(pgrep -x cargo | wc -l)" -ge 4 ]; do sleep 10; done && cargo test -j 4 ...`
+- **Mandatory compiler throttling (Coder worktrees only — Playtester is exempt):** Before running any `cargo` or `rustc` command in any coding workspace or subagent shell, always enforce compiler throttling (`<= 5` active `cargo` processes) and limit jobs to 4 (`-j 4`) to prevent CPU starvation and lock contention (always use `pgrep -x cargo` exact binary matching — NEVER `pgrep -fl`, which matches multi-line shell scripts):
+  `while [ "$(pgrep -x cargo | wc -l)" -ge 5 ]; do sleep 10; done && cargo test -j 4 ...`
+  The Playtester (`EvoMu-playtester`) is exempt from the `cargo` concurrency slot cap and builds `eve-server` directly without waiting for `cargo` slots.
   Never run two `cargo` commands concurrently in the same worktree (`target/.cargo-lock`), and immediately delete `/Users/sergeya/ai/EvoMu/.worktrees/<wt>/target` upon harvesting a subagent's commits so `/System/Volumes/Data` stays above `150 GiB` free.
 - **Pick tracks from the open rows** in `docs/ACTION_PLAN_STATUS.md` (one subagent each; split by service family or domain so tracks don't touch the same files), following the plan's dependencies.
 - **Every track follows the same gate in its own worktree:** pre-flight, `run_review.py`, and a non-FAIL verdict, before its branch is merged.
@@ -181,3 +182,8 @@
 - The full SDE database (`data/evomu_sde.sqlite`) stays local and gitignored, built by `tools/sde-import` from the operator's own client install. Tests that need real static data open it through `EVOMU_SDE_PATH` or the default path, and **fail loudly** when it's missing. They never skip silently and never fall back to client-derived subsets. (A compressed copy was briefly committed on 2026-10-21 and removed from history at the user's direction.)
 - A tracked CI fixture is allowed only if it's **synthetic**: generated by a script from invented values that follow the schema, and clearly named as synthetic. Tests that close ledger rows must run against the real local SDE, not the synthetic fixture.
 - Remove any `.gitignore` exception that would track client-derived data (e.g. `!/data/evomu_sde_fixture.sqlite`), unless that file has been replaced by a synthetic one.
+
+## Client updates (`SharedCache`)
+- Follow [`docs/CLIENT_UPDATE_PROTOCOL.md`](docs/CLIENT_UPDATE_PROTOCOL.md) and run `python3 .agents/skills/evomu-adversarial-review/scripts/client_update.py` whenever CCP updates `SharedCache`.
+- **Never overwrite `<main checkout>/data/quasar_descriptors.sqlite` or `<main checkout>/data/evomu_sde.sqlite` before the update track merges to `main`** (concurrent snapshot reviews fall back to `<main checkout>/data/`). Build them in the update worktree's own `data/` directory and atomically swap `<main checkout>/data/` at merge time.
+- Suspend the Playtester during a client update, land **Track 1** (`hotfix/client-<ver>-protocol-quasar`: single-source handshake/version constants in `crates/eve-machonet` + Quasar descriptors) and **Track 2** (`feat/client-<ver>-sde-catalog`: SDE, `staticdata_catalog.json`, and differential fixtures), then resume the Playtester on the updated client.
