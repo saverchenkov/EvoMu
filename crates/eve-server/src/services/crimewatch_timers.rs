@@ -1109,17 +1109,65 @@ pub async fn handle_crimewatch(
             if target_char_id <= 0 || target_char_id == char_id {
                 return Some(Err(BridgeRpcError::user_error("InvalidDuelTarget")));
             }
-            let (target_user_opt, from_corp_id, from_alliance_id) = ctx.db.with_snapshot(|s| {
-                let tu = s.characters.get(&target_char_id).map(|c| c.user_id);
-                let corp = s.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                let all = s.characters.get(&char_id).and_then(|c| c.alliance_id);
-                (tu, corp, all)
+            let (challenger_loc_opt, target_info_opt) = ctx.db.with_snapshot(|s| {
+                let ch = s.characters.get(&char_id).map(|c| {
+                    (
+                        c.corporation_id,
+                        c.alliance_id,
+                        c.station_id,
+                        c.structure_id,
+                        c.solar_system_id,
+                    )
+                });
+                let tgt = s
+                    .characters
+                    .get(&target_char_id)
+                    .map(|c| (c.user_id, c.station_id, c.structure_id, c.solar_system_id));
+                (ch, tgt)
             });
-            let Some(target_user_id) = target_user_opt else {
+            let Some((target_user_id, tgt_station_id, tgt_structure_id, target_solar_system_id)) =
+                target_info_opt
+            else {
                 return Some(Err(BridgeRpcError::user_error("InvalidDuelTarget")));
             };
+            let (
+                from_corp_id,
+                from_alliance_id,
+                ch_station_id,
+                ch_structure_id,
+                ch_solar_system_id,
+            ) = challenger_loc_opt.unwrap_or((0, None, None, None, 0));
             if !ctx.is_character_online(target_char_id, target_user_id) {
                 return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::DuelChallengeFailNoSesssionForTarget)));
+            }
+            if session.station_id.is_some()
+                || session.structure_id.is_some()
+                || ch_station_id.is_some()
+                || ch_structure_id.is_some()
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "CantDuelWhileDocked".into(),
+                    message: "Cannot initiate a duel challenge while docked".into(),
+                    client_error: None,
+                }));
+            }
+            if tgt_station_id.is_some() || tgt_structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "CantDuelWhileDocked".into(),
+                    message: "Target character is docked and cannot be challenged to a duel".into(),
+                    client_error: None,
+                }));
+            }
+            let challenger_sys_id = session.solar_system_id.unwrap_or(ch_solar_system_id);
+            if challenger_sys_id == 0
+                || target_solar_system_id == 0
+                || challenger_sys_id != target_solar_system_id
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "DuelChallengeSameSystemRequired".into(),
+                    message: "Both pilots must be in the same solar system to initiate a duel challenge".into(),
+                    client_error: None,
+                }));
             }
             let now_unix = ctx.now_unix();
             let expiry_ft = ctx.now_blueos_filetime_ticks() + 600_000_000;

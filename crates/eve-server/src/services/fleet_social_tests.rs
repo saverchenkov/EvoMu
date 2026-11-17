@@ -317,3 +317,105 @@ async fn office_manager_lifecycle_and_fleet_rpc_handlers() {
     .unwrap();
     assert_eq!(leader.dict_get("newBossID").and_then(|v| v.as_i64()), Some(90_000_002));
 }
+
+#[tokio::test]
+async fn office_manager_uses_station_rental_cost_map_and_emits_account_and_item_notifications() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let char_id = 90_000_001_i64;
+    let corp_id = 98_000_055_i64;
+    let station_id = 60_003_760_i64;
+    let uid = char_id as u64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::new(corp_id, "Quote Corp", "QUOT", char_id)
+            .with_master_wallet(IskCents::from_isk(1_000_000));
+        corp.hq_station_id = Some(station_id);
+        corp.tax_rate = 0.05;
+        corp.members.insert(char_id);
+        snap.corporations.insert(corp_id, corp);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.user_id = uid;
+            ch.corporation_id = corp_id;
+            ch.station_id = Some(station_id);
+        }
+        if !snap.accounts.values().any(|a| a.user_id == uid) {
+            let uname = format!("u{uid}");
+            snap.accounts.insert(
+                uname.clone(),
+                eve_db::AccountRecord {
+                    user_id: uid,
+                    username: uname,
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
+        snap.station_office_rental_costs.insert(station_id, 50_000.0);
+        snap.items.retain(|_, i| !(i.location_id == station_id && i.type_id == 27));
+        snap.items.insert(
+            920_000_050,
+            InventoryItemRecord {
+                item_id: 920_000_050,
+                type_id: 27,
+                owner_id: 98_999_001,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut session = make_session(char_id, corp_id, Some(station_id));
+    session.user_id = Some(uid);
+    session.corp_role |= eve_db::corp_roles::ROLE_DIRECTOR;
+    ctx.db
+        .acquire_online_lock(uid, session.session_id, Some(char_id), true, 1_700_000_000)
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let kw = HashMap::new();
+
+    // Base 50,000 ISK with 1 existing office -> 50,000 * 1.5 = 75,000 ISK.
+    let quote = handle(&ctx, &mut session, "officeManager", "GetPriceQuote", &[PyRep::Integer(station_id)], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(quote.as_f64(), Some(75_000.0));
+
+    let rent = handle(&ctx, &mut session, "officeManager", "RentOffice", &[PyRep::Integer(station_id)], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    let office_id = rent.dict_get("officeID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(rent.dict_get("cost").and_then(|v| v.as_f64()), Some(75_000.0));
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(
+        notifs
+            .iter()
+            .filter(|n| n.event == "OnAccountChange")
+            .map(|n| n.args.clone())
+            .collect::<Vec<_>>(),
+        vec![vec![
+            PyRep::String("cash".into()),
+            PyRep::Integer(corp_id),
+            PyRep::Real(925_000.0),
+        ]]
+    );
+    assert_eq!(
+        notifs.iter().filter(|n| n.event == "OnItemChange").count(),
+        1
+    );
+    assert_eq!(
+        notifs
+            .iter()
+            .filter(|n| n.event == "OnOfficeRentalChange")
+            .map(|n| n.args.clone())
+            .collect::<Vec<_>>(),
+        vec![vec![PyRep::Integer(corp_id), PyRep::Integer(office_id)]]
+    );
+}

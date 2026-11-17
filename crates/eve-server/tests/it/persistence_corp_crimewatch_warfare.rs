@@ -301,9 +301,49 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
 
         rpc(&ctx, &mut sess, "crimewatch", "SetSafetyLevel", &[PyRep::Integer(0)]).await;
         rpc(&ctx, &mut sess, "bountyProxy", "AddToBounty", &[PyRep::Integer(OTHER), PyRep::Integer(5_000_000)]).await;
+        let (orig_p_st, orig_p_str, orig_p_sys) = (sess.station_id, sess.structure_id, sess.solar_system_id);
+        let (orig_o_st, orig_o_str, orig_o_sys) = (sess_other.station_id, sess_other.structure_id, sess_other.solar_system_id);
+        let duel_sys = orig_p_sys.unwrap_or(30_000_142);
+        ctx.db.with_mut_snapshot(|snap| {
+            for cid in [PILOT, OTHER] {
+                if let Some(ch) = snap.characters.get_mut(&cid) {
+                    ch.station_id = None;
+                    ch.structure_id = None;
+                    ch.solar_system_id = duel_sys;
+                }
+            }
+        });
+        sess.station_id = None;
+        sess.structure_id = None;
+        sess.solar_system_id = Some(duel_sys);
+        sess_other.station_id = None;
+        sess_other.structure_id = None;
+        sess_other.solar_system_id = Some(duel_sys);
         rpc(&ctx, &mut sess, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(OTHER)]).await;
         rpc(&ctx, &mut sess_other, "crimewatch", "RespondToDuelChallenge", &[PyRep::Integer(PILOT), PyRep::Bool(true)]).await;
         rpc(&ctx, &mut sess, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(OTHER)]).await;
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&PILOT) {
+                ch.station_id = orig_p_st;
+                ch.structure_id = orig_p_str;
+                if let Some(sys) = orig_p_sys {
+                    ch.solar_system_id = sys;
+                }
+            }
+            if let Some(ch) = snap.characters.get_mut(&OTHER) {
+                ch.station_id = orig_o_st;
+                ch.structure_id = orig_o_str;
+                if let Some(sys) = orig_o_sys {
+                    ch.solar_system_id = sys;
+                }
+            }
+        });
+        sess.station_id = orig_p_st;
+        sess.structure_id = orig_p_str;
+        sess.solar_system_id = orig_p_sys;
+        sess_other.station_id = orig_o_st;
+        sess_other.structure_id = orig_o_str;
+        sess_other.solar_system_id = orig_o_sys;
         rpc(&ctx, &mut sess, "entity", "ChangeDroneSettings", &[PyRep::Bool(true), PyRep::Bool(true)]).await;
 
         // Turn in a Clone Soldier Negotiator Tag (33141) via ApplyTagsForSecStatus while docked at a low-sec Security Office

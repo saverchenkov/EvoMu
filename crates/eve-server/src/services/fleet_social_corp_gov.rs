@@ -256,11 +256,57 @@ pub(super) fn handle_add_corporation(
         );
         snap.seed_default_corp_titles(cid);
         let released = super::fleet_social_corps::record_corp_join_in_snap(snap, char_id, old_corp_id, cid, now_unix);
-        Ok((old_corp_id, cid, released))
+        let corp_hq_station = session.station_id.or(char_station_id);
+        let allow_war = snap
+            .fleet_and_social_ops
+            .corp_allow_war
+            .get(&cid)
+            .copied()
+            .unwrap_or(true);
+        let mut raw_cols: Vec<(String, PyRep)> = vec![
+            ("corporationID".into(), PyRep::Integer(cid)),
+            ("corporationName".into(), PyRep::String(name.to_string())),
+            ("ticker".into(), PyRep::String(ticker.to_string())),
+            ("tickerName".into(), PyRep::String(ticker.to_string())),
+            ("ceoID".into(), PyRep::Integer(char_id)),
+            ("creatorID".into(), PyRep::Integer(char_id)),
+            ("memberCount".into(), PyRep::Integer(1)),
+            ("memberLimit".into(), PyRep::Integer(init_limit as i64)),
+            ("taxRate".into(), PyRep::Real(tax_rate)),
+            ("iskTaxRate".into(), PyRep::Real(tax_rate)),
+            ("loyaltyPointTaxRate".into(), PyRep::Real(tax_rate)),
+            ("allianceID".into(), PyRep::None),
+            ("stationID".into(), corp_hq_station.map(PyRep::Integer).unwrap_or(PyRep::None)),
+            ("description".into(), PyRep::String(description.to_string())),
+            ("url".into(), PyRep::String(url.to_string())),
+            ("shares".into(), PyRep::Integer(1_000)),
+            ("shape1".into(), PyRep::Integer(shape1)),
+            ("shape2".into(), PyRep::Integer(shape2)),
+            ("shape3".into(), PyRep::Integer(shape3)),
+            ("color1".into(), PyRep::Integer(color1)),
+            ("color2".into(), PyRep::Integer(color2)),
+            ("color3".into(), PyRep::Integer(color3)),
+            ("applicationsEnabled".into(), PyRep::Bool(apps_enabled)),
+            ("isRecruiting".into(), PyRep::Bool(apps_enabled)),
+            ("allowWar".into(), PyRep::Bool(allow_war)),
+            ("friendlyFire".into(), PyRep::Bool(false)),
+            ("deleted".into(), PyRep::Integer(0)),
+        ];
+        let default_h = ["1st Division", "2nd Division", "3rd Division", "4th Division", "5th Division", "6th Division", "7th Division"];
+        for i in 1..=7u8 {
+            raw_cols.push((format!("division{i}"), PyRep::String(default_h[(i - 1) as usize].into())));
+            let w_name = if i == 1 { "Master Wallet".into() } else { format!("Division {i}") };
+            raw_cols.push((format!("walletDivision{i}"), PyRep::String(w_name)));
+        }
+        let corp_change: Vec<(PyRep, PyRep)> = raw_cols
+            .into_iter()
+            .map(|(k, v)| (PyRep::String(k), PyRep::Tuple(vec![PyRep::None, v])))
+            .collect();
+        Ok((old_corp_id, cid, released, new_bal, corp_change))
     });
 
     match res {
-        Ok((old_corp_id, corp_id, released)) => {
+        Ok((old_corp_id, corp_id, released, new_bal, corp_change)) => {
             crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
             let old_corp_role = session.corp_role;
             let old_alliance_id = session.alliance_id;
@@ -309,16 +355,12 @@ pub(super) fn handle_add_corporation(
                     change: PyRep::Dict(sess_changes),
                 },
             );
-            let change = PyRep::Dict(vec![
-                (PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(corp_id)])),
-                (PyRep::String(("corporationName").into()), PyRep::Tuple(vec![PyRep::None, PyRep::String(name.to_string())])),
-                (PyRep::String(("tickerName").into()), PyRep::Tuple(vec![PyRep::None, PyRep::String(ticker.to_string())])),
-                (PyRep::String(("ceoID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(char_id)])),
-            ]);
+            let change = PyRep::Dict(corp_change);
             ctx.emit_typed(
                 NotificationTarget::Corporation(corp_id),
                 crate::router::notify_registry::OnCorporationChanged { corp_id, change },
             );
+            ctx.notify_wallet_balance(false, char_id, 1, new_bal);
             let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(
                 &ctx.quasar_gateway, &ctx.db, char_id as u32, now_unix,
             );
@@ -1418,21 +1460,49 @@ pub(super) fn handle_corp_gov(
             if !has_role {
                 return deny_role("Managing recruitment ads requires Personnel Manager or Director role");
             }
-            if method == "CreateRecruitmentAd" {
+            let ad_debit = if method == "CreateRecruitmentAd" {
                 let ad_fee = IskCents::from_isk(250_000);
-                let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                let debit_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(bool, i64, IskCents), BridgeRpcError> {
                     if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-                        if corp.debit_division(1, ad_fee).is_none() {
-                            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                                if let Some(nb) = ch.balance.checked_sub(ad_fee) {
-                                    ch.balance = nb;
-                                }
-                            }
+                        if corp.debit_division(1, ad_fee).is_some() {
+                            let corp_bal = corp.division_balance(1);
+                            snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
+                                owner_id: corp_id,
+                                entry_type: "corp_recruitment_ad_fee",
+                                amount: IskCents(-ad_fee.0),
+                                balance_after: corp_bal,
+                                reason: "Corporation recruitment advertisement fee".into(),
+                                meta: eve_db::ledger::JournalMeta::new(10, char_id, corp_id, now_unix),
+                            });
+                            return Ok((true, corp_id, corp_bal));
                         }
                     }
-                    Ok(())
+                    if let Some(ch) = snap.characters.get_mut(&char_id) {
+                        if let Some(nb) = ch.balance.checked_sub(ad_fee) {
+                            ch.balance = nb;
+                            snap.append_journal(
+                                char_id,
+                                "corp_recruitment_ad_fee",
+                                IskCents(-ad_fee.0),
+                                nb,
+                                "Corporation recruitment advertisement fee",
+                            );
+                            return Ok((false, char_id, nb));
+                        }
+                    }
+                    Err(BridgeRpcError {
+                        code: "NotEnoughISK".into(),
+                        message: "Creating a corporation recruitment ad requires 250,000 ISK".into(),
+                        client_error: None,
+                    })
                 });
-            }
+                match debit_res {
+                    Ok(v) => Some(v),
+                    Err(e) => return Some(Err(e)),
+                }
+            } else {
+                None
+            };
             let (days, type_mask, title, desc, lang_mask) = if args.first().and_then(|a| a.as_str()).is_some() {
                 let title = args.first().and_then(|a| a.as_str()).unwrap_or("Nullsec PvP & Industry");
                 let desc = args.get(1).and_then(|a| a.as_str()).unwrap_or("Join our corp today");
@@ -1489,6 +1559,9 @@ pub(super) fn handle_corp_gov(
                 id
             };
             save_corp_rec_ads(ctx, &ads);
+            if let Some((is_corp_wallet, wallet_owner_id, bal_after)) = ad_debit {
+                ctx.notify_wallet_balance(is_corp_wallet, wallet_owner_id, 1, bal_after);
+            }
             ctx.emit_typed(
                 NotificationTarget::Corporation(corp_id),
                 crate::router::notify_registry::OnCorporationRecruitmentAdChanged {

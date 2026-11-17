@@ -197,6 +197,16 @@ pub(super) fn parse_dest_id(args: &[PyRep], kwargs: &HashMap<String, PyRep>) -> 
         .or_else(|| kwargs.get("destinationID").and_then(|a| a.as_i64()))
 }
 
+fn office_rental_quote_in_snap(snap: &eve_db::WorldStateSnapshot, station_id: i64, occupied: usize) -> f64 {
+    let base = snap
+        .station_office_rental_costs
+        .get(&station_id)
+        .copied()
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(10_000.0);
+    base * (1.0 + (occupied as f64) * 0.5)
+}
+
 fn resolve_office_station_id(
     ctx: &ServerContext,
     args: &[PyRep],
@@ -256,10 +266,10 @@ fn handle_office_manager(
 
         "GetPriceQuote" => {
             let station_id = resolve_office_station_id(ctx, args, bound_entry, default_station_id);
-            let occupied = ctx.db.with_snapshot(|snap| {
-                snap.items.values().filter(|i| i.location_id == station_id && i.type_id == 27).count()
+            let quote = ctx.db.with_snapshot(|snap| {
+                let occupied = snap.items.values().filter(|i| i.location_id == station_id && i.type_id == 27).count();
+                office_rental_quote_in_snap(snap, station_id, occupied)
             });
-            let quote = 10_000.0 * (1.0 + (occupied as f64) * 0.5);
             Some(Ok(PyRep::Real(quote)))
         }
 
@@ -335,13 +345,6 @@ fn handle_office_manager(
                         });
                     }
                 }
-                let Some(corp) = snap.corporations.get_mut(&corp_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CorporationNotFound".into(),
-                        message: format!("Corporation {corp_id} not found"),
-                        client_error: None,
-                    });
-                };
                 let occupied = snap.items.values().filter(|i| i.location_id == station_id && i.type_id == 27).count();
                 if occupied >= 16 {
                     return Err(BridgeRpcError {
@@ -358,8 +361,15 @@ fn handle_office_manager(
                         client_error: None,
                     });
                 }
-                let quote = 10_000.0 * (1.0 + (occupied as f64) * 0.5);
-                let fee = eve_db::IskCents((quote * 100.0) as i64);
+                let quote = office_rental_quote_in_snap(snap, station_id, occupied);
+                let fee = eve_db::IskCents((quote * 100.0).round() as i64);
+                let Some(corp) = snap.corporations.get_mut(&corp_id) else {
+                    return Err(BridgeRpcError {
+                        code: "CorporationNotFound".into(),
+                        message: format!("Corporation {corp_id} not found"),
+                        client_error: None,
+                    });
+                };
                 if corp.debit_division(1, fee).is_none() {
                     return Err(BridgeRpcError {
                         code: "NotEnoughISK".into(),
@@ -367,30 +377,31 @@ fn handle_office_manager(
                         client_error: None,
                     });
                 }
+                let corp_bal_after = corp.division_balance(1);
 
                 let office_id = snap.items.keys().max().copied().unwrap_or(920_000_000).max(920_000_000) + 1;
-                snap.items.insert(
-                    office_id,
-                    eve_db::InventoryItemRecord {
-                        item_id: office_id,
-                        type_id: 27,
-                        owner_id: corp_id,
-                        location_id: station_id,
-                        flag: eve_db::InventoryFlag::Hangar,
-                        quantity: 1,
-                        singleton: true,
-                        version: 1,
-                        ..Default::default()
-                    },
-                );
+                let office_item = eve_db::InventoryItemRecord {
+                    item_id: office_id,
+                    type_id: 27,
+                    owner_id: corp_id,
+                    location_id: station_id,
+                    flag: eve_db::InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                };
+                snap.items.insert(office_id, office_item.clone());
                 snap.corp_governance.entry(corp_id).or_default().offices.insert(station_id, office_id);
-                Ok((office_id, station_id, quote))
+                Ok((office_id, station_id, quote, corp_bal_after, office_item))
             });
 
             match res {
-                Ok((office_id, st_id, quote)) => {
+                Ok((office_id, st_id, quote, corp_bal_after, office_item)) => {
                     let due_unix = ctx.now_unix().saturating_add(30 * 86_400);
                     let _ = super::wallet_serverops::create_bill(ctx, 2, corp_id, 1_000_035, quote, due_unix, 0.0, st_id, 27);
+                    ctx.notify_wallet_balance(true, corp_id, 1, corp_bal_after);
+                    ctx.notify_item_mutation(char_id, None, Some(&office_item));
                     ctx.emit_typed(
                         NotificationTarget::Corporation(corp_id),
                         crate::router::notify_registry::OnOfficeRentalChange {

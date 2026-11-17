@@ -100,6 +100,7 @@ fn seed_pilot_and_structure(
             __corp });
         let mut ch = snap.characters.values().next().cloned().expect("demo char");
         ch.character_id = char_id;
+        ch.user_id = char_id as u64;
         ch.name = format!("Pilot {char_id}");
         ch.corporation_id = corp_id;
         ch.alliance_id = None;
@@ -110,6 +111,21 @@ fn seed_pilot_and_structure(
         ch.home_station_id = 60003760;
         ch.balance = IskCents(100_000);
         snap.characters.insert(char_id, ch);
+        let uid = char_id as u64;
+        if !snap.accounts.values().any(|a| a.user_id == uid) {
+            let uname = format!("u{uid}");
+            snap.accounts.insert(
+                uname.clone(),
+                eve_db::AccountRecord {
+                    user_id: uid,
+                    username: uname,
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
         snap.items.insert(
             ship_id,
             InventoryItemRecord {
@@ -154,6 +170,12 @@ async fn docked_take_control_release_eject_and_pilot_lookup_roundtrip() {
     let sid = 10_000_950_001i64;
     seed_pilot_and_structure(&ctx, 5101, 98510, 30000142, 61001, sid, st_tid, true);
     seed_pilot_and_structure(&ctx, 5102, 98510, 30000142, 61002, sid, st_tid, false);
+    ctx.db
+        .acquire_online_lock(5101, 720, Some(5101), true, ctx.now_unix())
+        .unwrap();
+    ctx.db
+        .acquire_online_lock(5102, 720, Some(5102), true, ctx.now_unix())
+        .unwrap();
 
     // Non-director without ACL cannot control
     let mut rogue = make_session(5102, 98510, 30000142, Some(61002), Some(sid), 0);
@@ -195,10 +217,42 @@ async fn docked_take_control_release_eject_and_pilot_lookup_roundtrip() {
         PyRep::Integer(5102)
     );
 
+    let _ = rogue.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(5102);
+    let _ = ceo.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(5101);
     let overtaken = handle_take_control(&ctx, &mut ceo, &[PyRep::Integer(sid)])
         .await
         .expect("ceo overtake");
     assert!(matches!(overtaken, PyRep::KeyVal(_)));
+    let ceo_assume: Vec<_> = ceo
+        .drain_notifications()
+        .into_iter()
+        .chain(
+            ctx.drain_notifications_for_char(5101)
+                .into_iter()
+                .map(|n| (n.event, n.args)),
+        )
+        .collect();
+    assert!(
+        ceo_assume
+            .iter()
+            .any(|(ev, args)| ev == "OnAssumeStructureControl" && args.is_empty()),
+        "TakeControl must emit 0-arg OnAssumeStructureControl: {ceo_assume:?}"
+    );
+    let rogue_relinquish = ctx.drain_notifications_for_char(5102);
+    assert!(
+        rogue_relinquish
+            .iter()
+            .any(|n| n.event == "OnRelinquishStructureControl" && n.args.is_empty()),
+        "Overtake must emit 0-arg OnRelinquishStructureControl to displaced pilot: {rogue_relinquish:?}"
+    );
+    assert!(
+        rogue_relinquish
+            .iter()
+            .any(|n| n.event == "OnSessionChanged" && matches!(n.args.get(1), Some(PyRep::KeyVal(kv)) if kv.contains_key("solarsystemid2"))),
+        "Displaced OnSessionChanged must carry full session KeyVal: {rogue_relinquish:?}"
+    );
 
     // Non-pilot cannot release
     assert_eq!(
@@ -210,6 +264,27 @@ async fn docked_take_control_release_eject_and_pilot_lookup_roundtrip() {
     let released = handle_release_control(&ctx, &mut ceo, &[PyRep::Integer(sid)]).expect("release");
     assert_eq!(released, PyRep::None);
     assert_eq!(ceo.ship_id, Some(61001));
+    let ceo_release: Vec<_> = ceo
+        .drain_notifications()
+        .into_iter()
+        .chain(
+            ctx.drain_notifications_for_char(5101)
+                .into_iter()
+                .map(|n| (n.event, n.args)),
+        )
+        .collect();
+    assert!(
+        ceo_release
+            .iter()
+            .any(|(ev, args)| ev == "OnRelinquishStructureControl" && args.is_empty()),
+        "ReleaseControl must emit 0-arg OnRelinquishStructureControl: {ceo_release:?}"
+    );
+    assert!(
+        ceo_release
+            .iter()
+            .any(|(ev, args)| ev == "OnSessionChanged" && matches!(args.get(1), Some(PyRep::KeyVal(kv)) if kv.contains_key("solarsystemid2") && kv.contains_key("userid"))),
+        "ReleaseControl OnSessionChanged must carry full session KeyVal: {ceo_release:?}"
+    );
     assert_eq!(
         handle_get_structure_pilot(&ctx, &ceo, &[PyRep::Integer(sid)]).expect("none"),
         PyRep::None
