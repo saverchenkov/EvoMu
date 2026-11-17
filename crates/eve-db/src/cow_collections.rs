@@ -82,8 +82,9 @@ fn step_vec_hash<T: Serialize>(prev_hash: u64, idx: usize, val: &T) -> u64 {
 }
 
 /// Result of classifying changes between two [`CowIdVec`] snapshots in `O(k log N)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CowVecDiff {
+    #[default]
     Unchanged,
     AppendOnly { old_len: usize },
     Rewritten,
@@ -701,6 +702,12 @@ impl CowLpLogs {
             return self.id_counts.contains_key(&id);
         }
         self.map.values().flatten().any(|l| l.log_id == id)
+    }
+
+    /// Returns `true` when deferred mutable iteration (`values_mut`/`iter_mut`) invalidated `id_counts`.
+    #[inline]
+    pub fn is_dirty_ids(&self) -> bool {
+        self.dirty_ids
     }
 
     /// Rebuilds the `log_id` index if bulk mutable iteration (`values_mut`/`iter_mut`) occurred.

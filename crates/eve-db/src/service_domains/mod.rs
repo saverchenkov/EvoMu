@@ -185,7 +185,7 @@ pub fn migrate_legacy_service_state(snap: &mut WorldStateSnapshot) {
                     || !legacy.incursion_lp_logs.is_empty()
                     || legacy.next_seq > 0)
             {
-                snap.pve_special_sites = PveSpecialSitesState {
+                snap.pve_special_sites = crate::cow::CowCell::new(PveSpecialSitesState {
                     initialized: legacy.initialized,
                     incursions: legacy.incursions,
                     incursion_lifecycle: legacy.incursion_lifecycle,
@@ -203,7 +203,7 @@ pub fn migrate_legacy_service_state(snap: &mut WorldStateSnapshot) {
                     seasonal_event_sites: legacy.seasonal_event_sites,
                     sim_clock_sec: legacy.sim_clock_sec,
                     next_seq: legacy.next_seq,
-                };
+                });
             }
             if snap.crab_beacons.beacons.is_empty() && !legacy.crab_beacons.is_empty() {
                 snap.crab_beacons.beacons = legacy.crab_beacons;
@@ -293,7 +293,7 @@ pub fn migrate_legacy_service_state(snap: &mut WorldStateSnapshot) {
     if let Some(raw) = snap.service_state_blobs.remove("dungeon_runtime_store") {
         if snap.dungeon_runtime.instances.is_empty() {
             if let Ok(parsed) = serde_json::from_str::<DungeonRuntimeStore>(&raw) {
-                snap.dungeon_runtime = parsed;
+                snap.dungeon_runtime = parsed.into();
             }
         }
     }
@@ -302,7 +302,7 @@ pub fn migrate_legacy_service_state(snap: &mut WorldStateSnapshot) {
             && snap.dungeon_editor.active_editors.is_empty()
         {
             if let Ok(parsed) = serde_json::from_str::<DungeonEditorStore>(&raw) {
-                snap.dungeon_editor = parsed;
+                snap.dungeon_editor = parsed.into();
             }
         }
     }

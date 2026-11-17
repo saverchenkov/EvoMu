@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS wallet_journal (
     balance_after_cents INTEGER NOT NULL,
     reason TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_wallet_journal_entry_id ON wallet_journal(entry_id);
 
 CREATE TABLE IF NOT EXISTS contracts (
     contract_id INTEGER PRIMARY KEY,
@@ -230,6 +231,7 @@ CREATE TABLE IF NOT EXISTS mail (
     subject TEXT NOT NULL,
     body TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_mail_message_id ON mail(message_id);
 
 CREATE TABLE IF NOT EXISTS fleets (
     fleet_id INTEGER PRIMARY KEY,

@@ -224,6 +224,60 @@ pub mod cow_cell_sorted_map_of_sets_serde {
     }
 }
 
+pub mod cow_map_entity_kv_serde {
+    use crate::cow::CowMap;
+    use crate::service_domains::{EntityKvKey, EntityKvRow};
+    use serde::de::{MapAccess, Visitor};
+    use serde::ser::SerializeMap;
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub fn serialize<S>(
+        map: &CowMap<EntityKvKey, EntityKvRow>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut ser_map = serializer.serialize_map(Some(map.len()))?;
+        for (k, v) in map {
+            ser_map.serialize_entry(&k.to_map_key_string(), v)?;
+        }
+        ser_map.end()
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<CowMap<EntityKvKey, EntityKvRow>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct KvMapVisitor;
+        impl<'de> Visitor<'de> for KvMapVisitor {
+            type Value = CowMap<EntityKvKey, EntityKvRow>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a map of 'ns|entity_id|sub_key' strings to EntityKvRow")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut entries = Vec::with_capacity(access.size_hint().unwrap_or(0));
+                while let Some((k_str, row)) = access.next_entry::<String, EntityKvRow>()? {
+                    let key = EntityKvKey::from_map_key_str(&k_str)
+                        .map_err(serde::de::Error::custom)?;
+                    entries.push((key, row));
+                }
+                Ok(entries.into_iter().collect())
+            }
+        }
+
+        deserializer.deserialize_map(KvMapVisitor)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CorpGovState {

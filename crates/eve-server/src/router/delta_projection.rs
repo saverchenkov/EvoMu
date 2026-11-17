@@ -411,7 +411,7 @@ impl DeltaStateCache {
             .paused_skill_queues
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        *paused_guard = snap.paused_skill_queues.clone();
+        *paused_guard = (&*snap.paused_skill_queues).clone();
         *self.seeded.lock().unwrap_or_else(|e| e.into_inner()) = true;
     }
 
@@ -486,7 +486,7 @@ impl DeltaStateCache {
                     OnSkillQueuePausedServer { paused: None },
                 ));
             }
-            *paused_guard = after.paused_skill_queues.clone();
+            *paused_guard = (&*after.paused_skill_queues).clone();
         }
 
         if changes.cold_domains.part3_social_corp {
@@ -509,7 +509,7 @@ impl DeltaStateCache {
                 .paused_skill_queues
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            *paused_guard = after.paused_skill_queues.clone();
+            *paused_guard = (&*after.paused_skill_queues).clone();
         }
 
         out

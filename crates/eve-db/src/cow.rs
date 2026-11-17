@@ -43,9 +43,14 @@ pub const IMBL_ORD_CHUNK_SIZE: usize = 16;
 static COW_FULL_TOUCH_TOTAL: AtomicU64 = AtomicU64::new(0);
 static COW_FULL_TOUCH_BY_SITE: OnceLock<Mutex<BTreeMap<String, u64>>> = OnceLock::new();
 
+thread_local! {
+    static THREAD_COW_FULL_TOUCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 #[inline]
 fn record_full_touch(loc: &'static Location<'static>) {
     COW_FULL_TOUCH_TOTAL.fetch_add(1, Ordering::Relaxed);
+    THREAD_COW_FULL_TOUCH.with(|c| c.set(c.get().saturating_add(1)));
     let mutex = COW_FULL_TOUCH_BY_SITE.get_or_init(|| Mutex::new(BTreeMap::new()));
     if let Ok(mut map) = mutex.lock() {
         let key = format!("{}:{}", loc.file(), loc.line());
@@ -74,6 +79,16 @@ pub fn reset_cow_full_touch_for_test() {
             map.clear();
         }
     }
+}
+
+/// Resets the thread-local full-touch counter so parallel unit tests never race on the process-wide atomic.
+pub fn reset_thread_cow_full_touch_for_test() {
+    THREAD_COW_FULL_TOUCH.with(|c| c.set(0));
+}
+
+/// Returns the number of full-table mutable touches recorded on the current test thread.
+pub fn thread_cow_full_touch_for_test() -> u64 {
+    THREAD_COW_FULL_TOUCH.with(|c| c.get())
 }
 
 /// Private per-row `Arc<V>` wrapper that short-circuits `PartialEq` via `Arc::ptr_eq` even when
@@ -1932,6 +1947,13 @@ impl<T: PartialEq> PartialEq for CowCell<T> {
 }
 
 impl<T: Eq> Eq for CowCell<T> {}
+
+impl<T: PartialEq> PartialEq<T> for CowCell<T> {
+    #[inline]
+    fn eq(&self, other: &T) -> bool {
+        *self.0 == *other
+    }
+}
 
 impl<T> Deref for CowCell<T> {
     type Target = T;

@@ -215,22 +215,6 @@ pub fn sqlite_entity_id_exists(conn: &Connection, candidate: i64) -> Result<bool
         }
     }
     if let Ok(mut stmt) = conn.prepare_cached(
-        "SELECT value FROM domain_rows WHERE domain = ?1 AND value LIKE ?2",
-    ) {
-        let pattern = format!("%{candidate}%");
-        let mut rows = stmt
-            .query(rusqlite::params![DOMAIN_CHAR_LP_LOGS, pattern])
-            .map_err(|e| e.to_string())?;
-        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
-            let val_str: String = r.get(0).map_err(|e| e.to_string())?;
-            if let Ok(entries) = serde_json::from_str::<Vec<LpRewardLogEntry>>(&val_str) {
-                if entries.iter().any(|l| l.log_id == candidate) {
-                    return Ok(true);
-                }
-            }
-        }
-    }
-    if let Ok(mut stmt) = conn.prepare_cached(
         "SELECT 1 FROM domain_rows
          WHERE (domain = ?1 AND key = ?2)
             OR (domain = ?3 AND key = ?4)

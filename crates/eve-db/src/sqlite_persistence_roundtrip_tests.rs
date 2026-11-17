@@ -114,7 +114,8 @@ fn populate_all_domains(snap: &mut WorldStateSnapshot, cid: i64, alt_cid: i64, c
         )]),
         missions_awaiting_downtime_respawn: vec![(cid, 101)],
         ..Sp6PersistedState::default()
-    };
+    }
+    .into();
 
     // Ledger & market fill history
     let tx_id = snap.journal_market_fill(MarketFill {
@@ -417,7 +418,7 @@ fn sqlite_store_insert_update_rollback_delete_and_wal_recovery() {
         snap.owner_notes.clear();
         snap.corp_lp_balances.clear();
         snap.char_lp_logs.clear();
-        snap.sp6_lifecycle = Sp6PersistedState::default();
+        snap.sp6_lifecycle = Sp6PersistedState::default().into();
         snap.account_plex_vault.clear();
         snap.wallet_journal_meta.clear();
         snap.market_transactions.clear();

@@ -700,13 +700,13 @@ pub struct WorldStateSnapshot {
     pub wh_polarizations: CowCell<HashMap<(i64, i64), u64>>,
     #[serde(default)]
     pub mining_ledger: CowCell<Vec<MiningLedgerRecord>>,
-    pub module_online_states: HashMap<i64, bool>,
+    pub module_online_states: CowCell<HashMap<i64, bool>>,
     /// Fitted modules currently cycling, set by `dogmaIM.Activate` and cleared by `dogmaIM.Deactivate`.
-    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
-    pub module_active_states: HashSet<i64>,
+    #[serde(default, with = "crate::durable_domain_types::cow_cell_sorted_set_serde")]
+    pub module_active_states: CowCell<HashSet<i64>>,
     /// Charge type loaded into an active burst module when it was activated (`dogmaIM.Activate`).
     #[serde(default)]
-    pub module_active_charges: HashMap<i64, u32>,
+    pub module_active_charges: CowCell<HashMap<i64, u32>>,
     #[serde(default)]
     pub ship_fit_inputs: CowCell<HashMap<i64, ShipFitInputsRecord>>,
     #[serde(default)]
@@ -721,8 +721,8 @@ pub struct WorldStateSnapshot {
     pub observer_mining_ledger: CowCell<HashMap<i64, Vec<ObserverMiningRecord>>>,
     #[serde(default)]
     pub owner_notes: crate::cow::CowMap<i64, OwnerNoteRecord>,
-    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
-    pub paused_skill_queues: HashSet<i64>,
+    #[serde(default, with = "crate::durable_domain_types::cow_cell_sorted_set_serde")]
+    pub paused_skill_queues: CowCell<HashSet<i64>>,
     #[serde(default)]
     pub cosmic_anomalies: CowCell<HashMap<SolarSystemId, Vec<CosmicAnomalyRecord>>>,
     #[serde(default)]
@@ -911,17 +911,17 @@ pub struct WorldStateSnapshot {
     #[serde(default, with = "crate::durable_domain_types::cow_cell_sorted_map_of_sets_serde")]
     pub structure_docking_acl_denied: CowCell<HashMap<i64, HashSet<i64>>>,
     #[serde(default)]
-    pub sp6_lifecycle: Sp6PersistedState,
+    pub sp6_lifecycle: CowCell<Sp6PersistedState>,
     #[serde(default)]
-    pub pve_special_sites: crate::service_domains::PveSpecialSitesState,
+    pub pve_special_sites: CowCell<crate::service_domains::PveSpecialSitesState>,
     #[serde(default)]
     pub crab_beacons: CowCell<crate::service_domains::CrabBeaconStore>,
     #[serde(default)]
-    pub abyssal_state: crate::service_domains::AbyssalRuntimeStore,
+    pub abyssal_state: CowCell<crate::service_domains::AbyssalRuntimeStore>,
     #[serde(default)]
-    pub dungeon_runtime: crate::service_domains::DungeonRuntimeStore,
+    pub dungeon_runtime: CowCell<crate::service_domains::DungeonRuntimeStore>,
     #[serde(default)]
-    pub dungeon_editor: crate::service_domains::DungeonEditorStore,
+    pub dungeon_editor: CowCell<crate::service_domains::DungeonEditorStore>,
     #[serde(default)]
     pub fob_observatory_state: CowCell<crate::service_domains::FobObservatoryStore>,
     #[serde(default)]
@@ -946,8 +946,8 @@ pub struct WorldStateSnapshot {
     pub fleet_and_social_ops: CowCell<crate::service_domains::FleetAndSocialOpsStore>,
     #[serde(default)]
     pub cluster_and_runtime: CowCell<crate::service_domains::ClusterAndRuntimeStore>,
-    #[serde(default, with = "crate::service_domains::entity_kv_map_serde")]
-    pub entity_kv: std::collections::BTreeMap<
+    #[serde(default, with = "crate::durable_domain_types::cow_map_entity_kv_serde")]
+    pub entity_kv: crate::cow::CowMap<
         crate::service_domains::EntityKvKey,
         crate::service_domains::EntityKvRow,
     >,
@@ -1974,6 +1974,12 @@ impl WorldStateSnapshot {
     /// persisted in `world_meta`, skipping any candidate still referenced in any ID-bearing table
     /// (`feat:invariant.ids-monotonic-across-restart`, `#1087`).
     pub fn alloc_entity_id(&mut self) -> i64 {
+        if self.active_missions.is_dirty_ids() {
+            self.active_missions.reconcile_id_index();
+        }
+        if self.char_lp_logs.is_dirty_ids() {
+            self.char_lp_logs.reconcile_id_index();
+        }
         let mut next = self.next_entity_id.max(200_000_000).saturating_add(1);
         while self.is_entity_id_referenced(next) {
             next = next.saturating_add(1);
