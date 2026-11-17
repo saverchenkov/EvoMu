@@ -18,6 +18,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(SKILL_DIR)))
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
+import preflight  # noqa: E402
 import ratchet_checks  # noqa: E402
 import run_review  # noqa: E402
 
@@ -84,25 +85,54 @@ mod tests {
 class TestPreflightAndReviewGates(unittest.TestCase):
     def test_preflight_early_only_exits_zero_in_under_one_second(self):
         preflight_py = os.path.join(SCRIPTS_DIR, "preflight.py")
-        # Warm shared/worktree cache once, then assert `< 1.0s` execution and exit code 0.
-        first = subprocess.run(
-            [sys.executable, preflight_py, "--early-only"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        with tempfile.TemporaryDirectory() as tmp_state:
+            _write(os.path.join(tmp_state, "state.json"), json.dumps({"reviews": [{"head": head_sha}]}))
+            env = dict(os.environ, EVOMU_STATE_DIR=tmp_state)
+            # Warm shared/worktree cache once, then assert `< 1.0s` execution and exit code 0 in isolated state.
+            first = subprocess.run(
+                [sys.executable, preflight_py, "--early-only"],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
 
-        t0 = time.monotonic()
-        second = subprocess.run(
-            [sys.executable, preflight_py, "--early-only"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-        )
-        elapsed = time.monotonic() - t0
-        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
-        self.assertLess(elapsed, 1.0, "preflight.py --early-only took %.3fs (>= 1.0s)" % elapsed)
+            t0 = time.monotonic()
+            second = subprocess.run(
+                [sys.executable, preflight_py, "--early-only"],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            elapsed = time.monotonic() - t0
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            self.assertLess(elapsed, 1.0, "preflight.py --early-only took %.3fs (>= 1.0s)" % elapsed)
+
+            # Verify find_base prefers merge-base(origin/main, HEAD) over an older historical review SHA in state.json
+            parent_proc = subprocess.run(
+                ["git", "rev-parse", "--verify", "-q", "origin/main~3"],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+            )
+            if parent_proc.returncode == 0 and parent_proc.stdout.strip():
+                old_sha = parent_proc.stdout.strip()
+                mb_om = subprocess.run(
+                    ["git", "merge-base", "origin/main", "HEAD"],
+                    cwd=REPO_ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout.strip()
+                _write(os.path.join(tmp_state, "state.json"), json.dumps({"reviews": [{"head": old_sha}]}))
+                with mock.patch.dict(os.environ, {"EVOMU_STATE_DIR": tmp_state}):
+                    self.assertEqual(preflight.find_base(REPO_ROOT), mb_om)
+
         self.assertEqual(ratchet_checks.check_all_ratchets(REPO_ROOT), [])
 
     def test_synthetic_ratchets_match_rust_semantics_and_detect_breaches(self):

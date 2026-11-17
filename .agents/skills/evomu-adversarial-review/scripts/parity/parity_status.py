@@ -43,6 +43,9 @@ SMOKE_SCENARIOS = (
     "pve_combat",
     "skills_training",
 )
+# Phase LW (Living Universe v3, `docs/spec/06_living_world_v3_prd.md`) is explicitly PARKED pending spec sign-off:
+# excluded from open_rows / total_rows completeness blocking until unparked.
+PARKED_PLAN = frozenset("plan:LW-%d" % i for i in range(1, 9))
 DEFAULT_CLIENT_VERSION = "V24.02"
 DEFAULT_CLIENT_BUILD = 3698585
 DEFAULT_SHARED_CACHE_START_INI = os.path.expanduser(
@@ -449,9 +452,15 @@ def main():
     def supervisor_owned(rid):
         return rid.startswith("journey:") or rid in SUPERVISOR_OWNED_PLAN
 
+    def is_parked(rid):
+        return rid in PARKED_PLAN
+
     status = {}
     for r in rows:
         rid = r["id"]
+        if is_parked(rid):
+            status[rid] = {"status": "PARKED", "tests": [], "attested_by": [], "parked": True}
+            continue
         if supervisor_owned(rid):
             if rid.startswith("journey:"):
                 jid = rid.split(":", 1)[1]
@@ -524,7 +533,7 @@ def main():
         "T-2": lambda rid: rid.startswith(("sde:", "effect:")),          # every sde:* and effect:* attested
         "ESI-7": lambda rid: rid.startswith("esi:"),                      # Phase ESI exit gate
         "Q-9": lambda rid: rid.startswith(("quasar:", "feat:quasar.")),
-        "Z-8": lambda rid: rid != "plan:Z-8" and not supervisor_owned(rid),  # final gate: every other row DONE or NA
+        "Z-8": lambda rid: rid != "plan:Z-8" and not supervisor_owned(rid) and not is_parked(rid),  # final gate: every other active row DONE or NA
     }
     all_ids = [r["id"] for r in rows]
     for r in rows:
@@ -547,7 +556,8 @@ def main():
         # In `interim_smoke` stage, keep `journey:*` rows on the dedicated 29-journey scoreboard rather than
         # emitting a partial denominator in `cats["journey"]`, while verified `plan:T-6` / `plan:ESI-1` / `plan:Z-6`
         # enter `cats["plan"]` as DONE. In `full_z6` stage, all 29 `journey:*` rows enter `cats["journey"]`.
-        if st == "SUPERVISOR_OWNED" or (r["category"] == "journey" and sb_stage != "full_z6"):
+        # Parked Phase LW rows (`PARKED_PLAN`) are likewise excluded from completeness denominators until unparked.
+        if st in ("SUPERVISOR_OWNED", "PARKED") or (r["category"] == "journey" and sb_stage != "full_z6"):
             excluded_rows.append(rid)
             continue
         c = cats.setdefault(r["category"], {"total": 0, "DONE": 0, "NA": 0, "open": 0})
@@ -557,6 +567,7 @@ def main():
         else:
             c["open"] += 1
     supervisor_rows = sorted(rid for rid, s in status.items() if s["status"] == "SUPERVISOR_OWNED")
+    parked_rows = sorted(rid for rid, s in status.items() if s["status"] == "PARKED")
     total = len(rows) - len(excluded_rows)
     closed = sum(c["DONE"] + c["NA"] for c in cats.values())
     journey_total = len(sb_all_ids) or sum(1 for r in rows if r["category"] == "journey")
@@ -589,6 +600,7 @@ def main():
         "na_rows": sum(c["NA"] for c in cats.values()),
         "unknown_tags": unknown_tags[:50], "ledger_rows_removed": tamper,
         "supervisor_owned_rows": len(supervisor_rows),
+        "parked_rows": len(parked_rows),
         "journeys": journeys_summary,
         "complete": (closed == total and not tamper),
     }
@@ -605,9 +617,9 @@ def main():
     md += [
         "",
         "Real-client journeys (supervisor scoreboard, stage `%s`, build `%s`): **%d / %d verified** "
-        "(core smoke: **%d / %d**); %d supervisor-owned row(s) pending."
+        "(core smoke: **%d / %d**); %d supervisor-owned row(s) pending, %d parked row(s) excluded."
         % (sb_stage, sb["expected_build"], journey_done, journey_total, smoke_done, len(sb_smoke_ids),
-           len(supervisor_rows)),
+           len(supervisor_rows), len(parked_rows)),
     ]
     if tamper:
         md += ["", "**LEDGER TAMPERING: rows removed since last run:** %s" % tamper[:20]]
@@ -616,7 +628,7 @@ def main():
     md += ["", "## First open rows per category"]
     row_cat = {r["id"]: r.get("category") for r in rows}
     for k in sorted(cats):
-        opens = [rid for rid, s in status.items() if s["status"] not in ("DONE", "NA")
+        opens = [rid for rid, s in status.items() if s["status"] not in ("DONE", "NA", "SUPERVISOR_OWNED", "PARKED")
                  and row_cat.get(rid) == k][:15]
         if opens:
             md.append("- **%s:** %s" % (k, ", ".join("`%s` (%s)" % (o, status[o]["status"]) for o in opens)))

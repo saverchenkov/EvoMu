@@ -352,7 +352,8 @@ def main():
     checks["tests_all_pass"] = {"passed": rc == 0 and failed == 0, "exit": rc, "failed": failed}
     checks["ledger_complete"] = {"passed": bool(summ.get("complete")) and flagged == 0,
                                  "percent_closed": summ.get("percent_closed"),
-                                 "open_rows": summ.get("open_rows"), "flagged_fake": flagged}
+                                 "open_rows": summ.get("open_rows"), "flagged_fake": flagged,
+                                 "parked_rows": summ.get("parked_rows", 0)}
 
     # 2/3. reviews on this exact tree
     state = rl.load_state(root)

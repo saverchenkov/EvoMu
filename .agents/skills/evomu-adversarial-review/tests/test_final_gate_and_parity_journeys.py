@@ -356,6 +356,116 @@ class TestFinalGateAndParityJourneys(unittest.TestCase):
         self.assertNotIn("cargo mutants", arch_txt)
         self.assertNotIn("Mutation Score", arch_txt)
 
+    def test_parked_phase_lw_rows_do_not_block_completeness_and_render_parked(self):
+        expected_parked = {"plan:LW-%d" % i for i in range(1, 9)}
+        self.assertEqual(set(parity_status.PARKED_PLAN), expected_parked)
+        self.assertTrue(os.path.isfile(os.path.join(REPO_ROOT, "docs", "spec", "06_living_world_v3_prd.md")))
+        self.assertFalse(os.path.exists(os.path.join(REPO_ROOT, "docs", "spec", "06_living_world_v2_prd.md")))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tests_txt = os.path.join(tmp, "tests.txt")
+            with open(tests_txt, "w", encoding="utf-8") as fh:
+                fh.write("test test_close_active ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored\n")
+
+            synth_rows = [
+                {
+                    "id": "feat:demo.active",
+                    "category": "feat",
+                    "title": "Demo active",
+                    "acceptance": "ok",
+                    "na_allowed": False,
+                    "attest_ok": False,
+                    "plan_task": "S-1",
+                },
+                {
+                    "id": "plan:S-1",
+                    "category": "plan",
+                    "title": "S-1",
+                    "acceptance": "ok",
+                    "na_allowed": False,
+                    "attest_ok": False,
+                },
+                {
+                    "id": "plan:Z-8",
+                    "category": "plan",
+                    "title": "Z-8",
+                    "acceptance": "ok",
+                    "na_allowed": False,
+                    "attest_ok": False,
+                },
+                {
+                    "id": "journey:launch_login",
+                    "category": "journey",
+                    "title": "Launch",
+                    "acceptance": "ok",
+                    "na_allowed": False,
+                    "attest_ok": False,
+                },
+            ] + [
+                {
+                    "id": "plan:LW-%d" % i,
+                    "category": "plan",
+                    "title": "LW-%d" % i,
+                    "acceptance": "parked",
+                    "na_allowed": False,
+                    "attest_ok": False,
+                }
+                for i in range(1, 9)
+            ]
+
+            # Include `"plan:LW-1"` in tags to verify parked rows stay PARKED even if tagged prematurely
+            fake_tags = {
+                "test_close_active": {"feat:demo.active", "plan:S-1", "plan:Z-8", "plan:LW-1"},
+            }
+            par_synth = os.path.join(tmp, "parity_synth.json")
+            par_synth_md = os.path.join(tmp, "parity_synth.md")
+            argv_synth = ["parity_status.py", "--tests", tests_txt, "--out", par_synth, "--md", par_synth_md]
+            with mock.patch.dict(os.environ, {"EVOMU_CLIENT_START_INI": ""}), mock.patch.object(
+                sys, "argv", argv_synth
+            ), mock.patch.object(parity_status, "repo_root", return_value=REPO_ROOT), mock.patch.object(
+                parity_status, "load_ledger", return_value=(synth_rows, set(), set())
+            ), mock.patch.object(parity_status, "rust_files", return_value=[]), mock.patch.object(
+                parity_status, "collect_tags", return_value=fake_tags
+            ), redirect_stdout(io.StringIO()):
+                rc = parity_status.main()
+
+            self.assertEqual(rc, 0)
+            ps = _read_json(par_synth)
+            self.assertTrue(ps["summary"]["complete"], ps["summary"])
+            self.assertEqual(ps["summary"]["open_rows"], 0)
+            self.assertEqual(ps["summary"]["parked_rows"], 8)
+            self.assertEqual(ps["rows"]["plan:Z-8"]["status"], "DONE")
+            for i in range(1, 9):
+                self.assertEqual(ps["rows"]["plan:LW-%d" % i]["status"], "PARKED")
+
+            # Also verify full ledger + status_table.py renders Phase LW v3 and LW-1..LW-8 as PARKED
+            par_full = os.path.join(tmp, "parity_full.json")
+            argv_full = ["parity_status.py", "--tests", tests_txt, "--out", par_full]
+            with mock.patch.dict(os.environ, {"EVOMU_CLIENT_START_INI": ""}), mock.patch.object(
+                sys, "argv", argv_full
+            ), mock.patch.object(parity_status, "repo_root", return_value=REPO_ROOT), mock.patch.object(
+                parity_status, "rust_files", return_value=[]
+            ), redirect_stdout(io.StringIO()):
+                parity_status.main()
+
+            pf = _read_json(par_full)
+            self.assertEqual(pf["summary"]["parked_rows"], 8)
+            for i in range(1, 9):
+                self.assertEqual(pf["rows"]["plan:LW-%d" % i]["status"], "PARKED")
+
+            status_md = os.path.join(tmp, "ACTION_PLAN_STATUS.md")
+            with mock.patch.object(
+                sys, "argv", ["status_table.py", "--parity", par_full, "--out", status_md]
+            ), mock.patch.object(status_table, "last_commit", return_value="—"), redirect_stdout(io.StringIO()):
+                status_table.main()
+
+            with open(status_md, encoding="utf-8") as fh:
+                st_txt = fh.read()
+            self.assertIn("## Phase LW: Living Universe v3 (PARKED", st_txt)
+            self.assertIn("8 parked `Phase LW` row(s) excluded from completeness", st_txt)
+            for i in range(1, 9):
+                self.assertRegex(st_txt, r"\|\s*`?LW-%d`?\s*\|[^|]+\|\s*PARKED\s*\|" % i)
+
 
 if __name__ == "__main__":
     unittest.main()

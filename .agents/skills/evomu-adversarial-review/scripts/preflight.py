@@ -189,16 +189,25 @@ def lint_claims(root, claims_text, evidence_text, parity_rows):
 
 
 def find_base(root):
+    cands = []
     st = rl.load_state(root)
     for r in reversed(st.get("reviews", [])):
         h = r.get("head")
         if h and subprocess.run(["git", "merge-base", "--is-ancestor", h, "HEAD"], cwd=root, capture_output=True).returncode == 0:
-            return h
-    if subprocess.run(["git", "rev-parse", "--verify", "-q", "main"], cwd=root, capture_output=True).returncode == 0:
-        mb = subprocess.run(["git", "merge-base", "main", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
-        if mb:
-            return mb
-    return None
+            cands.append(h)
+            break
+    for ref in ("origin/main", "main"):
+        if subprocess.run(["git", "rev-parse", "--verify", "-q", ref], cwd=root, capture_output=True).returncode == 0:
+            mb = subprocess.run(["git", "merge-base", ref, "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+            if mb and mb not in cands:
+                cands.append(mb)
+    if not cands:
+        return None
+    best = cands[0]
+    for c in cands[1:]:
+        if c != best and subprocess.run(["git", "merge-base", "--is-ancestor", best, c], cwd=root, capture_output=True).returncode == 0:
+            best = c
+    return best
 
 
 def collect_added_lines(root, base):

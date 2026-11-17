@@ -147,13 +147,18 @@ def main():
         L.append("| %s | %d | %d | %d | %d |" % (k, c["total"], c["DONE"], c["NA"], c["open"]))
     js = summ.get("journeys")
     if isinstance(js, dict):
+        parked_note = (
+            " (%d parked `Phase LW` row(s) excluded from completeness)" % int(summ["parked_rows"])
+            if summ.get("parked_rows")
+            else ""
+        )
         L += [
             "",
             "**Real-client journeys (supervisor scoreboard, stage `%s`, build `%s`):** **%d / %d verified** "
-            "(core smoke: **%d / %d**)."
+            "(core smoke: **%d / %d**)%s."
             % (js.get("stage", "interim_smoke"), js.get("expected_client_build", "—"),
                int(js.get("DONE", 0)), int(js.get("total", 29)),
-               int(js.get("smoke_DONE", 0)), int(js.get("smoke_total", 7))),
+               int(js.get("smoke_DONE", 0)), int(js.get("smoke_total", 7)), parked_note),
         ]
     areas_path = os.path.join(root, "docs", "parity", "feature_areas.json")
     if os.path.exists(areas_path):
@@ -174,7 +179,9 @@ def main():
             tests = ", ".join(pr.get("tests") or pr.get("attested_by") or [])[:120] or "—"
             n = notes.get(tid) or {}
             assess = str(n.get("assessment", "")).upper() or "—"
-            if assess == "DONE" and st != "DONE":
+            if st == "PARKED" and assess in ("NOT STARTED", "—"):
+                assess = "PARKED"
+            elif assess == "DONE" and st != "DONE":
                 assess = "PARTIAL (claimed DONE, ledger %s)" % st
             note = str(n.get("note", ""))[:200]
             if CITE_RE.search(note):

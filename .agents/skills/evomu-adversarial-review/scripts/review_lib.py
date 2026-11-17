@@ -46,7 +46,7 @@ def head_tree(root):
 
 
 def state_dir(root):
-    p = os.path.join(root, STATE_DIRNAME)
+    p = os.environ.get("EVOMU_STATE_DIR") or os.path.join(root, STATE_DIRNAME)
     os.makedirs(p, exist_ok=True)
     return p
 
