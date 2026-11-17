@@ -1471,12 +1471,7 @@ impl WorldStateSnapshot {
                     "Cannot split a non-empty container".into(),
                 ));
             }
-            if item_ref.singleton
-                || item_ref.is_blueprint_copy
-                || item_ref.blueprint_runs_remaining.is_some()
-                || !item_ref.dynamic_attributes.is_empty()
-                || item_ref.source_mutaplasmid_id.is_some()
-            {
+            if Self::has_non_stackable_item_state(item_ref) {
                 return Err(DbError::ValidationError(
                     "Cannot split a singleton, BPC, or mutated item".into(),
                 ));

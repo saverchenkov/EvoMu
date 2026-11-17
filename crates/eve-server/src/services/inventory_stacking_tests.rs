@@ -3337,5 +3337,712 @@ fn in_space_foreign_ship_nested_container_rejects_before_password_oracle() {
     assert_eq!(ok_split.dict_get("originalQuantity"), Some(&PyRep::Integer(15)));
 }
 
+#[test]
+fn undocked_structure_and_missing_pos_fail_closed_before_password_oracle() {
+    let ctx = test_ctx();
+    let char_id = 92_000_082;
+    let corp_id = 98_000_082;
+    let sys_id = 30_000_142;
+    let struct_id = 1_000_282_900;
+    let ship_id = 1_000_282_001;
+    let struct_cont = 1_000_282_010;
+    let space_cont = 1_000_282_011;
+    let st_1 = 1_000_282_020;
+    let st_2 = 1_000_282_021;
+    let sc_1 = 1_000_282_022;
+    let sc_2 = 1_000_282_023;
+    let sp_1 = 1_000_282_030;
+    let sp_2 = 1_000_282_031;
+
+    ensure_char(&ctx, char_id, corp_id, None, sys_id, ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Citadel Undocked Guard".into(),
+                position: [10_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.station_id = None;
+        ch.structure_id = None;
+    });
+    insert_item(&ctx, ship_id, 587, char_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, struct_cont, 17_366, char_id, struct_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, st_1, 34, char_id, struct_id, InventoryFlag::Hangar, 20, false);
+    insert_item(&ctx, st_2, 34, char_id, struct_id, InventoryFlag::Hangar, 30, false);
+    insert_item(&ctx, sc_1, 35, char_id, struct_cont, InventoryFlag::Cargo, 10, false);
+    insert_item(&ctx, sc_2, 35, char_id, struct_cont, InventoryFlag::Cargo, 15, false);
+
+    insert_item(&ctx, space_cont, 17_366, char_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, sp_1, 34, char_id, space_cont, InventoryFlag::Cargo, 25, false);
+    insert_item(&ctx, sp_2, 34, char_id, space_cont, InventoryFlag::Cargo, 35, false);
+
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.container_passwords.insert(struct_cont, "structcontpw".into());
+        st.container_passwords.insert(space_cont, "spacecontpw".into());
+        save_container_ship_state(&ctx, &st);
+    }
+
+    // 1. Undocked pilot tethered within 5,000m of ACL-owned structure MUST be rejected for internal hangars/containers
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(ship_id, [10_500.0, 0.0, 0.0]);
+    });
+    let mut space_sess = make_session(char_id, corp_id, None, Some(sys_id), Some(ship_id));
+    for (ship_pos_opt, pw) in [
+        (Some([10_500.0, 0.0, 0.0]), "wrong"),
+        (Some([10_500.0, 0.0, 0.0]), "structcontpw"),
+        (None, "structcontpw"),
+    ] {
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(pos) = ship_pos_opt {
+                snap.item_positions.insert(ship_id, pos);
+            } else {
+                snap.item_positions.remove(&ship_id);
+            }
+        });
+        let commits_before = ctx.db.tx_commit_count();
+        let mut kw_hangar = HashMap::new();
+        kw_hangar.insert("locationID".into(), PyRep::Integer(struct_id));
+        kw_hangar.insert("flag".into(), PyRep::Integer(InventoryFlag::Hangar as i64));
+        assert_eq!(
+            handle_stack_ops(&ctx, &mut space_sess, None, "invbroker", "StackAll", &[], &kw_hangar)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "DestinationAccessDenied"
+        );
+        let mut kw_cont = HashMap::new();
+        kw_cont.insert("locationID".into(), PyRep::Integer(struct_cont));
+        kw_cont.insert("flag".into(), PyRep::Integer(InventoryFlag::Cargo as i64));
+        kw_cont.insert("password".into(), PyRep::String(pw.into()));
+        assert_eq!(
+            handle_stack_ops(&ctx, &mut space_sess, None, "invbroker", "StackAll", &[], &kw_cont)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "DestinationAccessDenied"
+        );
+        let merge_cont = PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(sc_1),
+            PyRep::Integer(sc_2),
+            PyRep::None,
+        ])]);
+        let mut kw_pw = HashMap::new();
+        kw_pw.insert("password".into(), PyRep::String(pw.into()));
+        assert_eq!(
+            handle_stack_ops(&ctx, &mut space_sess, None, "invbroker", "MultiMerge", &[merge_cont], &kw_pw)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "DestinationAccessDenied"
+        );
+        assert_eq!(
+            handle_stack_ops(
+                &ctx,
+                &mut space_sess,
+                None,
+                "invbroker",
+                "SplitStack",
+                &[
+                    PyRep::Integer(struct_cont),
+                    PyRep::Integer(sc_1),
+                    PyRep::Integer(5),
+                ],
+                &kw_pw,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "SplitFailed"
+        );
+        assert_eq!(ctx.db.tx_commit_count(), commits_before);
+    }
+    assert!(!read_container_ship_state(&ctx)
+        .unlocked_containers
+        .contains(&(struct_cont, char_id)));
+
+    // 2. In-space container with missing ship or container position MUST fail closed before password oracle
+    for (ship_pos_opt, cont_pos_opt, pw) in [
+        (Some([0.0, 0.0, 0.0]), None, "wrong"),
+        (Some([0.0, 0.0, 0.0]), None, "spacecontpw"),
+        (None, Some([1_000.0, 0.0, 0.0]), "spacecontpw"),
+    ] {
+        ctx.db.with_mut_snapshot(|snap| {
+            match ship_pos_opt {
+                Some(pos) => {
+                    snap.item_positions.insert(ship_id, pos);
+                }
+                None => {
+                    snap.item_positions.remove(&ship_id);
+                }
+            }
+            match cont_pos_opt {
+                Some(pos) => {
+                    snap.item_positions.insert(space_cont, pos);
+                }
+                None => {
+                    snap.item_positions.remove(&space_cont);
+                }
+            }
+        });
+        let commits_before = ctx.db.tx_commit_count();
+        let bound_space = make_bound(space_cont, char_id);
+        let mut kw_pw = HashMap::new();
+        kw_pw.insert("password".into(), PyRep::String(pw.into()));
+        assert_eq!(
+            handle_stack_ops(&ctx, &mut space_sess, Some(&bound_space), "invbroker", "StackAll", &[], &kw_pw)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "OutOfRange"
+        );
+        let merge_sp = PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(sp_1),
+            PyRep::Integer(sp_2),
+            PyRep::None,
+        ])]);
+        assert_eq!(
+            handle_stack_ops(&ctx, &mut space_sess, Some(&bound_space), "invbroker", "MultiMerge", &[merge_sp], &kw_pw)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "OutOfRange"
+        );
+        assert_eq!(
+            handle_stack_ops(
+                &ctx,
+                &mut space_sess,
+                Some(&bound_space),
+                "invbroker",
+                "SplitStack",
+                &[
+                    PyRep::Integer(space_cont),
+                    PyRep::Integer(sp_1),
+                    PyRep::Integer(5),
+                ],
+                &kw_pw,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "SplitFailed"
+        );
+        assert_eq!(ctx.db.tx_commit_count(), commits_before);
+    }
+
+    // Restoring both in-range positions enables normal container operations
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
+        snap.item_positions.insert(space_cont, [1_200.0, 0.0, 0.0]);
+    });
+    let mut kw_space_ok = HashMap::new();
+    kw_space_ok.insert("password".into(), PyRep::String("spacecontpw".into()));
+    let space_ok = handle_stack_ops(
+        &ctx,
+        &mut space_sess,
+        Some(&make_bound(space_cont, char_id)),
+        "invbroker",
+        "StackAll",
+        &[],
+        &kw_space_ok,
+    )
+    .unwrap()
+    .expect("in-range space container StackAll with positions and password must succeed");
+    assert_eq!(space_ok.dict_get("mergedCount"), Some(&PyRep::Integer(1)));
+
+    // Docking in structure allows internal hangar/container operations
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().structure_id = Some(struct_id);
+    });
+    space_sess.structure_id = Some(struct_id);
+    let mut kw_st = HashMap::new();
+    kw_st.insert("locationID".into(), PyRep::Integer(struct_id));
+    kw_st.insert("flag".into(), PyRep::Integer(InventoryFlag::Hangar as i64));
+    let docked_ok = handle_stack_ops(&ctx, &mut space_sess, None, "invbroker", "StackAll", &[], &kw_st)
+        .unwrap()
+        .expect("docked structure StackAll must succeed");
+    assert_eq!(docked_ok.dict_get("mergedCount"), Some(&PyRep::Integer(1)));
+}
+
+#[test]
+fn paid_asset_safety_wrap_items_allow_stacking_while_unpaid_remain_locked() {
+    use crate::services::station_structure::structure_upwell_ops::{
+        load_ext_state, save_ext_state, AssetSafetyWrapRecord,
+    };
+
+    let ctx = test_ctx();
+    let char_id = 92_000_083;
+    let corp_id = 98_000_083;
+    let sys_id = 30_000_142;
+    let struct_id = 1_000_283_900;
+    let ship_id = 1_000_283_001;
+    let unpaid_wrap_id = 1_000_283_010;
+    let paid_wrap_id = 1_000_283_011;
+    let u_1 = 1_000_283_020;
+    let u_2 = 1_000_283_021;
+    let p_1 = 1_000_283_030;
+    let p_2 = 1_000_283_031;
+    let p_3 = 1_000_283_032;
+
+    ensure_char(&ctx, char_id, corp_id, None, sys_id, ship_id);
+    insert_item(&ctx, ship_id, 587, char_id, struct_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, u_1, 34, char_id, struct_id, InventoryFlag::Hangar, 40, false);
+    insert_item(&ctx, u_2, 34, char_id, struct_id, InventoryFlag::Hangar, 60, false);
+    insert_item(&ctx, p_1, 34, char_id, struct_id, InventoryFlag::Deliveries, 40, false);
+    insert_item(&ctx, p_2, 34, char_id, struct_id, InventoryFlag::Deliveries, 60, false);
+    insert_item(&ctx, p_3, 34, char_id, struct_id, InventoryFlag::Deliveries, 50, false);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Asset Safety Test Structure".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.station_id = None;
+        ch.structure_id = Some(struct_id);
+
+        let mut ext = load_ext_state(snap);
+        ext.asset_safety_wraps.insert(
+            unpaid_wrap_id,
+            AssetSafetyWrapRecord {
+                wrap_id: unpaid_wrap_id,
+                owner_id: char_id,
+                is_corp: false,
+                source_structure_id: struct_id,
+                source_structure_name: "Source".into(),
+                solar_system_id: sys_id,
+                created_unix: 1,
+                deliverable_after_unix: 1,
+                delivered_to_id: None,
+                item_ids: vec![u_1, u_2],
+                estimated_value_isk: 1_000.0,
+                nearest_npc_station_id: None,
+                auto_delivered: false,
+                retrieval_fee_paid: false,
+            },
+        );
+        // Simulate post-MoveSafetyWrapToStructure state: wrap record kept with retrieval_fee_paid=true
+        ext.asset_safety_wraps.insert(
+            paid_wrap_id,
+            AssetSafetyWrapRecord {
+                wrap_id: paid_wrap_id,
+                owner_id: char_id,
+                is_corp: false,
+                source_structure_id: struct_id,
+                source_structure_name: "Source".into(),
+                solar_system_id: sys_id,
+                created_unix: 1,
+                deliverable_after_unix: 1,
+                delivered_to_id: Some(struct_id),
+                item_ids: vec![p_1, p_2, p_3],
+                estimated_value_isk: 1_000.0,
+                nearest_npc_station_id: None,
+                auto_delivered: false,
+                retrieval_fee_paid: true,
+            },
+        );
+        save_ext_state(snap, &ext);
+    });
+
+    let mut sess = make_session(char_id, corp_id, None, Some(sys_id), Some(ship_id));
+    sess.structure_id = Some(struct_id);
+    let bound_struct = make_bound(struct_id, char_id);
+    let kw = HashMap::new();
+
+    // 1. Unpaid Asset Safety wrap items remain blocked across SplitStack, MultiMerge, and StackAll
+    assert_eq!(
+        handle_stack_ops(
+            &ctx,
+            &mut sess,
+            Some(&bound_struct),
+            "invbroker",
+            "SplitStack",
+            &[PyRep::Integer(u_1), PyRep::Integer(10)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "SplitFailed"
+    );
+    let merge_unpaid = PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::Integer(u_1),
+        PyRep::Integer(u_2),
+        PyRep::None,
+    ])]);
+    assert_eq!(
+        handle_stack_ops(&ctx, &mut sess, Some(&bound_struct), "invbroker", "MultiMerge", &[merge_unpaid], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "StackFailed"
+    );
+    let unpaid_stack = handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&bound_struct),
+        "invbroker",
+        "StackAll",
+        &[PyRep::Integer(InventoryFlag::Hangar as i64)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(unpaid_stack.dict_get("mergedCount"), Some(&PyRep::Integer(0)));
+
+    // 2. Paid/delivered Asset Safety wrap items split, MultiMerge, and StackAll cleanly
+    let split_paid = handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&bound_struct),
+        "invbroker",
+        "SplitStack",
+        &[PyRep::Integer(p_1), PyRep::Integer(15)],
+        &kw,
+    )
+    .unwrap()
+    .expect("paid Asset Safety item SplitStack must succeed");
+    assert_eq!(split_paid.dict_get("originalQuantity"), Some(&PyRep::Integer(25)));
+    let split_new_id = split_paid
+        .dict_get("newItemID")
+        .and_then(|v| v.as_i64())
+        .expect("newItemID");
+
+    let merge_paid = PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::Integer(split_new_id),
+        PyRep::Integer(p_2),
+        PyRep::None,
+    ])]);
+    handle_stack_ops(&ctx, &mut sess, Some(&bound_struct), "invbroker", "MultiMerge", &[merge_paid], &kw)
+        .unwrap()
+        .expect("paid Asset Safety item MultiMerge must succeed");
+
+    let stack_paid = handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&bound_struct),
+        "invbroker",
+        "StackAll",
+        &[PyRep::Integer(InventoryFlag::Deliveries as i64)],
+        &kw,
+    )
+    .unwrap()
+    .expect("paid Asset Safety item StackAll must succeed");
+    assert_eq!(stack_paid.dict_get("mergedCount"), Some(&PyRep::Integer(2)));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&p_1).map(|i| i.quantity), Some(150));
+        assert_eq!(snap.items.get(&u_1).map(|i| i.quantity), Some(40));
+        assert_eq!(snap.items.get(&u_2).map(|i| i.quantity), Some(60));
+    });
+}
+
+#[test]
+fn foreign_ship_bay_password_and_alsc_password_per_action_enforced() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        ContainerConfig, ShipAccessConfig,
+    };
+
+    let ctx = test_ctx();
+    let owner_id = 92_000_084;
+    let mate_id = 92_000_085;
+    let corp_id = 98_000_084;
+    let sys_id = 30_000_142;
+    let station_id = 60_003_760;
+    let owner_ship = 1_000_284_001;
+    let mate_ship = 1_000_284_002;
+    let sma_nest_cont = 1_000_284_010;
+    let alsc_cont = 1_000_284_011;
+    let f_1 = 1_000_284_020;
+    let f_2 = 1_000_284_021;
+    let m_1 = 1_000_284_022;
+    let m_2 = 1_000_284_023;
+    let a_1 = 1_000_284_030;
+    let a_2 = 1_000_284_031;
+    let a_3 = 1_000_284_032;
+
+    ensure_char(&ctx, owner_id, corp_id, None, sys_id, owner_ship);
+    ensure_char(&ctx, mate_id, corp_id, None, sys_id, mate_ship);
+    insert_item(&ctx, owner_ship, 587, owner_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, mate_ship, 587, mate_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, f_1, 34, mate_id, owner_ship, InventoryFlag::FleetHangar, 30, false);
+    insert_item(&ctx, f_2, 34, mate_id, owner_ship, InventoryFlag::FleetHangar, 20, false);
+    insert_item(&ctx, sma_nest_cont, 17_366, mate_id, owner_ship, InventoryFlag::ShipHangar, 1, true);
+    insert_item(&ctx, m_1, 34, mate_id, sma_nest_cont, InventoryFlag::Cargo, 12, false);
+    insert_item(&ctx, m_2, 34, mate_id, sma_nest_cont, InventoryFlag::Cargo, 8, false);
+
+    // Docked ALSC with password_per_action = true for part 2
+    insert_item(&ctx, alsc_cont, 17_366, owner_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, a_1, 34, owner_id, alsc_cont, InventoryFlag::Cargo, 40, false);
+    insert_item(&ctx, a_2, 34, owner_id, alsc_cont, InventoryFlag::Cargo, 15, false);
+    insert_item(&ctx, a_3, 34, owner_id, alsc_cont, InventoryFlag::Cargo, 25, false);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(
+            777_002,
+            FleetRecord {
+                fleet_id: 777_002,
+                boss_id: owner_id,
+                members: vec![owner_id, mate_id],
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(mate_ship, [0.0, 0.0, 0.0]);
+        snap.item_positions.insert(owner_ship, [10_000.0, 0.0, 0.0]);
+    });
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.ship_configs.insert(
+            owner_ship,
+            ShipAccessConfig {
+                allow_fleet_smb: true,
+                allow_corp_smb: false,
+                allow_fleet_hangar: true,
+                allow_corp_hangar: false,
+                password: Some("bay-secret".into()),
+            },
+        );
+        st.container_passwords.insert(alsc_cont, "peract".into());
+        st.container_configs.insert(
+            alsc_cont,
+            ContainerConfig {
+                lock_by_default: false,
+                password_per_action: true,
+                config_bitmask: 0,
+            },
+        );
+        // Pre-seed unlocked_containers to ensure password_per_action ignores cached unlocks
+        st.unlocked_containers.insert((alsc_cont, owner_id));
+        save_container_ship_state(&ctx, &st);
+    }
+
+    let mut mate_sess = make_session(mate_id, corp_id, None, Some(sys_id), Some(mate_ship));
+    let bound_owner_ship = make_bound(owner_ship, mate_id);
+    let bound_sma_cont = make_bound(sma_nest_cont, mate_id);
+    let kw_empty = HashMap::new();
+
+    // 1. Out-of-range foreign ship (> 2,500m) rejects with OutOfRange/SplitFailed BEFORE ShipAccessConfig.password
+    for pw in ["wrong", "bay-secret"] {
+        let mut kw_pw = HashMap::new();
+        kw_pw.insert("password".into(), PyRep::String(pw.into()));
+        let merge_fh = PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(f_1),
+            PyRep::Integer(f_2),
+            PyRep::None,
+        ])]);
+        assert_eq!(
+            handle_stack_ops(&ctx, &mut mate_sess, Some(&bound_owner_ship), "invbroker", "MultiMerge", &[merge_fh], &kw_pw)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "OutOfRange"
+        );
+        assert_eq!(
+            handle_stack_ops(
+                &ctx,
+                &mut mate_sess,
+                Some(&bound_owner_ship),
+                "invbroker",
+                "SplitStack",
+                &[PyRep::Integer(owner_ship), PyRep::Integer(f_1), PyRep::Integer(5)],
+                &kw_pw,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "SplitFailed"
+        );
+    }
+    assert!(!read_container_ship_state(&ctx)
+        .unlocked_containers
+        .contains(&(mate_id, owner_ship)));
+
+    // 2. Move within 2,500m: missing/wrong bay password denies FleetHangarAccessDenied & SMAAccessDenied
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(owner_ship, [500.0, 0.0, 0.0]);
+    });
+    assert_eq!(
+        handle_stack_ops(
+            &ctx,
+            &mut mate_sess,
+            Some(&bound_owner_ship),
+            "invbroker",
+            "SplitStack",
+            &[PyRep::Integer(owner_ship), PyRep::Integer(f_1), PyRep::Integer(5)],
+            &kw_empty,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "FleetHangarAccessDenied"
+    );
+    let merge_sma = PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::Integer(m_1),
+        PyRep::Integer(m_2),
+        PyRep::None,
+    ])]);
+    assert_eq!(
+        handle_stack_ops(&ctx, &mut mate_sess, Some(&bound_sma_cont), "invbroker", "MultiMerge", &[merge_sma.clone()], &kw_empty)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "SMAAccessDenied"
+    );
+
+    // Failed SplitStack with exact bay password MUST NOT persist ship unlock
+    let mut kw_bay = HashMap::new();
+    kw_bay.insert("password".into(), PyRep::String("bay-secret".into()));
+    assert_eq!(
+        handle_stack_ops(
+            &ctx,
+            &mut mate_sess,
+            Some(&bound_owner_ship),
+            "invbroker",
+            "SplitStack",
+            &[PyRep::Integer(owner_ship), PyRep::Integer(f_1), PyRep::Integer(999)],
+            &kw_bay,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "SplitFailed"
+    );
+    assert!(!read_container_ship_state(&ctx)
+        .unlocked_containers
+        .contains(&(mate_id, owner_ship)));
+
+    // Valid SplitStack with bay password succeeds AND records (mate_id, owner_ship)
+    let ok_fh_split = handle_stack_ops(
+        &ctx,
+        &mut mate_sess,
+        Some(&bound_owner_ship),
+        "invbroker",
+        "SplitStack",
+        &[PyRep::Integer(owner_ship), PyRep::Integer(f_1), PyRep::Integer(10)],
+        &kw_bay,
+    )
+    .unwrap()
+    .expect("in-range FleetHangar SplitStack with bay password must succeed");
+    assert_eq!(ok_fh_split.dict_get("originalQuantity"), Some(&PyRep::Integer(20)));
+    assert!(read_container_ship_state(&ctx)
+        .unlocked_containers
+        .contains(&(mate_id, owner_ship)));
+
+    // Subsequent MultiMerge without re-sending bay password succeeds via persisted unlock
+    let split_fh_id = ok_fh_split.dict_get("newItemID").and_then(|v| v.as_i64()).unwrap();
+    let merge_fh_ok = PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::Integer(split_fh_id),
+        PyRep::Integer(f_2),
+        PyRep::None,
+    ])]);
+    handle_stack_ops(&ctx, &mut mate_sess, Some(&bound_owner_ship), "invbroker", "MultiMerge", &[merge_fh_ok], &kw_empty)
+        .unwrap()
+        .expect("subsequent MultiMerge on unlocked ship bay must succeed");
+
+    // Clear ship unlock and confirm SMA container requires bay password then unlocks on commit
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.unlocked_containers.remove(&(mate_id, owner_ship));
+        save_container_ship_state(&ctx, &st);
+    }
+    handle_stack_ops(&ctx, &mut mate_sess, Some(&bound_sma_cont), "invbroker", "MultiMerge", &[merge_sma], &kw_bay)
+        .unwrap()
+        .expect("ShipHangar MultiMerge with bay password must succeed");
+    assert!(read_container_ship_state(&ctx)
+        .unlocked_containers
+        .contains(&(mate_id, owner_ship)));
+
+    // 3. ALSC password_per_action requires password on every SplitStack / MultiMerge / StackAll invocation
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&owner_id).unwrap().station_id = Some(station_id);
+    });
+    let mut owner_sess = make_session(owner_id, corp_id, Some(station_id), Some(sys_id), Some(owner_ship));
+    let bound_alsc = make_bound(alsc_cont, owner_id);
+    let mut kw_peract = HashMap::new();
+    kw_peract.insert("password".into(), PyRep::String("peract".into()));
+
+    assert_eq!(
+        handle_stack_ops(
+            &ctx,
+            &mut owner_sess,
+            Some(&bound_alsc),
+            "invbroker",
+            "SplitStack",
+            &[PyRep::Integer(alsc_cont), PyRep::Integer(a_1), PyRep::Integer(10)],
+            &kw_empty,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ALSCPasswordRequired"
+    );
+    let ok_alsc_split = handle_stack_ops(
+        &ctx,
+        &mut owner_sess,
+        Some(&bound_alsc),
+        "invbroker",
+        "SplitStack",
+        &[PyRep::Integer(alsc_cont), PyRep::Integer(a_1), PyRep::Integer(10)],
+        &kw_peract,
+    )
+    .unwrap()
+    .expect("SplitStack with per-action password must succeed");
+    let a_split_id = ok_alsc_split.dict_get("newItemID").and_then(|v| v.as_i64()).unwrap();
+
+    // Even immediately after a valid per-action RPC, next MultiMerge without password MUST reject
+    let merge_alsc = PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::Integer(a_split_id),
+        PyRep::Integer(a_2),
+        PyRep::None,
+    ])]);
+    assert_eq!(
+        handle_stack_ops(&ctx, &mut owner_sess, Some(&bound_alsc), "invbroker", "MultiMerge", &[merge_alsc.clone()], &kw_empty)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ALSCPasswordRequired"
+    );
+    handle_stack_ops(&ctx, &mut owner_sess, Some(&bound_alsc), "invbroker", "MultiMerge", &[merge_alsc], &kw_peract)
+        .unwrap()
+        .expect("MultiMerge with per-action password must succeed");
+
+    // Next StackAll without password MUST still reject, and with password succeeds
+    assert_eq!(
+        handle_stack_ops(&ctx, &mut owner_sess, Some(&bound_alsc), "invbroker", "StackAll", &[PyRep::Integer(InventoryFlag::Cargo as i64)], &kw_empty)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ALSCPasswordRequired"
+    );
+    let ok_alsc_stack = handle_stack_ops(
+        &ctx,
+        &mut owner_sess,
+        Some(&bound_alsc),
+        "invbroker",
+        "StackAll",
+        &[PyRep::Integer(InventoryFlag::Cargo as i64)],
+        &kw_peract,
+    )
+    .unwrap()
+    .expect("StackAll with per-action password must succeed");
+    assert_eq!(ok_alsc_stack.dict_get("mergedCount"), Some(&PyRep::Integer(2)));
+}
+
+
 
 

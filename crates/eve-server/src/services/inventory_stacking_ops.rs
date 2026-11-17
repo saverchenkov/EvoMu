@@ -146,15 +146,14 @@ fn character_or_session_fallback(
 
 fn persist_unlocked_containers_in_snap(
     guard: &mut eve_db::WorldStateSnapshot,
-    char_id: i64,
-    unlock_ids: &[i64],
+    unlock_pairs: &[(i64, i64)],
 ) {
-    if unlock_ids.is_empty() {
+    if unlock_pairs.is_empty() {
         return;
     }
     fitting_containers_ships::write_container_ship_state_snap(guard, |st| {
-        for &cid in unlock_ids {
-            st.unlocked_containers.insert((cid, char_id));
+        for &pair in unlock_pairs {
+            st.unlocked_containers.insert(pair);
         }
     });
 }
@@ -268,7 +267,7 @@ fn enforce_container_chain_policies(
     chain: &ContainerChainInfo,
     provided_pw: Option<&str>,
     policy: ContainerChainPolicy,
-) -> Result<Vec<i64>, BridgeRpcError> {
+) -> Result<Vec<(i64, i64)>, BridgeRpcError> {
     let container_hops = &chain.chain_locs[..chain.chain_locs.len().saturating_sub(1)];
     for &anc_id in container_hops {
         let Some(anc) = snap.items.get(&anc_id) else {
@@ -331,34 +330,43 @@ fn enforce_container_chain_policies(
         }
     }
 
-    let mut unlock_ids = Vec::new();
+    let mut unlock_pairs = Vec::new();
     for &anc_id in container_hops {
         if let Some(req_pw) = cs_state.container_passwords.get(&anc_id) {
-            if !req_pw.is_empty()
-                && !cs_state.unlocked_containers.contains(&(anc_id, char_id))
-                && !cs_state.unlocked_containers.contains(&(char_id, anc_id))
-            {
-                if provided_pw == Some(req_pw.as_str()) {
-                    unlock_ids.push(anc_id);
-                } else {
-                    return Err(BridgeRpcError {
-                        code: "ALSCPasswordRequired".into(),
-                        message: format!(
-                            "Password required to access Secure Container {anc_id}"
-                        ),
-                        client_error: None,
-                    });
+            if !req_pw.is_empty() {
+                let password_per_action = cs_state
+                    .container_configs
+                    .get(&anc_id)
+                    .is_some_and(|c| c.password_per_action);
+                let already_unlocked = !password_per_action
+                    && (cs_state.unlocked_containers.contains(&(anc_id, char_id))
+                        || cs_state.unlocked_containers.contains(&(char_id, anc_id)));
+                if !already_unlocked {
+                    if provided_pw == Some(req_pw.as_str()) {
+                        if !password_per_action {
+                            unlock_pairs.push((anc_id, char_id));
+                        }
+                    } else {
+                        return Err(BridgeRpcError {
+                            code: "ALSCPasswordRequired".into(),
+                            message: format!(
+                                "Password required to access Secure Container {anc_id}"
+                            ),
+                            client_error: None,
+                        });
+                    }
                 }
             }
         }
     }
 
-    Ok(unlock_ids)
+    Ok(unlock_pairs)
 }
 
 fn validate_location_reachability_in_snap(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
+    cs_state: &fitting_containers_ships::ContainerShipRuntimeState,
     session: &SessionState,
     ch: &eve_db::CharacterRecord,
     char_id: i64,
@@ -366,10 +374,11 @@ fn validate_location_reachability_in_snap(
     target_loc: i64,
     target_bay_flag: Option<InventoryFlag>,
     chain: &ContainerChainInfo,
+    provided_pw: Option<&str>,
     access_err_code: &'static str,
     range_err_code: &'static str,
     check_container_owner: bool,
-) -> Result<(), BridgeRpcError> {
+) -> Result<Option<(i64, i64)>, BridgeRpcError> {
     if let Some(sess_dock) = session.station_id.or(session.structure_id) {
         if ch
             .station_id
@@ -384,11 +393,42 @@ fn validate_location_reachability_in_snap(
         }
     }
 
+    let ch_dock = if session.station_id.is_none()
+        && session.structure_id.is_none()
+        && session.solar_system_id.is_some()
+    {
+        0
+    } else {
+        ch.station_id.or(ch.structure_id).unwrap_or(0)
+    };
+    let ch_sys = if ch.solar_system_id > 0 {
+        i64::from(ch.solar_system_id)
+    } else {
+        session.solar_system_id.map(i64::from).unwrap_or(0)
+    };
+    let caller_ship_id = session.ship_id.filter(|&id| id > 0).unwrap_or(ch.active_ship_id);
+
     if let Some(st) = snap.structures.get(&chain.root_loc) {
         if st.state == "Destroyed" {
             return Err(BridgeRpcError {
                 code: "StructureDestroyed".into(),
                 message: format!("Structure {} is destroyed", chain.root_loc),
+                client_error: None,
+            });
+        }
+        let docked_at_structure = (ch_dock == chain.root_loc
+            && session.structure_id == Some(chain.root_loc))
+            || (ch.station_id.is_none()
+                && ch.structure_id.is_none()
+                && session.solar_system_id.is_none()
+                && session.structure_id == Some(chain.root_loc));
+        if !docked_at_structure {
+            return Err(BridgeRpcError {
+                code: access_err_code.into(),
+                message: format!(
+                    "Character {char_id} is not docked at structure {}",
+                    chain.root_loc
+                ),
                 client_error: None,
             });
         }
@@ -406,6 +446,109 @@ fn validate_location_reachability_in_snap(
                     "Character {char_id} lacks structure ACL access at {}",
                     chain.root_loc
                 ),
+                client_error: None,
+            });
+        }
+    }
+
+    if ch_dock == 0 && ch_sys > 0 && chain.root_loc == ch_sys {
+        // In-space targets rooted in the active solar system use exact chain + 2,500m/5,000m range
+        // verification directly so targets >5,000m away still return `range_err_code` (`OutOfRange`)
+        // before ship-bay/container password checks.
+        let Some(outer_id) = chain.chain_locs.iter().rev().nth(1).copied() else {
+            return Err(BridgeRpcError {
+                code: access_err_code.into(),
+                message: format!("Inventory {target_loc} is not physically co-located with pilot"),
+                client_error: None,
+            });
+        };
+        if outer_id != caller_ship_id && outer_id != ch.active_ship_id {
+            let Some(outer_node) = snap.items.get(&outer_id) else {
+                return Err(BridgeRpcError {
+                    code: access_err_code.into(),
+                    message: format!("Inventory {target_loc} is not physically co-located with pilot"),
+                    client_error: None,
+                });
+            };
+            let ship_pos = pre_balls.get(&caller_ship_id).map(|b| b.0).or_else(|| {
+                snap.item_positions
+                    .get(&caller_ship_id)
+                    .copied()
+                    .map(glam::DVec3::from)
+            });
+            let cont_pos = pre_balls.get(&outer_id).map(|b| b.0).or_else(|| {
+                snap.item_positions
+                    .get(&outer_id)
+                    .copied()
+                    .map(glam::DVec3::from)
+            });
+            let Some((s_pos, t_pos)) = ship_pos.zip(cont_pos) else {
+                return Err(BridgeRpcError {
+                    code: range_err_code.into(),
+                    message: format!(
+                        "Cannot verify range to container {outer_id}: missing ship or container position"
+                    ),
+                    client_error: None,
+                });
+            };
+            let cat = ctx
+                .sde
+                .types
+                .get(&outer_node.type_id)
+                .map(|t| t.category_id)
+                .unwrap_or(0);
+            let max_range = if cat == 22 { 5_000.0 } else { 2_500.0 };
+            let ship_r = pre_balls
+                .get(&caller_ship_id)
+                .map(|b| b.1)
+                .or_else(|| {
+                    snap.items
+                        .get(&caller_ship_id)
+                        .and_then(|si| ctx.sde.types.get(&si.type_id))
+                        .map(|t| t.radius)
+                })
+                .unwrap_or(0.0);
+            let cont_r = pre_balls
+                .get(&outer_id)
+                .map(|b| b.1)
+                .or_else(|| ctx.sde.types.get(&outer_node.type_id).map(|t| t.radius))
+                .unwrap_or(0.0);
+            let edge_dist = (s_pos.distance(t_pos) - ship_r - cont_r).max(0.0);
+            if edge_dist > max_range {
+                return Err(BridgeRpcError {
+                    code: range_err_code.into(),
+                    message: format!(
+                        "Container {outer_id} is out of range ({edge_dist:.1}m > {max_range:.0}m)"
+                    ),
+                    client_error: None,
+                });
+            }
+        }
+    } else {
+        // `is_inventory_location_colocated` walks 4 hops; for deeper container chains pass the
+        // nearest child below `root_loc` so depth up to `max_hops` resolves against dock/system.
+        let coloc_probe = if chain.chain_locs.len() > 4 {
+            chain.chain_locs[chain.chain_locs.len().saturating_sub(2)]
+        } else {
+            target_loc
+        };
+        let colocated = crate::services::inventory_bound::is_inventory_location_colocated(
+            snap,
+            session,
+            ch,
+            pre_balls,
+            coloc_probe,
+        ) || (ch.station_id.is_none()
+            && ch.structure_id.is_none()
+            && session.solar_system_id.is_none()
+            && session
+                .station_id
+                .or(session.structure_id)
+                .is_some_and(|sd| sd > 0 && sd == chain.root_loc));
+        if !colocated {
+            return Err(BridgeRpcError {
+                code: access_err_code.into(),
+                message: format!("Inventory {target_loc} is not physically co-located with pilot"),
                 client_error: None,
             });
         }
@@ -433,153 +576,76 @@ fn validate_location_reachability_in_snap(
                 }
             }
         }
-    } else if let Some(&root_obj_id) = container_hops.last() {
-        if let Some(root_item) = snap.items.get(&root_obj_id) {
-            let is_foreign_ship = root_item.owner_id != char_id
-                && root_item.owner_id != 0
-                && !session.has_gm_role()
-                && ctx
-                    .sde
-                    .types
-                    .get(&root_item.type_id)
-                    .is_some_and(|t| t.category_id == 6);
-            if is_foreign_ship {
-                let cs_state = fitting_containers_ships::read_container_ship_state_snap(snap);
-                let cfg = cs_state
-                    .ship_configs
-                    .get(&root_obj_id)
-                    .cloned()
-                    .unwrap_or_default();
-                let in_same_fleet = snap.fleets.values().any(|fl| {
-                    fl.members.contains(&char_id) && fl.members.contains(&root_item.owner_id)
-                });
-                let same_corp = ch.corporation_id > 0
-                    && (root_item.owner_id == ch.corporation_id
-                        || snap
-                            .characters
-                            .get(&root_item.owner_id)
-                            .is_some_and(|rc| rc.corporation_id == ch.corporation_id));
-                let root_bay_flag = container_hops
-                    .len()
-                    .checked_sub(2)
-                    .and_then(|idx| snap.items.get(&container_hops[idx]).map(|c| c.flag))
-                    .or(target_bay_flag);
-                let bay_shared = match root_bay_flag {
-                    Some(InventoryFlag::FleetHangar) => {
-                        (in_same_fleet && cfg.allow_fleet_hangar)
-                            || (same_corp && cfg.allow_corp_hangar)
-                    }
-                    Some(InventoryFlag::ShipHangar) => {
-                        (in_same_fleet && cfg.allow_fleet_smb) || (same_corp && cfg.allow_corp_smb)
-                    }
-                    _ => false,
-                };
-                if !bay_shared {
-                    return Err(BridgeRpcError {
-                        code: access_err_code.into(),
-                        message: format!(
-                            "Character {char_id} cannot access inventory {target_loc}"
-                        ),
-                        client_error: None,
-                    });
-                }
-            }
-        }
     }
 
-    // `is_inventory_location_colocated` walks 4 hops; for deeper container chains pass the
-    // nearest child below `root_loc` so depth up to `max_hops` resolves against dock/system.
-    let coloc_probe = if chain.chain_locs.len() > 4 {
-        chain.chain_locs[chain.chain_locs.len().saturating_sub(2)]
-    } else {
-        target_loc
-    };
-    let colocated = crate::services::inventory_bound::is_inventory_location_colocated(
-        snap,
-        session,
-        ch,
-        pre_balls,
-        coloc_probe,
-    ) || (ch.station_id.is_none()
-        && ch.structure_id.is_none()
-        && session.solar_system_id.is_none()
-        && session
-            .station_id
-            .or(session.structure_id)
-            .is_some_and(|sd| sd > 0 && sd == chain.root_loc));
-    if !colocated {
-        return Err(BridgeRpcError {
-            code: access_err_code.into(),
-            message: format!("Inventory {target_loc} is not physically co-located with pilot"),
-            client_error: None,
-        });
-    }
-
-    let ch_dock = if session.station_id.is_none()
-        && session.structure_id.is_none()
-        && session.solar_system_id.is_some()
-    {
-        0
-    } else {
-        ch.station_id.or(ch.structure_id).unwrap_or(0)
-    };
-    let ch_sys = if ch.solar_system_id > 0 {
-        i64::from(ch.solar_system_id)
-    } else {
-        session.solar_system_id.map(i64::from).unwrap_or(0)
-    };
-    let caller_ship_id = session.ship_id.filter(|&id| id > 0).unwrap_or(ch.active_ship_id);
-
-    if ch_dock == 0 && ch_sys > 0 && chain.root_loc == ch_sys {
-        if let Some(outer_id) = chain.chain_locs.iter().rev().nth(1).copied() {
-            if outer_id != caller_ship_id && outer_id != ch.active_ship_id {
-                if let Some(outer_node) = snap.items.get(&outer_id) {
-                    let ship_pos = pre_balls.get(&caller_ship_id).map(|b| b.0).or_else(|| {
-                        snap.item_positions
-                            .get(&caller_ship_id)
-                            .copied()
-                            .map(glam::DVec3::from)
-                    });
-                    let cont_pos = pre_balls.get(&outer_id).map(|b| b.0).or_else(|| {
-                        snap.item_positions
-                            .get(&outer_id)
-                            .copied()
-                            .map(glam::DVec3::from)
-                    });
-                    if let Some((s_pos, t_pos)) = ship_pos.zip(cont_pos) {
-                        let cat = ctx
-                            .sde
-                            .types
-                            .get(&outer_node.type_id)
-                            .map(|t| t.category_id)
-                            .unwrap_or(0);
-                        let max_range = if cat == 22 { 5_000.0 } else { 2_500.0 };
-                        let ship_r = pre_balls
-                            .get(&caller_ship_id)
-                            .map(|b| b.1)
-                            .or_else(|| {
-                                snap.items
-                                    .get(&caller_ship_id)
-                                    .and_then(|si| ctx.sde.types.get(&si.type_id))
-                                    .map(|t| t.radius)
-                            })
-                            .unwrap_or(0.0);
-                        let cont_r = pre_balls
-                            .get(&outer_id)
-                            .map(|b| b.1)
-                            .or_else(|| {
-                                ctx.sde.types.get(&outer_node.type_id).map(|t| t.radius)
-                            })
-                            .unwrap_or(0.0);
-                        let edge_dist = (s_pos.distance(t_pos) - ship_r - cont_r).max(0.0);
-                        if edge_dist > max_range {
+    // Check foreign ship bay access and password strictly after co-location and range checks
+    // so remote/out-of-range callers cannot probe ship bay passwords.
+    let mut ship_bay_unlock = None;
+    if is_in_space_root {
+        if let Some(&root_obj_id) = container_hops.last() {
+            if let Some(root_item) = snap.items.get(&root_obj_id) {
+                let is_foreign_ship = root_item.owner_id != char_id
+                    && root_item.owner_id != 0
+                    && !session.has_gm_role()
+                    && ctx
+                        .sde
+                        .types
+                        .get(&root_item.type_id)
+                        .is_some_and(|t| t.category_id == 6);
+                if is_foreign_ship {
+                    let root_bay_flag = container_hops
+                        .len()
+                        .checked_sub(2)
+                        .and_then(|idx| snap.items.get(&container_hops[idx]).map(|c| c.flag))
+                        .or(target_bay_flag);
+                    if !check_container_owner
+                        || matches!(
+                            root_bay_flag,
+                            Some(InventoryFlag::FleetHangar | InventoryFlag::ShipHangar)
+                        )
+                    {
+                        let (is_sma, deny_code) = match root_bay_flag {
+                            Some(InventoryFlag::FleetHangar) => (false, "FleetHangarAccessDenied"),
+                            Some(InventoryFlag::ShipHangar) => (true, "SMAAccessDenied"),
+                            _ => {
+                                return Err(BridgeRpcError {
+                                    code: access_err_code.into(),
+                                    message: format!(
+                                        "Character {char_id} cannot access inventory {target_loc}"
+                                    ),
+                                    client_error: None,
+                                });
+                            }
+                        };
+                        if !fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
+                            snap,
+                            char_id,
+                            root_obj_id,
+                            root_item.owner_id,
+                            is_sma,
+                            provided_pw,
+                        ) {
                             return Err(BridgeRpcError {
-                                code: range_err_code.into(),
+                                code: deny_code.into(),
                                 message: format!(
-                                    "Container {outer_id} is out of range ({edge_dist:.1}m > {max_range:.0}m)"
+                                    "Character {char_id} lacks ship bay access or valid password for {root_obj_id}"
                                 ),
                                 client_error: None,
                             });
+                        }
+                        if let Some(cfg) = cs_state.ship_configs.get(&root_obj_id) {
+                            if let Some(req_pw) = cfg.password.as_deref().filter(|s| !s.is_empty())
+                            {
+                                let already_unlocked = cs_state
+                                    .unlocked_containers
+                                    .contains(&(char_id, root_obj_id))
+                                    || cs_state
+                                        .unlocked_containers
+                                        .contains(&(root_obj_id, char_id));
+                                if !already_unlocked && provided_pw == Some(req_pw) {
+                                    ship_bay_unlock = Some((char_id, root_obj_id));
+                                }
+                            }
                         }
                     }
                 }
@@ -587,7 +653,7 @@ fn validate_location_reachability_in_snap(
         }
     }
 
-    Ok(())
+    Ok(ship_bay_unlock)
 }
 
 fn execute_split_stack_in_tx(
@@ -644,9 +710,10 @@ fn execute_split_stack_in_tx(
             "SplitFailed",
             &format!("Item {item_id}"),
         )?;
-        validate_location_reachability_in_snap(
+        let ship_unlock = validate_location_reachability_in_snap(
             ctx,
             guard,
+            &cs_state,
             session,
             &ch,
             char_id,
@@ -654,6 +721,7 @@ fn execute_split_stack_in_tx(
             item.location_id,
             Some(item.flag),
             &chain,
+            provided_pw,
             "SplitFailed",
             "SplitFailed",
             false,
@@ -682,9 +750,7 @@ fn execute_split_stack_in_tx(
                 client_error: None,
             });
         }
-        if matches!(item.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
-            || matches!(item.flag as u16, 36 | 63 | 72)
-            || item.type_id == 3_468
+        if eve_db::WorldStateSnapshot::has_locked_flag_or_wrap_type(&item)
             || guard.is_item_locked_in_contract_or_job(item_id)
         {
             return Err(BridgeRpcError {
@@ -693,13 +759,7 @@ fn execute_split_stack_in_tx(
                 client_error: None,
             });
         }
-        let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(guard);
-        let in_asset_safety = ext.asset_safety_wraps.values().any(|w| {
-            w.wrap_id == item_id
-                || w.wrap_id == item.location_id
-                || w.item_ids.contains(&item_id)
-        });
-        if in_asset_safety {
+        if guard.is_item_in_active_asset_safety_wrap(item_id) {
             return Err(BridgeRpcError {
                 code: "SplitFailed".into(),
                 message: format!("Item {item_id} is sealed inside an Asset Safety wrap"),
@@ -707,7 +767,7 @@ fn execute_split_stack_in_tx(
             });
         }
 
-        let unlock_ids = enforce_container_chain_policies(
+        let mut unlock_pairs = enforce_container_chain_policies(
             ctx,
             guard,
             &cs_state,
@@ -724,6 +784,9 @@ fn execute_split_stack_in_tx(
                 locked_err_code: "SplitFailed",
             },
         )?;
+        if let Some(pair) = ship_unlock {
+            unlock_pairs.push(pair);
+        }
 
         let split_res = guard
             .split_stack_in_snap(item.owner_id, item_id, split_quantity)
@@ -733,7 +796,7 @@ fn execute_split_stack_in_tx(
                 client_error: None,
             })?;
         // Persist container unlock only after `split_stack_in_snap` succeeds inside the same tx.
-        persist_unlocked_containers_in_snap(guard, char_id, &unlock_ids);
+        persist_unlocked_containers_in_snap(guard, &unlock_pairs);
         Ok(split_res)
     })
 }
@@ -909,14 +972,10 @@ pub(in crate::services) fn handle_stack_ops(
                 let ch = character_or_session_fallback(guard, session, char_id)?;
                 let cs_state_merge =
                     fitting_containers_ships::read_container_ship_state_snap(guard);
-                let ext =
-                    crate::services::station_structure::structure_upwell_ops::load_ext_state(
-                        guard,
-                    );
                 let lock_index = guard.build_inventory_lock_index();
                 let mut events = Vec::with_capacity(ops.len());
                 let mut checked_reachability = HashSet::new();
-                let mut unlock_ids = Vec::new();
+                let mut unlock_pairs = Vec::new();
                 for &(src_id, dst_id, qty_opt) in &ops {
                     if src_id == dst_id {
                         return Err(BridgeRpcError {
@@ -971,9 +1030,10 @@ pub(in crate::services) fn handle_stack_ops(
                         &format!("Items {src_id}/{dst_id}"),
                     )?;
                     if checked_reachability.insert((src.location_id, src.flag as u16)) {
-                        validate_location_reachability_in_snap(
+                        if let Some(ship_unlock) = validate_location_reachability_in_snap(
                             ctx,
                             guard,
+                            &cs_state_merge,
                             session,
                             &ch,
                             char_id,
@@ -981,10 +1041,13 @@ pub(in crate::services) fn handle_stack_ops(
                             src.location_id,
                             Some(src.flag),
                             &chain,
+                            provided_pw,
                             "DestinationAccessDenied",
                             "OutOfRange",
                             false,
-                        )?;
+                        )? {
+                            unlock_pairs.push(ship_unlock);
+                        }
                     }
                     if cs_state_merge.alsc_locked_items.contains(&src_id)
                         || cs_state_merge.alsc_locked_items.contains(&dst_id)
@@ -1048,11 +1111,13 @@ pub(in crate::services) fn handle_stack_ops(
                             client_error: None,
                         });
                     }
-                    if ext.asset_safety_wraps.values().any(|w| {
-                        w.wrap_id == src.location_id
-                            || w.item_ids.contains(&src_id)
-                            || w.item_ids.contains(&dst_id)
-                    }) {
+                    if lock_index.unpaid_wrap_items.contains(&src_id)
+                        || lock_index.unpaid_wrap_items.contains(&dst_id)
+                        || chain
+                            .chain_locs
+                            .iter()
+                            .any(|loc| lock_index.unpaid_wrap_items.contains(loc))
+                    {
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
                             message: "Cannot merge items inside an Asset Safety wrap".into(),
@@ -1076,7 +1141,7 @@ pub(in crate::services) fn handle_stack_ops(
                             locked_err_code: "StackFailed",
                         },
                     )?;
-                    unlock_ids.extend(chain_unlocks);
+                    unlock_pairs.extend(chain_unlocks);
                     if guard.is_item_or_ancestor_locked_or_impounded_with_index(&lock_index, dst_id)
                         || guard.is_item_or_ancestor_locked_or_impounded_with_index(
                             &lock_index,
@@ -1147,7 +1212,7 @@ pub(in crate::services) fn handle_stack_ops(
                         });
                     }
                 }
-                persist_unlocked_containers_in_snap(guard, char_id, &unlock_ids);
+                persist_unlocked_containers_in_snap(guard, &unlock_pairs);
                 Ok(events)
             });
             let events = match tx_res {
@@ -1304,9 +1369,10 @@ pub(in crate::services) fn handle_stack_ops(
                     "InvalidLocation",
                     &format!("Inventory {target_loc}"),
                 )?;
-                validate_location_reachability_in_snap(
+                let ship_unlock = validate_location_reachability_in_snap(
                     ctx,
                     guard,
+                    &cs_state,
                     session,
                     &ch,
                     char_id,
@@ -1314,11 +1380,12 @@ pub(in crate::services) fn handle_stack_ops(
                     target_loc,
                     Some(target_flag),
                     &chain,
+                    provided_pw,
                     "DestinationAccessDenied",
                     "OutOfRange",
                     true,
                 )?;
-                let unlock_ids = enforce_container_chain_policies(
+                let mut unlock_pairs = enforce_container_chain_policies(
                     ctx,
                     guard,
                     &cs_state,
@@ -1335,13 +1402,16 @@ pub(in crate::services) fn handle_stack_ops(
                         locked_err_code: "StackFailed",
                     },
                 )?;
+                if let Some(pair) = ship_unlock {
+                    unlock_pairs.push(pair);
+                }
                 let outcome = guard.stack_all_items_in_snap(
                     char_id,
                     target_loc,
                     target_flag,
                     &loaded_tube_items,
                 );
-                persist_unlocked_containers_in_snap(guard, char_id, &unlock_ids);
+                persist_unlocked_containers_in_snap(guard, &unlock_pairs);
                 Ok(outcome)
             }) {
                 Ok(outcome) => outcome,
