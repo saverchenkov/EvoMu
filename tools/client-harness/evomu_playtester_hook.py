@@ -2187,6 +2187,104 @@ def _close_utilmenu_if_outside(node):
         pass
 
 
+def _is_top_level_window_node(node):
+    """Return True for top-level windows/stacks, excluding child containers like FormWnd."""
+    if node is None:
+        return False
+    if getattr(node, "isTopLevelWindow", False) or getattr(node, "windowID", None) is not None:
+        return True
+    wcls = _safe_str(getattr(getattr(node, "__class__", None), "__name__", ""), 64)
+    if not wcls or wcls == "FormWnd":
+        return False
+    if not (wcls == "WindowStack" or wcls.endswith("Window") or wcls.endswith("Wnd")):
+        return False
+    anc = getattr(node, "parent", None)
+    for _ in range(8):
+        if anc is None:
+            break
+        if getattr(anc, "isTopLevelWindow", False) or getattr(anc, "windowID", None) is not None:
+            return False
+        anc = getattr(anc, "parent", None)
+    return True
+
+
+def _resolve_combo_dropdown(owner):
+    try:
+        dd_ref = getattr(owner, "_comboDropDown", None)
+        return dd_ref() if callable(dd_ref) else dd_ref
+    except Exception:
+        return None
+
+
+def _find_combo_owner_for_menu_container(ch):
+    """Return the Combo widget that owns a dropdown Container in uicore.layer.menu."""
+    if ch is None:
+        return None
+    candidates = []
+    sr = getattr(ch, "sr", None)
+    sr_scroll = getattr(sr, "scroll", None) if sr is not None else None
+    if sr_scroll is not None:
+        candidates.append(sr_scroll)
+    for sub in list(getattr(ch, "children", []) or []):
+        if sub is not None and sub is not sr_scroll:
+            candidates.append(sub)
+    for sc in candidates:
+        for attr in ("OnKillFocus", "Confirm", "OnUp", "OnDown", "OnSelectionChange"):
+            fn = getattr(sc, attr, None)
+            if not callable(fn):
+                continue
+            owner = getattr(fn, "__self__", None)
+            if owner is None:
+                owner = getattr(fn, "im_self", None)
+            if owner is None or getattr(owner, "destroyed", False) or not hasattr(owner, "_comboDropDown"):
+                continue
+            if _resolve_combo_dropdown(owner) is ch or getattr(owner, "optionMenu", None) is ch:
+                return owner
+    return None
+
+
+def _cleanup_combo_dropdown(combo_owner, menu_container=None, preserve_pinned=False):
+    """Reset Combo dropdown state cleanly so Combo._Expanded() cannot wedge True. # Fixes #1289"""
+    if combo_owner is None:
+        return
+    ran_cleanup = False
+    # Combo.Cleanup(False) calls ClearMenuLayer() (menu.Flush()), so skip it when a
+    # pinned tooltip sibling on menu_layer must survive this outside click.
+    if not preserve_pinned and callable(getattr(combo_owner, "Cleanup", None)):
+        try:
+            combo_owner.Cleanup(False)
+            ran_cleanup = True
+        except Exception:
+            ran_cleanup = False
+    if menu_container is not None and not getattr(menu_container, "destroyed", False):
+        if callable(getattr(menu_container, "Close", None)):
+            try:
+                menu_container.Close()
+            except Exception:
+                pass
+    dd_obj = _resolve_combo_dropdown(combo_owner)
+    if not ran_cleanup or (dd_obj is not None and (dd_obj is menu_container or getattr(dd_obj, "destroyed", False))):
+        try:
+            combo_owner._comboDropDown = None
+        except Exception:
+            pass
+        if callable(getattr(combo_owner, "CollapseBackground", None)):
+            try:
+                combo_owner.CollapseBackground()
+            except Exception:
+                pass
+
+
+def _reset_stale_combo_dropdown(node):
+    """Clear a destroyed Combo dropdown reference before OnClick checks _Expanded()."""
+    if node is None or not hasattr(node, "_comboDropDown"):
+        return
+    dd = _resolve_combo_dropdown(node)
+    if dd is not None and getattr(dd, "destroyed", False):
+        # Preserve any unrelated live children in uicore.layer.menu.
+        _cleanup_combo_dropdown(node, menu_container=dd, preserve_pinned=True)
+
+
 def _close_context_menus_if_outside(node):
     try:
         uic = _get_uicore()
@@ -2206,7 +2304,14 @@ def _close_context_menus_if_outside(node):
             CloseContextMenus()
         except Exception:
             pass
-        for ch in list(getattr(menu_layer, "children", []) or []):
+        remaining = [
+            ch for ch in list(getattr(menu_layer, "children", []) or [])
+            if not getattr(ch, "destroyed", False)
+        ]
+        preserve_pinned = bool(
+            node is not None and any(getattr(ch, "_evomu_pinned", False) for ch in remaining)
+        )
+        for ch in remaining:
             if getattr(ch, "destroyed", False):
                 continue
             if node is not None and getattr(ch, "_evomu_pinned", False):
@@ -2214,8 +2319,12 @@ def _close_context_menus_if_outside(node):
             try:
                 if getattr(ch, "_evomu_pinned", False):
                     _close_pinned_tooltip_panel(ch)
-                elif callable(getattr(ch, "Close", None)):
-                    ch.Close()
+                else:
+                    combo_owner = _find_combo_owner_for_menu_container(ch)
+                    if combo_owner is not None:
+                        _cleanup_combo_dropdown(combo_owner, ch, preserve_pinned=preserve_pinned)
+                    elif callable(getattr(ch, "Close", None)):
+                        ch.Close()
             except Exception:
                 pass
     except Exception:
@@ -2637,7 +2746,9 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
             if cur_w is None:
                 break
             wcls = _safe_str(getattr(getattr(cur_w, "__class__", None), "__name__", ""), 64)
-            if hasattr(cur_w, "windowID") or "Window" in wcls or "Wnd" in wcls:
+            # Fixes #1289: skip child layout containers like FormWnd so SetOrder(0) does not
+            # move TOALL containers ahead of TOTOP/TOBOTTOM siblings inside the parent Window.
+            if _is_top_level_window_node(cur_w):
                 try:
                     if hasattr(cur_w, "SetOrder"):
                         cur_w.SetOrder(0)
@@ -2687,6 +2798,8 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
                             break
         except Exception:
             _clicked_pinned_tp = None
+    if not right_click:
+        _reset_stale_combo_dropdown(node)
     click_attrs = (
         ("OnDblClick", "on_double_click", "DoubleClick", "Click", "OnClick", "on_click", "OnMouseDown")
         if double_click
@@ -5405,12 +5518,7 @@ def _execute_action(sm, action):
                         for _ in range(12):
                             if cur_w is None:
                                 break
-                            wcls = cur_w.__class__.__name__
-                            if getattr(cur_w, "windowID", None) is not None or (
-                                (wcls.endswith("Window") or wcls.endswith("Wnd") or wcls == "WindowStack")
-                                and not wcls.endswith("Header")
-                                and not wcls.endswith("Underlay")
-                            ):
+                            if _is_top_level_window_node(cur_w):
                                 try:
                                     wx, wy, ww, wh = _widget_abs_rect(cur_w)
                                     nx, ny, nw, nh = _widget_abs_rect(node)
@@ -6740,13 +6848,11 @@ def _execute_action(sm, action):
                 if (
                     depth == 1
                     or getattr(node, "isModal", False)
-                    or getattr(node, "windowID", None) is not None
                     or "MessageBox" in cls_n
                     or "Popup" in cls_n
                     or "HybridWindow" in cls_n
                     or "Dialog" in cls_n
-                    or "Window" in cls_n
-                    or "Wnd" in cls_n
+                    or _is_top_level_window_node(node)
                 ):
                     seen_modals.add(_modal_key(node, cls_n))
                 for sub in list(getattr(node, "children", []) or []):

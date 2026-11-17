@@ -3572,5 +3572,314 @@ class TestScenarioHookExtensions(unittest.TestCase):
             self.assertFalse(res_nes_pri.get("ok"), res_nes_pri)
 
 
+class TestComboDropdownAndFormWndLayout(unittest.TestCase):
+    @staticmethod
+    def _build_v24_combo_and_menu_layer():
+        import weakref
+
+        class FakeContainer:
+            def __init__(self, name="", parent=None):
+                self.name = name
+                self.parent = parent
+                self.children = []
+                self.destroyed = False
+                self.display = True
+                self.closed_calls = 0
+                self.sr = types.SimpleNamespace()
+                if parent is not None:
+                    parent.children.append(self)
+
+            def Close(self):
+                self.closed_calls += 1
+                self.destroyed = True
+                for sub in list(self.children):
+                    if hasattr(sub, "Close"):
+                        sub.Close()
+                if self.parent is not None and self in self.parent.children:
+                    self.parent.children.remove(self)
+
+            def Flush(self):
+                for sub in list(self.children):
+                    sub.Close()
+
+        menu_layer = FakeContainer(name="l_menu")
+
+        class FakeCombo:
+            def __init__(self, name="startStation", parent=None):
+                self.name = name
+                self.parent = parent
+                self.children = []
+                self.destroyed = False
+                self.display = True
+                self._comboDropDown = None
+                self.optionMenu = None
+                self.expand_calls = 0
+                self.cleanup_calls = []
+                self.collapse_calls = 0
+                self.onchange_calls = []
+                self.bg_expanded = False
+                if parent is not None:
+                    parent.children.append(self)
+
+            def _Expanded(self):
+                return bool(self._comboDropDown and self._comboDropDown())
+
+            def Expand(self):
+                self.expand_calls += 1
+                menu = FakeContainer(name="comboOptionMenu", parent=menu_layer)
+                scroll = FakeContainer(name="comboScroll", parent=menu)
+                scroll.OnKillFocus = self.OnScrollFocusLost
+                scroll.Confirm = self.Confirm
+                scroll.OnUp = self.OnUp
+                scroll.OnDown = self.OnDown
+                scroll.OnSelectionChange = self.OnScrollSelectionChange
+                entry = FakeContainer(name="ComboEntry_0", parent=scroll)
+                entry.OnClick = lambda: self.Confirm()
+                menu.sr.scroll = scroll
+                self.optionMenu = menu
+                self._comboDropDown = weakref.ref(menu)
+                self.bg_expanded = True
+
+            def OnClick(self):
+                if not self._Expanded():
+                    self.Expand()
+
+            def OnScrollFocusLost(self, *args):
+                self.Confirm(False)
+
+            def Confirm(self, setfocus=True):
+                self.onchange_calls.append("confirmed")
+                self.Cleanup(setfocus)
+
+            def OnUp(self):
+                pass
+
+            def OnDown(self):
+                pass
+
+            def OnScrollSelectionChange(self, *args):
+                pass
+
+            def CollapseBackground(self):
+                self.collapse_calls += 1
+                self.bg_expanded = False
+
+            def Cleanup(self, setfocus=True):
+                self.cleanup_calls.append(bool(setfocus))
+                menu_layer.Flush()
+                self._comboDropDown = None
+                self.CollapseBackground()
+
+        return menu_layer, FakeContainer, FakeCombo
+
+    @staticmethod
+    def _build_fake_carbon_menu_mods():
+        class ContextMenuMixin:
+            pass
+
+        def CloseContextMenus():
+            # V24 CloseContextMenus only closes ContextMenuMixin widgets, not Combo optionMenu containers.
+            return None
+
+        carbonui_pkg = types.ModuleType("carbonui")
+        control_pkg = types.ModuleType("carbonui.control")
+        ctx_pkg = types.ModuleType("carbonui.control.contextMenu")
+        menu_util_mod = types.ModuleType("carbonui.control.contextMenu.menuUtil")
+        menu_util_mod.CloseContextMenus = CloseContextMenus
+        ctx_mod = types.ModuleType("carbonui.control.contextMenu.contextMenu")
+        ctx_mod.ContextMenuMixin = ContextMenuMixin
+        return {
+            "carbonui": carbonui_pkg,
+            "carbonui.control": control_pkg,
+            "carbonui.control.contextMenu": ctx_pkg,
+            "carbonui.control.contextMenu.menuUtil": menu_util_mod,
+            "carbonui.control.contextMenu.contextMenu": ctx_mod,
+        }
+
+    def test_close_context_menus_if_outside_cleans_up_combo_dropdown_and_allows_reopen(self):
+        # Fixes #1289
+        hook = _load_hook_with_py2_stubs()
+        menu_layer, _, FakeCombo = self._build_v24_combo_and_menu_layer()
+        combo = FakeCombo("startStation")
+        fake_uicore = types.SimpleNamespace(
+            layer=types.SimpleNamespace(menu=menu_layer),
+            registry=None,
+            uilib=None,
+            cmd=None,
+            desktop=None,
+        )
+
+        with mock.patch.dict(sys.modules, self._build_fake_carbon_menu_mods()), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_dismiss_pinned_tooltip_if_outside", return_value=False):
+            res_open_1 = hook._invoke_widget_click(combo)
+            self.assertEqual(res_open_1, "OnClick")
+            self.assertEqual(combo.expand_calls, 1)
+            self.assertTrue(combo._Expanded())
+            self.assertTrue(combo.bg_expanded)
+            self.assertEqual(len(menu_layer.children), 1)
+
+            # Clicking an entry inside optionMenu must keep optionMenu open for selection.
+            entry = menu_layer.children[0].sr.scroll.children[0]
+            hook._close_context_menus_if_outside(entry)
+            self.assertTrue(combo._Expanded())
+            self.assertEqual(len(menu_layer.children), 1)
+
+            # External dismissal (e.g., open_window / open_neocom -> _close_context_menus_if_outside(None))
+            # must run Combo.Cleanup(False) instead of raw ch.Close(), without firing OnChange.
+            first_menu = combo.optionMenu
+            hook._close_context_menus_if_outside(None)
+            self.assertTrue(first_menu.destroyed)
+            self.assertEqual(menu_layer.children, [])
+            self.assertEqual(combo.cleanup_calls, [False])
+            self.assertEqual(combo.onchange_calls, [])
+            self.assertIsNone(combo._comboDropDown)
+            self.assertFalse(combo._Expanded())
+            self.assertFalse(combo.bg_expanded)
+            self.assertEqual(combo.collapse_calls, 1)
+
+            # Re-clicking startStation Combo must now re-expand instead of silently no-oping.
+            res_open_2 = hook._invoke_widget_click(combo)
+            self.assertEqual(res_open_2, "OnClick")
+            self.assertEqual(combo.expand_calls, 2)
+            self.assertTrue(combo._Expanded())
+            self.assertEqual(len(menu_layer.children), 1)
+
+    def test_close_context_menus_preserves_pinned_tooltip_and_resets_stale_combo_dropdown(self):
+        # Fixes #1289
+        hook = _load_hook_with_py2_stubs()
+        menu_layer, FakeContainer, FakeCombo = self._build_v24_combo_and_menu_layer()
+        combo = FakeCombo("startStation")
+        outside_btn = FakeContainer("otherBtn")
+        fake_uicore = types.SimpleNamespace(
+            layer=types.SimpleNamespace(menu=menu_layer),
+            registry=None,
+            uilib=None,
+            cmd=None,
+            desktop=None,
+        )
+
+        with mock.patch.dict(sys.modules, self._build_fake_carbon_menu_mods()), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_dismiss_pinned_tooltip_if_outside", return_value=False):
+            combo.Expand()
+            pinned_tp = FakeContainer("TooltipPanel", parent=menu_layer)
+            pinned_tp._evomu_pinned = True
+
+            # Outside click with a pinned tooltip sibling must preserve pinned_tp (not Flush menu_layer)
+            # while still closing combo's optionMenu and resetting _comboDropDown / background state.
+            hook._close_context_menus_if_outside(outside_btn)
+            self.assertFalse(pinned_tp.destroyed)
+            self.assertEqual(pinned_tp.closed_calls, 0)
+            self.assertTrue(combo.optionMenu.destroyed)
+            self.assertEqual(combo.cleanup_calls, [])
+            self.assertIsNone(combo._comboDropDown)
+            self.assertFalse(combo._Expanded())
+            self.assertFalse(combo.bg_expanded)
+            self.assertEqual(combo.collapse_calls, 1)
+
+            # Simulate an already-wedged Combo (e.g. optionMenu destroyed externally while
+            # self.optionMenu + weakref _comboDropDown still keep _Expanded() == True).
+            combo.Expand()
+            stale_menu = combo.optionMenu
+            stale_menu.Close()
+            self.assertTrue(stale_menu.destroyed)
+            self.assertTrue(combo._Expanded())
+
+            res_reopen = hook._invoke_widget_click(combo)
+            self.assertEqual(res_reopen, "OnClick")
+            self.assertEqual(combo.expand_calls, 3)
+            self.assertTrue(combo._Expanded())
+            self.assertEqual(combo.collapse_calls, 2)
+
+    def test_invoke_widget_click_and_drag_widget_skip_formwnd_and_target_parent_window(self):
+        # Fixes #1289
+        hook = _load_hook_with_py2_stubs()
+
+        class FakeRectWidget:
+            def __init__(self, name, cls_name, x, y, w, h, parent=None):
+                self.name = name
+                self.__class__ = type(cls_name, (FakeRectWidget,), {})
+                self._rect = (x, y, w, h)
+                self.left = x
+                self.top = y
+                self.parent = parent
+                self.children = []
+                self.destroyed = False
+                self.display = True
+                self.state = 0
+                self.set_order_calls = []
+                if parent is not None:
+                    parent.children.append(self)
+
+            def GetAbsolute(self):
+                return self._rect
+
+            def SetOrder(self, idx):
+                self.set_order_calls.append(idx)
+
+        main_layer = FakeRectWidget("l_main", "Layer", 0, 0, 1920, 1080)
+        create_contract_wnd = FakeRectWidget("createcontract", "CreateContractWnd", 700, 150, 740, 720, parent=main_layer)
+        create_contract_wnd.windowID = "createcontract"
+        create_contract_wnd.isTopLevelWindow = True
+
+        sr_main = FakeRectWidget("main", "Container", 700, 180, 740, 690, parent=create_contract_wnd)
+        FakeRectWidget("topParent", "Container", 700, 180, 740, 42, parent=sr_main)
+        FakeRectWidget("buttonWnd", "ButtonGroup", 700, 830, 740, 40, parent=sr_main)
+        form_wnd = FakeRectWidget("form", "FormWnd", 700, 222, 740, 608, parent=sr_main)
+        start_station = FakeRectWidget("startStation", "Combo", 740, 538, 380, 32, parent=form_wnd)
+        combo_clicks = []
+        start_station.OnClick = lambda: combo_clicks.append("clicked")
+        drag_handle = FakeRectWidget("headerLabel", "Label", 720, 240, 180, 24, parent=form_wnd)
+
+        # Also verify a FormWnd inside a mock window without windowID/isTopLevelWindow is skipped.
+        custom_wnd = FakeRectWidget("custom", "MyCustomWnd", 100, 100, 400, 300, parent=main_layer)
+        custom_form = FakeRectWidget("form", "FormWnd", 100, 130, 400, 270, parent=custom_wnd)
+        custom_btn = FakeRectWidget("ok_btn", "Button", 120, 150, 80, 28, parent=custom_form)
+        custom_btn.OnClick = lambda: combo_clicks.append("custom_ok")
+
+        focused = []
+        fake_reg = types.SimpleNamespace(SetFocus=lambda obj: focused.append(obj))
+        fake_desktop = types.SimpleNamespace(width=1920, height=1080)
+        fake_uicore = types.SimpleNamespace(
+            layer=types.SimpleNamespace(menu=None, main=main_layer, abovemain=None, modal=None),
+            registry=fake_reg,
+            uilib=None,
+            cmd=None,
+            desktop=fake_desktop,
+        )
+        fake_sm = mock.MagicMock()
+
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_dismiss_pinned_tooltip_if_outside", return_value=False), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value={"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "inflight"}), \
+             mock.patch.object(hook, "_find_widget", return_value=drag_handle), \
+             mock.patch.object(hook, "_find_widget_at_xy", return_value=None):
+            res_combo = hook._invoke_widget_click(start_station)
+            self.assertEqual(res_combo, "OnClick")
+            self.assertEqual(form_wnd.set_order_calls, [])
+            self.assertEqual(create_contract_wnd.set_order_calls, [0])
+            self.assertEqual(focused, [create_contract_wnd])
+
+            res_custom = hook._invoke_widget_click(custom_btn)
+            self.assertEqual(res_custom, "OnClick")
+            self.assertEqual(custom_form.set_order_calls, [])
+            self.assertEqual(custom_wnd.set_order_calls, [0])
+            self.assertEqual(combo_clicks, ["clicked", "custom_ok"])
+
+            res_drag = hook._execute_action(
+                fake_sm,
+                {"type": "drag_widget", "target": "headerLabel", "dest_x": 920, "dest_y": 340, "wait_ms": 0},
+            )
+            self.assertTrue(res_drag.get("ok"), res_drag)
+            self.assertEqual(res_drag.get("moved_window"), "createcontract")
+            self.assertEqual((form_wnd.left, form_wnd.top), (700, 222))
+            self.assertNotEqual((create_contract_wnd.left, create_contract_wnd.top), (700, 150))
+
+
 if __name__ == "__main__":
     unittest.main()
