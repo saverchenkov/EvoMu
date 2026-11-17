@@ -2146,6 +2146,104 @@ class TestSpeedupOptimizations(unittest.TestCase):
             )
         )
 
+    def test_benign_user_error_markers_include_quantum_core_dockable_and_warp_short(self):
+        oracle_cls = playtester.PlaytesterBugOracle
+
+        def _eval_macho(svc: str, meth: str, err_str: str, expected_ui: str, action_error: str):
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                qdir = root / "queue"
+                sdir = root / "step_1"
+                qdir.mkdir()
+                sdir.mkdir()
+                shot = root / "shot.png"
+                shot.write_bytes(b"png")
+                tb = root / "tb.log"
+                tb.write_text("", encoding="utf-8")
+                srv = root / "srv.log"
+                srv.write_text("", encoding="utf-8")
+                mem = playtester.PlaytesterMemory(root, git_head="deadbeef")
+                oracle = oracle_cls(root, qdir, mem, sync_github=False)
+                queued = oracle.evaluate_step(
+                    step_num=1,
+                    git_head="deadbeef",
+                    decision={
+                        "action": {"type": "click_widget", "target": "ok", "expected_ui_and_state_change": expected_ui},
+                        "bug_report": {"should_file": False},
+                    },
+                    exec_res={
+                        "action_ok": False,
+                        "action_error": action_error,
+                        "flight_recorder": {
+                            "log_exceptions": [],
+                            "quasar_errors": [],
+                            "macho_exceptions": [{"service": svc, "method": meth, "error": err_str}],
+                        },
+                    },
+                    ui_snapshot={},
+                    screenshot_path=shot,
+                    burst_paths=[],
+                    traceback_log=tb,
+                    server_log=srv,
+                    step_dir=sdir,
+                )
+                return [json.loads(p.read_text(encoding="utf-8")) for p in queued]
+
+        benign_cases = (
+            (
+                "N=888444:10057",
+                "MultiAdd",
+                "UserError('CustomInfo', {'info': 'QuantumCoreRequired: Ship fitting service is disabled at structure 1001897528498 until its Quantum Core is online'})",
+                "Miner I fits into high power slot",
+            ),
+            (
+                "stationSvc",
+                "Dock",
+                "UserError('CustomInfo', {'info': \"StructureNotDockable: Structure 1001897542825 is in state 'Anchoring' and cannot be docked at\"})",
+                "Ship docks at Upwell structure",
+            ),
+            (
+                "beyonce",
+                "WarpToObject",
+                "UserError('WarpTooShort', {})",
+                "Ship warps to celestial object",
+            ),
+            (
+                "structureDocking",
+                "Dock",
+                "UserError('StructureNotDockable', {})",
+                "Ship docks at structure",
+            ),
+            (
+                "repairSvc",
+                "RepairItemsInStructure",
+                "UserError('QuantumCoreRequired', {})",
+                "Items repaired in structure",
+            ),
+        )
+        for svc, meth, err_str, expected_ui in benign_cases:
+            with self.subTest(err=err_str):
+                self.assertTrue(oracle_cls.is_expected_user_error(err_str, expected_ui))
+                self.assertTrue(
+                    oracle_cls.is_expected_user_error({"service": svc, "method": meth, "error": err_str}, expected_ui)
+                )
+                self.assertEqual(
+                    _eval_macho(svc, meth, err_str, expected_ui, f"Client action rejected with {err_str}"),
+                    [],
+                )
+
+        # Non-UserError failures (even mentioning the marker token) and unknown UserErrors still queue protocol_error.
+        non_benign_cases = (
+            ("stationSvc", "Dock", "RuntimeError('StructureNotDockable')", "Ship docks at structure"),
+            ("beyonce", "WarpToObject", "UserError('CustomInfo', {'info': 'UnexpectedWarpFailure'})", "Ship warps"),
+        )
+        for svc, meth, err_str, expected_ui in non_benign_cases:
+            with self.subTest(non_benign=err_str):
+                self.assertFalse(oracle_cls.is_expected_user_error({"service": svc, "method": meth, "error": err_str}, expected_ui))
+                payloads = _eval_macho(svc, meth, err_str, expected_ui, err_str)
+                self.assertEqual(len(payloads), 1)
+                self.assertEqual(payloads[0]["kind"], "protocol_error")
+
     def test_type_text_preserves_text_alias_in_executor_and_direct_resolution(self):
         dec = playtester._normalize_executor_decision(
             {
