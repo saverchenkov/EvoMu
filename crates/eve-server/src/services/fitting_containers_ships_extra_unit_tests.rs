@@ -1594,3 +1594,198 @@ async fn invbroker_misc_crystal_damage_fit_fitting_edge_cases_and_pi_errors() {
         assert_eq!(check_item_lock_impound_asset_safety_in_snap(snap, &mk_item(1, 60, char_id, station_id, InventoryFlag::Hangar, 1, false)).unwrap_err().code, "AssetSafetyLocked");
     });
 }
+
+#[tokio::test]
+async fn validate_item_can_be_opened_accepts_dbrow_keyval_and_rejects_out_of_range_or_invalid() {
+    let (ctx, mut sess) = make_ctx_and_session();
+    let char_id = sess.character_id.unwrap();
+    let sys_id = sess.solar_system_id.unwrap();
+    let ship_id = sess.ship_id.unwrap();
+    let cont_id = 100_991_001_i64;
+    let missing_id = 100_991_999_i64;
+
+    sess.station_id = None;
+    sess.structure_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            mk_item(ship_id, 587, char_id, i64::from(sys_id), InventoryFlag::None, 1, true),
+        );
+        snap.items.insert(
+            cont_id,
+            mk_item(cont_id, 23, char_id, i64::from(sys_id), InventoryFlag::None, 1, true),
+        );
+    });
+    ctx.sync_session(&mut sess);
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    for (id, tid, pos, mode) in [
+        (ship_id, 587_u32, DVec3::ZERO, MovementMode::Stop),
+        (cont_id, 23_u32, DVec3::new(1_000.0, 0.0, 0.0), MovementMode::Rigid),
+    ] {
+        let _ = sys_h
+            .spawn_ball(Ball {
+                id,
+                type_id: tid,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 100.0,
+                inertia: 1.0,
+                mass: 1.0e4,
+                radius: 25.0,
+                speed_fraction: 0.0,
+                mode,
+            })
+            .await;
+    }
+
+    let mk_dbrow = |id: i64| {
+        eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(vec![
+            PyRep::Integer(id),
+            PyRep::Integer(23),
+            PyRep::Integer(char_id),
+            PyRep::Integer(i64::from(sys_id)),
+            PyRep::Integer(InventoryFlag::None as i64),
+            PyRep::Integer(-1),
+            PyRep::Integer(6),
+            PyRep::Integer(1),
+            PyRep::String(String::new()),
+        ])
+    };
+
+    let kw = HashMap::new();
+    for (label, rep) in [
+        ("integer", PyRep::Integer(cont_id)),
+        ("dbrow", mk_dbrow(cont_id)),
+        ("keyval", PyRep::keyval([("itemID", PyRep::Integer(cont_id))])),
+    ] {
+        let res = handle_containers_ships_and_fitting(
+            &ctx,
+            &mut sess,
+            None,
+            "invbroker",
+            "ValidateItemCanBeOpened",
+            &[rep],
+            &kw,
+        )
+        .await
+        .expect("method handled")
+        .unwrap_or_else(|e| panic!("{label} should succeed, got {e:?}"));
+        assert_eq!(res, PyRep::Bool(true), "{label}");
+    }
+
+    let mut kw_item = HashMap::new();
+    kw_item.insert("itemID".to_string(), mk_dbrow(cont_id));
+    assert_eq!(
+        handle_containers_ships_and_fitting(
+            &ctx,
+            &mut sess,
+            None,
+            "invbroker",
+            "ValidateItemCanBeOpened",
+            &[],
+            &kw_item,
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+
+    // Move container beyond 2,500m -> OutOfRange for both DBRow and KeyVal descriptors.
+    let _ = sys_h.remove_ball(cont_id).await;
+    let _ = sys_h
+        .spawn_ball(Ball {
+            id: cont_id,
+            type_id: 23,
+            position: DVec3::new(6_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1.0e4,
+            radius: 25.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Rigid,
+        })
+        .await;
+    for (label, rep) in [
+        ("dbrow_out_of_range", mk_dbrow(cont_id)),
+        ("keyval_out_of_range", PyRep::keyval([("itemID", PyRep::Integer(cont_id))])),
+    ] {
+        let err = handle_containers_ships_and_fitting(
+            &ctx,
+            &mut sess,
+            None,
+            "invbroker",
+            "ValidateItemCanBeOpened",
+            &[rep],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, "OutOfRange", "{label}");
+    }
+
+    // Missing and malformed item descriptors reject cleanly with ItemNotFound / InvalidArgument.
+    for (rep, expected_code) in [
+        (mk_dbrow(missing_id), "ItemNotFound"),
+        (PyRep::keyval([("itemID", PyRep::Integer(missing_id))]), "ItemNotFound"),
+        (PyRep::keyval([("itemID", PyRep::String("bad".into()))]), "InvalidArgument"),
+        (PyRep::Integer(0), "InvalidArgument"),
+    ] {
+        let err = handle_containers_ships_and_fitting(
+            &ctx,
+            &mut sess,
+            None,
+            "invbroker",
+            "ValidateItemCanBeOpened",
+            &[rep],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, expected_code);
+    }
+
+    // ValidateItemListCanBeOpened also accepts DBRow/KeyVal lists and rejects missing IDs.
+    assert_eq!(
+        handle_containers_ships_and_fitting(
+            &ctx,
+            &mut sess,
+            None,
+            "invbroker",
+            "ValidateItemListCanBeOpened",
+            &[PyRep::List(vec![mk_dbrow(cont_id)])],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OutOfRange"
+    );
+    assert_eq!(
+        handle_containers_ships_and_fitting(
+            &ctx,
+            &mut sess,
+            None,
+            "invbroker",
+            "ValidateItemListCanBeOpened",
+            &[PyRep::List(vec![PyRep::keyval([("itemID", PyRep::Integer(missing_id))])])],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ItemNotFound"
+    );
+}

@@ -355,6 +355,176 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
         cont.OnInvChange(types.SimpleNamespace(itemID=102, locationID=50001, flagID=29), {4: 0})
         self.assertEqual(cont.init_delayed_calls, 3)
 
+    def test_1267_bf01_ship_cargo_skips_rpc_and_handles_container_errors_without_masking(self):
+        class LocalUserError(Exception):
+            def __init__(self, msg, err_dict=None):
+                super().__init__(msg)
+                self.msg = msg
+                self.dict = err_dict
+
+            def __repr__(self):
+                return f"UserError({self.msg!r}, {self.dict!r})"
+
+        validate_calls = []
+
+        class TrackingInvCache:
+            def ValidateItemCanBeOpened(self, item):
+                validate_calls.append(item)
+                return True
+
+        class TrackingSM:
+            def GetService(self, name):
+                if name == "invCache":
+                    return TrackingInvCache()
+                raise KeyError(name)
+
+        builtins.sm = TrackingSM()
+        builtins.session = types.SimpleNamespace(
+            structureid=None,
+            stationid=None,
+            solarsystemid2=30000142,
+            shipid=50001,
+        )
+
+        inv_mod = types.ModuleType("eve.client.script.ui.shared.inventory.invWindow")
+
+        class Inventory:
+            def __init__(self, default_windowID, currInvID, invCont=None, use_inv_cache=False):
+                self.default_windowID = default_windowID
+                self.currInvID = currInvID
+                self.invCont = invCont
+                self._valid_exc = None
+                self._valid_result = True
+                self._use_inv_cache = use_inv_cache
+
+            def _IsCurrentInventoryValid(self):
+                if self._use_inv_cache:
+                    return builtins.sm.GetService("invCache").ValidateItemCanBeOpened(self.invCont)
+                if self._valid_exc is not None:
+                    raise self._valid_exc
+                return self._valid_result
+
+            def _UpdateSelectedItems(self, *args, **kwargs):
+                return None
+
+        inv_mod.Inventory = Inventory
+        sys.modules["eve.client.script.ui.shared.inventory.invWindow"] = inv_mod
+
+        self.assertTrue(evomu_site._install_inventory_transition_guard())
+
+        cargo_wnd = Inventory(
+            default_windowID="InventoryPrimary",
+            currInvID=("ShipCargo", 50001),
+            invCont=types.SimpleNamespace(invID=("ShipCargo", 50001), itemID=50001),
+        )
+        self.assertTrue(cargo_wnd._IsCurrentInventoryValid())
+        self.assertEqual(validate_calls, [])
+
+        for err_key in (
+            "InventoryNotAccessible",
+            "CantOpenCargoContainer",
+            "OutOfRange",
+            "ContainerIsLocked",
+            "ItemNotFound",
+            "FakeItemNotFound",
+            "NotInSameSolarSystem",
+        ):
+            cargo_wnd._valid_exc = LocalUserError(err_key)
+            self.assertFalse(cargo_wnd._IsCurrentInventoryValid(), msg=f"direct {err_key}")
+            cargo_wnd._valid_exc = LocalUserError("CustomInfo", {"info": err_key})
+            self.assertFalse(cargo_wnd._IsCurrentInventoryValid(), msg=f"CustomInfo {err_key}")
+
+        cargo_wnd._valid_exc = LocalUserError("InvalidArgument", {"info": "OutOfRange"})
+        with self.assertRaises(LocalUserError) as exc_ctx:
+            cargo_wnd._IsCurrentInventoryValid()
+        self.assertEqual(exc_ctx.exception.msg, "InvalidArgument")
+
+        cargo_wnd._valid_exc = KeyError("missing")
+        self.assertFalse(cargo_wnd._IsCurrentInventoryValid())
+        cargo_wnd._valid_exc = RuntimeError("stale")
+        self.assertFalse(cargo_wnd._IsCurrentInventoryValid())
+
+        cargo_wnd._valid_exc = ValueError("unexpected client failure")
+        with self.assertRaises(ValueError):
+            cargo_wnd._IsCurrentInventoryValid()
+        self.assertEqual(validate_calls, [])
+
+        # SpaceContainer delegating through orig_valid invokes ValidateItemCanBeOpened once and catches OutOfRange.
+        def _failing_validate(item):
+            validate_calls.append(item)
+            raise LocalUserError("OutOfRange")
+
+        builtins.sm = types.SimpleNamespace(
+            GetService=lambda name: types.SimpleNamespace(ValidateItemCanBeOpened=_failing_validate)
+        )
+        space_item = types.SimpleNamespace(invID=("SpaceContainer", 77777), itemID=77777)
+        space_wnd = Inventory(
+            default_windowID="SpaceContainer",
+            currInvID=("SpaceContainer", 77777),
+            invCont=space_item,
+            use_inv_cache=True,
+        )
+        self.assertFalse(space_wnd._IsCurrentInventoryValid())
+        self.assertEqual(validate_calls, [space_item])
+
+    def test_1219_hangar_clear_scene_handles_none_clear_refs_without_masking(self):
+        hv_mod = types.ModuleType("eve.client.script.ui.view.hangarView")
+
+        class HangarView:
+            def __init__(self, ship_behaviour, active_scene, bad_attr=False):
+                self.shipBehaviour = ship_behaviour
+                self.activeHangarScene = active_scene
+                self._bad_attr = bad_attr
+
+            def ClearScene(self):
+                if self._bad_attr:
+                    return object().unrelated_missing_attr
+                return self.shipBehaviour.CleanScene()
+
+        hv_mod.HangarView = HangarView
+        sys.modules["eve.client.script.ui.view.hangarView"] = hv_mod
+        self.assertTrue(evomu_site._install_hangar_view_teardown_guard())
+
+        # Case 1: CleanScene triggers `'NoneType' object has no attribute 'ClearRefs'` before teardown completes.
+        beh_none_cam = types.SimpleNamespace(CleanScene=lambda: None.ClearRefs())
+        view_clear_refs = HangarView(beh_none_cam, active_scene=object())
+        self.assertIsNone(view_clear_refs.ClearScene())
+        self.assertEqual(view_clear_refs._evomu_hangar_gen, 1)
+
+        # Case 2: HangarView already torn down (shipBehaviour is None) during ClearScene.
+        view_torn_down = HangarView(None, active_scene=None)
+        self.assertIsNone(view_torn_down.ClearScene())
+        self.assertEqual(view_torn_down._evomu_hangar_gen, 1)
+
+        # Case 3: Unrelated AttributeError while view is active propagates untouched, and generation still increments.
+        view_unrelated = HangarView(types.SimpleNamespace(CleanScene=lambda: None), active_scene=object(), bad_attr=True)
+        with self.assertRaises(AttributeError):
+            view_unrelated.ClearScene()
+        self.assertEqual(view_unrelated._evomu_hangar_gen, 1)
+
+        # Case 4: ModularHangarShipBehaviour.CleanScene swallows `'NoneType' object has no attribute 'ClearRefs'`
+        # even if GetCamera() initially returned a non-None object, without masking unrelated AttributeError.
+        mhb_mod = types.ModuleType("eve.client.script.ui.view.hangarBehaviours.modularHangarBehaviours")
+
+        class ModularHangarShipBehaviour:
+            def __init__(self, bad_attr=False):
+                self._bad_attr = bad_attr
+
+            def GetCamera(self):
+                return object()
+
+            def CleanScene(self):
+                if self._bad_attr:
+                    return object().unrelated_missing_attr
+                None.ClearRefs()
+
+        mhb_mod.ModularHangarShipBehaviour = ModularHangarShipBehaviour
+        sys.modules["eve.client.script.ui.view.hangarBehaviours.modularHangarBehaviours"] = mhb_mod
+        self.assertTrue(evomu_site._install_modular_hangar_teardown_guard())
+        self.assertIsNone(ModularHangarShipBehaviour().CleanScene())
+        with self.assertRaises(AttributeError):
+            ModularHangarShipBehaviour(bad_attr=True).CleanScene()
+
 
 if __name__ == "__main__":
     unittest.main()

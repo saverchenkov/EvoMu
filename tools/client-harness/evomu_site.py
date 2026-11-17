@@ -1112,10 +1112,19 @@ def _abort_hangar_call_or_noop(view, abort_replace):
     return None
 
 
+def _is_none_clear_refs_error(exc):
+    return "'NoneType' object has no attribute 'ClearRefs'" in str(exc)
+
+
 def _make_hangar_clear_scene_guard(orig_fn):
     def _wrapped_clear_scene(self, *args, **kwargs):
+        _install_modular_hangar_teardown_guard()
         try:
             return orig_fn(self, *args, **kwargs)
+        except AttributeError as exc:
+            if _is_none_clear_refs_error(exc) or _is_hangar_view_torn_down(self):
+                return None
+            raise
         finally:
             self._evomu_hangar_gen = getattr(self, "_evomu_hangar_gen", 0) + 1
 
@@ -1331,17 +1340,48 @@ class _NullHangarCamera(object):
         return None
 
 
-def _is_inventory_not_accessible_error(exc):
-    """Return True if *exc* represents an InventoryNotAccessible UserError or stringified message."""
+_CONTAINER_INACCESSIBLE_ERROR_KEYS = (
+    "InventoryNotAccessible",
+    "CantOpenCargoContainer",
+    "OutOfRange",
+    "ContainerIsLocked",
+    "ItemNotFound",
+    "FakeItemNotFound",
+    "NotInSameSolarSystem",
+)
+_GENERIC_USER_ERROR_KEYS = ("", "CustomInfo", "RpcError", "ServerError")
+_TEXT_TYPES = (str, type(u""))
+
+
+def _matches_user_error_keys(exc, keys):
+    """Return True if *exc* matches one of *keys* without masking unrelated UserErrors."""
     if exc is None:
         return False
-    msg = repr(exc)
-    if "InventoryNotAccessible" in msg:
+    msg = getattr(exc, "msg", None)
+    if msg in keys:
         return True
+    if isinstance(msg, _TEXT_TYPES) and msg not in _GENERIC_USER_ERROR_KEYS:
+        return False
     err_dict = getattr(exc, "dict", None)
-    if isinstance(err_dict, dict) and "InventoryNotAccessible" in repr(err_dict):
+    if isinstance(err_dict, dict):
+        dict_repr = repr(err_dict)
+        if any(key in dict_repr for key in keys):
+            return True
+    msg_repr = repr(exc)
+    if any(key in msg_repr for key in keys):
         return True
-    return "InventoryNotAccessible" in str(exc)
+    err_str = str(exc)
+    return any(key in err_str for key in keys)
+
+
+def _is_inventory_not_accessible_error(exc):
+    """Return True if *exc* represents an InventoryNotAccessible UserError or stringified message."""
+    return _matches_user_error_keys(exc, ("InventoryNotAccessible",))
+
+
+def _is_container_inaccessible_error(exc):
+    """Return True if *exc* indicates an opened container/inventory is no longer accessible."""
+    return _matches_user_error_keys(exc, _CONTAINER_INACCESSIBLE_ERROR_KEYS)
 
 
 def _is_stale_inventory_controller_for_session(inv_cont, sess):
@@ -1379,7 +1419,7 @@ def _install_inventory_transition_guard():
     ):
         orig_valid = getattr(inv_cls, "_IsCurrentInventoryValid", None)
         if callable(orig_valid) and not getattr(orig_valid, "_evomu_camera_guard", False):
-            def _wrapped_is_current_inventory_valid(self):
+            def _wrapped_is_current_inventory_valid(self, *args, **kwargs):
                 sess = getattr(__builtin__, "session", None)
                 if (
                     sess is not None
@@ -1400,23 +1440,14 @@ def _install_inventory_transition_guard():
                         )
                         if inv_head.startswith(("Structure", "Station")):
                             return False
-                        get_ctrl = getattr(inv_mod, "GetInvCtrlFromInvID", None)
-                        if callable(get_ctrl):
-                            try:
-                                ctrl = get_ctrl(curr_inv_id)
-                                if ctrl is not None:
-                                    inv_item = ctrl.GetInventoryItem()
-                                    if inv_item is not None:
-                                        sm = getattr(__builtin__, "sm", None)
-                                        if sm is not None:
-                                            return bool(
-                                                sm.GetService("invCache").ValidateItemCanBeOpened(inv_item)
-                                            )
-                            except Exception as exc:
-                                if isinstance(exc, (KeyError, RuntimeError)) or _is_inventory_not_accessible_error(exc):
-                                    return False
-                                raise
-                return orig_valid(self)
+                    if _is_stale_inventory_controller_for_session(getattr(self, "invCont", None), sess):
+                        return False
+                try:
+                    return orig_valid(self, *args, **kwargs)
+                except Exception as exc:
+                    if isinstance(exc, (KeyError, RuntimeError)) or _is_container_inaccessible_error(exc):
+                        return False
+                    raise
 
             _wrapped_is_current_inventory_valid._evomu_camera_guard = True
             inv_cls._IsCurrentInventoryValid = _wrapped_is_current_inventory_valid
@@ -1456,7 +1487,7 @@ def _install_inventory_transition_guard():
                     if (
                         getattr(self, "destroyed", False)
                         or getattr(sess, "mutating", False)
-                        or _is_inventory_not_accessible_error(exc)
+                        or _is_container_inaccessible_error(exc)
                         and (
                             (callable(valid_fn) and not valid_fn())
                             or _is_stale_inventory_controller_for_session(inv_cont, sess)
@@ -1501,7 +1532,7 @@ def _install_inventory_transition_guard():
                                 getattr(self, "destroyed", False)
                                 or getattr(inv_cont, "destroyed", False)
                                 or (
-                                    _is_inventory_not_accessible_error(exc)
+                                    _is_container_inaccessible_error(exc)
                                     and (
                                         _is_hangar_session_undocked()
                                         or _is_stale_inventory_controller_for_session(inv_cont, sess)
@@ -1630,7 +1661,7 @@ def _install_modular_hangar_teardown_guard():
                     try:
                         return orig_fn(self)
                     except AttributeError as exc:
-                        if "ClearRefs" in str(exc) and cam_val is None:
+                        if _is_none_clear_refs_error(exc) or ("ClearRefs" in str(exc) and cam_val is None):
                             return None
                         raise
                     finally:

@@ -330,4 +330,45 @@ async fn strip_fitting_validation_flags_and_container_hooks() {
             .code,
         "OutOfRange"
     );
+
+    ctx.db
+        .with_mut_snapshot(|s| s.sp6_lifecycle.space_object_meta.remove(&cont_id));
+    let cont_keyval = PyRep::keyval([("itemID", PyRep::Integer(cont_id))]);
+    post_inventory_fitting_hook(&ctx, &sess, Some(&bound), "ValidateItemCanBeOpened", &[cont_keyval])
+        .await;
+    assert!(!ctx
+        .db
+        .with_snapshot(|s| s.sp6_lifecycle.space_object_meta.contains_key(&cont_id)));
+
+    let _ = sys_h.remove_ball(cont_id).await;
+    let _ = sys_h
+        .spawn_ball(Ball {
+            id: cont_id,
+            type_id: cont_type_id,
+            position: glam::DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1.0e3,
+            radius: 20.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Rigid,
+        })
+        .await;
+    let cont_dbrow = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(vec![
+        PyRep::Integer(cont_id),
+        PyRep::Integer(i64::from(cont_type_id)),
+        PyRep::Integer(cid),
+        PyRep::Integer(i64::from(sys_id)),
+        PyRep::Integer(InventoryFlag::None as i64),
+        PyRep::Integer(-1),
+        PyRep::Integer(6),
+        PyRep::Integer(1),
+        PyRep::String(String::new()),
+    ]);
+    post_inventory_fitting_hook(&ctx, &sess, Some(&bound), "ValidateItemCanBeOpened", &[cont_dbrow])
+        .await;
+    assert!(ctx
+        .db
+        .with_snapshot(|s| s.sp6_lifecycle.space_object_meta.contains_key(&cont_id)));
 }
