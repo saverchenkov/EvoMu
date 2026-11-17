@@ -123,35 +123,6 @@ fn make_id_request(_id: u32) -> Vec<u8> {
     Vec::new()
 }
 
-fn configure_test_daily_goals(ctx: &ServerContext) {
-    use eve_server::services::quasar_daily_goals::DailyGoalTemplate;
-    let specs = [
-        ([0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], "DestroyNPC", 1u32, 3u32, 10u64, 500_000i64, None, None),
-        ([0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2], "MineAsteroid", 2, 2, 500, 500_000, None, Some(2_500)),
-        ([0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3], "ScanSignature", 3, 1, 2, 250_000, None, None),
-        ([0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4], "JumpStargate", 4, 4, 5, 250_000, None, None),
-        ([0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5], "ManufactureItem", 5, 2, 1, 500_000, None, None),
-    ];
-    for (uuid, name, category, career, target, isk_reward, completion_cost_isk, completion_cost_evermarks) in specs {
-        ctx.quasar_gateway.progression.daily_goals.configure_template(DailyGoalTemplate {
-            uuid,
-            name_message: name.to_string(),
-            description_message: format!("{name}_desc"),
-            category,
-            career,
-            target,
-            isk_reward,
-            sp_reward: 0.0,
-            completion_cost_isk,
-            completion_cost_evermarks,
-            name_message_id: 0,
-            description_message_id: 0,
-            help_text_message_id: 0,
-            assigner_corporation_id: 1_000_419,
-        });
-    }
-}
-
 // ============================================================================
 // 1. Daily Goals Acceptance Test
 // ============================================================================
@@ -169,11 +140,10 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     let mut sess = build_sess(10_001, 90_000_001, 98_000_001);
     let empty_kw = HashMap::new();
 
-    // ServerContext seeds 5 SDE-backed AIR Daily Goals from contributionmethods.fsdbinary out of the box
+    // ServerContext seeds 6 SDE-backed AIR Daily Operations + 1 DailyBonus from evomu_sde.sqlite out of the box
     let sde_tpls = ctx.quasar_gateway.progression.daily_goals.get_templates();
-    assert_eq!(sde_tpls.len(), 6, "ServerContext must seed 5 SDE daily goals + 1 daily bonus goal");
+    assert_eq!(sde_tpls.len(), 7, "ServerContext must seed 6 SDE daily operations + 1 daily bonus goal");
     assert!(sde_tpls.iter().all(|t| t.name_message_id > 0 && t.description_message_id > 0));
-    configure_test_daily_goals(&ctx);
 
     // Subscribe session to publicGatewaySvc for notice delivery
     ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "Subscribe", &[], &empty_kw, None)
@@ -197,10 +167,15 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
 
     let wm = WireMessage::decode(&payload.value).expect("decode WireMessage");
     let goal_entries: Vec<&WireField> = wm.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(goal_entries.len(), 10, "5 active SDE (4 daily + 1 bonus) + 5 configured daily goals should be returned");
+    assert_eq!(goal_entries.len(), 6, "6 active SDE daily goals (5 per-career/general daily + 1 bonus) must populate on startup");
 
-    // Target configured goal #1 ([0x44, 0x47, 0x01, ..., 1]) and verify its Identifier is present
-    let target_uuid = [0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    // Target active combat daily goal (#1 KillNPC) and active mining goal (#2 MineOre on pinned even day_bucket)
+    let active_goals = ctx.quasar_gateway.progression.daily_goals.get_or_init_goals(90_000_001);
+    let target_tpl = &active_goals.iter().find(|g| g.template.category == 1).expect("active KillNPC goal").template;
+    let second_tpl = &active_goals.iter().find(|g| g.template.category == 2).expect("active MineOre goal on even day").template;
+    let target_uuid = target_tpl.uuid;
+    let target_goal_count = target_tpl.target;
+    let second_uuid = second_tpl.uuid;
     assert!(goal_entries.iter().any(|f| {
         reg.decode_dynamic(
             "eve_public.dailygoal.api.GetAllCurrentResponse.Goal",
@@ -221,15 +196,15 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     let get_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetRequest", make_uuid_request(target_uuid)).await;
     assert_eq!(get_rsp.status_code, STATUS_OK);
     let get_dyn = reg.decode_dynamic("eve_public.dailygoal.api.GetResponse", &get_rsp.payload.unwrap().value).expect("decode GetResponse");
-    assert!(matches!(get_dyn.get(4), Some(eve_proto::quasar::DynamicValue::Repeated(items)) if items.len() == 1), "Regular goal GetResponse carries ISK Earning entry");
+    assert!(matches!(get_dyn.get(4), Some(eve_proto::quasar::DynamicValue::Repeated(items)) if items.len() == 2), "Regular goal GetResponse carries ISK + EverMarks Earning entries");
     let bonus_uuid = eve_server::services::quasar_daily_goals::default_daily_bonus_template().uuid;
     let bonus_get_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetRequest", make_uuid_request(bonus_uuid)).await;
     assert_eq!(bonus_get_rsp.status_code, STATUS_OK);
     let bonus_dyn = reg.decode_dynamic("eve_public.dailygoal.api.GetResponse", &bonus_get_rsp.payload.unwrap().value).expect("decode bonus GetResponse");
     assert!(matches!(bonus_dyn.get(4), Some(eve_proto::quasar::DynamicValue::Repeated(items)) if items.len() == 1), "DailyBonus GetResponse carries 10,000 SP Earning entry");
 
-    // 2. PayForCompletionRequest on goal #1 (no completion cost configured) must return STATUS_PRECONDITION_FAILED
-    let no_cost_pay = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.PayForCompletionRequest", make_uuid_request(target_uuid)).await;
+    // 2. PayForCompletionRequest on DailyBonus (no paid completion allowed) must return STATUS_PRECONDITION_FAILED
+    let no_cost_pay = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.PayForCompletionRequest", make_uuid_request(bonus_uuid)).await;
     assert_eq!(no_cost_pay.status_code, eve_server::quasar_gateway::STATUS_PRECONDITION_FAILED);
 
     // 3. Verify unprivileged session is rejected on .admin. endpoint, then progress via real NPC kill + GM session
@@ -244,11 +219,28 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     let prog_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.admin.ProgressRequest", make_admin_progress(target_uuid, 1)).await;
     assert_eq!(prog_rsp.status_code, STATUS_OK);
 
-    // 4. Complete goal #1 by adding more progress and verify GetAllCompletedWithEntitlementsResponse & GetAllWithRewardsResponse
-    let comp_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.admin.ProgressRequest", make_admin_progress(target_uuid, 100)).await;
+    // 4. Complete goal #1 by adding remaining progress and verify decoded notices + GetAllCompletedWithEntitlementsResponse & GetAllWithRewardsResponse
+    let remaining = target_goal_count.saturating_sub(2).max(1);
+    let comp_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.admin.ProgressRequest", make_admin_progress(target_uuid, remaining)).await;
     assert_eq!(comp_rsp.status_code, STATUS_OK);
     let notifs = drain_notices(&mut stream_rx);
-    assert!(!notifs.is_empty(), "Notices should be published upon progress/completion");
+    let dg_prog = notifs
+        .iter()
+        .filter(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.dailygoal.api.ProgressedNotice")))
+        .last()
+        .expect("dailygoal ProgressedNotice emitted");
+    let dg_prog_wm = WireMessage::decode(&dg_prog.payload.as_ref().unwrap().value).expect("decode ProgressedNotice");
+    let dg_prog_id = WireMessage::decode(dg_prog_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(dg_prog_id.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()), Some(target_uuid.as_slice()));
+    assert_eq!(dg_prog_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(target_goal_count));
+
+    let dg_comp = notifs
+        .iter()
+        .find(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.dailygoal.api.CompletedNotice")))
+        .expect("dailygoal CompletedNotice emitted");
+    let dg_comp_wm = WireMessage::decode(&dg_comp.payload.as_ref().unwrap().value).expect("decode CompletedNotice");
+    let dg_comp_id = WireMessage::decode(dg_comp_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(dg_comp_id.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()), Some(target_uuid.as_slice()));
 
     let def_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetAllCompletedWithEntitlementsRequest", Vec::new()).await;
     assert_eq!(def_rsp.status_code, STATUS_OK);
@@ -282,6 +274,22 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     assert_eq!(redeem_rsp.status_code, STATUS_OK);
     let double_redeem = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.RedeemRequest", make_uuid_request(target_uuid)).await;
     assert_eq!(double_redeem.status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
+    let redeem_notices = drain_notices(&mut stream_rx);
+    let target_red_notice = redeem_notices
+        .iter()
+        .find(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.dailygoal.api.RedeemedNotice")))
+        .expect("RedeemedNotice for target_uuid");
+    let target_red_dyn = reg
+        .decode_dynamic("eve_public.dailygoal.api.RedeemedNotice", &target_red_notice.payload.as_ref().unwrap().value)
+        .expect("decode target RedeemedNotice");
+    let target_red_uuid = match target_red_dyn.get(1) {
+        Some(eve_proto::quasar::DynamicValue::Message(id_m)) => match id_m.get(1) {
+            Some(eve_proto::quasar::DynamicValue::Bytes(b)) => b.as_slice(),
+            _ => panic!("expected redeemed target goal uuid bytes"),
+        },
+        other => panic!("expected redeemed target goal identifier, got {other:?}"),
+    };
+    assert_eq!(target_red_uuid, target_uuid.as_slice());
 
     let (final_isk, final_free_sp, has_dg_journal) = ctx.db.with_snapshot(|s| {
         let ch = &s.characters[&90_000_001];
@@ -292,8 +300,7 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     assert_eq!(final_free_sp - initial_free_sp, 0.0, "Individual daily goal awards ISK + EverMarks (SP comes from DailyBonus)");
     assert!(has_dg_journal, "DailyGoalReward wallet journal entry must be recorded");
 
-    // 6. Pay for completion on goal #2 (which has completion_cost_evermarks = Some(2_500))
-    let second_uuid = [0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+    // 6. Pay for completion on goal #2 (MineOre, which has completion_cost_evermarks = Some(2_500))
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&90_000_001).unwrap().loyalty_points.insert(1_000_419, 2_500);
     });
@@ -323,7 +330,14 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     let post_notices = drain_notices(&mut stream_rx);
     let red_notice = post_notices.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("eve_public.dailygoal.api.RedeemedNotice")).unwrap_or(false)).expect("RedeemedNotice");
     let red_dyn = reg.decode_dynamic("eve_public.dailygoal.api.RedeemedNotice", &red_notice.payload.as_ref().unwrap().value).expect("decode RedeemedNotice");
-    assert!(red_dyn.get(1).is_some());
+    let red_uuid = match red_dyn.get(1) {
+        Some(eve_proto::quasar::DynamicValue::Message(id_m)) => match id_m.get(1) {
+            Some(eve_proto::quasar::DynamicValue::Bytes(b)) => b.as_slice(),
+            _ => panic!("expected redeemed goal uuid bytes"),
+        },
+        other => panic!("expected redeemed goal identifier, got {other:?}"),
+    };
+    assert!(red_uuid == second_uuid.as_slice() || red_uuid == bonus_uuid.as_slice());
 
     // 8. eve.dailygoal.api.GetRequest & GetAllRequest + daily rollover reset across 86,400s boundary (persisted to DB)
     let eve_get_rsp = quasar_rpc(&ctx, &mut sess, "eve.dailygoal.api.GetRequest", make_uuid_request(target_uuid)).await;
@@ -356,7 +370,7 @@ async fn quasar_career_goals_paths_and_milestones() {
     let reg = eve_proto::quasar::QuasarDescriptorRegistry::open_default().expect("descriptor registry");
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    configure_test_daily_goals(&ctx);
+    // Start on Day 0 (day_bucket 20832, even: MineOre active) so step 6 mines on Day 0 before step 7 advances +86_400s to Day 1 (odd: ManufactureItem active).
     let mut sess = build_sess(10_002, 90_000_001, 98_000_001);
     let empty_kw = HashMap::new();
 
@@ -511,10 +525,14 @@ async fn quasar_career_goals_paths_and_milestones() {
         }
         0
     };
-    let mfg_goal_uuid = [0x43, 0x47, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6];
+    let scordite_goal_uuid = [0x43, 0x47, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+    let shuttle_goal_uuid = [0x43, 0x47, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6];
+    let mfg_goal_uuid = [0x43, 0x47, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7];
     let scan_goal_uuid = [0x43, 0x47, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
-    assert_eq!(find_goal_prog(&after_mine_wm, &mining_goal_uuid), 3, "Mining goal must have progress 3");
+    assert_eq!(find_goal_prog(&after_mine_wm, &mining_goal_uuid), 3, "Veldspar mining must progress Veldspar goal");
+    assert_eq!(find_goal_prog(&after_mine_wm, &scordite_goal_uuid), 0, "Veldspar mining must NOT progress Scordite goal");
     assert_eq!(find_goal_prog(&after_mine_wm, &mfg_goal_uuid), 0, "Manufacturing goal must not advance from mining");
+    assert_eq!(find_goal_prog(&after_mine_wm, &shuttle_goal_uuid), 0, "Shuttle goal must not advance from mining");
 
     // 7. Manufacturing job install must NOT advance manufacturing goals; job completion MUST advance both daily and career goals
     sess.station_id = Some(60_003_760);
@@ -524,13 +542,28 @@ async fn quasar_career_goals_paths_and_milestones() {
     let after_inst_wm = WireMessage::decode(&quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.GetAllRequest", Vec::new()).await.payload.unwrap().value).unwrap();
     assert_eq!(find_goal_prog(&after_inst_wm, &mfg_goal_uuid), 0, "InstallJob must not advance manufacturing goal");
 
-    ctx.advance_secs(100_000);
+    ctx.advance_secs(86_400);
     ctx.dispatch_rpc(&mut sess, "industryManager", None, "CompleteJob", &[PyRep::Integer(job_id)], &HashMap::new(), None).await.unwrap();
     let mfg_notifs = drain_notices(&mut stream_rx);
-    assert!(mfg_notifs.iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.career.goal.api.ProgressedNotice"))));
-    assert!(mfg_notifs.iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.dailygoal.api.ProgressedNotice"))));
+    let mfg_cg_not = mfg_notifs
+        .iter()
+        .find(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.career.goal.api.ProgressedNotice")))
+        .expect("mfg career ProgressedNotice");
+    let mfg_cg_wm = WireMessage::decode(&mfg_cg_not.payload.as_ref().unwrap().value).expect("decode mfg career ProgressedNotice");
+    let mfg_cg_id_wm = WireMessage::decode(mfg_cg_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(mfg_cg_id_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap(), &mfg_goal_uuid);
+    assert_eq!(mfg_cg_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(1));
+    let mfg_dg_not = mfg_notifs
+        .iter()
+        .find(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.dailygoal.api.ProgressedNotice")))
+        .expect("mfg daily ProgressedNotice");
+    let mfg_dg_wm = WireMessage::decode(&mfg_dg_not.payload.as_ref().unwrap().value).expect("decode mfg daily ProgressedNotice");
+    let mfg_dg_id_wm = WireMessage::decode(mfg_dg_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(mfg_dg_id_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap().len(), 16);
+    assert_eq!(mfg_dg_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(1));
     let after_comp_wm = WireMessage::decode(&quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.GetAllRequest", Vec::new()).await.payload.unwrap().value).unwrap();
-    assert_eq!(find_goal_prog(&after_comp_wm, &mfg_goal_uuid), 1, "CompleteJob must advance manufacturing goal to 1");
+    assert_eq!(find_goal_prog(&after_comp_wm, &mfg_goal_uuid), 1, "CompleteJob for Rifter (Frigate) must advance ManufactureFrigate to 1");
+    assert_eq!(find_goal_prog(&after_comp_wm, &shuttle_goal_uuid), 0, "CompleteJob for Rifter must NOT advance ManufactureShuttle");
     assert_eq!(find_goal_prog(&after_comp_wm, &scan_goal_uuid), 0, "Exploration goal starts at 0 before scanning");
 
     // 8. Cosmic signature scan (100% probe resolution) advances Explorer daily and career goals (idempotent per signature), even if legacy persisted activity_kind was empty
@@ -542,8 +575,22 @@ async fn quasar_career_goals_paths_and_milestones() {
     ctx.mark_signature_scanned(90_000_001, 30_000_142, 555_001);
     ctx.mark_signature_scanned(90_000_001, 30_000_142, 555_001);
     let scan_notifs = drain_notices(&mut stream_rx);
-    assert!(scan_notifs.iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.career.goal.api.ProgressedNotice"))));
-    assert!(scan_notifs.iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.dailygoal.api.ProgressedNotice"))));
+    let scan_cg_not = scan_notifs
+        .iter()
+        .find(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.career.goal.api.ProgressedNotice")))
+        .expect("scan career ProgressedNotice");
+    let scan_cg_wm = WireMessage::decode(&scan_cg_not.payload.as_ref().unwrap().value).expect("decode scan career ProgressedNotice");
+    let scan_cg_id_wm = WireMessage::decode(scan_cg_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(scan_cg_id_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap(), &scan_goal_uuid);
+    assert_eq!(scan_cg_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(1));
+    let scan_dg_not = scan_notifs
+        .iter()
+        .find(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.dailygoal.api.ProgressedNotice")))
+        .expect("scan daily ProgressedNotice");
+    let scan_dg_wm = WireMessage::decode(&scan_dg_not.payload.as_ref().unwrap().value).expect("decode scan daily ProgressedNotice");
+    let scan_dg_id_wm = WireMessage::decode(scan_dg_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(scan_dg_id_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap().len(), 16);
+    assert_eq!(scan_dg_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(1));
     let after_scan_wm = WireMessage::decode(&quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.GetAllRequest", Vec::new()).await.payload.unwrap().value).unwrap();
     assert_eq!(find_goal_prog(&after_scan_wm, &scan_goal_uuid), 1, "Scanning signature must advance exploration goal once");
 

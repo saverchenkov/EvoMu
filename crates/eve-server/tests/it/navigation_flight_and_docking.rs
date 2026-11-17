@@ -3980,7 +3980,14 @@ async fn test_pve_air_career_program_daily_goals_and_login_campaign() {
     // 1. AIR Career Program
     let (goal_uuid, goal_target, goal_isk, goal_sp, goal_kind) = {
         let goals = ctx.quasar_gateway.progression.career_goals.get_or_init_goals(char_id);
-        let g = goals.iter().find(|g| g.def.target <= 5 && (g.def.isk_reward > 0 || g.def.sp_reward > 0.0)).unwrap();
+        let g = goals
+            .iter()
+            .find(|g| {
+                g.def.activity_kind == "exploration"
+                    && g.def.target <= 5
+                    && (g.def.isk_reward > 0 || g.def.sp_reward > 0.0)
+            })
+            .unwrap();
         (g.uuid, g.def.target, g.def.isk_reward, g.def.sp_reward, g.def.activity_kind.clone())
     };
     let kind_arg = if goal_kind.is_empty() { "combat" } else { goal_kind.as_str() };

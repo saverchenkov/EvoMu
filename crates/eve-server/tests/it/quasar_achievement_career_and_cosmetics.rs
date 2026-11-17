@@ -149,14 +149,27 @@ async fn test_quasar_achievement_progress() {
     assert_eq!(r_prog.status_code, STATUS_OK);
 
     let notices_prog = drain(&mut rx, "eve_public.achievement");
-    assert!(notices_prog.iter().any(|(name, _)| name.ends_with("ProgressedNotice")), "ProgressedNotice emitted");
+    let (_, prog_wm) = notices_prog
+        .iter()
+        .find(|(name, _)| name.ends_with("ProgressedNotice"))
+        .expect("ProgressedNotice emitted");
+    let prog_id_wm = WireMessage::decode(prog_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    let prog_uuid = prog_id_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap();
+    assert_eq!(u32::from_be_bytes(prog_uuid[12..16].try_into().unwrap()), 2);
+    assert_eq!(prog_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(1));
 
     // 7. Admin CompleteRequest & CompletedNotice publication
     let r_comp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.CompleteRequest", make_ident_req(2)).await;
     assert_eq!(r_comp.status_code, STATUS_OK);
 
     let notices_comp = drain(&mut rx, "eve_public.achievement");
-    assert!(notices_comp.iter().any(|(name, _)| name.ends_with("CompletedNotice")), "CompletedNotice emitted");
+    let (_, comp_wm) = notices_comp
+        .iter()
+        .find(|(name, _)| name.ends_with("CompletedNotice"))
+        .expect("CompletedNotice emitted");
+    let comp_id_wm = WireMessage::decode(comp_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    let comp_uuid = comp_id_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap();
+    assert_eq!(u32::from_be_bytes(comp_uuid[12..16].try_into().unwrap()), 2);
 
     // 8. Verify GetRequest returns completed_date set and not_completed absent
     let r_get2 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", make_ident_req(2)).await;
@@ -234,7 +247,20 @@ async fn test_quasar_career_goals() {
     assert_eq!(r_prog.status_code, STATUS_OK);
 
     let notices_prog = drain(&mut rx, "eve_public.career");
-    assert!(notices_prog.iter().any(|(name, _)| name.ends_with("ProgressedNotice")), "ProgressedNotice emitted");
+    let (_, prog_wm) = notices_prog
+        .iter()
+        .find(|(name, _)| name == "eve_public.career.goal.api.ProgressedNotice")
+        .expect("ProgressedNotice emitted");
+    let prog_id = prog_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).expect("goal ident");
+    let prog_id_wm = WireMessage::decode(prog_id).expect("decode goal ident");
+    assert_eq!(
+        prog_id_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()),
+        Some(enforcer_uuid.as_slice())
+    );
+    assert_eq!(
+        prog_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()),
+        Some(5)
+    );
 
     // 4. Admin CompleteRequest emits CompletedNotice
     let mut comp_req = Vec::new();
@@ -246,7 +272,16 @@ async fn test_quasar_career_goals() {
     assert_eq!(r_comp.status_code, STATUS_OK);
 
     let notices_comp = drain(&mut rx, "eve_public.career");
-    assert!(notices_comp.iter().any(|(name, _)| name.ends_with("CompletedNotice")), "CompletedNotice emitted");
+    let (_, comp_wm) = notices_comp
+        .iter()
+        .find(|(name, _)| name == "eve_public.career.goal.api.CompletedNotice")
+        .expect("CompletedNotice emitted");
+    let comp_id = comp_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).expect("goal ident");
+    let comp_id_wm = WireMessage::decode(comp_id).expect("decode goal ident");
+    assert_eq!(
+        comp_id_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()),
+        Some(enforcer_uuid.as_slice())
+    );
 
     // 5. ClaimRewardRequest credits character balance and writes wallet journal
     let bal_before = ctx.db.with_snapshot(|s| s.characters.get(&(cid as i64)).unwrap().balance);

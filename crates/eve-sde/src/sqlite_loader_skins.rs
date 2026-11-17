@@ -106,6 +106,13 @@ pub(crate) struct EagerUniverseAuxTables {
     pub school_starting_stations: HashMap<u32, (u32, Vec<i64>)>,
     pub school_career_agents: HashMap<u32, (u32, Vec<i64>)>,
     pub career_goals: HashMap<u32, CareerGoalTemplate>,
+    pub achievements_static: Vec<AchievementStaticDef>,
+    pub achievement_events_static: HashMap<u32, AchievementEventDef>,
+    pub achievement_category_labels: Vec<AchievementCategoryLabel>,
+    pub career_paths_static: Vec<CareerPathDef>,
+    pub career_goal_definitions: Vec<CareerGoalDefinitionDef>,
+    pub contribution_methods: HashMap<String, ContributionMethodDef>,
+    pub daily_goal_catalog: Vec<DailyGoalCatalogEntry>,
 }
 
 /// Eagerly loads celestials, stars, solar-system sovereignty/security classes, stargate type/name
@@ -258,6 +265,15 @@ pub(crate) fn load_universe_aux_and_career_tables(
     }
 
     let career_goals = load_career_goals_table(conn)?;
+    let (
+        achievements_static,
+        achievement_events_static,
+        achievement_category_labels,
+        career_paths_static,
+        career_goal_definitions,
+        contribution_methods,
+        daily_goal_catalog,
+    ) = load_v24_progression_tables(conn)?;
 
     Ok(EagerUniverseAuxTables {
         celestial_count,
@@ -270,65 +286,272 @@ pub(crate) fn load_universe_aux_and_career_tables(
         school_starting_stations,
         school_career_agents,
         career_goals,
+        achievements_static,
+        achievement_events_static,
+        achievement_category_labels,
+        career_paths_static,
+        career_goal_definitions,
+        contribution_methods,
+        daily_goal_catalog,
     })
 }
 
+fn table_exists(conn: &Connection, table: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+        [table],
+        |_| Ok(true),
+    )
+    .unwrap_or(false)
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> bool {
+    let sql = format!("PRAGMA table_info({table})");
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return false;
+    };
+    let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(1)) else {
+        return false;
+    };
+    let found = rows.flatten().any(|col| col == column);
+    found
+}
+
+fn decode_uuid_hex_16(hex: &str) -> Option<[u8; 16]> {
+    let raw = hex.as_bytes();
+    if raw.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let hi = (raw[i * 2] as char).to_digit(16)?;
+        let lo = (raw[i * 2 + 1] as char).to_digit(16)?;
+        *slot = ((hi << 4) | lo) as u8;
+    }
+    Some(out)
+}
+
 fn load_career_goals_table(conn: &Connection) -> Result<HashMap<u32, CareerGoalTemplate>, SdeError> {
-    let table_exists: bool = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sde_career_goals'",
-            [],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-    if table_exists {
-        let mut out = HashMap::new();
+    if !table_exists(conn, "sde_career_goals") {
+        return Ok(HashMap::new());
+    }
+    let mut out = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT goal_id, career_path, name, target_progress, sp_reward FROM sde_career_goals",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(CareerGoalTemplate {
+            goal_id: r.get::<_, i64>(0)? as u32,
+            career_path: r.get(1)?,
+            name: r.get(2)?,
+            target_progress: r.get::<_, i64>(3)?.max(0) as u64,
+            sp_reward: r.get::<_, i64>(4)?.max(0) as u64,
+        })
+    })?;
+    for row in rows {
+        let goal = row?;
+        out.insert(goal.goal_id, goal);
+    }
+    Ok(out)
+}
+
+#[allow(clippy::type_complexity)]
+fn load_v24_progression_tables(
+    conn: &Connection,
+) -> Result<
+    (
+        Vec<AchievementStaticDef>,
+        HashMap<u32, AchievementEventDef>,
+        Vec<AchievementCategoryLabel>,
+        Vec<CareerPathDef>,
+        Vec<CareerGoalDefinitionDef>,
+        HashMap<String, ContributionMethodDef>,
+        Vec<DailyGoalCatalogEntry>,
+    ),
+    SdeError,
+> {
+    let mut achievements_static = Vec::new();
+    if table_exists(conn, "sde_achievements") {
         let mut stmt = conn.prepare(
-            "SELECT goal_id, career_path, name, target_progress, sp_reward FROM sde_career_goals",
+            "SELECT achievement_id, name_id, name, description_id, description, notification_text_id, notification_text, is_client_achievement, is_enabled, conditions_json, target_value, primary_event_id FROM sde_achievements ORDER BY achievement_id",
         )?;
         let rows = stmt.query_map([], |r| {
-            Ok(CareerGoalTemplate {
-                goal_id: r.get::<_, i64>(0)? as u32,
-                career_path: r.get(1)?,
+            let conds_json: String = r.get(9)?;
+            let simple_conditions: Vec<AchievementConditionDef> =
+                serde_json::from_str(&conds_json).unwrap_or_default();
+            Ok(AchievementStaticDef {
+                achievement_id: r.get::<_, i64>(0)?.max(0) as u32,
+                name_id: r.get::<_, i64>(1)?.max(0) as u32,
                 name: r.get(2)?,
-                target_progress: r.get::<_, i64>(3)?.max(0) as u64,
-                sp_reward: r.get::<_, i64>(4)?.max(0) as u64,
+                description_id: r.get::<_, i64>(3)?.max(0) as u32,
+                description: r.get(4)?,
+                notification_text_id: r.get::<_, i64>(5)?.max(0) as u32,
+                notification_text: r.get(6)?,
+                is_client_achievement: r.get::<_, i64>(7)? != 0,
+                is_enabled: r.get::<_, i64>(8)? != 0,
+                simple_conditions,
+                target_value: r.get::<_, i64>(10)?.max(0) as u64,
+                primary_event_id: r.get::<_, i64>(11)?.max(0) as u32,
             })
         })?;
         for row in rows {
-            let goal = row?;
-            out.insert(goal.goal_id, goal);
+            achievements_static.push(row?);
         }
-        return Ok(out);
     }
 
-    #[derive(Deserialize)]
-    struct RawAirCareerGoal {
-        career_name: String,
-        name: String,
-        target: u64,
-        #[serde(default)]
-        sp_reward: f64,
-        uuid: [u8; 16],
+    let mut achievement_events_static = HashMap::new();
+    if table_exists(conn, "sde_achievement_events") {
+        let mut stmt = conn.prepare(
+            "SELECT event_id, name, description FROM sde_achievement_events ORDER BY event_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(AchievementEventDef {
+                event_id: r.get::<_, i64>(0)?.max(0) as u32,
+                name: r.get(1)?,
+                description: r.get(2)?,
+            })
+        })?;
+        for row in rows {
+            let ev = row?;
+            achievement_events_static.insert(ev.event_id, ev);
+        }
     }
 
-    let raw_goals: Vec<RawAirCareerGoal> =
-        serde_json::from_str(include_str!("../../../data/air_career_goals.json"))?;
-    let mut out = HashMap::with_capacity(raw_goals.len());
-    for g in raw_goals {
-        let goal_id = u32::from(g.uuid[2]) * 10_000 + u32::from(g.uuid[15]);
-        out.insert(
-            goal_id,
-            CareerGoalTemplate {
-                goal_id,
-                career_path: g.career_name,
-                name: g.name,
-                target_progress: g.target,
-                sp_reward: g.sp_reward.max(0.0).round() as u64,
-            },
-        );
+    let mut achievement_category_labels = Vec::new();
+    if table_exists(conn, "sde_achievement_categories") {
+        let mut stmt = conn.prepare(
+            "SELECT message_id, label, text FROM sde_achievement_categories ORDER BY message_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(AchievementCategoryLabel {
+                message_id: r.get::<_, i64>(0)?.max(0) as u32,
+                label: r.get(1)?,
+                text: r.get(2)?,
+            })
+        })?;
+        for row in rows {
+            achievement_category_labels.push(row?);
+        }
     }
-    Ok(out)
+
+    let mut career_paths_static = Vec::new();
+    if table_exists(conn, "sde_career_paths") {
+        let mut stmt = conn.prepare(
+            "SELECT career_path_id, internal_name, name_id, name, description_id, description FROM sde_career_paths ORDER BY career_path_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(CareerPathDef {
+                career_path_id: r.get::<_, i64>(0)?.max(0) as u32,
+                internal_name: r.get(1)?,
+                name_id: r.get::<_, i64>(2)?.max(0) as u32,
+                name: r.get(3)?,
+                description_id: r.get::<_, i64>(4)?.max(0) as u32,
+                description: r.get(5)?,
+            })
+        })?;
+        for row in rows {
+            career_paths_static.push(row?);
+        }
+    }
+
+    let mut career_goal_definitions = Vec::new();
+    if table_exists(conn, "sde_career_goals")
+        && table_has_column(conn, "sde_career_goals", "goal_uuid_hex")
+    {
+        let mut stmt = conn.prepare(
+            "SELECT goal_id, career_path, career_id, career_order, label, activity_group_key, activity_name, activity_kind, name, description, target_progress, sp_reward, name_message_id, description_message_id, aura_text_id, aura_text, agency_link_text_id, agency_link_text, sort_order, goal_uuid_hex FROM sde_career_goals ORDER BY career_order, goal_uuid_hex",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let hex: String = r.get(19)?;
+            let goal_uuid = decode_uuid_hex_16(&hex).unwrap_or([0u8; 16]);
+            Ok(CareerGoalDefinitionDef {
+                goal_id: r.get::<_, i64>(0)?.max(0) as u32,
+                career_path: r.get(1)?,
+                career_id: r.get::<_, i64>(2)?.max(0) as u32,
+                career_order: r.get::<_, i64>(3)?.clamp(0, 255) as u8,
+                label: r.get(4)?,
+                activity_group_key: r.get(5)?,
+                activity_name: r.get(6)?,
+                activity_kind: r.get(7)?,
+                name: r.get(8)?,
+                description: r.get(9)?,
+                target_progress: r.get::<_, i64>(10)?.max(0) as u64,
+                sp_reward: r.get::<_, i64>(11)?.max(0) as u64,
+                name_message_id: r.get::<_, i64>(12)?.max(0) as u32,
+                description_message_id: r.get::<_, i64>(13)?.max(0) as u32,
+                aura_text_id: r.get::<_, i64>(14)?.max(0) as u32,
+                aura_text: r.get(15)?,
+                agency_link_text_id: r.get::<_, i64>(16)?.max(0) as u32,
+                agency_link_text: r.get(17)?,
+                sort_order: r.get::<_, i64>(18)?.max(0) as u32,
+                goal_uuid,
+            })
+        })?;
+        for row in rows {
+            career_goal_definitions.push(row?);
+        }
+    }
+
+    let mut contribution_methods = HashMap::new();
+    if table_exists(conn, "sde_contribution_methods") {
+        let mut stmt = conn.prepare(
+            "SELECT method_key, name, title_id, title, description_id, description, progress_description_id, progress_description, rewarding_description_id, rewarding_description, target_value_description_id, target_value_description, icon, unit, content_tags_json, parameters_json FROM sde_contribution_methods ORDER BY method_key",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let tags_json: String = r.get(14)?;
+            let content_tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+            Ok(ContributionMethodDef {
+                method_key: r.get(0)?,
+                name: r.get(1)?,
+                title_id: r.get::<_, i64>(2)?.max(0) as u32,
+                title: r.get(3)?,
+                description_id: r.get::<_, i64>(4)?.max(0) as u32,
+                description: r.get(5)?,
+                progress_description_id: r.get::<_, i64>(6)?.max(0) as u32,
+                progress_description: r.get(7)?,
+                rewarding_description_id: r.get::<_, i64>(8)?.max(0) as u32,
+                rewarding_description: r.get(9)?,
+                target_value_description_id: r.get::<_, i64>(10)?.max(0) as u32,
+                target_value_description: r.get(11)?,
+                icon: r.get(12)?,
+                unit: r.get(13)?,
+                content_tags,
+                parameters_json: r.get(15)?,
+            })
+        })?;
+        for row in rows {
+            let cm = row?;
+            contribution_methods.insert(cm.method_key.clone(), cm);
+        }
+    }
+
+    let mut daily_goal_catalog = Vec::new();
+    if table_exists(conn, "sde_daily_goal_catalog") {
+        let mut stmt = conn.prepare(
+            "SELECT message_id, full_path, label, text FROM sde_daily_goal_catalog ORDER BY message_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(DailyGoalCatalogEntry {
+                message_id: r.get::<_, i64>(0)?.max(0) as u32,
+                full_path: r.get(1)?,
+                label: r.get(2)?,
+                text: r.get(3)?,
+            })
+        })?;
+        for row in rows {
+            daily_goal_catalog.push(row?);
+        }
+    }
+
+    Ok((
+        achievements_static,
+        achievement_events_static,
+        achievement_category_labels,
+        career_paths_static,
+        career_goal_definitions,
+        contribution_methods,
+        daily_goal_catalog,
+    ))
 }
 
 impl SdeRegistry {

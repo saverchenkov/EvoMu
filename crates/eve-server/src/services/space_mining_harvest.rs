@@ -24,10 +24,22 @@ pub fn dispatch_mining_gameplay_events(ctx: &ServerContext, char_id: i64, units:
                 .progression
                 .daily_goals
                 .on_gameplay_event(char_id as u32, 2, units, &ctx.quasar_gateway);
+            let ore_group_id = ctx.sde.types.get(&ore_type_id).map(|t| t.group_id);
             ctx.quasar_gateway
                 .progression
                 .career_goals
-                .on_gameplay_event(char_id as u32, "mining", units, &ctx.quasar_gateway);
+                .on_career_gameplay_event(
+                    char_id as u32,
+                    crate::services::quasar_career_goals::CareerGameplayEvent {
+                        activity_kind: "mining",
+                        type_id: Some(ore_type_id),
+                        group_id: ore_group_id,
+                        solar_system_id: Some(sys_id),
+                        ..Default::default()
+                    },
+                    units,
+                    &ctx.quasar_gateway,
+                );
             ctx.quasar_gateway
                 .progression
                 .extra

@@ -205,6 +205,18 @@ fn drain_notices(rx: &mut Receiver<EvePublicNotice>) -> Vec<EvePublicNotice> {
     out
 }
 
+fn find_notice<'a>(notices: &'a [EvePublicNotice], expected: &str) -> &'a EvePublicNotice {
+    notices
+        .iter()
+        .find(|n| {
+            n.payload
+                .as_ref()
+                .map(|p| p.normalized_type_name() == expected)
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| panic!("Missing expected notice: {expected}"))
+}
+
 fn has_notice(notices: &[EvePublicNotice], expected: &str) -> bool {
     notices.iter().any(|n| {
         n.payload
@@ -212,6 +224,11 @@ fn has_notice(notices: &[EvePublicNotice], expected: &str) -> bool {
             .map(|p| p.normalized_type_name() == expected)
             .unwrap_or(false)
     })
+}
+
+fn decode_notice_wire(notice: &EvePublicNotice) -> WireMessage {
+    let payload = notice.payload.as_ref().expect("notice payload");
+    WireMessage::decode(&payload.value).expect("decode notice WireMessage")
 }
 
 #[tokio::test]
@@ -279,13 +296,49 @@ async fn test_quasar_achievements_career_and_daily_goals_live() {
     let prog_rsp = q_rpc(&ctx, &mut pilot, "eve_public.achievement.api.admin.AddProgressRequest", add_prog).await;
     assert_eq!(prog_rsp.status_code, STATUS_OK);
     let ach_notices = drain_notices(&mut rx);
-    assert!(has_notice(&ach_notices, "eve_public.achievement.api.ProgressedNotice"));
+    let ach_prog_wm = decode_notice_wire(find_notice(
+        &ach_notices,
+        "eve_public.achievement.api.ProgressedNotice",
+    ));
+    let mut expected_ach_uuid = [0u8; 16];
+    expected_ach_uuid[12..16].copy_from_slice(&first_ach_id.to_be_bytes());
+    assert_eq!(
+        wire_bytes(&wire_sub(&ach_prog_wm, 1).expect("achievement ident"), 1),
+        expected_ach_uuid
+    );
+    assert_eq!(
+        ach_prog_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 2)
+            .and_then(|f| f.value.as_varint()),
+        Some(1)
+    );
 
     let mut cat_get = Vec::new();
     encode_bytes_field(1, &uuid_u32_msg(1), &mut cat_get);
     assert_eq!(q_rpc(&ctx, &mut pilot, "eve_public.achievement.category.api.GetRequest", cat_get.clone()).await.status_code, STATUS_OK);
     assert_eq!(q_rpc(&ctx, &mut pilot, "eve_public.achievement.category.api.admin.ResetRequest", cat_get).await.status_code, STATUS_OK);
-    assert!(has_notice(&drain_notices(&mut rx), "eve_public.achievement.category.api.ProgressedNotice"));
+    let cat_notices = drain_notices(&mut rx);
+    let cat_prog_wm = decode_notice_wire(find_notice(
+        &cat_notices,
+        "eve_public.achievement.category.api.ProgressedNotice",
+    ));
+    let mut expected_cat_uuid = [0u8; 16];
+    expected_cat_uuid[12..16].copy_from_slice(&1_u32.to_be_bytes());
+    assert_eq!(
+        wire_bytes(&wire_sub(&cat_prog_wm, 1).expect("category ident"), 1),
+        expected_cat_uuid
+    );
+    assert_eq!(
+        cat_prog_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 2)
+            .and_then(|f| f.value.as_varint())
+            .unwrap_or(0),
+        0
+    );
 
     assert_eq!(q_rpc(&ctx, &mut pilot, "eve_public.achievement.showcase.api.GetCharacterScoreRequest", Vec::new()).await.status_code, STATUS_OK);
     assert_eq!(q_rpc(&ctx, &mut pilot, "eve_public.achievement.reward.api.GetUnclaimedRequest", Vec::new()).await.status_code, STATUS_OK);
@@ -311,12 +364,36 @@ async fn test_quasar_achievements_career_and_daily_goals_live() {
     encode_bytes_field(1, &uuid_msg(&first_goal_uuid), &mut cg_prog);
     encode_varint_field(2, 1, &mut cg_prog);
     assert_eq!(q_rpc(&ctx, &mut pilot, "eve_public.career.goal.api.admin.ProgressRequest", cg_prog).await.status_code, STATUS_OK);
-    assert!(has_notice(&drain_notices(&mut rx), "eve_public.career.goal.api.ProgressedNotice"));
+    let cg_prog_notices = drain_notices(&mut rx);
+    let cg_prog_wm = decode_notice_wire(find_notice(
+        &cg_prog_notices,
+        "eve_public.career.goal.api.ProgressedNotice",
+    ));
+    assert_eq!(
+        wire_bytes(&wire_sub(&cg_prog_wm, 1).expect("career goal ident"), 1),
+        first_goal_uuid
+    );
+    assert_eq!(
+        cg_prog_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 2)
+            .and_then(|f| f.value.as_varint()),
+        Some(1)
+    );
 
     let mut cg_comp = Vec::new();
     encode_bytes_field(1, &uuid_msg(&first_goal_uuid), &mut cg_comp);
     assert_eq!(q_rpc(&ctx, &mut pilot, "eve_public.career.goal.api.admin.CompleteRequest", cg_comp.clone()).await.status_code, STATUS_OK);
-    assert!(has_notice(&drain_notices(&mut rx), "eve_public.career.goal.api.CompletedNotice"));
+    let cg_comp_notices = drain_notices(&mut rx);
+    let cg_comp_wm = decode_notice_wire(find_notice(
+        &cg_comp_notices,
+        "eve_public.career.goal.api.CompletedNotice",
+    ));
+    assert_eq!(
+        wire_bytes(&wire_sub(&cg_comp_wm, 1).expect("career goal ident"), 1),
+        first_goal_uuid
+    );
     assert_eq!(q_rpc(&ctx, &mut pilot, "eve_public.career.goal.api.ClaimRewardRequest", cg_comp).await.status_code, STATUS_OK);
 
     // 4. Daily Goals: SDE-seeded on fresh ServerContext::new(), GetAllCurrentRequest, GetRequest, admin.ProgressRequest -> notices, RedeemRequest
@@ -343,8 +420,31 @@ async fn test_quasar_achievements_career_and_daily_goals_live() {
     encode_varint_field(3, 5_000, &mut dg_prog);
     assert_eq!(q_rpc(&ctx, &mut pilot, "eve_public.dailygoal.api.admin.ProgressRequest", dg_prog).await.status_code, STATUS_OK);
     let dg_notices = drain_notices(&mut rx);
-    assert!(has_notice(&dg_notices, "eve_public.dailygoal.api.ProgressedNotice"));
-    assert!(has_notice(&dg_notices, "eve_public.dailygoal.api.CompletedNotice"));
+    let dg_prog_wm = decode_notice_wire(find_notice(
+        &dg_notices,
+        "eve_public.dailygoal.api.ProgressedNotice",
+    ));
+    assert_eq!(
+        wire_bytes(&wire_sub(&dg_prog_wm, 1).expect("daily goal ident"), 1),
+        dg_uuid
+    );
+    assert!(
+        dg_prog_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 2)
+            .and_then(|f| f.value.as_varint())
+            .unwrap_or(0)
+            >= 1
+    );
+    let dg_comp_wm = decode_notice_wire(find_notice(
+        &dg_notices,
+        "eve_public.dailygoal.api.CompletedNotice",
+    ));
+    assert_eq!(
+        wire_bytes(&wire_sub(&dg_comp_wm, 1).expect("daily goal ident"), 1),
+        dg_uuid
+    );
     assert_eq!(q_rpc(&ctx, &mut pilot, "eve_public.dailygoal.api.RedeemRequest", dg_get).await.status_code, STATUS_OK);
 }
 

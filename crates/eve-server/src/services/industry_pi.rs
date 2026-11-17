@@ -1348,7 +1348,18 @@ pub fn finalize_completed_industry_job_response(
                 Some(job.product_type_id as i64),
             );
             ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(char_id as u32, 5, 1, &ctx.quasar_gateway);
-            ctx.quasar_gateway.progression.career_goals.on_gameplay_event(char_id as u32, "manufacturing", 1, &ctx.quasar_gateway);
+            let prod_group_id = ctx.sde.types.get(&job.product_type_id).map(|t| t.group_id);
+            ctx.quasar_gateway.progression.career_goals.on_career_gameplay_event(
+                char_id as u32,
+                crate::services::quasar_career_goals::CareerGameplayEvent {
+                    activity_kind: "manufacturing",
+                    type_id: Some(job.product_type_id),
+                    group_id: prod_group_id,
+                    ..Default::default()
+                },
+                1,
+                &ctx.quasar_gateway,
+            );
             ctx.quasar_gateway.progression.extra.on_campaign_gameplay_event(
                 char_id as u32,
                 crate::services::quasar_campaign_state::CampaignEvent {

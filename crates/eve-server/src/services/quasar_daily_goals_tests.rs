@@ -133,6 +133,7 @@ fn template_effective_getters_and_day_bucket_boundaries() {
         (4, 1, 541_824, 1_041_584, 1_004_955),
         (5, 1, 665_394, 696_246, 665_412),
         (6, 2, 722_674, 698_433, 698_433),
+        (7, 1, 659_201, 696_243, 659_202),
         (99, 1, 582_520, 582_521, 582_521),
     ];
     for (cat, eff_cat, name_id, desc_id, help_id) in expected {
@@ -160,21 +161,27 @@ fn build_sde_templates_and_manager_persistence_roundtrip() {
     // parity: feat:pve.daily-goals
     let sde = shared_sde();
     let templates = build_sde_daily_goal_templates(&sde);
-    assert_eq!(templates.len(), 6);
+    assert_eq!(templates.len(), 7);
     assert_eq!(templates[0].category, 1);
     assert_eq!(templates[0].target, 25);
+    assert_eq!(templates[0].evermarks_reward, 500);
     assert_eq!(templates[1].category, 2);
     assert_eq!(templates[1].completion_cost_isk, None);
     assert_eq!(templates[1].completion_cost_evermarks, Some(2_500));
-    assert_eq!(templates[5].category, 6);
-    assert_eq!(templates[5].effective_goal_category(), 2);
+    assert_eq!(templates[3].category, 4); // SpaceJump
+    assert_eq!(templates[3].career, 0); // General / CAREER_UNSPECIFIED
+    assert_eq!(templates[5].category, 7); // DamageShip
+    assert_eq!(templates[5].career, 4); // Soldier of Fortune
+    assert_eq!(templates[6].category, 6);
+    assert_eq!(templates[6].effective_goal_category(), 2);
+    assert_eq!(templates[6].effective_evermarks_reward(), 0);
 
     let db = Arc::new(WorldRepository::with_demo_seed());
     let mgr = DailyGoalManager::new_with_sde(Some(Arc::clone(&db)), Some(sde));
-    assert_eq!(mgr.get_templates().len(), 6);
+    assert_eq!(mgr.get_templates().len(), 7);
 
     let goals_init = mgr.get_or_init_goals_at(5001, 200_000);
-    assert_eq!(goals_init.len(), 5);
+    assert_eq!(goals_init.len(), 6);
     let expected_bucket = daily_goal_day_bucket(200_000);
     assert!(goals_init.iter().all(|g| g.day_bucket == expected_bucket));
 
@@ -190,12 +197,12 @@ fn build_sde_templates_and_manager_persistence_roundtrip() {
     custom_tpl.uuid = [0xAA; 16];
     custom_tpl.target = 3;
     mgr.configure_template(custom_tpl.clone());
-    assert_eq!(mgr.get_templates().len(), 7);
+    assert_eq!(mgr.get_templates().len(), 8);
 
     // Update existing template via configure_template
     custom_tpl.target = 4;
     mgr.configure_template(custom_tpl.clone());
-    assert_eq!(mgr.get_templates().len(), 7);
+    assert_eq!(mgr.get_templates().len(), 8);
     assert_eq!(
         mgr.get_templates()
             .iter()
@@ -207,9 +214,9 @@ fn build_sde_templates_and_manager_persistence_roundtrip() {
 
     // Reload from DB snapshot
     let mgr_reloaded = DailyGoalManager::new(Some(Arc::clone(&db)));
-    assert_eq!(mgr_reloaded.get_templates().len(), 7);
+    assert_eq!(mgr_reloaded.get_templates().len(), 8);
     let reloaded_goals = mgr_reloaded.get_or_init_goals_at(5001, 200_020);
-    assert_eq!(reloaded_goals.len(), 6);
+    assert_eq!(reloaded_goals.len(), 7);
 
     // Test legacy HashMap<u32, Vec<CharacterDailyGoal>> deserialization fallback + auto bonus injection
     let only_reg_goal = CharacterDailyGoal {
@@ -307,11 +314,11 @@ fn redeem_and_pay_for_completion_happy_and_error_paths() {
 
     let mgr = &router.progression.daily_goals;
     let goals = mgr.get_or_init_goals_at(char_id, 300_000);
-    assert_eq!(goals.len(), 5);
+    assert_eq!(goals.len(), 6);
     let g1_uuid = goals[0].uuid; // KillNPC (target 25, cost EM=2500, ISK=None)
-    let g2_uuid = goals[1].uuid; // MineOre (target 2000, cost EM=2500, ISK=None)
+    let g2_uuid = goals[1].uuid; // MineOre or ManufactureItem (cost EM=2500, ISK=None)
     let g3_uuid = goals[2].uuid; // ScanSignature (target 5, cost EM=2500, ISK=None)
-    let bonus_uuid = goals[4].uuid; // DailyBonus (target 2, cost EM=None, ISK=None)
+    let bonus_uuid = goals.iter().find(|g| g.template.category == 6).unwrap().uuid; // DailyBonus (target 2, cost EM=None, ISK=None)
 
     // Redeem before completion -> FORBIDDEN
     let err = mgr.redeem_goal(char_id, &g1_uuid, 300_000, &db).unwrap_err();
@@ -438,10 +445,11 @@ fn gameplay_events_and_all_12_rpc_handlers() {
     let (router, db) = make_router_and_db();
     let char_id = 211200020u32;
     seed_char(&db, char_id as i64, 98000020, 10_000_000, 10_000);
+    let now_unix = router.progression.daily_goals.now_unix();
 
-    let anon = make_ctx(None, 0, 600_000);
-    let user = make_ctx(Some(char_id), 0, 600_000);
-    let admin = make_ctx(Some(char_id), ROLE_PROGRAMMER, 600_000);
+    let anon = make_ctx(None, 0, now_unix);
+    let user = make_ctx(Some(char_id), 0, now_unix);
+    let admin = make_ctx(Some(char_id), ROLE_PROGRAMMER, now_unix);
 
     // Unauthenticated checks
     for rpc in [
@@ -523,10 +531,11 @@ fn gameplay_events_and_all_12_rpc_handlers() {
     };
     assert_eq!(cur_uuids, int_uuids);
 
-    let goals = router.progression.daily_goals.get_or_init_goals_at(char_id, 600_000);
+    let goals = router.progression.daily_goals.get_or_init_goals_at(char_id, now_unix);
     let g1_uuid = goals.iter().find(|g| g.template.category == 1).unwrap().uuid; // KillNPC (cat 1, target 25)
     let g4_uuid = goals.iter().find(|g| g.template.category == 4).unwrap().uuid; // SpaceJump (cat 4, target 3)
-    let g5_uuid = goals.iter().find(|g| g.template.category == 5).unwrap().uuid; // ManufactureItem (cat 5, target 1)
+    let g3_scan = goals.iter().find(|g| g.template.category == 3).unwrap().clone(); // ScanSignature (cat 3, target 5, active daily)
+    let g3_uuid = g3_scan.uuid;
 
     // 2. GetRequest & 9. eve.dailygoal.api.GetRequest & 11. eve.dailygoal.api.GetProgressRequest
     for rpc in [
@@ -539,6 +548,7 @@ fn gameplay_events_and_all_12_rpc_handlers() {
             type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rpc}"),
             value: vec![],
         };
+        assert_eq!(router.dispatch(&anon, &bad).unwrap_err().0, STATUS_FORBIDDEN);
         assert_eq!(router.dispatch(&user, &bad).unwrap_err().0, STATUS_BAD_REQUEST);
         // Unknown uuid -> NOT_FOUND
         let nf = make_uuid_req(rpc, &[0x99; 16]);
@@ -548,11 +558,11 @@ fn gameplay_events_and_all_12_rpc_handlers() {
         assert!(!ok.value.is_empty());
     }
 
-    // Trigger gameplay event for category 5 (target 1) -> completes g5
+    // Trigger gameplay event for category 3 (target 5) -> completes g3
     router
         .progression
         .daily_goals
-        .on_gameplay_event(char_id, 5, 1, &router);
+        .on_gameplay_event(char_id, 3, g3_scan.template.target, &router);
     let routed: Vec<String> = router
         .routing_cache
         .read()
@@ -566,11 +576,11 @@ fn gameplay_events_and_all_12_rpc_handlers() {
 
     // Check GetProgressRequest when completed (encodes timestamp at field 4 instead of field 3)
     let prog_done = router
-        .dispatch(&user, &make_uuid_req("eve.dailygoal.api.GetProgressRequest", &g5_uuid))
+        .dispatch(&user, &make_uuid_req("eve.dailygoal.api.GetProgressRequest", &g3_uuid))
         .expect("GetProgressRequest completed");
     let prog_dyn =
         crate::services::quasar_char_skill_services::decode_wire_dynamic("test.Msg", &prog_done.value);
-    assert_eq!(prog_dyn.get(1), Some(&DynamicValue::Uint64(1)));
+    assert_eq!(prog_dyn.get(1), Some(&DynamicValue::Uint64(g3_scan.template.target)));
     assert!(prog_dyn.get(4).is_some());
 
     // 7. PayForCompletionRequest on g4
@@ -607,9 +617,9 @@ fn gameplay_events_and_all_12_rpc_handlers() {
         .expect("GetAllWithRewardsRequest");
     assert!(!rew_resp.value.is_empty());
 
-    // 5. RedeemRequest on g5
+    // 5. RedeemRequest on g3
     let red_resp = router
-        .dispatch(&user, &make_uuid_req("eve_public.dailygoal.api.RedeemRequest", &g5_uuid))
+        .dispatch(&user, &make_uuid_req("eve_public.dailygoal.api.RedeemRequest", &g3_uuid))
         .expect("RedeemRequest");
     assert!(red_resp.type_url.ends_with("RedeemResponse"));
 
@@ -650,50 +660,77 @@ fn gameplay_events_and_all_12_rpc_handlers() {
 mod quasar_daily_goals_extra_unit_tests;
 
 #[test]
-fn daily_goals_select_four_rotating_plus_bonus_across_five_day_cycle() {
+fn daily_goals_select_five_distinct_career_goals_plus_bonus_and_rotate_industrialist() {
     let (router, _db) = make_router_and_db();
     let mgr = &router.progression.daily_goals;
+    let reg = QuasarDescriptorRegistry::open_default_or_empty();
     let char_id = 211200030u32;
-    let mut category_appearances: HashMap<u32, usize> = HashMap::new();
-    let mut omitted_categories = Vec::new();
+    let mut industrialist_categories = Vec::new();
 
+    // Verify 6 consecutive downtime days each expose 6 goals (5 distinct career regular goals + 1 bonus)
     let day0_ts = 1_735_732_800u64;
-    for day in 0u64..5 {
+    for day in 0u64..6 {
         let active = mgr.get_or_init_goals_at(char_id, day0_ts + day * 86_400);
         assert_eq!(
             active.len(),
-            5,
-            "each day must return 4 rotating daily goals + 1 DailyBonus (5 total)"
+            6,
+            "each day must return 5 distinct career/general regular daily goals + 1 DailyBonus (6 total)"
         );
-        let regular: Vec<u32> = active
+        let regular: Vec<&CharacterDailyGoal> = active
             .iter()
             .filter(|g| g.template.category != 6)
-            .map(|g| g.template.category)
             .collect();
         let bonus_cnt = active.iter().filter(|g| g.template.category == 6).count();
-        assert_eq!(regular.len(), 4);
+        assert_eq!(regular.len(), 5);
         assert_eq!(bonus_cnt, 1);
 
-        for &cat in &regular {
-            *category_appearances.entry(cat).or_insert(0) += 1;
-        }
-        for cat in 1u32..=5 {
-            if !regular.contains(&cat) {
-                omitted_categories.push(cat);
-            }
-        }
-    }
-
-    assert_eq!(category_appearances.len(), 5);
-    for cat in 1u32..=5 {
+        let mut careers: Vec<u32> = regular.iter().map(|g| g.template.career).collect();
+        careers.sort_unstable();
         assert_eq!(
-            category_appearances.get(&cat).copied(),
-            Some(4),
-            "category {cat} should appear 4 of 5 days"
+            careers,
+            vec![0, 1, 2, 3, 4],
+            "each downtime day must cover 4 careers + 1 General (career 0) without duplicates"
+        );
+
+        let ind = regular
+            .iter()
+            .find(|g| g.template.career == 2)
+            .expect("Industrialist daily goal");
+        industrialist_categories.push(ind.template.category);
+
+        // Verify wire attributes for SpaceJump (career 0, not clamped to 1) & DamageShip (category 7, damage_ship config)
+        let space_jump = regular
+            .iter()
+            .find(|g| g.template.category == 4)
+            .expect("SpaceJump General goal");
+        let mut sj_buf = Vec::new();
+        encode_goal_attributes_for_day_bucket(&space_jump.template, space_jump.day_bucket, &mut sj_buf);
+        let sj_dyn = reg.decode_dynamic("eve_public.dailygoal.Attributes", &sj_buf).expect("decode SpaceJump Attributes");
+        assert!(
+            matches!(sj_dyn.get(7), Some(DynamicValue::Enum(0) | DynamicValue::Int32(0) | DynamicValue::Uint32(0))),
+            "General SpaceJump goal must encode CAREER_UNSPECIFIED (0), got {:?}",
+            sj_dyn.get(7)
+        );
+        // Verify ScanSignature uses progress_description_id (696_245) and NOT mismatched Scan15_description (697_689)
+        let scan_goal = regular.iter().find(|g| g.template.category == 3).expect("ScanSignature");
+        assert_eq!(scan_goal.template.target, 5);
+        assert_ne!(scan_goal.template.effective_description_message_id(), 697_689);
+        // Verify regular daily goal earnings include both ISK (500_000) and EverMarks (500, corp 1_000_419)
+        let mut earn_buf = Vec::new();
+        encode_goal_earnings(&scan_goal.template, 4, &mut earn_buf);
+        let earn_wm = WireMessage::decode(&earn_buf).expect("decode earnings wire");
+        assert_eq!(
+            earn_wm.fields.iter().filter(|f| f.field_number == 4).count(),
+            2,
+            "regular daily goal must encode both ISK and EverMark LP Earning messages"
         );
     }
-    omitted_categories.sort_unstable();
-    assert_eq!(omitted_categories, vec![1, 2, 3, 4, 5]);
+
+    assert!(industrialist_categories.contains(&2), "MineOre must appear in Industrialist rotation");
+    assert!(industrialist_categories.contains(&5), "ManufactureItem must appear in Industrialist rotation");
+    for w in industrialist_categories.windows(2) {
+        assert_ne!(w[0], w[1], "Industrialist slot must alternate across consecutive downtime days");
+    }
 }
 
 #[test]
@@ -960,7 +997,7 @@ fn utc_year_month_all_calendar_and_leap_century_boundaries() {
 
 #[test]
 fn ensure_goals_sde_rotation_len_day_bucket_zero_and_rehydrate_edges() {
-    let make_tpl = |prefix: &[u8; 5], suffix: u8, category: u32| -> DailyGoalTemplate {
+    let make_tpl = |prefix: &[u8; 5], suffix: u8, category: u32, career: u32| -> DailyGoalTemplate {
         let mut uuid = [0u8; 16];
         uuid[0..5].copy_from_slice(prefix);
         uuid[15] = suffix;
@@ -969,9 +1006,10 @@ fn ensure_goals_sde_rotation_len_day_bucket_zero_and_rehydrate_edges() {
             name_message: format!("G{suffix}"),
             description_message: String::new(),
             category,
-            career: 1,
+            career,
             target: 5,
             isk_reward: 100_000,
+            evermarks_reward: 500,
             sp_reward: 0.0,
             completion_cost_isk: None,
             completion_cost_evermarks: Some(2_500),
@@ -983,83 +1021,71 @@ fn ensure_goals_sde_rotation_len_day_bucket_zero_and_rehydrate_edges() {
     };
 
     // 1. is_sde_rotating_regular_template checks both prefix == b"SDEDG" and category != 6
-    let sde_1 = make_tpl(b"SDEDG", 1, 1);
-    let sde_2 = make_tpl(b"SDEDG", 2, 2);
-    let sde_3 = make_tpl(b"SDEDG", 3, 3);
-    let sde_4 = make_tpl(b"SDEDG", 4, 4);
-    let sde_5 = make_tpl(b"SDEDG", 5, 5);
-    let sde_6 = make_tpl(b"SDEDG", 7, 1);
-    let sde_bonus = make_tpl(b"SDEDG", 6, 6);
-    let custom_reg = make_tpl(b"CUSTM", 8, 1);
-    let custom_cat6 = make_tpl(b"CUSTM", 9, 6);
+    let sde_0 = make_tpl(b"SDEDG", 4, 4, 0);
+    let sde_1 = make_tpl(b"SDEDG", 1, 1, 1);
+    let sde_2a = make_tpl(b"SDEDG", 2, 2, 2);
+    let sde_2b = make_tpl(b"SDEDG", 5, 5, 2);
+    let sde_3 = make_tpl(b"SDEDG", 3, 3, 3);
+    let sde_4 = make_tpl(b"SDEDG", 7, 7, 4);
+    let sde_bonus = make_tpl(b"SDEDG", 6, 6, 0);
+    let custom_reg = make_tpl(b"CUSTM", 8, 1, 1);
+    let custom_cat6 = make_tpl(b"CUSTM", 9, 6, 0);
     assert!(is_sde_rotating_regular_template(&sde_1));
     assert!(!is_sde_rotating_regular_template(&sde_bonus));
     assert!(!is_sde_rotating_regular_template(&custom_reg));
     assert!(!is_sde_rotating_regular_template(&custom_cat6));
 
-    // 2. With 4 rotating SDE templates (+ bonus + custom_reg), NONE are omitted
-    let tpls_4 = vec![
+    // 2. With 1 rotating SDE template per career (+ bonus + custom_reg), NONE are omitted
+    let tpls_unique = vec![
+        sde_0.clone(),
         sde_1.clone(),
-        sde_2.clone(),
+        sde_2a.clone(),
         sde_3.clone(),
-        sde_4.clone(),
         sde_bonus.clone(),
         custom_reg.clone(),
     ];
-    let day5_ts = 39_600 + 5 * 86_400 + 100; // day_bucket == 5
-    let day6_ts = 39_600 + 6 * 86_400 + 100; // day_bucket == 6
+    let day5_ts = 39_600 + 5 * 86_400 + 100; // day_bucket == 5 (odd -> idx 1 in len-2 bucket)
+    let day6_ts = 39_600 + 6 * 86_400 + 100; // day_bucket == 6 (even -> idx 0 in len-2 bucket)
     let mut goals_4 = Vec::new();
-    assert!(ensure_character_daily_goals_with_templates(&mut goals_4, &tpls_4, day5_ts));
-    assert!(!ensure_character_daily_goals_with_templates(&mut goals_4, &tpls_4, day5_ts));
+    assert!(ensure_character_daily_goals_with_templates(&mut goals_4, &tpls_unique, day5_ts));
+    assert!(!ensure_character_daily_goals_with_templates(&mut goals_4, &tpls_unique, day5_ts));
     assert!(goals_4.iter().all(|g| !g.expired && g.day_bucket == 5));
 
-    // 3. With 5 rotating SDE templates, day_bucket == 5 omits idx 0 (sde_1) and day_bucket == 6 omits idx 1 (sde_2);
-    // calling again with now_unix == 0 preserves existing max(day_bucket) and marks newly omitted non-expired goal expired
-    let tpls_5 = vec![
+    // 3. When career 2 has [sde_2a, sde_2b], day_bucket == 5 (odd) omits sde_2a and activates sde_2b;
+    // calling again with now_unix == 0 preserves existing max(day_bucket) and marks omitted non-expired goal expired
+    let tpls_pool = vec![
+        sde_0.clone(),
         sde_1.clone(),
-        sde_2.clone(),
+        sde_2a.clone(),
+        sde_2b.clone(),
         sde_3.clone(),
         sde_4.clone(),
-        sde_5.clone(),
         sde_bonus.clone(),
     ];
-    let mut goals_5 = Vec::new();
-    assert!(ensure_character_daily_goals_with_templates(&mut goals_5, &tpls_5, day5_ts));
-    assert!(goals_5.iter().find(|g| g.uuid == sde_1.uuid).unwrap().expired);
-    assert!(!goals_5.iter().find(|g| g.uuid == sde_2.uuid).unwrap().expired);
+    let mut goals_pool = Vec::new();
+    assert!(ensure_character_daily_goals_with_templates(&mut goals_pool, &tpls_pool, day5_ts));
+    assert!(goals_pool.iter().find(|g| g.uuid == sde_2a.uuid).unwrap().expired);
+    assert!(!goals_pool.iter().find(|g| g.uuid == sde_2b.uuid).unwrap().expired);
     // Flip expired manually to verify same-day `!is_active_today && !existing.expired` under now_unix == 0 (max day_bucket = 5)
-    goals_5.iter_mut().find(|g| g.uuid == sde_1.uuid).unwrap().expired = false;
-    assert!(ensure_character_daily_goals_with_templates(&mut goals_5, &tpls_5, 0));
-    assert!(goals_5.iter().find(|g| g.uuid == sde_1.uuid).unwrap().expired);
-    assert_eq!(goals_5.iter().find(|g| g.uuid == sde_2.uuid).unwrap().day_bucket, 5);
-    assert!(!ensure_character_daily_goals_with_templates(&mut goals_5, &tpls_5, 0));
+    goals_pool.iter_mut().find(|g| g.uuid == sde_2a.uuid).unwrap().expired = false;
+    assert!(ensure_character_daily_goals_with_templates(&mut goals_pool, &tpls_pool, 0));
+    assert!(goals_pool.iter().find(|g| g.uuid == sde_2a.uuid).unwrap().expired);
+    assert_eq!(goals_pool.iter().find(|g| g.uuid == sde_2b.uuid).unwrap().day_bucket, 5);
+    assert!(!ensure_character_daily_goals_with_templates(&mut goals_pool, &tpls_pool, 0));
 
-    // Rollover to day 6 omits sde_2 (idx = 6 % 5 = 1) and un-expires sde_1
-    assert!(ensure_character_daily_goals_with_templates(&mut goals_5, &tpls_5, day6_ts));
-    assert!(!goals_5.iter().find(|g| g.uuid == sde_1.uuid).unwrap().expired);
-    assert!(goals_5.iter().find(|g| g.uuid == sde_2.uuid).unwrap().expired);
-
-    // With 6 rotating SDE templates (> 4, != 5), day_bucket == 6 omits idx 6 % 6 == 0 (sde_1)
-    let tpls_6 = vec![
-        sde_1.clone(),
-        sde_2.clone(),
-        sde_3.clone(),
-        sde_4.clone(),
-        sde_5.clone(),
-        sde_6.clone(),
-    ];
-    let mut goals_6 = Vec::new();
-    assert!(ensure_character_daily_goals_with_templates(&mut goals_6, &tpls_6, day6_ts));
-    assert!(goals_6.iter().find(|g| g.uuid == sde_1.uuid).unwrap().expired);
-    assert_eq!(goals_6.iter().filter(|g| g.expired).count(), 1);
+    // Rollover to day 6 (even) activates sde_2a (idx = 6 % 2 = 0) and expires sde_2b
+    assert!(ensure_character_daily_goals_with_templates(&mut goals_pool, &tpls_pool, day6_ts));
+    assert!(!goals_pool.iter().find(|g| g.uuid == sde_2a.uuid).unwrap().expired);
+    assert!(goals_pool.iter().find(|g| g.uuid == sde_2b.uuid).unwrap().expired);
+    assert_eq!(goals_pool.iter().filter(|g| g.expired).count(), 1);
 
     // 4. Legacy `day_bucket == 0` migration with `day_bucket > 0`:
     // active goal with expired=true & zero/clean state un-expires; any individual activity flag preserves expired=true;
     // omitted goal (!is_active_today) is forced expired=true even if progressed & completed.
     let mut legacy_goals = vec![
         CharacterDailyGoal {
-            uuid: sde_2.uuid, // active on day 5
-            template: sde_2.clone(),
+            uuid: sde_2b.uuid, // active on day 5
+            template: sde_2b.clone(),
             current_progress: 0,
             completed: false,
             claimed: false,
@@ -1094,8 +1120,8 @@ fn ensure_goals_sde_rotation_len_day_bucket_zero_and_rehydrate_edges() {
             expired: true, // keeps expired=true due to completed
         },
         CharacterDailyGoal {
-            uuid: sde_5.uuid, // active on day 5
-            template: sde_5.clone(),
+            uuid: sde_1.uuid, // active on day 5
+            template: sde_1.clone(),
             current_progress: 0,
             completed: false,
             claimed: true,
@@ -1118,8 +1144,8 @@ fn ensure_goals_sde_rotation_len_day_bucket_zero_and_rehydrate_edges() {
             expired: true, // keeps expired=true due to paid_completion
         },
         CharacterDailyGoal {
-            uuid: sde_1.uuid, // omitted on day 5
-            template: sde_1.clone(),
+            uuid: sde_2a.uuid, // omitted on day 5
+            template: sde_2a.clone(),
             current_progress: 4,
             completed: true,
             claimed: false,
@@ -1130,13 +1156,13 @@ fn ensure_goals_sde_rotation_len_day_bucket_zero_and_rehydrate_edges() {
             expired: false, // forced expired=true because !is_active_today
         },
     ];
-    assert!(ensure_character_daily_goals_with_templates(&mut legacy_goals, &tpls_5, day5_ts));
-    assert!(!legacy_goals.iter().find(|g| g.uuid == sde_2.uuid).unwrap().expired);
+    assert!(ensure_character_daily_goals_with_templates(&mut legacy_goals, &tpls_pool, day5_ts));
+    assert!(!legacy_goals.iter().find(|g| g.uuid == sde_2b.uuid).unwrap().expired);
     assert!(legacy_goals.iter().find(|g| g.uuid == sde_3.uuid).unwrap().expired);
     assert!(legacy_goals.iter().find(|g| g.uuid == sde_4.uuid).unwrap().expired);
-    assert!(legacy_goals.iter().find(|g| g.uuid == sde_5.uuid).unwrap().expired);
-    assert!(legacy_goals.iter().find(|g| g.uuid == sde_bonus.uuid).unwrap().expired);
     assert!(legacy_goals.iter().find(|g| g.uuid == sde_1.uuid).unwrap().expired);
+    assert!(legacy_goals.iter().find(|g| g.uuid == sde_bonus.uuid).unwrap().expired);
+    assert!(legacy_goals.iter().find(|g| g.uuid == sde_2a.uuid).unwrap().expired);
 
     // 5. rehydrate_from_db store filter & deduplication edge cases
     let db = Arc::new(WorldRepository::with_demo_seed());
@@ -1163,8 +1189,8 @@ fn ensure_goals_sde_rotation_len_day_bucket_zero_and_rehydrate_edges() {
         character_goals: HashMap::from([(
             char_a,
             vec![CharacterDailyGoal {
-                uuid: sde_2.uuid,
-                template: sde_2.clone(),
+                uuid: sde_2a.uuid,
+                template: sde_2a.clone(),
                 current_progress: 3,
                 completed: false,
                 claimed: false,
@@ -1197,7 +1223,7 @@ fn ensure_goals_sde_rotation_len_day_bucket_zero_and_rehydrate_edges() {
 
     // Store with non-empty templates including bonus (cat 2 effective) and empty character_goals loads without duplicating bonus
     let tpls_only_store = DailyGoalStore {
-        templates: vec![sde_2.clone(), sde_bonus.clone()],
+        templates: vec![sde_2a.clone(), sde_bonus.clone()],
         character_goals: HashMap::new(),
         monthly_progress: HashMap::new(),
     };
@@ -1212,8 +1238,8 @@ fn ensure_goals_sde_rotation_len_day_bucket_zero_and_rehydrate_edges() {
 
     // Legacy HashMap across 2 characters sharing the same template UUID deduplicates to 1 regular + 1 injected bonus = 2
     let shared_goal = CharacterDailyGoal {
-        uuid: sde_2.uuid,
-        template: sde_2.clone(),
+        uuid: sde_2a.uuid,
+        template: sde_2a.clone(),
         current_progress: 1,
         completed: false,
         claimed: false,

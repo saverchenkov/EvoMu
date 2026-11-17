@@ -7,7 +7,7 @@ use super::*;
 use crate::quasar_gateway::PublicGatewayRouter;
 use eve_db::WorldRepository;
 use eve_proto::quasar::{DynamicQuasarMessage, QuasarDescriptorRegistry};
-use eve_sde::{AchievementInfo, SdeRegistry};
+use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
 
 static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
@@ -16,24 +16,8 @@ fn shared_sde() -> Arc<SdeRegistry> {
     Arc::clone(SHARED_SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
 }
 
-fn make_ach_info(id: u32, name: &str, desc: &str) -> AchievementInfo {
-    AchievementInfo {
-        achievement_id: id,
-        is_client_achievement: false,
-        is_enabled: true,
-        name_id: 0,
-        description_id: 0,
-        notification_text_id: 0,
-        name: name.to_string(),
-        description: desc.to_string(),
-        notification_text: String::new(),
-        target_value: 10,
-        conditions: Vec::new(),
-    }
-}
-
 #[test]
-fn serde_i64_or_f64_visitor_and_category_classification_and_ident_extractors() {
+fn serde_i64_or_f64_visitor_and_ident_extractors() {
     // deserialize_i64_or_f64: positive u64, negative i64, f64 rounding, and invalid type error (`expecting`)
     let d_float: AchievementDef = serde_json::from_str(
         r#"{"id":1,"category_id":1,"name":"n","target":5,"score":10,"milestone_targets":[5],"reward_isk":250000.6,"reward_sp":-12}"#,
@@ -47,25 +31,6 @@ fn serde_i64_or_f64_visitor_and_category_classification_and_ident_extractors() {
     );
     let err_msg = bad.unwrap_err().to_string();
     assert!(err_msg.contains("integer or floating point"));
-
-    // classify_achievement_category: all 5 keyword branches + `(id % 5) + 1` fallback
-    assert_eq!(classify_achievement_category(7, &make_ach_info(7, "Bounty Hunter", ""), &[]), 1);
-    assert_eq!(classify_achievement_category(7, &make_ach_info(7, "Wormhole Diver", ""), &[]), 2);
-    assert_eq!(classify_achievement_category(7, &make_ach_info(7, "Blueprint Master", ""), &[]), 3);
-    assert_eq!(classify_achievement_category(7, &make_ach_info(7, "Market Tycoon", ""), &[]), 4);
-    let social_cond = [AchievementConditionDef {
-        condition_id: 1,
-        target_value: 1,
-        statistic_event_id: 99,
-        event_name: "join_fleet".into(),
-    }];
-    assert_eq!(classify_achievement_category(7, &make_ach_info(7, "Unclassified", "plain"), &social_cond), 5);
-    for id in 0..5_u32 {
-        assert_eq!(
-            classify_achievement_category(id, &make_ach_info(id, "Mystery", "Plain"), &[]),
-            (id % 5) + 1
-        );
-    }
 
     // extract_u32_ident & extract_u64_val across all variants & boundaries
     assert_eq!(extract_u32_ident(&DynamicValue::Uint64(77)), Some(77));
@@ -550,6 +515,10 @@ fn sde_achievement_flatbuffer_encodes_all_roots_categories_methods_and_definitio
     assert_eq!(child_cats.len(), 5, "categories 1..=5 present under Challenges");
 
     let mut encoded_achs = HashMap::new();
+    for ach in challenges.get_table_vec(16) {
+        let aid_str = ach.get_str(4).expect("Achievement Id").to_string();
+        encoded_achs.insert(aid_str, ach);
+    }
     for cat in &child_cats {
         let cat_id_str = cat.get_str(4).expect("Category Id");
         assert!(cat_id_str.starts_with("00000000-0000-0000-0000-"));
@@ -725,7 +694,7 @@ fn get_latest_request_upgrades_stale_legacy_140_byte_achievements_flatbuffer() {
     assert_eq!(std::fs::read(&data_path).unwrap(), expected_fb);
     assert_eq!(
         std::fs::read_to_string(&ver_path).unwrap(),
-        format!("24.2.{}", mgr.sde_achievement_count)
+        format!("24.1.{}", mgr.sde_achievement_count)
     );
 
     let ctx = eve_proto::quasar::AuthoritativeContext::for_session(

@@ -315,6 +315,7 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             career: 3,
             target: 5,
             isk_reward: 500_000,
+            evermarks_reward: 500,
             sp_reward: 10_000.0,
             completion_cost_isk: None,
             completion_cost_evermarks: None,

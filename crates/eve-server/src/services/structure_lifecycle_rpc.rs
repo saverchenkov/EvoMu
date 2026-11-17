@@ -841,9 +841,11 @@ pub async fn apply_damage_structure_or_ball(
     }
     if let Some((applied, _, _)) = hit {
         if applied >= 1.0 && attacker_char_id > 0 {
-            let is_ship = ctx.db.with_snapshot(|s| {
-                s.items.get(&target_ball_id).is_some_and(|i| {
-                    ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6)
+            let (is_ship, is_other_capsuleer_ship) = ctx.db.with_snapshot(|s| {
+                s.items.get(&target_ball_id).map_or((false, false), |i| {
+                    let ship_type =
+                        ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6);
+                    (ship_type, ship_type && i.owner_id != attacker_char_id)
                 })
             });
             if is_ship {
@@ -853,6 +855,14 @@ pub async fn apply_damage_structure_or_ball(
                     &["DamageShips"],
                     applied.round() as u64,
                     Some(sys_id as i64),
+                );
+            }
+            if is_other_capsuleer_ship {
+                ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(
+                    attacker_char_id as u32,
+                    7,
+                    applied.round() as u64,
+                    &ctx.quasar_gateway,
                 );
             }
         }

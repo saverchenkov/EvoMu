@@ -1534,9 +1534,20 @@ fn finalize_destroyed_npc_side_effects(
                 1,
                 &ctx.quasar_gateway,
             );
-            ctx.quasar_gateway.progression.career_goals.on_gameplay_event(
-                killer_char_id as u32,
+            let ship_group_id = crate::services::quasar_career_goals::character_active_ship_group_id(
+                &ctx.db,
+                &ctx.sde,
+                killer_char_id,
+            );
+            let mut combat_ev = crate::services::quasar_career_goals::solar_system_career_event(
+                &ctx.sde,
                 "combat",
+                sys_id,
+            );
+            combat_ev.ship_group_id = ship_group_id;
+            ctx.quasar_gateway.progression.career_goals.on_career_gameplay_event(
+                killer_char_id as u32,
+                combat_ev,
                 1,
                 &ctx.quasar_gateway,
             );

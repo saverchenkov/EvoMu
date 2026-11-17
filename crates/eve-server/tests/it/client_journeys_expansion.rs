@@ -545,6 +545,7 @@ async fn test_journey_daily_goals_events() {
         career: 1,
         target: 25,
         isk_reward: 500_000,
+        evermarks_reward: 500,
         sp_reward: 2_500.0,
         completion_cost_isk: None,
         completion_cost_evermarks: Some(2_500),

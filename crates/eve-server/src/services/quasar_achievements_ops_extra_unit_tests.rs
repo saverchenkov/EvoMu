@@ -53,8 +53,8 @@ fn notice_publishers_and_admin_handler_error_and_alias_branches() {
             statistic_event_id: 101,
             event_name: "evt".into(),
         }],
-        reward_isk: 0,
-        reward_sp: 0,
+        reward_isk: 10_000,
+        reward_sp: 250,
     }];
     let mgr = Arc::new(mgr);
     let router = &ctx.quasar_gateway;
@@ -227,8 +227,8 @@ fn query_claim_showcase_unclaimed_and_cdn_latest_branches() {
         score: 30,
         milestone_targets: vec![5, 10],
         conditions: Vec::new(),
-        reward_isk: 0,
-        reward_sp: 0,
+        reward_isk: 10_000,
+        reward_sp: 250,
     }];
     let mgr = Arc::new(mgr);
     let router = &ctx.quasar_gateway;
@@ -425,6 +425,14 @@ fn query_claim_showcase_unclaimed_and_cdn_latest_branches() {
     claim_cat
         .fields
         .insert(2, DynamicValue::Message(Box::new(src_cat)));
+    assert!(call_ach(
+        router,
+        "eve_public.achievement.reward.api.ClaimRequest",
+        &player_ctx,
+        &dummy_any,
+        &claim_cat
+    )
+    .is_ok());
     assert_eq!(
         call_ach(
             router,

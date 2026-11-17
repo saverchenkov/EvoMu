@@ -20,8 +20,8 @@ fn make_test_manager(db: Arc<WorldRepository>) -> AchievementManager {
                 statistic_event_id: 501,
                 event_name: "kill_npc".into(),
             }],
-            reward_isk: 0,
-            reward_sp: 0,
+            reward_isk: 1_000,
+            reward_sp: 10,
         },
         AchievementDef {
             id: 20,
@@ -39,8 +39,8 @@ fn make_test_manager(db: Arc<WorldRepository>) -> AchievementManager {
                 statistic_event_id: 502,
                 event_name: "client_zoom".into(),
             }],
-            reward_isk: 0,
-            reward_sp: 0,
+            reward_isk: 500,
+            reward_sp: 5,
         },
     ];
     mgr.allowed_client_counter_keys.insert("client_zoom".into());
@@ -114,54 +114,23 @@ fn achievement_manager_progress_milestones_claims_and_helpers() {
 fn achievements_mutant_killers_locks_rehydrate_partial_claims_and_notices() {
     use crate::quasar_gateway::NoticeScope;
     use eve_proto::quasar::{DynamicQuasarMessage, WireMessage};
-    use eve_sde::AchievementInfo;
 
-    // 1. Category classification priority & fallback arithmetic
-    let empty_info = AchievementInfo {
-        achievement_id: 9,
-        is_client_achievement: false,
-        is_enabled: true,
-        name_id: 0,
-        description_id: 0,
-        notification_text_id: 0,
-        name: "Explore Destroy".into(), // "destroy" (cat 1) precedes "explor" (cat 2)!
-        description: String::new(),
-        notification_text: String::new(),
-        target_value: 1,
-        conditions: Vec::new(),
-    };
-    assert_eq!(classify_achievement_category(9, &empty_info, &[]), 1);
-    let desc_only_ind = AchievementInfo {
-        name: "Plain Title".into(),
-        description: "REPROCESS Ore".into(),
-        ..empty_info.clone()
-    };
-    assert_eq!(classify_achievement_category(9, &desc_only_ind, &[]), 3);
-    assert_eq!(
-        classify_achievement_category(
-            12,
-            &AchievementInfo {
-                name: "Unclassified".into(),
-                description: "Neutral".into(),
-                ..empty_info
-            },
-            &[]
-        ),
-        (12 % 5) + 1
-    );
-
-    // Verify optional SDE formulas whenever live SDE DB is available
+    // 1. Default SDE definitions load from client static data with DERIVED non-zero category IDs (1..=5)
+    // and without synthetic score/milestone/reward fabrication.
     let sde_mgr = AchievementManager::new(None);
+    assert!(!sde_mgr.definitions.is_empty());
+    let mut seen_cats = std::collections::HashSet::new();
     for d in &sde_mgr.definitions {
-        assert_eq!(d.score, ((d.id % 5) + 1) * 10);
-        if d.target < 4 {
-            assert!(d.milestone_targets.is_empty());
-        } else {
-            assert_eq!(d.milestone_targets, vec![d.target / 2, d.target]);
-        }
-        assert!((100_000..=1_000_000).contains(&d.reward_isk));
-        assert!((2_500..=10_000).contains(&d.reward_sp));
+        assert!((1..=5).contains(&d.category_id), "expected DERIVED category 1..=5 for {}, got {}", d.id, d.category_id);
+        seen_cats.insert(d.category_id);
+        assert_eq!(d.score, 0);
+        assert!(d.milestone_targets.is_empty());
+        assert_eq!(d.reward_isk, 0);
+        assert_eq!(d.reward_sp, 0);
+        assert!(!d.name.is_empty());
+        assert!(d.target >= 1);
     }
+    assert_eq!(seen_cats.len(), 5, "all 5 DERIVED achievement categories should be populated");
 
     // 2. Multi-condition clamping, a.progress.max(total_cond), client-id enforcement, and mark_completed no-reward edge
     let (ctx, _clock) = test_ctx_and_clock(1_750_000_000);
@@ -331,7 +300,7 @@ fn achievements_mutant_killers_locks_rehydrate_partial_claims_and_notices() {
         0
     );
 
-    // Negative reward achievement 53 claims cleanly without subtracting wallet ISK or SP
+    // Negative/unconfigured reward achievement 53 produces 0 claimable rewards without touching wallet ISK or SP
     assert_eq!(
         mgr.claim_rewards_filtered(
             cid,
@@ -341,7 +310,7 @@ fn achievements_mutant_killers_locks_rehydrate_partial_claims_and_notices() {
                 ..Default::default()
             }
         ),
-        2
+        0
     );
     ctx.db.with_snapshot(|s| {
         let ch = &s.characters[&(cid as i64)];

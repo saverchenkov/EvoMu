@@ -244,10 +244,46 @@ fn category_internal_name(category_id: u32) -> Cow<'static, str> {
     }
 }
 
+fn category_localization_ids(
+    category_id: u32,
+    labels_by_key: &HashMap<&str, u32>,
+) -> (u32, u32) {
+    let (name_key, desc_key) = match category_id {
+        1 => ("Combat_Name", "Combat_Description"),
+        2 => ("Exploration_Name", "Exploration_Description"),
+        3 => ("Industry_Name", "Industry_Description"),
+        4 => ("Goals_Name", "Goals_Description"),
+        _ => return (0, 0),
+    };
+    (
+        labels_by_key.get(name_key).copied().unwrap_or(0),
+        labels_by_key.get(desc_key).copied().unwrap_or(0),
+    )
+}
+
+fn root_category_localization_ids(
+    internal_name: &str,
+    labels_by_key: &HashMap<&str, u32>,
+) -> (u32, u32) {
+    let (name_key, desc_key) = match internal_name {
+        "career_program" => ("RootCareerProgram_Name", "RootCareerProgram_Description"),
+        "challenges" => ("RootChallenges_Name", "RootChallenges_Description"),
+        "time_limited" => ("RootTimeLimited_Name", "RootTimeLimited_Description"),
+        "manual" => ("RootManual_Name", "RootManual_Description"),
+        _ => return (0, 0),
+    };
+    (
+        labels_by_key.get(name_key).copied().unwrap_or(0),
+        labels_by_key.get(desc_key).copied().unwrap_or(0),
+    )
+}
+
 fn build_category_table(
     fb: &mut FlatBufferWriter,
     id_uuid: [u8; 16],
     internal_name: &str,
+    name_id: u32,
+    description_id: u32,
     child_categories: &[u32],
     child_achievements: &[u32],
 ) -> u32 {
@@ -270,6 +306,8 @@ fn build_category_table(
     // 9: AuraGuidance, 10: Presentation, 11: ContributesToTotalScore (default true)
     let mut tbl = fb.start_table(12);
     fb.add_offset(&mut tbl, 0, id_off);
+    fb.add_u32(&mut tbl, 1, name_id, 0);
+    fb.add_u32(&mut tbl, 2, description_id, 0);
     fb.add_offset(&mut tbl, 5, cats_vec_off);
     fb.add_offset(&mut tbl, 6, achs_vec_off);
     fb.add_offset(&mut tbl, 7, name_off);
@@ -298,7 +336,7 @@ fn build_achievement_table(
             let m_id = (idx as u32) + 1;
             let m_id_off = fb.create_string(&uuid_bytes_to_hyphenated_string(u32_to_uuid(m_id)));
             let total_milestones = (def.milestone_targets.len() as u32).max(1);
-            let category_points = (def.score / total_milestones).max(1);
+            let category_points = def.score / total_milestones;
             // AchievementMilestone (6 slots):
             // 0: Id, 1: Target, 2: CategoryPoints, 3: Rewards, 4: InternalName, 5: Presentation
             let mut m_tbl = fb.start_table(6);
@@ -336,7 +374,12 @@ fn build_achievement_table(
 pub(crate) fn encode_achievement_data_flatbuffer(
     defs: &[AchievementDef],
     localization_ids: &HashMap<u32, (u32, u32)>,
+    category_labels: &[eve_sde::AchievementCategoryLabel],
 ) -> Vec<u8> {
+    let labels_by_key: HashMap<&str, u32> = category_labels
+        .iter()
+        .map(|l| (l.label.as_str(), l.message_id))
+        .collect();
     let mut fb = FlatBufferWriter::with_capacity(defs.len().saturating_mul(192) + 2048);
 
     // 1. CumulativeMode (1 slot: 0: ValueScale default 1) + ContributionMethodDefinition (11 slots)
@@ -387,10 +430,13 @@ pub(crate) fn encode_achievement_data_flatbuffer(
             ));
         }
         let internal_name = category_internal_name(cat_id);
+        let (cat_name_id, cat_desc_id) = category_localization_ids(cat_id, &labels_by_key);
         child_category_offs.push(build_category_table(
             &mut fb,
             u32_to_uuid(cat_id),
             &internal_name,
+            cat_name_id,
+            cat_desc_id,
             &[],
             &ach_offs,
         ));
@@ -405,18 +451,46 @@ pub(crate) fn encode_achievement_data_flatbuffer(
         .collect();
 
     // 4. All 4 AchievementCategoryRoot categories required by `_load_root_category`
-    let career_program_off =
-        build_category_table(&mut fb, ROOT_CAREER_PROGRAM_UUID, "career_program", &[], &[]);
+    let (cp_name_id, cp_desc_id) = root_category_localization_ids("career_program", &labels_by_key);
+    let career_program_off = build_category_table(
+        &mut fb,
+        ROOT_CAREER_PROGRAM_UUID,
+        "career_program",
+        cp_name_id,
+        cp_desc_id,
+        &[],
+        &[],
+    );
+    let (ch_name_id, ch_desc_id) = root_category_localization_ids("challenges", &labels_by_key);
     let challenges_off = build_category_table(
         &mut fb,
         ROOT_CHALLENGES_UUID,
         "challenges",
+        ch_name_id,
+        ch_desc_id,
         &child_category_offs,
         &direct_root_ach_offs,
     );
-    let time_limited_off =
-        build_category_table(&mut fb, ROOT_TIME_LIMITED_UUID, "time_limited", &[], &[]);
-    let manual_off = build_category_table(&mut fb, ROOT_MANUAL_UUID, "manual", &[], &[]);
+    let (tl_name_id, tl_desc_id) = root_category_localization_ids("time_limited", &labels_by_key);
+    let time_limited_off = build_category_table(
+        &mut fb,
+        ROOT_TIME_LIMITED_UUID,
+        "time_limited",
+        tl_name_id,
+        tl_desc_id,
+        &[],
+        &[],
+    );
+    let (man_name_id, man_desc_id) = root_category_localization_ids("manual", &labels_by_key);
+    let manual_off = build_category_table(
+        &mut fb,
+        ROOT_MANUAL_UUID,
+        "manual",
+        man_name_id,
+        man_desc_id,
+        &[],
+        &[],
+    );
 
     // 5. Root AchievementData (5 slots):
     // 0: CareerProgram, 1: Challenges, 2: TimeLimited, 3: ContributionMethods, 4: Manual

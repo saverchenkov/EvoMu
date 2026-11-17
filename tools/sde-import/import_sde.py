@@ -35,6 +35,7 @@ from sde_extractors import (
     extract_belt_asteroid_counts,
     extract_celestials_and_stations,
     extract_system_asteroid_types,
+    extract_v24_achievement_career_daily_catalogs,
     verify_sde_resources,
 )
 
@@ -133,7 +134,11 @@ def run_import(
         )
 
     fsd_data = json.loads(py2_out_json.read_text(encoding="utf-8"))
-    if not force_extract and fsd_data.get("types") and "isis_group_id" not in fsd_data["types"][0]:
+    if not force_extract and (
+        (fsd_data.get("types") and "isis_group_id" not in fsd_data["types"][0])
+        or "achievements" not in fsd_data
+        or "contribution_methods" not in fsd_data
+    ):
         return run_import(shared_cache, out_db, manifest_path, force_extract=True)
     catalog = json.loads(STATIC_CATALOG.read_text(encoding="utf-8"))
     rfi_map = {}
@@ -160,6 +165,12 @@ def run_import(
         if msg_id is None or msg_id == 0:
             return fallback
         return en_labels.get(int(msg_id), fallback)
+
+    main_rel = cat_by_path["res:/localizationfsd/localization_fsd_main.pickle"]["cdn_relative_path"]
+    main_pickle_bytes = (res_dir / main_rel).read_bytes()
+    v24_prog_catalogs = extract_v24_achievement_career_daily_catalogs(
+        main_pickle_bytes, en_labels, fsd_data
+    )
 
     # Complete resource verification across all 213 files (MD5, byte size, record count, spot value)
     verified_resources = verify_sde_resources(catalog, res_dir, fsd_data["resource_counts"])
@@ -666,6 +677,92 @@ def run_import(
             luminosity REAL NOT NULL,
             temperature INTEGER NOT NULL,
             spectral_class TEXT NOT NULL
+        );
+        CREATE TABLE sde_achievements (
+            achievement_id INTEGER PRIMARY KEY,
+            name_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            description_id INTEGER NOT NULL,
+            description TEXT NOT NULL,
+            notification_text_id INTEGER NOT NULL,
+            notification_text TEXT NOT NULL,
+            is_client_achievement INTEGER NOT NULL,
+            is_enabled INTEGER NOT NULL,
+            conditions_json TEXT NOT NULL,
+            target_value INTEGER NOT NULL,
+            primary_event_id INTEGER NOT NULL
+        );
+        CREATE TABLE sde_achievement_events (
+            event_id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL
+        );
+        CREATE TABLE sde_achievement_categories (
+            message_id INTEGER PRIMARY KEY,
+            label TEXT NOT NULL,
+            text TEXT NOT NULL
+        );
+        CREATE TABLE sde_career_paths (
+            career_path_id INTEGER PRIMARY KEY,
+            internal_name TEXT NOT NULL,
+            name_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            description_id INTEGER NOT NULL,
+            description TEXT NOT NULL
+        );
+        CREATE TABLE sde_career_goal_catalog (
+            message_id INTEGER PRIMARY KEY,
+            full_path TEXT NOT NULL,
+            career_path TEXT NOT NULL,
+            sub_kind TEXT NOT NULL,
+            label TEXT NOT NULL,
+            text TEXT NOT NULL
+        );
+        CREATE TABLE sde_career_goals (
+            goal_id INTEGER PRIMARY KEY,
+            career_path TEXT NOT NULL,
+            career_id INTEGER NOT NULL,
+            career_order INTEGER NOT NULL,
+            label TEXT NOT NULL,
+            activity_group_key TEXT NOT NULL,
+            activity_name TEXT NOT NULL,
+            activity_kind TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL,
+            target_progress INTEGER NOT NULL,
+            sp_reward INTEGER NOT NULL,
+            name_message_id INTEGER NOT NULL,
+            description_message_id INTEGER NOT NULL,
+            aura_text_id INTEGER NOT NULL,
+            aura_text TEXT NOT NULL,
+            agency_link_text_id INTEGER NOT NULL,
+            agency_link_text TEXT NOT NULL,
+            sort_order INTEGER NOT NULL,
+            goal_uuid_hex TEXT NOT NULL
+        );
+        CREATE TABLE sde_contribution_methods (
+            method_key TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            title_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            description_id INTEGER NOT NULL,
+            description TEXT NOT NULL,
+            progress_description_id INTEGER NOT NULL,
+            progress_description TEXT NOT NULL,
+            rewarding_description_id INTEGER NOT NULL,
+            rewarding_description TEXT NOT NULL,
+            target_value_description_id INTEGER NOT NULL,
+            target_value_description TEXT NOT NULL,
+            icon TEXT NOT NULL,
+            unit INTEGER NOT NULL,
+            content_tags_json TEXT NOT NULL,
+            parameters_json TEXT NOT NULL
+        );
+        CREATE TABLE sde_daily_goal_catalog (
+            message_id INTEGER PRIMARY KEY,
+            full_path TEXT NOT NULL,
+            label TEXT NOT NULL,
+            text TEXT NOT NULL
         );
         """
     )
@@ -1260,6 +1357,38 @@ def run_import(
                 )
                 for st in fsd_data.get("stars", [])
             ],
+        )
+        conn.executemany(
+            "INSERT INTO sde_achievements VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            v24_prog_catalogs["achievements"],
+        )
+        conn.executemany(
+            "INSERT INTO sde_achievement_events VALUES (?, ?, ?)",
+            v24_prog_catalogs["achievement_events"],
+        )
+        conn.executemany(
+            "INSERT INTO sde_achievement_categories VALUES (?, ?, ?)",
+            v24_prog_catalogs["achievement_categories"],
+        )
+        conn.executemany(
+            "INSERT INTO sde_career_paths VALUES (?, ?, ?, ?, ?, ?)",
+            v24_prog_catalogs["career_paths"],
+        )
+        conn.executemany(
+            "INSERT INTO sde_career_goal_catalog VALUES (?, ?, ?, ?, ?, ?)",
+            v24_prog_catalogs["career_goal_catalog"],
+        )
+        conn.executemany(
+            "INSERT INTO sde_career_goals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            v24_prog_catalogs["career_goals"],
+        )
+        conn.executemany(
+            "INSERT INTO sde_contribution_methods VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            v24_prog_catalogs["contribution_methods"],
+        )
+        conn.executemany(
+            "INSERT INTO sde_daily_goal_catalog VALUES (?, ?, ?, ?)",
+            v24_prog_catalogs["daily_goal_catalog"],
         )
 
     manifest_resources = [

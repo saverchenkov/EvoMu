@@ -24,7 +24,7 @@ fn default_and_sde_progression_managers_register_all_tracks() {
     let db = Arc::new(WorldRepository::with_demo_seed());
     let sde = shared_sde();
     let mgrs = new_progression_managers(Arc::clone(&db), Arc::clone(&sde));
-    assert_eq!(mgrs.daily_goals.get_templates().len(), 6);
+    assert_eq!(mgrs.daily_goals.get_templates().len(), 7);
     assert!(!mgrs.achievements.definitions.is_empty());
 
     let router = PublicGatewayRouter::new(

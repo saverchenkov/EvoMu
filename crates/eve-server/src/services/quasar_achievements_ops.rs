@@ -288,8 +288,42 @@ pub fn register_achievement_admin_handlers(
 fn seed_client_achievements_storage(mgr: &AchievementManager) {
     let fb = mgr.flatbuffer_bytes();
     let count = mgr.definitions.len().max(mgr.sde_achievement_count);
-    let version = format!("24.2.{count}");
+    let version = format!("24.1.{count}");
     super::quasar_achievements::seed_or_upgrade_achievements_flatbuffer(&version, &fb);
+}
+
+fn build_unclaimed_rewards_response(
+    type_url: &str,
+    mgr: &AchievementManager,
+    cid: u32,
+) -> Result<eve_proto::quasar::GoogleAny, (u32, String)> {
+    let achievements = mgr.get_or_init_achievements(cid);
+    let mut msg = pb::message(type_url);
+    for a in &achievements {
+        if a.unclaimed_reward_count == 0 || (a.def.reward_isk <= 0 && a.def.reward_sp <= 0) {
+            continue;
+        }
+        let ms_ids: Vec<u32> = if !a.reached_milestones.is_empty() {
+            a.reached_milestones
+                .iter()
+                .rev()
+                .take(a.unclaimed_reward_count as usize)
+                .copied()
+                .rev()
+                .collect()
+        } else {
+            (1..=a.unclaimed_reward_count).collect()
+        };
+        for m_id in ms_ids {
+            let rew_uuid = super::quasar_achievements::achievement_reward_uuid(a.def.id, m_id);
+            msg = msg.add_with("rewards", |rew| {
+                rew.set("achievement_source.achievement.uuid", id_to_uuid(a.def.id))
+                    .set("achievement_source.milestone.uuid", id_to_uuid(m_id))
+                    .add_with("unclaimed_rewards", |ident| ident.set("uuid", rew_uuid))
+            });
+        }
+    }
+    msg.to_any_or_internal_err()
 }
 
 pub fn register_achievement_handlers(
@@ -402,26 +436,11 @@ pub fn register_achievement_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let achievements = mgr.get_or_init_achievements(cid);
-            let mut msg = pb::message("eve_public.achievement.reward.api.GetUnclaimedResponse");
-            for a in &achievements {
-                if a.unclaimed_reward_count > 0 {
-                    let ms_ids: Vec<u32> = if !a.reached_milestones.is_empty() {
-                        a.reached_milestones.iter().rev().take(a.unclaimed_reward_count as usize).copied().rev().collect()
-                    } else {
-                        (1..=a.unclaimed_reward_count).collect()
-                    };
-                    for m_id in ms_ids {
-                        let rew_uuid = super::quasar_achievements::achievement_reward_uuid(a.def.id, m_id);
-                        msg = msg.add_with("rewards", |rew| {
-                            rew.set("achievement_source.achievement.uuid", id_to_uuid(a.def.id))
-                                .set("achievement_source.milestone.uuid", id_to_uuid(m_id))
-                                .add_with("unclaimed_rewards", |ident| ident.set("uuid", rew_uuid))
-                        });
-                    }
-                }
-            }
-            msg.to_any_or_internal_err()
+            build_unclaimed_rewards_response(
+                "eve_public.achievement.reward.api.GetUnclaimedResponse",
+                &mgr,
+                cid,
+            )
         }),
     );
 
@@ -431,7 +450,7 @@ pub fn register_achievement_handlers(
     router.register_handler(
         "eve_public.achievement.reward.api.ClaimRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let Some(_cid) = ctx.effective_character_id() else {
+            let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
             let mut filter = RewardClaimFilter::default();
@@ -466,15 +485,27 @@ pub fn register_achievement_handlers(
                     );
                 }
             }
-            // DATA GAP: Achievement reward payouts require server CDN checkpoint definitions
-            // (not shipped in local client FSD `achievements.static`). Fail closed without
-            // minting ISK, free SP, or wallet journal entries.
-            let _ = (&mgr, &db_claim, &filter);
-            Err((
-                STATUS_PRECONDITION_FAILED,
-                "DATA GAP: Achievement reward payouts require server CDN checkpoint definitions"
-                    .into(),
-            ))
+            let has_configured_payout = mgr.get_or_init_achievements(cid).into_iter().any(|a| {
+                a.unclaimed_reward_count > 0
+                    && (a.def.reward_isk > 0 || a.def.reward_sp > 0)
+                    && filter.achievement_id.is_none_or(|id| a.def.id == id)
+                    && filter.category_id.is_none_or(|cat| a.def.category_id == cat)
+            });
+            if !has_configured_payout {
+                return Err((
+                    STATUS_PRECONDITION_FAILED,
+                    "No operator-configured achievement reward payouts are claimable; client FSD `achievements.static` ships no server CDN reward definitions".into(),
+                ));
+            }
+            let claimed = mgr.claim_rewards_filtered(cid, &db_claim, &filter);
+            if claimed == 0 {
+                return Err((
+                    STATUS_PRECONDITION_FAILED,
+                    "No matching unclaimed achievement rewards".into(),
+                ));
+            }
+            pb::message("eve_public.achievement.reward.api.ClaimResponse")
+                .to_any_or_internal_err()
         }),
     );
 
@@ -599,27 +630,11 @@ pub fn register_achievement_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let achievements = mgr.get_or_init_achievements(cid);
-            let mut msg = pb::message("eve.achievement.reward.api.GetUnclaimedResponse");
-            for a in &achievements {
-                if a.unclaimed_reward_count > 0 {
-                    let ms_ids: Vec<u32> = if !a.reached_milestones.is_empty() {
-                        a.reached_milestones.iter().rev().take(a.unclaimed_reward_count as usize).copied().rev().collect()
-                    } else {
-                        (1..=a.unclaimed_reward_count).collect()
-                    };
-                    for m_id in ms_ids {
-                        let rew_uuid =
-                            super::quasar_achievements::achievement_reward_uuid(a.def.id, m_id);
-                        msg = msg.add_with("rewards", |rew| {
-                            rew.set("achievement_source.achievement.uuid", id_to_uuid(a.def.id))
-                                .set("achievement_source.milestone.uuid", id_to_uuid(m_id))
-                                .add_with("unclaimed_rewards", |ident| ident.set("uuid", rew_uuid))
-                        });
-                    }
-                }
-            }
-            msg.to_any_or_internal_err()
+            build_unclaimed_rewards_response(
+                "eve.achievement.reward.api.GetUnclaimedResponse",
+                &mgr,
+                cid,
+            )
         }),
     );
 

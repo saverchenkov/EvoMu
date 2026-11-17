@@ -1231,7 +1231,17 @@ async fn evaluate_system_fw_complex_tick(
                 1, ctx.now_unix(), &ctx.quasar_gateway,
             );
             if total_lp_awarded > 0 {
-                ctx.quasar_gateway.progression.career_goals.on_gameplay_event(cid as u32, "faction_warfare", 1, &ctx.quasar_gateway);
+                ctx.quasar_gateway.progression.career_goals.on_career_gameplay_event(
+                    cid as u32,
+                    crate::services::quasar_career_goals::CareerGameplayEvent {
+                        activity_kind: "faction_warfare",
+                        solar_system_id: Some(sys_id),
+                        sub_kind: Some("capture_scout_complex"),
+                        ..Default::default()
+                    },
+                    1,
+                    &ctx.quasar_gateway,
+                );
                 crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
                     ctx, cid, &["CaptureFWComplexes", "DefendFWComplexes"], 1, Some(sys_id as i64),
                 );

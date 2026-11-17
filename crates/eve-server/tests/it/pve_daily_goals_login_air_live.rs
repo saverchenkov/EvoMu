@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use eve_db::InventoryFlag;
 use eve_machonet::SessionState;
-use eve_proto::quasar::{encode_bytes_field, encode_varint_field, EvePublicRequest, EvePublicResponse, GoogleAny};
+use eve_proto::quasar::{encode_bytes_field, encode_varint_field, EvePublicRequest, EvePublicResponse, GoogleAny, WireMessage};
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::{STATUS_FORBIDDEN, STATUS_OK};
 use eve_server::router::ServerContext;
@@ -127,7 +127,7 @@ async fn test_live_pve_daily_goals_and_air_career_program() {
         .progression
         .daily_goals
         .get_or_init_goals(char_id as u32);
-    assert_eq!(goals_init.len(), 5, "Must seed 4 rotating category goals + 1 DailyBonus milestone");
+    assert_eq!(goals_init.len(), 6, "Must seed 5 regular career/general goals + 1 DailyBonus milestone");
 
     let combat_goal = goals_init
         .iter()
@@ -178,18 +178,36 @@ async fn test_live_pve_daily_goals_and_air_career_program() {
     while let Ok(msg) = stream_rx.try_recv() {
         notices.push(msg);
     }
-    assert!(
-        notices.iter().any(|n| n.payload.as_ref().is_some_and(|p| p
-            .type_url
-            .ends_with("ProgressedNotice"))),
-        "Expected ProgressedNotice"
-    );
-    assert!(
-        notices.iter().any(|n| n.payload.as_ref().is_some_and(|p| p
-            .type_url
-            .ends_with("CompletedNotice"))),
-        "Expected CompletedNotice"
-    );
+    let decode_goal_uuid = |wm: &WireMessage| -> Option<Vec<u8>> {
+        let id_bytes = wm.fields.iter().find(|f| f.field_number == 1)?.value.as_bytes()?;
+        let id_wm = WireMessage::decode(id_bytes).ok()?;
+        id_wm.fields.iter().find(|f| f.field_number == 1)?.value.as_bytes().map(|b| b.to_vec())
+    };
+    let has_prog_for = |target_uuid: &[u8; 16], expected_progress: u64| {
+        notices.iter().any(|n| {
+            let Some(p) = n.payload.as_ref() else { return false };
+            if p.normalized_type_name() != "eve_public.dailygoal.api.ProgressedNotice" {
+                return false;
+            }
+            let Ok(wm) = WireMessage::decode(&p.value) else { return false };
+            let prog = wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint());
+            decode_goal_uuid(&wm).as_deref() == Some(target_uuid.as_slice()) && prog == Some(expected_progress)
+        })
+    };
+    let has_comp_for = |target_uuid: &[u8; 16]| {
+        notices.iter().any(|n| {
+            let Some(p) = n.payload.as_ref() else { return false };
+            if p.normalized_type_name() != "eve_public.dailygoal.api.CompletedNotice" {
+                return false;
+            }
+            let Ok(wm) = WireMessage::decode(&p.value) else { return false };
+            decode_goal_uuid(&wm).as_deref() == Some(target_uuid.as_slice())
+        })
+    };
+    assert!(has_prog_for(&combat_goal.uuid, 25), "Expected decoded dailygoal ProgressedNotice for combat goal");
+    assert!(has_prog_for(&mining_goal.uuid, 2_000), "Expected decoded dailygoal ProgressedNotice for mining goal");
+    assert!(has_comp_for(&combat_goal.uuid), "Expected decoded dailygoal CompletedNotice for combat goal");
+    assert!(has_comp_for(&mining_goal.uuid), "Expected decoded dailygoal CompletedNotice for mining goal");
 
     // Check goals state: goals 1 & 2 completed, bonus milestone completed (progress = 2/2)
     let goals_after = ctx

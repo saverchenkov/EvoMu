@@ -168,7 +168,7 @@ fn store_loading_corrupt_json_empty_store_and_day_bucket_zero_upgrade() {
             .insert("quasar_daily_goals".into(), "{not-valid-json".into());
     });
     let mgr_corrupt = DailyGoalManager::new_with_sde(Some(Arc::clone(&db)), Some(Arc::clone(&sde)));
-    assert_eq!(mgr_corrupt.get_templates().len(), 6);
+    assert_eq!(mgr_corrupt.get_templates().len(), 7);
     assert!(mgr_corrupt.now_unix() > 0);
 
     // 2. Empty DailyGoalStore JSON falls back to SDE templates
@@ -180,7 +180,7 @@ fn store_loading_corrupt_json_empty_store_and_day_bucket_zero_upgrade() {
         );
     });
     let mgr_empty = DailyGoalManager::new_with_sde(Some(Arc::clone(&db)), Some(Arc::clone(&sde)));
-    assert_eq!(mgr_empty.get_templates().len(), 6);
+    assert_eq!(mgr_empty.get_templates().len(), 7);
 
     // 3. Store with existing goal at day_bucket == 0 upgrades day_bucket without resetting progress
     let tpls = build_sde_daily_goal_templates(&sde);
@@ -276,7 +276,7 @@ fn add_progress_boundaries_expired_filtering_and_already_completed() {
         list.iter_mut().find(|g| g.uuid == g1_uuid).unwrap().expired = true;
     }
     let active = mgr.get_or_init_goals_at(cid, 200_010);
-    assert_eq!(active.len(), 4);
+    assert_eq!(active.len(), 5);
     assert!(mgr.add_progress(cid, &g1_uuid, 1, 200_010).is_none());
 }
 

@@ -974,9 +974,19 @@ pub fn record_npc_kill_progression(
             1,
             &ctx.quasar_gateway,
         );
-        ctx.quasar_gateway.progression.career_goals.on_gameplay_event(
+        let ship_group_id = crate::services::quasar_career_goals::character_active_ship_group_id(
+            &ctx.db,
+            &ctx.sde,
+            killer_char_id,
+        );
+        ctx.quasar_gateway.progression.career_goals.on_career_gameplay_event(
             killer_char_id as u32,
-            "combat",
+            crate::services::quasar_career_goals::CareerGameplayEvent {
+                activity_kind: "combat",
+                type_id: npc_type_id,
+                ship_group_id,
+                ..Default::default()
+            },
             1,
             &ctx.quasar_gateway,
         );

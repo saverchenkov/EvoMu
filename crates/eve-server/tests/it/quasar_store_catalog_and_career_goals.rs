@@ -436,14 +436,15 @@ async fn test_achievements_sde_and_career_goals() {
     let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
     let mut unauth = SessionState::new(2);
 
-    // 1. AchievementManager loads real SDE achievements with zero synthetic category/score/rewards
+    // 1. AchievementManager loads real SDE achievements with DERIVED category 1..=5 and zero synthetic score/rewards
     let mgr = AchievementManager::new_with_sde(Some(Arc::clone(&ctx.db)), Some(Arc::clone(&ctx.sde)));
     assert!(mgr.sde_achievement_count > 0, "SDE must contain achievements");
     for def in &mgr.definitions {
-        assert!((1..=5).contains(&def.category_id));
-        assert!(def.score >= 10);
-        assert!(def.reward_isk >= 100_000);
-        assert!(def.reward_sp >= 2_500);
+        assert!((1..=5).contains(&def.category_id), "achievement {} category_id {} must be in 1..=5", def.id, def.category_id);
+        assert_eq!(def.score, 0);
+        assert!(def.milestone_targets.is_empty());
+        assert_eq!(def.reward_isk, 0);
+        assert_eq!(def.reward_sp, 0);
     }
 
     // 2. Achievement category, showcase, and reward endpoints
