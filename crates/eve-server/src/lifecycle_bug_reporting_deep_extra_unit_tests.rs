@@ -180,7 +180,7 @@ async fn sp6_lifecycle_state_helpers_safe_logoff_conditions_and_abort_paths() {
             solar_system_id: sys_id, hit_moon_id: None, arrival_unix_secs: now + 300,
         });
     }
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.weapon_timers_until.insert(char_id, now + 60);
         st.npc_timers_until.insert(char_id, now + 300);
         st.pvp_timers_until.insert(char_id, now + 900);
@@ -202,7 +202,7 @@ async fn sp6_lifecycle_state_helpers_safe_logoff_conditions_and_abort_paths() {
     let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
     ctx.active_fighters.write().unwrap().clear();
     ctx.active_moon_probes.write().unwrap().clear();
-    with_mut_sp6_state(&ctx.db, |st, _| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.weapon_timers_until.clear();
         st.npc_timers_until.clear();
         st.pvp_timers_until.clear();
@@ -214,7 +214,7 @@ async fn sp6_lifecycle_state_helpers_safe_logoff_conditions_and_abort_paths() {
     assert!(maybe_abort_safe_logoff_on_action(&ctx, char_id, "ABORTED_BY_PILOT"));
 
     // Mark completed=true -> maybe_abort returns false; handle_abort_safe_logoff removes it explicitly
-    with_mut_sp6_state(&ctx.db, |st, _| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs.insert(char_id, SafeLogoffEntry {
             char_id, ship_id, solar_system_id: sys_id, started_unix: now, complete_at_unix: now + 30, completed: true,
         });
@@ -224,7 +224,7 @@ async fn sp6_lifecycle_state_helpers_safe_logoff_conditions_and_abort_paths() {
 
     // PvP aggression renews already-disconnected victim's remove_at_unix; NPC aggression skips disconnected victim
     let victim_id = 90_000_002_i64;
-    with_mut_sp6_state(&ctx.db, |st, _| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.disconnected_ships.insert(victim_id, DisconnectedShipEntry {
             char_id: victim_id, ship_id: 100_000_002, ship_type_id: 587, solar_system_id: sys_id,
             disconnected_at_unix: now, remove_at_unix: now + 60, emergency_warp_dest: None,
@@ -249,7 +249,7 @@ async fn sp6_lifecycle_disconnect_reconnect_fallback_positions_and_drone_ops() {
     let sys_id = 30_000_142_u32;
 
     // 1. Already completed safe logoff -> disconnect returns None
-    with_mut_sp6_state(&ctx.db, |st, _| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs.insert(char_id, SafeLogoffEntry {
             char_id, ship_id, solar_system_id: sys_id, started_unix: now - 30, complete_at_unix: now, completed: true,
         });
@@ -258,7 +258,8 @@ async fn sp6_lifecycle_disconnect_reconnect_fallback_positions_and_drone_ops() {
 
     // 2. Disconnect with unspawned ball preserves persisted position & skips hold (#1085);
     // once a live ball exists with active combat engagement + high-sec criminal, hold is created & emergency warp is prohibited.
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.sp6_lifecycle.as_inner_mut();
         st.safe_logoffs.remove(&char_id);
         st.criminal_timers_until.insert(char_id, now + 900);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -373,7 +374,8 @@ async fn sp6_lifecycle_disconnect_reconnect_fallback_positions_and_drone_ops() {
     assert_eq!(p_deep, DVec3::new(15_000_000_000.0, 0.0, 0.0));
 
     // Reconnect when live ball is far from `pre_warp_position` -> triggers return warp
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.sp6_lifecycle.as_inner_mut();
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = sys_id;
         }

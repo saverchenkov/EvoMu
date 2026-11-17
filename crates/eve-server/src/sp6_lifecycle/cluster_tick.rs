@@ -530,7 +530,8 @@ pub fn populate_persisted_space_objects(
     if !expired_item_ids.is_empty() || !expired_disconnected_chars.is_empty() {
         let expired_set: std::collections::HashSet<i64> =
             expired_item_ids.iter().copied().collect();
-        with_mut_sp6_state(db, |st, snap| {
+        db.with_mut_snapshot(|snap| {
+            let st = snap.sp6_lifecycle.as_inner_mut();
             for iid in &expired_item_ids {
                 snap.items.remove(iid);
                 snap.item_positions.remove(iid);
@@ -701,19 +702,19 @@ pub(crate) fn collapse_stranded_abyssal_if_needed_sync(
     char_id: i64,
     now_unix: u64,
 ) {
-    let due_opt = with_mut_sp6_state(&ctx.db, |st, snap| {
-        if let Some(ab) = st.abyssal_sessions.get(&char_id) {
+    let due_opt = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ab) = snap.sp6_lifecycle.abyssal_sessions.get(&char_id) {
             if now_unix >= ab.collapse_at_unix {
-                st.disconnected_ships.remove(&char_id);
-                st.safe_logoffs.remove(&char_id);
-                return st.abyssal_sessions.remove(&char_id);
+                snap.sp6_lifecycle.disconnected_ships.remove(&char_id);
+                snap.sp6_lifecycle.safe_logoffs.remove(&char_id);
+                return snap.sp6_lifecycle.abyssal_sessions.remove(&char_id);
             }
             return None;
         }
         let ch = snap.characters.get(&char_id)?;
         if (32_000_000..=32_999_999).contains(&ch.solar_system_id) {
-            st.disconnected_ships.remove(&char_id);
-            st.safe_logoffs.remove(&char_id);
+            snap.sp6_lifecycle.disconnected_ships.remove(&char_id);
+            snap.sp6_lifecycle.safe_logoffs.remove(&char_id);
             let origin_sys = crate::services::pve_special_sites_abyssal::resolve_character_home_station_and_system(
                 snap,
                 &ctx.sde,
@@ -1008,7 +1009,8 @@ pub fn on_advance_secs_internal(
             .map(|(_, ship_id)| ship_id)
             .collect();
 
-        with_mut_sp6_state(&ctx.db, |st, snap| {
+        ctx.db.with_mut_snapshot(|snap| {
+            let st = snap.sp6_lifecycle.as_inner_mut();
             for cd in rt_self_destructs {
                 let started = cd.started_unix;
                 let detonate = cd.detonate_at_unix;
@@ -1210,7 +1212,8 @@ pub fn on_advance_secs_internal(
                     finished,
                 ));
             }
-            with_mut_sp6_state(&ctx.db, |st, snap| {
+            ctx.db.with_mut_snapshot(|snap| {
+                let st = snap.sp6_lifecycle.as_inner_mut();
                 for (cid, sid, pos_arr, finished) in warp_updates {
                     snap.item_positions.insert(sid, pos_arr);
                     if let Some(d) = st.disconnected_ships.get_mut(&cid) {
@@ -1273,7 +1276,7 @@ pub fn on_advance_secs_internal(
 
     // 6. Collapse expired Abyssal pockets (`feat:lifecycle.abyssal-disconnect`)
     for ab in due_abyssal {
-        with_mut_sp6_state(&ctx.db, |st, _snap| {
+        with_mut_sp6_state(&ctx.db, |st| {
             st.disconnected_ships.remove(&ab.char_id);
             st.safe_logoffs.remove(&ab.char_id);
         });
@@ -1445,9 +1448,10 @@ pub fn on_advance_secs_internal(
     });
 
     if !expired_ids.is_empty() || !newly_anchored_ids.is_empty() {
-        with_mut_sp6_state(&ctx.db, |st, snap| {
+        ctx.db.with_mut_snapshot(|snap| {
             for iid in newly_anchored_ids {
-                st.space_object_meta
+                snap.sp6_lifecycle
+                    .space_object_meta
                     .entry(iid)
                     .or_default()
                     .anchor_completed = true;
@@ -1458,8 +1462,8 @@ pub fn on_advance_secs_internal(
                 for (iid, sys_id, is_bubble) in &expired_ids {
                     snap.items.remove(iid);
                     snap.item_positions.remove(iid);
-                    st.space_object_meta.remove(iid);
-                    st.ship_combat_hp.remove(iid);
+                    snap.sp6_lifecycle.space_object_meta.remove(iid);
+                    snap.sp6_lifecycle.ship_combat_hp.remove(iid);
                     expired_set.insert(*iid);
                     balls_to_remove.push((*sys_id, *iid, *is_bubble));
                 }
@@ -1593,11 +1597,11 @@ pub async fn tick_background_cluster_with_step(ctx: &ServerContext, explicit_ste
     let now_day_idx = now_unix.saturating_sub(dt_sec) / 86_400;
     let last_dt_day_idx = super::with_sp6_state(&ctx.db, |st| st.last_downtime_day_idx);
     let action = match last_dt_day_idx {
-        Some(last_idx) if now_day_idx > last_idx => with_mut_sp6_state(&ctx.db, |st, _snap| {
+        Some(last_idx) if now_day_idx > last_idx => with_mut_sp6_state(&ctx.db, |st| {
             st.last_downtime_day_idx = Some(now_day_idx);
             if in_downtime_window { 2 } else { 1 }
         }),
-        None => with_mut_sp6_state(&ctx.db, |st, _snap| {
+        None => with_mut_sp6_state(&ctx.db, |st| {
             st.last_downtime_day_idx = Some(now_day_idx);
             0
         }),

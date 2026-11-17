@@ -65,7 +65,8 @@ async fn downtime_wreck_filter_system_bounds_group186_and_mission_target_counts(
     let m2_agent = 3_010_002u32; // Uses spawned_npc_ball_ids.len() = 6 (> npcs_remaining=2, > 4)
     let m3_agent = 3_010_003u32; // Uses npcs_remaining = 5 (> spawned_npc_ball_ids.len()=1, > 4)
 
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.sp6_lifecycle.as_inner_mut();
         for (wid, tid, loc, is_npc) in [
             (w_low_bound, sde_wreck_tid, 30_000_000i64, true),
             (w_high_bound, 26557u32, 34_000_000i64, true),
@@ -278,7 +279,8 @@ async fn spawn_mission_wave_handles_custom_types_fallback_stats_and_geometry() {
         snap.active_missions.clear();
     });
 
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.sp6_lifecycle.as_inner_mut();
         st.missions_awaiting_downtime_respawn.clear();
         // Mission needs respawn via (spawned_npc_ball_ids.is_empty() && npcs_remaining > 0) even without awaiting flag!
         snap.active_missions.insert(
@@ -711,7 +713,7 @@ async fn flush_bounties_safe_logoff_and_pocket_entry_mission_edge_paths() {
     // 2. clear_safe_logoff and disconnect_safe_logoff_sessions
     let ship1 = 930_000_001i64;
     let ship2 = 930_000_002i64;
-    with_mut_sp6_state(&ctx.db, |st, _| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs.insert(
             c1,
             crate::sp6_lifecycle::SafeLogoffEntry {
@@ -792,7 +794,8 @@ async fn flush_bounties_safe_logoff_and_pocket_entry_mission_edge_paths() {
     let m_floor4 = 3_020_003u32;
     let origin = DVec3::new(10_000.0, 0.0, 20_000.0);
 
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.sp6_lifecycle.as_inner_mut();
         snap.active_missions.clear();
         st.mission_initial_npc_counts.clear();
         st.missions_awaiting_downtime_respawn.clear();

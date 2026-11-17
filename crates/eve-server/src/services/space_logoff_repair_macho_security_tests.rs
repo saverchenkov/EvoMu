@@ -80,7 +80,7 @@ async fn r7_tb_01_safe_logoff_disconnects_session_and_clears_immunity_for_future
     .await
     .unwrap();
 
-    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
+    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs.insert(
             char_id,
             SafeLogoffEntry {
@@ -109,7 +109,7 @@ async fn r7_tb_01_safe_logoff_disconnects_session_and_clears_immunity_for_future
     });
 
     // 3. Even if a completed entry was persisted (e.g. session did not drop), actions & login clear it
-    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
+    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs.insert(
             char_id,
             SafeLogoffEntry {
@@ -210,7 +210,7 @@ async fn r7_tb_02_disconnect_emergency_warp_and_reconcile_respect_bubbles_and_ta
     }
 
     // 3. Interdiction nullifier bypasses bubble alone, but CANNOT bypass targeted warp scrambler
-    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
+    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
         st.disconnected_ships.remove(&char_id);
     });
     sys.set_combat_state(
@@ -233,7 +233,7 @@ async fn r7_tb_02_disconnect_emergency_warp_and_reconcile_respect_bubbles_and_ta
     );
 
     // Now apply targeted warp scrambler (strength 2 >= core 1) while still interdiction-nullified
-    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
+    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
         st.disconnected_ships.remove(&char_id);
     });
     sys.set_combat_state(

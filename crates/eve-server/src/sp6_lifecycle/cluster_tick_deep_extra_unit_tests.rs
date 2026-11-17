@@ -70,7 +70,8 @@ async fn deep_downtime_npc_wreck_purge_and_mission_wave_respawn() {
     let stale_npc_id = 950_000_010i64;
     let now_unix = ctx.now_unix();
 
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.sp6_lifecycle.as_inner_mut();
         snap.active_missions.clear();
         snap.items.insert(
             npc_wreck_id,
@@ -256,7 +257,7 @@ async fn deep_space_object_anchoring_and_expiry_lifecycle() {
     let deployable_id = 920_003;
     let planet_launch_id = 920_004;
 
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
         for (iid, tid, pos) in [
             (mwd_id, mwd_tid, [15_000.0, 0.0, 0.0]),
             (container_id, container_tid, [25_000.0, 0.0, 0.0]),
@@ -271,7 +272,7 @@ async fn deep_space_object_anchoring_and_expiry_lifecycle() {
         }
 
         // Completed anchor timestamp for bubble, secure container, and mobile deployable
-        st.space_object_meta.insert(
+        snap.sp6_lifecycle.space_object_meta.insert(
             mwd_id,
             crate::sp6_lifecycle::PersistedSpaceObjectMeta {
                 anchor_start_unix: Some(now_unix.saturating_sub(20)),
@@ -281,7 +282,7 @@ async fn deep_space_object_anchoring_and_expiry_lifecycle() {
                 ..Default::default()
             },
         );
-        st.space_object_meta.insert(
+        snap.sp6_lifecycle.space_object_meta.insert(
             container_id,
             crate::sp6_lifecycle::PersistedSpaceObjectMeta {
                 anchor_start_unix: Some(now_unix.saturating_sub(20)),
@@ -290,7 +291,7 @@ async fn deep_space_object_anchoring_and_expiry_lifecycle() {
                 ..Default::default()
             },
         );
-        st.space_object_meta.insert(
+        snap.sp6_lifecycle.space_object_meta.insert(
             deployable_id,
             crate::sp6_lifecycle::PersistedSpaceObjectMeta {
                 anchor_start_unix: Some(now_unix.saturating_sub(20)),
@@ -321,7 +322,7 @@ async fn deep_space_object_anchoring_and_expiry_lifecycle() {
                 },
             );
         });
-        st.space_object_meta.insert(
+        snap.sp6_lifecycle.space_object_meta.insert(
             planet_launch_id,
             crate::sp6_lifecycle::PersistedSpaceObjectMeta {
                 created_unix: Some(now_unix.saturating_sub(PLANETARY_LAUNCH_DECAY_SECS + 10)),
@@ -341,7 +342,7 @@ async fn deep_space_object_anchoring_and_expiry_lifecycle() {
     assert!(!ctx.db.with_snapshot(|s| s.items.contains_key(&planet_launch_id)));
 
     // Expire container and mobile warp disruptor by moving anchor_start_unix far into the past
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         if let Some(m) = st.space_object_meta.get_mut(&container_id) {
             m.anchor_start_unix = Some(now_unix.saturating_sub(SECURE_CONTAINER_DECAY_SECS + 5));
         }
@@ -370,7 +371,8 @@ async fn deep_disconnected_warp_and_safe_logoff_abort_transitions() {
     // 1. Disconnected ship mid-emergency-warp steps forward on on_advance_secs and later expires
     let start_pos = DVec3::new(100_000.0, 0.0, 0.0);
     let dest_pos = DVec3::new(50_000_000.0, 0.0, 0.0);
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.sp6_lifecycle.as_inner_mut();
         if let Some(ch) = snap.characters.get_mut(&cid_warp) {
             ch.station_id = None;
             ch.structure_id = None;

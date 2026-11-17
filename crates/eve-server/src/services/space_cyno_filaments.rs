@@ -797,7 +797,7 @@ async fn handle_random_jump_filament(
             let pilot_cw = cw.get_or_create(p_char);
             pilot_cw.pvp_timer_until_unix = pilot_cw.pvp_timer_until_unix.max(pvp_until);
         }
-        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
+        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
             st.pvp_timers_until.insert(p_char, pvp_until);
         });
         crate::services::combat_crimewatch::schedule_highsec_criminal_concord_if_needed(

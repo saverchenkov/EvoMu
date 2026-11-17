@@ -1908,8 +1908,8 @@ pub fn execute_live_self_destruct_sync(
     pos: DVec3,
     now_unix: u64,
 ) -> Result<Option<DeathPipelineResult>, String> {
-    let still_valid = crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, snap| {
-        st.self_destructs.remove(&ship_id);
+    let still_valid = ctx.db.with_mut_snapshot(|snap| {
+        snap.sp6_lifecycle.self_destructs.remove(&ship_id);
         let Some(ship) = snap.items.get(&ship_id) else {
             return false;
         };

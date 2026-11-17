@@ -554,21 +554,21 @@ async fn dispatch_rpc_bind_edges_wal_rollback_and_sov_respawn_triggered() {
     assert!(matches!(beyonce_ok, PyRep::Tuple(_)));
     assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
 
-    // 3. WAL write failure inside real `dispatch_rpc` rolls back the snapshot cleanly via CoW tx engine.
-    let wal_tmp = std::env::temp_dir().join(format!(
-        "evomu_dispatch_wal_rollback_{}_{:?}.json",
+    // 3. SQLite commit failure inside real `dispatch_rpc` rolls back the snapshot cleanly via CoW tx engine.
+    let wal_db = std::env::temp_dir().join(format!(
+        "evomu_dispatch_wal_rollback_{}_{:?}.sqlite",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos()
     ));
-    let wal_dir = wal_tmp.with_extension("json.wal");
-    let _ = std::fs::remove_file(&wal_tmp);
-    let _ = std::fs::remove_dir_all(&wal_dir);
-    let wal_repo = eve_db::WorldRepository::new_empty_with_snapshot_path(Some(wal_tmp.clone()))
-        .expect("wal repo");
-    std::fs::write(&wal_tmp, b"{}").expect("seed wal json");
+    let wal_db_wal = std::path::PathBuf::from(format!("{}-wal", wal_db.display()));
+    let wal_db_shm = std::path::PathBuf::from(format!("{}-shm", wal_db.display()));
+    let _ = std::fs::remove_file(&wal_db);
+    let _ = std::fs::remove_file(&wal_db_wal);
+    let _ = std::fs::remove_file(&wal_db_shm);
+    let wal_repo = eve_db::WorldRepository::open_sqlite(&wal_db).expect("sqlite repo");
     let wal_ctx = ServerContext::with_sde_and_repository(Arc::clone(&ctx.sde), Arc::new(wal_repo));
     let mut wal_ch = ctx.db.get_character(90_000_001).unwrap();
     let wal_uid = wal_ch.user_id;
@@ -623,9 +623,9 @@ async fn dispatch_rpc_bind_edges_wal_rollback_and_sov_respawn_triggered() {
         .write()
         .unwrap()
         .insert((90_000_001, 30_000_142, 777));
-    // Initial snapshot seeding above created a regular `.wal` file; remove it before blocking with a dir.
-    let _ = std::fs::remove_file(&wal_dir);
-    std::fs::create_dir_all(&wal_dir).expect("block wal dir");
+    wal_ctx
+        .db
+        .set_fault_plan_for_test(eve_db::TxFaultPlan::FailAtCommit);
     let wal_err = wal_ctx
         .dispatch_rpc(
             &mut wal_sess,
@@ -638,14 +638,10 @@ async fn dispatch_rpc_bind_edges_wal_rollback_and_sov_respawn_triggered() {
         )
         .await
         .unwrap_err();
-    let _ = std::fs::remove_dir_all(&wal_dir);
-    let _ = std::fs::remove_file(&wal_tmp);
-    assert!(
-        matches!(
-            wal_err.code.as_str(),
-            "InternalError" | "PersistenceFailure" | "DatabasePersistenceError"
-        ),
-        "unexpected error code on failed WAL dispatch: {:?}",
+    assert_eq!(
+        wal_err.code.as_str(),
+        "PersistenceFailure",
+        "unexpected error code on failed SQLite dispatch: {:?}",
         wal_err
     );
     assert!(!wal_ctx
@@ -653,6 +649,10 @@ async fn dispatch_rpc_bind_edges_wal_rollback_and_sov_respawn_triggered() {
         .with_snapshot(|s| s.corp_governance.contains_key(&wal_corp_id)));
     assert_eq!(wal_ctx.pending_notifications.read().unwrap()[&90_000_001].len(), 1);
     let _ = wal_ctx.scanned_signatures.write().unwrap().clear();
+    drop(wal_ctx);
+    let _ = std::fs::remove_file(&wal_db);
+    let _ = std::fs::remove_file(&wal_db_wal);
+    let _ = std::fs::remove_file(&wal_db_shm);
 
     // 4. `tick_sov_prospecting_deposit_respawn` clears & respawns an elapsed SovOre anomaly when upgrade installed
     let null_sys = 30_000_144_u32;

@@ -1102,9 +1102,6 @@ mod market_transactions_cow_serde {
 }
 
 impl WorldStateSnapshot {
-    // Transitional no-op shim for `sp6_lifecycle.rs` (owned by another track; `#915` follow-up cleanup).
-    #[doc(hidden)] #[inline] pub fn mark_other_domains_dirty(&mut self) {}
-
     /// Persists a killmail stamped with the kill time and the victim's and final-blow attacker's
     /// corporation/alliance as they are at the moment of the kill. Affiliations already set on
     /// `km` (e.g. a structure's owning corporation) are kept when the id is not a known pilot.

@@ -85,7 +85,7 @@ async fn r7_tb_03_reconnect_return_warp_blocked_when_scrambled_or_bubbled() {
             },
         );
     };
-    with_mut_sp6_state(&ctx.db, |st, _snap| insert_disc(st));
+    with_mut_sp6_state(&ctx.db, |st| insert_disc(st));
 
     // 1. Targeted warp scrambler active -> reconnect must NOT force ship into warp
     let mut scrammed_cs = CombatState::default();
@@ -118,7 +118,7 @@ async fn r7_tb_03_reconnect_return_warp_blocked_when_scrambled_or_bubbled() {
     }
 
     // 2. Inside warp disruption bubble without targeted scram -> must NOT enter return warp
-    with_mut_sp6_state(&ctx.db, |st, _snap| insert_disc(st));
+    with_mut_sp6_state(&ctx.db, |st| insert_disc(st));
     sys.set_combat_state(ship_id, CombatState::default()).await.unwrap();
     {
         let mut bp = sys.ballpark.write().unwrap();
@@ -134,7 +134,7 @@ async fn r7_tb_03_reconnect_return_warp_blocked_when_scrambled_or_bubbled() {
     }
 
     // 3. Clean unbubbled/unscrambled reconnect > 10km -> initiates return warp
-    with_mut_sp6_state(&ctx.db, |st, _snap| insert_disc(st));
+    with_mut_sp6_state(&ctx.db, |st| insert_disc(st));
     {
         let mut bp = sys.ballpark.write().unwrap();
         bp.warp_bubble_mgr.bubbles.remove(&910_001);

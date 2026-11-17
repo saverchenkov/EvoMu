@@ -2,7 +2,6 @@
 
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::with_mut_combat_runtime;
-use super::with_mut_sp6_state;
 use eve_destiny::{Ball, MovementMode, SlimItemMeta};
 use glam::DVec3;
 use std::collections::HashMap;
@@ -16,7 +15,8 @@ pub fn cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx: &ServerContext) ->
     let mut removed_mission_npcs: Vec<(u32, i64)> = Vec::new();
     let mut missions_reset_count: usize = 0;
 
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.sp6_lifecycle.as_inner_mut();
         let npc_wreck_ids: Vec<(i64, u32)> = snap
             .items
             .values()
@@ -368,13 +368,16 @@ pub fn spawn_mission_wave_on_pocket_entry_if_needed(
             .max(10_019);
     let mut spawned_npcs: Vec<(u32, i64, u32, DVec3)> = Vec::new();
 
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
         let mut keys: Vec<(i64, u32)> = snap.active_missions.keys().copied().collect();
         keys.sort_unstable();
         for (cid, aid) in keys {
+            let awaiting = snap
+                .sp6_lifecycle
+                .missions_awaiting_downtime_respawn
+                .contains(&(cid, aid));
             let Some((mission_id, cur_npcs)) =
                 snap.active_missions.get(&(cid, aid)).and_then(|mission| {
-                    let awaiting = st.missions_awaiting_downtime_respawn.contains(&(cid, aid));
                     let needs_respawn = awaiting
                         || (mission.spawned_npc_ball_ids.is_empty() && mission.npcs_remaining > 0);
                     (cid == char_id
@@ -386,10 +389,12 @@ pub fn spawn_mission_wave_on_pocket_entry_if_needed(
             else {
                 continue;
             };
-            st.missions_awaiting_downtime_respawn
+            snap.sp6_lifecycle
+                .missions_awaiting_downtime_respawn
                 .retain(|&k| k != (cid, aid));
             let mkey = format!("{cid}:{mission_id}");
-            let initial_count = st
+            let initial_count = snap
+                .sp6_lifecycle
                 .mission_initial_npc_counts
                 .get(&mkey)
                 .copied()
@@ -402,7 +407,11 @@ pub fn spawn_mission_wave_on_pocket_entry_if_needed(
             } else {
                 cur_npcs.max(4)
             };
-            let wave_types = st.mission_initial_npc_types.get(&mkey).cloned();
+            let wave_types = snap
+                .sp6_lifecycle
+                .mission_initial_npc_types
+                .get(&mkey)
+                .cloned();
             let new_bids: Vec<i64> = (0..wave_count).map(|_| snap.alloc_entity_id()).collect();
             if let Some(mission) = snap.active_missions.get_mut(&(cid, aid)) {
                 mission.npcs_remaining = wave_count;
@@ -540,7 +549,7 @@ pub fn spawn_mission_wave_on_pocket_entry_if_needed(
 
 /// Clears any stored safe-logoff state for `char_id` on login, undock, ship board, or action.
 pub fn clear_safe_logoff(db: &std::sync::Arc<eve_db::WorldRepository>, char_id: i64) {
-    super::with_mut_sp6_state(db, |st, _snap| {
+    super::with_mut_sp6_state(db, |st| {
         st.safe_logoffs.remove(&char_id);
     });
 }

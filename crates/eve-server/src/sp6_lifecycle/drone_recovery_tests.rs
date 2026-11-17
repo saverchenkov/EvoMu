@@ -542,7 +542,7 @@ async fn disconnect_hold_committed_warp_immobilizer_safe_logoff_and_unobserved_f
     let docked_rep = handle_safe_logoff(&ctx, &mut sess_docked).await.unwrap();
     assert!(format!("{docked_rep:?}").contains("SAFE_LOGOFF_DOCKED"));
 
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.weapon_timers_until.insert(char_id, now + 60);
         st.npc_timers_until.insert(char_id, now + 60);
         st.pvp_timers_until.insert(char_id, now + 60);
@@ -575,7 +575,7 @@ async fn disconnect_hold_committed_warp_immobilizer_safe_logoff_and_unobserved_f
 
     // Clear blockers: warp guard (`SAFE_LOGOFF_IN_WARP`) triggers first while emergency warp is active,
     // then stopping ship lets clean `handle_safe_logoff` succeed (`L929-960`), followed by abort paths.
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.weapon_timers_until.remove(&char_id);
         st.npc_timers_until.remove(&char_id);
         st.pvp_timers_until.remove(&char_id);

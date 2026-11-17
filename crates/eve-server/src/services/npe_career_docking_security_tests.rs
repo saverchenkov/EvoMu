@@ -248,7 +248,7 @@ async fn test_r7_td_457_blocks_combat_and_warp_scramble_pocket_entry_skip_and_co
 
     // 1. Active weapons / PvP combat timer blocks skip and complete
     let now = ctx.now_unix();
-    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |sp6, _| {
+    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |sp6| {
         sp6.weapon_timers_until.insert(cid, now + 60);
     });
     assert!(call_ops(
@@ -272,7 +272,7 @@ async fn test_r7_td_457_blocks_combat_and_warp_scramble_pocket_entry_skip_and_co
     });
 
     // Clear combat timer, apply warp scramble to ship ball in space
-    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |sp6, _| {
+    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |sp6| {
         sp6.weapon_timers_until.remove(&cid);
     });
     let sys_h = ctx.systems.get_or_spawn(jita_sys);

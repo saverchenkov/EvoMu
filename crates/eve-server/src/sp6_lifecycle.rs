@@ -98,43 +98,18 @@ pub fn with_sp6_state<R>(
     db.with_snapshot(|snap| f(&snap.sp6_lifecycle))
 }
 
-struct Sp6RestoreGuard<'a> {
-    snap: &'a mut eve_db::WorldStateSnapshot,
-    state: Sp6PersistedState,
-}
-
-impl<'a> Sp6RestoreGuard<'a> {
-    fn new(snap: &'a mut eve_db::WorldStateSnapshot) -> Self {
-        let state = std::mem::take(&mut snap.sp6_lifecycle).into_inner();
-        Self { snap, state }
-    }
-}
-
-impl<'a> Drop for Sp6RestoreGuard<'a> {
-    fn drop(&mut self) {
-        self.snap.sp6_lifecycle.set(std::mem::take(&mut self.state));
-        self.snap.mark_other_domains_dirty();
-    }
-}
-
 pub fn try_with_mut_sp6_state<R>(
     db: &Arc<WorldRepository>,
-    f: impl FnOnce(&mut Sp6PersistedState, &mut eve_db::WorldStateSnapshot) -> Result<R, String>,
+    f: impl FnOnce(&mut Sp6PersistedState) -> Result<R, String>,
 ) -> Result<R, String> {
-    db.try_with_mut_snapshot(|snap| {
-        let mut guard = Sp6RestoreGuard::new(snap);
-        f(&mut guard.state, guard.snap)
-    })
+    db.try_with_mut_snapshot(|snap| f(snap.sp6_lifecycle.as_inner_mut()))
 }
 
 pub fn with_mut_sp6_state<R>(
     db: &Arc<WorldRepository>,
-    f: impl FnOnce(&mut Sp6PersistedState, &mut eve_db::WorldStateSnapshot) -> R,
+    f: impl FnOnce(&mut Sp6PersistedState) -> R,
 ) -> R {
-    db.with_mut_snapshot(|snap| {
-        let mut guard = Sp6RestoreGuard::new(snap);
-        f(&mut guard.state, guard.snap)
-    })
+    db.with_mut_snapshot(|snap| f(snap.sp6_lifecycle.as_inner_mut()))
 }
 
 /// Records wreck, jetcan, or corpse creation metadata in `snap.sp6_lifecycle.space_object_meta`.
@@ -1542,7 +1517,7 @@ pub fn record_pvp_aggression_and_renew_logoff_timer(
             vic.pvp_timer_until_unix = vic.pvp_timer_until_unix.max(pvp_until);
         }
     }
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.weapon_timers_until
             .insert(attacker_char_id, weap_until);
         st.pvp_timers_until.insert(attacker_char_id, pvp_until);
@@ -1580,7 +1555,7 @@ pub fn record_npc_aggression_timer(ctx: &ServerContext, char_id: i64, now_unix: 
     with_mut_combat_runtime(ctx, |rt| {
         rt.npc_timers.insert(char_id, npc_until);
     });
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.npc_timers_until.insert(char_id, npc_until);
     });
     let _ = maybe_abort_safe_logoff_on_action(ctx, char_id, "SAFE_LOGOFF_ABORT_AGGRESSION");
@@ -1772,7 +1747,7 @@ pub async fn handle_safe_logoff(
         let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
         let _ = sys_handle.set_speed_fraction(ship_id, 0.0).await;
     }
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.disconnected_ships.remove(&char_id);
         st.safe_logoffs.insert(
             char_id,
@@ -1806,7 +1781,7 @@ pub fn handle_abort_safe_logoff(
     reason_code: &str,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs.remove(&char_id);
     });
     let abort_notif = OnSafeLogoffAborted {
@@ -1829,7 +1804,7 @@ pub fn maybe_abort_safe_logoff_on_action(
     {
         return false;
     }
-    let aborted = with_mut_sp6_state(&ctx.db, |st, _snap| {
+    let aborted = with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs
             .remove(&char_id)
             .is_some_and(|entry| !entry.completed)
@@ -1884,7 +1859,7 @@ pub fn handle_character_logoff_or_disconnect_sync(
     );
     let (weap_until, npc_until, pvp_until, crim_until) =
         active_timers_for_char(ctx, char_id, now_unix);
-    let safe_entry = with_mut_sp6_state(&ctx.db, |st, _snap| st.safe_logoffs.remove(&char_id));
+    let safe_entry = with_mut_sp6_state(&ctx.db, |st| st.safe_logoffs.remove(&char_id));
     let char_info = ctx.db.with_snapshot(|snap| {
         let ch = snap.characters.get(&char_id)?;
         if ch.station_id.is_some() || ch.structure_id.is_some() {
@@ -1954,10 +1929,11 @@ pub fn handle_character_logoff_or_disconnect_sync(
     );
     entry.last_velocity = [current_vel.x, current_vel.y, current_vel.z];
 
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    ctx.db.with_mut_snapshot(|snap| {
         snap.item_positions
             .insert(ship_id, [current_pos.x, current_pos.y, current_pos.z]);
-        st.item_velocities
+        snap.sp6_lifecycle
+            .item_velocities
             .insert(ship_id, [current_vel.x, current_vel.y, current_vel.z]);
         let _ = crate::router::apply_character_transition_in_snap(
             snap,
@@ -1968,7 +1944,9 @@ pub fn handle_character_logoff_or_disconnect_sync(
             false,
             false,
         );
-        st.disconnected_ships.insert(char_id, entry.clone());
+        snap.sp6_lifecycle
+            .disconnected_ships
+            .insert(char_id, entry.clone());
     });
 
     Some(entry)
@@ -1997,11 +1975,11 @@ pub fn reconnect_character_in_space_sync(
     cluster_tick::collapse_stranded_abyssal_if_needed_sync(ctx, char_id, now_unix);
 
     let (sys_id, ship_id, ship_type_id, pos_arr, vel_arr, had_live_disc, pre_warp_pos_opt, corp_id, alliance_id, sec_status) =
-        with_mut_sp6_state(&ctx.db, |st, snap| {
+        ctx.db.with_mut_snapshot(|snap| {
             let ch = snap.characters.get(&char_id)?;
             if ch.station_id.is_some() || ch.structure_id.is_some() {
-                st.disconnected_ships.remove(&char_id);
-                st.safe_logoffs.remove(&char_id);
+                snap.sp6_lifecycle.disconnected_ships.remove(&char_id);
+                snap.sp6_lifecycle.safe_logoffs.remove(&char_id);
                 return None;
             }
             let sys_id = ch.solar_system_id;
@@ -2011,14 +1989,15 @@ pub fn reconnect_character_in_space_sync(
             let alliance_id = ch.alliance_id.unwrap_or(-1);
             let sec_status = ch.security_status;
 
-            let disc_entry = st
+            let disc_entry = snap
+                .sp6_lifecycle
                 .disconnected_ships
                 .remove(&char_id)
                 .filter(|d| d.ship_id == ship_id && snap.items.contains_key(&d.ship_id));
             let pre_warp_pos_opt = disc_entry.as_ref().and_then(|d| d.pre_warp_position);
             let disc_vel = disc_entry.as_ref().map(|d| d.last_velocity);
             let disc_pos = disc_entry.map(|d| d.last_position);
-            st.safe_logoffs.remove(&char_id);
+            snap.sp6_lifecycle.safe_logoffs.remove(&char_id);
 
             let is_valid_space_pos = |arr: [f64; 3]| -> bool {
                 let pos = DVec3::from_array(arr);
@@ -2090,10 +2069,10 @@ pub fn reconnect_character_in_space_sync(
                 })
                 .unwrap_or_else(safe_fallback_pos);
             let vel_arr = disc_vel
-                .or_else(|| st.item_velocities.get(&ship_id).copied())
+                .or_else(|| snap.sp6_lifecycle.item_velocities.get(&ship_id).copied())
                 .unwrap_or([0.0, 0.0, 0.0]);
             snap.item_positions.insert(ship_id, pos_arr);
-            st.item_velocities.insert(ship_id, vel_arr);
+            snap.sp6_lifecycle.item_velocities.insert(ship_id, vel_arr);
             if let Some(ship_item) = snap.items.get_mut(&ship_id) {
                 ship_item.location_id = sys_id as i64;
                 ship_item.flag = InventoryFlag::None;
@@ -2290,7 +2269,7 @@ pub fn register_self_destruct_countdown(
     started_unix: u64,
     detonate_at_unix: u64,
 ) {
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.self_destructs.insert(
             ship_id,
             SelfDestructPersistedEntry {
@@ -2305,7 +2284,7 @@ pub fn register_self_destruct_countdown(
 }
 
 pub fn abort_self_destruct_countdown(ctx: &ServerContext, ship_id: i64) -> bool {
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.self_destructs.remove(&ship_id).is_some()
     })
 }
@@ -2313,7 +2292,7 @@ pub fn abort_self_destruct_countdown(ctx: &ServerContext, ship_id: i64) -> bool 
 /// Aborts any active self-destruct countdown for `ship_id` across both persisted SP6 state
 /// and runtime combat state (#539).
 pub fn abort_self_destruct_for_ship(ctx: &ServerContext, ship_id: i64) -> bool {
-    let sp6_aborted = with_mut_sp6_state(&ctx.db, |st, _snap| {
+    let sp6_aborted = with_mut_sp6_state(&ctx.db, |st| {
         st.self_destructs.remove(&ship_id).is_some()
     });
     let rt_aborted = crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
@@ -2335,7 +2314,7 @@ pub fn register_abyssal_session(
     entered_unix: u64,
     collapse_at_unix: u64,
 ) {
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.abyssal_sessions.insert(
             char_id,
             AbyssalPersistedSession {
@@ -2351,7 +2330,7 @@ pub fn register_abyssal_session(
 }
 
 pub fn clear_abyssal_session(ctx: &ServerContext, char_id: i64) {
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.abyssal_sessions.remove(&char_id);
     });
 }

@@ -380,7 +380,7 @@ async fn void_space_and_reconcile_abyssal_login_sp6_and_completed_branches() {
         reconcile_abyssal_login(&ctx, char_id, abyss_sys, ship_id),
         abyss_sys
     );
-    with_mut_sp6_state(&ctx.db, |st, _| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.abyssal_sessions.remove(&char_id);
     });
 

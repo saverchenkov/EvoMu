@@ -270,19 +270,19 @@ async fn test_fleet_object_and_manager_lifecycle() {
 
     // Persist to SQLite, reload blobs from SQLite, re-hydrate social state, and verify GetJoinRequests hydrates only Pilot 4
     let pid = std::process::id();
-    let json_path = std::env::temp_dir().join(format!("evomu_fleet_reqs_{pid}.json"));
     let sqlite_path = std::env::temp_dir().join(format!("evomu_fleet_reqs_{pid}.sqlite"));
-    let _ = std::fs::remove_file(&json_path);
+    let sqlite_wal = std::path::PathBuf::from(format!("{}-wal", sqlite_path.display()));
+    let sqlite_shm = std::path::PathBuf::from(format!("{}-shm", sqlite_path.display()));
     let _ = std::fs::remove_file(&sqlite_path);
-    ctx.db.save_snapshot_to_file(&json_path).expect("save_snapshot_to_file");
-    {
-        let writer = eve_db::WorldRepository::open_sqlite(&sqlite_path).expect("open_sqlite writer");
-        writer.load_snapshot_from_file(&json_path).expect("load_snapshot_from_file");
-    }
+    let _ = std::fs::remove_file(&sqlite_wal);
+    let _ = std::fs::remove_file(&sqlite_shm);
+    ctx.db.save_to_sqlite(&sqlite_path).expect("save_to_sqlite");
     let repo_reloaded = eve_db::WorldRepository::open_sqlite(&sqlite_path).expect("reopen_sqlite");
     let snap_reloaded = repo_reloaded.with_snapshot(|s| s.clone());
-    let _ = std::fs::remove_file(&json_path);
+    drop(repo_reloaded);
     let _ = std::fs::remove_file(&sqlite_path);
+    let _ = std::fs::remove_file(&sqlite_wal);
+    let _ = std::fs::remove_file(&sqlite_shm);
     ctx.db.with_mut_snapshot(|s| {
         s.fleet_and_social_ops = snap_reloaded.fleet_and_social_ops;
         s.service_state_blobs = snap_reloaded.service_state_blobs;
@@ -350,15 +350,13 @@ async fn test_fleet_object_and_manager_lifecycle() {
     // RegisterForDamageUpdates with list persists fleet_watchlist in service_state_blobs; verify SQLite roundtrip & cache eviction hydration
     let reg_dam = ctx.dispatch_rpc(&mut sess2, "fleetMgr", None, "RegisterForDamageUpdates", &[PyRep::List(vec![PyRep::Integer(PILOT1)])], &kw, None).await.expect("RegisterForDamageUpdates");
     assert_eq!(get_bool(&reg_dam, "watched"), Some(true));
-    ctx.db.save_snapshot_to_file(&json_path).expect("save_snapshot_to_file watchlist");
-    {
-        let writer = eve_db::WorldRepository::open_sqlite(&sqlite_path).expect("open_sqlite writer watchlist");
-        writer.load_snapshot_from_file(&json_path).expect("load_snapshot_from_file watchlist");
-    }
+    ctx.db.save_to_sqlite(&sqlite_path).expect("save_to_sqlite watchlist");
     let repo_wl = eve_db::WorldRepository::open_sqlite(&sqlite_path).expect("reopen_sqlite watchlist");
     let snap_wl = repo_wl.with_snapshot(|s| s.clone());
-    let _ = std::fs::remove_file(&json_path);
+    drop(repo_wl);
     let _ = std::fs::remove_file(&sqlite_path);
+    let _ = std::fs::remove_file(&sqlite_wal);
+    let _ = std::fs::remove_file(&sqlite_shm);
     ctx.db.with_mut_snapshot(|s| {
         s.fleet_and_social_ops = snap_wl.fleet_and_social_ops;
         s.service_state_blobs = snap_wl.service_state_blobs;

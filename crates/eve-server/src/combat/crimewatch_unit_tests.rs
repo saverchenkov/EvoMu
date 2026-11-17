@@ -1154,3 +1154,63 @@ fn crimewatch_lock_ranks_and_unmutated_drop_fast_path() {
     }
     assert!(eve_db::lock_rank::held_lock_ranks().is_empty());
 }
+
+#[test]
+fn crimewatch_mut_helpers_preserve_cow_arcs_and_roll_back_pending_despawns_on_err() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let target_id = 90_000_002_i64;
+    let sys_id = 30_000_142_u32;
+
+    ctx.crimewatch.with_mut_crimewatch(|dir| {
+        dir.trigger_suspect_flag(char_id, 1_000);
+        dir.pending_concord_despawns.push((sys_id, 777_001, 1_120));
+    });
+
+    let (states_before, aggs_before) = ctx.db.with_snapshot(|s| {
+        (s.crimewatch_states.clone(), s.crimewatch_aggressions.clone())
+    });
+    let commits_before = ctx.db.tx_commit_count();
+
+    // No-op mutation leaves CowCells Arc::ptr_eq intact and avoids committing a transaction.
+    ctx.crimewatch.with_mut_crimewatch(|dir| {
+        assert!(dir.is_suspect(char_id, 1_010));
+    });
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+    ctx.db.with_snapshot(|s| {
+        assert!(states_before.ptr_eq(&s.crimewatch_states));
+        assert!(aggs_before.ptr_eq(&s.crimewatch_aggressions));
+    });
+
+    // Mutating only `states` preserves `crimewatch_aggressions` Arc identity.
+    ctx.crimewatch.with_mut_crimewatch(|dir| {
+        dir.trigger_weapon_timer(char_id, 1_050);
+    });
+    let states_mid = ctx.db.with_snapshot(|s| {
+        assert!(!states_before.ptr_eq(&s.crimewatch_states));
+        assert!(aggs_before.ptr_eq(&s.crimewatch_aggressions));
+        s.crimewatch_states.clone()
+    });
+    let commits_mid = ctx.db.tx_commit_count();
+
+    // Returning Err rolls back states, aggressions, and pending_concord_despawns.
+    let err: Result<(), String> = ctx.crimewatch.try_with_mut_crimewatch(|dir| {
+        dir.states.clear();
+        dir.aggression_mgr
+            .record_aggression(char_id, target_id, sys_id, false, false, 1_060);
+        dir.pending_concord_despawns.push((sys_id, 888_002, 2_000));
+        Err("abort crimewatch tx".to_string())
+    });
+    assert!(err.is_err());
+    assert_eq!(ctx.db.tx_commit_count(), commits_mid);
+    ctx.db.with_snapshot(|s| {
+        assert!(states_mid.ptr_eq(&s.crimewatch_states));
+        assert!(aggs_before.ptr_eq(&s.crimewatch_aggressions));
+    });
+    ctx.crimewatch.with_crimewatch(|dir| {
+        assert!(dir.is_suspect(char_id, 1_060));
+        assert_eq!(dir.states[&char_id].weapon_timer_until_unix, 1_110);
+        assert!(dir.get_aggression(char_id, target_id, 1_060).is_none());
+        assert_eq!(dir.pending_concord_despawns, vec![(sys_id, 777_001, 1_120)]);
+    });
+}

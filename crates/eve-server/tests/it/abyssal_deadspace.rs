@@ -1603,11 +1603,13 @@ async fn test_abyssal_downtime_evacuation_purges_abandoned_and_orphaned_drones()
 #[tokio::test]
 async fn test_world_repository_monotonic_instance_id_and_ballpark_isolation() {
     let r1 = Arc::new(WorldRepository::with_demo_seed());
-    let r2 = Arc::new(WorldRepository::new_empty_with_snapshot_path(None).unwrap());
+    let r2 = Arc::new(WorldRepository::new_in_memory().unwrap());
     let tmp = std::env::temp_dir().join(format!("evomu_repo_id_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let r3 = Arc::new(WorldRepository::open_sqlite(&tmp).unwrap());
     let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_file(tmp.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(tmp.with_extension("sqlite-shm"));
 
     assert!(r1.instance_id() > 0);
     assert!(r2.instance_id() > r1.instance_id());

@@ -220,7 +220,7 @@ async fn timers_aggression_and_filament_preconditions_enforce_all_guards() {
     assert!(require_ship_ready_for_filament_jump(&ctx, att, ship_id, sys_id).is_ok());
 
     // Safe logoff blocks filament
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.safe_logoffs.insert(
             att,
             SafeLogoffEntry {
@@ -239,7 +239,7 @@ async fn timers_aggression_and_filament_preconditions_enforce_all_guards() {
     );
 
     // PvP aggression aborts safe logoff on both attacker & victim and sets Weapons (60s) + PvP (900s)
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.disconnected_ships.insert(
             vic,
             DisconnectedShipEntry {
@@ -283,7 +283,7 @@ async fn timers_aggression_and_filament_preconditions_enforce_all_guards() {
             st.pvp_timer_until_unix = 0;
         }
     }
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.pvp_timers_until.remove(&att);
     });
     assert_eq!(
@@ -300,7 +300,7 @@ async fn timers_aggression_and_filament_preconditions_enforce_all_guards() {
             st.weapon_timer_until_unix = 0;
         }
     }
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.weapon_timers_until.remove(&att);
     });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -688,7 +688,7 @@ fn w5a_p2_0c_sp6_and_crimewatch_restore_guards_preserve_state_across_closure_pan
     let char_id = 90_904_001_i64;
     let ship_id = 885_904_001_i64;
 
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    with_mut_sp6_state(&ctx.db, |st| {
         st.ship_combat_hp.insert(
             ship_id,
             PersistedCombatHp {
@@ -704,9 +704,9 @@ fn w5a_p2_0c_sp6_and_crimewatch_restore_guards_preserve_state_across_closure_pan
             .record_aggression(char_id, 90_904_002, 30_000_142, false, false, 10_000);
     });
 
-    // 1. Panic inside try_with_mut_sp6_state restores sp6_lifecycle via Sp6RestoreGuard and rolls
-    //    back from SQLite without wiping pre-existing sp6_lifecycle state (#904 / #833).
-    let sp6_err = try_with_mut_sp6_state(&ctx.db, |st, _snap| -> Result<(), String> {
+    // 1. Panic inside try_with_mut_sp6_state rolls back working snapshot + SQLite tx without wiping
+    //    pre-existing sp6_lifecycle state (#904 / #833 / #921).
+    let sp6_err = try_with_mut_sp6_state(&ctx.db, |st| -> Result<(), String> {
         st.ship_combat_hp.clear();
         st.ship_combat_hp.insert(
             999_999,
@@ -726,12 +726,12 @@ fn w5a_p2_0c_sp6_and_crimewatch_restore_guards_preserve_state_across_closure_pan
             armor_hp: 600.0,
             hull_hp: 700.0,
         }),
-        "Sp6RestoreGuard + SQLite rollback must preserve pre-panic sp6_lifecycle state (#904)"
+        "try_with_mut_sp6_state + tx rollback must preserve pre-panic sp6_lifecycle state (#904 / #921)"
     );
     assert!(!with_sp6_state(&ctx.db, |st| st.ship_combat_hp.contains_key(&999_999)));
 
-    // 2. Panic inside try_with_mut_crimewatch restores crimewatch_states and crimewatch_aggressions
-    //    via CrimeWatchRestoreGuard and rolls back from SQLite without wiping pre-existing state (#904 / #833).
+    // 2. Panic inside try_with_mut_crimewatch rolls back crimewatch_states and crimewatch_aggressions
+    //    without wiping pre-existing state (#904 / #833 / #921).
     let cw_err: Result<(), String> = ctx.crimewatch.try_with_mut_crimewatch(|dir| {
         dir.states.clear();
         dir.aggression_mgr.records.clear();
@@ -741,11 +741,11 @@ fn w5a_p2_0c_sp6_and_crimewatch_restore_guards_preserve_state_across_closure_pan
     ctx.crimewatch.with_crimewatch(|dir| {
         assert!(
             dir.is_suspect(char_id, 10_100),
-            "CrimeWatchRestoreGuard + SQLite rollback must preserve pre-panic suspect state (#904)"
+            "try_with_mut_crimewatch + tx rollback must preserve pre-panic suspect state (#904 / #921)"
         );
         assert!(
             dir.get_aggression(char_id, 90_904_002, 10_100).is_some(),
-            "CrimeWatchRestoreGuard + SQLite rollback must preserve pre-panic aggressions (#904)"
+            "try_with_mut_crimewatch + tx rollback must preserve pre-panic aggressions (#904 / #921)"
         );
     });
 }

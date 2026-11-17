@@ -203,9 +203,9 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
         );
 
         let (home_sys_id, _home_station_id, _corvette_id, cleared_zarzakh_gate, extra_balls_to_remove) =
-            crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, snap| {
+            ctx.db.with_mut_snapshot(|snap| {
                 snap.insurance_contracts.remove(&pilot_sid);
-                st.abyssal_sessions.remove(&pilot_cid);
+                snap.sp6_lifecycle.abyssal_sessions.remove(&pilot_cid);
                 if idx == 0 {
                     if let Some((_, _, false, _, _, ref caches, _, _, _)) = pocket_cleanup {
                         for &cid in caches {
@@ -239,7 +239,7 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
                     snap.items.remove(&eb);
                     snap.item_positions.remove(&eb);
                     snap.module_online_states.remove(&eb);
-                    st.ship_combat_hp.remove(&eb);
+                    snap.sp6_lifecycle.ship_combat_hp.remove(&eb);
                 }
 
                 let ship_type_id = snap
@@ -260,7 +260,7 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
 
                 snap.items.remove(&pilot_sid);
                 snap.module_online_states.remove(&pilot_sid);
-                st.ship_combat_hp.remove(&pilot_sid);
+                snap.sp6_lifecycle.ship_combat_hp.remove(&pilot_sid);
                 snap.items.retain(|_, item| item.location_id != pilot_sid);
                 let cleared_lock = snap.zarzakh_gate_locks.remove(&pilot_cid).map(|(gid, _)| gid);
 

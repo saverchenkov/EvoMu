@@ -150,46 +150,54 @@ fn persist_corruption_stage_diffs(
     }
 }
 
-struct CrimeWatchRestoreGuard<'a> {
-    snap: &'a mut eve_db::WorldStateSnapshot,
-    orig_stages: HashMap<u32, u8>,
+fn build_director_from_snapshot(
+    snap: &eve_db::WorldStateSnapshot,
+    now_unix: u64,
+    pending_concord_despawns: Vec<(u32, i64, u64)>,
+) -> (HashMap<u32, u8>, CrimeWatchDirector) {
+    let orig_stages = snapshot_corruption_stages(snap, now_unix);
+    let dir = CrimeWatchDirector {
+        states: snap.crimewatch_states.as_inner().clone(),
+        aggression_mgr: AggressionManager {
+            records: snap.crimewatch_aggressions.as_inner().clone(),
+        },
+        system_corruption_stages: orig_stages.clone(),
+        pending_concord_despawns,
+    };
+    (orig_stages, dir)
+}
+
+fn apply_director_fields_to_snapshot(
+    snap: &mut eve_db::WorldStateSnapshot,
+    orig_stages: &HashMap<u32, u8>,
+    states: HashMap<i64, CharacterCrimeWatchState>,
+    aggs: HashMap<(i64, i64), AggressionRecord>,
+    stages: &HashMap<u32, u8>,
+) {
+    if states != *snap.crimewatch_states {
+        snap.crimewatch_states.set(states);
+    }
+    if aggs != *snap.crimewatch_aggressions {
+        snap.crimewatch_aggressions.set(aggs);
+    }
+    if stages != orig_stages {
+        persist_corruption_stage_diffs(snap, orig_stages, stages);
+    }
+}
+
+fn apply_director_to_snapshot(
+    snap: &mut eve_db::WorldStateSnapshot,
+    orig_stages: &HashMap<u32, u8>,
     dir: CrimeWatchDirector,
-}
-
-impl<'a> CrimeWatchRestoreGuard<'a> {
-    fn new(
-        snap: &'a mut eve_db::WorldStateSnapshot,
-        now_unix: u64,
-        pending_concord_despawns: Vec<(u32, i64, u64)>,
-    ) -> Self {
-        let orig_stages = snapshot_corruption_stages(snap, now_unix);
-        let dir = CrimeWatchDirector {
-            states: std::mem::take(&mut *snap.crimewatch_states),
-            aggression_mgr: AggressionManager {
-                records: std::mem::take(&mut *snap.crimewatch_aggressions),
-            },
-            system_corruption_stages: orig_stages.clone(),
-            pending_concord_despawns,
-        };
-        Self {
-            snap,
-            orig_stages,
-            dir,
-        }
-    }
-}
-
-impl<'a> Drop for CrimeWatchRestoreGuard<'a> {
-    fn drop(&mut self) {
-        self.snap.crimewatch_states = std::mem::take(&mut self.dir.states).into();
-        self.snap.crimewatch_aggressions =
-            std::mem::take(&mut self.dir.aggression_mgr.records).into();
-        persist_corruption_stage_diffs(
-            self.snap,
-            &self.orig_stages,
-            &self.dir.system_corruption_stages,
-        );
-    }
+) -> Vec<(u32, i64, u64)> {
+    apply_director_fields_to_snapshot(
+        snap,
+        orig_stages,
+        dir.states,
+        dir.aggression_mgr.records,
+        &dir.system_corruption_stages,
+    );
+    dir.pending_concord_despawns
 }
 
 impl CrimeWatchLock {
@@ -238,22 +246,22 @@ impl CrimeWatchLock {
     pub fn with_mut_crimewatch<R>(&self, f: impl FnOnce(&mut CrimeWatchDirector) -> R) -> R {
         let _guard = self.lock.write().unwrap_or_else(|e| e.into_inner());
         let now_unix = self.db.now_unix_secs();
-        let mut pending_despawns = self
+        let pending_despawns = self
             .pending_concord_despawns
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let out = self.db.with_mut_snapshot(|snap| {
-            let mut cw_guard =
-                CrimeWatchRestoreGuard::new(snap, now_unix, std::mem::take(&mut pending_despawns));
-            let out = f(&mut cw_guard.dir);
-            pending_despawns = std::mem::take(&mut cw_guard.dir.pending_concord_despawns);
-            out
+        let (out, next_pending) = self.db.with_mut_snapshot(|snap| {
+            let (orig_stages, mut dir) =
+                build_director_from_snapshot(snap, now_unix, pending_despawns);
+            let out = f(&mut dir);
+            let next_pending = apply_director_to_snapshot(snap, &orig_stages, dir);
+            (out, next_pending)
         });
         *self
             .pending_concord_despawns
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = pending_despawns;
+            .unwrap_or_else(|e| e.into_inner()) = next_pending;
         out
     }
 
@@ -263,27 +271,23 @@ impl CrimeWatchLock {
     ) -> Result<R, E> {
         let _guard = self.lock.write().unwrap_or_else(|e| e.into_inner());
         let now_unix = self.db.now_unix_secs();
-        let mut pending_despawns = self
+        let pending_despawns = self
             .pending_concord_despawns
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let res = self.db.try_with_mut_snapshot(|snap| {
-            let mut cw_guard =
-                CrimeWatchRestoreGuard::new(snap, now_unix, std::mem::take(&mut pending_despawns));
-            let res = f(&mut cw_guard.dir);
-            if res.is_ok() {
-                pending_despawns = std::mem::take(&mut cw_guard.dir.pending_concord_despawns);
-            }
-            res
-        });
-        if res.is_ok() {
-            *self
-                .pending_concord_despawns
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = pending_despawns;
-        }
-        res
+        let (out, next_pending) = self.db.try_with_mut_snapshot(|snap| {
+            let (orig_stages, mut dir) =
+                build_director_from_snapshot(snap, now_unix, pending_despawns);
+            let out = f(&mut dir)?;
+            let next_pending = apply_director_to_snapshot(snap, &orig_stages, dir);
+            Ok((out, next_pending))
+        })?;
+        *self
+            .pending_concord_despawns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = next_pending;
+        Ok(out)
     }
 
     pub fn read(
@@ -291,26 +295,17 @@ impl CrimeWatchLock {
     ) -> Result<CrimeWatchReadGuard<'_>, std::sync::PoisonError<CrimeWatchReadGuard<'_>>> {
         let guard = self.lock.read().unwrap_or_else(|e| e.into_inner());
         let now_unix = self.db.now_unix_secs();
-        let (states, records, stages) = self.db.with_snapshot(|s| {
-            (
-                s.crimewatch_states.as_inner().clone(),
-                s.crimewatch_aggressions.as_inner().clone(),
-                snapshot_corruption_stages(s, now_unix),
-            )
-        });
         let pending_concord_despawns = self
             .pending_concord_despawns
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let (_, director) = self.db.with_snapshot(|s| {
+            build_director_from_snapshot(s, now_unix, pending_concord_despawns)
+        });
         Ok(CrimeWatchReadGuard {
             _guard: guard,
-            director: CrimeWatchDirector {
-                states,
-                aggression_mgr: AggressionManager { records },
-                system_corruption_stages: stages,
-                pending_concord_despawns,
-            },
+            director,
         })
     }
 
@@ -319,31 +314,22 @@ impl CrimeWatchLock {
     ) -> Result<CrimeWatchWriteGuard<'_>, std::sync::PoisonError<CrimeWatchWriteGuard<'_>>> {
         let guard = self.lock.write().unwrap_or_else(|e| e.into_inner());
         let now_unix = self.db.now_unix_secs();
-        let (states, records, stages) = self.db.with_snapshot(|s| {
-            (
-                s.crimewatch_states.as_inner().clone(),
-                s.crimewatch_aggressions.as_inner().clone(),
-                snapshot_corruption_stages(s, now_unix),
-            )
-        });
         let pending_despawns = self
             .pending_concord_despawns
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let (orig_stages, director) = self.db.with_snapshot(|s| {
+            build_director_from_snapshot(s, now_unix, pending_despawns.clone())
+        });
         Ok(CrimeWatchWriteGuard {
             _guard: guard,
             db: &self.db,
             pending_despawns_lock: &self.pending_concord_despawns,
-            orig_stages: stages.clone(),
-            orig_pending_despawns: pending_despawns.clone(),
+            orig_stages,
+            orig_pending_despawns: pending_despawns,
             mutated: false,
-            director: CrimeWatchDirector {
-                states,
-                aggression_mgr: AggressionManager { records },
-                system_corruption_stages: stages,
-                pending_concord_despawns: pending_despawns,
-            },
+            director,
         })
     }
 }
@@ -405,9 +391,7 @@ impl<'a> Drop for CrimeWatchWriteGuard<'a> {
             let stages = std::mem::take(&mut self.director.system_corruption_stages);
             let orig_stages = &self.orig_stages;
             self.db.with_mut_snapshot(|snap| {
-                snap.crimewatch_states = states.into();
-                snap.crimewatch_aggressions = aggs.into();
-                persist_corruption_stage_diffs(snap, orig_stages, &stages);
+                apply_director_fields_to_snapshot(snap, orig_stages, states, aggs, &stages);
             });
         }
         if self.director.pending_concord_despawns != self.orig_pending_despawns {
