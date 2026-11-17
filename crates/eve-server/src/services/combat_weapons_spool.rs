@@ -843,13 +843,9 @@ pub async fn step_system_entropic_spools(
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
 
     for (ship_id, module_id) in active_spool_keys {
-        let spool_state = ctx
-            .combat_ephemeral
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .entropic_spools
-            .get(&(ship_id, module_id))
-            .cloned();
+        let spool_state = with_combat_runtime(ctx, |guard| {
+            guard.entropic_spools.get(&(ship_id, module_id)).cloned()
+        });
         let Some(mut state) = spool_state else {
             continue;
         };
@@ -1198,11 +1194,9 @@ pub async fn step_system_entropic_spools(
         }
 
         if !stopped {
-            ctx.combat_ephemeral
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .entropic_spools
-                .insert((ship_id, module_id), state);
+            with_mut_combat_runtime(ctx, |rt| {
+                rt.entropic_spools.insert((ship_id, module_id), state);
+            });
         }
     }
 }

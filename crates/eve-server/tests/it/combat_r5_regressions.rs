@@ -23,8 +23,8 @@ use eve_proto::PyRep;
 use eve_server::combat::death_pipeline::execute_death_pipeline_sync_inner;
 use eve_server::router::{ActiveScannerProbe, ServerContext};
 use eve_server::services::combat_crimewatch::{
-    record_killmail_assist_action, step_combat_system, with_mut_combat_runtime,
-    ActiveBreacherDot, EntropicSpoolState, SafetyLevel,
+    record_killmail_assist_action, step_combat_system, with_combat_runtime,
+    with_mut_combat_runtime, ActiveBreacherDot, EntropicSpoolState, SafetyLevel,
 };
 use eve_server::services::pve_exploration::{
     with_pve_exploration_reg, HackingGameSession, HackingNodeKind, HackingTileState, PveSiteInstance,
@@ -310,7 +310,7 @@ async fn test_r5_202_207_weapon_zero_lock_deactivation_and_vorton_secondary_arc_
             .expect_err("Firing weapon with zero locked targets must fail")
     };
     assert_eq!(err.code, "TargetNotLocked");
-    let spool_exists = with_mut_combat_runtime(&ctx, |rt| rt.entropic_spools.contains_key(&(ship_id, gun_id)));
+    let spool_exists = with_combat_runtime(&ctx, |rt| rt.entropic_spools.contains_key(&(ship_id, gun_id)));
     assert!(!spool_exists, "Entropic spool must reset when lock check fails");
 }
 
@@ -521,7 +521,7 @@ async fn test_r5_208_209_breacher_dot_impact_system_scoping_and_smartbomb_wreck_
         );
     });
     step_combat_system(&ctx, sys_b, 10.0).await;
-    let rem_after_other_sys = with_mut_combat_runtime(&ctx, |rt| rt.active_breacher_dots[&vic_ship].remaining_s);
+    let rem_after_other_sys = with_combat_runtime(&ctx, |rt| rt.active_breacher_dots[&vic_ship].remaining_s);
     assert!((rem_after_other_sys - 50.0).abs() < 1e-6, "Stepping another solar system must not decrement Breacher DoT timer");
 
     let sys_handle = ctx.systems.get_or_spawn(sys_a);
@@ -568,7 +568,7 @@ async fn test_r5_208_209_breacher_dot_impact_system_scoping_and_smartbomb_wreck_
     );
     let sec_after = ctx.db.with_snapshot(|s| s.characters[&atk_id].security_status);
     assert!(sec_after < sec_before, "Illegal lowsec smartbomb hit must reduce security status");
-    let has_le = with_mut_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(atk_id, vic_id, ctx.now_unix()));
+    let has_le = with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(atk_id, vic_id, ctx.now_unix()));
     assert!(!has_le, "Illegal lowsec smartbomb hit must NOT create Limited Engagement");
     assert!(
         ctx.crimewatch

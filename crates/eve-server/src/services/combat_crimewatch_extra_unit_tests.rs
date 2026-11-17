@@ -1864,4 +1864,175 @@ fn rehydrate_and_flush_reject_stale_snapshot_when_combat_state_epoch_advances_co
     }
 }
 
+#[test]
+fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobbering_db() {
+    let (ctx, _session, char_id, ship_id, sys_a) = make_fighter_ctx_and_session();
+    let sys_b = sys_a + 1;
+    let victim_id = char_id + 10;
+    let victim_concurrent = char_id + 11;
+
+    // Establish baseline synced runtime state.
+    with_combat_runtime(&ctx, |_| {});
+
+    // 1. Prior `_in_snap` commit modifies both core (`player_bounty_pool`) and extended
+    // (`modified_system_securities[&sys_a]`) directly in DB without touching `combat_ephemeral`.
+    ctx.db.with_mut_snapshot(|snap| {
+        with_mut_combat_runtime_in_snap(snap, |rt| {
+            rt.player_bounty_pool.insert(victim_id, 500_000.0);
+            rt.modified_system_securities.insert(sys_a, 0.4);
+        });
+    });
+
+    // 2. Dirty extended runtime edits arrive in `combat_ephemeral` (same map disjoint key `sys_b`,
+    // plus another extended map `self_destruct_countdowns`).
+    {
+        let mut guard = ctx.combat_ephemeral.write().unwrap();
+        guard.modified_system_securities.insert(sys_b, 0.25);
+        guard.self_destruct_countdowns.insert(
+            ship_id,
+            SelfDestructCountdown {
+                ship_id,
+                char_id,
+                solar_system_id: sys_b,
+                started_unix: 100,
+                detonate_at_unix: 220,
+            },
+        );
+    }
+
+    // 3. Concurrent `_in_snap` commit firing during flush (no read-to-write TOCTOU window!).
+    let mut hook_injected = false;
+    flush_combat_runtime_to_db_with_hooks(
+        &ctx,
+        || {
+            if !hook_injected {
+                hook_injected = true;
+                ctx.db.with_mut_snapshot(|snap| {
+                    with_mut_combat_runtime_in_snap(snap, |rt| {
+                        rt.player_bounty_pool.insert(victim_concurrent, 900_000.0);
+                    });
+                });
+            }
+        },
+        || {},
+    );
+    assert!(hook_injected);
+
+    // 4. Both RAM and persisted DB must retain ALL prior + concurrent `_in_snap` DB fields AND dirty RAM edits.
+    with_combat_runtime(&ctx, |rt| {
+        assert_eq!(rt.player_bounty_pool.get(&victim_id).copied(), Some(500_000.0));
+        assert_eq!(
+            rt.player_bounty_pool.get(&victim_concurrent).copied(),
+            Some(900_000.0)
+        );
+        assert_eq!(rt.modified_system_securities.get(&sys_a).copied(), Some(0.4));
+        assert_eq!(rt.modified_system_securities.get(&sys_b).copied(), Some(0.25));
+        assert_eq!(
+            rt.self_destruct_countdowns
+                .get(&ship_id)
+                .map(|c| c.detonate_at_unix),
+            Some(220)
+        );
+    });
+    let persisted = ctx
+        .db
+        .with_snapshot(|s| s.combat_crimewatch_state.as_inner().clone());
+    assert_eq!(
+        persisted.player_bounty_pool.get(&victim_id).copied(),
+        Some(500_000.0)
+    );
+    assert_eq!(
+        persisted.player_bounty_pool.get(&victim_concurrent).copied(),
+        Some(900_000.0)
+    );
+    let mut decoded = CombatRuntimeState::default();
+    decoded.sync_from_persisted(&persisted);
+    assert_eq!(
+        decoded.modified_system_securities.get(&sys_a).copied(),
+        Some(0.4)
+    );
+    assert_eq!(
+        decoded.modified_system_securities.get(&sys_b).copied(),
+        Some(0.25)
+    );
+    assert!(decoded.self_destruct_countdowns.contains_key(&ship_id));
+}
+
+#[test]
+fn crimewatch_states_epoch_bump_preserves_unpersisted_core_mutation_in_combat_ephemeral() {
+    let (ctx, _session, char_id, _ship_id, _sys_id) = make_fighter_ctx_and_session();
+    let victim_id = char_id + 20;
+
+    with_combat_runtime(&ctx, |_| {});
+    let cw_ep0 = ctx.db.combat_state_epoch();
+    let rt_ep0 = ctx.db.combat_runtime_epoch();
+
+    // Unpersisted core-field mutation in RAM (`safety_levels` + `player_bounty_pool`).
+    {
+        let mut guard = ctx.combat_ephemeral.write().unwrap();
+        guard.safety_levels.insert(char_id, SafetyLevel::Red);
+        guard.player_bounty_pool.insert(victim_id, 777_000.0);
+    }
+
+    // Unrelated commits to `crimewatch_states` and `crimewatch_aggressions` bump `combat_state_epoch`,
+    // while `combat_runtime_epoch` stays unchanged.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.crimewatch_states.insert(
+            char_id,
+            eve_db::PersistedCrimeWatchState {
+                character_id: char_id,
+                weapon_timer_until_unix: 12_345,
+                ..Default::default()
+            },
+        );
+        snap.crimewatch_aggressions.insert(
+            (char_id, victim_id),
+            eve_db::PersistedAggressionRecord {
+                aggressor_char_id: char_id,
+                victim_char_id: victim_id,
+                system_id: 30_000_142,
+                started_unix: 10_000,
+                expires_unix: 12_345,
+                is_legal: true,
+                is_pod: false,
+            },
+        );
+    });
+    assert!(ctx.db.combat_state_epoch() > cw_ep0);
+    assert_eq!(ctx.db.combat_runtime_epoch(), rt_ep0);
+
+    // Reading via `with_combat_runtime` or flushing must NOT drop the unpersisted core edits.
+    with_combat_runtime(&ctx, |rt| {
+        assert_eq!(rt.safety_levels.get(&char_id), Some(&SafetyLevel::Red));
+        assert_eq!(
+            rt.player_bounty_pool.get(&victim_id).copied(),
+            Some(777_000.0)
+        );
+    });
+    rehydrate_combat_runtime_with_hook(&ctx, false, || {});
+    flush_combat_runtime_to_db(&ctx);
+
+    with_combat_runtime(&ctx, |rt| {
+        assert_eq!(rt.safety_levels.get(&char_id), Some(&SafetyLevel::Red));
+        assert_eq!(
+            rt.player_bounty_pool.get(&victim_id).copied(),
+            Some(777_000.0)
+        );
+    });
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(
+            s.combat_crimewatch_state.safety_levels.get(&char_id).copied(),
+            Some(SafetyLevel::Red as i32)
+        );
+        assert_eq!(
+            s.combat_crimewatch_state
+                .player_bounty_pool
+                .get(&victim_id)
+                .copied(),
+            Some(777_000.0)
+        );
+    });
+}
+
+
 

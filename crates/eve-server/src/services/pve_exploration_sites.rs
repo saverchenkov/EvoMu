@@ -12,7 +12,7 @@ use eve_destiny::{Ball, MovementMode};
 use eve_proto::BridgeRpcError;
 use eve_sde::{InvType, SdeRegistry};
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::{CombatRuntimeState, ExtendedNpcEntity};
+use crate::services::combat_crimewatch::{with_mut_combat_runtime_with_locks, CombatRuntimeState, ExtendedNpcEntity};
 use crate::services::pve_exploration::SpewedLootCan;
 use crate::services::pve_exploration_seeding::{
     build_type_combat_state_from_sde, pirate_faction_for_system, PirateFaction,
@@ -358,6 +358,7 @@ pub async fn spawn_sleeper_wave_core(
     let blue_loot = sleeper_blue_loot_for_class(sde, wh_class);
     let sys_handle = systems.get_or_spawn(solar_system_id);
     let mut ball_ids = Vec::with_capacity(1 + other_tids.len());
+    let mut entities = Vec::with_capacity(1 + other_tids.len());
     for (idx, tid) in std::iter::once(trigger_tid).chain(other_tids).enumerate() {
         let bid = db.with_mut_snapshot(|snap| {
             snap.next_entity_id += 1;
@@ -379,10 +380,7 @@ pub async fn spawn_sleeper_wave_core(
         };
         let _ = sys_handle.spawn_ball_with_combat(ball, build_type_combat_state_from_sde(sde, tid)).await;
         let sde_attr = |aid: u16| sde.types.get(&tid).and_then(|t| t.default_attributes.get(&aid).copied());
-        let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-        rt.npc_entities.insert(
-            bid,
-            ExtendedNpcEntity {
+        entities.push(ExtendedNpcEntity {
                 ball_id: bid,
                 type_id: tid,
                 faction_id: 500_005, // Sleepers
@@ -419,10 +417,15 @@ pub async fn spawn_sleeper_wave_core(
                 spawn_position: pos,
                 sleeper_wh_class: wh_class,
                 custom_cargo_loot: blue_loot,
-            },
-        );
-        drop(rt);
+            });
         ball_ids.push(bid);
+    }
+    if !entities.is_empty() {
+        with_mut_combat_runtime_with_locks(db, combat_ephemeral, |rt| {
+            for entity in entities {
+                rt.npc_entities.insert(entity.ball_id, entity);
+            }
+        });
     }
     if wave == 1 {
         let sentry_bid = crate::services::wormhole_pve_escalations::spawn_sleeper_sentry_tower_for_class(

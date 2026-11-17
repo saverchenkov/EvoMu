@@ -8,7 +8,9 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::{CombatRuntimeState, ExtendedNpcEntity};
+use crate::services::combat_crimewatch::{
+    with_mut_combat_runtime, with_mut_combat_runtime_with_locks, CombatRuntimeState, ExtendedNpcEntity,
+};
 use crate::services::pve_exploration::{
     with_pve_exploration_reg, with_pve_exploration_reg_db, ItemId,
 };
@@ -92,6 +94,7 @@ pub async fn spawn_upgraded_avengers_core(
     let attr = |aid: u16| -> Option<f64> { sde_type.default_attributes.get(&aid).copied() };
     let sys_handle = systems.get_or_spawn(solar_system_id);
     let mut ids = Vec::with_capacity(count);
+    let mut entities = Vec::with_capacity(count);
     for i in 0..count {
         let bid = db.with_mut_snapshot(|snap| {
             snap.next_entity_id += 1;
@@ -156,12 +159,15 @@ pub async fn spawn_upgraded_avengers_core(
             sleeper_wh_class: wh_class,
             custom_cargo_loot: None,
         };
-        combat_ephemeral
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .npc_entities
-            .insert(bid, entity);
+        entities.push(entity);
         ids.push(bid);
+    }
+    if !entities.is_empty() {
+        with_mut_combat_runtime_with_locks(db, combat_ephemeral, |rt| {
+            for entity in entities {
+                rt.npc_entities.insert(entity.ball_id, entity);
+            }
+        });
     }
     ids
 }
@@ -273,11 +279,9 @@ pub async fn spawn_decloaked_transmission_relay_core(
         sleeper_wh_class: 6,
         custom_cargo_loot: None,
     };
-    combat_ephemeral
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .npc_entities
-        .insert(relay_bid, entity);
+    with_mut_combat_runtime_with_locks(db, combat_ephemeral, |rt| {
+        rt.npc_entities.insert(relay_bid, entity);
+    });
 
     with_pve_exploration_reg_db(db, now_unix, |reg| {
         reg.active_relays.insert(
@@ -390,11 +394,9 @@ pub fn on_decloaked_relay_attacked_sync(
         &ctx.sde,
         &mut entity,
     );
-    ctx.combat_ephemeral
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .npc_entities
-        .insert(drifter_bid, entity);
+    with_mut_combat_runtime(ctx, |rt| {
+        rt.npc_entities.insert(drifter_bid, entity);
+    });
 
     let now_unix = ctx.now_unix_secs();
     let now_sim = sys_handle.sim_elapsed_secs();
@@ -719,11 +721,13 @@ pub async fn step_wormhole_pve_system(
 
     for &bid in &avengers_to_despawn {
         let _ = sys_handle.remove_ball(bid).await;
-        ctx.combat_ephemeral
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .npc_entities
-            .remove(&bid);
+    }
+    if !avengers_to_despawn.is_empty() {
+        with_mut_combat_runtime(ctx, |rt| {
+            for bid in &avengers_to_despawn {
+                rt.npc_entities.remove(bid);
+            }
+        });
     }
 
     for (site_id, ship_id, wh_c, site_pos, batch) in avengers_to_spawn {
@@ -793,19 +797,21 @@ pub async fn step_wormhole_pve_system(
     }
 
     let had_drifter_warp_or_despawn = !drifter_warps.is_empty() || !avengers_to_despawn.is_empty();
+    let mut warped_positions = Vec::with_capacity(drifter_warps.len());
     for (drifter_bid, cur_pos, next_pos) in drifter_warps {
         let _ = sys_handle
             .set_movement_mode(drifter_bid, MovementMode::new_warp(cur_pos, next_pos, 3.0))
             .await;
-        if let Some(npc) = ctx
-            .combat_ephemeral
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .npc_entities
-            .get_mut(&drifter_bid)
-        {
-            npc.spawn_position = next_pos;
-        }
+        warped_positions.push((drifter_bid, next_pos));
+    }
+    if !warped_positions.is_empty() {
+        with_mut_combat_runtime(ctx, |rt| {
+            for (drifter_bid, next_pos) in warped_positions {
+                if let Some(npc) = rt.npc_entities.get_mut(&drifter_bid) {
+                    npc.spawn_position = next_pos;
+                }
+            }
+        });
     }
     if had_drifter_warp_or_despawn {
         crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(ctx, solar_system_id);
@@ -854,6 +860,7 @@ pub fn on_asteroid_mined_in_system(
             crate::services::pve_exploration_sites::sleeper_blue_loot_for_class(&ctx.sde, wh_c);
         let center = DVec3::from_array(site_pos);
         let mut spawned_ids = Vec::new();
+        let mut spawned_entities = Vec::new();
         for (idx, tid) in std::iter::once(trigger_tid)
             .chain(other_tids)
             .enumerate()
@@ -915,50 +922,43 @@ pub fn on_asteroid_mined_in_system(
             } else {
                 0.0
             };
-            ctx.combat_ephemeral
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .npc_entities
-                .insert(
-                    bid,
-                    ExtendedNpcEntity {
-                        ball_id: bid,
-                        type_id: tid,
-                        faction_id: 500_005,
-                        archetype: "Sleeper".into(),
-                        solar_system_id,
-                        spawn_group_id: 0,
-                        target_id: None,
-                        aggression_threat: HashMap::new(),
-                        threat_table: HashMap::new(),
-                        bounty_isk: 0.0,
-                        optimal_range: sde_attr(54).filter(|&v| v > 0.0).unwrap_or(20_000.0),
-                        orbit_range: sde_attr(416).filter(|&v| v > 0.0).unwrap_or(15_000.0),
-                        damage_vector,
-                        entropic_cycles: 0,
-                        drifter_overshield_hp: 0.0,
-                        drifter_doomsday_fired: false,
-                        web_speed_factor: sde_attr(20).filter(|&v| v < 0.0).unwrap_or(-50.0),
-                        web_range: sde_attr(514)
-                            .or_else(|| sde_attr(580))
-                            .unwrap_or(if sde_t.is_some() { 0.0 } else { 15_000.0 }),
-                        scram_strength: sde_attr(105)
-                            .unwrap_or(if sde_t.is_some() { 0.0 } else { 2.0 }),
-                        scram_range: sde_attr(103)
-                            .or_else(|| sde_attr(582))
-                            .unwrap_or(if sde_t.is_some() { 0.0 } else { 12_000.0 }),
-                        neut_amount: sde_attr(97)
-                            .unwrap_or(if sde_t.is_some() { 0.0 } else { 120.0 }),
-                        ecm_jammed: false,
-                        remote_shield_rep,
-                        remote_armor_rep,
-                        remote_rep_range,
-                        tag_drop_type_id: None,
-                        spawn_position: pos,
-                        sleeper_wh_class: wh_c,
-                        custom_cargo_loot: blue_loot,
-                    },
-                );
+            spawned_entities.push(ExtendedNpcEntity {
+                ball_id: bid,
+                type_id: tid,
+                faction_id: 500_005,
+                archetype: "Sleeper".into(),
+                solar_system_id,
+                spawn_group_id: 0,
+                target_id: None,
+                aggression_threat: HashMap::new(),
+                threat_table: HashMap::new(),
+                bounty_isk: 0.0,
+                optimal_range: sde_attr(54).filter(|&v| v > 0.0).unwrap_or(20_000.0),
+                orbit_range: sde_attr(416).filter(|&v| v > 0.0).unwrap_or(15_000.0),
+                damage_vector,
+                entropic_cycles: 0,
+                drifter_overshield_hp: 0.0,
+                drifter_doomsday_fired: false,
+                web_speed_factor: sde_attr(20).filter(|&v| v < 0.0).unwrap_or(-50.0),
+                web_range: sde_attr(514)
+                    .or_else(|| sde_attr(580))
+                    .unwrap_or(if sde_t.is_some() { 0.0 } else { 15_000.0 }),
+                scram_strength: sde_attr(105)
+                    .unwrap_or(if sde_t.is_some() { 0.0 } else { 2.0 }),
+                scram_range: sde_attr(103)
+                    .or_else(|| sde_attr(582))
+                    .unwrap_or(if sde_t.is_some() { 0.0 } else { 12_000.0 }),
+                neut_amount: sde_attr(97)
+                    .unwrap_or(if sde_t.is_some() { 0.0 } else { 120.0 }),
+                ecm_jammed: false,
+                remote_shield_rep,
+                remote_armor_rep,
+                remote_rep_range,
+                tag_drop_type_id: None,
+                spawn_position: pos,
+                sleeper_wh_class: wh_c,
+                custom_cargo_loot: blue_loot,
+            });
             spawned_ids.push(bid);
         }
         let sbid = ctx.db.with_mut_snapshot(|snap| {
@@ -975,11 +975,12 @@ pub fn on_asteroid_mined_in_system(
         );
         let sentry_meta = build_wh_npc_slim_meta(&ctx.sde, sentry_tid, 500_005, 383);
         sys_handle.try_spawn_ball_with_meta(sball, scs, sentry_meta);
-        ctx.combat_ephemeral
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .npc_entities
-            .insert(sbid, sentity);
+        spawned_entities.push(sentity);
+        with_mut_combat_runtime(ctx, |rt| {
+            for entity in spawned_entities {
+                rt.npc_entities.insert(entity.ball_id, entity);
+            }
+        });
         spawned_ids.push(sbid);
 
         with_pve_exploration_reg(ctx, |reg| {
@@ -1120,14 +1121,12 @@ pub fn process_wormhole_sites_on_downtime(ctx: &ServerContext) -> usize {
         }
     });
 
-    {
-        let mut rt = ctx
-            .combat_ephemeral
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        for (_, bid) in all_removed_balls.iter().chain(removed_ast_balls.iter()) {
-            rt.npc_entities.remove(bid);
-        }
+    if !all_removed_balls.is_empty() || !removed_ast_balls.is_empty() {
+        with_mut_combat_runtime(ctx, |rt| {
+            for (_, bid) in all_removed_balls.iter().chain(removed_ast_balls.iter()) {
+                rt.npc_entities.remove(bid);
+            }
+        });
     }
 
     for (sys_id, bid) in all_removed_balls.iter().chain(removed_ast_balls.iter()) {
