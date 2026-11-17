@@ -99,15 +99,11 @@ fn find_nullsec_system_with_power_and_belts(ctx: &ServerContext) -> (u32, i64, i
         sys_ids.sort_unstable();
         for sys in sys_ids {
             let cels = ctx.sde.celestials_in_system(sys);
-            let star_p: u64 = cels
-                .iter()
-                .filter(|c| c.group_id == 6)
-                .map(|c| eve_server::services::quasar_sov_hub::star_power(&ctx.sde, c.type_id))
-                .sum();
+            let star_p = eve_server::services::quasar_sov_hub::star_power_for_system(&ctx.sde, sys);
             let temp = cels.iter().find(|c| c.type_id == 11).map(|c| c.celestial_id);
             let lava = cels.iter().find(|c| c.type_id == 2015).map(|c| c.celestial_id);
             let has_belts = cels.iter().any(|c| c.group_id == 9);
-            if star_p >= 700 && has_belts {
+            if star_p >= 600 && has_belts {
                 if let (Some(t), Some(l)) = (temp, lava) {
                     return (sys, t, l);
                 }
@@ -529,16 +525,24 @@ async fn test_live_sovereignty_hub_adm_upgrades_skyhook_and_esi_campaigns() {
         .and_then(|v| v.as_i64())
         .unwrap();
 
+    let lava_rate = eve_server::services::quasar_sov_skyhook::planet_hourly_reagent_yield(
+        &ctx.sde,
+        Some(lava_planet),
+        Some(sys_id),
+        TYPE_MAGMATIC_GAS,
+    );
     ctx.advance_secs(2 * 3600);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     ctx.db.with_snapshot(|s| {
         let (tid, sec, insec, _) = s.sov_runtime.skyhook_reagent_bays[&sky_id];
+        let total_2h = 2 * lava_rate;
         assert_eq!(tid, TYPE_MAGMATIC_GAS);
-        assert_eq!((sec, insec), (1500, 1500));
+        assert_eq!((sec, insec), (total_2h / 2, total_2h - total_2h / 2));
     });
 
     ctx.advance_secs(12 * 3600);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    let sec_before_extract = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&sky_id].1);
     let sky_pos = ctx.db.with_snapshot(|s| DVec3::from_array(s.structures[&sky_id].position));
     sys_handle.set_ball_position(venture_id, sky_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
     let ext_rep = rpc(
@@ -550,10 +554,21 @@ async fn test_live_sovereignty_hub_adm_upgrades_skyhook_and_esi_campaigns() {
     )
     .await
     .expect("ExtractReagentsToShip");
-    assert_eq!(ext_rep.dict_get("extractedQuantity").and_then(|v| v.as_i64()), Some(5000));
+    assert_eq!(
+        ext_rep.dict_get("extractedQuantity").and_then(|v| v.as_i64()),
+        Some(sec_before_extract.min(5_000) as i64)
+    );
 
-    // 5. Sov Hub Upgrades & Site Spawning (Combat & Ore anomalies; anchor Temperate Skyhook for +1,500 planetary workforce).
-    let temp_pos = ctx.sde.celestials_in_system(sys_id).into_iter().find(|c| c.celestial_id == temp_planet).unwrap().position;
+    // 5. Sov Hub Upgrades & Site Spawning (Combat & Ore anomalies; anchor Temperate + optional Power Skyhooks).
+    let sys_cels = ctx.sde.celestials_in_system(sys_id);
+    if let Some(pwr_planet) = sys_cels.iter().find(|c| c.group_id == 7 && matches!(c.type_id, 13 | 2017 | 2063)) {
+        sys_handle.set_ball_position(venture_id, pwr_planet.position + DVec3::new(100_000.0, 0.0, 0.0)).await;
+        let pwr_sky_item = give_item(&ctx, &mut s_def, TYPE_ORBITAL_SKYHOOK, 1).await;
+        rpc(&ctx, &mut s_def, "structureDeployment", "Anchor", &[PyRep::Integer(pwr_sky_item), PyRep::Integer(pwr_planet.celestial_id)])
+            .await
+            .expect("anchor Power Skyhook");
+    }
+    let temp_pos = sys_cels.into_iter().find(|c| c.celestial_id == temp_planet).unwrap().position;
     sys_handle.set_ball_position(venture_id, temp_pos + DVec3::new(100_000.0, 0.0, 0.0)).await;
     let temp_sky_item = give_item(&ctx, &mut s_def, TYPE_ORBITAL_SKYHOOK, 1).await;
     rpc(&ctx, &mut s_def, "structureDeployment", "Anchor", &[PyRep::Integer(temp_sky_item), PyRep::Integer(temp_planet)])

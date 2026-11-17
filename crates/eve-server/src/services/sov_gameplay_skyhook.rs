@@ -31,8 +31,12 @@ use glam::DVec3;
 
 /// Skyhook reagent maturity cycle (24 hours = 86,400 seconds).
 pub const SKYHOOK_MATURITY_CYCLE_SECS: u64 = 24 * 3_600;
-/// Baseline hourly planetary reagent harvest rate (scaled per planet in `quasar_sov_skyhook.rs`).
+/// Fallback hourly planetary reagent yield constant (non-reagent or unlinked planets harvest `0`).
 pub const SKYHOOK_HOURLY_REAGENT_YIELD: u64 = 50;
+/// Secured and unsecured bay capacities on an Orbital Skyhook (`orbitalSkyhook/const.pyj` / Quasar `Definition`).
+pub const SKYHOOK_REAGENT_BAY_CAPACITY: u64 = 25_000;
+/// Secured harvest split percentage (`0..=100`): `50%` matures immediately to Secure, `50%` enters Surplus.
+pub const REAGENT_SECURED_PERCENTAGE: u64 = 50;
 /// Orbital Skyhook Reagent Silo ship-link duration (10 minutes = 600 seconds, `Orbital_Skyhook.md`).
 pub const SKYHOOK_SILO_LINK_DURATION_SECS: u64 = 600;
 /// Maximum ship-to-Skyhook range to initiate and maintain a Reagent Silo link (`15,000 m`).
@@ -42,11 +46,12 @@ pub const SKYHOOK_SILO_LINK_MAX_SPEED_MS: f64 = 1_000.0;
 /// Base shield HP assigned to an anchored Orbital Skyhook (`10%` threshold = `1,000.0` HP).
 pub const SKYHOOK_BASE_SHIELD_HP: f64 = 10_000.0;
 
-/// Maps SDE planet type to extracted Colony Reagent (`Sovereignty.md` / `Orbital_Skyhook.md`):
-/// Ice (`12`) and Oceanic (`2014`) -> Superionic Ice (`81144`), Lava (`2015`) -> Magmatic Gas (`81143`).
+/// Maps SDE planet type to extracted Colony Reagent (`orbitalSkyhook/const.pyj`):
+/// ONLY Ice (`12`) -> Superionic Ice (`81144`) and Lava (`2015`) -> Magmatic Gas (`81143`).
+/// Oceanic (`2014`), Temperate (`11`), and Barren (`2016`) planets yield Workforce only.
 pub fn planet_reagent_type(planet_type_id: u32) -> Option<u32> {
     match planet_type_id {
-        12 | 2014 => Some(TYPE_SUPERIONIC_ICE),
+        12 => Some(TYPE_SUPERIONIC_ICE),
         2015 => Some(TYPE_MAGMATIC_GAS),
         _ => None,
     }
@@ -199,9 +204,11 @@ pub fn advance_skyhook_reagents_in_snap(
         let numer = u128::from(batch_qty)
             .saturating_mul(u128::from(elapsed))
             .saturating_add(rem);
-        let matured = (numer / cycle).min(u128::from(insecure_qty)) as u64;
-        insecure_qty -= matured;
-        secure_qty = secure_qty.saturating_add(matured);
+        let cap_matured = (numer / cycle)
+            .min(u128::from(insecure_qty))
+            .min(u128::from(SKYHOOK_REAGENT_BAY_CAPACITY.saturating_sub(secure_qty))) as u64;
+        insecure_qty -= cap_matured;
+        secure_qty = secure_qty.saturating_add(cap_matured);
         if insecure_qty == 0 {
             batch_qty = 0;
             rem = 0;
@@ -210,10 +217,23 @@ pub fn advance_skyhook_reagents_in_snap(
         }
     }
     if harvested_now > 0 {
-        let to_secure = harvested_now / 2;
+        let to_secure = (harvested_now.saturating_mul(REAGENT_SECURED_PERCENTAGE)) / 100;
         let to_surplus = harvested_now - to_secure;
-        secure_qty = secure_qty.saturating_add(to_secure);
-        insecure_qty = insecure_qty.saturating_add(to_surplus);
+        let sec_room = SKYHOOK_REAGENT_BAY_CAPACITY.saturating_sub(secure_qty);
+        let sec_add = to_secure.min(sec_room);
+        let sec_spill = to_secure - sec_add;
+        secure_qty = secure_qty.saturating_add(sec_add);
+
+        let desired_insec = to_surplus.saturating_add(sec_spill);
+        let insec_room = SKYHOOK_REAGENT_BAY_CAPACITY.saturating_sub(insecure_qty);
+        let insec_add = desired_insec.min(insec_room);
+        let insec_spill = desired_insec - insec_add;
+        insecure_qty = insecure_qty.saturating_add(insec_add);
+
+        if insec_spill > 0 {
+            let extra_sec_room = SKYHOOK_REAGENT_BAY_CAPACITY.saturating_sub(secure_qty);
+            secure_qty = secure_qty.saturating_add(insec_spill.min(extra_sec_room));
+        }
         batch_qty = insecure_qty;
     }
     last_ts = now_unix;

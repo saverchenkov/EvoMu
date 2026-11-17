@@ -25,8 +25,9 @@ pub use sov_gameplay_entosis::*;
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::quasar_sov_hub::{push_notice, PendingNotices};
 use crate::services::quasar_sov_mercden::{
-    encode_evolution_simulation, push_definitions_updated_notice, refresh_activities,
-    simulate_den_in_snap, MERCENARY_DEN_ABSOLUTE_MAX, TYPE_MERCENARY_DEN_MANAGEMENT,
+    encode_evolution_simulation, push_definitions_updated_notice_with_sde,
+    refresh_activities_with_sde, simulate_den_in_snap_with_sde, MERCENARY_DEN_ABSOLUTE_MAX,
+    TYPE_MERCENARY_DEN_MANAGEMENT,
 };
 use crate::services::sov_services::{
     emit_sov_structures_updated, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB,
@@ -458,13 +459,13 @@ pub async fn handle_anchor_mercenary_den_rpc(
             infomorphs: 0,
             next_activity_generation_unix: now,
         };
-        push_definitions_updated_notice(&pending, &den);
+        push_definitions_updated_notice_with_sde(&pending, Some(&ctx.sde), &den);
         snap.sov_runtime.mercenary_dens.insert(den_id, den);
         snap.sov_runtime
             .mercenary_den_reinforcement
             .insert(den_id, (0, 0, 100));
         snap.sov_runtime.mercenary_den_tax_pct.entry(skyhook_id).or_insert(0);
-        refresh_activities(snap, &pending, den_id, now);
+        refresh_activities_with_sde(snap, Some(&ctx.sde), &pending, den_id, now);
         Ok(den_id)
     });
 
@@ -622,7 +623,7 @@ pub async fn handle_mercden_component_call(
             .unwrap_or(0.01)
             .max(1e-6);
         let max_owner_units = ((free_m3 + 1e-9) / unit_vol).floor() as u32;
-        if simulate_den_in_snap(&mut snap.sov_runtime, den_id, now) {
+        if simulate_den_in_snap_with_sde(&mut snap.sov_runtime, Some(&ctx.sde), den_id, now) {
             let den_mut = snap.sov_runtime.mercenary_dens.get(&den_id).expect("checked");
             if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
                 "sov_gameplay.mercenary_den.evolution_notice",
@@ -881,7 +882,7 @@ pub async fn apply_mercenary_den_weapon_damage(
                 st.state = "HullReinforced".into();
                 st.reinforced_until_unix = reinf_until;
                 if snap.sov_runtime.mercenary_dens.contains_key(&den_id) {
-                    let _ = simulate_den_in_snap(&mut snap.sov_runtime, den_id, now);
+                    let _ = simulate_den_in_snap_with_sde(&mut snap.sov_runtime, Some(&ctx.sde), den_id, now);
                     let den_mut = snap.sov_runtime.mercenary_dens.get_mut(&den_id).expect("checked");
                     den_mut.enabled = false;
                     if let Some(n) = crate::quasar_gateway::pb_encode_or_log(

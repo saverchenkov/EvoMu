@@ -1007,20 +1007,32 @@ async fn test_mercenary_den_lifecycle_evolution_and_anarchy_parity() {
     assert_eq!(varint(&dev_sim4, 2), Some(2));
     assert_eq!(ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available), base_wf);
 
-    // Advance to Day 8 (Dev 40, Anarchy 40 -> Stage 3): -10% of Temperate Skyhook workforce (150 of 1,500)!
+    let temp_cel = ctx.sde.celestial(temp_planet).expect("Temperate planet in SDE");
+    let temp_wf = eve_server::services::quasar_sov_hub::planet_yield_for_planet(temp_cel.type_id, temp_cel.radius).1;
+
+    // Advance to Day 8 (Dev 40, Anarchy 40 -> Stage 3): -10% of Temperate Skyhook workforce!
     ctx.advance_secs(4 * 86_400);
     let _ = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await;
-    assert_eq!(ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available) + 150, base_wf);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available) + (temp_wf * 10 / 100),
+        base_wf
+    );
 
-    // Advance to Day 14 (Dev 70, Anarchy 70 -> Stage 4): -20% of Temperate Skyhook workforce (300 of 1,500)!
+    // Advance to Day 14 (Dev 70, Anarchy 70 -> Stage 4): -20% of Temperate Skyhook workforce!
     ctx.advance_secs(6 * 86_400);
     let _ = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await;
-    assert_eq!(ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available) + 300, base_wf);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available) + (temp_wf * 20 / 100),
+        base_wf
+    );
 
-    // Advance to Day 20 (Dev 100, Anarchy 100 -> Stage 5): 78 IDK/hr, -40% of Temperate Skyhook workforce (600 of 1,500)!
+    // Advance to Day 20 (Dev 100, Anarchy 100 -> Stage 5): -40% of Temperate Skyhook workforce!
     ctx.advance_secs(6 * 86_400);
     let _ = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await;
-    assert_eq!(ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available) + 600, base_wf);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available) + (temp_wf * 40 / 100),
+        base_wf
+    );
 
     // Extract stored infomorphs with 25% sov tax, then advance 1h at Stage 5 to verify 78 IDK/hr rate!
     rpc_call(&ctx, &mut s_owner, "sovMgr", "ConfirmSkyhookSovManagement", &[PyRep::Integer(skyhook_id), PyRep::Integer(25)])
@@ -1079,7 +1091,11 @@ async fn test_mercenary_den_lifecycle_evolution_and_anarchy_parity() {
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.mercenary_dens[&den_id].infomorphs), exp_rate5 + 350);
     assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.mercenary_dens[&den_id].anarchy_level), 90);
-    assert_eq!(ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available) + 300, base_wf);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available)
+            + (base_wf * 20) / 100,
+        base_wf
+    );
 
     drop(ctx);
 }
@@ -1143,20 +1159,35 @@ async fn test_quasar_sovereignty_all_seven_protos_parity() {
     // 1. resource.planet.api (GetAllDefinitions, GetDefinitionsVersion, GetAllConfigurations) + invalid version negative check.
     let all_defs = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest", Vec::new()).await;
     let defs_list = fields(&all_defs.payload.unwrap().value, 1);
-    assert_eq!(defs_list.len(), 8);
-    assert_eq!(defs_list.iter().filter(|d| field(d, 4).is_some()).count(), 3);
-    let lava_def = defs_list.iter().find(|d| varint(&field(d, 1).unwrap(), 1) == Some(2015)).expect("Lava planet definition");
+    assert!(defs_list.len() >= 1_000);
+    assert!(defs_list.iter().filter(|d| field(d, 4).is_some()).count() >= 100);
+    let lava_def = defs_list
+        .iter()
+        .find(|d| {
+            field(d, 4)
+                .and_then(|rw| field(&rw, 3))
+                .and_then(|rid| varint(&rid, 1))
+                == Some(TYPE_MAGMATIC_GAS as u64)
+        })
+        .expect("Lava planet definition");
+    let lava_cel_id = varint(&field(lava_def, 1).unwrap(), 1).unwrap() as i64;
+    let lava_cel = ctx.sde.celestial(lava_cel_id).expect("Lava celestial in SDE");
+    assert_eq!(lava_cel.type_id, 2015);
+    let expected_lava_rate = eve_server::services::quasar_sov_skyhook::planet_hourly_reagent_yield_for_planet(
+        lava_cel.type_id,
+        lava_cel.radius,
+    );
     let lava_reagent_wrapper = field(lava_def, 4).expect("Lava reagent_definition");
     let lava_reagent_inner = field(&lava_reagent_wrapper, 2).expect("Lava inner ReagentDefinition");
-    assert_eq!(varint(&lava_reagent_inner, 1), Some(1_000));
+    assert_eq!(varint(&lava_reagent_inner, 1), Some(expected_lava_rate));
     assert_eq!(varint(&field(&lava_reagent_inner, 2).expect("cycle_period Duration"), 1), Some(3_600));
-    assert_eq!(varint(&lava_reagent_inner, 3), Some(1_000));
+    assert_eq!(varint(&lava_reagent_inner, 3), Some(50));
     assert_eq!(varint(&lava_reagent_inner, 4), Some(25_000));
     assert_eq!(varint(&lava_reagent_inner, 5), Some(25_000));
     assert_eq!(varint(&field(&lava_reagent_wrapper, 3).unwrap(), 1), Some(TYPE_MAGMATIC_GAS as u64));
 
     let ver_defs = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest", Vec::new()).await;
-    assert_eq!(fields(&ver_defs.payload.unwrap().value, 1).len(), 8);
+    assert_eq!(fields(&ver_defs.payload.unwrap().value, 1).len(), defs_list.len());
     let mut bad_ver = Vec::new();
     let mut spec = Vec::new();
     encode_varint_field(1, 99, &mut spec);
@@ -1180,7 +1211,12 @@ async fn test_quasar_sovereignty_all_seven_protos_parity() {
     let star_cfgs = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest", Vec::new()).await;
     let stars = fields(&star_cfgs.payload.unwrap().value, 1);
     assert_eq!(stars.is_empty(), false);
-    assert_eq!(varint(&stars[0], 2).unwrap_or(0) >= 200, true);
+    assert!(stars.iter().all(|c| (120..=800).contains(&varint(c, 2).unwrap_or(0))));
+    let null_star_id = ctx.sde.celestials_in_system(null_sys).into_iter().find(|c| c.group_id == 6).unwrap().celestial_id as u64;
+    let expected_star_p = eve_server::services::quasar_sov_hub::star_power_for_system(&ctx.sde, null_sys);
+    assert!(stars.iter().any(|c| {
+        field(c, 1).and_then(|id| varint(&id, 1)) == Some(null_star_id) && varint(c, 2) == Some(expected_star_p)
+    }));
 
     // 3. hub.api (GetResourcesRequest + non-owner forbidden check)
     let hub_res = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, hub_id as u64)).await.payload.unwrap().value;
@@ -1342,7 +1378,7 @@ async fn test_sov_power_workforce_fuel_upgrades_reagents_and_sites_parity() {
                 .celestials_in_system(sys)
                 .into_iter()
                 .filter(|c| c.group_id == 7)
-                .map(|c| eve_server::services::quasar_sov_hub::planet_yield(c.type_id).1)
+                .map(|c| eve_server::services::quasar_sov_hub::planet_yield_for_planet(c.type_id, c.radius).1)
                 .sum::<u64>()
                 >= 5_000
         })
@@ -1445,9 +1481,10 @@ async fn test_sov_power_workforce_fuel_upgrades_reagents_and_sites_parity() {
     let net_rsp = rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.workforce.api.GetNetworkableHubsRequest", id_req(1, hub_a as u64)).await.payload.unwrap().value;
     assert_eq!(fields(&net_rsp, 1).iter().any(|b| field(b, 1).and_then(|h| varint(&h, 1)) == Some(hub_b as u64)), true);
     let wf0 = varint(&field(&rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, hub_a as u64)).await.payload.unwrap().value, 2).unwrap(), 1).unwrap();
+    let import_amt = 6_200u64.saturating_sub(wf0).max(500);
     let (mut exp, mut exp_cfg, mut cfg_b) = (Vec::new(), Vec::new(), id_req(1, hub_b as u64));
     encode_bytes_field(3, &idm(null_sys as u64), &mut exp);
-    encode_varint_field(2, 3_500, &mut exp);
+    encode_varint_field(2, import_amt, &mut exp);
     encode_bytes_field(3, &exp, &mut exp_cfg);
     encode_bytes_field(2, &exp_cfg, &mut cfg_b);
     assert_eq!(rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", cfg_b).await.status_code, 200);
@@ -1458,7 +1495,7 @@ async fn test_sov_power_workforce_fuel_upgrades_reagents_and_sites_parity() {
     encode_bytes_field(2, &imp_cfg, &mut cfg_a);
     assert_eq!(rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", cfg_a).await.status_code, 200);
     let wf1 = varint(&field(&rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, hub_a as u64)).await.payload.unwrap().value, 2).unwrap(), 1).unwrap();
-    assert_eq!(wf1, wf0 + 3_500);
+    assert_eq!(wf1, wf0 + import_amt);
 
     // 3. Exclusive group conflict check + priority-slot power/workforce overload (`POWER_STATE_LOW`) + valid priority reorder:
     //    - Duplicate Major Threat Detection Array fails (`400`).
@@ -1620,12 +1657,16 @@ async fn test_skyhook_harvest_gating_anarchy_and_persisted_npc_durability() {
     });
     claim_system_sovereignty(&ctx, null_sys, ALLIANCE, CORP, hub_id).expect("claim null_sys");
 
-    // 1. With 0 Orbital Skyhooks, planetary Power & Workforce are 0 (only stellar power = 300).
+    // 1. With 0 Orbital Skyhooks, planetary Power & Workforce are 0 (only luminosity-scaled stellar power).
+    let expected_star_p = eve_server::services::quasar_sov_hub::star_power_for_system(&ctx.sde, null_sys);
     let r0 = rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, hub_id as u64)).await.payload.unwrap().value;
-    assert_eq!(varint(&field(&r0, 1).unwrap(), 1), Some(300));
+    assert_eq!(varint(&field(&r0, 1).unwrap(), 1), Some(expected_star_p));
     assert_eq!(varint(&field(&r0, 2).unwrap(), 1).unwrap_or(0), 0);
 
-    // Anchor active Skyhook on non-first Temperate planet -> harvests +1,500 workforce; Anarchy stage 5 siphons 600 -> 900 wf.
+    // Anchor active Skyhook on non-first Temperate planet -> harvests planet_yield_for_planet wf; Anarchy stage 5 siphons 40%.
+    let temp_cel = ctx.sde.celestial(temp_planet).expect("Temperate planet in SDE");
+    let temp_wf = eve_server::services::quasar_sov_hub::planet_yield_for_planet(temp_cel.type_id, temp_cel.radius).1;
+    let expected_wf_after_anarchy = temp_wf - (temp_wf * 40 / 100);
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(temp_sh_id, structure(temp_sh_id, CORP, null_sys, TYPE_ORBITAL_SKYHOOK));
         snap.sov_runtime.skyhook_planets.insert(temp_sh_id, temp_planet);
@@ -1649,7 +1690,7 @@ async fn test_skyhook_harvest_gating_anarchy_and_persisted_npc_durability() {
         );
     });
     let r_active = rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, hub_id as u64)).await.payload.unwrap().value;
-    assert_eq!(varint(&field(&r_active, 2).unwrap(), 1), Some(900), "1,500 harvested - 40% Anarchy siphon = 900 wf");
+    assert_eq!(varint(&field(&r_active, 2).unwrap(), 1), Some(expected_wf_after_anarchy), "harvested workforce minus 40% Anarchy siphon");
 
     // Deactivating the Skyhook drops harvested workforce to 0 (Anarchy siphons 0 when unharvested) and emits exact bound `temp_planet` in ActivationNotice!
     let _ = drain_quasar(&mut rx);
@@ -1679,6 +1720,17 @@ async fn test_skyhook_harvest_gating_anarchy_and_persisted_npc_durability() {
     let hb = 1_130_000_002i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.get_mut(&temp_sh_id).unwrap().state = "ShieldVulnerable".into();
+        if let Some(pw_planet) = ctx
+            .sde
+            .celestials_in_system(null_sys)
+            .into_iter()
+            .find(|c| matches!(c.type_id, 13 | 2017 | 2063))
+            .map(|c| c.celestial_id)
+        {
+            let sh_pw = 1_130_000_012i64;
+            snap.structures.insert(sh_pw, structure(sh_pw, CORP, null_sys, TYPE_ORBITAL_SKYHOOK));
+            snap.sov_runtime.skyhook_planets.insert(sh_pw, pw_planet);
+        }
         let sh2 = 1_130_000_011i64;
         snap.system_states.entry(neigh).or_default().solar_system_id = neigh;
         snap.structures.insert(hb, structure(hb, CORP, neigh, TYPE_SOVEREIGNTY_HUB));

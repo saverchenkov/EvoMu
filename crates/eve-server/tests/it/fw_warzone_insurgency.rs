@@ -4265,7 +4265,7 @@ async fn test_e2e_skyhook_reagent_maturity_and_theft() {
     tick_background_cluster(&ctx).await;
     let sk_proto = rpc(&ctx, &mut s_dir, "eve_public.sovereignty.skyhook.api.GetRequest", id_req(1, skyhook_id as u64))
         .await.payload.unwrap().value;
-    let sim = field(&field(&sk_proto, 2).unwrap(), 2).unwrap();
+    let sim = field(&field(&sk_proto, 2).unwrap(), 4).unwrap();
     assert!(varint(&sim, 1).unwrap_or(0) > sec_after_theft, "Surplus reagents must mature into Secure bay");
 }
 

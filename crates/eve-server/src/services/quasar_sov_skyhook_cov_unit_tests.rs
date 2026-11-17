@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_BAD_REQUEST};
-use crate::services::sov_gameplay::SKYHOOK_HOURLY_REAGENT_YIELD;
+use crate::services::quasar_sov_hub;
 use crate::services::sov_services::{TYPE_MAGMATIC_GAS, TYPE_SUPERIONIC_ICE};
 use eve_db::{corp_roles, UpwellStructureRecord};
 use eve_proto::quasar::{
@@ -133,72 +133,59 @@ fn mk_struct(id: i64, type_id: u32, corp_id: i64, sys_id: u32) -> UpwellStructur
 fn planet_hourly_reagent_yield_planet_types_radius_clamps_and_fallbacks() {
     let sys = 30_000_142_u32;
     let tmp = TempCelestialSqlite::new(&[
-        (40_100, sys, 12, 7, 0.0),            // Ice zero radius -> base 1200
-        (40_101, sys, 12, 7, -10.0),          // Ice negative radius -> base 1200
-        (40_102, sys, 12, 7, 1_000_000.0),    // Ice clamp min 0.75 * 1200 = 900
-        (40_103, sys, 12, 7, 5_000_000.0),    // Ice factor 1.0 -> 1200
-        (40_104, sys, 12, 7, 6_000_000.0),    // Ice factor 1.2 -> 1440
-        (40_105, sys, 12, 7, 15_000_000.0),   // Ice clamp max 1.5 * 1200 = 1800
-        (40_200, sys, 2015, 7, 1_000_000.0),  // Lava min -> 750
-        (40_201, sys, 2015, 7, 5_000_000.0),  // Lava 1.0 -> 1000
-        (40_202, sys, 2015, 7, 15_000_000.0), // Lava max -> 1500
-        (40_300, sys, 2014, 7, 1_000_000.0),  // Oceanic min -> 450
-        (40_301, sys, 2014, 7, 5_000_000.0),  // Oceanic 1.0 -> 600
-        (40_302, sys, 2014, 7, 15_000_000.0), // Oceanic max -> 900
-        (40_303, sys, 2063, 7, 5_000_000.0),  // Plasma 1.0 -> 600
-        (40_400, sys, 2017, 7, 1_000_000.0),  // Storm min -> 300
-        (40_401, sys, 2017, 7, 5_000_000.0),  // Storm 1.0 -> 400
-        (40_402, sys, 2017, 7, 15_000_000.0), // Storm max -> 600
-        (40_403, sys, 13, 7, 5_000_000.0),    // Gas 1.0 -> 400
-        (40_500, sys, 11, 7, 5_000_000.0),    // Temperate -> fallback
+        (40_100, sys, 12, 7, 0.0),            // Ice zero radius -> nominal 36
+        (40_101, sys, 12, 7, -10.0),          // Ice negative radius -> nominal 36
+        (40_102, sys, 12, 7, 1_000_000.0),    // Ice clamp min t=0 -> 22
+        (40_103, sys, 12, 7, 5_000_000.0),    // Ice mid radius -> >22, <46
+        (40_104, sys, 12, 7, 6_000_000.0),    // Ice larger radius -> >= 5M
+        (40_105, sys, 12, 7, 60_000_000.0),   // Ice clamp max t=1.35 -> 46
+        (40_200, sys, 2015, 7, 1_000_000.0),  // Lava clamp min t=0 -> 520
+        (40_201, sys, 2015, 7, 2_500_000.0),  // Lava mid radius -> >520, <946
+        (40_202, sys, 2015, 7, 4_160_000.0),  // Lava max cutoff t=1.0 -> 946
+        (40_203, sys, 2015, 7, 15_000_000.0), // Lava clamp max t=1.4 -> 1116
+        (40_300, sys, 2014, 7, 1_000_000.0),  // Oceanic -> 0 reagents (workforce only)
+        (40_301, sys, 2014, 7, 5_000_000.0),
+        (40_302, sys, 2014, 7, 15_000_000.0),
+        (40_303, sys, 2063, 7, 5_000_000.0),  // Plasma -> 0
+        (40_400, sys, 2017, 7, 1_000_000.0),  // Storm -> 0
+        (40_401, sys, 2017, 7, 5_000_000.0),
+        (40_402, sys, 2017, 7, 15_000_000.0),
+        (40_403, sys, 13, 7, 5_000_000.0),    // Gas -> 0
+        (40_500, sys, 11, 7, 5_000_000.0),    // Temperate -> 0
     ]);
     let sde = tmp.sde();
 
-    assert_eq!(
-        planet_hourly_reagent_yield(&sde, None, Some(sys), TYPE_SUPERIONIC_ICE),
-        SKYHOOK_HOURLY_REAGENT_YIELD
-    );
-    assert_eq!(
-        planet_hourly_reagent_yield(&sde, Some(40_103), None, TYPE_SUPERIONIC_ICE),
-        SKYHOOK_HOURLY_REAGENT_YIELD
-    );
-    assert_eq!(
-        planet_hourly_reagent_yield(&sde, Some(999_999), Some(sys), TYPE_SUPERIONIC_ICE),
-        SKYHOOK_HOURLY_REAGENT_YIELD
-    );
-    assert_eq!(
-        planet_hourly_reagent_yield(&sde, Some(40_500), Some(sys), TYPE_SUPERIONIC_ICE),
-        SKYHOOK_HOURLY_REAGENT_YIELD
-    );
+    assert_eq!(planet_hourly_reagent_yield(&sde, None, Some(sys), TYPE_SUPERIONIC_ICE), 0);
+    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_103), None, TYPE_SUPERIONIC_ICE), 0);
+    assert_eq!(planet_hourly_reagent_yield(&sde, Some(999_999), Some(sys), TYPE_SUPERIONIC_ICE), 0);
+    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_500), Some(sys), TYPE_SUPERIONIC_ICE), 0);
 
-    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_100), Some(sys), TYPE_SUPERIONIC_ICE), 1_200);
-    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_101), Some(sys), TYPE_SUPERIONIC_ICE), 1_200);
-    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_102), Some(sys), TYPE_SUPERIONIC_ICE), 900);
-    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_103), Some(sys), TYPE_SUPERIONIC_ICE), 1_200);
-    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_104), Some(sys), TYPE_SUPERIONIC_ICE), 1_440);
-    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_105), Some(sys), TYPE_SUPERIONIC_ICE), 1_800);
+    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_100), Some(sys), TYPE_SUPERIONIC_ICE), 36);
+    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_101), Some(sys), TYPE_SUPERIONIC_ICE), 36);
+    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_102), Some(sys), TYPE_SUPERIONIC_ICE), 22);
+    let ice_5m = planet_hourly_reagent_yield(&sde, Some(40_103), Some(sys), TYPE_SUPERIONIC_ICE);
+    let ice_6m = planet_hourly_reagent_yield(&sde, Some(40_104), Some(sys), TYPE_SUPERIONIC_ICE);
+    assert_eq!(ice_5m, planet_hourly_reagent_yield_for_planet(12, 5_000_000.0));
+    assert!(ice_5m > 22 && ice_5m <= ice_6m && ice_6m < 46);
+    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_105), Some(sys), TYPE_SUPERIONIC_ICE), 46);
 
-    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_200), Some(sys), TYPE_MAGMATIC_GAS), 750);
-    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_201), Some(sys), TYPE_MAGMATIC_GAS), 1_000);
-    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_202), Some(sys), TYPE_MAGMATIC_GAS), 1_500);
+    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_200), Some(sys), TYPE_MAGMATIC_GAS), 520);
+    let lava_mid = planet_hourly_reagent_yield(&sde, Some(40_201), Some(sys), TYPE_MAGMATIC_GAS);
+    assert!(lava_mid > 520 && lava_mid < 946);
+    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_202), Some(sys), TYPE_MAGMATIC_GAS), 946);
+    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_203), Some(sys), TYPE_MAGMATIC_GAS), 1_116);
 
-    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_300), Some(sys), TYPE_SUPERIONIC_ICE), 450);
-    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_301), Some(sys), TYPE_SUPERIONIC_ICE), 600);
-    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_302), Some(sys), TYPE_SUPERIONIC_ICE), 900);
-    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_303), Some(sys), TYPE_SUPERIONIC_ICE), 600);
-
-    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_400), Some(sys), TYPE_MAGMATIC_GAS), 300);
-    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_401), Some(sys), TYPE_MAGMATIC_GAS), 400);
-    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_402), Some(sys), TYPE_MAGMATIC_GAS), 600);
-    assert_eq!(planet_hourly_reagent_yield(&sde, Some(40_403), Some(sys), TYPE_MAGMATIC_GAS), 400);
+    for pid in [40_300, 40_301, 40_302, 40_303, 40_400, 40_401, 40_402, 40_403] {
+        assert_eq!(planet_hourly_reagent_yield(&sde, Some(pid), Some(sys), TYPE_SUPERIONIC_ICE), 0);
+    }
 }
 
 #[test]
 fn skyhook_window_boundaries_and_wire_encoding_variants() {
     let sys = 30_000_142_u32;
     let tmp = TempCelestialSqlite::new(&[
-        (50_001, sys, 2014, 7, 5_000_000.0), // Oceanic: workforce = 1_000, reagent = 600
-        (50_002, sys, 12, 7, 5_000_000.0),   // Ice: workforce = 0, reagent = 1_200
+        (50_001, sys, 2014, 7, 5_000_000.0), // Oceanic: workforce via curve, reagent = 0
+        (50_002, sys, 12, 7, 5_000_000.0),   // Ice: workforce = 0, reagent via curve
     ]);
     let sde = tmp.sde();
     let db = WorldRepository::with_demo_seed();
@@ -222,7 +209,7 @@ fn skyhook_window_boundaries_and_wire_encoding_variants() {
         snap.structures
             .insert(not_skyhook, mk_struct(not_skyhook, 35_832, 10, sys));
 
-        // 1) Reagents without bay entry -> fallback (stock, stock / 2, now); active missing -> true; Oceanic planet -> workforce 1000
+        // 1) Reagents without bay entry -> fallback (stock, 0, now); active missing -> true; Oceanic planet -> radius-scaled workforce
         snap.sov_runtime
             .skyhook_reagents
             .insert(sh_default_bay, (TYPE_SUPERIONIC_ICE, 900));
@@ -240,7 +227,7 @@ fn skyhook_window_boundaries_and_wire_encoding_variants() {
             .insert(sh_zero_ts_inactive, (TYPE_SUPERIONIC_ICE, 700, 250, 0));
         snap.sov_runtime
             .skyhook_planets
-            .insert(sh_zero_ts_inactive, 50_001);
+            .insert(sh_zero_ts_inactive, 50_002);
         snap.sov_runtime
             .skyhook_active
             .insert(sh_zero_ts_inactive, false);
@@ -258,31 +245,36 @@ fn skyhook_window_boundaries_and_wire_encoding_variants() {
         assert_eq!(open_window(snap, sh_default_bay, 2_000), None);
         assert_eq!(open_window(snap, sh_no_reagent_no_planet, 1_500), None);
 
-        // Verify Case 1 at boundary now == 1_000 (vulnerable = 1)
+        // Verify Case 1 at boundary now == 1_000 (vulnerable = 1, version field 8 = 1)
         let f1 = decode_wire(&encode_skyhook(snap, &sde, sh_default_bay, 1_000));
         assert_eq!(decode_id_submsg(&extract_bytes_all(&f1, 1)[0]), sh_default_bay as u64);
         assert_eq!(extract_varint(&f1, 3), Some(1));
-        assert_eq!(decode_id_submsg(&extract_bytes_all(&f1, 6)[0]), 50_001);
+        assert!(extract_bytes_all(&f1, 6).is_empty(), "field 6 collides with unknown vulnerability bool and must stay unset");
+        assert_eq!(decode_id_submsg(&extract_bytes_all(&f1, 8)[0]), 1);
 
         let r_msg = decode_wire(&extract_bytes_all(&f1, 2)[0]);
         assert_eq!(decode_id_submsg(&extract_bytes_all(&r_msg, 1)[0]), u64::from(TYPE_SUPERIONIC_ICE));
-        let sim = decode_wire(&extract_bytes_all(&r_msg, 2)[0]);
+        let sim = decode_wire(&extract_bytes_all(&r_msg, 4)[0]);
         assert_eq!(extract_varint(&sim, 1), Some(900));
-        assert_eq!(extract_varint(&sim, 2), Some(450)); // stock / 2
+        assert_eq!(extract_varint(&sim, 2), Some(0)); // explicit bay missing -> unsecured 0
         assert_eq!(decode_ts_submsg(&extract_bytes_all(&sim, 3)[0]), 1_000);
 
         let r_def = decode_wire(&extract_bytes_all(&f1, 4)[0]);
         let amt = decode_wire(&extract_bytes_all(&r_def, 2)[0]);
-        assert_eq!(extract_varint(&amt, 1), Some(600)); // Oceanic 1.0 yield
+        assert_eq!(extract_varint(&amt, 1), Some(0)); // Oceanic produces 0 reagents
         assert_eq!(extract_varint(&amt, 2), Some(3_600));
+        assert_eq!(extract_varint(&amt, 3), Some(50));
+        assert_eq!(extract_varint(&amt, 4), Some(25_000));
+        assert_eq!(extract_varint(&amt, 5), Some(25_000));
 
         let theft_open = decode_wire(&extract_bytes_all(&f1, 5)[0]);
         assert_eq!(extract_varint(&theft_open, 1), Some(1));
         assert_eq!(decode_ts_submsg(&extract_bytes_all(&theft_open, 2)[0]), 1_000);
         assert_eq!(decode_ts_submsg(&extract_bytes_all(&theft_open, 3)[0]), 2_000);
 
+        let expected_wf = quasar_sov_hub::planet_yield_for_planet(2014, 5_000_000.0).1;
         let wf_active = decode_wire(&extract_bytes_all(&f1, 7)[0]);
-        assert_eq!(extract_varint(&wf_active, 1), Some(1_000));
+        assert_eq!(extract_varint(&wf_active, 1), Some(expected_wf));
         assert_eq!(extract_varint(&wf_active, 2), None);
 
         // At now == 2_000 (end boundary), theft_vulnerability field 1 flips to 0
@@ -290,14 +282,17 @@ fn skyhook_window_boundaries_and_wire_encoding_variants() {
         let theft_closed = decode_wire(&extract_bytes_all(&f1_closed, 5)[0]);
         assert_eq!(extract_varint(&theft_closed, 1), Some(0));
 
-        // Verify Case 2: ts == 0 falls back to `now`, active == false encodes 0 and workforce disabled (field 2 = 1)
+        // Verify Case 2: ts == 0 falls back to `now`, Ice planet produces reagent yield, active == false encodes workforce disabled (field 2 = 1)
         let f2 = decode_wire(&encode_skyhook(snap, &sde, sh_zero_ts_inactive, 4_321));
         assert_eq!(extract_varint(&f2, 3), Some(0));
         let r_msg2 = decode_wire(&extract_bytes_all(&f2, 2)[0]);
-        let sim2 = decode_wire(&extract_bytes_all(&r_msg2, 2)[0]);
+        let sim2 = decode_wire(&extract_bytes_all(&r_msg2, 4)[0]);
         assert_eq!(extract_varint(&sim2, 1), Some(700));
         assert_eq!(extract_varint(&sim2, 2), Some(250));
         assert_eq!(decode_ts_submsg(&extract_bytes_all(&sim2, 3)[0]), 4_321);
+        let r_def2 = decode_wire(&extract_bytes_all(&f2, 4)[0]);
+        let amt2 = decode_wire(&extract_bytes_all(&r_def2, 2)[0]);
+        assert_eq!(extract_varint(&amt2, 1), Some(planet_hourly_reagent_yield_for_planet(12, 5_000_000.0)));
         let wf_inactive = decode_wire(&extract_bytes_all(&f2, 7)[0]);
         assert_eq!(extract_varint(&wf_inactive, 1), None);
         assert_eq!(extract_varint(&wf_inactive, 2), Some(1));
@@ -307,6 +302,7 @@ fn skyhook_window_boundaries_and_wire_encoding_variants() {
         assert!(extract_bytes_all(&f3, 2).is_empty());
         assert!(extract_bytes_all(&f3, 4).is_empty());
         assert!(extract_bytes_all(&f3, 6).is_empty());
+        assert!(extract_bytes_all(&f3, 8).is_empty());
         let theft_none = decode_wire(&extract_bytes_all(&f3, 5)[0]);
         assert_eq!(extract_varint(&theft_none, 1), Some(0));
         assert!(extract_bytes_all(&theft_none, 2).is_empty());
@@ -484,16 +480,16 @@ fn query_handlers_sorting_filtering_and_error_paths() {
 #[test]
 fn planet_hourly_reagent_yield_planet_types_and_radius_scaling() {
     let mut sde = SdeRegistry::default();
-    // Fallback without planet/system returns SKYHOOK_HOURLY_REAGENT_YIELD (50)
-    assert_eq!(planet_hourly_reagent_yield(&sde, None, None, 81_143), 50);
-    assert_eq!(planet_hourly_reagent_yield(&sde, None, None, 81_144), 50);
+    // Fallback without planet/system returns 0 (non-reagent / unknown)
+    assert_eq!(planet_hourly_reagent_yield(&sde, None, None, 81_143), 0);
+    assert_eq!(planet_hourly_reagent_yield(&sde, None, None, 81_144), 0);
 
-    // Base yield by planet type_id
-    assert_eq!(planet_type_base_hourly_reagent_yield(12), 1_200);
-    assert_eq!(planet_type_base_hourly_reagent_yield(2015), 1_000);
-    assert_eq!(planet_type_base_hourly_reagent_yield(2014), 600);
-    assert_eq!(planet_type_base_hourly_reagent_yield(2017), 400);
-    assert_eq!(planet_type_base_hourly_reagent_yield(11), 50);
+    // Nominal average by planet type_id (Ice=36, Lava=763, others=0)
+    assert_eq!(planet_type_base_hourly_reagent_yield(12), 36);
+    assert_eq!(planet_type_base_hourly_reagent_yield(2015), 763);
+    assert_eq!(planet_type_base_hourly_reagent_yield(2014), 0);
+    assert_eq!(planet_type_base_hourly_reagent_yield(2017), 0);
+    assert_eq!(planet_type_base_hourly_reagent_yield(11), 0);
 
     // Radius scaling for Lava (2015) and Ice (12) planets
     Arc::make_mut(&mut sde.celestials_by_system).insert(
@@ -527,10 +523,10 @@ fn planet_hourly_reagent_yield_planet_types_and_radius_scaling() {
     );
     assert_eq!(
         planet_hourly_reagent_yield(&sde, Some(40_009_080), Some(30_000_142), 81_143),
-        1_000
+        planet_hourly_reagent_yield_for_planet(2015, 5_000_000.0)
     );
     assert_eq!(
         planet_hourly_reagent_yield(&sde, Some(40_009_081), Some(30_000_142), 81_144),
-        1_800
+        planet_hourly_reagent_yield_for_planet(12, 7_500_000.0)
     );
 }

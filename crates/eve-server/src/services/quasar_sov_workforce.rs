@@ -54,7 +54,12 @@ fn linked_owners(snap: &WorldStateSnapshot, a: i64, b: i64) -> bool {
     }
 }
 
-/// `true` when `exporter_id` (exporting to `dest_sys`) can reach `importer_id` directly or via `Transit` relay hubs.
+/// Maximum number of source hubs a single hub may import workforce from (`MAX_IMPORT_SOURCES`).
+/// `// DERIVED:` EVE Equinox Workforce network rules allow at most `3` concurrent Import sources per hub.
+pub const MAX_IMPORT_SOURCES: usize = 3;
+
+/// `true` when `exporter_id` (exporting to `dest_sys`) can reach `importer_id` directly or via
+/// `Transit` relay hubs (cycle-safe multi-hop BFS across all owner/alliance `Transit` hubs).
 fn can_relay_export(
     snap: &WorldStateSnapshot,
     sde: &SdeRegistry,
@@ -71,7 +76,7 @@ fn can_relay_export(
     if dest_sys == imp_sys && exp_reach.contains_key(&imp_sys) {
         return true;
     }
-    // Collect all Transit relay hubs belonging to the same owner/alliance.
+    // Collect all live Transit relay hubs belonging to the same corporation/alliance.
     let transit_hubs: Vec<(i64, u32)> = snap
         .sov_runtime
         .sov_hubs
@@ -85,35 +90,30 @@ fn can_relay_export(
         .filter_map(|(id, _)| hub_sys(snap, *id).map(|sys| (*id, sys)))
         .collect();
 
+    // State is `(transit_hub_id, cur_sys, passed_dest)`. Tracking `(tid, passed_dest)` prevents
+    // infinite loops on cyclic hub graphs while allowing multi-hop chains where `dest_sys` itself
+    // lies >5 jumps away beyond one or more upstream `Transit` relays.
     let mut visited = std::collections::HashSet::new();
     let mut queue = VecDeque::new();
-    if dest_sys == imp_sys {
-        for (tid, tsys) in &transit_hubs {
-            if exp_reach.contains_key(tsys) && visited.insert(*tid) {
-                queue.push_back(*tsys);
-            }
-        }
-    } else {
-        if !exp_reach.contains_key(&dest_sys) {
-            return false;
-        }
-        for (tid, tsys) in &transit_hubs {
-            if *tsys == dest_sys && visited.insert(*tid) {
-                queue.push_back(*tsys);
+    for &(tid, tsys) in &transit_hubs {
+        if exp_reach.contains_key(&tsys) {
+            let passed = dest_sys == imp_sys || tsys == dest_sys;
+            if visited.insert((tid, passed)) {
+                queue.push_back((tsys, passed));
             }
         }
     }
-    for _ in 0..transit_hubs.len() {
-        let Some(cur_sys) = queue.pop_front() else {
-            break;
-        };
+    while let Some((cur_sys, passed_dest)) = queue.pop_front() {
         let reach = systems_within_jumps(sde, cur_sys, WORKFORCE_TRANSFER_MAX_JUMPS);
-        if reach.contains_key(&imp_sys) {
+        if passed_dest && reach.contains_key(&imp_sys) {
             return true;
         }
-        for (tid, tsys) in &transit_hubs {
-            if reach.contains_key(tsys) && visited.insert(*tid) {
-                queue.push_back(*tsys);
+        for &(tid, tsys) in &transit_hubs {
+            if reach.contains_key(&tsys) {
+                let next_passed = passed_dest || tsys == dest_sys;
+                if visited.insert((tid, next_passed)) {
+                    queue.push_back((tsys, next_passed));
+                }
             }
         }
     }
@@ -364,8 +364,32 @@ fn apply_configuration(
     let reachable: Vec<u32> = networkable_hubs(snap, sde, hub_id).into_iter().map(|h| h.1).collect();
     match &new_mode {
         PersistedWorkforceMode::Import { sources } => {
-            if let Some(bad) = sources.iter().find(|s| !reachable.contains(s)) {
-                return Err((STATUS_BAD_REQUEST, format!("No networkable hub in source system {bad}")));
+            if sources.len() > MAX_IMPORT_SOURCES {
+                return Err((
+                    STATUS_BAD_REQUEST,
+                    format!("Cannot import workforce from more than {MAX_IMPORT_SOURCES} sources"),
+                ));
+            }
+            let mut seen = std::collections::HashSet::with_capacity(sources.len());
+            for &src in sources {
+                if src == sys {
+                    return Err((
+                        STATUS_BAD_REQUEST,
+                        "Hub cannot import workforce from its own solar system".to_string(),
+                    ));
+                }
+                if !seen.insert(src) {
+                    return Err((
+                        STATUS_BAD_REQUEST,
+                        format!("Duplicate workforce import source system {src}"),
+                    ));
+                }
+                if !reachable.contains(&src) {
+                    return Err((
+                        STATUS_BAD_REQUEST,
+                        format!("No networkable hub in source system {src}"),
+                    ));
+                }
             }
         }
         PersistedWorkforceMode::Export { destination: Some(d), .. } if !reachable.contains(d) => {

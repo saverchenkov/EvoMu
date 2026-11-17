@@ -6,7 +6,7 @@ use super::flush_pending_quasar;
 use super::sov_gameplay_skyhook::tick_skyhooks;
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::quasar_sov_hub::{compute_hub_resources, enforce_hub_power_overload, PendingNotices};
-use crate::services::quasar_sov_mercden::{complete_mercenary_activity_in_snap, refresh_activities};
+use crate::services::quasar_sov_mercden::{complete_mercenary_activity_in_snap, refresh_activities_with_sde};
 use crate::services::sov_services::{
     calculate_adm, is_hub_hacked,
     TYPE_PHAROLUX_CYNO_BEACON, TYPE_SOVEREIGNTY_HUB, TYPE_TENEBREX_CYNO_JAMMER as SOV_TENEBREX_TYPE,
@@ -710,7 +710,7 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
             .collect();
         let den_ids: Vec<i64> = snap.sov_runtime.mercenary_dens.keys().copied().collect();
         for did in den_ids {
-            refresh_activities(snap, &pending, did, now_unix);
+            refresh_activities_with_sde(snap, Some(&ctx.sde), &pending, did, now_unix);
         }
         let mto_despawns: Vec<(u32, i64)> = mto_before
             .into_iter()

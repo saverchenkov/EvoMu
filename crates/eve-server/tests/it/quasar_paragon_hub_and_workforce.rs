@@ -19,9 +19,7 @@ use eve_proto::PyRep;
 use eve_server::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_OK};
 use eve_server::router::ServerContext;
 use eve_server::services::quasar_cosmetics_market::{BUYER_FEES_VERSION, PARAGON_CORP_ID};
-use eve_server::services::quasar_sov_hub::planet_yield;
 use eve_server::services::quasar_sov_workforce::systems_within_jumps;
-use eve_server::services::sov_gameplay::SKYHOOK_HOURLY_REAGENT_YIELD;
 use eve_server::services::sov_services::{TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -575,7 +573,7 @@ async fn test_quasar_sov_skyhook_workforce_and_admin_lifecycle() {
     let get_rsp = qrpc(&ctx, &mut admin, "eve_public.sovereignty.skyhook.api.GetRequest", req_with_id(skyhook_id as u64)).await;
     assert_eq!(get_rsp.status_code, STATUS_OK);
     let wm = WireMessage::decode(&get_rsp.payload.as_ref().unwrap().value).expect("decode GetResponse wire");
-    let (_, expected_wf) = planet_yield(11);
+    let (_, expected_wf) = eve_server::services::quasar_sov_hub::planet_yield_for_planet(planet.type_id, planet.radius);
     assert!(expected_wf > 0);
     let wf_bytes = wm.fields.iter().find(|f| f.field_number == 7).and_then(|f| f.value.as_bytes()).expect("workforce field 7");
     let wf_wm = WireMessage::decode(wf_bytes).expect("decode workforce");
@@ -584,7 +582,14 @@ async fn test_quasar_sov_skyhook_workforce_and_admin_lifecycle() {
     let rdef_wm = WireMessage::decode(rdef_bytes).expect("decode reagent def");
     let amt_bytes = rdef_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_bytes()).expect("amt field 2");
     let amt_wm = WireMessage::decode(amt_bytes).expect("decode amt");
-    assert_eq!(amt_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()), Some(SKYHOOK_HOURLY_REAGENT_YIELD));
+    let expected_reagent_rate = eve_server::services::quasar_sov_skyhook::planet_hourly_reagent_yield_for_planet(
+        planet.type_id,
+        planet.radius,
+    );
+    assert_eq!(
+        amt_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()),
+        Some(expected_reagent_rate)
+    );
 
     assert_eq!(qrpc(&ctx, &mut admin, "eve_public.sovereignty.skyhook.api.GetAllLocalRequest", Vec::new()).await.status_code, STATUS_OK);
     assert_eq!(qrpc(&ctx, &mut admin, "eve_public.sovereignty.skyhook.api.GetAllByCorporationRequest", req_with_id(corp_id as u64)).await.status_code, STATUS_OK);

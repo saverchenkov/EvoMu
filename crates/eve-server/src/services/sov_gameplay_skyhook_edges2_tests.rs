@@ -73,20 +73,30 @@ fn skyhook_helpers_hull_eligibility_reagent_harvest_and_damage_edges() {
     // 3. advance_skyhook_reagents_in_snap: active hourly harvest splits 50/50 into secure/insecure,
     // and structure state "Destroyed" suppresses hourly harvest while maturing existing insecure bay.
     let mut snap = WorldStateSnapshot::default();
+    let (null_sys, planet_id, _) = find_null_system_with_reagent_planet(&ctx);
+    let reagent_type = ctx
+        .sde
+        .celestials_in_system(null_sys)
+        .iter()
+        .find(|p| p.celestial_id == planet_id)
+        .and_then(|p| planet_reagent_type(p.type_id))
+        .expect("reagent planet type");
     let sh_id = 8_001_i64;
     let t0 = 1_850_000_000_u64;
     snap.structures.insert(
         sh_id,
         UpwellStructureRecord {
             structure_id: sh_id,
+            solar_system_id: null_sys,
             type_id: TYPE_ORBITAL_SKYHOOK,
             state: "ShieldVulnerable".into(),
             ..Default::default()
         },
     );
+    snap.sov_runtime.skyhook_planets.insert(sh_id, planet_id);
     snap.sov_runtime
         .skyhook_reagent_bays
-        .insert(sh_id, (TYPE_SUPERIONIC_ICE, 0, 0, t0));
+        .insert(sh_id, (reagent_type, 0, 0, t0));
     snap.sov_runtime.skyhook_last_harvest_unix.insert(sh_id, t0);
     // Advance 2 hours (7200s): harvests 2 * hourly_yield, half to secure, half to insecure.
     let (_, sec1, insec1) = advance_skyhook_reagents_in_snap(&mut snap, &ctx.sde, sh_id, t0 + 7_200).unwrap();

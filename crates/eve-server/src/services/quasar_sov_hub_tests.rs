@@ -37,8 +37,8 @@ fn upgrade_definitions_celestial_yields_and_fuel_simulation() {
     assert!(is_hub_fuel_type(TYPE_SUPERIONIC_ICE));
     assert!(!is_hub_fuel_type(34));
 
-    assert_eq!(planet_yield(11), (0, 1_500));
-    assert_eq!(planet_yield(2063), (200, 0));
+    assert_eq!(planet_yield(11), (0, 5_000));
+    assert_eq!(planet_yield(2063), (420, 0));
     assert_eq!(planet_yield(999_999), (0, 0));
 
     let sys_y = system_yield(&sde, 30_000_142);

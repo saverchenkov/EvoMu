@@ -47,19 +47,31 @@ fn find_transit_chain(ctx: &ServerContext) -> (u32, u32, u32) {
         if reach_a.len() < 2 {
             continue;
         }
-        for (&b, &dab) in &reach_a {
-            if dab == 0 || b == a {
-                continue;
-            }
+        let mut b_candidates: Vec<u32> = reach_a
+            .iter()
+            .filter_map(|(&b, &dab)| (dab > 0 && b != a).then_some(b))
+            .collect();
+        b_candidates.sort_unstable();
+        for b in b_candidates {
             let reach_b = systems_within_jumps(&ctx.sde, b, WORKFORCE_TRANSFER_MAX_JUMPS);
-            for (&c, &dbc) in &reach_b {
-                if dbc > 0 && c != a && c != b && !reach_a.contains_key(&c) {
+            let mut c_candidates: Vec<u32> = reach_b
+                .iter()
+                .filter_map(|(&c, &dbc)| (dbc > 0 && c != a && c != b && !reach_a.contains_key(&c)).then_some(c))
+                .collect();
+            c_candidates.sort_unstable();
+            for c in c_candidates {
+                let c_star_power: u64 = eve_server::services::quasar_sov_hub::system_yield(&ctx.sde, c)
+                    .stars
+                    .iter()
+                    .map(|s| s.1)
+                    .sum();
+                if c_star_power >= 200 {
                     return (a, b, c);
                 }
             }
         }
     }
-    panic!("Expected a 3-system chain (a -> b <= 5 jumps, b -> c <= 5 jumps, a -> c > 5 jumps) in SDE");
+    panic!("Expected a 3-system chain (a -> b <= 5 jumps, b -> c <= 5 jumps, a -> c > 5 jumps, c star_power >= 200) in SDE");
 }
 
 fn encode_configure_req(hub_id: i64, cfg_bytes: &[u8]) -> Vec<u8> {
@@ -159,8 +171,13 @@ async fn test_sov_hub_mercenaryden_and_star_resources_descriptors() {
     // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj
     let ctx = ServerContext::new();
-    let sys_a = 30_000_142u32;
+    let sys_a = 30_000_669u32;
     seed_hub(&ctx, HUB_A, sys_a);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT) {
+            ch.solar_system_id = sys_a;
+        }
+    });
 
     let mut s = sess(9102, PILOT, CORP, sys_a, corp_roles::ROLE_DIRECTOR);
     s.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT | eve_machonet::service_roles::ROLE_ADMIN;
@@ -171,7 +188,7 @@ async fn test_sov_hub_mercenaryden_and_star_resources_descriptors() {
     assert_eq!(res.status_code, STATUS_OK);
     let res_bytes = res.payload.unwrap().value;
     let power_pair = field(&res_bytes, 1).expect("power pair");
-    assert!(varint(&power_pair, 1).unwrap_or(0) > 0, "Jita hub must have positive available power");
+    assert!(varint(&power_pair, 1).unwrap_or(0) > 0, "Null-sec hub must have positive available power");
 
     // 2. sovereignty.resource.star.api.GetAllConfigurationsRequest
     let expected_star_id = ctx
@@ -185,14 +202,17 @@ async fn test_sov_hub_mercenaryden_and_star_resources_descriptors() {
     assert_eq!(stars.status_code, STATUS_OK);
     let star_cfgs = fields(&stars.payload.unwrap().value, 1);
     assert!(!star_cfgs.is_empty(), "Must return SDE star configurations");
-    let jita_star_cfg = star_cfgs
+    let sys_star_cfg = star_cfgs
         .iter()
         .find(|cfg| field(cfg, 1).and_then(|id| varint(&id, 1)) == Some(expected_star_id))
-        .expect("GetAllConfigurationsResponse must include Jita SDE star");
-    assert!(varint(jita_star_cfg, 2).unwrap_or(0) > 0);
+        .expect("GetAllConfigurationsResponse must include N3-JBX SDE star");
+    assert_eq!(
+        varint(sys_star_cfg, 2),
+        Some(eve_server::services::quasar_sov_hub::star_power_for_system(&ctx.sde, sys_a))
+    );
 
     // 3. Seed Mercenary Den and verify EvolutionStateChangedNotice + Activity requests/notices.
-    let planet_id = 40_009_048i64;
+    let planet_id = 40_042_173i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.sov_runtime.mercenary_dens.insert(
             DEN_ID,

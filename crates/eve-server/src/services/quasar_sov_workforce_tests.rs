@@ -234,13 +234,7 @@ fn workforce_relay_alliance_permissions_overload_and_error_paths() {
         .find(|&&s| {
             s != sys_a
                 && s != sys_b
-                && sde
-                    .celestials_in_system(s)
-                    .iter()
-                    .filter(|c| c.group_id == 6)
-                    .map(|c| super::super::quasar_sov_hub::star_power(&sde, c.type_id))
-                    .sum::<u64>()
-                    >= 250
+                && super::super::quasar_sov_hub::star_power_for_system(&sde, s) >= 250
         })
         .unwrap_or(&sys_b);
 
@@ -484,4 +478,181 @@ fn workforce_relay_alliance_permissions_overload_and_error_paths() {
     assert!(notices
         .iter()
         .any(|(_, a)| a.type_url.ends_with("HubUpgradesSimulatedNotice")));
+}
+
+#[test]
+fn multi_hop_cyclic_transit_relays_and_import_validation_guards() {
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let descriptors = Arc::new(QuasarDescriptorRegistry::empty_with_builtins());
+    let router = PublicGatewayRouter::new(descriptors, Arc::clone(&db), Arc::clone(&sde));
+    register_handlers(&router, Arc::clone(&db), Arc::clone(&sde));
+
+    // Real 6-hop claimable null-sec path in SDE:
+    // N3-JBX(0) -> GN-PDU(1) -> 8Q-T7B(2) -> HJ-BCH(3) -> QPTT-F(4) -> PU-UMM(5) -> 6-KPAB(6)
+    let sys_0 = 30_000_669_u32;
+    let sys_1 = 30_000_671_u32;
+    let sys_2 = 30_000_697_u32;
+    let sys_4 = 30_000_722_u32;
+    let sys_6 = 30_000_728_u32;
+    let sys_branch = 30_000_670_u32; // extra 1j neighbor for >3 import check
+
+    let cid = 90_000_001_i64;
+    let corp_id = 1_000_009_i64;
+    let (hub_0, hub_1, hub_2, hub_4, hub_6, hub_b) = (
+        82_000_000_i64,
+        82_000_001_i64,
+        82_000_002_i64,
+        82_000_004_i64,
+        82_000_006_i64,
+        82_000_007_i64,
+    );
+
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = sys_0;
+        }
+        snap.corporations.insert(corp_id, {
+            let mut c = eve_db::CorporationRecord::default();
+            c.corporation_id = corp_id;
+            c.ceo_id = cid;
+            c.ensure_wallet_divisions();
+            c
+        });
+        for (hid, sys) in [
+            (hub_0, sys_0),
+            (hub_1, sys_1),
+            (hub_2, sys_2),
+            (hub_4, sys_4),
+            (hub_6, sys_6),
+            (hub_b, sys_branch),
+        ] {
+            snap.structures.insert(
+                hid,
+                UpwellStructureRecord {
+                    structure_id: hid,
+                    type_id: TYPE_SOVEREIGNTY_HUB,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sys,
+                    name: format!("Hub {hid}"),
+                    state: "anchor_vulnerable".into(),
+                    ..Default::default()
+                },
+            );
+        }
+        // Hub 0 has skyhook + upgrade workforce so it can export 1,000 wf.
+        snap.sov_runtime.sov_hubs.insert(
+            hub_0,
+            PersistedSovHubData {
+                hub_id: hub_0,
+                upgrades: vec![PersistedHubUpgrade {
+                    type_id: 87_710,
+                    online: true,
+                    low_power: false,
+                }],
+                ..Default::default()
+            },
+        );
+    });
+
+    let handlers = router.handlers.read().unwrap();
+    let any = GoogleAny::default();
+    let dir_ctx = AuthoritativeContext::for_session(
+        Some(1),
+        Some(cid as u32),
+        Some(corp_id as u32),
+        corp_roles::ROLE_DIRECTOR,
+        "tranquility",
+        vec![1],
+    );
+
+    // Put Hub 1, Hub 2, and Hub 4 in Transit (forming bidirectional cycle sys_1 <-> sys_2 through shared relay)
+    for tid in [hub_1, hub_2, hub_4] {
+        let mut tcfg = DynamicQuasarMessage::new("Cfg");
+        tcfg.fields.insert(4, DynamicValue::Bool(true));
+        let mut req = id_msg(1, tid);
+        req.fields.insert(2, DynamicValue::Message(Box::new(tcfg)));
+        handlers["eve_public.sovereignty.hub.workforce.api.ConfigureRequest"](&dir_ctx, &any, &req)
+            .expect("configure Transit relay");
+    }
+
+    // Hub 6 (> 5 jumps from sys_0!) is reachable via multi-hop Transit relays and does not loop!
+    db.with_snapshot(|snap| {
+        let net = networkable_hubs(snap, &sde, hub_0);
+        assert!(
+            net.iter().any(|(hid, _)| *hid == hub_6),
+            "6-hop destination hub must be reachable via chained Transit relays"
+        );
+    });
+
+    // Export from hub_0 -> sys_6 and import on hub_6 from sys_0 across cyclic relays
+    let mut exp_0 = id_msg(1, sys_6 as i64);
+    exp_0.fields.insert(2, DynamicValue::Int64(1_000));
+    let mut cfg_0 = DynamicQuasarMessage::new("Cfg");
+    cfg_0.fields.insert(3, DynamicValue::Message(Box::new(exp_0)));
+    let mut req_0 = id_msg(1, hub_0);
+    req_0.fields.insert(2, DynamicValue::Message(Box::new(cfg_0)));
+    handlers["eve_public.sovereignty.hub.workforce.api.ConfigureRequest"](&dir_ctx, &any, &req_0)
+        .expect("export to 6-hop destination");
+
+    let mut imp_6 = DynamicQuasarMessage::new("Imp");
+    imp_6.fields.insert(1, DynamicValue::Repeated(vec![DynamicValue::Message(Box::new(id_msg(1, sys_0 as i64)))]));
+    let mut cfg_6 = DynamicQuasarMessage::new("Cfg");
+    cfg_6.fields.insert(2, DynamicValue::Message(Box::new(imp_6)));
+    let mut req_6 = id_msg(1, hub_6);
+    req_6.fields.insert(2, DynamicValue::Message(Box::new(cfg_6)));
+    handlers["eve_public.sovereignty.hub.workforce.api.ConfigureRequest"](&dir_ctx, &any, &req_6)
+        .expect("import from 6-hop source across Transit cycle");
+
+    db.with_snapshot(|snap| {
+        assert_eq!(export_connected(snap, &sde, hub_0), Some(sys_6));
+        assert_eq!(imports(snap, &sde, hub_6), vec![(sys_0, 1_000)]);
+    });
+
+    // Negative import guards: self-import, duplicate source, and > MAX_IMPORT_SOURCES (4 > 3)
+    for sources in [
+        vec![sys_0],                        // self-import on hub_0
+        vec![sys_1, sys_1],                 // duplicate source on hub_0
+        vec![sys_1, sys_2, sys_4, sys_branch], // 4 sources (> MAX_IMPORT_SOURCES=3)
+    ] {
+        let mut imp = DynamicQuasarMessage::new("Imp");
+        imp.fields.insert(
+            1,
+            DynamicValue::Repeated(
+                sources
+                    .into_iter()
+                    .map(|s| DynamicValue::Message(Box::new(id_msg(1, i64::from(s)))))
+                    .collect(),
+            ),
+        );
+        let mut cfg = DynamicQuasarMessage::new("Cfg");
+        cfg.fields.insert(2, DynamicValue::Message(Box::new(imp)));
+        let mut req = id_msg(1, hub_0);
+        req.fields.insert(2, DynamicValue::Message(Box::new(cfg)));
+        assert_eq!(
+            handlers["eve_public.sovereignty.hub.workforce.api.ConfigureRequest"](&dir_ctx, &any, &req)
+                .unwrap_err()
+                .0,
+            STATUS_BAD_REQUEST
+        );
+    }
+
+    // Valid import with MAX_IMPORT_SOURCES = 3 succeeds on hub_0
+    let mut imp_3 = DynamicQuasarMessage::new("Imp");
+    imp_3.fields.insert(
+        1,
+        DynamicValue::Repeated(
+            [sys_1, sys_2, sys_branch]
+                .into_iter()
+                .map(|s| DynamicValue::Message(Box::new(id_msg(1, i64::from(s)))))
+                .collect(),
+        ),
+    );
+    let mut cfg_3 = DynamicQuasarMessage::new("Cfg");
+    cfg_3.fields.insert(2, DynamicValue::Message(Box::new(imp_3)));
+    let mut req_3 = id_msg(1, hub_0);
+    req_3.fields.insert(2, DynamicValue::Message(Box::new(cfg_3)));
+    handlers["eve_public.sovereignty.hub.workforce.api.ConfigureRequest"](&dir_ctx, &any, &req_3)
+        .expect("import with exact MAX_IMPORT_SOURCES = 3 succeeds");
 }

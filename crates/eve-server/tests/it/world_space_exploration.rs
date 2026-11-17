@@ -1308,8 +1308,16 @@ async fn test_equinox_sov_hub_power_reagents_fuel_upgrades_and_workforce() {
     // 1. Reagents & Star Power definitions
     let defs = qrpc(&ctx, &mut s, "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest", Vec::new()).await.payload.unwrap().value;
     let defs_list = fields(&defs, 1);
-    assert_eq!(defs_list.len(), 8);
-    let lava_def = defs_list.iter().find(|d| varint(&field(d, 1).unwrap(), 1) == Some(2015)).unwrap();
+    assert!(defs_list.len() > 1_000);
+    let lava_def = defs_list
+        .iter()
+        .find(|d| {
+            field(d, 4)
+                .and_then(|r| field(&r, 3))
+                .and_then(|id| varint(&id, 1))
+                == Some(TYPE_MAGMATIC_GAS as u64)
+        })
+        .expect("Lava celestial reagent definition");
     assert_eq!(varint(&field(&field(lava_def, 4).unwrap(), 3).unwrap(), 1), Some(TYPE_MAGMATIC_GAS as u64));
 
     let mut bad_ver = Vec::new();
@@ -1328,7 +1336,8 @@ async fn test_equinox_sov_hub_power_reagents_fuel_upgrades_and_workforce() {
 
     // 2. Power & Workforce from stellar + anchored Skyhooks
     let res_no_sh = qrpc(&ctx, &mut s, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, hub_a as u64)).await.payload.unwrap().value;
-    assert_eq!(varint(&field(&res_no_sh, 1).unwrap(), 1), Some(800));
+    let expected_jita_star_power = eve_server::services::quasar_sov_hub::star_power_for_system(&ctx.sde, jita);
+    assert_eq!(varint(&field(&res_no_sh, 1).unwrap(), 1), Some(expected_jita_star_power));
     ctx.db.with_mut_snapshot(|snap| {
         for (idx, pid) in jita_planets.iter().copied().enumerate() {
             let sh_id = 1_000_000_200 + idx as i64;
@@ -1337,9 +1346,16 @@ async fn test_equinox_sov_hub_power_reagents_fuel_upgrades_and_workforce() {
             snap.sov_runtime.skyhook_active.insert(sh_id, true);
         }
     });
+    let (expected_planet_p, expected_planet_wf): (u64, u64) = ctx
+        .sde
+        .celestials_in_system(jita)
+        .into_iter()
+        .filter(|c| c.group_id == 7)
+        .map(|c| eve_server::services::quasar_sov_hub::planet_yield_for_planet(c.type_id, c.radius))
+        .fold((0, 0), |(ap, aw), (p, w)| (ap + p, aw + w));
     let res = qrpc(&ctx, &mut s, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, hub_a as u64)).await.payload.unwrap().value;
-    assert_eq!(varint(&field(&res, 1).unwrap(), 1), Some(1_100));
-    assert_eq!(varint(&field(&res, 2).unwrap(), 1), Some(3_000));
+    assert_eq!(varint(&field(&res, 1).unwrap(), 1), Some(expected_jita_star_power + expected_planet_p));
+    assert_eq!(varint(&field(&res, 2).unwrap(), 1), Some(expected_planet_wf));
 
     // 3. Hub Fuel deposit & hourly burn
     let mut other = qsess(61_002, 90_000_002, 98_000_002, jita, corp_roles::ROLE_DIRECTOR);

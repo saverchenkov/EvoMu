@@ -235,17 +235,18 @@ fn split_tier(name: &str) -> (&str, u64) {
     }
 }
 
-/// Builds the definition of an SDE Sovereignty Hub upgrade type from the `44` upgrade rows
-/// in `res:/staticdata/sovereigntyupgrades.fsdbinary` (`SdeRegistry::sovereignty_upgrades` /
-/// `eve-wiki/articles/Sovereignty.md:155-198`, SDE build `3538132`), with
-/// `fuel_startup = fuel_hourly_upkeep * 2` (`fuel_per_hour * 2`).
+/// Builds the definition of an SDE Sovereignty Hub upgrade type keyed off `sde_types`
+/// groups `4768`, `4772`, `4838`, `4839` and published names.
+///
+/// `// DERIVED:` CCP serves upgrade power/workforce/fuel costs from the Quasar backend rather than
+/// a client `.fsdbinary` file; numeric tuning follows V24.01 Equinox specifications.
 pub fn upgrade_definition(sde: &SdeRegistry, type_id: u32) -> Option<UpgradeDefinition> {
     let t = sde.types.get(&type_id)?;
     if !t.published || !SOV_HUB_UPGRADE_GROUPS.contains(&t.group_id) {
         return None;
     }
     let (base, _) = split_tier(&t.name);
-    // 44 upgrade definitions from `res:/staticdata/sovereigntyupgrades.fsdbinary` (build 3538132).
+    // DERIVED: V24.01 Equinox upgrade resource requirements and Colony Reagent upkeep/startup costs.
     let (power_required, workforce_required, fuel_type, fuel_per_hour, exclusive_group, power_produced, workforce_produced) =
         match type_id {
             // Group 4772: Sovereignty Hub Service Infrastructure Upgrades
@@ -318,8 +319,8 @@ pub fn is_hub_fuel_type(type_id: u32) -> bool {
 
 /// Power output of a star by spectral class of its SDE sun type (`Sun G5 (Yellow)` -> `G`).
 ///
-/// Follows the V24.01 Equinox stellar luminosity rules (`Sovereignty.md`): hotter spectral classes
-/// yield more power, 800 (O) down to 200 (M).
+/// `// DERIVED:` Fallback spectral mapping used when an `sde_stars` row is absent (hotter
+/// spectral classes O..M yield `800..200`); live system star output uses [`star_power_for_info`].
 pub fn star_power(sde: &SdeRegistry, star_type_id: u32) -> u64 {
     let class = sde
         .types
@@ -337,30 +338,100 @@ pub fn star_power(sde: &SdeRegistry, star_type_id: u32) -> u64 {
     }
 }
 
-/// Single shared planet resource table `(SDE planet type id, name, power, workforce)` used by both
-/// `resource.planet.api.GetAllDefinitionsRequest` and the hub resource computation.
+/// Power output of an SDE star from `sde_stars.luminosity` (`STAR_POWER` curve).
 ///
-/// Follows the V24.01 Equinox planetary resource rules (`Sovereignty.md:107-110`): Temperate /
-/// Oceanic / Barren planets yield workforce, Plasma > Storm > Gas planets yield power, and Ice /
-/// Oceanic (`Superionic Ice`) plus Lava (`Magmatic Gas`) yield colony reagents via Orbital Skyhooks.
+/// `// DERIVED:` Client `orbitalSkyhook/resourceRichness.pyj` defines `STAR_POWER = (241, 371)`
+/// (`Average`, `Prosperous`), matching the P50 (`0.093` -> `241`) and P75 (`0.402` -> `371`)
+/// quantiles of K-space `sde_stars.luminosity` with log10 slope `205` clamped to `[120, 800]`,
+/// falling back to [`star_power`] when `luminosity <= 0`.
+pub fn star_power_for_info(sde: &SdeRegistry, star: &eve_sde::StarInfo) -> u64 {
+    if star.luminosity > 0.0 {
+        let val = 241.0 + 205.0 * (star.luminosity.max(1e-4).log10() - 0.093f64.log10());
+        val.round().clamp(120.0, 800.0) as u64
+    } else {
+        star_power(sde, star.type_id)
+    }
+}
+
+/// Power output for `sys_id`'s primary star (using `sde_stars.luminosity` when present,
+/// otherwise summing [`star_power`] across `GROUP_SUN` celestials).
+pub fn star_power_for_system(sde: &SdeRegistry, sys_id: u32) -> u64 {
+    if let Some(st) = sde.star_for_system(sys_id) {
+        return star_power_for_info(sde, st);
+    }
+    sde.celestials_in_system_slice(sys_id)
+        .iter()
+        .filter(|c| c.group_id == GROUP_SUN)
+        .map(|c| star_power(sde, c.type_id))
+        .sum()
+}
+
+/// Nominal planetary resource table `(SDE planet type id, name, power, workforce)`.
+///
+/// `// DERIVED:` Client `orbitalSkyhook/const.pyj` (`WORKFORCE` = Temperate/Oceanic/Barren;
+/// `POWER` = Gas/Storm/Plasma; `ICE` = Ice; `LAVA` = Lava) and `resourceRichness.pyj`
+/// (`PLANET_WORKFORCE = (2831, 5671)`, `PLANET_POWER = (271, 481)`) supply client richness
+/// classification thresholds; nominal midpoints here represent medium-radius planets when exact
+/// celestial radius is unavailable.
 pub const PLANET_RESOURCE_TABLE: [(u32, &str, u64, u64); 8] = [
-    (11, "Temperate", 0, 1_500),
-    (2014, "Oceanic", 0, 1_000),
-    (2016, "Barren", 0, 500),
-    (13, "Gas", 150, 0),
-    (2017, "Storm", 175, 0),
-    (2063, "Plasma", 200, 0),
+    (11, "Temperate", 0, 5_000),
+    (2014, "Oceanic", 0, 3_800),
+    (2016, "Barren", 0, 2_800),
+    (13, "Gas", 320, 0),
+    (2017, "Storm", 360, 0),
+    (2063, "Plasma", 420, 0),
     (12, "Ice", 0, 0),
     (2015, "Lava", 0, 0),
 ];
 
-/// `(power, workforce)` harvested from a planet of the given SDE planet type
-/// (looked up in [`PLANET_RESOURCE_TABLE`]).
+/// Nominal `(power, workforce)` for an SDE planet type when no celestial radius is supplied.
 pub fn planet_yield(planet_type_id: u32) -> (u64, u64) {
+    if planet_type_id == 73_911 {
+        return (0, 2_800);
+    }
     PLANET_RESOURCE_TABLE
         .iter()
         .find(|row| row.0 == planet_type_id)
         .map_or((0, 0), |row| (row.2, row.3))
+}
+
+/// Radius-calibrated `(power, workforce)` harvested from a planet of `(planet_type_id, radius_m)`.
+///
+/// `// DERIVED:` Log-radius curve fitted to V24 client `orbitalSkyhook/const.pyj` size breakpoints
+/// (`WORKFORCE`: Small `2.00M`..Large `5.88M`; `POWER`: Small `0.348M`..Large `28.75M`) and
+/// `resourceRichness.pyj` cutoffs (`PLANET_WORKFORCE = (2831, 5671)`, `PLANET_POWER = (271, 481)`),
+/// falling back to [`planet_yield`] when `radius_m <= 0`.
+pub fn planet_yield_for_planet(planet_type_id: u32, radius_m: f64) -> (u64, u64) {
+    if radius_m <= 0.0 || !radius_m.is_finite() {
+        return planet_yield(planet_type_id);
+    }
+    match planet_type_id {
+        11 | 2014 | 2016 | 73_911 => {
+            let bias = match planet_type_id {
+                11 => 1.08,
+                2014 => 1.0,
+                _ => 0.88,
+            };
+            let t = ((radius_m.ln() - 2_000_000.0f64.ln())
+                / (5_880_000.0f64.ln() - 2_000_000.0f64.ln()))
+            .clamp(-0.3, 1.4);
+            let wf = ((2_000.0 + 3_750.0 * t) * bias).round().max(500.0) as u64;
+            (0, wf)
+        }
+        13 | 2017 | 2063 => {
+            let bias = match planet_type_id {
+                13 => 0.90,
+                2017 => 1.0,
+                _ => 1.15,
+            };
+            let t = ((radius_m.ln() - 1_470_000.0f64.ln())
+                / (35_000_000.0f64.ln() - 1_470_000.0f64.ln()))
+            .clamp(0.0, 1.3);
+            let pw = ((150.0 + 335.0 * t) * bias).round().max(100.0) as u64;
+            (pw, 0)
+        }
+        _ => (0, 0),
+    }
 }
 
 /// Resource inputs of a solar system: stars (`group_id == 6`) and planets (`group_id == 7`).
@@ -373,11 +444,14 @@ pub struct SystemYield {
 
 pub fn system_yield(sde: &SdeRegistry, sys_id: u32) -> SystemYield {
     let mut y = SystemYield::default();
-    for c in sde.celestials_in_system(sys_id) {
+    for c in sde.celestials_in_system_slice(sys_id) {
         if c.group_id == GROUP_SUN {
-            y.stars.push((c.celestial_id, star_power(sde, c.type_id)));
+            let p = sde
+                .star(c.celestial_id)
+                .map_or_else(|| star_power(sde, c.type_id), |st| star_power_for_info(sde, st));
+            y.stars.push((c.celestial_id, p));
         } else if c.group_id == GROUP_PLANET {
-            let (p, w) = planet_yield(c.type_id);
+            let (p, w) = planet_yield_for_planet(c.type_id, c.radius);
             y.planet_power += p;
             y.planet_workforce += w;
         }
@@ -436,13 +510,15 @@ fn hub_local_and_base_pool(
     let mut star_p = 0u64;
     let mut harvested_p = 0u64;
     let mut harvested_w = 0u64;
-    for c in sde.celestials_in_system(sys_id) {
+    for c in sde.celestials_in_system_slice(sys_id) {
         if c.group_id == GROUP_SUN {
-            star_p += star_power(sde, c.type_id);
+            star_p += sde
+                .star(c.celestial_id)
+                .map_or_else(|| star_power(sde, c.type_id), |star| star_power_for_info(sde, star));
         } else if c.group_id == GROUP_PLANET
             && is_planet_harvested_by_active_skyhook(snap, sys_id, c.celestial_id)
         {
-            let (p, mut w) = planet_yield(c.type_id);
+            let (p, mut w) = planet_yield_for_planet(c.type_id, c.radius);
             if w > 0 {
                 let siphoned: u64 = snap
                     .sov_runtime
