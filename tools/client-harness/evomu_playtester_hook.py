@@ -282,6 +282,32 @@ def _install_flight_recorder_hooks(sm):
     except Exception:
         pass
 
+    try:
+        pgw_svc = getattr(sm, "services", {}).get("publicGatewaySvc") if sm is not None else None
+        if pgw_svc is not None:
+            for pg_mname in ("send_request", "send_character_request"):
+                orig_pg_fn = getattr(pgw_svc, pg_mname, None)
+                if orig_pg_fn is not None and not getattr(orig_pg_fn, "_evomu_pt_wrapped", False):
+                    def _make_pg_wrapper(orig_fn, mname):
+                        def _wrapped_pg(*args, **kwargs):
+                            req_obj = args[0] if args else kwargs.get("request")
+                            r_name = type(req_obj).__name__ if req_obj is not None else mname
+                            t0 = time.time()
+                            try:
+                                res = orig_fn(*args, **kwargs)
+                                dur_ms = (time.time() - t0) * 1000.0
+                                _record_flight("quasar", "publicGateway", _safe_str(r_name, 64), mname, "OK", dur_ms)
+                                return res
+                            except Exception as exc:
+                                dur_ms = (time.time() - t0) * 1000.0
+                                _record_flight("quasar", "publicGateway", _safe_str(r_name, 64), mname, "ERR", dur_ms, repr(exc))
+                                raise
+                        _wrapped_pg._evomu_pt_wrapped = True
+                        return _wrapped_pg
+                    setattr(pgw_svc, pg_mname, _make_pg_wrapper(orig_pg_fn, pg_mname))
+    except Exception:
+        pass
+
     if _HOOKED_REMOTESVC or sm is None:
         return
     _HOOKED_REMOTESVC = True
@@ -1307,6 +1333,190 @@ def _auto_position_structure_deployment(w):
         _clear_py2_exc()
 
 
+def _inspect_window_content(w):
+    """Inspect bounded visible tabs, rows, loading indicators, and sample text labels inside a window."""
+    summary = {
+        "has_loading": False,
+        "has_error": False,
+        "tab_count": 0,
+        "row_count": 0,
+        "text_count": 0,
+        "populated_count": 0,
+        "sample_texts": [],
+    }
+    if w is None or getattr(w, "destroyed", False):
+        return summary
+    if bool(getattr(w, "loading", False) or getattr(w, "isLoading", False)):
+        summary["has_loading"] = True
+    wcap = _strip_tags(_safe_str(getattr(w, "caption", "") or "", 100)).strip().lower()
+    seen = set()
+    samples = []
+    tab_count = 0
+    row_count = 0
+    text_count = 0
+    queue = [(w, 0)]
+    visited = 0
+    skip_chrome = ("DefaultWindowHeader", "WindowUnderlay", "WindowControlButton", "StretchSpriteHorizontal", "StretchSpriteVertical")
+    while queue and visited < 110:
+        node, depth = queue.pop(0)
+        if node is None or id(node) in seen or getattr(node, "destroyed", False):
+            continue
+        seen.add(id(node))
+        if node is not w and not _is_visible(node):
+            continue
+        cls_n = node.__class__.__name__
+        if node is not w and cls_n in skip_chrome:
+            continue
+        visited += 1
+        nname = _safe_str(getattr(node, "name", ""), 64).lower()
+        cls_l = cls_n.lower()
+        if "loadingwheel" in cls_l or nname in ("loading", "loadingwheel", "loadingindicator", "busyindicator"):
+            summary["has_loading"] = True
+        if hasattr(node, "GetNodes"):
+            try:
+                nodes = node.GetNodes() or []
+                row_count += len(nodes)
+            except Exception:
+                pass
+        if hasattr(node, "tabs") and isinstance(getattr(node, "tabs", None), (list, tuple)):
+            try:
+                tab_count += len(getattr(node, "tabs") or ())
+            except Exception:
+                pass
+        if node is not w and ("tab" in cls_l and "tabgroup" not in cls_l):
+            tab_count += 1
+        elif node is not w and any(cls_l.endswith(suf) for suf in ("entry", "row", "order", "item", "notificationentry", "skillentry", "servicebtn")):
+            row_count += 1
+        raw_txt = getattr(node, "text", None)
+        if raw_txt and not callable(raw_txt) and not isinstance(raw_txt, (bool, int, float)):
+            clean_txt = _strip_tags(_safe_str(raw_txt, 100)).strip()
+            low_txt = clean_txt.lower()
+            if clean_txt:
+                if low_txt in ("loading", "loading...", "please wait", "loading data..."):
+                    summary["has_loading"] = True
+                elif any(err_k in low_txt for err_k in ("error loading", "failed to load", "unable to load", "unexpected error")):
+                    summary["has_error"] = True
+                elif low_txt != wcap and low_txt not in ("x", "?", "-", "_"):
+                    text_count += 1
+                    if clean_txt not in samples and len(samples) < 10:
+                        samples.append(clean_txt[:60])
+        if depth < 8:
+            for ch in list(getattr(node, "children", []) or [])[:25]:
+                if id(ch) not in seen:
+                    queue.append((ch, depth + 1))
+    summary["tab_count"] = int(tab_count)
+    summary["row_count"] = int(row_count)
+    summary["text_count"] = int(text_count)
+    summary["populated_count"] = int(tab_count + row_count + text_count)
+    summary["sample_texts"] = samples
+    return summary
+
+
+def _inspect_charsel_state(sm):
+    """Read visible character-selection UI slots/characters without issuing remote RPCs."""
+    out = {"active": False, "characters": [], "names": [], "slot_count": 0}
+    uc = _get_uicore()
+    layers = getattr(uc, "layer", None) if uc is not None else None
+    cs = getattr(layers, "charsel", None) if layers is not None else None
+    is_open = bool(cs is not None and (getattr(cs, "isopen", False) or _is_visible(cs)))
+    vs = getattr(sm, "services", {}).get("viewState") if sm is not None else None
+    if not is_open and vs is not None and hasattr(vs, "GetCurrentViewInfo"):
+        try:
+            vi = vs.GetCurrentViewInfo()
+            is_open = bool(getattr(vi, "name", None) == "charsel")
+        except Exception:
+            pass
+    out["active"] = is_open
+    if cs is None:
+        return out
+    seen_cids = set()
+    seen_names = set()
+    chars = []
+    slots = list(getattr(cs, "slots", None) or [])
+    out["slot_count"] = len(slots)
+    cs_data = getattr(cs, "characterSelectionData", None)
+    details_map = getattr(cs_data, "details", None) if cs_data is not None else None
+    if isinstance(details_map, dict):
+        for cid, det in details_map.items():
+            try:
+                cid_i = int(cid)
+            except Exception:
+                continue
+            cname = _safe_str(
+                getattr(det, "characterName", None)
+                or (det.get("characterName") if isinstance(det, dict) else None)
+                or getattr(det, "name", None)
+                or "",
+                64,
+            ).strip()
+            if not cname:
+                try:
+                    cinfo = getattr(__builtin__, "cfg", None)
+                    eveowners = getattr(cinfo, "eveowners", None)
+                    if eveowners is not None and hasattr(eveowners, "GetIfExists"):
+                        owner = eveowners.GetIfExists(cid_i)
+                        cname = _safe_str(getattr(owner, "name", "") or "", 64).strip()
+                except Exception:
+                    pass
+            if cid_i and cid_i not in seen_cids:
+                seen_cids.add(cid_i)
+                chars.append({"character_id": cid_i, "name": cname})
+                if cname and cname not in seen_names:
+                    seen_names.add(cname)
+    for sl in slots:
+        cd = getattr(sl, "charDetails", None)
+        cid_val = getattr(sl, "charID", None) or getattr(sl, "characterID", None)
+        if cid_val is None and cd is not None:
+            cid_val = getattr(cd, "charID", None) or getattr(cd, "characterID", None)
+        lbl = _extract_widget_label(sl)
+        try:
+            cid_i = int(cid_val) if cid_val else 0
+        except Exception:
+            cid_i = 0
+        cname = lbl.split("|")[0].strip() if lbl else ""
+        if not cname:
+            cname = _safe_str(
+                getattr(sl, "characterName", None)
+                or (getattr(cd, "characterName", None) if cd is not None else None)
+                or (getattr(cd, "name", None) if cd is not None else None)
+                or "",
+                64,
+            ).strip()
+        if not cname and cid_i:
+            try:
+                cinfo_s = getattr(__builtin__, "cfg", None)
+                eveowners_s = getattr(cinfo_s, "eveowners", None)
+                if eveowners_s is not None and hasattr(eveowners_s, "GetIfExists"):
+                    owner_s = eveowners_s.GetIfExists(cid_i)
+                    cname = _safe_str(getattr(owner_s, "name", "") or "", 64).strip()
+            except Exception:
+                pass
+        if cid_i and cid_i not in seen_cids:
+            seen_cids.add(cid_i)
+            chars.append({"character_id": cid_i, "name": cname})
+            if cname and cname not in seen_names:
+                seen_names.add(cname)
+        elif cname and cname not in seen_names:
+            seen_names.add(cname)
+    # Also scan visible text labels under charsel layer for rendered character names
+    if is_open:
+        q = [cs]
+        vset = set()
+        while q and len(vset) < 120:
+            n = q.pop(0)
+            if n is None or id(n) in vset or not _is_visible(n):
+                continue
+            vset.add(id(n))
+            t = _strip_tags(_safe_str(getattr(n, "text", "") or "", 64)).strip()
+            if t and t in seen_names:
+                pass
+            for ch in list(getattr(n, "children", []) or [])[:16]:
+                q.append(ch)
+    out["characters"] = chars
+    out["names"] = [c["name"] for c in chars if c.get("name")] or sorted(seen_names)
+    return out
+
+
 def _inspect_uicore_tree():
     uicore = _get_uicore()
     if uicore is None:
@@ -1388,6 +1598,7 @@ def _inspect_uicore_tree():
                 or "Popup" in cls_name
                 or "HybridWindow" in cls_name
             )
+            w_content = _inspect_window_content(w)
             info = {
                 "window_id": str(wname),
                 "name": _safe_str(getattr(w, "name", wname), 64),
@@ -1398,6 +1609,12 @@ def _inspect_uicore_tree():
                 "w": wd,
                 "h": ht,
                 "minimized": is_min,
+                "has_loading": w_content["has_loading"],
+                "has_error": w_content["has_error"],
+                "tab_count": w_content["tab_count"],
+                "row_count": w_content["row_count"],
+                "populated_count": w_content["populated_count"],
+                "sample_texts": w_content["sample_texts"],
             }
             msg_lbl = getattr(w, "_message_label", None)
             if msg_lbl is not None and getattr(msg_lbl, "text", None):
@@ -1407,6 +1624,66 @@ def _inspect_uicore_tree():
             open_windows.append(info)
             if is_modal:
                 modals.append(info)
+
+        # Include NotificationCenter drawer and active secondary view (e.g. New Eden Store) when visible
+        sm_obj = getattr(__builtin__, "sm", None)
+        svcs = getattr(sm_obj, "services", {}) if sm_obj is not None else {}
+        n_ui = svcs.get("notificationUIService")
+        nc = getattr(n_ui, "notificationCenter", None) if n_ui is not None else None
+        if nc is not None and not any(o.get("window_id") == "notifications" for o in open_windows):
+            nc_cont = getattr(nc, "notificationContainer", None) or getattr(nc, "drawer", None) or nc
+            is_showing = bool(getattr(nc, "isShowingDrawer", False))
+            if is_showing or (nc_cont is not nc and _is_visible(nc_cont)):
+                nc_c = _inspect_window_content(nc_cont)
+                open_windows.append({
+                    "window_id": "notifications",
+                    "name": "NotificationCenter",
+                    "cls": nc.__class__.__name__,
+                    "caption": "Notifications",
+                    "x": 0,
+                    "y": 0,
+                    "w": 320,
+                    "h": 480,
+                    "minimized": False,
+                    "is_showing_drawer": is_showing,
+                    "has_loading": nc_c["has_loading"],
+                    "has_error": nc_c["has_error"],
+                    "tab_count": nc_c["tab_count"],
+                    "row_count": nc_c["row_count"],
+                    "populated_count": nc_c["populated_count"],
+                    "sample_texts": nc_c["sample_texts"],
+                })
+        vs = svcs.get("viewState")
+        if vs is not None and hasattr(vs, "GetCurrentViewInfo"):
+            try:
+                vi = vs.GetCurrentViewInfo()
+                vname = _safe_str(getattr(vi, "name", "") or "", 48)
+                sec_vi = getattr(vs, "secondaryInfo", None)
+                if sec_vi is not None and getattr(sec_vi, "name", None):
+                    sec_name = _safe_str(getattr(sec_vi, "name", ""), 48)
+                    if not any(sec_name.lower() in (o.get("window_id", "").lower(), o.get("cls", "").lower()) for o in open_windows):
+                        sec_view_obj = getattr(vs, "activeView", None)
+                        sec_layer = getattr(sec_view_obj, "layer", None) if sec_view_obj is not None else None
+                        sec_c = _inspect_window_content(sec_layer)
+                        open_windows.append({
+                            "window_id": sec_name,
+                            "name": sec_name,
+                            "cls": sec_view_obj.__class__.__name__ if sec_view_obj is not None else sec_name,
+                            "caption": "New Eden Store" if "store" in sec_name.lower() else sec_name,
+                            "x": 0,
+                            "y": 0,
+                            "w": desk_w,
+                            "h": desk_h,
+                            "minimized": False,
+                            "has_loading": sec_c["has_loading"],
+                            "has_error": sec_c["has_error"],
+                            "tab_count": sec_c["tab_count"],
+                            "row_count": sec_c["row_count"],
+                            "populated_count": sec_c["populated_count"],
+                            "sample_texts": sec_c["sample_texts"],
+                        })
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -2731,6 +3008,58 @@ def _get_state_snapshot(sm):
         except Exception:
             pass
         space_info["nearby_balls"] = nearby[:38]
+        selected_id = None
+        try:
+            st_svc = getattr(sm, "services", {}).get("stateSvc")
+            if st_svc is not None and hasattr(st_svc, "GetExclState"):
+                from eve.client.script.parklife import states as _park_states
+                selected_id = st_svc.GetExclState(_park_states.selected)
+        except Exception:
+            selected_id = None
+        if selected_id is not None:
+            try:
+                sel_id_i = int(selected_id)
+                sel_ball = next((b for b in nearby if int(b.get("item_id", 0)) == sel_id_i), None)
+                space_info["selected_item"] = dict(sel_ball) if sel_ball is not None else {"item_id": sel_id_i}
+            except Exception:
+                pass
+        overview_entries = []
+        try:
+            uc_ov = _get_uicore()
+            reg_ov = getattr(uc_ov, "registry", None) if uc_ov is not None else None
+            wins_ov = list(reg_ov.GetWindows() or []) if (reg_ov is not None and hasattr(reg_ov, "GetWindows")) else []
+            for ov_w in wins_ov:
+                if getattr(ov_w, "destroyed", False) or not _is_visible(ov_w):
+                    continue
+                if "Overview" not in ov_w.__class__.__name__ and "overview" not in str(getattr(ov_w, "windowID", "") or "").lower():
+                    continue
+                scroll_ov = getattr(ov_w, "scroll", None)
+                if scroll_ov is not None and hasattr(scroll_ov, "GetNodes"):
+                    for nd in list(scroll_ov.GetNodes() or [])[:40]:
+                        bid_ov = getattr(nd, "itemID", None)
+                        slim_ov = getattr(nd, "slimItem", None) or getattr(nd, "ball", None)
+                        if bid_ov is None and slim_ov is not None:
+                            bid_ov = getattr(slim_ov, "itemID", None)
+                        gid_ov = int(getattr(slim_ov, "groupID", 0) or 0) if slim_ov is not None else 0
+                        cid_ov = int(getattr(slim_ov, "categoryID", 0) or 0) if slim_ov is not None else 0
+                        name_ov = _strip_tags(_safe_str(getattr(nd, "label", "") or getattr(nd, "name", "") or _resolve_ball_name(slim_ov, bid_ov), 64))
+                        dist_ov = getattr(nd, "distance", None)
+                        if bid_ov is not None or name_ov:
+                            overview_entries.append({
+                                "item_id": int(bid_ov) if bid_ov is not None else None,
+                                "name": name_ov,
+                                "group_id": gid_ov,
+                                "category_id": cid_ov,
+                                "distance_m": round(float(dist_ov), 1) if isinstance(dist_ov, (int, float)) else None,
+                            })
+        except Exception:
+            pass
+        space_info["overview_entries"] = overview_entries[:30]
+        space_info["overview_count"] = len(overview_entries)
+        space_info["celestials_in_overview"] = any(
+            int(b.get("group_id") or 0) in (6, 7, 8, 9, 10, 15)
+            for b in (overview_entries or nearby)
+        )
 
     new_flights = [e for e in _FLIGHT_RECORDER if e["seq"] > _LAST_OBSERVED_SEQ]
     _LAST_OBSERVED_SEQ = _FLIGHT_SEQ
@@ -2791,6 +3120,118 @@ def _get_state_snapshot(sm):
     except Exception:
         pass
 
+    inventory_state = {"hangar_item_count": None, "cargo_item_count": None, "ship_hangar_count": None}
+    try:
+        ic_svc = getattr(sm, "services", {}).get("invCache")
+        invs = getattr(ic_svc, "inventories", None) if ic_svc is not None else None
+        if isinstance(invs, dict):
+            ship_id_i = sess_dict.get("shipid")
+            st_locs = {x for x in (sess_dict.get("stationid"), sess_dict.get("structureid")) if x}
+
+            def _item_category_id(rec):
+                val = rec.get("categoryID") if isinstance(rec, dict) else getattr(rec, "categoryID", None)
+                try:
+                    return int(val) if val is not None else None
+                except Exception:
+                    return None
+
+            for ik, iv in invs.items():
+                items_attr = getattr(iv, "items", None)
+                cnt = len(items_attr) if isinstance(items_attr, (dict, list, tuple, set)) else None
+                if cnt is None and hasattr(iv, "GetItems"):
+                    continue
+                if isinstance(ik, tuple) and len(ik) >= 1:
+                    loc_k = ik[0]
+                    flag_k = ik[1] if len(ik) > 1 else None
+                    is_cargo = loc_k == ship_id_i and flag_k in (5, None)
+                    is_hangar = loc_k in st_locs and flag_k == 4
+                elif hasattr(iv, "itemID"):
+                    loc_k = getattr(iv, "itemID", None)
+                    flag_k = getattr(iv, "flag", None)
+                    if flag_k is None:
+                        flag_k = getattr(iv, "locationFlag", None)
+                    is_cargo = loc_k == ship_id_i
+                    is_hangar = loc_k in st_locs and flag_k == 4
+                else:
+                    continue
+                if is_cargo:
+                    inventory_state["cargo_item_count"] = cnt
+                elif is_hangar and cnt is not None:
+                    inventory_state["hangar_item_count"] = cnt
+                    item_vals = list(items_attr.values()) if isinstance(items_attr, dict) else (
+                        list(items_attr) if isinstance(items_attr, (list, tuple, set)) else []
+                    )
+                    ship_cnt = sum(1 for it in item_vals if _item_category_id(it) == 6)
+                    if inventory_state["ship_hangar_count"] is None:
+                        inventory_state["ship_hangar_count"] = 0
+                    inventory_state["ship_hangar_count"] += ship_cnt
+    except Exception:
+        pass
+
+    market_state = {"char_orders_count": None}
+    try:
+        mq_svc = getattr(sm, "services", {}).get("marketQuote")
+        if mq_svc is not None:
+            for attr in ("myOrders", "_myOrders", "orders"):
+                val = getattr(mq_svc, attr, None)
+                if isinstance(val, (list, tuple, dict, set)):
+                    market_state["char_orders_count"] = len(val)
+                    break
+    except Exception:
+        pass
+
+    bookmarks_state = {"count": None, "names": [], "items": []}
+    try:
+        bm_svc = getattr(sm, "services", {}).get("bookmarkSvc")
+        if bm_svc is not None:
+            bmap = getattr(bm_svc, "bookmarkMap", None)
+            if not isinstance(bmap, dict) and hasattr(bm_svc, "GetBookmarks"):
+                bmap = bm_svc.GetBookmarks()
+            if isinstance(bmap, dict):
+                bm_items = []
+                for bmid, bm in list(bmap.items())[:50]:
+                    bm_memo = _safe_str(getattr(bm, "memo", None) or getattr(bm, "name", "") or "", 64)
+                    bm_items.append({"bookmark_id": int(bmid) if str(bmid).isdigit() else str(bmid), "name": bm_memo})
+                bookmarks_state["count"] = len(bmap)
+                bookmarks_state["items"] = bm_items
+                bookmarks_state["names"] = [b["name"] for b in bm_items if b.get("name")]
+    except Exception:
+        pass
+
+    autopilot_state = {"active": False, "waypoints": [], "route": [], "route_len": 0}
+    try:
+        ap_svc = getattr(sm, "services", {}).get("autoPilot")
+        if ap_svc is not None:
+            if hasattr(ap_svc, "GetState"):
+                autopilot_state["active"] = bool(ap_svc.GetState())
+            elif hasattr(ap_svc, "InAutoPilot"):
+                autopilot_state["active"] = bool(ap_svc.InAutoPilot())
+        starmap_svc = getattr(sm, "services", {}).get("starmap")
+        if starmap_svc is not None:
+            if hasattr(starmap_svc, "GetWaypoints"):
+                wps = list(starmap_svc.GetWaypoints() or [])
+                autopilot_state["waypoints"] = [int(w) for w in wps if str(w).isdigit()]
+            if hasattr(starmap_svc, "GetDestinationPath"):
+                path_ids = list(starmap_svc.GetDestinationPath() or [])
+                autopilot_state["route"] = [int(x) for x in path_ids if str(x).isdigit()]
+                autopilot_state["route_len"] = len(autopilot_state["route"])
+    except Exception:
+        pass
+
+    charsel_state = _inspect_charsel_state(sm)
+
+    client_build = None
+    client_version = None
+    try:
+        boot_obj = getattr(__builtin__, "boot", None)
+        if boot_obj is not None:
+            b_val = getattr(boot_obj, "build", None)
+            v_val = getattr(boot_obj, "version", None)
+            client_build = str(b_val) if b_val else None
+            client_version = str(v_val) if v_val else None
+    except Exception:
+        pass
+
     ui_tree = _inspect_uicore_tree()
     desktop = getattr(_get_uicore(), "desktop", None)
     desktop_info = {
@@ -2800,14 +3241,21 @@ def _get_state_snapshot(sm):
 
     return {
         "ts": round(time.time(), 3),
+        "client_build": client_build,
+        "client_version": client_version,
         "session": sess_dict,
         "active_view": cur_view,
         "current_view": cur_view,
         "is_loading": is_loading,
         "quasar_channel_state": quasar_state,
         "desktop": desktop_info,
+        "charsel_state": charsel_state,
         "skills_state": skills_state,
         "wallet_state": wallet_state,
+        "inventory_state": inventory_state,
+        "market_state": market_state,
+        "bookmarks_state": bookmarks_state,
+        "autopilot_state": autopilot_state,
         "locked_targets": locked_targets,
         "space": space_info,
         "warp_telemetry": dict(_WARP_TELEMETRY),
@@ -3124,6 +3572,46 @@ def _open_client_window(sm, target):
         except Exception:
             pass
 
+    if t in ("notifications", "notification", "notificationpanel", "notificationfeed", "notificationcenter", "notificationreading"):
+        svcs = getattr(sm, "services", {}) if sm is not None else {}
+        n_ui = svcs.get("notificationUIService")
+        if n_ui is None and sm is not None and hasattr(sm, "GetService"):
+            try:
+                n_ui = sm.GetService("notificationUIService")
+            except Exception:
+                n_ui = None
+        if n_ui is not None:
+            try:
+                nc = getattr(n_ui, "notificationCenter", None)
+                if nc is None and hasattr(n_ui, "_ConstructNotificationCenter"):
+                    n_ui._ConstructNotificationCenter()
+                    nc = getattr(n_ui, "notificationCenter", None)
+                if nc is not None:
+                    if not getattr(nc, "isShowingDrawer", False) and hasattr(nc, "OpenDrawer"):
+                        nc.OpenDrawer()
+                        H._sleep_ms(500)
+                        return {"ok": True, "opened_via": "notificationUIService.notificationCenter.OpenDrawer"}
+                    if getattr(nc, "isShowingDrawer", False):
+                        return {"ok": True, "opened_via": "notificationUIService.notificationCenter (already open)"}
+            except Exception:
+                pass
+        n_svc = svcs.get("notificationSvc")
+        if n_svc is None and sm is not None and hasattr(sm, "GetService"):
+            try:
+                n_svc = sm.GetService("notificationSvc")
+            except Exception:
+                n_svc = None
+        if n_svc is not None:
+            try:
+                if hasattr(n_svc, "GetAllFormattedNotifications"):
+                    n_svc.GetAllFormattedNotifications()
+                if hasattr(n_svc, "OpenNotificationReadingWnd"):
+                    n_svc.OpenNotificationReadingWnd()
+                    H._sleep_ms(500)
+                    return {"ok": True, "opened_via": "notificationSvc.OpenNotificationReadingWnd"}
+            except Exception:
+                pass
+
     cmd_map = {
         "inventory": "OpenInventory",
         "cargohold": "OpenCargoHoldOfActiveShip",
@@ -3162,6 +3650,9 @@ def _open_client_window(sm, target):
         "assets": "OpenAssets",
         "wallet": "OpenWallet",
         "mail": "OpenMail",
+        "notifications": "OpenNotificationReadingWnd",
+        "notification": "OpenNotificationReadingWnd",
+        "notificationpanel": "OpenNotificationReadingWnd",
         "map": "CmdToggleMap",
         "solarsystemmap": "CmdToggleSolarSystemMap",
         "dscan": "OpenDirectionalScanner",
@@ -3619,9 +4110,9 @@ def _execute_action(sm, action):
         if raw_target.isdigit():
             action = dict(action)
             action["type_id"] = int(raw_target)
-    elif raw_atype in ("warp_to", "dock", "jump_gate", "approach", "orbit", "keep_at_range", "lock_target"):
+    elif raw_atype in ("warp_to", "dock", "jump_gate", "approach", "orbit", "keep_at_range", "lock_target", "align", "align_to", "stop"):
         atype = "space_command"
-        target = raw_atype
+        target = "align_to" if raw_atype in ("align", "align_to") else raw_atype
         if raw_target.isdigit():
             action = dict(action)
             action["item_id"] = int(raw_target)
@@ -3655,6 +4146,7 @@ def _execute_action(sm, action):
         else min(max(int(wait_ms), 0), 5000)
     )
 
+    allow_time_control = bool(action.get("time_control", not action.get("scenario_mode", False)))
     uicore = _get_uicore()
     layers = getattr(uicore, "layer", None) if uicore is not None else None
     result = {"ok": True, "action_ok": True, "action_type": raw_atype, "target": raw_target}
@@ -4099,6 +4591,19 @@ def _execute_action(sm, action):
                                 closed.append(cur_vname)
                     except Exception:
                         pass
+                try:
+                    if not t_low or "notif" in t_low:
+                        svcs_c = getattr(sm, "services", {}) if sm is not None else {}
+                        n_ui_c = svcs_c.get("notificationUIService")
+                        nc_c = getattr(n_ui_c, "notificationCenter", None) if n_ui_c is not None else None
+                        if nc_c is not None and getattr(nc_c, "isShowingDrawer", False):
+                            if hasattr(nc_c, "CloseDrawer"):
+                                nc_c.CloseDrawer()
+                            elif hasattr(nc_c, "Hide"):
+                                nc_c.Hide()
+                            closed.append("notifications")
+                except Exception:
+                    pass
                 try:
                     _close_context_menus_if_outside(None)
                     _dismiss_pinned_tooltip_if_outside(None)
@@ -4634,7 +5139,7 @@ def _execute_action(sm, action):
                                 vs.CloseSecondaryView(sec_name)
                     except Exception:
                         pass
-                    H._undock_ship(sm)
+                    H._undock_ship(sm, allow_time_control=allow_time_control)
                     result["undocked"] = True
                 elif sub == "open_plex_store":
                     result.update(_open_client_window(sm, "nes"))
@@ -4775,7 +5280,7 @@ def _execute_action(sm, action):
                     beyonce = H._get_beyonce(sm, sys_id)
                     michelle = sm.GetService("michelle")
                     bp = michelle.GetBallpark() if michelle is not None else None
-                    if not item_id and sub != "jump_gate" and bp is not None:
+                    if not item_id and sub not in ("jump_gate", "stop") and bp is not None:
                         sid = int(getattr(sess, "shipid", 0) or 0) if sess is not None else 0
                         item_id, resolve_err = _resolve_space_command_item_id(bp, sid, sub, raw_target)
                         if resolve_err:
@@ -4820,6 +5325,9 @@ def _execute_action(sm, action):
                             "saw_fx_warping": _WARP_TELEMETRY["last_warp_saw_fx_warping"],
                             "saw_signal": _WARP_TELEMETRY["last_warp_saw_signal"],
                             "warp_signal_count": 1 if _WARP_TELEMETRY["last_warp_saw_signal"] else 0,
+                            "started_count": int(_WARP_TELEMETRY.get("started_count", 0) or 0),
+                            "finished_count": int(_WARP_TELEMETRY.get("finished_count", 0) or 0),
+                            "in_warp": bool(_WARP_TELEMETRY.get("in_warp", False)),
                             "peak_speed_mps": _WARP_TELEMETRY["last_warp_peak_speed_mps"],
                         }
                         result["warp_telemetry"] = result["warp_realtime_telemetry"]
@@ -4863,14 +5371,19 @@ def _execute_action(sm, action):
                             or _WARP_TELEMETRY.get("in_warp")
                             or (getattr(H, "_WARP_SIGNAL_STATE", None) or {}).get("in_warp")
                         ):
-                            H._wait_warp_fx_settled(sm, timeout_sec=6.0)
+                            H._wait_warp_fx_settled(
+                                sm,
+                                timeout_sec=(12.0 if not allow_time_control else 6.0),
+                                allow_time_control=allow_time_control,
+                            )
                         H._wait_view_settled(sm)
-                        try:
-                            sm.RemoteSvc("timeControl").ClearSessionTimer()
-                        except Exception:
-                            pass
+                        if allow_time_control:
+                            try:
+                                sm.RemoteSvc("timeControl").ClearSessionTimer()
+                            except Exception:
+                                pass
                         dock_started_at = time.time()
-                        dock_loop_deadline = dock_started_at + 18.5
+                        dock_loop_deadline = dock_started_at + (35.0 if not allow_time_control else 18.5)
                         def _dock_surf_dist():
                             cur_bp = mich_d.GetBallpark() if (sid_d and mich_d is not None) else bp_d
                             if cur_bp is None or not hasattr(cur_bp, "GetBall"):
@@ -4898,23 +5411,28 @@ def _execute_action(sm, action):
                             beyonce.CmdFollowBall(dock_id, 0.0)
                             cur_sd = _dock_surf_dist()
                             steps = 0
-                            for _ in range(max_iters):
+                            iter_cap = max(max_iters, 50) if not allow_time_control else max_iters
+                            for _ in range(iter_cap):
                                 if time.time() >= dock_loop_deadline:
                                     break
                                 if cur_sd is not None and cur_sd <= float(limit_m):
                                     break
-                                adv_secs = 15 if (cur_sd is not None and cur_sd > 12000.0) else (10 if (cur_sd is not None and cur_sd > 4500.0) else 8)
+                                if allow_time_control:
+                                    adv_secs = 15 if (cur_sd is not None and cur_sd > 12000.0) else (10 if (cur_sd is not None and cur_sd > 4500.0) else 8)
+                                    try:
+                                        sm.RemoteSvc("timeControl").AdvanceClock(adv_secs)
+                                    except Exception:
+                                        pass
+                                    H._sleep_sim_ms(200)
+                                else:
+                                    H._sleep_sim_ms(500)
+                                steps += 1
+                                cur_sd = _dock_surf_dist()
+                            if allow_time_control:
                                 try:
-                                    sm.RemoteSvc("timeControl").AdvanceClock(adv_secs)
+                                    sm.RemoteSvc("timeControl").ClearSessionTimer()
                                 except Exception:
                                     pass
-                                steps += 1
-                                H._sleep_sim_ms(200)
-                                cur_sd = _dock_surf_dist()
-                            try:
-                                sm.RemoteSvc("timeControl").ClearSessionTimer()
-                            except Exception:
-                                pass
                             return steps
                         target_ball_d = bp_d.GetBall(dock_id) if (bp_d is not None and hasattr(bp_d, "GetBall")) else None
                         surf_d = _dock_surf_dist()
@@ -4927,15 +5445,22 @@ def _execute_action(sm, action):
                                     raise
                                 warp_too_short = True
                             if not warp_too_short:
-                                try:
-                                    sm.RemoteSvc("timeControl").AdvanceClock(180)
-                                except Exception:
-                                    pass
+                                if allow_time_control:
+                                    try:
+                                        sm.RemoteSvc("timeControl").AdvanceClock(180)
+                                    except Exception:
+                                        pass
                                 H._sleep_sim_ms(400)
-                                H._wait_warp_fx_settled(sm, timeout_sec=8.0)
+                                H._wait_warp_fx_settled(
+                                    sm,
+                                    timeout_sec=(35.0 if not allow_time_control else 8.0),
+                                    allow_time_control=allow_time_control,
+                                )
                                 surf_d = _dock_surf_dist()
                         if warp_too_short or (surf_d is not None and surf_d > 2400.0):
                             _approach_dock_within(2200.0, 12)
+                        if not allow_time_control:
+                            H._wait_session_timer_clear(max_wait_sec=12.0)
                         try:
                             sm.RemoteSvc("stationSvc").Dock(dock_id)
                         except Exception as dock_exc:
@@ -4956,18 +5481,22 @@ def _execute_action(sm, action):
                                 # large stations) while server perimeter check still rejects Dock.
                                 # Advance simulation with CmdFollowBall active and retry Dock
                                 # within dock_loop_deadline instead of stopping at 0 iterations.
-                                for _ in range(8):
+                                for _ in range(16 if not allow_time_control else 8):
                                     if time.time() >= dock_loop_deadline:
                                         break
-                                    try:
-                                        sm.RemoteSvc("timeControl").AdvanceClock(12)
-                                    except Exception:
-                                        pass
-                                    H._sleep_sim_ms(200)
-                                    try:
-                                        sm.RemoteSvc("timeControl").ClearSessionTimer()
-                                    except Exception:
-                                        pass
+                                    if allow_time_control:
+                                        try:
+                                            sm.RemoteSvc("timeControl").AdvanceClock(12)
+                                        except Exception:
+                                            pass
+                                        H._sleep_sim_ms(200)
+                                        try:
+                                            sm.RemoteSvc("timeControl").ClearSessionTimer()
+                                        except Exception:
+                                            pass
+                                    else:
+                                        H._sleep_sim_ms(600)
+                                        H._wait_session_timer_clear(max_wait_sec=4.0)
                                     try:
                                         sm.RemoteSvc("stationSvc").Dock(dock_id)
                                         pending_dock_exc = None
@@ -4978,7 +5507,7 @@ def _execute_action(sm, action):
                                         pending_dock_exc = retry_exc
                             if pending_dock_exc is not None:
                                 raise pending_dock_exc
-                        dl_d = time.time() + 10.0
+                        dl_d = time.time() + (16.0 if not allow_time_control else 10.0)
                         while time.time() < dl_d:
                             sess_d = getattr(__builtin__, "session", None)
                             if (
@@ -4988,10 +5517,11 @@ def _execute_action(sm, action):
                             ):
                                 break
                             H._sleep_ms(100)
-                        try:
-                            sm.RemoteSvc("timeControl").ClearSessionTimer()
-                        except Exception:
-                            pass
+                        if allow_time_control:
+                            try:
+                                sm.RemoteSvc("timeControl").ClearSessionTimer()
+                            except Exception:
+                                pass
                         H._ensure_view(sm, "hangar")
                     elif sub == "jump_gate":
                         sess_j = getattr(__builtin__, "session", None)
@@ -5050,12 +5580,17 @@ def _execute_action(sm, action):
                                         raise
                                     warp_too_short_j = True
                                 if not warp_too_short_j:
-                                    try:
-                                        sm.RemoteSvc("timeControl").AdvanceClock(180)
-                                    except Exception:
-                                        pass
+                                    if allow_time_control:
+                                        try:
+                                            sm.RemoteSvc("timeControl").AdvanceClock(180)
+                                        except Exception:
+                                            pass
                                     H._sleep_sim_ms(400)
-                                    H._wait_warp_fx_settled(sm, timeout_sec=8.0)
+                                    H._wait_warp_fx_settled(
+                                        sm,
+                                        timeout_sec=(35.0 if not allow_time_control else 8.0),
+                                        allow_time_control=allow_time_control,
+                                    )
                                     bp_j = mich_j.GetBallpark() if mich_j is not None else None
                                     target_ball_j = bp_j.GetBall(gate_id) if (bp_j is not None and hasattr(bp_j, "GetBall")) else None
                                     surf_j = None
@@ -5069,12 +5604,19 @@ def _execute_action(sm, action):
                                             surf_j = None
                             if warp_too_short_j or surf_j is None or surf_j > 2400.0:
                                 beyonce.CmdFollowBall(gate_id, 0.0)
-                                for _ in range(14):
-                                    try:
-                                        sm.RemoteSvc("timeControl").AdvanceClock(8)
-                                    except Exception:
-                                        pass
-                                    H._sleep_sim_ms(200)
+                                gate_approach_dl = time.time() + (25.0 if not allow_time_control else 18.0)
+                                gate_iters = 50 if not allow_time_control else 14
+                                for _ in range(gate_iters):
+                                    if time.time() >= gate_approach_dl:
+                                        break
+                                    if allow_time_control:
+                                        try:
+                                            sm.RemoteSvc("timeControl").AdvanceClock(8)
+                                        except Exception:
+                                            pass
+                                        H._sleep_sim_ms(200)
+                                    else:
+                                        H._sleep_sim_ms(500)
                                     target_ball_j = bp_j.GetBall(gate_id) if (bp_j is not None and hasattr(bp_j, "GetBall")) else None
                                     if target_ball_j is not None:
                                         try:
@@ -5087,12 +5629,15 @@ def _execute_action(sm, action):
                                                 break
                                         except Exception:
                                             pass
-                            try:
-                                sm.RemoteSvc("timeControl").ClearSessionTimer()
-                            except Exception:
-                                pass
+                            if allow_time_control:
+                                try:
+                                    sm.RemoteSvc("timeControl").ClearSessionTimer()
+                                except Exception:
+                                    pass
+                            else:
+                                H._wait_session_timer_clear(max_wait_sec=12.0)
                             beyonce.CmdStargateJump(gate_id)
-                            dl_j = time.time() + 12.0
+                            dl_j = time.time() + (18.0 if not allow_time_control else 12.0)
                             post_sys = pre_sys
                             while time.time() < dl_j:
                                 sess_now = getattr(__builtin__, "session", None)
@@ -5109,10 +5654,11 @@ def _execute_action(sm, action):
                                     post_sys = cur_sys
                                     break
                                 H._sleep_sim_ms(200)
-                            try:
-                                sm.RemoteSvc("timeControl").ClearSessionTimer()
-                            except Exception:
-                                pass
+                            if allow_time_control:
+                                try:
+                                    sm.RemoteSvc("timeControl").ClearSessionTimer()
+                                except Exception:
+                                    pass
                             H._wait_view_settled(sm)
                             for _ in range(20):
                                 bp_done = mich_j.GetBallpark() if mich_j is not None else None
@@ -5204,6 +5750,301 @@ def _execute_action(sm, action):
                     elif sub == "unlock_target":
                         tgt_svc = sm.GetService("target")
                         tgt_svc.UnlockTarget(int(item_id))
+            elif atype == "select_character":
+                req_cid = int(action.get("character_id", 0) or (raw_target if raw_target.isdigit() else 0) or 0)
+                req_name = _to_utf8(action.get("target") or raw_cmd or "").strip().lower()
+                cs_layer = getattr(getattr(uicore, "layer", None), "charsel", None) if uicore is not None else None
+                cs_info = _inspect_charsel_state(sm)
+                if not cs_info.get("active") or cs_layer is None:
+                    result["ok"] = False
+                    result["error"] = "character selection screen is not active"
+                else:
+                    matched_cid = req_cid
+                    if not matched_cid and req_name:
+                        for c_entry in cs_info.get("characters") or []:
+                            if req_name in str(c_entry.get("name") or "").lower():
+                                matched_cid = int(c_entry.get("character_id") or 0)
+                                break
+                    if not matched_cid and (cs_info.get("characters") or []):
+                        matched_cid = int(cs_info["characters"][0]["character_id"])
+                    if not matched_cid:
+                        result["ok"] = False
+                        result["error"] = "character %r not found on charsel screen (%r)" % (raw_target, cs_info.get("names"))
+                    else:
+                        slots = list(getattr(cs_layer, "slots", None) or [])
+                        target_slot = None
+                        for sl in slots:
+                            scid = getattr(sl, "charID", None) or getattr(sl, "characterID", None)
+                            if scid is None:
+                                cd = getattr(sl, "charDetails", None)
+                                scid = getattr(cd, "charID", None) or getattr(cd, "characterID", None) if cd is not None else None
+                            if scid is not None and int(scid) == int(matched_cid):
+                                target_slot = sl
+                                break
+                        if target_slot is not None and hasattr(target_slot, "OnClick"):
+                            target_slot.OnClick()
+                            H._sleep_ms(150)
+                        entered = False
+                        if target_slot is not None and hasattr(target_slot, "OnDblClick"):
+                            try:
+                                target_slot.OnDblClick()
+                                entered = True
+                            except Exception:
+                                entered = False
+                        if not entered:
+                            for confirm_attr in ("_CharacterSelection__Confirm", "Confirm", "SelectCharacterID"):
+                                cfn = getattr(cs_layer, confirm_attr, None)
+                                if callable(cfn):
+                                    try:
+                                        if confirm_attr == "SelectCharacterID":
+                                            cfn(matched_cid)
+                                        else:
+                                            cfn()
+                                        entered = True
+                                        break
+                                    except TypeError:
+                                        try:
+                                            cfn()
+                                            entered = True
+                                            break
+                                        except Exception:
+                                            pass
+                        if not entered:
+                            sm.GetService("sessionMgr").PerformSessionChange(
+                                "charsel",
+                                sm.RemoteSvc("charUnboundMgr").SelectCharacterID,
+                                int(matched_cid),
+                                None,
+                                True,
+                            )
+                        dl_cs = time.time() + 18.0
+                        while time.time() < dl_cs:
+                            s_now = getattr(__builtin__, "session", None)
+                            if (
+                                getattr(s_now, "charid", None) == matched_cid
+                                and not getattr(s_now, "mutating", 0)
+                                and getattr(s_now, "changing", None) is None
+                            ):
+                                break
+                            H._sleep_ms(150)
+                        s_now = getattr(__builtin__, "session", None)
+                        if getattr(s_now, "stationid", None) or getattr(s_now, "structureid", None):
+                            H._ensure_view(sm, "hangar")
+                        elif getattr(s_now, "solarsystemid", None) or getattr(s_now, "solarsystemid2", None):
+                            H._ensure_view(sm, "inflight")
+                        H._sync_quasar_gateway(sm, int(matched_cid))
+                        result["selected_character_id"] = int(matched_cid)
+            elif atype == "select_overview":
+                sess_ov = getattr(__builtin__, "session", None)
+                sys_ov = int(getattr(sess_ov, "solarsystemid", 0) or 0) if sess_ov is not None else 0
+                if not sys_ov or getattr(sess_ov, "stationid", None):
+                    result["ok"] = False
+                    result["error"] = "select_overview requires being undocked in space"
+                else:
+                    q_low = _to_utf8(action.get("target") or raw_cmd or "").strip().lower()
+                    req_iid = int(action.get("item_id", 0) or (q_low if q_low.isdigit() else 0) or 0)
+                    mich_ov = sm.GetService("michelle")
+                    bp_ov = mich_ov.GetBallpark() if mich_ov is not None else None
+                    sid_ov = int(getattr(sess_ov, "shipid", 0) or 0)
+                    chosen_id = req_iid
+                    chosen_name = ""
+                    chosen_node = None
+                    # Try OverviewWindow visible entries first
+                    reg_ov = getattr(uicore, "registry", None) if uicore is not None else None
+                    wins_ov = list(reg_ov.GetWindows() or []) if (reg_ov is not None and hasattr(reg_ov, "GetWindows")) else []
+                    for ov_w in wins_ov:
+                        if getattr(ov_w, "destroyed", False) or not _is_visible(ov_w):
+                            continue
+                        if "Overview" not in ov_w.__class__.__name__ and "overview" not in str(getattr(ov_w, "windowID", "") or "").lower():
+                            continue
+                        sc_ov = getattr(ov_w, "scroll", None)
+                        if sc_ov is None or not hasattr(sc_ov, "GetNodes"):
+                            continue
+                        for nd in list(sc_ov.GetNodes() or []):
+                            bid_nd = getattr(nd, "itemID", None)
+                            slim_nd = getattr(nd, "slimItem", None)
+                            if bid_nd is None and slim_nd is not None:
+                                bid_nd = getattr(slim_nd, "itemID", None)
+                            if bid_nd is None or int(bid_nd) == sid_ov:
+                                continue
+                            nm_nd = _strip_tags(_safe_str(getattr(nd, "label", "") or getattr(nd, "name", "") or _resolve_ball_name(slim_nd, bid_nd), 64))
+                            gid_nd = int(getattr(slim_nd, "groupID", 0) or 0) if slim_nd is not None else 0
+                            matched_nd = (
+                                (req_iid and int(bid_nd) == req_iid)
+                                or (not q_low)
+                                or (q_low in nm_nd.lower())
+                                or (q_low == "planet" and gid_nd == 7)
+                                or (q_low == "stargate" and gid_nd == 10)
+                                or (q_low == "station" and gid_nd == 15)
+                                or (q_low == "celestial" and gid_nd in (6, 7, 8, 10, 15))
+                            )
+                            if matched_nd:
+                                chosen_id = int(bid_nd)
+                                chosen_name = nm_nd
+                                chosen_node = (sc_ov, nd)
+                                break
+                        if chosen_id:
+                            break
+                    if not chosen_id and bp_ov is not None:
+                        chosen_id, r_err = _resolve_space_command_item_id(bp_ov, sid_ov, "approach", raw_target or "planet")
+                        if r_err:
+                            result["ok"] = False
+                            result["error"] = r_err
+                    if chosen_id:
+                        if chosen_node is not None:
+                            try:
+                                sc_obj, nd_obj = chosen_node
+                                panel_obj = getattr(nd_obj, "panel", None)
+                                if panel_obj is not None and hasattr(panel_obj, "OnClick"):
+                                    panel_obj.OnClick()
+                                elif hasattr(sc_obj, "SelectNode"):
+                                    sc_obj.SelectNode(nd_obj)
+                            except Exception:
+                                pass
+                        try:
+                            from eve.client.script.parklife import states as _park_states
+                            sm.GetService("stateSvc").SetState(int(chosen_id), _park_states.selected, 1)
+                        except Exception:
+                            pass
+                        result["selected_item_id"] = int(chosen_id)
+                        if chosen_name:
+                            result["selected_name"] = chosen_name
+            elif atype == "save_location":
+                bm_name = _to_utf8(action.get("target") or raw_cmd or "Scenario Bookmark").strip()
+                cmd_svc_bm = getattr(uicore, "cmd", None) if uicore is not None else None
+                bm_svc = sm.GetService("bookmarkSvc") if sm is not None else None
+                created_bm = False
+                if cmd_svc_bm is not None and hasattr(cmd_svc_bm, "CmdCreateBookmark"):
+                    try:
+                        cmd_svc_bm.CmdCreateBookmark()
+                        H._sleep_ms(300)
+                        reg_bm = getattr(uicore, "registry", None)
+                        for bw in list(reg_bm.GetWindows() or []) if reg_bm is not None else []:
+                            if "Bookmark" in bw.__class__.__name__ and _is_visible(bw):
+                                for fld in ("locationName", "nameEdit", "name"):
+                                    ed = getattr(bw, fld, None)
+                                    if ed is not None and hasattr(ed, "SetValue"):
+                                        ed.SetValue(bm_name)
+                                        break
+                                for cbtn in ("Confirm", "Submit", "OnConfirm"):
+                                    fn_bm = getattr(bw, cbtn, None)
+                                    if callable(fn_bm):
+                                        fn_bm()
+                                        created_bm = True
+                                        break
+                                break
+                    except Exception:
+                        created_bm = False
+                if not created_bm and bm_svc is not None and hasattr(bm_svc, "BookmarkLocation"):
+                    sess_bm = getattr(__builtin__, "session", None)
+                    loc_id_bm = int(getattr(sess_bm, "shipid", 0) or getattr(sess_bm, "solarsystemid", 0) or 0)
+                    bm_svc.BookmarkLocation(loc_id_bm, None, bm_name, "")
+                    created_bm = True
+                if not created_bm:
+                    result["ok"] = False
+                    result["error"] = "save_location could not trigger BookmarkLocationWindow or bookmarkSvc"
+                else:
+                    H._sleep_ms(350)
+                    result["bookmark_name"] = bm_name
+            elif atype in ("warp_to_location", "warp_to_bookmark"):
+                bm_q = _to_utf8(action.get("target") or raw_cmd or "").strip().lower()
+                bm_svc = sm.GetService("bookmarkSvc") if sm is not None else None
+                found_bm = None
+                if bm_svc is not None:
+                    bmap = getattr(bm_svc, "bookmarkMap", None)
+                    if not isinstance(bmap, dict) and hasattr(bm_svc, "GetBookmarks"):
+                        bmap = bm_svc.GetBookmarks()
+                    if isinstance(bmap, dict):
+                        for bmid, bm_obj in bmap.items():
+                            memo = _safe_str(getattr(bm_obj, "memo", None) or getattr(bm_obj, "name", "") or "", 64)
+                            if not bm_q or bm_q in memo.lower() or str(bmid) == bm_q:
+                                found_bm = (bmid, bm_obj, memo)
+                                break
+                if found_bm is None:
+                    result["ok"] = False
+                    result["error"] = "saved location %r not found in bookmarkSvc" % (action.get("target"),)
+                else:
+                    bmid, bm_obj, memo = found_bm
+                    _WARP_TELEMETRY["last_warp_saw_mode3"] = False
+                    _WARP_TELEMETRY["last_warp_saw_fx_warping"] = False
+                    _WARP_TELEMETRY["last_warp_saw_signal"] = False
+                    _WARP_TELEMETRY["last_warp_peak_speed_mps"] = 0.0
+                    _WARP_TELEMETRY["last_warp_samples"] = []
+                    dist_bm = float(action.get("distance", 0.0) or 0.0)
+                    menu_svc = None
+                    try:
+                        menu_svc = sm.GetService("menu")
+                    except Exception:
+                        menu_svc = None
+                    if menu_svc is not None and hasattr(menu_svc, "WarpToBookmark"):
+                        menu_svc.WarpToBookmark(bm_obj, warpRange=dist_bm)
+                    else:
+                        sess_wb = getattr(__builtin__, "session", None)
+                        sys_wb = int(getattr(sess_wb, "solarsystemid", 0) or 0)
+                        H._get_beyonce(sm, sys_wb).CmdWarpToStuff("bookmark", int(bmid), dist_bm)
+                    for _w_idx in range(8):
+                        H._sleep_sim_ms(400)
+                        smp = _sample_ego_warp_state(sm)
+                        _WARP_TELEMETRY["last_warp_samples"].append(smp)
+                        if smp["mode"] == 3:
+                            _WARP_TELEMETRY["last_warp_saw_mode3"] = True
+                        if "effects.Warping" in smp["fx_activations"] or smp["has_warp_dest_cache"]:
+                            _WARP_TELEMETRY["last_warp_saw_fx_warping"] = True
+                        if smp["speed_mps"] > _WARP_TELEMETRY["last_warp_peak_speed_mps"]:
+                            _WARP_TELEMETRY["last_warp_peak_speed_mps"] = smp["speed_mps"]
+                    result["bookmark_id"] = int(bmid) if str(bmid).isdigit() else str(bmid)
+                    result["bookmark_name"] = memo
+                    result["warp_telemetry"] = {
+                        "saw_mode3": _WARP_TELEMETRY["last_warp_saw_mode3"],
+                        "saw_fx_warping": _WARP_TELEMETRY["last_warp_saw_fx_warping"],
+                        "saw_signal": _WARP_TELEMETRY["last_warp_saw_signal"],
+                        "warp_signal_count": 1 if _WARP_TELEMETRY["last_warp_saw_signal"] else 0,
+                        "started_count": int(_WARP_TELEMETRY.get("started_count", 0) or 0),
+                        "finished_count": int(_WARP_TELEMETRY.get("finished_count", 0) or 0),
+                        "in_warp": bool(_WARP_TELEMETRY.get("in_warp", False)),
+                        "peak_speed_mps": _WARP_TELEMETRY["last_warp_peak_speed_mps"],
+                    }
+            elif atype == "set_destination":
+                dest_raw = _to_utf8(action.get("target") or raw_cmd or "").strip()
+                dest_id = int(action.get("system_id", 0) or (dest_raw if dest_raw.isdigit() else 0) or 0)
+                if not dest_id and dest_raw:
+                    try:
+                        map_svc = sm.GetService("map")
+                        if map_svc is not None and hasattr(map_svc, "GetItem"):
+                            pass
+                        c_cfg = getattr(__builtin__, "cfg", None)
+                        locs = getattr(c_cfg, "evelocations", None)
+                        if locs is not None and hasattr(locs, "data"):
+                            for lid, lrec in locs.data.items():
+                                if _to_utf8(getattr(lrec, "locationName", "") or "").lower() == dest_raw.lower():
+                                    dest_id = int(lid)
+                                    break
+                    except Exception:
+                        pass
+                if not dest_id:
+                    result["ok"] = False
+                    result["error"] = "set_destination could not resolve solar system %r" % (dest_raw,)
+                else:
+                    starmap_svc = sm.GetService("starmap")
+                    starmap_svc.SetWaypoint(int(dest_id), clearOtherWaypoints=bool(action.get("clear_other", True)))
+                    H._sleep_ms(300)
+                    path = list(starmap_svc.GetDestinationPath() or []) if hasattr(starmap_svc, "GetDestinationPath") else []
+                    result["destination_id"] = int(dest_id)
+                    result["route"] = [int(x) for x in path if str(x).isdigit()]
+            elif atype in ("engage_autopilot", "toggle_autopilot"):
+                ap_svc = sm.GetService("autoPilot")
+                want_on = _to_utf8(action.get("target") or "on").strip().lower() not in ("off", "false", "0")
+                cur_on = bool(ap_svc.GetState()) if (ap_svc is not None and hasattr(ap_svc, "GetState")) else False
+                if cur_on != want_on:
+                    cmd_svc_ap = getattr(uicore, "cmd", None) if uicore is not None else None
+                    if cmd_svc_ap is not None and hasattr(cmd_svc_ap, "CmdToggleAutopilot"):
+                        cmd_svc_ap.CmdToggleAutopilot()
+                    elif ap_svc is not None and hasattr(ap_svc, "SetOn") and want_on:
+                        ap_svc.SetOn()
+                    elif ap_svc is not None and hasattr(ap_svc, "SetOff") and not want_on:
+                        ap_svc.SetOff()
+                    H._sleep_ms(300)
+                result["autopilot_active"] = bool(ap_svc.GetState()) if (ap_svc is not None and hasattr(ap_svc, "GetState")) else want_on
             else:
                 result["ok"] = False
                 result["error"] = "unsupported action type %r" % (raw_atype,)
@@ -5286,7 +6127,16 @@ def _execute_action(sm, action):
         max_wait_s = (
             42.0
             if raw_atype == "jump_gate"
-            else (32.0 if raw_atype == "dock" else (25.0 if raw_atype in ("warp_to", "undock") else 12.0))
+            else (
+                38.0
+                if raw_atype == "dock"
+                else (
+                    25.0
+                    if raw_atype in ("warp_to", "warp_to_location", "warp_to_bookmark", "undock", "select_character")
+                    or atype in ("select_character", "warp_to_location", "warp_to_bookmark")
+                    else 12.0
+                )
+            )
         )
         t_start = time.time()
         while not done_flag[0] and (time.time() - t_start) < max_wait_s:
@@ -5505,7 +6355,7 @@ def _execute_action(sm, action):
     _tgt_id = action.get("item_id") or (raw_target if raw_target.isdigit() else None)
     result["state_diff"] = _compute_state_diff(pre_state, post_state, new_scatters, target_item_id=_tgt_id)
     result["flight_recorder"] = {
-        "macho_calls": new_flights[-30:],
+        "macho_calls": new_flights[-80:],
         "macho_exceptions": macho_excs,
         "quasar_errors": quasar_errs,
         "log_exceptions": new_log_excs[-10:],
@@ -5620,6 +6470,9 @@ class PlaytesterRpcServer(object):
                 _install_flight_recorder_hooks(self.sm)
             return {"ok": True, "reloaded": True, "ts": time.time()}
         if cmd in ("bootstrap_session", "ensure_logged_in"):
+            _install_flight_recorder_hooks(self.sm)
+            _install_warp_telemetry(self.sm)
+            defer_sel = bool(params.get("defer_char_select", self.cfg.get("defer_char_select", False)))
             sess = getattr(__builtin__, "session", None)
             cid = getattr(sess, "charid", None) if sess is not None else None
             if not cid:
@@ -5630,6 +6483,7 @@ class PlaytesterRpcServer(object):
                     self.cfg.get("password", "demo-secret"),
                     self.cfg.get("char_id", 90000001),
                     timeout_sec=timeout_s,
+                    defer_char_select=defer_sel,
                 )
             _ensure_windowed_mode(
                 self.sm,
@@ -5645,7 +6499,28 @@ class PlaytesterRpcServer(object):
             globals()["_LAST_SNAPSHOT"] = st
             globals()["_LAST_SNAPSHOT_SM"] = self.sm
             globals()["_LAST_SNAPSHOT_TS"] = time.time()
-            return {"ok": True, "result": st, "char_id": int(cid or 0), "state": st}
+            return {
+                "ok": True,
+                "result": st,
+                "char_id": int(cid or 0),
+                "state": st,
+                "flight_recorder": {
+                    "macho_calls": list(_FLIGHT_RECORDER[-80:]),
+                    "scatters_observed": [s.get("event") for s in _RECENT_SCATTERS[-60:]],
+                },
+            }
+        if cmd == "get_flight_recorder":
+            since_seq = int(params.get("since_seq", 0) or 0)
+            fr_payload = {
+                "macho_calls": [e for e in _FLIGHT_RECORDER if int(e.get("seq", 0) or 0) > since_seq][-120:],
+                "scatters_observed": [s.get("event") for s in _RECENT_SCATTERS[-60:]],
+            }
+            return {
+                "ok": True,
+                "result": fr_payload,
+                "macho_calls": fr_payload["macho_calls"],
+                "scatters_observed": fr_payload["scatters_observed"],
+            }
         if cmd in ("get_state", "observe"):
             st = _get_state_snapshot(self.sm)
             globals()["_LAST_SNAPSHOT"] = st
@@ -5685,7 +6560,10 @@ class PlaytesterRpcServer(object):
                 cln_res = _cleanup_utility_windows(self.sm, keep_chat=keep_chat)
             return {"ok": bool(cln_res.get("ok")), "result": cln_res, "cleanup_result": cln_res}
         if cmd in ("execute_action", "act"):
-            act_res = _execute_action(self.sm, params.get("action", {}))
+            act_payload = dict(params.get("action") or {})
+            if self.cfg.get("scenario_mode") and "scenario_mode" not in act_payload:
+                act_payload["scenario_mode"] = True
+            act_res = _execute_action(self.sm, act_payload)
             return {"ok": True, "result": act_res, "action_result": act_res}
         if cmd == "shutdown":
             self.running = False
@@ -5906,6 +6784,8 @@ def run_playtester_hook():
         evomu_site._install_fsd_typelist_preload_hook(preload_typelist=True)
     except Exception:
         pass
+    _install_flight_recorder_hooks(sm)
+    _install_warp_telemetry(sm)
     try:
         H._wait_for_session(
             sm,
@@ -5913,6 +6793,7 @@ def run_playtester_hook():
             cfg.get("password", "demo-secret"),
             int(cfg.get("char_id", 90000001)),
             timeout_sec=120.0,
+            defer_char_select=bool(cfg.get("defer_char_select", False)),
         )
     except Exception:
         pass

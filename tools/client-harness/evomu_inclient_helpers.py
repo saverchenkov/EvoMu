@@ -315,7 +315,7 @@ def _assert_ui_rendered(sm, expected_view):
             raise RuntimeError("michelle.GetBallpark() is None in inflight view")
 
 
-def _wait_for_session(sm, user, password, target_char_id, timeout_sec=120.0):
+def _wait_for_session(sm, user, password, target_char_id, timeout_sec=120.0, defer_char_select=False):
     deadline = time.time() + timeout_sec
     tried_manual_login, tried_manual_select = False, False
     chosen_char_id, avail_ids = int(target_char_id or 0), []
@@ -325,6 +325,21 @@ def _wait_for_session(sm, user, password, target_char_id, timeout_sec=120.0):
         charid = getattr(sess, "charid", None) if sess is not None else None
         if userid:
             _sync_quasar_gateway(sm, int(charid) if charid else None)
+        if defer_char_select and userid and not charid:
+            try:
+                vs = sm.GetService("viewState") if sm is not None else None
+            except Exception:
+                vs = None
+            cur = vs.GetCurrentViewInfo() if (vs is not None and hasattr(vs, "GetCurrentViewInfo")) else None
+            cname = getattr(cur, "name", None) if cur is not None else None
+            if cname == "charsel" and not getattr(vs, "isOpeningView", None):
+                uc = _get_uicore()
+                cs_layer = getattr(getattr(uc, "layer", None), "charsel", None) if uc is not None else None
+                cs_data = getattr(cs_layer, "characterSelectionData", None) if cs_layer is not None else None
+                cs_slots = getattr(cs_layer, "slots", None) if cs_layer is not None else None
+                if cs_layer is None or cs_data is not None or cs_slots:
+                    _sleep_ms(200)
+                    return 0
         sess_busy = bool(
             sess is not None
             and (getattr(sess, "mutating", 0) or getattr(sess, "changing", None) is not None)
@@ -393,7 +408,7 @@ def _wait_for_session(sm, user, password, target_char_id, timeout_sec=120.0):
                     sm.RemoteSvc("authentication").Login(user, password)
                 except Exception:
                     pass
-        if userid and not charid and not tried_manual_select:
+        if userid and not charid and not tried_manual_select and not defer_char_select:
             vs = sm.GetService("viewState")
             cur = vs.GetCurrentViewInfo()
             cname = getattr(cur, "name", None) if cur is not None else None
@@ -527,7 +542,33 @@ def _ensure_warp_signal_tracker(sm):
         pass
 
 
-def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0):
+def _wait_session_timer_clear(max_wait_sec=12.0):
+    deadline = time.time() + float(max_wait_sec)
+    while time.time() < deadline:
+        sess = getattr(__builtin__, "session", None)
+        if sess is None:
+            return
+        nsc = getattr(sess, "nextSessionChange", None)
+        mut = getattr(sess, "mutating", 0)
+        chg = getattr(sess, "changing", None)
+        now_sim = None
+        try:
+            import blue
+
+            now_sim = blue.os.GetSimTime()
+        except Exception:
+            now_sim = None
+        timer_active = (
+            bool(mut)
+            or chg is not None
+            or (nsc is not None and now_sim is not None and int(nsc) > int(now_sim))
+        )
+        if not timer_active:
+            return
+        _sleep_ms(200)
+
+
+def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0, allow_time_control=True):
     _ensure_warp_signal_tracker(sm)
     try:
         sess = getattr(__builtin__, "session", None)
@@ -588,14 +629,17 @@ def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0):
             _sleep_sim_ms(100)
         sess = getattr(__builtin__, "session", None)
         if getattr(sess, "stationid", None) is None and getattr(sess, "structureid", None) is None:
-            try:
-                sm.RemoteSvc("timeControl").AdvanceClock(2)
-            except Exception:
-                pass
-            _sleep_sim_ms(1500)
+            if allow_time_control:
+                try:
+                    sm.RemoteSvc("timeControl").AdvanceClock(2)
+                except Exception:
+                    pass
+                _sleep_sim_ms(1500)
+            else:
+                _sleep_sim_ms(600)
             _sleep_ms(300)
             if not settled:
-                post_deadline = time.time() + 4.0
+                post_deadline = time.time() + (12.0 if not allow_time_control else 4.0)
                 while time.time() < post_deadline:
                     if _is_warp_settled():
                         break
@@ -755,7 +799,7 @@ def _warp_animated(sm, b_obj, tid, stuff_type="item", distance=0.0, max_ticks=45
     }
 
 
-def _undock_ship(sm):
+def _undock_ship(sm, allow_time_control=True):
     _wait_view_settled(sm)
     sess = getattr(__builtin__, "session", None)
     if (
@@ -766,13 +810,16 @@ def _undock_ship(sm):
         _ensure_view(sm, "inflight")
         _ensure_warp_signal_tracker(sm)
         return
-    try:
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
-    except Exception:
-        pass
+    if allow_time_control:
+        try:
+            sm.RemoteSvc("timeControl").ClearSessionTimer()
+        except Exception:
+            pass
+    else:
+        _wait_session_timer_clear(max_wait_sec=12.0)
     _sleep_ms(600)
     sm.RemoteSvc("ship").Undock()
-    deadline = time.time() + 10.0
+    deadline = time.time() + (16.0 if not allow_time_control else 10.0)
     while time.time() < deadline:
         sess = getattr(__builtin__, "session", None)
         if (
@@ -784,29 +831,33 @@ def _undock_ship(sm):
         ):
             break
         _sleep_ms(100)
-    try:
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
-    except Exception:
-        pass
+    if allow_time_control:
+        try:
+            sm.RemoteSvc("timeControl").ClearSessionTimer()
+        except Exception:
+            pass
     _ensure_view(sm, "inflight")
     _ensure_warp_signal_tracker(sm)
 
 
-def _dock_station(sm, station_id=60003760):
+def _dock_station(sm, station_id=60003760, allow_time_control=True):
     sess = getattr(__builtin__, "session", None)
     sid = int(getattr(sess, "shipid", 0) or 0) if sess is not None else 0
     michelle = sm.services.get("michelle") if hasattr(sm, "services") else None
     bp = michelle.GetBallpark() if (sid and michelle is not None) else None
     ball = bp.GetBall(sid) if (bp is not None and sid) else None
     if ball is not None and int(getattr(ball, "mode", 0) or 0) == 3:
-        _wait_warp_fx_settled(sm, timeout_sec=6.0)
+        _wait_warp_fx_settled(sm, timeout_sec=6.0, allow_time_control=allow_time_control)
     _wait_view_settled(sm)
-    try:
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
-    except Exception:
-        pass
+    if allow_time_control:
+        try:
+            sm.RemoteSvc("timeControl").ClearSessionTimer()
+        except Exception:
+            pass
+    else:
+        _wait_session_timer_clear(max_wait_sec=12.0)
     sm.RemoteSvc("stationSvc").Dock(station_id)
-    deadline = time.time() + 10.0
+    deadline = time.time() + (16.0 if not allow_time_control else 10.0)
     while time.time() < deadline:
         sess = getattr(__builtin__, "session", None)
         if (
@@ -816,10 +867,11 @@ def _dock_station(sm, station_id=60003760):
         ):
             break
         _sleep_ms(100)
-    try:
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
-    except Exception:
-        pass
+    if allow_time_control:
+        try:
+            sm.RemoteSvc("timeControl").ClearSessionTimer()
+        except Exception:
+            pass
     _ensure_view(sm, "hangar")
 
 

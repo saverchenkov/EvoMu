@@ -2847,5 +2847,425 @@ class TestHookWindowCommandsAndRpcCompat(unittest.TestCase):
         self.assertEqual(wedged_sleeps, [50, 50, 50, 50])
 
 
+class TestScenarioHookExtensions(unittest.TestCase):
+    def test_notifications_drawer_open_and_close_plus_content_and_charsel_inspection(self):
+        hook = _load_hook_with_py2_stubs()
+        drawer_state = {"open": False}
+
+        class FakeLbl:
+            def __init__(self, text):
+                self.text = text
+                self.name = "lbl"
+                self.display = True
+                self.destroyed = False
+
+        class FakeScroll:
+            def GetNodes(self):
+                return [types.SimpleNamespace(label="Reward Earned"), types.SimpleNamespace(label="Skill Completed")]
+
+        class FakeNotifCenter:
+            def __init__(self):
+                self.drawer = types.SimpleNamespace(
+                    name="NotificationCenterDrawer",
+                    display=True,
+                    destroyed=False,
+                    children=[FakeScroll(), FakeLbl("Notifications")],
+                    scroll=FakeScroll(),
+                )
+
+            @property
+            def isShowingDrawer(self):
+                return drawer_state["open"]
+
+            def OpenDrawer(self):
+                drawer_state["open"] = True
+
+            def CloseDrawer(self):
+                drawer_state["open"] = False
+
+        nc = FakeNotifCenter()
+        fake_sm = types.SimpleNamespace(services={"notificationUIService": types.SimpleNamespace(notificationCenter=nc)})
+        fake_uicore = types.SimpleNamespace(
+            cmd=types.SimpleNamespace(),
+            registry=types.SimpleNamespace(GetWindows=lambda: [], GetModalWindow=lambda: None, modals=[]),
+            layer=types.SimpleNamespace(modal=None, abovemain=None, main=None),
+            desktop=types.SimpleNamespace(width=1280, height=800),
+        )
+        with mock.patch.dict(builtins.__dict__, {"sm": fake_sm}), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook, "_close_context_menus_if_outside"), \
+             mock.patch.object(hook, "_dismiss_pinned_tooltip_if_outside"):
+            open_res = hook._open_client_window(fake_sm, "notifications")
+            self.assertTrue(open_res.get("ok"), open_res)
+            self.assertTrue(drawer_state["open"])
+
+            ui_tree = hook._inspect_uicore_tree()
+            wins = ui_tree.get("open_windows") or []
+            notif_wins = [w for w in wins if "notification" in str(w.get("window_id") or "").lower()]
+            self.assertEqual(len(notif_wins), 1, wins)
+            self.assertGreaterEqual(int(notif_wins[0].get("populated_count", 0)), 1)
+            self.assertFalse(notif_wins[0].get("has_loading"))
+            self.assertFalse(notif_wins[0].get("has_error"))
+
+            snap = {
+                "open_windows": [], "modals": [], "ui": {}, "space": {},
+                "skills_state": {}, "wallet_state": {}, "active_view": "hangar",
+            }
+            with mock.patch.dict(builtins.__dict__, {"session": types.SimpleNamespace(shipid=1001, mutating=0)}), \
+                 mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+                 mock.patch.object(hook, "_install_warp_telemetry"), \
+                 mock.patch.object(hook, "_get_state_snapshot", return_value=snap):
+                close_res = hook._execute_action(fake_sm, {"type": "close_window", "target": "notifications", "wait_ms": 0})
+            self.assertTrue(close_res.get("action_ok"), close_res)
+            self.assertFalse(drawer_state["open"])
+
+    def test_defer_char_select_pauses_without_select_character_and_inspect_charsel_lists_chars(self):
+        helpers = _load_helpers_with_py2_stubs()
+        hook = _load_hook_with_py2_stubs()
+
+        char_selected_calls = []
+
+        class FakeCharSelLayer:
+            def __init__(self):
+                self.isopen = True
+                self.display = True
+                self.slots = [
+                    types.SimpleNamespace(charDetails=types.SimpleNamespace(charID=90000001, characterName="Aura Capsuleer")),
+                    types.SimpleNamespace(charDetails=types.SimpleNamespace(charID=90000002, characterName="Aura Two")),
+                ]
+
+            def SelectCharacterID(self, cid):
+                char_selected_calls.append(cid)
+
+        charsel_layer = FakeCharSelLayer()
+        fake_sm_svcs = {
+            "machoNet": object(),
+            "gameui": types.SimpleNamespace(),
+            "viewState": types.SimpleNamespace(
+                GetCurrentViewInfo=lambda: types.SimpleNamespace(name="charsel"),
+                isOpeningView=None,
+            ),
+        }
+        fake_sm = types.SimpleNamespace(
+            services=fake_sm_svcs,
+            GetService=lambda name: fake_sm_svcs.get(name),
+        )
+        fake_uicore = types.SimpleNamespace(layer=types.SimpleNamespace(charsel=charsel_layer))
+        fake_sess = types.SimpleNamespace(userid=1, charid=None, stationid=None, solarsystemid=None)
+
+        with mock.patch.dict(builtins.__dict__, {"uicore": fake_uicore, "session": fake_sess}), \
+             mock.patch.object(helpers, "_sleep_ms"):
+            cid = helpers._wait_for_session(fake_sm, "demo", "demo-secret", 90000001, timeout_sec=2.0, defer_char_select=True)
+        self.assertEqual(cid, 0)
+        self.assertEqual(char_selected_calls, [])
+
+        with mock.patch.object(hook, "_get_uicore", return_value=fake_uicore):
+            cs = hook._inspect_charsel_state(fake_sm)
+        self.assertTrue(cs["active"])
+        self.assertEqual(cs["names"], ["Aura Capsuleer", "Aura Two"])
+        self.assertEqual([c["character_id"] for c in cs["characters"]], [90000001, 90000002])
+
+    def test_notification_center_empty_drawer_reports_zero_populated_count(self):
+        hook = _load_hook_with_py2_stubs()
+        nc_container = types.SimpleNamespace(display=True, destroyed=False, children=[])
+        nc = type("NotificationCenter", (), {
+            "isShowingDrawer": True,
+            "notificationContainer": nc_container,
+        })()
+        fake_sm = types.SimpleNamespace(
+            services={"notificationUIService": types.SimpleNamespace(notificationCenter=nc)},
+        )
+        fake_desktop = types.SimpleNamespace(children=[], width=1280, height=720)
+        fake_uicore = types.SimpleNamespace(desktop=fake_desktop, layer=types.SimpleNamespace(l_main=types.SimpleNamespace(children=[])))
+        with mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.dict(builtins.__dict__, {"sm": fake_sm}):
+            ui_tree = hook._inspect_uicore_tree()
+        wins = [w for w in (ui_tree.get("open_windows") or []) if w.get("window_id") == "notifications"]
+        self.assertEqual(len(wins), 1, ui_tree)
+        self.assertTrue(wins[0]["is_showing_drawer"])
+        self.assertEqual(wins[0]["populated_count"], 0)
+
+        nc_container.children = [types.SimpleNamespace(display=True, destroyed=False, text="Skill completed", children=[])]
+        with mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.dict(builtins.__dict__, {"sm": fake_sm}):
+            ui_tree_pop = hook._inspect_uicore_tree()
+        wins_pop = [w for w in (ui_tree_pop.get("open_windows") or []) if w.get("window_id") == "notifications"]
+        self.assertEqual(len(wins_pop), 1)
+        self.assertGreaterEqual(wins_pop[0]["populated_count"], 1)
+
+    def test_inventory_state_populates_ship_hangar_count(self):
+        hook = _load_hook_with_py2_stubs()
+        fake_sess = types.SimpleNamespace(
+            userid=1, charid=90000001, stationid=60003760, structureid=None,
+            solarsystemid=None, solarsystemid2=30000142, shipid=1001,
+        )
+        fake_inv_cache = types.SimpleNamespace(inventories={
+            (60003760, 4): types.SimpleNamespace(items={
+                11: {"categoryID": 6},
+                12: types.SimpleNamespace(categoryID=6),
+                13: {"categoryID": 4},
+            }),
+        })
+        fake_sm = types.SimpleNamespace(
+            services={"invCache": fake_inv_cache},
+            GetService=lambda n: fake_sm.services.get(n),
+        )
+        with mock.patch.dict(builtins.__dict__, {"session": fake_sess, "sm": fake_sm}), \
+             mock.patch.object(hook, "_ensure_windowed_mode"), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_inspect_uicore_tree", return_value={"open_windows": [], "modals": []}):
+            snap = hook._get_state_snapshot(fake_sm)
+            self.assertEqual(snap["inventory_state"]["hangar_item_count"], 3)
+            self.assertEqual(snap["inventory_state"]["ship_hangar_count"], 2)
+
+            fake_inv_cache.inventories[(60003760, 4)] = types.SimpleNamespace(items={})
+            snap_empty = hook._get_state_snapshot(fake_sm)
+            self.assertEqual(snap_empty["inventory_state"]["hangar_item_count"], 0)
+            self.assertEqual(snap_empty["inventory_state"]["ship_hangar_count"], 0)
+
+    def test_space_command_stop_skips_ball_resolution_and_set_destination_handles_unicode(self):
+        hook = _load_hook_with_py2_stubs()
+        cmd_stop_calls = []
+        waypoint_calls = []
+        fake_beyonce = types.SimpleNamespace(CmdStop=lambda: cmd_stop_calls.append(True))
+        fake_michelle = types.SimpleNamespace(GetBallpark=lambda: types.SimpleNamespace(
+            GetBall=lambda bid: types.SimpleNamespace(mode=2),
+        ))
+        fake_starmap = types.SimpleNamespace(
+            SetWaypoint=lambda did, clearOtherWaypoints=True: waypoint_calls.append((did, clearOtherWaypoints)),
+            GetDestinationPath=lambda: [30000142],
+        )
+        fake_svcs = {"michelle": fake_michelle, "starmap": fake_starmap, "map": None}
+        fake_sm = types.SimpleNamespace(services=fake_svcs, GetService=lambda n: fake_svcs.get(n))
+        fake_sess = types.SimpleNamespace(userid=1, charid=90000001, solarsystemid=30000142, stationid=None, structureid=None, shipid=1001)
+        fake_cfg = types.SimpleNamespace(evelocations=types.SimpleNamespace(data={
+            30000142: types.SimpleNamespace(locationName="Jit\u00e4"),
+        }))
+        snap_base = {"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "inflight"}
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.dict(builtins.__dict__, {"session": fake_sess, "cfg": fake_cfg}), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value=snap_base), \
+             mock.patch.object(hook, "_settle_after_action", return_value=0), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook.H, "_get_beyonce", return_value=fake_beyonce, create=True), \
+             mock.patch.object(hook, "_resolve_space_command_item_id", side_effect=AssertionError("stop must skip ball resolution")):
+            res_stop = hook._execute_action(fake_sm, {"type": "stop", "wait_ms": 0, "reuse_pre_state": False})
+            res_dest = hook._execute_action(fake_sm, {"type": "set_destination", "target": "Jit\u00e4", "wait_ms": 0, "reuse_pre_state": False})
+        self.assertTrue(res_stop.get("ok"), res_stop)
+        self.assertEqual(cmd_stop_calls, [True])
+        self.assertTrue(res_dest.get("ok"), res_dest)
+        self.assertEqual(res_dest.get("destination_id"), 30000142)
+        self.assertEqual(waypoint_calls, [(30000142, True)])
+
+    def test_execute_action_uses_25s_max_wait_for_select_character_and_warp_variants(self):
+        hook = _load_hook_with_py2_stubs()
+        snap_base = {"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "hangar"}
+        fake_uicore = types.SimpleNamespace(cmd=None, registry=None, layer=None, desktop=None)
+        fake_sm = types.SimpleNamespace(services={}, GetService=lambda _n: None)
+        fake_uthread = types.SimpleNamespace(new=lambda _fn: None)
+        for atype in ("select_character", "warp_to_location", "warp_to_bookmark"):
+            time_seq = iter([0.0, 0.0, 0.1, 20.0, 20.1, 26.0, 26.0, 26.0])
+            with mock.patch.dict(sys.modules, {"uthread": fake_uthread}), \
+                 mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+                 mock.patch.object(hook, "_install_warp_telemetry"), \
+                 mock.patch.object(hook, "_get_state_snapshot", return_value=snap_base), \
+                 mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+                 mock.patch.object(hook, "_settle_after_action", return_value=0), \
+                 mock.patch.object(hook.H, "_sleep_ms", create=True), \
+                 mock.patch.object(hook.time, "time", side_effect=lambda s=time_seq: next(s, 26.0)):
+                res = hook._execute_action(fake_sm, {"type": atype, "target": "x", "wait_ms": 0, "reuse_pre_state": False})
+            self.assertFalse(res.get("ok"), f"{atype} unexpectedly succeeded: {res}")
+            self.assertIn("timed out after 26.0s", res.get("error", ""), f"{atype}: {res}")
+
+        # dock uses a 38.0s tasklet ceiling (> 35.0s scenario_mode warp budget, < 45.0s RPC socket timeout):
+        # a worker finishing at 34.0s succeeds rather than timing out at the old 32.0s limit, while 38.5s times out.
+        dock_seq = iter([0.0, 0.0, 34.0, 39.0, 39.0, 39.0])
+        with mock.patch.dict(sys.modules, {"uthread": fake_uthread}), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value=snap_base), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_settle_after_action", return_value=0), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook.time, "time", side_effect=lambda s=dock_seq: next(s, 39.0)):
+            dock_res = hook._execute_action(fake_sm, {"type": "dock", "target": "60003760", "wait_ms": 0, "reuse_pre_state": False})
+        self.assertFalse(dock_res.get("ok"), dock_res)
+        self.assertIn("timed out after 39.0s", dock_res.get("error", ""), dock_res)
+
+    def test_helpers_suppress_time_control_when_disabled(self):
+        helpers = _load_helpers_with_py2_stubs()
+        tc_calls = []
+
+        class FakeTimeControl:
+            def ClearSessionTimer(self):
+                tc_calls.append("ClearSessionTimer")
+            def AdvanceClock(self, secs):
+                tc_calls.append(("AdvanceClock", secs))
+
+        sess = types.SimpleNamespace(
+            userid=1, charid=90000001, solarsystemid=None, solarsystemid2=30000142,
+            stationid=60003760, structureid=None, shipid=1001, mutating=0, changing=None,
+        )
+
+        def _fake_undock():
+            sess.stationid = None
+            sess.solarsystemid = 30000142
+
+        def _fake_dock(_sid):
+            sess.stationid = 60003760
+            sess.solarsystemid = None
+
+        fake_ship_svc = types.SimpleNamespace(Undock=_fake_undock)
+        fake_station_svc = types.SimpleNamespace(Dock=_fake_dock)
+        fake_svcs = {"timeControl": FakeTimeControl(), "ship": fake_ship_svc, "stationSvc": fake_station_svc}
+        fake_sm = types.SimpleNamespace(
+            services=fake_svcs,
+            GetService=lambda n: fake_svcs.get(n),
+            RemoteSvc=lambda n: fake_svcs[n],
+        )
+        with mock.patch.dict(builtins.__dict__, {"session": sess, "sm": fake_sm}), \
+             mock.patch.object(helpers, "_wait_view_settled"), \
+             mock.patch.object(helpers, "_ensure_view"), \
+             mock.patch.object(helpers, "_ensure_warp_signal_tracker"), \
+             mock.patch.object(helpers, "_sleep_ms"), \
+             mock.patch.object(helpers, "_sleep_sim_ms"):
+            helpers._undock_ship(fake_sm, allow_time_control=False)
+            helpers._wait_warp_fx_settled(fake_sm, timeout_sec=0.05, allow_time_control=False)
+            helpers._dock_station(fake_sm, 60003760, allow_time_control=False)
+            self.assertEqual(tc_calls, [])
+
+            helpers._undock_ship(fake_sm, allow_time_control=True)
+            self.assertGreater(len(tc_calls), 0)
+
+    def test_execute_action_suppresses_time_control_for_dock_and_jump_gate_in_scenario_mode(self):
+        hook = _load_hook_with_py2_stubs()
+        helpers = _load_helpers_with_py2_stubs()
+        tc_calls = []
+
+        class FakeTimeControl:
+            def ClearSessionTimer(self):
+                tc_calls.append("ClearSessionTimer")
+            def AdvanceClock(self, secs):
+                tc_calls.append(("AdvanceClock", secs))
+
+        sess = types.SimpleNamespace(
+            userid=1, charid=90000001, solarsystemid=30000142, solarsystemid2=30000142,
+            stationid=None, structureid=None, shipid=1001, mutating=0, changing=None,
+        )
+        follow_calls = []
+
+        def _fake_follow(tid, _dist):
+            follow_calls.append(tid)
+
+        def _fake_dock(st_id):
+            sess.stationid = st_id
+            sess.solarsystemid = None
+
+        def _fake_jump(_gate_id):
+            sess.solarsystemid = 30001363
+            sess.solarsystemid2 = 30001363
+
+        fake_beyonce = types.SimpleNamespace(
+            CmdFollowBall=_fake_follow,
+            CmdWarpToStuff=lambda *_a: None,
+            CmdStargateJump=_fake_jump,
+        )
+        fake_station_svc = types.SimpleNamespace(Dock=_fake_dock)
+        fake_bp = types.SimpleNamespace(
+            GetBall=lambda bid: types.SimpleNamespace(surfaceDist=1000.0, mode=2),
+            GetSurfaceDist=lambda _a, _b: 1000.0,
+            slimItems={50001234: types.SimpleNamespace(groupID=10, name="Stargate (Sobaseki)")},
+        )
+        fake_michelle = types.SimpleNamespace(GetBallpark=lambda: fake_bp)
+        fake_svcs = {"timeControl": FakeTimeControl(), "stationSvc": fake_station_svc, "michelle": fake_michelle}
+        fake_sm = types.SimpleNamespace(
+            services=fake_svcs,
+            GetService=lambda n: fake_svcs.get(n),
+            RemoteSvc=lambda n: fake_svcs[n],
+        )
+        snap_base = {"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "inflight"}
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.dict(builtins.__dict__, {"session": sess, "sm": fake_sm}), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value=snap_base), \
+             mock.patch.object(hook, "_settle_after_action", return_value=0), \
+             mock.patch.object(hook.H, "_sleep_ms", helpers._sleep_ms, create=True), \
+             mock.patch.object(hook.H, "_sleep_sim_ms", lambda _ms: None, create=True), \
+             mock.patch.object(hook.H, "_wait_view_settled", lambda _sm: None, create=True), \
+             mock.patch.object(hook.H, "_ensure_view", lambda _sm, _v: None, create=True), \
+             mock.patch.object(hook.H, "_wait_warp_fx_settled", helpers._wait_warp_fx_settled, create=True), \
+             mock.patch.object(hook.H, "_wait_session_timer_clear", lambda max_wait_sec=12.0: None, create=True), \
+             mock.patch.object(hook.H, "_get_beyonce", return_value=fake_beyonce, create=True):
+            with mock.patch.object(helpers, "_sleep_ms"), mock.patch.object(helpers, "_sleep_sim_ms"), \
+                 mock.patch.object(helpers, "_ensure_warp_signal_tracker"):
+                res_dock = hook._execute_action(
+                    fake_sm,
+                    {"type": "dock", "target": "60003760", "item_id": 60003760, "wait_ms": 0, "reuse_pre_state": False, "scenario_mode": True, "time_control": False},
+                )
+                self.assertTrue(res_dock.get("ok"), res_dock)
+                self.assertEqual(tc_calls, [])
+
+                sess.stationid = None
+                sess.solarsystemid = 30000142
+                sess.solarsystemid2 = 30000142
+                res_gate = hook._execute_action(
+                    fake_sm,
+                    {"type": "jump_gate", "target": "30001363", "item_id": 50001234, "wait_ms": 0, "reuse_pre_state": False, "scenario_mode": True, "time_control": False},
+                )
+                self.assertTrue(res_gate.get("ok"), res_gate)
+                self.assertEqual(res_gate.get("to_system_id"), 30001363)
+                self.assertEqual(tc_calls, [])
+
+    def test_select_character_ensures_inflight_when_undocked_and_hangar_when_docked(self):
+        hook = _load_hook_with_py2_stubs()
+        ensured_views = []
+        sess = types.SimpleNamespace(userid=1, charid=None, stationid=None, structureid=None, solarsystemid=None, solarsystemid2=None, mutating=0, changing=None)
+
+        def _fake_select_char(cid):
+            sess.charid = cid
+
+        fake_char_svc = types.SimpleNamespace(SelectCharacterID=_fake_select_char)
+        fake_session_mgr = types.SimpleNamespace(PerformSessionChange=lambda _tag, fn, cid, *_a: fn(cid))
+        fake_svcs = {"sessionMgr": fake_session_mgr, "charUnboundMgr": fake_char_svc}
+        fake_sm = types.SimpleNamespace(
+            services=fake_svcs,
+            GetService=lambda n: fake_svcs.get(n),
+            RemoteSvc=lambda n: fake_svcs[n],
+        )
+        snap_base = {"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "inflight"}
+        fake_uicore = types.SimpleNamespace(
+            cmd=None, registry=None, desktop=None,
+            layer=types.SimpleNamespace(charsel=types.SimpleNamespace(slots=[])),
+        )
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.dict(builtins.__dict__, {"session": sess, "sm": fake_sm}), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value=snap_base), \
+             mock.patch.object(hook, "_settle_after_action", return_value=0), \
+             mock.patch.object(hook, "_inspect_charsel_state", return_value={"active": True, "characters": [{"character_id": 90000001, "name": "Demo Pilot"}]}), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook.H, "_sync_quasar_gateway", create=True), \
+             mock.patch.object(hook.H, "_ensure_view", side_effect=lambda _sm, v: ensured_views.append(v), create=True):
+            sess.solarsystemid = 30000142
+            sess.solarsystemid2 = 30000142
+            res_space = hook._execute_action(fake_sm, {"type": "select_character", "target": "90000001", "character_id": 90000001, "wait_ms": 0, "reuse_pre_state": False})
+            self.assertTrue(res_space.get("ok"), res_space)
+
+            sess.charid = None
+            sess.solarsystemid = None
+            sess.stationid = 60003760
+            res_dock = hook._execute_action(fake_sm, {"type": "select_character", "target": "90000001", "character_id": 90000001, "wait_ms": 0, "reuse_pre_state": False})
+            self.assertTrue(res_dock.get("ok"), res_dock)
+
+        self.assertEqual(ensured_views, ["inflight", "hangar"])
+
+
 if __name__ == "__main__":
     unittest.main()

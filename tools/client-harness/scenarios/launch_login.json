@@ -1,0 +1,104 @@
+{
+  "id": "launch_login",
+  "title": "Launch Client, Defer CharSel, Inspect Multi-Char List, Select Character & Load Hangar",
+  "starting_state": {
+    "account": "demo",
+    "password": "demo-secret",
+    "char_id": 90000001,
+    "defer_char_select": true,
+    "extra_characters": [
+      {
+        "name": "Aura Two",
+        "bloodline_id": 1,
+        "gender": 0,
+        "ancestry_id": 11,
+        "school_id": 17
+      }
+    ]
+  },
+  "steps": [
+    {
+      "id": "wait_for_charsel",
+      "description": "Wait for character selection screen and verify all account characters and login handshake RPCs",
+      "action": {
+        "type": "wait",
+        "wait_ms": 1000,
+        "expected_ui_and_state_change": "Character selection screen lists all characters of the demo account"
+      },
+      "checks": {
+        "charsel_listed_all_characters": true,
+        "rpc_sent": [
+          "charUnboundMgr.GetCharacterSelectionData"
+        ],
+        "handshake_server_check": "demo",
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "select_test_character",
+      "description": "Select primary test character from character selection UI",
+      "action": {
+        "type": "select_character",
+        "target": "90000001",
+        "character_id": 90000001,
+        "expected_ui_and_state_change": "Client calls SelectCharacterID and enters station hangar"
+      },
+      "wait_until": {
+        "timeout_ms": 20000,
+        "poll_interval_ms": 600,
+        "checks": {
+          "expect_session_field": "charid==90000001",
+          "ship_shown": true
+        }
+      },
+      "checks": {
+        "rpc_sent": [
+          "charUnboundMgr.SelectCharacterID"
+        ],
+        "expect_session_field": "charid==90000001",
+        "ship_shown": true,
+        "state_checks": [
+          {
+            "field": "active_view",
+            "equals": "hangar"
+          }
+        ],
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "verify_hangar_and_ship",
+      "description": "Verify station hangar view, initial ship, trained skills, and starter wallet with clean logs",
+      "action": {
+        "type": "wait",
+        "wait_ms": 1500,
+        "expected_ui_and_state_change": "Station hangar active with initial ship, starter skills, wallet ISK, and zero errors"
+      },
+      "checks": {
+        "ship_shown": true,
+        "expect_session_field": "stationid==60003760",
+        "state_checks": [
+          {
+            "field": "active_view",
+            "equals": "hangar"
+          },
+          {
+            "field": "wallet_isk",
+            "min": 1
+          },
+          {
+            "field": "trained_skill_count",
+            "min": 1
+          }
+        ],
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    }
+  ]
+}

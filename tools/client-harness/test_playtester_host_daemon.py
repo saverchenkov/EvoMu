@@ -2341,6 +2341,113 @@ class TestSpeedupOptimizations(unittest.TestCase):
                 )
             )
 
+    def test_oracle_filters_noammoloaded_minimap_resizeslider_and_fitting_validation_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            qdir = root / "queue"
+            qdir.mkdir()
+            mem = playtester.PlaytesterMemory(root, git_head="7e3600c29")
+            oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False)
+
+            no_ammo_tb = (
+                "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x2, ctxt='ModuleButton.OnStateChange'>\",)\n"
+                '  File "packages/hud/client/moduleButton.py", line 412, in OnStateChange\n'
+                '  File "eve/client/script/environment/spaceObject/module.py", line 118, in ActivateEffect\n'
+                "UserError: User error, msg=NoAmmoLoaded, dict={}\n"
+            )
+            self.assertIn("noammoloaded", oracle.BENIGN_USER_ERROR_MARKERS)
+            self.assertFalse(oracle._is_unhandled_tasklet_traceback("UserError: NoAmmoLoaded", no_ammo_tb))
+            self.assertTrue(oracle.is_ignorable_client_traceback("Unhandled exception in ModuleButton.OnStateChange", no_ammo_tb))
+
+            minimap_tb = (
+                '  File "packages/map/client/minimap.py", line 219, in _ResizeSlider\n'
+                "AttributeError: 'MapSlider' object has no attribute 'minimumWidth'\n"
+            )
+            self.assertTrue(oracle.is_benign_client_traceback("'MapSlider' object has no attribute 'minimumWidth'", minimap_tb))
+            self.assertTrue(oracle.is_ignorable_client_traceback("AttributeError", minimap_tb))
+
+            fitting_drag_tb = (
+                "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x3, ctxt='fittingSlotController.OnDropData'>\",)\n"
+                '  File "eve/client/script/ui/shared/fitting/fittingSlotController.py", line 310, in OnDropData\n'
+                '  File "eve/client/script/inc/invCache.py", line 915, in TryFit\n'
+                "UserError: ('CustomInfo', {'info': 'FittingValidationFailed: No available turret hardpoints'})\n"
+            )
+            self.assertFalse(oracle._is_unhandled_tasklet_traceback("Unhandled exception in OnDropData", fitting_drag_tb))
+            self.assertTrue(oracle.is_ignorable_client_traceback("Unhandled exception in OnDropData", fitting_drag_tb))
+
+            unexpected_custom_info_tb = (
+                "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x4, ctxt='market.Buy'>\",)\n"
+                '  File "eve/client/script/ui/shared/market/marketWindow.py", line 210, in ConfirmOrder\n'
+                "UserError: ('CustomInfo', {'info': 'UnexpectedInternalServerMismatch'})\n"
+            )
+            self.assertTrue(oracle._is_unhandled_tasklet_traceback("Unhandled exception in market.Buy", unexpected_custom_info_tb))
+            self.assertFalse(oracle.is_ignorable_client_traceback("Unhandled exception in market.Buy", unexpected_custom_info_tb))
+
+            # GH #1227: invWindow.py in _MoveItems tasklet UserError(NotEnoughCargoSpace)
+            inv_move_tb = (
+                "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x5, ctxt='invWindow._MoveItems'>\",)\n"
+                '  File "eve/client/script/ui/shared/inventory/invWindow.py", line 812, in _MoveItems\n'
+                "UserError: User error, msg=NotEnoughCargoSpace, dict={'space': 5.0}\n"
+            )
+            self.assertFalse(oracle._is_unhandled_tasklet_traceback("Unhandled exception in invWindow._MoveItems", inv_move_tb))
+            self.assertTrue(oracle.is_ignorable_client_traceback("Unhandled exception in invWindow._MoveItems", inv_move_tb))
+
+            inv_move_crash_tb = (
+                "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x6, ctxt='invWindow._MoveItems'>\",)\n"
+                '  File "eve/client/script/ui/shared/inventory/invWindow.py", line 812, in _MoveItems\n'
+                "RuntimeError: unexpected UI container crash\n"
+            )
+            self.assertTrue(oracle._is_unhandled_tasklet_traceback("Unhandled exception in invWindow._MoveItems", inv_move_crash_tb))
+            self.assertFalse(oracle.is_ignorable_client_traceback("Unhandled exception in invWindow._MoveItems", inv_move_crash_tb))
+
+            # GH #1230 / #1231: ModuleButton.OnStateChange -> ActivateEffect tasklet UserError(InsufficientFuel / NotEnoughCapacitor)
+            for msg_marker in (
+                "InsufficientFuel: Insufficient superweapon fuel (type 16274): need 50000, have 30000",
+                "NotEnoughCapacitor: Insufficient capacitor for Doomsday: need 35000.0 GJ",
+            ):
+                doomsday_tb = (
+                    "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x7, ctxt='ModuleButton.OnStateChange'>\",)\n"
+                    '  File "eve/client/script/ui/inflight/shipModuleButton/shipmodulebutton.py", line 1630, in OnStateChange\n'
+                    '  File "eve/client/script/ui/inflight/shipModuleButton/shipmodulebutton.py", line 1580, in ActivateEffect\n'
+                    f"UserError: User error, msg=CustomInfo, dict={{'info': '{msg_marker}'}}\n"
+                )
+                self.assertFalse(oracle._is_unhandled_tasklet_traceback("Unhandled exception in ModuleButton.OnStateChange", doomsday_tb))
+                self.assertTrue(oracle.is_ignorable_client_traceback("Unhandled exception in ModuleButton.OnStateChange", doomsday_tb))
+
+            doomsday_unexpected_tb = (
+                "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x8, ctxt='ModuleButton.OnStateChange'>\",)\n"
+                '  File "eve/client/script/ui/inflight/shipModuleButton/shipmodulebutton.py", line 1630, in OnStateChange\n'
+                '  File "eve/client/script/ui/inflight/shipModuleButton/shipmodulebutton.py", line 1580, in ActivateEffect\n'
+                "UserError: User error, msg=CustomInfo, dict={'info': 'UnexpectedDoomsdayState'}\n"
+            )
+            self.assertTrue(oracle._is_unhandled_tasklet_traceback("Unhandled exception in ModuleButton.OnStateChange", doomsday_unexpected_tb))
+            self.assertFalse(oracle.is_ignorable_client_traceback("Unhandled exception in ModuleButton.OnStateChange", doomsday_unexpected_tb))
+
+    def test_parse_tb_blocks_splits_action_tasklet_and_schedule_startup_headers(self):
+        raw_tb = (
+            "[evomu_site] logmodule.LogException args=(\"first\",)\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/shared/foo.py", line 10, in Foo\n'
+            "RuntimeError: first_err\n"
+            "[evomu_site] Action tasklet exception (dock):\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/shared/bar.py", line 20, in Dock\n'
+            "RuntimeError: action_err\n"
+            "[evomu_site] schedule_startup failed:\n"
+            "Traceback (most recent call last):\n"
+            '  File "evomu_site.py", line 1347, in _schedule\n'
+            "RuntimeError: startup_err\n"
+        )
+        blocks = playtester.PlaytesterBugOracle.parse_tb_blocks(raw_tb)
+        self.assertEqual(len(blocks), 3, blocks)
+        self.assertIn("first_err", blocks[0]["headline"] + blocks[0]["trace"])
+        self.assertNotIn("Action tasklet exception", blocks[0]["trace"])
+        self.assertIn("action_err", blocks[1]["headline"] + blocks[1]["trace"])
+        self.assertIn("Action tasklet exception", blocks[1]["trace"])
+        self.assertNotIn("schedule_startup failed:", blocks[1]["trace"])
+        self.assertIn("startup_err", blocks[2]["headline"] + blocks[2]["trace"])
+        self.assertIn("schedule_startup failed:", blocks[2]["trace"])
+
     def test_abort_conditions_schema_string_parity(self):
         schema = json.loads((HARNESS_DIR / "playtester_planner_schema.json").read_text(encoding="utf-8"))
         abort_schema = schema["properties"]["delegated_plan"]["properties"]["abort_conditions"]
@@ -2645,6 +2752,41 @@ class TestPlaytester1200OriginMainCutover(unittest.TestCase):
             self.assertEqual(self._git(wt, "status", "--porcelain"), "")
             self.assertEqual((wt / "AGENTS.md").read_text(encoding="utf-8"), "rules v2\n")
             self.assertEqual((wt / "tools" / "client-harness" / "playtester.py").read_text(encoding="utf-8"), "# v2\n")
+
+    def test_hot_reload_server_boundary_preserves_state_when_compile_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            wt = Path(td)
+            runner = playtester.PlaytesterRunner.__new__(playtester.PlaytesterRunner)
+            runner.args = types.SimpleNamespace(no_git_checkout=True)
+            runner.worktree_dir = wt
+            runner.current_run_dir = wt / ".playtester" / "run"
+            runner.current_run_dir.mkdir(parents=True)
+            runner.reload_requested = True
+            runner.cached_git_head = "abc123456"
+
+            lifecycle_calls = []
+            runner.stop_client = lambda: lifecycle_calls.append("stop_client")
+            runner.stop_server = lambda: lifecycle_calls.append("stop_server")
+            runner.start_server = lambda reset_db=False: lifecycle_calls.append("start_server") or True
+            runner.start_client = lambda: lifecycle_calls.append("start_client") or True
+            runner.reset_batch_state = lambda: lifecycle_calls.append("reset_batch_state")
+            save_calls = []
+            runner.memory = types.SimpleNamespace(
+                data={"server_reloads": 2, "long_term_notes": ["prior"]},
+                normalize_coverage_frontier=lambda **_kw: {"buggy_decayed": 0},
+                save=lambda: save_calls.append(True),
+            )
+
+            with mock.patch.object(playtester, "compile_eve_server", return_value=(False, None, "cargo compile error")), \
+                 mock.patch.object(playtester, "DEFAULT_CONTROL_FILE", wt / "missing.control"):
+                ok = runner.hot_reload_server_boundary()
+
+            self.assertFalse(ok)
+            self.assertEqual(lifecycle_calls, [])
+            self.assertEqual(runner.cached_git_head, "abc123456")
+            self.assertEqual(runner.memory.data["server_reloads"], 2)
+            self.assertEqual(runner.memory.data["long_term_notes"], ["prior"])
+            self.assertEqual(save_calls, [])
 
 
 
