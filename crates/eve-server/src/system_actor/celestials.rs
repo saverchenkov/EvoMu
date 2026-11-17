@@ -1876,6 +1876,7 @@ impl SystemHandle {
             .map_err(|_| "Solar system reply dropped".to_string())
     }
 
+    #[cfg(any(test, feature = "testkit"))]
     pub(crate) async fn step_manual_tick_only(&self, dt: f64) -> Result<u64, String> {
         let output = self.ask_step_tick_only(dt).await?;
         self.apply_step_output(&output).await;
