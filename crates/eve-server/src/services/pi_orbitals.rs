@@ -15,7 +15,7 @@ use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Baseline ISK cost per unit for Planetary Interaction customs office import/export tax.
 /// Matches EVE Online PI commodity tier base costs (`spaceportPin.pyj:99-120`, `importExportUI.pyj`):
@@ -55,6 +55,50 @@ pub(crate) struct PreparedPocoTax {
     tax_cents: IskCents,
     player_share: IskCents,
     orbital_tid: TypeId,
+    credit_corp: bool,
+}
+
+fn ensure_character_can_pay_tax(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    tax_cents: IskCents,
+    tax_isk: f64,
+    action_label: &str,
+) -> Result<(), BridgeRpcError> {
+    if tax_cents.0 > 0 {
+        if let Some(ch) = snap.characters.get(&char_id) {
+            if ch.balance.checked_sub(tax_cents).is_none() {
+                return Err(BridgeRpcError {
+                    code: "InsufficientFunds".into(),
+                    message: format!(
+                        "Insufficient ISK to pay POCO {action_label} tax ({tax_isk:.2} ISK)"
+                    ),
+                    client_error: None,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Prepares flat 15% (`1.5 * 0.10`) NPC export fee for Command Center rocket launches,
+/// bypassing planetary Customs Office / Skyhook ACLs and crediting zero ISK to corp wallets.
+pub(crate) fn prepare_command_center_launch_tax(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    base_value_isk: f64,
+    action_label: &str,
+) -> Result<PreparedPocoTax, BridgeRpcError> {
+    let tax_isk = 0.15 * base_value_isk.max(0.0);
+    let tax_cents = IskCents::from_f64_isk(tax_isk);
+    ensure_character_can_pay_tax(snap, char_id, tax_cents, tax_isk, action_label)?;
+    Ok(PreparedPocoTax {
+        tax_isk,
+        tax_cents,
+        player_share: IskCents(0),
+        orbital_tid: 2233,
+        credit_corp: false,
+    })
 }
 
 pub(crate) fn prepare_poco_commodity_tax(
@@ -89,23 +133,14 @@ pub(crate) fn prepare_poco_commodity_tax(
     let tax_isk = tax_mult
         * compute_poco_export_tax(base_value_isk, npc_customs_tax_rate, customs_lvl, player_poco_rate);
     let tax_cents = IskCents::from_f64_isk(tax_isk);
-    if tax_cents.0 > 0 {
-        if let Some(ch) = snap.characters.get(&char_id) {
-            if ch.balance.checked_sub(tax_cents).is_none() {
-                return Err(BridgeRpcError {
-                    code: "InsufficientFunds".into(),
-                    message: format!("Insufficient ISK to pay POCO {action_label} tax ({tax_isk:.2} ISK)"),
-                    client_error: None,
-                });
-            }
-        }
-    }
+    ensure_character_can_pay_tax(snap, char_id, tax_cents, tax_isk, action_label)?;
     let player_share = IskCents::from_f64_isk(tax_mult * base_value_isk * player_poco_rate);
     Ok(PreparedPocoTax {
         tax_isk,
         tax_cents,
         player_share,
         orbital_tid,
+        credit_corp: true,
     })
 }
 
@@ -133,9 +168,11 @@ pub(crate) fn commit_poco_commodity_tax(
         let bal_after = ch.balance;
         snap.append_journal(char_id, "CustomOfficeTax", tax.tax_cents, bal_after, journal_note);
     }
-    if let Some(cfg) = load_orbital_settings(snap, planet_id) {
-        if let Some(corp) = snap.corporations.get_mut(&cfg.owner_corp_id) {
-            corp.credit_division(1, tax.player_share);
+    if tax.credit_corp && tax.player_share.0 > 0 {
+        if let Some(cfg) = load_orbital_settings(snap, planet_id) {
+            if let Some(corp) = snap.corporations.get_mut(&cfg.owner_corp_id) {
+                corp.credit_division(1, tax.player_share);
+            }
         }
     }
     Ok(())
@@ -174,12 +211,281 @@ fn handle_planet_mgr_append(
     Ok(PyRep::None)
 }
 
-fn handle_planet_mgr_remote_handler(
-    session: &SessionState,
-) -> Result<PyRep, BridgeRpcError> {
-    // const-ok: bound moniker remoteHandler property accessor
-    ServerContext::require_character(session)?;
-    Ok(PyRep::None)
+struct ParsedLaunchRequest {
+    planet_id: i64,
+    launch_pin_id: Option<i64>,
+    commodities: BTreeMap<TypeId, i32>,
+    destination: String,
+    is_v24_wire: bool,
+}
+
+fn parse_user_launch_commodities_args(
+    ctx: &ServerContext,
+    bound_planet: Option<i64>,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<ParsedLaunchRequest, BridgeRpcError> {
+    let (planet_id_opt, launch_args) = match bound_planet {
+        Some(bp) => {
+            if args.len() >= 3 && matches!(args.get(2), Some(PyRep::Dict(_) | PyRep::KeyVal(_))) {
+                (args.first().and_then(|a| a.as_i64()), &args[1..])
+            } else if matches!(args.get(1), Some(PyRep::Dict(_) | PyRep::KeyVal(_)))
+                || kwargs.contains_key("commoditiesToLaunch")
+            {
+                (Some(bp), args)
+            } else if let Some(first_id) = args.first().and_then(|a| a.as_i64()) {
+                if (40_000_000..50_000_000).contains(&first_id) {
+                    (Some(first_id), &args[1..])
+                } else {
+                    (Some(bp), args)
+                }
+            } else {
+                (Some(bp), args)
+            }
+        }
+        None => (
+            args.first().and_then(|a| a.as_i64()),
+            if args.is_empty() { args } else { &args[1..] },
+        ),
+    };
+    let Some(planet_id) = planet_id_opt else {
+        return Err(BridgeRpcError {
+            code: "InvalidPlanetID".into(),
+            message: "UserLaunchCommodities requires planetID or bound planetMgr moniker".into(),
+            client_error: None,
+        });
+    };
+
+    let v24_dict_arg = kwargs
+        .get("commoditiesToLaunch")
+        .or_else(|| {
+            launch_args
+                .get(1)
+                .filter(|a| matches!(a, PyRep::Dict(_) | PyRep::KeyVal(_)))
+        });
+    if let Some(comms_rep) = v24_dict_arg {
+        let lrpc = crate::router::RpcArgs::positional(launch_args);
+        let pin_id = if let Some(kw_pin) = kwargs.get("commandPinID").and_then(PyRep::as_i64) {
+            (kw_pin > 0).then_some(kw_pin)
+        } else {
+            lrpc.opt_positive_i64(0, "commandPinID")?
+        }
+        .ok_or_else(|| BridgeRpcError {
+            code: "InvalidRoutingParameters".into(),
+            message: "UserLaunchCommodities requires a positive commandPinID".into(),
+            client_error: None,
+        })?;
+        let raw_map = parse_pi_commodities_map(comms_rep)?;
+        if raw_map.is_empty() {
+            return Err(BridgeRpcError {
+                code: "InvalidCommodity".into(),
+                message: "UserLaunchCommodities requires at least one commodity to launch".into(),
+                client_error: None,
+            });
+        }
+        let mut commodities = BTreeMap::new();
+        for (tid, qty) in raw_map {
+            ensure_valid_pi_commodity_type(&ctx.sde, tid)?;
+            let qty_i32 = i32::try_from(qty).map_err(|_| BridgeRpcError {
+                code: "InvalidCommodityQuantity".into(),
+                message: format!(
+                    "Commodity quantity {qty} is invalid or exceeds maximum stack size ({})",
+                    i32::MAX
+                ),
+                client_error: None,
+            })?;
+            commodities.insert(tid, qty_i32);
+        }
+        let raw_dest = kwargs
+            .get("destination")
+            .and_then(PyRep::as_str)
+            .or_else(|| launch_args.get(2).and_then(PyRep::as_str));
+        let is_import = matches!(raw_dest, Some("ImportToColony" | "Import"));
+        let destination = if is_import {
+            raw_dest.unwrap_or("ImportToColony").to_string()
+        } else {
+            "CommandCenterLaunch".to_string()
+        };
+        let is_v24_wire = !is_import;
+        return Ok(ParsedLaunchRequest {
+            planet_id,
+            launch_pin_id: Some(pin_id),
+            commodities,
+            destination,
+            is_v24_wire,
+        });
+    }
+
+    let lrpc = crate::router::RpcArgs::positional(launch_args);
+    let (launch_pin_id, type_id, qty, destination) = if launch_args.len() >= 3
+        && launch_args.get(2).and_then(|a| a.as_i64()).is_some()
+        && launch_args.get(3).is_some()
+    {
+        let pid = lrpc.opt_positive_i64(0, "launchPinID")?;
+        let tid = lrpc.req_u32(1, "typeID")? as TypeId;
+        let q = lrpc.opt_positive_i64(2, "quantity")?.unwrap_or(1) as u64;
+        (pid, tid, q, "CommandCenterLaunch".to_string())
+    } else if launch_args.len() >= 3 && launch_args.get(2).and_then(|a| a.as_str()).is_some() {
+        let tid = lrpc.req_u32(0, "typeID")? as TypeId;
+        let q = lrpc.opt_positive_i64(1, "quantity")?.unwrap_or(1) as u64;
+        let dest = lrpc
+            .opt_str_max(2, "destination", 64, 256)?
+            .unwrap_or("Storage")
+            .to_string();
+        (None, tid, q, dest)
+    } else if launch_args.len() >= 3 {
+        let pid = lrpc.opt_positive_i64(0, "launchPinID")?;
+        let tid = lrpc.req_u32(1, "typeID")? as TypeId;
+        let q = lrpc.opt_positive_i64(2, "quantity")?.unwrap_or(1) as u64;
+        (pid, tid, q, "CommandCenterLaunch".to_string())
+    } else {
+        let tid = lrpc.req_u32(0, "typeID")? as TypeId;
+        let q = lrpc.opt_positive_i64(1, "quantity")?.unwrap_or(1) as u64;
+        let dest = lrpc
+            .opt_str_max(2, "destination", 64, 256)?
+            .unwrap_or("Storage")
+            .to_string();
+        (None, tid, q, dest)
+    };
+    if type_id == 0 {
+        return Err(BridgeRpcError {
+            code: "InvalidRoutingParameters".into(),
+            message: "UserLaunchCommodities requires commodity typeID".into(),
+            client_error: None,
+        });
+    }
+    ensure_valid_pi_commodity_type(&ctx.sde, type_id)?;
+    let qty_i32 = i32::try_from(qty)
+        .ok()
+        .filter(|&v| v > 0)
+        .ok_or_else(|| BridgeRpcError {
+            code: "InvalidCommodityQuantity".into(),
+            message: format!(
+                "Commodity quantity {qty} is invalid or exceeds maximum stack size ({})",
+                i32::MAX
+            ),
+            client_error: None,
+        })?;
+    Ok(ParsedLaunchRequest {
+        planet_id,
+        launch_pin_id,
+        commodities: BTreeMap::from([(type_id, qty_i32)]),
+        destination,
+        is_v24_wire: false,
+    })
+}
+
+fn is_orbital_or_structure_item(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    it: &eve_db::InventoryItemRecord,
+) -> bool {
+    snap.structures.contains_key(&it.item_id)
+        || matches!(it.type_id, 2233 | 3962 | 4318 | 81080)
+        || ctx
+            .sde
+            .types
+            .get(&it.type_id)
+            .is_some_and(|t| t.category_id == 46 || matches!(t.group_id, 1025 | 1106 | 4736))
+}
+
+fn is_launch_container_type(ctx: &ServerContext, type_id: TypeId) -> bool {
+    matches!(type_id, 23 | 2263 | 72_075)
+        || ctx
+            .sde
+            .types
+            .get(&type_id)
+            .is_some_and(|t| t.category_id == 2 && matches!(t.group_id, 12 | 1975))
+}
+
+fn resolve_planetary_launch_planet(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    it: &eve_db::InventoryItemRecord,
+) -> Option<i64> {
+    if is_orbital_or_structure_item(ctx, snap, it) || !is_launch_container_type(ctx, it.type_id) {
+        return None;
+    }
+    if let Some(pid) = snap
+        .sp6_lifecycle
+        .space_object_meta
+        .get(&it.item_id)
+        .and_then(|m| m.planet_id)
+    {
+        return Some(pid);
+    }
+    (it.flag != InventoryFlag::Hangar && (40_000_000..50_000_000).contains(&it.location_id))
+        .then_some(it.location_id)
+}
+
+fn spawn_pi_launch_canister(
+    ctx: &ServerContext,
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    planet_id: i64,
+    solar_system_id: u32,
+    container_type_id: TypeId,
+    commodities: &BTreeMap<TypeId, i32>,
+    now_unix: u64,
+) -> (i64, [f64; 3]) {
+    let launch_pos = ctx
+        .sde
+        .celestials_in_system(solar_system_id)
+        .into_iter()
+        .find(|c| c.celestial_id == planet_id)
+        .map(|c| {
+            let offset = c.radius.max(1_000_000.0) + 150_000.0;
+            [
+                c.position.x + offset,
+                c.position.y + 25_000.0,
+                c.position.z - 15_000.0,
+            ]
+        })
+        .unwrap_or([1.5e10, 2.5e8, -1.5e8]);
+    snap.next_entity_id += 1;
+    let canister_id = snap.next_entity_id;
+    snap.items.insert(
+        canister_id,
+        InventoryItemRecord {
+            item_id: canister_id,
+            type_id: container_type_id,
+            owner_id: char_id,
+            location_id: solar_system_id as i64,
+            flag: InventoryFlag::None,
+            quantity: 1,
+            singleton: true,
+            version: 1,
+            ..Default::default()
+        },
+    );
+    for (&type_id, &qty_i32) in commodities {
+        snap.next_entity_id += 1;
+        let commodity_item_id = snap.next_entity_id;
+        snap.items.insert(
+            commodity_item_id,
+            InventoryItemRecord {
+                item_id: commodity_item_id,
+                type_id,
+                owner_id: char_id,
+                location_id: canister_id,
+                flag: InventoryFlag::Hangar,
+                quantity: qty_i32,
+                singleton: false,
+                is_blueprint_copy: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    }
+    snap.item_positions.insert(canister_id, launch_pos);
+    let meta = snap
+        .sp6_lifecycle
+        .space_object_meta
+        .entry(canister_id)
+        .or_default();
+    meta.created_unix = Some(now_unix);
+    meta.planet_id = Some(planet_id);
+    (canister_id, launch_pos)
 }
 
 pub fn handle_pi_orbitals(
@@ -548,7 +854,15 @@ pub fn handle_pi_orbitals(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
+            let (planet_id_opt, xfer_args) = if matches!(args.first(), Some(PyRep::List(_))) {
+                (bound_planet, args)
+            } else if args.first().and_then(PyRep::as_i64).is_some()
+                && matches!(args.get(1), Some(PyRep::List(_)))
+            {
+                (args.first().and_then(PyRep::as_i64), &args[1..])
+            } else {
+                (bound_planet.or_else(|| args.first().and_then(|a| a.as_i64())), args)
+            };
             let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
@@ -557,120 +871,24 @@ pub fn handle_pi_orbitals(
                 }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                user_transfer_commodities_logic(ctx, snap, char_id, planet_id, args, kwargs)
+                user_transfer_commodities_logic(ctx, snap, char_id, planet_id, xfer_args, kwargs)
             });
             Some(res)
         }
 
-        // Launchpad export/import via Customs Office or Skyhook, or Command Center 500 ISK launch (`feat:pi.launch`, `feat:pi.customs-office`, `feat:pi.skyhook-pi`)
+        // Launchpad export/import via Customs Office or Skyhook, or V24 Command Center launch (`feat:pi.launch`, `feat:pi.customs-office`, `feat:pi.skyhook-pi`)
         ("planetMgr", "UserLaunchCommodities") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let (planet_id_opt, launch_args) = match bound_planet {
-                Some(bp) => {
-                    if let Some(first_id) = args.first().and_then(|a| a.as_i64()) {
-                        if (40_000_000..50_000_000).contains(&first_id) {
-                            (Some(first_id), &args[1..])
-                        } else {
-                            (Some(bp), args)
-                        }
-                    } else {
-                        (Some(bp), args)
-                    }
-                }
-                None => (args.first().and_then(|a| a.as_i64()), if args.is_empty() { args } else { &args[1..] }),
+            let req = match parse_user_launch_commodities_args(ctx, bound_planet, args, kwargs) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
             };
-            let Some(planet_id) = planet_id_opt else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidPlanetID".into(),
-                    message: "UserLaunchCommodities requires planetID or bound planetMgr moniker".into(),
-                    client_error: None,
-                }));
-            };
-            let lrpc = crate::router::RpcArgs::positional(launch_args);
-            let (launch_pin_id_opt, type_id, qty, destination) = if launch_args.len() >= 3 && launch_args.get(2).and_then(|a| a.as_i64()).is_some() && launch_args.get(3).is_some() {
-                let pid = match lrpc.opt_positive_i64(0, "launchPinID") {
-                    Ok(v) => v,
-                    Err(e) => return Some(Err(e)),
-                };
-                let tid = match lrpc.req_u32(1, "typeID") {
-                    Ok(v) => v as TypeId,
-                    Err(e) => return Some(Err(e)),
-                };
-                let q = match lrpc.opt_positive_i64(2, "quantity") {
-                    Ok(v) => v.unwrap_or(1) as u64,
-                    Err(e) => return Some(Err(e)),
-                };
-                (pid, tid, q, "CommandCenterLaunch")
-            } else if launch_args.len() >= 3 && launch_args.get(2).and_then(|a| a.as_str()).is_some() {
-                let tid = match lrpc.req_u32(0, "typeID") {
-                    Ok(v) => v as TypeId,
-                    Err(e) => return Some(Err(e)),
-                };
-                let q = match lrpc.opt_positive_i64(1, "quantity") {
-                    Ok(v) => v.unwrap_or(1) as u64,
-                    Err(e) => return Some(Err(e)),
-                };
-                let dest = match lrpc.opt_str_max(2, "destination", 64, 256) {
-                    Ok(v) => v.unwrap_or("Storage"),
-                    Err(e) => return Some(Err(e)),
-                };
-                (None, tid, q, dest)
-            } else if launch_args.len() >= 3 {
-                let pid = match lrpc.opt_positive_i64(0, "launchPinID") {
-                    Ok(v) => v,
-                    Err(e) => return Some(Err(e)),
-                };
-                let tid = match lrpc.req_u32(1, "typeID") {
-                    Ok(v) => v as TypeId,
-                    Err(e) => return Some(Err(e)),
-                };
-                let q = match lrpc.opt_positive_i64(2, "quantity") {
-                    Ok(v) => v.unwrap_or(1) as u64,
-                    Err(e) => return Some(Err(e)),
-                };
-                (pid, tid, q, "CommandCenterLaunch")
-            } else {
-                let tid = match lrpc.req_u32(0, "typeID") {
-                    Ok(v) => v as TypeId,
-                    Err(e) => return Some(Err(e)),
-                };
-                let q = match lrpc.opt_positive_i64(1, "quantity") {
-                    Ok(v) => v.unwrap_or(1) as u64,
-                    Err(e) => return Some(Err(e)),
-                };
-                let dest = match lrpc.opt_str_max(2, "destination", 64, 256) {
-                    Ok(v) => v.unwrap_or("Storage"),
-                    Err(e) => return Some(Err(e)),
-                };
-                (None, tid, q, dest)
-            };
-            if type_id == 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidRoutingParameters".into(),
-                    message: "UserLaunchCommodities requires commodity typeID".into(),
-                    client_error: None,
-                }));
-            }
-            if let Err(e) = ensure_valid_pi_commodity_type(&ctx.sde, type_id) {
-                return Some(Err(e));
-            }
-            let qty_i32 = match i32::try_from(qty) {
-                Ok(v) if v > 0 => v,
-                _ => {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidCommodityQuantity".into(),
-                        message: format!(
-                            "Commodity quantity {qty} is invalid or exceeds maximum stack size ({})",
-                            i32::MAX
-                        ),
-                        client_error: None,
-                    }));
-                }
-            };
-
+            let planet_id = req.planet_id;
+            let (&first_tid, &first_qty_i32) = req.commodities.iter().next().expect("non-empty commodities");
+            let first_qty = first_qty_i32 as u64;
             let current_sys_id = session.solar_system_id;
             let now_unix = ctx.now_unix();
             let container_type_id: TypeId = ctx
@@ -681,6 +899,7 @@ pub fn handle_pi_orbitals(
                 .or_else(|| ctx.sde.types.values().find(|t| t.name.contains("Planetary Launch")))
                 .map(|t| t.type_id)
                 .unwrap_or(27_912);
+
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)).cloned() else {
                     return Err(BridgeRpcError {
@@ -691,29 +910,48 @@ pub fn handle_pi_orbitals(
                         client_error: None,
                     });
                 };
-                if current_sys_id != Some(col.solar_system_id) {
-                    return Err(BridgeRpcError {
-                        code: "ColonyNotInCurrentSystem".into(),
-                        message: format!(
-                            "Planetary colony {planet_id} is in solar system {}, not {:?}",
-                            col.solar_system_id, current_sys_id
-                        ),
-                        client_error: None,
-                    });
+
+                let mut total_vol_m3 = 0.0_f64;
+                let mut total_base_value = 0.0_f64;
+                let mut total_qty = 0_u64;
+                for (&tid, &qty_i32) in &req.commodities {
+                    let qty = qty_i32 as u64;
+                    let unit_vol = ctx
+                        .sde
+                        .types
+                        .get(&tid)
+                        .map(|t| t.volume.max(0.005))
+                        .unwrap_or(0.38);
+                    let unit_base = pi_commodity_tier_base_cost(&ctx.sde, tid);
+                    total_vol_m3 += unit_vol * (qty as f64);
+                    total_base_value += unit_base * (qty as f64);
+                    total_qty = total_qty.saturating_add(qty);
                 }
 
-                let unit_vol = ctx
-                    .sde
-                    .types
-                    .get(&type_id)
-                    .map(|t| t.volume.max(0.005))
-                    .unwrap_or(0.38);
-                let total_vol_m3 = unit_vol * (qty as f64);
-                let unit_base = pi_commodity_tier_base_cost(&ctx.sde, type_id);
-
-                if destination == "ImportToColony" || destination == "Import" {
+                if req.destination == "ImportToColony" || req.destination == "Import" {
+                    if current_sys_id != Some(col.solar_system_id) {
+                        return Err(BridgeRpcError {
+                            code: "ColonyNotInCurrentSystem".into(),
+                            message: format!(
+                                "Planetary colony {planet_id} is in solar system {}, not {:?}",
+                                col.solar_system_id, current_sys_id
+                            ),
+                            client_error: None,
+                        });
+                    }
+                    if session.station_id.is_some() || session.structure_id.is_some() {
+                        return Err(BridgeRpcError {
+                            code: "NotInSpace".into(),
+                            message: format!(
+                                "Orbital transfer via {} requires caller to be undocked in space",
+                                req.destination
+                            ),
+                            client_error: None,
+                        });
+                    }
                     let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
-                    let target_idx = launch_pin_id_opt
+                    let target_idx = req
+                        .launch_pin_id
                         .and_then(|pid| net.pins.iter().position(|p| p.pin_id == pid))
                         .or_else(|| net.pins.iter().position(|p| is_launchpad_pin(&ctx.sde, p.type_id)))
                         .or_else(|| net.pins.iter().position(|p| is_storage_pin(&ctx.sde, p.type_id)))
@@ -735,49 +973,61 @@ pub fn handle_pi_orbitals(
                             client_error: None,
                         });
                     }
-                    let existing_pin_qty = net.pins[target_idx].contents.get(&type_id).copied().unwrap_or(0);
-                    let new_pin_qty = existing_pin_qty.checked_add(qty).ok_or_else(|| BridgeRpcError {
-                        code: "InvalidCommodityQuantity".into(),
-                        message: "Target pin commodity quantity overflow".into(),
-                        client_error: None,
-                    })?;
-
-                    let import_plan = plan_pi_import_consumptions(
-                        snap,
-                        char_id,
-                        planet_id,
-                        type_id,
-                        qty,
-                        session.ship_id,
-                        session.station_id,
-                        session.structure_id,
-                    )?;
+                    let mut planned_imports = Vec::with_capacity(req.commodities.len());
+                    for (&tid, &qty_i32) in &req.commodities {
+                        let qty = qty_i32 as u64;
+                        let existing_pin_qty =
+                            net.pins[target_idx].contents.get(&tid).copied().unwrap_or(0);
+                        let new_pin_qty =
+                            existing_pin_qty.checked_add(qty).ok_or_else(|| BridgeRpcError {
+                                code: "InvalidCommodityQuantity".into(),
+                                message: "Target pin commodity quantity overflow".into(),
+                                client_error: None,
+                            })?;
+                        let import_plan = plan_pi_import_consumptions(
+                            snap,
+                            char_id,
+                            planet_id,
+                            tid,
+                            qty,
+                            session.ship_id,
+                            session.station_id,
+                            session.structure_id,
+                        )?;
+                        planned_imports.push((tid, new_pin_qty, import_plan));
+                    }
                     let poco_tax = prepare_poco_commodity_tax(
                         ctx,
                         snap,
                         char_id,
                         planet_id,
                         col.solar_system_id,
-                        unit_base * (qty as f64),
+                        total_base_value,
                         0.5,
                         "import",
                     )?;
 
-                    apply_pi_import_consumptions(snap, char_id, &import_plan)?;
+                    for (_, _, import_plan) in &planned_imports {
+                        apply_pi_import_consumptions(snap, char_id, import_plan)?;
+                    }
                     commit_poco_commodity_tax(
                         snap,
                         char_id,
                         planet_id,
                         poco_tax,
-                        format!("POCO import tax for {qty}x type {type_id} on planet {planet_id}"),
+                        format!(
+                            "POCO import tax for {total_qty} units on planet {planet_id}"
+                        ),
                         "import",
                     )?;
 
-                    net.pins[target_idx].contents.insert(type_id, new_pin_qty);
+                    for (tid, new_pin_qty, _) in planned_imports {
+                        net.pins[target_idx].contents.insert(tid, new_pin_qty);
+                    }
                     save_pi_network(snap, char_id, planet_id, &net);
 
                     return Ok((
-                        qty,
+                        total_qty,
                         poco_tax.tax_isk,
                         poco_tax.tax_isk,
                         poco_tax.orbital_tid,
@@ -787,18 +1037,27 @@ pub fn handle_pi_orbitals(
                     ));
                 }
 
-                let cc_lvl = col.command_center_level;
-                let mut net = load_pi_network(snap, char_id, planet_id, cc_lvl);
-                let launch_pin_idx = if let Some(pid) = launch_pin_id_opt {
+                let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
+                let launch_pin_idx = if let Some(pid) = req.launch_pin_id {
                     let idx = net.pins.iter().position(|p| p.pin_id == pid).ok_or_else(|| BridgeRpcError {
                         code: "PinNotFound".into(),
                         message: format!("Launching pin {pid} not found on planet {planet_id}"),
                         client_error: None,
                     })?;
-                    if !is_storage_or_cc_or_launchpad_pin(&ctx.sde, net.pins[idx].type_id) {
+                    let pin_tid = net.pins[idx].type_id;
+                    let valid_pin = if req.is_v24_wire {
+                        is_command_center_pin(&ctx.sde, pin_tid) || is_launchpad_pin(&ctx.sde, pin_tid)
+                    } else {
+                        is_storage_or_cc_or_launchpad_pin(&ctx.sde, pin_tid)
+                    };
+                    if !valid_pin {
                         return Err(BridgeRpcError {
                             code: "InvalidPinTypeForLaunch".into(),
-                            message: format!("Pin {pid} is not a storage, command center, or launchpad pin"),
+                            message: if req.is_v24_wire {
+                                format!("Pin {pid} is not a command center or launchpad pin")
+                            } else {
+                                format!("Pin {pid} is not a storage, command center, or launchpad pin")
+                            },
                             client_error: None,
                         });
                     }
@@ -806,7 +1065,7 @@ pub fn handle_pi_orbitals(
                 } else {
                     net.pins
                         .iter()
-                        .position(|p| is_storage_or_cc_or_launchpad_pin(&ctx.sde, p.type_id) && p.contents.get(&type_id).copied().unwrap_or(0) >= qty)
+                        .position(|p| is_storage_or_cc_or_launchpad_pin(&ctx.sde, p.type_id) && p.contents.get(&first_tid).copied().unwrap_or(0) >= first_qty)
                         .or_else(|| net.pins.iter().position(|p| is_storage_or_cc_or_launchpad_pin(&ctx.sde, p.type_id)))
                         .ok_or_else(|| BridgeRpcError {
                             code: "PinNotFound".into(),
@@ -815,43 +1074,120 @@ pub fn handle_pi_orbitals(
                         })?
                 };
 
-                let mut export_tax_isk = 0.0_f64;
-                let mut orbital_tid: TypeId = 2233;
-                let is_cc = destination == "CommandCenterLaunch" || destination == "CommandCenter";
-                if destination == "CustomsOffice" || destination == "Skyhook" || destination == "Hangar" || is_cc {
+                let is_cc_pin = is_command_center_pin(&ctx.sde, net.pins[launch_pin_idx].type_id);
+                let is_cc = if req.is_v24_wire {
+                    is_cc_pin
+                } else {
+                    req.destination == "CommandCenterLaunch" || req.destination == "CommandCenter"
+                };
+                if !is_cc && current_sys_id != Some(col.solar_system_id) {
+                    return Err(BridgeRpcError {
+                        code: "ColonyNotInCurrentSystem".into(),
+                        message: format!(
+                            "Planetary colony {planet_id} is in solar system {}, not {:?}",
+                            col.solar_system_id, current_sys_id
+                        ),
+                        client_error: None,
+                    });
+                }
+                if !is_cc
+                    && (req.is_v24_wire || req.destination != "Hangar")
+                    && (session.station_id.is_some() || session.structure_id.is_some())
+                {
+                    return Err(BridgeRpcError {
+                        code: "NotInSpace".into(),
+                        message: format!(
+                            "Orbital launch via {} requires caller to be undocked in space",
+                            req.destination
+                        ),
+                        client_error: None,
+                    });
+                }
+
+                if req.is_v24_wire {
+                    let last_launch = net.pins[launch_pin_idx].last_launch_unix;
+                    if last_launch > 0 && now_unix < last_launch.saturating_add(60) {
+                        return Err(BridgeRpcError {
+                            code: "LaunchOnCooldown".into(),
+                            message: format!(
+                                "Launching pin {} is on 60s launch cooldown ({}s remaining)",
+                                net.pins[launch_pin_idx].pin_id,
+                                last_launch.saturating_add(60).saturating_sub(now_unix)
+                            ),
+                            client_error: None,
+                        });
+                    }
+                }
+                if req.is_v24_wire
+                    || req.destination == "CustomsOffice"
+                    || req.destination == "Skyhook"
+                    || req.destination == "Hangar"
+                    || is_cc
+                {
                     let max_vol = if is_cc { 500.0 } else { 10_000.0 };
                     if total_vol_m3 > max_vol + 1e-6 {
-                        let code = if is_cc { "CommandCenterLaunchCapacityExceeded" } else { "LaunchpadCapacityExceeded" };
+                        let code = if is_cc {
+                            "CommandCenterLaunchCapacityExceeded"
+                        } else {
+                            "LaunchpadCapacityExceeded"
+                        };
                         return Err(BridgeRpcError {
                             code: code.into(),
-                            message: format!("Transfer volume {total_vol_m3:.1} m3 exceeds {max_vol:.0} m3 limit for {destination}"),
+                            message: format!(
+                                "Transfer volume {total_vol_m3:.1} m3 exceeds {max_vol:.0} m3 limit for {}",
+                                req.destination
+                            ),
                             client_error: None,
                         });
                     }
                 }
 
                 let launch_pin_id = net.pins[launch_pin_idx].pin_id;
-                let available = net.pins[launch_pin_idx].contents.get(&type_id).copied().unwrap_or(0);
-                if available < qty {
-                    return Err(BridgeRpcError {
-                        code: "InsufficientCommoditiesForRouting".into(),
-                        message: format!(
-                            "Launching pin {launch_pin_id} has {available} of type {type_id}, cannot route {qty}"
-                        ),
-                        client_error: None,
-                    });
+                for (&tid, &qty_i32) in &req.commodities {
+                    let qty = qty_i32 as u64;
+                    let available = net.pins[launch_pin_idx].contents.get(&tid).copied().unwrap_or(0);
+                    if available < qty {
+                        return Err(BridgeRpcError {
+                            code: "InsufficientCommoditiesForRouting".into(),
+                            message: format!(
+                                "Launching pin {launch_pin_id} has {available} of type {tid}, cannot route {qty}"
+                            ),
+                            client_error: None,
+                        });
+                    }
                 }
 
-                if destination == "CustomsOffice" || destination == "Skyhook" || destination == "Hangar" || is_cc {
-                    let tax_mult = if is_cc { 1.5 } else { 1.0 };
+                let mut export_tax_isk = 0.0_f64;
+                let mut orbital_tid: TypeId = 2233;
+                if is_cc {
+                    let cc_tax = prepare_command_center_launch_tax(
+                        snap,
+                        char_id,
+                        total_base_value,
+                        "export",
+                    )?;
+                    export_tax_isk = cc_tax.tax_isk;
+                    commit_poco_commodity_tax(
+                        snap,
+                        char_id,
+                        planet_id,
+                        cc_tax,
+                        format!("Command Center export tax on planet {planet_id}"),
+                        "export",
+                    )?;
+                } else if req.is_v24_wire
+                    || req.destination == "CustomsOffice"
+                    || req.destination == "Skyhook"
+                    || req.destination == "Hangar"
+                {
                     let poco_tax = prepare_poco_commodity_tax(
                         ctx,
                         snap,
                         char_id,
                         planet_id,
                         col.solar_system_id,
-                        unit_base * (qty as f64),
-                        tax_mult,
+                        total_base_value,
+                        1.0,
                         "export",
                     )?;
                     orbital_tid = poco_tax.orbital_tid;
@@ -861,25 +1197,35 @@ pub fn handle_pi_orbitals(
                         char_id,
                         planet_id,
                         poco_tax,
-                        format!("POCO export tax for {qty}x type {type_id} on planet {planet_id}"),
+                        format!("POCO export tax on planet {planet_id}"),
                         "export",
                     )?;
                 }
+
                 let mut created_launch_id = 0_i64;
                 let mut launch_pos = [0.0_f64; 3];
-                if matches!(
-                    destination,
-                    "Hangar" | "CustomsOffice" | "Skyhook" | "CommandCenterLaunch" | "CommandCenter"
-                ) {
-                    if let Some(c) = net.pins[launch_pin_idx].contents.get_mut(&type_id) {
-                        if *c <= qty {
-                            net.pins[launch_pin_idx].contents.remove(&type_id);
-                        } else {
-                            *c -= qty;
+                if req.is_v24_wire
+                    || matches!(
+                        req.destination.as_str(),
+                        "Hangar" | "CustomsOffice" | "Skyhook" | "CommandCenterLaunch" | "CommandCenter"
+                    )
+                {
+                    for (&tid, &qty_i32) in &req.commodities {
+                        let qty = qty_i32 as u64;
+                        if let Some(c) = net.pins[launch_pin_idx].contents.get_mut(&tid) {
+                            if *c <= qty {
+                                net.pins[launch_pin_idx].contents.remove(&tid);
+                            } else {
+                                *c -= qty;
+                            }
                         }
                     }
+                    if req.is_v24_wire {
+                        net.pins[launch_pin_idx].last_launch_unix = now_unix;
+                    }
                     save_pi_network(snap, char_id, planet_id, &net);
-                    if destination == "Hangar" {
+
+                    if req.destination == "Hangar" && !req.is_v24_wire {
                         snap.next_entity_id += 1;
                         let nid = snap.next_entity_id;
                         created_launch_id = nid;
@@ -887,11 +1233,11 @@ pub fn handle_pi_orbitals(
                             nid,
                             InventoryItemRecord {
                                 item_id: nid,
-                                type_id,
+                                type_id: first_tid,
                                 owner_id: char_id,
                                 location_id: col.planet_id,
                                 flag: InventoryFlag::Hangar,
-                                quantity: qty_i32,
+                                quantity: first_qty_i32,
                                 singleton: false,
                                 is_blueprint_copy: false,
                                 version: 1,
@@ -899,70 +1245,34 @@ pub fn handle_pi_orbitals(
                             },
                         );
                     } else {
-                        launch_pos = ctx
-                            .sde
-                            .celestials_in_system(col.solar_system_id)
-                            .into_iter()
-                            .find(|c| c.celestial_id == col.planet_id)
-                            .map(|c| {
-                                let offset = c.radius.max(1_000_000.0) + 150_000.0;
-                                [
-                                    c.position.x + offset,
-                                    c.position.y + 25_000.0,
-                                    c.position.z - 15_000.0,
-                                ]
-                            })
-                            .unwrap_or([1.5e10, 2.5e8, -1.5e8]);
-                        snap.next_entity_id += 1;
-                        let canister_id = snap.next_entity_id;
+                        let (canister_id, pos) = spawn_pi_launch_canister(
+                            ctx,
+                            snap,
+                            char_id,
+                            planet_id,
+                            col.solar_system_id,
+                            container_type_id,
+                            &req.commodities,
+                            now_unix,
+                        );
                         created_launch_id = canister_id;
-                        snap.items.insert(
-                            canister_id,
-                            InventoryItemRecord {
-                                item_id: canister_id,
-                                type_id: container_type_id,
-                                owner_id: char_id,
-                                location_id: col.solar_system_id as i64,
-                                flag: InventoryFlag::None,
-                                quantity: 1,
-                                singleton: true,
-                                version: 1,
-                                ..Default::default()
-                            },
-                        );
-                        snap.next_entity_id += 1;
-                        let commodity_item_id = snap.next_entity_id;
-                        snap.items.insert(
-                            commodity_item_id,
-                            InventoryItemRecord {
-                                item_id: commodity_item_id,
-                                type_id,
-                                owner_id: char_id,
-                                location_id: canister_id,
-                                flag: InventoryFlag::Hangar,
-                                quantity: qty_i32,
-                                singleton: false,
-                                is_blueprint_copy: false,
-                                version: 1,
-                                ..Default::default()
-                            },
-                        );
-                        snap.item_positions.insert(canister_id, launch_pos);
-                        let meta = snap
-                            .sp6_lifecycle
-                            .space_object_meta
-                            .entry(canister_id)
-                            .or_default();
-                        meta.created_unix = Some(now_unix);
-                        meta.planet_id = Some(col.planet_id);
+                        launch_pos = pos;
                     }
                 }
-                Ok((qty, export_tax_isk, 0.0, orbital_tid, created_launch_id, col.solar_system_id, launch_pos))
+                Ok((
+                    total_qty,
+                    export_tax_isk,
+                    0.0,
+                    orbital_tid,
+                    created_launch_id,
+                    col.solar_system_id,
+                    launch_pos,
+                ))
             });
 
             match res {
                 Ok((routed, export_tax_isk, import_tax_isk, orbital_tid, created_launch_id, col_sys_id, launch_pos)) => {
-                    if created_launch_id > 0 && destination != "Hangar" {
+                    if created_launch_id > 0 && (req.is_v24_wire || req.destination != "Hangar") {
                         ctx.emit_typed(
                             crate::router::NotificationTarget::Character(char_id),
                             crate::router::notify_registry::OnPILaunchesChange,
@@ -1000,16 +1310,20 @@ pub fn handle_pi_orbitals(
                             },
                         );
                     }
-                    Some(Ok(PyRep::keyval([
-                        ("launchID", PyRep::Integer(created_launch_id)),
-                        ("planetID", PyRep::Integer(planet_id)),
-                        ("orbitalTypeID", PyRep::Integer(orbital_tid as i64)),
-                        ("commodityTypeID", PyRep::Integer(type_id as i64)),
-                        ("routedQuantity", PyRep::Integer(routed as i64)),
-                        ("destination", PyRep::String(destination.to_string())),
-                        ("exportTaxISK", PyRep::Real(export_tax_isk)),
-                        ("importTaxISK", PyRep::Real(import_tax_isk)),
-                    ])))
+                    if req.is_v24_wire {
+                        Some(Ok(PyRep::Integer(ctx.now_blueos_filetime_ticks())))
+                    } else {
+                        Some(Ok(PyRep::keyval([
+                            ("launchID", PyRep::Integer(created_launch_id)),
+                            ("planetID", PyRep::Integer(planet_id)),
+                            ("orbitalTypeID", PyRep::Integer(orbital_tid as i64)),
+                            ("commodityTypeID", PyRep::Integer(first_tid as i64)),
+                            ("routedQuantity", PyRep::Integer(routed as i64)),
+                            ("destination", PyRep::String(req.destination)),
+                            ("exportTaxISK", PyRep::Real(export_tax_isk)),
+                            ("importTaxISK", PyRep::Real(import_tax_isk)),
+                        ])))
+                    }
                 }
                 Err(e) => Some(Err(e)),
             }
@@ -1035,9 +1349,7 @@ pub fn handle_pi_orbitals(
                             return None;
                         }
                         let meta = snap.sp6_lifecycle.space_object_meta.get(&it.item_id);
-                        let launch_planet = meta
-                            .and_then(|m| m.planet_id)
-                            .or_else(|| (40_000_000..50_000_000).contains(&it.location_id).then_some(it.location_id))?;
+                        let launch_planet = resolve_planetary_launch_planet(ctx, snap, it)?;
                         if filter_planet.is_some_and(|p| launch_planet != p) {
                             return None;
                         }
@@ -1056,16 +1368,34 @@ pub fn handle_pi_orbitals(
                                 })
                                 .unwrap_or(session_sys_id)
                         };
-                        let launch_ts = meta
-                            .and_then(|m| m.created_unix)
-                            .map(|t| t as i64)
-                            .unwrap_or(now_unix as i64);
-                        let (comm_tid, comm_qty) = snap
+                        let launch_ts = crate::sp6_lifecycle::unix_to_filetime(
+                            meta.and_then(|m| m.created_unix).unwrap_or(now_unix),
+                        );
+                        let mut contents = snap
                             .items
                             .values()
-                            .find(|c| c.location_id == it.item_id)
-                            .map(|c| (c.type_id, c.quantity))
-                            .unwrap_or((it.type_id, it.quantity));
+                            .filter(|c| c.location_id == it.item_id)
+                            .collect::<Vec<_>>();
+                        contents.sort_by_key(|c| (c.type_id, c.item_id));
+                        let mut total_comm_qty = 0_i64;
+                        let mut grouped_comms = BTreeMap::<TypeId, i64>::new();
+                        for c in &contents {
+                            let q = i64::from(c.quantity.max(0));
+                            total_comm_qty = total_comm_qty.saturating_add(q);
+                            *grouped_comms.entry(c.type_id).or_default() += q;
+                        }
+                        let mut commodities_dict = Vec::with_capacity(grouped_comms.len());
+                        for (tid, qty) in &grouped_comms {
+                            commodities_dict.push((
+                                PyRep::Integer(i64::from(*tid)),
+                                PyRep::Integer(*qty),
+                            ));
+                        }
+                        let (comm_tid, comm_qty) = if let Some(first_c) = contents.first() {
+                            (first_c.type_id, total_comm_qty)
+                        } else {
+                            (it.type_id, i64::from(it.quantity))
+                        };
                         let pos = snap
                             .item_positions
                             .get(&it.item_id)
@@ -1078,7 +1408,8 @@ pub fn handle_pi_orbitals(
                             ("planetID", PyRep::Integer(launch_planet)),
                             ("solarSystemID", PyRep::Integer(sys_id)),
                             ("typeID", PyRep::Integer(comm_tid as i64)),
-                            ("quantity", PyRep::Integer(comm_qty as i64)),
+                            ("quantity", PyRep::Integer(comm_qty)),
+                            ("commodities", PyRep::Dict(commodities_dict)),
                             ("status", PyRep::Integer(1)),
                             ("launchTime", PyRep::Integer(launch_ts)),
                             ("x", PyRep::Real(pos[0])),
@@ -1118,19 +1449,22 @@ pub fn handle_pi_orbitals(
                         client_error: None,
                     });
                 }
-                let launch_planet_opt = snap
-                    .sp6_lifecycle
-                    .space_object_meta
-                    .get(&launch_id)
-                    .and_then(|m| m.planet_id)
-                    .or_else(|| (40_000_000..50_000_000).contains(&it.location_id).then_some(it.location_id));
-                let Some(launch_planet) = launch_planet_opt else {
+                let Some(launch_planet) = resolve_planetary_launch_planet(ctx, snap, it) else {
                     return Err(BridgeRpcError {
                         code: "InvalidLaunchID".into(),
                         message: format!("Item {launch_id} is not a planetary launch container (location_id: {})", it.location_id),
                         client_error: None,
                     });
                 };
+                if snap.is_item_or_ancestor_locked_or_impounded(launch_id)
+                    || snap.is_item_locked_in_contract_or_job(launch_id)
+                {
+                    return Err(BridgeRpcError {
+                        code: "ItemLocked".into(),
+                        message: format!("Launch container {launch_id} is locked and cannot be deleted"),
+                        client_error: None,
+                    });
+                }
                 if let Some(bp) = bound_planet {
                     if launch_planet != bp {
                         return Err(BridgeRpcError {
@@ -1511,10 +1845,6 @@ pub fn handle_pi_orbitals(
                 }));
             }
             Some(Ok(PyRep::Integer(planet_id)))
-        }
-
-        ("planetMgr", "remoteHandler") => {
-            Some(handle_planet_mgr_remote_handler(session))
         }
 
         _ => None,

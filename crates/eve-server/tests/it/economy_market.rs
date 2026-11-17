@@ -3177,6 +3177,15 @@ async fn test_e6_pi_extractor_expiry_and_launch_canister() {
         .await
         .expect("SelectCharacterID after offline PI events");
     sess_relogin.solar_system_id = Some(JITA_SYSTEM_ID);
+    sess_relogin.station_id = None;
+    sess_relogin.structure_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&P1) {
+            ch.solar_system_id = JITA_SYSTEM_ID;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
 
     let login_notifs = ctx.drain_notifications_for_char(P1);
     assert!(
@@ -3327,7 +3336,7 @@ async fn test_e6_pi_extractor_expiry_and_launch_canister() {
 
     // Command Center launch creates a real Planetary Launch Container item and Ball in space near the planet
     // (never in station hangar), places commodities inside the container, preserves launchTime, and expires after 5 days
-    let launch_ts = ctx.now_unix() as i64;
+    let launch_ft = ctx.now_blueos_filetime_ticks();
     let launch_rep = rpc(
         &ctx,
         &mut sess_relogin,
@@ -3398,8 +3407,8 @@ async fn test_e6_pi_extractor_expiry_and_launch_canister() {
         .expect("launch entry in GetMyLaunchesDetails");
     assert_eq!(
         found_launch.dict_get("launchTime").and_then(|v| v.as_i64()),
-        Some(launch_ts),
-        "GetMyLaunchesDetails reports stored launchTime"
+        Some(launch_ft),
+        "GetMyLaunchesDetails reports stored Blue FileTime launchTime"
     );
     let lx = found_launch.dict_get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let ly = found_launch.dict_get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);

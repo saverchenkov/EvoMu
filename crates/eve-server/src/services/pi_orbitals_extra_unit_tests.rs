@@ -112,10 +112,11 @@ fn flush_validation_errors_cooldown_poco_tax_and_bound_moniker_routing() {
         "Flush", "UpgradeCommandCenter", "UserTransferCommodities", "UserLaunchCommodities",
         "GetMyLaunchesDetails", "DeleteLaunch", "CancelInstallProgram", "RevertChanges",
         "StartTicking", "GetProgramResultInfo", "GetLocalDistributionReport", "append",
-        "colonies", "id", "planetID", "remoteHandler",
+        "colonies", "id", "planetID",
     ] {
         assert!(call_pi(&ctx, &mut unauth, m, &[], None).is_err());
     }
+    assert!(handle_pi_orbitals(&ctx, &mut unauth, "planetMgr", "remoteHandler", &[], &kw, None).is_none());
     assert!(handle_pi_orbitals(&ctx, &mut unauth, "config", "Flush", &[], &kw, None).is_none());
     assert!(handle_pi_orbitals(&ctx, &mut unauth, "planetMgr", "", &[], &kw, None).is_none());
 
@@ -309,17 +310,57 @@ fn upgrade_transfer_launch_import_and_delete_launch_edge_cases() {
         for (iid, tid, owner, loc) in [
             (888_101, 27_912, other_char, planet_id),
             (888_102, 34, char_id, 60_003_760),
-            (888_103, 27_912, char_id, other_planet),
+            (888_104, 3645, char_id, planet_id),
         ] {
             snap.items.insert(iid, InventoryItemRecord {
                 item_id: iid, type_id: tid, owner_id: owner, location_id: loc,
                 flag: InventoryFlag::Hangar, quantity: 1, ..Default::default()
             });
         }
+        snap.items.insert(888_103, InventoryItemRecord {
+            item_id: 888_103, type_id: 2263, owner_id: char_id, location_id: i64::from(sys_id),
+            flag: InventoryFlag::None, quantity: 1, ..Default::default()
+        });
+        snap.sp6_lifecycle
+            .space_object_meta
+            .entry(888_103)
+            .or_default()
+            .planet_id = Some(other_planet);
+        snap.items.insert(888_105, InventoryItemRecord {
+            item_id: 888_105, type_id: 2233, owner_id: char_id, location_id: planet_id,
+            flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
+        });
+        snap.structures.insert(
+            888_105,
+            eve_db::UpwellStructureRecord {
+                structure_id: 888_105,
+                type_id: 2233,
+                owner_corp_id: 98_000_001,
+                solar_system_id: sys_id,
+                name: format!("Orbital:{planet_id}"),
+                ..Default::default()
+            },
+        );
+        snap.items.insert(888_106, InventoryItemRecord {
+            item_id: 888_106, type_id: 2263, owner_id: char_id, location_id: i64::from(sys_id),
+            flag: InventoryFlag::Locked, quantity: 1, ..Default::default()
+        });
+        snap.sp6_lifecycle
+            .space_object_meta
+            .entry(888_106)
+            .or_default()
+            .planet_id = Some(planet_id);
     });
     assert_eq!(call_pi(&ctx, &mut sess, "DeleteLaunch", &[PyRep::Integer(888_101)], None).unwrap_err().code, "LaunchAccessDenied");
     assert_eq!(call_pi(&ctx, &mut sess, "DeleteLaunch", &[PyRep::Integer(888_102)], None).unwrap_err().code, "InvalidLaunchID");
     assert_eq!(call_pi(&ctx, &mut sess, "DeleteLaunch", &[PyRep::Integer(888_103)], Some(&bound)).unwrap_err().code, "LaunchNotFound");
+    assert_eq!(call_pi(&ctx, &mut sess, "DeleteLaunch", &[PyRep::Integer(888_104)], Some(&bound)).unwrap_err().code, "InvalidLaunchID");
+    assert_eq!(call_pi(&ctx, &mut sess, "DeleteLaunch", &[PyRep::Integer(888_105)], Some(&bound)).unwrap_err().code, "InvalidLaunchID");
+    assert_eq!(call_pi(&ctx, &mut sess, "DeleteLaunch", &[PyRep::Integer(888_106)], Some(&bound)).unwrap_err().code, "ItemLocked");
+    let launches_bound = call_pi(&ctx, &mut sess, "GetMyLaunchesDetails", &[], Some(&bound)).unwrap();
+    let launches_text = format!("{launches_bound:?}");
+    assert!(!launches_text.contains("888104"), "POCO hangar commodity stack must not appear in GetMyLaunchesDetails");
+    assert!(!launches_text.contains("888105"), "Orbital Customs Office structure must not appear in GetMyLaunchesDetails");
 }
 
 #[test]
@@ -396,8 +437,8 @@ fn program_result_cancel_revert_ticking_and_moniker_properties() {
     assert_eq!(call_pi(&ctx, &mut sess, "id", &[], Some(&bound)).unwrap(), PyRep::Integer(planet_id));
 }
 
-#[test]
-fn transfer_launch_import_export_and_sim_remaining_branches() {
+#[tokio::test]
+async fn transfer_launch_import_export_and_sim_remaining_branches() {
     let ctx = make_ctx();
     let char_id = 90_000_001_i64;
     let planet_id = 40_009_082_i64;
@@ -484,21 +525,129 @@ fn transfer_launch_import_export_and_sim_remaining_branches() {
         "ColonyNotFound"
     );
 
-    // ColonyNotInCurrentSystem on bound UserLaunchCommodities with explicit planetID prefix (`L473`, `L537-543`)
+    // ColonyNotInCurrentSystem on bound CustomsOffice launch, whereas V24 Command Center rocket launches succeed remotely & while docked
     sess.solar_system_id = Some(30_000_144);
     assert_eq!(
         call_pi(
             &ctx,
             &mut sess,
             "UserLaunchCommodities",
-            &[PyRep::Integer(planet_id), PyRep::Integer(701), PyRep::Integer(2268), PyRep::Integer(2), PyRep::String("CommandCenter".into())],
+            &[PyRep::Integer(planet_id), PyRep::Integer(2268), PyRep::Integer(2), PyRep::String("CustomsOffice".into())],
             Some(&bound),
         )
         .unwrap_err()
         .code,
         "ColonyNotInCurrentSystem"
     );
+    // Remote + docked V24 Command Center multi-commodity launch succeeds & populates Blue FileTime + commodities dict in GetMyLaunchesDetails
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut net = load_pi_network(snap, char_id, planet_id, 3);
+        net.pins[0].contents.insert(2268, 200);
+        net.pins[0].contents.insert(3645, 200);
+        net.pins.push(PiPinState { pin_id: 703, type_id: 2543, contents: HashMap::from([(2268, 100)]), ..Default::default() });
+        save_pi_network(snap, char_id, planet_id, &net);
+    });
+    sess.station_id = Some(60_003_760);
+    // Docked CustomsOffice / Launchpad in same system is rejected with NotInSpace
     sess.solar_system_id = Some(sys_id);
+    for docked_call in [
+        vec![PyRep::Integer(3645), PyRep::Integer(5), PyRep::String("CustomsOffice".into())],
+        vec![PyRep::Integer(2268), PyRep::Integer(5), PyRep::String("Skyhook".into())],
+        vec![PyRep::Integer(703), PyRep::Dict(vec![(PyRep::Integer(2268), PyRep::Integer(5))])],
+    ] {
+        assert_eq!(
+            call_pi(&ctx, &mut sess, "UserLaunchCommodities", &docked_call, Some(&bound)).unwrap_err().code,
+            "NotInSpace"
+        );
+    }
+    // Docked + remote V24 Command Center multi-stack rocket launch succeeds and returns Blue FileTime
+    sess.solar_system_id = Some(30_000_144);
+    let cc_ft = ctx.now_blueos_filetime_ticks();
+    let cc_remote_rep = call_pi(
+        &ctx,
+        &mut sess,
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(701),
+            PyRep::Dict(vec![
+                (PyRep::Integer(3645), PyRep::Integer(50)),
+                (PyRep::Integer(2268), PyRep::Integer(100)),
+            ]),
+        ],
+        Some(&bound),
+    )
+    .expect("remote & docked V24 Command Center launch succeeds");
+    assert_eq!(cc_remote_rep.as_i64(), Some(cc_ft));
+    let remote_launches = call_pi(&ctx, &mut sess, "GetMyLaunchesDetails", &[PyRep::Integer(planet_id)], None)
+        .expect("GetMyLaunchesDetails");
+    let PyRep::List(remote_rows) = remote_launches else { panic!("expected launch list"); };
+    let multi_row = remote_rows.last().expect("created launch row");
+    assert_eq!(multi_row.dict_get("launchTime").and_then(PyRep::as_i64), Some(cc_ft));
+    assert_eq!(multi_row.dict_get("quantity").and_then(PyRep::as_i64), Some(150));
+    assert_eq!(multi_row.dict_get("solarSystemID").and_then(PyRep::as_i64), Some(i64::from(sys_id)));
+    let PyRep::Dict(comms_entries) = multi_row.dict_get("commodities").expect("commodities dict") else {
+        panic!("expected Dict for commodities");
+    };
+    assert_eq!(comms_entries.len(), 2);
+    assert!(comms_entries.contains(&(PyRep::Integer(2268), PyRep::Integer(100))));
+    assert!(comms_entries.contains(&(PyRep::Integer(3645), PyRep::Integer(50))));
+    let multi_launch_id = multi_row.dict_get("launchID").and_then(PyRep::as_i64).unwrap();
+    assert_eq!(call_pi(&ctx, &mut sess, "DeleteLaunch", &[PyRep::Integer(multi_launch_id)], Some(&bound)), Ok(PyRep::Bool(true)));
+
+    // Multi-commodity ImportToColony credits every commodity 1:1 with proportional POCO import tax
+    sess.station_id = None;
+    sess.solar_system_id = Some(sys_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            77_700_099,
+            eve_db::InventoryItemRecord {
+                item_id: 77_700_099,
+                type_id: 3645,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 50,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            77_700_100,
+            eve_db::InventoryItemRecord {
+                item_id: 77_700_100,
+                type_id: 2268,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 80,
+                ..Default::default()
+            },
+        );
+    });
+    let multi_imp = call_pi(
+        &ctx,
+        &mut sess,
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(703),
+            PyRep::Dict(vec![
+                (PyRep::Integer(3645), PyRep::Integer(20)),
+                (PyRep::Integer(2268), PyRep::Integer(30)),
+            ]),
+            PyRep::String("ImportToColony".into()),
+        ],
+        Some(&bound),
+    )
+    .expect("multi-commodity ImportToColony succeeds");
+    assert_eq!(multi_imp.dict_get("routedQuantity").and_then(PyRep::as_i64), Some(50));
+    ctx.db.with_snapshot(|snap| {
+        let lp = load_pi_network(snap, char_id, planet_id, 3)
+            .pins
+            .into_iter()
+            .find(|p| p.pin_id == 703)
+            .unwrap();
+        assert_eq!(lp.contents.get(&3645).copied(), Some(20));
+        assert_eq!(lp.contents.get(&2268).copied(), Some(130));
+    });
 
     // Short 2-arg form (`L505-508`) & Import InsufficientFunds (`L596-598`) + Export InsufficientFunds (`L690-692`)
     ctx.db.with_mut_snapshot(|snap| {

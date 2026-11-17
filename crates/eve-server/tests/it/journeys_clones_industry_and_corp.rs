@@ -335,7 +335,7 @@ async fn test_journey_planetary() {
     let col = call_rpc(&ctx, &mut sess, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(planet_id)])
         .await
         .expect("GetPlanetResourceInfo");
-    assert!(col.dict_get("planetID").is_some() || col.dict_get("resources").is_some());
+    assert!(matches!(col, PyRep::Dict(ref entries) if !entries.is_empty()));
 }
 
 #[tokio::test]

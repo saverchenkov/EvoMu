@@ -448,8 +448,8 @@ async fn test_esi_live_planetary_interaction_colonies_layout_and_customs() {
     rpc(&ctx, &mut s1, "stationSvc", "Undock", &[]).await.expect("Undock");
 
     let res_info = rpc(&ctx, &mut s1, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(jita_planet_id)]).await.expect("GetPlanetResourceInfo");
-    let PyRep::List(res_list) = res_info.dict_get("resources").expect("resources") else { panic!("Expected list") };
-    let first_p0_tid = res_list[0].dict_get("resourceTypeID").and_then(|v| v.as_i64()).unwrap() as u32;
+    let PyRep::Dict(res_entries) = res_info else { panic!("Expected Dict") };
+    let first_p0_tid = res_entries[0].0.as_i64().unwrap() as u32;
 
     let (p1_schem_id, p1_out_tid, p1_out_qty) = ctx
         .sde

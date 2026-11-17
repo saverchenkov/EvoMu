@@ -102,7 +102,7 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
         )
         .await
         .expect("GetPlanetResourceInfo");
-    assert!(matches!(res_info_ok, PyRep::KeyVal(_)));
+    assert!(matches!(res_info_ok, PyRep::Dict(ref d) if !d.is_empty()));
     let invalid_planet = ctx
         .dispatch_rpc(
             &mut sess,

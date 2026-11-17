@@ -38,6 +38,8 @@ pub struct PiPinState {
     #[serde(default)]
     pub last_expedited_transfer_unix: u64,
     #[serde(default)]
+    pub last_launch_unix: u64,
+    #[serde(default)]
     pub contents: HashMap<TypeId, u64>,
     #[serde(default)]
     pub last_cycle_unix: Option<u64>,
@@ -1013,13 +1015,21 @@ pub fn orbital_settings_note_id(planet_or_orbital_id: i64) -> i64 {
 }
 
 pub fn resolve_orbital_and_planet(snap: &eve_db::WorldStateSnapshot, planet_or_orbital_id: i64) -> (Option<i64>, i64) {
-    if let Some(st) = snap.structures.get(&planet_or_orbital_id) {
+    if let Some(st) = snap
+        .structures
+        .get(&planet_or_orbital_id)
+        .filter(|s| crate::services::station_structure::structure_lifecycle::is_in_space_structure_state(&s.state))
+    {
         if let Some(pid) = st.name.strip_prefix("Orbital:").and_then(|s| s.parse::<i64>().ok()) {
             return (Some(st.structure_id), pid);
         }
     }
     let tag = format!("Orbital:{planet_or_orbital_id}");
-    if let Some(st) = snap.structures.values().find(|s| s.state != "Destroyed" && s.name == tag) {
+    if let Some(st) = snap
+        .structures
+        .values()
+        .find(|s| crate::services::station_structure::structure_lifecycle::is_in_space_structure_state(&s.state) && s.name == tag)
+    {
         return (Some(st.structure_id), planet_or_orbital_id);
     }
     (None, planet_or_orbital_id)
@@ -1416,6 +1426,72 @@ pub fn consume_pi_import_commodities(
     apply_pi_import_consumptions(snap, char_id, &plan)
 }
 
+/// Parses a `{typeID: quantity}` `PyRep::Dict` or `PyRep::KeyVal` commodity map.
+pub fn parse_pi_commodities_map(rep: &PyRep) -> Result<BTreeMap<TypeId, u64>, BridgeRpcError> {
+    let mut comm_map: BTreeMap<TypeId, u64> = BTreeMap::new();
+    let add_entry = |map: &mut BTreeMap<TypeId, u64>, tid_raw: i64, qty_raw: i64| -> Result<(), BridgeRpcError> {
+        let tid = u32::try_from(tid_raw).map_err(|_| BridgeRpcError {
+            code: "InvalidCommodity".into(),
+            message: format!("Commodity type ID {tid_raw} out of range"),
+            client_error: None,
+        })?;
+        if qty_raw <= 0 {
+            return Err(BridgeRpcError {
+                code: "InvalidCommodityQuantity".into(),
+                message: format!("Commodity quantity must be positive, got {qty_raw}"),
+                client_error: None,
+            });
+        }
+        let slot = map.entry(tid).or_insert(0);
+        *slot = slot.checked_add(qty_raw as u64).ok_or_else(|| BridgeRpcError {
+            code: "InvalidCommodityQuantity".into(),
+            message: "Commodity quantity overflow".into(),
+            client_error: None,
+        })?;
+        Ok(())
+    };
+    match rep {
+        PyRep::Dict(entries) => {
+            for (k, v) in entries {
+                let tid_raw = k.as_i64().ok_or_else(|| BridgeRpcError {
+                    code: "InvalidCommodity".into(),
+                    message: "Commodity type ID must be an integer".into(),
+                    client_error: None,
+                })?;
+                let qty_raw = v.as_i64().ok_or_else(|| BridgeRpcError {
+                    code: "InvalidCommodityQuantity".into(),
+                    message: "Commodity quantity must be an integer".into(),
+                    client_error: None,
+                })?;
+                add_entry(&mut comm_map, tid_raw, qty_raw)?;
+            }
+        }
+        PyRep::KeyVal(entries) => {
+            for (k, v) in entries {
+                let tid_raw = k.parse::<i64>().map_err(|_| BridgeRpcError {
+                    code: "InvalidCommodity".into(),
+                    message: "Commodity type ID must be an integer".into(),
+                    client_error: None,
+                })?;
+                let qty_raw = v.as_i64().ok_or_else(|| BridgeRpcError {
+                    code: "InvalidCommodityQuantity".into(),
+                    message: "Commodity quantity must be an integer".into(),
+                    client_error: None,
+                })?;
+                add_entry(&mut comm_map, tid_raw, qty_raw)?;
+            }
+        }
+        _ => {
+            return Err(BridgeRpcError {
+                code: "InvalidCommodity".into(),
+                message: "Commodities argument must be a dict mapping typeID to quantity".into(),
+                client_error: None,
+            });
+        }
+    }
+    Ok(comm_map)
+}
+
 pub fn user_transfer_commodities_logic(
     ctx: &ServerContext,
     snap: &mut WorldStateSnapshot,
@@ -1424,113 +1500,37 @@ pub fn user_transfer_commodities_logic(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
-    let mut comm_map: BTreeMap<TypeId, u64> = BTreeMap::new();
-    let path = if let Some(PyRep::List(path_list)) = args.get(1) {
-        let p: Vec<i64> = path_list.iter().filter_map(|x| x.as_i64()).collect();
-        match args.get(2) {
-            Some(PyRep::Dict(entries)) => {
-                for (k, v) in entries {
-                    let tid_raw = k.as_i64().ok_or_else(|| BridgeRpcError {
-                        code: "InvalidCommodity".into(),
-                        message: "Commodity type ID must be an integer".into(),
-                        client_error: None,
-                    })?;
-                    let tid = u32::try_from(tid_raw).map_err(|_| BridgeRpcError {
-                        code: "InvalidCommodity".into(),
-                        message: format!("Commodity type ID {tid_raw} out of range"),
-                        client_error: None,
-                    })?;
-                    let qty_raw = v.as_i64().ok_or_else(|| BridgeRpcError {
-                        code: "InvalidCommodityQuantity".into(),
-                        message: "Commodity quantity must be an integer".into(),
-                        client_error: None,
-                    })?;
-                    if qty_raw <= 0 {
-                        return Err(BridgeRpcError {
-                            code: "InvalidCommodityQuantity".into(),
-                            message: format!("Commodity quantity must be positive, got {qty_raw}"),
-                            client_error: None,
-                        });
-                    }
-                    let slot = comm_map.entry(tid).or_insert(0);
-                    *slot = slot.checked_add(qty_raw as u64).ok_or_else(|| BridgeRpcError {
-                        code: "InvalidCommodityQuantity".into(),
-                        message: "Commodity quantity overflow".into(),
-                        client_error: None,
-                    })?;
-                }
-            }
-            Some(PyRep::KeyVal(entries)) => {
-                for (k, v) in entries {
-                    let tid_raw = k.parse::<i64>().map_err(|_| BridgeRpcError {
-                        code: "InvalidCommodity".into(),
-                        message: "Commodity type ID must be an integer".into(),
-                        client_error: None,
-                    })?;
-                    let tid = u32::try_from(tid_raw).map_err(|_| BridgeRpcError {
-                        code: "InvalidCommodity".into(),
-                        message: format!("Commodity type ID {tid_raw} out of range"),
-                        client_error: None,
-                    })?;
-                    let qty_raw = v.as_i64().ok_or_else(|| BridgeRpcError {
-                        code: "InvalidCommodityQuantity".into(),
-                        message: "Commodity quantity must be an integer".into(),
-                        client_error: None,
-                    })?;
-                    if qty_raw <= 0 {
-                        return Err(BridgeRpcError {
-                            code: "InvalidCommodityQuantity".into(),
-                            message: format!("Commodity quantity must be positive, got {qty_raw}"),
-                            client_error: None,
-                        });
-                    }
-                    let slot = comm_map.entry(tid).or_insert(0);
-                    *slot = slot.checked_add(qty_raw as u64).ok_or_else(|| BridgeRpcError {
-                        code: "InvalidCommodityQuantity".into(),
-                        message: "Commodity quantity overflow".into(),
-                        client_error: None,
-                    })?;
-                }
-            }
-            _ => {}
-        }
-        p
+    let (path_list, comms_rep) = if let Some(PyRep::List(path_list)) = args.first() {
+        (path_list, args.get(1).or_else(|| kwargs.get("commodities")))
+    } else if let Some(PyRep::List(path_list)) = args.get(1) {
+        (path_list, args.get(2).or_else(|| kwargs.get("commodities")))
+    } else if let Some(PyRep::List(path_list)) = kwargs.get("path") {
+        (path_list, kwargs.get("commodities"))
     } else {
-        let src_pin_id = args
-            .get(1)
-            .and_then(|a| a.as_i64())
-            .or_else(|| kwargs.get("sourcePinID").and_then(|v| v.as_i64()))
-            .unwrap_or(0);
-        let dst_pin_id = args
-            .get(2)
-            .and_then(|a| a.as_i64())
-            .or_else(|| kwargs.get("destPinID").and_then(|v| v.as_i64()))
-            .unwrap_or(0);
-        let comm_raw = args
-            .get(3)
-            .and_then(|a| a.as_i64())
-            .or_else(|| kwargs.get("commodityTypeID").and_then(|v| v.as_i64()))
-            .unwrap_or(0);
-        let comm_type_id = u32::try_from(comm_raw).map_err(|_| BridgeRpcError {
-            code: "InvalidCommodity".into(),
-            message: format!("Commodity type ID {comm_raw} out of range"),
+        return Err(BridgeRpcError {
+            code: "InvalidTransferParameters".into(),
+            message: "UserTransferCommodities requires (path, commodities) with a pin path list and commodities dict".into(),
             client_error: None,
-        })?;
-        let qty_raw = args
-            .get(4)
-            .and_then(|a| a.as_i64())
-            .or_else(|| kwargs.get("quantity").and_then(|v| v.as_i64()))
-            .unwrap_or(1);
-        if qty_raw <= 0 {
-            return Err(BridgeRpcError {
-                code: "InvalidCommodityQuantity".into(),
-                message: format!("Commodity quantity must be positive, got {qty_raw}"),
-                client_error: None,
-            });
-        }
-        comm_map.insert(comm_type_id, qty_raw as u64);
-        vec![src_pin_id, dst_pin_id]
+        });
     };
+
+    let path: Vec<i64> = path_list
+        .iter()
+        .map(|x| {
+            x.as_i64().ok_or_else(|| BridgeRpcError {
+                code: "PinNotFound".into(),
+                message: "Pin IDs in transfer path must be integers".into(),
+                client_error: None,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let comms_rep = comms_rep.ok_or_else(|| BridgeRpcError {
+        code: "InvalidCommodity".into(),
+        message: "UserTransferCommodities requires a commodities dict".into(),
+        client_error: None,
+    })?;
+    let comm_map = parse_pi_commodities_map(comms_rep)?;
 
     if path.len() < 2 {
         return Err(BridgeRpcError {
@@ -1654,20 +1654,10 @@ pub fn user_transfer_commodities_logic(
     net.pins[src_idx].last_expedited_transfer_unix = now_unix;
 
     save_pi_network(snap, char_id, planet_id, &net);
-    let (first_tid, first_qty) = comm_map.iter().next().map(|(&t, &q)| (t, q)).unwrap_or((0, 0));
-    let first_qty_i64 = i64::try_from(first_qty).map_err(|_| BridgeRpcError {
-        code: "InvalidCommodityQuantity".into(),
-        message: format!("Commodity quantity {first_qty} overflows i64"),
-        client_error: None,
-    })?;
-    Ok(PyRep::keyval([
-        ("planetID", PyRep::Integer(planet_id)),
-        ("sourcePinID", PyRep::Integer(src_pin_id)),
-        ("destPinID", PyRep::Integer(dst_pin_id)),
-        ("commodityTypeID", PyRep::Integer(first_tid as i64)),
-        ("quantity", PyRep::Integer(first_qty_i64)),
-        ("volumeM3", PyRep::Real(total_transfer_vol_m3)),
-        ("cooldownSeconds", PyRep::Integer(cooldown_secs as i64)),
+    let sim_ret_ft = ctx.now_blueos_filetime_ticks();
+    Ok(PyRep::Tuple(vec![
+        PyRep::Integer(sim_ret_ft),
+        PyRep::Integer(sim_ret_ft),
     ]))
 }
 

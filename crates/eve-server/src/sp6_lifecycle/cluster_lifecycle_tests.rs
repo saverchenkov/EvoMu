@@ -40,6 +40,7 @@ fn populate_persisted_space_objects_restores_structures_bubbles_wrecks_and_disco
     let sys_id = 30_000_142;
     let now = ctx.now_unix();
     let structure_id = 1_050_000_001;
+    let unanchored_structure_id = 1_050_000_002;
     let fresh_wreck = 1_050_000_010;
     let expired_wreck = 1_050_000_011;
     let fresh_jetcan = 1_050_000_012;
@@ -73,6 +74,27 @@ fn populate_persisted_space_objects_restores_structures_bubbles_wrecks_and_disco
                 state: "ShieldVulnerable".into(),
                 quantum_core_installed: true,
                 fuel_blocks: 500,
+                shield_hp: 500_000.0,
+                armor_hp: 500_000.0,
+                hull_hp: 500_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.structures.insert(
+            unanchored_structure_id,
+            UpwellStructureRecord {
+                structure_id: unanchored_structure_id,
+                type_id: 35832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: sys_id,
+                name: "Unanchored Astrahus".into(),
+                position: [75_000.0, 0.0, 0.0],
+                state: "Unanchored".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 0,
                 shield_hp: 500_000.0,
                 armor_hp: 500_000.0,
                 hull_hp: 500_000.0,
@@ -179,6 +201,7 @@ fn populate_persisted_space_objects_restores_structures_bubbles_wrecks_and_disco
     assert_eq!(pending[0].id, pending_bubble);
 
     assert!(bp.balls.contains_key(&structure_id));
+    assert!(!bp.balls.contains_key(&unanchored_structure_id));
     assert!(bp.balls.contains_key(&fresh_wreck));
     assert!(!bp.balls.contains_key(&expired_wreck));
     assert!(bp.balls.contains_key(&fresh_jetcan));

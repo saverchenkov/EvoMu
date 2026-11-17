@@ -541,6 +541,7 @@ fn upgrade_cc_errors_import_consumption_and_transfer_keyval_kwargs_branches() {
         save_pi_network(snap, char_id, planet_id, &net);
 
         // KeyVal commodities map transfer
+        let before_ft = ctx.now_blueos_filetime_ticks();
         let kv_res = user_transfer_commodities_logic(
             &ctx,
             snap,
@@ -554,18 +555,26 @@ fn upgrade_cc_errors_import_consumption_and_transfer_keyval_kwargs_branches() {
             &HashMap::new(),
         )
         .unwrap();
-        assert_eq!(kv_res.dict_get("quantity"), Some(&PyRep::Integer(20)));
+        let after_ft = ctx.now_blueos_filetime_ticks();
+        let PyRep::Tuple(kv_parts) = &kv_res else {
+            panic!("expected 2-tuple from KeyVal transfer, got {kv_res:?}");
+        };
+        assert_eq!(kv_parts.len(), 2);
+        let kv_sim = kv_parts[0].as_i64().expect("simRet ticks");
+        assert_eq!(kv_parts[1].as_i64(), Some(kv_sim));
+        assert!(before_ft <= kv_sim && kv_sim <= after_ft);
+        let post_kv_net = load_pi_network(snap, char_id, planet_id, 1);
+        assert_eq!(post_kv_net.pins[0].contents.get(&3645).copied(), Some(30));
+        assert_eq!(post_kv_net.pins[1].contents.get(&3645).copied(), Some(20));
 
-        // Reset cooldown and test scalar kwargs transfer + InsufficientCommodityStorage error
+        // Reset cooldown and test V24 kwargs transfer + InsufficientCommodityStorage error
         let mut net2 = load_pi_network(snap, char_id, planet_id, 1);
         net2.pins[0].last_expedited_transfer_unix = 0;
         save_pi_network(snap, char_id, planet_id, &net2);
 
         let kw = HashMap::from([
-            ("sourcePinID".into(), PyRep::Integer(1)),
-            ("destPinID".into(), PyRep::Integer(2)),
-            ("commodityTypeID".into(), PyRep::Integer(3645)),
-            ("quantity".into(), PyRep::Integer(999)),
+            ("path".into(), PyRep::List(vec![PyRep::Integer(1), PyRep::Integer(2)])),
+            ("commodities".into(), PyRep::Dict(vec![(PyRep::Integer(3645), PyRep::Integer(999))])),
         ]);
         assert_eq!(
             user_transfer_commodities_logic(&ctx, snap, char_id, planet_id, &[PyRep::Integer(planet_id)], &kw)

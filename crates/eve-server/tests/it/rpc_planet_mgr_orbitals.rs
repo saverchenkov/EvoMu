@@ -91,9 +91,7 @@ fn get_f64(rep: &PyRep, key: &str) -> Option<f64> {
     rep.dict_get(key).and_then(|v| v.as_f64())
 }
 
-fn get_str<'a>(rep: &'a PyRep, key: &str) -> Option<&'a str> {
-    rep.dict_get(key).and_then(|v| v.as_str())
-}
+const ERR_UNIMPLEMENTED_RPC: &str = "UnimplementedRPC";
 
 fn cmd_pin(id: i64, tid: TypeId, lat: f64, lon: f64) -> PyRep {
     PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(id), PyRep::Integer(tid as i64), PyRep::Real(lat), PyRep::Real(lon)])
@@ -131,10 +129,11 @@ async fn test_planet_mgr_launches_commodities_and_lifecycle() {
     let res_info = rpc(&ctx, &mut sess, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(JITA_PLANET_ID)])
         .await
         .expect("GetPlanetResourceInfo");
-    let PyRep::List(res_list) = res_info.dict_get("resources").expect("resources list") else {
-        panic!("Expected resources list");
+    let PyRep::Dict(res_entries) = res_info else {
+        panic!("Expected PyRep::Dict from GetPlanetResourceInfo, got {res_info:?}");
     };
-    let first_p0_tid = get_i64(&res_list[0], "resourceTypeID").expect("first P0 typeID") as TypeId;
+    assert!(!res_entries.is_empty());
+    let first_p0_tid = res_entries[0].0.as_i64().expect("first P0 typeID") as TypeId;
 
     // Deploy 4-pin colony with upgraded command center (providing sufficient CPU/PG)
     let col_dep = rpc(
@@ -215,7 +214,8 @@ async fn test_planet_mgr_launches_commodities_and_lifecycle() {
         }
     });
 
-    // 2. UserTransferCommodities: V24 client expedited transfer via path and commodities dict
+    // 2. UserTransferCommodities: V24 client expedited transfer via path and commodities dict -> 2-tuple (simRet, lastRunTime)
+    let expected_ft = ctx.now_blueos_filetime_ticks();
     let comms = vec![(PyRep::Integer(produced_p0_tid as i64), PyRep::Integer(10))];
     let xfer_rep = rpc(
         &ctx,
@@ -234,11 +234,12 @@ async fn test_planet_mgr_launches_commodities_and_lifecycle() {
     )
     .await
     .expect("UserTransferCommodities V24");
-    assert_eq!(get_i64(&xfer_rep, "planetID"), Some(JITA_PLANET_ID));
-    assert_eq!(get_i64(&xfer_rep, "sourcePinID"), Some(ext_pin_id));
-    assert_eq!(get_i64(&xfer_rep, "destPinID"), Some(launch_pin_id));
-    assert_eq!(get_i64(&xfer_rep, "commodityTypeID"), Some(produced_p0_tid as i64));
-    assert_eq!(get_i64(&xfer_rep, "quantity"), Some(10));
+    let PyRep::Tuple(ref xfer_tuple) = xfer_rep else {
+        panic!("UserTransferCommodities must return 2-tuple, got {xfer_rep:?}");
+    };
+    assert_eq!(xfer_tuple.len(), 2);
+    assert_eq!(xfer_tuple[0].as_i64(), Some(expected_ft));
+    assert_eq!(xfer_tuple[1].as_i64(), Some(expected_ft));
 
     // Pin-to-pin transfer: Launchpad to Command Center
     let comms2 = vec![(PyRep::Integer(produced_p0_tid as i64), PyRep::Integer(5))];
@@ -260,9 +261,12 @@ async fn test_planet_mgr_launches_commodities_and_lifecycle() {
     )
     .await
     .expect("Pin-to-pin transfer");
-    assert_eq!(get_i64(&pin_xfer, "sourcePinID"), Some(launch_pin_id));
-    assert_eq!(get_i64(&pin_xfer, "destPinID"), Some(cc_pin_id));
-    assert_eq!(get_i64(&pin_xfer, "quantity"), Some(5));
+    let PyRep::Tuple(ref pin_xfer_tuple) = pin_xfer else {
+        panic!("Pin-to-pin UserTransferCommodities must return 2-tuple, got {pin_xfer:?}");
+    };
+    assert_eq!(pin_xfer_tuple.len(), 2);
+    assert_eq!(pin_xfer_tuple[0].as_i64(), Some(expected_ft));
+    assert_eq!(pin_xfer_tuple[1].as_i64(), Some(expected_ft));
 
     ctx.db.with_snapshot(|snap| {
         let net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
@@ -283,7 +287,7 @@ async fn test_planet_mgr_launches_commodities_and_lifecycle() {
         eve_server::services::industry_pi::save_pi_network(snap, char_id, JITA_PLANET_ID, &net);
     });
 
-    // 3. UserLaunchCommodities: orbital launch from Command Center
+    // 3. UserLaunchCommodities: V24 orbital launch (commandPinID, commoditiesToLaunch dict) -> scalar Blue lastLaunchTime
     let launch_rep = rpc(
         &ctx,
         &mut sess,
@@ -292,16 +296,16 @@ async fn test_planet_mgr_launches_commodities_and_lifecycle() {
         &[
             PyRep::Integer(JITA_PLANET_ID),
             PyRep::Integer(cc_pin_id),
-            PyRep::Integer(WATER_P1_TYPE_ID as i64),
-            PyRep::Integer(300),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(300))]),
         ],
     )
     .await
-    .expect("UserLaunchCommodities");
-    assert_eq!(get_i64(&launch_rep, "planetID"), Some(JITA_PLANET_ID));
-    assert_eq!(get_i64(&launch_rep, "commodityTypeID"), Some(WATER_P1_TYPE_ID as i64));
-    assert_eq!(get_i64(&launch_rep, "routedQuantity"), Some(300));
-    assert_eq!(get_str(&launch_rep, "destination"), Some("CommandCenterLaunch"));
+    .expect("UserLaunchCommodities V24");
+    assert_eq!(
+        launch_rep.as_i64(),
+        Some(ctx.now_blueos_filetime_ticks()),
+        "V24 UserLaunchCommodities must return scalar Blue FileTime lastLaunchTime"
+    );
 
     // 4. GetMyLaunchesDetails
     let my_launches = rpc(&ctx, &mut sess, "planetMgr", "GetMyLaunchesDetails", &[])
@@ -540,10 +544,12 @@ async fn test_planet_mgr_gm_tools_and_properties() {
     });
     assert!(has_depletion, "GMRunDepletionSim must persist planet depletion state in snapshot");
 
-    // 6. Proxy properties: append and remoteHandler
+    // 6. Proxy property append (client-local remoteHandler attribute is not a server RPC)
     let append_rep = rpc(&ctx, &mut sess, "planetMgr", "append", &[]).await.expect("append");
     assert_eq!(append_rep, PyRep::None);
 
-    let remote_rep = rpc(&ctx, &mut sess, "planetMgr", "remoteHandler", &[]).await.expect("remoteHandler");
-    assert_eq!(remote_rep, PyRep::None);
+    let remote_err = rpc(&ctx, &mut sess, "planetMgr", "remoteHandler", &[])
+        .await
+        .expect_err("remoteHandler must not be routed as a server RPC");
+    assert_eq!(remote_err.code, ERR_UNIMPLEMENTED_RPC);
 }

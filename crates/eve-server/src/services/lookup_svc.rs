@@ -595,9 +595,10 @@ pub fn handle(
                     })
                 };
                 let is_corp_war_eligible = |corp_id: i64| -> bool {
-                    snap.structures
-                        .values()
-                        .any(|s| s.owner_corp_id == corp_id && s.state != "Destroyed")
+                    snap.structures.values().any(|s| {
+                        s.owner_corp_id == corp_id
+                            && crate::services::station_structure::structure_lifecycle::is_in_space_structure_state(&s.state)
+                    })
                 };
 
                 // Standalone player corporations (group 2): must be war-eligible (own >= 1 non-destroyed Upwell structure),
@@ -857,7 +858,7 @@ fn search_ids_for_group(
                 snap.structures
                     .values()
                     .filter(|st| {
-                        st.state != "Destroyed"
+                        crate::services::station_structure::structure_lifecycle::is_in_space_structure_state(&st.state)
                             && matches_query(&st.name, query, exact)
                             && crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
                                 snap,

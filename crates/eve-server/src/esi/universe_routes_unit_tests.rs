@@ -332,6 +332,7 @@ fn private_structure_is_hidden_from_public_list_detail_and_search() {
     let outsider_id = 90_000_099_i64;
     let private_sid = 1_055_000_099_i64;
     let public_sid = 1_055_000_100_i64;
+    let unanchored_sid = 1_055_000_101_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
         let mut ch = snap.characters[&char_id].clone();
@@ -341,9 +342,10 @@ fn private_structure_is_hidden_from_public_list_detail_and_search() {
         ch.alliance_id = None;
         ch.standings.clear();
         snap.characters.insert(outsider_id, ch);
-        for (sid, name, corp_only) in [
-            (private_sid, "Private Keepstar", true),
-            (public_sid, "Public Freeport Keepstar", false),
+        for (sid, name, state, corp_only) in [
+            (private_sid, "Private Keepstar", "ShieldVulnerable", true),
+            (public_sid, "Public Freeport Keepstar", "ShieldVulnerable", false),
+            (unanchored_sid, "Unanchored Keepstar", "Unanchored", false),
         ] {
             snap.structures.insert(
                 sid,
@@ -354,7 +356,7 @@ fn private_structure_is_hidden_from_public_list_detail_and_search() {
                     solar_system_id: 30_000_142,
                     name: name.into(),
                     position: [10_000.0, 20_000.0, 30_000.0],
-                    state: "ShieldVulnerable".into(),
+                    state: state.into(),
                     quantum_core_installed: true,
                     fuel_blocks: 500,
                     ..Default::default()
@@ -381,6 +383,7 @@ fn private_structure_is_hidden_from_public_list_detail_and_search() {
     let arr = ids.as_array().unwrap();
     assert!(!arr.contains(&json!(private_sid)));
     assert!(arr.contains(&json!(public_sid)));
+    assert!(!arr.contains(&json!(unanchored_sid)));
 
     let outsider_claims = make_claims(outsider_id);
     let priv_detail = dispatch_universe_and_nav(
@@ -407,6 +410,17 @@ fn private_structure_is_hidden_from_public_list_detail_and_search() {
         b"",
     );
     assert_eq!(owner_detail.status_code, 200);
+    let unanchored_detail = dispatch_universe_and_nav(
+        &ctx,
+        "GET",
+        "/universe/structures/{structure_id}",
+        &params(&[("structure_id", &unanchored_sid.to_string())]),
+        &empty_q,
+        Some(&owner_claims),
+        1,
+        b"",
+    );
+    assert_eq!(unanchored_detail.status_code, 404);
 
     let search_query = "Keepstar";
     let search_outsider = dispatch_universe_and_nav(
@@ -426,6 +440,7 @@ fn private_structure_is_hidden_from_public_list_detail_and_search() {
         .unwrap();
     assert!(!outsider_hits.contains(&json!(private_sid)));
     assert!(outsider_hits.contains(&json!(public_sid)));
+    assert!(!outsider_hits.contains(&json!(unanchored_sid)));
 
     let search_owner = dispatch_universe_and_nav(
         &ctx,
@@ -444,6 +459,23 @@ fn private_structure_is_hidden_from_public_list_detail_and_search() {
         .unwrap();
     assert!(owner_hits.contains(&json!(private_sid)));
     assert!(owner_hits.contains(&json!(public_sid)));
+    assert!(!owner_hits.contains(&json!(unanchored_sid)));
+
+    let wp_unanchored = dispatch_universe_and_nav(
+        &ctx,
+        "POST",
+        "/ui/autopilot/waypoint",
+        &empty_q,
+        &params(&[
+            ("destination_id", &unanchored_sid.to_string()),
+            ("add_to_beginning", "false"),
+            ("clear_other_waypoints", "false"),
+        ]),
+        Some(&owner_claims),
+        1,
+        b"",
+    );
+    assert_eq!(wp_unanchored.status_code, 404);
 }
 
 #[test]

@@ -152,7 +152,10 @@ fn flush_active_and_expired_extractor_storage_cap_and_transfer_errors() {
         &ctx,
         &mut sess,
         "UserTransferCommodities",
-        &[PyRep::Integer(999), PyRep::Integer(888), PyRep::Integer(2268), PyRep::Integer(10)],
+        &[
+            PyRep::List(vec![PyRep::Integer(999), PyRep::Integer(888)]),
+            PyRep::Dict(vec![(PyRep::Integer(2268), PyRep::Integer(10))]),
+        ],
         Some(&bound),
     )
     .is_err());
@@ -297,7 +300,16 @@ async fn launch_details_delete_launch_cancel_auto_revert_start_ticking_and_monik
             .code,
         "InvalidPlanetID"
     );
-    assert!(call_pi(&ctx, &mut sess, "remoteHandler", &[], None).is_ok());
+    assert!(handle_pi_orbitals(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "remoteHandler",
+        &[],
+        &HashMap::new(),
+        None,
+    )
+    .is_none());
 
     // Clean up dummy item check so InventoryFlag is used
     let _ = InventoryFlag::Hangar;
@@ -369,7 +381,7 @@ async fn dispatch_unknown_flush_and_user_launch_all_arg_shapes_kill_mutants() {
     assert_eq!(flush_res.dict_get("planetID"), Some(&PyRep::Integer(planet_id)));
     assert!(flush_res.dict_get("producedQuantity").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
 
-    // Shape 1: 4-arg [pin_701, type_id, qty, str] -> CommandCenterLaunch (1.5x tax; ignores arg 3 string)
+    // Shape 1: 4-arg [pin_701, type_id, qty, str] -> CommandCenterLaunch (flat 15% NPC fee; ignores arg 3 string)
     let s1 = call_pi(
         &ctx,
         &mut sess,
@@ -379,9 +391,9 @@ async fn dispatch_unknown_flush_and_user_launch_all_arg_shapes_kill_mutants() {
     )
     .expect("Shape 1 CommandCenterLaunch");
     let cc_tax = s1.dict_get("exportTaxISK").and_then(|v| v.as_f64()).unwrap();
-    assert!(cc_tax > 0.0);
+    assert!((cc_tax - 300.0).abs() < 1e-6, "cc_tax={cc_tax} should be flat 15% (300.0 ISK)");
 
-    // Shape 2a: 3-arg [type_id, qty, "CustomsOffice"] -> CustomsOffice (1.0x tax)
+    // Shape 2a: 3-arg [type_id, qty, "CustomsOffice"] -> CustomsOffice (10% NPC + 5% default POCO in Jita = 300.0)
     let s2a = call_pi(
         &ctx,
         &mut sess,
@@ -391,7 +403,7 @@ async fn dispatch_unknown_flush_and_user_launch_all_arg_shapes_kill_mutants() {
     )
     .expect("Shape 2a CustomsOffice");
     let co_tax = s2a.dict_get("exportTaxISK").and_then(|v| v.as_f64()).unwrap();
-    assert!(co_tax > 0.0 && cc_tax > co_tax, "cc_tax={cc_tax} should exceed co_tax={co_tax}");
+    assert!((co_tax - 300.0).abs() < 1e-6, "co_tax={co_tax} should be 300.0 ISK");
 
     // Shape 2b: 4-arg [type_id, qty, "CustomsOffice", PyRep::None] -> MUST fall through arm 1 (because args[2] is str, not i64) to arm 2 CustomsOffice!
     let s2b = call_pi(

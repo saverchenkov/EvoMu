@@ -323,20 +323,34 @@ fn test_orbital_access_tax_upgrade_cc_and_expedited_transfer() {
         };
         save_pi_network(snap, char_id, planet_id, &net);
 
+        let before_ft = ctx.now_blueos_filetime_ticks();
         let xfer = user_transfer_commodities_logic(
             &ctx,
             snap,
             char_id,
             planet_id,
             &[
-                PyRep::Integer(planet_id),
                 PyRep::List(vec![PyRep::Integer(101), PyRep::Integer(102)]),
                 PyRep::Dict(vec![(PyRep::Integer(3645), PyRep::Integer(40))]),
             ],
             &HashMap::new(),
         )
         .unwrap();
-        assert_eq!(xfer.dict_get("quantity").and_then(|v| v.as_i64()), Some(40));
+        let after_ft = ctx.now_blueos_filetime_ticks();
+        let PyRep::Tuple(parts) = &xfer else {
+            panic!("expected 2-tuple from V24 UserTransferCommodities, got {xfer:?}");
+        };
+        assert_eq!(parts.len(), 2);
+        let sim_ret = parts[0].as_i64().expect("simRet FileTime ticks");
+        let last_run = parts[1].as_i64().expect("lastRunTime FileTime ticks");
+        assert_eq!(sim_ret, last_run);
+        assert!(
+            before_ft <= sim_ret && sim_ret <= after_ft,
+            "expected FileTime ticks in [{before_ft}, {after_ft}], got {sim_ret}"
+        );
+        let updated_net = load_pi_network(snap, char_id, planet_id, 2);
+        assert_eq!(updated_net.pins[0].contents.get(&3645).copied(), Some(60));
+        assert_eq!(updated_net.pins[1].contents.get(&3645).copied(), Some(40));
 
         // Second immediate transfer hits cooldown
         let cd_err = user_transfer_commodities_logic(
@@ -345,7 +359,6 @@ fn test_orbital_access_tax_upgrade_cc_and_expedited_transfer() {
             char_id,
             planet_id,
             &[
-                PyRep::Integer(planet_id),
                 PyRep::List(vec![PyRep::Integer(101), PyRep::Integer(102)]),
                 PyRep::Dict(vec![(PyRep::Integer(3645), PyRep::Integer(10))]),
             ],

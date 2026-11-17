@@ -556,9 +556,11 @@ async fn user_launch_commodities_import_05x_export_10x_and_command_center_15x_ta
     .unwrap_err();
     assert_eq!(cc_err.code, "CommandCenterLaunchCapacityExceeded");
 
-    // Verify total tax (3,600 + 7,200 + 10,800 = 21,600 ISK) deducted from pilot and credited to POCO owner corp
+    // Verify total tax (3,600 + 7,200 + 10,800 = 21,600 ISK) deducted from pilot,
+    // while POCO owner corp only receives the Import + CustomsOffice POCO share (3,600 + 7,200 = 10,800 ISK;
+    // CommandCenterLaunch pays flat 15% NPC fee with 0 corp share).
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.characters[&char_id].balance, IskCents::from_isk(978_400));
-        assert_eq!(snap.corporations[&poco_corp].master_wallet_balance(), IskCents::from_isk(21_600));
+        assert_eq!(snap.corporations[&poco_corp].master_wallet_balance(), IskCents::from_isk(10_800));
     });
 }

@@ -74,6 +74,12 @@ pub const STATE_DEPLOY_VULNERABLE: &str = "DeployVulnerable";
 pub const STATE_FOB_INVULNERABLE: &str = "FobInvulnerable";
 pub const STATE_DESTROYED: &str = "Destroyed";
 
+/// Returns whether a structure record state represents a structure currently deployed in space.
+#[inline]
+pub fn is_in_space_structure_state(state: &str) -> bool {
+    !state.eq_ignore_ascii_case(STATE_DESTROYED) && !state.eq_ignore_ascii_case(STATE_UNANCHORED)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HullClass {
     Medium,
@@ -276,7 +282,8 @@ fn online_service_modules(ctx: &ServerContext, snap: &WorldStateSnapshot, struct
 }
 
 pub fn is_operational(state: &str) -> bool {
-    !matches!(state, STATE_ANCHOR_VULNERABLE | STATE_ANCHORING | STATE_NO_CORE | STATE_ONLINING | STATE_DESTROYED)
+    is_in_space_structure_state(state)
+        && !matches!(state, STATE_ANCHOR_VULNERABLE | STATE_ANCHORING | STATE_NO_CORE | STATE_ONLINING)
 }
 
 /// Power state: full power with at least one online service module, low power otherwise,

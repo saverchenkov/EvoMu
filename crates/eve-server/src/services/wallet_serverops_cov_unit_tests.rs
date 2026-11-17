@@ -362,8 +362,8 @@ fn check_starbase_auth_all_role_bitshifts_and_ownership_combinations() {
     });
 }
 
-#[test]
-fn pos_mgr_all_arms_bill_mgr_autopay_count_give_cash_contact_cost_and_telemetry_limits() {
+#[tokio::test]
+async fn pos_mgr_all_arms_bill_mgr_autopay_count_give_cash_contact_cost_and_telemetry_limits() {
     let (ctx, ceo_id, member_id, corp_a, corp_b) = setup_wallet_ops_world();
     let kw = HashMap::new();
     let ally_id = 99_910_001_i64;
@@ -399,7 +399,7 @@ fn pos_mgr_all_arms_bill_mgr_autopay_count_give_cash_contact_cost_and_telemetry_
             ship_id,
             eve_db::InventoryItemRecord {
                 item_id: ship_id,
-                type_id: 587,
+                type_id: 20185,
                 owner_id: ceo_id,
                 location_id: i64::from(sys_id),
                 flag: InventoryFlag::None,
@@ -447,9 +447,10 @@ fn pos_mgr_all_arms_bill_mgr_autopay_count_give_cash_contact_cost_and_telemetry_
             orbital_id,
             eve_db::InventoryItemRecord {
                 item_id: orbital_id,
-                type_id: 2233,
+                type_id: 3962,
                 owner_id: corp_a,
                 location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
                 quantity: 1,
                 singleton: true,
                 ..Default::default()
@@ -459,7 +460,7 @@ fn pos_mgr_all_arms_bill_mgr_autopay_count_give_cash_contact_cost_and_telemetry_
             orbital_id,
             eve_db::UpwellStructureRecord {
                 structure_id: orbital_id,
-                type_id: 2233,
+                type_id: 3962,
                 owner_corp_id: corp_a,
                 solar_system_id: sys_id,
                 position: [1_000.0, 0.0, 0.0],
@@ -471,11 +472,24 @@ fn pos_mgr_all_arms_bill_mgr_autopay_count_give_cash_contact_cost_and_telemetry_
             orbital_no_ship,
             eve_db::InventoryItemRecord {
                 item_id: orbital_no_ship,
-                type_id: 2233,
+                type_id: 3962,
                 owner_id: ceo_id,
                 location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
                 quantity: 1,
                 singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            orbital_no_ship,
+            eve_db::UpwellStructureRecord {
+                structure_id: orbital_no_ship,
+                type_id: 3962,
+                owner_corp_id: corp_a,
+                solar_system_id: sys_id,
+                position: [1_000.0, 0.0, 0.0],
+                state: "Online".into(),
                 ..Default::default()
             },
         );
@@ -608,7 +622,7 @@ fn pos_mgr_all_arms_bill_mgr_autopay_count_give_cash_contact_cost_and_telemetry_
     let cycle_rep = handle(&ctx, &mut ceo_sess, "posMgr", "RunMoonProcessCycleforTower", &[PyRep::Integer(tower_id)], &kw).unwrap().unwrap();
     assert!(matches!(cycle_rep, PyRep::List(ref rows) if rows.len() == 1));
 
-    // posMgr.UnanchorOrbital error gates + distance + RoleNotAuthorized + cargo move vs hangar move
+    // posMgr.UnanchorOrbital error gates + distance + RoleNotAuthorized + cargo move vs NoActiveShip reject
     assert_eq!(
         handle(&ctx, &mut mem_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_id)], &kw).unwrap().unwrap_err().code,
         "RoleNotAuthorized"
@@ -619,18 +633,37 @@ fn pos_mgr_all_arms_bill_mgr_autopay_count_give_cash_contact_cost_and_telemetry_
         handle(&ctx, &mut wrong_sys_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_id)], &kw).unwrap().unwrap_err().code,
         "NotInSameSystem"
     );
+    let ship_combat = ctx.build_ship_combat_state(ceo_id, ship_id, 20185);
+    ctx.systems.get_or_spawn(sys_id).try_spawn_ball_with_combat(
+        eve_destiny::Ball {
+            id: ship_id,
+            type_id: 20185,
+            position: glam::DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 100.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        },
+        ship_combat,
+    );
     let kv_ship = handle(&ctx, &mut ceo_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_id)], &kw).unwrap().unwrap();
     assert_eq!(kv_ship.dict_get("state"), Some(&PyRep::String("Unanchored".into())));
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&orbital_id].location_id, ship_id);
         assert_eq!(snap.items[&orbital_id].flag, InventoryFlag::Cargo);
+        assert_eq!(snap.items[&orbital_id].owner_id, ceo_id);
     });
     let mut no_ship_sess = ceo_sess.clone();
     no_ship_sess.ship_id = None;
-    handle(&ctx, &mut no_ship_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_no_ship)], &kw).unwrap().unwrap();
+    assert_eq!(
+        handle(&ctx, &mut no_ship_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_no_ship)], &kw).unwrap().unwrap_err().code,
+        "NoActiveShip"
+    );
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.items[&orbital_no_ship].location_id, ceo_id);
-        assert_eq!(snap.items[&orbital_no_ship].flag, InventoryFlag::Hangar);
+        assert_eq!(snap.items[&orbital_no_ship].location_id, i64::from(sys_id));
     });
 
     // billMgr: foreign CorpAccessDenied, empty/non-corp fallback (corp_id == 0 -> skips role check), process_due_automatic_bills == 2

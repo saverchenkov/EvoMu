@@ -98,6 +98,8 @@ async fn test_planetary_interaction_expedited_transfer() {
         grant_pi_skills(snap, char_id);
         seed_cargo_item(snap, CC_PIN_TYPE_ID, char_id, ship_id, 1);
     });
+    sess.station_id = None;
+    sess.structure_id = None;
 
     // Deploy colony
     let col_dep = rpc(
@@ -226,32 +228,35 @@ async fn test_planetary_interaction_expedited_transfer() {
     ).await.expect_err("Destination full must fail");
     assert_eq!(err_cap.code, "PinStorageFull");
 
-    // 6. Successful expedited transfer via V24 client signature: Launchpad -> Storage, transfer 150 units (28.5 m3)
-    // Server wire-shape bug (`pi_helpers::user_transfer_commodities_logic`): returns a
-    // `PyRep::keyval` summary (`planetID`, `sourcePinID`, `destPinID`, `commodityTypeID`,
-    // `quantity`, `volumeM3`, `cooldownSeconds`), whereas V24 `ClientPlanet.TransferCommodities`
-    // (`clientPlanet.pyj:615`) unpacks a 2-tuple `(runSimUntil, lastRunTime)` (`unpack:2` at `$`).
+    // 6. Successful expedited transfer via V24 bound moniker signature (path, commodities) -> (simRet, lastRunTime)
+    let expected_ft = ctx.now_blueos_filetime_ticks();
+    let bound_planet_id = ctx
+        .bind_object(&sess, "planetMgr", JITA_PLANET_ID)
+        .expect("bind planetMgr");
     let xfer_ok = ClientHarness::new(SessionBorrowWireTransport {
         ctx: &ctx,
         session: &mut sess,
         preserve_char_notifications: false,
     })
-    .with_mode(ContractValidationMode::ReportOnly)
+    .with_mode(ContractValidationMode::Strict)
     .call_ok(
         "planetMgr",
-        None,
+        Some(bound_planet_id),
         "UserTransferCommodities",
-        &[PyRep::Integer(JITA_PLANET_ID), PyRep::List(vec![PyRep::Integer(launch_pin_id), PyRep::Integer(storage_pin_id)]), comms_map(WATER_P1_TYPE_ID, 150)],
+        &[
+            PyRep::List(vec![PyRep::Integer(launch_pin_id), PyRep::Integer(storage_pin_id)]),
+            comms_map(WATER_P1_TYPE_ID, 150),
+        ],
         &HashMap::new(),
     )
     .await;
 
-    assert_eq!(get_i64(&xfer_ok, "planetID"), Some(JITA_PLANET_ID));
-    assert_eq!(get_i64(&xfer_ok, "sourcePinID"), Some(launch_pin_id));
-    assert_eq!(get_i64(&xfer_ok, "destPinID"), Some(storage_pin_id));
-    assert_eq!(get_i64(&xfer_ok, "commodityTypeID"), Some(WATER_P1_TYPE_ID as i64));
-    assert_eq!(get_i64(&xfer_ok, "quantity"), Some(150));
-    assert!(get_i64(&xfer_ok, "cooldownSeconds").unwrap_or(0) >= 300);
+    let PyRep::Tuple(ref xfer_tuple) = xfer_ok else {
+        panic!("UserTransferCommodities must return 2-tuple (simRet, lastRunTime), got {xfer_ok:?}");
+    };
+    assert_eq!(xfer_tuple.len(), 2);
+    assert_eq!(xfer_tuple[0].as_i64(), Some(expected_ft));
+    assert_eq!(xfer_tuple[1].as_i64(), Some(expected_ft));
 
     // Verify storage amounts updated in pin contents and layout
     ctx.db.with_snapshot(|snap| {
@@ -276,4 +281,712 @@ async fn test_planetary_interaction_expedited_transfer() {
         &[PyRep::Integer(JITA_PLANET_ID), PyRep::List(vec![PyRep::Integer(launch_pin_id), PyRep::Integer(storage_pin_id)]), comms_map(WATER_P1_TYPE_ID, 50)],
     ).await.expect_err("Immediate repeat transfer must fail with cooldown");
     assert_eq!(err_cd.code, "ExpeditedTransferOnCooldown");
+
+    // 8. After cooldown elapses, unbound V24 transfer (planetID, path, commodities) returns updated timestamps
+    ctx.advance_secs(301);
+    let expected_ft_2 = ctx.now_blueos_filetime_ticks();
+    let xfer_unbound = ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: false,
+    })
+    .with_mode(ContractValidationMode::Strict)
+    .call_ok(
+        "planetMgr",
+        None,
+        "UserTransferCommodities",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::List(vec![PyRep::Integer(storage_pin_id), PyRep::Integer(launch_pin_id)]),
+            comms_map(WATER_P1_TYPE_ID, 50),
+        ],
+        &HashMap::new(),
+    )
+    .await;
+    let PyRep::Tuple(ref xfer_tuple_2) = xfer_unbound else {
+        panic!("Expected 2-tuple from unbound UserTransferCommodities, got {xfer_unbound:?}");
+    };
+    assert_eq!(xfer_tuple_2.len(), 2);
+    assert_eq!(xfer_tuple_2[0].as_i64(), Some(expected_ft_2));
+    assert_eq!(xfer_tuple_2[1].as_i64(), Some(expected_ft_2));
+    ctx.db.with_snapshot(|snap| {
+        let net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+        let lp = net.pins.iter().find(|p| p.pin_id == launch_pin_id).expect("lp");
+        let sp = net.pins.iter().find(|p| p.pin_id == storage_pin_id).expect("sp");
+        assert_eq!(lp.contents.get(&WATER_P1_TYPE_ID).copied(), Some(3400));
+        assert_eq!(sp.contents.get(&WATER_P1_TYPE_ID).copied(), Some(100));
+    });
+}
+
+#[tokio::test]
+async fn test_planetary_interaction_launch_commodities_v24() {
+    // parity: feat:pi.launch, rpc:planetMgr.UserLaunchCommodities
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let char_id = 90_000_001;
+    let mut sess = setup_pilot(&ctx, 1105, "demo", "demo-secret", char_id).await;
+    let ship_id = sess.ship_id.expect("Active ship");
+    ctx.db.with_mut_snapshot(|snap| {
+        grant_pi_skills(snap, char_id);
+        seed_cargo_item(snap, CC_PIN_TYPE_ID, char_id, ship_id, 1);
+    });
+    sess.station_id = None;
+    sess.structure_id = None;
+
+    let col_dep = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2001), PyRep::Integer(CC_PIN_TYPE_ID as i64), PyRep::Real(0.10), PyRep::Real(0.10)]),
+                PyRep::Tuple(vec![PyRep::Integer(9), PyRep::Integer(2001), PyRep::Integer(3)]),
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2002), PyRep::Integer(LAUNCHPAD_PIN_TYPE_ID as i64), PyRep::Real(0.11), PyRep::Real(0.11)]),
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2004), PyRep::Integer(EXTRACTOR_PIN_TYPE_ID as i64), PyRep::Real(0.12), PyRep::Real(0.12)]),
+            ]),
+        ],
+    )
+    .await
+    .expect("Deploy PI colony for V24 launch");
+
+    let PyRep::List(pins) = col_dep.dict_get("pins").expect("pins list") else {
+        panic!("expected pins list");
+    };
+    let cc_pin_id = pins
+        .iter()
+        .find(|p| get_i64(p, "typeID") == Some(CC_PIN_TYPE_ID as i64))
+        .and_then(|p| get_i64(p, "pinID"))
+        .expect("cc pin id");
+    let launch_pin_id = pins
+        .iter()
+        .find(|p| get_i64(p, "typeID") == Some(LAUNCHPAD_PIN_TYPE_ID as i64))
+        .and_then(|p| get_i64(p, "pinID"))
+        .expect("launch pin id");
+    let ext_pin_id = pins
+        .iter()
+        .find(|p| get_i64(p, "typeID") == Some(EXTRACTOR_PIN_TYPE_ID as i64))
+        .and_then(|p| get_i64(p, "pinID"))
+        .expect("ext pin id");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+        if let Some(cc) = net.pins.iter_mut().find(|p| p.pin_id == cc_pin_id) {
+            cc.contents.insert(WATER_P1_TYPE_ID, 2_800);
+            cc.contents.insert(2268, 250); // Aqueous Liquids P0 for multi-commodity launch
+        }
+        if let Some(lp) = net.pins.iter_mut().find(|p| p.pin_id == launch_pin_id) {
+            lp.contents.insert(WATER_P1_TYPE_ID, 500);
+        }
+        if let Some(ext) = net.pins.iter_mut().find(|p| p.pin_id == ext_pin_id) {
+            ext.contents.insert(WATER_P1_TYPE_ID, 50);
+        }
+        eve_server::services::industry_pi::save_pi_network(snap, char_id, JITA_PLANET_ID, &net);
+        seed_cargo_item(snap, WATER_P1_TYPE_ID, char_id, ship_id, 100);
+        seed_cargo_item(snap, 2268, char_id, ship_id, 150);
+    });
+
+    let bound_planet_id = ctx
+        .bind_object(&sess, "planetMgr", JITA_PLANET_ID)
+        .expect("bind planetMgr");
+
+    // 1. Validation gates with V24 (commandPinID, commoditiesToLaunch) signature
+    let err_pin_missing = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(999_999),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(10))]),
+        ],
+    )
+    .await
+    .expect_err("Missing pin must fail");
+    assert_eq!(err_pin_missing.code, "PinNotFound");
+
+    let err_pin_type = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(ext_pin_id),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(10))]),
+        ],
+    )
+    .await
+    .expect_err("Extractor pin cannot launch");
+    assert_eq!(err_pin_type.code, "InvalidPinTypeForLaunch");
+
+    // Command Center launch capacity cap is 500 m3 (3,000 * 0.19 m3 = 570 m3 > 500 m3)
+    let err_cc_cap = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(cc_pin_id),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(3_000))]),
+        ],
+    )
+    .await
+    .expect_err("Exceeding Command Center 500 m3 cap must fail");
+    assert_eq!(err_cc_cap.code, "CommandCenterLaunchCapacityExceeded");
+
+    // Empty commodities dict rejected
+    let err_empty = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserLaunchCommodities",
+        &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(cc_pin_id), PyRep::Dict(Vec::new())],
+    )
+    .await
+    .expect_err("Empty dict must fail");
+    assert_eq!(err_empty.code, "InvalidCommodity");
+
+    // Insufficient stock in pin (Launchpad only has 500, ask for 600)
+    let err_insuf = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(launch_pin_id),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(600))]),
+        ],
+    )
+    .await
+    .expect_err("Insufficient commodities in pin must fail");
+    assert_eq!(err_insuf.code, "InsufficientCommoditiesForRouting");
+
+    // 2. Successful V24 bound multi-commodity launch while docked -> scalar Blue FileTime timestamp
+    sess.solar_system_id = Some(JITA_SOLAR_SYSTEM_ID);
+    sess.station_id = Some(60_003_760);
+    sess.structure_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = JITA_SOLAR_SYSTEM_ID;
+            ch.station_id = Some(60_003_760);
+            ch.structure_id = None;
+        }
+    });
+    assert!(sess.station_id.is_some(), "Command Center launch must succeed while docked");
+    let expected_ft = ctx.now_blueos_filetime_ticks();
+    let launch_rep = ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: false,
+    })
+    .with_mode(ContractValidationMode::Strict)
+    .call_ok(
+        "planetMgr",
+        Some(bound_planet_id),
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(cc_pin_id),
+            PyRep::Dict(vec![
+                (PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(200)),
+                (PyRep::Integer(2268), PyRep::Integer(100)),
+            ]),
+        ],
+        &HashMap::new(),
+    )
+    .await;
+    assert_eq!(
+        launch_rep.as_i64(),
+        Some(expected_ft),
+        "V24 UserLaunchCommodities must return scalar Blue FileTime lastLaunchTime"
+    );
+
+    // Customs Office / Launchpad transfers must fail while docked (NotInSpace)
+    let err_docked_poco = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(launch_pin_id),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(50))]),
+        ],
+    )
+    .await
+    .expect_err("Docked Launchpad/CustomsOffice launch must fail with NotInSpace");
+    assert_eq!(err_docked_poco.code, "NotInSpace");
+
+    // V24 dict calls cannot bypass docked Launchpad NotInSpace check by appending "Hangar"/"Storage"/"CustomsOffice"/"Skyhook"
+    for dest_override in ["Hangar", "Storage", "CustomsOffice", "Skyhook"] {
+        let err_override = rpc(
+            &ctx,
+            &mut sess,
+            "planetMgr",
+            "UserLaunchCommodities",
+            &[
+                PyRep::Integer(JITA_PLANET_ID),
+                PyRep::Integer(launch_pin_id),
+                PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(50))]),
+                PyRep::String(dest_override.into()),
+            ],
+        )
+        .await
+        .expect_err(&format!(
+            "Docked V24 Launchpad call with '{dest_override}' override must fail with NotInSpace"
+        ));
+        assert_eq!(err_override.code, "NotInSpace", "{dest_override}");
+    }
+
+    // Immediate retry from same pin must fail with 60s LaunchOnCooldown
+    let err_cd = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(cc_pin_id),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(50))]),
+        ],
+    )
+    .await
+    .expect_err("Immediate repeat launch from same pin must hit 60s cooldown");
+    assert_eq!(err_cd.code, "LaunchOnCooldown");
+
+    // Inspect created multi-stack launch canister (Blue FileTime launchTime + aggregated quantity + commodities dict) & verify pin deduction
+    let launches = rpc(&ctx, &mut sess, "planetMgr", "GetMyLaunchesDetails", &[PyRep::Integer(JITA_PLANET_ID)])
+        .await
+        .expect("GetMyLaunchesDetails");
+    let PyRep::List(launch_rows) = launches else {
+        panic!("expected launches list");
+    };
+    assert_eq!(launch_rows.len(), 1);
+    let launch_id = launch_rows[0]
+        .dict_get("launchID")
+        .and_then(|v| v.as_i64())
+        .expect("launchID");
+    assert_eq!(launch_rows[0].dict_get("quantity").and_then(|v| v.as_i64()), Some(300));
+    assert_eq!(launch_rows[0].dict_get("launchTime").and_then(|v| v.as_i64()), Some(expected_ft));
+    let PyRep::Dict(comms_entries) = launch_rows[0]
+        .dict_get("commodities")
+        .expect("commodities dict in launch details")
+    else {
+        panic!("expected Dict for commodities");
+    };
+    assert_eq!(comms_entries.len(), 2);
+    assert!(comms_entries.contains(&(PyRep::Integer(2268), PyRep::Integer(100))));
+    assert!(comms_entries.contains(&(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(200))));
+
+    ctx.db.with_snapshot(|snap| {
+        let net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+        let cc = net.pins.iter().find(|p| p.pin_id == cc_pin_id).expect("cc");
+        assert_eq!(cc.contents.get(&WATER_P1_TYPE_ID).copied(), Some(2_600));
+        assert_eq!(cc.contents.get(&2268).copied(), Some(150));
+        let container = snap.items.get(&launch_id).expect("launch container item");
+        assert_eq!(container.location_id, i64::from(JITA_SOLAR_SYSTEM_ID));
+    });
+
+    // Advance 61s and launch from a remote solar system (Command Center works anywhere in the universe)
+    ctx.advance_secs(61);
+    sess.solar_system_id = Some(30_000_001);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = 30_000_001;
+        }
+    });
+    let err_remote_lp = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(launch_pin_id),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(50))]),
+        ],
+    )
+    .await
+    .expect_err("Remote Launchpad/CustomsOffice launch must fail");
+    assert_eq!(err_remote_lp.code, "ColonyNotInCurrentSystem");
+
+    let expected_ft_2 = ctx.now_blueos_filetime_ticks();
+    let launch_rep_2 = ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: false,
+    })
+    .with_mode(ContractValidationMode::Strict)
+    .call_ok(
+        "planetMgr",
+        Some(bound_planet_id),
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(cc_pin_id),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(100))]),
+        ],
+        &HashMap::new(),
+    )
+    .await;
+    assert_eq!(launch_rep_2.as_i64(), Some(expected_ft_2));
+
+    // Undocked same-system multi-commodity ImportToColony consumes and credits all entries 1:1
+    sess.solar_system_id = Some(JITA_SOLAR_SYSTEM_ID);
+    sess.station_id = None;
+    sess.structure_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = JITA_SOLAR_SYSTEM_ID;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    let imp_multi = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(launch_pin_id),
+            PyRep::Dict(vec![
+                (PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(40)),
+                (PyRep::Integer(2268), PyRep::Integer(60)),
+            ]),
+            PyRep::String("ImportToColony".into()),
+        ],
+    )
+    .await
+    .expect("multi-commodity ImportToColony succeeds");
+    assert_eq!(get_i64(&imp_multi, "routedQuantity"), Some(100));
+    ctx.db.with_snapshot(|snap| {
+        let net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+        let lp = net.pins.iter().find(|p| p.pin_id == launch_pin_id).expect("lp");
+        assert_eq!(lp.contents.get(&WATER_P1_TYPE_ID).copied(), Some(540));
+        assert_eq!(lp.contents.get(&2268).copied(), Some(60));
+    });
+
+    // Strict V24 contract sweep across touched PI RPCs:
+    // GetPlanetResourceInfo, GetPlanetsForChar, undocked Launchpad UserLaunchCommodities + OnPILaunchesChange + ball,
+    // GetMyLaunchesDetails, DeleteLaunch
+    let res_info = ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: true,
+    })
+    .with_mode(ContractValidationMode::Strict)
+    .call_ok(
+        "planetMgr",
+        None,
+        "GetPlanetResourceInfo",
+        &[PyRep::Integer(JITA_PLANET_ID)],
+        &HashMap::new(),
+    )
+    .await;
+    assert!(matches!(res_info, PyRep::Dict(ref d) if !d.is_empty()));
+
+    let planets = ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: true,
+    })
+    .with_mode(ContractValidationMode::Strict)
+    .call_ok("planetMgr", None, "GetPlanetsForChar", &[], &HashMap::new())
+    .await;
+    let PyRep::List(ref p_list) = planets else {
+        panic!("GetPlanetsForChar must return List");
+    };
+    assert!(
+        p_list
+            .iter()
+            .any(|p| p.dict_get("planetID").and_then(PyRep::as_i64) == Some(JITA_PLANET_ID))
+    );
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.advance_secs(61);
+    let expected_lp_ft = ctx.now_blueos_filetime_ticks();
+    let lp_launch_rep = ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: true,
+    })
+    .with_mode(ContractValidationMode::Strict)
+    .call_ok(
+        "planetMgr",
+        Some(bound_planet_id),
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(launch_pin_id),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(40))]),
+        ],
+        &HashMap::new(),
+    )
+    .await;
+    assert_eq!(lp_launch_rep.as_i64(), Some(expected_lp_ft));
+    assert!(
+        ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "OnPILaunchesChange"),
+        "Undocked V24 Launchpad launch must emit OnPILaunchesChange"
+    );
+
+    let strict_launches = ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: true,
+    })
+    .with_mode(ContractValidationMode::Strict)
+    .call_ok("planetMgr", None, "GetMyLaunchesDetails", &[], &HashMap::new())
+    .await;
+    let PyRep::List(ref strict_rows) = strict_launches else {
+        panic!("GetMyLaunchesDetails must return List");
+    };
+    let lp_launch_id = strict_rows
+        .iter()
+        .filter_map(|r| r.dict_get("launchID").and_then(PyRep::as_i64))
+        .max()
+        .expect("newly spawned Launchpad canister");
+    let sys_handle = ctx.systems.get_or_spawn(JITA_SOLAR_SYSTEM_ID);
+    assert!(
+        sys_handle
+            .get_ball_snapshot(lp_launch_id)
+            .await
+            .expect("ball query")
+            .is_some(),
+        "V24 Launchpad launch canister must have a live ballpark ball"
+    );
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: true,
+    })
+    .with_mode(ContractValidationMode::Strict)
+    .call_ok(
+        "planetMgr",
+        None,
+        "DeleteLaunch",
+        &[PyRep::Integer(lp_launch_id)],
+        &HashMap::new(),
+    )
+    .await;
+    assert!(
+        ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "OnPILaunchesChange"),
+        "DeleteLaunch must emit OnPILaunchesChange"
+    );
+    assert!(
+        sys_handle
+            .get_ball_snapshot(lp_launch_id)
+            .await
+            .expect("ball query")
+            .is_none(),
+        "DeleteLaunch must remove canister ball from ballpark"
+    );
+}
+
+#[tokio::test]
+async fn test_command_center_rocket_launch_bypasses_hostile_poco_acl_and_charges_flat_15pct_npc_fee() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let char_id = 90_000_001;
+    let hostile_corp_id = 98_600_777_i64;
+    let poco_id = 1_090_600_777_i64;
+    let mut sess = setup_pilot(&ctx, 1106, "demo", "demo-secret", char_id).await;
+    let ship_id = sess.ship_id.expect("Active ship");
+    ctx.db.with_mut_snapshot(|snap| {
+        grant_pi_skills(snap, char_id);
+        snap.skills.entry(char_id).or_default().insert(
+            33467,
+            TrainedSkillRecord {
+                type_id: 33467, // Customs Code Expertise V must not discount CC rocket flat 15% NPC fee
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        seed_cargo_item(snap, CC_PIN_TYPE_ID, char_id, ship_id, 1);
+
+        let mut h_corp = eve_db::CorporationRecord::default();
+        h_corp.corporation_id = hostile_corp_id;
+        h_corp.name = "Hostile POCO Corp".into();
+        h_corp.ticker = "HPOC".into();
+        h_corp.ceo_id = 99_999;
+        h_corp.set_division_balance(1, IskCents(0));
+        h_corp.ensure_wallet_divisions();
+        snap.corporations.insert(hostile_corp_id, h_corp);
+    });
+    sess.station_id = None;
+    sess.structure_id = None;
+
+    let col_dep = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2101), PyRep::Integer(CC_PIN_TYPE_ID as i64), PyRep::Real(0.10), PyRep::Real(0.10)]),
+                PyRep::Tuple(vec![PyRep::Integer(9), PyRep::Integer(2101), PyRep::Integer(3)]),
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2102), PyRep::Integer(LAUNCHPAD_PIN_TYPE_ID as i64), PyRep::Real(0.11), PyRep::Real(0.11)]),
+            ]),
+        ],
+    )
+    .await
+    .expect("Deploy colony");
+
+    let PyRep::List(pins) = col_dep.dict_get("pins").expect("pins list") else {
+        panic!("expected pins list");
+    };
+    let cc_pin_id = pins
+        .iter()
+        .find(|p| get_i64(p, "typeID") == Some(CC_PIN_TYPE_ID as i64))
+        .and_then(|p| get_i64(p, "pinID"))
+        .expect("cc pin");
+    let launchpad_pin_id = pins
+        .iter()
+        .find(|p| get_i64(p, "typeID") == Some(LAUNCHPAD_PIN_TYPE_ID as i64))
+        .and_then(|p| get_i64(p, "pinID"))
+        .expect("launchpad pin");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_isk(1_000_000);
+        }
+        let mut net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+        if let Some(cc) = net.pins.iter_mut().find(|p| p.pin_id == cc_pin_id) {
+            cc.contents.insert(WATER_P1_TYPE_ID, 500);
+        }
+        if let Some(lp) = net.pins.iter_mut().find(|p| p.pin_id == launchpad_pin_id) {
+            lp.contents.insert(WATER_P1_TYPE_ID, 500);
+        }
+        eve_server::services::industry_pi::save_pi_network(snap, char_id, JITA_PLANET_ID, &net);
+
+        snap.structures.insert(
+            poco_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: poco_id,
+                type_id: 2233,
+                owner_corp_id: hostile_corp_id,
+                solar_system_id: JITA_SOLAR_SYSTEM_ID,
+                name: format!("Orbital:{JITA_PLANET_ID}"),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                ..Default::default()
+            },
+        );
+        eve_server::services::industry_pi::pi_helpers::save_orbital_settings(
+            snap,
+            JITA_PLANET_ID,
+            &eve_server::services::industry_pi::pi_helpers::OrbitalCustomsSettings {
+                planet_id: JITA_PLANET_ID,
+                orbital_type_id: 2233,
+                owner_corp_id: hostile_corp_id,
+                allow_alliance: false,
+                allow_standings: false,
+                minimum_standing: 10.0,
+                standing_neutral_tax_rate: 0.25,
+                ..Default::default()
+            },
+        );
+    });
+
+    let bound_planet_id = ctx
+        .bind_object(&sess, "planetMgr", JITA_PLANET_ID)
+        .expect("bind planetMgr");
+
+    // 1. Launchpad export through the hostile-ACL POCO must be denied.
+    let err_lp = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(launchpad_pin_id),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(100))]),
+        ],
+    )
+    .await
+    .expect_err("Launchpad launch through hostile POCO must be denied");
+    assert_eq!(err_lp.code, "CustomsOfficeAccessDenied");
+
+    // 2. Command Center rocket launch bypasses hostile POCO ACL, charges flat 15% (100 * 400 * 0.15 = 6,000 ISK),
+    //    and credits 0 ISK to the POCO owner corp wallet.
+    let expected_ft_1 = ctx.now_blueos_filetime_ticks();
+    let cc_rep_1 = ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: false,
+    })
+    .with_mode(ContractValidationMode::Strict)
+    .call_ok(
+        "planetMgr",
+        Some(bound_planet_id),
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(cc_pin_id),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(100))]),
+        ],
+        &HashMap::new(),
+    )
+    .await;
+    assert_eq!(cc_rep_1.as_i64(), Some(expected_ft_1));
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&char_id].balance, IskCents::from_isk(994_000));
+        assert_eq!(
+            snap.corporations[&hostile_corp_id].master_wallet_balance(),
+            IskCents(0),
+            "Command Center launch must never credit POCO owner corp wallet"
+        );
+        assert!(
+            snap.wallet_journal.iter().any(|j| {
+                j.character_id == char_id
+                    && j.entry_type == "CustomOfficeTax"
+                    && j.amount == IskCents::from_isk(6_000)
+                    && j.reason.contains("Command Center export tax")
+            }),
+            "Command Center launch must write 6,000 ISK CustomOfficeTax journal entry"
+        );
+    });
+
+    // 3. Command Center rocket launch also works identically with no POCO on the planet at all.
+    ctx.advance_secs(61);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.remove(&poco_id);
+        snap.owner_notes.remove(&eve_server::services::industry_pi::orbital_settings_note_id(JITA_PLANET_ID));
+        snap.corp_customs_offices.remove(&hostile_corp_id);
+    });
+    let expected_ft_2 = ctx.now_blueos_filetime_ticks();
+    let cc_rep_2 = ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: false,
+    })
+    .with_mode(ContractValidationMode::Strict)
+    .call_ok(
+        "planetMgr",
+        Some(bound_planet_id),
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(cc_pin_id),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(100))]),
+        ],
+        &HashMap::new(),
+    )
+    .await;
+    assert_eq!(cc_rep_2.as_i64(), Some(expected_ft_2));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&char_id].balance, IskCents::from_isk(988_000));
+    });
 }

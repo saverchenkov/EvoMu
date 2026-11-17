@@ -143,10 +143,10 @@ async fn test_planet_mgr_colony_queries_and_network_updates() {
     let res_info = rpc(&ctx, &mut sess, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(JITA_PLANET_ID)])
         .await
         .expect("GetPlanetResourceInfo");
-    let PyRep::List(res_list) = res_info.dict_get("resources").expect("resources list") else {
-        panic!("Expected resources list");
+    let PyRep::Dict(res_entries) = res_info else {
+        panic!("Expected PyRep::Dict from GetPlanetResourceInfo");
     };
-    let first_p0_tid = get_i64(&res_list[0], "resourceTypeID").expect("first P0 typeID") as TypeId;
+    let first_p0_tid = res_entries[0].0.as_i64().expect("first P0 typeID") as TypeId;
 
     let p1_schem_id = ctx
         .sde
@@ -310,15 +310,16 @@ async fn test_planet_mgr_resource_info_and_planet_queries() {
         }
     });
 
-    // Determine a valid resource on the planet
+    // Determine a valid resource on the planet (V24 returns Dict {resourceTypeID: quality})
     let res_info_initial = rpc(&ctx, &mut sess, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(JITA_PLANET_ID)])
         .await
         .expect("GetPlanetResourceInfo");
-    let PyRep::List(resources_initial) = res_info_initial.dict_get("resources").expect("resources list") else {
-        panic!("expected resources list");
+    let PyRep::Dict(resources_initial) = res_info_initial else {
+        panic!("expected PyRep::Dict from GetPlanetResourceInfo, got {res_info_initial:?}");
     };
     assert!(!resources_initial.is_empty());
-    let valid_p0_tid = get_i64(&resources_initial[0], "resourceTypeID").expect("resourceTypeID");
+    let valid_p0_tid = resources_initial[0].0.as_i64().expect("resourceTypeID");
+    assert!(resources_initial[0].1.as_f64().is_some_and(|q| q > 0.0 && q <= 1.0));
 
     // 1. GetResourceData requires Remote Sensing (13279) >= 1
     let unlearned_err = rpc(&ctx, &mut sess, "planetMgr", "GetResourceData", &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(valid_p0_tid)])
@@ -331,16 +332,19 @@ async fn test_planet_mgr_resource_info_and_planet_queries() {
         grant_pi_skills(snap, char_id);
     });
 
-    // 2. GetPlanetResourceInfo: band count = 2 + 3 + 2*2 = 9
+    // 2. GetPlanetResourceInfo returns {resourceTypeID: quality} dict
     let res_info = rpc(&ctx, &mut sess, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(JITA_PLANET_ID)])
         .await
         .expect("GetPlanetResourceInfo");
-    assert_eq!(get_i64(&res_info, "planetID"), Some(JITA_PLANET_ID));
-    assert_eq!(get_i64(&res_info, "solarSystemID"), Some(JITA_SOLAR_SYSTEM_ID as i64));
-    assert_eq!(get_i64(&res_info, "remoteSensingLevel"), Some(4));
-    assert_eq!(get_i64(&res_info, "planetologyLevel"), Some(3));
-    assert_eq!(get_i64(&res_info, "advancedPlanetologyLevel"), Some(2));
-    assert_eq!(get_i64(&res_info, "numBands"), Some(9));
+    let PyRep::Dict(res_dict) = res_info else {
+        panic!("expected PyRep::Dict from GetPlanetResourceInfo, got {res_info:?}");
+    };
+    assert_eq!(res_dict.len(), resources_initial.len());
+    for (k, v) in &res_dict {
+        assert!(k.as_i64().unwrap_or(0) > 0);
+        let q = v.as_f64().unwrap_or(0.0);
+        assert!(q > 0.0 && q <= 1.0, "unexpected quality {q}");
+    }
 
     // 3. GetResourceData: test tuple arguments, KeyVal arguments, and Dict arguments
     let data_tuple = rpc(&ctx, &mut sess, "planetMgr", "GetResourceData", &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(valid_p0_tid)])
@@ -420,7 +424,18 @@ async fn test_planet_mgr_resource_info_and_planet_queries() {
     let PyRep::Rowset { columns, rows: planet_rows } = char_planets else {
         panic!("expected PyRep::Rowset from GetPlanetsForChar");
     };
-    assert_eq!(columns, vec!["planetID", "solarSystemID", "commandCenterLevel", "pinsCount"]);
+    assert_eq!(
+        columns,
+        vec![
+            "planetID",
+            "solarSystemID",
+            "planetTypeID",
+            "celestialIndex",
+            "numberOfPins",
+            "commandCenterLevel",
+            "colonyData",
+        ]
+    );
     assert!(!planet_rows.is_empty());
     let jita_col = planet_rows
         .iter()
@@ -428,7 +443,13 @@ async fn test_planet_mgr_resource_info_and_planet_queries() {
         .expect("Jita colony row in GetPlanetsForChar");
     assert_eq!(jita_col[0].as_i64(), Some(JITA_PLANET_ID));
     assert_eq!(jita_col[1].as_i64(), Some(JITA_SOLAR_SYSTEM_ID as i64));
-    assert_eq!(jita_col[3].as_i64(), Some(2)); // 2 pins
+    assert!(jita_col[2].as_i64().unwrap_or(0) > 0);
+    assert!(jita_col[3].as_i64().unwrap_or(0) >= 1);
+    assert_eq!(jita_col[4].as_i64(), Some(2)); // numberOfPins = 2
+    let PyRep::List(col_pins) = jita_col[6].dict_get("pins").expect("colonyData.pins") else {
+        panic!("expected colonyData.pins list");
+    };
+    assert_eq!(col_pins.len(), 2);
 
     // 7. GetProgramResultInfo
     let prog_info = rpc(

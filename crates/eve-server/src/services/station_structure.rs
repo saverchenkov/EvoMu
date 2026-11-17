@@ -1550,6 +1550,13 @@ pub async fn handle(
                 );
                 return Some(res);
             }
+            if service == "posMgr" && method == "UnanchorOrbital" {
+                return Some(
+                    crate::services::station_structure_handlers::handle_unanchor_orbital(
+                        ctx, session, args,
+                    ),
+                );
+            }
             if service == "structure" && method == "JettisonStructureFuel" {
                 return Some(structure_lifecycle_rpc::handle_jettison_structure_fuel(ctx, session, args).await);
             }

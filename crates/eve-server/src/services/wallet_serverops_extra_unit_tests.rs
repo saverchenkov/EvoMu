@@ -283,7 +283,13 @@ async fn unanchor_orbital_distance_system_ownership_and_ship_cargo_branches() {
     let outsider_id = 90_000_003_i64;
     let corp_id = 98_000_001_i64;
     let orbital_id = 1_000_000_650_i64;
+    let hangar_gantry_id = 1_000_000_651_i64;
+    let locked_gantry_id = 1_000_000_652_i64;
+    let contract_gantry_id = 1_000_000_653_i64;
+    let bp_orbital_id = 1_000_000_654_i64;
     let ship_id = 100_000_001_i64;
+    let small_ship_id = 100_000_002_i64;
+    let no_ball_ship_id = 100_000_003_i64;
     let sys_id = 30_000_142_u32;
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -307,7 +313,33 @@ async fn unanchor_orbital_distance_system_ownership_and_ship_cargo_branches() {
             ship_id,
             InventoryItemRecord {
                 item_id: ship_id,
+                type_id: 20185,
+                owner_id: ceo_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::Unlocked,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            small_ship_id,
+            InventoryItemRecord {
+                item_id: small_ship_id,
                 type_id: 587,
+                owner_id: ceo_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::Unlocked,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            no_ball_ship_id,
+            InventoryItemRecord {
+                item_id: no_ball_ship_id,
+                type_id: 20185,
                 owner_id: ceo_id,
                 location_id: i64::from(sys_id),
                 flag: InventoryFlag::Unlocked,
@@ -320,9 +352,9 @@ async fn unanchor_orbital_distance_system_ownership_and_ship_cargo_branches() {
             orbital_id,
             InventoryItemRecord {
                 item_id: orbital_id,
-                type_id: 2233,
+                type_id: 3962,
                 owner_id: corp_id,
-                location_id: i64::from(sys_id),
+                location_id: 30_002_187, // Amarr initially to test NotInSameSystem
                 flag: InventoryFlag::Unlocked,
                 quantity: 1,
                 singleton: true,
@@ -333,12 +365,103 @@ async fn unanchor_orbital_distance_system_ownership_and_ship_cargo_branches() {
             orbital_id,
             UpwellStructureRecord {
                 structure_id: orbital_id,
-                type_id: 2233,
+                type_id: 3962,
                 owner_corp_id: corp_id,
                 solar_system_id: 30_002_187, // Amarr initially to test NotInSameSystem
-                name: "Customs Office".into(),
+                name: "Customs Office Gantry".into(),
                 position: [0.0, 0.0, 0.0],
                 state: "Online".into(),
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            hangar_gantry_id,
+            InventoryItemRecord {
+                item_id: hangar_gantry_id,
+                type_id: 3962,
+                owner_id: ceo_id,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            locked_gantry_id,
+            InventoryItemRecord {
+                item_id: locked_gantry_id,
+                type_id: 3962,
+                owner_id: ceo_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::Locked,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            locked_gantry_id,
+            UpwellStructureRecord {
+                structure_id: locked_gantry_id,
+                type_id: 3962,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Locked Gantry".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "Online".into(),
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            contract_gantry_id,
+            InventoryItemRecord {
+                item_id: contract_gantry_id,
+                type_id: 3962,
+                owner_id: ceo_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::Unlocked,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            contract_gantry_id,
+            UpwellStructureRecord {
+                structure_id: contract_gantry_id,
+                type_id: 3962,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Contract Gantry".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "Online".into(),
+                ..Default::default()
+            },
+        );
+        snap.contracts.insert(
+            888_001,
+            eve_db::ContractRecord {
+                contract_id: 888_001,
+                issuer_id: ceo_id,
+                contract_type: "ItemExchange".into(),
+                status: "Outstanding".into(),
+                start_station_id: 60_003_760,
+                end_station_id: 60_003_760,
+                item_ids: vec![contract_gantry_id],
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            bp_orbital_id,
+            InventoryItemRecord {
+                item_id: bp_orbital_id,
+                type_id: 3963,
+                owner_id: ceo_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::Unlocked,
+                quantity: 1,
+                singleton: true,
                 ..Default::default()
             },
         );
@@ -347,7 +470,12 @@ async fn unanchor_orbital_distance_system_ownership_and_ship_cargo_branches() {
     let mut ceo_sess = make_session(ceo_id, corp_id);
     ceo_sess.ship_id = Some(ship_id);
 
-    // 1. Missing arg -> InvalidOrbitalID; no solar_system_id -> NotInSpace; unknown id -> OrbitalNotFound
+    // Docked session -> NotInSpace; missing arg -> InvalidOrbitalID; no solar_system_id -> NotInSpace; unknown id -> OrbitalNotFound
+    assert_eq!(
+        call_ws(&ctx, &mut ceo_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_id)]).unwrap_err().code,
+        "NotInSpace"
+    );
+    ceo_sess.station_id = None;
     assert_eq!(call_ws(&ctx, &mut ceo_sess, "posMgr", "UnanchorOrbital", &[]).unwrap_err().code, "InvalidOrbitalID");
     ceo_sess.solar_system_id = None;
     assert_eq!(
@@ -369,13 +497,28 @@ async fn unanchor_orbital_distance_system_ownership_and_ship_cargo_branches() {
     // Move structure to sys_id and spawn ship at 10,000 m (> 5,000 m) -> OrbitalOutOfRange
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.get_mut(&orbital_id).unwrap().solar_system_id = sys_id;
+        snap.items.get_mut(&orbital_id).unwrap().location_id = i64::from(sys_id);
     });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_handle
         .spawn_ball(Ball {
             id: ship_id,
-            type_id: 587,
+            type_id: 20185,
             position: DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: small_ship_id,
+            type_id: 587,
+            position: DVec3::new(1_000.0, 0.0, 0.0),
             velocity: DVec3::ZERO,
             max_velocity: 300.0,
             inertia: 1.0,
@@ -393,22 +536,75 @@ async fn unanchor_orbital_distance_system_ownership_and_ship_cargo_branches() {
     // Move ship within 2,000 m; test NotOrbitalOwner and RoleNotAuthorized before CEO unanchors into ship Cargo
     let _ = sys_handle.try_set_ball_position(ship_id, DVec3::new(2_000.0, 0.0, 0.0));
     let mut outsider_sess = make_session(outsider_id, 98_000_099);
+    outsider_sess.station_id = None;
     assert_eq!(
         call_ws(&ctx, &mut outsider_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_id)]).unwrap_err().code,
         "NotOrbitalOwner"
     );
     let mut line_sess = make_session(line_id, corp_id);
+    line_sess.station_id = None;
     assert_eq!(
         call_ws(&ctx, &mut line_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_id)]).unwrap_err().code,
         "RoleNotAuthorized"
     );
 
+    assert_eq!(
+        call_ws(&ctx, &mut ceo_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(bp_orbital_id)]).unwrap_err().code,
+        "InvalidOrbitalType"
+    );
+    assert_eq!(
+        call_ws(&ctx, &mut ceo_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(hangar_gantry_id)]).unwrap_err().code,
+        "OrbitalNotAnchored"
+    );
+    assert_eq!(
+        call_ws(&ctx, &mut ceo_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(locked_gantry_id)]).unwrap_err().code,
+        "ItemLocked"
+    );
+    assert_eq!(
+        call_ws(&ctx, &mut ceo_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(contract_gantry_id)]).unwrap_err().code,
+        "ItemLocked"
+    );
+    ceo_sess.ship_id = None;
+    assert_eq!(
+        call_ws(&ctx, &mut ceo_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_id)]).unwrap_err().code,
+        "NoActiveShip"
+    );
+    ceo_sess.ship_id = Some(no_ball_ship_id);
+    assert_eq!(
+        call_ws(&ctx, &mut ceo_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_id)]).unwrap_err().code,
+        "ShipNotInSpace"
+    );
+    ceo_sess.ship_id = Some(small_ship_id);
+    assert_eq!(
+        call_ws(&ctx, &mut ceo_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_id)]).unwrap_err().code,
+        "NotEnoughCargoSpace"
+    );
+    ceo_sess.ship_id = Some(ship_id);
+    let ceo_uid = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&ceo_id).map(|c| c.user_id))
+        .unwrap_or(1);
+    let _ = ctx
+        .db
+        .acquire_online_lock(ceo_uid, 415, Some(ceo_id), false, ctx.now_unix());
+    let _ = ctx.drain_notifications_for_char(ceo_id);
+
     let unanchored = call_ws(&ctx, &mut ceo_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_id)]).unwrap();
     assert_eq!(unanchored.dict_get("state").and_then(PyRep::as_str), Some("Unanchored"));
+    assert_eq!(unanchored.dict_get("ownerID").and_then(PyRep::as_i64), Some(ceo_id));
     ctx.db.with_snapshot(|snap| {
+        assert!(!snap.structures.contains_key(&orbital_id));
         assert_eq!(snap.items[&orbital_id].location_id, ship_id);
         assert_eq!(snap.items[&orbital_id].flag, InventoryFlag::Cargo);
+        assert_eq!(snap.items[&orbital_id].owner_id, ceo_id);
+        assert!(!snap.items[&orbital_id].singleton);
     });
+    assert!(
+        ctx.drain_notifications_for_char(ceo_id)
+            .iter()
+            .any(|n| n.event == "OnItemChange"),
+        "UnanchorOrbital must emit OnItemChange to the unanchoring pilot"
+    );
 }
 
 #[test]

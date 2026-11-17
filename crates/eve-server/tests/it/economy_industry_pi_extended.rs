@@ -715,10 +715,10 @@ pub(crate) mod pi_command_center_budget_launchpads {
             .dispatch_rpc(&mut sess, "planetMgr", None, "GetPlanetResourceInfo", &[PyRep::Integer(JITA_PLANET_ID)], &kw, None)
             .await
             .expect("Gas planet resources");
-        let PyRep::List(gas_list) = gas_res.dict_get("resources").unwrap() else { panic!() };
-        let gas_tids: Vec<TypeId> = gas_list
+        let PyRep::Dict(gas_entries) = gas_res else { panic!() };
+        let gas_tids: Vec<TypeId> = gas_entries
             .iter()
-            .filter_map(|r| r.dict_get("resourceTypeID").and_then(|v| v.as_i64()))
+            .filter_map(|(k, _)| k.as_i64())
             .map(|v| v as TypeId)
             .collect();
         assert!(gas_tids.contains(&2310));
@@ -810,7 +810,7 @@ pub(crate) mod pi_command_center_budget_launchpads {
             .expect_err("Extracting non-native P0 resource must fail");
         assert_eq!(non_native_err.code, "ClientSchematicOverrideForbidden");
 
-        // 3. Command Center 500 m3 one-way orbital launch (at 1.5x higher tax) vs Spaceport Launchpad 10,000 m3 bidirectional transfer
+        // 3. Command Center 500 m3 one-way orbital launch (flat 15% NPC export fee, independent of POCO rates) vs Spaceport Launchpad 10,000 m3 bidirectional transfer
         ctx.db.with_mut_snapshot(|snap| {
             seed_item(snap, 3645, char_id, ship_id, InventoryFlag::Cargo, 100, false, false, None);
             let mut net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 0);
@@ -874,7 +874,10 @@ pub(crate) mod pi_command_center_budget_launchpads {
             .await
             .expect("Valid Launchpad export");
         let lp_export_tax = lp_export.dict_get("exportTaxISK").and_then(|v| v.as_f64()).unwrap();
-        assert!((cc_tax - lp_export_tax * 1.5).abs() < 1e-4);
+        assert!(
+            (cc_tax - 6_000.0).abs() < 1e-4,
+            "Command Center launch must charge flat 15% NPC export fee (6,000 ISK for 100 Water)"
+        );
 
         let lp_import = ctx
             .dispatch_rpc(

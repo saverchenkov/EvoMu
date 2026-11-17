@@ -333,6 +333,47 @@ fn seed_comprehensive_world(ctx: &ServerContext) {
                 last_extracted_unix: now.saturating_sub(600),
             },
         );
+        snap.next_entity_id += 1;
+        let pi_launch_id = snap.next_entity_id;
+        let pi_launch_pos = [1.5e10, 2.5e8, -1.5e8];
+        snap.items.insert(
+            pi_launch_id,
+            InventoryItemRecord {
+                item_id: pi_launch_id,
+                type_id: 2263,
+                owner_id: CHAR_ID,
+                location_id: i64::from(SYSTEM_ID),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(pi_launch_id, pi_launch_pos);
+        let pi_meta = snap
+            .sp6_lifecycle
+            .space_object_meta
+            .entry(pi_launch_id)
+            .or_default();
+        pi_meta.created_unix = Some(now.saturating_sub(60));
+        pi_meta.planet_id = Some(PLANET_ID);
+        snap.next_entity_id += 1;
+        let pi_launch_comm_id = snap.next_entity_id;
+        snap.items.insert(
+            pi_launch_comm_id,
+            InventoryItemRecord {
+                item_id: pi_launch_comm_id,
+                type_id: 2268,
+                owner_id: CHAR_ID,
+                location_id: pi_launch_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
         snap.active_missions.insert(
             (CHAR_ID, 1),
             ActiveMissionRecord {

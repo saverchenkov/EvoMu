@@ -349,7 +349,8 @@ pub fn dispatch_universe_and_nav(
                             snap.structures
                                 .values()
                                 .filter(|st| {
-                                    character_has_structure_acl_access(snap, caller_char_id, st)
+                                    crate::services::station_structure::structure_lifecycle::is_in_space_structure_state(&st.state)
+                                        && character_has_structure_acl_access(snap, caller_char_id, st)
                                         && crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access(
                                             ctx,
                                             snap,
@@ -798,7 +799,7 @@ pub fn dispatch_universe_and_nav(
                     .structures
                     .values()
                     .filter(|st| {
-                        st.state != "Destroyed"
+                        crate::services::station_structure::structure_lifecycle::is_in_space_structure_state(&st.state)
                             && crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access(
                                 ctx,
                                 snap,
@@ -821,7 +822,9 @@ pub fn dispatch_universe_and_nav(
             };
             let caller_char_id = claims.map(|c| c.character_id).unwrap_or(0);
             ctx.db.with_snapshot(|snap| {
-                let Some(st) = snap.structures.get(&sid) else {
+                let Some(st) = snap.structures.get(&sid).filter(|st| {
+                    crate::services::station_structure::structure_lifecycle::is_in_space_structure_state(&st.state)
+                }) else {
                     return RouteExecutionResult::error(
                         404,
                         format!("Structure {sid} not found"),
@@ -1155,7 +1158,11 @@ pub fn dispatch_universe_and_nav(
                 .ok()
                 .is_some_and(|sid| ctx.sde.solar_systems.contains_key(&sid))
                 || ctx.sde.stations.contains_key(&destination_id)
-                || ctx.db.with_snapshot(|snap| snap.structures.contains_key(&destination_id));
+                || ctx.db.with_snapshot(|snap| {
+                    snap.structures.get(&destination_id).is_some_and(|st| {
+                        crate::services::station_structure::structure_lifecycle::is_in_space_structure_state(&st.state)
+                    })
+                });
             if !is_known_destination {
                 return RouteExecutionResult::error(404, format!("Destination {destination_id} is not a known solar system, station, or structure"));
             }

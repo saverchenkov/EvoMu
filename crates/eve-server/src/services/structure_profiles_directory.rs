@@ -71,8 +71,8 @@ pub fn handle_get_my_dockable_structures(
             .values()
             .filter(|s| {
                 s.solar_system_id == sys_id
-                    && s.state != life::STATE_DESTROYED
-                    && !matches!(s.state.as_str(), "Unanchored" | "AnchorVulnerable" | "Anchoring")
+                    && life::is_in_space_structure_state(&s.state)
+                    && !matches!(s.state.as_str(), "AnchorVulnerable" | "Anchoring")
                     && !matches!(s.type_id, 35840 | 35841 | 37534 | 81826)
                     && evaluate_character_structure_access_in_snap(snap, s.structure_id, char_id)
             })
@@ -104,8 +104,8 @@ fn handle_check_my_docking_access(
             .into_iter()
             .filter(|&sid| {
                 snap.structures.get(&sid).is_some_and(|s| {
-                    s.state != life::STATE_DESTROYED
-                        && !matches!(s.state.as_str(), "Unanchored" | "AnchorVulnerable" | "Anchoring")
+                    life::is_in_space_structure_state(&s.state)
+                        && !matches!(s.state.as_str(), "AnchorVulnerable" | "Anchoring")
                         && !matches!(s.type_id, 35840 | 35841 | 37534 | 81826)
                         && evaluate_character_structure_access_in_snap(snap, sid, char_id)
                 })
@@ -138,7 +138,7 @@ fn handle_get_structure_map_data(
             .values()
             .filter(|s| {
                 s.solar_system_id == sys_id
-                    && s.state != life::STATE_DESTROYED
+                    && life::is_in_space_structure_state(&s.state)
                     && evaluate_character_structure_access_in_snap(snap, s.structure_id, char_id)
             })
             .collect();

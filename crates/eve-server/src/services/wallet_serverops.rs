@@ -1148,68 +1148,9 @@ pub fn handle(
             Some(res.map(|()| PyRep::None))
         }
 
-        ("posMgr", "UnanchorOrbital") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let Some(item_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(rpc_err("InvalidOrbitalID", "UnanchorOrbital requires orbital itemID")));
-            };
-            let sess_sys = session.solar_system_id.ok_or_else(|| rpc_err("NotInSpace", "UnanchorOrbital requires active solar system session"));
-            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<PyRep, BridgeRpcError> {
-                let sys_id = sess_sys?;
-                let ship_id = session.ship_id.unwrap_or(0);
-                let has_ship = ship_id > 0 && snap.items.contains_key(&ship_id);
-                let it_owner_id = snap.items.get(&item_id).ok_or_else(|| rpc_err("OrbitalNotFound", format!("Orbital item {item_id} not found")))?.owner_id;
-                if let Some(st) = snap.structures.get(&item_id) {
-                    if st.solar_system_id != sys_id {
-                        return Err(rpc_err("NotInSameSystem", format!("Orbital is located in system {}, caller in {sys_id}", st.solar_system_id)));
-                    }
-                    if let Some(ship_pos) = ctx.systems.get_ball_position_sync(sys_id, ship_id) {
-                        let orbital_pos = glam::DVec3::from_array(st.position);
-                        let dist = (ship_pos - orbital_pos).length();
-                        if dist > 5000.0 {
-                            return Err(rpc_err("OrbitalOutOfRange", format!("Ship is {dist:.1} m from orbital {item_id} (must be <= 5000 m)")));
-                        }
-                    }
-                }
-                let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                if it_owner_id != char_id && it_owner_id != char_corp {
-                    return Err(rpc_err("NotOrbitalOwner", format!("Character {char_id} is not authorized to unanchor orbital {item_id}")));
-                }
-                if it_owner_id == char_corp {
-                    let (is_ceo, roles) = snap.effective_corp_roles_at(
-                        char_corp,
-                        char_id,
-                        None,
-                        session.corp_role,
-                        ctx.now_unix(),
-                    );
-                    let has_dir = snap.corporations.contains_key(&char_corp)
-                        && (is_ceo || (roles & (1 << 0)) != 0);
-                    if !has_dir {
-                        return Err(rpc_err("RoleNotAuthorized", "Unanchoring corporate orbital structures requires Director or CEO role"));
-                    }
-                }
-                if let Some(st) = snap.structures.get_mut(&item_id) { st.state = "Unanchored".into(); }
-                let it = snap.items.get_mut(&item_id).ok_or_else(|| rpc_err("OrbitalNotFound", format!("Orbital item {item_id} not found")))?;
-                if has_ship {
-                    it.location_id = ship_id;
-                    it.flag = InventoryFlag::Cargo;
-                } else {
-                    it.location_id = char_id;
-                    it.flag = InventoryFlag::Hangar;
-                }
-                let tid = it.type_id;
-                let q = it.quantity;
-                Ok(PyRep::keyval([
-                    ("itemID", PyRep::Integer(item_id)),
-                    ("typeID", PyRep::Integer(tid as i64)),
-                    ("ownerID", PyRep::Integer(char_id)),
-                    ("quantity", PyRep::Integer(q as i64)),
-                    ("state", PyRep::String("Unanchored".into())),
-                ]))
-            });
-            Some(res)
-        }
+        ("posMgr", "UnanchorOrbital") => Some(
+            crate::services::station_structure_handlers::handle_unanchor_orbital(ctx, session, args),
+        ),
 
         // --- Corporation & Personal Bills (`billMgr`, `feat:wallet.bills`) ---
         ("billMgr", "GetCorporationBills") | ("billMgr", "GetCorporationBillsReceivable") => {

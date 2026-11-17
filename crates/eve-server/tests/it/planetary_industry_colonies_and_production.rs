@@ -124,13 +124,9 @@ async fn test_pi_planet_info_command_center_and_colony_limit() {
     assert!(pkv.get("radius").and_then(|v| v.as_f64()).unwrap_or(0.0) > 1_000_000.0);
 
     let res_info = rpc(&ctx, &mut sess, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(JITA_PLANET_ID)]).await.expect("GetPlanetResourceInfo");
-    let PyRep::KeyVal(res_kv) = res_info else { panic!("Expected KeyVal"); };
-    let Some(PyRep::List(res_list)) = res_kv.get("resources") else { panic!("Expected resources List"); };
-    assert!(!res_list.is_empty(), "Planet must have P0 resources");
-    let first_p0_tid = match &res_list[0] {
-        PyRep::KeyVal(kv) => kv.get("resourceTypeID").and_then(|v| v.as_i64()).unwrap(),
-        _ => panic!("Expected KeyVal"),
-    };
+    let PyRep::Dict(res_entries) = res_info else { panic!("Expected Dict"); };
+    assert!(!res_entries.is_empty(), "Planet must have P0 resources");
+    let first_p0_tid = res_entries[0].0.as_i64().unwrap();
 
     // Survey fails without Remote Sensing
     let s_err = rpc(&ctx, &mut sess, "planetMgr", "GetResourceData", &[PyRep::keyval([("planetID", PyRep::Integer(JITA_PLANET_ID)), ("resourceTypeID", PyRep::Integer(first_p0_tid))])]).await.unwrap_err();
@@ -392,13 +388,9 @@ async fn test_pi_depletion_factory_cycles_and_storage_overflow() {
     assert!(flush_res.dict_get("producedQuantity").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
 
     let res_info = rpc(&ctx, &mut sess, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(JITA_PLANET_ID)]).await.expect("GetPlanetResourceInfo after Flush");
-    let Some(PyRep::List(res_list)) = res_info.dict_get("resources") else { panic!("Expected resources"); };
-    let depleted_qual = res_list.iter().find_map(|r| {
-        if r.dict_get("resourceTypeID").and_then(|v| v.as_i64()) == Some(AQUEOUS_LIQUIDS_P0_TYPE as i64) {
-            r.dict_get("quality").and_then(|v| v.as_f64())
-        } else {
-            None
-        }
+    let PyRep::Dict(res_entries) = res_info else { panic!("Expected Dict"); };
+    let depleted_qual = res_entries.iter().find_map(|(k, v)| {
+        (k.as_i64() == Some(AQUEOUS_LIQUIDS_P0_TYPE as i64)).then(|| v.as_f64()).flatten()
     }).unwrap();
     assert!(depleted_qual < 0.85, "Harvested resource quality must be depleted");
 
