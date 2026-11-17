@@ -201,8 +201,8 @@ async fn test_d6_industry_pi_and_market_wallet_history_durable_across_sqlite_res
 
         // Deploy PI colony & network on Jita IV while undocked with Gas Command Center (2534) in ship cargo
         let res_info = call(&ctx, &mut sess_p1, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(PLANET_ID)]).await.expect("GetPlanetResourceInfo");
-        let PyRep::List(res_list) = res_info.dict_get("resources").unwrap() else { panic!() };
-        let first_p0_tid = res_list[0].dict_get("resourceTypeID").and_then(|v| v.as_i64()).unwrap();
+        let PyRep::Dict(res_entries) = res_info else { panic!() };
+        let first_p0_tid = res_entries[0].0.as_i64().unwrap();
         call(
             &ctx, &mut sess_p1, "planetMgr", "UserUpdateNetwork",
             &[

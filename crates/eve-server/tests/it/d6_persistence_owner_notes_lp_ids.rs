@@ -203,8 +203,8 @@ async fn test_d3_owner_notes_persistence_market_industry_and_pi_across_sqlite_re
         });
 
         let res_info = call(&ctx, &mut sess, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(JITA_PLANET_ID)]).await.unwrap();
-        let PyRep::List(res_list) = res_info.dict_get("resources").unwrap() else { panic!("expected resources list") };
-        let first_p0_tid = res_list[0].dict_get("resourceTypeID").and_then(|v| v.as_i64()).unwrap() as TypeId;
+        let PyRep::Dict(res_entries) = res_info else { panic!("expected resource dict") };
+        let first_p0_tid = res_entries[0].0.as_i64().unwrap() as TypeId;
 
         let pi_cmds = vec![
             cmd_pin(101, GAS_COMMAND_CENTER_TYPE_ID, 0.10, 0.10),

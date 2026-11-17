@@ -412,7 +412,7 @@ async fn test_action_plan_s_space_structures_clones_mutations() {
         .dispatch_rpc(&mut sess, "planetMgr", None, "GetPlanetResourceInfo", &[PyRep::Integer(40_009_077)], &empty_kw, None)
         .await
         .expect("GetPlanetResourceInfo");
-    assert!(matches!(res_info, PyRep::KeyVal(_)));
+    assert!(matches!(res_info, PyRep::Dict(ref d) if !d.is_empty()));
 
     let char_planets = ctx
         .dispatch_rpc(&mut sess, "planetMgr", None, "GetPlanetsForChar", &[], &empty_kw, None)

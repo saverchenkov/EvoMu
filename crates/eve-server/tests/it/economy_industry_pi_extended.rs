@@ -715,10 +715,10 @@ pub(crate) mod pi_command_center_budget_launchpads {
             .dispatch_rpc(&mut sess, "planetMgr", None, "GetPlanetResourceInfo", &[PyRep::Integer(JITA_PLANET_ID)], &kw, None)
             .await
             .expect("Gas planet resources");
-        let PyRep::List(gas_list) = gas_res.dict_get("resources").unwrap() else { panic!() };
-        let gas_tids: Vec<TypeId> = gas_list
+        let PyRep::Dict(gas_entries) = gas_res else { panic!() };
+        let gas_tids: Vec<TypeId> = gas_entries
             .iter()
-            .filter_map(|r| r.dict_get("resourceTypeID").and_then(|v| v.as_i64()))
+            .filter_map(|(k, _)| k.as_i64())
             .map(|v| v as TypeId)
             .collect();
         assert!(gas_tids.contains(&2310));

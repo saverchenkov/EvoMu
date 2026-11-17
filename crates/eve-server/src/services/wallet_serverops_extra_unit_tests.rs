@@ -347,7 +347,12 @@ async fn unanchor_orbital_distance_system_ownership_and_ship_cargo_branches() {
     let mut ceo_sess = make_session(ceo_id, corp_id);
     ceo_sess.ship_id = Some(ship_id);
 
-    // 1. Missing arg -> InvalidOrbitalID; no solar_system_id -> NotInSpace; unknown id -> OrbitalNotFound
+    // Docked session -> NotInSpace; missing arg -> InvalidOrbitalID; no solar_system_id -> NotInSpace; unknown id -> OrbitalNotFound
+    assert_eq!(
+        call_ws(&ctx, &mut ceo_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_id)]).unwrap_err().code,
+        "NotInSpace"
+    );
+    ceo_sess.station_id = None;
     assert_eq!(call_ws(&ctx, &mut ceo_sess, "posMgr", "UnanchorOrbital", &[]).unwrap_err().code, "InvalidOrbitalID");
     ceo_sess.solar_system_id = None;
     assert_eq!(
@@ -393,11 +398,13 @@ async fn unanchor_orbital_distance_system_ownership_and_ship_cargo_branches() {
     // Move ship within 2,000 m; test NotOrbitalOwner and RoleNotAuthorized before CEO unanchors into ship Cargo
     let _ = sys_handle.try_set_ball_position(ship_id, DVec3::new(2_000.0, 0.0, 0.0));
     let mut outsider_sess = make_session(outsider_id, 98_000_099);
+    outsider_sess.station_id = None;
     assert_eq!(
         call_ws(&ctx, &mut outsider_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_id)]).unwrap_err().code,
         "NotOrbitalOwner"
     );
     let mut line_sess = make_session(line_id, corp_id);
+    line_sess.station_id = None;
     assert_eq!(
         call_ws(&ctx, &mut line_sess, "posMgr", "UnanchorOrbital", &[PyRep::Integer(orbital_id)]).unwrap_err().code,
         "RoleNotAuthorized"

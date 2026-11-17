@@ -393,7 +393,11 @@ pub fn handle_anchor_orbital(
     let planet_id = target_planet.celestial_id;
 
     let (tid, pid) = ctx.db.try_with_mut_snapshot(|snap| {
-        if snap.structures.contains_key(&item_id) {
+        if snap
+            .structures
+            .get(&item_id)
+            .is_some_and(|st| st.state != "Destroyed" && st.state != "Unanchored")
+        {
             return Err(BridgeRpcError {
                 code: "AlreadyAnchored".into(),
                 message: format!("Orbital structure {item_id} is already anchored in space"),
@@ -404,6 +408,7 @@ pub fn handle_anchor_orbital(
         if snap.structures.values().any(|st| {
             st.solar_system_id == sys_id
                 && st.state != "Destroyed"
+                && st.state != "Unanchored"
                 && st.name == tag
         }) {
             return Err(BridgeRpcError {
@@ -466,6 +471,178 @@ pub fn handle_anchor_orbital(
         ("typeID", PyRep::Integer(i64::from(tid))),
         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
         ("state", PyRep::String("Anchored".into())),
+    ]))
+}
+
+pub fn handle_unanchor_orbital(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let item_id = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .filter(|&id| id > 0)
+        .ok_or_else(|| err("InvalidOrbitalID", "UnanchorOrbital requires orbital itemID"))?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(err(
+            "NotInSpace",
+            "UnanchorOrbital requires caller to be undocked in space",
+        ));
+    }
+    let sys_id = session.solar_system_id.ok_or_else(|| {
+        err(
+            "NotInSpace",
+            "UnanchorOrbital requires active solar system session",
+        )
+    })?;
+    let ship_id = session.ship_id.unwrap_or(0);
+    // Lock Hierarchy: resolve ship ball coordinates outside DB snapshot lock.
+    let ship_pos_opt = (ship_id > 0)
+        .then(|| ctx.systems.get_ball_position_sync(sys_id, ship_id))
+        .flatten();
+    let now_unix = ctx.now_unix();
+
+    let (tid, qty) = ctx.db.try_with_mut_snapshot(|snap| -> Result<(eve_sde::TypeId, i32), BridgeRpcError> {
+        let has_ship = ship_id > 0 && snap.items.contains_key(&ship_id);
+        let (it_owner_id, it_type_id) = snap
+            .items
+            .get(&item_id)
+            .map(|it| (it.owner_id, it.type_id))
+            .ok_or_else(|| err("OrbitalNotFound", format!("Orbital item {item_id} not found")))?;
+        let is_orbital_type = matches!(it_type_id, 2233 | 3962 | 3963 | 4318)
+            || ctx
+                .sde
+                .types
+                .get(&it_type_id)
+                .is_some_and(|t| matches!(t.group_id, 1025 | 1106 | 4736));
+        if !is_orbital_type {
+            return Err(err(
+                "InvalidOrbitalType",
+                format!("Item {item_id} (type {it_type_id}) is not an orbital structure"),
+            ));
+        }
+
+        let mut st_corp_owner: Option<i64> = None;
+        let mut planet_opt: Option<i64> = None;
+        if let Some(st) = snap.structures.get(&item_id) {
+            if st.solar_system_id != sys_id {
+                return Err(err(
+                    "NotInSameSystem",
+                    format!(
+                        "Orbital is located in system {}, caller in {sys_id}",
+                        st.solar_system_id
+                    ),
+                ));
+            }
+            if matches!(st.state.as_str(), "Destroyed" | "Unanchored")
+                || st.self_destruct_at_unix.is_some()
+            {
+                return Err(err(
+                    "InvalidOrbitalState",
+                    format!("Orbital {item_id} cannot be unanchored in state '{}'", st.state),
+                ));
+            }
+            if st.state == "Reinforced" || st.reinforced_until_unix > now_unix {
+                return Err(err(
+                    "InvalidOrbitalState",
+                    format!("Orbital {item_id} cannot be unanchored while reinforced"),
+                ));
+            }
+            if let Some(ship_pos) = ship_pos_opt {
+                let dist = (ship_pos - glam::DVec3::from_array(st.position)).length();
+                if dist > 5000.0 {
+                    return Err(err(
+                        "OrbitalOutOfRange",
+                        format!("Ship is {dist:.1} m from orbital {item_id} (must be <= 5000 m)"),
+                    ));
+                }
+            }
+            st_corp_owner = (st.owner_corp_id >= 98_000_000).then_some(st.owner_corp_id);
+            planet_opt = st
+                .name
+                .strip_prefix("Orbital:")
+                .and_then(|s| s.parse::<i64>().ok());
+        }
+
+        let char_corp = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .or(session.corporation_id)
+            .unwrap_or(0);
+        let is_owner = it_owner_id == char_id
+            || it_owner_id == char_corp
+            || st_corp_owner.is_some_and(|c| c == char_corp);
+        if !is_owner {
+            return Err(err(
+                "NotOrbitalOwner",
+                format!("Character {char_id} is not authorized to unanchor orbital {item_id}"),
+            ));
+        }
+        if it_owner_id == char_corp || st_corp_owner == Some(char_corp) {
+            let (is_ceo, roles) = snap.effective_corp_roles_at(
+                char_corp,
+                char_id,
+                None,
+                session.corp_role,
+                now_unix,
+            );
+            let req_roles =
+                eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
+            let has_role = snap.corporations.contains_key(&char_corp)
+                && (is_ceo || (roles & req_roles) != 0);
+            if !has_role {
+                return Err(err(
+                    "RoleNotAuthorized",
+                    "Unanchoring corporate orbital structures requires Director, Station Manager, or CEO role",
+                ));
+            }
+        }
+
+        if let Some(st) = snap.structures.get_mut(&item_id) {
+            st.state = "Unanchored".into();
+            st.fuel_blocks = 0;
+            st.reinforced_until_unix = 0;
+            st.self_destruct_at_unix = None;
+        }
+        snap.owner_notes
+            .remove(&crate::services::industry_pi::orbital_settings_note_id(item_id));
+        if let Some(pid) = planet_opt {
+            snap.owner_notes
+                .remove(&crate::services::industry_pi::orbital_settings_note_id(pid));
+            if let Some(corp_id) = st_corp_owner {
+                if let Some(offices) = snap.corp_customs_offices.get_mut(&corp_id) {
+                    offices.retain(|o| o.office_id != item_id && o.office_id != pid);
+                }
+            }
+        }
+
+        let it = snap.items.get_mut(&item_id).ok_or_else(|| {
+            err("OrbitalNotFound", format!("Orbital item {item_id} not found"))
+        })?;
+        if has_ship {
+            it.location_id = ship_id;
+            it.flag = eve_db::InventoryFlag::Cargo;
+        } else {
+            it.location_id = char_id;
+            it.flag = eve_db::InventoryFlag::Hangar;
+        }
+        it.singleton = false;
+        Ok((it.type_id, it.quantity))
+    })?;
+
+    if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+        sys_handle.try_remove_ball(item_id);
+    }
+
+    Ok(PyRep::keyval([
+        ("itemID", PyRep::Integer(item_id)),
+        ("typeID", PyRep::Integer(i64::from(tid))),
+        ("ownerID", PyRep::Integer(char_id)),
+        ("quantity", PyRep::Integer(i64::from(qty))),
+        ("state", PyRep::String("Unanchored".into())),
     ]))
 }
 

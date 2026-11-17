@@ -112,10 +112,11 @@ fn flush_validation_errors_cooldown_poco_tax_and_bound_moniker_routing() {
         "Flush", "UpgradeCommandCenter", "UserTransferCommodities", "UserLaunchCommodities",
         "GetMyLaunchesDetails", "DeleteLaunch", "CancelInstallProgram", "RevertChanges",
         "StartTicking", "GetProgramResultInfo", "GetLocalDistributionReport", "append",
-        "colonies", "id", "planetID", "remoteHandler",
+        "colonies", "id", "planetID",
     ] {
         assert!(call_pi(&ctx, &mut unauth, m, &[], None).is_err());
     }
+    assert!(handle_pi_orbitals(&ctx, &mut unauth, "planetMgr", "remoteHandler", &[], &kw, None).is_none());
     assert!(handle_pi_orbitals(&ctx, &mut unauth, "config", "Flush", &[], &kw, None).is_none());
     assert!(handle_pi_orbitals(&ctx, &mut unauth, "planetMgr", "", &[], &kw, None).is_none());
 

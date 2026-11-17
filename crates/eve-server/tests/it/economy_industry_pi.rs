@@ -867,13 +867,9 @@ async fn test_pi_colony_command_center_pins_and_links() {
     )
     .await
     .expect("GetPlanetResourceInfo");
-    let PyRep::KeyVal(res_kv) = res_info else { panic!("Expected KeyVal"); };
-    let Some(PyRep::List(res_list)) = res_kv.get("resources") else { panic!("Expected resources List"); };
-    assert!(!res_list.is_empty());
-    let first_res_type_id = match &res_list[0] {
-        PyRep::KeyVal(kv) => kv.get("resourceTypeID").and_then(|v| v.as_i64()).unwrap(),
-        _ => panic!("Expected KeyVal"),
-    };
+    let PyRep::Dict(res_entries) = res_info else { panic!("Expected Dict"); };
+    assert!(!res_entries.is_empty());
+    let first_res_type_id = res_entries[0].0.as_i64().unwrap();
 
     ctx.db.with_mut_snapshot(|snap| { snap.skills.entry(90_000_001).or_default().remove(&13279); });
     let scan_err = rpc(
@@ -1292,16 +1288,10 @@ async fn test_pi_colony_command_center_pins_and_links() {
     )
     .await
     .expect("GetPlanetResourceInfo after Flush");
-    let PyRep::KeyVal(ra_kv) = res_after else { panic!("Expected KeyVal"); };
-    let Some(PyRep::List(ra_list)) = ra_kv.get("resources") else { panic!("Expected resources List"); };
-    let depleted_qual = ra_list
+    let PyRep::Dict(ra_entries) = res_after else { panic!("Expected Dict"); };
+    let depleted_qual = ra_entries
         .iter()
-        .find_map(|r| match r {
-            PyRep::KeyVal(kv)
-                if kv.get("resourceTypeID").and_then(|v| v.as_i64()) == Some(extracted_type_id) =>
-            { kv.get("quality").and_then(|v| v.as_f64()) }
-            _ => None,
-        })
+        .find_map(|(k, v)| (k.as_i64() == Some(extracted_type_id)).then(|| v.as_f64()).flatten())
         .unwrap();
     assert!(depleted_qual < 0.85);
 
@@ -1359,9 +1349,8 @@ async fn test_pi_colony_command_center_pins_and_links() {
         "UserTransferCommodities",
         &[
             PyRep::Integer(JITA_PLANET_ID),
-            PyRep::Integer(2288),
-            PyRep::Integer(3645),
-            PyRep::Integer(50_000),
+            PyRep::List(vec![PyRep::Integer(2288), PyRep::Integer(99_999)]),
+            PyRep::Dict(vec![(PyRep::Integer(3645), PyRep::Integer(50_000))]),
         ],
     )
     .await

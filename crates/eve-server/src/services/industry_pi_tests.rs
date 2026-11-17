@@ -254,7 +254,15 @@ fn planet_mgr_resource_rpcs_and_p0_extraction_resolve_correctly() {
     )
     .unwrap()
     .unwrap();
-    assert!(res_info.dict_get("numBands").unwrap().as_i64().unwrap() >= 2);
+    let PyRep::Dict(res_entries) = res_info else {
+        panic!("GetPlanetResourceInfo must return PyRep::Dict, got {res_info:?}");
+    };
+    assert!(res_entries.len() >= 2);
+    for (k, v) in &res_entries {
+        assert!(k.as_i64().unwrap_or(0) > 0);
+        let q = v.as_f64().unwrap_or(0.0);
+        assert!(q > 0.0 && q <= 1.0, "unexpected quality {q}");
+    }
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.remove(&char_id);
@@ -328,7 +336,28 @@ fn planet_mgr_resource_rpcs_and_p0_extraction_resolve_correctly() {
     )
     .unwrap()
     .unwrap();
-    assert!(format!("{planets_rep:?}").contains(&planet_id.to_string()));
+    let PyRep::Rowset { columns, rows } = &planets_rep else {
+        panic!("GetPlanetsForChar must return Rowset, got {planets_rep:?}");
+    };
+    assert_eq!(
+        columns,
+        &vec![
+            "planetID",
+            "solarSystemID",
+            "planetTypeID",
+            "celestialIndex",
+            "numberOfPins",
+            "commandCenterLevel",
+            "colonyData",
+        ]
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0].as_i64(), Some(planet_id));
+    assert_eq!(rows[0][4].as_i64(), Some(1));
+    let Some(PyRep::List(pins)) = rows[0][6].dict_get("pins") else {
+        panic!("expected colonyData.pins list, got {:?}", rows[0][6]);
+    };
+    assert_eq!(pins.len(), 1);
 }
 
 #[test]

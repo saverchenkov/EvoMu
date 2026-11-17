@@ -152,7 +152,10 @@ fn flush_active_and_expired_extractor_storage_cap_and_transfer_errors() {
         &ctx,
         &mut sess,
         "UserTransferCommodities",
-        &[PyRep::Integer(999), PyRep::Integer(888), PyRep::Integer(2268), PyRep::Integer(10)],
+        &[
+            PyRep::List(vec![PyRep::Integer(999), PyRep::Integer(888)]),
+            PyRep::Dict(vec![(PyRep::Integer(2268), PyRep::Integer(10))]),
+        ],
         Some(&bound),
     )
     .is_err());
@@ -297,7 +300,16 @@ async fn launch_details_delete_launch_cancel_auto_revert_start_ticking_and_monik
             .code,
         "InvalidPlanetID"
     );
-    assert!(call_pi(&ctx, &mut sess, "remoteHandler", &[], None).is_ok());
+    assert!(handle_pi_orbitals(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "remoteHandler",
+        &[],
+        &HashMap::new(),
+        None,
+    )
+    .is_none());
 
     // Clean up dummy item check so InventoryFlag is used
     let _ = InventoryFlag::Hangar;

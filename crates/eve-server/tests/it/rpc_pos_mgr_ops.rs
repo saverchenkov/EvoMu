@@ -566,6 +566,27 @@ async fn test_pos_mgr_moon_silo_and_orbital() {
     });
     sess.solar_system_id = Some(SYS_LOWSEC);
 
+    // Docked callers must be rejected with NotInSpace
+    let docked_err = rpc(
+        &ctx,
+        &mut sess,
+        "posMgr",
+        "UnanchorOrbital",
+        &[PyRep::Integer(orbital_id)],
+    )
+    .await
+    .expect_err("Docked UnanchorOrbital must fail with NotInSpace");
+    assert_eq!(docked_err.code, "NotInSpace");
+
+    sess.station_id = None;
+    sess.structure_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT1) {
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+
     let unanchor_res = rpc(
         &ctx,
         &mut sess,
@@ -849,4 +870,414 @@ async fn test_pos_mgr_towers_moon_cycle_and_target_obo() {
         "notify:OnTargetOBO",
         "feat:removed.pos-towers",
     ]);
+}
+
+async fn wire_rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    service: &str,
+    bound_id: Option<u64>,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, eve_testkit::client_harness::ClientErrorResponse> {
+    let kw = HashMap::new();
+    common::borrow_wire_harness(ctx, sess)
+        .call(service, bound_id, method, args, &kw)
+        .await
+}
+
+#[tokio::test]
+async fn test_pos_mgr_unanchor_orbital_e2e_lifecycle_and_security() {
+    // parity: rpc:posMgr.AnchorOrbital, rpc:posMgr.OnlineOrbital, rpc:posMgr.UnanchorOrbital
+    const RANCER_SYS: u32 = 30_002_718;
+    const GANTRY_TYPE_ID: u32 = 3962;
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let planet = ctx
+        .sde
+        .celestials_in_system(RANCER_SYS)
+        .into_iter()
+        .find(|c| c.group_id == 7)
+        .expect("Rancer planet");
+    let near_planet = planet.position + glam::DVec3::new(planet.radius + 5_000.0, 0.0, 0.0);
+
+    let mut dir_sess = setup_pilot(&ctx, 505, "demo", "demo-secret", PILOT1).await;
+    let ship_id = dir_sess.ship_id.expect("Active ship");
+    let corp_id = 98_555_001_i64;
+    let other_corp_id = 98_555_002_i64;
+    let line_char_id = 90_099_102_i64;
+    let outsider_char_id = 90_099_103_i64;
+    let far_ship_id = 890_555_101_i64;
+    let non_orbital_id = 890_555_102_i64;
+    let gantry_id = 890_555_201_i64;
+    let poco_upgrade_id = 890_555_202_i64;
+    let gantry2_id = 890_555_203_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Orbital Test Corp".into();
+        corp.ticker = "ORBT".into();
+        corp.ceo_id = PILOT1;
+        snap.corporations.insert(corp_id, corp);
+
+        let mut other_corp = eve_db::CorporationRecord::default();
+        other_corp.corporation_id = other_corp_id;
+        other_corp.name = "Foreign Corp".into();
+        other_corp.ticker = "FRGN".into();
+        other_corp.ceo_id = outsider_char_id;
+        snap.corporations.insert(other_corp_id, other_corp);
+
+        let base_char = snap.characters.get(&PILOT1).cloned().expect("PILOT1");
+        if let Some(ch) = snap.characters.get_mut(&PILOT1) {
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = RANCER_SYS;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        let mut line_ch = base_char.clone();
+        line_ch.character_id = line_char_id;
+        line_ch.user_id = 99_502;
+        line_ch.name = "Orbital Line".into();
+        line_ch.corporation_id = corp_id;
+        line_ch.solar_system_id = RANCER_SYS;
+        line_ch.station_id = None;
+        line_ch.structure_id = None;
+        line_ch.active_ship_id = ship_id;
+        snap.characters.insert(line_char_id, line_ch);
+
+        let mut out_ch = base_char;
+        out_ch.character_id = outsider_char_id;
+        out_ch.user_id = 99_503;
+        out_ch.name = "Orbital Outsider".into();
+        out_ch.corporation_id = other_corp_id;
+        out_ch.solar_system_id = RANCER_SYS;
+        out_ch.station_id = None;
+        out_ch.structure_id = None;
+        snap.characters.insert(outsider_char_id, out_ch);
+
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = i64::from(RANCER_SYS);
+            sh.flag = InventoryFlag::None;
+        }
+        snap.items.insert(
+            far_ship_id,
+            InventoryItemRecord {
+                item_id: far_ship_id,
+                type_id: 587,
+                owner_id: PILOT1,
+                location_id: i64::from(RANCER_SYS),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            non_orbital_id,
+            InventoryItemRecord {
+                item_id: non_orbital_id,
+                type_id: 34, // Tritanium
+                owner_id: corp_id,
+                location_id: i64::from(RANCER_SYS),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            gantry_id,
+            InventoryItemRecord {
+                item_id: gantry_id,
+                type_id: GANTRY_TYPE_ID,
+                owner_id: PILOT1,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            poco_upgrade_id,
+            InventoryItemRecord {
+                item_id: poco_upgrade_id,
+                type_id: POCO_TYPE_ID,
+                owner_id: PILOT1,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            gantry2_id,
+            InventoryItemRecord {
+                item_id: gantry2_id,
+                type_id: GANTRY_TYPE_ID,
+                owner_id: PILOT1,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    dir_sess.corporation_id = Some(corp_id);
+    dir_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    dir_sess.solar_system_id = Some(RANCER_SYS);
+    dir_sess.station_id = None;
+    dir_sess.structure_id = None;
+
+    let mut line_sess = SessionState::new(506);
+    line_sess.user_id = Some(99_502);
+    line_sess.character_id = Some(line_char_id);
+    line_sess.corporation_id = Some(corp_id);
+    line_sess.corp_role = 0;
+    line_sess.solar_system_id = Some(RANCER_SYS);
+    line_sess.ship_id = Some(ship_id);
+
+    let mut outsider_sess = SessionState::new(507);
+    outsider_sess.user_id = Some(99_503);
+    outsider_sess.character_id = Some(outsider_char_id);
+    outsider_sess.corporation_id = Some(other_corp_id);
+    outsider_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    outsider_sess.solar_system_id = Some(RANCER_SYS);
+
+    let sys_handle = ctx.systems.get_or_spawn(RANCER_SYS);
+    for (bid, bpos) in [
+        (ship_id, near_planet),
+        (far_ship_id, near_planet + glam::DVec3::new(12_000.0, 0.0, 0.0)),
+    ] {
+        sys_handle
+            .spawn_ball(eve_destiny::Ball {
+                id: bid,
+                type_id: 587,
+                position: bpos,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            })
+            .await
+            .expect("spawn test ship ball");
+    }
+
+    let bound_pos = ctx.bind_object(&dir_sess, "posMgr", i64::from(RANCER_SYS)).ok();
+
+    // 1. Anchor Gantry (3962) and upgrade to POCO (2233) via OnlineOrbital
+    let anchored = wire_rpc(
+        &ctx,
+        &mut dir_sess,
+        "posMgr",
+        bound_pos,
+        "AnchorOrbital",
+        &[PyRep::Integer(gantry_id), PyRep::Integer(planet.celestial_id)],
+    )
+    .await
+    .expect("AnchorOrbital gantry");
+    assert_eq!(anchored.dict_get("state"), Some(&PyRep::String("Anchored".into())));
+
+    let onlined = wire_rpc(
+        &ctx,
+        &mut dir_sess,
+        "posMgr",
+        bound_pos,
+        "OnlineOrbital",
+        &[PyRep::Integer(gantry_id), PyRep::Integer(poco_upgrade_id)],
+    )
+    .await
+    .expect("OnlineOrbital to POCO");
+    assert_eq!(onlined.dict_get("typeID"), Some(&PyRep::Integer(i64::from(POCO_TYPE_ID))));
+    assert_eq!(onlined.dict_get("state"), Some(&PyRep::String("ShieldVulnerable".into())));
+
+    // Spawn an in-space ball for the orbital so UnanchorOrbital removes it live
+    sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: gantry_id,
+            type_id: POCO_TYPE_ID,
+            position: near_planet,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e9,
+            radius: 2_000.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .expect("spawn orbital ball");
+
+    // 2. Negative authorization, type, range, and state guards
+    let non_orb_err = wire_rpc(
+        &ctx,
+        &mut dir_sess,
+        "posMgr",
+        bound_pos,
+        "UnanchorOrbital",
+        &[PyRep::Integer(non_orbital_id)],
+    )
+    .await
+    .expect_err("non-orbital must fail");
+    assert_eq!(non_orb_err.code, "InvalidOrbitalType");
+
+    let outsider_err = wire_rpc(
+        &ctx,
+        &mut outsider_sess,
+        "posMgr",
+        None,
+        "UnanchorOrbital",
+        &[PyRep::Integer(gantry_id)],
+    )
+    .await
+    .expect_err("outsider corp must fail");
+    assert_eq!(outsider_err.code, "NotOrbitalOwner");
+
+    let line_err = wire_rpc(
+        &ctx,
+        &mut line_sess,
+        "posMgr",
+        None,
+        "UnanchorOrbital",
+        &[PyRep::Integer(gantry_id)],
+    )
+    .await
+    .expect_err("corp line member without Director/StationManager must fail");
+    assert_eq!(line_err.code, "RoleNotAuthorized");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT1) {
+            ch.active_ship_id = far_ship_id;
+        }
+    });
+    let mut far_sess = dir_sess.clone();
+    far_sess.ship_id = Some(far_ship_id);
+    let range_err = wire_rpc(
+        &ctx,
+        &mut far_sess,
+        "posMgr",
+        None,
+        "UnanchorOrbital",
+        &[PyRep::Integer(gantry_id)],
+    )
+    .await
+    .expect_err(">5000m out of range must fail");
+    assert_eq!(range_err.code, "OrbitalOutOfRange");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT1) {
+            ch.active_ship_id = ship_id;
+        }
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&gantry_id) {
+            st.state = "Reinforced".into();
+        }
+    });
+    let reinf_err = wire_rpc(
+        &ctx,
+        &mut dir_sess,
+        "posMgr",
+        bound_pos,
+        "UnanchorOrbital",
+        &[PyRep::Integer(gantry_id)],
+    )
+    .await
+    .expect_err("Reinforced orbital cannot be unanchored");
+    assert_eq!(reinf_err.code, "InvalidOrbitalState");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&gantry_id) {
+            st.state = "ShieldVulnerable".into();
+        }
+    });
+
+    // 3. Live UnanchorOrbital cleans structure state/fuel/notes, moves item to cargo, removes ball
+    let unanchored = wire_rpc(
+        &ctx,
+        &mut dir_sess,
+        "posMgr",
+        bound_pos,
+        "UnanchorOrbital",
+        &[PyRep::Integer(gantry_id)],
+    )
+    .await
+    .expect("live posMgr.UnanchorOrbital");
+    assert_eq!(unanchored.dict_get("itemID"), Some(&PyRep::Integer(gantry_id)));
+    assert_eq!(unanchored.dict_get("typeID"), Some(&PyRep::Integer(i64::from(POCO_TYPE_ID))));
+    assert_eq!(unanchored.dict_get("state"), Some(&PyRep::String("Unanchored".into())));
+
+    assert!(
+        ctx.systems.get_ball_position_sync(RANCER_SYS, gantry_id).is_none(),
+        "UnanchorOrbital must remove orbital ball from solar system"
+    );
+    ctx.db.with_snapshot(|snap| {
+        let st = snap.structures.get(&gantry_id).expect("structure record");
+        assert_eq!(st.state, "Unanchored");
+        assert_eq!(st.fuel_blocks, 0);
+        let note_id = eve_server::services::industry_pi::orbital_settings_note_id(gantry_id);
+        assert!(!snap.owner_notes.contains_key(&note_id));
+        let it = snap.items.get(&gantry_id).expect("unanchored item");
+        assert_eq!(it.location_id, ship_id);
+        assert_eq!(it.flag, InventoryFlag::Cargo);
+        assert!(!it.singleton);
+    });
+
+    // Double unanchor rejected
+    let repeat_err = wire_rpc(
+        &ctx,
+        &mut dir_sess,
+        "posMgr",
+        bound_pos,
+        "UnanchorOrbital",
+        &[PyRep::Integer(gantry_id)],
+    )
+    .await
+    .expect_err("already Unanchored orbital cannot unanchor twice");
+    assert_eq!(repeat_err.code, "InvalidOrbitalState");
+
+    // 4. Re-anchoring an unanchored planet slot and re-anchoring an unanchored gantry both succeed
+    let anchored2 = wire_rpc(
+        &ctx,
+        &mut dir_sess,
+        "posMgr",
+        bound_pos,
+        "AnchorOrbital",
+        &[PyRep::Integer(gantry2_id), PyRep::Integer(planet.celestial_id)],
+    )
+    .await
+    .expect("AnchorOrbital on planet after POCO unanchored");
+    assert_eq!(anchored2.dict_get("state"), Some(&PyRep::String("Anchored".into())));
+
+    wire_rpc(
+        &ctx,
+        &mut dir_sess,
+        "posMgr",
+        bound_pos,
+        "UnanchorOrbital",
+        &[PyRep::Integer(gantry2_id)],
+    )
+    .await
+    .expect("UnanchorOrbital on gantry");
+
+    let reanchored2 = wire_rpc(
+        &ctx,
+        &mut dir_sess,
+        "posMgr",
+        bound_pos,
+        "AnchorOrbital",
+        &[PyRep::Integer(gantry2_id), PyRep::Integer(planet.celestial_id)],
+    )
+    .await
+    .expect("Re-anchor unanchored gantry");
+    assert_eq!(reanchored2.dict_get("state"), Some(&PyRep::String("Anchored".into())));
 }

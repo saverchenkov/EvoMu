@@ -564,43 +564,20 @@ pub fn handle(
                     client_error: None,
                 }));
             }
-            let (remote_sensing_lvl, planetology_lvl, adv_planetology_lvl, extracted_map) =
-                ctx.db.with_snapshot(|snap| {
-                    let sk = snap.skills.get(&char_id);
-                    let rs = sk.and_then(|m| m.get(&13279)).map(|s| s.level).unwrap_or(0);
-                    let pl = sk.and_then(|m| m.get(&2406)).map(|s| s.level).unwrap_or(0);
-                    let apl = sk.and_then(|m| m.get(&2403)).map(|s| s.level).unwrap_or(0);
-                    let ext = snap
-                        .planetary_colonies
-                        .get(&(char_id, planet_id))
-                        .map(|c| c.extracted_commodities.clone())
-                        .unwrap_or_default();
-                    (rs, pl, apl, ext)
-                });
-            let num_bands = 2 + (planetology_lvl as i64) + 2 * (adv_planetology_lvl as i64);
+            let extracted_map = ctx.db.with_snapshot(|snap| {
+                snap.planetary_colonies
+                    .get(&(char_id, planet_id))
+                    .map(|c| c.extracted_commodities.clone())
+                    .unwrap_or_default()
+            });
             let mut entries = Vec::with_capacity(p0_resources.len());
             for (idx, &tid) in p0_resources.iter().enumerate() {
                 let extracted_qty = extracted_map.get(&tid).copied().unwrap_or(0);
                 let depletion = ((extracted_qty as f64) / 100_000.0).min(0.40);
                 let quality = (0.85 - (idx as f64) * 0.08 - depletion).clamp(0.25, 1.0);
-                entries.push(PyRep::keyval([
-                    ("resourceTypeID", PyRep::Integer(tid as i64)),
-                    ("quality", PyRep::Real(quality)),
-                    ("numBands", PyRep::Integer(num_bands)),
-                ]));
+                entries.push((PyRep::Integer(tid as i64), PyRep::Real(quality)));
             }
-            Some(Ok(PyRep::keyval([
-                ("planetID", PyRep::Integer(planet_id)),
-                ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                ("remoteSensingLevel", PyRep::Integer(remote_sensing_lvl as i64)),
-                ("planetologyLevel", PyRep::Integer(planetology_lvl as i64)),
-                (
-                    "advancedPlanetologyLevel",
-                    PyRep::Integer(adv_planetology_lvl as i64),
-                ),
-                ("numBands", PyRep::Integer(num_bands)),
-                ("resources", PyRep::List(entries)),
-            ])))
+            Some(Ok(PyRep::Dict(entries)))
         }
 
         ("planetMgr", "GetResourceData") => {
@@ -737,26 +714,74 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let rows = ctx.db.with_snapshot(|snap| {
-                snap.planetary_colonies
-                    .values()
-                    .filter(|c| c.owner_id == char_id)
-                    .map(|c| {
-                        vec![
-                            PyRep::Integer(c.planet_id),
-                            PyRep::Integer(c.solar_system_id as i64),
-                            PyRep::Integer(c.command_center_level as i64),
-                            PyRep::Integer(c.pins_count as i64),
-                        ]
-                    })
-                    .collect()
-            });
+            let colonies: Vec<(eve_db::PlanetaryColonyRecord, pi_helpers::PiColonyNetworkState)> =
+                ctx.db.with_snapshot(|snap| {
+                    let mut list: Vec<_> = snap
+                        .planetary_colonies
+                        .values()
+                        .filter(|c| c.owner_id == char_id)
+                        .map(|c| {
+                            let net = pi_colonies::load_pi_network(
+                                snap,
+                                char_id,
+                                c.planet_id,
+                                c.command_center_level,
+                            );
+                            (c.clone(), net)
+                        })
+                        .collect();
+                    list.sort_by_key(|(c, _)| c.planet_id);
+                    list
+                });
+            let now_ft = ctx.now_blueos_filetime_ticks();
+            let rows = colonies
+                .into_iter()
+                .map(|(c, net)| {
+                    let planet_celestial = ctx
+                        .sde
+                        .celestials_in_system(c.solar_system_id)
+                        .into_iter()
+                        .find(|cel| cel.celestial_id == c.planet_id && cel.group_id == 7);
+                    let planet_type_id = planet_celestial
+                        .as_ref()
+                        .map(|cel| cel.type_id)
+                        .unwrap_or(11);
+                    let celestial_index = planet_celestial
+                        .as_ref()
+                        .and_then(|cel| cel.celestial_index)
+                        .unwrap_or(1);
+                    let number_of_pins = if net.pins.is_empty() {
+                        i64::from(c.pins_count)
+                    } else {
+                        net.pins.len() as i64
+                    };
+                    let (pins_rep, links_rep, routes_rep) = pi_colonies::format_pi_pins_links(&net);
+                    let colony_data = PyRep::keyval([
+                        ("currentSimTime", PyRep::Integer(now_ft)),
+                        ("pins", PyRep::List(pins_rep)),
+                        ("links", PyRep::List(links_rep)),
+                        ("routes", PyRep::List(routes_rep)),
+                    ]);
+                    vec![
+                        PyRep::Integer(c.planet_id),
+                        PyRep::Integer(c.solar_system_id as i64),
+                        PyRep::Integer(planet_type_id as i64),
+                        PyRep::Integer(celestial_index as i64),
+                        PyRep::Integer(number_of_pins),
+                        PyRep::Integer(c.command_center_level as i64),
+                        colony_data,
+                    ]
+                })
+                .collect();
             Some(Ok(PyRep::rowset(
                 vec![
                     "planetID",
                     "solarSystemID",
+                    "planetTypeID",
+                    "celestialIndex",
+                    "numberOfPins",
                     "commandCenterLevel",
-                    "pinsCount",
+                    "colonyData",
                 ],
                 rows,
             )))

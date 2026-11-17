@@ -331,8 +331,8 @@ async fn test_b30_industry_pause_many_and_owner_notes_persistence() {
         snap.items.insert(710_030, make_item(710_030, 2534, P1, ship_id, InventoryFlag::Cargo, 1, false));
     });
     let res_info = rpc(&ctx, &mut sess, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(JITA_PLANET_ID)]).await.unwrap();
-    let PyRep::List(res_list) = res_info.dict_get("resources").unwrap() else { panic!() };
-    let p0_tid = res_list[0].dict_get("resourceTypeID").and_then(|v| v.as_i64()).unwrap();
+    let PyRep::Dict(res_entries) = res_info else { panic!() };
+    let p0_tid = res_entries[0].0.as_i64().unwrap();
     let pi_cmds = vec![
         PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(101), PyRep::Integer(2534), PyRep::Real(0.10), PyRep::Real(0.10)]),
         PyRep::Tuple(vec![PyRep::Integer(9), PyRep::Integer(101), PyRep::Integer(3)]),

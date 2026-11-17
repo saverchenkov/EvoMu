@@ -124,8 +124,8 @@ async fn test_pi_orbitals_flush_launch_import_and_program_rpcs() {
     .expect("UpgradeCommandCenter should succeed");
     assert_eq!(upg.dict_get("commandCenterLevel").and_then(|v| v.as_i64()), Some(3));
 
-    // UserLaunchCommodities (CommandCenterLaunch) -> creates canister in space
-    let launch = handle_pi_orbitals(
+    // UserLaunchCommodities (V24 signature: commandPinID + commodities dict) -> creates canister & returns lastLaunchTime
+    let last_launch_time = handle_pi_orbitals(
         &ctx,
         &mut session,
         "planetMgr",
@@ -133,16 +133,33 @@ async fn test_pi_orbitals_flush_launch_import_and_program_rpcs() {
         &[
             PyRep::Integer(planet_id),
             PyRep::Integer(301),
-            PyRep::Integer(3645),
-            PyRep::Integer(50),
+            PyRep::Dict(vec![(PyRep::Integer(3645), PyRep::Integer(50))]),
         ],
         &HashMap::new(),
         None,
     )
     .unwrap()
-    .expect("UserLaunchCommodities should succeed");
-    let launch_id = launch.dict_get("launchID").and_then(|v| v.as_i64()).unwrap();
-    assert!(launch_id > 0);
+    .expect("UserLaunchCommodities V24 should succeed");
+    assert!(
+        last_launch_time.as_i64().unwrap_or(0) > 0,
+        "V24 UserLaunchCommodities must return scalar Blue FileTime lastLaunchTime, got {last_launch_time:?}"
+    );
+    let cd_err = handle_pi_orbitals(
+        &ctx,
+        &mut session,
+        "planetMgr",
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(planet_id),
+            PyRep::Integer(301),
+            PyRep::Dict(vec![(PyRep::Integer(3645), PyRep::Integer(10))]),
+        ],
+        &HashMap::new(),
+        None,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(cd_err.code, "LaunchOnCooldown");
 
     // GetMyLaunchesDetails & DeleteLaunch
     let details = handle_pi_orbitals(
@@ -156,7 +173,15 @@ async fn test_pi_orbitals_flush_launch_import_and_program_rpcs() {
     )
     .unwrap()
     .unwrap();
-    assert!(matches!(details, PyRep::List(v) if v.len() == 1));
+    let PyRep::List(launch_rows) = details else {
+        panic!("expected launches list");
+    };
+    assert_eq!(launch_rows.len(), 1);
+    let launch_id = launch_rows[0]
+        .dict_get("launchID")
+        .and_then(|v| v.as_i64())
+        .expect("launchID in GetMyLaunchesDetails");
+    assert!(launch_id > 0);
 
     let del = handle_pi_orbitals(
         &ctx,
@@ -302,20 +327,16 @@ async fn test_pi_orbitals_flush_launch_import_and_program_rpcs() {
             .unwrap(),
         PyRep::None
     );
-    assert_eq!(
-        handle_pi_orbitals(
-            &ctx,
-            &mut session,
-            "planetMgr",
-            "remoteHandler",
-            &[],
-            &HashMap::new(),
-            None
-        )
-        .unwrap()
-        .unwrap(),
-        PyRep::None
-    );
+    assert!(handle_pi_orbitals(
+        &ctx,
+        &mut session,
+        "planetMgr",
+        "remoteHandler",
+        &[],
+        &HashMap::new(),
+        None,
+    )
+    .is_none());
 }
 
 #[test]

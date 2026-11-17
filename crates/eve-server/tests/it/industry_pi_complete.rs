@@ -803,14 +803,11 @@ async fn run_pi_full_suite() -> (Option<bool>, Option<i64>, f64, i64, i64) {
         )
         .await
         .expect("GetPlanetResourceInfo");
-    assert_eq!(res_info.dict_get("numBands").and_then(|v| v.as_i64()), Some(9));
-    let PyRep::List(res_list) = res_info.dict_get("resources").expect("resources list") else {
-        panic!("Expected list");
+    let PyRep::Dict(res_entries) = res_info else {
+        panic!("Expected Dict from GetPlanetResourceInfo, got {res_info:?}");
     };
-    let first_p0_tid = res_list[0]
-        .dict_get("resourceTypeID")
-        .and_then(|v| v.as_i64())
-        .expect("first P0 typeID") as TypeId;
+    assert!(!res_entries.is_empty());
+    let first_p0_tid = res_entries[0].0.as_i64().expect("first P0 typeID") as TypeId;
 
     let heatmap = ctx
         .dispatch_rpc(
@@ -979,7 +976,12 @@ async fn run_pi_full_suite() -> (Option<bool>, Option<i64>, f64, i64, i64) {
         )
         .await
         .expect("Expedited transfer");
-    assert!(exp_res.dict_get("cooldownSeconds").and_then(|v| v.as_i64()).unwrap_or(0) >= 300);
+    let PyRep::Tuple(ref exp_tuple) = exp_res else {
+        panic!("UserTransferCommodities must return 2-tuple (simRet, lastRunTime), got {exp_res:?}");
+    };
+    assert_eq!(exp_tuple.len(), 2);
+    assert!(exp_tuple[0].as_i64().unwrap_or(0) > 0);
+    assert_eq!(exp_tuple[0], exp_tuple[1]);
 
     let comms_exp2 = vec![(PyRep::Integer(produced_tid as i64), PyRep::Integer(50))];
     let xfer_cd_err = ctx
