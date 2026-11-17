@@ -974,15 +974,27 @@ async fn test_trade_and_contact_blocklist() {
     );
 
     let n1 = ctx.drain_notifications_for_char(P1);
-    assert!(n1.iter().any(|n| {
-        n.event == "OnTradeInitiate" && matches!(n.args.get(1), Some(PyRep::SubStruct(_)))
-    }));
+    assert!(
+        !n1.iter().any(|n| n.event == "OnTradeInitiate"),
+        "Initiator must receive tradeSession from CallRsp, not OnTradeInitiate: {n1:?}"
+    );
     let n2 = ctx.drain_notifications_for_char(P2);
     assert!(n2.iter().any(|n| {
-        n.event == "OnTradeInitiate" && matches!(n.args.get(1), Some(PyRep::SubStruct(_)))
+        n.event == "OnTradeInitiate"
+            && n.args.first() == Some(&PyRep::Integer(P1))
+            && matches!(n.args.get(1), Some(PyRep::SubStruct(_)))
     }));
 
-    // 2. BlockOwners
+    // Duplicate active InitiateTrade must fail until existing trade closes.
+    let dup_err = rpc(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)])
+        .await
+        .expect_err("duplicate active trade must fail");
+    assert_eq!(dup_err.code, "TradeAlreadyActive");
+    rpc(&ctx, &mut s1, "trademgr", "Abort", &[PyRep::Integer(trade_id)])
+        .await
+        .expect("Abort active trade");
+
+    // 2. BlockOwners (and verify ContactBlocked blocks P2 from initiating trade with P1)
     let bo = rpc(
         &ctx,
         &mut s1,
@@ -1000,6 +1012,11 @@ async fn test_trade_and_contact_blocklist() {
         bo_kv.get("blockedIDs"),
         Some(&PyRep::List(vec![PyRep::Integer(P2)]))
     );
+    let blocked_trade_err =
+        rpc(&ctx, &mut s2, "trademgr", "InitiateTrade", &[PyRep::Integer(P1)])
+            .await
+            .expect_err("blocked contact must not initiate trade");
+    assert_eq!(blocked_trade_err.code, "ContactBlocked");
 
     let is_blocked = ctx
         .esi_state
@@ -1092,7 +1109,20 @@ async fn test_trade_initiate_bound_session_and_manifest_wire() {
     let mut h1 = h1.with_mode(eve_testkit::client_harness::ContractValidationMode::Strict);
     let mut h2 = h2.with_mode(eve_testkit::client_harness::ContractValidationMode::Strict);
 
-    // 1. InitiateTrade returns bound tradeSession wire SubStruct and pushes bound rep via OnTradeInitiate.
+    // 1. InitiateTrade returns bound tradeSession wire SubStruct and pushes bound rep ONLY to partner via OnTradeInitiate.
+    let existing_partner_inv = h2
+        .call_ok(
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Tuple(vec![PyRep::Integer(JITA_STATION_ID), PyRep::Integer(3)]), PyRep::None],
+            &kw,
+        )
+        .await;
+    let existing_partner_inv_oid =
+        eve_testkit::client_harness::extract_bound_id_from_wire_rep(&existing_partner_inv)
+            .expect("partner bound invbroker oid");
+
     let init_rep = h1
         .call_ok("trademgr", None, "InitiateTrade", &[PyRep::Integer(P2)], &kw)
         .await;
@@ -1102,6 +1132,22 @@ async fn test_trade_initiate_bound_session_and_manifest_wire() {
     );
     let oid_a = eve_testkit::client_harness::extract_bound_id_from_wire_rep(&init_rep)
         .expect("initiator bound tradeSession id");
+
+    let frames_a = h1.drain_pending_frames();
+    assert!(
+        !frames_a.iter().any(|f| {
+            matches!(
+                &f.kind,
+                eve_testkit::client_harness::ClientWireFrameKind::Notification { event, .. }
+                    if event == "OnTradeInitiate"
+            )
+        }),
+        "initiator wire session must receive 0 OnTradeInitiate frames, got {frames_a:?}"
+    );
+    assert!(
+        ctx.bound_objects.read().unwrap().contains_key(&existing_partner_inv_oid),
+        "InitiateTrade must never evict partner's existing bound services"
+    );
 
     let frames_b = h2.drain_pending_frames();
     let notif_args = frames_b
@@ -1233,4 +1279,13 @@ async fn test_trade_initiate_bound_session_and_manifest_wire() {
             .sum()
     });
     assert_eq!(p2_trit, 40);
+    assert!(
+        !ctx.bound_objects.read().unwrap().contains_key(&oid_a)
+            && !ctx.bound_objects.read().unwrap().contains_key(&oid_b),
+        "completed trade must release bound tradeSession handles on both sessions"
+    );
+    assert!(
+        ctx.bound_objects.read().unwrap().contains_key(&existing_partner_inv_oid),
+        "partner's invbroker handle must remain bound after trade lifecycle"
+    );
 }

@@ -3320,19 +3320,17 @@ async fn test_wallet_bills_lp_trade_market_and_industry_notifications() {
     let n_ti2 = ctx.drain_notifications_for_char(P2);
     let ti1 = events_from(&n_ti1, "OnTradeInitiate");
     let ti2 = events_from(&n_ti2, "OnTradeInitiate");
-    assert_eq!(ti1.len(), 1);
+    assert!(
+        ti1.is_empty(),
+        "Initiator must not receive duplicate OnTradeInitiate; got {ti1:?}"
+    );
     assert_eq!(ti2.len(), 1);
-    assert_eq!(ti1[0].len(), 3);
     assert_eq!(ti2[0].len(), 3);
-    assert_eq!(ti1[0][0], PyRep::Integer(P1));
     assert_eq!(ti2[0][0], PyRep::Integer(P1));
-    assert_eq!(ti1[0][2], PyRep::List(vec![]));
     assert_eq!(ti2[0][2], PyRep::List(vec![]));
-    let oid1 = eve_testkit::client_harness::extract_bound_id_from_wire_rep(&ti1[0][1])
-        .expect("initiator bound tradeSession rep");
     let oid2 = eve_testkit::client_harness::extract_bound_id_from_wire_rep(&ti2[0][1])
         .expect("partner bound tradeSession rep");
-    assert_ne!(oid1, oid2);
+    assert_ne!(init_bid as u64, oid2);
 
     call(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(trade_item_id)]).await;
     let n_to2 = ctx.drain_notifications_for_char(P2);

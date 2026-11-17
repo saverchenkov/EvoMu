@@ -1209,6 +1209,7 @@ impl ServerContext {
                 })
                 .map_err(db_err_to_rpc)?;
             for (trade_id, char_a, char_b) in cancelled_trades {
+                self.release_bound_objects_for_object("trademgr", trade_id);
                 for party in [char_a, char_b] {
                     self.emit_typed(
                         NotificationTarget::Character(party),
@@ -1390,6 +1391,7 @@ impl ServerContext {
                 })
                 .map_err(db_err_to_rpc)?;
             for (trade_id, char_a, char_b) in cancelled_trades {
+                self.release_bound_objects_for_object("trademgr", trade_id);
                 for party in [char_a, char_b] {
                     self.emit_typed(
                         NotificationTarget::Character(party),

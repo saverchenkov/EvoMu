@@ -113,6 +113,7 @@ pub fn cancel_open_trades_for_character(ctx: &ServerContext, char_id: i64) {
         .db
         .with_mut_snapshot(|snap| cancel_open_trades_for_character_in_snap(snap, char_id));
     for (trade_id, char_a, char_b) in cancelled {
+        ctx.release_bound_objects_for_object("trademgr", trade_id);
         for party in [char_a, char_b] {
             ctx.emit_typed(
                 NotificationTarget::Character(party),
@@ -536,6 +537,8 @@ pub fn handle(
         }
 
         // --- Station Direct Trade (`trademgr`, `feat:wallet.trade-window`) ---
+        // Router dispatch routes `trademgr` via `inventory_bound` / `inventory_fitting`; keep
+        // this arm so unit tests invoking `wallet_services_ext::handle` directly continue to hit it.
         ("trademgr", "InitiateTrade") => Some(
             initiate_trade_session(ctx, session, args).map(|bid| PyRep::Integer(bid as i64)),
         ),
@@ -573,6 +576,28 @@ pub fn initiate_trade_session(
     if partner_id == char_id {
         return Err(rpc_err("InvalidArgument", "Cannot trade with yourself"));
     }
+    if crate::services::fleet_social::fleet_social_persistence::is_blocked_by(
+        ctx, partner_id, char_id,
+    ) || crate::services::fleet_social::fleet_social_persistence::is_blocked_by(
+        ctx, char_id, partner_id,
+    ) {
+        return Err(rpc_err(
+            "ContactBlocked",
+            "Direct trade blocked by character contact settings",
+        ));
+    }
+    let partner_uid = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .get(&partner_id)
+            .map(|p| p.user_id)
+            .ok_or_else(|| rpc_err("CharacterNotFound", "Trade partner not found"))
+    })?;
+    if !ctx.is_character_online(partner_id, partner_uid) {
+        return Err(rpc_err(
+            "PartnerNotOnline",
+            "Trade partner is not currently online",
+        ));
+    }
     let now = ctx.now_unix();
     let trade_id = ctx.db.try_with_mut_snapshot(|snap| {
         let partner = snap
@@ -584,6 +609,29 @@ pub fn initiate_trade_session(
                 "PartnerNotInStation",
                 "Trade partner must be docked at the same station or structure",
             ));
+        }
+        let mut stale_nids = Vec::new();
+        for (&nid, note) in &snap.owner_notes {
+            if note.character_id != -73 {
+                continue;
+            }
+            if let Ok(tr) = serde_json::from_str::<TradeSessionState>(&note.note) {
+                if tr.completed || tr.cancelled {
+                    stale_nids.push(nid);
+                } else if tr.char_a == char_id
+                    || tr.char_b == char_id
+                    || tr.char_a == partner_id
+                    || tr.char_b == partner_id
+                {
+                    return Err(rpc_err(
+                        "TradeAlreadyActive",
+                        "Character or partner already has an active direct trade session",
+                    ));
+                }
+            }
+        }
+        for nid in stale_nids {
+            snap.owner_notes.remove(&nid);
         }
         snap.next_entity_id += 1;
         let trade_id = snap.next_entity_id;
@@ -612,17 +660,28 @@ pub fn initiate_trade_session(
         );
         Ok(trade_id)
     })?;
-    let bid_a = ctx.bind_verified_sub_object(session, "trademgr", trade_id)?;
+    let bid_a = match ctx.bind_verified_sub_object(session, "trademgr", trade_id) {
+        Ok(bid) => bid,
+        Err(e) => {
+            let _ = ctx.db.with_mut_snapshot(|snap| {
+                snap.owner_notes.remove(&trade_note_id(trade_id));
+            });
+            return Err(e);
+        }
+    };
     let (_, partner_wire_rep) =
-        ctx.bind_sub_object_for_notification(partner_id, None, "trademgr", trade_id)?;
-    ctx.emit_typed(
-        NotificationTarget::Character(char_id),
-        crate::router::notify_registry::OnTradeInitiate {
-            char_id,
-            trade_session: ctx.bound_object_wire_rep(bid_a),
-            trade_items: PyRep::List(vec![]),
-        },
-    );
+        match ctx.bind_sub_object_for_notification(partner_id, None, "trademgr", trade_id) {
+            Ok(bound) => bound,
+            Err(e) => {
+                ctx.release_bound_objects_for_object("trademgr", trade_id);
+                let _ = ctx.db.with_mut_snapshot(|snap| {
+                    snap.owner_notes.remove(&trade_note_id(trade_id));
+                });
+                return Err(e);
+            }
+        };
+    // Per V24 `PVPTradeService.StartTradeSession`, the initiator receives `tradeSession` as the
+    // `InitiateTrade` CallRsp return value; only the partner receives `OnTradeInitiate`.
     ctx.emit_typed(
         NotificationTarget::Character(partner_id),
         crate::router::notify_registry::OnTradeInitiate {
@@ -1308,9 +1367,13 @@ fn handle_trade_action(
     });
     match res {
         Ok(TradeActionOutcome::ClosedStale) => {
+            if trade_id > 0 {
+                ctx.release_bound_objects_for_object("trademgr", trade_id);
+            }
             Some(Err(rpc_err("TradeClosed", "Trade session is already closed")))
         }
         Ok(TradeActionOutcome::UndockedCancelled(tr)) => {
+            ctx.release_bound_objects_for_object("trademgr", tr.trade_id);
             for party in [tr.char_a, tr.char_b] {
                 ctx.emit_typed(
                     NotificationTarget::Character(party),
@@ -1428,6 +1491,9 @@ fn handle_trade_action(
                     }
                     _ => {}
                 }
+            }
+            if tr.completed || tr.cancelled {
+                ctx.release_bound_objects_for_object("trademgr", tr.trade_id);
             }
             Some(Ok(custom_reply.unwrap_or_else(|| {
                 PyRep::keyval([
