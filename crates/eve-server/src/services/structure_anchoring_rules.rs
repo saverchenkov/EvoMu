@@ -209,7 +209,7 @@ pub fn check_anchor_position(
         _ => false,
     });
     let structure_hit = snap.structures.values().any(|s| {
-        if s.solar_system_id != sys_id || s.state == STATE_DESTROYED {
+        if s.solar_system_id != sys_id || !life::is_in_space_structure_state(&s.state) {
             return false;
         }
         let other_is_flex = life::structure_profile(ctx, s.type_id)

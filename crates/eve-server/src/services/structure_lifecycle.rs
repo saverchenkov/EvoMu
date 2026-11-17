@@ -74,6 +74,12 @@ pub const STATE_DEPLOY_VULNERABLE: &str = "DeployVulnerable";
 pub const STATE_FOB_INVULNERABLE: &str = "FobInvulnerable";
 pub const STATE_DESTROYED: &str = "Destroyed";
 
+/// Returns whether a structure record state represents a structure currently deployed in space.
+#[inline]
+pub fn is_in_space_structure_state(state: &str) -> bool {
+    !state.eq_ignore_ascii_case(STATE_DESTROYED) && !state.eq_ignore_ascii_case(STATE_UNANCHORED)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HullClass {
     Medium,

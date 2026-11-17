@@ -162,7 +162,7 @@ pub fn handle_upgrade_gantry(
                     client_error: None,
                 });
             }
-            if matches!(st.state.as_str(), "Destroyed" | "Unanchored") {
+            if !life::is_in_space_structure_state(&st.state) {
                 return Err(BridgeRpcError {
                     code: "InvalidOrbitalState".into(),
                     message: format!("Orbital {orbital_id} is in invalid state '{}'", st.state),
@@ -435,7 +435,7 @@ pub fn handle_anchor_orbital(
             if snap
                 .structures
                 .get(&item_id)
-                .is_some_and(|st| st.state != "Destroyed" && st.state != "Unanchored")
+                .is_some_and(|st| life::is_in_space_structure_state(&st.state))
             {
                 return Err(err(
                     "AlreadyAnchored",
@@ -445,8 +445,7 @@ pub fn handle_anchor_orbital(
             let tag = format!("Orbital:{planet_id}");
             if snap.structures.values().any(|st| {
                 st.solar_system_id == sys_id
-                    && st.state != "Destroyed"
-                    && st.state != "Unanchored"
+                    && life::is_in_space_structure_state(&st.state)
                     && st.name == tag
             }) {
                 return Err(err(
@@ -674,7 +673,7 @@ pub fn handle_unanchor_orbital(
                     ),
                 ));
             }
-            if matches!(st.state.as_str(), "Destroyed" | "Unanchored")
+            if !life::is_in_space_structure_state(&st.state)
                 || st.self_destruct_at_unix.is_some()
             {
                 return Err(err(
@@ -808,12 +807,10 @@ pub fn handle_unanchor_orbital(
                 ));
             }
 
-            if let Some(st_mut) = snap.structures.get_mut(&item_id) {
-                st_mut.state = "Unanchored".into();
-                st_mut.fuel_blocks = 0;
-                st_mut.reinforced_until_unix = 0;
-                st_mut.self_destruct_at_unix = None;
-            }
+            snap.structures.remove(&item_id);
+            snap.structure_vulnerability_windows.remove(&item_id);
+            snap.sp6_lifecycle.space_object_meta.remove(&item_id);
+            snap.item_positions.remove(&item_id);
             snap.owner_notes
                 .remove(&crate::services::industry_pi::orbital_settings_note_id(item_id));
             if let Some(pid) = planet_opt {
@@ -967,7 +964,7 @@ fn build_structure_dir_entry(
         ("wars", PyRep::List(war_ids.into_iter().map(PyRep::Integer).collect())),
         ("services", PyRep::Dict(services)),
         ("onlineServiceTypeIDs", PyRep::List(online_types.into_iter().map(|t| PyRep::Integer(i64::from(t))).collect())),
-        ("inSpace", PyRep::Bool(st.state != life::STATE_DESTROYED)),
+        ("inSpace", PyRep::Bool(life::is_in_space_structure_state(&st.state))),
         ("reinforceHour", r_hour.clone()),
         ("reinforceWeekday", r_day.clone()),
         ("nextReinforceHour", nr_hour.clone()),
@@ -992,7 +989,7 @@ pub(crate) fn handle_get_structures(ctx: &ServerContext, session: &mut SessionSt
             .structures
             .values()
             .filter_map(|s| {
-                if s.state == life::STATE_DESTROYED {
+                if !life::is_in_space_structure_state(&s.state) {
                     return None;
                 }
                 let has_acl = structure_upwell_ops::evaluate_character_structure_access_in_snap_at(snap, s.structure_id, char_id, Some(now));
@@ -1022,7 +1019,7 @@ pub(crate) fn handle_get_structure_info(ctx: &ServerContext, session: &mut Sessi
         let Some(st) = snap
             .structures
             .get(&structure_id)
-            .filter(|s| s.state != life::STATE_DESTROYED)
+            .filter(|s| life::is_in_space_structure_state(&s.state))
         else {
             return Ok(PyRep::None);
         };

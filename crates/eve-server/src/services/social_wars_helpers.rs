@@ -139,13 +139,14 @@ pub(super) fn is_war_participant_corp(
 
 pub(super) fn war_eligible(snap: &WorldStateSnapshot, corp_id: i64) -> bool {
     snap.structures.values().any(|s| {
-        s.state != "Destroyed"
-            && (s.owner_corp_id == corp_id
-                || snap
-                    .corporations
-                    .get(&s.owner_corp_id)
-                    .and_then(|c| c.alliance_id)
-                    == Some(corp_id))
+        crate::services::station_structure::structure_lifecycle::is_in_space_structure_state(
+            &s.state,
+        ) && (s.owner_corp_id == corp_id
+            || snap
+                .corporations
+                .get(&s.owner_corp_id)
+                .and_then(|c| c.alliance_id)
+                == Some(corp_id))
     })
 }
 

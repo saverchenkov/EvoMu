@@ -624,13 +624,16 @@ async fn test_pos_mgr_moon_silo_and_orbital() {
     assert_eq!(unanchor_res.dict_get("state"), Some(&PyRep::String("Unanchored".into())));
     assert_eq!(unanchor_res.dict_get("itemID"), Some(&PyRep::Integer(orbital_id)));
 
-    let (st_state, it_flag, it_loc) = ctx.db.with_snapshot(|snap| {
-        let st = snap.structures.get(&orbital_id).map(|s| s.state.clone());
+    let (st_present, it_flag, it_loc) = ctx.db.with_snapshot(|snap| {
+        let st_present = snap.structures.contains_key(&orbital_id);
         let it_flag = snap.items.get(&orbital_id).map(|i| i.flag);
         let it_loc = snap.items.get(&orbital_id).map(|i| i.location_id);
-        (st, it_flag, it_loc)
+        (st_present, it_flag, it_loc)
     });
-    assert_eq!(st_state, Some("Unanchored".into()), "UnanchorOrbital must transition structure state to Unanchored");
+    assert!(
+        !st_present,
+        "UnanchorOrbital must remove structure record from snap.structures"
+    );
     assert_eq!(it_flag, Some(InventoryFlag::Cargo), "UnanchorOrbital must transfer item to ship cargo hold");
     assert_eq!(it_loc, Some(lowsec_ship_id), "UnanchorOrbital must move item into active Charon hold");
     assert!(
@@ -1466,9 +1469,10 @@ async fn test_pos_mgr_unanchor_orbital_e2e_lifecycle_and_security() {
         "UnanchorOrbital must remove orbital ball from solar system"
     );
     ctx.db.with_snapshot(|snap| {
-        let st = snap.structures.get(&gantry_id).expect("structure record");
-        assert_eq!(st.state, "Unanchored");
-        assert_eq!(st.fuel_blocks, 0);
+        assert!(
+            !snap.structures.contains_key(&gantry_id),
+            "unanchored gantry structure record must be removed from snap.structures"
+        );
         let note_id = eve_server::services::industry_pi::orbital_settings_note_id(gantry_id);
         assert!(!snap.owner_notes.contains_key(&note_id));
         let it = snap.items.get(&gantry_id).expect("unanchored item");
@@ -1924,6 +1928,10 @@ async fn test_pos_mgr_anchor_orbital_stacked_and_locked_gantry() {
     assert_eq!(unanchored.dict_get("itemID"), Some(&PyRep::Integer(orbital_id)));
     assert_eq!(unanchored.dict_get("state"), Some(&PyRep::String("Unanchored".into())));
     ctx.db.with_snapshot(|snap| {
+        assert!(
+            !snap.structures.contains_key(&orbital_id),
+            "unanchored split orbital must be removed from snap.structures"
+        );
         let unanchored_item = snap.items.get(&orbital_id).expect("unanchored item");
         assert_eq!(unanchored_item.location_id, ship_id);
         assert_eq!(unanchored_item.flag, InventoryFlag::Cargo);
@@ -1931,4 +1939,468 @@ async fn test_pos_mgr_anchor_orbital_stacked_and_locked_gantry() {
         assert_eq!(unanchored_item.quantity, 1);
         assert!(!unanchored_item.singleton);
     });
+}
+
+#[tokio::test]
+async fn test_pos_mgr_unanchor_orbital_clears_war_directory_search_clearance_and_pi() {
+    use eve_server::services::industry_pi::pi_helpers::resolve_orbital_and_planet;
+    use eve_server::services::station_structure::structure_lifecycle::is_in_space_structure_state;
+
+    const RANCER_SYS: u32 = 30_002_718;
+    const PERIMETER_SYS: u32 = 30_000_144;
+    const ASTRAHUS_TYPE_ID: u32 = 35_832;
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let celestials = ctx.sde.celestials_in_system(RANCER_SYS);
+    let (planet, clear_pos) = celestials
+        .iter()
+        .filter(|c| c.group_id == 7)
+        .find_map(|p| {
+            let offset_d = p.radius + 5_000_000.0;
+            [
+                glam::DVec3::new(0.0, offset_d, 0.0),
+                glam::DVec3::new(offset_d, 0.0, 0.0),
+                glam::DVec3::new(-offset_d, 0.0, 0.0),
+            ]
+            .into_iter()
+            .find_map(|off| {
+                let pos = p.position + off;
+                let stn_clear = ctx
+                    .sde
+                    .stations
+                    .values()
+                    .filter(|s| s.solar_system_id == RANCER_SYS)
+                    .all(|s| s.position.distance(pos) >= 1_500_000.0);
+                let cel_clear = celestials
+                    .iter()
+                    .filter(|c| matches!(c.group_id, 7 | 8 | 9 | 10))
+                    .all(|c| (c.position.distance(pos) - c.radius).max(0.0) >= 1_500_000.0);
+                (stn_clear && cel_clear).then_some((p.clone(), pos))
+            })
+        })
+        .expect("Rancer planet with clear Upwell anchor offset within orbital range");
+
+    let mut def_sess = setup_pilot(&ctx, 508, "demo", "demo-secret", PILOT1).await;
+    let def_ship_id = def_sess.ship_id.expect("PILOT1 active ship");
+    let def_corp = 98_557_001_i64;
+    let agg_char = 90_557_002_i64;
+    let agg_corp = 98_557_002_i64;
+    let agg_hq_id = 1_090_557_900_i64;
+    let agg_ship_id = 890_557_202_i64;
+    let gantry_item_id = 890_557_101_i64;
+    let astra_item_id = 890_557_301_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut base_char = snap.characters.get(&PILOT1).cloned().expect("PILOT1");
+        if let Some(ch) = snap.characters.get_mut(&PILOT1) {
+            ch.corporation_id = def_corp;
+            ch.solar_system_id = RANCER_SYS;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        base_char.character_id = agg_char;
+        base_char.user_id = 509;
+        base_char.name = "Agg Unanchor Pilot".into();
+        base_char.corporation_id = agg_corp;
+        base_char.solar_system_id = RANCER_SYS;
+        base_char.station_id = None;
+        base_char.structure_id = None;
+        base_char.active_ship_id = agg_ship_id;
+        snap.characters.insert(agg_char, base_char);
+
+        let mut d_corp = eve_db::CorporationRecord::default();
+        d_corp.corporation_id = def_corp;
+        d_corp.name = "DefUnanchorWarCorp".into();
+        d_corp.ticker = "DUWC".into();
+        d_corp.ceo_id = PILOT1;
+        d_corp.hq_station_id = Some(60_003_760);
+        d_corp.members = [PILOT1].into_iter().collect();
+        d_corp.member_roles = [(PILOT1, u64::MAX)].into_iter().collect();
+        snap.corporations.insert(def_corp, d_corp);
+
+        let mut a_corp = eve_db::CorporationRecord::default();
+        a_corp.corporation_id = agg_corp;
+        a_corp.name = "AggUnanchorWarCorp".into();
+        a_corp.ticker = "AUWC".into();
+        a_corp.ceo_id = agg_char;
+        a_corp.hq_station_id = Some(60_003_760);
+        a_corp.members = [agg_char].into_iter().collect();
+        a_corp.member_roles = [(agg_char, u64::MAX)].into_iter().collect();
+        a_corp.set_division_balance(1, eve_db::IskCents::from_isk(1_000));
+        a_corp.ensure_wallet_divisions();
+        snap.corporations.insert(agg_corp, a_corp);
+
+        snap.structures.insert(
+            agg_hq_id,
+            UpwellStructureRecord {
+                structure_id: agg_hq_id,
+                type_id: ASTRAHUS_TYPE_ID,
+                owner_corp_id: agg_corp,
+                solar_system_id: PERIMETER_SYS,
+                name: "AUWC Perimeter HQ".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                hull_hp: 500_000.0,
+                ..Default::default()
+            },
+        );
+
+        if let Some(sh) = snap.items.get_mut(&def_ship_id) {
+            sh.type_id = 20185; // Charon freighter
+            sh.location_id = i64::from(RANCER_SYS);
+            sh.flag = InventoryFlag::None;
+            sh.singleton = true;
+        }
+        snap.items.insert(
+            agg_ship_id,
+            InventoryItemRecord {
+                item_id: agg_ship_id,
+                type_id: 20185,
+                owner_id: agg_char,
+                location_id: i64::from(RANCER_SYS),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            gantry_item_id,
+            InventoryItemRecord {
+                item_id: gantry_item_id,
+                type_id: GANTRY_TYPE_ID,
+                owner_id: PILOT1,
+                location_id: def_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            astra_item_id,
+            InventoryItemRecord {
+                item_id: astra_item_id,
+                type_id: ASTRAHUS_TYPE_ID,
+                owner_id: agg_char,
+                location_id: agg_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    def_sess.corporation_id = Some(def_corp);
+    def_sess.corp_role = u64::MAX;
+    def_sess.solar_system_id = Some(RANCER_SYS);
+    def_sess.station_id = None;
+    def_sess.structure_id = None;
+
+    let mut agg_sess = SessionState::new(509);
+    agg_sess.user_id = Some(509);
+    agg_sess.character_id = Some(agg_char);
+    agg_sess.corporation_id = Some(agg_corp);
+    agg_sess.corp_role = u64::MAX;
+    agg_sess.solar_system_id = Some(RANCER_SYS);
+    agg_sess.ship_id = Some(agg_ship_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(RANCER_SYS);
+    for (sid, owner_pos) in [(def_ship_id, clear_pos), (agg_ship_id, clear_pos)] {
+        sys_handle
+            .spawn_ball(eve_destiny::Ball {
+                id: sid,
+                type_id: 20185,
+                position: owner_pos,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 100.0,
+                inertia: 1.0,
+                mass: 1e8,
+                radius: 500.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            })
+            .await
+            .expect("spawn freighter ball");
+    }
+
+    let bound_pos = Some(
+        ctx.bind_object(&def_sess, "posMgr", i64::from(RANCER_SYS))
+            .expect("bind posMgr"),
+    );
+    let anchored = wire_rpc(
+        &ctx,
+        &mut def_sess,
+        "posMgr",
+        bound_pos,
+        "AnchorOrbital",
+        &[PyRep::Integer(gantry_item_id), PyRep::Integer(planet.celestial_id)],
+    )
+    .await
+    .expect("AnchorOrbital");
+    let orbital_id = anchored
+        .dict_get("orbitalID")
+        .and_then(|v| v.as_i64())
+        .expect("orbitalID");
+    let orbital_name = format!("Orbital:{}", planet.celestial_id);
+
+    // Before unanchoring: gantry makes def_corp war-eligible, visible in directory/search,
+    // blocks Upwell anchoring within 1,000 km, and resolves via pi_helpers.
+    let warable_before = rpc(
+        &ctx,
+        &mut agg_sess,
+        "lookupSvc",
+        "LookupWarableCorporationsOrAlliances",
+        &[PyRep::String("DefUnanchorWarCorp".into()), PyRep::Bool(false)],
+    )
+    .await
+    .expect("LookupWarableCorporationsOrAlliances before");
+    assert!(matches!(
+        &warable_before,
+        PyRep::List(entries) if entries.iter().any(|e| e.dict_get("ownerID") == Some(&PyRep::Integer(def_corp)))
+    ));
+    let war_err_before = rpc(
+        &ctx,
+        &mut agg_sess,
+        "warRegistry",
+        "DeclareWarAgainst",
+        &[PyRep::Integer(def_corp)],
+    )
+    .await
+    .expect_err("DeclareWarAgainst with <100M ISK still passes war-eligibility before unanchor");
+    assert_eq!(war_err_before.code, "InsufficientFunds");
+
+    let dir_before = rpc(&ctx, &mut def_sess, "structureDirectory", "GetStructures", &[])
+        .await
+        .expect("GetStructures before");
+    assert!(matches!(
+        &dir_before,
+        PyRep::Dict(entries) if entries.iter().any(|(k, _)| k == &PyRep::Integer(orbital_id))
+    ));
+    let info_before = rpc(
+        &ctx,
+        &mut def_sess,
+        "structureDirectory",
+        "GetStructureInfo",
+        &[PyRep::Integer(orbital_id)],
+    )
+    .await
+    .expect("GetStructureInfo before");
+    assert_ne!(info_before, PyRep::None);
+
+    let search_before = rpc(
+        &ctx,
+        &mut def_sess,
+        "search",
+        "QuickQuery",
+        &[PyRep::String(orbital_name.clone()), PyRep::List(vec![PyRep::Integer(1657)])],
+    )
+    .await
+    .expect("search.QuickQuery before");
+    assert!(matches!(
+        &search_before,
+        PyRep::List(ids) if ids.contains(&PyRep::Integer(orbital_id))
+    ));
+
+    let too_close_err = rpc(
+        &ctx,
+        &mut agg_sess,
+        "structureDeployment",
+        "Anchor",
+        &[PyRep::Integer(astra_item_id)],
+    )
+    .await
+    .expect_err("Upwell structure cannot anchor at anchored gantry coordinates");
+    assert_eq!(too_close_err.code, "TooCloseToStructureOrStation");
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(resolve_orbital_and_planet(snap, orbital_id), (Some(orbital_id), planet.celestial_id));
+        assert_eq!(
+            resolve_orbital_and_planet(snap, planet.celestial_id),
+            (Some(orbital_id), planet.celestial_id)
+        );
+    });
+
+    // Unanchor gantry back into ship cargo.
+    wire_rpc(
+        &ctx,
+        &mut def_sess,
+        "posMgr",
+        bound_pos,
+        "UnanchorOrbital",
+        &[PyRep::Integer(orbital_id)],
+    )
+    .await
+    .expect("UnanchorOrbital");
+
+    // Raise attacker wallet so war declaration only checks target war-eligibility.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&agg_corp) {
+            c.set_division_balance(1, eve_db::IskCents::from_isk(500_000_000));
+            c.wallet_divisions.clear();
+            c.ensure_wallet_divisions();
+        }
+    });
+
+    // After unanchoring: gantry is removed from snap.structures & all 4 subsystems exclude it.
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.structures.contains_key(&orbital_id));
+        assert!(!snap.sp6_lifecycle.space_object_meta.contains_key(&orbital_id));
+        assert_eq!(resolve_orbital_and_planet(snap, orbital_id), (None, orbital_id));
+        assert_eq!(
+            resolve_orbital_and_planet(snap, planet.celestial_id),
+            (None, planet.celestial_id)
+        );
+    });
+
+    let warable_after = rpc(
+        &ctx,
+        &mut agg_sess,
+        "lookupSvc",
+        "LookupWarableCorporationsOrAlliances",
+        &[PyRep::String("DefUnanchorWarCorp".into()), PyRep::Bool(false)],
+    )
+    .await
+    .expect("LookupWarableCorporationsOrAlliances after");
+    assert!(!matches!(
+        &warable_after,
+        PyRep::List(entries) if entries.iter().any(|e| e.dict_get("ownerID") == Some(&PyRep::Integer(def_corp)))
+    ));
+    let war_err_after = rpc(
+        &ctx,
+        &mut agg_sess,
+        "warRegistry",
+        "DeclareWarAgainst",
+        &[PyRep::Integer(def_corp)],
+    )
+    .await
+    .expect_err("Corp whose only orbital was unanchored must not be war-eligible");
+    assert_eq!(war_err_after.code, "DefenderNotWarEligible");
+
+    let dir_after = rpc(&ctx, &mut def_sess, "structureDirectory", "GetStructures", &[])
+        .await
+        .expect("GetStructures after");
+    assert!(!matches!(
+        &dir_after,
+        PyRep::Dict(entries) if entries.iter().any(|(k, _)| k == &PyRep::Integer(orbital_id))
+    ));
+    let info_after = rpc(
+        &ctx,
+        &mut def_sess,
+        "structureDirectory",
+        "GetStructureInfo",
+        &[PyRep::Integer(orbital_id)],
+    )
+    .await
+    .expect("GetStructureInfo after");
+    assert_eq!(info_after, PyRep::None);
+
+    let search_after = rpc(
+        &ctx,
+        &mut def_sess,
+        "search",
+        "QuickQuery",
+        &[PyRep::String(orbital_name.clone()), PyRep::List(vec![PyRep::Integer(1657)])],
+    )
+    .await
+    .expect("search.QuickQuery after");
+    assert!(!matches!(
+        &search_after,
+        PyRep::List(ids) if ids.contains(&PyRep::Integer(orbital_id))
+    ));
+
+    // Verify defensive `is_in_space_structure_state` guards reject a synthetic stale `"Unanchored"`
+    // record across PI resolution, war eligibility, structure directory, search, AND Upwell anchoring!
+    assert!(!is_in_space_structure_state("Unanchored"));
+    assert!(!is_in_space_structure_state("unanchored"));
+    assert!(!is_in_space_structure_state("Destroyed"));
+    assert!(is_in_space_structure_state("ShieldVulnerable"));
+    let stale_id = 890_557_999_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            stale_id,
+            UpwellStructureRecord {
+                structure_id: stale_id,
+                type_id: GANTRY_TYPE_ID,
+                owner_corp_id: def_corp,
+                solar_system_id: RANCER_SYS,
+                name: orbital_name.clone(),
+                position: clear_pos.to_array(),
+                state: "Unanchored".into(),
+                quantum_core_installed: false,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(resolve_orbital_and_planet(snap, stale_id), (None, stale_id));
+        assert_eq!(
+            resolve_orbital_and_planet(snap, planet.celestial_id),
+            (None, planet.celestial_id)
+        );
+    });
+    let warable_stale = rpc(
+        &ctx,
+        &mut agg_sess,
+        "lookupSvc",
+        "LookupWarableCorporationsOrAlliances",
+        &[PyRep::String("DefUnanchorWarCorp".into()), PyRep::Bool(false)],
+    )
+    .await
+    .expect("LookupWarableCorporationsOrAlliances stale");
+    assert!(!matches!(
+        &warable_stale,
+        PyRep::List(entries) if entries.iter().any(|e| e.dict_get("ownerID") == Some(&PyRep::Integer(def_corp)))
+    ));
+    let war_err_stale = rpc(
+        &ctx,
+        &mut agg_sess,
+        "warRegistry",
+        "DeclareWarAgainst",
+        &[PyRep::Integer(def_corp)],
+    )
+    .await
+    .expect_err("Synthetic Unanchored structure must not grant war-eligibility");
+    assert_eq!(war_err_stale.code, "DefenderNotWarEligible");
+    let info_stale = rpc(
+        &ctx,
+        &mut def_sess,
+        "structureDirectory",
+        "GetStructureInfo",
+        &[PyRep::Integer(stale_id)],
+    )
+    .await
+    .expect("GetStructureInfo stale");
+    assert_eq!(info_stale, PyRep::None);
+    let search_stale = rpc(
+        &ctx,
+        &mut def_sess,
+        "search",
+        "QuickQuery",
+        &[PyRep::String(orbital_name), PyRep::List(vec![PyRep::Integer(1657)])],
+    )
+    .await
+    .expect("search.QuickQuery stale");
+    assert!(!matches!(
+        &search_stale,
+        PyRep::List(ids) if ids.contains(&PyRep::Integer(stale_id))
+    ));
+
+    // Even with the synthetic `"Unanchored"` record present at `clear_pos`, Upwell anchoring succeeds!
+    let anchor_after = rpc(
+        &ctx,
+        &mut agg_sess,
+        "structureDeployment",
+        "Anchor",
+        &[PyRep::Integer(astra_item_id)],
+    )
+    .await
+    .expect("Upwell structure must be anchorable once gantry is unanchored");
+    assert!(anchor_after.dict_get("structureID").and_then(|v| v.as_i64()).is_some());
 }

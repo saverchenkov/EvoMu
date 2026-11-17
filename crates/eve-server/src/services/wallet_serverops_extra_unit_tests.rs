@@ -593,6 +593,7 @@ async fn unanchor_orbital_distance_system_ownership_and_ship_cargo_branches() {
     assert_eq!(unanchored.dict_get("state").and_then(PyRep::as_str), Some("Unanchored"));
     assert_eq!(unanchored.dict_get("ownerID").and_then(PyRep::as_i64), Some(ceo_id));
     ctx.db.with_snapshot(|snap| {
+        assert!(!snap.structures.contains_key(&orbital_id));
         assert_eq!(snap.items[&orbital_id].location_id, ship_id);
         assert_eq!(snap.items[&orbital_id].flag, InventoryFlag::Cargo);
         assert_eq!(snap.items[&orbital_id].owner_id, ceo_id);

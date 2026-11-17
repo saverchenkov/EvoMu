@@ -1015,7 +1015,11 @@ pub fn orbital_settings_note_id(planet_or_orbital_id: i64) -> i64 {
 }
 
 pub fn resolve_orbital_and_planet(snap: &eve_db::WorldStateSnapshot, planet_or_orbital_id: i64) -> (Option<i64>, i64) {
-    if let Some(st) = snap.structures.get(&planet_or_orbital_id) {
+    if let Some(st) = snap
+        .structures
+        .get(&planet_or_orbital_id)
+        .filter(|s| crate::services::station_structure::structure_lifecycle::is_in_space_structure_state(&s.state))
+    {
         if let Some(pid) = st.name.strip_prefix("Orbital:").and_then(|s| s.parse::<i64>().ok()) {
             return (Some(st.structure_id), pid);
         }
@@ -1024,7 +1028,7 @@ pub fn resolve_orbital_and_planet(snap: &eve_db::WorldStateSnapshot, planet_or_o
     if let Some(st) = snap
         .structures
         .values()
-        .find(|s| s.state != "Destroyed" && s.state != "Unanchored" && s.name == tag)
+        .find(|s| crate::services::station_structure::structure_lifecycle::is_in_space_structure_state(&s.state) && s.name == tag)
     {
         return (Some(st.structure_id), planet_or_orbital_id);
     }
