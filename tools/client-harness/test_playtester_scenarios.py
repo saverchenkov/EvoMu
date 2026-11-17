@@ -78,6 +78,16 @@ class TestScenarioValidation(unittest.TestCase):
             scenarios["launch_login"]["declared_setup_steps"][0]["step_id"],
             "starting_state.extra_characters",
         )
+        verify_step = next(s for s in scenarios["launch_login"]["steps"] if s["id"] == "verify_hangar_and_ship")
+        sc_fields = {
+            item["field"]: item
+            for item in (verify_step["checks"].get("state_checks") or [])
+            if isinstance(item, dict) and item.get("field")
+        }
+        self.assertIn("wallet_isk", sc_fields)
+        self.assertGreaterEqual(sc_fields["wallet_isk"].get("min", 0), 1)
+        self.assertIn("trained_skill_count", sc_fields)
+        self.assertGreaterEqual(sc_fields["trained_skill_count"].get("min", 0), 1)
         # station_ui and undock_navigate have zero GM/time-control steps
         self.assertEqual(scenarios["station_ui"]["declared_setup_steps"], [])
         self.assertEqual(scenarios["undock_navigate"]["declared_setup_steps"], [])
@@ -96,6 +106,12 @@ class TestScenarioValidation(unittest.TestCase):
             {"type": "run_slash", "target": "/tr 30000142"},
             {"type": "train_skill", "target": "3300"},
             {"type": "type_text", "target": "chat_input", "command": "/giveitem 587 1"},
+            {"type": "type_text", "target": "chat_input", "command": "/teleport 30000142"},
+            {"type": "type_text", "target": "chat_input", "command": "/kick pilot"},
+            {"type": "type_text", "target": "chat_input", "command": "/suspend pilot"},
+            {"type": "type_text", "target": "chat_input", "command": "/downtime 60"},
+            {"type": "type_text", "target": "chat_input", "command": "/reinforce 1001"},
+            {"type": "station_command", "target": "buy_free_plex_pack"},
             {"type": "advance_server_time", "target": "3600"},
             {"type": "complete_skills", "target": "all"},
         ]
@@ -106,6 +122,29 @@ class TestScenarioValidation(unittest.TestCase):
             }
             with self.assertRaises(playtester.ScenarioValidationError, msg=f"Should reject {bad_act!r}"):
                 playtester.validate_scenario(spec)
+
+    def test_rejects_unknown_check_keys_and_state_check_operators(self):
+        bad_specs = [
+            {
+                "id": "bad_check_key",
+                "steps": [{"id": "s1", "action": {"type": "wait", "wait_ms": 10}, "checks": {"expect_windiw_open": "wallet"}}],
+            },
+            {
+                "id": "bad_wait_until_key",
+                "steps": [{"id": "s1", "action": {"type": "wait", "wait_ms": 10}, "wait_until": {"timeout": 1000, "checks": {}}}],
+            },
+            {
+                "id": "bad_wait_until_check_key",
+                "steps": [{"id": "s1", "action": {"type": "wait", "wait_ms": 10}, "wait_until": {"checks": {"bogus_key": True}}}],
+            },
+            {
+                "id": "bad_rule_op",
+                "steps": [{"id": "s1", "action": {"type": "wait", "wait_ms": 10}, "checks": {"state_checks": [{"field": "wallet_isk", "greater_than": 0}]}}],
+            },
+        ]
+        for bad_spec in bad_specs:
+            with self.assertRaises(playtester.ScenarioValidationError, msg=f"Should reject {bad_spec['id']}"):
+                playtester.validate_scenario(bad_spec)
 
         # Explicitly declared setup / time_control steps ARE accepted and listed in declared_setup_steps
         allowed_spec = {
@@ -907,7 +946,7 @@ class TestScenarioReviewFixes(unittest.TestCase):
                 [scen],
                 out_benign,
                 _ok_step,
-                init_client_logs=lambda _rd, cl: (cl / "client_tracebacks.log").write_text(benign_tb, encoding="utf-8"),
+                init_client_logs=lambda rd, _cl: (rd / "client_tracebacks.log").write_text(benign_tb, encoding="utf-8"),
             )
             self.assertEqual(rc_b, 0)
             res_b = json.loads((out_benign / "result.json").read_text(encoding="utf-8"))
@@ -919,13 +958,175 @@ class TestScenarioReviewFixes(unittest.TestCase):
                 [scen],
                 out_bad,
                 _ok_step,
-                init_client_logs=lambda _rd, cl: (cl / "client_tracebacks.log").write_text(benign_tb + unhandled_tb, encoding="utf-8"),
+                init_client_logs=lambda rd, _cl: (rd / "client_tracebacks.log").write_text(benign_tb + unhandled_tb, encoding="utf-8"),
             )
             self.assertEqual(rc_u, 1)
             res_u = json.loads((out_bad / "result.json").read_text(encoding="utf-8"))
             self.assertFalse(res_u["journeys"]["tb_check"]["passed"])
             self.assertEqual(res_u["journeys"]["tb_check"]["failure"]["step_id"], "step_one")
             self.assertEqual(res_u["journeys"]["tb_check"]["failure"]["failed_check"], "no_client_exception")
+
+    def test_evomu_site_logexception_blocks_in_client_log_and_scen_dir_tracebacks_log(self):
+        benign_evomu_blocks = (
+            "2026-11-16 00:00:01 EVE Client version 24.02 started\n"
+            "[evomu_site] logmodule.LogException args=(AttributeError(\"'MapSlider' object has no attribute 'minimumWidth'\"),) kwargs={}\n"
+            "INNER TRACEBACK:\n"
+            '  File "packages/map/client/minimap.py", line 219, in _ResizeSlider\n'
+            "Traceback (most recent call last):\n"
+            "None\n"
+            "CALLSTACK:\n"
+            '  File "packages/logmodule/__init__.py", line 50, in LogException\n'
+            "[evomu_site] logmodule.LogException args=(UserError('CustomInfo', {'info': 'FittingValidationFailed: No slots'}),) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/shared/fitting/fittingSlotController.py", line 188, in OnDropData\n'
+            "UserError: ('CustomInfo', {'info': 'FittingValidationFailed: No slots'})\n"
+            "CALLSTACK:\n"
+            '  File "carbon/common/script/util/bluepy.py", line 12, in TaskletExt\n'
+            "[evomu_site] logmodule.LogException args=(UserError('NotEnoughCargoSpace', {}),) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/shared/inventory/invWindow.py", line 812, in _MoveItems\n'
+            "UserError: User error, msg=NotEnoughCargoSpace, dict={}\n"
+            "CALLSTACK:\n"
+            '  File "carbon/common/script/util/bluepy.py", line 15, in TaskletExt\n'
+            "INFO client UI steady state tick\n"
+        )
+        unhandled_evomu_client_log = (
+            "[evomu_site] logmodule.LogException args=(RuntimeError('real_client_bug'),) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/shared/brokenPanel.py", line 77, in LoadData\n'
+            "RuntimeError: real_client_bug\n"
+            "CALLSTACK:\n"
+            '  File "carbon/common/script/util/bluepy.py", line 20, in TaskletExt\n'
+        )
+        unhandled_evomu_tb_log = (
+            "logmodule.LogException args=(RuntimeError('boom_in_scen_dir_tb'),) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/shared/brokenPanel.py", line 88, in Open\n'
+            "RuntimeError: boom_in_scen_dir_tb\n"
+            "CALLSTACK:\n"
+            '  File "carbon/common/script/util/bluepy.py", line 22, in TaskletExt\n'
+        )
+        self.assertEqual(len(playtester.PlaytesterBugOracle.parse_tb_blocks(benign_evomu_blocks)), 3)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen = root / "evomu_site_logs.json"
+            scen.write_text(
+                json.dumps({
+                    "id": "evomu_site_logs",
+                    "steps": [{"id": "step_one", "action": {"type": "wait", "wait_ms": 10}, "checks": {"no_client_exception": True}}],
+                }),
+                encoding="utf-8",
+            )
+
+            def _ok_step(_runner, _cmd, _params):
+                return {
+                    "action_ok": True,
+                    "post_state": {"client_build": "9990001", "session": {"charid": 90000001}},
+                    "flight_recorder": {"macho_calls": [], "scatters_observed": [], "log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+                }
+
+            out_ok = root / "out_ok"
+            rc_ok = self._run_with_step_hook(
+                root,
+                [scen],
+                out_ok,
+                _ok_step,
+                init_client_logs=lambda rd, _cl: (
+                    (rd / "client.log").write_text(benign_evomu_blocks, encoding="utf-8"),
+                    (rd / "client_tracebacks.log").write_text(benign_evomu_blocks.replace("[evomu_site] ", ""), encoding="utf-8"),
+                ),
+            )
+            self.assertEqual(rc_ok, 0)
+            res_ok = json.loads((out_ok / "result.json").read_text(encoding="utf-8"))
+            self.assertTrue(res_ok["journeys"]["evomu_site_logs"]["passed"], res_ok)
+
+            out_bad_clog = root / "out_bad_clog"
+            rc_bad_clog = self._run_with_step_hook(
+                root,
+                [scen],
+                out_bad_clog,
+                _ok_step,
+                init_client_logs=lambda rd, _cl: (rd / "client.log").write_text(
+                    benign_evomu_blocks + unhandled_evomu_client_log, encoding="utf-8"
+                ),
+            )
+            self.assertEqual(rc_bad_clog, 1)
+            res_bad_clog = json.loads((out_bad_clog / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(res_bad_clog["journeys"]["evomu_site_logs"]["failure"]["failed_check"], "no_client_exception")
+
+            out_bad_tblog = root / "out_bad_tblog"
+            rc_bad_tblog = self._run_with_step_hook(
+                root,
+                [scen],
+                out_bad_tblog,
+                _ok_step,
+                init_client_logs=lambda rd, _cl: (
+                    (rd / "client.log").write_text(benign_evomu_blocks, encoding="utf-8"),
+                    (rd / "client_tracebacks.log").write_text(unhandled_evomu_tb_log, encoding="utf-8"),
+                ),
+            )
+            self.assertEqual(rc_bad_tblog, 1)
+            res_bad_tblog = json.loads((out_bad_tblog / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(res_bad_tblog["journeys"]["evomu_site_logs"]["failure"]["failed_check"], "no_client_exception")
+
+    def test_scenario_runner_writes_non_gm_player_server_config_and_propagates_time_control_flag(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen = root / "non_gm.json"
+            scen.write_text(
+                json.dumps({
+                    "id": "non_gm",
+                    "starting_state": {"account": "capsuleer_one", "password": "pw1", "char_id": 91000011},
+                    "steps": [
+                        {"id": "undock_step", "action": {"type": "undock"}},
+                        {"id": "tc_step", "time_control": True, "setup": True, "action": {"type": "wait", "wait_ms": 10}},
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            args = _fake_scenario_args(root, [scen], root / "out")
+            runner = playtester.ScenarioRunner(args)
+            runner.current_run_dir = root / "run_cfg"
+            runner.current_run_dir.mkdir(parents=True, exist_ok=True)
+            runner._active_starting_state = {"account": "capsuleer_one", "password": "pw1", "char_id": 91000011}
+            runner._active_declared_setup_steps = []
+
+            cfg_player = runner.write_server_config().read_text(encoding="utf-8")
+            self.assertIn("gm_mode = false", cfg_player)
+            self.assertNotIn("[[admin_accounts]]", cfg_player)
+            self.assertIn("[[player_accounts]]", cfg_player)
+            self.assertIn('username = "capsuleer_one"', cfg_player)
+            self.assertIn('password_token = "pw1"', cfg_player)
+            self.assertIn("[player_accounts.starter_character]", cfg_player)
+
+            inclient_cfg = json.loads(runner.write_inclient_cfg().read_text(encoding="utf-8"))
+            self.assertTrue(inclient_cfg.get("scenario_mode"))
+            self.assertEqual(inclient_cfg.get("user"), "capsuleer_one")
+
+            runner._active_declared_setup_steps = [{"step_index": 2, "step_id": "tc_step", "kind": "time_control"}]
+            cfg_setup = runner.write_server_config().read_text(encoding="utf-8")
+            self.assertIn("gm_mode = true", cfg_setup)
+            self.assertIn("[[admin_accounts]]", cfg_setup)
+
+            seen_payloads = []
+
+            def _capture_payload(_runner, cmd, params):
+                if cmd == "execute_action":
+                    seen_payloads.append(dict(params.get("action") or {}))
+                return {
+                    "action_ok": True,
+                    "post_state": {"client_build": "9990001", "session": {"charid": 91000011}},
+                    "flight_recorder": {"macho_calls": [], "scatters_observed": [], "log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+                }
+
+            rc = self._run_with_step_hook(root, [scen], root / "out_flags", _capture_payload)
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(seen_payloads), 2)
+            self.assertTrue(seen_payloads[0].get("scenario_mode"))
+            self.assertFalse(seen_payloads[0].get("time_control"))
+            self.assertTrue(seen_payloads[1].get("scenario_mode"))
+            self.assertTrue(seen_payloads[1].get("time_control"))
 
     def test_mid_run_per_step_log_offsets_fail_at_offending_step(self):
         with tempfile.TemporaryDirectory() as td:
@@ -951,7 +1152,7 @@ class TestScenarioReviewFixes(unittest.TestCase):
                 tgt = str((params.get("action") or {}).get("target") or "")
                 seen_targets_tb.append(tgt)
                 if tgt == "20":
-                    tb_path = runner.current_run_dir / "client_logs" / "client_tracebacks.log"
+                    tb_path = runner.current_run_dir / "client_tracebacks.log"
                     tb_path.write_text(
                         "EXCEPTION #9 logged at 11/16/2026 00:00:05 : error\n"
                         "Traceback (most recent call last):\n"

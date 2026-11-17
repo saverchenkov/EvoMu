@@ -4146,6 +4146,7 @@ def _execute_action(sm, action):
         else min(max(int(wait_ms), 0), 5000)
     )
 
+    allow_time_control = bool(action.get("time_control", not action.get("scenario_mode", False)))
     uicore = _get_uicore()
     layers = getattr(uicore, "layer", None) if uicore is not None else None
     result = {"ok": True, "action_ok": True, "action_type": raw_atype, "target": raw_target}
@@ -5138,7 +5139,7 @@ def _execute_action(sm, action):
                                 vs.CloseSecondaryView(sec_name)
                     except Exception:
                         pass
-                    H._undock_ship(sm)
+                    H._undock_ship(sm, allow_time_control=allow_time_control)
                     result["undocked"] = True
                 elif sub == "open_plex_store":
                     result.update(_open_client_window(sm, "nes"))
@@ -5370,14 +5371,19 @@ def _execute_action(sm, action):
                             or _WARP_TELEMETRY.get("in_warp")
                             or (getattr(H, "_WARP_SIGNAL_STATE", None) or {}).get("in_warp")
                         ):
-                            H._wait_warp_fx_settled(sm, timeout_sec=6.0)
+                            H._wait_warp_fx_settled(
+                                sm,
+                                timeout_sec=(12.0 if not allow_time_control else 6.0),
+                                allow_time_control=allow_time_control,
+                            )
                         H._wait_view_settled(sm)
-                        try:
-                            sm.RemoteSvc("timeControl").ClearSessionTimer()
-                        except Exception:
-                            pass
+                        if allow_time_control:
+                            try:
+                                sm.RemoteSvc("timeControl").ClearSessionTimer()
+                            except Exception:
+                                pass
                         dock_started_at = time.time()
-                        dock_loop_deadline = dock_started_at + 18.5
+                        dock_loop_deadline = dock_started_at + (35.0 if not allow_time_control else 18.5)
                         def _dock_surf_dist():
                             cur_bp = mich_d.GetBallpark() if (sid_d and mich_d is not None) else bp_d
                             if cur_bp is None or not hasattr(cur_bp, "GetBall"):
@@ -5405,23 +5411,28 @@ def _execute_action(sm, action):
                             beyonce.CmdFollowBall(dock_id, 0.0)
                             cur_sd = _dock_surf_dist()
                             steps = 0
-                            for _ in range(max_iters):
+                            iter_cap = max(max_iters, 50) if not allow_time_control else max_iters
+                            for _ in range(iter_cap):
                                 if time.time() >= dock_loop_deadline:
                                     break
                                 if cur_sd is not None and cur_sd <= float(limit_m):
                                     break
-                                adv_secs = 15 if (cur_sd is not None and cur_sd > 12000.0) else (10 if (cur_sd is not None and cur_sd > 4500.0) else 8)
+                                if allow_time_control:
+                                    adv_secs = 15 if (cur_sd is not None and cur_sd > 12000.0) else (10 if (cur_sd is not None and cur_sd > 4500.0) else 8)
+                                    try:
+                                        sm.RemoteSvc("timeControl").AdvanceClock(adv_secs)
+                                    except Exception:
+                                        pass
+                                    H._sleep_sim_ms(200)
+                                else:
+                                    H._sleep_sim_ms(500)
+                                steps += 1
+                                cur_sd = _dock_surf_dist()
+                            if allow_time_control:
                                 try:
-                                    sm.RemoteSvc("timeControl").AdvanceClock(adv_secs)
+                                    sm.RemoteSvc("timeControl").ClearSessionTimer()
                                 except Exception:
                                     pass
-                                steps += 1
-                                H._sleep_sim_ms(200)
-                                cur_sd = _dock_surf_dist()
-                            try:
-                                sm.RemoteSvc("timeControl").ClearSessionTimer()
-                            except Exception:
-                                pass
                             return steps
                         target_ball_d = bp_d.GetBall(dock_id) if (bp_d is not None and hasattr(bp_d, "GetBall")) else None
                         surf_d = _dock_surf_dist()
@@ -5434,15 +5445,22 @@ def _execute_action(sm, action):
                                     raise
                                 warp_too_short = True
                             if not warp_too_short:
-                                try:
-                                    sm.RemoteSvc("timeControl").AdvanceClock(180)
-                                except Exception:
-                                    pass
+                                if allow_time_control:
+                                    try:
+                                        sm.RemoteSvc("timeControl").AdvanceClock(180)
+                                    except Exception:
+                                        pass
                                 H._sleep_sim_ms(400)
-                                H._wait_warp_fx_settled(sm, timeout_sec=8.0)
+                                H._wait_warp_fx_settled(
+                                    sm,
+                                    timeout_sec=(35.0 if not allow_time_control else 8.0),
+                                    allow_time_control=allow_time_control,
+                                )
                                 surf_d = _dock_surf_dist()
                         if warp_too_short or (surf_d is not None and surf_d > 2400.0):
                             _approach_dock_within(2200.0, 12)
+                        if not allow_time_control:
+                            H._wait_session_timer_clear(max_wait_sec=12.0)
                         try:
                             sm.RemoteSvc("stationSvc").Dock(dock_id)
                         except Exception as dock_exc:
@@ -5463,18 +5481,22 @@ def _execute_action(sm, action):
                                 # large stations) while server perimeter check still rejects Dock.
                                 # Advance simulation with CmdFollowBall active and retry Dock
                                 # within dock_loop_deadline instead of stopping at 0 iterations.
-                                for _ in range(8):
+                                for _ in range(16 if not allow_time_control else 8):
                                     if time.time() >= dock_loop_deadline:
                                         break
-                                    try:
-                                        sm.RemoteSvc("timeControl").AdvanceClock(12)
-                                    except Exception:
-                                        pass
-                                    H._sleep_sim_ms(200)
-                                    try:
-                                        sm.RemoteSvc("timeControl").ClearSessionTimer()
-                                    except Exception:
-                                        pass
+                                    if allow_time_control:
+                                        try:
+                                            sm.RemoteSvc("timeControl").AdvanceClock(12)
+                                        except Exception:
+                                            pass
+                                        H._sleep_sim_ms(200)
+                                        try:
+                                            sm.RemoteSvc("timeControl").ClearSessionTimer()
+                                        except Exception:
+                                            pass
+                                    else:
+                                        H._sleep_sim_ms(600)
+                                        H._wait_session_timer_clear(max_wait_sec=4.0)
                                     try:
                                         sm.RemoteSvc("stationSvc").Dock(dock_id)
                                         pending_dock_exc = None
@@ -5485,7 +5507,7 @@ def _execute_action(sm, action):
                                         pending_dock_exc = retry_exc
                             if pending_dock_exc is not None:
                                 raise pending_dock_exc
-                        dl_d = time.time() + 10.0
+                        dl_d = time.time() + (16.0 if not allow_time_control else 10.0)
                         while time.time() < dl_d:
                             sess_d = getattr(__builtin__, "session", None)
                             if (
@@ -5495,10 +5517,11 @@ def _execute_action(sm, action):
                             ):
                                 break
                             H._sleep_ms(100)
-                        try:
-                            sm.RemoteSvc("timeControl").ClearSessionTimer()
-                        except Exception:
-                            pass
+                        if allow_time_control:
+                            try:
+                                sm.RemoteSvc("timeControl").ClearSessionTimer()
+                            except Exception:
+                                pass
                         H._ensure_view(sm, "hangar")
                     elif sub == "jump_gate":
                         sess_j = getattr(__builtin__, "session", None)
@@ -5557,12 +5580,17 @@ def _execute_action(sm, action):
                                         raise
                                     warp_too_short_j = True
                                 if not warp_too_short_j:
-                                    try:
-                                        sm.RemoteSvc("timeControl").AdvanceClock(180)
-                                    except Exception:
-                                        pass
+                                    if allow_time_control:
+                                        try:
+                                            sm.RemoteSvc("timeControl").AdvanceClock(180)
+                                        except Exception:
+                                            pass
                                     H._sleep_sim_ms(400)
-                                    H._wait_warp_fx_settled(sm, timeout_sec=8.0)
+                                    H._wait_warp_fx_settled(
+                                        sm,
+                                        timeout_sec=(35.0 if not allow_time_control else 8.0),
+                                        allow_time_control=allow_time_control,
+                                    )
                                     bp_j = mich_j.GetBallpark() if mich_j is not None else None
                                     target_ball_j = bp_j.GetBall(gate_id) if (bp_j is not None and hasattr(bp_j, "GetBall")) else None
                                     surf_j = None
@@ -5576,12 +5604,19 @@ def _execute_action(sm, action):
                                             surf_j = None
                             if warp_too_short_j or surf_j is None or surf_j > 2400.0:
                                 beyonce.CmdFollowBall(gate_id, 0.0)
-                                for _ in range(14):
-                                    try:
-                                        sm.RemoteSvc("timeControl").AdvanceClock(8)
-                                    except Exception:
-                                        pass
-                                    H._sleep_sim_ms(200)
+                                gate_approach_dl = time.time() + (25.0 if not allow_time_control else 18.0)
+                                gate_iters = 50 if not allow_time_control else 14
+                                for _ in range(gate_iters):
+                                    if time.time() >= gate_approach_dl:
+                                        break
+                                    if allow_time_control:
+                                        try:
+                                            sm.RemoteSvc("timeControl").AdvanceClock(8)
+                                        except Exception:
+                                            pass
+                                        H._sleep_sim_ms(200)
+                                    else:
+                                        H._sleep_sim_ms(500)
                                     target_ball_j = bp_j.GetBall(gate_id) if (bp_j is not None and hasattr(bp_j, "GetBall")) else None
                                     if target_ball_j is not None:
                                         try:
@@ -5594,12 +5629,15 @@ def _execute_action(sm, action):
                                                 break
                                         except Exception:
                                             pass
-                            try:
-                                sm.RemoteSvc("timeControl").ClearSessionTimer()
-                            except Exception:
-                                pass
+                            if allow_time_control:
+                                try:
+                                    sm.RemoteSvc("timeControl").ClearSessionTimer()
+                                except Exception:
+                                    pass
+                            else:
+                                H._wait_session_timer_clear(max_wait_sec=12.0)
                             beyonce.CmdStargateJump(gate_id)
-                            dl_j = time.time() + 12.0
+                            dl_j = time.time() + (18.0 if not allow_time_control else 12.0)
                             post_sys = pre_sys
                             while time.time() < dl_j:
                                 sess_now = getattr(__builtin__, "session", None)
@@ -5616,10 +5654,11 @@ def _execute_action(sm, action):
                                     post_sys = cur_sys
                                     break
                                 H._sleep_sim_ms(200)
-                            try:
-                                sm.RemoteSvc("timeControl").ClearSessionTimer()
-                            except Exception:
-                                pass
+                            if allow_time_control:
+                                try:
+                                    sm.RemoteSvc("timeControl").ClearSessionTimer()
+                                except Exception:
+                                    pass
                             H._wait_view_settled(sm)
                             for _ in range(20):
                                 bp_done = mich_j.GetBallpark() if mich_j is not None else None
@@ -5781,10 +5820,18 @@ def _execute_action(sm, action):
                         dl_cs = time.time() + 18.0
                         while time.time() < dl_cs:
                             s_now = getattr(__builtin__, "session", None)
-                            if getattr(s_now, "charid", None) == matched_cid and not getattr(s_now, "mutating", 0):
+                            if (
+                                getattr(s_now, "charid", None) == matched_cid
+                                and not getattr(s_now, "mutating", 0)
+                                and getattr(s_now, "changing", None) is None
+                            ):
                                 break
                             H._sleep_ms(150)
-                        H._ensure_view(sm, "hangar")
+                        s_now = getattr(__builtin__, "session", None)
+                        if getattr(s_now, "stationid", None) or getattr(s_now, "structureid", None):
+                            H._ensure_view(sm, "hangar")
+                        elif getattr(s_now, "solarsystemid", None) or getattr(s_now, "solarsystemid2", None):
+                            H._ensure_view(sm, "inflight")
                         H._sync_quasar_gateway(sm, int(matched_cid))
                         result["selected_character_id"] = int(matched_cid)
             elif atype == "select_overview":
@@ -6508,7 +6555,10 @@ class PlaytesterRpcServer(object):
                 cln_res = _cleanup_utility_windows(self.sm, keep_chat=keep_chat)
             return {"ok": bool(cln_res.get("ok")), "result": cln_res, "cleanup_result": cln_res}
         if cmd in ("execute_action", "act"):
-            act_res = _execute_action(self.sm, params.get("action", {}))
+            act_payload = dict(params.get("action") or {})
+            if self.cfg.get("scenario_mode") and "scenario_mode" not in act_payload:
+                act_payload["scenario_mode"] = True
+            act_res = _execute_action(self.sm, act_payload)
             return {"ok": True, "result": act_res, "action_result": act_res}
         if cmd == "shutdown":
             self.running = False

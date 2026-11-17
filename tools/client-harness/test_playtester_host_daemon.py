@@ -2383,6 +2383,23 @@ class TestSpeedupOptimizations(unittest.TestCase):
             self.assertTrue(oracle._is_unhandled_tasklet_traceback("Unhandled exception in market.Buy", unexpected_custom_info_tb))
             self.assertFalse(oracle.is_ignorable_client_traceback("Unhandled exception in market.Buy", unexpected_custom_info_tb))
 
+            # GH #1227: invWindow.py in _MoveItems tasklet UserError(NotEnoughCargoSpace)
+            inv_move_tb = (
+                "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x5, ctxt='invWindow._MoveItems'>\",)\n"
+                '  File "eve/client/script/ui/shared/inventory/invWindow.py", line 812, in _MoveItems\n'
+                "UserError: User error, msg=NotEnoughCargoSpace, dict={'space': 5.0}\n"
+            )
+            self.assertFalse(oracle._is_unhandled_tasklet_traceback("Unhandled exception in invWindow._MoveItems", inv_move_tb))
+            self.assertTrue(oracle.is_ignorable_client_traceback("Unhandled exception in invWindow._MoveItems", inv_move_tb))
+
+            inv_move_crash_tb = (
+                "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x6, ctxt='invWindow._MoveItems'>\",)\n"
+                '  File "eve/client/script/ui/shared/inventory/invWindow.py", line 812, in _MoveItems\n'
+                "RuntimeError: unexpected UI container crash\n"
+            )
+            self.assertTrue(oracle._is_unhandled_tasklet_traceback("Unhandled exception in invWindow._MoveItems", inv_move_crash_tb))
+            self.assertFalse(oracle.is_ignorable_client_traceback("Unhandled exception in invWindow._MoveItems", inv_move_crash_tb))
+
     def test_abort_conditions_schema_string_parity(self):
         schema = json.loads((HARNESS_DIR / "playtester_planner_schema.json").read_text(encoding="utf-8"))
         abort_schema = schema["properties"]["delegated_plan"]["properties"]["abort_conditions"]

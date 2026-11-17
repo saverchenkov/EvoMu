@@ -4732,12 +4732,15 @@ class PlaytesterBugOracle:
         ended_prev = False
         for ln in raw_tb.splitlines():
             s = ln.strip()
+            s_hdr = ln[len("[evomu_site] "):] if ln.startswith("[evomu_site] ") else ln
             is_header = (
-                ln.startswith("log.Log")
-                or ln.startswith("logmodule.")
-                or ln.startswith("service.CoreMixIn.")
-                or ln.startswith("blue.pyos.exceptionHandler:")
-                or ln.startswith("EXCEPTION #")
+                s_hdr.startswith("log.Log")
+                or s_hdr.startswith("logmodule.")
+                or s_hdr.startswith("service.CoreMixIn.")
+                or s_hdr.startswith("blue.pyos.exceptionHandler:")
+                or s_hdr.startswith("stdlogutils.")
+                or s_hdr.startswith("sys.excepthook:")
+                or s_hdr.startswith("EXCEPTION #")
                 or (ended_prev and bool(s))
             )
             if is_header and cur:
@@ -4917,8 +4920,8 @@ class PlaytesterBugOracle:
         if "unhandled exception in" not in txt:
             return False
         # CarbonUI drag/drop inventory moves raise benign UserError (e.g. NotEnoughCargoSpace)
-        # out of BluepyTasklet::_MoveItems so the client UI can show a modal popup.
-        if "bluepytasklet::_moveitems" in txt and "notenoughcargospace" in txt:
+        # out of BluepyTasklet::_MoveItems / _MoveItems so the client UI can show a modal popup (#1227).
+        if ("bluepytasklet::_moveitems" in txt or "in _moveitems" in txt) and "notenoughcargospace" in txt:
             return False
         # CarbonUI drag-drop/fit rejections raise UserError('CustomInfo', {'info': 'FittingValidationFailed: ...'})
         # out of fittingSlotController/invCache fitting tasklets (GH #1223) when a slot/hardpoint rule rejects the fit.
@@ -6989,7 +6992,85 @@ _TIME_CONTROL_SLASH_PREFIXES = (
     "/upwelltimer",
     "/completeindustry",
     "/cleartimers",
+    "/fastforward",
+    "/ff",
+    "/finishjobs",
+    "/finishskills",
+    "/finishstructure",
+    "/industrytimer",
+    "/structuretimer",
 )
+_ALL_REMOTE_GM_SLASH_COMMANDS = frozenset({
+    "/achievements",
+    "/advancetime",
+    "/autotidi",
+    "/backintime",
+    "/ban",
+    "/campaign",
+    "/chatban",
+    "/chatunban",
+    "/cleartimers",
+    "/completeindustry",
+    "/completeskills",
+    "/contact",
+    "/createccpevent",
+    "/createitem",
+    "/deadwarp",
+    "/despawn",
+    "/downtime",
+    "/energy",
+    "/fastcheckout",
+    "/fastforward",
+    "/ff",
+    "/finishjobs",
+    "/finishskills",
+    "/finishstructure",
+    "/fit",
+    "/fwcapture",
+    "/getattr",
+    "/giveisk",
+    "/giveitem",
+    "/giveskill",
+    "/heal",
+    "/industrytimer",
+    "/kick",
+    "/kill",
+    "/load",
+    "/moveme",
+    "/online",
+    "/operation",
+    "/pd",
+    "/reinforce",
+    "/role",
+    "/season",
+    "/secstatus",
+    "/session",
+    "/setattr",
+    "/setomega",
+    "/setskill",
+    "/setunderage",
+    "/shutdown",
+    "/soak",
+    "/spawn",
+    "/spawnanomaly",
+    "/spawnnpc",
+    "/spawnwreck",
+    "/standing",
+    "/structure",
+    "/structuretimer",
+    "/survey",
+    "/suspend",
+    "/sysjunkclear",
+    "/teleport",
+    "/tidi",
+    "/tr",
+    "/trainskills",
+    "/translocate",
+    "/unban",
+    "/unspawn",
+    "/unsuspend",
+    "/upwelltimer",
+})
 _GM_SLASH_IN_TEXT_PREFIXES = (
     "/give",
     "/tr",
@@ -7010,7 +7091,75 @@ _GM_SLASH_IN_TEXT_PREFIXES = (
     "/upwell",
     "/ban",
     "/role",
+    "/teleport",
+    "/kick",
+    "/suspend",
+    "/downtime",
+    "/reinforce",
+    "/backintime",
+    "/shutdown",
+    "/tidi",
+    "/autotidi",
+    "/fwcapture",
+    "/finish",
+    "/fastforward",
+    "/ff",
 )
+_SCENARIO_ALLOWED_CHECK_KEYS = frozenset({
+    "expect_window_open",
+    "expect_window_closed",
+    "expect_modal_absent",
+    "expect_context_menu_item",
+    "expect_ball_present",
+    "expect_session_field",
+    "no_error_reply",
+    "no_client_exception",
+    "include_startup_rpcs",
+    "rpc_sent",
+    "min_rpcs",
+    "notification_received",
+    "charsel_listed_all_characters",
+    "window_populated",
+    "ship_shown",
+    "ship_mode",
+    "celestials_in_overview",
+    "target_distance",
+    "warp_started",
+    "warp_completed",
+    "bookmark_present",
+    "bookmark_server_check",
+    "handshake_server_check",
+    "no_server_unimplemented_rpc",
+    "state_checks",
+})
+_SCENARIO_ALLOWED_RULE_OPS = frozenset({
+    "equals",
+    "not_equals",
+    "non_empty",
+    "contains",
+    "subset",
+    "prefix",
+    "min",
+    "max",
+    "increased",
+    "decreased",
+    "changed",
+    "delta",
+})
+_SCENARIO_ALLOWED_RULE_KEYS = _SCENARIO_ALLOWED_RULE_OPS | frozenset({"tolerance"})
+_SCENARIO_ALLOWED_WINDOW_POPULATED_KEYS = frozenset({
+    "window",
+    "name",
+    "min_populated",
+    "min_tabs",
+    "min_rows",
+    "contains_text",
+    "require_rpc_or_data",
+    "allow_loading",
+    "allow_error",
+})
+_SCENARIO_ALLOWED_WARP_COMPLETED_KEYS = frozenset({"target_id", "landing_distance_max_m"})
+_SCENARIO_ALLOWED_WAIT_UNTIL_KEYS = frozenset({"checks", "timeout_ms", "poll_interval_ms"})
 _SCENARIO_ERROR_LINE_RE = re.compile(
     r"UnimplementedRPC|panicked at|Traceback \(most recent|\bEXCEPTION\b|_LogException\b|\bLogException\b|\bLogTraceback\b|SendClientStackTraceAlert|client exception report saved"
 )
@@ -7022,6 +7171,53 @@ _SCENARIO_DESYNC_LINE_RE = re.compile(
 
 class ScenarioValidationError(ValueError):
     """Raised when a scenario file fails schema or GM/time-control policy validation."""
+
+
+def _validate_value_rule_dict(rule: Dict[str, Any], ctx_label: str, *, allow_field: bool = False) -> None:
+    allowed = set(_SCENARIO_ALLOWED_RULE_KEYS) | {"target_id"}
+    if allow_field:
+        allowed.add("field")
+    unknown = sorted(set(rule.keys()) - allowed)
+    if unknown:
+        raise ScenarioValidationError(f"{ctx_label}: unsupported rule key(s) {unknown!r}")
+    if allow_field and not str(rule.get("field") or "").strip():
+        raise ScenarioValidationError(f"{ctx_label}: state check item missing non-empty 'field'")
+    if not any(op in rule for op in _SCENARIO_ALLOWED_RULE_OPS):
+        raise ScenarioValidationError(f"{ctx_label}: rule must specify at least one check operator")
+
+
+def _validate_scenario_checks_dict(checks: Dict[str, Any], ctx_label: str) -> None:
+    unknown = sorted(set(checks.keys()) - _SCENARIO_ALLOWED_CHECK_KEYS)
+    if unknown:
+        raise ScenarioValidationError(f"{ctx_label}: unsupported check key(s) {unknown!r}")
+    sc = checks.get("state_checks")
+    if sc is not None:
+        if isinstance(sc, dict):
+            for fname, rspec in sc.items():
+                if isinstance(rspec, dict):
+                    _validate_value_rule_dict(rspec, f"{ctx_label}.state_checks[{fname!r}]")
+        elif isinstance(sc, list):
+            for r_idx, item in enumerate(sc):
+                if not isinstance(item, dict):
+                    raise ScenarioValidationError(f"{ctx_label}.state_checks[{r_idx}] must be an object")
+                _validate_value_rule_dict(item, f"{ctx_label}.state_checks[{r_idx}]", allow_field=True)
+        else:
+            raise ScenarioValidationError(f"{ctx_label}.state_checks must be a list or object")
+    td = checks.get("target_distance")
+    if td is not None:
+        if not isinstance(td, dict):
+            raise ScenarioValidationError(f"{ctx_label}.target_distance must be an object")
+        _validate_value_rule_dict(td, f"{ctx_label}.target_distance")
+    wp = checks.get("window_populated")
+    if isinstance(wp, dict):
+        unknown_wp = sorted(set(wp.keys()) - _SCENARIO_ALLOWED_WINDOW_POPULATED_KEYS)
+        if unknown_wp:
+            raise ScenarioValidationError(f"{ctx_label}.window_populated: unsupported key(s) {unknown_wp!r}")
+    wc = checks.get("warp_completed")
+    if isinstance(wc, dict):
+        unknown_wc = sorted(set(wc.keys()) - _SCENARIO_ALLOWED_WARP_COMPLETED_KEYS)
+        if unknown_wc:
+            raise ScenarioValidationError(f"{ctx_label}.warp_completed: unsupported key(s) {unknown_wc!r}")
 
 
 def _is_gm_or_time_control_action(action: Dict[str, Any]) -> Tuple[bool, bool, str]:
@@ -7036,20 +7232,24 @@ def _is_gm_or_time_control_action(action: Dict[str, Any]) -> Tuple[bool, bool, s
         return False, True, f"time-control action {act_type!r}"
     if act_type in _SCENARIO_GM_ACTIONS:
         return True, False, f"GM action {act_type!r}"
-    if act_type == "station_command" and target.lower() == "inject_and_train_skill":
-        return True, False, "GM-backed skill injection 'inject_and_train_skill'"
+    if act_type == "station_command" and target.lower() in ("inject_and_train_skill", "buy_free_plex_pack"):
+        return True, False, f"GM/setup station command {target.lower()!r}"
 
     slash_candidates = []
     if cmd_str.startswith("/"):
         slash_candidates.append(cmd_str)
     if act_type not in ("click_widget", "drag_widget", "type_text") and target.startswith("/"):
         slash_candidates.append(target)
-    if act_type == "type_text" and cmd_str.lower().startswith(_GM_SLASH_IN_TEXT_PREFIXES):
-        slash_candidates.append(cmd_str)
+    if act_type == "type_text":
+        c_low_txt = cmd_str.lower()
+        first_tok = c_low_txt.split(None, 1)[0] if c_low_txt else ""
+        if first_tok in _ALL_REMOTE_GM_SLASH_COMMANDS or c_low_txt.startswith(_GM_SLASH_IN_TEXT_PREFIXES):
+            slash_candidates.append(cmd_str)
 
     for cand in slash_candidates:
         c_low = cand.lower()
-        if any(c_low.startswith(pfx) for pfx in _TIME_CONTROL_SLASH_PREFIXES):
+        first_tok = c_low.split(None, 1)[0] if c_low else ""
+        if first_tok in _TIME_CONTROL_SLASH_PREFIXES or any(c_low.startswith(pfx) for pfx in _TIME_CONTROL_SLASH_PREFIXES):
             return False, True, f"slash time-control command {cand!r}"
         return True, False, f"GM slash command {cand!r}"
 
@@ -7126,11 +7326,26 @@ def validate_scenario(spec: Any, source_name: str = "<scenario>") -> Dict[str, A
             })
 
         checks = raw_step.get("checks") if "checks" in raw_step else raw_step.get("assertions")
-        if checks is not None and not isinstance(checks, dict):
-            raise ScenarioValidationError(f"{source_name} step {step_num} ({step_id}): 'checks' must be an object")
+        if checks is not None:
+            if not isinstance(checks, dict):
+                raise ScenarioValidationError(f"{source_name} step {step_num} ({step_id}): 'checks' must be an object")
+            _validate_scenario_checks_dict(checks, f"{source_name} step {step_num} ({step_id}).checks")
         wait_until = raw_step.get("wait_until")
-        if wait_until is not None and not isinstance(wait_until, dict):
-            raise ScenarioValidationError(f"{source_name} step {step_num} ({step_id}): 'wait_until' must be an object")
+        if wait_until is not None:
+            if not isinstance(wait_until, dict):
+                raise ScenarioValidationError(f"{source_name} step {step_num} ({step_id}): 'wait_until' must be an object")
+            unknown_wu = sorted(set(wait_until.keys()) - _SCENARIO_ALLOWED_WAIT_UNTIL_KEYS)
+            if unknown_wu:
+                raise ScenarioValidationError(
+                    f"{source_name} step {step_num} ({step_id}).wait_until: unsupported key(s) {unknown_wu!r}"
+                )
+            wu_checks = wait_until.get("checks")
+            if wu_checks is not None:
+                if not isinstance(wu_checks, dict):
+                    raise ScenarioValidationError(
+                        f"{source_name} step {step_num} ({step_id}).wait_until.checks must be an object"
+                    )
+                _validate_scenario_checks_dict(wu_checks, f"{source_name} step {step_num} ({step_id}).wait_until.checks")
 
         step_copy = dict(raw_step)
         step_copy["id"] = step_id
@@ -7754,6 +7969,93 @@ def _read_log_chunk_from_offset(path: Optional[Path], log_offsets: Optional[Dict
     return chunk.decode("utf-8", errors="replace"), offset
 
 
+def _is_explicit_client_log_header(ln: str) -> bool:
+    s_hdr = ln[len("[evomu_site] "):] if ln.startswith("[evomu_site] ") else ln
+    if ln.startswith("[evomu_site] ") and any(
+        tok in s_hdr for tok in ("LogException", "_LogException", "LogTraceback", "sys.excepthook", "EXCEPTION #", "Traceback (most recent call last):")
+    ):
+        return True
+    return s_hdr.startswith((
+        "log.Log",
+        "logmodule.",
+        "service.CoreMixIn.",
+        "blue.pyos.exceptionHandler:",
+        "stdlogutils.",
+        "sys.excepthook:",
+        "EXCEPTION #",
+    ))
+
+
+def _collect_client_log_block(lines: List[str], start_idx: int) -> Tuple[List[str], int]:
+    """Collect a multi-line client traceback / LogException block with INNER TRACEBACK & CALLSTACK."""
+    first = lines[start_idx]
+    block = [first]
+    in_exception_banner = (
+        first[len("[evomu_site] "):] if first.startswith("[evomu_site] ") else first
+    ).startswith("EXCEPTION #")
+    saw_tb = "Traceback (most recent call last):" in first
+    saw_section_or_frame = saw_tb or _is_explicit_client_log_header(first)
+    j = start_idx + 1
+    while j < len(lines) and len(block) < 120:
+        nxt = lines[j]
+        nxt_s = nxt.strip()
+        if _is_explicit_client_log_header(nxt):
+            break
+        if nxt_s == "Traceback (most recent call last):" and saw_tb and not in_exception_banner:
+            break
+        if nxt_s == "EXCEPTION END":
+            block.append(nxt)
+            j += 1
+            break
+        if in_exception_banner:
+            block.append(nxt)
+            j += 1
+            continue
+        if nxt_s == "Traceback (most recent call last):":
+            saw_tb = True
+            saw_section_or_frame = True
+            block.append(nxt)
+            j += 1
+            continue
+        if nxt_s in (
+            "INNER TRACEBACK:",
+            "CALLSTACK:",
+            "Local variables:",
+            "Thread Locals:",
+            "None",
+        ) or nxt_s.startswith(("Reported from", "Common path prefix =")):
+            saw_section_or_frame = True
+            block.append(nxt)
+            j += 1
+            continue
+        if nxt.startswith((" ", "\t")):
+            saw_section_or_frame = True
+            block.append(nxt)
+            j += 1
+            continue
+        if not nxt_s:
+            if j + 1 < len(lines) and (
+                lines[j + 1].strip()
+                in ("INNER TRACEBACK:", "Traceback (most recent call last):", "CALLSTACK:", "EXCEPTION END", "None")
+                or lines[j + 1].startswith((" ", "\t"))
+            ):
+                block.append(nxt)
+                j += 1
+                continue
+            break
+        if saw_section_or_frame and (
+            PlaytesterBugOracle._TB_EXC_LINE_RE.match(nxt_s)
+            or "Error:" in nxt_s
+            or "Exception:" in nxt_s
+            or nxt_s.startswith(("UserError", "RuntimeError", "AttributeError", "TypeError", "ValueError", "KeyError"))
+        ):
+            block.append(nxt)
+            j += 1
+            continue
+        break
+    return block, j
+
+
 def scan_scenario_logs_for_errors(
     server_log_path: Optional[Path],
     client_log_paths: List[Path],
@@ -7788,23 +8090,25 @@ def scan_scenario_logs_for_errors(
             ln = lines[idx]
             if "EVE Client version" in ln and "started" in ln:
                 seen_started = True
-            if "Traceback (most recent call last):" in ln:
-                block = [ln]
-                j = idx + 1
-                while j < len(lines) and (lines[j].startswith((" ", "\t")) or not lines[j].strip()):
-                    block.append(lines[j])
-                    j += 1
-                    if len(block) >= 40:
-                        break
-                if j < len(lines) and lines[j].strip() and len(block) < 40:
-                    block.append(lines[j])
-                    j += 1
-                tb_txt = "\n".join(block)
-                non_empty = [b for b in block if b.strip()]
-                hl = non_empty[-1] if non_empty else ln
-                if not PlaytesterBugOracle.is_ignorable_client_traceback(hl, tb_txt):
-                    errors.append(f"[{clp.name}] {tb_txt.splitlines()[0][:240]}")
-                idx = j
+            starts_block = (
+                "Traceback (most recent call last):" in ln
+                or _is_explicit_client_log_header(ln)
+                or any(tok in ln for tok in ("_LogException", "LogException", "LogTraceback"))
+            )
+            if starts_block:
+                block, next_idx = _collect_client_log_block(lines, idx)
+                blk_txt = "\n".join(block)
+                if _SCENARIO_DESYNC_LINE_RE.search(blk_txt):
+                    desync_ln = next(
+                        (b.strip() for b in block if _SCENARIO_DESYNC_LINE_RE.search(b)),
+                        ln.strip(),
+                    )
+                    errors.append(f"[{clp.name}] destiny desync: {desync_ln[:240]}")
+                else:
+                    hl = PlaytesterBugOracle._extract_tb_headline(blk_txt, default=ln.strip())
+                    if not PlaytesterBugOracle.is_ignorable_client_traceback(hl, blk_txt):
+                        errors.append(f"[{clp.name}] {hl[:240]}")
+                idx = next_idx
                 continue
             if _SCENARIO_DESYNC_LINE_RE.search(ln):
                 errors.append(f"[{clp.name}] destiny desync: {ln.strip()[:240]}")
@@ -7839,6 +8143,7 @@ class ScenarioRunner(PlaytesterRunner):
             Path(args.out_dir) if getattr(args, "out_dir", None) else (self.runtime_dir / f"scenario_{self.run_id}")
         )
         self._active_starting_state: Dict[str, Any] = {}
+        self._active_declared_setup_steps: List[Dict[str, Any]] = []
         self._active_expected_characters: List[str] = []
         self._last_boot_result: Dict[str, Any] = {}
         self._client_launch_server_log_offset: int = 0
@@ -7851,6 +8156,76 @@ class ScenarioRunner(PlaytesterRunner):
         defer_cs = bool(st.get("defer_char_select", False))
         return user, password, char_id, defer_cs
 
+    def _scenario_requires_gm(self) -> bool:
+        return any(
+            int(d.get("step_index", 0) or 0) > 0
+            for d in getattr(self, "_active_declared_setup_steps", [])
+        )
+
+    def write_server_config(self) -> Path:
+        self.world_dir.mkdir(parents=True, exist_ok=True)
+        self.current_run_dir.mkdir(parents=True, exist_ok=True)
+        cfg_path = self.runtime_dir / "evomu_playtester_server.toml"
+        sde_path, _ = self._resolve_sde_and_quasar_paths()
+        user, password, char_id, _ = self._scenario_auth_params()
+        st = self._active_starting_state
+        requires_gm = self._scenario_requires_gm()
+        char_name = str(
+            st.get("character_name")
+            or ("Demo Pilot" if user == "demo" else f"Scenario {user}")
+        )
+        solar_system_id = int(st.get("solar_system_id", 30000142) or 30000142)
+        station_id = int(st.get("station_id", 60003760) or 60003760)
+        initial_isk = int(st.get("initial_balance_isk", 125000000) or 125000000)
+        initial_plex = int(st.get("initial_balance_plex", 50000) or 50000)
+        gm_flag = "true" if requires_gm else "false"
+        lines = [
+            'bind_address = "127.0.0.1"',
+            f"macho_port = {self.ports['macho']}",
+            f"bridge_port = {self.ports['bridge']}",
+            f"esi_port = {self.ports['http']}",
+            f"quasar_grpc_port = {self.ports['gateway']}",
+            f"xmpp_port = {self.ports['xmpp']}",
+            f"sde_path = {json.dumps(str(sde_path))}",
+            f"world_db_path = {json.dumps(str(self.world_db_path))}",
+            "",
+            "[feature_flags]",
+            "enable_quasar_gateway = true",
+            "enable_esi_http = true",
+            "enable_living_world = true",
+            "seed_demo = true",
+            "free_fast_checkout_plex = true",
+            f"starter_plex_balance = {initial_plex}",
+            "allow_local_dev_gateway_jwt = true",
+            f"gm_mode = {gm_flag}",
+            "",
+            "[[player_accounts]]",
+            f"username = {json.dumps(user)}",
+            f"password_token = {json.dumps(password)}",
+            "",
+            "[player_accounts.starter_character]",
+            f"name = {json.dumps(char_name)}",
+            f"bloodline_id = {int(st.get('bloodline_id', 1) or 1)}",
+            f"gender = {int(st.get('gender', 1) or 1)}",
+            f"ancestry_id = {int(st.get('ancestry_id', 11) or 11)}",
+            f"school_id = {int(st.get('school_id', 11) or 11)}",
+            f"solar_system_id = {solar_system_id}",
+            f"station_id = {station_id}",
+            f"initial_balance_isk = {initial_isk}",
+            f"initial_balance_plex = {initial_plex}",
+        ]
+        if requires_gm:
+            lines.extend([
+                "",
+                "[[admin_accounts]]",
+                f"username = {json.dumps(user)}",
+                f"password_token = {json.dumps(password)}",
+                f"character_id = {char_id}",
+                f"character_name = {json.dumps(char_name)}",
+            ])
+        cfg_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return cfg_path
+
     def write_inclient_cfg(self) -> Path:
         cfg_path = super().write_inclient_cfg()
         user, password, char_id, defer_cs = self._scenario_auth_params()
@@ -7859,6 +8234,7 @@ class ScenarioRunner(PlaytesterRunner):
         payload["password"] = password
         payload["char_id"] = char_id
         payload["defer_char_select"] = defer_cs
+        payload["scenario_mode"] = True
         cfg_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return cfg_path
 
@@ -8060,9 +8436,9 @@ class ScenarioRunner(PlaytesterRunner):
     def _step_rpc_timeout(action: Dict[str, Any]) -> float:
         atype = str(action.get("type") or "")
         if atype == "jump_gate":
-            return 50.0
+            return 75.0
         if atype == "dock":
-            return 38.0
+            return 65.0
         if atype in ("warp_to", "warp_to_location", "warp_to_bookmark", "undock", "select_character"):
             return 35.0
         if atype == "wait":
@@ -8107,7 +8483,14 @@ class ScenarioRunner(PlaytesterRunner):
         while True:
             tick_res = self.rpc.call(
                 "execute_action",
-                {"action": {"type": "wait", "wait_ms": poll_ms}},
+                {
+                    "action": {
+                        "type": "wait",
+                        "wait_ms": poll_ms,
+                        "scenario_mode": True,
+                        "time_control": bool(step.get("time_control", False)),
+                    }
+                },
                 timeout=max(20.0, (poll_ms / 1000.0) + 15.0),
             ) or {}
             fr = tick_res.get("flight_recorder") or {}
@@ -8182,6 +8565,7 @@ class ScenarioRunner(PlaytesterRunner):
         scen_dir.mkdir(parents=True, exist_ok=True)
         self.current_run_dir = scen_dir
         self._active_starting_state = dict(scenario.get("starting_state") or {})
+        self._active_declared_setup_steps = list(scenario.get("declared_setup_steps") or [])
         self._active_expected_characters = []
         self._last_boot_result = {}
 
@@ -8211,7 +8595,13 @@ class ScenarioRunner(PlaytesterRunner):
                 for p in sorted(cdir.glob("*.log")):
                     if p.name != "client_tracebacks.log" and p not in logs:
                         logs.append(p)
-            return logs, cdir / "client_tracebacks.log"
+            primary_tb = scen_dir / "client_tracebacks.log"
+            legacy_tb = cdir / "client_tracebacks.log"
+            if primary_tb.exists():
+                return logs, primary_tb
+            if legacy_tb.exists():
+                return logs, legacy_tb
+            return logs, primary_tb
 
         try:
             if not self.start_server(reset_db=True):
@@ -8283,6 +8673,8 @@ class ScenarioRunner(PlaytesterRunner):
                         else:
                             payload = dict(act)
                             payload["type"] = act_type
+                            payload["scenario_mode"] = True
+                            payload["time_control"] = bool(step.get("time_control", False))
                             try:
                                 exec_res = self.rpc.call(
                                     "execute_action",

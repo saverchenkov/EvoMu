@@ -72,11 +72,11 @@
     },
     {
       "id": "verify_hangar_and_ship",
-      "description": "Verify station hangar view is settled with ship shown and clean logs",
+      "description": "Verify station hangar view, initial ship, trained skills, and starter wallet with clean logs",
       "action": {
         "type": "wait",
         "wait_ms": 1500,
-        "expected_ui_and_state_change": "Station hangar active with ship loaded and zero errors"
+        "expected_ui_and_state_change": "Station hangar active with initial ship, starter skills, wallet ISK, and zero errors"
       },
       "checks": {
         "ship_shown": true,
@@ -85,6 +85,14 @@
           {
             "field": "active_view",
             "equals": "hangar"
+          },
+          {
+            "field": "wallet_isk",
+            "min": 1
+          },
+          {
+            "field": "trained_skill_count",
+            "min": 1
           }
         ],
         "no_client_exception": true,
