@@ -715,6 +715,9 @@ async fn duel_lifecycle_kill_right_activate_buy_edges_and_action_restriction_cap
         );
     });
     ctx.db
+        .acquire_online_lock(session.user_id.unwrap_or(1), session.session_id, Some(char_id), true, ctx.now_unix())
+        .unwrap();
+    ctx.db
         .acquire_online_lock(peer_id as u64, 99_801, Some(peer_id), true, ctx.now_unix())
         .unwrap();
     dispatch_combat_rpc(&ctx, &mut session, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(peer_id)], &kw)
