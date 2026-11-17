@@ -959,6 +959,293 @@ async fn create_recruitment_ad_rejects_insufficient_isk_and_emits_account_change
 }
 
 #[tokio::test]
+async fn recruitment_ad_paid_create_and_extend_require_active_division_wallet_take_role_and_respect_stasis() {
+    let (ctx, clock) = test_ctx_and_clock(1_700_000_000);
+    let (mut ceo, mut member) = seed_player_corps(&ctx);
+    let corp_id = ceo.corporation_id.unwrap();
+    let mem_id = member.character_id.unwrap();
+    let mem_uid = mem_id as u64;
+    member.user_id = Some(mem_uid);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.set_division_balance(1, IskCents::from_isk(1_000_000));
+        corp.set_division_balance(2, IskCents::from_isk(1_000_000));
+        // Member has Personnel Manager + Junior Accountant (can switch corpAccountKey to div 2), no wallet take.
+        corp.member_roles.insert(
+            mem_id,
+            corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_JUNIOR_ACCOUNTANT,
+        );
+        // Delayed grant of ROLE_ACCOUNT_CAN_TAKE[1] (div 2) still under 24h stasis.
+        snap.corp_governance
+            .entry(corp_id)
+            .or_default()
+            .pending_role_grants
+            .insert(mem_id, (corp_roles::ROLE_ACCOUNT_CAN_TAKE[1], 1_700_000_000 + 86_400));
+        if let Some(ch) = snap.characters.get_mut(&mem_id) {
+            ch.user_id = mem_uid;
+        }
+        if !snap.accounts.values().any(|a| a.user_id == mem_uid) {
+            let uname = format!("u{mem_uid}");
+            snap.accounts.insert(
+                uname.clone(),
+                eve_db::AccountRecord {
+                    user_id: mem_uid,
+                    username: uname,
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
+    });
+    ctx.db
+        .acquire_online_lock(mem_uid, member.session_id, Some(mem_id), true, 1_700_000_000)
+        .unwrap();
+
+    // Junior Accountant switches active division to 1001 (div 2); stale session bits must NOT authorize spending.
+    crate::services::corp_registry_ops::handle(
+        &ctx,
+        &mut member,
+        "corpRegistry",
+        "SetAccountKey",
+        &[PyRep::Integer(1001)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(member.corp_account_key, 1001);
+    member.corp_role = corp_roles::ROLE_PERSONNEL_MANAGER
+        | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]
+        | corp_roles::ROLE_ACCOUNT_CAN_TAKE[1];
+    let _ = ctx.drain_notifications_for_char(mem_id);
+
+    // 1. CreateRecruitmentAd rejected with CorpRoleDenied before 24h wallet-take stasis expires.
+    let err_create = call_gov(
+        &ctx,
+        &mut member,
+        "corpRecProxy",
+        "CreateRecruitmentAd",
+        vec![
+            PyRep::Integer(7),
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+            PyRep::String("Unauthorized spend".into()),
+            PyRep::List(vec![PyRep::Integer(mem_id)]),
+            PyRep::String("Denied Ad".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_create.code, "CorpRoleDenied");
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.corporations[&corp_id].division_balance(1), IskCents::from_isk(1_000_000));
+        assert_eq!(s.corporations[&corp_id].division_balance(2), IskCents::from_isk(1_000_000));
+        assert!(s.fleet_and_social_ops.corp_recruitment_ads.iter().all(|a| a.corp_id != corp_id));
+    });
+
+    // 2. CEO creates an initial ad from div 1 (1_000_000 -> 750_000 ISK).
+    let created = call_gov(
+        &ctx,
+        &mut ceo,
+        "corpRecProxy",
+        "CreateRecruitmentAd",
+        vec![
+            PyRep::Integer(7),
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+            PyRep::String("Initial Desc".into()),
+            PyRep::List(vec![PyRep::Integer(mem_id)]),
+            PyRep::String("Initial Ad".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap();
+    let ad_id = kv(&created, "adID").as_i64().unwrap();
+    let orig_expiry = ctx.db.with_snapshot(|s| {
+        s.fleet_and_social_ops
+            .corp_recruitment_ads
+            .iter()
+            .find(|a| a.ad_id == ad_id)
+            .unwrap()
+            .expiry_unix
+    });
+
+    // 3. Free edit (addedDays = 0) succeeds for Personnel Manager without wallet take and spends 0 ISK.
+    call_gov(
+        &ctx,
+        &mut member,
+        "corpRecProxy",
+        "UpdateRecruitmentAd",
+        vec![
+            PyRep::Integer(ad_id),
+            PyRep::Integer(3),
+            PyRep::Integer(1),
+            PyRep::String("Edited Free".into()),
+            PyRep::List(vec![PyRep::Integer(mem_id)]),
+            PyRep::String("Free Edit Title".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap();
+    ctx.db.with_snapshot(|s| {
+        let ad = s
+            .fleet_and_social_ops
+            .corp_recruitment_ads
+            .iter()
+            .find(|a| a.ad_id == ad_id)
+            .unwrap();
+        assert_eq!(ad.title, "Free Edit Title");
+        assert_eq!(ad.expiry_unix, orig_expiry);
+        assert_eq!(s.corporations[&corp_id].division_balance(1), IskCents::from_isk(750_000));
+        assert_eq!(s.corporations[&corp_id].division_balance(2), IskCents::from_isk(1_000_000));
+    });
+
+    // 4. Paid extend (addedDays = 7) rejected under stasis, and still rejected when only div-1 take is granted.
+    let err_extend_stasis = call_gov(
+        &ctx,
+        &mut member,
+        "corpRecProxy",
+        "UpdateRecruitmentAd",
+        vec![
+            PyRep::Integer(ad_id),
+            PyRep::Integer(3),
+            PyRep::Integer(1),
+            PyRep::String("Blocked Extend".into()),
+            PyRep::List(vec![PyRep::Integer(mem_id)]),
+            PyRep::String("Blocked Title".into()),
+            PyRep::Integer(7),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_extend_stasis.code, "CorpRoleDenied");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&corp_id).unwrap().member_roles.insert(
+            mem_id,
+            corp_roles::ROLE_PERSONNEL_MANAGER
+                | corp_roles::ROLE_JUNIOR_ACCOUNTANT
+                | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0],
+        );
+    });
+    let err_create_wrong_div = call_gov(
+        &ctx,
+        &mut member,
+        "corpRecProxy",
+        "CreateRecruitmentAd",
+        vec![
+            PyRep::Integer(7),
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+            PyRep::String("Wrong Div".into()),
+            PyRep::List(vec![PyRep::Integer(mem_id)]),
+            PyRep::String("Wrong Div Ad".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_create_wrong_div.code, "CorpRoleDenied");
+    let err_extend_wrong_div = call_gov(
+        &ctx,
+        &mut member,
+        "corpRecProxy",
+        "UpdateRecruitmentAd",
+        vec![
+            PyRep::Integer(ad_id),
+            PyRep::Integer(3),
+            PyRep::Integer(1),
+            PyRep::String("Wrong Div Extend".into()),
+            PyRep::List(vec![PyRep::Integer(mem_id)]),
+            PyRep::String("Wrong Div Title".into()),
+            PyRep::Integer(7),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_extend_wrong_div.code, "CorpRoleDenied");
+
+    ctx.db.with_snapshot(|s| {
+        let ad = s
+            .fleet_and_social_ops
+            .corp_recruitment_ads
+            .iter()
+            .find(|a| a.ad_id == ad_id)
+            .unwrap();
+        assert_eq!(ad.title, "Free Edit Title");
+        assert_eq!(ad.expiry_unix, orig_expiry);
+        assert_eq!(s.corporations[&corp_id].division_balance(1), IskCents::from_isk(750_000));
+        assert_eq!(s.corporations[&corp_id].division_balance(2), IskCents::from_isk(1_000_000));
+    });
+
+    // 5. Advance past 24h stasis so ROLE_ACCOUNT_CAN_TAKE[1] matures -> Create & paid Extend succeed from div 2.
+    clock.advance_secs(86_405);
+    call_gov(
+        &ctx,
+        &mut member,
+        "corpRecProxy",
+        "CreateRecruitmentAd",
+        vec![
+            PyRep::Integer(7),
+            PyRep::Integer(2),
+            PyRep::Integer(1),
+            PyRep::String("Matured Create".into()),
+            PyRep::List(vec![PyRep::Integer(mem_id)]),
+            PyRep::String("Matured Ad".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap();
+    call_gov(
+        &ctx,
+        &mut member,
+        "corpRecProxy",
+        "UpdateRecruitmentAd",
+        vec![
+            PyRep::Integer(ad_id),
+            PyRep::Integer(3),
+            PyRep::Integer(1),
+            PyRep::String("Matured Extend".into()),
+            PyRep::List(vec![PyRep::Integer(mem_id)]),
+            PyRep::String("Extended Title".into()),
+            PyRep::Integer(7),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap();
+    ctx.db.with_snapshot(|s| {
+        let ad = s
+            .fleet_and_social_ops
+            .corp_recruitment_ads
+            .iter()
+            .find(|a| a.ad_id == ad_id)
+            .unwrap();
+        assert_eq!(ad.title, "Extended Title");
+        assert!(ad.expiry_unix > orig_expiry);
+        assert_eq!(s.corporations[&corp_id].division_balance(1), IskCents::from_isk(750_000));
+        assert_eq!(s.corporations[&corp_id].division_balance(2), IskCents::from_isk(500_000));
+    });
+}
+
+#[tokio::test]
 async fn add_corporation_v24_15_args_persists_typeface_friendly_fire_and_lp_tax_rate() {
     let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
     let (_ceo, mut founder) = seed_player_corps(&ctx);

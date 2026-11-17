@@ -2013,6 +2013,7 @@ pub(super) fn handle_corp_gov(
         ("corpRegistry", "DeleteBulletin") => handle_corp_bulletins(ctx, session, corp_id, char_id, now_unix, has_comms, method, args),
 
         ("corpRecProxy", "CreateRecruitmentAd") | ("corpRecProxy", "UpdateRecruitmentAd") => {
+            super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
             let has_role = ctx.db.with_snapshot(|snap| {
                 if !snap.corporations.contains_key(&corp_id) {
                     return false;
@@ -2033,6 +2034,16 @@ pub(super) fn handle_corp_gov(
             let type_mask_out = parsed.type_mask;
             let tx_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(i64, Option<IskCents>), BridgeRpcError> {
                 ensure_corp_rec_ads_populated_in_snap(snap);
+                if method == "CreateRecruitmentAd" || parsed.added_days > 0 {
+                    super::ensure_corp_wallet_take_access(
+                        snap,
+                        corp_id,
+                        char_id,
+                        None,
+                        wallet_div,
+                        now_unix,
+                    )?;
+                }
                 if method == "UpdateRecruitmentAd" {
                     let id = parsed.ad_id.unwrap_or(1);
                     let Some(corp_ref) = snap.corporations.get(&corp_id) else {

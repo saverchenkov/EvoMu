@@ -205,6 +205,43 @@ pub(super) fn active_corp_wallet_div(session: &SessionState) -> (i32, u8) {
     }
 }
 
+/// Ensures `char_id` holds wallet-take authority (`is_ceo`, `ROLE_DIRECTOR`, or matured
+/// `ROLE_ACCOUNT_CAN_TAKE` for `wallet_div`) from authoritative snapshot roles (`session_roles = 0`).
+pub(super) fn ensure_corp_wallet_take_access(
+    snap: &eve_db::WorldStateSnapshot,
+    corp_id: i64,
+    char_id: i64,
+    location_id: Option<i64>,
+    wallet_div: u8,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    if !snap.corporations.contains_key(&corp_id) {
+        return Err(BridgeRpcError {
+            code: "CorporationNotFound".into(),
+            message: format!("Corporation {corp_id} not found"),
+            client_error: None,
+        });
+    }
+    let div_idx = usize::from(wallet_div.clamp(1, 7) - 1);
+    let take_bit = eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[div_idx];
+    let (is_ceo, eff_roles) =
+        snap.effective_corp_roles_at(corp_id, char_id, location_id, 0, now_unix);
+    if is_ceo
+        || eve_db::corp_roles::has_role(eff_roles, eve_db::corp_roles::ROLE_DIRECTOR)
+        || (eff_roles & take_bit) != 0
+    {
+        Ok(())
+    } else {
+        Err(BridgeRpcError {
+            code: "CorpRoleDenied".into(),
+            message: format!(
+                "Spending from corporation wallet division {wallet_div} requires Director or Account Can Take {wallet_div} role"
+            ),
+            client_error: None,
+        })
+    }
+}
+
 fn office_rental_quote_in_snap(snap: &eve_db::WorldStateSnapshot, station_id: i64, occupied: usize) -> f64 {
     let base = snap
         .station_office_rental_costs
@@ -298,7 +335,7 @@ fn handle_office_manager(
                     corp_id,
                     char_id,
                     Some(station_id),
-                    session.corp_role,
+                    0,
                     ctx.now_unix(),
                 )
             });
@@ -384,6 +421,14 @@ fn handle_office_manager(
                     .map(|s| s.owner_corporation_id)
                     .or(structure_owner_id)
                     .unwrap_or(1_000_035);
+                ensure_corp_wallet_take_access(
+                    snap,
+                    corp_id,
+                    char_id,
+                    Some(station_id),
+                    wallet_div,
+                    now_unix,
+                )?;
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
                     return Err(BridgeRpcError {
                         code: "CorporationNotFound".into(),
@@ -444,13 +489,49 @@ fn handle_office_manager(
                 };
                 snap.items.insert(office_id, office_item.clone());
                 snap.corp_governance.entry(corp_id).or_default().offices.insert(station_id, office_id);
-                Ok((office_id, station_id, creditor_id, quote, corp_bal_after, owner_credit, office_item))
+                let due_unix = now_unix.saturating_add(30 * 86_400);
+                let (_bill_id, is_corp_debtor, bill_kv) =
+                    super::wallet_serverops::create_bill_in_snapshot(
+                        snap,
+                        now_unix,
+                        2,
+                        corp_id,
+                        creditor_id,
+                        quote,
+                        due_unix,
+                        0.0,
+                        station_id,
+                        27,
+                    );
+                Ok((
+                    office_id,
+                    station_id,
+                    is_corp_debtor,
+                    bill_kv,
+                    quote,
+                    corp_bal_after,
+                    owner_credit,
+                    office_item,
+                ))
             });
 
             match res {
-                Ok((office_id, st_id, creditor_id, quote, corp_bal_after, owner_credit, office_item)) => {
-                    let due_unix = now_unix.saturating_add(30 * 86_400);
-                    let _ = super::wallet_serverops::create_bill(ctx, 2, corp_id, creditor_id, quote, due_unix, 0.0, st_id, 27);
+                Ok((
+                    office_id,
+                    st_id,
+                    is_corp_debtor,
+                    bill_kv,
+                    quote,
+                    corp_bal_after,
+                    owner_credit,
+                    office_item,
+                )) => {
+                    super::wallet_serverops::emit_bill_received(
+                        ctx,
+                        corp_id,
+                        is_corp_debtor,
+                        bill_kv,
+                    );
                     ctx.notify_wallet_balance(true, corp_id, wallet_div, corp_bal_after);
                     if let Some((owner_corp_id, cred_bal_after)) = owner_credit {
                         ctx.notify_wallet_balance(true, owner_corp_id, 1, cred_bal_after);
@@ -573,7 +654,7 @@ fn handle_office_manager(
                     corp_id,
                     char_id,
                     Some(station_id),
-                    session.corp_role,
+                    0,
                     ctx.now_unix(),
                 )
             });

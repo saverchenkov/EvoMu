@@ -13,7 +13,8 @@ use crate::services::fleet_social::{
 };
 use eve_db::{
     corp_roles, BookmarkRecord, CorporationRecord, FleetMemberRecord, FleetRecord, FleetRole,
-    InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord, UpwellStructureRecord,
+    InventoryFlag, InventoryItemRecord, IskCents, ServerClock, TrainedSkillRecord,
+    UpwellStructureRecord,
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -167,6 +168,11 @@ async fn office_manager_fulcrum_upwell_capacity_roles_and_wallet_branches_kill_m
     assert_eq!(call_office(&ctx, &mut sess, "RentOffice", &[PyRep::Integer(station_id)]).await.unwrap().unwrap_err().code, "CorpRoleDenied");
     assert_eq!(call_office(&ctx, &mut sess, "UnrentOffice", &[PyRep::Integer(station_id)]).await.unwrap().unwrap_err().code, "CorpRoleDenied");
 
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.members.insert(char_id);
+        corp.member_roles.insert(char_id, corp_roles::ROLE_RENT_OFFICE);
+    });
     sess.corp_role = corp_roles::ROLE_RENT_OFFICE;
     let (is_ceo, _) = get_effective_corp_roles(&ctx, corp_id, char_id);
     assert!(!is_ceo);
@@ -177,7 +183,17 @@ async fn office_manager_fulcrum_upwell_capacity_roles_and_wallet_branches_kill_m
     sess.structure_id = Some(1_999_999_999_999);
     assert_eq!(call_office(&ctx, &mut sess, "RentOffice", &[PyRep::Integer(1_999_999_999_999)]).await.unwrap().unwrap_err().code, "StationNotFound");
 
+    // ROLE_RENT_OFFICE (even with stale session ROLE_ACCOUNT_CAN_TAKE) without DB wallet-take fails CorpRoleDenied.
     sess.structure_id = Some(struct_id);
+    sess.corp_role = corp_roles::ROLE_RENT_OFFICE | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0];
+    assert_eq!(call_office(&ctx, &mut sess, "RentOffice", &[PyRep::Integer(struct_id)]).await.unwrap().unwrap_err().code, "CorpRoleDenied");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .member_roles
+            .insert(char_id, corp_roles::ROLE_RENT_OFFICE | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]);
+    });
     assert_eq!(call_office(&ctx, &mut sess, "RentOffice", &[PyRep::Integer(struct_id)]).await.unwrap().unwrap_err().code, "NotEnoughISK");
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -318,4 +334,143 @@ async fn mass_move_members_make_leader_get_wings_and_init_state_error_paths_kill
     stale_sess.character_id = Some(90_000_099);
     assert_eq!(handle_get_init_state(&ctx, &mut stale_sess).unwrap().unwrap_err().code, "NotInFleet");
     assert_eq!(stale_sess.fleet_id, None);
+}
+
+#[tokio::test]
+async fn office_manager_rent_office_enforces_active_div_wallet_take_stasis_and_atomic_bill() {
+    let (ctx, clock) = test_ctx_and_clock(1_700_000_000);
+    let (_ceo, mut member) =
+        crate::services::fleet_social::fleet_social_corps::fleet_social_corps_tests::seed_player_corps(
+            &ctx,
+        );
+    let corp_id = member.corporation_id.unwrap();
+    let char_id = member.character_id.unwrap();
+    let uid = char_id as u64;
+    let station_id = 60_003_760_i64;
+    member.station_id = Some(station_id);
+    member.user_id = Some(uid);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.set_division_balance(1, IskCents::from_isk(1_000_000));
+        corp.set_division_balance(2, IskCents::from_isk(1_000_000));
+        // Member holds Rent Office + Junior Accountant (can SetAccountKey to div 2), without wallet take.
+        corp.member_roles.insert(
+            char_id,
+            corp_roles::ROLE_RENT_OFFICE | corp_roles::ROLE_JUNIOR_ACCOUNTANT,
+        );
+        // Schedule delayed ROLE_ACCOUNT_CAN_TAKE[1] (div 2) maturing at +86_400s.
+        snap.corp_governance
+            .entry(corp_id)
+            .or_default()
+            .pending_role_grants
+            .insert(char_id, (corp_roles::ROLE_ACCOUNT_CAN_TAKE[1], 1_700_000_000 + 86_400));
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.user_id = uid;
+        }
+        if !snap.accounts.values().any(|a| a.user_id == uid) {
+            let uname = format!("u{uid}");
+            snap.accounts.insert(
+                uname.clone(),
+                eve_db::AccountRecord {
+                    user_id: uid,
+                    username: uname,
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
+    });
+    ctx.db
+        .acquire_online_lock(uid, member.session_id, Some(char_id), true, 1_700_000_000)
+        .unwrap();
+
+    // Junior Accountant switches active division to 1001 (div 2); stale session bits must NOT authorize take.
+    crate::services::corp_registry_ops::handle(
+        &ctx,
+        &mut member,
+        "corpRegistry",
+        "SetAccountKey",
+        &[PyRep::Integer(1001)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(member.corp_account_key, 1001);
+    member.corp_role =
+        corp_roles::ROLE_RENT_OFFICE | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0] | corp_roles::ROLE_ACCOUNT_CAN_TAKE[1];
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Before 24h stasis matures: RentOffice fails CorpRoleDenied with zero debit, item, bill, or notify.
+    let err_stasis = call_office(&ctx, &mut member, "RentOffice", &[PyRep::Integer(station_id)])
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err_stasis.code, "CorpRoleDenied");
+
+    // 2. Matured take permission on div 1 only still fails CorpRoleDenied when active key is div 2 (1001).
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&corp_id).unwrap().member_roles.insert(
+            char_id,
+            corp_roles::ROLE_RENT_OFFICE
+                | corp_roles::ROLE_JUNIOR_ACCOUNTANT
+                | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0],
+        );
+    });
+    let err_wrong_div = call_office(&ctx, &mut member, "RentOffice", &[PyRep::Integer(station_id)])
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err_wrong_div.code, "CorpRoleDenied");
+
+    ctx.db.with_snapshot(|snap| {
+        let corp = &snap.corporations[&corp_id];
+        assert_eq!(corp.division_balance(1), IskCents::from_isk(1_000_000));
+        assert_eq!(corp.division_balance(2), IskCents::from_isk(1_000_000));
+        assert!(!snap
+            .items
+            .values()
+            .any(|i| i.owner_id == corp_id && i.location_id == station_id && i.type_id == 27));
+        let corp_bills = snap
+            .owner_notes
+            .values()
+            .filter(|n| n.character_id == -71)
+            .filter_map(|n| serde_json::from_str::<crate::services::wallet_serverops::CorpBillRecord>(&n.note).ok())
+            .filter(|b| b.debtor_id == corp_id)
+            .count();
+        assert_eq!(corp_bills, 0);
+    });
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    // 3. Advance past 24h stasis so ROLE_ACCOUNT_CAN_TAKE[1] matures -> succeeds, debits div 2, and stores bill atomically.
+    clock.advance_secs(86_405);
+    let rent = call_office(&ctx, &mut member, "RentOffice", &[PyRep::Integer(station_id)])
+        .await
+        .unwrap()
+        .unwrap();
+    let office_id = rent.dict_get("officeID").and_then(|v| v.as_i64()).unwrap();
+    let notes = ctx.drain_notifications_for_char(char_id);
+    assert!(notes.iter().any(|n| n.event == "OnBillReceived"));
+    ctx.db.with_snapshot(|snap| {
+        let corp = &snap.corporations[&corp_id];
+        assert_eq!(corp.division_balance(1), IskCents::from_isk(1_000_000));
+        assert!(corp.division_balance(2) < IskCents::from_isk(1_000_000));
+        assert!(snap
+            .items
+            .get(&office_id)
+            .is_some_and(|i| i.type_id == 27 && i.owner_id == corp_id && i.location_id == station_id));
+        let bills: Vec<crate::services::wallet_serverops::CorpBillRecord> = snap
+            .owner_notes
+            .values()
+            .filter(|n| n.character_id == -71)
+            .filter_map(|n| serde_json::from_str(&n.note).ok())
+            .filter(|b: &crate::services::wallet_serverops::CorpBillRecord| b.debtor_id == corp_id)
+            .collect();
+        assert_eq!(bills.len(), 1);
+        assert_eq!(bills[0].bill_type_id, 2);
+        assert_eq!(bills[0].external_id, station_id);
+        assert_eq!(bills[0].external_id2, 27);
+    });
 }

@@ -419,9 +419,12 @@ fn handle_run_moon_process_cycle_for_tower(
     })
 }
 
-/// Creates a corporation or personal bill (office rent `bill_type_id = 2`, infrastructure `6`, alliance maintenance `5`).
-pub fn create_bill(
-    ctx: &ServerContext,
+/// Writes a corporation or personal bill into `snap` and returns `(bill_id, is_corp_debtor, bill_kv)`
+/// so callers inside `try_with_mut_snapshot` can persist bills atomically with debits.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_bill_in_snapshot(
+    snap: &mut WorldStateSnapshot,
+    now_unix: u64,
     bill_type_id: i64,
     debtor_id: i64,
     creditor_id: i64,
@@ -430,36 +433,33 @@ pub fn create_bill(
     interest: f64,
     external_id: i64,
     external_id2: i64,
-) -> i64 {
-    let now = ctx.now_unix();
+) -> (i64, bool, PyRep) {
     let amount_cents = IskCents::from_f64_isk(amount_isk).0;
-    let (bill_id, is_corp_debtor) = ctx.db.with_mut_snapshot(|snap| {
-        snap.next_entity_id += 1;
-        let bill_id = snap.next_entity_id;
-        let rec = CorpBillRecord {
-            bill_id,
-            bill_type_id,
-            debtor_id,
-            creditor_id,
-            amount_cents,
-            due_unix,
-            interest,
-            external_id,
-            external_id2,
-            paid: false,
-            paid_by_division: None,
-        };
-        save_json_note(
-            snap,
-            bill_note_id(bill_id),
-            -71,
-            bill_id,
-            format!("bill:{bill_id}"),
-            &rec,
-            now,
-        );
-        (bill_id, snap.corporations.contains_key(&debtor_id))
-    });
+    snap.next_entity_id += 1;
+    let bill_id = snap.next_entity_id;
+    let rec = CorpBillRecord {
+        bill_id,
+        bill_type_id,
+        debtor_id,
+        creditor_id,
+        amount_cents,
+        due_unix,
+        interest,
+        external_id,
+        external_id2,
+        paid: false,
+        paid_by_division: None,
+    };
+    save_json_note(
+        snap,
+        bill_note_id(bill_id),
+        -71,
+        bill_id,
+        format!("bill:{bill_id}"),
+        &rec,
+        now_unix,
+    );
+    let is_corp_debtor = snap.corporations.contains_key(&debtor_id);
     let bill_kv = PyRep::keyval([
         ("billID", PyRep::Integer(bill_id)),
         ("billTypeID", PyRep::Integer(bill_type_id)),
@@ -471,6 +471,16 @@ pub fn create_bill(
         ("externalID", PyRep::Integer(external_id)),
         ("externalID2", PyRep::Integer(external_id2)),
     ]);
+    (bill_id, is_corp_debtor, bill_kv)
+}
+
+/// Emits the `OnBillReceived` notification after a bill snapshot transaction commits.
+pub(crate) fn emit_bill_received(
+    ctx: &ServerContext,
+    debtor_id: i64,
+    is_corp_debtor: bool,
+    bill_kv: PyRep,
+) {
     if is_corp_debtor {
         ctx.emit_typed(
             NotificationTarget::Corporation(debtor_id),
@@ -487,6 +497,36 @@ pub fn create_bill(
             },
         );
     }
+}
+
+/// Creates a corporation or personal bill (office rent `bill_type_id = 2`, infrastructure `6`, alliance maintenance `5`).
+pub fn create_bill(
+    ctx: &ServerContext,
+    bill_type_id: i64,
+    debtor_id: i64,
+    creditor_id: i64,
+    amount_isk: f64,
+    due_unix: u64,
+    interest: f64,
+    external_id: i64,
+    external_id2: i64,
+) -> i64 {
+    let now = ctx.now_unix();
+    let (bill_id, is_corp_debtor, bill_kv) = ctx.db.with_mut_snapshot(|snap| {
+        create_bill_in_snapshot(
+            snap,
+            now,
+            bill_type_id,
+            debtor_id,
+            creditor_id,
+            amount_isk,
+            due_unix,
+            interest,
+            external_id,
+            external_id2,
+        )
+    });
+    emit_bill_received(ctx, debtor_id, is_corp_debtor, bill_kv);
     bill_id
 }
 
