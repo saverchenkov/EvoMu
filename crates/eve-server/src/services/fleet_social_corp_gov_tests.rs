@@ -596,18 +596,27 @@ async fn create_recruitment_ad_rejects_insufficient_isk_and_emits_account_change
         .unwrap();
     let _ = ctx.drain_notifications_for_char(char_id);
 
-    // 1. Both corp div 1 (0 ISK) and founder (100,000 ISK) lack 250,000 ISK -> NotEnoughISK, no ad, no notifications.
+    // 1. Corp div 1 has 0 ISK even though founder has 1,000,000 ISK -> strict NotEnoughISK, personal wallet untouched, no ads/notifications.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_isk(1_000_000);
+        }
+    });
     let err = call_gov(
         &ctx,
         &mut ceo,
         "corpRecProxy",
         "CreateRecruitmentAd",
         vec![
-            PyRep::String("Underfunded Ad".into()),
-            PyRep::String("Should fail".into()),
-            PyRep::Integer(7),
             PyRep::Integer(14),
+            PyRep::Integer(7),
             PyRep::Integer(1),
+            PyRep::String("Should fail".into()),
+            PyRep::List(vec![PyRep::Integer(char_id)]),
+            PyRep::String("Underfunded V24 Ad".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
         ],
     )
     .await
@@ -615,82 +624,72 @@ async fn create_recruitment_ad_rejects_insufficient_isk_and_emits_account_change
     assert_eq!(err.code, "NotEnoughISK");
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
     ctx.db.with_snapshot(|s| {
+        assert_eq!(s.characters[&char_id].balance, IskCents::from_isk(1_000_000));
         assert!(s.fleet_and_social_ops.corp_recruitment_ads.iter().all(|a| a.corp_id != corp_id));
+        assert!(s.corp_governance.get(&corp_id).map_or(true, |g| g.recruitment_ads.is_empty()));
     });
 
-    // 2. Fund personal wallet to 1,000,000 ISK -> fallback debits personal wallet + emits personal OnAccountChange.
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.balance = IskCents::from_isk(1_000_000);
-        }
-    });
-    let ad1 = call_gov(
-        &ctx,
-        &mut ceo,
-        "corpRecProxy",
-        "CreateRecruitmentAd",
-        vec![
-            PyRep::String("Personal Fallback Ad".into()),
-            PyRep::String("Funded personally".into()),
-            PyRep::Integer(7),
-            PyRep::Integer(14),
-            PyRep::Integer(1),
-        ],
-    )
-    .await
-    .unwrap();
-    assert!(kv(&ad1, "adID").as_i64().unwrap() > 0);
-    let n_personal = ctx.drain_notifications_for_char(char_id);
-    assert_eq!(
-        n_personal
-            .iter()
-            .filter(|n| n.event == "OnAccountChange")
-            .map(|n| n.args.clone())
-            .collect::<Vec<_>>(),
-        vec![vec![
-            PyRep::String("cash".into()),
-            PyRep::Integer(char_id),
-            PyRep::Real(750_000.0),
-        ]]
-    );
-    assert_eq!(
-        n_personal
-            .iter()
-            .filter(|n| n.event == "OnCorporationRecruitmentAdChanged")
-            .count(),
-        1
-    );
-    ctx.db.with_snapshot(|s| {
-        assert_eq!(s.characters[&char_id].balance, IskCents::from_isk(750_000));
-        assert!(s.wallet_journal.iter().any(|j| {
-            j.character_id == char_id
-                && j.entry_type == "corp_recruitment_ad_fee"
-                && j.amount == IskCents(-IskCents::from_isk(250_000).0)
-        }));
-    });
-
-    // 3. Fund corp div 1 to 1,000,000 ISK -> debits corp master wallet + emits corp OnAccountChange.
+    // 2. Reject invalid days (< 1 or > 28) and negative bitmasks via checked casts before any debit.
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(corp) = snap.corporations.get_mut(&corp_id) {
             corp.set_division_balance(1, IskCents::from_isk(1_000_000));
+            corp.set_division_balance(2, IskCents::from_isk(1_000_000));
         }
     });
-    let ad2 = call_gov(
+    for bad_args in [
+        vec![
+            PyRep::Integer(-1), PyRep::Integer(7), PyRep::Integer(1), PyRep::String("Bad".into()),
+            PyRep::List(vec![]), PyRep::String("Bad Days -1".into()), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0),
+        ],
+        vec![
+            PyRep::Integer(29), PyRep::Integer(7), PyRep::Integer(1), PyRep::String("Bad".into()),
+            PyRep::List(vec![]), PyRep::String("Bad Days 29".into()), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0),
+        ],
+        vec![
+            PyRep::Integer(14), PyRep::Integer(-2), PyRep::Integer(1), PyRep::String("Bad".into()),
+            PyRep::List(vec![]), PyRep::String("Bad TypeMask".into()), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0),
+        ],
+        vec![
+            PyRep::Integer(14), PyRep::Integer(7), PyRep::Integer(-5), PyRep::String("Bad".into()),
+            PyRep::List(vec![]), PyRep::String("Bad LangMask".into()), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0),
+        ],
+    ] {
+        assert_eq!(
+            call_gov(&ctx, &mut ceo, "corpRecProxy", "CreateRecruitmentAd", bad_args)
+                .await
+                .unwrap_err()
+                .code,
+            "InvalidArgument"
+        );
+    }
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.corporations[&corp_id].division_balance(1), IskCents::from_isk(1_000_000));
+    });
+
+    // 3. Canonical V24 9-arg CreateRecruitmentAd debits active corp_account_key division (div 2 / 1001),
+    // parses title (args[5]), langMask (args[2]), and recruiters (args[4]) atomically, and UpdateRecruitmentAd (8-arg V24) updates them.
+    ceo.corp_account_key = 1001;
+    let ad_v24 = call_gov(
         &ctx,
         &mut ceo,
         "corpRecProxy",
         "CreateRecruitmentAd",
         vec![
-            PyRep::String("Corp Funded Ad".into()),
-            PyRep::String("Funded by corp".into()),
-            PyRep::Integer(7),
-            PyRep::Integer(14),
-            PyRep::Integer(1),
+            PyRep::Integer(21),
+            PyRep::Integer(12),
+            PyRep::Integer(4),
+            PyRep::String("USTZ Nullsec Recruitment".into()),
+            PyRep::List(vec![PyRep::Integer(char_id), PyRep::Integer(90_000_002)]),
+            PyRep::String("V24 Title".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(5_000_000),
+            PyRep::Integer(0),
         ],
     )
     .await
     .unwrap();
-    assert!(kv(&ad2, "adID").as_i64().unwrap() > 0);
+    let ad_v24_id = kv(&ad_v24, "adID").as_i64().unwrap();
+    assert_eq!(kv(&ad_v24, "title").as_str(), Some("V24 Title"));
     let n_corp = ctx.drain_notifications_for_char(char_id);
     assert_eq!(
         n_corp
@@ -699,7 +698,7 @@ async fn create_recruitment_ad_rejects_insufficient_isk_and_emits_account_change
             .map(|n| n.args.clone())
             .collect::<Vec<_>>(),
         vec![vec![
-            PyRep::String("cash".into()),
+            PyRep::String("cash2".into()),
             PyRep::Integer(corp_id),
             PyRep::Real(750_000.0),
         ]]
@@ -712,9 +711,21 @@ async fn create_recruitment_ad_rejects_insufficient_isk_and_emits_account_change
         1
     );
     ctx.db.with_snapshot(|s| {
-        assert_eq!(s.corporations[&corp_id].division_balance(1), IskCents::from_isk(750_000));
-        assert_eq!(s.characters[&char_id].balance, IskCents::from_isk(750_000));
-        assert!(s.corp_wallet_journals.get(&(corp_id, 1)).is_some_and(|rows| {
+        assert_eq!(s.corporations[&corp_id].division_balance(1), IskCents::from_isk(1_000_000));
+        assert_eq!(s.corporations[&corp_id].division_balance(2), IskCents::from_isk(750_000));
+        assert_eq!(s.characters[&char_id].balance, IskCents::from_isk(1_000_000));
+        let stored = s
+            .fleet_and_social_ops
+            .corp_recruitment_ads
+            .iter()
+            .find(|a| a.ad_id == ad_v24_id)
+            .expect("ad persisted");
+        assert_eq!(stored.title, "V24 Title");
+        assert_eq!(stored.description, "USTZ Nullsec Recruitment");
+        assert_eq!(stored.days, 21);
+        assert_eq!(stored.type_mask, 12);
+        assert_eq!(stored.lang_mask, 4);
+        assert!(s.corp_wallet_journals.get(&(corp_id, 2)).is_some_and(|rows| {
             rows.iter().any(|r| {
                 r.ref_type == "corp_recruitment_ad_fee"
                     && (r.amount - (-250_000.0)).abs() < 1e-6
@@ -722,6 +733,159 @@ async fn create_recruitment_ad_rejects_insufficient_isk_and_emits_account_change
             })
         }));
     });
+    assert_eq!(
+        call_gov(
+            &ctx,
+            &mut ceo,
+            "corpRecProxy",
+            "GetRecruiters",
+            vec![PyRep::Integer(corp_id), PyRep::Integer(ad_v24_id)],
+        )
+        .await
+        .unwrap(),
+        PyRep::List(vec![PyRep::Integer(char_id), PyRep::Integer(90_000_002)])
+    );
+
+    // Canonical V24 8-arg UpdateRecruitmentAd(adID, typeMask, langMask, description, recruiters, title, addedDays, hourMask1)
+    let upd_v24 = call_gov(
+        &ctx,
+        &mut ceo,
+        "corpRecProxy",
+        "UpdateRecruitmentAd",
+        vec![
+            PyRep::Integer(ad_v24_id),
+            PyRep::Integer(8),
+            PyRep::Integer(16),
+            PyRep::String("Updated V24 Desc".into()),
+            PyRep::List(vec![PyRep::Integer(90_000_002)]),
+            PyRep::String("Updated V24 Title".into()),
+            PyRep::Integer(7),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(kv(&upd_v24, "title").as_str(), Some("Updated V24 Title"));
+    ctx.db.with_snapshot(|s| {
+        let stored = s
+            .fleet_and_social_ops
+            .corp_recruitment_ads
+            .iter()
+            .find(|a| a.ad_id == ad_v24_id)
+            .unwrap();
+        assert_eq!(stored.title, "Updated V24 Title");
+        assert_eq!(stored.lang_mask, 16);
+        assert_eq!(stored.days, 28);
+        assert_eq!(stored.recruiter_id, 90_000_002);
+    });
+    ceo.corp_account_key = 1000;
+}
+
+#[tokio::test]
+async fn add_corporation_v24_15_args_persists_typeface_friendly_fire_and_lp_tax_rate() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let (_ceo, mut founder) = seed_player_corps(&ctx);
+    let char_id = founder.character_id.unwrap();
+    let station_id = 60_003_760_i64;
+    let uid = char_id as u64;
+    founder.user_id = Some(uid);
+    founder.station_id = Some(station_id);
+    founder.ship_id = None;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.user_id = uid;
+            ch.station_id = Some(station_id);
+            ch.balance = IskCents::from_isk(5_000_000);
+        }
+        snap.skills
+            .entry(char_id)
+            .or_default()
+            .insert(
+                3363,
+                TrainedSkillRecord {
+                    type_id: 3363,
+                    skill_points: 100_000.0,
+                    level: 2,
+                },
+            );
+        if !snap.accounts.values().any(|a| a.user_id == uid) {
+            let uname = format!("u{uid}");
+            snap.accounts.insert(
+                uname.clone(),
+                eve_db::AccountRecord {
+                    user_id: uid,
+                    username: uname,
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
+    });
+    ctx.db
+        .acquire_online_lock(uid, founder.session_id, Some(char_id), true, 1_700_000_000)
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let created = call_gov(
+        &ctx,
+        &mut founder,
+        "corpRegistry",
+        "AddCorporation",
+        vec![
+            PyRep::String("LP Frontier".into()),
+            PyRep::String("LPFR".into()),
+            PyRep::String("Desc".into()),
+            PyRep::String("https://lp.example".into()),
+            PyRep::Real(0.05),
+            PyRep::Integer(415),
+            PyRep::Integer(416),
+            PyRep::Integer(417),
+            PyRep::Integer(671),
+            PyRep::Integer(672),
+            PyRep::Integer(673),
+            PyRep::String("Futura".into()),
+            PyRep::Bool(false),
+            PyRep::Bool(true),
+            PyRep::Real(0.22),
+        ],
+    )
+    .await
+    .unwrap();
+    let new_corp_id = kv(&created, "corporationID").as_i64().unwrap();
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let corp_changed = notifs
+        .iter()
+        .find(|n| n.event == "OnCorporationChanged")
+        .expect("OnCorporationChanged emitted");
+    let chg_dict = &corp_changed.args[1];
+    assert_eq!(
+        chg_dict.dict_get("typeface"),
+        Some(&PyRep::Tuple(vec![PyRep::None, PyRep::String("Futura".into())]))
+    );
+    assert_eq!(
+        chg_dict.dict_get("friendlyFire"),
+        Some(&PyRep::Tuple(vec![PyRep::None, PyRep::Bool(true)]))
+    );
+    assert_eq!(
+        chg_dict.dict_get("loyaltyPointTaxRate"),
+        Some(&PyRep::Tuple(vec![PyRep::None, PyRep::Real(0.22)]))
+    );
+    assert_eq!(
+        chg_dict.dict_get("applicationsEnabled"),
+        Some(&PyRep::Tuple(vec![PyRep::None, PyRep::Bool(false)]))
+    );
+
+    let fetched = call_gov(&ctx, &mut founder, "corpRegistry", "GetCorporation", vec![])
+        .await
+        .unwrap();
+    assert_eq!(kv(&fetched, "corporationID").as_i64(), Some(new_corp_id));
+    assert_eq!(kv(&fetched, "iskTaxRate").as_f64(), Some(0.05));
+    assert_eq!(kv(&fetched, "loyaltyPointTaxRate").as_f64(), Some(0.22));
+    assert_eq!(kv(&fetched, "friendlyFire").as_bool(), Some(true));
+    assert_eq!(kv(&fetched, "typeface").as_str(), Some("Futura"));
 }
 
 #[tokio::test]

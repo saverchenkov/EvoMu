@@ -10,6 +10,73 @@ use crate::router::notify_registry::{
     OnSecurityStatusUpdate,
 };
 
+/// Ensures both duel participants are online, undocked, and in the same non-zero solar system.
+fn validate_duel_participants_in_same_space_system(
+    ctx: &ServerContext,
+    session: &SessionState,
+    caller_char_id: i64,
+    other_char_id: i64,
+    action_desc: &str,
+) -> Result<(i64, Option<i64>), BridgeRpcError> {
+    let (caller_loc_opt, other_info_opt) = ctx.db.with_snapshot(|s| {
+        let ch = s.characters.get(&caller_char_id).map(|c| {
+            (
+                c.corporation_id,
+                c.alliance_id,
+                c.station_id,
+                c.structure_id,
+                c.solar_system_id,
+            )
+        });
+        let other = s
+            .characters
+            .get(&other_char_id)
+            .map(|c| (c.user_id, c.station_id, c.structure_id, c.solar_system_id));
+        (ch, other)
+    });
+    let Some((other_user_id, other_station_id, other_structure_id, other_solar_system_id)) =
+        other_info_opt
+    else {
+        return Err(BridgeRpcError::user_error("InvalidDuelTarget"));
+    };
+    let (caller_corp_id, caller_alliance_id, ch_station_id, ch_structure_id, ch_solar_system_id) =
+        caller_loc_opt.unwrap_or((0, None, None, None, 0));
+    if !ctx.is_character_online(other_char_id, other_user_id) {
+        return Err(BridgeRpcError::from_user_key(
+            eve_proto::UserErrorKey::DuelChallengeFailNoSesssionForTarget,
+        ));
+    }
+    if session.station_id.is_some()
+        || session.structure_id.is_some()
+        || ch_station_id.is_some()
+        || ch_structure_id.is_some()
+    {
+        return Err(BridgeRpcError {
+            code: "CantDuelWhileDocked".into(),
+            message: format!("Cannot {action_desc} a duel challenge while docked"),
+            client_error: None,
+        });
+    }
+    if other_station_id.is_some() || other_structure_id.is_some() {
+        return Err(BridgeRpcError {
+            code: "CantDuelWhileDocked".into(),
+            message: "Target character is docked and cannot participate in a duel".into(),
+            client_error: None,
+        });
+    }
+    let caller_sys_id = session.solar_system_id.unwrap_or(ch_solar_system_id);
+    if caller_sys_id == 0 || other_solar_system_id == 0 || caller_sys_id != other_solar_system_id {
+        return Err(BridgeRpcError {
+            code: "DuelChallengeSameSystemRequired".into(),
+            message: format!(
+                "Both pilots must be in the same solar system to {action_desc} a duel challenge"
+            ),
+            client_error: None,
+        });
+    }
+    Ok((caller_corp_id, caller_alliance_id))
+}
+
 /// Evaluates Faction Police security status threshold for a given high-security system (`feat:crimewatch.faction-police-thresholds`).
 pub fn faction_police_sec_threshold(system_security: f64) -> Option<f64> {
     let rounded = (system_security * 10.0).round() / 10.0;
@@ -1109,66 +1176,17 @@ pub async fn handle_crimewatch(
             if target_char_id <= 0 || target_char_id == char_id {
                 return Some(Err(BridgeRpcError::user_error("InvalidDuelTarget")));
             }
-            let (challenger_loc_opt, target_info_opt) = ctx.db.with_snapshot(|s| {
-                let ch = s.characters.get(&char_id).map(|c| {
-                    (
-                        c.corporation_id,
-                        c.alliance_id,
-                        c.station_id,
-                        c.structure_id,
-                        c.solar_system_id,
-                    )
-                });
-                let tgt = s
-                    .characters
-                    .get(&target_char_id)
-                    .map(|c| (c.user_id, c.station_id, c.structure_id, c.solar_system_id));
-                (ch, tgt)
-            });
-            let Some((target_user_id, tgt_station_id, tgt_structure_id, target_solar_system_id)) =
-                target_info_opt
-            else {
-                return Some(Err(BridgeRpcError::user_error("InvalidDuelTarget")));
-            };
-            let (
-                from_corp_id,
-                from_alliance_id,
-                ch_station_id,
-                ch_structure_id,
-                ch_solar_system_id,
-            ) = challenger_loc_opt.unwrap_or((0, None, None, None, 0));
-            if !ctx.is_character_online(target_char_id, target_user_id) {
-                return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::DuelChallengeFailNoSesssionForTarget)));
-            }
-            if session.station_id.is_some()
-                || session.structure_id.is_some()
-                || ch_station_id.is_some()
-                || ch_structure_id.is_some()
-            {
-                return Some(Err(BridgeRpcError {
-                    code: "CantDuelWhileDocked".into(),
-                    message: "Cannot initiate a duel challenge while docked".into(),
-                    client_error: None,
-                }));
-            }
-            if tgt_station_id.is_some() || tgt_structure_id.is_some() {
-                return Some(Err(BridgeRpcError {
-                    code: "CantDuelWhileDocked".into(),
-                    message: "Target character is docked and cannot be challenged to a duel".into(),
-                    client_error: None,
-                }));
-            }
-            let challenger_sys_id = session.solar_system_id.unwrap_or(ch_solar_system_id);
-            if challenger_sys_id == 0
-                || target_solar_system_id == 0
-                || challenger_sys_id != target_solar_system_id
-            {
-                return Some(Err(BridgeRpcError {
-                    code: "DuelChallengeSameSystemRequired".into(),
-                    message: "Both pilots must be in the same solar system to initiate a duel challenge".into(),
-                    client_error: None,
-                }));
-            }
+            let (from_corp_id, from_alliance_id) =
+                match validate_duel_participants_in_same_space_system(
+                    ctx,
+                    session,
+                    char_id,
+                    target_char_id,
+                    "initiate",
+                ) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
             let now_unix = ctx.now_unix();
             let expiry_ft = ctx.now_blueos_filetime_ticks() + 600_000_000;
             with_mut_combat_runtime(ctx, |rt| {
@@ -1202,9 +1220,6 @@ pub async fn handle_crimewatch(
                     client_error: None,
                 }));
             };
-            let _ = ctx
-                .db
-                .with_snapshot(|s| s.characters.get(&challenger_id).map(|c| c.character_id));
             // V24.01 `RespondToDuelChallenge(fromCharID, expiryTime, accept)` passes 3 positional
             // args where `args[1]` is a non-zero FILETIME integer; fail closed (`false`) if
             // `accept` is missing or not a valid boolean/3rd-arg value.
@@ -1220,20 +1235,20 @@ pub async fn handle_crimewatch(
                 false
             };
             let now_unix = ctx.now_unix();
-            let valid_challenge = with_mut_combat_runtime(ctx, |rt| {
-                let Some(expires_at) = rt.duel_challenges.remove(&(challenger_id, char_id)) else {
+            let pending_ok = with_mut_combat_runtime(ctx, |rt| {
+                let Some(&expires_at) = rt.duel_challenges.get(&(challenger_id, char_id)) else {
                     return false;
                 };
                 if now_unix > expires_at {
+                    rt.duel_challenges.remove(&(challenger_id, char_id));
                     return false;
                 }
-                if accept {
-                    rt.add_limited_engagement(char_id, challenger_id, now_unix);
-                    rt.add_limited_engagement(challenger_id, char_id, now_unix);
+                if !accept {
+                    rt.duel_challenges.remove(&(challenger_id, char_id));
                 }
                 true
             });
-            if !valid_challenge {
+            if !pending_ok {
                 return Some(Err(BridgeRpcError {
                     code: "NoPendingDuelChallenge".into(),
                     message: format!("No active duel challenge from {challenger_id} to {char_id}"),
@@ -1241,6 +1256,36 @@ pub async fn handle_crimewatch(
                 }));
             }
             if accept {
+                if let Err(e) = validate_duel_participants_in_same_space_system(
+                    ctx,
+                    session,
+                    char_id,
+                    challenger_id,
+                    "accept",
+                ) {
+                    return Some(Err(e));
+                }
+                let accepted_ok = with_mut_combat_runtime(ctx, |rt| {
+                    let Some(expires_at) = rt.duel_challenges.remove(&(challenger_id, char_id))
+                    else {
+                        return false;
+                    };
+                    if now_unix > expires_at {
+                        return false;
+                    }
+                    rt.add_limited_engagement(char_id, challenger_id, now_unix);
+                    rt.add_limited_engagement(challenger_id, char_id, now_unix);
+                    true
+                });
+                if !accepted_ok {
+                    return Some(Err(BridgeRpcError {
+                        code: "NoPendingDuelChallenge".into(),
+                        message: format!(
+                            "No active duel challenge from {challenger_id} to {char_id}"
+                        ),
+                        client_error: None,
+                    }));
+                }
                 let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
                 ctx.emit_typed(
                     NotificationTarget::Character(char_id),

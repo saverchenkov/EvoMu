@@ -552,20 +552,70 @@ fn add_corp_rpc_validation_tax_clamp_docked_alliance_stasis_and_ad_fallback() {
             .code,
         "CorpRoleDenied"
     );
-    // Character balance debit fallback when corp wallet div 1 has 0 ISK
-    let bal_before = ctx.db.with_snapshot(|snap| snap.characters[&90_000_901].balance);
+    // Strict corp wallet enforcement: 0 ISK in corp div 1 rejects with NotEnoughISK and leaves personal wallet untouched.
+    let char_bal_before = ctx.db.with_snapshot(|snap| snap.characters[&90_000_901].balance);
+    let err = call_corp_gov(
+        &ctx,
+        &mut f1,
+        "corpRecProxy",
+        "CreateRecruitmentAd",
+        &[
+            PyRep::Integer(14),
+            PyRep::Integer(5),
+            PyRep::Integer(1),
+            PyRep::String("Desc".into()),
+            PyRep::List(vec![PyRep::Integer(90_000_901)]),
+            PyRep::String("V24 Ad Requires Corp Funds".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+        &kw,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "NotEnoughISK");
+    assert_eq!(
+        ctx.db.with_snapshot(|snap| snap.characters[&90_000_901].balance),
+        char_bal_before,
+        "personal balance must never be debited as fallback"
+    );
+
+    // Fund corp div 1 and create V24 9-arg recruitment ad -> debits corp wallet, personal untouched.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&c_alpha)
+            .unwrap()
+            .set_division_balance(1, IskCents::from_isk(1_000_000));
+    });
     let created_ad = call_corp_gov(
         &ctx,
         &mut f1,
         "corpRecProxy",
         "CreateRecruitmentAd",
-        &[PyRep::Integer(14), PyRep::Integer(5), PyRep::String("New Fallback Ad".into()), PyRep::String("Desc".into()), PyRep::Integer(1)],
+        &[
+            PyRep::Integer(14),
+            PyRep::Integer(5),
+            PyRep::Integer(2),
+            PyRep::String("Desc".into()),
+            PyRep::List(vec![PyRep::Integer(90_000_901)]),
+            PyRep::String("New V24 Ad".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
         &kw,
     )
     .unwrap();
     let new_ad_id = created_ad.dict_get("adID").and_then(|v| v.as_i64()).unwrap();
-    let bal_after = ctx.db.with_snapshot(|snap| snap.characters[&90_000_901].balance);
-    assert_eq!(bal_before.0 - bal_after.0, IskCents::from_isk(250_000).0);
+    assert_eq!(created_ad.dict_get("title").and_then(|v| v.as_str()), Some("New V24 Ad"));
+    assert_eq!(
+        ctx.db.with_snapshot(|snap| snap.characters[&90_000_901].balance),
+        char_bal_before
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|snap| snap.corporations[&c_alpha].division_balance(1)),
+        IskCents::from_isk(750_000)
+    );
     assert_eq!(
         rs_rows(&call_corp_gov(&ctx, &mut f1, "corpRecProxy", "GetRecruitmentAd", &[PyRep::Integer(new_ad_id)], &kw).unwrap()).len(),
         1

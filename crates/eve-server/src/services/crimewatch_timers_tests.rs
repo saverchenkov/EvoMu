@@ -294,6 +294,7 @@ async fn test_handle_crimewatch_rpcs_and_duel_lifecycle() {
     assert!(offline_err.is_err());
 
     // Seed challenge directly and test RespondToDuelChallenge
+    make_duel_peer_online_and_undocked(&ctx, &mut sess, char_id, other_id, now);
     with_mut_combat_runtime(&ctx, |rt| {
         rt.duel_challenges.insert((other_id, char_id), now + 60);
     });
@@ -315,6 +316,52 @@ async fn test_handle_crimewatch_rpcs_and_duel_lifecycle() {
     assert!(with_combat_runtime(&ctx, |rt| {
         rt.has_limited_engagement_with(char_id, other_id, now)
     }));
+}
+
+fn make_duel_peer_online_and_undocked(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+    peer_id: i64,
+    now_unix: u64,
+) {
+    sess.station_id = None;
+    sess.structure_id = None;
+    let duel_sys = sess.solar_system_id.unwrap_or(30_000_142);
+    let peer_uid = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = duel_sys;
+        }
+        let peer_uid = {
+            let peer = snap.characters.get_mut(&peer_id).unwrap();
+            peer.station_id = None;
+            peer.structure_id = None;
+            peer.solar_system_id = duel_sys;
+            peer.user_id
+        };
+        if !snap.accounts.values().any(|a| a.user_id == peer_uid) {
+            let uname = format!("u{peer_uid}");
+            snap.accounts.insert(
+                uname.clone(),
+                eve_db::AccountRecord {
+                    user_id: peer_uid,
+                    username: uname,
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
+        peer_uid
+    });
+    if !ctx.is_character_online(peer_id, peer_uid) {
+        ctx.db
+            .acquire_online_lock(peer_uid, 99_703, Some(peer_id), true, now_unix)
+            .unwrap();
+    }
 }
 
 #[tokio::test]
@@ -387,6 +434,7 @@ async fn test_respond_to_duel_challenge_three_arg_and_fail_closed() {
     }
 
     // 3. V24.01 3-arg accept: (fromCharID, expiryTime, true) creates mutual LE
+    make_duel_peer_online_and_undocked(&ctx, &mut sess, char_id, other_id, now);
     with_mut_combat_runtime(&ctx, |rt| {
         rt.duel_challenges.insert((other_id, char_id), now + 60);
     });

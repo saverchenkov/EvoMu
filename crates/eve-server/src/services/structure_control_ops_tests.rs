@@ -250,8 +250,20 @@ async fn docked_take_control_release_eject_and_pilot_lookup_roundtrip() {
     assert!(
         rogue_relinquish
             .iter()
-            .any(|n| n.event == "OnSessionChanged" && matches!(n.args.get(1), Some(PyRep::KeyVal(kv)) if kv.contains_key("solarsystemid2"))),
-        "Displaced OnSessionChanged must carry full session KeyVal: {rogue_relinquish:?}"
+            .any(|n| {
+                n.event == "OnSessionChanged"
+                    && matches!(
+                        n.args.get(1),
+                        Some(PyRep::KeyVal(kv))
+                            if kv.get("solarsystemid2").and_then(|v| v.as_i64()).is_some()
+                                && kv.get("constellationid").and_then(|v| v.as_i64()).is_some()
+                                && kv.get("regionid").and_then(|v| v.as_i64()).is_some()
+                                && kv.get("raceID").and_then(|v| v.as_i64()).is_some()
+                                && kv.get("bloodlineID").and_then(|v| v.as_i64()).is_some()
+                                && kv.get("genderID").and_then(|v| v.as_i64()).is_some()
+                    )
+            }),
+        "Displaced OnSessionChanged must carry full session KeyVal (hierarchy + bloodline/race/gender): {rogue_relinquish:?}"
     );
 
     // Non-pilot cannot release

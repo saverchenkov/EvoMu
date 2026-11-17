@@ -322,9 +322,11 @@ async fn office_manager_lifecycle_and_fleet_rpc_handlers() {
 async fn office_manager_uses_station_rental_cost_map_and_emits_account_and_item_notifications() {
     let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
     let char_id = 90_000_001_i64;
+    let char2_id = 90_000_002_i64;
     let corp_id = 98_000_055_i64;
     let station_id = 60_003_760_i64;
     let uid = char_id as u64;
+    let uid2 = char2_id as u64;
 
     ctx.db.with_mut_snapshot(|snap| {
         let mut corp = eve_db::CorporationRecord::new(corp_id, "Quote Corp", "QUOT", char_id)
@@ -332,25 +334,39 @@ async fn office_manager_uses_station_rental_cost_map_and_emits_account_and_item_
         corp.hq_station_id = Some(station_id);
         corp.tax_rate = 0.05;
         corp.members.insert(char_id);
+        corp.members.insert(char2_id);
         snap.corporations.insert(corp_id, corp);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.user_id = uid;
             ch.corporation_id = corp_id;
             ch.station_id = Some(station_id);
         }
-        if !snap.accounts.values().any(|a| a.user_id == uid) {
-            let uname = format!("u{uid}");
-            snap.accounts.insert(
-                uname.clone(),
-                eve_db::AccountRecord {
-                    user_id: uid,
-                    username: uname,
-                    password_token: String::new(),
-                    role: 0,
-                    banned_until_unix: None,
-                    ban_reason: None,
-                },
-            );
+        let mut ch2 = snap
+            .characters
+            .get(&char_id)
+            .cloned()
+            .expect("primary character seeded");
+        ch2.character_id = char2_id;
+        ch2.user_id = uid2;
+        ch2.name = "Corp Member 2".into();
+        ch2.corporation_id = corp_id;
+        ch2.station_id = Some(station_id);
+        snap.characters.insert(char2_id, ch2);
+        for acct_uid in [uid, uid2] {
+            if !snap.accounts.values().any(|a| a.user_id == acct_uid) {
+                let uname = format!("u{acct_uid}");
+                snap.accounts.insert(
+                    uname.clone(),
+                    eve_db::AccountRecord {
+                        user_id: acct_uid,
+                        username: uname,
+                        password_token: String::new(),
+                        role: 0,
+                        banned_until_unix: None,
+                        ban_reason: None,
+                    },
+                );
+            }
         }
         snap.station_office_rental_costs.insert(station_id, 50_000.0);
         snap.items.retain(|_, i| !(i.location_id == station_id && i.type_id == 27));
@@ -376,7 +392,12 @@ async fn office_manager_uses_station_rental_cost_map_and_emits_account_and_item_
     ctx.db
         .acquire_online_lock(uid, session.session_id, Some(char_id), true, 1_700_000_000)
         .unwrap();
+    let sess2 = make_session(char2_id, corp_id, Some(station_id));
+    ctx.db
+        .acquire_online_lock(uid2, sess2.session_id + 1, Some(char2_id), true, 1_700_000_000)
+        .unwrap();
     let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = ctx.drain_notifications_for_char(char2_id);
     let kw = HashMap::new();
 
     // Base 50,000 ISK with 1 existing office -> 50,000 * 1.5 = 75,000 ISK.
@@ -393,29 +414,66 @@ async fn office_manager_uses_station_rental_cost_map_and_emits_account_and_item_
     let office_id = rent.dict_get("officeID").and_then(|v| v.as_i64()).unwrap();
     assert_eq!(rent.dict_get("cost").and_then(|v| v.as_f64()), Some(75_000.0));
 
-    let notifs = ctx.drain_notifications_for_char(char_id);
-    assert_eq!(
-        notifs
+    let expected_creditor = ctx
+        .sde
+        .stations
+        .get(&station_id)
+        .map(|s| s.owner_corporation_id)
+        .unwrap_or(1_000_035);
+    ctx.db.with_snapshot(|snap| {
+        let journals = snap
+            .corp_wallet_journals
+            .get(&(corp_id, 1))
+            .expect("corp division 1 journal recorded");
+        let rent_entry = journals
             .iter()
-            .filter(|n| n.event == "OnAccountChange")
-            .map(|n| n.args.clone())
-            .collect::<Vec<_>>(),
-        vec![vec![
-            PyRep::String("cash".into()),
-            PyRep::Integer(corp_id),
-            PyRep::Real(925_000.0),
-        ]]
-    );
-    assert_eq!(
-        notifs.iter().filter(|n| n.event == "OnItemChange").count(),
-        1
-    );
-    assert_eq!(
-        notifs
+            .find(|e| e.ref_type == "office_rental_fee")
+            .expect("office_rental_fee journal entry present");
+        assert_eq!(rent_entry.amount, -75_000.0);
+        assert_eq!(rent_entry.balance, 925_000.0);
+        assert_eq!(rent_entry.first_party_id, Some(char_id));
+        assert_eq!(rent_entry.second_party_id, Some(expected_creditor));
+    });
+
+    for member_id in [char_id, char2_id] {
+        let notifs = ctx.drain_notifications_for_char(member_id);
+        assert_eq!(
+            notifs
+                .iter()
+                .filter(|n| n.event == "OnAccountChange")
+                .map(|n| n.args.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![
+                PyRep::String("cash".into()),
+                PyRep::Integer(corp_id),
+                PyRep::Real(925_000.0),
+            ]],
+            "member {member_id} OnAccountChange"
+        );
+        assert_eq!(
+            notifs.iter().filter(|n| n.event == "OnItemChange").count(),
+            1,
+            "member {member_id} corp-targeted OnItemChange"
+        );
+        assert_eq!(
+            notifs
+                .iter()
+                .filter(|n| n.event == "OnOfficeRentalChange")
+                .map(|n| n.args.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![PyRep::Integer(corp_id), PyRep::Integer(office_id)]],
+            "member {member_id} OnOfficeRentalChange"
+        );
+        let bill_creditor = notifs
             .iter()
-            .filter(|n| n.event == "OnOfficeRentalChange")
-            .map(|n| n.args.clone())
-            .collect::<Vec<_>>(),
-        vec![vec![PyRep::Integer(corp_id), PyRep::Integer(office_id)]]
-    );
+            .find(|n| n.event == "OnBillReceived")
+            .and_then(|n| n.args.first())
+            .and_then(|b| b.dict_get("creditorID"))
+            .and_then(|v| v.as_i64());
+        assert_eq!(
+            bill_creditor,
+            Some(expected_creditor),
+            "member {member_id} OnBillReceived creditorID"
+        );
+    }
 }

@@ -786,7 +786,26 @@ pub(super) fn handle_corps(
                         c.corporation_id,
                         ceo_id.unwrap_or(c.ceo_id),
                     ) as i64;
-                    (c.corporation_id, c.name.clone(), ticker, ceo_id, m_count, m_limit, c.tax_rate, c.alliance_id.filter(|&id| id > 0), hq_station, desc, c.url.clone(), h_divs, w_divs, allow_war)
+                    let lp_tax = snap
+                        .service_state_blobs
+                        .get(&format!("corp_lp_tax_rate:{corp_id}"))
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .filter(|v| v.is_finite())
+                        .map(|v| v.clamp(0.0, 1.0))
+                        .unwrap_or(c.tax_rate);
+                    let typeface = snap
+                        .service_state_blobs
+                        .get(&format!("corp_typeface:{corp_id}"))
+                        .and_then(|enc| {
+                            if let Some(s) = enc.strip_prefix("s:") {
+                                Some(PyRep::String(s.to_string()))
+                            } else if let Some(i) = enc.strip_prefix("i:") {
+                                i.parse::<i64>().ok().map(PyRep::Integer)
+                            } else {
+                                None
+                            }
+                        });
+                    (c.corporation_id, c.name.clone(), ticker, ceo_id, m_count, m_limit, c.tax_rate, lp_tax, typeface, c.alliance_id.filter(|&id| id > 0), hq_station, desc, c.url.clone(), h_divs, w_divs, allow_war)
                 })
             }).or_else(|| {
                 // DERIVED: SDE NPC corporations fallback for starter/NPC corps; always supply a
@@ -794,11 +813,11 @@ pub(super) fn handle_corps(
                 // passes corpinfo.ceoID directly into cfg.eveowners.Get().
                 ctx.sde.npc_corporations.get(&corp_id).map(|c| {
                     let ceo_id = c.ceo_id.filter(|&id| id > 0).or(Some(c.corporation_id));
-                    (c.corporation_id, c.name.clone(), c.ticker_name.clone(), ceo_id, 10_000i64, 100_000i64, c.tax_rate, None, c.station_id.filter(|&id| id > 0), format!("NPC Corporation {}", c.name), String::new(), HashMap::new(), Vec::new(), false)
+                    (c.corporation_id, c.name.clone(), c.ticker_name.clone(), ceo_id, 10_000i64, 100_000i64, c.tax_rate, c.tax_rate, None, None, c.station_id.filter(|&id| id > 0), format!("NPC Corporation {}", c.name), String::new(), HashMap::new(), Vec::new(), false)
                 })
             });
 
-            let Some((cid, name, ticker, ceo_id, m_count, m_limit, tax, alliance_id, hq_station, desc, url, h_divs, w_divs, allow_war)) = corp_info else {
+            let Some((cid, name, ticker, ceo_id, m_count, m_limit, tax, lp_tax, typeface, alliance_id, hq_station, desc, url, h_divs, w_divs, allow_war)) = corp_info else {
                 return Some(Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None }));
             };
             let ((s1, s2, s3, c1), (c2, c3), apps_enabled, friendly_fire) = read_corp_gov(ctx, |g| {
@@ -846,7 +865,7 @@ pub(super) fn handle_corps(
                 ("memberLimit".into(), PyRep::Integer(m_limit)),
                 ("taxRate".into(), PyRep::Real(tax)),
                 ("iskTaxRate".into(), PyRep::Real(tax)),
-                ("loyaltyPointTaxRate".into(), PyRep::Real(tax)),
+                ("loyaltyPointTaxRate".into(), PyRep::Real(lp_tax)),
                 ("allianceID".into(), alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("stationID".into(), hq_station.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("description".into(), PyRep::String(desc)),
@@ -864,6 +883,9 @@ pub(super) fn handle_corps(
                 ("friendlyFire".into(), PyRep::Bool(friendly_fire)),
                 ("deleted".into(), PyRep::Integer(0)),
             ];
+            if let Some(tf_val) = typeface {
+                entries.push(("typeface".into(), tf_val));
+            }
             for i in 1..=7u8 {
                 let h_name = h_divs.get(&i).cloned().unwrap_or_else(|| default_h[(i - 1) as usize].into());
                 let w_name = w_divs.iter().find(|(id, _)| *id == i).map(|(_, n)| n.clone()).unwrap_or_else(|| default_w[(i - 1) as usize].into());

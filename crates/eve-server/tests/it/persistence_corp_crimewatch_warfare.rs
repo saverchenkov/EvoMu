@@ -181,6 +181,12 @@ async fn test_d6_corp_governance_and_employment_history_persist_and_rollback() {
         let lbl = rpc(&ctx, &mut sess, "corpRegistry", "CreateLabel", &[PyRep::String("Coalition".into()), PyRep::Integer(0x112233)]).await;
         let label_id = lbl.dict_get("labelID").and_then(|v| v.as_i64()).unwrap_or(1);
         rpc(&ctx, &mut sess, "corpRegistry", "AssignLabels", &[PyRep::List(vec![PyRep::Integer(OTHER)]), PyRep::Integer(label_id)]).await;
+        ctx.db.with_mut_snapshot(|s| {
+            s.corporations
+                .get_mut(&corp_id)
+                .unwrap()
+                .set_division_balance(1, eve_db::IskCents::from_isk(5_000_000));
+        });
         let ad = rpc(
             &ctx,
             &mut sess,

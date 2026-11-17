@@ -302,6 +302,7 @@ fn handle_office_manager(
                 }));
             }
 
+            let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let exists = if station_id >= 1_000_000_000_000 {
                     snap.structures.contains_key(&station_id)
@@ -362,7 +363,14 @@ fn handle_office_manager(
                     });
                 }
                 let quote = office_rental_quote_in_snap(snap, station_id, occupied);
-                let fee = eve_db::IskCents((quote * 100.0).round() as i64);
+                let fee = eve_db::IskCents::from_f64_isk(quote);
+                let creditor_id = ctx
+                    .sde
+                    .stations
+                    .get(&station_id)
+                    .map(|s| s.owner_corporation_id)
+                    .or_else(|| snap.structures.get(&station_id).map(|s| s.owner_corp_id))
+                    .unwrap_or(1_000_035);
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
                     return Err(BridgeRpcError {
                         code: "CorporationNotFound".into(),
@@ -378,6 +386,15 @@ fn handle_office_manager(
                     });
                 }
                 let corp_bal_after = corp.division_balance(1);
+                snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
+                    owner_id: corp_id,
+                    entry_type: "office_rental_fee",
+                    amount: eve_db::IskCents(-fee.0),
+                    balance_after: corp_bal_after,
+                    reason: format!("Corporation office rental fee at station {station_id}"),
+                    meta: eve_db::ledger::JournalMeta::new(13, char_id, creditor_id, now_unix)
+                        .with_account_key(1000),
+                });
 
                 let office_id = snap.items.keys().max().copied().unwrap_or(920_000_000).max(920_000_000) + 1;
                 let office_item = eve_db::InventoryItemRecord {
@@ -393,15 +410,20 @@ fn handle_office_manager(
                 };
                 snap.items.insert(office_id, office_item.clone());
                 snap.corp_governance.entry(corp_id).or_default().offices.insert(station_id, office_id);
-                Ok((office_id, station_id, quote, corp_bal_after, office_item))
+                Ok((office_id, station_id, creditor_id, quote, corp_bal_after, office_item))
             });
 
             match res {
-                Ok((office_id, st_id, quote, corp_bal_after, office_item)) => {
-                    let due_unix = ctx.now_unix().saturating_add(30 * 86_400);
-                    let _ = super::wallet_serverops::create_bill(ctx, 2, corp_id, 1_000_035, quote, due_unix, 0.0, st_id, 27);
+                Ok((office_id, st_id, creditor_id, quote, corp_bal_after, office_item)) => {
+                    let due_unix = now_unix.saturating_add(30 * 86_400);
+                    let _ = super::wallet_serverops::create_bill(ctx, 2, corp_id, creditor_id, quote, due_unix, 0.0, st_id, 27);
                     ctx.notify_wallet_balance(true, corp_id, 1, corp_bal_after);
-                    ctx.notify_item_mutation(char_id, None, Some(&office_item));
+                    ctx.emit_item_change_with_target(
+                        NotificationTarget::Corporation(corp_id),
+                        "corpid",
+                        &office_item,
+                        vec![(3, PyRep::Integer(0))],
+                    );
                     ctx.emit_typed(
                         NotificationTarget::Corporation(corp_id),
                         crate::router::notify_registry::OnOfficeRentalChange {

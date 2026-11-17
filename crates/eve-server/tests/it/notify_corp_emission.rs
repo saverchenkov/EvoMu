@@ -311,6 +311,12 @@ async fn test_corporation_lifecycle_recruitment_and_aggression_notifications() {
     assert!(events(&ctx, p3, "OnCorporationWelcomeMailChanged").is_empty());
 
     // CreateRecruitmentAd & DeleteRecruitmentAd -> OnCorporationRecruitmentAdChanged(corpID, adID) to P1 & P2 only.
+    ctx.db.with_mut_snapshot(|s| {
+        s.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .set_division_balance(1, eve_db::IskCents::from_isk(5_000_000));
+    });
     let ad = ctx
         .dispatch_rpc(
             &mut s1,
@@ -342,8 +348,8 @@ async fn test_corporation_lifecycle_recruitment_and_aggression_notifications() {
             .collect::<Vec<_>>(),
         vec![vec![
             PyRep::String("cash".into()),
-            PyRep::Integer(P1),
-            PyRep::Real(498_150_200.0),
+            PyRep::Integer(corp_id),
+            PyRep::Real(4_750_000.0),
         ]]
     );
     assert_eq!(events(&ctx, P2, "OnCorporationRecruitmentAdChanged"), vec![expected_ad.clone()]);
