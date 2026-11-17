@@ -319,10 +319,23 @@ pub async fn handle(
         ("corpRegistry", "CreateAlliance") | ("allianceRegistry", "CreateAlliance") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let corp_id = session.corporation_id.unwrap_or(0);
-            let name = args.first().and_then(|a| a.as_str()).unwrap_or("New Eden Coalition").trim();
-            let short_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("NECO").trim();
-            let description = args.get(2).and_then(|a| a.as_str()).unwrap_or("");
-            let url = args.get(3).and_then(|a| a.as_str()).unwrap_or("");
+            let rpc = crate::router::RpcArgs::positional(args);
+            let name = match rpc.opt_str_max(0, "name", 100, 400) {
+                Ok(v) => v.unwrap_or("New Eden Coalition").trim(),
+                Err(e) => return Some(Err(e)),
+            };
+            let short_name = match rpc.opt_str_max(1, "shortName", 16, 64) {
+                Ok(v) => v.unwrap_or("NECO").trim(),
+                Err(e) => return Some(Err(e)),
+            };
+            let description = match rpc.opt_str_max(2, "description", 2_000, 8_000) {
+                Ok(v) => v.unwrap_or(""),
+                Err(e) => return Some(Err(e)),
+            };
+            let url = match rpc.opt_str_max(3, "url", 256, 1_024) {
+                Ok(v) => v.unwrap_or(""),
+                Err(e) => return Some(Err(e)),
+            };
             if name.is_empty() || short_name.is_empty() || short_name.len() > 5 {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidAllianceName".into(),
@@ -447,7 +460,7 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let msg = match rpc.opt_str(1, "applicationText") {
+            let msg = match rpc.opt_str_max(1, "applicationText", 1_000, 4_000) {
                 Ok(v) => v.unwrap_or(""),
                 Err(e) => return Some(Err(e)),
             };
@@ -1535,8 +1548,15 @@ fn handle_upsert_alliance_bulletin(
     } else {
         None
     };
-    let title = args.get(off).and_then(|a| a.as_str()).unwrap_or("").to_string();
-    let body = args.get(off + 1).and_then(|a| a.as_str()).unwrap_or("").to_string();
+    let rpc = crate::router::RpcArgs::positional(args);
+    let title = rpc
+        .opt_str_max(off, "title", 128, 512)?
+        .unwrap_or("")
+        .to_string();
+    let body = rpc
+        .opt_str_max(off + 1, "body", 4_000, 16_000)?
+        .unwrap_or("")
+        .to_string();
     if title.is_empty() {
         return Err(BridgeRpcError {
             code: "BulletinTitleRequired".into(),
@@ -1640,8 +1660,15 @@ fn handle_update_alliance(
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_character(session)?;
     let aid = require_executor(ctx, session)?;
-    let description = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
-    let url = args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string();
+    let rpc = crate::router::RpcArgs::positional(args);
+    let description = rpc
+        .opt_str_max(0, "description", 2_000, 8_000)?
+        .unwrap_or("")
+        .to_string();
+    let url = rpc
+        .opt_str_max(1, "url", 256, 1_024)?
+        .unwrap_or("")
+        .to_string();
     let dict_opt = args
         .get(3)
         .and_then(|a| a.as_bool())

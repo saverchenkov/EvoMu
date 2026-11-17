@@ -1263,8 +1263,35 @@ async fn handle_bridge_client_collapses_forged_bound_id_and_kicked_session_probe
         .bind_verified_sub_object(&victim_sess, "beyonce", 30_000_142)
         .expect("bind victim beyonce sub-object");
 
-    // 1. Pre-auth TCP attacker floods forged `bound_id: Some(existing_bid)` probes and rejected
-    //    non-allowlisted RPCs via `handle_bridge_client`.
+    // 1. Pre-auth TCP attacker floods forged `bound_id: Some(existing_bid)` probes (sharded across
+    //    sequential connections under per-session burst cap) and rejected non-allowlisted RPCs via
+    //    `handle_bridge_client`.
+    let flood_count = MAX_TRACKED_RPC_METHODS + 16;
+    let mut next_req_id = 1u64;
+    let mut expected_collapsed = 0u64;
+    for chunk_start in (0..flood_count).step_by(150) {
+        let chunk_end = (chunk_start + 150).min(flood_count);
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let ctx_chunk = Arc::clone(&ctx);
+        let srv = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_bridge_client(stream, ctx_chunk).await
+        });
+        let mut cli = TcpStream::connect(addr).await?;
+        for i in chunk_start..chunk_end {
+            let svc = format!("tcp_probe_svc_{i}");
+            let meth = format!("tcp_probe_meth_{i}");
+            let res =
+                call_bridge_rpc(&mut cli, next_req_id, &svc, Some(existing_bid), &meth, vec![])
+                    .await?;
+            next_req_id += 1;
+            assert!(res.is_err());
+            expected_collapsed += 1;
+        }
+        finish_bridge_client(cli, srv).await?;
+    }
+
     let listener1 = TcpListener::bind("127.0.0.1:0").await?;
     let addr1 = listener1.local_addr()?;
     let ctx1 = Arc::clone(&ctx);
@@ -1273,19 +1300,6 @@ async fn handle_bridge_client_collapses_forged_bound_id_and_kicked_session_probe
         handle_bridge_client(stream, ctx1).await
     });
     let mut cli_unauth = TcpStream::connect(addr1).await?;
-
-    let flood_count = MAX_TRACKED_RPC_METHODS + 16;
-    let mut next_req_id = 1u64;
-    let mut expected_collapsed = 0u64;
-    for i in 0..flood_count {
-        let svc = format!("tcp_probe_svc_{i}");
-        let meth = format!("tcp_probe_meth_{i}");
-        let res = call_bridge_rpc(&mut cli_unauth, next_req_id, &svc, Some(existing_bid), &meth, vec![])
-            .await?;
-        next_req_id += 1;
-        assert!(res.is_err());
-        expected_collapsed += 1;
-    }
 
     let forged_preauth_probes: &[(&str, Option<u64>, &str, Vec<PyRep>)] = &[
         ("machoNet", Some(existing_bid), "GetTime", vec![]),

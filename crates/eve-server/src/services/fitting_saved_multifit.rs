@@ -1099,19 +1099,31 @@ pub(crate) async fn handle_ships_and_services(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            const MAX_INVENTORY_LABEL_CHARS: usize = 128;
+            const MAX_INVENTORY_LABEL_BYTES: usize = 512;
             let rpc = crate::router::RpcArgs::positional(args);
             let (item_id, raw_label) = if args.len() >= 2 {
                 let id = match rpc.opt_positive_i64(0, "itemID") {
                     Ok(v) => v.or(session.ship_id).unwrap_or(0),
                     Err(e) => return Some(Err(e)),
                 };
-                let lbl = match rpc.req_str(1, "label") {
+                let lbl = match rpc.req_str_max(
+                    1,
+                    "label",
+                    MAX_INVENTORY_LABEL_CHARS,
+                    MAX_INVENTORY_LABEL_BYTES,
+                ) {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };
                 (id, lbl)
             } else {
-                let lbl = match rpc.req_str(0, "label") {
+                let lbl = match rpc.req_str_max(
+                    0,
+                    "label",
+                    MAX_INVENTORY_LABEL_CHARS,
+                    MAX_INVENTORY_LABEL_BYTES,
+                ) {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };

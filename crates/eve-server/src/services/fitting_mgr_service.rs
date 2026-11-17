@@ -409,15 +409,25 @@ async fn handle_save_fitting(
             Ok((name, ship_type_id, description, parsed_items))
         };
 
+    const MAX_FITTING_NAME_CHARS: usize = 100;
+    const MAX_FITTING_NAME_BYTES: usize = 400;
+    const MAX_FITTING_DESC_CHARS: usize = 1_000;
+    const MAX_FITTING_DESC_BYTES: usize = 4_000;
+
     let extract_fit_from_rep = |rep: &PyRep| -> Result<
         (String, TypeId, String, Vec<(TypeId, InventoryFlag, i32)>),
         BridgeRpcError,
     > {
-        let name = rep
-            .dict_get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Saved Fitting")
-            .to_string();
+        let name = match rep.dict_get("name") {
+            Some(v) if !matches!(v, PyRep::None) => crate::router::check_str_rep_max(
+                v,
+                "name",
+                MAX_FITTING_NAME_CHARS,
+                MAX_FITTING_NAME_BYTES,
+            )?
+            .to_string(),
+            _ => "Saved Fitting".to_string(),
+        };
         let Some(raw_ship_type) = rep.dict_get("shipTypeID").and_then(|v| v.as_i64())
         else {
             return Err(BridgeRpcError {
@@ -426,11 +436,16 @@ async fn handle_save_fitting(
                 client_error: None,
             });
         };
-        let description = rep
-            .dict_get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let description = match rep.dict_get("description") {
+            Some(v) if !matches!(v, PyRep::None) => crate::router::check_str_rep_max(
+                v,
+                "description",
+                MAX_FITTING_DESC_CHARS,
+                MAX_FITTING_DESC_BYTES,
+            )?
+            .to_string(),
+            _ => String::new(),
+        };
         let items_rep = rep.dict_get("fitData").or_else(|| rep.dict_get("items"));
         validate_and_build_fit(name, raw_ship_type, description, items_rep)
     };
@@ -508,11 +523,20 @@ async fn handle_save_fitting(
         }
     } else {
         // Legacy positional signature: SaveFitting(name, shipTypeID, description?, items?)
-        let name = args
-            .first()
-            .and_then(|a| a.as_str())
-            .unwrap_or("Rifter Combat Fit")
-            .to_string();
+        let name = match args.first() {
+            Some(v) if !matches!(v, PyRep::None) => crate::router::check_str_rep_max(
+                v,
+                "name",
+                MAX_FITTING_NAME_CHARS,
+                MAX_FITTING_NAME_BYTES,
+            )
+            .map(str::to_string),
+            _ => Ok("Rifter Combat Fit".to_string()),
+        };
+        let name = match name {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
         let Some(raw_ship_type) = args.get(1).and_then(|a| a.as_i64()) else {
             return Some(Err(BridgeRpcError {
                 code: "InvalidShipType".into(),
@@ -521,7 +545,17 @@ async fn handle_save_fitting(
             }));
         };
         let (description, items_arg) = match args.get(2) {
-            Some(PyRep::String(s)) => (s.clone(), args.get(3)),
+            Some(desc_rep @ (PyRep::String(_) | PyRep::Token(_) | PyRep::Bytes(_))) => {
+                match crate::router::check_str_rep_max(
+                    desc_rep,
+                    "description",
+                    MAX_FITTING_DESC_CHARS,
+                    MAX_FITTING_DESC_BYTES,
+                ) {
+                    Ok(s) => (s.to_string(), args.get(3)),
+                    Err(e) => return Some(Err(e)),
+                }
+            }
             Some(list_or_tuple @ (PyRep::List(_) | PyRep::Tuple(_))) => {
                 (format!("Saved via {service}"), Some(list_or_tuple))
             }
@@ -673,11 +707,11 @@ async fn handle_update_fitting(
                 (a0, a1)
             }
         });
-        let name = match rpc.opt_str(2, "name") {
+        let name = match rpc.opt_str_max(2, "name", 100, 400) {
             Ok(v) => v.unwrap_or("").to_string(),
             Err(e) => return Some(Err(e)),
         };
-        let desc = match rpc.opt_str(3, "description") {
+        let desc = match rpc.opt_str_max(3, "description", 1_000, 4_000) {
             Ok(v) => v.unwrap_or("").to_string(),
             Err(e) => return Some(Err(e)),
         };
@@ -697,11 +731,11 @@ async fn handle_update_fitting(
         } else {
             None
         };
-        let name = match rpc.opt_str(1, "name") {
+        let name = match rpc.opt_str_max(1, "name", 100, 400) {
             Ok(v) => v.unwrap_or("").to_string(),
             Err(e) => return Some(Err(e)),
         };
-        let desc = match rpc.opt_str(2, "description") {
+        let desc = match rpc.opt_str_max(2, "description", 1_000, 4_000) {
             Ok(v) => v.unwrap_or("").to_string(),
             Err(e) => return Some(Err(e)),
         };

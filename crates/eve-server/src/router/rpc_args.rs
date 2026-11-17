@@ -77,7 +77,8 @@ fn parse_strict_str<'a>(rep: &'a PyRep, label: &str) -> Result<&'a str, BridgeRp
         .ok_or_else(|| invalid_arg(format!("Expected string for {label}")))
 }
 
-fn check_str_bounds<'a>(
+/// Validates an already-decoded string slice against UTF-8 byte and scalar limits.
+pub fn check_str_bounds<'a>(
     s: &'a str,
     label: &str,
     max_chars: usize,
@@ -99,7 +100,8 @@ fn check_str_bounds<'a>(
     Ok(s)
 }
 
-fn parse_strict_str_max<'a>(
+/// Validates and borrows a string `PyRep` within `max_chars` and `max_bytes` without allocating.
+pub fn check_str_rep_max<'a>(
     rep: &'a PyRep,
     label: &str,
     max_chars: usize,
@@ -602,7 +604,7 @@ impl<'a> RpcArgs<'a> {
         let rep = self
             .get_raw(idx, kw_name)
             .ok_or_else(|| invalid_arg(format!("Missing required string {label}")))?;
-        parse_strict_str_max(rep, &label, max_chars, max_bytes)
+        check_str_rep_max(rep, &label, max_chars, max_bytes)
     }
 
     /// Extracts an optional string within `max_chars` and `max_bytes` without allocating;
@@ -617,12 +619,30 @@ impl<'a> RpcArgs<'a> {
         let Some(rep) = self.get_raw(idx, kw_name) else {
             return Ok(None);
         };
-        parse_strict_str_max(rep, &arg_label(idx, kw_name), max_chars, max_bytes).map(Some)
+        check_str_rep_max(rep, &arg_label(idx, kw_name), max_chars, max_bytes).map(Some)
     }
 
     /// Extracts a required non-empty, non-whitespace string.
     pub fn req_non_empty_str(&self, idx: usize, kw_name: &str) -> Result<&'a str, BridgeRpcError> {
         let s = self.req_str(idx, kw_name)?;
+        if s.trim().is_empty() {
+            return Err(invalid_arg(format!(
+                "{} must not be empty",
+                arg_label(idx, kw_name)
+            )));
+        }
+        Ok(s)
+    }
+
+    /// Extracts a required non-empty, non-whitespace string within `max_chars` and `max_bytes`.
+    pub fn req_non_empty_str_max(
+        &self,
+        idx: usize,
+        kw_name: &str,
+        max_chars: usize,
+        max_bytes: usize,
+    ) -> Result<&'a str, BridgeRpcError> {
+        let s = self.req_str_max(idx, kw_name, max_chars, max_bytes)?;
         if s.trim().is_empty() {
             return Err(invalid_arg(format!(
                 "{} must not be empty",
@@ -1242,6 +1262,35 @@ mod tests {
         assert_eq!(
             RpcArgs::positional(&[PyRep::Integer(42)])
                 .opt_str_max(0, "memo", 256, 512)
+                .unwrap_err()
+                .code,
+            "InvalidArgument"
+        );
+        // Token and UTF-8 Bytes borrow directly from the backing PyRep buffer (zero String allocation)
+        let token_rep = PyRep::Token("alliance_tag".to_string());
+        let PyRep::Token(ref token_backing) = token_rep else {
+            unreachable!();
+        };
+        let borrowed_token = RpcArgs::positional(std::slice::from_ref(&token_rep))
+            .req_non_empty_str_max(0, "tag", 16, 32)
+            .unwrap();
+        assert!(std::ptr::eq(borrowed_token.as_ptr(), token_backing.as_ptr()));
+        let bytes_rep = PyRep::Bytes(b"corp-label".to_vec());
+        let PyRep::Bytes(ref bytes_backing) = bytes_rep else {
+            unreachable!();
+        };
+        let borrowed_bytes = check_str_rep_max(&bytes_rep, "label", 16, 32).unwrap();
+        assert!(std::ptr::eq(borrowed_bytes.as_ptr(), bytes_backing.as_ptr()));
+        assert_eq!(
+            RpcArgs::positional(&[PyRep::String("   ".to_string())])
+                .req_non_empty_str_max(0, "tag", 16, 32)
+                .unwrap_err()
+                .code,
+            "InvalidArgument"
+        );
+        assert_eq!(
+            RpcArgs::positional(&[PyRep::String("abc".to_string())])
+                .req_non_empty_str_max(0, "tag", 2, 16)
                 .unwrap_err()
                 .code,
             "InvalidArgument"

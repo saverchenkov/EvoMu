@@ -146,10 +146,26 @@ fn compute_silo_capacity(ctx: &ServerContext, snap: &WorldStateSnapshot, item_id
     20_000.0
 }
 
+const MAX_STARBASE_PERM_FLAG_CHARS: usize = 32;
+const MAX_STARBASE_PERM_FLAG_BYTES: usize = 64;
+const MAX_STARBASE_PASSWORD_CHARS: usize = 128;
+const MAX_STARBASE_PASSWORD_BYTES: usize = 256;
+
 fn perm_rep_to_flag(rep: &PyRep) -> Option<String> {
     if let Some(s) = rep.as_str() {
-        return Some(s.to_string());
+        return crate::router::check_str_bounds(
+            s,
+            "permFlag",
+            MAX_STARBASE_PERM_FLAG_CHARS,
+            MAX_STARBASE_PERM_FLAG_BYTES,
+        )
+        .ok()
+        .map(str::to_string);
     }
+    perm_int_to_flag(rep)
+}
+
+fn perm_int_to_flag(rep: &PyRep) -> Option<String> {
     rep.as_i64().map(|v| match v {
         2 => "alliance".to_string(),
         3 => "starbase".to_string(),
@@ -812,37 +828,36 @@ pub fn handle(
             {
                 extracted
             } else {
-                let fa = match rpc.opt_str(1, "anchor") {
-                    Ok(Some(v)) => v.to_string(),
-                    Ok(None) => "corp".to_string(),
-                    Err(e) => match args.get(1).and_then(perm_rep_to_flag) {
-                        Some(s) => s,
-                        None => return Some(Err(e)),
-                    },
+                let extract_perm = |idx: usize, kw: &str| -> Result<String, BridgeRpcError> {
+                    match rpc.opt_str_max(
+                        idx,
+                        kw,
+                        MAX_STARBASE_PERM_FLAG_CHARS,
+                        MAX_STARBASE_PERM_FLAG_BYTES,
+                    ) {
+                        Ok(Some(v)) => Ok(v.to_string()),
+                        Ok(None) => Ok("corp".to_string()),
+                        Err(e) => match args.get(idx).and_then(perm_int_to_flag) {
+                            Some(s) => Ok(s),
+                            None => Err(e),
+                        },
+                    }
                 };
-                let fu = match rpc.opt_str(2, "unanchor") {
-                    Ok(Some(v)) => v.to_string(),
-                    Ok(None) => "corp".to_string(),
-                    Err(e) => match args.get(2).and_then(perm_rep_to_flag) {
-                        Some(s) => s,
-                        None => return Some(Err(e)),
-                    },
+                let fa = match extract_perm(1, "anchor") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
                 };
-                let fon = match rpc.opt_str(3, "online") {
-                    Ok(Some(v)) => v.to_string(),
-                    Ok(None) => "corp".to_string(),
-                    Err(e) => match args.get(3).and_then(perm_rep_to_flag) {
-                        Some(s) => s,
-                        None => return Some(Err(e)),
-                    },
+                let fu = match extract_perm(2, "unanchor") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
                 };
-                let foff = match rpc.opt_str(4, "offline") {
-                    Ok(Some(v)) => v.to_string(),
-                    Ok(None) => "corp".to_string(),
-                    Err(e) => match args.get(4).and_then(perm_rep_to_flag) {
-                        Some(s) => s,
-                        None => return Some(Err(e)),
-                    },
+                let fon = match extract_perm(3, "online") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                let foff = match extract_perm(4, "offline") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
                 };
                 (fa, fu, fon, foff)
             };
@@ -961,7 +976,12 @@ pub fn handle(
             let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let new_password: Option<String> = match args.get(1) {
                 Some(PyRep::Bool(false) | PyRep::Integer(0) | PyRep::None) => None,
-                _ => match rpc.req_str(1, "password") {
+                _ => match rpc.req_str_max(
+                    1,
+                    "password",
+                    MAX_STARBASE_PASSWORD_CHARS,
+                    MAX_STARBASE_PASSWORD_BYTES,
+                ) {
                     Ok(v) => Some(v.to_string()),
                     Err(e) => return Some(Err(e)),
                 },

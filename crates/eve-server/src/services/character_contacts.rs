@@ -898,13 +898,19 @@ pub fn handle_contacts(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(name) = args.first().and_then(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()) else {
+            let rpc = crate::router::RpcArgs::positional(args);
+            let raw_name = match rpc.opt_str_max(0, "name", 64, 256) {
+                Ok(v) => v.map(str::trim).unwrap_or(""),
+                Err(e) => return Some(Err(e)),
+            };
+            if raw_name.is_empty() {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidLabelName".into(),
                     message: "CreateLabel requires a non-empty label name".into(),
                     client_error: None,
                 }));
-            };
+            }
+            let name = raw_name;
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let labels = snap.char_contact_labels.entry(char_id).or_default();
                 let used_mask = labels.iter().fold(0i64, |acc, (lid, _)| acc | *lid);
@@ -962,18 +968,19 @@ pub fn handle_contacts(
                     client_error: None,
                 }));
             };
-            let Some(new_name) = args
-                .get(1)
-                .and_then(|a| a.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            else {
+            let rpc = crate::router::RpcArgs::positional(args);
+            let raw_new_name = match rpc.opt_str_max(1, "name", 64, 256) {
+                Ok(v) => v.map(str::trim).unwrap_or(""),
+                Err(e) => return Some(Err(e)),
+            };
+            if raw_new_name.is_empty() {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidLabelName".into(),
                     message: "EditLabel requires a non-empty label name".into(),
                     client_error: None,
                 }));
-            };
+            }
+            let new_name = raw_new_name;
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let found = snap
                     .char_contact_labels

@@ -1,6 +1,8 @@
 //! Edge-case behavioral tests for `router::dispatch`.
 
-use crate::router::ServerContext;
+use crate::router::{
+    ServerContext, RPC_BOOTSTRAP_BURST_ALLOWANCE, RPC_RATE_BURST_TOKENS, RPC_RATE_REFILL_PER_SEC,
+};
 use eve_db::{VirtualServerClock, WorldRepository};
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::PyRep;
@@ -477,16 +479,20 @@ async fn forged_bound_id_and_kicked_session_probes_collapse_preserving_preauth_r
         .bind_verified_sub_object(&victim, "beyonce", 30_000_142)
         .expect("bind victim beyonce sub-object");
 
-    // Flood MAX_TRACKED_RPC_METHODS + 12 distinct pre-auth forged-bound-id probes, plus
-    // forged-bound-id calls targeting valid pre-auth RPC names and non-allowlisted pre-auth RPCs.
-    let mut unauth = SessionState::new(901);
+    // Flood MAX_TRACKED_RPC_METHODS + 12 distinct pre-auth forged-bound-id probes sharded across
+    // 16 unauth sessions (~129 calls/session, below per-session burst), plus forged-bound-id calls
+    // targeting valid pre-auth RPC names and non-allowlisted pre-auth RPCs.
+    let mut unauth_sessions: Vec<SessionState> =
+        (0..16u64).map(|k| SessionState::new(901 + k)).collect();
     let mut expected_collapsed = 0u64;
     let flood_count = MAX_TRACKED_RPC_METHODS + 12;
     for i in 0..flood_count {
         let svc = format!("probe_svc_{i}");
         let meth = format!("probe_meth_{i}");
+        let sess_idx = i % unauth_sessions.len();
+        let sess = &mut unauth_sessions[sess_idx];
         let err = ctx
-            .dispatch_rpc(&mut unauth, &svc, Some(existing_bid), &meth, &[], &kw, None)
+            .dispatch_rpc(sess, &svc, Some(existing_bid), &meth, &[], &kw, None)
             .await
             .unwrap_err();
         assert!(
@@ -498,6 +504,7 @@ async fn forged_bound_id_and_kicked_session_probes_collapse_preserving_preauth_r
         );
         expected_collapsed += 1;
     }
+    let mut unauth = SessionState::new(920);
 
     let forged_preauth_calls: &[(&str, Option<u64>, &str, &[PyRep])] = &[
         ("machoNet", Some(existing_bid), "GetTime", &[]),
@@ -698,4 +705,158 @@ async fn forged_bound_id_and_kicked_session_probes_collapse_preserving_preauth_r
         Some(expected_collapsed)
     );
 }
+
+#[test]
+fn session_rpc_rate_bucket_burst_refill_and_isolation() {
+    let ctx = edge_ctx();
+    let t0 = std::time::Instant::now();
+    let sid_a = 9_101;
+    let sid_b = 9_102;
+
+    // Bootstrap burst allowance handles 100+ login/undock bootstrap calls without eating
+    // into standard RPC burst capacity.
+    for _ in 0..RPC_BOOTSTRAP_BURST_ALLOWANCE {
+        assert!(ctx.try_consume_rpc_token_at(sid_a, t0, true));
+    }
+
+    let burst = RPC_RATE_BURST_TOKENS as usize;
+    for i in 0..burst {
+        assert!(
+            ctx.try_consume_rpc_token_at(sid_a, t0, false),
+            "expected burst token {i} to be available"
+        );
+    }
+    assert!(
+        !ctx.try_consume_rpc_token_at(sid_a, t0, false),
+        "expected bucket exhaustion after {burst} calls"
+    );
+
+    // Another session's bucket stays completely unaffected.
+    assert!(ctx.try_consume_rpc_token_at(sid_b, t0, false));
+
+    // After 1 second of elapsed monotonic time, exactly `RPC_RATE_REFILL_PER_SEC` tokens refill.
+    let t1 = t0 + std::time::Duration::from_secs(1);
+    let refilled = RPC_RATE_REFILL_PER_SEC as usize;
+    for i in 0..refilled {
+        assert!(
+            ctx.try_consume_rpc_token_at(sid_a, t1, false),
+            "expected refilled token {i} after 1s"
+        );
+    }
+    assert!(!ctx.try_consume_rpc_token_at(sid_a, t1, false));
+
+    // Closing the connection cleans up the bucket and resets quota on reconnect.
+    ctx.release_session_rate_bucket(sid_a);
+    assert!(ctx.try_consume_rpc_token_at(sid_a, t1, false));
+}
+
+#[tokio::test]
+async fn dispatch_rpc_rate_limits_tight_loop_without_starving_other_sessions() {
+    let ctx = edge_ctx();
+    let kw = HashMap::new();
+    let mut attacker = demo_session(&ctx, 9_201, service_roles::ROLE_PLAYER);
+    let mut bystander = demo_session(&ctx, 9_202, service_roles::ROLE_PLAYER);
+
+    // Bootstrap burst of 150 calls passes cleanly without throttling.
+    for _ in 0..75 {
+        assert!(ctx
+            .dispatch_rpc(&mut attacker, "machoNet", None, "GetTime", &[], &kw, None)
+            .await
+            .is_ok());
+        assert!(ctx
+            .dispatch_rpc(
+                &mut attacker,
+                "machoNet",
+                None,
+                "GetGlobalConfig",
+                &[],
+                &kw,
+                None,
+            )
+            .await
+            .is_ok());
+    }
+
+    // Tight loop of non-bootstrap RPCs exhausts the standard burst and triggers `RateLimited`.
+    let total_calls = RPC_RATE_BURST_TOKENS as usize + 120;
+    let mut allowed = 0usize;
+    let mut rate_limited = 0usize;
+    for _ in 0..total_calls {
+        match ctx
+            .dispatch_rpc(&mut attacker, "account", None, "GetCashBalance", &[], &kw, None)
+            .await
+        {
+            Ok(_) => allowed += 1,
+            Err(err) => {
+                assert_eq!(err.code, "RateLimited", "unexpected error: {err:?}");
+                rate_limited += 1;
+            }
+        }
+    }
+    assert!(
+        allowed >= RPC_RATE_BURST_TOKENS as usize,
+        "expected full burst before throttling, allowed={allowed}"
+    );
+    assert!(
+        rate_limited > 0,
+        "expected tight loop past burst to be rejected with RateLimited"
+    );
+
+    // Bystander session remains unaffected and unthrottled.
+    assert!(ctx
+        .dispatch_rpc(&mut bystander, "account", None, "GetCashBalance", &[], &kw, None)
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn dispatch_rpc_gm_soak_exemption_requires_gm_mode_and_gm_role() {
+    let ctx = edge_ctx();
+    let kw = HashMap::new();
+    let gm_role = service_roles::ROLE_ADMIN | service_roles::ROLE_GMH | service_roles::ROLE_LOGIN;
+    let mut gm_no_flag = demo_session(&ctx, 9_301, gm_role);
+    let mut gm_with_flag = demo_session(&ctx, 9_302, gm_role);
+    let mut normal_player = demo_session(&ctx, 9_303, service_roles::ROLE_PLAYER);
+
+    let loop_calls = RPC_RATE_BURST_TOKENS as usize + 50;
+
+    // Without `--gm`, even a GM role session hits `RateLimited` beyond burst.
+    ctx.set_gm_ops_enabled(false);
+    let mut saw_rate_limit = false;
+    for _ in 0..loop_calls {
+        if let Err(err) = ctx
+            .dispatch_rpc(&mut gm_no_flag, "account", None, "GetCashBalance", &[], &kw, None)
+            .await
+        {
+            assert_eq!(err.code, "RateLimited");
+            saw_rate_limit = true;
+            break;
+        }
+    }
+    assert!(saw_rate_limit, "GM role without --gm must still be rate-limited");
+
+    // With `--gm` active, GM soak sessions bypass throttling while regular players do not.
+    ctx.set_gm_ops_enabled(true);
+    for i in 0..(loop_calls + 100) {
+        ctx.dispatch_rpc(&mut gm_with_flag, "account", None, "GetCashBalance", &[], &kw, None)
+            .await
+            .unwrap_or_else(|e| panic!("--gm soak call {i} unexpectedly failed: {e:?}"));
+    }
+    let mut player_limited = false;
+    for _ in 0..loop_calls {
+        if let Err(err) = ctx
+            .dispatch_rpc(&mut normal_player, "account", None, "GetCashBalance", &[], &kw, None)
+            .await
+        {
+            assert_eq!(err.code, "RateLimited");
+            player_limited = true;
+            break;
+        }
+    }
+    assert!(
+        player_limited,
+        "regular player session must remain rate-limited even when --gm is active"
+    );
+}
+
 

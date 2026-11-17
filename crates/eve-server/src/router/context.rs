@@ -123,6 +123,66 @@ pub struct ServerContext {
     /// Tracks `(session_id, char_id)` pairs that already emitted their initial `OnServerBrainUpdated`
     /// on first `dogmaIM.GetAllInfo` (`#1083`).
     pub brain_primed_sessions: Arc<RankedRwLock<HashSet<(u64, i64)>, RANK_LEAF>>,
+    /// Per-session RPC token buckets checked before `sync_session` / DB snapshot locks (`#1186`).
+    pub(crate) rpc_rate_buckets: Arc<RankedMutex<HashMap<u64, SessionRpcRateBucket>, RANK_LEAF>>,
+}
+
+/// Burst token capacity for standard per-session RPC throttling.
+pub const RPC_RATE_BURST_TOKENS: f64 = 300.0;
+/// Sustained per-session RPC refill rate (tokens per second).
+pub const RPC_RATE_REFILL_PER_SEC: f64 = 120.0;
+/// Per-session bootstrap burst token allowance during login and undock transitions.
+pub const RPC_BOOTSTRAP_BURST_ALLOWANCE: u32 = 512;
+/// Minimum bootstrap burst tokens restored on login/character-select/undock transitions.
+pub const RPC_BOOTSTRAP_TRANSITION_ALLOWANCE: u32 = 256;
+const RPC_RATE_PRUNE_THRESHOLD: usize = 4_096;
+
+/// Per-session RPC rate budget combining a token bucket with a bounded login/undock bootstrap allowance.
+#[derive(Debug, Clone)]
+pub(crate) struct SessionRpcRateBucket {
+    tokens: f64,
+    bootstrap_tokens: u32,
+    last_refill: std::time::Instant,
+}
+
+impl SessionRpcRateBucket {
+    pub(crate) fn new(now: std::time::Instant) -> Self {
+        Self {
+            tokens: RPC_RATE_BURST_TOKENS,
+            bootstrap_tokens: RPC_BOOTSTRAP_BURST_ALLOWANCE,
+            last_refill: now,
+        }
+    }
+
+    fn refill(&mut self, now: std::time::Instant) {
+        let elapsed = now.saturating_duration_since(self.last_refill).as_secs_f64();
+        if elapsed > 0.0 {
+            self.tokens =
+                (self.tokens + elapsed * RPC_RATE_REFILL_PER_SEC).min(RPC_RATE_BURST_TOKENS);
+            self.last_refill = now;
+        }
+    }
+
+    pub(crate) fn try_consume(&mut self, now: std::time::Instant, is_bootstrap: bool) -> bool {
+        self.refill(now);
+        if is_bootstrap && self.bootstrap_tokens > 0 {
+            self.bootstrap_tokens -= 1;
+            return true;
+        }
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn grant_transition_bootstrap(&mut self) {
+        self.bootstrap_tokens = self
+            .bootstrap_tokens
+            .max(RPC_BOOTSTRAP_TRANSITION_ALLOWANCE)
+            .min(RPC_BOOTSTRAP_BURST_ALLOWANCE);
+    }
 }
 
 /// Non-owning weak handle to all shared [`ServerContext`] state (`RFC-1 E-4`, `#839`, `#919`).
@@ -194,6 +254,7 @@ pub(crate) struct ServerContextWeak {
     fw_idle_last_step_unix: std::sync::Weak<RankedRwLock<HashMap<i64, u64>, RANK_LEAF>>,
     space_ballpark_bootstrapped: std::sync::Weak<RankedRwLock<HashMap<(u64, i64), u32>, RANK_LEAF>>,
     brain_primed_sessions: std::sync::Weak<RankedRwLock<HashSet<(u64, i64)>, RANK_LEAF>>,
+    rpc_rate_buckets: std::sync::Weak<RankedMutex<HashMap<u64, SessionRpcRateBucket>, RANK_LEAF>>,
 }
 
 impl ServerContextWeak {
@@ -268,6 +329,7 @@ impl ServerContextWeak {
             fw_idle_last_step_unix: self.fw_idle_last_step_unix.upgrade()?,
             space_ballpark_bootstrapped: self.space_ballpark_bootstrapped.upgrade()?,
             brain_primed_sessions: self.brain_primed_sessions.upgrade()?,
+            rpc_rate_buckets: self.rpc_rate_buckets.upgrade()?,
         })
     }
 }
@@ -617,6 +679,7 @@ impl ServerContext {
             fw_idle_last_step_unix: Arc::downgrade(&self.fw_idle_last_step_unix),
             space_ballpark_bootstrapped: Arc::downgrade(&self.space_ballpark_bootstrapped),
             brain_primed_sessions: Arc::downgrade(&self.brain_primed_sessions),
+            rpc_rate_buckets: Arc::downgrade(&self.rpc_rate_buckets),
         }
     }
 
@@ -776,6 +839,7 @@ impl ServerContext {
             fw_idle_last_step_unix: Arc::new(RankedRwLock::new(HashMap::new())),
             space_ballpark_bootstrapped: Arc::new(RankedRwLock::new(HashMap::new())),
             brain_primed_sessions: Arc::new(RankedRwLock::new(HashSet::new())),
+            rpc_rate_buckets: Arc::new(RankedMutex::new(HashMap::new())),
         };
         let npc_ctx_w = ctx.downgrade();
         ctx.systems.set_npc_death_hook(Arc::new(move |sys_id, npc_id, killer_opt| {
@@ -3181,6 +3245,49 @@ impl ServerContext {
             .get(&char_id)
             .copied()
             .filter(|&until| now < until)
+    }
+
+    /// Attempts to consume one RPC rate-budget token for `session_id` at `now`.
+    pub(crate) fn try_consume_rpc_token_at(
+        &self,
+        session_id: u64,
+        now: std::time::Instant,
+        is_bootstrap: bool,
+    ) -> bool {
+        let mut guard = self
+            .rpc_rate_buckets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if guard.len() > RPC_RATE_PRUNE_THRESHOLD && !guard.contains_key(&session_id) {
+            guard.retain(|_, bucket| {
+                bucket.refill(now);
+                bucket.tokens < RPC_RATE_BURST_TOKENS - 1e-6
+                    || bucket.bootstrap_tokens < RPC_BOOTSTRAP_BURST_ALLOWANCE
+            });
+        }
+        guard
+            .entry(session_id)
+            .or_insert_with(|| SessionRpcRateBucket::new(now))
+            .try_consume(now, is_bootstrap)
+    }
+
+    /// Refreshes the bootstrap burst allowance for `session_id` on login/undock transitions.
+    pub(crate) fn grant_session_bootstrap_burst(&self, session_id: u64) {
+        let mut guard = self
+            .rpc_rate_buckets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(bucket) = guard.get_mut(&session_id) {
+            bucket.grant_transition_bootstrap();
+        }
+    }
+
+    /// Removes the per-session RPC rate bucket when a client connection closes.
+    pub fn release_session_rate_bucket(&self, session_id: u64) {
+        self.rpc_rate_buckets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&session_id);
     }
 
     /// Returns the remaining lock acquisition milliseconds for `ship_id -> target_id`, if locking (`§C`).

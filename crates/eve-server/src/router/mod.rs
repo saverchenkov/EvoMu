@@ -37,7 +37,7 @@ pub use eve_proto::{
     UI_LABEL_SHIP_TOO_LARGE, V24_PROGRAMMATIC_USER_ERROR_KEYS,
 };
 pub use reply_registry::{into_client_reply, ToClient};
-pub use rpc_args::RpcArgs;
+pub use rpc_args::{check_str_bounds, check_str_rep_max, RpcArgs};
 pub use session_transition::*;
 
 /// Canonical MachoNet error code returned for unimplemented RPC methods.
