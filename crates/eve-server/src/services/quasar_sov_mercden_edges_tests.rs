@@ -212,7 +212,7 @@ fn complete_mercenary_activity_in_snap_handles_fallback_owner_zero_impacts_cap_a
     }
 
     let pending: PendingNotices = Default::default();
-    complete_mercenary_activity_in_snap(&mut snap, &pending, &act, den_id, 3000_0142);
+    complete_mercenary_activity_in_snap(&mut snap, &pending, None, &act, den_id, 3000_0142);
 
     let den_after = snap.sov_runtime.mercenary_dens.get(&den_id).unwrap();
     assert_eq!(den_after.development_level, 60);
@@ -242,7 +242,7 @@ fn complete_mercenary_activity_in_snap_handles_fallback_owner_zero_impacts_cap_a
         anarchy_impact: -5,
         infomorph_bonus: 400,
     };
-    complete_mercenary_activity_in_snap(&mut snap, &pending, &act2, den_capped_id, 3000_0142);
+    complete_mercenary_activity_in_snap(&mut snap, &pending, None, &act2, den_capped_id, 3000_0142);
     let den_capped_after = snap.sov_runtime.mercenary_dens.get(&den_capped_id).unwrap();
     assert_eq!(den_capped_after.development_level, 100);
     assert!(den_capped_after.infomorphs >= 350);

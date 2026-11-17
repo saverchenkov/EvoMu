@@ -210,7 +210,7 @@ fn complete_mercenary_activity_and_refresh_activities_branches() {
         };
         assert!(!encode_activity_attributes(&act_max).is_empty());
 
-        complete_mercenary_activity_in_snap(snap, &pending, &act_max, den_id, sys_id);
+        complete_mercenary_activity_in_snap(snap, &pending, None, &act_max, den_id, sys_id);
         let d = &snap.sov_runtime.mercenary_dens[&den_id];
         // At MAX_LEVEL (100), infomorph_bonus is max(10, 350) = 350 -> 100 + 350 = 450; anarchy reduced by default -10 -> 15
         assert_eq!(d.infomorphs, 450);

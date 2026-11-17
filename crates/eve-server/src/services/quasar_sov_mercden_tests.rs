@@ -91,7 +91,7 @@ fn mercenary_den_formulas_simulation_and_activity_completion() {
 
     db.with_mut_snapshot(|snap| {
         snap.sov_runtime.mercenary_dens.insert(den.den_id, den.clone());
-        complete_mercenary_activity_in_snap(snap, &pending, &act, den.den_id, den.solar_system_id);
+        complete_mercenary_activity_in_snap(snap, &pending, None, &act, den.den_id, den.solar_system_id);
         let updated = &snap.sov_runtime.mercenary_dens[&den.den_id];
         assert_eq!(updated.development_level, 33);
         assert_eq!(updated.anarchy_level, 5);

@@ -45,6 +45,93 @@ fn timestamp_secs(msg: &DynamicQuasarMessage, field: u32) -> Option<u64> {
     }
 }
 
+fn parse_reagent_state_entry(
+    item: &DynamicValue,
+    now: u64,
+) -> Result<(u32, u64, u64, u64), (u32, String)> {
+    let DynamicValue::Message(sub) = item else {
+        return Err((STATUS_BAD_REQUEST, "Malformed reagent state entry".to_string()));
+    };
+    let tid = sub
+        .get(1)
+        .or_else(|| sub.get(6))
+        .and_then(|r| match r {
+            DynamicValue::Message(rid) => rid.get(1).and_then(dyn_u64),
+            _ => None,
+        })
+        .map(|n| n as u32)
+        .filter(|&t| t == TYPE_SUPERIONIC_ICE || t == TYPE_MAGMATIC_GAS)
+        .ok_or((
+            STATUS_BAD_REQUEST,
+            "Valid Colony Reagent type_id (81143 or 81144) is required".to_string(),
+        ))?;
+    let sec_qty = sub.get(2).and_then(dyn_u64).unwrap_or(0);
+    let unsec_qty = sub.get(3).and_then(dyn_u64).unwrap_or(0);
+    if sec_qty > SKYHOOK_REAGENT_BAY_CAPACITY || unsec_qty > SKYHOOK_REAGENT_BAY_CAPACITY {
+        return Err((
+            STATUS_BAD_REQUEST,
+            format!(
+                "Reagent stock ({sec_qty}/{unsec_qty}) exceeds bay capacity {SKYHOOK_REAGENT_BAY_CAPACITY}"
+            ),
+        ));
+    }
+    let ts = timestamp_secs(sub, 5).unwrap_or(now);
+    Ok((tid, sec_qty, unsec_qty, ts))
+}
+
+/// Populates common `ReagentSimulation` descriptor fields shared between `ModifyReagentsResponse`
+/// and `ReagentSimulationsNotice`.
+pub(crate) fn build_reagent_simulation_entry(
+    b: pb::ProtoBuilder,
+    reag_type: u32,
+    sec_qty: u64,
+    unsec_qty: u64,
+    cycle_ts: u64,
+) -> pb::ProtoBuilder {
+    b.set("reagent.sequential", reag_type)
+        .set("reagent_type.sequential", u64::from(reag_type))
+        .set("simulation.secured_stock", sec_qty as u32)
+        .set("simulation.unsecured_stock", unsec_qty as u32)
+        .set(
+            "simulation.last_cycle",
+            GoogleTimestamp::from_unix(cycle_ts as i64, 0),
+        )
+}
+
+/// Builds a descriptor-validated `eve_public.sovereignty.skyhook.api.ReagentSimulationsNotice`.
+pub(crate) fn build_reagent_simulations_notice(
+    label: &str,
+    skyhook_id: i64,
+    planet_id: Option<i64>,
+    reag_type: u32,
+    sec_qty: u64,
+    unsec_qty: u64,
+    cycle_ts: u64,
+) -> Option<GoogleAny> {
+    crate::quasar_gateway::pb_to_any_or_log(
+        label,
+        pb::message("eve_public.sovereignty.skyhook.api.ReagentSimulationsNotice")
+            .set("skyhook.sequential", skyhook_id as u64)
+            .with(|b| match planet_id {
+                Some(pid) => b.set("planet.sequential", pid as u64),
+                None => b,
+            })
+            .add_with("simulations", |s| {
+                build_reagent_simulation_entry(s, reag_type, sec_qty, unsec_qty, cycle_ts)
+                    .set("maturation.stock", unsec_qty as u32)
+                    .set(
+                        "maturation.last_cycle",
+                        GoogleTimestamp::from_unix(cycle_ts as i64, 0),
+                    )
+                    .set("harvest.stock", sec_qty as u32)
+                    .set(
+                        "harvest.last_cycle",
+                        GoogleTimestamp::from_unix(cycle_ts as i64, 0),
+                    )
+            }),
+    )
+}
+
 fn wire_id_msg(field_number: u32, sequential: u64) -> WireField {
     WireField {
         field_number,
@@ -374,36 +461,15 @@ pub fn register_handlers(
 
                 let explicit: Option<(u32, u64, u64, u64)> = match dyn_msg.get(2) {
                     Some(DynamicValue::Repeated(list)) => {
-                        let item = list.first().ok_or((
+                        let mut parsed = list
+                            .iter()
+                            .map(|item| parse_reagent_state_entry(item, now))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let last = parsed.pop().ok_or((
                             STATUS_BAD_REQUEST,
                             "Reagents state list must not be empty".to_string(),
                         ))?;
-                        let DynamicValue::Message(sub) = item else {
-                            return Err((STATUS_BAD_REQUEST, "Malformed reagent state entry".to_string()));
-                        };
-                        let tid = sub
-                            .get(1)
-                            .or_else(|| sub.get(6))
-                            .and_then(|r| match r {
-                                DynamicValue::Message(rid) => rid.get(1).and_then(dyn_u64),
-                                _ => None,
-                            })
-                            .map(|n| n as u32)
-                            .filter(|&t| t == TYPE_SUPERIONIC_ICE || t == TYPE_MAGMATIC_GAS)
-                            .ok_or((
-                                STATUS_BAD_REQUEST,
-                                "Valid Colony Reagent type_id (81143 or 81144) is required".to_string(),
-                            ))?;
-                        let sec_qty = sub.get(2).and_then(dyn_u64).unwrap_or(0);
-                        let unsec_qty = sub.get(3).and_then(dyn_u64).unwrap_or(0);
-                        if sec_qty > SKYHOOK_REAGENT_BAY_CAPACITY || unsec_qty > SKYHOOK_REAGENT_BAY_CAPACITY {
-                            return Err((
-                                STATUS_BAD_REQUEST,
-                                format!("Reagent stock ({sec_qty}/{unsec_qty}) exceeds bay capacity {SKYHOOK_REAGENT_BAY_CAPACITY}"),
-                            ));
-                        }
-                        let ts = timestamp_secs(sub, 5).unwrap_or(now);
-                        Some((tid, sec_qty, unsec_qty, ts))
+                        Some(last)
                     }
                     Some(_) => {
                         return Err((STATUS_BAD_REQUEST, "Malformed reagents field".to_string()));
@@ -425,9 +491,21 @@ pub fn register_handlers(
                                 .or_else(|| {
                                     pid.and_then(|p| sde_mod.celestial(p))
                                         .and_then(|c| planet_reagent_type(c.type_id))
-                                })
-                                .unwrap_or(TYPE_MAGMATIC_GAS);
-                            (default_tid, 1_200, 0, now)
+                                });
+                            let tid = match default_tid {
+                                Some(t) => t,
+                                None if pid.is_some() => {
+                                    return Err((
+                                        STATUS_BAD_REQUEST,
+                                        format!(
+                                            "Skyhook {skyhook_id} planet has no harvestable Colony Reagent"
+                                        ),
+                                    ));
+                                }
+                                // Test-seeded skyhook without linked planet defaults to Magmatic Gas.
+                                None => TYPE_MAGMATIC_GAS,
+                            };
+                            (tid, 1_200, 0, now)
                         }
                     };
                     snap.sov_runtime
@@ -440,23 +518,14 @@ pub fn register_handlers(
                 })?;
 
                 // Emit ReagentSimulationsNotice
-                if let Some(notice) = crate::quasar_gateway::pb_to_any_or_log(
+                if let Some(notice) = build_reagent_simulations_notice(
                     "quasar_sov_resources.modify_reagents",
-                    pb::message(
-                        "eve_public.sovereignty.skyhook.api.ReagentSimulationsNotice",
-                    )
-                    .set("skyhook.sequential", skyhook_id as u64)
-                    .with(|b| match planet_id {
-                        Some(pid) => b.set("planet.sequential", pid as u64),
-                        None => b,
-                    })
-                    .add_with("simulations", |s| {
-                        s.set("reagent.sequential", reag_type)
-                            .set("reagent_type.sequential", u64::from(reag_type))
-                            .set("simulation.secured_stock", sec_qty as u32)
-                            .set("simulation.unsecured_stock", unsec_qty as u32)
-                            .set("simulation.last_cycle", GoogleTimestamp::from_unix(cycle_ts as i64, 0))
-                    }),
+                    skyhook_id,
+                    planet_id,
+                    reag_type,
+                    sec_qty,
+                    unsec_qty,
+                    cycle_ts,
                 ) {
                     pending.write().unwrap_or_else(|e| e.into_inner()).push((
                         NoticeScope::SolarSystem(sys_id),
@@ -468,11 +537,7 @@ pub fn register_handlers(
                     "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsResponse",
                 )
                 .add_with("reagent_simulations", |s| {
-                    s.set("reagent.sequential", reag_type)
-                        .set("reagent_type.sequential", u64::from(reag_type))
-                        .set("simulation.secured_stock", sec_qty as u32)
-                        .set("simulation.unsecured_stock", unsec_qty as u32)
-                        .set("simulation.last_cycle", GoogleTimestamp::from_unix(cycle_ts as i64, 0))
+                    build_reagent_simulation_entry(s, reag_type, sec_qty, unsec_qty, cycle_ts)
                 })
                 .to_any_or_internal_err()
             }),

@@ -510,6 +510,25 @@ async fn sovereignty_skyhook_reagent_scaling_and_mercenary_den() {
             simulate_den_for_planet(den, &mut rem, Some(&ctx.sde), ctx.now_unix() + 7_200);
             assert!(den.infomorphs > 0);
         }
+        snap.structures.get_mut(&skyhook_id).unwrap().state = "Destroyed".into();
+    });
+    assert_eq!(
+        qrpc(&ctx, &mut dir, "eve_public.sovereignty.skyhook.api.GetRequest", id_req(1, skyhook_id as u64))
+            .await
+            .status_code,
+        STATUS_NOT_FOUND
+    );
+    let local_after_destroy = qrpc(&ctx, &mut dir, "eve_public.sovereignty.skyhook.api.GetAllLocalRequest", Vec::new()).await;
+    assert_eq!(local_after_destroy.status_code, STATUS_OK);
+    let local_wm = WireMessage::decode(&local_after_destroy.payload.unwrap().value).unwrap();
+    assert!(
+        local_wm.fields.iter().all(|f| f.field_number != 2),
+        "destroyed Skyhook must not be listed in GetAllLocalResponse"
+    );
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.sov_runtime.skyhook_planets.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_active.contains_key(&skyhook_id));
     });
 }
 

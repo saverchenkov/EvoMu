@@ -432,6 +432,7 @@ pub fn on_space_entity_destroyed_ext(
                 complete_mercenary_activity_in_snap(
                     snap,
                     &pending,
+                    Some(&ctx.sde),
                     &a,
                     a.den_id,
                     a.solar_system_id,

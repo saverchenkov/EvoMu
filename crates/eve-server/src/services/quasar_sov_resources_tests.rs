@@ -204,7 +204,42 @@ fn planet_star_resources_and_skyhook_admin_handlers() {
         .type_url
         .ends_with("eve_public.sovereignty.skyhook.api.admin.ModifyReagentsResponse"));
 
-    // Empty reagents list (explicit empty vec or invalid type/capacity) -> STATUS_BAD_REQUEST
+    // Empty reagents list (explicit empty vec, invalid type/capacity, or non-reagent planet on omitted reagents) -> STATUS_BAD_REQUEST
+    let temp_planet = sde
+        .celestials_in_system_slice(sys_id)
+        .iter()
+        .find(|c| c.type_id == 11)
+        .expect("HE-V4V temperate planet")
+        .celestial_id;
+    let non_reagent_skyhook_id = 79_500_002_i64;
+    db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            non_reagent_skyhook_id,
+            UpwellStructureRecord {
+                structure_id: non_reagent_skyhook_id,
+                type_id: TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Temperate Skyhook".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime
+            .skyhook_planets
+            .insert(non_reagent_skyhook_id, temp_planet);
+    });
+    assert_eq!(
+        handlers["eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest"](
+            &gm_ctx,
+            &dummy_any,
+            &id_msg(1, non_reagent_skyhook_id),
+        )
+        .unwrap_err()
+        .0,
+        STATUS_BAD_REQUEST,
+        "ModifyReagentsRequest omitting reagents must reject planets without harvestable reagents"
+    );
     let mut bad_type_reag = id_msg(1, 34);
     bad_type_reag.fields.insert(2, DynamicValue::Uint64(100));
     let mut bad_type_req = id_msg(1, skyhook_id);

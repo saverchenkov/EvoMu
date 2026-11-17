@@ -1132,10 +1132,56 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
 
     ctx.advance_secs(SKYHOOK_SILO_LINK_DURATION_SECS + 1);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    assert!(drain_quasar(&mut rx).iter().any(|(t, _)| t == "eve_public.sovereignty.skyhook.api.SkyhookReagentsSimulatedNotice"));
+    let assert_reagent_sim_notice = |notices: Vec<(String, Vec<u8>)>, exp_sec: u64, exp_insec: u64| {
+        let bytes = notices
+            .into_iter()
+            .rev()
+            .find_map(|(t, b)| (t == "eve_public.sovereignty.skyhook.api.ReagentSimulationsNotice").then_some(b))
+            .expect("eve_public.sovereignty.skyhook.api.ReagentSimulationsNotice");
+        let decoded = ctx
+            .quasar_gateway
+            .descriptors
+            .decode_dynamic("eve_public.sovereignty.skyhook.api.ReagentSimulationsNotice", &bytes)
+            .expect("ReagentSimulationsNotice must decode cleanly against V24 descriptor");
+        let dyn_u = |m: &eve_proto::quasar::DynamicQuasarMessage, f: u32| match m.get(f) {
+            Some(eve_proto::quasar::DynamicValue::Uint64(v)) => Some(*v),
+            Some(eve_proto::quasar::DynamicValue::Uint32(v)) => Some(u64::from(*v)),
+            _ => None,
+        };
+        let sky_seq = match decoded.get(1) {
+            Some(eve_proto::quasar::DynamicValue::Message(m)) => dyn_u(m, 1),
+            _ => None,
+        };
+        assert_eq!(sky_seq, Some(lava_skyhook as u64));
+        let pl_seq = match decoded.get(2) {
+            Some(eve_proto::quasar::DynamicValue::Message(m)) => dyn_u(m, 1),
+            _ => None,
+        };
+        assert_eq!(pl_seq, Some(lava_planet as u64));
+        let sims = match decoded.get(3) {
+            Some(eve_proto::quasar::DynamicValue::Repeated(list)) => list,
+            other => panic!("expected repeated simulations, got {other:?}"),
+        };
+        let entry = match sims.first() {
+            Some(eve_proto::quasar::DynamicValue::Message(m)) => m,
+            other => panic!("expected ReagentSimulation message, got {other:?}"),
+        };
+        let rtype_seq = match entry.get(6) {
+            Some(eve_proto::quasar::DynamicValue::Message(m)) => dyn_u(m, 1),
+            _ => None,
+        };
+        assert_eq!(rtype_seq, Some(u64::from(TYPE_MAGMATIC_GAS)));
+        let (sec, insec) = match entry.get(4) {
+            Some(eve_proto::quasar::DynamicValue::Message(m)) => (dyn_u(m, 1), dyn_u(m, 2)),
+            _ => (None, None),
+        };
+        assert_eq!((sec, insec), (Some(exp_sec), Some(exp_insec)));
+    };
+    let theft_notices = drain_quasar(&mut rx);
     let (_, final_sec, final_insec, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&lava_skyhook]);
     assert_eq!(final_insec, 0);
     assert!(final_sec > exp_lava_sec12);
+    assert_reagent_sim_notice(theft_notices, final_sec, 0);
     let balls = ctx.systems.get_or_spawn(sys_id).list_balls().await.unwrap();
     let can_ball = balls.iter().find(|b| b.type_id == 23).expect("Cargo Container 23 spawned in space");
     let stolen_qty: i32 = ctx.db.with_snapshot(|s| {
@@ -1168,11 +1214,13 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.remove(&full_cargo_item_id);
     });
+    let _ = drain_quasar(&mut rx);
     let ext_rep = rpc_call(
         &ctx, &mut s_dir, "beyonce", "CallComponentFromClient",
         &[PyRep::Integer(lava_skyhook), PyRep::String("orbitalSkyhook".into()), PyRep::String("ExtractReagentsToShip".into())],
     ).await.expect("ExtractReagentsToShip");
     assert_eq!(ext_rep.dict_get("extractedQuantity").and_then(|v| v.as_i64()), Some(final_sec as i64));
+    assert_reagent_sim_notice(drain_quasar(&mut rx), 0, 0);
 
     drop(ctx);
     let ctx_restarted = open_sqlite_ctx(&db_path, false);

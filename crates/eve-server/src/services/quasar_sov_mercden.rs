@@ -492,6 +492,7 @@ pub fn encode_activity_attributes(a: &PersistedMercenaryActivity) -> Vec<u8> {
 pub(crate) fn complete_mercenary_activity_in_snap(
     snap: &mut WorldStateSnapshot,
     pending: &PendingNotices,
+    sde: Option<&eve_sde::SdeRegistry>,
     a: &PersistedMercenaryActivity,
     den_id: i64,
     solar_system_id: u32,
@@ -511,7 +512,7 @@ pub(crate) fn complete_mercenary_activity_in_snap(
         } else {
             a.infomorph_bonus.max(50)
         };
-        let cap = infomorph_cargo_capacity(stage_for_level(den_mut.development_level));
+        let cap = den_cargo_capacity(sde);
         den_mut.infomorphs = den_mut.infomorphs.saturating_add(applied_infomorph_bonus).min(cap);
 
         if den_mut.development_level < MAX_LEVEL {
@@ -526,6 +527,7 @@ pub(crate) fn complete_mercenary_activity_in_snap(
     }
     // Award MTO ISK reward to completing pilot
     if reward_char_id > 0 {
+        // DERIVED: Calibrated MTO completion ISK payout (no static payout column in V24 SDE/FSD).
         let isk_reward = 7_500_000_i64;
         if let Some(ch) = snap.characters.get_mut(&reward_char_id) {
             ch.balance = ch

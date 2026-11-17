@@ -23,9 +23,6 @@ use crate::services::sov_services::{
 use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord, WorldStateSnapshot};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
-use eve_proto::quasar::{
-    GoogleAny, WireField, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
-};
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 
@@ -113,6 +110,15 @@ pub fn next_skyhook_theft_window(
         }
     }
     (start, start.saturating_add(7_200))
+}
+
+/// Clears active planet/workforce/vulnerability/link runtime state when a Skyhook is destroyed.
+pub(crate) fn cleanup_destroyed_skyhook_in_snap(snap: &mut WorldStateSnapshot, skyhook_id: i64) {
+    snap.sov_runtime.skyhook_planets.remove(&skyhook_id);
+    snap.sov_runtime.skyhook_active.remove(&skyhook_id);
+    snap.sov_runtime.skyhook_theft_windows.remove(&skyhook_id);
+    snap.sov_runtime.skyhook_hackable.remove(&skyhook_id);
+    snap.sov_runtime.skyhook_silo_links.remove(&skyhook_id);
 }
 
 /// Rolls an expired 2-hour Skyhook theft window forward to its next 3–4 day window and clears stale hackable state.
@@ -916,71 +922,91 @@ pub async fn handle_skyhook_component_call(
                 });
             }
             let req_qty_opt = args.get(4).and_then(|a| a.as_i64()).filter(|&q| q > 0).map(|q| q as u64);
-            let (reagent_tid, extracted, rem_sec) = ctx.db.try_with_mut_snapshot(|snap| {
-                let free_m3 = super::ship_free_cargo_m3(ctx, snap, ship_id)?;
-                let _ = advance_skyhook_reagents_in_snap(snap, &ctx.sde, skyhook_id, now);
-                let entry = snap
-                    .sov_runtime
-                    .skyhook_reagent_bays
-                    .get_mut(&skyhook_id)
-                    .ok_or_else(|| BridgeRpcError {
-                        code: "SkyhookReagentBayNotFound".into(),
-                        message: format!("Skyhook {skyhook_id} has no reagent bay"),
-                        client_error: None,
-                    })?;
-                if entry.1 == 0 {
-                    return Err(BridgeRpcError {
-                        code: "NoSecuredReagentsAvailable".into(),
-                        message: format!("Skyhook {skyhook_id} has 0 secured reagents available"),
-                        client_error: None,
-                    });
-                }
-                let unit_vol = ctx
-                    .sde
-                    .types
-                    .get(&entry.0)
-                    .map(|t| t.volume)
-                    .unwrap_or(0.01)
-                    .max(1e-6);
-                let max_units = ((free_m3 + 1e-9) / unit_vol).floor() as u64;
-                if max_units == 0 {
-                    let req_vol = (req_qty_opt.unwrap_or(1) as f64) * unit_vol;
-                    return Err(BridgeRpcError::with_client_error(
-                        "NotEnoughCargoSpace",
-                        format!(
-                            "Active ship {ship_id} does not have enough free cargo capacity to extract Skyhook reagents"
-                        ),
-                        eve_proto::ClientError::hold_capacity_error(
-                            eve_proto::UserErrorKey::NotEnoughCargoSpace,
-                            req_vol,
-                            free_m3.max(0.0),
-                        ),
-                    ));
-                }
-                let take = req_qty_opt.unwrap_or(entry.1).min(entry.1).min(max_units);
-                entry.1 -= take;
-                let r_tid = entry.0;
-                let rem_s = entry.1;
-                let insec = entry.2;
-                snap.sov_runtime
-                    .skyhook_reagents
-                    .insert(skyhook_id, (r_tid, rem_s + insec));
-                snap.next_entity_id += 1;
-                let item_id = snap.next_entity_id;
-                snap.items.insert(
-                    item_id,
-                    InventoryItemRecord {
+            let (reagent_tid, extracted, rem_sec, rem_insec, cycle_ts, planet_id) =
+                ctx.db.try_with_mut_snapshot(|snap| {
+                    let free_m3 = super::ship_free_cargo_m3(ctx, snap, ship_id)?;
+                    let _ = advance_skyhook_reagents_in_snap(snap, &ctx.sde, skyhook_id, now);
+                    let pid = snap.sov_runtime.skyhook_planets.get(&skyhook_id).copied();
+                    let entry = snap
+                        .sov_runtime
+                        .skyhook_reagent_bays
+                        .get_mut(&skyhook_id)
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "SkyhookReagentBayNotFound".into(),
+                            message: format!("Skyhook {skyhook_id} has no reagent bay"),
+                            client_error: None,
+                        })?;
+                    if entry.1 == 0 {
+                        return Err(BridgeRpcError {
+                            code: "NoSecuredReagentsAvailable".into(),
+                            message: format!("Skyhook {skyhook_id} has 0 secured reagents available"),
+                            client_error: None,
+                        });
+                    }
+                    let unit_vol = ctx
+                        .sde
+                        .types
+                        .get(&entry.0)
+                        .map(|t| t.volume)
+                        .unwrap_or(0.01)
+                        .max(1e-6);
+                    let max_units = ((free_m3 + 1e-9) / unit_vol).floor() as u64;
+                    if max_units == 0 {
+                        let req_vol = (req_qty_opt.unwrap_or(1) as f64) * unit_vol;
+                        return Err(BridgeRpcError::with_client_error(
+                            "NotEnoughCargoSpace",
+                            format!(
+                                "Active ship {ship_id} does not have enough free cargo capacity to extract Skyhook reagents"
+                            ),
+                            eve_proto::ClientError::hold_capacity_error(
+                                eve_proto::UserErrorKey::NotEnoughCargoSpace,
+                                req_vol,
+                                free_m3.max(0.0),
+                            ),
+                        ));
+                    }
+                    let take = req_qty_opt.unwrap_or(entry.1).min(entry.1).min(max_units);
+                    entry.1 -= take;
+                    let r_tid = entry.0;
+                    let rem_s = entry.1;
+                    let insec = entry.2;
+                    let cycle_ts = entry.3;
+                    snap.sov_runtime
+                        .skyhook_reagents
+                        .insert(skyhook_id, (r_tid, rem_s + insec));
+                    snap.next_entity_id += 1;
+                    let item_id = snap.next_entity_id;
+                    snap.items.insert(
                         item_id,
-                        type_id: r_tid,
-                        owner_id: char_id,
-                        location_id: ship_id,
-                        flag: InventoryFlag::Cargo,
-                        quantity: take as i32,
-                        ..Default::default()
-                    },
+                        InventoryItemRecord {
+                            item_id,
+                            type_id: r_tid,
+                            owner_id: char_id,
+                            location_id: ship_id,
+                            flag: InventoryFlag::Cargo,
+                            quantity: take as i32,
+                            ..Default::default()
+                        },
+                    );
+                    Ok((r_tid, take, rem_s, insec, cycle_ts, pid))
+                })?;
+            if let Some(notice) =
+                crate::services::quasar_sov_resources::build_reagent_simulations_notice(
+                    "sov_gameplay_skyhook.extract_reagents",
+                    skyhook_id,
+                    planet_id,
+                    reagent_tid,
+                    rem_sec,
+                    rem_insec,
+                    cycle_ts,
+                )
+            {
+                let _ = ctx.quasar_gateway.publish_notice(
+                    NoticeScope::SolarSystem(skyhook_st.solar_system_id),
+                    notice,
+                    now,
                 );
-                Ok((r_tid, take, rem_s))
-            })?;
+            }
             Ok(PyRep::keyval([
                 ("skyhookID", PyRep::Integer(skyhook_id)),
                 ("reagentTypeID", PyRep::Integer(reagent_tid as i64)),
@@ -1008,7 +1034,8 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
             }
             for (&id, st) in &snap.structures {
                 if st.type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
-                    && st.state == "ArmorReinforced"
+                    && (st.state == "ArmorReinforced"
+                        || st.state.eq_ignore_ascii_case("destroyed"))
                     && !ids.contains(&id)
                 {
                     ids.push(id);
@@ -1032,6 +1059,14 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
         let mut opened = Vec::new();
         let mut expired_reinf = Vec::new();
         for id in skyhook_ids {
+            if snap
+                .structures
+                .get(&id)
+                .is_some_and(|s| s.state.eq_ignore_ascii_case("destroyed"))
+            {
+                cleanup_destroyed_skyhook_in_snap(snap, id);
+                continue;
+            }
             if let Some(st) = snap.structures.get_mut(&id) {
                 if st.type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
                     && st.state == "ArmorReinforced"
@@ -1189,13 +1224,14 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
                     ..Default::default()
                 },
             );
-            Some((container_id, c_pos, r_type, final_sec))
+            let planet_id = snap.sov_runtime.skyhook_planets.get(&skyhook_id).copied();
+            Some((container_id, c_pos, r_type, final_sec, planet_id))
         });
 
         if ship_opt.is_some() && orig_vel > 0.0 {
             let _ = sys_handle.set_ball_max_velocity_cap(ship_id, None).await;
         }
-        if let Some((container_id, c_pos, r_type, final_sec)) = drop_res {
+        if let Some((container_id, c_pos, r_type, final_sec, planet_id)) = drop_res {
             let _ = sys_handle
                 .spawn_ball(Ball {
                     id: container_id,
@@ -1210,69 +1246,23 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
                     mode: MovementMode::Rigid,
                 })
                 .await;
-            let id_b = WireMessage {
-                fields: vec![WireField {
-                    field_number: 1,
-                    value: WireValue::Varint(skyhook_id as u64),
-                }],
+            if let Some(notice) =
+                crate::services::quasar_sov_resources::build_reagent_simulations_notice(
+                    "sov_gameplay_skyhook.tick_theft",
+                    skyhook_id,
+                    planet_id,
+                    r_type,
+                    final_sec,
+                    0,
+                    now_unix,
+                )
+            {
+                let _ = ctx.quasar_gateway.publish_notice(
+                    NoticeScope::SolarSystem(sys_id),
+                    notice,
+                    now_unix,
+                );
             }
-            .encode();
-            let sim = WireMessage {
-                fields: vec![
-                    WireField {
-                        field_number: 1,
-                        value: WireValue::Varint(final_sec),
-                    },
-                    WireField {
-                        field_number: 2,
-                        value: WireValue::Varint(0),
-                    },
-                ],
-            }
-            .encode();
-            let rt_b = WireMessage {
-                fields: vec![WireField {
-                    field_number: 1,
-                    value: WireValue::Varint(u64::from(r_type)),
-                }],
-            }
-            .encode();
-            let r = WireMessage {
-                fields: vec![
-                    WireField {
-                        field_number: 1,
-                        value: WireValue::LengthDelimited(rt_b),
-                    },
-                    WireField {
-                        field_number: 2,
-                        value: WireValue::LengthDelimited(sim),
-                    },
-                ],
-            }
-            .encode();
-            let n = WireMessage {
-                fields: vec![
-                    WireField {
-                        field_number: 1,
-                        value: WireValue::LengthDelimited(id_b),
-                    },
-                    WireField {
-                        field_number: 2,
-                        value: WireValue::LengthDelimited(r),
-                    },
-                ],
-            }
-            .encode();
-            let _ = ctx.quasar_gateway.publish_notice(
-                NoticeScope::SolarSystem(sys_id),
-                GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.skyhook.api.SkyhookReagentsSimulatedNotice"
-                    ),
-                    value: n,
-                },
-                now_unix,
-            );
         }
     }
 }
