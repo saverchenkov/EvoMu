@@ -791,3 +791,202 @@ async fn test_planetary_interaction_launch_commodities_v24() {
         "DeleteLaunch must remove canister ball from ballpark"
     );
 }
+
+#[tokio::test]
+async fn test_command_center_rocket_launch_bypasses_hostile_poco_acl_and_charges_flat_15pct_npc_fee() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let char_id = 90_000_001;
+    let hostile_corp_id = 98_600_777_i64;
+    let poco_id = 1_090_600_777_i64;
+    let mut sess = setup_pilot(&ctx, 1106, "demo", "demo-secret", char_id).await;
+    let ship_id = sess.ship_id.expect("Active ship");
+    ctx.db.with_mut_snapshot(|snap| {
+        grant_pi_skills(snap, char_id);
+        snap.skills.entry(char_id).or_default().insert(
+            33467,
+            TrainedSkillRecord {
+                type_id: 33467, // Customs Code Expertise V must not discount CC rocket flat 15% NPC fee
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        seed_cargo_item(snap, CC_PIN_TYPE_ID, char_id, ship_id, 1);
+
+        let mut h_corp = eve_db::CorporationRecord::default();
+        h_corp.corporation_id = hostile_corp_id;
+        h_corp.name = "Hostile POCO Corp".into();
+        h_corp.ticker = "HPOC".into();
+        h_corp.ceo_id = 99_999;
+        h_corp.set_division_balance(1, IskCents(0));
+        h_corp.ensure_wallet_divisions();
+        snap.corporations.insert(hostile_corp_id, h_corp);
+    });
+    sess.station_id = None;
+    sess.structure_id = None;
+
+    let col_dep = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2101), PyRep::Integer(CC_PIN_TYPE_ID as i64), PyRep::Real(0.10), PyRep::Real(0.10)]),
+                PyRep::Tuple(vec![PyRep::Integer(9), PyRep::Integer(2101), PyRep::Integer(3)]),
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2102), PyRep::Integer(LAUNCHPAD_PIN_TYPE_ID as i64), PyRep::Real(0.11), PyRep::Real(0.11)]),
+            ]),
+        ],
+    )
+    .await
+    .expect("Deploy colony");
+
+    let PyRep::List(pins) = col_dep.dict_get("pins").expect("pins list") else {
+        panic!("expected pins list");
+    };
+    let cc_pin_id = pins
+        .iter()
+        .find(|p| get_i64(p, "typeID") == Some(CC_PIN_TYPE_ID as i64))
+        .and_then(|p| get_i64(p, "pinID"))
+        .expect("cc pin");
+    let launchpad_pin_id = pins
+        .iter()
+        .find(|p| get_i64(p, "typeID") == Some(LAUNCHPAD_PIN_TYPE_ID as i64))
+        .and_then(|p| get_i64(p, "pinID"))
+        .expect("launchpad pin");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_isk(1_000_000);
+        }
+        let mut net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+        if let Some(cc) = net.pins.iter_mut().find(|p| p.pin_id == cc_pin_id) {
+            cc.contents.insert(WATER_P1_TYPE_ID, 500);
+        }
+        if let Some(lp) = net.pins.iter_mut().find(|p| p.pin_id == launchpad_pin_id) {
+            lp.contents.insert(WATER_P1_TYPE_ID, 500);
+        }
+        eve_server::services::industry_pi::save_pi_network(snap, char_id, JITA_PLANET_ID, &net);
+
+        snap.structures.insert(
+            poco_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: poco_id,
+                type_id: 2233,
+                owner_corp_id: hostile_corp_id,
+                solar_system_id: JITA_SOLAR_SYSTEM_ID,
+                name: format!("Orbital:{JITA_PLANET_ID}"),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                ..Default::default()
+            },
+        );
+        eve_server::services::industry_pi::pi_helpers::save_orbital_settings(
+            snap,
+            JITA_PLANET_ID,
+            &eve_server::services::industry_pi::pi_helpers::OrbitalCustomsSettings {
+                planet_id: JITA_PLANET_ID,
+                orbital_type_id: 2233,
+                owner_corp_id: hostile_corp_id,
+                allow_alliance: false,
+                allow_standings: false,
+                minimum_standing: 10.0,
+                standing_neutral_tax_rate: 0.25,
+                ..Default::default()
+            },
+        );
+    });
+
+    let bound_planet_id = ctx
+        .bind_object(&sess, "planetMgr", JITA_PLANET_ID)
+        .expect("bind planetMgr");
+
+    // 1. Launchpad export through the hostile-ACL POCO must be denied.
+    let err_lp = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(launchpad_pin_id),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(100))]),
+        ],
+    )
+    .await
+    .expect_err("Launchpad launch through hostile POCO must be denied");
+    assert_eq!(err_lp.code, "CustomsOfficeAccessDenied");
+
+    // 2. Command Center rocket launch bypasses hostile POCO ACL, charges flat 15% (100 * 400 * 0.15 = 6,000 ISK),
+    //    and credits 0 ISK to the POCO owner corp wallet.
+    let expected_ft_1 = ctx.now_blueos_filetime_ticks();
+    let cc_rep_1 = ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: false,
+    })
+    .with_mode(ContractValidationMode::Strict)
+    .call_ok(
+        "planetMgr",
+        Some(bound_planet_id),
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(cc_pin_id),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(100))]),
+        ],
+        &HashMap::new(),
+    )
+    .await;
+    assert_eq!(cc_rep_1.as_i64(), Some(expected_ft_1));
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&char_id].balance, IskCents::from_isk(994_000));
+        assert_eq!(
+            snap.corporations[&hostile_corp_id].master_wallet_balance(),
+            IskCents(0),
+            "Command Center launch must never credit POCO owner corp wallet"
+        );
+        assert!(
+            snap.wallet_journal.iter().any(|j| {
+                j.character_id == char_id
+                    && j.entry_type == "CustomOfficeTax"
+                    && j.amount == IskCents::from_isk(6_000)
+                    && j.reason.contains("Command Center export tax")
+            }),
+            "Command Center launch must write 6,000 ISK CustomOfficeTax journal entry"
+        );
+    });
+
+    // 3. Command Center rocket launch also works identically with no POCO on the planet at all.
+    ctx.advance_secs(61);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.remove(&poco_id);
+        snap.owner_notes.remove(&eve_server::services::industry_pi::orbital_settings_note_id(JITA_PLANET_ID));
+        snap.corp_customs_offices.remove(&hostile_corp_id);
+    });
+    let expected_ft_2 = ctx.now_blueos_filetime_ticks();
+    let cc_rep_2 = ClientHarness::new(SessionBorrowWireTransport {
+        ctx: &ctx,
+        session: &mut sess,
+        preserve_char_notifications: false,
+    })
+    .with_mode(ContractValidationMode::Strict)
+    .call_ok(
+        "planetMgr",
+        Some(bound_planet_id),
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(cc_pin_id),
+            PyRep::Dict(vec![(PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(100))]),
+        ],
+        &HashMap::new(),
+    )
+    .await;
+    assert_eq!(cc_rep_2.as_i64(), Some(expected_ft_2));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&char_id].balance, IskCents::from_isk(988_000));
+    });
+}

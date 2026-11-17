@@ -16,8 +16,8 @@ use crate::services::station_structure::structure_lifecycle::{
     validate_structure_refit, HullClass, PowerState, ServiceFamily, SpaceClass,
     ABANDON_AFTER_LOW_POWER_SECS, ANCHORING_SECS, ANCHOR_VULNERABLE_SECS, REPAIR_HULL_SECS,
     REPAIR_SHIELD_ARMOR_SECS, STATE_ANCHOR_VULNERABLE, STATE_ARMOR_REINFORCED,
-    STATE_ARMOR_VULNERABLE, STATE_DESTROYED, STATE_HULL_VULNERABLE,
-    STATE_NO_CORE, STATE_ONLINING, STATE_SHIELD_VULNERABLE,
+    STATE_ARMOR_VULNERABLE, STATE_DESTROYED, STATE_HULL_VULNERABLE, STATE_NO_CORE,
+    STATE_ONLINING, STATE_SHIELD_VULNERABLE, STATE_UNANCHORED,
 };
 use crate::services::station_structure::structure_lifecycle_rpc::{
     handle_jettison_structure_fuel, handle_structure_fit_move, handle_structure_module_online,
@@ -107,6 +107,8 @@ fn deep_structure_lifecycle_anchoring_core_power_burn_and_self_destruct() {
     assert_eq!(structure_family(1657), ServiceFamily::Citadel);
     assert!(is_operational(STATE_SHIELD_VULNERABLE));
     assert!(!is_operational(STATE_DESTROYED));
+    assert!(!is_operational(STATE_UNANCHORED));
+    assert!(!is_operational("unanchored"));
     assert_eq!(space_class(&ctx, 30_000_142), SpaceClass::HighSec);
     assert_eq!(space_class(&ctx, 31_000_005), SpaceClass::Wormhole);
     assert!(nearest_npc_station(&ctx, 30_000_142).is_some());

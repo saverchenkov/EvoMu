@@ -17,6 +17,8 @@ fn structure_directory_rpc_queries_filter_by_type_state_and_access() {
     let astra_id = 1_000_000_950_001_i64;
     let beacon_id = 1_000_000_950_002_i64;
     let anchoring_id = 1_000_000_950_003_i64;
+    let unanchored_id = 1_000_000_950_004_i64;
+    let unanchored_beacon_id = 1_000_000_950_005_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
         let ch = clone_char_with(snap, char_id, "Dir Tester", corp_id, sys_id, 100_000_001);
@@ -87,6 +89,49 @@ fn structure_directory_rpc_queries_filter_by_type_state_and_access() {
                 self_destruct_at_unix: None,
             },
         );
+        // Unanchored structure & cyno beacon (must be excluded from every directory query)
+        snap.structures.insert(
+            unanchored_id,
+            UpwellStructureRecord {
+                structure_id: unanchored_id,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Unanchored Citadel".into(),
+                position: [12_000.0, 0.0, 0.0],
+                state: "Unanchored".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.structures.insert(
+            unanchored_beacon_id,
+            UpwellStructureRecord {
+                structure_id: unanchored_beacon_id,
+                type_id: 35_840,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Unanchored Cyno Beacon".into(),
+                position: [15_000.0, 0.0, 0.0],
+                state: "Unanchored".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
     });
 
     let mut session = SessionState::new(1);
@@ -96,7 +141,7 @@ fn structure_directory_rpc_queries_filter_by_type_state_and_access() {
     session.solar_system_id = Some(sys_id);
     let kw = HashMap::new();
 
-    // GetMyDockableStructures returns only the operational Astrahus (excludes FLEX beacon & Anchoring)
+    // GetMyDockableStructures returns only the operational Astrahus (excludes FLEX beacon, Anchoring & Unanchored)
     let PyRep::List(dockable) = handle(
         &ctx,
         &mut session,
@@ -111,7 +156,7 @@ fn structure_directory_rpc_queries_filter_by_type_state_and_access() {
     };
     assert_eq!(dockable, vec![PyRep::Integer(astra_id)]);
 
-    // CheckMyDockingAccessToStructures filters and deduplicates
+    // CheckMyDockingAccessToStructures filters and deduplicates (including Unanchored exclusion)
     let PyRep::List(checked) = handle(
         &ctx,
         &mut session,
@@ -122,6 +167,7 @@ fn structure_directory_rpc_queries_filter_by_type_state_and_access() {
             PyRep::Integer(astra_id),
             PyRep::Integer(beacon_id),
             PyRep::Integer(anchoring_id),
+            PyRep::Integer(unanchored_id),
         ])],
         &kw,
     )
@@ -131,7 +177,7 @@ fn structure_directory_rpc_queries_filter_by_type_state_and_access() {
     };
     assert_eq!(checked, vec![PyRep::Integer(astra_id)]);
 
-    // GetStructureMapData returns all 3 non-destroyed structures in system as 12-column CRowset rows
+    // GetStructureMapData returns all 3 in-space structures in system (excludes Unanchored) as 12-column CRowset rows
     let PyRep::List(map_data) = handle(
         &ctx,
         &mut session,
@@ -145,6 +191,9 @@ fn structure_directory_rpc_queries_filter_by_type_state_and_access() {
         panic!("expected list");
     };
     assert_eq!(map_data.len(), 3);
+    assert!(!map_data.iter().any(|row| {
+        matches!(row, PyRep::List(cols) if cols.get(2).and_then(|c| c.as_i64()) == Some(unanchored_id))
+    }));
     let mut astra_row_matched = false;
     for row in &map_data {
         let PyRep::List(cols) = row else {
@@ -178,6 +227,7 @@ fn structure_directory_rpc_queries_filter_by_type_state_and_access() {
         panic!("expected dict");
     };
     assert!(beacons.iter().any(|(k, _)| k.as_i64() == Some(beacon_id)));
+    assert!(!beacons.iter().any(|(k, _)| k.as_i64() == Some(unanchored_beacon_id)));
 
     let PyRep::List(beacon_sys) = handle(
         &ctx,
@@ -193,7 +243,7 @@ fn structure_directory_rpc_queries_filter_by_type_state_and_access() {
     };
     assert!(beacon_sys.contains(&PyRep::Integer(sys_id as i64)));
 
-    // GetValidWarHQs includes operational high-sec Astrahus
+    // GetValidWarHQs includes operational high-sec Astrahus and excludes FLEX beacon + Unanchored
     let PyRep::List(war_hqs) = handle(
         &ctx,
         &mut session,
@@ -208,6 +258,7 @@ fn structure_directory_rpc_queries_filter_by_type_state_and_access() {
     };
     assert!(war_hqs.contains(&PyRep::Integer(astra_id)));
     assert!(!war_hqs.contains(&PyRep::Integer(beacon_id)));
+    assert!(!war_hqs.contains(&PyRep::Integer(unanchored_id)));
 
     // GetMyCharacterStructures & GetMyCorporationStructures
     let PyRep::Dict(char_structs) = handle(

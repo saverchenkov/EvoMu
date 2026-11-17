@@ -55,6 +55,50 @@ pub(crate) struct PreparedPocoTax {
     tax_cents: IskCents,
     player_share: IskCents,
     orbital_tid: TypeId,
+    credit_corp: bool,
+}
+
+fn ensure_character_can_pay_tax(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    tax_cents: IskCents,
+    tax_isk: f64,
+    action_label: &str,
+) -> Result<(), BridgeRpcError> {
+    if tax_cents.0 > 0 {
+        if let Some(ch) = snap.characters.get(&char_id) {
+            if ch.balance.checked_sub(tax_cents).is_none() {
+                return Err(BridgeRpcError {
+                    code: "InsufficientFunds".into(),
+                    message: format!(
+                        "Insufficient ISK to pay POCO {action_label} tax ({tax_isk:.2} ISK)"
+                    ),
+                    client_error: None,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Prepares flat 15% (`1.5 * 0.10`) NPC export fee for Command Center rocket launches,
+/// bypassing planetary Customs Office / Skyhook ACLs and crediting zero ISK to corp wallets.
+pub(crate) fn prepare_command_center_launch_tax(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    base_value_isk: f64,
+    action_label: &str,
+) -> Result<PreparedPocoTax, BridgeRpcError> {
+    let tax_isk = 0.15 * base_value_isk.max(0.0);
+    let tax_cents = IskCents::from_f64_isk(tax_isk);
+    ensure_character_can_pay_tax(snap, char_id, tax_cents, tax_isk, action_label)?;
+    Ok(PreparedPocoTax {
+        tax_isk,
+        tax_cents,
+        player_share: IskCents(0),
+        orbital_tid: 2233,
+        credit_corp: false,
+    })
 }
 
 pub(crate) fn prepare_poco_commodity_tax(
@@ -89,23 +133,14 @@ pub(crate) fn prepare_poco_commodity_tax(
     let tax_isk = tax_mult
         * compute_poco_export_tax(base_value_isk, npc_customs_tax_rate, customs_lvl, player_poco_rate);
     let tax_cents = IskCents::from_f64_isk(tax_isk);
-    if tax_cents.0 > 0 {
-        if let Some(ch) = snap.characters.get(&char_id) {
-            if ch.balance.checked_sub(tax_cents).is_none() {
-                return Err(BridgeRpcError {
-                    code: "InsufficientFunds".into(),
-                    message: format!("Insufficient ISK to pay POCO {action_label} tax ({tax_isk:.2} ISK)"),
-                    client_error: None,
-                });
-            }
-        }
-    }
+    ensure_character_can_pay_tax(snap, char_id, tax_cents, tax_isk, action_label)?;
     let player_share = IskCents::from_f64_isk(tax_mult * base_value_isk * player_poco_rate);
     Ok(PreparedPocoTax {
         tax_isk,
         tax_cents,
         player_share,
         orbital_tid,
+        credit_corp: true,
     })
 }
 
@@ -133,9 +168,11 @@ pub(crate) fn commit_poco_commodity_tax(
         let bal_after = ch.balance;
         snap.append_journal(char_id, "CustomOfficeTax", tax.tax_cents, bal_after, journal_note);
     }
-    if let Some(cfg) = load_orbital_settings(snap, planet_id) {
-        if let Some(corp) = snap.corporations.get_mut(&cfg.owner_corp_id) {
-            corp.credit_division(1, tax.player_share);
+    if tax.credit_corp && tax.player_share.0 > 0 {
+        if let Some(cfg) = load_orbital_settings(snap, planet_id) {
+            if let Some(corp) = snap.corporations.get_mut(&cfg.owner_corp_id) {
+                corp.credit_division(1, tax.player_share);
+            }
         }
     }
     Ok(())
@@ -1122,13 +1159,27 @@ pub fn handle_pi_orbitals(
 
                 let mut export_tax_isk = 0.0_f64;
                 let mut orbital_tid: TypeId = 2233;
-                if req.is_v24_wire
+                if is_cc {
+                    let cc_tax = prepare_command_center_launch_tax(
+                        snap,
+                        char_id,
+                        total_base_value,
+                        "export",
+                    )?;
+                    export_tax_isk = cc_tax.tax_isk;
+                    commit_poco_commodity_tax(
+                        snap,
+                        char_id,
+                        planet_id,
+                        cc_tax,
+                        format!("Command Center export tax on planet {planet_id}"),
+                        "export",
+                    )?;
+                } else if req.is_v24_wire
                     || req.destination == "CustomsOffice"
                     || req.destination == "Skyhook"
                     || req.destination == "Hangar"
-                    || is_cc
                 {
-                    let tax_mult = if is_cc { 1.5 } else { 1.0 };
                     let poco_tax = prepare_poco_commodity_tax(
                         ctx,
                         snap,
@@ -1136,7 +1187,7 @@ pub fn handle_pi_orbitals(
                         planet_id,
                         col.solar_system_id,
                         total_base_value,
-                        tax_mult,
+                        1.0,
                         "export",
                     )?;
                     orbital_tid = poco_tax.orbital_tid;

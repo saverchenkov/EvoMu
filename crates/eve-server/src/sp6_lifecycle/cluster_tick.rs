@@ -60,7 +60,9 @@ pub fn populate_persisted_space_objects(
 
         // 1. Upwell Structures (`feat:lifecycle.structure-restart`)
         for st in snap.structures.values() {
-            if st.solar_system_id == solar_system_id && st.state != "Destroyed" {
+            if st.solar_system_id == solar_system_id
+                && crate::services::station_structure::structure_lifecycle::is_in_space_structure_state(&st.state)
+            {
                 if ballpark.balls.contains_key(&st.structure_id) {
                     continue;
                 }

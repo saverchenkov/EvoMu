@@ -282,7 +282,8 @@ fn online_service_modules(ctx: &ServerContext, snap: &WorldStateSnapshot, struct
 }
 
 pub fn is_operational(state: &str) -> bool {
-    !matches!(state, STATE_ANCHOR_VULNERABLE | STATE_ANCHORING | STATE_NO_CORE | STATE_ONLINING | STATE_DESTROYED)
+    is_in_space_structure_state(state)
+        && !matches!(state, STATE_ANCHOR_VULNERABLE | STATE_ANCHORING | STATE_NO_CORE | STATE_ONLINING)
 }
 
 /// Power state: full power with at least one online service module, low power otherwise,

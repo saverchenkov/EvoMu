@@ -381,7 +381,7 @@ async fn dispatch_unknown_flush_and_user_launch_all_arg_shapes_kill_mutants() {
     assert_eq!(flush_res.dict_get("planetID"), Some(&PyRep::Integer(planet_id)));
     assert!(flush_res.dict_get("producedQuantity").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
 
-    // Shape 1: 4-arg [pin_701, type_id, qty, str] -> CommandCenterLaunch (1.5x tax; ignores arg 3 string)
+    // Shape 1: 4-arg [pin_701, type_id, qty, str] -> CommandCenterLaunch (flat 15% NPC fee; ignores arg 3 string)
     let s1 = call_pi(
         &ctx,
         &mut sess,
@@ -391,9 +391,9 @@ async fn dispatch_unknown_flush_and_user_launch_all_arg_shapes_kill_mutants() {
     )
     .expect("Shape 1 CommandCenterLaunch");
     let cc_tax = s1.dict_get("exportTaxISK").and_then(|v| v.as_f64()).unwrap();
-    assert!(cc_tax > 0.0);
+    assert!((cc_tax - 300.0).abs() < 1e-6, "cc_tax={cc_tax} should be flat 15% (300.0 ISK)");
 
-    // Shape 2a: 3-arg [type_id, qty, "CustomsOffice"] -> CustomsOffice (1.0x tax)
+    // Shape 2a: 3-arg [type_id, qty, "CustomsOffice"] -> CustomsOffice (10% NPC + 5% default POCO in Jita = 300.0)
     let s2a = call_pi(
         &ctx,
         &mut sess,
@@ -403,7 +403,7 @@ async fn dispatch_unknown_flush_and_user_launch_all_arg_shapes_kill_mutants() {
     )
     .expect("Shape 2a CustomsOffice");
     let co_tax = s2a.dict_get("exportTaxISK").and_then(|v| v.as_f64()).unwrap();
-    assert!(co_tax > 0.0 && cc_tax > co_tax, "cc_tax={cc_tax} should exceed co_tax={co_tax}");
+    assert!((co_tax - 300.0).abs() < 1e-6, "co_tax={co_tax} should be 300.0 ISK");
 
     // Shape 2b: 4-arg [type_id, qty, "CustomsOffice", PyRep::None] -> MUST fall through arm 1 (because args[2] is str, not i64) to arm 2 CustomsOffice!
     let s2b = call_pi(
