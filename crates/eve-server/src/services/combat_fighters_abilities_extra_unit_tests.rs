@@ -622,3 +622,153 @@ async fn fighter_ability_uses_surface_distance_for_non_upwell_titan_hull_1247() 
         sys_handle.get_combat_state(titan_ball).await.unwrap().unwrap().shield_hp < 50_000.0
     );
 }
+
+#[tokio::test]
+async fn fighter_sensor_dampener_preserves_zero_surface_lock_on_titan_1247() {
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let mut sde = make_fighter_sde_registry();
+    if let Some(sys) = sde.solar_systems.get_mut(&sys_id) {
+        sys.security_status = -0.5;
+    }
+    insert_ability_def(&mut sde, 17, "itemTargeted", false, false);
+    sde.types.insert(
+        999_501,
+        make_fighter_type(999_501, 1652, 87, 1_000.0, vec![(76, 50_000.0), (2215, 3.0)]),
+    );
+    sde.fighter_abilities_by_type.insert(
+        999_501,
+        vec![FighterAbilitySlot {
+            slot_index: 0,
+            ability_id: 17,
+            cooldown_seconds: Some(0.0),
+            charges: None,
+        }],
+    );
+    sde.types.insert(11_567, make_fighter_type(11_567, 30, 6, 10_000_000.0, vec![(76, 5_000.0)]));
+    sde.types.insert(23_911, make_fighter_type(23_911, 26, 6, 100_000.0, vec![(76, 5_000.0)]));
+    ctx.sde = Arc::new(sde);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let titan_ball = 800_601i64;
+    let near_lock = 800_602i64;
+    let far_lock = 800_603i64;
+    let cruiser_ball = 800_604i64;
+    let cruiser_titan_lock = 800_605i64;
+    let cruiser_far_lock = 800_606i64;
+
+    sys_handle.spawn_ball(make_ball(ship_id, 23_911, DVec3::ZERO, 200.0)).await.unwrap();
+    for (bid, tid, pos, radius) in [
+        // Case A: Damped Titan (radius 6_800m) holding 0m-surface lock (center 7_000m > damped_range 4_250m) & OOR lock (5_500m surface)
+        (titan_ball, 11_567u32, DVec3::ZERO, 6_800.0),
+        (near_lock, 23_911, DVec3::new(7_000.0, 0.0, 0.0), 200.0),
+        (far_lock, 23_911, DVec3::new(12_500.0, 0.0, 0.0), 200.0),
+        // Case B: Damped cruiser (radius 200m) locking 6_800m Titan at 0m surface distance (center 7_000m) & OOR cruiser (5_600m surface)
+        (cruiser_ball, 23_911, DVec3::new(0.0, 20_000.0, 0.0), 200.0),
+        (cruiser_titan_lock, 11_567, DVec3::new(0.0, 27_000.0, 0.0), 6_800.0),
+        (cruiser_far_lock, 23_911, DVec3::new(6_000.0, 20_000.0, 0.0), 200.0),
+    ] {
+        sys_handle
+            .spawn_ball_with_combat(make_ball(bid, tid, pos, radius), make_cs(50_000.0, 50_000.0, 50_000.0, 10_000.0))
+            .await
+            .unwrap();
+    }
+
+    for (src, dst) in [
+        (ship_id, titan_ball),
+        (ship_id, cruiser_ball),
+        (titan_ball, near_lock),
+        (titan_ball, far_lock),
+        (cruiser_ball, cruiser_titan_lock),
+        (cruiser_ball, cruiser_far_lock),
+    ] {
+        sys_handle
+            .add_target_lock(
+                src,
+                TargetLock {
+                    target_id: dst,
+                    lock_time_ms: 100.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: Some(250_000.0),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let f_titan = 500_601i64;
+    let f_cruiser = 500_602i64;
+    for (idx, (fid, pos)) in [
+        (f_titan, DVec3::new(7_500.0, 0.0, 0.0)),
+        (f_cruiser, DVec3::new(0.0, 20_500.0, 0.0)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        sys_handle
+            .spawn_ball_with_combat(make_ball(fid, 999_501, pos, 20.0), make_cs(1_000.0, 1_000.0, 1_000.0, 100.0))
+            .await
+            .unwrap();
+        ctx.active_fighters.write().unwrap().insert(
+            fid,
+            ActiveFighterSquadron {
+                ball_id: fid,
+                item_id: fid + 100_000,
+                type_id: 999_501,
+                owner_char_id: char_id,
+                parent_ship_id: ship_id,
+                tube_index: idx,
+                squadron_size: 1,
+                target_id: None,
+                is_abandoned: false,
+                mwd_active: false,
+            },
+        );
+    }
+
+    assert!(
+        handle_activate_fighter_ability_slots(
+            &ctx,
+            &mut session,
+            &[PyRep::Integer(f_titan), PyRep::Integer(0), PyRep::Integer(titan_ball)],
+        )
+        .await
+        .unwrap()
+        .is_ok(),
+        "Support fighter sensor dampener (ability 17) must activate on Titan"
+    );
+    assert!(
+        handle_activate_fighter_ability_slots(
+            &ctx,
+            &mut session,
+            &[PyRep::Integer(f_cruiser), PyRep::Integer(0), PyRep::Integer(cruiser_ball)],
+        )
+        .await
+        .unwrap()
+        .is_ok(),
+        "Support fighter sensor dampener (ability 17) must activate on cruiser"
+    );
+
+    let titan_locks = sys_handle.get_target_locks(titan_ball).await.unwrap();
+    let near_lk = titan_locks.iter().find(|l| l.target_id == near_lock).expect("0m surface lock on Titan must stay locked");
+    assert!((near_lk.max_range_m.unwrap() - 11_250.0).abs() < 1e-3);
+    assert!(!titan_locks.iter().any(|l| l.target_id == far_lock), "5_500m surface lock must drop past 4_250m damped range");
+
+    let cruiser_locks = sys_handle.get_target_locks(cruiser_ball).await.unwrap();
+    let cruiser_titan_lk = cruiser_locks
+        .iter()
+        .find(|l| l.target_id == cruiser_titan_lock)
+        .expect("0m surface lock from cruiser onto Titan must stay locked");
+    assert!((cruiser_titan_lk.max_range_m.unwrap() - 11_250.0).abs() < 1e-3);
+    assert!(!cruiser_locks.iter().any(|l| l.target_id == cruiser_far_lock), "5_600m surface lock must drop past 4_250m damped range");
+
+    sys_handle.step_manual(1.0).await.unwrap();
+    assert!(
+        sys_handle.get_target_locks(titan_ball).await.unwrap().iter().any(|l| l.target_id == near_lock),
+        "0m surface lock held by damped Titan must survive Ballpark::step"
+    );
+    assert!(
+        sys_handle.get_target_locks(cruiser_ball).await.unwrap().iter().any(|l| l.target_id == cruiser_titan_lock),
+        "0m surface lock onto Titan must survive Ballpark::step"
+    );
+}

@@ -214,7 +214,8 @@ pub async fn step_missiles_and_breachers(
 
         let to_target = t_ball.position - m_ball.position;
         let raw_len = to_target.length();
-        let dist = if mstate.target_ball_id >= 1_000_000_000_000 { (raw_len - t_ball.radius).max(0.0) } else { raw_len };
+        // Why: Measure remaining missile flight to target hull surface across all target ID ranges (#1247).
+        let dist = (raw_len - t_ball.radius.max(0.0)).max(0.0);
         let dir = if raw_len > 1e-3 {
             to_target / raw_len
         } else {
@@ -1110,6 +1111,62 @@ pub async fn activate_aoe_or_defender_module_with_cap(
     None
 }
 
+/// Computes `(max_velocity_ms, flight_time_s, max_flight_range_m)` for a missile or breacher launcher charge (#1247).
+#[inline]
+pub(crate) fn compute_missile_flight_kinematics(
+    fit: &eve_dogma::ShipFittingEngine,
+    module_id: i64,
+    charge_type: Option<&eve_sde::InvType>,
+    sde: &eve_sde::SdeRegistry,
+) -> (f64, f64, f64) {
+    let missile_vel = {
+        let v = fit.get_charge_effective_attribute(module_id, 37, sde);
+        if v > 0.0 {
+            v
+        } else {
+            charge_type
+                .and_then(|ct| ct.default_attributes.get(&37).copied())
+                .unwrap_or(3_750.0)
+        }
+    };
+    let flight_time_s = {
+        let v = fit.get_charge_effective_attribute(module_id, 281, sde);
+        let ms = if v > 0.0 {
+            v
+        } else {
+            charge_type
+                .and_then(|ct| ct.default_attributes.get(&281).copied())
+                .unwrap_or(5_000.0)
+        };
+        ms / 1_000.0
+    };
+    (missile_vel, flight_time_s, missile_vel * flight_time_s)
+}
+
+/// Computes the hull-surface launch position on `attacker_ball` toward `target_ball`,
+/// clamping forward offset so overlapping hulls never spawn a missile past the target's surface (#1247).
+#[inline]
+pub(crate) fn compute_missile_surface_spawn_pos(
+    attacker_ball: &eve_destiny::Ball,
+    target_ball: Option<&eve_destiny::Ball>,
+) -> DVec3 {
+    let Some(tb) = target_ball else {
+        return attacker_ball.position;
+    };
+    let delta = tb.position - attacker_ball.position;
+    let center_dist = delta.length();
+    let aim_dir = if center_dist > 1e-6 {
+        delta / center_dist
+    } else {
+        DVec3::X
+    };
+    let forward_offset = attacker_ball
+        .radius
+        .max(0.0)
+        .min((center_dist - tb.radius.max(0.0)).max(0.0));
+    attacker_ball.position + aim_dir * forward_offset
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn activate_missile_or_breacher_launcher(
     ctx: &ServerContext,
@@ -1130,15 +1187,8 @@ pub async fn activate_missile_or_breacher_launcher(
     has_explicit_target: bool,
 ) -> Result<PyRep, BridgeRpcError> {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                let missile_vel = {
-                    let v = fit.get_charge_effective_attribute(module_id, 37, &ctx.sde);
-                    if v > 0.0 { v } else { charge_type.default_attributes.get(&37).copied().unwrap_or(3_750.0) }
-                };
-                let flight_time_s = {
-                    let v = fit.get_charge_effective_attribute(module_id, 281, &ctx.sde);
-                    let ms = if v > 0.0 { v } else { charge_type.default_attributes.get(&281).copied().unwrap_or(5_000.0) };
-                    ms / 1_000.0
-                };
+                let (missile_vel, flight_time_s, _) =
+                    compute_missile_flight_kinematics(fit, module_id, Some(charge_type), &ctx.sde);
                 let missile_hp = charge_type.default_attributes.get(&9).copied().unwrap_or(60.0);
                 let exp_vel = {
                     let v = fit.get_charge_effective_attribute(module_id, 653, &ctx.sde);
@@ -1156,6 +1206,15 @@ pub async fn activate_missile_or_breacher_launcher(
                 let dot_flat = charge_type.default_attributes.get(&5736).copied().unwrap_or(200.0);
                 let dot_pct = charge_type.default_attributes.get(&5737).copied().unwrap_or(0.6) / 100.0;
 
+                let target_ball_opt = sys_handle
+                    .get_ball_snapshot(target_ball_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|(_, b)| b);
+                let spawn_pos =
+                    compute_missile_surface_spawn_pos(attacker_ball, target_ball_opt.as_ref());
+
                 let missile_ball_id = ctx.db.with_mut_snapshot(|snap| {
                     snap.next_entity_id += 1;
                     snap.next_entity_id
@@ -1165,7 +1224,7 @@ pub async fn activate_missile_or_breacher_launcher(
                         eve_destiny::Ball {
                             id: missile_ball_id,
                             type_id: charge_type_id,
-                            position: attacker_ball.position,
+                            position: spawn_pos,
                             velocity: DVec3::ZERO,
                             max_velocity: missile_vel,
                             inertia: 0.1,

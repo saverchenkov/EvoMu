@@ -1475,31 +1475,17 @@ pub(crate) async fn handle_module_cycles(
                             .is_some_and(|eid| active_charge_sde.is_some_and(|ct| ct.effect_ids.contains(&eid)))
                 })
             };
-            let (missile_max_velocity_ms, missile_flight_time_s) = if is_missile_group {
-                let vel = {
-                    let v = fit.get_charge_effective_attribute(module_id, 37, &ctx.sde);
-                    if v > 0.0 {
-                        v
-                    } else {
-                        active_charge_sde
-                            .and_then(|ct| ct.default_attributes.get(&37).copied())
-                            .unwrap_or(3_750.0)
-                    }
+            let (missile_max_velocity_ms, missile_flight_time_s, missile_max_range_m) =
+                if is_missile_group {
+                    crate::services::combat_crimewatch::combat_missiles_aoe::compute_missile_flight_kinematics(
+                        &fit,
+                        module_id,
+                        active_charge_sde,
+                        &ctx.sde,
+                    )
+                } else {
+                    (0.0, 0.0, 0.0)
                 };
-                let delay_ms = {
-                    let v = fit.get_charge_effective_attribute(module_id, 281, &ctx.sde);
-                    if v > 0.0 {
-                        v
-                    } else {
-                        active_charge_sde
-                            .and_then(|ct| ct.default_attributes.get(&281).copied())
-                            .unwrap_or(5_000.0)
-                    }
-                };
-                (vel, delay_ms / 1_000.0)
-            } else {
-                (0.0, 0.0)
-            };
             let weapon_optimal_m = if is_turret_group {
                 let range_mult = active_charge_sde
                     .and_then(|ct| ct.default_attributes.get(&120).copied())
@@ -1518,7 +1504,7 @@ pub(crate) async fn handle_module_cycles(
                     base_opt * range_mult
                 }) * weapon_dark_mult
             } else if is_missile_group {
-                missile_max_velocity_ms * missile_flight_time_s
+                missile_max_range_m
             } else if is_vorton_group {
                 let v = mod_state.get_attribute(54, &ctx.sde);
                 if v > 0.0 {

@@ -839,14 +839,24 @@ async fn activate_single_fighter_ability(
                 let damped_range = (base_range * (1.0 - damp_reduction)).max(2_500.0);
                 if let Ok(locks) = sys_handle.get_target_locks(tid).await {
                     for mut lk in locks {
-                        lk.max_range_m = Some(damped_range);
+                        let locked_ball_opt = sys_handle
+                            .get_ball_snapshot(lk.target_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|(_, b)| b);
+                        let (surface_dist, surface_offset) = match locked_ball_opt.as_ref() {
+                            Some(lb) => (
+                                target_ball.surface_distance(lb),
+                                target_ball.radius.max(0.0) + lb.radius.max(0.0),
+                            ),
+                            None => (0.0, target_ball.radius.max(0.0)),
+                        };
+                        // Why: TargetLock.max_range_m is checked center-to-center in Ballpark::step, so preserve both hull radii (#1247).
+                        lk.max_range_m = Some(damped_range + surface_offset);
                         lk.lock_time_ms *= 1.0 + damp_reduction;
                         let _ = sys_handle.remove_target_lock(tid, lk.target_id).await;
-                        if target_ball
-                            .position
-                            .distance(sys_handle.get_ball_position_sync(lk.target_id).unwrap_or(target_ball.position))
-                            <= damped_range
-                        {
+                        if surface_dist <= damped_range {
                             let _ = sys_handle.add_target_lock(tid, lk).await;
                         }
                     }

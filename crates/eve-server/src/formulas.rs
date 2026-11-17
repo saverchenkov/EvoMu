@@ -423,20 +423,19 @@ pub fn vorton_chain_targets(
     vorton_arc_targets_with_cap(primary_id, primary_pos, candidates, arc_range_m, 9)
 }
 
-pub fn vorton_arc_targets_with_cap(
+/// Shared Vorton arc target filter/sorter over `(candidate_id, distance_m)` entries.
+fn select_vorton_arc_hits(
     primary_id: i64,
-    primary_pos: DVec3,
-    candidates: &[(i64, DVec3)],
+    candidates: impl Iterator<Item = (i64, f64)>,
     arc_range_m: f64,
     max_additional_targets: usize,
 ) -> Vec<i64> {
     let mut hit = vec![primary_id];
     let mut in_arc: Vec<(i64, f64)> = Vec::new();
-    for &(cid, cpos) in candidates {
+    for (cid, d) in candidates {
         if cid == primary_id || in_arc.iter().any(|&(id, _)| id == cid) {
             continue;
         }
-        let d = (cpos - primary_pos).length();
         if d <= arc_range_m {
             in_arc.push((cid, d));
         }
@@ -450,6 +449,39 @@ pub fn vorton_arc_targets_with_cap(
         hit.push(cid);
     }
     hit
+}
+
+/// Selects Vorton secondary arc targets from precomputed `(candidate_id, distance_m)` pairs
+/// (such as `Ball::surface_distance`), capped to `max_additional_targets.min(9)` (#1247).
+pub fn vorton_arc_targets_from_distances(
+    primary_id: i64,
+    candidate_distances: &[(i64, f64)],
+    arc_range_m: f64,
+    max_additional_targets: usize,
+) -> Vec<i64> {
+    select_vorton_arc_hits(
+        primary_id,
+        candidate_distances.iter().copied(),
+        arc_range_m,
+        max_additional_targets,
+    )
+}
+
+pub fn vorton_arc_targets_with_cap(
+    primary_id: i64,
+    primary_pos: DVec3,
+    candidates: &[(i64, DVec3)],
+    arc_range_m: f64,
+    max_additional_targets: usize,
+) -> Vec<i64> {
+    select_vorton_arc_hits(
+        primary_id,
+        candidates
+            .iter()
+            .map(|&(cid, cpos)| (cid, (cpos - primary_pos).length())),
+        arc_range_m,
+        max_additional_targets,
+    )
 }
 
 /// #54: Entropic Disintegrator spool multiplier:
