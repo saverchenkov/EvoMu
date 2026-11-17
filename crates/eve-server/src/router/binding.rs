@@ -24,7 +24,7 @@ pub fn alloc_transport_session_id() -> u64 {
 }
 
 const ERR_BIND_AUTH_DENIED: &str = "BindAuthorizationDenied";
-const ERR_BOUND_OWNERSHIP: &str = "BoundObjectOwnershipViolation";
+pub(crate) const ERR_BOUND_OWNERSHIP: &str = "BoundObjectOwnershipViolation";
 
 /// Maximum concurrent bound objects retained per client session (`#882` / `C20`).
 pub const MAX_BOUND_OBJECTS_PER_SESSION: usize = 256;

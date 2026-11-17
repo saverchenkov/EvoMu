@@ -1113,3 +1113,433 @@ fn xmpp_iq_result_and_error_stanzas_do_not_echo_reply() {
         Some("<iq type='result' id='ping_get'/>")
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handle_bridge_client_collapses_unauthenticated_and_unknown_rpc_latency() -> Result<()> {
+    use eve_server::flight_recorder::UNKNOWN_RPC_LABEL;
+
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(
+        Arc::new(eve_sde::SdeRegistry::default()),
+        Arc::new(eve_db::WorldRepository::with_demo_seed()),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let srv_ctx = Arc::clone(&ctx);
+    let srv = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        handle_bridge_client(stream, srv_ctx).await
+    });
+
+    let mut cli = TcpStream::connect(addr).await?;
+    let pad_64k = "b".repeat(65_536);
+
+    async fn send_rpc(
+        cli: &mut TcpStream,
+        req_id: u64,
+        service: &str,
+        method: &str,
+    ) -> Result<()> {
+        let req = BridgeEnvelope::RpcRequest {
+            req_id,
+            service: service.to_string(),
+            bound_id: None,
+            method: method.to_string(),
+            args: vec![],
+            kwargs: HashMap::new(),
+            caller_trace: None,
+        };
+        write_bounded_frame(cli, &serde_json::to_vec(&req)?).await?;
+        loop {
+            let raw = read_bounded_frame(cli).await?.expect("rpc response frame");
+            if let BridgeEnvelope::RpcResponse { req_id: got_id, .. } =
+                serde_json::from_slice(&raw)?
+            {
+                assert_eq!(got_id, req_id);
+                return Ok(());
+            }
+        }
+    }
+
+    // Valid pre-auth bootstrap RPC keeps its own bucket.
+    send_rpc(&mut cli, 1, "machoNet", "GetTime").await?;
+
+    // Unauthenticated unknown, 64 KiB, Unauthorized, and release probes must all collapse.
+    for i in 0..32u64 {
+        let (svc, meth) = match i % 4 {
+            0 => (format!("bridge_svc_{i}"), format!("{pad_64k}_{i}")),
+            1 => (format!("bridge_svc_{i}"), format!("bridge_meth_{i}")),
+            2 => (
+                "charUnboundMgr".to_string(),
+                "GetCharactersToSelect".to_string(),
+            ),
+            _ => (
+                format!("bridge_rel_{i}"),
+                "ClientHasReleasedTheseObjects".to_string(),
+            ),
+        };
+        send_rpc(&mut cli, i + 2, &svc, &meth).await?;
+    }
+
+    drop(cli);
+    srv.await.unwrap()?;
+
+    let report = ctx.flight_recorder.latency_histogram_report();
+    assert_eq!(report.total_calls, 33);
+    assert_eq!(report.methods.len(), 2);
+    assert_eq!(
+        report
+            .methods
+            .iter()
+            .find(|m| m.service == "machoNet" && m.method == "GetTime")
+            .map(|m| m.count),
+        Some(1)
+    );
+    assert_eq!(
+        report
+            .methods
+            .iter()
+            .find(|m| m.service == UNKNOWN_RPC_LABEL && m.method == UNKNOWN_RPC_LABEL)
+            .map(|m| m.count),
+        Some(32)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handle_bridge_client_collapses_forged_bound_id_and_kicked_session_probes() -> Result<()> {
+    use eve_server::flight_recorder::{MAX_TRACKED_RPC_METHODS, UNKNOWN_RPC_LABEL};
+
+    async fn call_bridge_rpc(
+        cli: &mut TcpStream,
+        req_id: u64,
+        service: &str,
+        bound_id: Option<u64>,
+        method: &str,
+        args: Vec<PyRep>,
+    ) -> Result<Result<PyRep, eve_proto::BridgeRpcError>> {
+        let req = BridgeEnvelope::RpcRequest {
+            req_id,
+            service: service.to_string(),
+            bound_id,
+            method: method.to_string(),
+            args,
+            kwargs: HashMap::new(),
+            caller_trace: None,
+        };
+        write_bounded_frame(cli, &serde_json::to_vec(&req)?).await?;
+        loop {
+            let resp_bytes = read_bounded_frame(cli)
+                .await?
+                .expect("expected RPC response frame");
+            if let BridgeEnvelope::RpcResponse { req_id: got_id, result } =
+                serde_json::from_slice(&resp_bytes)?
+            {
+                if got_id == req_id {
+                    return Ok(result);
+                }
+            }
+        }
+    }
+
+    async fn finish_bridge_client(
+        mut cli: TcpStream,
+        srv: tokio::task::JoinHandle<Result<()>>,
+    ) -> Result<()> {
+        cli.shutdown().await?;
+        while read_bounded_frame(&mut cli).await?.is_some() {}
+        srv.await.unwrap()
+    }
+
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(
+        Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
+        Arc::new(eve_db::WorldRepository::with_demo_seed()),
+    ));
+
+    // Bind a victim object before any RPC latency buckets exist.
+    let mut victim_sess = SessionState::new(8_001);
+    victim_sess.user_id = Some(1);
+    victim_sess.character_id = Some(90_000_001);
+    let existing_bid = ctx
+        .bind_verified_sub_object(&victim_sess, "beyonce", 30_000_142)
+        .expect("bind victim beyonce sub-object");
+
+    // 1. Pre-auth TCP attacker floods forged `bound_id: Some(existing_bid)` probes and rejected
+    //    non-allowlisted RPCs via `handle_bridge_client`.
+    let listener1 = TcpListener::bind("127.0.0.1:0").await?;
+    let addr1 = listener1.local_addr()?;
+    let ctx1 = Arc::clone(&ctx);
+    let srv1 = tokio::spawn(async move {
+        let (stream, _) = listener1.accept().await.unwrap();
+        handle_bridge_client(stream, ctx1).await
+    });
+    let mut cli_unauth = TcpStream::connect(addr1).await?;
+
+    let flood_count = MAX_TRACKED_RPC_METHODS + 16;
+    let mut next_req_id = 1u64;
+    let mut expected_collapsed = 0u64;
+    for i in 0..flood_count {
+        let svc = format!("tcp_probe_svc_{i}");
+        let meth = format!("tcp_probe_meth_{i}");
+        let res = call_bridge_rpc(&mut cli_unauth, next_req_id, &svc, Some(existing_bid), &meth, vec![])
+            .await?;
+        next_req_id += 1;
+        assert!(res.is_err());
+        expected_collapsed += 1;
+    }
+
+    let forged_preauth_probes: &[(&str, Option<u64>, &str, Vec<PyRep>)] = &[
+        ("machoNet", Some(existing_bid), "GetTime", vec![]),
+        (
+            "authentication",
+            Some(existing_bid),
+            "Login",
+            vec![
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+        ),
+        ("cache", Some(existing_bid), "Rowset", vec![]),
+        ("skillMgr2", None, "GetSkills", vec![]),
+    ];
+    for (svc, bid, meth, args) in forged_preauth_probes {
+        let err = call_bridge_rpc(
+            &mut cli_unauth,
+            next_req_id,
+            svc,
+            *bid,
+            meth,
+            args.clone(),
+        )
+        .await?
+        .unwrap_err();
+        next_req_id += 1;
+        if bid.is_some() {
+            assert_eq!(err.code, "BoundObjectOwnershipViolation");
+        }
+        expected_collapsed += 1;
+    }
+
+    assert!(call_bridge_rpc(
+        &mut cli_unauth,
+        next_req_id,
+        "machoNet",
+        None,
+        "GetGlobalConfig",
+        vec![],
+    )
+    .await?
+    .is_ok());
+    next_req_id += 1;
+    expected_collapsed += 1;
+
+    assert!(call_bridge_rpc(
+        &mut cli_unauth,
+        next_req_id,
+        "machoNet",
+        Some(existing_bid),
+        "ClientHasReleasedTheseObjects",
+        vec![],
+    )
+    .await?
+    .is_ok());
+    next_req_id += 1;
+    expected_collapsed += 1;
+
+    finish_bridge_client(cli_unauth, srv1).await?;
+
+    let after_preauth = ctx.flight_recorder.latency_histogram_report();
+    assert_eq!(after_preauth.total_calls, expected_collapsed);
+    assert_eq!(after_preauth.methods.len(), 1);
+    assert_eq!(after_preauth.methods[0].service, UNKNOWN_RPC_LABEL);
+    assert_eq!(after_preauth.methods[0].method, UNKNOWN_RPC_LABEL);
+    assert_eq!(after_preauth.methods[0].count, expected_collapsed);
+
+    // 2. Logged-in TCP client is kicked; its first post-kick call (`machoNet.GetTime`) returns
+    //    `SessionKicked` and collapses, and subsequent bound/authed calls also collapse.
+    let kicked_uid1 = ctx
+        .db
+        .provision_player_account("kicked_tcp1_hf1184", "kicked-tcp1-secret");
+    let listener2 = TcpListener::bind("127.0.0.1:0").await?;
+    let addr2 = listener2.local_addr()?;
+    let ctx2 = Arc::clone(&ctx);
+    let srv2 = tokio::spawn(async move {
+        let (stream, _) = listener2.accept().await.unwrap();
+        handle_bridge_client(stream, ctx2).await
+    });
+    let mut cli_kicked1 = TcpStream::connect(addr2).await?;
+    assert!(call_bridge_rpc(
+        &mut cli_kicked1,
+        next_req_id,
+        "authentication",
+        None,
+        "Login",
+        vec![
+            PyRep::String("kicked_tcp1_hf1184".into()),
+            PyRep::String("kicked-tcp1-secret".into()),
+        ],
+    )
+    .await?
+    .is_ok());
+    next_req_id += 1;
+
+    ctx.db
+        .kick_user(kicked_uid1, "TCP kick test 1", ctx.now_unix());
+    let kicked_time_err = call_bridge_rpc(&mut cli_kicked1, next_req_id, "machoNet", None, "GetTime", vec![])
+        .await?
+        .unwrap_err();
+    next_req_id += 1;
+    assert_eq!(kicked_time_err.code, "SessionKicked");
+    expected_collapsed += 1;
+
+    let kicked_bound_err = call_bridge_rpc(
+        &mut cli_kicked1,
+        next_req_id,
+        "beyonce",
+        Some(existing_bid),
+        "GetFormations",
+        vec![],
+    )
+    .await?
+    .unwrap_err();
+    next_req_id += 1;
+    assert_eq!(kicked_bound_err.code, "BoundObjectOwnershipViolation");
+    expected_collapsed += 1;
+    finish_bridge_client(cli_kicked1, srv2).await?;
+
+    // 3. Second logged-in TCP client is kicked before calling `charMgr.GetPublicInfo3`;
+    //    `SessionKicked` collapses `charMgr.GetPublicInfo3` to `<unknown>`.
+    let kicked_uid2 = ctx
+        .db
+        .provision_player_account("kicked_tcp2_hf1184", "kicked-tcp2-secret");
+    let listener3 = TcpListener::bind("127.0.0.1:0").await?;
+    let addr3 = listener3.local_addr()?;
+    let ctx3 = Arc::clone(&ctx);
+    let srv3 = tokio::spawn(async move {
+        let (stream, _) = listener3.accept().await.unwrap();
+        handle_bridge_client(stream, ctx3).await
+    });
+    let mut cli_kicked2 = TcpStream::connect(addr3).await?;
+    assert!(call_bridge_rpc(
+        &mut cli_kicked2,
+        next_req_id,
+        "authentication",
+        None,
+        "Login",
+        vec![
+            PyRep::String("kicked_tcp2_hf1184".into()),
+            PyRep::String("kicked-tcp2-secret".into()),
+        ],
+    )
+    .await?
+    .is_ok());
+    next_req_id += 1;
+
+    ctx.db
+        .kick_user(kicked_uid2, "TCP kick test 2", ctx.now_unix());
+    let kicked_char_err = call_bridge_rpc(
+        &mut cli_kicked2,
+        next_req_id,
+        "charMgr",
+        None,
+        "GetPublicInfo3",
+        vec![PyRep::Integer(90_000_788)],
+    )
+    .await?
+    .unwrap_err();
+    next_req_id += 1;
+    assert_eq!(kicked_char_err.code, "SessionKicked");
+    expected_collapsed += 1;
+    finish_bridge_client(cli_kicked2, srv3).await?;
+
+    // 4. Legit TCP client calls valid pre-auth RPCs (`machoNet.GetTime`, `authentication.Login`,
+    //    `authentication.Logout`) and still gets individual tracking buckets after the probe flood.
+    let listener4 = TcpListener::bind("127.0.0.1:0").await?;
+    let addr4 = listener4.local_addr()?;
+    let ctx4 = Arc::clone(&ctx);
+    let srv4 = tokio::spawn(async move {
+        let (stream, _) = listener4.accept().await.unwrap();
+        handle_bridge_client(stream, ctx4).await
+    });
+    let mut cli_legit = TcpStream::connect(addr4).await?;
+    assert!(call_bridge_rpc(&mut cli_legit, next_req_id, "machoNet", None, "GetTime", vec![])
+        .await?
+        .is_ok());
+    next_req_id += 1;
+    assert!(call_bridge_rpc(
+        &mut cli_legit,
+        next_req_id,
+        "authentication",
+        None,
+        "Login",
+        vec![
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+    )
+    .await?
+    .is_ok());
+    next_req_id += 1;
+    assert!(call_bridge_rpc(&mut cli_legit, next_req_id, "authentication", None, "Logout", vec![])
+        .await?
+        .is_ok());
+    finish_bridge_client(cli_legit, srv4).await?;
+
+    let final_report = ctx.flight_recorder.latency_histogram_report();
+    assert_eq!(final_report.methods.len(), 4);
+    assert_eq!(
+        final_report
+            .methods
+            .iter()
+            .find(|m| m.service == "machoNet" && m.method == "GetTime")
+            .map(|m| m.count),
+        Some(1)
+    );
+    assert_eq!(
+        final_report
+            .methods
+            .iter()
+            .find(|m| m.service == "authentication" && m.method == "Login")
+            .map(|m| m.count),
+        Some(3)
+    );
+    assert_eq!(
+        final_report
+            .methods
+            .iter()
+            .find(|m| m.service == "authentication" && m.method == "Logout")
+            .map(|m| m.count),
+        Some(1)
+    );
+    assert!(
+        final_report
+            .methods
+            .iter()
+            .find(|m| m.service == "beyonce" && m.method == "GetFormations")
+            .is_none()
+    );
+    assert!(
+        final_report
+            .methods
+            .iter()
+            .find(|m| m.service == "charMgr" && m.method == "GetPublicInfo3")
+            .is_none()
+    );
+    assert!(
+        final_report
+            .methods
+            .iter()
+            .find(|m| m.service == "machoNet" && m.method == "GetGlobalConfig")
+            .is_none()
+    );
+    assert_eq!(
+        final_report
+            .methods
+            .iter()
+            .find(|m| m.service == UNKNOWN_RPC_LABEL && m.method == UNKNOWN_RPC_LABEL)
+            .map(|m| m.count),
+        Some(expected_collapsed)
+    );
+    assert_eq!(final_report.total_calls, expected_collapsed + 5);
+    Ok(())
+}
+

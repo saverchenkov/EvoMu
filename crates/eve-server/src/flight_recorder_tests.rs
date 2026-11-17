@@ -399,3 +399,127 @@ fn sequencer_counters_violations_and_prevented_jolts_are_tracked_and_bounded() {
     assert_eq!(summary.recent_invariant_violations.len(), 10);
     assert_eq!(summary.recent_prevented_jolts.len(), 10);
 }
+
+#[test]
+fn record_rpc_latency_bounds_keys_and_collapses_oversized_and_over_cap_pairs() {
+    // 1. 10,000 distinct oversized/invalid (64 KiB, control-char, over-128B, empty) keys must
+    // collapse immediately into the single static `("<unknown>", "<unknown>")` bucket with zero
+    // `per_method` map insertions.
+    let fr_oversized = FlightRecorder::new();
+    let pad_64k = "x".repeat(65_536);
+    for i in 0..10_000usize {
+        let svc = format!("unknown_svc_{i}");
+        match i % 4 {
+            0 => {
+                let big_method = format!("{pad_64k}_{i}");
+                fr_oversized.record_rpc_latency(&svc, &big_method, Duration::from_micros(40));
+            }
+            1 => {
+                let over_len = format!("{}_{i}", "k".repeat(MAX_RPC_LATENCY_KEY_LEN));
+                fr_oversized.record_rpc_latency(&over_len, "op", Duration::from_micros(40));
+            }
+            2 => {
+                fr_oversized.record_rpc_latency(&svc, "bad\nmethod", Duration::from_micros(40));
+            }
+            _ => {
+                fr_oversized.record_rpc_latency("", "op", Duration::from_micros(40));
+            }
+        }
+    }
+    let oversized_report = fr_oversized.latency_histogram_report();
+    assert_eq!(oversized_report.total_calls, 10_000);
+    assert_eq!(oversized_report.methods.len(), 1);
+    assert_eq!(oversized_report.methods[0].service, UNKNOWN_RPC_LABEL);
+    assert_eq!(oversized_report.methods[0].method, UNKNOWN_RPC_LABEL);
+    assert_eq!(oversized_report.methods[0].count, 10_000);
+    {
+        let state = fr_oversized.latency_histograms.read().unwrap();
+        assert!(state.per_method.is_empty());
+        assert_eq!(state.tracked_method_count, 0);
+        assert!(state.unknown_bucket.is_some());
+    }
+
+    // 2. 10,000 distinct short pairs must respect `MAX_TRACKED_RPC_METHODS` (`2_048`) by reserving
+    // one slot for `<unknown>` and collapsing overflow without adding new entries.
+    let fr_capped = FlightRecorder::new();
+    for i in 0..10_000usize {
+        let svc = format!("svc_{i}");
+        let meth = format!("meth_{i}");
+        fr_capped.record_rpc_latency(&svc, &meth, Duration::from_micros(25));
+    }
+    // Re-recording an already tracked key must update it in-place without dropping it.
+    fr_capped.record_rpc_latency("svc_0", "meth_0", Duration::from_micros(35));
+
+    let capped_report = fr_capped.latency_histogram_report();
+    assert_eq!(capped_report.total_calls, 10_001);
+    assert!(capped_report.methods.len() <= MAX_TRACKED_RPC_METHODS);
+    assert_eq!(capped_report.methods.len(), MAX_TRACKED_RPC_METHODS);
+    let unknown_summary = capped_report
+        .methods
+        .iter()
+        .find(|m| m.service == UNKNOWN_RPC_LABEL && m.method == UNKNOWN_RPC_LABEL)
+        .expect("overflow bucket");
+    assert_eq!(
+        unknown_summary.count,
+        (10_000 - MAX_INDIVIDUAL_RPC_METHODS) as u64
+    );
+    let existing_summary = capped_report
+        .methods
+        .iter()
+        .find(|m| m.service == "svc_0" && m.method == "meth_0")
+        .expect("already tracked entry");
+    assert_eq!(existing_summary.count, 2);
+    {
+        let state = fr_capped.latency_histograms.read().unwrap();
+        assert_eq!(state.tracked_method_count, MAX_INDIVIDUAL_RPC_METHODS);
+        assert!(state.per_method.len() <= MAX_TRACKED_RPC_METHODS);
+        assert_eq!(
+            state.per_method.values().map(HashMap::len).sum::<usize>(),
+            MAX_INDIVIDUAL_RPC_METHODS
+        );
+    }
+}
+
+#[test]
+fn record_rpc_latency_classified_collapses_unmatched_and_preserves_known_rpcs() {
+    let fr = FlightRecorder::new();
+    fr.record_rpc_latency_classified("machoNet", "GetGlobalConfig", true, Duration::from_micros(120));
+    fr.record_rpc_latency_classified(
+        "charUnboundMgr",
+        "GetCharactersToSelect",
+        true,
+        Duration::from_micros(240),
+    );
+    let pad_64k = "u".repeat(65_536);
+    for i in 0..10_000usize {
+        let svc = format!("unknown_svc_{i}");
+        let meth = if i % 100 == 0 {
+            format!("{pad_64k}_{i}")
+        } else {
+            format!("unknown_meth_{i}")
+        };
+        fr.record_rpc_latency_classified(&svc, &meth, false, Duration::from_micros(30));
+    }
+
+    let report = fr.latency_histogram_report();
+    assert_eq!(report.total_calls, 10_002);
+    assert_eq!(report.methods.len(), 3);
+    let get_cfg = report
+        .methods
+        .iter()
+        .find(|m| m.service == "machoNet" && m.method == "GetGlobalConfig")
+        .expect("machoNet.GetGlobalConfig bucket");
+    assert_eq!(get_cfg.count, 1);
+    let get_chars = report
+        .methods
+        .iter()
+        .find(|m| m.service == "charUnboundMgr" && m.method == "GetCharactersToSelect")
+        .expect("charUnboundMgr.GetCharactersToSelect bucket");
+    assert_eq!(get_chars.count, 1);
+    let unknown = report
+        .methods
+        .iter()
+        .find(|m| m.service == UNKNOWN_RPC_LABEL && m.method == UNKNOWN_RPC_LABEL)
+        .expect("collapsed <unknown> bucket");
+    assert_eq!(unknown.count, 10_000);
+}
