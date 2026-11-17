@@ -1,14 +1,13 @@
 #![forbid(unsafe_code)]
 //! Regression tests (`#481` / `#916`) verifying standalone `chat_channel_acl` entries (such as
 //! `"global"`) persist, clear cleanly, never synthesize phantom `ChatChannelRecord`, and
-//! `rollback_social` preserves and restores them.
+//! `load_social_domain_rows` restores them.
 
 use super::domain_rows::{DomainRowChange, DOMAIN_SOCIAL_CHAT_CALENDAR};
 use super::quarantine::LoadContext;
 use super::schema::apply_migrations;
 use super::social_store::{
-    collect_social_domain_row_diffs, load_social_domain_rows, rollback_social,
-    sync_social_domain_rows,
+    collect_social_domain_row_diffs, load_social_domain_rows, sync_social_domain_rows,
 };
 use crate::types::{ChatChannelAclRecord, WorldStateSnapshot};
 use rusqlite::Connection;
@@ -57,9 +56,10 @@ fn standalone_global_chat_channel_acl_persists_reloads_and_survives_rollback() {
     );
     assert_eq!(loaded.chat_channel_acl.get("global"), Some(&acl));
 
-    // Mutate in memory and restore via `rollback_social`.
+    // Mutate in memory and reload via `load_social_domain_rows`.
     loaded.chat_channel_acl.clear();
-    rollback_social(&conn, &mut loaded).expect("rollback_social");
+    load_social_domain_rows(&conn, &mut loaded, &mut LoadContext::new(false))
+        .expect("load_social_domain_rows");
     assert_eq!(loaded.chat_channel_acl.get("global"), Some(&acl));
 
     // Clearing all ACL sets back to empty removes the persisted domain row without creating a channel.

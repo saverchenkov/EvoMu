@@ -3,8 +3,7 @@ use crate::accounts::{base64url_encode_no_pad, sha256_bytes};
 use crate::cow::CowMap;
 use crate::durable_domain_types::sorted_set_serde;
 use crate::persistence::WorldStateWalDelta;
-use crate::sqlite_store::fingerprints::canonical_fp;
-use crate::sqlite_store::fingerprints::{fnv1a_hasher, fp_sp6_lifecycle};
+use crate::sqlite_store::checked_json::{canonical_fp, fnv1a_hasher};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::hash::Hasher;
@@ -155,9 +154,9 @@ fn canonical_fp_all_primitives_and_sorted_set_serde() {
         mission_initial_npc_types: CowMap::from([("30000142:7".into(), vec![587, 588])]),
         ..Sp6PersistedState::default()
     };
-    let fp_a = fp_sp6_lifecycle(&sp6);
+    let fp_a = canonical_fp(&sp6);
     sp6.mission_initial_npc_types.get_mut("30000142:7").unwrap().push(589);
-    assert_ne!(fp_a, fp_sp6_lifecycle(&sp6));
+    assert_ne!(fp_a, canonical_fp(&sp6));
 }
 
 #[test]

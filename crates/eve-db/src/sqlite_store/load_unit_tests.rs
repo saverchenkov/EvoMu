@@ -372,13 +372,11 @@ fn load_snapshot_from_sqlite_restores_all_37_tables_and_post_processes_state() {
     orig.account_plex_vault.clear();
 
     replace_sqlite_from_snapshot(&mut conn, &orig).unwrap();
-    let (loaded, fp) = load_snapshot_from_sqlite(&conn).unwrap();
+    let loaded = load_snapshot_from_sqlite(&conn).unwrap();
 
     assert!(loaded.next_entity_id >= 250_000_000);
     assert_eq!(loaded.wal_seq, 77);
     assert!(loaded.markets_seeded);
-    assert_eq!(fp.wal_seq, 77);
-    assert!(fp.markets_seeded);
 
     let banned = &loaded.accounts["banned_user"];
     assert_eq!(banned.user_id, 99);

@@ -1,12 +1,12 @@
 //! `sqlite_store` — Durable SQLite schema migrations, row-level change tracking, and transactional persistence (`D-3`).
 
 pub mod auth_store;
+pub(crate) mod checked_json;
 pub mod industry_market_pve_store;
 pub mod corp_crimewatch_store;
 pub mod social_store;
 pub mod notes_lp_sequence_store;
 pub mod domain_rows;
-pub mod fingerprints;
 pub mod load;
 pub mod quarantine;
 pub mod schema;
@@ -16,8 +16,9 @@ pub mod sync_ext;
 pub mod system_checkpoint;
 
 pub use auth_store::*;
+#[cfg(test)]
+pub(crate) use checked_json::*;
 pub use domain_rows::*;
-pub use fingerprints::*;
 pub use load::*;
 pub use quarantine::*;
 pub use schema::*;

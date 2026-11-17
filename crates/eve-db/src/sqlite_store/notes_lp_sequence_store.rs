@@ -3,20 +3,10 @@
 //!
 //! (`owner_notes`, `corp_lp_balances`, `char_lp_logs`, and `sp6_lifecycle` moved to `domain_rows` in `#916`.)
 
-use crate::sqlite_store::fingerprints::TableFingerprints;
 use crate::types::WorldStateSnapshot;
 use rusqlite::{params, Connection, Transaction};
 
 pub const D6_SCHEMA_VERSION: i64 = 3;
-
-/// Fingerprints of the `D-6` monotonic sequence counters.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct D6Fingerprints {
-    pub next_alliance_id: i64,
-    pub next_corporation_id: i64,
-    pub next_notification_id: i64,
-    pub next_report_id: i64,
-}
 
 pub fn apply_d6_migration(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
@@ -34,15 +24,6 @@ pub fn apply_d6_migration(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(())
-}
-
-pub fn compute_d6_fingerprints(snap: &WorldStateSnapshot) -> D6Fingerprints {
-    D6Fingerprints {
-        next_alliance_id: snap.next_alliance_id,
-        next_corporation_id: snap.next_corporation_id,
-        next_notification_id: snap.next_notification_id,
-        next_report_id: snap.next_report_id,
-    }
 }
 
 pub fn load_d6_checked(
@@ -100,42 +81,42 @@ pub fn load_d6(conn: &Connection, snap: &mut WorldStateSnapshot) {
 /// Writes changed `D-6` ID counters; returns `true` if anything changed.
 pub fn sync_d6(
     tx: &Transaction<'_>,
+    before: Option<&WorldStateSnapshot>,
     snap: &WorldStateSnapshot,
-    fp: &mut TableFingerprints,
 ) -> Result<bool, String> {
     let mut changed = false;
-    let df = &mut fp.d6;
 
-    for (key, snap_val, fp_val) in [
-        ("next_alliance_id", snap.next_alliance_id, &mut df.next_alliance_id),
-        ("next_corporation_id", snap.next_corporation_id, &mut df.next_corporation_id),
-        ("next_notification_id", snap.next_notification_id, &mut df.next_notification_id),
-        ("next_report_id", snap.next_report_id, &mut df.next_report_id),
+    for (key, before_val, snap_val) in [
+        (
+            "next_alliance_id",
+            before.map(|b| b.next_alliance_id),
+            snap.next_alliance_id,
+        ),
+        (
+            "next_corporation_id",
+            before.map(|b| b.next_corporation_id),
+            snap.next_corporation_id,
+        ),
+        (
+            "next_notification_id",
+            before.map(|b| b.next_notification_id),
+            snap.next_notification_id,
+        ),
+        (
+            "next_report_id",
+            before.map(|b| b.next_report_id),
+            snap.next_report_id,
+        ),
     ] {
-        if *fp_val != snap_val {
+        if before_val != Some(snap_val) {
             changed = true;
             tx.execute(
                 "INSERT OR REPLACE INTO world_meta (meta_key, meta_value) VALUES (?1, ?2)",
                 params![key, snap_val],
             )
             .map_err(|e| e.to_string())?;
-            *fp_val = snap_val;
         }
     }
 
     Ok(changed)
-}
-
-/// Restores `D-6` monotonic ID counters from baseline fingerprints after a failed write (`try_with_mut_snapshot` rollback).
-pub fn rollback_d6(
-    _conn: &Connection,
-    snap: &mut WorldStateSnapshot,
-    fp: &TableFingerprints,
-) -> Result<(), String> {
-    let df = &fp.d6;
-    snap.next_alliance_id = df.next_alliance_id;
-    snap.next_corporation_id = df.next_corporation_id;
-    snap.next_notification_id = df.next_notification_id;
-    snap.next_report_id = df.next_report_id;
-    Ok(())
 }

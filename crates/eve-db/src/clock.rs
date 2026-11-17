@@ -344,8 +344,7 @@ impl crate::WorldRepository {
     /// connection without mutating in-memory state (`P2-0g`, `#908`).
     pub fn reload_snapshot_from_sqlite(&self) -> Result<crate::WorldStateSnapshot, String> {
         let writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-        let (snap, _fp) = crate::sqlite_store::load_snapshot_from_sqlite(&writer.conn)?;
-        Ok(snap)
+        crate::sqlite_store::load_snapshot_from_sqlite(&writer.conn)
     }
 
     /// Mutates the in-memory [`crate::WorldStateSnapshot`] without syncing to the attached SQLite

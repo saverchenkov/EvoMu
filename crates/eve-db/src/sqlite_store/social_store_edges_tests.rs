@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use super::{
-    drop_legacy_social_tables, load_social_domain_rows, rollback_social, sync_social_domain_rows,
+    drop_legacy_social_tables, load_social_domain_rows, sync_social_domain_rows,
     PersistedBookmarkFolder, PersistedBookmarkMeta, PersistedChatChannel, LEGACY_D6_SOCIAL_SQL,
     LEGACY_SOCIAL_TABLES,
 };
@@ -423,7 +423,7 @@ fn social_legacy_tables_migration_preserves_newer_domain_rows_and_drops_tables()
     )
     .unwrap();
 
-    let (migrated, _) = load_snapshot_from_sqlite(&conn).expect("load + migrate legacy social tables");
+    let migrated = load_snapshot_from_sqlite(&conn).expect("load + migrate legacy social tables");
     assert!(
         existing_legacy_social_tables(&conn).is_empty(),
         "startup migration must drop all 19 legacy social tables"
@@ -600,7 +600,7 @@ fn social_load_missing_tables_unknown_keys_and_corrupt_rows_fail_closed_or_quara
 }
 
 #[test]
-fn social_rollback_fails_closed_and_restores_all_four_domains() {
+fn social_load_domain_rows_fails_closed_on_corrupt_row() {
     let mut conn = Connection::open_in_memory().unwrap();
     apply_migrations(&conn).unwrap();
 
@@ -640,7 +640,7 @@ fn social_rollback_fails_closed_and_restores_all_four_domains() {
     dirty.char_notes.insert((90_000_001, 90_000_002), "Dirty".into());
     let expected_dirty = dirty.clone();
 
-    // Corrupt 1 row in `social.contacts_notes` -> `load_social_domain_rows` & `rollback_social`
+    // Corrupt 1 row in `social.contacts_notes` -> `load_social_domain_rows`
     // must fail closed without mutating any field of `dirty`.
     conn.execute(
         "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'char_notes/90000001|999', '{bad')",
@@ -651,31 +651,4 @@ fn social_rollback_fails_closed_and_restores_all_four_domains() {
         .expect_err("corrupt row must fail load_social_domain_rows");
     assert!(load_err.contains(DOMAIN_SOCIAL_CONTACTS_NOTES), "{load_err}");
     assert_all_24_social_fields_equal(&dirty, &expected_dirty);
-
-    let failures_before = crate::persist_failures_total();
-    let rb_err = rollback_social(&conn, &mut dirty)
-        .expect_err("corrupt row must fail rollback_social closed");
-    assert!(rb_err.contains(DOMAIN_SOCIAL_CONTACTS_NOTES), "{rb_err}");
-    assert!(crate::persist_failures_total() >= failures_before + 1);
-    assert_all_24_social_fields_equal(&dirty, &expected_dirty);
-
-    // Clean DB restores all 24 collections cleanly back to `committed`.
-    conn.execute(
-        "DELETE FROM domain_rows WHERE domain = ?1 AND key = 'char_notes/90000001|999'",
-        [DOMAIN_SOCIAL_CONTACTS_NOTES],
-    )
-    .unwrap();
-    rollback_social(&conn, &mut dirty).expect("clean rollback restores all 24 fields");
-    assert_all_24_social_fields_equal(&dirty, &committed);
-
-    // Dropped `domain_rows` causes `rollback_social` to fail closed + increment metric.
-    conn.execute("DROP TABLE domain_rows", []).unwrap();
-    dirty.char_notes.insert((90_000_001, 90_000_002), "KeepMe".into());
-    let before_drop_fail = crate::persist_failures_total();
-    assert!(rollback_social(&conn, &mut dirty).is_err());
-    assert!(crate::persist_failures_total() >= before_drop_fail + 1);
-    assert_eq!(
-        dirty.char_notes.get(&(90_000_001, 90_000_002)),
-        Some(&"KeepMe".into())
-    );
 }

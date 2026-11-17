@@ -1148,7 +1148,7 @@ impl ServerContext {
                     storage_backend = "memory",
                     "opening ephemeral in-memory world repository"
                 );
-                Arc::new(WorldRepository::new_empty_with_snapshot_path(None)?)
+                Arc::new(WorldRepository::new_in_memory()?)
             }
             other => {
                 return Err(format!("Unsupported storage backend '{other}'"));

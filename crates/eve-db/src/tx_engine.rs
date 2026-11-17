@@ -2,7 +2,7 @@
 //! external block-persisted `EntityIdAllocator`, and SQLite fault-plan injection (`RFC-2 §3.2–§3.4`).
 
 use crate::cow::CowDiffItem;
-use crate::sqlite_store::fingerprints::{FiniteFloatChecker, TableFingerprints};
+use crate::sqlite_store::checked_json::{to_checked_json_string, FiniteFloatChecker};
 use crate::types::{
     CharacterRecord, DbError, InventoryItemRecord, MarketOrderRecord, SkillQueueEntry,
     TrainedSkillRecord, TypeId, WorldStateSnapshot,
@@ -863,6 +863,7 @@ impl EntityIdAllocator {
     }
 
     /// Resets in-memory allocator bounds (used when loading a full snapshot file into memory).
+    #[cfg(any(test, feature = "legacy-json-snapshot"))]
     pub(crate) fn reset_from_load(&self, next: i64, persisted_high_water: i64) {
         let bounded = next.max(200_000_000);
         let mut guard = self
@@ -1135,110 +1136,26 @@ impl<'a, 'conn> TxSqlExecutor<'a, 'conn> {
     }
 }
 
-/// Placeholder for hot-table fingerprint updates.
-///
-/// Hot `CowMap` tables (`items`, `characters`, `skills`, `skill_queues`, `market_orders`) are
-/// diffed in `O(k log N)` via structural sharing in `ChangeSet::diff`, so `WorldRepository::tx`
-/// never re-fingerprints mutated `CowMap` rows (`#826`).
-#[derive(Default)]
-pub(crate) struct HotFpDelta {
-    pub(crate) wallet_journal: Option<(usize, u64)>,
-    pub(crate) mails: Option<(usize, u64)>,
-    pub(crate) structures: Vec<(i64, Option<u64>)>,
-    pub(crate) mail_timestamps: Vec<(i64, Option<u64>)>,
-    pub(crate) item_custom_names: Vec<(i64, Option<u64>)>,
-    pub(crate) entity_kv: Vec<(crate::service_domains::EntityKvKey, Option<u64>)>,
-}
-
-impl HotFpDelta {
-    #[inline]
-    pub(crate) fn apply_to(self, fp: &mut TableFingerprints) {
-        self.apply_to_ref(fp);
-    }
-
-    fn apply_to_ref(&self, fp: &mut TableFingerprints) {
-        if let Some((len, hash)) = self.wallet_journal {
-            fp.wallet_journal_len = len;
-            fp.wallet_journal_hash = hash;
-        }
-        if let Some((len, hash)) = self.mails {
-            fp.mails_len = len;
-            fp.mails_hash = hash;
-        }
-        if !self.structures.is_empty() {
-            for &(sid, opt_fp) in &self.structures {
-                match opt_fp {
-                    Some(h) => {
-                        fp.structures.insert(sid, h);
-                    }
-                    None => {
-                        fp.structures.remove(&sid);
-                    }
-                }
-            }
-        }
-        if !self.mail_timestamps.is_empty() {
-            for &(mid, opt_ts) in &self.mail_timestamps {
-                match opt_ts {
-                    Some(ts) => {
-                        fp.mail_timestamps.insert(mid, ts);
-                    }
-                    None => {
-                        fp.mail_timestamps.remove(&mid);
-                    }
-                }
-            }
-        }
-        if !self.item_custom_names.is_empty() {
-            for &(iid, opt_fp) in &self.item_custom_names {
-                match opt_fp {
-                    Some(h) => {
-                        fp.item_custom_names.insert(iid, h);
-                    }
-                    None => {
-                        fp.item_custom_names.remove(&iid);
-                    }
-                }
-            }
-        }
-        if !self.entity_kv.is_empty() {
-            use crate::sqlite_store::service_domains_store::entity_kv_row_contrib;
-            for (k, opt_rfp) in &self.entity_kv {
-                if let Some(old_rfp) = fp.service_domains.entity_kv_rows.get(k).copied() {
-                    fp.service_domains.entity_kv_fp ^= entity_kv_row_contrib(k, old_rfp);
-                }
-                match *opt_rfp {
-                    Some(new_rfp) => {
-                        fp.service_domains.entity_kv_fp ^= entity_kv_row_contrib(k, new_rfp);
-                        fp.service_domains.entity_kv_rows.insert(k.clone(), new_rfp);
-                    }
-                    None => {
-                        fp.service_domains.entity_kv_rows.remove(k);
-                    }
-                }
-            }
-        }
-    }
-}
+#[cfg(any(test, feature = "legacy-json-snapshot"))]
+pub(crate) type ApplyChangesetOutput = crate::persistence::WorldStateWalDelta;
+#[cfg(not(any(test, feature = "legacy-json-snapshot")))]
+pub(crate) type ApplyChangesetOutput = ();
 
 /// Applies `changes` inside an already-started SQLite `Transaction` in `O(k)` for `CowMap` hot
-/// tables and `domain_rows` without re-fingerprinting `CowMap` rows (`#826`).
+/// tables and `domain_rows` (`#826`, `#915`).
 pub(crate) fn apply_changeset_to_sqlite(
     exec: &mut TxSqlExecutor<'_, '_>,
+    before: &WorldStateSnapshot,
     snap: &WorldStateSnapshot,
     changes: &ChangeSet,
-    _base_fp: &TableFingerprints,
-    staged_cold_fp: &mut TableFingerprints,
-    need_wal_delta: bool,
-) -> Result<(crate::persistence::WorldStateWalDelta, HotFpDelta), TxError> {
-    use crate::sqlite_store::fingerprints::to_checked_json_string;
-
+    #[cfg(any(test, feature = "legacy-json-snapshot"))] need_wal_delta: bool,
+) -> Result<ApplyChangesetOutput, TxError> {
+    #[cfg(any(test, feature = "legacy-json-snapshot"))]
     let mut delta = Box::new(crate::persistence::WorldStateWalDelta {
         seq: snap.wal_seq,
         next_entity_id: snap.next_entity_id,
         ..Default::default()
     });
-    let mut hot_fp = HotFpDelta::default();
 
     if changes.meta_changed {
         exec.execute(
@@ -1250,12 +1167,9 @@ pub(crate) fn apply_changeset_to_sqlite(
                 i64::from(snap.markets_seeded)
             ],
         )?;
-        staged_cold_fp.next_entity_id = snap.next_entity_id;
-        staged_cold_fp.wal_seq = snap.wal_seq;
-        staged_cold_fp.markets_seeded = snap.markets_seeded;
     }
 
-    // Hot CowMap tables: O(k) SQL updates directly from ChangeSet with zero row re-fingerprinting!
+    // Hot CowMap tables: O(k) SQL updates directly from ChangeSet with zero row scanning!
     for ch in &changes.characters {
         match &ch.after {
             None => {
@@ -1300,6 +1214,7 @@ pub(crate) fn apply_changeset_to_sqlite(
                         rec_json,
                     ],
                 )?;
+                #[cfg(any(test, feature = "legacy-json-snapshot"))]
                 if need_wal_delta {
                     delta.upserted_characters.push((**v).clone());
                 }
@@ -1345,6 +1260,7 @@ pub(crate) fn apply_changeset_to_sqlite(
                         "INSERT OR REPLACE INTO skills (character_id, type_id, level, skill_points) VALUES (?1, ?2, ?3, ?4)",
                         params![ch.key, tid as i64, sk.level as i64, sk.skill_points],
                     )?;
+                    #[cfg(any(test, feature = "legacy-json-snapshot"))]
                     if need_wal_delta {
                         delta.upserted_skills.push((ch.key, sk.clone()));
                     }
@@ -1385,6 +1301,7 @@ pub(crate) fn apply_changeset_to_sqlite(
                         ],
                     )?;
                 }
+                #[cfg(any(test, feature = "legacy-json-snapshot"))]
                 if need_wal_delta {
                     delta.upserted_skill_queues.push((ch.key, (**q).clone()));
                 }
@@ -1400,6 +1317,7 @@ pub(crate) fn apply_changeset_to_sqlite(
                     "DELETE FROM items WHERE item_id = ?1",
                     params![ch.key],
                 )?;
+                #[cfg(any(test, feature = "legacy-json-snapshot"))]
                 if need_wal_delta {
                     delta.removed_items.push(ch.key);
                 }
@@ -1422,6 +1340,7 @@ pub(crate) fn apply_changeset_to_sqlite(
                         rec_json,
                     ],
                 )?;
+                #[cfg(any(test, feature = "legacy-json-snapshot"))]
                 if need_wal_delta {
                     delta.upserted_items.push((**item).clone());
                 }
@@ -1438,6 +1357,7 @@ pub(crate) fn apply_changeset_to_sqlite(
                         "DELETE FROM market_orders WHERE order_id = ?1",
                         params![ch.key],
                     )?;
+                    #[cfg(any(test, feature = "legacy-json-snapshot"))]
                     if need_wal_delta {
                         delta.removed_market_orders.push(ch.key);
                     }
@@ -1462,6 +1382,7 @@ pub(crate) fn apply_changeset_to_sqlite(
                             ord.escrow.0,
                         ],
                     )?;
+                    #[cfg(any(test, feature = "legacy-json-snapshot"))]
                     if need_wal_delta {
                         delta.upserted_market_orders.push((**ord).clone());
                     }
@@ -1488,12 +1409,11 @@ pub(crate) fn apply_changeset_to_sqlite(
                         e.reason,
                     ],
                 )?;
+                #[cfg(any(test, feature = "legacy-json-snapshot"))]
                 if need_wal_delta {
                     delta.appended_wallet_journal.push(e.clone());
                 }
             }
-            let len = snap.wallet_journal.len();
-            hot_fp.wallet_journal = Some((len, snap.wallet_journal.prefix_hash(len)));
         }
         crate::cow_collections::CowVecDiff::Rewritten => {
             exec.execute(
@@ -1517,8 +1437,6 @@ pub(crate) fn apply_changeset_to_sqlite(
                     ],
                 )?;
             }
-            let len = snap.wallet_journal.len();
-            hot_fp.wallet_journal = Some((len, snap.wallet_journal.prefix_hash(len)));
         }
     }
 
@@ -1540,8 +1458,6 @@ pub(crate) fn apply_changeset_to_sqlite(
                     ],
                 )?;
             }
-            let len = snap.mails.len();
-            hot_fp.mails = Some((len, snap.mails.prefix_hash(len)));
         }
         crate::cow_collections::CowVecDiff::Rewritten => {
             exec.execute("mail:delete_all", "DELETE FROM mail", params![])?;
@@ -1560,13 +1476,10 @@ pub(crate) fn apply_changeset_to_sqlite(
                     ],
                 )?;
             }
-            let len = snap.mails.len();
-            hot_fp.mails = Some((len, snap.mails.prefix_hash(len)));
         }
     }
 
     if !changes.structures.is_empty() {
-        use crate::sqlite_store::fingerprints::fp_structure;
         for ch in &changes.structures {
             match &ch.after {
                 None => {
@@ -1575,7 +1488,6 @@ pub(crate) fn apply_changeset_to_sqlite(
                         "DELETE FROM structures WHERE structure_id = ?1",
                         params![ch.key],
                     )?;
-                    hot_fp.structures.push((ch.key, None));
                 }
                 Some(st) => {
                     let js = to_checked_json_string(&**st).map_err(TxError::Persist)?;
@@ -1598,7 +1510,6 @@ pub(crate) fn apply_changeset_to_sqlite(
                             js,
                         ],
                     )?;
-                    hot_fp.structures.push((ch.key, Some(fp_structure(&**st))));
                 }
             }
         }
@@ -1613,7 +1524,6 @@ pub(crate) fn apply_changeset_to_sqlite(
                         "DELETE FROM mail_timestamps WHERE mail_id = ?1",
                         params![ch.key],
                     )?;
-                    hot_fp.mail_timestamps.push((ch.key, None));
                 }
                 Some(ts) => {
                     exec.execute(
@@ -1621,14 +1531,12 @@ pub(crate) fn apply_changeset_to_sqlite(
                         "INSERT OR REPLACE INTO mail_timestamps (mail_id, timestamp_unix) VALUES (?1, ?2)",
                         params![ch.key, **ts as i64],
                     )?;
-                    hot_fp.mail_timestamps.push((ch.key, Some(**ts)));
                 }
             }
         }
     }
 
     if !changes.item_custom_names.is_empty() {
-        use crate::sqlite_store::fingerprints::fp_json;
         for ch in &changes.item_custom_names {
             match &ch.after {
                 None => {
@@ -1637,7 +1545,6 @@ pub(crate) fn apply_changeset_to_sqlite(
                         "DELETE FROM item_custom_names WHERE item_id = ?1",
                         params![ch.key],
                     )?;
-                    hot_fp.item_custom_names.push((ch.key, None));
                 }
                 Some(name) => {
                     exec.execute(
@@ -1645,14 +1552,12 @@ pub(crate) fn apply_changeset_to_sqlite(
                         "INSERT OR REPLACE INTO item_custom_names (item_id, custom_name) VALUES (?1, ?2)",
                         params![ch.key, &**name],
                     )?;
-                    hot_fp.item_custom_names.push((ch.key, Some(fp_json(&**name))));
                 }
             }
         }
     }
 
     if !changes.entity_kv.is_empty() {
-        use crate::sqlite_store::service_domains_store::entity_kv_row_fp;
         for ch in &changes.entity_kv {
             match &ch.after {
                 None => {
@@ -1661,7 +1566,6 @@ pub(crate) fn apply_changeset_to_sqlite(
                         "DELETE FROM entity_kv WHERE ns = ?1 AND entity_id = ?2 AND sub_key = ?3",
                         params![ch.key.ns.as_str(), ch.key.entity_id, ch.key.sub_key],
                     )?;
-                    hot_fp.entity_kv.push((ch.key.clone(), None));
                 }
                 Some(row) => {
                     crate::service_domains::validate_entity_kv_value(
@@ -1680,9 +1584,6 @@ pub(crate) fn apply_changeset_to_sqlite(
                             row.updated_unix as i64
                         ],
                     )?;
-                    hot_fp
-                        .entity_kv
-                        .push((ch.key.clone(), Some(entity_kv_row_fp(&**row))));
                 }
             }
         }
@@ -1695,23 +1596,30 @@ pub(crate) fn apply_changeset_to_sqlite(
     // Selective cold domain SQL sync: never scans the 5 hot CowMap tables!
     let cd = &changes.cold_domains;
     if cd.any() {
-        hot_fp.apply_to_ref(staged_cold_fp);
         exec.step_fault_check("cold_domains")?;
         crate::sqlite_store::sync::sync_selected_cold_domains_to_sqlite(
             exec.tx,
+            before,
             snap,
-            staged_cold_fp,
             cd,
-            &mut delta,
+            #[cfg(any(test, feature = "legacy-json-snapshot"))]
+            need_wal_delta.then_some(&mut *delta),
         )
         .map_err(TxError::Persist)?;
     }
 
-    delta.dirty = !changes.is_empty();
-    if need_wal_delta && (changes.cold_changed || !changes.domain_rows.is_empty()) {
-        delta.full_snapshot = Some(Box::new(snap.clone()));
+    #[cfg(any(test, feature = "legacy-json-snapshot"))]
+    {
+        delta.dirty = !changes.is_empty();
+        if need_wal_delta && (changes.cold_changed || !changes.domain_rows.is_empty()) {
+            delta.full_snapshot = Some(Box::new(snap.clone()));
+        }
+        Ok(*delta)
     }
-    Ok((*delta, hot_fp))
+    #[cfg(not(any(test, feature = "legacy-json-snapshot")))]
+    {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1974,7 +1882,6 @@ mod tests {
             let mut conn = rusqlite::Connection::open_in_memory().expect("open_in_memory");
             crate::sqlite_store::apply_migrations(&conn).expect("migrations");
             let mut snap = WorldStateSnapshot::default();
-            let mut fp = crate::sqlite_store::TableFingerprints::default();
             let tx = conn.transaction().expect("seed tx");
             {
                 let mut stmt = tx
@@ -1987,7 +1894,6 @@ mod tests {
                     let id = 200_100_000 + i as i64;
                     let item = make_test_item(id, 90_000_001, 1);
                     stmt.execute(rusqlite::params![id]).expect("seed sql item");
-                    fp.items.insert(id, crate::sqlite_store::fingerprints::fp_item(&item));
                     snap.items.insert(id, item);
                 }
             }
@@ -2000,7 +1906,6 @@ mod tests {
             WorldRepository::from_parts(
                 snap,
                 conn,
-                fp,
                 200_100_000 + count as i64,
                 None,
                 crate::types::AuthRuntimeState::new(jwt_secret),

@@ -5,7 +5,6 @@ use crate::sqlite_store::domain_rows::{
     DOMAIN_CHAR_LP_LOGS, DOMAIN_MARKET_TRANSACTIONS, DOMAIN_OWNER_NOTES, DOMAIN_SOCIAL_BOOKMARKS,
     DOMAIN_SOCIAL_CHAT_CALENDAR, DOMAIN_SOCIAL_MAIL, DOMAIN_WALLET_JOURNAL_META,
 };
-use crate::sqlite_store::fingerprints::{compute_fingerprints, TableFingerprints};
 use crate::sqlite_store::quarantine::{
     default_quarantine_unreadable, row_col_string, row_composite_key_string, row_payload_summary,
     LoadContext,
@@ -14,11 +13,11 @@ use crate::types::*;
 use eve_sde::{SolarSystemId, TypeId};
 use rusqlite::Connection;
 
-/// Loads the complete `WorldStateSnapshot` and its `TableFingerprints` from the SQLite database,
+/// Loads the complete `WorldStateSnapshot` from the SQLite database,
 /// failing closed on any corrupted row unless `--quarantine-unreadable` is active.
 pub fn load_snapshot_from_sqlite(
     conn: &Connection,
-) -> Result<(WorldStateSnapshot, TableFingerprints), String> {
+) -> Result<WorldStateSnapshot, String> {
     load_snapshot_from_sqlite_with_options(conn, default_quarantine_unreadable())
 }
 
@@ -258,13 +257,13 @@ pub fn load_entity_block_from_sqlite(conn: &Connection) -> Result<i64, String> {
     Ok(block)
 }
 
-/// Loads the complete `WorldStateSnapshot` and its `TableFingerprints` from the SQLite database.
+/// Loads the complete `WorldStateSnapshot` from the SQLite database.
 /// When `quarantine_unreadable` is `false`, any unreadable row returns `Err` naming the table and key.
 /// When `quarantine_unreadable` is `true`, offending rows are moved into `quarantine_rows` and logged.
 pub fn load_snapshot_from_sqlite_with_options(
     conn: &Connection,
     quarantine_unreadable: bool,
-) -> Result<(WorldStateSnapshot, TableFingerprints), String> {
+) -> Result<WorldStateSnapshot, String> {
     let mut ctx = LoadContext::new(quarantine_unreadable);
     let mut snap = WorldStateSnapshot {
         next_entity_id: 200_000_000,
@@ -1620,10 +1619,10 @@ pub fn load_snapshot_from_sqlite_with_options(
 
     let can_sync_migrations =
         conn.is_autocommit() && !conn.is_readonly(rusqlite::DatabaseName::Main).unwrap_or(false);
-    let mut pre_migration_fp = can_sync_migrations.then(|| compute_fingerprints(&snap));
-    // Run startup snapshot migrations BEFORE computing baseline fingerprints and flush any
-    // migrated rows immediately into SQLite so neither clean reads nor first-transaction rollbacks
-    // revert `next_entity_id`, `account_plex_vault`, `service_domains`, or `fw_system_occupations`.
+    let pre_migration = can_sync_migrations.then(|| snap.clone());
+    // Run startup snapshot migrations and flush any migrated rows immediately into SQLite so
+    // neither clean reads nor first-transaction rollbacks revert `next_entity_id`,
+    // `account_plex_vault`, `service_domains`, or `fw_system_occupations`.
     snap.fold_legacy_plex_balances();
     snap.migrate_legacy_service_state();
     snap.reconcile_id_counters();
@@ -1635,55 +1634,65 @@ pub fn load_snapshot_from_sqlite_with_options(
     for (&sid, st) in &mut snap.system_states {
         st.solar_system_id = sid;
     }
-    let fp = if let Some(mut fp) = pre_migration_fp.take() {
-        if had_legacy_ledger
+    if let Some(pre_mig) = pre_migration {
+        let had_any_legacy = had_legacy_ledger
             || had_legacy_notes_lp
             || had_legacy_sp6_lifecycle
             || had_legacy_social
             || had_legacy_corp_crimewatch
             || had_legacy_industry_market_pve
-            || had_legacy_service_domains
-        {
+            || had_legacy_service_domains;
+        if had_any_legacy {
             super::domain_rows::apply_domain_rows_migration(conn)?;
         }
-        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-        let delta = super::sync::sync_dirty_to_sqlite(&tx, &snap, &mut fp, false)?;
-        if had_legacy_ledger {
-            super::domain_rows::drop_legacy_ledger_tables(&tx)?;
-        }
-        if had_legacy_notes_lp {
-            super::domain_rows::drop_legacy_notes_lp_tables(&tx)?;
-        }
-        if had_legacy_sp6_lifecycle {
-            super::domain_rows::drop_legacy_sp6_lifecycle_table(&tx)?;
-        }
-        if had_legacy_social {
-            super::domain_rows::drop_legacy_social_tables(&tx)?;
-        }
-        if had_legacy_corp_crimewatch {
-            super::domain_rows::drop_legacy_corp_crimewatch_tables(&tx)?;
-        }
-        if had_legacy_industry_market_pve {
-            super::domain_rows::drop_legacy_industry_market_pve_tables(&tx)?;
-        }
-        if had_legacy_service_domains {
-            super::domain_rows::drop_legacy_service_domain_tables(&tx)?;
-        }
-        if delta.dirty
-            || had_legacy_ledger
-            || had_legacy_notes_lp
-            || had_legacy_sp6_lifecycle
-            || had_legacy_social
-            || had_legacy_corp_crimewatch
-            || had_legacy_industry_market_pve
-            || had_legacy_service_domains
-        {
+        let changes = crate::tx_engine::ChangeSet::diff(snap.wal_seq, &pre_mig, &snap);
+        let did_change_snap = !changes.is_empty();
+        if did_change_snap || had_any_legacy {
+            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+            if did_change_snap {
+                let mut exec =
+                    crate::tx_engine::TxSqlExecutor::new(&tx, crate::tx_engine::TxFaultPlan::None);
+                let _ = crate::tx_engine::apply_changeset_to_sqlite(
+                    &mut exec,
+                    &pre_mig,
+                    &snap,
+                    &changes,
+                    #[cfg(any(test, feature = "legacy-json-snapshot"))]
+                    false,
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            if had_legacy_ledger {
+                super::domain_rows::sync_ledger_domain_rows(&tx, &snap)?;
+                super::domain_rows::drop_legacy_ledger_tables(&tx)?;
+            }
+            if had_legacy_notes_lp {
+                super::domain_rows::sync_notes_lp_domain_rows(&tx, &snap)?;
+                super::domain_rows::drop_legacy_notes_lp_tables(&tx)?;
+            }
+            if had_legacy_sp6_lifecycle {
+                super::domain_rows::sync_sp6_lifecycle_domain_rows(&tx, &snap)?;
+                super::domain_rows::drop_legacy_sp6_lifecycle_table(&tx)?;
+            }
+            if had_legacy_social {
+                super::social_store::sync_social_domain_rows(&tx, &snap)?;
+                super::domain_rows::drop_legacy_social_tables(&tx)?;
+            }
+            if had_legacy_corp_crimewatch {
+                super::corp_crimewatch_store::sync_corp_crimewatch_domain_rows(&tx, &snap)?;
+                super::domain_rows::drop_legacy_corp_crimewatch_tables(&tx)?;
+            }
+            if had_legacy_industry_market_pve {
+                super::industry_market_pve_store::sync_industry_market_pve_domain_rows(&tx, &snap)?;
+                super::domain_rows::drop_legacy_industry_market_pve_tables(&tx)?;
+            }
+            if had_legacy_service_domains {
+                super::service_domains_store::sync_service_domains_rows(&tx, &snap)?;
+                super::domain_rows::drop_legacy_service_domain_tables(&tx)?;
+            }
             tx.commit().map_err(|e| e.to_string())?;
         }
-        fp
-    } else {
-        compute_fingerprints(&snap)
-    };
-    Ok((snap, fp))
+    }
+    Ok(snap)
 }
 #[cfg(test)] #[path = "load_unit_tests.rs"] mod load_unit_tests;

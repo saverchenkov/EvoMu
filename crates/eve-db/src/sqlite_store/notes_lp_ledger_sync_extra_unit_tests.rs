@@ -5,10 +5,9 @@ use super::domain_rows::{
     load_ledger_domain_rows, load_notes_lp_domain_rows, sync_ledger_domain_rows,
     sync_notes_lp_domain_rows,
 };
-use super::fingerprints::TableFingerprints;
 use super::load::load_snapshot_from_sqlite;
 use super::notes_lp_sequence_store::{
-    apply_d6_migration, compute_d6_fingerprints, load_d6, rollback_d6, sync_d6, D6_SCHEMA_VERSION,
+    apply_d6_migration, load_d6, sync_d6, D6_SCHEMA_VERSION,
 };
 use super::quarantine::LoadContext;
 use super::schema::apply_migrations;
@@ -19,7 +18,7 @@ use crate::types::*;
 use rusqlite::Connection;
 
 #[test]
-fn notes_lp_sequence_store_granular_mutations_deletions_and_selective_rollbacks() {
+fn notes_lp_sequence_store_granular_mutations_and_deletions() {
     assert_eq!(D6_SCHEMA_VERSION, 3);
     let mut conn = Connection::open_in_memory().unwrap();
     apply_migrations(&conn).unwrap();
@@ -34,8 +33,6 @@ fn notes_lp_sequence_store_granular_mutations_deletions_and_selective_rollbacks(
     assert!(init_snap.next_report_id >= 1);
 
     let mut snap = init_snap;
-    let mut fp = TableFingerprints::default();
-    fp.d6 = compute_d6_fingerprints(&snap);
 
     // 1. Mutate each ID counter individually and verify sync_d6 returns true
     for (field_idx, new_val) in [
@@ -44,6 +41,7 @@ fn notes_lp_sequence_store_granular_mutations_deletions_and_selective_rollbacks(
         (2, 940_333_444i64),
         (3, 555_666i64),
     ] {
+        let before = snap.clone();
         match field_idx {
             0 => snap.next_alliance_id = new_val,
             1 => snap.next_corporation_id = new_val,
@@ -51,7 +49,7 @@ fn notes_lp_sequence_store_granular_mutations_deletions_and_selective_rollbacks(
             _ => snap.next_report_id = new_val,
         }
         let tx = conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_d6(&tx, Some(&before), &snap).unwrap());
         tx.commit().unwrap();
     }
 
@@ -100,11 +98,12 @@ fn notes_lp_sequence_store_granular_mutations_deletions_and_selective_rollbacks(
             timestamp_unix: 2_500,
         }],
     );
+    let before_d6 = snap.clone();
     snap.sp6_lifecycle.last_downtime_day_idx = Some(20_100);
     snap.next_report_id += 1;
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_d6(&tx, Some(&before_d6), &snap).unwrap());
         assert!(sync_notes_lp_domain_rows(&tx, &snap).unwrap());
         assert!(!sync_notes_lp_domain_rows(&tx, &snap).unwrap());
         assert!(super::domain_rows::sync_sp6_lifecycle_domain_rows(&tx, &snap).unwrap());
@@ -112,16 +111,10 @@ fn notes_lp_sequence_store_granular_mutations_deletions_and_selective_rollbacks(
         tx.commit().unwrap();
     }
 
-    // 3. Test rollback_d6 on sequence counters and verify Family 2 in-place mutations
-    //    sync cleanly via `domain_rows` and reload after deletion.
+    // 3. Verify Family 2 in-place mutations sync cleanly via `domain_rows` and reload after deletion.
     snap.owner_notes.get_mut(&10).unwrap().note = "ModifiedInPlace".into();
     snap.corp_lp_balances.insert((98_000_001, 1_000_125), 9_999);
     snap.char_lp_logs.get_mut(&90_000_001).unwrap()[0].amount = 9_999;
-
-    let expected_report_id = snap.next_report_id;
-    snap.next_report_id += 50;
-    rollback_d6(&conn, &mut snap, &fp).unwrap();
-    assert_eq!(snap.next_report_id, expected_report_id);
 
     // 4. Delete one key from each collection and verify the other key remains in SQLite
     snap.owner_notes.remove(&10);
@@ -226,7 +219,7 @@ fn ledger_store_and_sync_ext_in_place_updates_order_and_selective_rollbacks() {
     assert_eq!(loaded_ledger.wallet_journal_meta[&1].date_unix, 1_000);
     assert_eq!(loaded_ledger.market_transactions[&100].quantity, 25);
 
-    let mut fp = TableFingerprints::default();
+    let before_ext_1 = snap.clone();
 
     // Sync extension tables: insert 2 entries per table, update 1 in place, delete 1, and reload from SQLite
     snap.character_last_jump_unix.insert(1, 100);
@@ -282,10 +275,11 @@ fn ledger_store_and_sync_ext_in_place_updates_order_and_selective_rollbacks() {
 
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_extension_tables(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_extension_tables(&tx, Some(&before_ext_1), &snap).unwrap());
         tx.commit().unwrap();
     }
 
+    let before_ext_2 = snap.clone();
     // Remove key 1 and mutate key 2 in-place across all 9 extension tables
     snap.character_last_jump_unix.remove(&1);
     snap.character_last_jump_unix.insert(2, 201);
@@ -308,11 +302,11 @@ fn ledger_store_and_sync_ext_in_place_updates_order_and_selective_rollbacks() {
 
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_extension_tables(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_extension_tables(&tx, Some(&before_ext_2), &snap).unwrap());
         tx.commit().unwrap();
     }
 
-    let (reloaded, _) = load_snapshot_from_sqlite(&conn).unwrap();
+    let reloaded = load_snapshot_from_sqlite(&conn).unwrap();
     assert!(!reloaded.character_last_jump_unix.contains_key(&1));
     assert_eq!(reloaded.character_last_jump_unix.get(&2), Some(&201));
     assert!(!reloaded.character_cspa_charges.contains_key(&1));

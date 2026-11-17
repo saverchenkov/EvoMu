@@ -116,7 +116,7 @@ async fn run_server(boot_start: std::time::Instant) -> Result<()> {
     // Pre-spawn Jita (30000142) solar system actor inside the ServerContext registry
     let _jita = ctx.systems.get_or_spawn(30000142);
     eve_server::lifecycle::set_open_sessions(ctx.db.online_session_count() as usize);
-    eve_server::lifecycle::set_pending_wal_records(ctx.db.pending_wal_records_count() as u64);
+    eve_server::lifecycle::set_pending_wal_records(0);
     eve_server::ops_telemetry::log_startup_presence_summary(
         &ctx,
         boot_start.elapsed().as_millis() as u64,
@@ -183,9 +183,7 @@ async fn run_server(boot_start: std::time::Instant) -> Result<()> {
                 eve_server::lifecycle::set_open_sessions(
                     physics_ctx.db.online_session_count() as usize,
                 );
-                eve_server::lifecycle::set_pending_wal_records(
-                    physics_ctx.db.pending_wal_records_count() as u64,
-                );
+                eve_server::lifecycle::set_pending_wal_records(0);
                 eve_server::ops_telemetry::record_tick_summary(
                     eve_server::ops_telemetry::TickSummary {
                         tick_seq,

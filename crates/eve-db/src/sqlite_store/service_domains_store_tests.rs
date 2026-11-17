@@ -4,9 +4,9 @@ use crate::service_domains::{
     TourneyMatch, TourneyStore, DEFAULT_ENTITY_KV_MAX_VALUE_BYTES, MAX_SERVICE_STATE_BLOB_KEYS,
     MAX_SERVICE_STATE_BLOB_TOTAL_BYTES, MAX_SERVICE_STATE_BLOB_VALUE_BYTES,
 };
+use crate::sqlite_store::sync::sync_snapshot_diff_for_test;
 use crate::sqlite_store::{
     apply_migrations, load_snapshot_from_sqlite, replace_sqlite_from_snapshot,
-    sync_dirty_to_sqlite,
 };
 use crate::types::{OwnerNoteRecord, WorldStateSnapshot};
 use rusqlite::Connection;
@@ -76,8 +76,8 @@ fn typed_service_domains_sqlite_roundtrip_and_rollback() {
     snap.mining_and_ess_state.mining_ledger_waste.insert(0, 420);
     snap.quasar_commerce.plex_invoices.push("inv-1".into());
 
-    let mut fp = replace_sqlite_from_snapshot(&mut conn, &snap).expect("replace");
-    let (loaded, _loaded_fp) = load_snapshot_from_sqlite(&conn).expect("load");
+    replace_sqlite_from_snapshot(&mut conn, &snap).expect("replace");
+    let loaded = load_snapshot_from_sqlite(&conn).expect("load");
     assert_eq!(loaded.pve_special_sites, snap.pve_special_sites);
     assert_eq!(loaded.crab_beacons, snap.crab_beacons);
     assert_eq!(
@@ -91,15 +91,16 @@ fn typed_service_domains_sqlite_roundtrip_and_rollback() {
     assert_eq!(loaded.quasar_commerce.plex_invoices, vec!["inv-1".to_string()]);
 
     // Reload restores unmodified domain cleanly from SQLite.
-    let (reloaded_dom, _) = load_snapshot_from_sqlite(&conn).expect("reload");
+    let reloaded_dom = load_snapshot_from_sqlite(&conn).expect("reload");
     assert_eq!(reloaded_dom.crab_beacons, snap.crab_beacons);
     assert_eq!(reloaded_dom.pve_special_sites, snap.pve_special_sites);
+    let mut prev = loaded.clone();
     let mut dirty = loaded.clone();
 
     // Reverting to default deletes domain row cleanly.
     dirty.quasar_commerce.plex_invoices.clear();
     let tx = conn.transaction().expect("tx");
-    let delta = sync_dirty_to_sqlite(&tx, &dirty, &mut fp, true).expect("sync");
+    let delta = sync_snapshot_diff_for_test(&tx, &mut prev, &dirty, true).expect("sync");
     assert!(delta.full_snapshot.is_some());
     tx.commit().expect("commit");
     let count: i64 = conn
@@ -264,9 +265,9 @@ fn legacy_service_blobs_and_sentinel_owner_notes_migrate_cleanly() {
     );
 
     // Seed directly into legacy SQLite tables before typed migration.
-    let _fp_old = replace_sqlite_from_snapshot(&mut conn, &legacy).expect("replace legacy");
+    replace_sqlite_from_snapshot(&mut conn, &legacy).expect("replace legacy");
 
-    let (snap, mut fp) = load_snapshot_from_sqlite(&conn).expect("load migrated");
+    let snap = load_snapshot_from_sqlite(&conn).expect("load migrated");
     assert!(snap.pve_special_sites.initialized);
     assert!(snap.pve_special_sites.incursions.contains_key(&20000005));
     assert!(snap.crab_beacons.beacons.contains_key(&555));
@@ -298,16 +299,17 @@ fn legacy_service_blobs_and_sentinel_owner_notes_migrate_cleanly() {
     assert!(!snap.owner_notes.contains_key(&-10_000_055));
     assert!(!snap.owner_notes.contains_key(&-8_650_000_000_000));
 
-    // `load_snapshot_from_sqlite` already flushed migrated typed tables and stripped legacy rows
-    // before computing baseline `fp`, so an immediate unchanged sync is a clean 0-write no-op.
+    // `load_snapshot_from_sqlite` already flushed migrated typed tables and stripped legacy rows,
+    // so an immediate unchanged sync is a clean 0-write no-op.
+    let mut prev = snap.clone();
     let tx = conn.transaction().expect("tx");
-    let delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp, true).expect("sync migrated");
+    let delta = sync_snapshot_diff_for_test(&tx, &mut prev, &snap, true).expect("sync migrated");
     assert!(!delta.dirty);
     assert!(delta.full_snapshot.is_none());
     tx.commit().expect("commit");
 
     // Reload after startup migration preserves migrated domains.
-    let (reloaded, _) = load_snapshot_from_sqlite(&conn).expect("reload");
+    let reloaded = load_snapshot_from_sqlite(&conn).expect("reload");
     assert!(reloaded.crab_beacons.beacons.contains_key(&555));
     assert!(reloaded.tourney_state.matches.contains_key(&1));
     assert!(reloaded.deployable_state.deployables.contains_key(&5001));
@@ -374,60 +376,21 @@ fn service_state_blobs_enforces_size_and_key_limits() {
     let path = temp_db_path("blob_limit");
     let mut conn = Connection::open(&path).expect("open");
     apply_migrations(&conn).expect("migrate");
-    let mut fp = replace_sqlite_from_snapshot(&mut conn, &WorldStateSnapshot::default())
-        .expect("seed");
+    replace_sqlite_from_snapshot(&mut conn, &WorldStateSnapshot::default()).expect("seed");
+    let mut prev = WorldStateSnapshot::default();
     let mut bad = WorldStateSnapshot::default();
     bad.service_state_blobs
         .insert("bad_key".into(), "z".repeat(MAX_SERVICE_STATE_BLOB_VALUE_BYTES + 1));
     let before = crate::service_domains::service_state_blob_limit_violations_total();
     let tx = conn.transaction().expect("tx");
-    assert!(sync_dirty_to_sqlite(&tx, &bad, &mut fp, false).is_ok());
+    assert!(sync_snapshot_diff_for_test(&tx, &mut prev, &bad, false).is_ok());
     assert!(crate::service_domains::service_state_blob_limit_violations_total() > before);
     drop(tx);
     let _ = std::fs::remove_file(&path);
 }
 
 #[test]
-fn rollback_domain_row_expected_fp_zero_and_missing_table_branches() {
-    use crate::sqlite_store::service_domains_store::{
-        load_service_domains, rollback_service_domains, ServiceDomainsFingerprints,
-    };
-    use crate::sqlite_store::fingerprints::TableFingerprints;
-
-    let path = temp_db_path("fp_zero_rollback");
-    let mut conn = Connection::open(&path).expect("open");
-    apply_migrations(&conn).expect("migrate");
-
-    let mut base = WorldStateSnapshot::default();
-    base.fleet_and_social_ops.contract_deposits.insert(1, 500);
-    let _fp = replace_sqlite_from_snapshot(&mut conn, &base).expect("seed");
-    let (loaded, loaded_fp) = load_snapshot_from_sqlite(&conn).expect("load");
-
-    // Reloaded snapshot retains committed baseline without unpersisted in-memory domain edits.
-    let mut dirty = loaded;
-    dirty.node_graph_state.certificates.insert(90_000_001, Default::default());
-    dirty.fleet_and_social_ops.contract_deposits.clear();
-    let (reloaded_base, _) = load_snapshot_from_sqlite(&conn).expect("reload");
-    assert!(reloaded_base.node_graph_state.certificates.is_empty());
-    assert_eq!(reloaded_base.fleet_and_social_ops.contract_deposits.get(&1), Some(&500));
-    let _ = (dirty, loaded_fp);
-
-    // Missing table in fresh SQLite connection hits Err(_) arms cleanly without panicking.
-    let mem = Connection::open_in_memory().expect("mem");
-    let mut s = WorldStateSnapshot::default();
-    load_service_domains(&mem, &mut s);
-    let mut fake_fp = TableFingerprints::default();
-    fake_fp.service_domains = ServiceDomainsFingerprints {
-        entity_kv_fp: 123,
-        ..Default::default()
-    };
-    assert!(rollback_service_domains(&mem, &mut s, &fake_fp).is_err());
-
-    let _ = std::fs::remove_file(&path);
-}
-
-#[test]
-fn entity_kv_sqlite_roundtrip_per_row_diff_rollback_and_cascade() {
+fn entity_kv_sqlite_roundtrip_per_row_diff_and_cascade() {
     // 1. Registry completeness & key serialization roundtrip
     assert_eq!(Ns::ALL.len(), 21);
     for &ns in Ns::ALL {
@@ -485,8 +448,8 @@ fn entity_kv_sqlite_roundtrip_per_row_diff_rollback_and_cascade() {
     assert_eq!(json_loaded.entity_kv, snap.entity_kv);
 
     // SQLite initial replace + load
-    let mut fp = replace_sqlite_from_snapshot(&mut conn, &snap).expect("replace");
-    let (loaded, _loaded_fp) = load_snapshot_from_sqlite(&conn).expect("load");
+    replace_sqlite_from_snapshot(&mut conn, &snap).expect("replace");
+    let loaded = load_snapshot_from_sqlite(&conn).expect("load");
     assert_eq!(loaded.entity_kv, snap.entity_kv);
     assert_eq!(
         loaded.kv(Ns::HomeStationRemoteCooldown).get::<u64>(90_000_001, ""),
@@ -501,6 +464,7 @@ fn entity_kv_sqlite_roundtrip_per_row_diff_rollback_and_cascade() {
     );
 
     // Incremental per-row diff sync: update 1 row, delete 1 row, insert 1 row
+    let mut prev = loaded.clone();
     let mut mutated = loaded.clone();
     mutated
         .kv_mut(Ns::XmppAuthToken)
@@ -515,11 +479,11 @@ fn entity_kv_sqlite_roundtrip_per_row_diff_rollback_and_cascade() {
         .expect("set market seeder");
 
     let tx = conn.transaction().expect("tx");
-    let delta = sync_dirty_to_sqlite(&tx, &mutated, &mut fp, false).expect("incremental sync");
+    let delta = sync_snapshot_diff_for_test(&tx, &mut prev, &mutated, false).expect("incremental sync");
     assert!(delta.dirty);
     tx.commit().expect("commit");
 
-    let (after_inc, after_inc_fp) = load_snapshot_from_sqlite(&conn).expect("reload after inc");
+    let after_inc = load_snapshot_from_sqlite(&conn).expect("reload after inc");
     assert_eq!(after_inc.entity_kv, mutated.entity_kv);
     assert_eq!(
         after_inc.kv(Ns::XmppAuthToken).get::<String>(90_000_001, "").as_deref(),
@@ -527,8 +491,6 @@ fn entity_kv_sqlite_roundtrip_per_row_diff_rollback_and_cascade() {
     );
     assert!(!after_inc.kv(Ns::ContractOrigFlag).contains(5001, "99001"));
     assert!(after_inc.kv(Ns::ContractOrigFlag).contains(5001, "99002"));
-
-    let _ = after_inc_fp;
 
     // Cascade delete for character 90_000_001 removes all Character-scoped rows for 90_000_001
     // while preserving character 90_000_002, contract 5001, and global settings.
@@ -576,22 +538,24 @@ fn entity_kv_1000_character_scale_and_per_row_64kib_budget() {
     }
     assert_eq!(snap.entity_kv.len(), 6_000);
 
-    let mut fp = replace_sqlite_from_snapshot(&mut conn, &snap).expect("replace 6000 rows");
+    replace_sqlite_from_snapshot(&mut conn, &snap).expect("replace 6000 rows");
+    let mut prev = snap.clone();
     {
         let tx = conn.transaction().expect("tx");
-        let delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp, false).expect("noop sync before reload");
+        let delta = sync_snapshot_diff_for_test(&tx, &mut prev, &snap, false).expect("noop sync before reload");
         assert!(!delta.dirty);
         tx.commit().expect("commit");
     }
-    let (loaded, mut loaded_fp) = load_snapshot_from_sqlite(&conn).expect("load 6000 rows");
+    let loaded = load_snapshot_from_sqlite(&conn).expect("load 6000 rows");
     assert_eq!(loaded.entity_kv.len(), 6_000);
     assert_eq!(
         loaded.kv(Ns::XmppAuthToken).get::<String>(90_000_999, "").as_deref(),
         Some("xmpp-secret-token-90000999")
     );
 
+    let mut prev_loaded = loaded.clone();
     let tx = conn.transaction().expect("tx");
-    let delta = sync_dirty_to_sqlite(&tx, &loaded, &mut loaded_fp, false).expect("noop sync");
+    let delta = sync_snapshot_diff_for_test(&tx, &mut prev_loaded, &loaded, false).expect("noop sync");
     assert!(!delta.dirty);
     tx.commit().expect("commit");
 
@@ -719,8 +683,9 @@ fn entity_kv_legacy_blobs_and_945_owner_notes_migration_and_quarantine() {
         .service_state_blobs
         .insert("market_seeder_version".into(), "v2-full-jita".into());
 
-    let _ = replace_sqlite_from_snapshot(&mut conn, &legacy).expect("seed legacy");
-    let (migrated, mut fp) = load_snapshot_from_sqlite(&conn).expect("load migrated");
+    replace_sqlite_from_snapshot(&mut conn, &legacy).expect("seed legacy");
+    let migrated = load_snapshot_from_sqlite(&conn).expect("load migrated");
+    let mut prev = migrated.clone();
 
     // Verify #945 sentinel note migrated and removed while player note 42 remains intact
     assert!(!migrated.owner_notes.contains_key(&sentinel_nid));
@@ -844,7 +809,7 @@ fn entity_kv_legacy_blobs_and_945_owner_notes_migration_and_quarantine() {
 
     // Immediate sync after startup migration is a 0-write no-op
     let tx = conn.transaction().expect("tx");
-    let delta = sync_dirty_to_sqlite(&tx, &migrated, &mut fp, true).expect("sync");
+    let delta = sync_snapshot_diff_for_test(&tx, &mut prev, &migrated, true).expect("sync");
     assert!(!delta.dirty);
     tx.commit().expect("commit");
 
@@ -866,89 +831,13 @@ fn entity_kv_legacy_blobs_and_945_owner_notes_migration_and_quarantine() {
     });
     assert!(fail_closed.is_err());
 
-    let (quarantined_snap, _) = crate::with_quarantine_unreadable_for_test(true, || {
+    let quarantined_snap = crate::with_quarantine_unreadable_for_test(true, || {
         load_snapshot_from_sqlite(&conn)
     })
     .expect("quarantine load succeeds");
     assert_eq!(quarantined_snap.entity_kv, migrated.entity_kv);
     let q_rows = crate::list_quarantined_rows(&conn).expect("list quarantined");
     assert!(q_rows.iter().filter(|r| r.source_table == "entity_kv").count() >= 2);
-
-    let _ = std::fs::remove_file(&path);
-}
-
-#[test]
-fn rollback_service_domains_and_entity_kv_fail_closed_preserving_live_maps() {
-    use crate::sqlite_store::service_domains_store::rollback_service_domains;
-
-    let path = temp_db_path("fail_closed_rollback");
-    let mut conn = Connection::open(&path).expect("open");
-    apply_migrations(&conn).expect("migrate");
-
-    let mut base = WorldStateSnapshot::default();
-    base.node_graph_state.certificates.insert(90_000_001, Default::default());
-    base.fleet_and_social_ops.contract_deposits.insert(1, 500);
-    base.kv_mut(Ns::XmppAuthToken)
-        .set_with_unix(90_000_001, "", &"tok-base", 1_700_000_001)
-        .expect("set base kv");
-
-    let fp = replace_sqlite_from_snapshot(&mut conn, &base).expect("seed");
-
-    let mut dirty = base.clone();
-    dirty.node_graph_state.certificates.clear();
-    dirty.fleet_and_social_ops.contract_deposits.insert(2, 999);
-    dirty
-        .kv_mut(Ns::XmppAuthToken)
-        .set_with_unix(90_000_002, "", &"tok-uncommitted", 1_700_000_002)
-        .expect("set dirty kv");
-
-    // 1. Corrupt `fleet_and_social_ops` JSON in `domain_rows` while `node_graph_state` is valid:
-    // rollback must fail closed without partially restoring `node_graph_state` or overwriting `entity_kv`.
-    conn.execute(
-        "UPDATE domain_rows SET value = '{corrupt' WHERE domain = ?1 AND key = 'contract_deposits/1'",
-        [crate::sqlite_store::domain_rows::DOMAIN_FLEET_AND_SOCIAL_OPS],
-    )
-    .expect("corrupt domain row");
-    let failures_before = crate::persist_failures_total();
-    let err = rollback_service_domains(&conn, &mut dirty, &fp).unwrap_err();
-    assert!(
-        err.contains(crate::sqlite_store::domain_rows::DOMAIN_FLEET_AND_SOCIAL_OPS),
-        "unexpected err: {err}"
-    );
-    assert!(crate::persist_failures_total() >= failures_before + 1);
-    assert!(dirty.node_graph_state.certificates.is_empty());
-    assert_eq!(dirty.fleet_and_social_ops.contract_deposits.get(&2), Some(&999));
-    assert_eq!(
-        dirty.kv(Ns::XmppAuthToken).get::<String>(90_000_002, "").as_deref(),
-        Some("tok-uncommitted")
-    );
-
-    // 2. Delete a committed non-empty `entity_kv` row while `domain_rows` is valid: must fail closed
-    // without touching dirty service domains or live `entity_kv`.
-    replace_sqlite_from_snapshot(&mut conn, &base).expect("reseed");
-    conn.execute("DELETE FROM entity_kv", [])
-        .expect("delete committed entity_kv row");
-    let err_missing_kv = rollback_service_domains(&conn, &mut dirty, &fp).unwrap_err();
-    assert!(err_missing_kv.contains("entity_kv"), "unexpected err: {err_missing_kv}");
-    assert!(dirty.node_graph_state.certificates.is_empty());
-    assert_eq!(dirty.fleet_and_social_ops.contract_deposits.get(&2), Some(&999));
-
-    // 3. Re-seed valid `domain_rows` + `entity_kv`, then inject a corrupt `entity_kv` row:
-    // rollback must fail closed without clearing `dirty.entity_kv` or touching dirty domains.
-    replace_sqlite_from_snapshot(&mut conn, &base).expect("reseed");
-    conn.execute(
-        "INSERT INTO entity_kv (ns, entity_id, sub_key, value, updated_unix) VALUES (?1, 777, '', ?2, 0)",
-        rusqlite::params![Ns::XmppAuthToken.as_str(), b"{bad-json" as &[u8]],
-    )
-    .expect("inject corrupt entity_kv");
-    let err_kv = rollback_service_domains(&conn, &mut dirty, &fp).unwrap_err();
-    assert!(err_kv.contains("entity_kv"), "unexpected err: {err_kv}");
-    assert!(dirty.node_graph_state.certificates.is_empty());
-    assert_eq!(dirty.fleet_and_social_ops.contract_deposits.get(&2), Some(&999));
-    assert_eq!(
-        dirty.kv(Ns::XmppAuthToken).get::<String>(90_000_002, "").as_deref(),
-        Some("tok-uncommitted")
-    );
 
     let _ = std::fs::remove_file(&path);
 }
@@ -996,7 +885,7 @@ fn legacy_service_domain_state_migrates_to_domain_rows_and_drops_legacy_table() 
         .expect("seed legacy row");
     }
 
-    let (migrated, _fp) = load_snapshot_from_sqlite(&conn).expect("load + migrate");
+    let migrated = load_snapshot_from_sqlite(&conn).expect("load + migrate");
     assert_eq!(*migrated.mining_and_ess_state, legacy_mining);
     assert_eq!(*migrated.fleet_and_social_ops, legacy_fleet);
     assert_eq!(*migrated.quasar_commerce, legacy_quasar);
@@ -1030,7 +919,7 @@ fn legacy_service_domain_state_migrates_to_domain_rows_and_drops_legacy_table() 
         .expect("migrated waste row");
     assert_eq!(migrated_waste, "1250");
 
-    let (reloaded, _) = load_snapshot_from_sqlite(&conn).expect("reload post-migration");
+    let reloaded = load_snapshot_from_sqlite(&conn).expect("reload post-migration");
     assert_eq!(*reloaded.mining_and_ess_state, legacy_mining);
     assert_eq!(*reloaded.fleet_and_social_ops, legacy_fleet);
     assert_eq!(*reloaded.quasar_commerce, legacy_quasar);
@@ -1077,17 +966,17 @@ fn service_domains_tx_writes_single_row_with_zero_cold_clones_and_rejects_non_fi
     });
     seed_res.expect("seed tx");
 
-    // Mutating 1 entry inside `fleet_and_social_ops` executes with 0 cold fingerprint clones.
-    crate::persistence::reset_thread_cold_fp_clones_for_test();
+    // Mutating 1 entry inside `fleet_and_social_ops` executes with 0 cold domain syncs.
+    crate::persistence::reset_thread_cold_domain_syncs_for_test();
     let update_res: Result<(), TxError> = repo.tx("update_one_deposit", |wtx| {
         wtx.snap.fleet_and_social_ops.contract_deposits.insert(10, 9_500);
         Ok(())
     });
     update_res.expect("update tx");
     assert_eq!(
-        crate::persistence::thread_cold_fp_clones_for_test(),
+        crate::persistence::thread_cold_domain_syncs_for_test(),
         0,
-        "migrated service_domains mutation must trigger 0 cold fingerprint clones"
+        "migrated service_domains mutation must trigger 0 cold domain syncs"
     );
 
     // Direct `ChangeSet::diff` + `apply_domain_row_changes` mutates strictly 1 SQLite row.

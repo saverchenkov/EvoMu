@@ -6,10 +6,9 @@ use crate::sqlite_store::load::load_snapshot_from_sqlite;
 use crate::sqlite_store::schema::apply_migrations;
 use rusqlite::{Connection, OpenFlags};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 #[test]
-fn sync_dirty_metadata_only_and_shared_arc_market_orders() {
+fn sync_dirty_metadata_only_and_cold_full_snapshot_delta() {
     let mut conn = Connection::open_in_memory().unwrap();
     apply_migrations(&conn).unwrap();
 
@@ -32,42 +31,37 @@ fn sync_dirty_metadata_only_and_shared_arc_market_orders() {
             escrow: IskCents(0),
         },
     );
-    let fp = replace_sqlite_from_snapshot(&mut conn, &snap).unwrap();
-
-    // Clone fp so Arc::make_mut(&mut fp.market_orders) must copy-on-write
-    let mut fp_cow = fp.clone();
-    assert!(Arc::strong_count(&fp_cow.market_orders) >= 2);
+    replace_sqlite_from_snapshot(&mut conn, &snap).unwrap();
+    let mut prev = snap.clone();
 
     // No-op sync produces empty delta and does not set full_snapshot
     {
         let tx = conn.transaction().unwrap();
-        let delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp_cow, true).unwrap();
+        let delta = sync_snapshot_diff_for_test(&tx, &mut prev, &snap, true).unwrap();
         tx.commit().unwrap();
         assert!(delta.full_snapshot.is_none());
         assert!(delta.upserted_characters.is_empty());
         assert!(delta.upserted_market_orders.is_empty());
     }
 
-    // Only next_entity_id and wal_seq change -> hot-only, no cold_changed
+    // Only next_entity_id, wal_seq, and market order vol_remaining change -> hot-only, no cold_changed
     snap.next_entity_id += 1;
     snap.wal_seq += 1;
     snap.market_orders.get_mut(&700_500).unwrap().vol_remaining = 80;
     {
         let tx = conn.transaction().unwrap();
-        let delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp_cow, true).unwrap();
+        let delta = sync_snapshot_diff_for_test(&tx, &mut prev, &snap, true).unwrap();
         tx.commit().unwrap();
         assert!(delta.full_snapshot.is_none());
         assert_eq!(delta.upserted_market_orders.len(), 1);
         assert_eq!(delta.upserted_market_orders[0].vol_remaining, 80);
     }
-    // Original fp still has the old fingerprint for 700_500
-    assert_ne!(fp.market_orders.get(&700_500), fp_cow.market_orders.get(&700_500));
 
     // Only markets_seeded flips -> cold_changed = true -> emits full_snapshot when need_wal_delta = true
     snap.markets_seeded = !snap.markets_seeded;
     {
         let tx = conn.transaction().unwrap();
-        let delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp_cow, true).unwrap();
+        let delta = sync_snapshot_diff_for_test(&tx, &mut prev, &snap, true).unwrap();
         tx.commit().unwrap();
         assert!(delta.full_snapshot.is_some());
     }
@@ -116,17 +110,18 @@ fn sync_dirty_wallet_journal_and_mail_truncation_and_prefix_mutation_rewrite() {
         },
     ]
     .into();
-    let mut fp = replace_sqlite_from_snapshot(&mut conn, &snap).unwrap();
+    replace_sqlite_from_snapshot(&mut conn, &snap).unwrap();
+    let mut prev = snap.clone();
 
     // Mutate prefix item[0] in both wallet_journal and mails (same len) -> triggers DELETE + re-insert
     snap.wallet_journal[0].reason = "mutated_prefix".into();
     snap.mails[0].body = "mutated_body".into();
     {
         let tx = conn.transaction().unwrap();
-        let delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp, true).unwrap();
+        let delta = sync_snapshot_diff_for_test(&tx, &mut prev, &snap, true).unwrap();
         tx.commit().unwrap();
         assert!(delta.full_snapshot.is_some());
-        assert_eq!(delta.appended_wallet_journal.len(), 2);
+        assert!(delta.appended_wallet_journal.is_empty());
     }
 
     // Truncate to len=1 (non-empty) -> triggers DELETE + re-insert of remaining 1 entry
@@ -134,15 +129,13 @@ fn sync_dirty_wallet_journal_and_mail_truncation_and_prefix_mutation_rewrite() {
     snap.mails.truncate(1);
     {
         let tx = conn.transaction().unwrap();
-        let delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp, true).unwrap();
+        let delta = sync_snapshot_diff_for_test(&tx, &mut prev, &snap, true).unwrap();
         tx.commit().unwrap();
         assert!(delta.full_snapshot.is_some());
-        assert_eq!(delta.appended_wallet_journal.len(), 1);
-        assert_eq!(fp.wallet_journal_len, 1);
-        assert_eq!(fp.mails_len, 1);
+        assert!(delta.appended_wallet_journal.is_empty());
     }
 
-    let (loaded, _) = load_snapshot_from_sqlite(&conn).unwrap();
+    let loaded = load_snapshot_from_sqlite(&conn).unwrap();
     assert_eq!(loaded.wallet_journal.len(), 1);
     assert_eq!(loaded.wallet_journal[0].reason, "mutated_prefix");
     assert_eq!(loaded.mails.len(), 1);
@@ -156,7 +149,8 @@ fn sync_dirty_skill_in_place_update_and_optional_field_paths() {
 
     let mut snap = WorldRepository::create_demo_snapshot();
     let cid = 90_000_001;
-    let mut fp = replace_sqlite_from_snapshot(&mut conn, &snap).unwrap();
+    replace_sqlite_from_snapshot(&mut conn, &snap).unwrap();
+    let mut prev = snap.clone();
 
     // Insert banned account, skill queue with started_at_unix=Some, industry job with all Some optionals,
     // bookmark with Some(item_id) & Some(folder_id) & is_shared=true, killmail with corp/alliance IDs, etc.
@@ -291,7 +285,7 @@ fn sync_dirty_skill_in_place_update_and_optional_field_paths() {
 
     {
         let tx = conn.transaction().unwrap();
-        let delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp, true).unwrap();
+        let delta = sync_snapshot_diff_for_test(&tx, &mut prev, &snap, true).unwrap();
         tx.commit().unwrap();
         assert!(delta.full_snapshot.is_some());
     }
@@ -302,11 +296,11 @@ fn sync_dirty_skill_in_place_update_and_optional_field_paths() {
     snap.items.get_mut(&100_000_001).unwrap().singleton = true;
     {
         let tx = conn.transaction().unwrap();
-        sync_dirty_to_sqlite(&tx, &snap, &mut fp, false).unwrap();
+        sync_snapshot_diff_for_test(&tx, &mut prev, &snap, false).unwrap();
         tx.commit().unwrap();
     }
 
-    let (loaded, _) = load_snapshot_from_sqlite(&conn).unwrap();
+    let loaded = load_snapshot_from_sqlite(&conn).unwrap();
     assert_eq!(loaded.skills[&cid][&3412].level, 4);
     assert_eq!(loaded.accounts["banned_user"].ban_reason.as_deref(), Some("RMT"));
     assert_eq!(loaded.industry_jobs[&900_001].licensed_runs, Some(10));
@@ -328,7 +322,7 @@ fn sync_dirty_wal_file_mode_and_busy_lock_conflict() {
     apply_migrations(&writer).unwrap();
 
     let mut snap = WorldRepository::create_demo_snapshot();
-    let mut fp = replace_sqlite_from_snapshot(&mut writer, &snap).unwrap();
+    replace_sqlite_from_snapshot(&mut writer, &snap).unwrap();
 
     // Another connection holds an IMMEDIATE transaction lock -> writer transaction_with_behavior(Immediate) fails SQLITE_BUSY
     let mut locker = Connection::open_with_flags(
@@ -349,9 +343,9 @@ fn sync_dirty_wal_file_mode_and_busy_lock_conflict() {
     drop(lock_tx);
 
     // Once lock released, replace_sqlite_from_snapshot succeeds in WAL mode
-    let fp2 = replace_sqlite_from_snapshot(&mut writer, &snap).unwrap();
-    assert_eq!(fp2.wal_seq, snap.wal_seq);
-    fp.wal_seq = snap.wal_seq;
+    replace_sqlite_from_snapshot(&mut writer, &snap).unwrap();
+    let reloaded = load_snapshot_from_sqlite(&writer).unwrap();
+    assert_eq!(reloaded.wal_seq, snap.wal_seq);
     drop(locker);
     drop(writer);
     let _ = std::fs::remove_dir_all(&dir);
@@ -678,15 +672,16 @@ fn replace_sqlite_and_sync_dirty_propagate_sqlite_errors_on_all_table_paths() {
         ))
         .unwrap();
         let tx = c.transaction().unwrap();
-        let mut fp = TableFingerprints::default();
-        let err = sync_dirty_to_sqlite(&tx, &snap, &mut fp, false).unwrap_err();
+        let mut prev = WorldStateSnapshot::default();
+        let err = sync_snapshot_diff_for_test(&tx, &mut prev, &snap, false).unwrap_err();
         assert!(err.contains(&format!("inj_ins_{tbl}")), "unexpected err for {tbl}: {err}");
     }
 
     // Also test DELETE triggers when clearing records from a populated DB
     let mut base_conn = Connection::open_in_memory().unwrap();
     apply_migrations(&base_conn).unwrap();
-    let base_fp = replace_sqlite_from_snapshot(&mut base_conn, &snap).unwrap();
+    replace_sqlite_from_snapshot(&mut base_conn, &snap).unwrap();
+    let loaded_base = load_snapshot_from_sqlite(&base_conn).unwrap();
     let mut cleared = snap.clone();
     cleared.accounts.clear();
     cleared.characters.clear();
@@ -727,14 +722,15 @@ fn replace_sqlite_and_sync_dirty_propagate_sqlite_errors_on_all_table_paths() {
         }
         let mut c = Connection::open_in_memory().unwrap();
         apply_migrations(&c).unwrap();
-        let mut fp = replace_sqlite_from_snapshot(&mut c, &snap).unwrap();
-        assert_eq!(fp.characters.len(), base_fp.characters.len());
+        replace_sqlite_from_snapshot(&mut c, &snap).unwrap();
+        assert_eq!(loaded_base.characters.len(), snap.characters.len());
         c.execute_batch(&format!(
             "CREATE TRIGGER fail_del_{tbl} BEFORE DELETE ON {tbl} BEGIN SELECT RAISE(ABORT, 'inj_del_{tbl}'); END;"
         ))
         .unwrap();
         let tx = c.transaction().unwrap();
-        let err = sync_dirty_to_sqlite(&tx, &cleared, &mut fp, false).unwrap_err();
+        let mut prev = snap.clone();
+        let err = sync_snapshot_diff_for_test(&tx, &mut prev, &cleared, false).unwrap_err();
         assert!(err.contains(&format!("inj_del_{tbl}")), "unexpected del err for {tbl}: {err}");
     }
     drop(ro);
@@ -808,7 +804,7 @@ fn changeset_and_selective_cold_domain_sync_branches() {
 
     let mut conn = Connection::open_in_memory().unwrap();
     apply_migrations(&conn).unwrap();
-    let fp = replace_sqlite_from_snapshot(&mut conn, &snap).unwrap();
+    replace_sqlite_from_snapshot(&mut conn, &snap).unwrap();
 
     after = snap.clone();
     after.characters.get_mut(&cid1).unwrap().balance = IskCents(999_888_777);
@@ -856,16 +852,14 @@ fn changeset_and_selective_cold_domain_sync_branches() {
                 && key == &format!("crimewatch_states/{cid1}")
     )));
 
-    let mut staged_cold = fp.clone();
     {
         let tx = conn.transaction().unwrap();
         let mut exec = crate::tx_engine::TxSqlExecutor::new(&tx, crate::TxFaultPlan::None);
-        let (delta, hot_fp) = crate::tx_engine::apply_changeset_to_sqlite(
+        let delta = crate::tx_engine::apply_changeset_to_sqlite(
             &mut exec,
+            &snap,
             &after,
             &changes,
-            &fp,
-            &mut staged_cold,
             true,
         )
         .unwrap();
@@ -873,12 +867,9 @@ fn changeset_and_selective_cold_domain_sync_branches() {
         assert!(delta.dirty);
         assert_eq!(delta.removed_items, vec![item_del]);
         assert_eq!(delta.removed_market_orders, vec![ord_del]);
-        let mut next_fp = staged_cold;
-        hot_fp.apply_to(&mut next_fp);
-        assert!(next_fp.asteroids.contains_key(&88_001));
     }
 
-    let (reloaded, _) = load_snapshot_from_sqlite(&conn).unwrap();
+    let reloaded = load_snapshot_from_sqlite(&conn).unwrap();
     assert_eq!(reloaded.characters[&cid1].balance, IskCents(999_888_777));
     assert!(!reloaded.items.contains_key(&item_del));
     assert!(!reloaded.market_orders.contains_key(&ord_del));

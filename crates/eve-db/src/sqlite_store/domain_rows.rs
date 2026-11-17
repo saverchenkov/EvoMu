@@ -1529,8 +1529,8 @@ pub(crate) fn format_domain_entry_key<K: KeyCodec>(prefix: &str, field: &str, ke
 /// with `TxError::NonFinite`, so pre-existing untouched `NaN` values are not falsely re-emitted.
 fn serialized_bits_equal<T: Serialize + ?Sized>(left: &T, right: &T) -> bool {
     fn fingerprint<T: Serialize + ?Sized>(val: &T) -> Option<u64> {
-        let mut hasher = super::fingerprints::FnvHasher::new();
-        val.serialize(super::fingerprints::FnvSerializer(&mut hasher))
+        let mut hasher = super::checked_json::FnvHasher::new();
+        val.serialize(super::checked_json::FnvSerializer(&mut hasher))
             .ok()?;
         Some(hasher.finish())
     }
@@ -2568,28 +2568,28 @@ pub(crate) fn sync_sp6_lifecycle_domain_rows(
 // Family 3 (`social`) persistence lives in `social_store.rs` and is re-exported here so
 // `domain_rows` serves as the single entry point for migrated families.
 pub(crate) use super::social_store::{
-    collect_social_domain_row_diffs, drop_legacy_social_tables, sync_social_domain_rows,
+    collect_social_domain_row_diffs, drop_legacy_social_tables,
 };
 
 // Family 4 (`corp_crimewatch`) persistence lives in `corp_crimewatch_store.rs` and is
 // re-exported here so `domain_rows` serves as the single entry point for migrated families.
 pub(crate) use super::corp_crimewatch_store::{
     collect_corp_crimewatch_domain_row_diffs, drop_legacy_corp_crimewatch_tables,
-    sync_corp_crimewatch_domain_rows,
 };
 
 // Family 6 (`service_domains`) persistence lives in `service_domains_store.rs` and is
 // re-exported here so `domain_rows` serves as the single entry point for migrated families.
-pub(crate) use super::service_domains_store::{
-    drop_legacy_service_domain_tables, sync_service_domains_rows,
-};
+pub(crate) use super::service_domains_store::drop_legacy_service_domain_tables;
+#[cfg(test)]
+pub(crate) use super::service_domains_store::sync_service_domains_rows;
 
 // Family 5 (`industry_market_pve`) persistence lives in `industry_market_pve_store.rs` and is
 // re-exported here so `domain_rows` serves as the single entry point for migrated families.
 pub(crate) use super::industry_market_pve_store::{
     collect_industry_market_pve_domain_row_diffs, drop_legacy_industry_market_pve_tables,
-    sync_industry_market_pve_domain_rows,
 };
+#[cfg(test)]
+pub(crate) use super::industry_market_pve_store::sync_industry_market_pve_domain_rows;
 
 #[cfg(test)]
 mod tests {
@@ -3114,8 +3114,6 @@ mod tests {
             tx.commit().expect("seed commit");
         }
 
-        let base_fp = crate::sqlite_store::compute_fingerprints(&snap);
-
         // Mutate strictly ONE entry in `account_plex_vault`.
         let before_update = snap.clone();
         snap.account_plex_vault.insert(25, 999_999);
@@ -3130,13 +3128,11 @@ mod tests {
                 &sql_tx,
                 crate::tx_engine::TxFaultPlan::None,
             );
-            let mut staged_fp = base_fp.clone();
-            let (_delta, _hot) = crate::tx_engine::apply_changeset_to_sqlite(
+            let _ = crate::tx_engine::apply_changeset_to_sqlite(
                 &mut exec,
+                &before_update,
                 &snap,
                 &changes_update,
-                &base_fp,
-                &mut staged_fp,
                 false,
             )
             .expect("apply update");
@@ -3161,13 +3157,11 @@ mod tests {
                 &sql_tx,
                 crate::tx_engine::TxFaultPlan::None,
             );
-            let mut staged_fp = base_fp.clone();
-            let (_delta, _hot) = crate::tx_engine::apply_changeset_to_sqlite(
+            let _ = crate::tx_engine::apply_changeset_to_sqlite(
                 &mut exec,
+                &before_delete,
                 &snap,
                 &changes_delete,
-                &base_fp,
-                &mut staged_fp,
                 false,
             )
             .expect("apply delete");
@@ -3386,8 +3380,6 @@ mod tests {
             tx.commit().expect("seed commit");
         }
 
-        let base_fp = crate::sqlite_store::compute_fingerprints(&snap);
-
         // 1. Mutate strictly ONE `corp_lp_balances` composite-key entry.
         let before_lp = snap.clone();
         snap.corp_lp_balances.insert((98_000_001, 1_000_010), 99_999);
@@ -3402,13 +3394,11 @@ mod tests {
                 &sql_tx,
                 crate::tx_engine::TxFaultPlan::None,
             );
-            let mut staged_fp = base_fp.clone();
-            let (_delta, _hot) = crate::tx_engine::apply_changeset_to_sqlite(
+            let _ = crate::tx_engine::apply_changeset_to_sqlite(
                 &mut exec,
+                &before_lp,
                 &snap,
                 &changes_lp,
-                &base_fp,
-                &mut staged_fp,
                 false,
             )
             .expect("apply lp update");
@@ -3433,13 +3423,11 @@ mod tests {
                 &sql_tx,
                 crate::tx_engine::TxFaultPlan::None,
             );
-            let mut staged_fp = base_fp.clone();
-            let (_delta, _hot) = crate::tx_engine::apply_changeset_to_sqlite(
+            let _ = crate::tx_engine::apply_changeset_to_sqlite(
                 &mut exec,
+                &before_note,
                 &snap,
                 &changes_note,
-                &base_fp,
-                &mut staged_fp,
                 false,
             )
             .expect("apply note update");
@@ -3464,13 +3452,11 @@ mod tests {
                 &sql_tx,
                 crate::tx_engine::TxFaultPlan::None,
             );
-            let mut staged_fp = base_fp.clone();
-            let (_delta, _hot) = crate::tx_engine::apply_changeset_to_sqlite(
+            let _ = crate::tx_engine::apply_changeset_to_sqlite(
                 &mut exec,
+                &before_log,
                 &snap,
                 &changes_log,
-                &base_fp,
-                &mut staged_fp,
                 false,
             )
             .expect("apply log delete");
@@ -3746,16 +3732,16 @@ mod tests {
         });
         seed_res.expect("seed lifecycle");
 
-        crate::persistence::reset_thread_cold_fp_clones_for_test();
+        crate::persistence::reset_thread_cold_domain_syncs_for_test();
         let update_res: Result<(), TxError> = repo.tx("update_one_timer", |wtx| {
             wtx.snap.sp6_lifecycle.pvp_timers_until.insert(5, 888_888);
             Ok(())
         });
         update_res.expect("update single timer");
         assert_eq!(
-            crate::persistence::thread_cold_fp_clones_for_test(),
+            crate::persistence::thread_cold_domain_syncs_for_test(),
             0,
-            "lifecycle mutation must trigger 0 cold fingerprint clones"
+            "lifecycle mutation must trigger 0 cold domain syncs"
         );
 
         let before_snap = repo.with_snapshot(Clone::clone);

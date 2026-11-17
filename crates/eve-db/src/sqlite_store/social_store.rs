@@ -896,27 +896,6 @@ pub(crate) fn drop_legacy_social_tables(tx: &Transaction<'_>) -> Result<(), Stri
     Ok(())
 }
 
-fn rollback_social_inner(conn: &Connection, snap: &mut WorldStateSnapshot) -> Result<(), String> {
-    if !table_exists(conn, "domain_rows")? {
-        return Err("cannot rollback social store: table 'domain_rows' does not exist".to_string());
-    }
-    let mut ctx = LoadContext::new(false);
-    let (staged, _had_legacy) = load_staged_social(conn, &snap.bookmarks, &mut ctx)?;
-    apply_staged_social(staged, snap);
-    Ok(())
-}
-
-/// Fail-closed reload of all 24 Family 3 (`social`) collections from SQLite into `snap`,
-/// leaving `snap` untouched on any schema or decoding error.
-pub fn rollback_social(conn: &Connection, snap: &mut WorldStateSnapshot) -> Result<(), String> {
-    if let Err(err) = rollback_social_inner(conn, snap) {
-        crate::persistence::record_persist_failure();
-        tracing::error!("rollback_social failed closed without mutating snapshot: {err}");
-        return Err(err);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 #[path = "social_store_edges_tests.rs"]
 mod social_store_edges_tests;

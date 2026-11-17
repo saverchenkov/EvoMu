@@ -1,251 +1,262 @@
 //! Incremental sync of the per-key extension tables (character jump times, CSPA charges, mail
 //! timestamps, login stats, custom names, positions, vulnerability windows, skill history, doll info).
-//! Split out of `sync.rs` unchanged (behaviour-neutral) to keep files under the size limit.
 
-use crate::sqlite_store::fingerprints::*;
+use crate::cow::{CowCell, CowDiffItem, CowMap};
+use crate::sqlite_store::checked_json::to_checked_json_string;
 use crate::types::*;
 use rusqlite::{params, Transaction};
+use std::collections::HashMap;
 
-/// Returns `true` when any cold table changed (callers then emit a full-snapshot WAL delta).
+fn sync_cell_i64_map<V: PartialEq>(
+    tx: &Transaction<'_>,
+    before: Option<&CowCell<HashMap<i64, V>>>,
+    after: &CowCell<HashMap<i64, V>>,
+    delete_sql: &str,
+    mut upsert_fn: impl FnMut(&Transaction<'_>, i64, &V) -> Result<(), String>,
+) -> Result<bool, String> {
+    if let Some(b) = before {
+        if b.ptr_eq(after) {
+            return Ok(false);
+        }
+        let mut changed = false;
+        for &k in b.keys() {
+            if !after.contains_key(&k) {
+                changed = true;
+                tx.execute(delete_sql, params![k])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        for (&k, v) in after.iter() {
+            if b.get(&k) != Some(v) {
+                changed = true;
+                upsert_fn(tx, k, v)?;
+            }
+        }
+        return Ok(changed);
+    }
+    let mut changed = false;
+    for (&k, v) in after.iter() {
+        changed = true;
+        upsert_fn(tx, k, v)?;
+    }
+    Ok(changed)
+}
+
+fn sync_cow_i64_map<V: Clone + PartialEq>(
+    tx: &Transaction<'_>,
+    before: Option<&CowMap<i64, V>>,
+    after: &CowMap<i64, V>,
+    delete_sql: &str,
+    mut upsert_fn: impl FnMut(&Transaction<'_>, i64, &V) -> Result<(), String>,
+) -> Result<bool, String> {
+    if let Some(b) = before {
+        if b.ptr_eq(after) {
+            return Ok(false);
+        }
+        let mut changed = false;
+        for diff in b.diff(after) {
+            match diff {
+                CowDiffItem::Add(k, v) | CowDiffItem::Update { new: (k, v), .. } => {
+                    changed = true;
+                    upsert_fn(tx, *k, v)?;
+                }
+                CowDiffItem::Remove(k, _) => {
+                    changed = true;
+                    tx.execute(delete_sql, params![*k])
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        return Ok(changed);
+    }
+    let mut changed = false;
+    for (&k, v) in after {
+        changed = true;
+        upsert_fn(tx, k, v)?;
+    }
+    Ok(changed)
+}
+
+/// Syncs all 9 extension tables (including `mail_timestamps` and `item_custom_names`),
+/// returning `true` if any row changed.
+#[cfg(test)]
 pub(crate) fn sync_extension_tables(
     tx: &Transaction<'_>,
+    before: Option<&WorldStateSnapshot>,
     snap: &WorldStateSnapshot,
-    fp: &mut TableFingerprints,
+) -> Result<bool, String> {
+    sync_extension_tables_inner(tx, before, snap, true)
+}
+
+/// Syncs the 7 cold extension tables; `mail_timestamps` and `item_custom_names` are synced via
+/// `tx_engine` `ChangeSet`s when called from `sync_selected_cold_domains_to_sqlite`.
+pub(crate) fn sync_extension_tables_cold_only(
+    tx: &Transaction<'_>,
+    before: Option<&WorldStateSnapshot>,
+    snap: &WorldStateSnapshot,
+) -> Result<bool, String> {
+    sync_extension_tables_inner(tx, before, snap, false)
+}
+
+fn sync_extension_tables_inner(
+    tx: &Transaction<'_>,
+    before: Option<&WorldStateSnapshot>,
+    snap: &WorldStateSnapshot,
+    include_cow_maps: bool,
 ) -> Result<bool, String> {
     let mut cold_changed = false;
+
     // 29. character_last_jump_unix
-    let removed_jumps: Vec<i64> = fp
-        .character_last_jump_unix
-        .keys()
-        .filter(|k| !snap.character_last_jump_unix.contains_key(*k))
-        .copied()
-        .collect();
-    for k in removed_jumps {
-        cold_changed = true;
-        tx.execute("DELETE FROM character_last_jump_unix WHERE character_id = ?1", params![k])
-            .map_err(|e| e.to_string())?;
-        fp.character_last_jump_unix.remove(&k);
-    }
-    for (&k, &v) in &snap.character_last_jump_unix {
-        if fp.character_last_jump_unix.get(&k) != Some(&v) {
-            cold_changed = true;
+    cold_changed |= sync_cell_i64_map(
+        tx,
+        before.map(|b| &b.character_last_jump_unix),
+        &snap.character_last_jump_unix,
+        "DELETE FROM character_last_jump_unix WHERE character_id = ?1",
+        |tx, k, &v| {
             tx.execute(
                 "INSERT OR REPLACE INTO character_last_jump_unix (character_id, last_jump_unix) VALUES (?1, ?2)",
                 params![k, v as i64],
             )
-            .map_err(|e| e.to_string())?;
-            fp.character_last_jump_unix.insert(k, v);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
     // 30. character_cspa_charges
-    let removed_cspa: Vec<i64> = fp
-        .character_cspa_charges
-        .keys()
-        .filter(|k| !snap.character_cspa_charges.contains_key(*k))
-        .copied()
-        .collect();
-    for k in removed_cspa {
-        cold_changed = true;
-        tx.execute("DELETE FROM character_cspa_charges WHERE character_id = ?1", params![k])
-            .map_err(|e| e.to_string())?;
-        fp.character_cspa_charges.remove(&k);
-    }
-    for (&k, &cents) in &snap.character_cspa_charges {
-        let v = cents.0;
-        if fp.character_cspa_charges.get(&k) != Some(&v) {
-            cold_changed = true;
+    cold_changed |= sync_cell_i64_map(
+        tx,
+        before.map(|b| &b.character_cspa_charges),
+        &snap.character_cspa_charges,
+        "DELETE FROM character_cspa_charges WHERE character_id = ?1",
+        |tx, k, &cents| {
             tx.execute(
                 "INSERT OR REPLACE INTO character_cspa_charges (character_id, cspa_charge_cents) VALUES (?1, ?2)",
-                params![k, v],
+                params![k, cents.0],
             )
-            .map_err(|e| e.to_string())?;
-            fp.character_cspa_charges.insert(k, v);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
-    // 31. mail_timestamps
-    let removed_mail_ts: Vec<i64> = fp
-        .mail_timestamps
-        .keys()
-        .filter(|k| !snap.mail_timestamps.contains_key(*k))
-        .copied()
-        .collect();
-    for k in removed_mail_ts {
-        cold_changed = true;
-        tx.execute("DELETE FROM mail_timestamps WHERE mail_id = ?1", params![k])
-            .map_err(|e| e.to_string())?;
-        fp.mail_timestamps.remove(&k);
-    }
-    for (&k, &v) in &snap.mail_timestamps {
-        if fp.mail_timestamps.get(&k) != Some(&v) {
-            cold_changed = true;
-            tx.execute(
-                "INSERT OR REPLACE INTO mail_timestamps (mail_id, timestamp_unix) VALUES (?1, ?2)",
-                params![k, v as i64],
-            )
-            .map_err(|e| e.to_string())?;
-            fp.mail_timestamps.insert(k, v);
-        }
+    if include_cow_maps {
+        // 31. mail_timestamps
+        cold_changed |= sync_cow_i64_map(
+            tx,
+            before.map(|b| &b.mail_timestamps),
+            &snap.mail_timestamps,
+            "DELETE FROM mail_timestamps WHERE mail_id = ?1",
+            |tx, k, &v| {
+                tx.execute(
+                    "INSERT OR REPLACE INTO mail_timestamps (mail_id, timestamp_unix) VALUES (?1, ?2)",
+                    params![k, v as i64],
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+            },
+        )?;
     }
 
     // 32. character_login_stats
-    let removed_login_stats: Vec<i64> = fp
-        .character_login_stats
-        .keys()
-        .filter(|k| !snap.character_login_stats.contains_key(*k))
-        .copied()
-        .collect();
-    for k in removed_login_stats {
-        cold_changed = true;
-        tx.execute("DELETE FROM character_login_stats WHERE character_id = ?1", params![k])
-            .map_err(|e| e.to_string())?;
-        fp.character_login_stats.remove(&k);
-    }
-    for (&k, v) in &snap.character_login_stats {
-        let h = fp_json(v);
-        if fp.character_login_stats.get(&k) != Some(&h) {
-            cold_changed = true;
+    cold_changed |= sync_cell_i64_map(
+        tx,
+        before.map(|b| &b.character_login_stats),
+        &snap.character_login_stats,
+        "DELETE FROM character_login_stats WHERE character_id = ?1",
+        |tx, k, v| {
             tx.execute(
                 "INSERT OR REPLACE INTO character_login_stats (character_id, last_login_unix, last_logout_unix, logins_count) VALUES (?1, ?2, ?3, ?4)",
                 params![k, v.last_login_unix as i64, v.last_logout_unix as i64, v.logins_count as i64],
             )
-            .map_err(|e| e.to_string())?;
-            fp.character_login_stats.insert(k, h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
-    // 33. item_custom_names
-    let removed_custom_names: Vec<i64> = fp
-        .item_custom_names
-        .keys()
-        .filter(|k| !snap.item_custom_names.contains_key(*k))
-        .copied()
-        .collect();
-    for k in removed_custom_names {
-        cold_changed = true;
-        tx.execute("DELETE FROM item_custom_names WHERE item_id = ?1", params![k])
-            .map_err(|e| e.to_string())?;
-        fp.item_custom_names.remove(&k);
-    }
-    for (&k, v) in &snap.item_custom_names {
-        let h = fp_json(v);
-        if fp.item_custom_names.get(&k) != Some(&h) {
-            cold_changed = true;
-            tx.execute(
-                "INSERT OR REPLACE INTO item_custom_names (item_id, custom_name) VALUES (?1, ?2)",
-                params![k, v],
-            )
-            .map_err(|e| e.to_string())?;
-            fp.item_custom_names.insert(k, h);
-        }
+    if include_cow_maps {
+        // 33. item_custom_names
+        cold_changed |= sync_cow_i64_map(
+            tx,
+            before.map(|b| &b.item_custom_names),
+            &snap.item_custom_names,
+            "DELETE FROM item_custom_names WHERE item_id = ?1",
+            |tx, k, v| {
+                tx.execute(
+                    "INSERT OR REPLACE INTO item_custom_names (item_id, custom_name) VALUES (?1, ?2)",
+                    params![k, v],
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+            },
+        )?;
     }
 
     // 34. item_positions
-    let removed_item_pos: Vec<i64> = fp
-        .item_positions
-        .keys()
-        .filter(|k| !snap.item_positions.contains_key(*k))
-        .copied()
-        .collect();
-    for k in removed_item_pos {
-        cold_changed = true;
-        tx.execute("DELETE FROM item_positions WHERE item_id = ?1", params![k])
-            .map_err(|e| e.to_string())?;
-        fp.item_positions.remove(&k);
-    }
-    for (&k, v) in &snap.item_positions {
-        let h = fp_json(v);
-        if fp.item_positions.get(&k) != Some(&h) {
+    cold_changed |= sync_cell_i64_map(
+        tx,
+        before.map(|b| &b.item_positions),
+        &snap.item_positions,
+        "DELETE FROM item_positions WHERE item_id = ?1",
+        |tx, k, v| {
             if !v[0].is_finite() || !v[1].is_finite() || !v[2].is_finite() {
                 return Err(format!("non-finite float in item_positions[{k}]: {v:?}"));
             }
-            cold_changed = true;
             tx.execute(
                 "INSERT OR REPLACE INTO item_positions (item_id, x, y, z) VALUES (?1, ?2, ?3, ?4)",
                 params![k, v[0], v[1], v[2]],
             )
-            .map_err(|e| e.to_string())?;
-            fp.item_positions.insert(k, h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
     // 35. structure_vulnerability_windows
-    let removed_vuln: Vec<i64> = fp
-        .structure_vulnerability_windows
-        .keys()
-        .filter(|k| !snap.structure_vulnerability_windows.contains_key(*k))
-        .copied()
-        .collect();
-    for k in removed_vuln {
-        cold_changed = true;
-        tx.execute("DELETE FROM structure_vulnerability_windows WHERE structure_id = ?1", params![k])
-            .map_err(|e| e.to_string())?;
-        fp.structure_vulnerability_windows.remove(&k);
-    }
-    for (&k, &v) in &snap.structure_vulnerability_windows {
-        if fp.structure_vulnerability_windows.get(&k) != Some(&v) {
-            cold_changed = true;
+    cold_changed |= sync_cell_i64_map(
+        tx,
+        before.map(|b| &b.structure_vulnerability_windows),
+        &snap.structure_vulnerability_windows,
+        "DELETE FROM structure_vulnerability_windows WHERE structure_id = ?1",
+        |tx, k, &v| {
             tx.execute(
                 "INSERT OR REPLACE INTO structure_vulnerability_windows (structure_id, window_start_unix, window_end_unix) VALUES (?1, ?2, ?3)",
                 params![k, v.0 as i64, v.1 as i64],
             )
-            .map_err(|e| e.to_string())?;
-            fp.structure_vulnerability_windows.insert(k, v);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
     // 36. skill_history
-    let removed_skill_hist: Vec<i64> = fp
-        .skill_history
-        .keys()
-        .filter(|k| !snap.skill_history.contains_key(*k))
-        .copied()
-        .collect();
-    for k in removed_skill_hist {
-        cold_changed = true;
-        tx.execute("DELETE FROM skill_history WHERE character_id = ?1", params![k])
-            .map_err(|e| e.to_string())?;
-        fp.skill_history.remove(&k);
-    }
-    for (&k, v) in &snap.skill_history {
-        let h = fp_json(v);
-        if fp.skill_history.get(&k) != Some(&h) {
-            cold_changed = true;
+    cold_changed |= sync_cell_i64_map(
+        tx,
+        before.map(|b| &b.skill_history),
+        &snap.skill_history,
+        "DELETE FROM skill_history WHERE character_id = ?1",
+        |tx, k, v| {
             let js = to_checked_json_string(v)?;
             tx.execute(
                 "INSERT OR REPLACE INTO skill_history (character_id, history_json) VALUES (?1, ?2)",
                 params![k, js],
             )
-            .map_err(|e| e.to_string())?;
-            fp.skill_history.insert(k, h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
     // 37. character_doll_info
-    let removed_doll_info: Vec<i64> = fp
-        .character_doll_info
-        .keys()
-        .filter(|k| !snap.character_doll_info.contains_key(*k))
-        .copied()
-        .collect();
-    for k in removed_doll_info {
-        cold_changed = true;
-        tx.execute("DELETE FROM character_doll_info WHERE character_id = ?1", params![k])
-            .map_err(|e| e.to_string())?;
-        fp.character_doll_info.remove(&k);
-    }
-    for (&k, v) in &snap.character_doll_info {
-        let h = fp_json(v);
-        if fp.character_doll_info.get(&k) != Some(&h) {
-            cold_changed = true;
+    cold_changed |= sync_cell_i64_map(
+        tx,
+        before.map(|b| &b.character_doll_info),
+        &snap.character_doll_info,
+        "DELETE FROM character_doll_info WHERE character_id = ?1",
+        |tx, k, v| {
             tx.execute(
                 "INSERT OR REPLACE INTO character_doll_info (character_id, doll_dna, portrait_meta) VALUES (?1, ?2, ?3)",
                 params![k, v.0, v.1],
             )
-            .map_err(|e| e.to_string())?;
-            fp.character_doll_info.insert(k, h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
+
     Ok(cold_changed)
 }

@@ -19,6 +19,7 @@ imbl.workspace = true
 [features]
 default = []
 demo-seed = []
+legacy-json-snapshot = []
 lock-rank = []
 testkit = []
 

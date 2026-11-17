@@ -1,5 +1,5 @@
 //! Comprehensive unit and mutation-killing tests for `sqlite_store` submodules:
-//! `fingerprints`, `industry_market_pve_store`, `ledger_store`, `notes_lp_sequence_store`,
+//! `checked_json`, `industry_market_pve_store`, `ledger_store`, `notes_lp_sequence_store`,
 //! `social_store`, and `sync_ext`.
 
 use super::*;
@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
 
 #[test]
-fn fnv_hasher_and_row_fingerprints_detect_every_field_mutation() {
+fn fnv_hasher_and_canonical_fp_detect_every_field_mutation() {
     let mut h1 = fnv1a_hasher();
     h1.write_u8(7);
     h1.write_bool(true);
@@ -35,21 +35,21 @@ fn fnv_hasher_and_row_fingerprints_detect_every_field_mutation() {
         banned_until_unix: None,
         ban_reason: None,
     };
-    let acc_fp = fp_account(&base_acc);
-    assert_ne!(fp_account(&AccountRecord { user_id: 11, ..base_acc.clone() }), acc_fp);
-    assert_ne!(fp_account(&AccountRecord { username: "pilot2".into(), ..base_acc.clone() }), acc_fp);
-    assert_ne!(fp_account(&AccountRecord { password_token: "tok2".into(), ..base_acc.clone() }), acc_fp);
-    assert_ne!(fp_account(&AccountRecord { role: 4, ..base_acc.clone() }), acc_fp);
-    assert_ne!(fp_account(&AccountRecord { banned_until_unix: Some(100), ..base_acc.clone() }), acc_fp);
-    assert_ne!(fp_account(&AccountRecord { ban_reason: Some("cheat".into()), ..base_acc.clone() }), acc_fp);
+    let acc_fp = canonical_fp(&base_acc);
+    assert_ne!(canonical_fp(&AccountRecord { user_id: 11, ..base_acc.clone() }), acc_fp);
+    assert_ne!(canonical_fp(&AccountRecord { username: "pilot2".into(), ..base_acc.clone() }), acc_fp);
+    assert_ne!(canonical_fp(&AccountRecord { password_token: "tok2".into(), ..base_acc.clone() }), acc_fp);
+    assert_ne!(canonical_fp(&AccountRecord { role: 4, ..base_acc.clone() }), acc_fp);
+    assert_ne!(canonical_fp(&AccountRecord { banned_until_unix: Some(100), ..base_acc.clone() }), acc_fp);
+    assert_ne!(canonical_fp(&AccountRecord { ban_reason: Some("cheat".into()), ..base_acc.clone() }), acc_fp);
 
     let demo = WorldRepository::create_demo_snapshot();
     let base_char = demo.characters[&90_000_001].clone();
-    let char_fp = fp_character(&base_char);
+    let char_fp = canonical_fp(&base_char);
     let check_char = |mutator: &dyn Fn(&mut CharacterRecord), label: &str| {
         let mut c = base_char.clone();
         mutator(&mut c);
-        assert_ne!(fp_character(&c), char_fp, "fp_character missed {label}");
+        assert_ne!(canonical_fp(&c), char_fp, "canonical_fp(character) missed {label}");
     };
     check_char(&|c| c.character_id += 1, "character_id");
     check_char(&|c| c.user_id += 1, "user_id");
@@ -94,11 +94,11 @@ fn fnv_hasher_and_row_fingerprints_detect_every_field_mutation() {
     check_char(&|c| { c.standings.insert(1_000_125, -2.5); }, "standings");
 
     let base_item = demo.items[&100_000_001].clone();
-    let item_fp = fp_item(&base_item);
+    let item_fp = canonical_fp(&base_item);
     let check_item = |mutator: &dyn Fn(&mut InventoryItemRecord), label: &str| {
         let mut i = base_item.clone();
         mutator(&mut i);
-        assert_ne!(fp_item(&i), item_fp, "fp_item missed {label}");
+        assert_ne!(canonical_fp(&i), item_fp, "canonical_fp(item) missed {label}");
     };
     check_item(&|i| i.item_id += 1, "item_id");
     check_item(&|i| i.type_id += 1, "type_id");
@@ -122,24 +122,24 @@ fn fp_market_contract_system_structure_and_slices_detect_mutations() {
         type_id: 34, is_bid: false, price: IskCents(500), vol_entered: 100, vol_remaining: 80,
         min_volume: 1, is_npc: false, escrow: IskCents(1000),
     };
-    let ord_fp = fp_market_order(&base_ord);
-    assert_ne!(fp_market_order(&MarketOrderRecord { order_id: 2, ..base_ord.clone() }), ord_fp);
-    assert_ne!(fp_market_order(&MarketOrderRecord { owner_id: 2, ..base_ord.clone() }), ord_fp);
-    assert_ne!(fp_market_order(&MarketOrderRecord { station_id: 2, ..base_ord.clone() }), ord_fp);
-    assert_ne!(fp_market_order(&MarketOrderRecord { region_id: 2, ..base_ord.clone() }), ord_fp);
-    assert_ne!(fp_market_order(&MarketOrderRecord { type_id: 35, ..base_ord.clone() }), ord_fp);
-    assert_ne!(fp_market_order(&MarketOrderRecord { is_bid: true, ..base_ord.clone() }), ord_fp);
-    assert_ne!(fp_market_order(&MarketOrderRecord { price: IskCents(600), ..base_ord.clone() }), ord_fp);
-    assert_ne!(fp_market_order(&MarketOrderRecord { vol_entered: 101, ..base_ord.clone() }), ord_fp);
-    assert_ne!(fp_market_order(&MarketOrderRecord { vol_remaining: 79, ..base_ord.clone() }), ord_fp);
-    assert_ne!(fp_market_order(&MarketOrderRecord { min_volume: 2, ..base_ord.clone() }), ord_fp);
-    assert_ne!(fp_market_order(&MarketOrderRecord { is_npc: true, ..base_ord.clone() }), ord_fp);
-    assert_ne!(fp_market_order(&MarketOrderRecord { escrow: IskCents(1001), ..base_ord.clone() }), ord_fp);
+    let ord_fp = canonical_fp(&base_ord);
+    assert_ne!(canonical_fp(&MarketOrderRecord { order_id: 2, ..base_ord.clone() }), ord_fp);
+    assert_ne!(canonical_fp(&MarketOrderRecord { owner_id: 2, ..base_ord.clone() }), ord_fp);
+    assert_ne!(canonical_fp(&MarketOrderRecord { station_id: 2, ..base_ord.clone() }), ord_fp);
+    assert_ne!(canonical_fp(&MarketOrderRecord { region_id: 2, ..base_ord.clone() }), ord_fp);
+    assert_ne!(canonical_fp(&MarketOrderRecord { type_id: 35, ..base_ord.clone() }), ord_fp);
+    assert_ne!(canonical_fp(&MarketOrderRecord { is_bid: true, ..base_ord.clone() }), ord_fp);
+    assert_ne!(canonical_fp(&MarketOrderRecord { price: IskCents(600), ..base_ord.clone() }), ord_fp);
+    assert_ne!(canonical_fp(&MarketOrderRecord { vol_entered: 101, ..base_ord.clone() }), ord_fp);
+    assert_ne!(canonical_fp(&MarketOrderRecord { vol_remaining: 79, ..base_ord.clone() }), ord_fp);
+    assert_ne!(canonical_fp(&MarketOrderRecord { min_volume: 2, ..base_ord.clone() }), ord_fp);
+    assert_ne!(canonical_fp(&MarketOrderRecord { is_npc: true, ..base_ord.clone() }), ord_fp);
+    assert_ne!(canonical_fp(&MarketOrderRecord { escrow: IskCents(1001), ..base_ord.clone() }), ord_fp);
 
     let mut orders = crate::CowMap::new();
-    let d0 = fp_market_orders_digest(&orders);
+    let d0 = canonical_fp(&orders);
     orders.insert(1, base_ord.clone());
-    assert_ne!(fp_market_orders_digest(&orders), d0);
+    assert_ne!(canonical_fp(&orders), d0);
 
     let base_con = ContractRecord {
         contract_id: 1, issuer_id: 90_000_001, issuer_corp_id: 98_000_001, assignee_id: 90_000_002,
@@ -151,12 +151,12 @@ fn fp_market_contract_system_structure_and_slices_detect_mutations() {
         expiration_unix: 2000, num_days: 3, item_ids: vec![100_000_003],
         requested_items: vec![(34, 50)], bid_history: vec![(90_000_002, IskCents(150), 1500)],
     };
-    let con_fp = fp_contract(&base_con);
-    assert_ne!(fp_contract(&ContractRecord { acceptor_id: None, ..base_con.clone() }), con_fp);
-    assert_ne!(fp_contract(&ContractRecord { current_bidder_id: None, ..base_con.clone() }), con_fp);
-    assert_ne!(fp_contract(&ContractRecord { item_ids: vec![100_000_004], ..base_con.clone() }), con_fp);
-    assert_ne!(fp_contract(&ContractRecord { requested_items: vec![(34, 51)], ..base_con.clone() }), con_fp);
-    assert_ne!(fp_contract(&ContractRecord { bid_history: vec![], ..base_con.clone() }), con_fp);
+    let con_fp = canonical_fp(&base_con);
+    assert_ne!(canonical_fp(&ContractRecord { acceptor_id: None, ..base_con.clone() }), con_fp);
+    assert_ne!(canonical_fp(&ContractRecord { current_bidder_id: None, ..base_con.clone() }), con_fp);
+    assert_ne!(canonical_fp(&ContractRecord { item_ids: vec![100_000_004], ..base_con.clone() }), con_fp);
+    assert_ne!(canonical_fp(&ContractRecord { requested_items: vec![(34, 51)], ..base_con.clone() }), con_fp);
+    assert_ne!(canonical_fp(&ContractRecord { bid_history: vec![], ..base_con.clone() }), con_fp);
 
     let mut base_sys = SystemDynamicState {
         solar_system_id: 30_000_142, dbs_multiplier: 1.2, ess_main_bank: IskCents(500),
@@ -170,15 +170,15 @@ fn fp_market_contract_system_structure_and_slices_detect_mutations() {
         fw_capture_seconds_elapsed: 30, fw_capture_duration_seconds: 600,
         last_fw_capture_tick: 12, last_sov_claim_tick: 15,
     };
-    let sys_fp = fp_system_state(&base_sys);
+    let sys_fp = canonical_fp(&base_sys);
     base_sys.signature_position = None;
-    assert_ne!(fp_system_state(&base_sys), sys_fp);
-    let sys_fp2 = fp_system_state(&base_sys);
+    assert_ne!(canonical_fp(&base_sys), sys_fp);
+    let sys_fp2 = canonical_fp(&base_sys);
     base_sys.fw_complex_position = None;
-    assert_ne!(fp_system_state(&base_sys), sys_fp2);
-    let sys_fp3 = fp_system_state(&base_sys);
+    assert_ne!(canonical_fp(&base_sys), sys_fp2);
+    let sys_fp3 = canonical_fp(&base_sys);
     base_sys.ess_main_bank_contributors.insert(90_000_001, 300);
-    assert_ne!(fp_system_state(&base_sys), sys_fp3);
+    assert_ne!(canonical_fp(&base_sys), sys_fp3);
 
     let mut st = UpwellStructureRecord {
         structure_id: 1_000_000_000_001, type_id: 35832, owner_corp_id: 98_000_001,
@@ -187,33 +187,33 @@ fn fp_market_contract_system_structure_and_slices_detect_mutations() {
         shield_hp: 5000.0, armor_hp: 5000.0, hull_hp: 5000.0, reinforced_until_unix: 0,
         last_damage_tick: 5, last_damage_unix: 100, self_destruct_at_unix: Some(5000),
     };
-    let st_fp = fp_structure(&st);
+    let st_fp = canonical_fp(&st);
     st.self_destruct_at_unix = None;
-    assert_ne!(fp_structure(&st), st_fp);
+    assert_ne!(canonical_fp(&st), st_fp);
 
     let wj = vec![WalletJournalEntry {
         entry_id: 1, character_id: 90_000_001, entry_type: "Bounty".into(),
         amount: IskCents(100), balance_after: IskCents(1100), reason: "pirate".into(),
     }];
-    assert_ne!(fp_wallet_journal_slice(&wj), fp_wallet_journal_slice(&[]));
+    assert_ne!(canonical_fp(&wj), canonical_fp(&Vec::<WalletJournalEntry>::new()));
     let mails = vec![MailRecord {
         message_id: 1, sender_id: 90_000_001, recipient_id: 90_000_002,
         subject: "Hi".into(), body: "Hello".into(),
     }];
-    assert_ne!(fp_mails_slice(&mails), fp_mails_slice(&[]));
+    assert_ne!(canonical_fp(&mails), canonical_fp(&Vec::<MailRecord>::new()));
     let sq = vec![SkillQueueEntry {
         type_id: 3300, target_level: 5, start_sp: 45_255.0, end_sp: 256_000.0,
         duration_seconds: 3600.0, started_at_unix: Some(1_700_000_000),
     }];
-    assert_ne!(fp_skill_queue(&sq), fp_skill_queue(&[]));
+    assert_ne!(canonical_fp(&sq), canonical_fp(&Vec::<SkillQueueEntry>::new()));
 
     let mut sp6 = Sp6PersistedState::default();
-    let sp6_0 = fp_sp6_lifecycle(&sp6);
+    let sp6_0 = canonical_fp(&sp6);
     sp6.mission_initial_npc_counts.insert("90000001:1".into(), 5);
-    let sp6_1 = fp_sp6_lifecycle(&sp6);
+    let sp6_1 = canonical_fp(&sp6);
     assert_ne!(sp6_0, sp6_1);
     sp6.mission_initial_npc_types.insert("90000001:1".into(), vec![1001, 1002]);
-    assert_ne!(fp_sp6_lifecycle(&sp6), sp6_1);
+    assert_ne!(canonical_fp(&sp6), sp6_1);
 }
 
 #[test]
@@ -306,28 +306,24 @@ fn notes_lp_sequence_store_sync_load_and_selective_rollback() {
     );
     snap.sp6_lifecycle.last_downtime_day_idx = Some(19_900);
 
-    let mut fp = TableFingerprints::default();
     {
         let tx = conn.transaction().unwrap();
-        assert!(notes_lp_sequence_store::sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(notes_lp_sequence_store::sync_d6(&tx, None, &snap).unwrap());
         assert!(domain_rows::sync_notes_lp_domain_rows(&tx, &snap).unwrap());
         assert!(domain_rows::sync_sp6_lifecycle_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
     {
         let tx = conn.transaction().unwrap();
-        assert!(!notes_lp_sequence_store::sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(!notes_lp_sequence_store::sync_d6(&tx, Some(&snap), &snap).unwrap());
         assert!(!domain_rows::sync_notes_lp_domain_rows(&tx, &snap).unwrap());
         assert!(!domain_rows::sync_sp6_lifecycle_domain_rows(&tx, &snap).unwrap());
         tx.commit().unwrap();
     }
 
-    notes_lp_sequence_store::rollback_d6(&conn, &mut snap, &fp).unwrap();
-    assert_eq!(snap.next_alliance_id, 99_000_111);
-
-    snap.next_alliance_id = 1;
-    notes_lp_sequence_store::rollback_d6(&conn, &mut snap, &fp).unwrap();
-    assert_eq!(snap.next_alliance_id, 99_000_111);
+    let mut d6_loaded = WorldStateSnapshot::default();
+    notes_lp_sequence_store::load_d6(&conn, &mut d6_loaded);
+    assert_eq!(d6_loaded.next_alliance_id, 99_000_111);
 
     let mut loaded_pop = WorldStateSnapshot::default();
     domain_rows::load_notes_lp_domain_rows(
@@ -372,7 +368,7 @@ fn notes_lp_sequence_store_sync_load_and_selective_rollback() {
 }
 
 #[test]
-fn industry_market_pve_store_sync_load_and_rollback_all_blobs() {
+fn industry_market_pve_store_sync_and_load_all_blobs() {
     let mut conn = Connection::open_in_memory().unwrap();
     apply_migrations(&conn).unwrap();
 
@@ -389,35 +385,28 @@ fn industry_market_pve_store_sync_load_and_rollback_all_blobs() {
         quantity: 500, date: "2025-01-01".into(), timestamp_unix: 1_735_689_600,
     });
 
-    let mut fp = TableFingerprints::default();
     {
         let tx = conn.transaction().unwrap();
         assert!(domain_rows::sync_industry_market_pve_domain_rows(&tx, &snap).unwrap());
-        assert!(industry_market_pve_store::sync_mining_ledger(&tx, &snap, &mut fp).unwrap());
+        assert!(industry_market_pve_store::sync_mining_ledger(&tx, None, &snap).unwrap());
         tx.commit().unwrap();
     }
     {
         let tx = conn.transaction().unwrap();
         assert!(!domain_rows::sync_industry_market_pve_domain_rows(&tx, &snap).unwrap());
-        assert!(!industry_market_pve_store::sync_mining_ledger(&tx, &snap, &mut fp).unwrap());
+        assert!(!industry_market_pve_store::sync_mining_ledger(&tx, Some(&snap), &snap).unwrap());
         tx.commit().unwrap();
     }
 
-    industry_market_pve_store::rollback_industry_market_pve(&conn, &mut snap, &fp).unwrap();
-    assert_eq!(snap.mining_ledger.len(), 1);
-
-    snap.module_online_states.clear();
-    snap.module_active_states.clear();
-    snap.weapon_banks.clear();
-    snap.paused_skill_queues.clear();
-    snap.mining_ledger.clear();
-    industry_market_pve_store::rollback_industry_market_pve(&conn, &mut snap, &fp).unwrap();
-    assert_eq!(snap.module_online_states.get(&100_000_005), Some(&true));
-    assert!(snap.module_active_states.contains(&100_000_005));
-    assert_eq!(snap.weapon_banks[&100_000_001][&100_000_005], vec![100_000_006]);
-    assert!(snap.paused_skill_queues.contains(&90_000_001));
-    assert_eq!(snap.mining_ledger.len(), 1);
-    assert_eq!(snap.mining_ledger[0].quantity, 500);
+    let mut reloaded = WorldStateSnapshot::default();
+    industry_market_pve_store::load_industry_market_pve(&conn, &mut reloaded);
+    assert_eq!(reloaded.module_online_states.get(&100_000_005), Some(&true));
+    assert!(reloaded.module_active_states.contains(&100_000_005));
+    assert_eq!(reloaded.weapon_banks[&100_000_001][&100_000_005], vec![100_000_006]);
+    assert!(reloaded.paused_skill_queues.contains(&90_000_001));
+    let reloaded_full = load::load_snapshot_from_sqlite(&conn).unwrap();
+    assert_eq!(reloaded_full.mining_ledger.len(), 1);
+    assert_eq!(reloaded_full.mining_ledger[0].quantity, 500);
 }
 
 #[test]
@@ -523,17 +512,16 @@ fn social_store_and_sync_ext_cover_all_collections_and_deletions() {
     );
     snap.character_doll_info.insert(90_000_001, ("dna_1".into(), "meta_1".into()));
 
-    let mut fp = TableFingerprints::default();
     {
         let tx = conn.transaction().unwrap();
         assert!(social_store::sync_social_domain_rows(&tx, &snap).unwrap());
-        assert!(sync_ext::sync_extension_tables(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_ext::sync_extension_tables(&tx, None, &snap).unwrap());
         tx.commit().unwrap();
     }
     {
         let tx = conn.transaction().unwrap();
         assert!(!social_store::sync_social_domain_rows(&tx, &snap).unwrap());
-        assert!(!sync_ext::sync_extension_tables(&tx, &snap, &mut fp).unwrap());
+        assert!(!sync_ext::sync_extension_tables(&tx, Some(&snap), &snap).unwrap());
         tx.commit().unwrap();
     }
 
@@ -542,6 +530,7 @@ fn social_store_and_sync_ext_cover_all_collections_and_deletions() {
     assert!(!social_store::load_social_domain_rows(&conn, &mut snap, &mut ctx).unwrap());
     assert_eq!(snap.char_notes.get(&(90_000_001, 90_000_002)), Some(&"Trusted".to_string()));
 
+    let before_clear = snap.clone();
     snap.character_last_jump_unix.clear();
     snap.character_cspa_charges.clear();
     snap.mail_timestamps.clear();
@@ -553,26 +542,27 @@ fn social_store_and_sync_ext_cover_all_collections_and_deletions() {
     snap.character_doll_info.clear();
     {
         let tx = conn.transaction().unwrap();
-        assert!(sync_ext::sync_extension_tables(&tx, &snap, &mut fp).unwrap());
+        assert!(sync_ext::sync_extension_tables(&tx, Some(&before_clear), &snap).unwrap());
         tx.commit().unwrap();
     }
-    assert!(fp.character_last_jump_unix.is_empty());
-    assert!(fp.character_cspa_charges.is_empty());
-    assert!(fp.mail_timestamps.is_empty());
-    assert!(fp.character_login_stats.is_empty());
-    assert!(fp.item_custom_names.is_empty());
-    assert!(fp.item_positions.is_empty());
-    assert!(fp.structure_vulnerability_windows.is_empty());
-    assert!(fp.skill_history.is_empty());
-    assert!(fp.character_doll_info.is_empty());
+    let loaded_after_clear = load::load_snapshot_from_sqlite(&conn).unwrap();
+    assert!(loaded_after_clear.character_last_jump_unix.is_empty());
+    assert!(loaded_after_clear.character_cspa_charges.is_empty());
+    assert!(loaded_after_clear.mail_timestamps.is_empty());
+    assert!(loaded_after_clear.character_login_stats.is_empty());
+    assert!(loaded_after_clear.item_custom_names.is_empty());
+    assert!(loaded_after_clear.item_positions.is_empty());
+    assert!(loaded_after_clear.structure_vulnerability_windows.is_empty());
+    assert!(loaded_after_clear.skill_history.is_empty());
+    assert!(loaded_after_clear.character_doll_info.is_empty());
 }
 
 #[test]
-fn ws_a3_fingerprints_fnv_serializer_all_primitives_and_order_independence() {
+fn ws_a3_checked_json_fnv_serializer_all_primitives_and_order_independence() {
     use serde::{ser::Error as _, Serialize, Serializer};
 
     // FnvSerError trait impls: Display, Debug, Error, serde::ser::Error::custom
-    let err = fingerprints::FnvSerError::custom("bad");
+    let err = checked_json::FnvSerError::custom("bad");
     assert_eq!(err.to_string(), "fnv serialization error");
     assert!(!format!("{err:?}").is_empty());
     let _dyn_err: &dyn std::error::Error = &err;
@@ -687,20 +677,20 @@ fn ws_a3_fingerprints_fnv_serializer_all_primitives_and_order_independence() {
     };
 
     // -0.0 and +0.0 canonicalize identically
-    let fp_pos0 = fingerprints::canonical_fp(&make(0.0));
-    let fp_neg0 = fingerprints::canonical_fp(&make(-0.0));
+    let fp_pos0 = checked_json::canonical_fp(&make(0.0));
+    let fp_neg0 = checked_json::canonical_fp(&make(-0.0));
     assert_eq!(fp_pos0, fp_neg0);
-    assert_ne!(fp_pos0, fingerprints::canonical_fp(&BytesWrap(b"\x01\x02\x04")));
+    assert_ne!(fp_pos0, checked_json::canonical_fp(&BytesWrap(b"\x01\x02\x04")));
 
     // Map key-order independence via xor & sum
     let m1 = KVSlice(&[("alpha", 1), ("beta", 2), ("gamma", 3)]);
     let m2 = KVSlice(&[("gamma", 3), ("alpha", 1), ("beta", 2)]);
-    assert_eq!(fingerprints::canonical_fp(&m1), fingerprints::canonical_fp(&m2));
+    assert_eq!(checked_json::canonical_fp(&m1), checked_json::canonical_fp(&m2));
 
     let mut m3_base = KVSlice(&[("alpha", 1), ("beta", 99), ("gamma", 3)]);
-    assert_ne!(fingerprints::canonical_fp(&m1), fingerprints::canonical_fp(&m3_base));
+    assert_ne!(checked_json::canonical_fp(&m1), checked_json::canonical_fp(&m3_base));
     m3_base = KVSlice(&[("alpha", 1), ("beta", 2)]);
-    assert_ne!(fingerprints::canonical_fp(&m1), fingerprints::canonical_fp(&m3_base));
+    assert_ne!(checked_json::canonical_fp(&m1), checked_json::canonical_fp(&m3_base));
 }
 
 #[test]
@@ -721,7 +711,6 @@ fn service_domains_store_hash_json_all_variants_and_corrupt_load() {
         }),
     );
 
-    let fp = TableFingerprints::default();
     {
         let tx = conn.transaction().unwrap();
         assert!(domain_rows::sync_service_domains_rows(&tx, &snap).unwrap());
@@ -736,10 +725,10 @@ fn service_domains_store_hash_json_all_variants_and_corrupt_load() {
         .unwrap();
     assert_eq!(stored_count, 1);
 
-    // Rollback restores mutated cluster_and_runtime
+    // Reload restores mutated cluster_and_runtime
     let expected = snap.cluster_and_runtime.session_registry.clone();
     snap.cluster_and_runtime.session_registry.clear();
-    service_domains_store::rollback_service_domains(&conn, &mut snap, &fp).unwrap();
+    service_domains_store::load_service_domains(&conn, &mut snap);
     assert_eq!(snap.cluster_and_runtime.session_registry, expected);
 
     // Corrupt rows in domain_rows are gracefully skipped by load_service_domains

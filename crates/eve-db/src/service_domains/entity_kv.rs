@@ -463,7 +463,7 @@ impl<'a> EntityKvWriter<'a> {
         value: &T,
         updated_unix: u64,
     ) -> Result<(), String> {
-        let value_json = crate::sqlite_store::fingerprints::to_checked_json_string(value)?;
+        let value_json = crate::sqlite_store::checked_json::to_checked_json_string(value)?;
         self.set_raw(entity_id, sub_key, value_json, updated_unix)
     }
 

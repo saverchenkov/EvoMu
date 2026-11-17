@@ -594,40 +594,45 @@ impl WorldRepository {
         let mut conn = rusqlite::Connection::open_in_memory()
             .expect("open in-memory SQLite connection for WorldRepository");
         sqlite_store::apply_migrations(&conn).expect("apply SQLite migrations for WorldRepository");
-        let fp = sqlite_store::replace_sqlite_from_snapshot(&mut conn, &initial_snap)
+        sqlite_store::replace_sqlite_from_snapshot(&mut conn, &initial_snap)
             .expect("initialize SQLite from demo snapshot");
         let jwt_secret =
             sqlite_store::load_or_init_jwt_secret(&conn, Self::generate_random_secret_32)
                 .expect("initialize per-deployment JWT signing secret");
         let entity_block = initial_snap.next_entity_id.max(200_000_000);
 
-        let mut repo = Self::from_parts(
+        let repo = Self::from_parts(
             initial_snap,
             conn,
-            fp,
             entity_block,
             None,
             AuthRuntimeState::new(jwt_secret),
         );
 
-        let snapshot_path = {
-            let _env_guard = crate::lock_test_env_read();
-            std::env::var("EVOMU_SNAPSHOT_PATH")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .map(std::path::PathBuf::from)
-        };
+        #[cfg(any(test, feature = "legacy-json-snapshot"))]
+        {
+            let mut repo = repo;
+            let snapshot_path = {
+                let _env_guard = crate::lock_test_env_read();
+                std::env::var("EVOMU_SNAPSHOT_PATH")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(std::path::PathBuf::from)
+            };
 
-        if let Some(ref p) = snapshot_path {
-            if p.exists() {
-                repo.load_snapshot_from_file(p)
-                    .expect("Failed to load persisted WorldRepository snapshot");
-            } else {
-                repo.save_snapshot_to_file(p)
-                    .expect("Failed to initialize persisted WorldRepository snapshot");
+            if let Some(ref p) = snapshot_path {
+                if p.exists() {
+                    repo.load_snapshot_from_file(p)
+                        .expect("Failed to load persisted WorldRepository snapshot");
+                } else {
+                    repo.save_snapshot_to_file(p)
+                        .expect("Failed to initialize persisted WorldRepository snapshot");
+                }
+                repo.snapshot_path = snapshot_path;
             }
-            repo.snapshot_path = snapshot_path;
+            return repo;
         }
+        #[cfg(not(any(test, feature = "legacy-json-snapshot")))]
         repo
     }
 }

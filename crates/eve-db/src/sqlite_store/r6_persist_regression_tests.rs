@@ -1,16 +1,17 @@
 //! Regression tests for Round-6 Quasar persistence bugs:
-//! - `#410` (`CharacterRecord` profile/autopilot fields persisted & rolled back via `fp_character`)
-//! - `#411` (`WorldStateSnapshot` D6 batch4 auxiliary collections synced, loaded, and rolled back)
-//! - `#412` (`rollback_snapshot` preserving `bookmarks` extended fields & same-length `wallet_journal`/`mails`)
+//! - `#410` (`CharacterRecord` profile/autopilot fields persisted & reloaded across restarts)
+//! - `#411` (`WorldStateSnapshot` D6 batch4 auxiliary collections synced, loaded, and restored)
+//! - `#412` (reloading/rollback preserves `bookmarks` extended fields & same-length `wallet_journal`/`mails`)
 //! - `#403` (Unified account PLEX Vault ledger & SQLite round-trip)
 
 #![forbid(unsafe_code)]
 
 use crate::persistence::WorldRepository;
-use crate::sqlite_store::fingerprints::{fp_character, TableFingerprints};
+use crate::sqlite_store::checked_json::canonical_fp;
 use crate::sqlite_store::load::load_snapshot_from_sqlite;
 use crate::sqlite_store::schema::apply_migrations;
-use crate::sqlite_store::sync::sync_dirty_to_sqlite;
+use crate::sqlite_store::sync::sync_snapshot_diff_for_test;
+use crate::tx_engine::ChangeSet;
 use crate::types::{BookmarkRecord, MailRecord, WalletJournalEntry, WorldStateSnapshot};
 use crate::{
     CorpProjectContributorEntry, IskCents, KillmailAttackerDetail, KillmailDetailRecord,
@@ -25,9 +26,13 @@ fn open_migrated_conn() -> Connection {
     conn
 }
 
-fn sync_conn(conn: &mut Connection, snap: &WorldStateSnapshot, fp: &mut TableFingerprints) {
+fn sync_conn(
+    conn: &mut Connection,
+    prev: &mut WorldStateSnapshot,
+    snap: &WorldStateSnapshot,
+) {
     let tx = conn.transaction().expect("begin sqlite tx");
-    sync_dirty_to_sqlite(&tx, snap, fp, false).expect("sync dirty snapshot");
+    sync_snapshot_diff_for_test(&tx, prev, snap, false).expect("sync dirty snapshot");
     tx.commit().expect("commit sqlite tx");
 }
 
@@ -36,29 +41,35 @@ fn regression_410_character_profile_and_autopilot_fields_dirty_detect_and_roundt
     let mut conn = open_migrated_conn();
     let mut snap = WorldRepository::create_demo_snapshot();
     let cid = 90_000_001i64;
-    let mut fp = TableFingerprints::default();
-    sync_conn(&mut conn, &snap, &mut fp);
+    let mut prev = WorldStateSnapshot::default();
+    sync_conn(&mut conn, &mut prev, &snap);
 
-    let base_fp = fp_character(&snap.characters[&cid]);
-    let mut mutated = snap.characters[&cid].clone();
-    mutated.description = "Updated bio for #410".into();
-    assert_ne!(fp_character(&mutated), base_fp);
+    let base_fp = canonical_fp(&snap.characters[&cid]);
+    let mut mutated_snap = snap.clone();
+    mutated_snap.characters.get_mut(&cid).unwrap().description = "Updated bio for #410".into();
+    assert_ne!(canonical_fp(&mutated_snap.characters[&cid]), base_fp);
+    assert_eq!(ChangeSet::diff(1, &snap, &mutated_snap).characters.len(), 1);
 
-    mutated = snap.characters[&cid].clone();
-    mutated.title = "Wing Commander".into();
-    assert_ne!(fp_character(&mutated), base_fp);
+    let mut mutated_snap = snap.clone();
+    mutated_snap.characters.get_mut(&cid).unwrap().title = "Wing Commander".into();
+    assert_ne!(canonical_fp(&mutated_snap.characters[&cid]), base_fp);
+    assert_eq!(ChangeSet::diff(1, &snap, &mutated_snap).characters.len(), 1);
 
-    mutated = snap.characters[&cid].clone();
-    mutated.gender = 2;
-    assert_ne!(fp_character(&mutated), base_fp);
+    let mut mutated_snap = snap.clone();
+    mutated_snap.characters.get_mut(&cid).unwrap().gender = 2;
+    assert_ne!(canonical_fp(&mutated_snap.characters[&cid]), base_fp);
+    assert_eq!(ChangeSet::diff(1, &snap, &mutated_snap).characters.len(), 1);
 
-    mutated = snap.characters[&cid].clone();
-    mutated.create_date_unix = 1_750_000_123;
-    assert_ne!(fp_character(&mutated), base_fp);
+    let mut mutated_snap = snap.clone();
+    mutated_snap.characters.get_mut(&cid).unwrap().create_date_unix = 1_750_000_123;
+    assert_ne!(canonical_fp(&mutated_snap.characters[&cid]), base_fp);
+    assert_eq!(ChangeSet::diff(1, &snap, &mutated_snap).characters.len(), 1);
 
-    mutated = snap.characters[&cid].clone();
-    mutated.autopilot_waypoints = vec![30_000_142, 30_002_187, 30_000_001];
-    assert_ne!(fp_character(&mutated), base_fp);
+    let mut mutated_snap = snap.clone();
+    mutated_snap.characters.get_mut(&cid).unwrap().autopilot_waypoints =
+        vec![30_000_142, 30_002_187, 30_000_001];
+    assert_ne!(canonical_fp(&mutated_snap.characters[&cid]), base_fp);
+    assert_eq!(ChangeSet::diff(1, &snap, &mutated_snap).characters.len(), 1);
 
     {
         let ch = snap.characters.get_mut(&cid).unwrap();
@@ -68,8 +79,8 @@ fn regression_410_character_profile_and_autopilot_fields_dirty_detect_and_roundt
         ch.create_date_unix = 1_760_111_222;
         ch.autopilot_waypoints = vec![30_000_142, 30_003_458];
     }
-    sync_conn(&mut conn, &snap, &mut fp);
-    let (loaded, _) = load_snapshot_from_sqlite(&conn).expect("load snapshot");
+    sync_conn(&mut conn, &mut prev, &snap);
+    let loaded = load_snapshot_from_sqlite(&conn).expect("load snapshot");
     let ch_loaded = &loaded.characters[&cid];
     assert_eq!(ch_loaded.description, "Persistent Capsuleer Bio");
     assert_eq!(ch_loaded.title, "Fleet Executor");
@@ -78,7 +89,7 @@ fn regression_410_character_profile_and_autopilot_fields_dirty_detect_and_roundt
     assert_eq!(ch_loaded.autopilot_waypoints, vec![30_000_142, 30_003_458]);
 
     snap.characters.get_mut(&cid).unwrap().autopilot_waypoints = vec![30_000_999];
-    let (reloaded_abort, _) = load_snapshot_from_sqlite(&conn).expect("reload character");
+    let reloaded_abort = load_snapshot_from_sqlite(&conn).expect("reload character");
     assert_eq!(
         reloaded_abort.characters[&cid].autopilot_waypoints,
         vec![30_000_142, 30_003_458]
@@ -157,10 +168,10 @@ fn regression_411_world_snapshot_auxiliary_collections_persist_and_rollback() {
         timestamp_unix: 1_760_000_750,
     });
 
-    let mut fp = TableFingerprints::default();
-    sync_conn(&mut conn, &snap, &mut fp);
+    let mut prev = WorldStateSnapshot::default();
+    sync_conn(&mut conn, &mut prev, &snap);
 
-    let (loaded, _) = load_snapshot_from_sqlite(&conn).expect("load #411 snapshot");
+    let loaded = load_snapshot_from_sqlite(&conn).expect("load #411 snapshot");
     assert_eq!(loaded.killmail_details, snap.killmail_details);
     assert_eq!(loaded.station_office_rental_costs, snap.station_office_rental_costs);
     assert_eq!(loaded.structure_esi_timer_meta, snap.structure_esi_timer_meta);
@@ -178,7 +189,7 @@ fn regression_411_world_snapshot_auxiliary_collections_persist_and_rollback() {
     working.system_jump_events.clear();
     working.system_kill_events.clear();
 
-    let (reloaded, _) = load_snapshot_from_sqlite(&conn).expect("reload #411 collections");
+    let reloaded = load_snapshot_from_sqlite(&conn).expect("reload #411 collections");
     assert_eq!(reloaded.killmail_details, loaded.killmail_details);
     assert_eq!(reloaded.station_office_rental_costs, loaded.station_office_rental_costs);
     assert_eq!(reloaded.structure_esi_timer_meta, loaded.structure_esi_timer_meta);
@@ -224,8 +235,8 @@ fn regression_412_rollback_preserves_bookmarks_metadata_and_same_length_journal_
         body: "Undock in 5 minutes".into(),
     });
 
-    let mut fp = TableFingerprints::default();
-    sync_conn(&mut conn, &snap, &mut fp);
+    let mut prev = WorldStateSnapshot::default();
+    sync_conn(&mut conn, &mut prev, &snap);
 
     let bm = snap.bookmarks.get_mut(&88_001).unwrap();
     bm.label = "Corrupted".into();
@@ -241,7 +252,7 @@ fn regression_412_rollback_preserves_bookmarks_metadata_and_same_length_journal_
     snap.mails[m_len - 1].subject = "Tampered same-length subject".into();
     snap.mails[m_len - 1].body = "Tampered same-length body".into();
 
-    let (restored, _) = load_snapshot_from_sqlite(&conn).expect("reload #412 mutations");
+    let restored = load_snapshot_from_sqlite(&conn).expect("reload #412 mutations");
     let _ = snap;
 
     let restored_bm = &restored.bookmarks[&88_001];
@@ -279,9 +290,9 @@ fn regression_403_unified_plex_vault_ledger_and_sqlite_roundtrip() {
     assert_eq!(snap.adjust_unified_plex_for_user(uid, -401), None);
     assert_eq!(snap.unified_plex_balance_for_user(uid), 400);
 
-    let mut fp = TableFingerprints::default();
-    sync_conn(&mut conn, &snap, &mut fp);
-    let (loaded, _) = load_snapshot_from_sqlite(&conn).expect("load unified plex vault");
+    let mut prev = WorldStateSnapshot::default();
+    sync_conn(&mut conn, &mut prev, &snap);
+    let loaded = load_snapshot_from_sqlite(&conn).expect("load unified plex vault");
     assert_eq!(loaded.unified_plex_balance_for_user(uid), 400);
     assert_eq!(loaded.unified_plex_balance(cid), 400);
     assert_eq!(loaded.characters[&cid].plex_balance, 0);
