@@ -110,6 +110,7 @@ fn sample_corp(corp_id: i64, ceo_id: i64, master_wallet: IskCents) -> Corporatio
         description: String::new(),
         url: String::new(),
         hq_station_id: Some(60_003_760),
+        ..Default::default()
     }
 }
 
@@ -797,6 +798,7 @@ fn id_allocation_reconciliation_cosmetic_stripping_and_date_formatting() {
             master_wallet: Default::default(),
             applications: Default::default(),
             wallet_divisions: Default::default(),
+            ..Default::default()
         },
     );
     snap.corp_governance

@@ -2,7 +2,7 @@
 
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::{
-    corp_roles, ChatChannelRecord, CorpVoteBallotRecord, CorpWalletDivisionRecord,
+    corp_roles, ChatChannelRecord, CorpTypeface, CorpVoteBallotRecord, CorpWalletDivisionRecord,
     CorporationRecord, IskCents, WalletJournalEntry,
 };
 use eve_machonet::SessionState;
@@ -27,8 +27,9 @@ fn load_corp_rec_ads(ctx: &ServerContext) -> Vec<CorpRecruitmentAd> {
                 for (aid, title, desc, mask, rec_id) in &state.recruitment_ads {
                     ads.push(CorpRecruitmentAd {
                         ad_id: *aid, corp_id: cid, title: title.clone(), description: desc.clone(),
-                        type_mask: *mask, recruiter_id: *rec_id, created_unix: 0,
-                        expiry_unix: u64::MAX, days: 30, lang_mask: 0,
+                        type_mask: *mask, recruiter_id: *rec_id,
+                        recruiters: (*rec_id > 0).then_some(*rec_id).into_iter().collect(),
+                        created_unix: 0, expiry_unix: u64::MAX, days: 30, lang_mask: 0,
                     });
                 }
             }
@@ -37,10 +38,476 @@ fn load_corp_rec_ads(ctx: &ServerContext) -> Vec<CorpRecruitmentAd> {
     ads
 }
 
-fn save_corp_rec_ads(ctx: &ServerContext, ads: &[CorpRecruitmentAd]) {
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.fleet_and_social_ops.corp_recruitment_ads = ads.to_vec();
-    });
+fn ensure_corp_rec_ads_populated_in_snap(snap: &mut eve_db::WorldStateSnapshot) {
+    if snap.fleet_and_social_ops.corp_recruitment_ads.is_empty() {
+        for (&cid, state) in &snap.corp_governance {
+            for (aid, title, desc, mask, rec_id) in &state.recruitment_ads {
+                snap.fleet_and_social_ops
+                    .corp_recruitment_ads
+                    .push(CorpRecruitmentAd {
+                        ad_id: *aid,
+                        corp_id: cid,
+                        title: title.clone(),
+                        description: desc.clone(),
+                        type_mask: *mask,
+                        recruiter_id: *rec_id,
+                        recruiters: (*rec_id > 0).then_some(*rec_id).into_iter().collect(),
+                        created_unix: 0,
+                        expiry_unix: u64::MAX,
+                        days: 14,
+                        lang_mask: 0,
+                    });
+            }
+        }
+    }
+}
+
+/// V24 `appConst.corporationMaxCorpRecruiters` / `corpRecruitmentContainer.pyj` per-ad recruiter cap.
+const MAX_CORP_AD_RECRUITERS: usize = 6;
+const MAX_CORP_AD_RECRUITER_INPUT_ITEMS: usize = 64;
+const MAX_RECRUITMENT_TITLE_CHARS: usize = 128;
+const MAX_RECRUITMENT_TITLE_BYTES: usize = 512;
+const MAX_RECRUITMENT_DESC_CHARS: usize = 4_000;
+const MAX_RECRUITMENT_DESC_BYTES: usize = 16_000;
+
+struct ParsedRecruitmentAdArgs {
+    ad_id: Option<i64>,
+    days: u32,
+    added_days: u32,
+    type_mask: u64,
+    lang_mask: u64,
+    has_lang_mask: bool,
+    title: String,
+    description: String,
+    recruiters: Option<Vec<i64>>,
+}
+
+fn bounded_ad_str(
+    val: Option<&PyRep>,
+    label: &str,
+    default: &str,
+    max_chars: usize,
+    max_bytes: usize,
+) -> Result<String, BridgeRpcError> {
+    let s = val.and_then(|a| a.as_str()).unwrap_or(default);
+    crate::router::check_str_bounds(s, label, max_chars, max_bytes)?;
+    Ok(s.to_string())
+}
+
+fn has_explicit_lang_mask(pos: Option<&PyRep>, kwargs: &HashMap<String, PyRep>) -> bool {
+    pos.is_some_and(|v| !matches!(v, PyRep::None))
+        || kwargs.get("langMask").is_some_and(|v| !matches!(v, PyRep::None))
+        || kwargs.get("languageMask").is_some_and(|v| !matches!(v, PyRep::None))
+}
+
+fn parse_checked_u64_mask(
+    val: Option<&PyRep>,
+    field: &str,
+    default: u64,
+) -> Result<u64, BridgeRpcError> {
+    match val {
+        None | Some(PyRep::None) => Ok(default),
+        Some(v) => v
+            .as_i64()
+            .and_then(|n| u64::try_from(n).ok())
+            .ok_or_else(|| BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: format!("{field} must be a non-negative integer bitmask"),
+                client_error: None,
+            }),
+    }
+}
+
+fn parse_checked_days(val: Option<&PyRep>, default: u32) -> Result<u32, BridgeRpcError> {
+    match val {
+        None | Some(PyRep::None) => Ok(default),
+        Some(v) => v
+            .as_i64()
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|&d| (1..=28).contains(&d))
+            .ok_or_else(|| BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: "Recruitment ad duration (days) must be between 1 and 28".into(),
+                client_error: None,
+            }),
+    }
+}
+
+fn parse_checked_added_days(val: Option<&PyRep>) -> Result<u32, BridgeRpcError> {
+    match val {
+        None | Some(PyRep::None) => Ok(0),
+        Some(v) => v
+            .as_i64()
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|&d| d <= 28)
+            .ok_or_else(|| BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: "Recruitment ad addedDays must be between 0 and 28".into(),
+                client_error: None,
+            }),
+    }
+}
+
+fn parse_recruiter_ids(val: Option<&PyRep>) -> Result<Option<Vec<i64>>, BridgeRpcError> {
+    let Some(rep) = val else {
+        return Ok(None);
+    };
+    if matches!(rep, PyRep::None) {
+        return Ok(None);
+    }
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    match rep {
+        PyRep::List(items) | PyRep::Tuple(items) | PyRep::Set(items) | PyRep::PySet(items) => {
+            if items.len() > MAX_CORP_AD_RECRUITER_INPUT_ITEMS {
+                return Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: format!(
+                        "Recruitment ad cannot have more than {MAX_CORP_AD_RECRUITERS} recruiters"
+                    ),
+                    client_error: None,
+                });
+            }
+            for item in items {
+                let Some(id) = item.as_i64().filter(|&id| id > 0) else {
+                    return Err(BridgeRpcError {
+                        code: "InvalidArgument".into(),
+                        message: "Recruitment ad recruiter IDs must be positive character IDs".into(),
+                        client_error: None,
+                    });
+                };
+                if seen.insert(id) {
+                    if out.len() >= MAX_CORP_AD_RECRUITERS {
+                        return Err(BridgeRpcError {
+                            code: "InvalidArgument".into(),
+                            message: format!(
+                                "Recruitment ad cannot have more than {MAX_CORP_AD_RECRUITERS} recruiters"
+                            ),
+                            client_error: None,
+                        });
+                    }
+                    out.push(id);
+                }
+            }
+        }
+        other => {
+            let Some(id) = other.as_i64().filter(|&id| id > 0) else {
+                return Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "Recruitment ad recruiters must be a list of positive character IDs".into(),
+                    client_error: None,
+                });
+            };
+            out.push(id);
+        }
+    }
+    Ok(Some(out))
+}
+
+fn parse_recruitment_ad_args(
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<ParsedRecruitmentAdArgs, BridgeRpcError> {
+    if method == "CreateRecruitmentAd" {
+        if args.first().and_then(|a| a.as_str()).is_some() {
+            let title = bounded_ad_str(
+                args.first(),
+                "title",
+                "Nullsec PvP & Industry",
+                MAX_RECRUITMENT_TITLE_CHARS,
+                MAX_RECRUITMENT_TITLE_BYTES,
+            )?;
+            let description = bounded_ad_str(
+                args.get(1),
+                "description",
+                "Join our corp today",
+                MAX_RECRUITMENT_DESC_CHARS,
+                MAX_RECRUITMENT_DESC_BYTES,
+            )?;
+            let type_mask = parse_checked_u64_mask(
+                args.get(2).or_else(|| kwargs.get("typeMask")),
+                "typeMask",
+                7,
+            )?;
+            let days = parse_checked_days(args.get(3).or_else(|| kwargs.get("days")), 14)?;
+            let lang_mask = parse_checked_u64_mask(
+                args.get(4)
+                    .or_else(|| kwargs.get("langMask"))
+                    .or_else(|| kwargs.get("languageMask")),
+                "langMask",
+                0,
+            )?;
+            return Ok(ParsedRecruitmentAdArgs {
+                ad_id: None,
+                days,
+                added_days: 0,
+                type_mask,
+                lang_mask,
+                has_lang_mask: true,
+                title,
+                description,
+                recruiters: None,
+            });
+        }
+        let is_v24 = args.len() >= 9
+            || (args.len() >= 6
+                && (args.get(5).and_then(|a| a.as_str()).is_some()
+                    || args.get(4).is_some_and(|a| {
+                        matches!(
+                            a,
+                            PyRep::List(_)
+                                | PyRep::Tuple(_)
+                                | PyRep::Set(_)
+                                | PyRep::PySet(_)
+                                | PyRep::None
+                        )
+                    })));
+        if is_v24 {
+            let days = parse_checked_days(args.first().or_else(|| kwargs.get("days")), 14)?;
+            let type_mask = parse_checked_u64_mask(
+                args.get(1).or_else(|| kwargs.get("typeMask")),
+                "typeMask",
+                0,
+            )?;
+            let lang_mask = parse_checked_u64_mask(
+                args.get(2)
+                    .or_else(|| kwargs.get("langMask"))
+                    .or_else(|| kwargs.get("languageMask")),
+                "langMask",
+                0,
+            )?;
+            let description = bounded_ad_str(
+                args.get(3),
+                "description",
+                "",
+                MAX_RECRUITMENT_DESC_CHARS,
+                MAX_RECRUITMENT_DESC_BYTES,
+            )?;
+            let recruiters = parse_recruiter_ids(args.get(4).or_else(|| kwargs.get("recruiters")))?;
+            let title = bounded_ad_str(
+                args.get(5),
+                "title",
+                "",
+                MAX_RECRUITMENT_TITLE_CHARS,
+                MAX_RECRUITMENT_TITLE_BYTES,
+            )?;
+            return Ok(ParsedRecruitmentAdArgs {
+                ad_id: None,
+                days,
+                added_days: 0,
+                type_mask,
+                lang_mask,
+                has_lang_mask: true,
+                title,
+                description,
+                recruiters,
+            });
+        }
+        let days = parse_checked_days(args.first().or_else(|| kwargs.get("days")), 14)?;
+        let type_mask = parse_checked_u64_mask(
+            args.get(1).or_else(|| kwargs.get("typeMask")),
+            "typeMask",
+            7,
+        )?;
+        let (title, description, lang_mask) = if args.get(6).and_then(|a| a.as_str()).is_some() {
+            let lang = parse_checked_u64_mask(
+                args.get(2).or_else(|| kwargs.get("langMask")),
+                "langMask",
+                0,
+            )?;
+            let desc = bounded_ad_str(
+                args.get(3),
+                "description",
+                "",
+                MAX_RECRUITMENT_DESC_CHARS,
+                MAX_RECRUITMENT_DESC_BYTES,
+            )?;
+            let t = bounded_ad_str(
+                args.get(6),
+                "title",
+                "",
+                MAX_RECRUITMENT_TITLE_CHARS,
+                MAX_RECRUITMENT_TITLE_BYTES,
+            )?;
+            (t, desc, lang)
+        } else {
+            let t = bounded_ad_str(
+                args.get(2),
+                "title",
+                "Corp Recruitment Ad",
+                MAX_RECRUITMENT_TITLE_CHARS,
+                MAX_RECRUITMENT_TITLE_BYTES,
+            )?;
+            let desc = bounded_ad_str(
+                args.get(3),
+                "description",
+                "Join our corp today",
+                MAX_RECRUITMENT_DESC_CHARS,
+                MAX_RECRUITMENT_DESC_BYTES,
+            )?;
+            let lang = parse_checked_u64_mask(
+                args.get(4)
+                    .or_else(|| kwargs.get("langMask"))
+                    .or_else(|| kwargs.get("languageMask")),
+                "langMask",
+                0,
+            )?;
+            (t, desc, lang)
+        };
+        return Ok(ParsedRecruitmentAdArgs {
+            ad_id: None,
+            days,
+            added_days: 0,
+            type_mask,
+            lang_mask,
+            has_lang_mask: true,
+            title,
+            description,
+            recruiters: None,
+        });
+    }
+
+    let ad_id = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .filter(|&id| id > 0)
+        .ok_or_else(|| BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "UpdateRecruitmentAd requires a positive adID".into(),
+            client_error: None,
+        })?;
+    let is_v24 = args.len() >= 7
+        && (args.get(5).and_then(|a| a.as_str()).is_some()
+            || args.get(4).is_some_and(|a| {
+                matches!(
+                    a,
+                    PyRep::List(_)
+                        | PyRep::Tuple(_)
+                        | PyRep::Set(_)
+                        | PyRep::PySet(_)
+                        | PyRep::None
+                )
+            }));
+    if is_v24 {
+        let type_mask = parse_checked_u64_mask(
+            args.get(1).or_else(|| kwargs.get("typeMask")),
+            "typeMask",
+            0,
+        )?;
+        let lang_arg = args.get(2);
+        let has_lang_mask = has_explicit_lang_mask(lang_arg, kwargs);
+        let lang_mask = parse_checked_u64_mask(
+            lang_arg
+                .or_else(|| kwargs.get("langMask"))
+                .or_else(|| kwargs.get("languageMask")),
+            "langMask",
+            0,
+        )?;
+        let description = bounded_ad_str(
+            args.get(3),
+            "description",
+            "",
+            MAX_RECRUITMENT_DESC_CHARS,
+            MAX_RECRUITMENT_DESC_BYTES,
+        )?;
+        let recruiters = parse_recruiter_ids(args.get(4).or_else(|| kwargs.get("recruiters")))?;
+        let title = bounded_ad_str(
+            args.get(5),
+            "title",
+            "",
+            MAX_RECRUITMENT_TITLE_CHARS,
+            MAX_RECRUITMENT_TITLE_BYTES,
+        )?;
+        let added_days = parse_checked_added_days(args.get(6).or_else(|| kwargs.get("addedDays")))?;
+        return Ok(ParsedRecruitmentAdArgs {
+            ad_id: Some(ad_id),
+            days: 0,
+            added_days,
+            type_mask,
+            lang_mask,
+            has_lang_mask,
+            title,
+            description,
+            recruiters,
+        });
+    }
+    let type_mask = parse_checked_u64_mask(
+        args.get(1).or_else(|| kwargs.get("typeMask")),
+        "typeMask",
+        7,
+    )?;
+    if args.get(6).and_then(|a| a.as_str()).is_some() {
+        let lang_arg = args.get(2);
+        let has_lang_mask = has_explicit_lang_mask(lang_arg, kwargs);
+        let lang_mask = parse_checked_u64_mask(
+            lang_arg
+                .or_else(|| kwargs.get("langMask"))
+                .or_else(|| kwargs.get("languageMask")),
+            "langMask",
+            0,
+        )?;
+        let description = bounded_ad_str(
+            args.get(3),
+            "description",
+            "",
+            MAX_RECRUITMENT_DESC_CHARS,
+            MAX_RECRUITMENT_DESC_BYTES,
+        )?;
+        let title = bounded_ad_str(
+            args.get(6),
+            "title",
+            "",
+            MAX_RECRUITMENT_TITLE_CHARS,
+            MAX_RECRUITMENT_TITLE_BYTES,
+        )?;
+        let added_days = parse_checked_added_days(args.get(7).or_else(|| kwargs.get("addedDays")))?;
+        return Ok(ParsedRecruitmentAdArgs {
+            ad_id: Some(ad_id),
+            days: 0,
+            added_days,
+            type_mask,
+            lang_mask,
+            has_lang_mask,
+            title,
+            description,
+            recruiters: None,
+        });
+    }
+    let title = bounded_ad_str(
+        args.get(2),
+        "title",
+        "Updated Corp Ad",
+        MAX_RECRUITMENT_TITLE_CHARS,
+        MAX_RECRUITMENT_TITLE_BYTES,
+    )?;
+    let description = bounded_ad_str(
+        args.get(3),
+        "description",
+        "Updated description",
+        MAX_RECRUITMENT_DESC_CHARS,
+        MAX_RECRUITMENT_DESC_BYTES,
+    )?;
+    let lang_arg = args.get(4);
+    let has_lang_mask = has_explicit_lang_mask(lang_arg, kwargs);
+    let lang_mask = parse_checked_u64_mask(
+        lang_arg
+            .or_else(|| kwargs.get("langMask"))
+            .or_else(|| kwargs.get("languageMask")),
+        "langMask",
+        0,
+    )?;
+    Ok(ParsedRecruitmentAdArgs {
+        ad_id: Some(ad_id),
+        days: 0,
+        added_days: 0,
+        type_mask,
+        lang_mask,
+        has_lang_mask,
+        title,
+        description,
+        recruiters: None,
+    })
 }
 
 fn handle_corp_rec_queries(
@@ -112,36 +579,139 @@ pub(super) fn handle_add_corporation(
             client_error: None,
         }));
     }
-    let Some(name) = args
-        .first()
-        .and_then(|a| a.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
-        return Some(Err(BridgeRpcError { code: "InvalidCorporationName".into(), message: "Corporation name is required".into(), client_error: None }));
-    };
     let rpc = crate::router::RpcArgs::positional(args);
-    let ticker = match rpc.opt_str(1, "ticker") {
+    let name = match args.first() {
+        None | Some(PyRep::None) => {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidCorporationName".into(),
+                message: "Corporation name is required".into(),
+                client_error: None,
+            }));
+        }
+        Some(_) => match rpc.req_str_max(0, "corporationName", 100, 400) {
+            Ok(s) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidCorporationName".into(),
+                        message: "Corporation name is required".into(),
+                        client_error: None,
+                    }));
+                }
+                trimmed
+            }
+            Err(e) => return Some(Err(e)),
+        },
+    };
+    let ticker = match rpc.opt_str_max(1, "ticker", 16, 64) {
         Ok(v) => v.unwrap_or("EVOMU"),
         Err(e) => return Some(Err(e)),
     };
-    let (description, url, tax_rate, shape1, shape2, shape3, color1, color2, color3, apps_enabled) =
-        if args.get(2).and_then(|a| a.as_str()).is_some() {
+    let (
+        description,
+        url,
+        tax_rate,
+        shape1,
+        shape2,
+        shape3,
+        color1,
+        color2,
+        color3,
+        typeface,
+        apps_enabled,
+        friendly_fire,
+        lp_tax_rate,
+        explicit_lp_tax,
+    ) = if args.len() >= 5 || args.get(2).and_then(|a| a.as_str()).is_some() {
+        let description = match rpc.opt_str_max(2, "description", 4_000, 16_000) {
+            Ok(v) => v.unwrap_or(""),
+            Err(e) => return Some(Err(e)),
+        };
+        let (url, tax) = if matches!(args.get(3), Some(PyRep::Real(_))) {
+            let tax = match rpc.opt_finite_f64(3, "taxRate") {
+                Ok(v) => v.unwrap_or(0.10).clamp(0.0, 1.0),
+                Err(e) => return Some(Err(e)),
+            };
+            ("", tax)
+        } else {
+            let url = match rpc.opt_str_max(3, "url", 256, 1_024) {
+                Ok(v) => v.unwrap_or(""),
+                Err(e) => return Some(Err(e)),
+            };
             let tax = match rpc.opt_finite_f64(4, "taxRate") {
                 Ok(v) => v.unwrap_or(0.10).clamp(0.0, 1.0),
                 Err(e) => return Some(Err(e)),
             };
-            let apps = args.get(12).map(|a| match a { PyRep::Bool(b) => *b, PyRep::Integer(i) => *i != 0, _ => true }).unwrap_or(true);
-            (args.get(2).and_then(|a| a.as_str()).unwrap_or(""), args.get(3).and_then(|a| a.as_str()).unwrap_or(""), tax,
-             args.get(5).and_then(|a| a.as_i64()).unwrap_or(415), args.get(6).and_then(|a| a.as_i64()).unwrap_or(416), args.get(7).and_then(|a| a.as_i64()).unwrap_or(417),
-             args.get(8).and_then(|a| a.as_i64()).unwrap_or(671), args.get(9).and_then(|a| a.as_i64()).unwrap_or(672), args.get(10).and_then(|a| a.as_i64()).unwrap_or(673), apps)
-        } else {
-            let tax = match rpc.opt_finite_f64(2, "taxRate") {
-                Ok(v) => v.unwrap_or(0.10).clamp(0.0, 1.0),
-                Err(e) => return Some(Err(e)),
-            };
-            ("", "", tax, 415, 416, 417, 671, 672, 673, true)
+            (url, tax)
         };
+        let explicit_lp_tax = match rpc.opt_finite_f64(14, "loyaltyPointTaxRate") {
+            Ok(v) => v.map(|x| x.clamp(0.0, 1.0)),
+            Err(e) => return Some(Err(e)),
+        };
+        let lp_tax = explicit_lp_tax.unwrap_or(tax);
+        let tf = match args.get(11) {
+            Some(PyRep::None) | None => None,
+            Some(PyRep::Integer(i)) => Some(CorpTypeface::Integer(*i)),
+            Some(_) => match rpc.opt_str_max(11, "typeface", 64, 256) {
+                Ok(Some(s)) => Some(CorpTypeface::String(s.to_string())),
+                Ok(None) => None,
+                Err(e) => return Some(Err(e)),
+            },
+        };
+        let apps = args
+            .get(12)
+            .map(|a| match a {
+                PyRep::Bool(b) => *b,
+                PyRep::Integer(i) => *i != 0,
+                _ => true,
+            })
+            .unwrap_or(true);
+        let ff = args
+            .get(13)
+            .map(|a| match a {
+                PyRep::Bool(b) => *b,
+                PyRep::Integer(i) => *i != 0,
+                _ => false,
+            })
+            .unwrap_or(false);
+        (
+            description,
+            url,
+            tax,
+            args.get(5).and_then(|a| a.as_i64()).unwrap_or(415),
+            args.get(6).and_then(|a| a.as_i64()).unwrap_or(416),
+            args.get(7).and_then(|a| a.as_i64()).unwrap_or(417),
+            args.get(8).and_then(|a| a.as_i64()).unwrap_or(671),
+            args.get(9).and_then(|a| a.as_i64()).unwrap_or(672),
+            args.get(10).and_then(|a| a.as_i64()).unwrap_or(673),
+            tf,
+            apps,
+            ff,
+            lp_tax,
+            explicit_lp_tax,
+        )
+    } else {
+        let tax = match rpc.opt_finite_f64(2, "taxRate") {
+            Ok(v) => v.unwrap_or(0.10).clamp(0.0, 1.0),
+            Err(e) => return Some(Err(e)),
+        };
+        (
+            "",
+            "",
+            tax,
+            415,
+            416,
+            417,
+            671,
+            672,
+            673,
+            None,
+            true,
+            false,
+            tax,
+            None,
+        )
+    };
     let reg_fee = IskCents::from_isk(1_599_800);
     let now_unix = ctx.now_unix();
     if let Some(cur_cid) = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id)).filter(|&id| id > 0) {
@@ -225,6 +795,8 @@ pub(super) fn handle_add_corporation(
 
         let mut corp_rec = CorporationRecord::new(cid, name, ticker, char_id);
         corp_rec.tax_rate = tax_rate;
+        corp_rec.loyalty_point_tax_rate = explicit_lp_tax;
+        corp_rec.typeface = typeface.clone();
         corp_rec.members = HashSet::from([char_id]);
         corp_rec.member_roles = member_roles;
         corp_rec.wallet_divisions = wallet_divisions;
@@ -242,6 +814,7 @@ pub(super) fn handle_add_corporation(
         state.logo = (shape1, shape2, shape3, color1);
         state.logo_extra_colors = (color2, color3);
         state.applications_enabled = Some(apps_enabled);
+        state.friendly_fire_legal = friendly_fire;
         state.accept_structures = true;
         state.accept_structures_set = true;
         state.reinforce_hour = 18;
@@ -256,11 +829,63 @@ pub(super) fn handle_add_corporation(
         );
         snap.seed_default_corp_titles(cid);
         let released = super::fleet_social_corps::record_corp_join_in_snap(snap, char_id, old_corp_id, cid, now_unix);
-        Ok((old_corp_id, cid, released))
+        let corp_hq_station = session.station_id.or(char_station_id);
+        let allow_war = snap
+            .fleet_and_social_ops
+            .corp_allow_war
+            .get(&cid)
+            .copied()
+            .unwrap_or(true);
+        let mut raw_cols: Vec<(String, PyRep)> = vec![
+            ("corporationID".into(), PyRep::Integer(cid)),
+            ("corporationName".into(), PyRep::String(name.to_string())),
+            ("ticker".into(), PyRep::String(ticker.to_string())),
+            ("tickerName".into(), PyRep::String(ticker.to_string())),
+            ("ceoID".into(), PyRep::Integer(char_id)),
+            ("creatorID".into(), PyRep::Integer(char_id)),
+            ("memberCount".into(), PyRep::Integer(1)),
+            ("memberLimit".into(), PyRep::Integer(init_limit as i64)),
+            ("taxRate".into(), PyRep::Real(tax_rate)),
+            ("iskTaxRate".into(), PyRep::Real(tax_rate)),
+            ("loyaltyPointTaxRate".into(), PyRep::Real(lp_tax_rate)),
+            ("allianceID".into(), PyRep::None),
+            ("stationID".into(), corp_hq_station.map(PyRep::Integer).unwrap_or(PyRep::None)),
+            ("description".into(), PyRep::String(description.to_string())),
+            ("url".into(), PyRep::String(url.to_string())),
+            ("shares".into(), PyRep::Integer(1_000)),
+            ("shape1".into(), PyRep::Integer(shape1)),
+            ("shape2".into(), PyRep::Integer(shape2)),
+            ("shape3".into(), PyRep::Integer(shape3)),
+            ("color1".into(), PyRep::Integer(color1)),
+            ("color2".into(), PyRep::Integer(color2)),
+            ("color3".into(), PyRep::Integer(color3)),
+            ("applicationsEnabled".into(), PyRep::Bool(apps_enabled)),
+            ("isRecruiting".into(), PyRep::Bool(apps_enabled)),
+            ("allowWar".into(), PyRep::Bool(allow_war)),
+            ("friendlyFire".into(), PyRep::Bool(friendly_fire)),
+            ("deleted".into(), PyRep::Integer(0)),
+        ];
+        if let Some(ref tf_val) = typeface {
+            raw_cols.push((
+                "typeface".into(),
+                super::fleet_social_corps::corp_typeface_to_pyrep(tf_val),
+            ));
+        }
+        let default_h = ["1st Division", "2nd Division", "3rd Division", "4th Division", "5th Division", "6th Division", "7th Division"];
+        for i in 1..=7u8 {
+            raw_cols.push((format!("division{i}"), PyRep::String(default_h[(i - 1) as usize].into())));
+            let w_name = if i == 1 { "Master Wallet".into() } else { format!("Division {i}") };
+            raw_cols.push((format!("walletDivision{i}"), PyRep::String(w_name)));
+        }
+        let corp_change: Vec<(PyRep, PyRep)> = raw_cols
+            .into_iter()
+            .map(|(k, v)| (PyRep::String(k), PyRep::Tuple(vec![PyRep::None, v])))
+            .collect();
+        Ok((old_corp_id, cid, released, new_bal, corp_change))
     });
 
     match res {
-        Ok((old_corp_id, corp_id, released)) => {
+        Ok((old_corp_id, corp_id, released, new_bal, corp_change)) => {
             crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
             let old_corp_role = session.corp_role;
             let old_alliance_id = session.alliance_id;
@@ -309,16 +934,12 @@ pub(super) fn handle_add_corporation(
                     change: PyRep::Dict(sess_changes),
                 },
             );
-            let change = PyRep::Dict(vec![
-                (PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(corp_id)])),
-                (PyRep::String(("corporationName").into()), PyRep::Tuple(vec![PyRep::None, PyRep::String(name.to_string())])),
-                (PyRep::String(("tickerName").into()), PyRep::Tuple(vec![PyRep::None, PyRep::String(ticker.to_string())])),
-                (PyRep::String(("ceoID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(char_id)])),
-            ]);
+            let change = PyRep::Dict(corp_change);
             ctx.emit_typed(
                 NotificationTarget::Corporation(corp_id),
                 crate::router::notify_registry::OnCorporationChanged { corp_id, change },
             );
+            ctx.notify_wallet_balance(false, char_id, 1, new_bal);
             let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(
                 &ctx.quasar_gateway, &ctx.db, char_id as u32, now_unix,
             );
@@ -1408,6 +2029,7 @@ pub(super) fn handle_corp_gov(
         ("corpRegistry", "DeleteBulletin") => handle_corp_bulletins(ctx, session, corp_id, char_id, now_unix, has_comms, method, args),
 
         ("corpRecProxy", "CreateRecruitmentAd") | ("corpRecProxy", "UpdateRecruitmentAd") => {
+            super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
             let has_role = ctx.db.with_snapshot(|snap| {
                 if !snap.corporations.contains_key(&corp_id) {
                     return false;
@@ -1418,77 +2040,219 @@ pub(super) fn handle_corp_gov(
             if !has_role {
                 return deny_role("Managing recruitment ads requires Personnel Manager or Director role");
             }
-            if method == "CreateRecruitmentAd" {
-                let ad_fee = IskCents::from_isk(250_000);
-                let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                    if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-                        if corp.debit_division(1, ad_fee).is_none() {
-                            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                                if let Some(nb) = ch.balance.checked_sub(ad_fee) {
-                                    ch.balance = nb;
-                                }
+            let parsed = match parse_recruitment_ad_args(method, args, kwargs) {
+                Ok(p) => p,
+                Err(e) => return Some(Err(e)),
+            };
+            let (account_key, wallet_div) = super::active_corp_wallet_div(session);
+            let ad_fee = IskCents::from_isk(250_000);
+            let title_out = parsed.title.clone();
+            let type_mask_out = parsed.type_mask;
+            let tx_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(i64, Option<IskCents>), BridgeRpcError> {
+                ensure_corp_rec_ads_populated_in_snap(snap);
+                if method == "CreateRecruitmentAd" || parsed.added_days > 0 {
+                    super::ensure_corp_wallet_take_access(
+                        snap,
+                        corp_id,
+                        char_id,
+                        None,
+                        wallet_div,
+                        now_unix,
+                    )?;
+                }
+                if method == "UpdateRecruitmentAd" {
+                    let id = parsed.ad_id.unwrap_or(1);
+                    let Some(corp_ref) = snap.corporations.get(&corp_id) else {
+                        return Err(BridgeRpcError {
+                            code: "CorporationNotFound".into(),
+                            message: format!("Corporation {corp_id} not found"),
+                            client_error: None,
+                        });
+                    };
+                    if let Some(ref recs) = parsed.recruiters {
+                        if let Some(&bad_id) = recs
+                            .iter()
+                            .find(|rid| **rid != corp_ref.ceo_id && !corp_ref.members.contains(rid))
+                        {
+                            return Err(BridgeRpcError {
+                                code: "InvalidArgument".into(),
+                                message: format!(
+                                    "Recruiter {bad_id} is not a member of corporation {corp_id}"
+                                ),
+                                client_error: None,
+                            });
+                        }
+                    }
+                    let Some(ad_idx) = snap
+                        .fleet_and_social_ops
+                        .corp_recruitment_ads
+                        .iter()
+                        .position(|a| a.ad_id == id && a.corp_id == corp_id)
+                    else {
+                        return Err(BridgeRpcError {
+                            code: "RecruitmentAdNotFound".into(),
+                            message: format!("Recruitment ad {id} not found"),
+                            client_error: None,
+                        });
+                    };
+                    let mut corp_bal_after = None;
+                    if parsed.added_days > 0 {
+                        let corp = snap.corporations.get_mut(&corp_id).expect("checked above");
+                        if corp.debit_division(wallet_div, ad_fee).is_none() {
+                            return Err(BridgeRpcError {
+                                code: "NotEnoughISK".into(),
+                                message: "Extending a corporation recruitment ad requires 250,000 ISK in the active corporation wallet division".into(),
+                                client_error: None,
+                            });
+                        }
+                        let bal = corp.division_balance(wallet_div);
+                        corp_bal_after = Some(bal);
+                        snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
+                            owner_id: corp_id,
+                            entry_type: "corp_recruitment_ad_fee",
+                            amount: IskCents(-ad_fee.0),
+                            balance_after: bal,
+                            reason: "Corporation recruitment advertisement extension fee".into(),
+                            meta: eve_db::ledger::JournalMeta::new(
+                                eve_db::ledger::ref_types::CORPORATION_ACCOUNT_WITHDRAWAL,
+                                char_id,
+                                corp_id,
+                                now_unix,
+                            )
+                            .with_account_key(account_key),
+                        });
+                    }
+                    let ad = &mut snap.fleet_and_social_ops.corp_recruitment_ads[ad_idx];
+                    ad.title = parsed.title.clone();
+                    ad.description = parsed.description.clone();
+                    ad.type_mask = parsed.type_mask;
+                    if parsed.has_lang_mask {
+                        ad.lang_mask = parsed.lang_mask;
+                    }
+                    if parsed.added_days > 0 {
+                        let max_expiry = now_unix.saturating_add(28 * 86_400);
+                        ad.days = ad.days.saturating_add(parsed.added_days).min(28);
+                        ad.expiry_unix = ad
+                            .expiry_unix
+                            .max(now_unix)
+                            .saturating_add(u64::from(parsed.added_days).saturating_mul(86_400))
+                            .min(max_expiry);
+                    }
+                    if let Some(ref recs) = parsed.recruiters {
+                        let primary_recruiter = recs.first().copied().unwrap_or(0);
+                        ad.recruiter_id = primary_recruiter;
+                        ad.recruiters = recs.clone();
+                        if let Some(state) = snap.corp_governance.get_mut(&corp_id) {
+                            if let Some(gov_ad) = state.recruitment_ads.iter_mut().find(|a| a.0 == id) {
+                                gov_ad.1 = parsed.title.clone();
+                                gov_ad.2 = parsed.description.clone();
+                                gov_ad.3 = parsed.type_mask;
+                                gov_ad.4 = primary_recruiter;
                             }
                         }
-                    }
-                    Ok(())
-                });
-            }
-            let (days, type_mask, title, desc, lang_mask) = if args.first().and_then(|a| a.as_str()).is_some() {
-                let title = args.first().and_then(|a| a.as_str()).unwrap_or("Nullsec PvP & Industry");
-                let desc = args.get(1).and_then(|a| a.as_str()).unwrap_or("Join our corp today");
-                let type_mask = args.get(2).and_then(|a| a.as_i64()).unwrap_or(7) as u64;
-                let days = args.get(3).and_then(|a| a.as_i64()).or_else(|| kwargs.get("days").and_then(|a| a.as_i64())).unwrap_or(30) as u32;
-                let lang = args.get(4).and_then(|a| a.as_i64()).or_else(|| kwargs.get("langMask").and_then(|a| a.as_i64())).unwrap_or(0) as u64;
-                (days, type_mask, title.to_string(), desc.to_string(), lang)
-            } else {
-                let days = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("days").and_then(|a| a.as_i64())).unwrap_or(30) as u32;
-                let type_mask = args.get(1).and_then(|a| a.as_i64()).or_else(|| kwargs.get("typeMask").and_then(|a| a.as_i64())).unwrap_or(7) as u64;
-                let title = args.get(2).and_then(|a| a.as_str()).unwrap_or("Updated Corp Ad");
-                let desc = args.get(3).and_then(|a| a.as_str()).unwrap_or("Updated description");
-                let lang = args.get(4).and_then(|a| a.as_i64()).or_else(|| kwargs.get("langMask").and_then(|a| a.as_i64())).unwrap_or(0) as u64;
-                (days, type_mask, title.to_string(), desc.to_string(), lang)
-            };
-            let mut ads = load_corp_rec_ads(ctx);
-            let ad_id = if method == "UpdateRecruitmentAd" {
-                let id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-                let Some(ad) = ads.iter_mut().find(|a| a.ad_id == id && a.corp_id == corp_id) else {
-                    return Some(Err(BridgeRpcError { code: "RecruitmentAdNotFound".into(), message: format!("Recruitment ad {id} not found"), client_error: None }));
-                };
-                ad.title = title.clone();
-                ad.description = desc.clone();
-                ad.type_mask = type_mask;
-                if lang_mask != 0 { ad.lang_mask = lang_mask; }
-                with_corp_gov(ctx, |g| {
-                    if let Some(state) = g.get_mut(&corp_id) {
-                        if let Some(ad) = state.recruitment_ads.iter_mut().find(|a| a.0 == id) {
-                            ad.1 = title.clone();
-                            ad.2 = desc.clone();
-                            ad.3 = type_mask;
+                    } else if let Some(state) = snap.corp_governance.get_mut(&corp_id) {
+                        if let Some(gov_ad) = state.recruitment_ads.iter_mut().find(|a| a.0 == id) {
+                            gov_ad.1 = parsed.title.clone();
+                            gov_ad.2 = parsed.description.clone();
+                            gov_ad.3 = parsed.type_mask;
                         }
                     }
+                    return Ok((id, corp_bal_after));
+                }
+
+                let Some(corp) = snap.corporations.get_mut(&corp_id) else {
+                    return Err(BridgeRpcError {
+                        code: "CorporationNotFound".into(),
+                        message: format!("Corporation {corp_id} not found"),
+                        client_error: None,
+                    });
+                };
+                if let Some(ref recs) = parsed.recruiters {
+                    if let Some(&bad_id) = recs
+                        .iter()
+                        .find(|rid| **rid != corp.ceo_id && !corp.members.contains(rid))
+                    {
+                        return Err(BridgeRpcError {
+                            code: "InvalidArgument".into(),
+                            message: format!(
+                                "Recruiter {bad_id} is not a member of corporation {corp_id}"
+                            ),
+                            client_error: None,
+                        });
+                    }
+                }
+                if corp.debit_division(wallet_div, ad_fee).is_none() {
+                    return Err(BridgeRpcError {
+                        code: "NotEnoughISK".into(),
+                        message: "Creating a corporation recruitment ad requires 250,000 ISK in the active corporation wallet division".into(),
+                        client_error: None,
+                    });
+                }
+                let corp_bal = corp.division_balance(wallet_div);
+                snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
+                    owner_id: corp_id,
+                    entry_type: "corp_recruitment_ad_fee",
+                    amount: IskCents(-ad_fee.0),
+                    balance_after: corp_bal,
+                    reason: "Corporation recruitment advertisement fee".into(),
+                    meta: eve_db::ledger::JournalMeta::new(
+                        eve_db::ledger::ref_types::CORPORATION_ACCOUNT_WITHDRAWAL,
+                        char_id,
+                        corp_id,
+                        now_unix,
+                    )
+                    .with_account_key(account_key),
                 });
-                id
-            } else {
-                let id = ads.iter().map(|a| a.ad_id).max().unwrap_or(0) + 1;
-                let expiry_unix = now_unix.saturating_add((days.max(1) as u64).saturating_mul(86_400));
-                ads.push(CorpRecruitmentAd {
-                    ad_id: id,
-                    corp_id,
-                    title: title.clone(),
-                    description: desc.clone(),
-                    type_mask,
-                    recruiter_id: char_id,
-                    created_unix: now_unix,
-                    expiry_unix,
-                    days,
-                    lang_mask,
-                });
-                with_corp_gov(ctx, |g| {
-                    g.entry(corp_id).or_default().recruitment_ads.push((id, title.clone(), desc.clone(), type_mask, char_id));
-                });
-                id
+                let id = snap
+                    .fleet_and_social_ops
+                    .corp_recruitment_ads
+                    .iter()
+                    .map(|a| a.ad_id)
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                let default_recruiters = [char_id];
+                let (recruiters, primary_recruiter) = match parsed.recruiters.as_deref() {
+                    Some(recs) => (recs, recs.first().copied().unwrap_or(0)),
+                    None => (&default_recruiters[..], char_id),
+                };
+                let expiry_unix =
+                    now_unix.saturating_add(u64::from(parsed.days).saturating_mul(86_400));
+                snap.fleet_and_social_ops
+                    .corp_recruitment_ads
+                    .push(CorpRecruitmentAd {
+                        ad_id: id,
+                        corp_id,
+                        title: parsed.title.clone(),
+                        description: parsed.description.clone(),
+                        type_mask: parsed.type_mask,
+                        recruiter_id: primary_recruiter,
+                        recruiters: recruiters.to_vec(),
+                        created_unix: now_unix,
+                        expiry_unix,
+                        days: parsed.days,
+                        lang_mask: parsed.lang_mask,
+                    });
+                snap.corp_governance
+                    .entry(corp_id)
+                    .or_default()
+                    .recruitment_ads
+                    .push((
+                        id,
+                        parsed.title.clone(),
+                        parsed.description.clone(),
+                        parsed.type_mask,
+                        primary_recruiter,
+                    ));
+                Ok((id, Some(corp_bal)))
+            });
+            let (ad_id, corp_bal_opt) = match tx_res {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
             };
-            save_corp_rec_ads(ctx, &ads);
+            if let Some(bal_after) = corp_bal_opt {
+                ctx.notify_wallet_balance(true, corp_id, wallet_div, bal_after);
+            }
             ctx.emit_typed(
                 NotificationTarget::Corporation(corp_id),
                 crate::router::notify_registry::OnCorporationRecruitmentAdChanged {
@@ -1499,8 +2263,8 @@ pub(super) fn handle_corp_gov(
             Some(Ok(PyRep::keyval([
                 ("adID", PyRep::Integer(ad_id)),
                 ("corporationID", PyRep::Integer(corp_id)),
-                ("title", PyRep::String(title)),
-                ("typeMask", PyRep::Integer(type_mask as i64)),
+                ("title", PyRep::String(title_out)),
+                ("typeMask", PyRep::Integer(type_mask_out as i64)),
             ])))
         }
 
@@ -1527,18 +2291,27 @@ pub(super) fn handle_corp_gov(
                 return deny_role("Deleting recruitment ads requires Personnel Manager or Director role");
             }
             let ad_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            let mut ads = load_corp_rec_ads(ctx);
-            let before = ads.len();
-            ads.retain(|a| a.ad_id != ad_id || a.corp_id != corp_id);
-            if ads.len() == before {
-                return Some(Err(BridgeRpcError { code: "RecruitmentAdNotFound".into(), message: format!("Recruitment ad {ad_id} not found"), client_error: None }));
-            }
-            save_corp_rec_ads(ctx, &ads);
-            with_corp_gov(ctx, |g| {
-                if let Some(s) = g.get_mut(&corp_id) {
+            let del_res = ctx.db.try_with_mut_snapshot(|snap| {
+                ensure_corp_rec_ads_populated_in_snap(snap);
+                let before = snap.fleet_and_social_ops.corp_recruitment_ads.len();
+                snap.fleet_and_social_ops
+                    .corp_recruitment_ads
+                    .retain(|a| a.ad_id != ad_id || a.corp_id != corp_id);
+                if snap.fleet_and_social_ops.corp_recruitment_ads.len() == before {
+                    return Err(BridgeRpcError {
+                        code: "RecruitmentAdNotFound".into(),
+                        message: format!("Recruitment ad {ad_id} not found"),
+                        client_error: None,
+                    });
+                }
+                if let Some(s) = snap.corp_governance.get_mut(&corp_id) {
                     s.recruitment_ads.retain(|a| a.0 != ad_id);
                 }
+                Ok(())
             });
+            if let Err(e) = del_res {
+                return Some(Err(e));
+            }
             ctx.emit_typed(
                 NotificationTarget::Corporation(corp_id),
                 crate::router::notify_registry::OnCorporationRecruitmentAdChanged {
@@ -1953,14 +2726,37 @@ fn handle_get_recruiters(
     corp_id: i64,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let target_corp = args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id);
-    let target_ad = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
     let ads = load_corp_rec_ads(ctx);
+    let (target_corp, target_ad) = if args.len() >= 2 {
+        let tc = args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id);
+        let ta = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+        (tc, ta)
+    } else {
+        let ta = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+        let tc = ads
+            .iter()
+            .find(|a| a.ad_id == ta)
+            .map(|a| a.corp_id)
+            .unwrap_or(corp_id);
+        (tc, ta)
+    };
     let recruiters: Vec<PyRep> = ads
         .iter()
-        .filter(|a| a.corp_id == target_corp && a.ad_id == target_ad)
-        .map(|a| PyRep::Integer(a.recruiter_id))
-        .collect();
+        .find(|a| a.corp_id == target_corp && a.ad_id == target_ad)
+        .map(|ad| {
+            if !ad.recruiters.is_empty() {
+                ad.recruiters
+                    .iter()
+                    .filter(|&&id| id > 0)
+                    .map(|&id| PyRep::Integer(id))
+                    .collect()
+            } else if ad.recruiter_id > 0 {
+                vec![PyRep::Integer(ad.recruiter_id)]
+            } else {
+                Vec::new()
+            }
+        })
+        .unwrap_or_default();
     Some(Ok(PyRep::List(recruiters)))
 }
 

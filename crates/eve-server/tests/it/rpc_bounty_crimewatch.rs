@@ -509,7 +509,23 @@ async fn test_crimewatch_security_and_duels() {
         .expect("GetCharacterSecurityStatus");
     assert_eq!(sec_rep, PyRep::Real(-8.5));
 
-    // 3. StartDuelChallenge: P1 challenges P2
+    // 3. StartDuelChallenge: P1 challenges P2 (both pilots undocked in the same solar system)
+    let duel_sys = s1.solar_system_id.unwrap_or(30_000_142);
+    ctx.db.with_mut_snapshot(|snap| {
+        for cid in [P1, P2] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.solar_system_id = duel_sys;
+            }
+        }
+    });
+    s1.station_id = None;
+    s1.structure_id = None;
+    s1.solar_system_id = Some(duel_sys);
+    s2.station_id = None;
+    s2.structure_id = None;
+    s2.solar_system_id = Some(duel_sys);
     let challenge_rep = ctx
         .dispatch_rpc(
             &mut s1,

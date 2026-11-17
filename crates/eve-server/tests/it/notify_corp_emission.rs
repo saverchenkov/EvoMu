@@ -95,18 +95,46 @@ async fn test_corporation_lifecycle_recruitment_and_aggression_notifications() {
         .await
         .expect("AddCorporation");
     let corp_id = created.dict_get("corporationID").and_then(PyRep::as_i64).expect("corp_id");
+    let p1_add_notifs = ctx.drain_notifications_for_char(P1);
     assert_eq!(
-        events(&ctx, P1, "OnCorporationChanged"),
+        p1_add_notifs
+            .iter()
+            .filter(|n| n.event == "OnAccountChange")
+            .map(|n| n.args.clone())
+            .collect::<Vec<_>>(),
         vec![vec![
-            PyRep::Integer(corp_id),
-            PyRep::Dict(vec![
-                (PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(corp_id)])),
-                (PyRep::String(("corporationName").into()), PyRep::Tuple(vec![PyRep::None, PyRep::String("Apex Logistics".into())])),
-                (PyRep::String(("tickerName").into()), PyRep::Tuple(vec![PyRep::None, PyRep::String("APXL".into())])),
-                (PyRep::String(("ceoID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(P1)])),
-            ]),
+            PyRep::String("cash".into()),
+            PyRep::Integer(P1),
+            PyRep::Real(498_400_200.0),
         ]]
     );
+    let corp_changed_ev: Vec<_> = p1_add_notifs
+        .iter()
+        .filter(|n| n.event == "OnCorporationChanged")
+        .map(|n| n.args.clone())
+        .collect();
+    assert_eq!(corp_changed_ev.len(), 1);
+    assert_eq!(corp_changed_ev[0].len(), 2);
+    assert_eq!(corp_changed_ev[0][0], PyRep::Integer(corp_id));
+    let PyRep::Dict(ref corp_entries) = corp_changed_ev[0][1] else {
+        panic!("expected OnCorporationChanged dict, got {:?}", corp_changed_ev[0][1]);
+    };
+    assert_eq!(corp_entries.len(), 41);
+    for (k, expected_val) in [
+        ("corporationID", PyRep::Integer(corp_id)),
+        ("corporationName", PyRep::String("Apex Logistics".into())),
+        ("tickerName", PyRep::String("APXL".into())),
+        ("ceoID", PyRep::Integer(P1)),
+        ("creatorID", PyRep::Integer(P1)),
+    ] {
+        assert_eq!(
+            corp_changed_ev[0][1].dict_get(k),
+            Some(&PyRep::Tuple(vec![PyRep::None, expected_val])),
+            "OnCorporationChanged mismatch for {k}"
+        );
+    }
+    assert!(corp_changed_ev[0][1].dict_get("walletDivision1").is_some());
+    assert!(corp_changed_ev[0][1].dict_get("division7").is_some());
     assert!(events(&ctx, P2, "OnCorporationChanged").is_empty());
     assert!(events(&ctx, p3, "OnCorporationChanged").is_empty());
 
@@ -283,6 +311,12 @@ async fn test_corporation_lifecycle_recruitment_and_aggression_notifications() {
     assert!(events(&ctx, p3, "OnCorporationWelcomeMailChanged").is_empty());
 
     // CreateRecruitmentAd & DeleteRecruitmentAd -> OnCorporationRecruitmentAdChanged(corpID, adID) to P1 & P2 only.
+    ctx.db.with_mut_snapshot(|s| {
+        s.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .set_division_balance(1, eve_db::IskCents::from_isk(5_000_000));
+    });
     let ad = ctx
         .dispatch_rpc(
             &mut s1,
@@ -297,7 +331,27 @@ async fn test_corporation_lifecycle_recruitment_and_aggression_notifications() {
         .expect("CreateRecruitmentAd");
     let ad_id = ad.dict_get("adID").and_then(PyRep::as_i64).expect("ad_id");
     let expected_ad = vec![PyRep::Integer(corp_id), PyRep::Integer(ad_id)];
-    assert_eq!(events(&ctx, P1, "OnCorporationRecruitmentAdChanged"), vec![expected_ad.clone()]);
+    let p1_ad_notifs = ctx.drain_notifications_for_char(P1);
+    assert_eq!(
+        p1_ad_notifs
+            .iter()
+            .filter(|n| n.event == "OnCorporationRecruitmentAdChanged")
+            .map(|n| n.args.clone())
+            .collect::<Vec<_>>(),
+        vec![expected_ad.clone()]
+    );
+    assert_eq!(
+        p1_ad_notifs
+            .iter()
+            .filter(|n| n.event == "OnAccountChange")
+            .map(|n| n.args.clone())
+            .collect::<Vec<_>>(),
+        vec![vec![
+            PyRep::String("cash".into()),
+            PyRep::Integer(corp_id),
+            PyRep::Real(4_750_000.0),
+        ]]
+    );
     assert_eq!(events(&ctx, P2, "OnCorporationRecruitmentAdChanged"), vec![expected_ad.clone()]);
     assert!(events(&ctx, p3, "OnCorporationRecruitmentAdChanged").is_empty());
 

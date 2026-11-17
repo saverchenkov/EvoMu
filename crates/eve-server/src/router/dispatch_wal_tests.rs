@@ -82,6 +82,9 @@ async fn test_issue_874_ignored_try_with_mut_snapshot_failure_poisons_rpc_withou
             c
         });
     corp.ceo_id = char_id;
+    corp.members.insert(char_id);
+    corp.member_roles.insert(char_id, u64::MAX);
+    corp.credit_division(1, eve_db::IskCents::from_isk(5_000_000));
     seed_ctx.db.with_mut_snapshot(|s| {
         s.characters.insert(char_id, ch);
         s.corporations.insert(corp_id, corp);
@@ -94,8 +97,8 @@ async fn test_issue_874_ignored_try_with_mut_snapshot_failure_poisons_rpc_withou
         .expect("online lock");
     let mut sess = issue_874_make_session(95_874, uid, char_id, corp_id);
 
-    // Abort the character/corp ISK debit inside `corpRecProxy.CreateRecruitmentAd`, which uses
-    // `let _ = ctx.db.try_with_mut_snapshot(...)` before writing the recruitment ad.
+    // Abort the corp ISK debit + ad commit inside `corpRecProxy.CreateRecruitmentAd` via SQLite
+    // `domain_rows` triggers, ensuring both rollback cleanly and poison any ignored subsequent writes.
     let ads_before = ctx
         .db
         .with_snapshot(|s| s.fleet_and_social_ops.corp_recruitment_ads.len());
@@ -106,7 +109,8 @@ async fn test_issue_874_ignored_try_with_mut_snapshot_failure_poisons_rpc_withou
     });
     ctx.db.with_sqlite_conn(|conn| {
         conn.execute_batch(
-            "CREATE TRIGGER abort_874_char_fee BEFORE UPDATE ON characters BEGIN SELECT RAISE(ABORT, 'abort_874_corp_ad_fee'); END;",
+            "CREATE TRIGGER abort_874_corp_ad_ins BEFORE INSERT ON domain_rows WHEN NEW.domain = 'service_domains.fleet_and_social_ops' BEGIN SELECT RAISE(ABORT, 'abort_874_corp_ad_fee'); END;\
+             CREATE TRIGGER abort_874_corp_ad_upd BEFORE UPDATE ON domain_rows WHEN NEW.domain = 'service_domains.fleet_and_social_ops' BEGIN SELECT RAISE(ABORT, 'abort_874_corp_ad_fee'); END;",
         )
         .unwrap();
     });
@@ -118,28 +122,39 @@ async fn test_issue_874_ignored_try_with_mut_snapshot_failure_poisons_rpc_withou
             None,
             "CreateRecruitmentAd",
             &[
-                eve_proto::PyRep::String("PoisTest Ad".into()),
-                eve_proto::PyRep::String("Must roll back".into()),
                 eve_proto::PyRep::Integer(7),
-                eve_proto::PyRep::Integer(30),
+                eve_proto::PyRep::Integer(1),
+                eve_proto::PyRep::Integer(1),
+                eve_proto::PyRep::String("Must roll back".into()),
+                eve_proto::PyRep::List(vec![]),
+                eve_proto::PyRep::String("PoisTest Ad".into()),
+                eve_proto::PyRep::Integer(0),
+                eve_proto::PyRep::Integer(0),
+                eve_proto::PyRep::Integer(0),
             ],
             &std::collections::HashMap::new(),
             None,
         )
         .await
-        .expect_err("ignored try_with_mut_snapshot failure must poison RPC and fail dispatch");
+        .expect_err("SQLite trigger abort in CreateRecruitmentAd must roll back and fail dispatch");
     assert_eq!(err.code, "PersistenceFailure");
     assert!(err.message.contains("abort_874_corp_ad_fee"));
     assert_eq!(
         ctx.db.get_character(char_id).unwrap().balance,
         eve_db::IskCents::from_isk(5_000_000),
-        "character balance must be rolled back"
+        "character personal balance must never be touched"
+    );
+    assert_eq!(
+        ctx.db
+            .with_snapshot(|s| s.corporations[&corp_id].division_balance(1)),
+        eve_db::IskCents::from_isk(5_000_000),
+        "corp division 1 balance must be rolled back"
     );
     assert_eq!(
         ctx.db
             .with_snapshot(|s| s.fleet_and_social_ops.corp_recruitment_ads.len()),
         ads_before,
-        "second write in same RPC must be poisoned and not commit a free recruitment ad"
+        "failed CreateRecruitmentAd must not commit a free recruitment ad"
     );
     assert_eq!(
         ctx.db.with_snapshot(|s| {
@@ -148,12 +163,63 @@ async fn test_issue_874_ignored_try_with_mut_snapshot_failure_poisons_rpc_withou
                 .map_or(0, |g| g.recruitment_ads.len())
         }),
         gov_ads_before,
-        "corp_governance must not record an ad after poisoned try_with_mut_snapshot"
+        "corp_governance must not record an ad after aborted CreateRecruitmentAd"
+    );
+
+    // Also verify ignored `try_with_mut_snapshot` errors inside a dispatch scope poison subsequent writes.
+    let poison_res: Result<eve_proto::PyRep, eve_proto::BridgeRpcError> =
+        super::maybe_with_dispatch_tx_error(true, async {
+            let _ = ctx.db.try_with_mut_snapshot(|s| -> Result<(), eve_proto::BridgeRpcError> {
+                s.fleet_and_social_ops
+                    .corp_recruitment_ads
+                    .push(eve_db::CorpRecruitmentAd {
+                        ad_id: 99_874,
+                        corp_id,
+                        title: "trigger_poison".into(),
+                        description: "trigger_poison".into(),
+                        type_mask: 1,
+                        recruiter_id: char_id,
+                        recruiters: vec![char_id],
+                        created_unix: 0,
+                        expiry_unix: 100,
+                        days: 1,
+                        lang_mask: 0,
+                    });
+                Ok(())
+            });
+            let second_res = ctx.db.try_with_mut_snapshot(
+                |s| -> Result<(), eve_proto::BridgeRpcError> {
+                    s.service_state_blobs
+                        .insert("poison_874_second_write".into(), "should_skip".into());
+                    Ok(())
+                },
+            );
+            assert!(
+                second_res.is_err(),
+                "second write after ignored tx failure must be aborted by poison"
+            );
+            if let Some(msg) = super::dispatch_check_tx_poison() {
+                return Err(eve_proto::BridgeRpcError {
+                    code: "PersistenceFailure".into(),
+                    message: msg,
+                    client_error: None,
+                });
+            }
+            Ok(eve_proto::PyRep::None)
+        })
+        .await;
+    let poison_err = poison_res.expect_err("ignored try_with_mut_snapshot failure must poison RPC scope");
+    assert_eq!(poison_err.code, "PersistenceFailure");
+    assert!(poison_err.message.contains("abort_874_corp_ad_fee"));
+    assert!(
+        ctx.db
+            .with_snapshot(|s| !s.service_state_blobs.contains_key("poison_874_second_write")),
+        "poisoned second write must not commit"
     );
 
     // Clear the fault and verify subsequent independent RPCs on the same context/session succeed.
     ctx.db.with_sqlite_conn(|conn| {
-        conn.execute_batch("DROP TRIGGER abort_874_char_fee;")
+        conn.execute_batch("DROP TRIGGER abort_874_corp_ad_ins; DROP TRIGGER abort_874_corp_ad_upd;")
             .unwrap();
     });
     let ok_res = ctx
@@ -163,16 +229,28 @@ async fn test_issue_874_ignored_try_with_mut_snapshot_failure_poisons_rpc_withou
             None,
             "CreateRecruitmentAd",
             &[
-                eve_proto::PyRep::String("Clean Ad".into()),
-                eve_proto::PyRep::String("Should succeed".into()),
                 eve_proto::PyRep::Integer(7),
-                eve_proto::PyRep::Integer(30),
+                eve_proto::PyRep::Integer(1),
+                eve_proto::PyRep::Integer(1),
+                eve_proto::PyRep::String("Should succeed".into()),
+                eve_proto::PyRep::List(vec![]),
+                eve_proto::PyRep::String("Clean Ad".into()),
+                eve_proto::PyRep::Integer(0),
+                eve_proto::PyRep::Integer(0),
+                eve_proto::PyRep::Integer(0),
             ],
             &std::collections::HashMap::new(),
             None,
         )
         .await;
     assert!(ok_res.is_ok(), "next independent RPC must not remain poisoned: {ok_res:?}");
+    let ok_rep = ok_res.unwrap();
+    assert_eq!(ok_rep.dict_get("title").and_then(|v| v.as_str()), Some("Clean Ad"));
+    assert_eq!(
+        ctx.db
+            .with_snapshot(|s| s.corporations[&corp_id].division_balance(1)),
+        eve_db::IskCents::from_isk(4_750_000),
+    );
 
     drop(ctx);
     let _ = std::fs::remove_file(&db_path);

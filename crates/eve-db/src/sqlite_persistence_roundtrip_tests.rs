@@ -576,3 +576,79 @@ fn sqlite_store_insert_update_rollback_delete_and_wal_recovery() {
     let _ = std::fs::remove_file(&snap_path);
     let _ = std::fs::remove_file(&wal_path);
 }
+
+#[test]
+fn sqlite_roundtrip_persists_corp_lp_tax_typeface_and_ad_recruiters_without_service_blobs() {
+    let pid = std::process::id();
+    let db_path = std::env::temp_dir().join(format!("evomu_corp_rec_roundtrip_{pid}.sqlite"));
+    let _ = std::fs::remove_file(&db_path);
+
+    let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite");
+    repo.with_mut_snapshot(|snap| {
+        for idx in 0..140_i64 {
+            let cid = 98_400_000 + idx;
+            let ceo_id = 90_400_000 + idx;
+            let mut corp = CorporationRecord::new(cid, format!("ScaleCorp{idx}"), format!("SC{idx:03}"), ceo_id);
+            corp.tax_rate = 0.05;
+            corp.loyalty_point_tax_rate = match idx % 3 {
+                0 => Some(0.0),
+                1 => Some(0.22),
+                _ => None,
+            };
+            corp.typeface = match idx % 3 {
+                0 => Some(CorpTypeface::String(format!("Font{idx}"))),
+                1 => Some(CorpTypeface::Integer(idx + 1)),
+                _ => None,
+            };
+            snap.corporations.insert(cid, corp);
+
+            snap.fleet_and_social_ops.corp_recruitment_ads.push(CorpRecruitmentAd {
+                ad_id: idx + 1,
+                corp_id: cid,
+                title: format!("Ad {idx}"),
+                description: format!("Recruiting {idx}"),
+                type_mask: 7,
+                recruiter_id: ceo_id,
+                recruiters: vec![ceo_id, ceo_id + 1_000],
+                created_unix: 1_700_000_000,
+                expiry_unix: 1_700_086_400,
+                days: 14,
+                lang_mask: 1,
+            });
+        }
+    });
+    assert!(
+        repo.with_snapshot(|s| s.service_state_blobs.is_empty()),
+        "corp LP tax, typeface, and ad recruiters must not populate service_state_blobs"
+    );
+    drop(repo);
+
+    let reopened = WorldRepository::open_sqlite(&db_path).expect("reopen sqlite");
+    reopened.with_snapshot(|snap| {
+        assert!(snap.service_state_blobs.is_empty());
+        assert_eq!(snap.fleet_and_social_ops.corp_recruitment_ads.len(), 140);
+
+        let corp0 = &snap.corporations[&98_400_000];
+        assert_eq!(corp0.loyalty_point_tax_rate, Some(0.0));
+        assert_eq!(corp0.effective_lp_tax_rate(), 0.0);
+        assert_eq!(corp0.typeface, Some(CorpTypeface::String("Font0".into())));
+
+        let corp1 = &snap.corporations[&98_400_001];
+        assert_eq!(corp1.effective_lp_tax_rate(), 0.22);
+        assert_eq!(corp1.typeface, Some(CorpTypeface::Integer(2)));
+
+        let corp2 = &snap.corporations[&98_400_002];
+        assert_eq!(corp2.loyalty_point_tax_rate, None);
+        assert_eq!(corp2.effective_lp_tax_rate(), 0.05);
+        assert_eq!(corp2.typeface, None);
+
+        let last_ad = &snap.fleet_and_social_ops.corp_recruitment_ads[139];
+        assert_eq!(last_ad.ad_id, 140);
+        assert_eq!(last_ad.recruiters, vec![90_400_139, 90_401_139]);
+    });
+    drop(reopened);
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(db_path.with_extension("sqlite-shm"));
+}

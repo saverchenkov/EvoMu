@@ -317,3 +317,262 @@ async fn office_manager_lifecycle_and_fleet_rpc_handlers() {
     .unwrap();
     assert_eq!(leader.dict_get("newBossID").and_then(|v| v.as_i64()), Some(90_000_002));
 }
+
+#[tokio::test]
+async fn office_manager_uses_station_rental_cost_map_and_emits_account_and_item_notifications() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let char_id = 90_000_001_i64;
+    let char2_id = 90_000_002_i64;
+    let corp_id = 98_000_055_i64;
+    let station_id = 60_003_760_i64;
+    let uid = char_id as u64;
+    let uid2 = char2_id as u64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::new(corp_id, "Quote Corp", "QUOT", char_id)
+            .with_master_wallet(IskCents::from_isk(1_000_000));
+        corp.hq_station_id = Some(station_id);
+        corp.tax_rate = 0.05;
+        corp.members.insert(char_id);
+        corp.members.insert(char2_id);
+        snap.corporations.insert(corp_id, corp);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.user_id = uid;
+            ch.corporation_id = corp_id;
+            ch.station_id = Some(station_id);
+        }
+        let mut ch2 = snap
+            .characters
+            .get(&char_id)
+            .cloned()
+            .expect("primary character seeded");
+        ch2.character_id = char2_id;
+        ch2.user_id = uid2;
+        ch2.name = "Corp Member 2".into();
+        ch2.corporation_id = corp_id;
+        ch2.station_id = Some(station_id);
+        snap.characters.insert(char2_id, ch2);
+        for acct_uid in [uid, uid2] {
+            if !snap.accounts.values().any(|a| a.user_id == acct_uid) {
+                let uname = format!("u{acct_uid}");
+                snap.accounts.insert(
+                    uname.clone(),
+                    eve_db::AccountRecord {
+                        user_id: acct_uid,
+                        username: uname,
+                        password_token: String::new(),
+                        role: 0,
+                        banned_until_unix: None,
+                        ban_reason: None,
+                    },
+                );
+            }
+        }
+        snap.station_office_rental_costs.insert(station_id, 50_000.0);
+        snap.items.retain(|_, i| !(i.location_id == station_id && i.type_id == 27));
+        snap.items.insert(
+            920_000_050,
+            InventoryItemRecord {
+                item_id: 920_000_050,
+                type_id: 27,
+                owner_id: 98_999_001,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut session = make_session(char_id, corp_id, Some(station_id));
+    session.user_id = Some(uid);
+    session.corp_role |= eve_db::corp_roles::ROLE_DIRECTOR;
+    ctx.db
+        .acquire_online_lock(uid, session.session_id, Some(char_id), true, 1_700_000_000)
+        .unwrap();
+    let sess2 = make_session(char2_id, corp_id, Some(station_id));
+    ctx.db
+        .acquire_online_lock(uid2, sess2.session_id + 1, Some(char2_id), true, 1_700_000_000)
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = ctx.drain_notifications_for_char(char2_id);
+    let kw = HashMap::new();
+
+    // Base 50,000 ISK with 1 existing office -> 50,000 * 1.5 = 75,000 ISK.
+    let quote = handle(&ctx, &mut session, "officeManager", "GetPriceQuote", &[PyRep::Integer(station_id)], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(quote.as_f64(), Some(75_000.0));
+
+    let rent = handle(&ctx, &mut session, "officeManager", "RentOffice", &[PyRep::Integer(station_id)], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    let office_id = rent.dict_get("officeID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(rent.dict_get("cost").and_then(|v| v.as_f64()), Some(75_000.0));
+
+    let expected_creditor = ctx
+        .sde
+        .stations
+        .get(&station_id)
+        .map(|s| s.owner_corporation_id)
+        .unwrap_or(1_000_035);
+    ctx.db.with_snapshot(|snap| {
+        let journals = snap
+            .corp_wallet_journals
+            .get(&(corp_id, 1))
+            .expect("corp division 1 journal recorded");
+        let rent_entry = journals
+            .iter()
+            .find(|e| e.ref_type == "office_rental_fee")
+            .expect("office_rental_fee journal entry present");
+        assert_eq!(rent_entry.amount, -75_000.0);
+        assert_eq!(rent_entry.balance, 925_000.0);
+        assert_eq!(rent_entry.first_party_id, Some(char_id));
+        assert_eq!(rent_entry.second_party_id, Some(expected_creditor));
+    });
+
+    for member_id in [char_id, char2_id] {
+        let notifs = ctx.drain_notifications_for_char(member_id);
+        assert_eq!(
+            notifs
+                .iter()
+                .filter(|n| n.event == "OnAccountChange")
+                .map(|n| n.args.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![
+                PyRep::String("cash".into()),
+                PyRep::Integer(corp_id),
+                PyRep::Real(925_000.0),
+            ]],
+            "member {member_id} OnAccountChange"
+        );
+        assert_eq!(
+            notifs.iter().filter(|n| n.event == "OnItemChange").count(),
+            1,
+            "member {member_id} corp-targeted OnItemChange"
+        );
+        assert_eq!(
+            notifs
+                .iter()
+                .filter(|n| n.event == "OnOfficeRentalChange")
+                .map(|n| n.args.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![PyRep::Integer(corp_id), PyRep::Integer(office_id)]],
+            "member {member_id} OnOfficeRentalChange"
+        );
+        let bill_creditor = notifs
+            .iter()
+            .find(|n| n.event == "OnBillReceived")
+            .and_then(|n| n.args.first())
+            .and_then(|b| b.dict_get("creditorID"))
+            .and_then(|v| v.as_i64());
+        assert_eq!(
+            bill_creditor,
+            Some(expected_creditor),
+            "member {member_id} OnBillReceived creditorID"
+        );
+    }
+
+    // Renting in an Upwell structure debits active session.corp_account_key division (div 2 / 1001)
+    // and credits the structure owner corporation's master wallet with journal + OnAccountChange.
+    let struct_id = 1_030_000_000_055_i64;
+    let owner_corp_id = 98_000_056_i64;
+    let owner_char_id = 90_000_056_i64;
+    let owner_uid = owner_char_id as u64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .set_division_balance(2, IskCents::from_isk(200_000));
+        let mut owner_corp =
+            eve_db::CorporationRecord::new(owner_corp_id, "Structure Owner", "SOWN", owner_char_id)
+                .with_master_wallet(IskCents::from_isk(500_000));
+        owner_corp.members.insert(owner_char_id);
+        snap.corporations.insert(owner_corp_id, owner_corp);
+        let mut owner_ch = snap.characters.get(&char_id).cloned().unwrap();
+        owner_ch.character_id = owner_char_id;
+        owner_ch.user_id = owner_uid;
+        owner_ch.name = "Owner Pilot".into();
+        owner_ch.corporation_id = owner_corp_id;
+        snap.characters.insert(owner_char_id, owner_ch);
+        let uname = format!("u{owner_uid}");
+        snap.accounts.insert(
+            uname.clone(),
+            eve_db::AccountRecord {
+                user_id: owner_uid,
+                username: uname,
+                password_token: String::new(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        snap.structures.insert(
+            struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35832,
+                owner_corp_id,
+                solar_system_id: 30_000_142,
+                name: "Test Astrahus".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.station_office_rental_costs.insert(struct_id, 40_000.0);
+    });
+    ctx.db
+        .acquire_online_lock(owner_uid, 9_056, Some(owner_char_id), true, 1_700_000_000)
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(owner_char_id);
+
+    session.station_id = None;
+    session.structure_id = Some(struct_id);
+    session.corp_account_key = 1001;
+    let rent_upwell = handle(
+        &ctx,
+        &mut session,
+        "officeManager",
+        "RentOffice",
+        &[PyRep::Integer(struct_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(rent_upwell.dict_get("cost").and_then(|v| v.as_f64()), Some(40_000.0));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.corporations[&corp_id].division_balance(2),
+            IskCents::from_isk(160_000)
+        );
+        assert_eq!(
+            snap.corporations[&owner_corp_id].division_balance(1),
+            IskCents::from_isk(540_000)
+        );
+        let cred_journal = snap
+            .corp_wallet_journals
+            .get(&(owner_corp_id, 1))
+            .expect("structure owner corp journal recorded");
+        assert!(cred_journal
+            .iter()
+            .any(|e| e.ref_type == "office_rental_fee" && (e.amount - 40_000.0).abs() < 1e-6));
+    });
+    let owner_notifs = ctx.drain_notifications_for_char(owner_char_id);
+    assert_eq!(
+        owner_notifs
+            .iter()
+            .filter(|n| n.event == "OnAccountChange")
+            .map(|n| n.args.clone())
+            .collect::<Vec<_>>(),
+        vec![vec![
+            PyRep::String("cash".into()),
+            PyRep::Integer(owner_corp_id),
+            PyRep::Real(540_000.0),
+        ]]
+    );
+}

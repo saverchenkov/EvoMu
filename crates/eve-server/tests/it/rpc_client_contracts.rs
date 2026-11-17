@@ -1119,6 +1119,18 @@ fn arg_from_expr(expr: &str, service: &str, method: &str, idx: usize) -> Option<
     if e.ends_with("droneids") || e.contains("drones") {
         return Some(PyRep::List(vec![PyRep::Integer(100_000_006)]));
     }
+    if e == "recruiters" {
+        return Some(PyRep::List(vec![PyRep::Integer(CHAR_ID)]));
+    }
+    if e == "days" {
+        return Some(PyRep::Integer(7));
+    }
+    if e == "addeddays" {
+        return Some(PyRep::Integer(1));
+    }
+    if e == "adid" || e == "ad_id" {
+        return Some(PyRep::Integer(1));
+    }
     if e.ends_with("contactids") || e.ends_with("memberids") || e.ends_with("charids") {
         return Some(PyRep::List(vec![PyRep::Integer(OTHER_CHAR_ID)]));
     }

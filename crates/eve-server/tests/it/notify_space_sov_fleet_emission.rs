@@ -579,6 +579,22 @@ async fn test_crimewatch_duels_kill_rights_and_bounties_notifications() {
 
     let ctx = new_ctx();
     let (mut s1, mut s2, _s3, p3) = three_pilots(&ctx).await;
+    let duel_sys = s1.solar_system_id.unwrap_or(30_000_142);
+    ctx.db.with_mut_snapshot(|snap| {
+        for cid in [P1, P2] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.solar_system_id = duel_sys;
+            }
+        }
+    });
+    s1.station_id = None;
+    s1.structure_id = None;
+    s1.solar_system_id = Some(duel_sys);
+    s2.station_id = None;
+    s2.structure_id = None;
+    s2.solar_system_id = Some(duel_sys);
 
     call(&ctx, &mut s1, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(P2)]).await;
     assert_eq!(events(&ctx, P2, "OnDuelChallenge")[0][0], PyRep::Integer(P1));

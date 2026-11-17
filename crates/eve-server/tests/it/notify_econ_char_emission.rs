@@ -3185,6 +3185,7 @@ async fn test_skills_implants_boosters_respec_clones_and_insurance_notifications
     let n_cj = ctx.drain_notifications_for_char(P1);
     assert_eq!(events_from(&n_cj, "OnJumpCloneTransitionCompleted"), vec![Vec::<PyRep>::new()]);
     assert_eq!(events_from(&n_cj, "OnJumpCloneCacheInvalidated"), vec![Vec::<PyRep>::new()]);
+    assert_eq!(events_from(&n_cj, "OnCloneJumpUpdate"), vec![Vec::<PyRep>::new()]);
 
     let remaining_jc = ctx.db.with_snapshot(|snap| snap.jump_clones.get(&P1).and_then(|v| v.first().map(|c| c.jump_clone_id)).unwrap_or(jc_id));
     call(&ctx, &mut s1, "jumpCloneSvc", "DestroyInstalledClone", &[PyRep::Integer(remaining_jc)]).await;
@@ -3268,13 +3269,24 @@ async fn test_wallet_bills_lp_trade_market_and_industry_notifications() {
     assert_eq!(events_from(&n_cash2, "OnAccountChange"), vec![vec![PyRep::String("cash".into()), PyRep::Integer(P2), PyRep::Real(100_001_000.0),]]);
     assert!(events_from(&n_cash1, "OnPersonalAccountChangedClient").is_empty());
 
-    // 2. RentOffice -> OnBillReceived(bill) & OnOfficeRentalChange(corporationID, officeID)
+    // 2. RentOffice -> OnBillReceived(bill), OnAccountChange, OnItemChange, OnOfficeRentalChange(corporationID, officeID)
     let rent_rep = call(&ctx, &mut s1, "officeManager", "RentOffice", &[PyRep::Integer(STATION_JITA)]).await;
     let office_id = rent_rep.dict_get("officeFolderID").and_then(|v| v.as_i64()).expect("officeFolderID");
+    let cost = rent_rep.dict_get("cost").and_then(|v| v.as_f64()).expect("cost");
+    assert!(cost > 0.0);
     let n_rent = ctx.drain_notifications_for_char(P1);
     let bills = events_from(&n_rent, "OnBillReceived");
     assert_eq!(bills.len(), 1);
     assert_eq!(bills[0][0].dict_get("debtorID"), Some(&PyRep::Integer(corp_id)));
+    assert_eq!(
+        events_from(&n_rent, "OnAccountChange"),
+        vec![vec![
+            PyRep::String("cash".into()),
+            PyRep::Integer(corp_id),
+            PyRep::Real(500_000_000.0 - cost),
+        ]]
+    );
+    assert_eq!(events_from(&n_rent, "OnItemChange").len(), 1);
     assert_eq!(events_from(&n_rent, "OnOfficeRentalChange"), vec![vec![PyRep::Integer(corp_id), PyRep::Integer(office_id)]]);
     assert!(events_from(&n_rent, "OnOfficeRentalChanged").is_empty());
     assert!(ctx.drain_notifications_for_char(P2).is_empty());

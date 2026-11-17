@@ -10,7 +10,10 @@ use super::station_structure::structure_upwell_ops::{
     load_ext_state, save_ext_state,
 };
 use super::structure_acl_defense_rules::evaluate_auto_defense_target;
-use crate::router::notify_registry::{OnSessionChanged, OnStructureTargetRemoved};
+use crate::router::notify_registry::{
+    OnAssumeStructureControl, OnRelinquishStructureControl, OnSessionChanged,
+    OnStructureTargetRemoved,
+};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::WorldStateSnapshot;
 use eve_destiny::{DamageVector, TargetLock};
@@ -351,6 +354,12 @@ async fn engage_structure_control(
         .with_emit_on_session_changed(false),
     );
     emit_ship_session_change(ctx, session, char_id, old_ship, Some(structure_id));
+    let assume_notif = OnAssumeStructureControl {
+        char_id: None,
+        item_id: None,
+    };
+    crate::router::notify_registry::push_typed_session_notification(session, assume_notif.clone());
+    ctx.emit_typed(NotificationTarget::Character(char_id), assume_notif);
     let _ = (sys_id, board_mode);
     Ok(sys_id)
 }
@@ -522,7 +531,7 @@ fn sync_released_ship_on_session(
     restored_ship: i64,
 ) {
     let old_ship = session.ship_id;
-    if restored_ship > 0 {
+    let relinquished = if restored_ship > 0 {
         let _ = ctx.execute_session_transition_sync(
             Some(session),
             crate::router::SessionTransitionSpec::for_kind(
@@ -534,9 +543,21 @@ fn sync_released_ship_on_session(
             .with_emit_on_session_changed(false),
         );
         emit_ship_session_change(ctx, session, char_id, old_ship, Some(restored_ship));
+        true
     } else if session.ship_id == Some(structure_id) {
         session.ship_id = None;
         emit_ship_session_change(ctx, session, char_id, old_ship, None);
+        true
+    } else {
+        false
+    };
+    if relinquished {
+        let relinquish_notif = OnRelinquishStructureControl {
+            char_id: None,
+            item_id: None,
+        };
+        crate::router::notify_registry::push_typed_session_notification(session, relinquish_notif.clone());
+        ctx.emit_typed(NotificationTarget::Character(char_id), relinquish_notif);
     }
 }
 
@@ -753,7 +774,28 @@ pub fn notify_released_structure_controllers(ctx: &ServerContext, released: &[(i
             s.forced_session_ship_sync.insert(pilot_id, (structure_id, new_ship_opt));
         });
         let new_py = new_ship_opt.map(PyRep::Integer).unwrap_or(PyRep::None);
-        let sess_rep = PyRep::keyval([("charid", PyRep::Integer(pilot_id)), ("shipid", new_py.clone())]);
+        let sess_rep = ctx.db.with_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get(&pilot_id) {
+                let mut ch_for_sess = ch.clone();
+                if ch_for_sess.solar_system_id <= 0 {
+                    ch_for_sess.solar_system_id = sys_id;
+                }
+                let mut displaced_sess = SessionState::new(pilot_id as u64);
+                displaced_sess.user_id = Some(ch.user_id);
+                displaced_sess.character_id = Some(pilot_id);
+                displaced_sess.corporation_id = Some(ch.corporation_id);
+                displaced_sess.alliance_id = ch.alliance_id;
+                crate::router::session_transition::apply_session_from_character(
+                    &mut displaced_sess,
+                    &ch_for_sess,
+                    Some(new_ship_opt),
+                    Some(&ctx.sde),
+                );
+                crate::router::session_transition::build_session_state_keyval(&displaced_sess, pilot_id)
+            } else {
+                PyRep::keyval([("charid", PyRep::Integer(pilot_id)), ("shipid", new_py.clone())])
+            }
+        });
         ctx.emit_typed(
             NotificationTarget::Character(pilot_id),
             OnSessionChanged {
@@ -770,6 +812,13 @@ pub fn notify_released_structure_controllers(ctx: &ServerContext, released: &[(i
             OnStructureTargetRemoved {
                 structure_id,
                 target_id: 0,
+            },
+        );
+        ctx.emit_typed(
+            NotificationTarget::Character(pilot_id),
+            OnRelinquishStructureControl {
+                char_id: None,
+                item_id: None,
             },
         );
     }

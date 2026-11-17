@@ -476,6 +476,43 @@ async fn kill_right_buy_activate_errors_set_safety_duel_accept_and_pvp_remote_as
         .code,
         "InvalidDuelTarget"
     );
+    sess.station_id = None;
+    sess.structure_id = None;
+    let duel_sys = sess.solar_system_id.unwrap_or(hs_sys);
+    let owner_uid = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = duel_sys;
+        }
+        let owner_uid = {
+            let own = snap.characters.get_mut(&owner_id).unwrap();
+            own.station_id = None;
+            own.structure_id = None;
+            own.solar_system_id = duel_sys;
+            own.user_id
+        };
+        if !snap.accounts.values().any(|a| a.user_id == owner_uid) {
+            let uname = format!("u{owner_uid}");
+            snap.accounts.insert(
+                uname.clone(),
+                eve_db::AccountRecord {
+                    user_id: owner_uid,
+                    username: uname,
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
+        owner_uid
+    });
+    if !ctx.is_character_online(owner_id, owner_uid) {
+        ctx.db
+            .acquire_online_lock(owner_uid, 99_702, Some(owner_id), true, now)
+            .unwrap();
+    }
     with_mut_combat_runtime(&ctx, |rt| {
         rt.duel_challenges.insert((owner_id, char_id), now + 60);
     });
@@ -518,4 +555,235 @@ async fn kill_right_buy_activate_errors_set_safety_duel_accept_and_pvp_remote_as
             .code,
         "CantDoInCurrentSafetyLevel"
     );
+}
+
+#[tokio::test]
+async fn start_duel_challenge_requires_both_pilots_undocked_and_in_same_solar_system() {
+    let (ctx, mut sess, char_id, _ship_id, sys_id) = make_fighter_ctx_and_session();
+    let target_id = 90_000_002_i64;
+    let other_sys = if sys_id == 30_000_144 { 30_000_142 } else { 30_000_144 };
+    let kw = HashMap::new();
+
+    let target_uid = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+        }
+        let tgt_uid = {
+            let tgt = snap.characters.get_mut(&target_id).unwrap();
+            tgt.station_id = None;
+            tgt.structure_id = None;
+            tgt.solar_system_id = sys_id;
+            tgt.user_id
+        };
+        if !snap.accounts.values().any(|a| a.user_id == tgt_uid) {
+            let uname = format!("u{tgt_uid}");
+            snap.accounts.insert(
+                uname.clone(),
+                eve_db::AccountRecord {
+                    user_id: tgt_uid,
+                    username: uname,
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
+        tgt_uid
+    });
+    ctx.db
+        .acquire_online_lock(target_uid, 99_701, Some(target_id), true, ctx.now_unix())
+        .unwrap();
+
+    // 1. Challenger docked in station on session -> CantDuelWhileDocked.
+    sess.station_id = Some(60_003_760);
+    assert_eq!(
+        handle_crimewatch(&ctx, &mut sess, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(target_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CantDuelWhileDocked"
+    );
+    sess.station_id = None;
+
+    // 2. Challenger docked in Upwell structure on DB snapshot -> CantDuelWhileDocked.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().structure_id = Some(1_000_000_001);
+    });
+    assert_eq!(
+        handle_crimewatch(&ctx, &mut sess, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(target_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CantDuelWhileDocked"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().structure_id = None;
+    });
+
+    // 3. Target docked in station or structure -> CantDuelWhileDocked.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&target_id).unwrap().station_id = Some(60_003_760);
+    });
+    assert_eq!(
+        handle_crimewatch(&ctx, &mut sess, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(target_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CantDuelWhileDocked"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        let tgt = snap.characters.get_mut(&target_id).unwrap();
+        tgt.station_id = None;
+        tgt.structure_id = Some(1_000_000_002);
+    });
+    assert_eq!(
+        handle_crimewatch(&ctx, &mut sess, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(target_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CantDuelWhileDocked"
+    );
+
+    // 4. Target undocked in a different solar system -> DuelChallengeSameSystemRequired.
+    ctx.db.with_mut_snapshot(|snap| {
+        let tgt = snap.characters.get_mut(&target_id).unwrap();
+        tgt.structure_id = None;
+        tgt.solar_system_id = other_sys;
+    });
+    assert_eq!(
+        handle_crimewatch(&ctx, &mut sess, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(target_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "DuelChallengeSameSystemRequired"
+    );
+
+    // 5. Both undocked in same solar system -> succeeds cleanly.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&target_id).unwrap().solar_system_id = sys_id;
+    });
+    let rep = handle_crimewatch(&ctx, &mut sess, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(target_id)], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rep.dict_get("challengeIssued"), Some(&PyRep::Bool(true)));
+
+    // 6. RespondToDuelChallenge(accept=true) re-validates online + undocked + same system (P2-4).
+    let ch_uid = ctx.db.with_mut_snapshot(|snap| {
+        let uid = snap.characters.get(&char_id).unwrap().user_id;
+        if !snap.accounts.values().any(|a| a.user_id == uid) {
+            let uname = format!("u{uid}");
+            snap.accounts.insert(
+                uname.clone(),
+                eve_db::AccountRecord {
+                    user_id: uid,
+                    username: uname,
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
+        uid
+    });
+    if !ctx.is_character_online(char_id, ch_uid) {
+        ctx.db
+            .acquire_online_lock(ch_uid, sess.session_id, Some(char_id), true, ctx.now_unix())
+            .unwrap();
+    }
+    let mut tgt_sess = SessionState {
+        user_id: Some(target_uid),
+        character_id: Some(target_id),
+        solar_system_id: Some(sys_id),
+        ..Default::default()
+    };
+
+    // 6a. Target docked before accepting -> CantDuelWhileDocked; challenge remains unengaged.
+    tgt_sess.station_id = Some(60_003_760);
+    assert_eq!(
+        handle_crimewatch(
+            &ctx,
+            &mut tgt_sess,
+            "crimewatch",
+            "RespondToDuelChallenge",
+            &[PyRep::Integer(char_id), PyRep::Integer(1), PyRep::Bool(true)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CantDuelWhileDocked"
+    );
+    tgt_sess.station_id = None;
+
+    // 6b. Challenger docked after issuing -> CantDuelWhileDocked.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().station_id = Some(60_003_760);
+    });
+    assert_eq!(
+        handle_crimewatch(
+            &ctx,
+            &mut tgt_sess,
+            "crimewatch",
+            "RespondToDuelChallenge",
+            &[PyRep::Integer(char_id), PyRep::Integer(1), PyRep::Bool(true)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CantDuelWhileDocked"
+    );
+
+    // 6c. Challenger jumped to another solar system -> DuelChallengeSameSystemRequired.
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.station_id = None;
+        ch.solar_system_id = other_sys;
+    });
+    assert_eq!(
+        handle_crimewatch(
+            &ctx,
+            &mut tgt_sess,
+            "crimewatch",
+            "RespondToDuelChallenge",
+            &[PyRep::Integer(char_id), PyRep::Integer(1), PyRep::Bool(true)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "DuelChallengeSameSystemRequired"
+    );
+    assert!(with_mut_combat_runtime(&ctx, |rt| !rt.has_limited_engagement_with(char_id, target_id, ctx.now_unix())));
+
+    // 6d. Both back in same system undocked -> accept succeeds and activates limited engagement.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().solar_system_id = sys_id;
+    });
+    let accepted = handle_crimewatch(
+        &ctx,
+        &mut tgt_sess,
+        "crimewatch",
+        "RespondToDuelChallenge",
+        &[PyRep::Integer(char_id), PyRep::Integer(1), PyRep::Bool(true)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(accepted.dict_get("accepted"), Some(&PyRep::Bool(true)));
+    assert!(with_mut_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(char_id, target_id, ctx.now_unix())));
 }

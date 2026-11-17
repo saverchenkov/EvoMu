@@ -875,13 +875,12 @@ pub(crate) fn require_structure_control_role_at(
 
 pub(crate) fn emit_ship_session_change(ctx: &ServerContext, session: &mut SessionState, char_id: i64, old_ship: Option<i64>, new_ship: Option<i64>) {
     let old_py = old_ship.filter(|&s| s > 0).map(PyRep::Integer).unwrap_or(PyRep::None);
-    let new_py = new_ship.filter(|&s| s > 0).map(PyRep::Integer).unwrap_or(PyRep::None);
-    let sess_rep = PyRep::keyval([
-        ("charid", PyRep::Integer(char_id)), ("shipid", new_py.clone()),
-        ("stationid", session.station_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-        ("structureid", session.structure_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-        ("solarsystemid2", session.solar_system_id.map(|s| PyRep::Integer(i64::from(s))).unwrap_or(PyRep::None)),
-    ]);
+    let new_ship_norm = new_ship.filter(|&s| s > 0);
+    let new_py = new_ship_norm.map(PyRep::Integer).unwrap_or(PyRep::None);
+    if session.ship_id != new_ship_norm {
+        session.ship_id = new_ship_norm;
+    }
+    let sess_rep = crate::router::session_transition::build_session_state_keyval(session, char_id);
     let change_rep = PyRep::Dict(vec![(PyRep::String("shipid".into()), PyRep::Tuple(vec![old_py, new_py]))]);
     let notif = crate::router::notify_registry::OnSessionChanged {
         is_remote: false,
