@@ -2362,7 +2362,7 @@ async fn daily_goals_evermarks_sp_rollover_and_reload() {
 
     let mut qrx = subscribe_quasar(&ctx, &mut sess).await;
 
-    // 1. Fetch daily goals with rewards & current daily goals (4-of-5 rotating SDE goals + DailyBonus)
+    // 1. Fetch daily goals with rewards & current daily goals (5 per-career/general rotating SDE goals + DailyBonus)
     let defs_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetAllWithRewardsRequest", vec![]).await;
     assert_eq!(defs_rsp.status_code, STATUS_OK);
     let mut cur_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetAllCurrentRequest", vec![]).await;
@@ -2374,7 +2374,7 @@ async fn daily_goals_evermarks_sp_rollover_and_reload() {
         assert_eq!(cur_rsp.status_code, STATUS_OK);
         goal_uuids = extract_16byte_uuids(&cur_rsp.payload.unwrap().value);
     }
-    assert!(goal_uuids.len() >= 5, "Expected 4 rotating SDE daily goals + DailyBonus, got {}", goal_uuids.len());
+    assert!(goal_uuids.len() >= 6, "Expected 5 per-career/general SDE daily goals + DailyBonus, got {}", goal_uuids.len());
 
     // Identify ManufactureItem (category 5 -> target 1), a second active regular goal (preferring MineOre category 2),
     // and DailyBonus (category 6 -> last byte 6)

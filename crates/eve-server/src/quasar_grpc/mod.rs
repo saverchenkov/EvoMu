@@ -1509,7 +1509,9 @@ mod tests {
             .mark_completed(char_id, &career_goal_uuid_2, now_u)
             .expect("complete career goal 2");
 
-        // Seed #259 (Achievements): complete 1 achievement so GetUnclaimedRequest returns a reward.
+        // Seed #259 (Achievements): complete 1 achievement so GetRequest populates completed_date
+        // while GetUnclaimedRequest decodes an empty GetUnclaimedResponse (unconfigured SDE
+        // achievements carry no fabricated ISK/SP payouts).
         let ach_list = ctx.quasar_gateway.progression.achievements.get_or_init_achievements(char_id);
         let ach_id = ach_list.first().expect("seeded achievement").def.id;
         let ach_cat_id = ach_list.first().expect("seeded achievement").def.category_id;
@@ -1702,7 +1704,7 @@ mod tests {
             ("eve_public.freelance.contributionmethod.definition.api.GetAllLatestRequest", Vec::new(), "eve_public.freelance.contributionmethod.definition.api.GetAllLatestResponse", true),
             ("eve_public.freelance.contributionmethod.definition.api.GetAllLatestWithinMajorRequest", Vec::new(), "eve_public.freelance.contributionmethod.definition.api.GetAllLatestWithinMajorResponse", true),
             // #259 btnDataAchievements.py -> update_badge
-            ("eve_public.achievement.reward.api.GetUnclaimedRequest", Vec::new(), "eve_public.achievement.reward.api.GetUnclaimedResponse", true),
+            ("eve_public.achievement.reward.api.GetUnclaimedRequest", Vec::new(), "eve_public.achievement.reward.api.GetUnclaimedResponse", false),
             ("eve_public.achievement.api.GetRequest", ach_get_req, "eve_public.achievement.api.GetResponse", true),
             ("eve_public.achievement.category.api.GetRequest", ach_cat_req, "eve_public.achievement.category.api.GetResponse", false),
             ("eve_public.achievement.showcase.api.GetCharacterScoreRequest", Vec::new(), "eve_public.achievement.showcase.api.GetCharacterScoreResponse", true),
@@ -1727,7 +1729,7 @@ mod tests {
             ("type.evetech.net/eve_public.corporationgoal.api.GetMineWithRewardsRequest", Vec::new(), "eve_public.corporationgoal.api.GetMineWithRewardsResponse", true),
             ("type.evetech.net/eve_public.dailygoal.api.GetAllCurrentRequest", Vec::new(), "eve_public.dailygoal.api.GetAllCurrentResponse", true),
             ("type.evetech.net/eve_public.campaign.api.GetAllRequest", Vec::new(), "eve_public.campaign.api.GetAllResponse", true),
-            ("type.evetech.net/eve_public.achievement.reward.api.GetUnclaimedRequest", Vec::new(), "eve_public.achievement.reward.api.GetUnclaimedResponse", true),
+            ("type.evetech.net/eve_public.achievement.reward.api.GetUnclaimedRequest", Vec::new(), "eve_public.achievement.reward.api.GetUnclaimedResponse", false),
         ];
 
         for (idx, (req_type, req_bytes, expected_rsp_type, require_non_empty)) in cases.iter().enumerate() {
@@ -1827,6 +1829,17 @@ mod tests {
                 }
             } else if *req_type == "eve_public.app.eveonline.career.goal.ClaimRewardRequest" {
                 assert!(dyn_rsp.get(1).is_some(), "ClaimRewardResponse.goal must be populated");
+            } else if *req_type == "eve_public.achievement.api.GetRequest" {
+                assert!(dyn_rsp.get(1).is_some(), "achievement.api.GetResponse.completed_date must be populated for completed achievement");
+            } else if *req_type == "eve_public.achievement.reward.api.GetUnclaimedRequest"
+                || *req_type == "type.evetech.net/eve_public.achievement.reward.api.GetUnclaimedRequest"
+            {
+                let empty_rewards = match dyn_rsp.get(1) {
+                    None => true,
+                    Some(DynamicValue::Repeated(v)) => v.is_empty(),
+                    _ => false,
+                };
+                assert!(empty_rewards, "SDE-only achievements must return empty unclaimed rewards");
             }
         }
         assert!(reader.next_message().await.unwrap().is_none());
