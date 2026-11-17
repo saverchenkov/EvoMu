@@ -613,7 +613,7 @@ pub fn handle_pi_orbitals(
                     Ok(v) => v.unwrap_or(1) as u64,
                     Err(e) => return Some(Err(e)),
                 };
-                let dest = match lrpc.opt_str(2, "destination") {
+                let dest = match lrpc.opt_str_max(2, "destination", 64, 256) {
                     Ok(v) => v.unwrap_or("Storage"),
                     Err(e) => return Some(Err(e)),
                 };
@@ -641,7 +641,7 @@ pub fn handle_pi_orbitals(
                     Ok(v) => v.unwrap_or(1) as u64,
                     Err(e) => return Some(Err(e)),
                 };
-                let dest = match lrpc.opt_str(2, "destination") {
+                let dest = match lrpc.opt_str_max(2, "destination", 64, 256) {
                     Ok(v) => v.unwrap_or("Storage"),
                     Err(e) => return Some(Err(e)),
                 };

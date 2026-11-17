@@ -273,6 +273,15 @@ impl ServerContext {
     ) -> Result<PyRep, BridgeRpcError> {
         ensure_dispatch_tx_hooks_installed();
 
+        let is_outer_tx_scope = DISPATCH_TX_ERROR.try_with(|_| ()).is_err();
+        if is_outer_tx_scope {
+            if let Err(rate_err) =
+                self.enforce_session_rpc_rate_budget(session, service, bound_id, method)
+            {
+                return Err(rate_err);
+            }
+        }
+
         let pre_sync_char_id = session.character_id;
         let pre_sync_loc = (
             session.solar_system_id,
@@ -314,7 +323,8 @@ impl ServerContext {
 
         let prev_station_id = session.station_id;
         let initial_active_char_id = session.character_id;
-        let is_outer_tx_scope = DISPATCH_TX_ERROR.try_with(|_| ()).is_err();
+        let pre_dispatch_user_id = session.user_id;
+        let pre_dispatch_was_docked = session.station_id.is_some() || session.structure_id.is_some();
         let is_outer_notify_scope =
             !crate::router::cache_notifications::has_staged_dispatch_notifications_scope();
         let start_time = std::time::Instant::now();
@@ -500,6 +510,23 @@ impl ServerContext {
         let resolved_service =
             bound_id.and_then(|bid| self.owned_bound_service_for_metrics(session, bid));
         let metric_service = resolved_service.as_deref().unwrap_or(service);
+        let genuine_bootstrap_transition = match (metric_service, method) {
+            ("authentication", "Login") => {
+                session.user_id.is_some() && pre_dispatch_user_id != session.user_id
+            }
+            ("charUnboundMgr", "SelectCharacterID") => {
+                session.character_id.is_some() && initial_active_char_id != session.character_id
+            }
+            ("stationSvc", "Undock") | ("structureDocking", "Undock") => {
+                pre_dispatch_was_docked
+                    && session.station_id.is_none()
+                    && session.structure_id.is_none()
+            }
+            _ => false,
+        };
+        if is_outer_tx_scope && !tx_poisoned && res.is_ok() && genuine_bootstrap_transition {
+            self.grant_session_bootstrap_burst(session.session_id);
+        }
         let track_individual =
             self.should_track_rpc_latency_individually(session, metric_service, method, &res);
         self.flight_recorder.record_rpc_latency_classified(
@@ -731,6 +758,97 @@ impl ServerContext {
         )
     }
 
+    /// Returns `true` for bootstrap RPCs expected during login/character-select/undock bursts.
+    pub(crate) fn is_bootstrap_burst_rpc(service: &str, method: &str) -> bool {
+        matches!(
+            (service, method),
+            ("authentication", "Logout" | "Ping")
+                | (
+                    "machoNet",
+                    "GetTime"
+                        | "GetGlobalConfig"
+                        | "GetServiceInfo"
+                        | "NoBlock"
+                        | "ClientHasReleasedTheseObjects"
+                        | "MachoBindObject"
+                )
+                | ("cache", "Rowset" | "Setting" | "GetServerVersionAndBuild")
+                | ("objectCaching", "GetCachableObject")
+                | ("charUnboundMgr", "GetCharactersToSelect" | "GetCharacterInfo")
+                | (
+                    "character",
+                    "GetCharacterSelectionInfo" | "GetCharacterToSelect"
+                )
+                | (
+                    "config",
+                    "GetBlackListedPlanets"
+                        | "GetOldStationData"
+                        | "GetMultiOwnersEx"
+                        | "GetLocationsEx"
+                        | "GetMultiLocationsEx"
+                        | "GetMultiAllianceShortNamesEx"
+                        | "GetMultiCorpTickerNamesEx"
+                        | "GetStationSolarSystemsByOwner"
+                )
+                | (
+                    "stationSvc",
+                    "Undock" | "GetStation" | "GetSolarSystem" | "GetGuests"
+                )
+                | ("structureDocking", "Undock")
+                | (
+                    "beyonce",
+                    "MachoBindObject" | "GetFormations" | "UpdateStateRequest"
+                )
+                | (
+                    "dogmaIM",
+                    "MachoBindObject" | "GetAllInfo" | "GetDynamicItemAttributes"
+                )
+                | (
+                    "skillMgr2",
+                    "MachoBindObject" | "GetSkills" | "GetSkillQueueAndFreePoints"
+                )
+                | ("invbroker", "MachoBindObject" | "List")
+                | ("ship", "MachoBindObject" | "GetShipConfiguration")
+                | ("publicGatewaySvc", "MachoBindObject")
+        )
+    }
+
+    fn enforce_session_rpc_rate_budget(
+        &self,
+        session: &SessionState,
+        service: &str,
+        bound_id: Option<u64>,
+        method: &str,
+    ) -> Result<(), BridgeRpcError> {
+        if self.is_gm_ops_enabled() && session.has_gm_role() {
+            return Ok(());
+        }
+        let resolved_service =
+            bound_id.and_then(|bid| self.owned_bound_service_for_metrics(session, bid));
+        let effective_service = resolved_service.as_deref().unwrap_or(service);
+        let is_bootstrap = Self::is_bootstrap_burst_rpc(effective_service, method);
+        if self.try_consume_rpc_token_at(
+            session.session_id,
+            std::time::Instant::now(),
+            is_bootstrap,
+        ) {
+            return Ok(());
+        }
+        self.flight_recorder.record_rpc_latency_classified(
+            effective_service,
+            method,
+            false,
+            std::time::Duration::ZERO,
+        );
+        Err(BridgeRpcError {
+            code: "RateLimited".into(),
+            message: format!(
+                "Per-session RPC rate budget exceeded for {effective_service}.{method}"
+            ),
+            client_error: None,
+        })
+    }
+
     /// Returns `true` only when `(effective_service, method)` represents a matched/known RPC
     /// eligible for its own latency bucket rather than collapsing into `<unknown>`.
     fn should_track_rpc_latency_individually(
@@ -744,6 +862,7 @@ impl ServerContext {
             if matches!(
                 err.code.as_str(),
                 "UnimplementedRPC"
+                    | "RateLimited"
                     | "Unauthorized"
                     | "AuthenticationRequired"
                     | "AuthenticationFailed"

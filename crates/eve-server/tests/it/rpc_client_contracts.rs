@@ -1247,6 +1247,7 @@ fn arg_from_expr(expr: &str, service: &str, method: &str, idx: usize) -> Option<
         || e == "ticker"
         || e == "url"
         || e == "comments"
+        || (e == "petition" && service == "petitioner")
     {
         return Some(PyRep::String("Test".to_string()));
     }
@@ -1785,6 +1786,7 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
         for sig in pending_sigs {
             let mut sig_ok = false;
             for cand_args in &sig.candidates {
+                ctx.release_session_rate_bucket(sess.session_id);
                 restore_session_profile(&ctx, &mut sess, profile);
                 let bound_id = bind_for_service(&ctx, &sess, &sig.service);
                 let res = ctx
@@ -3336,6 +3338,8 @@ async fn test_c2_raw_dispatch_ratchet_and_none_vs_wire_harness_diff_count() {
                 continue;
             }
             for cand_args in &sig.candidates {
+                ctx_raw.release_session_rate_bucket(sess_raw.session_id);
+                ctx_wire.release_session_rate_bucket(harness.transport().inner.session.session_id);
                 restore_session_profile(&ctx_raw, &mut sess_raw, profile);
                 restore_session_profile(
                     &ctx_wire,

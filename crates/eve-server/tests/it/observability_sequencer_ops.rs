@@ -7,7 +7,10 @@
 //! - Loopback `--gm` ops endpoint + non-`--gm` / non-loopback rejection
 //! - Outbound sequencer strict stamp monotonicity & equal-stamp coalescing
 
-use crate::common::{gm_pilot_in_space, slash_cmd, SessionBorrowWireTransport};
+use crate::common::{
+    borrow_wire_harness, gm_pilot_in_space, new_wire_harness, pin_clock, slash_cmd,
+    teardown_guard, SessionBorrowWireTransport,
+};
 use eve_machonet::service_roles::ROLE_LOGIN;
 use eve_proto::PyRep;
 use eve_server::bug_reporting::BugIncidentBundle;
@@ -19,7 +22,7 @@ use eve_server::outbound_sequencer::{
     sequence_tick_with_event, sequence_with_events, DestinyBatch, DestinyDrain, OutFrame,
     RpcCompletion, SequencerLedgerEventKind, SessionWireState,
 };
-use eve_server::router::ServerContext;
+use eve_server::router::{ServerContext, RPC_RATE_BURST_TOKENS};
 use eve_server::sso::{handle_http_request_with_peer, HttpResponse};
 use eve_testkit::client_harness::ClientHarness;
 use std::collections::HashMap;
@@ -453,4 +456,174 @@ fn observability_sequencer_monotonicity_and_coalesce_integration() {
     assert_eq!(stamps[0].client_current_tick, Some(199));
     assert_eq!(stamps[1].action, "OnSpecialFX");
     assert_eq!(stamps[1].entity_id, Some(7001));
+}
+
+#[tokio::test]
+async fn wire_login_undock_bootstrap_burst_passes_and_tight_loop_isolates_sessions() {
+    let ctx = ServerContext::new();
+    pin_clock(&ctx);
+    let _guard = teardown_guard(&ctx);
+    let kw = HashMap::new();
+
+    // Provision a bystander pilot on a separate session before running login/undock + tight-loop flood.
+    let mut bystander = gm_pilot_in_space(&ctx, 50_902, 90_107_799, 587, 30_000_142).await;
+
+    let mut h_attacker = new_wire_harness(&ctx, 50_901);
+    h_attacker
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+            &kw,
+        )
+        .await;
+    h_attacker
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(90_000_001)],
+            &kw,
+        )
+        .await;
+
+    // 120 login bootstrap RPCs pass cleanly without throttling.
+    for i in 0..60 {
+        let m = if i % 2 == 0 { "GetTime" } else { "GetGlobalConfig" };
+        h_attacker.call_ok("machoNet", None, m, &[], &kw).await;
+        h_attacker
+            .call_ok(
+                "config",
+                None,
+                "GetMultiOwnersEx",
+                &[PyRep::List(vec![PyRep::Integer(90_000_001)])],
+                &kw,
+            )
+            .await;
+    }
+
+    // Undock grants a fresh transition bootstrap allowance; another 120 space bootstrap calls pass.
+    h_attacker.call_ok("stationSvc", None, "Undock", &[], &kw).await;
+    for _ in 0..60 {
+        h_attacker
+            .call_ok("machoNet", None, "GetTime", &[], &kw)
+            .await;
+        h_attacker
+            .call_ok("dogmaIM", None, "GetAllInfo", &[], &kw)
+            .await;
+    }
+
+    // Tight loop of non-bootstrap RPCs past the per-session burst ceiling gets cleanly rejected
+    // with `RateLimited` without touching/starving the concurrent bystander session.
+    let loop_total = RPC_RATE_BURST_TOKENS as usize + 100;
+    let mut allowed = 0usize;
+    let mut rate_limited = 0usize;
+    for _ in 0..loop_total {
+        let ex = h_attacker
+            .call_exchange("account", None, "GetCashBalance", &[], &kw)
+            .await;
+        match ex.result {
+            Ok(_) => allowed += 1,
+            Err(err) => {
+                assert_eq!(err.code, "RateLimited", "unexpected wire error: {err:?}");
+                rate_limited += 1;
+            }
+        }
+    }
+    assert!(allowed >= RPC_RATE_BURST_TOKENS as usize);
+    assert!(
+        rate_limited > 0,
+        "expected tight loop on session A to be throttled cleanly"
+    );
+
+    // Bystander session continues serving wire RPCs normally without starvation.
+    let mut h_bystander = borrow_wire_harness(&ctx, &mut bystander.sess);
+    h_bystander
+        .call_ok("account", None, "GetCashBalance", &[], &kw)
+        .await;
+}
+
+#[tokio::test]
+async fn wire_bounded_rpc_args_reject_oversized_strings_without_mutation() {
+    let ctx = ServerContext::new();
+    pin_clock(&ctx);
+    let _guard = teardown_guard(&ctx);
+    let kw = HashMap::new();
+    let mut pilot = gm_pilot_in_space(&ctx, 50_910, 90_107_810, 587, 30_000_142).await;
+    let saved_before = ctx.db.with_snapshot(|snap| snap.saved_fittings.len());
+
+    let mut h = borrow_wire_harness(&ctx, &mut pilot.sess);
+
+    // Oversized UTF-8 payloads (both byte-bound and char-bound) fail with `InvalidArgument`
+    // across persisted text services without writing snapshot records.
+    let huge_label = "🚀".repeat(100); // 100 chars, 400 bytes (> 64 chars & > 256 bytes)
+    let err_label = h
+        .call_exchange(
+            "charMgr",
+            None,
+            "CreateLabel",
+            &[PyRep::String(huge_label)],
+            &kw,
+        )
+        .await
+        .result
+        .unwrap_err();
+    assert_eq!(err_label.code, "InvalidArgument");
+
+    let huge_subject = "S".repeat(200); // > 128 chars
+    let err_pet = h
+        .call_exchange(
+            "petitioner",
+            None,
+            "CreatePetition",
+            &[
+                PyRep::String(huge_subject),
+                PyRep::String("Valid description".into()),
+                PyRep::Integer(1),
+            ],
+            &kw,
+        )
+        .await
+        .result
+        .unwrap_err();
+    assert_eq!(err_pet.code, "InvalidArgument");
+
+    let huge_fit_name = "F".repeat(150); // > 100 chars
+    let err_fit = h
+        .call_exchange(
+            "charFittingMgr",
+            None,
+            "SaveFitting",
+            &[
+                PyRep::String(huge_fit_name),
+                PyRep::Integer(587),
+                PyRep::String("Valid desc".into()),
+            ],
+            &kw,
+        )
+        .await
+        .result
+        .unwrap_err();
+    assert_eq!(err_fit.code, "InvalidArgument");
+
+    let huge_item_label = "L".repeat(600); // > 128 chars
+    let err_item = h
+        .call_exchange(
+            "invbroker",
+            None,
+            "SetLabel",
+            &[PyRep::Integer(pilot.ship_id), PyRep::String(huge_item_label)],
+            &kw,
+        )
+        .await
+        .result
+        .unwrap_err();
+    assert_eq!(err_item.code, "InvalidArgument");
+
+    // Verify no contact label or saved fitting was mutated by the rejected calls.
+    let labels = h.call_ok("charMgr", None, "GetLabels", &[], &kw).await;
+    assert_eq!(labels, PyRep::Dict(vec![]));
+    let saved_after = ctx.db.with_snapshot(|snap| snap.saved_fittings.len());
+    assert_eq!(saved_after, saved_before);
 }

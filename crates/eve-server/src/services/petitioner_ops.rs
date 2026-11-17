@@ -93,9 +93,9 @@ fn handle_petitioner(
     match method {
         "CreatePetition" => {
             let (_, cid) = ServerContext::require_character(session)?;
-            let subject = args
-                .first()
-                .and_then(|a| a.as_str())
+            let rpc = crate::router::RpcArgs::positional(args);
+            let subject = rpc
+                .opt_str_max(0, "subject", 128, 512)?
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .unwrap_or("");
@@ -105,9 +105,8 @@ fn handle_petitioner(
                     "CreatePetition requires a non-empty subject",
                 ));
             }
-            let desc = args
-                .get(1)
-                .and_then(|a| a.as_str())
+            let desc = rpc
+                .opt_str_max(1, "description", 4_000, 16_000)?
                 .unwrap_or("Support request")
                 .to_string();
             let cat_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1);
@@ -281,7 +280,10 @@ fn handle_petitioner(
                 req_gm(session, "PetitioneeChat")?;
             }
             let pet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let msg = args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string();
+            let msg = crate::router::RpcArgs::positional(args)
+                .opt_str_max(1, "message", 2_000, 8_000)?
+                .unwrap_or("")
+                .to_string();
             let now_unix = ctx.now_unix();
             let (cnt, mid, petitioner_cid, claimed_by) = try_with_store(ctx, |_, store| {
                 let is_gm_msg = {

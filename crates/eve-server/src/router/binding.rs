@@ -104,6 +104,7 @@ impl Drop for SessionCleanupGuard {
         }
         self.ctx.unregister_session_closer(self.session_id);
         self.ctx.release_session_bindings(self.session_id);
+        self.ctx.release_session_rate_bucket(self.session_id);
         self.ctx.quasar_gateway.unsubscribe_session(self.session_id);
         let active_for_session = self.ctx.db.with_snapshot(|snap| {
             snap.sessions
