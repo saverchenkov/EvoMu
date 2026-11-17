@@ -2220,6 +2220,18 @@ class TestSpeedupOptimizations(unittest.TestCase):
                 "UserError('QuantumCoreRequired', {})",
                 "Items repaired in structure",
             ),
+            (
+                "structureSettings",
+                "CharacterCheckService",
+                "UserError('CustomInfo', {'info': 'StructureServiceAccessDenied: Character is denied structure service access'})",
+                "Access structure service",
+            ),
+            (
+                "structureSettings",
+                "CharacterCheckService",
+                "UserError('StructureServiceAccessDenied', {})",
+                "Access structure service",
+            ),
         )
         for svc, meth, err_str, expected_ui in benign_cases:
             with self.subTest(err=err_str):
@@ -2235,6 +2247,7 @@ class TestSpeedupOptimizations(unittest.TestCase):
         # Non-UserError failures (even mentioning the marker token) and unknown UserErrors still queue protocol_error.
         non_benign_cases = (
             ("stationSvc", "Dock", "RuntimeError('StructureNotDockable')", "Ship docks at structure"),
+            ("structureSettings", "CharacterCheckService", "RuntimeError('StructureServiceAccessDenied')", "Access structure service"),
             ("beyonce", "WarpToObject", "UserError('CustomInfo', {'info': 'UnexpectedWarpFailure'})", "Ship warps"),
         )
         for svc, meth, err_str, expected_ui in non_benign_cases:
