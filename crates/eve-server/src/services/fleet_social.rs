@@ -313,11 +313,14 @@ fn handle_office_manager(
             let now_unix = ctx.now_unix();
             let (account_key, wallet_div) = active_corp_wallet_div(session);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let is_upwell_structure = station_id >= 1_000_000_000_000;
-                let exists = if is_upwell_structure {
-                    snap.structures.contains_key(&station_id)
-                } else {
-                    station_id > 0 && ctx.sde.stations.contains_key(&station_id)
+                let structure_owner_id = snap
+                    .structures
+                    .get(&station_id)
+                    .filter(|s| s.state != "Destroyed")
+                    .map(|s| s.owner_corp_id);
+                let exists = match snap.structures.get(&station_id) {
+                    Some(s) => s.state != "Destroyed",
+                    None => station_id > 0 && ctx.sde.stations.contains_key(&station_id),
                 };
                 if !exists {
                     return Err(BridgeRpcError {
@@ -374,9 +377,6 @@ fn handle_office_manager(
                 }
                 let quote = office_rental_quote_in_snap(snap, station_id, occupied);
                 let fee = eve_db::IskCents::from_f64_isk(quote);
-                let structure_owner_id = is_upwell_structure
-                    .then(|| snap.structures.get(&station_id).map(|s| s.owner_corp_id))
-                    .flatten();
                 let creditor_id = ctx
                     .sde
                     .stations
