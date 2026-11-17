@@ -1296,7 +1296,7 @@ async fn test_combat_insurance_void_and_expiry_and_pochven_loot_drop() {
         )
         .await
         .expect("InsureShip RPC");
-    assert!(with_combat_runtime(&ctx, |rt| rt.insurance_contracts.contains_key(&ship_id)));
+    assert!(ctx.db.with_snapshot(|s| s.insurance_contracts.contains_key(&ship_id)));
 
     ctx.dispatch_rpc(
         &mut sess,
@@ -1310,7 +1310,7 @@ async fn test_combat_insurance_void_and_expiry_and_pochven_loot_drop() {
     .await
     .expect("UnInsureShip voids active insurance contract");
     assert!(
-        !with_combat_runtime(&ctx, |rt| rt.insurance_contracts.contains_key(&ship_id)),
+        !ctx.db.with_snapshot(|s| s.insurance_contracts.contains_key(&ship_id)),
         "Voiding/repackaging ship must remove active insurance contract"
     );
 

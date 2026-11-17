@@ -192,15 +192,6 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
             handle.try_remove_ball(ship_id);
         }
         ctx.invalidate_ship_fitting(pilot_sid);
-        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-            rt.insurance_contracts.remove(&pilot_sid);
-        });
-        crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
-            ctx,
-            |st| {
-                st.insurance_contracts.remove(&pilot_sid);
-            },
-        );
 
         let (home_sys_id, _home_station_id, _corvette_id, cleared_zarzakh_gate, extra_balls_to_remove) =
             ctx.db.with_mut_snapshot(|snap| {

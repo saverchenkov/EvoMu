@@ -161,7 +161,7 @@ pub(super) fn handle_insure_ship(
             }
             char_id
         };
-        let existing = fitting_containers_ships::read_container_ship_state_snap(snap)
+        let existing = snap
             .insurance_contracts
             .get(&ship_id)
             .cloned()
@@ -281,7 +281,7 @@ pub(super) fn handle_insure_ship(
         if let Some(ship_mut) = snap.items.get_mut(&ship_id) {
             ship_mut.insured_payout_isk = payout;
         }
-        let rec = fitting_containers_ships::InsuranceContractRecord {
+        let rec = eve_db::PersistedInsuranceContractRecord {
             ship_id,
             ship_type_id,
             owner_id,
@@ -292,47 +292,11 @@ pub(super) fn handle_insure_ship(
             start_unix,
             end_unix,
         };
-        fitting_containers_ships::write_container_ship_state_snap(snap, |st| {
-            st.insurance_contracts.insert(ship_id, rec.clone());
-        });
-        snap.insurance_contracts.insert(
-            ship_id,
-            eve_db::PersistedInsuranceContractRecord {
-                ship_id: rec.ship_id,
-                ship_type_id: rec.ship_type_id,
-                owner_id: rec.owner_id,
-                level_name: rec.level_name.clone(),
-                level_fraction: rec.level_fraction,
-                cost_isk: rec.cost_isk,
-                payout_isk: rec.payout_isk,
-                start_unix: rec.start_unix,
-                end_unix: rec.end_unix,
-            },
-        );
+        snap.insurance_contracts.insert(ship_id, rec.clone());
         Ok((cost, payout, rec, new_bal, is_corp, div_id))
     })?;
 
     let (cost, payout, rec, new_bal, is_corp, div_id) = res;
-    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        rt.insurance_contracts.insert(
-            ship_id,
-            crate::services::combat_crimewatch::InsuranceContractState {
-                ship_id: rec.ship_id,
-                ship_type_id: rec.ship_type_id,
-                owner_id: rec.owner_id,
-                level_name: rec.level_name.clone(),
-                level_fraction: rec.level_fraction,
-                cost_isk: rec.cost_isk,
-                payout_isk: rec.payout_isk,
-                start_unix: rec.start_unix,
-                end_unix: rec.end_unix,
-            },
-        );
-    });
-    crate::services::combat_crimewatch::combat_wrecks_killmails::sync_ship_insurance_contracts(
-        ctx,
-        rec.owner_id,
-    );
     ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnShipInsured {},

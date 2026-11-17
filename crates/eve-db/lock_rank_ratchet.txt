@@ -43,8 +43,6 @@
 60	60	crates/eve-server/src/router/context.rs::fit::active_scanner_probes
 60	60	crates/eve-server/src/router/context.rs::fit::projected_ewar
 60	60	crates/eve-server/src/router/context.rs::fit::ship_fittings
-60	60	crates/eve-server/src/services/combat_crimewatch.rs::sync_combat_runtime_from_db::combat_ephemeral
-60	60	crates/eve-server/src/services/combat_crimewatch.rs::with_combat_runtime::combat_ephemeral
 60	60	crates/eve-server/src/services/fleet_social_notify.rs::tick_fleet_lifecycle::fleet_extras
 60	60	crates/eve-server/src/system_actor/disruptors.rs::try_remove_module_cycle::active_module_ships
 60	60	crates/eve-server/src/system_actor/disruptors.rs::try_remove_module_cycle::module_deactivation_hook

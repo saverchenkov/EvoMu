@@ -248,10 +248,10 @@ async fn arch_585_arena_hazard_enforces_invuln_preserves_events_and_step_hook_pa
 
     // Insure ship_b so non-self-destruct hazard death pays out via execute_death_pipeline_sync.
     let now_u = ctx.now_unix();
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.insurance_contracts.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.insurance_contracts.insert(
             ship_b,
-            crate::services::combat_crimewatch::InsuranceContractState {
+            eve_db::PersistedInsuranceContractRecord {
                 ship_id: ship_b,
                 ship_type_id: 587,
                 owner_id: cid_b,

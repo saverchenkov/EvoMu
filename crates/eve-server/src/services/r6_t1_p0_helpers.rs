@@ -5,7 +5,7 @@
 
 use crate::router::{ActiveScannerProbe, ServerContext};
 use crate::services::combat_crimewatch::{
-    is_legal_war_or_suspect_target, process_ship_insurance_payout, with_combat_runtime,
+    is_legal_war_or_suspect_target, with_combat_runtime,
     with_mut_combat_runtime, SafetyLevel,
 };
 use crate::system_actor::SystemHandle;
@@ -168,7 +168,6 @@ pub(crate) async fn enforce_legacy_pvp_safety_and_concord(
             char_id,
             0.0,
         );
-        let _ = process_ship_insurance_payout(ctx, char_id, ship_id, attacker_ball.type_id, true);
         let rng_seed = ctx.mechanic_rng.try_next_u64().unwrap_or(0);
         match crate::combat::death_pipeline::execute_death_pipeline(
             ctx,

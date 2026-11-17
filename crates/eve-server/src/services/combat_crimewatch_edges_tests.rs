@@ -569,7 +569,7 @@ fn combat_runtime_rehydrate_epochs_hash_safety_levels_and_extended_state() {
     assert!(rt.to_persisted().extended_runtime_json.is_empty());
 
     // 1. Initial rehydrate (synced_db_epoch == 0) performs full sync_from_persisted
-    rt.rehydrate_from_persisted_epochs(&p, 10);
+    rt.rehydrate_from_persisted_epochs(&p, 10, false);
     assert_eq!(rt.synced_db_epoch, 10);
     assert_eq!(rt.synced_ext_hash, h_non_empty);
     assert_eq!(rt.safety_levels.get(&90_000_001), Some(&SafetyLevel::Red));
@@ -602,7 +602,7 @@ fn combat_runtime_rehydrate_epochs_hash_safety_levels_and_extended_state() {
         },
     );
     p.safety_levels.insert(90_000_001, 2);
-    rt.rehydrate_from_persisted_epochs(&p, 11);
+    rt.rehydrate_from_persisted_epochs(&p, 11, false);
     assert_eq!(rt.synced_db_epoch, 11);
     assert_eq!(rt.safety_levels.get(&90_000_001), Some(&SafetyLevel::Green));
     assert_eq!(
@@ -611,15 +611,14 @@ fn combat_runtime_rehydrate_epochs_hash_safety_levels_and_extended_state() {
         "core-only sync must keep in-memory extended state when ext_hash matches"
     );
 
-    // 3. Resetting synced_db_epoch == 0 triggers full sync_from_persisted (overwriting transient 202)
-    rt.synced_db_epoch = 0;
-    rt.rehydrate_from_persisted_epochs(&p, 12);
+    // 3. Passing force_full=true triggers full sync_from_persisted (overwriting transient 202)
+    rt.rehydrate_from_persisted_epochs(&p, 12, true);
     assert_eq!(rt.synced_db_epoch, 12);
     assert!(!rt.container_lifetimes.contains_key(&202));
 
     // 4. Changing extended_runtime_json to empty clears extended state via full sync
     p.extended_runtime_json.clear();
-    rt.rehydrate_from_persisted_epochs(&p, 13);
+    rt.rehydrate_from_persisted_epochs(&p, 13, false);
     assert!(rt.container_lifetimes.is_empty());
     assert!(!rt.has_extended_runtime_state());
 }

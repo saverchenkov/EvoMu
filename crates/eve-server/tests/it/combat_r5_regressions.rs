@@ -23,9 +23,8 @@ use eve_proto::PyRep;
 use eve_server::combat::death_pipeline::execute_death_pipeline_sync_inner;
 use eve_server::router::{ActiveScannerProbe, ServerContext};
 use eve_server::services::combat_crimewatch::{
-    record_killmail_assist_action, step_combat_system, with_combat_runtime,
-    with_mut_combat_runtime, ActiveBreacherDot, EntropicSpoolState, InsuranceContractState,
-    SafetyLevel,
+    record_killmail_assist_action, step_combat_system, with_mut_combat_runtime,
+    ActiveBreacherDot, EntropicSpoolState, SafetyLevel,
 };
 use eve_server::services::pve_exploration::{
     with_pve_exploration_reg, HackingGameSession, HackingNodeKind, HackingTileState, PveSiteInstance,
@@ -231,15 +230,23 @@ async fn test_r5_201_insurance_single_use_consumption_and_self_destruct_bounty_b
     let _vic_sess = setup_pilot_in_space(&ctx, 82011, vic_id, 1_000_125, ship_id, 587, sys_id, DVec3::ZERO).await;
     let _atk_sess = setup_pilot_in_space(&ctx, 82012, atk_id, 1_000_126, atk_ship_id, 587, sys_id, DVec3::new(1_000.0, 0.0, 0.0)).await;
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.insurance_contracts.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.insurance_contracts.insert(
             ship_id,
-            InsuranceContractState {
-                ship_id, ship_type_id: 587, owner_id: vic_id, level_name: "Platinum".into(),
-                level_fraction: 1.0, cost_isk: 1_000_000.0, payout_isk: 2_000_000.0,
-                start_unix: now - 100, end_unix: now + 86_400,
+            eve_db::PersistedInsuranceContractRecord {
+                ship_id,
+                ship_type_id: 587,
+                owner_id: vic_id,
+                level_name: "Platinum".into(),
+                level_fraction: 1.0,
+                cost_isk: 1_000_000.0,
+                payout_isk: 2_000_000.0,
+                start_unix: now - 100,
+                end_unix: now + 86_400,
             },
         );
+    });
+    with_mut_combat_runtime(&ctx, |rt| {
         rt.player_bounty_pool.insert(vic_id, 50_000_000.0);
     });
     record_killmail_assist_action(&ctx, ship_id, atk_id, 587, 486, 100.0, false, now);
@@ -249,7 +256,7 @@ async fn test_r5_201_insurance_single_use_consumption_and_self_destruct_bounty_b
         .expect("Self-destruct death pipeline");
     let atk_bal_after = ctx.db.with_snapshot(|s| s.characters[&atk_id].balance.to_wire_f64());
     assert!((atk_bal_after - atk_bal_before).abs() < 1e-2, "Attacker must not receive bounty payout on victim self-destruct");
-    let contract_remaining = with_combat_runtime(&ctx, |rt| rt.insurance_contracts.contains_key(&ship_id));
+    let contract_remaining = ctx.db.with_snapshot(|snap| snap.insurance_contracts.contains_key(&ship_id));
     assert!(!contract_remaining, "Insurance contract must be consumed upon ship destruction");
 }
 
@@ -303,7 +310,7 @@ async fn test_r5_202_207_weapon_zero_lock_deactivation_and_vorton_secondary_arc_
             .expect_err("Firing weapon with zero locked targets must fail")
     };
     assert_eq!(err.code, "TargetNotLocked");
-    let spool_exists = with_combat_runtime(&ctx, |rt| rt.entropic_spools.contains_key(&(ship_id, gun_id)));
+    let spool_exists = with_mut_combat_runtime(&ctx, |rt| rt.entropic_spools.contains_key(&(ship_id, gun_id)));
     assert!(!spool_exists, "Entropic spool must reset when lock check fails");
 }
 
@@ -514,7 +521,7 @@ async fn test_r5_208_209_breacher_dot_impact_system_scoping_and_smartbomb_wreck_
         );
     });
     step_combat_system(&ctx, sys_b, 10.0).await;
-    let rem_after_other_sys = with_combat_runtime(&ctx, |rt| rt.active_breacher_dots[&vic_ship].remaining_s);
+    let rem_after_other_sys = with_mut_combat_runtime(&ctx, |rt| rt.active_breacher_dots[&vic_ship].remaining_s);
     assert!((rem_after_other_sys - 50.0).abs() < 1e-6, "Stepping another solar system must not decrement Breacher DoT timer");
 
     let sys_handle = ctx.systems.get_or_spawn(sys_a);
@@ -561,7 +568,7 @@ async fn test_r5_208_209_breacher_dot_impact_system_scoping_and_smartbomb_wreck_
     );
     let sec_after = ctx.db.with_snapshot(|s| s.characters[&atk_id].security_status);
     assert!(sec_after < sec_before, "Illegal lowsec smartbomb hit must reduce security status");
-    let has_le = with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(atk_id, vic_id, ctx.now_unix()));
+    let has_le = with_mut_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(atk_id, vic_id, ctx.now_unix()));
     assert!(!has_le, "Illegal lowsec smartbomb hit must NOT create Limited Engagement");
     assert!(
         ctx.crimewatch

@@ -30,8 +30,8 @@ fn insurance_quotes_contracts_voiding_payouts_and_killmail_sha1_hash() {
         snap.items.get_mut(&ship_id).unwrap().insured_payout_isk = ref_val;
     });
     sync_ship_insurance_contracts(&ctx, char_id);
-    with_combat_runtime(&ctx, |rt| {
-        let c = rt.insurance_contracts.get(&ship_id).unwrap();
+    ctx.db.with_snapshot(|snap| {
+        let c = snap.insurance_contracts.get(&ship_id).unwrap();
         assert_eq!(c.level_name, "Platinum");
         assert!((c.payout_isk - ref_val).abs() < 1e-2);
     });
@@ -467,11 +467,6 @@ fn insurance_contract_persists_end_unix_across_reload_and_expires() {
         assert_eq!(c.end_unix, saved_end, "restart must NOT reset end_unix to +84 days");
         assert_eq!(c.level_name, "Gold");
     });
-    with_combat_runtime(&ctx_restarted, |rt| {
-        let c = rt.insurance_contracts.get(&ship_id).unwrap();
-        assert_eq!(c.end_unix, saved_end);
-        assert_eq!(c.level_name, "Gold");
-    });
 
     // Once now >= saved_end, sweep expires the persisted contract and clears ship payout.
     sweep_expired_insurance_contracts(&ctx_restarted, saved_end);
@@ -501,8 +496,8 @@ fn insurance_contract_persists_end_unix_across_reload_and_expires() {
         );
     });
     sync_ship_insurance_contracts(&ctx, char_id);
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.insurance_contracts.contains_key(&ship_id));
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.insurance_contracts.contains_key(&ship_id));
     });
 }
 

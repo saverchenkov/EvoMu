@@ -178,9 +178,10 @@ async fn insurance_svc_personal_corp_void_old_and_error_branches() {
 
     // Clear test contract before checking ownership, negative cost, and Basic -> Platinum lifecycle
     ctx.db.with_mut_snapshot(|snap| {
-        crate::services::fitting_containers_ships::write_container_ship_state_snap(snap, |st| {
-            st.insurance_contracts.remove(&ship_id);
-        });
+        snap.insurance_contracts.remove(&ship_id);
+        if let Some(it) = snap.items.get_mut(&ship_id) {
+            it.insured_payout_isk = 0.0;
+        }
     });
 
     // Ownership violation

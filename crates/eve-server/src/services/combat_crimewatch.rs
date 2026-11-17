@@ -53,7 +53,7 @@ use crate::router::{NotificationTarget, ServerContext};
 pub use crate::router::RpcArgs;
 use eve_db::{
     InventoryFlag, InventoryItemRecord, IskCents, KillRightRecord, KillmailRecord,
-    SystemDynamicState, WalletJournalEntry,
+    SystemDynamicState,
 };
 use eve_destiny::DamageVector;
 use eve_machonet::SessionState;
@@ -367,20 +367,7 @@ pub struct EncounterWaveDirector {
     pub next_wave_pending: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct InsuranceContractState {
-    pub ship_id: i64,
-    pub ship_type_id: u32,
-    pub owner_id: i64,
-    pub level_name: String,
-    pub level_fraction: f64,
-    pub cost_isk: f64,
-    pub payout_isk: f64,
-    pub start_unix: u64,
-    pub end_unix: u64,
-}
-
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct CombatRuntimeState {
     #[doc(hidden)]
     pub synced_db_epoch: u64,
@@ -412,7 +399,6 @@ pub struct CombatRuntimeState {
     pub bounty_tick_next_flush_unix: HashMap<(u32, i64), u64>,
     pub pending_bounty_tick_started_unix: HashMap<(u32, i64), u64>,
     pub encounter_waves: HashMap<u32, EncounterWaveDirector>,
-    pub insurance_contracts: HashMap<i64, InsuranceContractState>,
     pub player_bounty_pool: HashMap<i64, f64>,
     pub bounty_contributions: HashMap<i64, Vec<(i64, f64)>>,
     pub bounty_hunter_claimed: HashMap<i64, f64>,
@@ -473,7 +459,6 @@ struct PersistedCombatExtendedPayload {
     bounty_tick_next_flush_unix: Vec<((u32, i64), u64)>,
     pending_bounty_tick_started_unix: Vec<((u32, i64), u64)>,
     encounter_waves: HashMap<u32, EncounterWaveDirector>,
-    insurance_contracts: HashMap<i64, InsuranceContractState>,
     fighter_unit_damage_accum: HashMap<i64, f64>,
     fighter_tube_rearm_until: Vec<((i64, usize), u64)>,
     behavior_debugging_active: std::collections::HashSet<i64>,
@@ -510,9 +495,10 @@ impl CombatRuntimeState {
         &mut self,
         p: &eve_db::PersistedCombatCrimewatchState,
         combat_epoch: u64,
+        force_full: bool,
     ) {
         let ext_hash = Self::ext_runtime_hash(p);
-        if self.synced_db_epoch == 0 || self.synced_ext_hash != ext_hash {
+        if force_full || self.synced_db_epoch == 0 || self.synced_ext_hash != ext_hash {
             self.sync_from_persisted(p);
         } else {
             self.sync_core_from_persisted(p);
@@ -637,7 +623,6 @@ impl CombatRuntimeState {
             self.drone_next_ready_unix.clear();
             self.npc_entities.clear();
             self.encounter_waves.clear();
-            self.insurance_contracts.clear();
             self.fighter_unit_damage_accum.clear();
             self.fighter_tube_rearm_until.clear();
             self.behavior_debugging_active.clear();
@@ -686,7 +671,6 @@ impl CombatRuntimeState {
                     ext.pending_bounty_tick_started_unix.into_iter().collect();
             }
             self.encounter_waves = ext.encounter_waves;
-            self.insurance_contracts = ext.insurance_contracts;
             self.fighter_unit_damage_accum = ext.fighter_unit_damage_accum;
             self.fighter_tube_rearm_until = ext.fighter_tube_rearm_until.into_iter().collect();
             self.behavior_debugging_active = ext.behavior_debugging_active;
@@ -726,7 +710,6 @@ impl CombatRuntimeState {
             || !self.bounty_tick_next_flush_unix.is_empty()
             || !self.pending_bounty_tick_started_unix.is_empty()
             || !self.encounter_waves.is_empty()
-            || !self.insurance_contracts.is_empty()
             || !self.fighter_unit_damage_accum.is_empty()
             || !self.fighter_tube_rearm_until.is_empty()
             || !self.behavior_debugging_active.is_empty()
@@ -784,7 +767,6 @@ impl CombatRuntimeState {
                     .map(|(k, v)| (*k, *v))
                     .collect(),
                 encounter_waves: self.encounter_waves.clone(),
-                insurance_contracts: self.insurance_contracts.clone(),
                 fighter_unit_damage_accum: self.fighter_unit_damage_accum.clone(),
                 fighter_tube_rearm_until: self
                     .fighter_tube_rearm_until
@@ -861,14 +843,15 @@ impl CombatRuntimeState {
 /// (e.g. on startup, database reload, or snapshot replacement) (`#592`).
 pub fn sync_combat_runtime_from_db(ctx: &ServerContext) {
     let combat_epoch = ctx.db.combat_state_epoch();
-    let guard_read = ctx
-        .combat_ephemeral
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
-    if guard_read.synced_db_epoch == combat_epoch {
-        return;
+    {
+        let guard_read = ctx
+            .combat_ephemeral
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        if guard_read.synced_db_epoch == combat_epoch {
+            return;
+        }
     }
-    drop(guard_read);
     rehydrate_combat_runtime_with_mode(ctx, false);
 }
 
@@ -878,62 +861,119 @@ pub fn rehydrate_combat_runtime_from_db_forced(ctx: &ServerContext) {
 }
 
 fn rehydrate_combat_runtime_with_mode(ctx: &ServerContext, force_full: bool) {
-    if ctx.db.is_write_locked_by_current_thread() {
-        return;
-    }
-    ctx.db.with_snapshot(|s| {
+    rehydrate_combat_runtime_with_hook(ctx, force_full, || {});
+}
+
+pub(super) fn rehydrate_combat_runtime_with_hook(
+    ctx: &ServerContext,
+    force_full: bool,
+    mut after_snapshot_hook: impl FnMut(),
+) {
+    loop {
+        let epoch_before = ctx.db.combat_state_epoch();
+        let persisted = ctx
+            .db
+            .with_snapshot(|s| s.combat_crimewatch_state.clone());
+        after_snapshot_hook();
+        if ctx.db.combat_state_epoch() != epoch_before {
+            continue;
+        }
         let mut guard = ctx
             .combat_ephemeral
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        let combat_epoch = ctx.db.combat_state_epoch();
-        if force_full {
-            guard.synced_db_epoch = 0;
+        if ctx.db.combat_state_epoch() != epoch_before {
+            continue;
         }
-        guard.rehydrate_from_persisted_epochs(&s.combat_crimewatch_state, combat_epoch);
-    });
+        if force_full || guard.synced_db_epoch != epoch_before {
+            guard.rehydrate_from_persisted_epochs(&persisted, epoch_before, force_full);
+        }
+        break;
+    }
 }
 
 /// Persists the current in-memory [`CombatRuntimeState`] mirror into `ctx.db` (`#592`).
 pub fn flush_combat_runtime_to_db(ctx: &ServerContext) {
-    if ctx.db.is_write_locked_by_current_thread() {
-        return;
-    }
-    let (persisted, ext_hash) = {
+    flush_combat_runtime_to_db_with_hooks(ctx, || {}, || {});
+}
+
+pub(super) fn flush_combat_runtime_to_db_with_hooks(
+    ctx: &ServerContext,
+    mut after_read_hook: impl FnMut(),
+    mut before_stamp_hook: impl FnMut(),
+) {
+    let (persisted, ext_hash, synced_epoch, synced_ext_hash) = {
         let guard = ctx
             .combat_ephemeral
             .read()
             .unwrap_or_else(|e| e.into_inner());
         let p = guard.to_persisted();
         let h = CombatRuntimeState::ext_runtime_hash(&p);
-        (p, h)
+        (p, h, guard.synced_db_epoch, guard.synced_ext_hash)
     };
-    let already_matches = ctx
-        .db
-        .with_snapshot(|s| *s.combat_crimewatch_state == persisted);
-    if !already_matches {
-        ctx.db.with_mut_snapshot(|s| {
-            let mut guard = ctx
-                .combat_ephemeral
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            s.combat_crimewatch_state = persisted.into();
-            guard.synced_db_epoch = 0;
-        });
+    let (already_matches, expected_epoch) = loop {
+        let epoch_before = ctx.db.combat_state_epoch();
+        let matches = ctx
+            .db
+            .with_snapshot(|s| *s.combat_crimewatch_state == persisted);
+        after_read_hook();
+        if ctx.db.combat_state_epoch() == epoch_before {
+            break (matches, epoch_before);
+        }
+    };
+    if !already_matches
+        && synced_ext_hash != 0
+        && ext_hash == synced_ext_hash
+        && synced_epoch != expected_epoch
+    {
+        rehydrate_combat_runtime_with_mode(ctx, false);
+        return;
     }
-    let mut guard = ctx
-        .combat_ephemeral
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-    guard.synced_db_epoch = ctx.db.combat_state_epoch();
-    guard.synced_ext_hash = ext_hash;
+    let target_epoch = if already_matches {
+        expected_epoch
+    } else {
+        ctx.db.with_mut_snapshot(|s| {
+            let pre = ctx.db.combat_state_epoch();
+            if *s.combat_crimewatch_state == persisted {
+                pre
+            } else {
+                s.combat_crimewatch_state = persisted.into();
+                pre.wrapping_add(1)
+            }
+        })
+    };
+    before_stamp_hook();
+    if ctx.db.combat_state_epoch() == target_epoch {
+        let mut guard = ctx
+            .combat_ephemeral
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if ctx.db.combat_state_epoch() == target_epoch {
+            if CombatRuntimeState::ext_runtime_hash(&guard.to_persisted()) == ext_hash {
+                guard.synced_db_epoch = target_epoch;
+                guard.synced_ext_hash = ext_hash;
+            }
+            return;
+        }
+    }
+    rehydrate_combat_runtime_with_mode(ctx, false);
 }
 
 pub fn with_combat_runtime<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&CombatRuntimeState) -> R,
 ) -> R {
-    sync_combat_runtime_from_db(ctx);
+    let combat_epoch = ctx.db.combat_state_epoch();
+    {
+        let guard = ctx
+            .combat_ephemeral
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        if guard.synced_db_epoch == combat_epoch {
+            return f(&guard);
+        }
+    }
+    rehydrate_combat_runtime_with_mode(ctx, false);
     let guard = ctx
         .combat_ephemeral
         .read()
@@ -941,42 +981,70 @@ pub fn with_combat_runtime<R>(
     f(&guard)
 }
 
+/// Mutates persisted combat crimewatch state directly inside an open DB snapshot transaction
+/// (`#1238` EP-12), keeping `ctx.combat_ephemeral` untouched until post-commit rehydration so
+/// aborted or rolled-back transactions never leak partial mutations into runtime memory.
+pub fn with_mut_combat_runtime_in_snap<R>(
+    snap: &mut eve_db::WorldStateSnapshot,
+    f: impl FnOnce(&mut CombatRuntimeState) -> R,
+) -> R {
+    let mut rt = CombatRuntimeState::default();
+    rt.sync_from_persisted(&snap.combat_crimewatch_state);
+    let out = f(&mut rt);
+    snap.combat_crimewatch_state = rt.to_persisted().into();
+    out
+}
+
 pub fn with_mut_combat_runtime<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&mut CombatRuntimeState) -> R,
 ) -> R {
-    if ctx.db.is_write_locked_by_current_thread() {
-        let mut guard = ctx
-            .combat_ephemeral
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let out = f(&mut guard);
-        guard.synced_db_epoch = 0;
-        return out;
-    }
-    let mut ext_hash = 0;
+    let mut staged = None;
+    let mut expected_epoch = 0;
     let out = ctx.db.with_mut_snapshot(|s| {
-        let mut guard = ctx
-            .combat_ephemeral
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut guard_copy = {
+            let guard = ctx
+                .combat_ephemeral
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.clone()
+        };
         let combat_epoch = ctx.db.combat_state_epoch();
-        if guard.synced_db_epoch != combat_epoch {
-            guard.rehydrate_from_persisted_epochs(&s.combat_crimewatch_state, combat_epoch);
+        if guard_copy.synced_db_epoch != combat_epoch {
+            guard_copy.rehydrate_from_persisted_epochs(
+                &s.combat_crimewatch_state,
+                combat_epoch,
+                false,
+            );
         }
-        let out = f(&mut guard);
-        let persisted = guard.to_persisted();
-        ext_hash = CombatRuntimeState::ext_runtime_hash(&persisted);
-        s.combat_crimewatch_state = persisted.into();
-        guard.synced_db_epoch = 0;
+        let out = f(&mut guard_copy);
+        let persisted = guard_copy.to_persisted();
+        let ext_hash = CombatRuntimeState::ext_runtime_hash(&persisted);
+        let changed = *s.combat_crimewatch_state != persisted;
+        expected_epoch = if changed {
+            s.combat_crimewatch_state = persisted.into();
+            combat_epoch.wrapping_add(1)
+        } else {
+            combat_epoch
+        };
+        guard_copy.synced_db_epoch = expected_epoch;
+        guard_copy.synced_ext_hash = ext_hash;
+        staged = Some(guard_copy);
         out
     });
-    let mut guard = ctx
-        .combat_ephemeral
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-    guard.synced_db_epoch = ctx.db.combat_state_epoch();
-    guard.synced_ext_hash = ext_hash;
+    if let Some(next_state) = staged {
+        if ctx.db.combat_state_epoch() == expected_epoch {
+            let mut guard = ctx
+                .combat_ephemeral
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            if ctx.db.combat_state_epoch() == expected_epoch {
+                *guard = next_state;
+                return out;
+            }
+        }
+        rehydrate_combat_runtime_with_mode(ctx, false);
+    }
     out
 }
 
@@ -1572,6 +1640,84 @@ pub async fn dispatch_combat_rpc(
 }
 
 /// Claims up to 20% of the destroyed ship's reference value from the victim's (and corp/alliance)
+/// Claims up to 20% of `victim_ship_type_id`'s insurance reference value directly inside an open
+/// DB snapshot transaction (`#1238` EP-12).
+pub fn claim_player_bounty_on_kill_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
+    killer_char_id: i64,
+    victim_char_id: i64,
+    victim_ship_type_id: u32,
+) -> (f64, Option<f64>) {
+    if killer_char_id <= 0 || victim_char_id <= 0 || killer_char_id == victim_char_id {
+        return (0.0, None);
+    }
+    let vic_corp = snap
+        .characters
+        .get(&victim_char_id)
+        .map(|c| c.corporation_id)
+        .unwrap_or(0);
+    let vic_all = snap
+        .corporations
+        .get(&vic_corp)
+        .and_then(|co| co.alliance_id)
+        .or_else(|| snap.characters.get(&victim_char_id).and_then(|c| c.alliance_id))
+        .unwrap_or(0);
+    let kil_corp = snap
+        .characters
+        .get(&killer_char_id)
+        .map(|c| c.corporation_id)
+        .unwrap_or(0);
+    let kil_all = snap
+        .corporations
+        .get(&kil_corp)
+        .and_then(|co| co.alliance_id)
+        .or_else(|| snap.characters.get(&killer_char_id).and_then(|c| c.alliance_id))
+        .unwrap_or(0);
+    let ref_val = compute_ship_insurance_reference_value(sde, victim_ship_type_id).max(250_000.0);
+    let max_claim = 0.20 * ref_val;
+    let mut remaining_cap = max_claim;
+    let mut claimed = 0.0;
+    let rt = &mut snap.combat_crimewatch_state;
+    for tid in [victim_char_id, vic_corp, vic_all] {
+        if tid <= 0 || remaining_cap <= 0.0 {
+            continue;
+        }
+        if let Some(pool) = rt.player_bounty_pool.get_mut(&tid) {
+            let take = (*pool).min(remaining_cap);
+            if take > 0.0 {
+                *pool -= take;
+                remaining_cap -= take;
+                claimed += take;
+            }
+            if *pool <= 1e-6 {
+                rt.player_bounty_pool.remove(&tid);
+            }
+        }
+    }
+    if claimed > 0.0 {
+        *rt.bounty_hunter_claimed.entry(killer_char_id).or_insert(0.0) += claimed;
+        if kil_corp > 0 {
+            *rt.bounty_hunter_claimed.entry(kil_corp).or_insert(0.0) += claimed;
+        }
+        if kil_all > 0 {
+            *rt.bounty_hunter_claimed.entry(kil_all).or_insert(0.0) += claimed;
+        }
+    }
+    let bal = if claimed > 0.0 {
+        if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
+            let add = IskCents::from_f64_isk(claimed);
+            ch.balance = ch.balance.checked_add(add).unwrap_or(ch.balance);
+            Some(ch.balance.to_wire_f64())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    (claimed, bal)
+}
+
 /// bounty pool and credits the final-blow killer (`feat:combat.player-bounties`, `feat:combat.bounty-leaderboards`).
 pub fn claim_player_bounty_on_kill(
     ctx: &ServerContext,
@@ -1582,62 +1728,17 @@ pub fn claim_player_bounty_on_kill(
     if killer_char_id <= 0 || victim_char_id <= 0 || killer_char_id == victim_char_id {
         return 0.0;
     }
-    let (vic_corp, vic_all, kil_corp, kil_all) = ctx.db.with_snapshot(|snap| {
-        let vc = snap.characters.get(&victim_char_id).map(|c| c.corporation_id).unwrap_or(0);
-        let va = snap.corporations.get(&vc).and_then(|co| co.alliance_id).or_else(|| snap.characters.get(&victim_char_id).and_then(|c| c.alliance_id)).unwrap_or(0);
-        let kc = snap.characters.get(&killer_char_id).map(|c| c.corporation_id).unwrap_or(0);
-        let ka = snap.corporations.get(&kc).and_then(|co| co.alliance_id).or_else(|| snap.characters.get(&killer_char_id).and_then(|c| c.alliance_id)).unwrap_or(0);
-        (vc, va, kc, ka)
-    });
-    let ref_val = compute_ship_insurance_reference_value(&ctx.sde, victim_ship_type_id).max(250_000.0);
-    let max_claim = 0.20 * ref_val;
     let (claimed_isk, new_bal) = ctx.db.with_mut_snapshot(|snap| {
-        let mut remaining_cap = max_claim;
-        let mut claimed = 0.0;
-        let rt = &mut snap.combat_crimewatch_state;
-        for tid in [victim_char_id, vic_corp, vic_all] {
-            if tid <= 0 || remaining_cap <= 0.0 {
-                continue;
-            }
-            if let Some(pool) = rt.player_bounty_pool.get_mut(&tid) {
-                let take = (*pool).min(remaining_cap);
-                if take > 0.0 {
-                    *pool -= take;
-                    remaining_cap -= take;
-                    claimed += take;
-                }
-                if *pool <= 1e-6 {
-                    rt.player_bounty_pool.remove(&tid);
-                }
-            }
-        }
-        if claimed > 0.0 {
-            *rt.bounty_hunter_claimed.entry(killer_char_id).or_insert(0.0) += claimed;
-            if kil_corp > 0 {
-                *rt.bounty_hunter_claimed.entry(kil_corp).or_insert(0.0) += claimed;
-            }
-            if kil_all > 0 {
-                *rt.bounty_hunter_claimed.entry(kil_all).or_insert(0.0) += claimed;
-            }
-        }
-        let bal = if claimed > 0.0 {
-            if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
-                let add = IskCents::from_f64_isk(claimed);
-                ch.balance = ch.balance.checked_add(add).unwrap_or(ch.balance);
-                Some(ch.balance.to_wire_f64())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let mut guard = ctx.combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-        guard.sync_core_from_persisted(&snap.combat_crimewatch_state);
-        snap.combat_crimewatch_state = guard.to_persisted().into();
-        guard.synced_db_epoch = 0;
-        (claimed, bal)
+        claim_player_bounty_on_kill_in_snap(
+            snap,
+            &ctx.sde,
+            killer_char_id,
+            victim_char_id,
+            victim_ship_type_id,
+        )
     });
     if claimed_isk > 0.0 {
+        sync_combat_runtime_from_db(ctx);
         if let Some(bal) = new_bal {
             let _ = ctx.notify_account_change(killer_char_id, "cash", killer_char_id, bal);
         }
@@ -1711,46 +1812,10 @@ pub fn gm_admin_bounty_action(
         "reimburse" => {
             // Atomize GM bounty pool clearing and contributor wallet refunds under a single database
             // snapshot commit so a crash or persistence failure never leaves money movement half-applied.
-            // Refunds are capped at the remaining bounty pool and scaled pro-rata across contributors
-            // so that bounty ISK is strictly conserved without duplication.
             let total_reimbursed = ctx.db.with_mut_snapshot(|snap| {
-                let (remaining_pool, refunds) = if target_id > 0 {
-                    let pool = snap.combat_crimewatch_state.player_bounty_pool.remove(&target_id).unwrap_or(0.0);
-                    let contribs = snap.combat_crimewatch_state.bounty_contributions.remove(&target_id).unwrap_or_default();
-                    (pool, contribs)
-                } else {
-                    let pool: f64 = snap.combat_crimewatch_state.player_bounty_pool.values().sum();
-                    snap.combat_crimewatch_state.player_bounty_pool.clear();
-                    let all = std::mem::take(&mut snap.combat_crimewatch_state.bounty_contributions);
-                    (pool, all.into_values().flatten().collect())
-                };
-                let total_contrib: f64 = refunds.iter().map(|(_, a)| *a).sum();
-                let scale = if total_contrib > 0.0 && remaining_pool < total_contrib {
-                    (remaining_pool / total_contrib).max(0.0)
-                } else {
-                    1.0
-                };
-                let mut sum = 0.0;
-                for (cid, amt) in refunds {
-                    let refund_amt = amt * scale;
-                    if refund_amt > 0.0 {
-                        let mut entry = None;
-                        if let Some(ch) = snap.characters.get_mut(&cid) {
-                            let add = IskCents::from_f64_isk(refund_amt);
-                            ch.balance = ch.balance.checked_add(add).unwrap_or(ch.balance);
-                            entry = Some((add, ch.balance));
-                            sum += refund_amt;
-                        }
-                        if let Some((add, bal)) = entry {
-                            snap.append_journal(cid, "bounty_reimbursement", add, bal, "bounty_reimbursement");
-                        }
-                    }
-                }
-                let mut guard = ctx.combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-                guard.sync_from_persisted(&snap.combat_crimewatch_state);
-                guard.synced_db_epoch = 0;
-                sum
+                gm_admin_bounty_reimburse_in_snap(snap, target_id)
             });
+            sync_combat_runtime_from_db(ctx);
             Ok(total_reimbursed)
         }
         _ => Err(BridgeRpcError {
@@ -1761,28 +1826,93 @@ pub fn gm_admin_bounty_action(
     }
 }
 
+/// Atomically reimburses `target_id` (or all targets when `target_id <= 0`) pro-rata directly
+/// inside an open DB snapshot transaction (`#1238` EP-12).
+pub fn gm_admin_bounty_reimburse_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    target_id: i64,
+) -> f64 {
+    let (remaining_pool, refunds) = if target_id > 0 {
+        let pool = snap
+            .combat_crimewatch_state
+            .player_bounty_pool
+            .remove(&target_id)
+            .unwrap_or(0.0);
+        let contribs = snap
+            .combat_crimewatch_state
+            .bounty_contributions
+            .remove(&target_id)
+            .unwrap_or_default();
+        (pool, contribs)
+    } else {
+        let pool: f64 = snap.combat_crimewatch_state.player_bounty_pool.values().sum();
+        snap.combat_crimewatch_state.player_bounty_pool.clear();
+        let all = std::mem::take(&mut snap.combat_crimewatch_state.bounty_contributions);
+        (pool, all.into_values().flatten().collect())
+    };
+    let total_contrib: f64 = refunds.iter().map(|(_, a)| *a).sum();
+    let scale = if total_contrib > 0.0 && remaining_pool < total_contrib {
+        (remaining_pool / total_contrib).max(0.0)
+    } else {
+        1.0
+    };
+    let mut sum = 0.0;
+    for (cid, amt) in refunds {
+        let refund_amt = amt * scale;
+        if refund_amt > 0.0 {
+            let mut entry = None;
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                let add = IskCents::from_f64_isk(refund_amt);
+                ch.balance = ch.balance.checked_add(add).unwrap_or(ch.balance);
+                entry = Some((add, ch.balance));
+                sum += refund_amt;
+            }
+            if let Some((add, bal)) = entry {
+                snap.append_journal(
+                    cid,
+                    "bounty_reimbursement",
+                    add,
+                    bal,
+                    "bounty_reimbursement",
+                );
+            }
+        }
+    }
+    sum
+}
+
+/// Creates a kill right directly inside an open DB snapshot transaction (`#1238` EP-12).
+pub fn create_kill_right_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    kr_id: i64,
+    owner_id: i64,
+    target_id: i64,
+    fee_isk: f64,
+    expires_unix: u64,
+) {
+    snap.combat_crimewatch_state
+        .kill_right_expires_unix
+        .insert(kr_id, expires_unix);
+    snap.kill_rights.insert(
+        kr_id,
+        KillRightRecord {
+            kill_right_id: kr_id,
+            owner_id,
+            target_id,
+            activation_fee: IskCents::from_f64_isk(fee_isk.max(0.0)),
+            is_active_suspect: false,
+        },
+    );
+}
+
 /// Creates a kill right from `owner_id` against `target_id` and emits `OnKillRightCreated`.
 pub fn create_kill_right(ctx: &ServerContext, kr_id: i64, owner_id: i64, target_id: i64, fee_isk: f64) {
     let expiry_ft = ctx.now_blueos_filetime_ticks() + (30 * 86_400 * 10_000_000);
     let expires_unix = ctx.now_unix().saturating_add(30 * 86_400);
-    with_mut_combat_runtime(ctx, |rt| {
-        rt.kill_right_expires_unix.insert(kr_id, expires_unix);
-    });
     ctx.db.with_mut_snapshot(|snap| {
-        snap.combat_crimewatch_state
-            .kill_right_expires_unix
-            .insert(kr_id, expires_unix);
-        snap.kill_rights.insert(
-            kr_id,
-            KillRightRecord {
-                kill_right_id: kr_id,
-                owner_id,
-                target_id,
-                activation_fee: IskCents::from_f64_isk(fee_isk.max(0.0)),
-                is_active_suspect: false,
-            },
-        );
+        create_kill_right_in_snap(snap, kr_id, owner_id, target_id, fee_isk, expires_unix);
     });
+    sync_combat_runtime_from_db(ctx);
     let kr_notif = crate::router::notify_registry::OnKillRightCreated {
         kill_right_id: kr_id,
         from_id: owner_id,

@@ -488,10 +488,10 @@ async fn arch_585_abyssal_boundary_enforces_invuln_preserves_events_and_step_hoo
     });
 
     let now_u = ctx.now_unix();
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.insurance_contracts.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.insurance_contracts.insert(
             ship_id,
-            crate::services::combat_crimewatch::InsuranceContractState {
+            eve_db::PersistedInsuranceContractRecord {
                 ship_id,
                 ship_type_id: 587,
                 owner_id: char_id,

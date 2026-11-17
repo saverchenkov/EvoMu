@@ -100,9 +100,9 @@ pub(crate) async fn handle_ships_and_services(
                 return Some(Ok(PyRep::None));
             }
             crate::services::combat_crimewatch::combat_wrecks_killmails::sync_ship_insurance_contracts(ctx, owner_id);
-            let contract = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                rt.insurance_contracts.get(&ship_id).cloned()
-            });
+            let contract = ctx
+                .db
+                .with_snapshot(|snap| snap.insurance_contracts.get(&ship_id).cloned());
             let now_unix = ctx.now_unix();
             if let Some(c) = contract {
                 if c.end_unix > now_unix {
@@ -133,8 +133,10 @@ pub(crate) async fn handle_ships_and_services(
             };
             let owns_ship = ctx.db.with_snapshot(|snap| {
                 snap.items.get(&ship_id).is_some_and(|it| it.owner_id == char_id)
-            }) || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                rt.insurance_contracts.get(&ship_id).is_some_and(|c| c.owner_id == char_id)
+                    || snap
+                        .insurance_contracts
+                        .get(&ship_id)
+                        .is_some_and(|c| c.owner_id == char_id)
             });
             if !owns_ship {
                 return Some(Err(rpc_err("OwnershipViolation", format!("Ship {ship_id} is not owned by character {char_id}"))));
@@ -203,8 +205,8 @@ pub(crate) async fn handle_ships_and_services(
                 char_id
             };
             crate::services::combat_crimewatch::combat_wrecks_killmails::sync_ship_insurance_contracts(ctx, owner);
-            let rows = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                rt.insurance_contracts
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.insurance_contracts
                     .values()
                     .filter(|c| c.owner_id == owner)
                     .map(|c| {

@@ -407,10 +407,10 @@ async fn tractor_stop_distance_drone_bandwidth_multi_ship_drones_and_death_pipel
         }
     });
 
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.insurance_contracts.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.insurance_contracts.insert(
             victim_ship,
-            crate::services::combat_crimewatch::InsuranceContractState {
+            eve_db::PersistedInsuranceContractRecord {
                 ship_id: victim_ship,
                 ship_type_id: bs_type_id,
                 owner_id: corp_id,

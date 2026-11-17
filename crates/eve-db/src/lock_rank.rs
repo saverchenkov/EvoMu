@@ -848,6 +848,7 @@ mod imp {
     struct HeldEntry {
         id: u64,
         rank: u16,
+        lock_addr: usize,
         site: &'static Location<'static>,
     }
 
@@ -925,6 +926,19 @@ mod imp {
         rel_file: &str,
         resolved_key: Option<&RatchetSiteKey>,
     ) -> bool {
+        #[cfg(test)]
+        if let Some((_, Some(override_path))) = TEST_CONFIG.with(|c| c.borrow().clone()) {
+            if let Ok(raw) = std::fs::read_to_string(override_path) {
+                let parsed = parse_ratchet(&raw);
+                if let Some(key) = resolved_key {
+                    return parsed.contains(&(held_rank, acquired_rank, key.to_string()));
+                }
+                let prefix = format!("{rel_file}::");
+                return parsed
+                    .iter()
+                    .any(|(h, a, k)| *h == held_rank && *a == acquired_rank && k.starts_with(&prefix));
+            }
+        }
         let baseline = baseline_ratchet();
         if let Some(key) = resolved_key {
             return baseline.contains(&(held_rank, acquired_rank, key.to_string()));
@@ -1019,6 +1033,7 @@ mod imp {
         acquired_site: &'static Location<'static>,
         stack: &str,
         context: &str,
+        allow_ratchet: bool,
     ) {
         let held_loc = format_location(held_site);
         let acq_loc = format_location(acquired_site);
@@ -1031,20 +1046,29 @@ mod imp {
         let (mode, record_path) = current_mode_and_path();
         match mode {
             LockRankMode::Record => {
-                let triple = format!("{held_rank}\t{acquired_rank}\t{acq_key_str}");
-                record_triple(&triple, record_path);
-                tracing::warn!(
-                    held_rank,
-                    held_site = %held_loc,
-                    acquired_rank,
-                    acquired_site = %acq_loc,
-                    ratchet_key = %acq_key_str,
-                    held_stack = %stack,
-                    "{context} (recorded in lock_rank_ratchet.txt)"
-                );
+                if allow_ratchet {
+                    let triple = format!("{held_rank}\t{acquired_rank}\t{acq_key_str}");
+                    record_triple(&triple, record_path);
+                    tracing::warn!(
+                        held_rank,
+                        held_site = %held_loc,
+                        acquired_rank,
+                        acquired_site = %acq_loc,
+                        ratchet_key = %acq_key_str,
+                        held_stack = %stack,
+                        "{context} (recorded in lock_rank_ratchet.txt)"
+                    );
+                } else {
+                    UNRATCHETED_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+                    panic!(
+                        "lock-rank violation ({context}): cannot acquire rank {acquired_rank} at {acq_loc} (key: {acq_key_str}) while holding rank {held_rank} at {held_loc} [held: {stack}]"
+                    );
+                }
             }
             LockRankMode::Warn => {
-                if !is_entry_ratcheted(held_rank, acquired_rank, &rel_file, resolved_key.as_ref()) {
+                if !allow_ratchet
+                    || !is_entry_ratcheted(held_rank, acquired_rank, &rel_file, resolved_key.as_ref())
+                {
                     UNRATCHETED_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
                 }
                 tracing::warn!(
@@ -1058,7 +1082,9 @@ mod imp {
                 );
             }
             LockRankMode::EnforceRatchet => {
-                if is_entry_ratcheted(held_rank, acquired_rank, &rel_file, resolved_key.as_ref()) {
+                if allow_ratchet
+                    && is_entry_ratcheted(held_rank, acquired_rank, &rel_file, resolved_key.as_ref())
+                {
                     tracing::warn!(
                         held_rank,
                         held_site = %held_loc,
@@ -1083,28 +1109,67 @@ mod imp {
         }
     }
 
-    pub(crate) fn enter(rank: u16, site: &'static Location<'static>) -> HeldToken {
+    pub(crate) fn enter(
+        rank: u16,
+        lock_addr: usize,
+        site: &'static Location<'static>,
+    ) -> HeldToken {
         let tid = std::thread::current().id();
         let violation = {
             let map = held_stacks().lock().unwrap_or_else(|e| e.into_inner());
             map.get(&tid).and_then(|stack| {
-                stack
+                // Detect same-lock recursion first so another ratcheted lock higher on the stack
+                // never masks recursive re-acquisition of the same lock instance.
+                if let Some(same_lock) = stack
                     .entries
                     .iter()
                     .rev()
-                    .find(|e| e.rank >= rank)
+                    .find(|e| lock_addr != 0 && e.lock_addr == lock_addr)
                     .copied()
-                    .map(|v| (v.rank, v.site, stack_summary(&stack.entries)))
+                {
+                    Some((
+                        same_lock.rank,
+                        same_lock.site,
+                        stack_summary(&stack.entries),
+                        true,
+                    ))
+                } else {
+                    stack
+                        .entries
+                        .iter()
+                        .rev()
+                        .find(|e| e.rank >= rank)
+                        .copied()
+                        .map(|v| (v.rank, v.site, stack_summary(&stack.entries), false))
+                }
             })
         };
-        if let Some((held_rank, held_site, summary)) = violation {
-            report_violation(held_rank, held_site, rank, site, &summary, "out-of-order lock acquisition");
+        if let Some((held_rank, held_site, summary, is_same_lock)) = violation {
+            let (context, allow_ratchet) = if is_same_lock {
+                ("same-lock recursive acquisition", false)
+            } else {
+                ("out-of-order lock acquisition", true)
+            };
+            report_violation(
+                held_rank,
+                held_site,
+                rank,
+                site,
+                &summary,
+                context,
+                allow_ratchet,
+            );
         }
         let mut map = held_stacks().lock().unwrap_or_else(|e| e.into_inner());
         let stack = map.entry(tid).or_default();
         stack.next_id = stack.next_id.saturating_add(1).max(1);
         let id = stack.next_id;
-        stack.entries.push(HeldEntry { id, rank, site });
+        stack.entries.push(HeldEntry {
+            id,
+            rank,
+            lock_addr,
+            site,
+        });
         HeldToken {
             id,
             thread_id: Some(tid),
@@ -1124,7 +1189,15 @@ mod imp {
             })
         };
         if let Some((held_rank, held_site, summary)) = violation {
-            report_violation(held_rank, held_site, 0, site, &summary, "assert_no_locks_held");
+            report_violation(
+                held_rank,
+                held_site,
+                0,
+                site,
+                &summary,
+                "assert_no_locks_held",
+                true,
+            );
         }
     }
 
@@ -1150,6 +1223,7 @@ mod imp {
                 site,
                 &summary,
                 "assert_locks_below",
+                true,
             );
         }
     }
@@ -1329,19 +1403,25 @@ fn map_lock_result<G, W>(
     }
 }
 
+#[inline]
+fn lock_ptr_addr<L: ?Sized>(lock: &L) -> usize {
+    lock as *const L as *const () as usize
+}
+
 fn map_try_lock_result<G, W>(
     res: TryLockResult<G>,
     rank: u16,
+    lock_addr: usize,
     site: &'static Location<'static>,
     wrap: impl FnOnce(G, imp::HeldToken) -> W,
 ) -> TryLockResult<W> {
     match res {
         Ok(guard) => {
-            let held = imp::enter(rank, site);
+            let held = imp::enter(rank, lock_addr, site);
             Ok(wrap(guard, held))
         }
         Err(TryLockError::Poisoned(poison)) => {
-            let held = imp::enter(rank, site);
+            let held = imp::enter(rank, lock_addr, site);
             Err(TryLockError::Poisoned(PoisonError::new(wrap(
                 poison.into_inner(),
                 held,
@@ -1367,7 +1447,7 @@ impl<T: ?Sized, const RANK: u16> Ranked<RwLock<T>, RANK> {
     /// Acquires shared read access, enforcing `RANK` against locks currently held on this thread.
     #[track_caller]
     pub fn read(&self) -> LockResult<RankedRwLockReadGuard<'_, T, RANK>> {
-        let held = imp::enter(RANK, Location::caller());
+        let held = imp::enter(RANK, lock_ptr_addr(&self.0), Location::caller());
         map_lock_result(self.0.read(), held, |guard, _held| RankedRwLockReadGuard {
             guard,
             _held,
@@ -1378,15 +1458,19 @@ impl<T: ?Sized, const RANK: u16> Ranked<RwLock<T>, RANK> {
     #[track_caller]
     pub fn try_read(&self) -> TryLockResult<RankedRwLockReadGuard<'_, T, RANK>> {
         let site = Location::caller();
-        map_try_lock_result(self.0.try_read(), RANK, site, |guard, _held| {
-            RankedRwLockReadGuard { guard, _held }
-        })
+        map_try_lock_result(
+            self.0.try_read(),
+            RANK,
+            lock_ptr_addr(&self.0),
+            site,
+            |guard, _held| RankedRwLockReadGuard { guard, _held },
+        )
     }
 
     /// Acquires exclusive write access, enforcing `RANK` against locks currently held on this thread.
     #[track_caller]
     pub fn write(&self) -> LockResult<RankedRwLockWriteGuard<'_, T, RANK>> {
-        let held = imp::enter(RANK, Location::caller());
+        let held = imp::enter(RANK, lock_ptr_addr(&self.0), Location::caller());
         map_lock_result(self.0.write(), held, |guard, _held| RankedRwLockWriteGuard {
             guard,
             _held,
@@ -1397,9 +1481,13 @@ impl<T: ?Sized, const RANK: u16> Ranked<RwLock<T>, RANK> {
     #[track_caller]
     pub fn try_write(&self) -> TryLockResult<RankedRwLockWriteGuard<'_, T, RANK>> {
         let site = Location::caller();
-        map_try_lock_result(self.0.try_write(), RANK, site, |guard, _held| {
-            RankedRwLockWriteGuard { guard, _held }
-        })
+        map_try_lock_result(
+            self.0.try_write(),
+            RANK,
+            lock_ptr_addr(&self.0),
+            site,
+            |guard, _held| RankedRwLockWriteGuard { guard, _held },
+        )
     }
 
     /// Acquires shared read access on the underlying `RwLock` without pushing `RANK` onto the
@@ -1442,7 +1530,7 @@ impl<T: ?Sized, const RANK: u16> Ranked<Mutex<T>, RANK> {
     /// Acquires the mutex, enforcing `RANK` against locks currently held on this thread.
     #[track_caller]
     pub fn lock(&self) -> LockResult<RankedMutexGuard<'_, T, RANK>> {
-        let held = imp::enter(RANK, Location::caller());
+        let held = imp::enter(RANK, lock_ptr_addr(&self.0), Location::caller());
         map_lock_result(self.0.lock(), held, |guard, _held| RankedMutexGuard {
             guard,
             _held,
@@ -1453,10 +1541,13 @@ impl<T: ?Sized, const RANK: u16> Ranked<Mutex<T>, RANK> {
     #[track_caller]
     pub fn try_lock(&self) -> TryLockResult<RankedMutexGuard<'_, T, RANK>> {
         let site = Location::caller();
-        map_try_lock_result(self.0.try_lock(), RANK, site, |guard, _held| RankedMutexGuard {
-            guard,
-            _held,
-        })
+        map_try_lock_result(
+            self.0.try_lock(),
+            RANK,
+            lock_ptr_addr(&self.0),
+            site,
+            |guard, _held| RankedMutexGuard { guard, _held },
+        )
     }
 
     /// Returns whether the underlying `Mutex` is currently poisoned.
@@ -1546,7 +1637,7 @@ impl<T: ?Sized + Send + Sync> AnyRwLock<T> for std::sync::Arc<RwLock<T>> {
 impl<T: ?Sized + Send + Sync, const RANK: u16> AnyRwLock<T> for Ranked<RwLock<T>, RANK> {
     #[track_caller]
     fn read(&self) -> LockResult<AnyRwLockReadGuard<'_, T>> {
-        let held = imp::enter(RANK, Location::caller());
+        let held = imp::enter(RANK, lock_ptr_addr(&self.0), Location::caller());
         map_lock_result(self.0.read(), held, |guard, _held| AnyRwLockReadGuard {
             guard,
             _held,
@@ -1555,7 +1646,7 @@ impl<T: ?Sized + Send + Sync, const RANK: u16> AnyRwLock<T> for Ranked<RwLock<T>
 
     #[track_caller]
     fn write(&self) -> LockResult<AnyRwLockWriteGuard<'_, T>> {
-        let held = imp::enter(RANK, Location::caller());
+        let held = imp::enter(RANK, lock_ptr_addr(&self.0), Location::caller());
         map_lock_result(self.0.write(), held, |guard, _held| AnyRwLockWriteGuard {
             guard,
             _held,
@@ -1796,6 +1887,13 @@ mod tests {
             }),
             "committed ratchet must never allow RANK_LEAF (60) / RANK_WORLD_INNER (40) -> Ballpark (20) / ActorState (21) inversions"
         );
+        assert!(
+            parsed.iter().all(|(_, _, site)| {
+                !site.contains("combat_crimewatch.rs::sync_combat_runtime_from_db::combat_ephemeral")
+                    && !site.contains("combat_crimewatch.rs::with_combat_runtime::combat_ephemeral")
+            }),
+            "committed ratchet must not retain recursive combat_crimewatch.rs rank-60 combat_ephemeral entries"
+        );
 
         let path = temp_ratchet_path("roundtrip");
         let leaf: RankedRwLock<u32, RANK_LEAF> = RankedRwLock::new(1);
@@ -1935,5 +2033,68 @@ mod tests {
             }));
             assert!(err.is_err());
         });
+    }
+
+    #[test]
+    fn same_lock_rank_60_recursion_panics_immediately_without_false_positive_on_distinct_leaves() {
+        let ratchet_path = temp_ratchet_path("distinct_vs_same_lock_60");
+        let fn_name = "same_lock_rank_60_recursion_panics_immediately_without_false_positive_on_distinct_leaves";
+        let ratchet_body = format!(
+            "60\t60\tcrates/eve-db/src/lock_rank.rs::{fn_name}::lock_b\n\
+             60\t60\tcrates/eve-db/src/lock_rank.rs::{fn_name}::lock_a\n"
+        );
+        std::fs::write(&ratchet_path, ratchet_body).expect("write temp ratchet file");
+
+        let lock_a: RankedRwLock<u32, RANK_LEAF> = RankedRwLock::new(10);
+        let lock_b: RankedRwLock<u32, RANK_LEAF> = RankedRwLock::new(20);
+        let mutex_a: RankedMutex<u32, RANK_LEAF> = RankedMutex::new(30);
+
+        let mut before = 0u64;
+        imp::with_test_mode(LockRankMode::EnforceRatchet, Some(ratchet_path.clone()), || {
+            // Distinct ordered rank-60 leaves ratcheted by key succeed with zero false positives.
+            let _ga = lock_a.read().unwrap();
+            let _gb = lock_b.read().unwrap();
+            assert_eq!(held_lock_ranks(), vec![RANK_LEAF, RANK_LEAF]);
+
+            // Re-acquiring `lock_a` while `lock_a` is already on the held stack (even past `lock_b`
+            // and even with `lock_a` listed in the ratchet file) must fail immediately.
+            before = unratcheted_violation_count();
+            let nested_err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ga_nested = lock_a.read();
+            }))
+            .expect_err("same-lock rank-60 recursion must panic even when ratcheted");
+            let nested_msg = nested_err
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_default();
+            assert!(
+                nested_msg.contains("same-lock recursive acquisition"),
+                "unexpected panic message: {nested_msg}"
+            );
+        });
+        assert!(
+            unratcheted_violation_count() > before,
+            "same-lock recursion must increment unratcheted_violation_count"
+        );
+
+        let before_mutex = unratcheted_violation_count();
+        imp::with_test_mode(LockRankMode::EnforceRatchet, None, || {
+            let _gm = mutex_a.lock().unwrap();
+            let mutex_err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _gm2 = mutex_a.lock();
+            }))
+            .expect_err("same-lock RankedMutex lock recursion must panic immediately");
+            let mutex_msg = mutex_err
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_default();
+            assert!(
+                mutex_msg.contains("same-lock recursive acquisition"),
+                "unexpected mutex panic message: {mutex_msg}"
+            );
+        });
+        assert!(unratcheted_violation_count() > before_mutex);
+        let _ = std::fs::remove_file(&ratchet_path);
+        assert!(held_lock_ranks().is_empty());
     }
 }
