@@ -127,14 +127,14 @@ async fn test_action_plan_ch1_to_ch5_character_skills_and_gm() {
     .await
     .expect("SelectCharacterID");
 
-    // Set initial skill queue: Navigation (type 3173), Level 1 -> 2 (near completion)
+    // Set initial skill queue: Navigation (type 3449), Level 1 -> 2 (near completion)
     let nav_sp_target = sp_for_skill_level(1.0, 2);
     let nav_sp_start = nav_sp_target - 50.0;
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(char_id).or_default().insert(
-            3173,
+            3449,
             TrainedSkillRecord {
-                type_id: 3173,
+                type_id: 3449,
                 level: 1,
                 skill_points: nav_sp_start,
             },
@@ -142,7 +142,7 @@ async fn test_action_plan_ch1_to_ch5_character_skills_and_gm() {
         snap.skill_queues.insert(
             char_id,
             vec![SkillQueueEntry {
-                type_id: 3173,
+                type_id: 3449,
                 target_level: 2,
                 start_sp: nav_sp_start,
                 end_sp: nav_sp_target,
@@ -165,7 +165,7 @@ async fn test_action_plan_ch1_to_ch5_character_skills_and_gm() {
 
     // Verify skill level completed in DB
     let trained_lvl = ctx.db.with_snapshot(|snap| {
-        snap.skills.get(&char_id).and_then(|s| s.get(&3173)).map(|sk| sk.level)
+        snap.skills.get(&char_id).and_then(|s| s.get(&3449)).map(|sk| sk.level)
     });
     assert_eq!(trained_lvl, Some(2), "Skill level must be 2 after queue completion");
 

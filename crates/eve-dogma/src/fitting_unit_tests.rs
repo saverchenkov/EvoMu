@@ -353,19 +353,30 @@ fn test_issue_424_heat_cycle_single_thermodynamics_and_per_slot_rolls() {
     let thermo_tid: u32 = 28_164;
     let heat_eff_id: u16 = 9_150;
 
-    let mut eff = sde.effects.values().next().unwrap().clone();
-    eff.effect_id = heat_eff_id;
-    eff.name = "testThermoHeatReduction".to_string();
-    eff.modifiers = vec![EffectModifierSpec {
-        domain: "shipID".to_string(),
-        func: "LocationRequiredSkillModifier".to_string(),
-        modified_attribute_id: 1211, // heatDamage
-        modifying_attribute_id: 1229, // thermodynamicsHeatDamage bonus (-5%/lvl)
-        operator: 2,                  // PostPercent
-        group_id: None,
-        skill_type_id: Some(thermo_tid),
-        effect_id: Some(heat_eff_id),
-    }];
+    let eff = eve_sde::DogmaEffectType {
+        effect_id: heat_eff_id,
+        name: "testThermoHeatReduction".to_string(),
+        effect_category: 0,
+        is_offensive: false,
+        is_assistance: false,
+        is_warp_safe: false,
+        disallow_auto_repeat: false,
+        electronic_chance: false,
+        propulsion_chance: false,
+        range_chance: false,
+        guid: None,
+        published: true,
+        modifiers: vec![EffectModifierSpec {
+            domain: "shipID".to_string(),
+            func: "LocationRequiredSkillModifier".to_string(),
+            modified_attribute_id: 1211, // heatDamage
+            modifying_attribute_id: 1229, // thermodynamicsHeatDamage bonus (-5%/lvl)
+            operator: 2,                  // PostPercent
+            group_id: None,
+            skill_type_id: Some(thermo_tid),
+            effect_id: Some(heat_eff_id),
+        }],
+    };
     sde.effects.insert(heat_eff_id, eff);
     sde.types.insert(
         thermo_tid,

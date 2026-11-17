@@ -52,6 +52,21 @@ async fn test_parity_notify_criminal_timer_and_fw_capture_changed() {
             },
         );
         s.module_online_states.insert(gid, true);
+        s.next_entity_id += 1;
+        let charge_id = s.next_entity_id;
+        s.items.insert(
+            charge_id,
+            eve_db::InventoryItemRecord {
+                item_id: charge_id,
+                type_id: 185,
+                owner_id: PILOT_A,
+                location_id: ship_a,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 100,
+                singleton: false,
+                ..Default::default()
+            },
+        );
         gid
     });
     ctx.invalidate_ship_fitting(ship_a);

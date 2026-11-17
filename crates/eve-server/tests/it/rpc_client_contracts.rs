@@ -26,6 +26,21 @@ fn shared_sde() -> Arc<eve_sde::SdeRegistry> {
     }))
 }
 
+fn isolate_bug_queue_dir(ctx: &ServerContext) {
+    let dir = std::env::temp_dir().join(format!(
+        "evomu_rpc_contracts_bugs_{}",
+        uuid::Uuid::new_v4()
+    ));
+    ctx.bug_reporting.set_queue_dir_override(Some(dir));
+}
+
+fn cleanup_isolated_bug_queue_dir(ctx: &ServerContext) {
+    let dir = ctx.bug_reporting.effective_queue_dir();
+    if dir.starts_with(std::env::temp_dir()) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 async fn shared_comprehensive_ctx() -> Arc<ServerContext> {
     common::ensure_quasar_tap_hook_installed();
     static BASE: tokio::sync::OnceCell<(Arc<eve_sde::SdeRegistry>, WorldStateSnapshot)> =
@@ -35,6 +50,7 @@ async fn shared_comprehensive_ctx() -> Arc<ServerContext> {
             let sde = shared_sde();
             let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
             let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), db);
+            isolate_bug_queue_dir(&ctx);
             let mut gm = SessionState::new(99_998);
             gm.user_id = Some(1);
             gm.character_id = Some(99_999_998);
@@ -47,12 +63,15 @@ async fn shared_comprehensive_ctx() -> Arc<ServerContext> {
                 s.seasons_and_campaigns.season_states.remove(&99_999_998);
             });
             seed_comprehensive_world(&ctx);
+            cleanup_isolated_bug_queue_dir(&ctx);
             (sde, ctx.db.with_snapshot(|s| s.clone()))
         })
         .await;
     let db = Arc::new(eve_db::WorldRepository::new_empty());
     db.with_mut_snapshot(|s| *s = snap.clone());
-    Arc::new(ServerContext::with_sde_and_repository(Arc::clone(sde), db))
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(Arc::clone(sde), db));
+    isolate_bug_queue_dir(&ctx);
+    ctx
 }
 
 fn shared_demo_ctx() -> Arc<ServerContext> {
@@ -63,7 +82,9 @@ fn shared_demo_ctx() -> Arc<ServerContext> {
         .clone();
     let db = Arc::new(eve_db::WorldRepository::new_empty());
     db.with_mut_snapshot(|s| *s = snap);
-    Arc::new(ServerContext::with_sde_and_repository(sde, db))
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
+    isolate_bug_queue_dir(&ctx);
+    ctx
 }
 
 const CHAR_ID: i64 = 90_000_001;
@@ -1826,7 +1847,7 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
         }
         pending_sigs = next_pending;
     }
-    let _ = std::fs::remove_dir_all(".evomu-bugs");
+    cleanup_isolated_bug_queue_dir(&ctx);
 
     let unimplemented_rpcs: BTreeSet<String> = saw_unimplemented_rpcs
         .into_iter()
@@ -2577,6 +2598,7 @@ async fn test_world_invariants_and_persist_reload_equivalence_guard_908() {
     let panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let corrupted_sync = eve_db::WorldRepository::with_demo_seed();
         let ctx_p = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::new(corrupted_sync));
+        isolate_bug_queue_dir(&ctx_p);
         let _guard = common::teardown_guard(&ctx_p);
         ctx_p.db.inject_unpersisted_mutation_for_test(|snap| {
             if let Some(ch) = snap.characters.values_mut().next() {
@@ -3091,6 +3113,7 @@ async fn test_v24_live_client_bug_report_regressions_330_to_352() {
         .await
         .expect("RWManager.get_closest_rw_stations must succeed");
     assert_eq!(rw_stations, PyRep::Dict(Vec::new()));
+    cleanup_isolated_bug_queue_dir(&ctx);
 }
 
 #[test]
@@ -3413,6 +3436,9 @@ async fn test_c2_raw_dispatch_ratchet_and_none_vs_wire_harness_diff_count() {
     for (rpc, _) in differing_rpcs.iter().take(25) {
         println!("  [C-2 Reply Diff] {rpc}");
     }
+
+    cleanup_isolated_bug_queue_dir(&ctx_raw);
+    cleanup_isolated_bug_queue_dir(&ctx_wire);
 
     let compat_ratchet = eve_testkit::client_compat_ratchet::ClientCompatRatchet::load_default()
         .expect("load client_compat_ratchet.json");
