@@ -28,7 +28,7 @@ Thumbs.db
 /.evomu-reviews/*
 
 # Staged client bug reports & F12 screenshots/attachments (local; synced via tools/sync_bugs_to_github.py)
-/.evomu-bugs/
+.evomu-bugs/
 
 # Live playtester runtime state, world DB, and per-step artifacts
 .playtester/

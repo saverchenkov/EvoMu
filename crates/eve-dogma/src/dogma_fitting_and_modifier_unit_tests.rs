@@ -4,23 +4,79 @@ use super::*;
 use eve_sde::{DogmaEffectType, EffectModifierSpec, SdeRegistry};
 use std::collections::HashMap;
 
+fn clean_inv_tpl() -> eve_sde::InvType {
+    eve_sde::InvType {
+        type_id: 0,
+        group_id: 0,
+        category_id: 0,
+        name: String::new(),
+        mass: 0.0,
+        volume: 0.0,
+        capacity: 0.0,
+        radius: 0.0,
+        base_price: 0.0,
+        published: true,
+        portion_size: 1,
+        market_group_id: None,
+        race_id: None,
+        faction_id: None,
+        variation_parent_type_id: None,
+        description_id: None,
+        icon_id: None,
+        graphic_id: None,
+        sound_id: None,
+        meta_group_id: None,
+        meta_level: None,
+        tech_level: None,
+        default_effect_id: None,
+        description: String::new(),
+        effect_ids: Vec::new(),
+        default_attributes: HashMap::new(),
+    }
+}
+
+fn clean_effect_tpl() -> DogmaEffectType {
+    DogmaEffectType {
+        effect_id: 0,
+        name: String::new(),
+        effect_category: 0,
+        is_offensive: false,
+        is_assistance: false,
+        is_warp_safe: false,
+        disallow_auto_repeat: false,
+        electronic_chance: false,
+        propulsion_chance: false,
+        range_chance: false,
+        guid: None,
+        published: true,
+        modifiers: Vec::new(),
+    }
+}
+
+fn clean_wh_solar_system(solar_system_id: u32, wormhole_class_id: i32) -> eve_sde::SolarSystem {
+    eve_sde::SolarSystem {
+        solar_system_id,
+        constellation_id: 0,
+        region_id: 0,
+        name: format!("WH-{solar_system_id}"),
+        security_status: -1.0,
+        radius: 1.0e12,
+        galactic_pos_ly: [0.0, 0.0, 0.0],
+        planet_ids: Vec::new(),
+        stations: Vec::new(),
+        wormhole_class_id: Some(wormhole_class_id),
+    }
+}
+
 fn base_seed() -> (SdeRegistry, DogmaEffectType) {
-    let sde = SdeRegistry::with_canonical_seed();
-    let eff = sde
-        .effects
-        .values()
-        .find(|e| e.effect_category == 0)
-        .or_else(|| sde.effects.values().next())
-        .expect("canonical seed has at least one effect")
-        .clone();
-    (sde, eff)
+    (SdeRegistry::with_canonical_seed(), clean_effect_tpl())
 }
 
 #[test]
 fn test_implants_boosters_drones_and_effective_module_state() {
     let (mut sde, mut eff_tpl) = base_seed();
     eff_tpl.effect_category = 0;
-    let inv_tpl = sde.types.values().next().unwrap().clone();
+    let inv_tpl = clean_inv_tpl();
 
     let ship_tid = 90_100;
     let imp_tid = 90_101;
@@ -233,35 +289,26 @@ fn test_wormhole_phenomena_and_t3c_subsystems() {
     ));
 
     // Shattered C13 system maps to Wolf-Rayet effective class 6
-    let mut c13_sys = sde.solar_systems.values().next().unwrap().clone();
-    c13_sys.solar_system_id = 31_002_999;
-    c13_sys.wormhole_class_id = Some(13);
-    sde.solar_systems.insert(31_002_999, c13_sys);
+    sde.solar_systems.insert(31_002_999, clean_wh_solar_system(31_002_999, 13));
     let resolved = resolve_system_wormhole_phenomenon(&sde, 31_002_999, Some("Wolf-Rayet")).unwrap();
     assert_eq!(resolved.0, 13);
     assert_eq!(resolved.1, 6);
     assert_eq!(resolved.2, "Wolf-Rayet");
 
     // Drifter C14 maps to effective class 2
-    let mut c14_sys = sde.solar_systems.values().next().unwrap().clone();
-    c14_sys.solar_system_id = 31_003_001;
-    c14_sys.wormhole_class_id = Some(14);
-    sde.solar_systems.insert(31_003_001, c14_sys);
+    sde.solar_systems.insert(31_003_001, clean_wh_solar_system(31_003_001, 14));
     let resolved14 = resolve_system_wormhole_phenomenon(&sde, 31_003_001, Some("Pulsar")).unwrap();
     assert_eq!(resolved14.0, 14);
     assert_eq!(resolved14.1, 2);
 
     // Thera C12 returns None
-    let mut c12_sys = sde.solar_systems.values().next().unwrap().clone();
-    c12_sys.solar_system_id = 31_000_005;
-    c12_sys.wormhole_class_id = Some(12);
-    sde.solar_systems.insert(31_000_005, c12_sys);
+    sde.solar_systems.insert(31_000_005, clean_wh_solar_system(31_000_005, 12));
     assert!(resolve_system_wormhole_phenomenon(&sde, 31_000_005, Some("Pulsar")).is_none());
 
     // T3C subsystem slot modifiers dynamically populate hull hi/med/low/turret/launcher slots
     let t3c_tid = 29_984;
     let sub_tid = 90_200;
-    let mut sub = sde.types.values().next().unwrap().clone();
+    let mut sub = clean_inv_tpl();
     sub.type_id = sub_tid;
     sub.group_id = 954;
     sub.category_id = 32;
@@ -284,7 +331,9 @@ fn test_wormhole_phenomena_and_t3c_subsystems() {
 
     // Real W-space system with secondary sun resolves phenomenon automatically when override is None
     if let Ok(suns) = sde.load_secondary_suns() {
-        for (&wh_sys_id, _) in suns.iter().take(20) {
+        let mut sun_sys_ids: Vec<u32> = suns.keys().copied().collect();
+        sun_sys_ids.sort_unstable();
+        for wh_sys_id in sun_sys_ids.into_iter().take(20) {
             if let Some((raw_c, eff_c, name, beacon_id)) =
                 resolve_system_wormhole_phenomenon(&sde, wh_sys_id, None)
             {
@@ -299,7 +348,7 @@ fn test_wormhole_phenomena_and_t3c_subsystems() {
 fn test_cpu_pg_online_rollbacks_low_rack_heat_and_self_modifiers() {
     let (mut sde, mut eff_tpl) = base_seed();
     eff_tpl.effect_category = 0;
-    let inv_tpl = sde.types.values().next().unwrap().clone();
+    let inv_tpl = clean_inv_tpl();
 
     let ship_tid = 90_300;
     let imp_tid = 90_301;
@@ -502,18 +551,20 @@ fn test_kill_lib_and_combat_eval_mutants() {
     wh_beacon.effect_ids = vec![48_001, 48_002];
     wh_beacon.default_attributes = HashMap::from([(2001, 50.0), (2002, 20.0)]);
     sde.types.insert(30844, wh_beacon);
-    let base_eff = sde.effects.values().next().unwrap().clone();
-    let base_mod = sde.effects.values().find_map(|e| e.modifiers.first()).unwrap().clone();
+    let base_eff = clean_effect_tpl();
     let wh_eff = |eid: u16, func: &str, aid: u16| {
         let mut e = base_eff.clone();
         e.effect_id = eid;
-        let mut m = base_mod.clone();
-        m.domain = "shipID".into();
-        m.func = String::from(func);
-        m.modified_attribute_id = attr_ids::MAX_VELOCITY;
-        m.modifying_attribute_id = aid;
-        m.operator = 6;
-        e.modifiers = vec![m];
+        e.modifiers = vec![EffectModifierSpec {
+            domain: "shipID".into(),
+            func: String::from(func),
+            modified_attribute_id: attr_ids::MAX_VELOCITY,
+            modifying_attribute_id: aid,
+            operator: 6,
+            group_id: None,
+            skill_type_id: None,
+            effect_id: None,
+        }];
         e
     };
     let e1 = wh_eff(48_001, "LocationRequiredSkillModifier", 2001);

@@ -94,7 +94,49 @@ pub(crate) async fn train_skills(ctx: &ServerContext, sess: &mut SessionState, t
         if curr >= 5 {
             continue;
         }
-        let _ = rpc_harness(ctx, sess, "skillMgr2", "PurchaseSkills", &[PyRep::List(vec![PyRep::Integer(i64::from(sid))])]).await;
+        let already_injected = ctx.db.with_snapshot(|s| {
+            s.skills
+                .get(&char_id)
+                .is_some_and(|m| m.contains_key(&sid))
+        });
+        if let Err(err) = rpc_harness(
+            ctx,
+            sess,
+            "skillMgr2",
+            "PurchaseSkills",
+            &[PyRep::List(vec![PyRep::Integer(i64::from(sid))])],
+        )
+        .await
+        {
+            // Drop-only skills (base_price <= 0, e.g. Encryption Methods 21790) cannot be bought via
+            // PurchaseSkills post-#1178: stage a skillbook with GM /giveitem and inject via RPC.
+            if err.code == "SkillUnavailableForPurchase" && !already_injected {
+                let prev_role = sess.role;
+                sess.role |= eve_machonet::service_roles::ROLE_GM_DEFAULT;
+                let give_res = rpc_harness(
+                    ctx,
+                    sess,
+                    "slash",
+                    "SlashCmd",
+                    &[PyRep::String(format!("/giveitem {sid} 1"))],
+                )
+                .await;
+                sess.role = prev_role;
+                let book_kv = give_res.unwrap_or_else(|e| {
+                    panic!("GM /giveitem skillbook {sid} failed: {e:?}")
+                });
+                let book_item_id = int(&book_kv, "itemID");
+                rpc_harness(
+                    ctx,
+                    sess,
+                    "skillMgr2",
+                    "InjectSkillIntoBrain",
+                    &[PyRep::Integer(book_item_id)],
+                )
+                .await
+                .unwrap_or_else(|e| panic!("InjectSkillIntoBrain skill {sid} failed: {e:?}"));
+            }
+        }
         // Alpha clones cap some skills below V: fall back to the highest level the clone accepts.
         let mut queued = false;
         for top in ((curr + 1)..=5).rev() {

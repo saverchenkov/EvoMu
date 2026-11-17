@@ -98,7 +98,50 @@ async fn train_skills_to_five(ctx: &ServerContext, sess: &mut SessionState, skil
         if curr >= 5 {
             continue;
         }
-        let _ = rpc(ctx, sess, "skillMgr2", "PurchaseSkills", &[PyRep::List(vec![PyRep::Integer(i64::from(sid))])]).await;
+        let already_injected = ctx.db.with_snapshot(|s| {
+            s.skills
+                .get(&char_id)
+                .is_some_and(|m| m.contains_key(&sid))
+        });
+        if let Err(err) = rpc(
+            ctx,
+            sess,
+            "skillMgr2",
+            "PurchaseSkills",
+            &[PyRep::List(vec![PyRep::Integer(i64::from(sid))])],
+        )
+        .await
+        {
+            if err.code == "SkillUnavailableForPurchase" && !already_injected {
+                let prev_role = sess.role;
+                sess.role |= eve_machonet::service_roles::ROLE_GM_DEFAULT;
+                let give_res = rpc(
+                    ctx,
+                    sess,
+                    "slash",
+                    "SlashCmd",
+                    &[PyRep::String(format!("/giveitem {sid} 1"))],
+                )
+                .await;
+                sess.role = prev_role;
+                let book_kv = give_res.unwrap_or_else(|e| {
+                    panic!("GM /giveitem skillbook {sid} failed: {e:?}")
+                });
+                let book_item_id = book_kv
+                    .dict_get("itemID")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or_else(|| panic!("missing itemID from /giveitem skillbook {sid}"));
+                rpc(
+                    ctx,
+                    sess,
+                    "skillMgr2",
+                    "InjectSkillIntoBrain",
+                    &[PyRep::Integer(book_item_id)],
+                )
+                .await
+                .unwrap_or_else(|e| panic!("InjectSkillIntoBrain skill {sid} failed: {e:?}"));
+            }
+        }
         let q: Vec<PyRep> = ((curr + 1)..=5)
             .map(|lvl| PyRep::Tuple(vec![PyRep::Integer(i64::from(sid)), PyRep::Integer(i64::from(lvl))]))
             .collect();
