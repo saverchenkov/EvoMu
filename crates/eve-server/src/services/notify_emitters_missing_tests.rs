@@ -34,7 +34,11 @@ fn emit_effect_plex_bean_clear_flagged_and_market_notifications() {
     emit_bean_prime(
         &ctx,
         NotificationTarget::Character(char_id),
-        vec![(12345, 99, "stacktrace".into())],
+        vec![crate::router::notify_registry::BeanPrimeItem {
+            error_id: 99,
+            error_key_hash: 12345,
+            log_mode: "B".into(),
+        }],
     );
     emit_clear_fetched_data(&ctx);
     emit_flagged_lists_change(&ctx);
@@ -71,10 +75,11 @@ fn emit_effect_plex_bean_clear_flagged_and_market_notifications() {
     assert_eq!(drained[3].event, "OnBeanPrime");
     assert_eq!(
         drained[3].args,
-        vec![PyRep::Dict(vec![(
-            PyRep::Integer(12345),
-            PyRep::Tuple(vec![PyRep::Integer(99), PyRep::String("stacktrace".into())]),
-        )])]
+        vec![PyRep::List(vec![PyRep::keyval([
+            ("errorID", PyRep::Integer(99)),
+            ("errorKeyHash", PyRep::Integer(12345)),
+            ("logMode", PyRep::String("B".into())),
+        ])])]
     );
 
     assert_eq!(drained[4].event, "OnClearFetchedData");

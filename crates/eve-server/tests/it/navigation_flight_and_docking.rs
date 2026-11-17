@@ -4034,4 +4034,181 @@ async fn test_pve_air_career_program_daily_goals_and_login_campaign() {
         Some(&PyRep::Integer(2))
     );
 }
+
+#[tokio::test]
+async fn test_stargate_jump_observer_receives_on_client_controller_event_arrival_wire() {
+    // parity: destiny:OnClientControllerEvent
+    // #1188: verifies OnClientControllerEvent survives build_destiny_batch on :26000 and
+    // delivers the 5-arg tuple (ballID, targetID, eventName, value, delay) over ClientHarness.
+    eve_testkit::attest(&["destiny:OnClientControllerEvent"]);
+    use eve_testkit::client_harness::ClientWireFrameKind;
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let kw = HashMap::new();
+
+    let gate = ctx
+        .sde
+        .jumps
+        .values()
+        .find(|j| j.from_solar_system_id == JITA_SYS)
+        .expect("Jita outgoing stargate")
+        .clone();
+    let dest_gate_id = gate.destination_stargate_id;
+    let dest_sys = gate.to_solar_system_id;
+    let jita_handle = ctx.systems.get_or_spawn(JITA_SYS);
+    let dest_handle = ctx.systems.get_or_spawn(dest_sys);
+
+    // 1. Login observer ("other", char 90_000_002), undock, and jump through the gate first so
+    //    their wire harness is live and subscribed on the destination gate grid.
+    let mut h_obs = common::new_wire_harness(&ctx, 118_801);
+    h_obs
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("other".into()), PyRep::String("other-secret".into())],
+            &kw,
+        )
+        .await;
+    h_obs
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(90_000_002)],
+            &kw,
+        )
+        .await;
+    ctx.advance_secs(15);
+    h_obs.call_ok("stationSvc", None, "Undock", &[], &kw).await;
+    ctx.advance_secs(15);
+    let obs_ship_id = ctx
+        .db
+        .with_snapshot(|s| s.characters[&90_000_002].active_ship_id);
+    assert!(jita_handle.set_ball_position(obs_ship_id, gate.position).await);
+    let obs_bind = h_obs
+        .call_ok(
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(JITA_SYS as i64), PyRep::None],
+            &kw,
+        )
+        .await;
+    let obs_beyonce_id =
+        eve_testkit::client_harness::extract_bound_id_from_wire_rep(&obs_bind)
+            .expect("observer beyonce bound id");
+    let obs_jump_kv = h_obs
+        .call_ok(
+            "beyonce",
+            Some(obs_beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+        )
+        .await;
+    let obs_dest_beyonce_id = obs_jump_kv
+        .dict_get("beyonceBoundID")
+        .and_then(|v| v.as_i64())
+        .expect("observer destination beyonceBoundID") as u64;
+    h_obs
+        .call_ok("beyonce", Some(obs_dest_beyonce_id), "UpdateStateRequest", &[], &kw)
+        .await;
+    dest_handle.step_manual(1.0).await.unwrap();
+    let _ = h_obs.drain_pending_frames();
+
+    // 2. Login jumper ("demo", DEMO_PILOT), undock, move to gate, and jump to dest_sys.
+    let mut h_jumper = common::new_wire_harness(&ctx, 118_802);
+    h_jumper
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+            &kw,
+        )
+        .await;
+    h_jumper
+        .call_ok(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(DEMO_PILOT)],
+            &kw,
+        )
+        .await;
+    ctx.advance_secs(15);
+    h_jumper.call_ok("stationSvc", None, "Undock", &[], &kw).await;
+    ctx.advance_secs(15);
+    let jumper_ship_id = ctx
+        .db
+        .with_snapshot(|s| s.characters[&DEMO_PILOT].active_ship_id);
+    assert!(jita_handle.set_ball_position(jumper_ship_id, gate.position).await);
+    let jumper_bind = h_jumper
+        .call_ok(
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(JITA_SYS as i64), PyRep::None],
+            &kw,
+        )
+        .await;
+    let jumper_beyonce_id =
+        eve_testkit::client_harness::extract_bound_id_from_wire_rep(&jumper_bind)
+            .expect("jumper beyonce bound id");
+    h_jumper
+        .call_ok(
+            "beyonce",
+            Some(jumper_beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+        )
+        .await;
+
+    // 3. Step the destination simulation once and drain observer wire frames on the :26000 path.
+    dest_handle.step_manual(1.0).await.unwrap();
+    let obs_frames = h_obs.drain_pending_frames();
+
+    let mut arrival_events: Vec<Vec<PyRep>> = Vec::new();
+    for frame in &obs_frames {
+        let ClientWireFrameKind::DoDestinyUpdate { updates, .. } = &frame.kind else {
+            continue;
+        };
+        let bytes = eve_proto::marshal::encode(updates);
+        let decoded = eve_proto::marshal::decode(&bytes).expect("DoDestinyUpdate marshal round-trip");
+        let PyRep::List(entries) = decoded else {
+            continue;
+        };
+        for entry in entries {
+            let PyRep::Tuple(outer) = entry else {
+                continue;
+            };
+            let Some(PyRep::Tuple(action)) = outer.get(1) else {
+                continue;
+            };
+            if action.first().and_then(PyRep::as_str) == Some("OnClientControllerEvent") {
+                let Some(PyRep::Tuple(args)) = action.get(1) else {
+                    panic!("expected tuple args on OnClientControllerEvent: {action:?}");
+                };
+                if args.get(2).and_then(PyRep::as_str) == Some("Arrival") {
+                    arrival_events.push(args.clone());
+                }
+            }
+        }
+    }
+    let arrival = arrival_events
+        .into_iter()
+        .find(|a| a.get(1) == Some(&PyRep::Integer(jumper_ship_id)))
+        .unwrap_or_else(|| {
+            panic!("observer wire frames must deliver OnClientControllerEvent Arrival for ship={jumper_ship_id}, got {obs_frames:?}")
+        });
+    assert_eq!(arrival.len(), 5);
+    assert_eq!(arrival[0], PyRep::Integer(dest_gate_id));
+    assert_eq!(arrival[1], PyRep::Integer(jumper_ship_id));
+    assert_eq!(arrival[2], PyRep::String("Arrival".into()));
+    assert_eq!(arrival[3], PyRep::Integer(1));
+    assert_eq!(arrival[4], PyRep::None);
+}
 }

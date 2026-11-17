@@ -496,7 +496,8 @@ async fn test_b30_industry_pi_and_market_wallet_history_durable() {
     rpc_kw(&ctx, &mut s1, "account", "GiveCashFromCorpAccount", &[PyRep::Integer(P2), PyRep::Real(50_000.0), PyRep::Integer(1000)], &[("reason", PyRep::String("B30 dividend".into()))]).await.unwrap();
     let bill_id = create_bill(&ctx, 2, CORP_ID, 1_000_035, 250_000.0, ctx.now_unix() + 86_400, 0.0, JITA_STATION_ID, 0);
     rpc(&ctx, &mut s1, "billMgr", "SendAutomaticPaySettings", &[PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Tuple(vec![PyRep::Bool(true), PyRep::Integer(1000)]))])]).await.unwrap();
-    let trade_id = rpc(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)]).await.unwrap().dict_get("tradeContainerID").and_then(|v| v.as_i64()).unwrap();
+    let trade_bid = rpc(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)]).await.unwrap().as_i64().unwrap();
+    let trade_id = rpc(&ctx, &mut s1, "trademgr", "List", &[PyRep::Integer(trade_bid)]).await.unwrap().dict_get("tradeContainerID").and_then(|v| v.as_i64()).unwrap();
     rpc(&ctx, &mut s1, "trademgr", "OfferMoney", &[PyRep::Integer(trade_id), PyRep::Real(125_000.0)]).await.unwrap();
     assert_eq!(rpc(&ctx, &mut s1, "trademgr", "List", &[PyRep::Integer(trade_id)]).await.unwrap().dict_get("myMoney").and_then(|v| v.as_f64()), Some(125_000.0));
     let raffle_id = rpc(&ctx, &mut s1, "raffleProxy", "CreateRaffle", &[PyRep::Dict(vec![

@@ -95,6 +95,24 @@ impl<A: ToNotifyArg, B: ToNotifyArg> ToNotifyArg for (A, B) {
     }
 }
 
+/// Single bean-priming entry sent in `OnBeanPrime(beans)` (`carbon/common/script/sys/alert.pyj:Alert.OnBeanPrime`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeanPrimeItem {
+    pub error_id: i64,
+    pub error_key_hash: i64,
+    pub log_mode: String,
+}
+
+impl ToNotifyArg for BeanPrimeItem {
+    fn into_notify_arg(self) -> PyRep {
+        PyRep::keyval([
+            ("errorID", PyRep::Integer(self.error_id)),
+            ("errorKeyHash", PyRep::Integer(self.error_key_hash)),
+            ("logMode", PyRep::String(self.log_mode)),
+        ])
+    }
+}
+
 /// Implemented by every registered notification payload struct.
 pub trait TypedNotification {
     const EVENT: &'static str;
@@ -690,15 +708,13 @@ define_notifications! {
         samples: || vec![vec![]],
     },
     OnBeanPrime => "OnBeanPrime" ("charid") {
-        fields: { beans: PyRep },
-        samples: || vec![vec![PyRep::Dict(vec![(
-            PyRep::Integer(12_345),
-            PyRep::keyval([
-                ("errorID", PyRep::Integer(12_345)),
-                ("errorKeyHash", PyRep::String("test_hash".into())),
-                ("logMode", PyRep::Integer(1)),
-            ]),
-        )])]],
+        fields: { beans: Vec<BeanPrimeItem> },
+        samples: || vec![vec![PyRep::List(vec![BeanPrimeItem {
+            error_id: 12_345,
+            error_key_hash: 0x1234_5678,
+            log_mode: "B".into(),
+        }
+        .into_notify_arg()])]],
     },
     OnCCPNotification => "OnCCPNotification" ("charid") {
         fields: {
@@ -3069,11 +3085,11 @@ define_notifications! {
         fields: { char_id: i64, trade_session: PyRep, trade_items: PyRep },
         samples: || vec![vec![
             PyRep::Integer(90_000_001),
-            PyRep::keyval([(
-                "List",
-                PyRep::keyval([("tradeContainerID", PyRep::Integer(1))]),
-            )]),
-            PyRep::List(vec![sample_keyval_item()]),
+            PyRep::SubStruct(Box::new(PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+                PyRep::ascii_bytes("N=1001:1"),
+                PyRep::Integer(1),
+            ]))))),
+            PyRep::List(vec![]),
         ]],
     },
     OnTradeMoneyOffer => "OnTradeMoneyOffer" ("charid") {

@@ -8,7 +8,7 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::agents_missions::*;
-use eve_testkit::client_harness::{ClientErrorResponse, ContractValidationMode};
+use eve_testkit::client_harness::ClientErrorResponse;
 use std::collections::HashMap;
 
 const JITA_STATION_ID: i64 = 60_003_760;
@@ -629,35 +629,27 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
         .expect_err("courier cargo contract creation must fail");
     assert_eq!(contract_err.code, "ItemCannotBeContracted");
 
-    // RV-CLAIMS-ERRCODES-TESTS-01: trademgr.AddItem
+    // RV-CLAIMS-ERRCODES-TESTS-01: trademgr.AddItem (via bound tradeSession from InitiateTrade)
     let partner_id = 90_000_002;
     let mut sess2 = setup_pilot(&ctx, 507, "other", "other-secret", partner_id).await;
     colocate_with_agent(&ctx, &mut sess2, partner_id, dist_agent_id);
-    // Server V24 parity gap: `trademgr.InitiateTrade` returns KeyVal without `.List` wrapper
-    // and emits `OnTradeInitiate` with `trade_session: Integer` instead of `.List.tradeContainerID`.
-    let tr_out = common::borrow_wire_harness(&ctx, &mut sess)
-        .with_mode(ContractValidationMode::ReportOnly)
-        .call_exchange("trademgr", None, "InitiateTrade", &[PyRep::Integer(partner_id)], &HashMap::new())
+    let tr_rep = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("trademgr", None, "InitiateTrade", &[PyRep::Integer(partner_id)], &HashMap::new())
         .await;
-    assert!(
-        !tr_out.violations.iter().any(|v| v.starts_with("wire:marshal:")),
-        "unexpected wire:marshal error on InitiateTrade: {:?}",
-        tr_out.violations
-    );
-    assert!(
-        tr_out.violations.iter().all(|v| {
-            v.starts_with("trademgr.InitiateTrade:")
-                || v.starts_with("notify:OnTradeInitiate[arg1]:")
-        }),
-        "unexpected contract violation on InitiateTrade: {:?}",
-        tr_out.violations
-    );
-    let tr_rep = tr_out.result.expect("init trade");
-    let tr_id = tr_rep
+    let tr_oid = eve_testkit::client_harness::extract_bound_id_from_wire_rep(&tr_rep)
+        .expect("bound tradeSession oid");
+    let tr_list = common::borrow_wire_harness(&ctx, &mut sess)
+        .call_ok("trademgr", Some(tr_oid), "List", &[], &HashMap::new())
+        .await;
+    let tr_id = tr_list
         .dict_get("tradeContainerID")
         .and_then(|v| v.as_i64())
         .expect("tradeContainerID");
-    let tr_err = rpc_call(&ctx, &mut sess, "trademgr", "AddItem", &[PyRep::Integer(tr_id), PyRep::Integer(granted_cid), PyRep::Integer(1)]).await.expect_err("trademgr.AddItem courier cargo must fail");
+    assert!(tr_id > 0);
+    let tr_err = common::borrow_wire_harness(&ctx, &mut sess)
+        .call("trademgr", Some(tr_oid), "AddItem", &[PyRep::Integer(granted_cid), PyRep::Integer(1)], &HashMap::new())
+        .await
+        .expect_err("trademgr.AddItem courier cargo must fail");
     assert_eq!(tr_err.code, "InvalidTradeItem");
 
     // Move courier cargo into ship cargo via invbroker.Add

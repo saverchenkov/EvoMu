@@ -451,11 +451,19 @@ async fn arch_737_751_item_wallet_and_market_notification_parity() {
             },
         );
     });
-    let init_tr = ctx
+    let init_bid = ctx
         .dispatch_rpc(&mut sess_a, "trademgr", None, "InitiateTrade", &[PyRep::Integer(PILOT_B)], &kw, None)
         .await
-        .expect("InitiateTrade");
-    let trade_id = init_tr.dict_get("tradeContainerID").and_then(|v| v.as_i64()).unwrap();
+        .expect("InitiateTrade")
+        .as_i64()
+        .unwrap();
+    let trade_id = ctx
+        .dispatch_rpc(&mut sess_a, "trademgr", None, "List", &[PyRep::Integer(init_bid)], &kw, None)
+        .await
+        .expect("List")
+        .dict_get("tradeContainerID")
+        .and_then(|v| v.as_i64())
+        .unwrap();
     ctx.dispatch_rpc(
         &mut sess_a,
         "trademgr",

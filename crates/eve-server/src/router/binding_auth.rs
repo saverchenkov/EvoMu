@@ -474,6 +474,9 @@ fn authorize_trade_binding(ctx: &ServerContext, session: &SessionState, object_i
     if object_id <= 0 {
         return false;
     }
+    if crate::services::wallet_services_ext::is_active_trade_participant(ctx, session, object_id) {
+        return true;
+    }
     session.station_id == Some(object_id)
         || session.structure_id == Some(object_id)
         || session.solar_system_id.map(i64::from) == Some(object_id)

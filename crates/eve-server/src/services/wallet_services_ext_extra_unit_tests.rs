@@ -319,9 +319,10 @@ fn store_handlers_inventory_fields_and_direct_trade_partial_and_full_item_versio
 
     ctx.db.with_mut_snapshot(|snap| {
         let base_ch = snap.characters.values().next().unwrap().clone();
-        for (cid, active_ship) in [(char_a, 971_901_i64), (char_b, 971_902_i64)] {
+        for (cid, active_ship, uid) in [(char_a, 971_901_i64, 1_u64), (char_b, 971_902_i64, 2_u64)] {
             let mut ch = base_ch.clone();
             ch.character_id = cid;
+            ch.user_id = uid;
             ch.station_id = Some(station_id);
             ch.structure_id = None;
             ch.solar_system_id = 30_000_142;
@@ -390,6 +391,9 @@ fn store_handlers_inventory_fields_and_direct_trade_partial_and_full_item_versio
     sess_b.character_id = Some(char_b);
     sess_b.station_id = Some(station_id);
     sess_b.ship_id = Some(971_902);
+    ctx.db
+        .acquire_online_lock(2, 7102, Some(char_b), false, ctx.now_unix())
+        .unwrap();
 
     let kw = HashMap::new();
     // 1. Store get_categories, get_products, get_offers (kills L102, L133, L161 FnValue mutants)
@@ -468,7 +472,20 @@ fn store_handlers_inventory_fields_and_direct_trade_partial_and_full_item_versio
     )
     .unwrap()
     .unwrap();
-    let trade_id = trade.dict_get("tradeContainerID").and_then(|v| v.as_i64()).unwrap();
+    let trade_bid = trade.as_i64().unwrap();
+    let trade_id = call_wallet_ext(
+        &ctx,
+        &mut sess_a,
+        "trademgr",
+        "List",
+        &[PyRep::Integer(trade_bid)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap()
+    .dict_get("tradeContainerID")
+    .and_then(|v| v.as_i64())
+    .unwrap();
     assert!(trade_id > 0);
 
     for (iid, qty) in [(item_a_partial, 3_i64), (item_a_full, 4_i64)] {

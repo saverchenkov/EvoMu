@@ -620,13 +620,12 @@ async fn test_slim_item_change_broadcast() {
 #[tokio::test]
 async fn test_ball_flags_harmonic_packaged_action_and_docking_accepted() {
     // parity: destiny:SetBallFree, destiny:SetBallHarmonic, destiny:SetBallInteractive
-    // parity: destiny:PackagedAction, destiny:OnDockingAccepted
+    // parity: destiny:PackagedAction
     eve_testkit::attest(&[
         "destiny:SetBallFree",
         "destiny:SetBallHarmonic",
         "destiny:SetBallInteractive",
         "destiny:PackagedAction",
-        "destiny:OnDockingAccepted",
     ]);
     let mut park = two_ship_park();
     let mut meta = pilot_meta(90_000_001, 98_000_001);
@@ -660,37 +659,27 @@ async fn test_ball_flags_harmonic_packaged_action_and_docking_accepted() {
         assert_eq!(names(&inner), vec!["OnSlimItemChange", "SetBallInteractive"]);
     }
 
-    // Crucible Destiny.xmlp:697-715: ([ship_x, ship_y, ship_z], [station_x, station_y, station_z], stationID)
+    // Docking removes SHIP_A from space and notifies grid observers with RemoveBall (#1188).
     let station_id: BallId = 60_003_760;
     let station_pos = DVec3::new(1_000.0, -500.0, 250.0);
     park.add_static_ball(ship(station_id, station_pos, MovementMode::Rigid), 15);
-    let ship_pos = park.balls[&SHIP_A].position;
     let removed = park.accept_docking(SHIP_A, station_id).expect("dock A");
     assert_eq!(removed.id, SHIP_A);
     assert!(!park.balls.contains_key(&SHIP_A));
 
     let a_actions = wire_for(&mut park, SHIP_A);
-    assert_eq!(names(&a_actions), vec!["OnDockingAccepted"]);
-    assert_eq!(
-        args_of(&a_actions, "OnDockingAccepted")[0],
-        &[
-            PyRep::List(vec![PyRep::Real(ship_pos.x), PyRep::Real(ship_pos.y), PyRep::Real(ship_pos.z)]),
-            PyRep::List(vec![PyRep::Real(station_pos.x), PyRep::Real(station_pos.y), PyRep::Real(station_pos.z)]),
-            PyRep::Integer(station_id),
-        ]
-    );
+    assert!(a_actions.is_empty(), "docking no longer emits destiny OnDockingAccepted (#1188): {a_actions:?}");
     let b_actions = wire_for(&mut park, SHIP_B);
-    assert_eq!(names(&b_actions), vec!["OnDockingAccepted", "RemoveBall"]);
+    assert_eq!(names(&b_actions), vec!["RemoveBall"]);
 }
 
 #[tokio::test]
 async fn test_sov_controller_fleet_ship_state_dbuff_dot_and_drone_state_emission() {
-    // parity: destiny:OnSovereigntyChanged, destiny:OnClientControllerEvent
+    // parity: destiny:OnSovereigntyChanged
     // parity: destiny:OnFleetDamageStateChange, destiny:OnFleetStateChange, destiny:OnShipStateUpdate
     // parity: destiny:OnDbuffUpdated, destiny:OnDotVictimUpdated, destiny:OnDroneStateChange
     eve_testkit::attest(&[
         "destiny:OnSovereigntyChanged",
-        "destiny:OnClientControllerEvent",
         "destiny:OnFleetDamageStateChange",
         "destiny:OnFleetStateChange",
         "destiny:OnShipStateUpdate",

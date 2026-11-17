@@ -4,11 +4,11 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::{NotificationTarget, ServerContext};
+use crate::router::{BoundObjectEntry, NotificationTarget, ServerContext};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
-use std::collections::{BTreeMap, HashMap};
+use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub use crate::services::hypernet_raffle_ops::{
     ALLOWED_RAFFLE_SIZES, HYPERCORE_TYPE_ID, RAFFLE_DURATION_SECS, RaffleStateRecord,
@@ -64,6 +64,25 @@ fn trade_note_id(trade_id: i64) -> i64 {
     -(7_300_000_000_000_i64.saturating_add(trade_id.abs()))
 }
 
+/// Returns `true` if `session`'s character participates in open station trade `trade_id`.
+pub fn is_active_trade_participant(
+    ctx: &ServerContext,
+    session: &SessionState,
+    trade_id: i64,
+) -> bool {
+    let Some(char_id) = session.character_id else {
+        return false;
+    };
+    ctx.db.with_snapshot(|snap| {
+        snap.owner_notes
+            .get(&trade_note_id(trade_id))
+            .and_then(|n| serde_json::from_str::<TradeSessionState>(&n.note).ok())
+            .is_some_and(|t| {
+                !t.completed && !t.cancelled && (t.char_a == char_id || t.char_b == char_id)
+            })
+    })
+}
+
 pub fn cancel_open_trades_for_character_in_snap(
     snap: &mut eve_db::WorldStateSnapshot,
     char_id: i64,
@@ -94,6 +113,7 @@ pub fn cancel_open_trades_for_character(ctx: &ServerContext, char_id: i64) {
         .db
         .with_mut_snapshot(|snap| cancel_open_trades_for_character_in_snap(snap, char_id));
     for (trade_id, char_a, char_b) in cancelled {
+        ctx.release_bound_objects_for_object("trademgr", trade_id);
         for party in [char_a, char_b] {
             ctx.emit_typed(
                 NotificationTarget::Character(party),
@@ -288,7 +308,7 @@ pub fn handle(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         // --- New Eden Store (`storeManager`, `feat:wallet.nes-store` & `feat:removed.aurum-currency`) ---
@@ -310,7 +330,7 @@ pub fn handle(
             };
             let offer_id = match args
                 .first()
-                .or_else(|| _kwargs.get("offer_id").or_else(|| _kwargs.get("offerID")))
+                .or_else(|| kwargs.get("offer_id").or_else(|| kwargs.get("offerID")))
                 .and_then(|a| match a {
                     PyRep::Integer(i) => Some(*i),
                     PyRep::String(s) => s.trim_start_matches("VEVC-").parse::<i64>().ok(),
@@ -327,7 +347,7 @@ pub fn handle(
             let currency = args
                 .get(1)
                 .and_then(|a| a.as_str())
-                .or_else(|| _kwargs.get("currency").and_then(|v| v.as_str()))
+                .or_else(|| kwargs.get("currency").and_then(|v| v.as_str()))
                 .unwrap_or("PLX");
             if currency.eq_ignore_ascii_case("AUR") || currency.eq_ignore_ascii_case("AURUM") {
                 return Some(Err(rpc_err(
@@ -344,7 +364,7 @@ pub fn handle(
             let qty = match args
                 .get(2)
                 .and_then(|a| a.as_i64())
-                .or_else(|| _kwargs.get("quantity").and_then(|v| v.as_i64()))
+                .or_else(|| kwargs.get("quantity").and_then(|v| v.as_i64()))
             {
                 Some(q) if q <= 0 => {
                     return Some(Err(rpc_err(
@@ -517,142 +537,425 @@ pub fn handle(
         }
 
         // --- Station Direct Trade (`trademgr`, `feat:wallet.trade-window`) ---
-        ("trademgr", "InitiateTrade") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(station_id) = session.station_id.or(session.structure_id) else {
-                return Some(Err(rpc_err(
-                    "NotDockedAtStation",
-                    "Character must be docked to initiate a direct trade",
-                )));
-            };
-            let Some(partner_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(rpc_err("InvalidArgument", "InitiateTrade requires target charID")));
-            };
-            if partner_id == char_id {
-                return Some(Err(rpc_err("InvalidArgument", "Cannot trade with yourself")));
-            }
-            let now = ctx.now_unix();
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let partner = snap
-                    .characters
-                    .get(&partner_id)
-                    .ok_or_else(|| rpc_err("CharacterNotFound", "Trade partner not found"))?;
-                if partner.station_id.or(partner.structure_id) != Some(station_id) {
-                    return Err(rpc_err(
-                        "PartnerNotInStation",
-                        "Trade partner must be docked at the same station or structure",
-                    ));
-                }
-                snap.next_entity_id += 1;
-                let trade_id = snap.next_entity_id;
-                let state = TradeSessionState {
-                    trade_id,
-                    station_id,
-                    char_a: char_id,
-                    char_b: partner_id,
-                    items_a: Vec::new(),
-                    items_b: Vec::new(),
-                    money_a_cents: 0,
-                    money_b_cents: 0,
-                    accept_a: false,
-                    accept_b: false,
-                    completed: false,
-                    cancelled: false,
-                };
-                save_json_note(
-                    snap,
-                    trade_note_id(trade_id),
-                    -73,
-                    trade_id,
-                    format!("trade:{trade_id}"),
-                    &state,
-                    now,
-                );
-                Ok(trade_id)
-            });
-            match res {
-                Ok(trade_id) => {
-                    for party in [char_id, partner_id] {
-                        ctx.emit_typed(
-                            NotificationTarget::Character(party),
-                            crate::router::notify_registry::OnTradeInitiate {
-                                char_id,
-                                trade_session: PyRep::Integer(partner_id),
-                                trade_items: PyRep::Integer(trade_id),
-                            },
-                        );
-                    }
-                    Some(Ok(PyRep::keyval([
-                        ("tradeContainerID", PyRep::Integer(trade_id)),
-                        ("myID", PyRep::Integer(char_id)),
-                        ("herID", PyRep::Integer(partner_id)),
-                        ("stationID", PyRep::Integer(station_id)),
-                    ])))
-                }
-                Err(e) => Some(Err(e)),
-            }
-        }
-        ("trademgr", "AddItem") => handle_trade_add_item(ctx, session, args),
-        ("trademgr", "OfferMoney") => handle_trade_offer_money(ctx, session, args),
-        ("trademgr", "MakeOffer") => handle_trade_make_offer(ctx, session, args),
-        ("trademgr", "Abort") => handle_trade_abort(ctx, session, args),
-        ("trademgr", "List") => handle_trade_list(ctx, session, args),
+        // Router dispatch routes `trademgr` via `inventory_bound` / `inventory_fitting`; keep
+        // this arm so unit tests invoking `wallet_services_ext::handle` directly continue to hit it.
+        ("trademgr", "InitiateTrade") => Some(
+            initiate_trade_session(ctx, session, args).map(|bid| PyRep::Integer(bid as i64)),
+        ),
+        ("trademgr", _) => handle_trademgr_rpc(ctx, session, None, method, args, kwargs),
 
         // --- HyperNet Relay (`raffleProxy`, `feat:wallet.hypernet-relay` & `feat:wallet.hypernet-hypercore-sizing-expiry`) ---
         ("raffleProxy", _) => {
-            crate::services::hypernet_raffle_ops::handle(ctx, session, service, method, args, _kwargs)
+            crate::services::hypernet_raffle_ops::handle(ctx, session, service, method, args, kwargs)
         }
 
         _ => None,
     }
 }
 
-#[inline]
-fn handle_trade_add_item(
+/// Starts a direct station trade with the partner character and returns the initiator's
+/// verified bound sub-object ID for `trademgr`.
+pub fn initiate_trade_session(
     ctx: &ServerContext,
-    session: &mut SessionState,
+    session: &SessionState,
     args: &[PyRep],
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    handle_trade_action(ctx, session, "AddItem", args)
+) -> Result<u64, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let Some(station_id) = session.station_id.or(session.structure_id) else {
+        return Err(rpc_err(
+            "NotDockedAtStation",
+            "Character must be docked to initiate a direct trade",
+        ));
+    };
+    let Some(partner_id) = args.first().and_then(|a| a.as_i64()) else {
+        return Err(rpc_err(
+            "InvalidArgument",
+            "InitiateTrade requires target charID",
+        ));
+    };
+    if partner_id == char_id {
+        return Err(rpc_err("InvalidArgument", "Cannot trade with yourself"));
+    }
+    if crate::services::fleet_social::fleet_social_persistence::is_blocked_by(
+        ctx, partner_id, char_id,
+    ) || crate::services::fleet_social::fleet_social_persistence::is_blocked_by(
+        ctx, char_id, partner_id,
+    ) {
+        return Err(rpc_err(
+            "ContactBlocked",
+            "Direct trade blocked by character contact settings",
+        ));
+    }
+    let partner_uid = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .get(&partner_id)
+            .map(|p| p.user_id)
+            .ok_or_else(|| rpc_err("CharacterNotFound", "Trade partner not found"))
+    })?;
+    if !ctx.is_character_online(partner_id, partner_uid) {
+        return Err(rpc_err(
+            "PartnerNotOnline",
+            "Trade partner is not currently online",
+        ));
+    }
+    let now = ctx.now_unix();
+    let trade_id = ctx.db.try_with_mut_snapshot(|snap| {
+        let partner = snap
+            .characters
+            .get(&partner_id)
+            .ok_or_else(|| rpc_err("CharacterNotFound", "Trade partner not found"))?;
+        if partner.station_id.or(partner.structure_id) != Some(station_id) {
+            return Err(rpc_err(
+                "PartnerNotInStation",
+                "Trade partner must be docked at the same station or structure",
+            ));
+        }
+        let mut stale_nids = Vec::new();
+        for (&nid, note) in &snap.owner_notes {
+            if note.character_id != -73 {
+                continue;
+            }
+            if let Ok(tr) = serde_json::from_str::<TradeSessionState>(&note.note) {
+                if tr.completed || tr.cancelled {
+                    stale_nids.push(nid);
+                } else if tr.char_a == char_id
+                    || tr.char_b == char_id
+                    || tr.char_a == partner_id
+                    || tr.char_b == partner_id
+                {
+                    return Err(rpc_err(
+                        "TradeAlreadyActive",
+                        "Character or partner already has an active direct trade session",
+                    ));
+                }
+            }
+        }
+        for nid in stale_nids {
+            snap.owner_notes.remove(&nid);
+        }
+        snap.next_entity_id += 1;
+        let trade_id = snap.next_entity_id;
+        let state = TradeSessionState {
+            trade_id,
+            station_id,
+            char_a: char_id,
+            char_b: partner_id,
+            items_a: Vec::new(),
+            items_b: Vec::new(),
+            money_a_cents: 0,
+            money_b_cents: 0,
+            accept_a: false,
+            accept_b: false,
+            completed: false,
+            cancelled: false,
+        };
+        save_json_note(
+            snap,
+            trade_note_id(trade_id),
+            -73,
+            trade_id,
+            format!("trade:{trade_id}"),
+            &state,
+            now,
+        );
+        Ok(trade_id)
+    })?;
+    let bid_a = match ctx.bind_verified_sub_object(session, "trademgr", trade_id) {
+        Ok(bid) => bid,
+        Err(e) => {
+            let _ = ctx.db.with_mut_snapshot(|snap| {
+                snap.owner_notes.remove(&trade_note_id(trade_id));
+            });
+            return Err(e);
+        }
+    };
+    let (_, partner_wire_rep) =
+        match ctx.bind_sub_object_for_notification(partner_id, None, "trademgr", trade_id) {
+            Ok(bound) => bound,
+            Err(e) => {
+                ctx.release_bound_objects_for_object("trademgr", trade_id);
+                let _ = ctx.db.with_mut_snapshot(|snap| {
+                    snap.owner_notes.remove(&trade_note_id(trade_id));
+                });
+                return Err(e);
+            }
+        };
+    // Per V24 `PVPTradeService.StartTradeSession`, the initiator receives `tradeSession` as the
+    // `InitiateTrade` CallRsp return value; only the partner receives `OnTradeInitiate`.
+    ctx.emit_typed(
+        NotificationTarget::Character(partner_id),
+        crate::router::notify_registry::OnTradeInitiate {
+            char_id,
+            trade_session: partner_wire_rep,
+            trade_items: PyRep::List(vec![]),
+        },
+    );
+    Ok(bid_a)
 }
 
-#[inline]
-fn handle_trade_offer_money(
+/// Handles both bound `tradeSession` calls (`List`, `GetSelfInvItem`, `GetItem`, `GetCapacity`,
+/// `Add`, `MultiAdd`, `OfferMoney`, `MakeOffer`, `Abort`) and legacy unbound `trademgr` calls.
+pub fn handle_trademgr_rpc(
     ctx: &ServerContext,
     session: &mut SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    method: &str,
     args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    handle_trade_action(ctx, session, "OfferMoney", args)
+    if !matches!(
+        method,
+        "List"
+            | "GetSelfInvItem"
+            | "GetItem"
+            | "GetCapacity"
+            | "AddItem"
+            | "Add"
+            | "MultiAdd"
+            | "OfferMoney"
+            | "MakeOffer"
+            | "Abort"
+    ) {
+        return None;
+    }
+    let (trade_id, action_args) = if let Some(entry) = bound_entry.filter(|b| b.service == "trademgr")
+    {
+        (entry.object_id, args)
+    } else if let Some(PyRep::Integer(id)) = args.first() {
+        let resolved = if *id <= 0 {
+            0
+        } else if let Ok(entry) = ctx.verify_bound_object(session, *id as u64) {
+            if entry.service == "trademgr" {
+                entry.object_id
+            } else {
+                *id
+            }
+        } else {
+            *id
+        };
+        (resolved, &args[1..])
+    } else {
+        (0, args)
+    };
+    handle_trade_action(ctx, session, trade_id, method, action_args, kwargs)
 }
 
-#[inline]
-fn handle_trade_make_offer(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    handle_trade_action(ctx, session, "MakeOffer", args)
+fn extract_trade_seq(rep: &PyRep) -> Option<&[PyRep]> {
+    match rep {
+        PyRep::List(items)
+        | PyRep::Tuple(items)
+        | PyRep::PySet(items)
+        | PyRep::Set(items) => Some(items.as_slice()),
+        PyRep::ObjectEx { list, .. } => Some(list.as_slice()),
+        _ => None,
+    }
 }
 
-#[inline]
-fn handle_trade_abort(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    handle_trade_action(ctx, session, "Abort", args)
+fn extract_manifest_item_id(rep: &PyRep) -> Option<i64> {
+    rep.as_i64()
+        .or_else(|| rep.dict_get("itemID").and_then(|v| v.as_i64()))
 }
 
-#[inline]
-fn handle_trade_list(
+fn validate_trade_manifest(manifest: &PyRep, tr: &TradeSessionState) -> bool {
+    if let Some(cid) = manifest.dict_get("tradeContainerID").and_then(|v| v.as_i64()) {
+        if cid != tr.trade_id {
+            return false;
+        }
+    }
+    let Some(money_seq) = manifest.dict_get("money").and_then(extract_trade_seq) else {
+        return false;
+    };
+    if money_seq.len() != 2 {
+        return false;
+    }
+    let Some(m0) = money_seq[0].as_f64().filter(|m| m.is_finite() && *m >= 0.0) else {
+        return false;
+    };
+    let Some(m1) = money_seq[1].as_f64().filter(|m| m.is_finite() && *m >= 0.0) else {
+        return false;
+    };
+    let c0 = (m0 * 100.0).round() as i64;
+    let c1 = (m1 * 100.0).round() as i64;
+    if (c0 - tr.money_a_cents).abs() > 1 || (c1 - tr.money_b_cents).abs() > 1 {
+        return false;
+    }
+    let Some(items_seq) = manifest.dict_get("tradeItems").and_then(extract_trade_seq) else {
+        return false;
+    };
+    let mut manifest_ids = BTreeSet::new();
+    for entry in items_seq {
+        let Some(iid) = extract_manifest_item_id(entry) else {
+            return false;
+        };
+        manifest_ids.insert(iid);
+    }
+    let expected_ids: BTreeSet<i64> = tr
+        .items_a
+        .iter()
+        .chain(tr.items_b.iter())
+        .map(|&(iid, _)| iid)
+        .collect();
+    manifest_ids == expected_ids
+}
+
+fn build_trade_list_rep(
     ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    handle_trade_action(ctx, session, "List", args)
+    snap: &eve_db::WorldStateSnapshot,
+    tr: &TradeSessionState,
+) -> PyRep {
+    let header = DBRowDescriptor::inv_item_header();
+    let mut rows = Vec::with_capacity(tr.items_a.len() + tr.items_b.len());
+    for &(iid, qty) in tr.items_a.iter().chain(tr.items_b.iter()) {
+        if let Some(orig) = snap.items.get(&iid) {
+            let mut virtual_row = orig.clone();
+            virtual_row.location_id = tr.trade_id;
+            virtual_row.flag = InventoryFlag::Hangar;
+            virtual_row.quantity = qty;
+            rows.push(header.build_dbrow(super::inventory_bound::item_to_packed_cells(
+                ctx,
+                &virtual_row,
+            )));
+        }
+    }
+    let money_a = IskCents(tr.money_a_cents).to_wire_f64();
+    let money_b = IskCents(tr.money_b_cents).to_wire_f64();
+    PyRep::keyval([
+        ("tradeContainerID", PyRep::Integer(tr.trade_id)),
+        ("stationID", PyRep::Integer(tr.station_id)),
+        (
+            "traders",
+            PyRep::List(vec![PyRep::Integer(tr.char_a), PyRep::Integer(tr.char_b)]),
+        ),
+        ("items", PyRep::List(rows)),
+        (
+            "money",
+            PyRep::List(vec![PyRep::Real(money_a), PyRep::Real(money_b)]),
+        ),
+        (
+            "state",
+            PyRep::List(vec![
+                PyRep::Integer(i64::from(tr.accept_a)),
+                PyRep::Integer(i64::from(tr.accept_b)),
+            ]),
+        ),
+        ("myAccept", PyRep::Bool(tr.accept_a)),
+        ("herAccept", PyRep::Bool(tr.accept_b)),
+        ("myMoney", PyRep::Real(money_a)),
+        ("herMoney", PyRep::Real(money_b)),
+        ("completed", PyRep::Bool(tr.completed)),
+        ("cancelled", PyRep::Bool(tr.cancelled)),
+    ])
+}
+
+fn build_trade_self_inv_item(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    tr: &TradeSessionState,
+) -> PyRep {
+    let type_id = ctx
+        .sde
+        .stations
+        .get(&tr.station_id)
+        .map(|s| s.station_type_id)
+        .or_else(|| snap.structures.get(&tr.station_id).map(|s| s.type_id))
+        .unwrap_or(1529);
+    let (group_id, category_id) = ctx
+        .sde
+        .types
+        .get(&type_id)
+        .map(|t| (i64::from(t.group_id), i64::from(t.category_id)))
+        .unwrap_or((15, 3));
+    DBRowDescriptor::inv_item_header().build_dbrow(vec![
+        PyRep::Integer(tr.trade_id),
+        PyRep::Integer(i64::from(type_id)),
+        PyRep::Integer(char_id),
+        PyRep::Integer(tr.station_id),
+        PyRep::Integer(InventoryFlag::Hangar as i64),
+        PyRep::Integer(-1),
+        PyRep::Integer(group_id),
+        PyRep::Integer(category_id),
+        PyRep::String(String::new()),
+    ])
+}
+
+fn stage_trade_item_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    session_ship_id: Option<i64>,
+    is_a: bool,
+    tr: &mut TradeSessionState,
+    item_id: i64,
+    qty_opt: Option<i64>,
+) -> Result<(), BridgeRpcError> {
+    let item = snap
+        .items
+        .get(&item_id)
+        .ok_or_else(|| rpc_err("ItemNotFound", "Item not found"))?;
+    let active_ship_id = snap.characters.get(&char_id).map(|c| c.active_ship_id);
+    let has_contents = snap
+        .items
+        .values()
+        .any(|child| child.item_id != item_id && child.location_id == item_id && child.quantity > 0);
+    if item.owner_id != char_id
+        || item.location_id != tr.station_id
+        || item.flag != InventoryFlag::Hangar
+        || Some(item_id) == active_ship_id
+        || snap.is_character_boarded_or_saved_ship(char_id, session_ship_id, item_id)
+        || snap.is_item_locked_excluding_trade(item_id, Some(tr.trade_id))
+        || has_contents
+    {
+        return Err(rpc_err(
+            "InvalidTradeItem",
+            "Item must be an unlocked, empty item in station hangar (not active ship)",
+        ));
+    }
+    if snap
+        .item_custom_names
+        .get(&item_id)
+        .is_some_and(|s| s.starts_with("courier_cargo:"))
+    {
+        return Err(rpc_err(
+            "InvalidTradeItem",
+            "Courier mission items cannot be traded",
+        ));
+    }
+    let raw_qty = qty_opt.unwrap_or(item.quantity as i64);
+    let Some(qty) = i32::try_from(raw_qty).ok().filter(|&q| q >= 1) else {
+        return Err(rpc_err(
+            "InvalidQuantity",
+            "Quantity must be a positive integer between 1 and i32::MAX",
+        ));
+    };
+    if item.singleton && qty != item.quantity {
+        return Err(rpc_err(
+            "CannotSplitSingleton",
+            "Assembled items cannot be split",
+        ));
+    }
+    let items_list = if is_a {
+        &mut tr.items_a
+    } else {
+        &mut tr.items_b
+    };
+    if let Some(existing_entry) = items_list.iter_mut().find(|(id, _)| *id == item_id) {
+        let Some(new_total) = existing_entry.1.checked_add(qty).filter(|&t| t <= item.quantity) else {
+            return Err(rpc_err(
+                "InsufficientQuantity",
+                "Offered quantity exceeds available item stack",
+            ));
+        };
+        existing_entry.1 = new_total;
+    } else {
+        if qty > item.quantity {
+            return Err(rpc_err(
+                "InsufficientQuantity",
+                "Offered quantity exceeds available item stack",
+            ));
+        }
+        items_list.push((item_id, qty));
+    }
+    Ok(())
 }
 
 /// Serializes a transferred station trade item into the V24 KeyVal shape expected by `OnTradeComplete`.
@@ -692,21 +995,116 @@ fn trade_item_to_keyval(ctx: &ServerContext, item: &eve_db::InventoryItemRecord)
     ])
 }
 
+fn verify_party_items_for_completion(
+    snap: &eve_db::WorldStateSnapshot,
+    owner_id: i64,
+    station_id: i64,
+    trade_id: i64,
+    items: &[(i64, i32)],
+) -> Result<(), BridgeRpcError> {
+    let active_ship_id = snap.characters.get(&owner_id).map(|c| c.active_ship_id);
+    for &(iid, q) in items {
+        let Some(it) = snap.items.get(&iid) else {
+            return Err(rpc_err("ItemNotFound", "Offered item missing"));
+        };
+        let has_contents = snap
+            .items
+            .values()
+            .any(|child| child.item_id != iid && child.location_id == iid && child.quantity > 0);
+        if it.owner_id != owner_id
+            || it.location_id != station_id
+            || it.flag != InventoryFlag::Hangar
+            || it.quantity < q
+            || Some(iid) == active_ship_id
+            || snap.is_character_boarded_or_saved_ship(owner_id, None, iid)
+            || snap.is_item_locked_excluding_trade(iid, Some(trade_id))
+            || has_contents
+        {
+            return Err(rpc_err("InvalidTradeItem", "Offered item no longer available"));
+        }
+        if it.singleton && q != it.quantity {
+            return Err(rpc_err("CannotSplitSingleton", "Assembled items cannot be split"));
+        }
+    }
+    Ok(())
+}
+
+fn transfer_party_items_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    from_char: i64,
+    to_char: i64,
+    station_id: i64,
+    items: &[(i64, i32)],
+    item_diffs: &mut Vec<(i64, Option<InventoryItemRecord>, Option<InventoryItemRecord>)>,
+) -> Result<(), BridgeRpcError> {
+    for &(iid, q) in items {
+        let (pre_item, new_item) = if let Some(it) = snap.items.get_mut(&iid) {
+            if it.owner_id != from_char || it.location_id != station_id {
+                return Err(rpc_err("InvalidTradeItem", "Offered item no longer available"));
+            }
+            if it.singleton && q != it.quantity {
+                return Err(rpc_err("CannotSplitSingleton", "Assembled items cannot be split"));
+            }
+            let pre = it.clone();
+            if q < it.quantity {
+                it.quantity = it.quantity.checked_sub(q).ok_or_else(|| {
+                    rpc_err("InvalidTradeItem", "Underflow calculating remaining quantity")
+                })?;
+                it.version += 1;
+                let mut new_it = it.clone();
+                new_it.owner_id = to_char;
+                new_it.location_id = station_id;
+                new_it.flag = InventoryFlag::Hangar;
+                new_it.quantity = q;
+                new_it.version = 1;
+                (pre, Some(new_it))
+            } else if q == it.quantity {
+                it.owner_id = to_char;
+                it.flag = InventoryFlag::Hangar;
+                it.version += 1;
+                (pre, None)
+            } else {
+                return Err(rpc_err("InvalidTradeItem", "Offered item quantity exceeded"));
+            }
+        } else {
+            return Err(rpc_err("ItemNotFound", "Offered item missing"));
+        };
+        snap.sp6_lifecycle.self_destructs.remove(&iid);
+        let post_src = snap.items.get(&iid).cloned();
+        item_diffs.push((from_char, Some(pre_item), post_src));
+        if let Some(mut new_it) = new_item {
+            snap.next_entity_id += 1;
+            let new_iid = snap
+                .next_entity_id
+                .max(snap.items.keys().copied().max().unwrap_or(1_000_000) + 1);
+            snap.next_entity_id = new_iid;
+            new_it.item_id = new_iid;
+            snap.items.insert(new_iid, new_it.clone());
+            item_diffs.push((to_char, None, Some(new_it)));
+        }
+    }
+    Ok(())
+}
+
 fn handle_trade_action(
     ctx: &ServerContext,
     session: &mut SessionState,
+    trade_id: i64,
     method: &str,
     args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let (_, char_id) = match ServerContext::require_character(session) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let trade_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let now = ctx.now_unix();
-    let mut added_item_id: Option<i64> = None;
-    let mut item_diffs: Vec<(i64, Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)> = Vec::new();
+    let mut added_item_ids: Vec<i64> = Vec::new();
+    let mut item_diffs: Vec<(i64, Option<InventoryItemRecord>, Option<InventoryItemRecord>)> =
+        Vec::new();
     let mut bal_updates: Vec<(i64, IskCents)> = Vec::new();
+    let mut custom_reply: Option<PyRep> = None;
+    let mut manifest_error = false;
     enum TradeActionOutcome {
         Ok(TradeSessionState),
         ClosedStale,
@@ -726,7 +1124,7 @@ fn handle_trade_action(
         };
         let Some(note) = snap.owner_notes.get(&nid) else {
             return Err(rpc_err(
-                if trade_id > 0 { "TradeClosed" } else { "TradeNotFound" },
+                if trade_id > 0 { "CustomInfo" } else { "TradeNotFound" },
                 "Trade session is already closed or not found",
             ));
         };
@@ -752,95 +1150,99 @@ fn handle_trade_action(
         }
 
         match method {
-            "List" => {}
+            "List" => {
+                custom_reply = Some(build_trade_list_rep(ctx, snap, &tr));
+            }
+            "GetSelfInvItem" | "GetItem" => {
+                custom_reply = Some(build_trade_self_inv_item(ctx, snap, char_id, &tr));
+            }
+            "GetCapacity" => {
+                let used_volume: f64 = tr
+                    .items_a
+                    .iter()
+                    .chain(tr.items_b.iter())
+                    .filter_map(|&(iid, qty)| {
+                        snap.items
+                            .get(&iid)
+                            .and_then(|it| ctx.sde.types.get(&it.type_id))
+                            .map(|t| t.volume * f64::from(qty))
+                    })
+                    .sum();
+                custom_reply = Some(PyRep::keyval([
+                    ("capacity", PyRep::Real(1_000_000_000.0)),
+                    ("used", PyRep::Real(used_volume)),
+                ]));
+            }
             "Abort" => {
                 tr.cancelled = true;
                 snap.owner_notes.remove(&nid);
             }
             "AddItem" => {
-                let item_id = args
+                let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                let qty_opt = args
                     .get(1)
-                    .or_else(|| args.first())
-                    .and_then(|a| a.as_i64())
-                    .unwrap_or(0);
-                let item = snap
-                    .items
-                    .get(&item_id)
-                    .ok_or_else(|| rpc_err("ItemNotFound", "Item not found"))?;
-                let active_ship_id = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.active_ship_id);
-                let has_contents = snap
-                    .items
-                    .values()
-                    .any(|child| child.item_id != item_id && child.location_id == item_id && child.quantity > 0);
-                if item.owner_id != char_id
-                    || item.location_id != tr.station_id
-                    || item.flag != InventoryFlag::Hangar
-                    || Some(item_id) == active_ship_id
-                    || snap.is_character_boarded_or_saved_ship(char_id, session.ship_id, item_id)
-                    || snap.is_item_locked_excluding_trade(item_id, Some(tr.trade_id))
-                    || has_contents
-                {
-                    return Err(rpc_err(
-                        "InvalidTradeItem",
-                        "Item must be an unlocked, empty item in station hangar (not active ship)",
-                    ));
-                }
-                if snap.item_custom_names.get(&item_id).is_some_and(|s| s.starts_with("courier_cargo:")) {
-                    return Err(rpc_err("InvalidTradeItem", "Courier mission items cannot be traded"));
-                }
-                let raw_qty = args.get(2).and_then(|a| a.as_i64()).unwrap_or(item.quantity as i64);
-                let Some(qty) = i32::try_from(raw_qty).ok().filter(|&q| q >= 1) else {
-                    return Err(BridgeRpcError {
-                        code: "InvalidQuantity".into(),
-                        message: "Quantity must be a positive integer between 1 and i32::MAX".into(),
-                        client_error: None,
-                    });
-                };
-                if item.singleton && qty != item.quantity {
-                    return Err(BridgeRpcError {
-                        code: "CannotSplitSingleton".into(),
-                        message: "Assembled items cannot be split".into(),
-                        client_error: None,
-                    });
-                }
-                let items_list = if is_a {
-                    &mut tr.items_a
-                } else {
-                    &mut tr.items_b
-                };
-                if let Some(existing_entry) = items_list.iter_mut().find(|(id, _)| *id == item_id) {
-                    let Some(new_total) = existing_entry.1.checked_add(qty).filter(|&t| t <= item.quantity) else {
-                        return Err(BridgeRpcError {
-                            code: "InsufficientQuantity".into(),
-                            message: "Offered quantity exceeds available item stack".into(),
-                            client_error: None,
-                        });
-                    };
-                    existing_entry.1 = new_total;
-                } else {
-                    if qty > item.quantity {
-                        return Err(BridgeRpcError {
-                            code: "InsufficientQuantity".into(),
-                            message: "Offered quantity exceeds available item stack".into(),
-                            client_error: None,
-                        });
-                    }
-                    items_list.push((item_id, qty));
-                }
+                    .or_else(|| kwargs.get("qty"))
+                    .and_then(|a| a.as_i64());
+                stage_trade_item_in_snap(
+                    snap,
+                    char_id,
+                    session.ship_id,
+                    is_a,
+                    &mut tr,
+                    item_id,
+                    qty_opt,
+                )?;
                 tr.accept_a = false;
                 tr.accept_b = false;
                 save_json_note(snap, nid, -73, tr.trade_id, format!("trade:{}", tr.trade_id), &tr, now);
-                added_item_id = Some(item_id);
+                added_item_ids.push(item_id);
+            }
+            "Add" => {
+                let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                let qty_opt = kwargs
+                    .get("qty")
+                    .or_else(|| args.get(2))
+                    .and_then(|a| a.as_i64());
+                stage_trade_item_in_snap(
+                    snap,
+                    char_id,
+                    session.ship_id,
+                    is_a,
+                    &mut tr,
+                    item_id,
+                    qty_opt,
+                )?;
+                tr.accept_a = false;
+                tr.accept_b = false;
+                save_json_note(snap, nid, -73, tr.trade_id, format!("trade:{}", tr.trade_id), &tr, now);
+                added_item_ids.push(item_id);
+            }
+            "MultiAdd" => {
+                let ids: Vec<i64> = args
+                    .first()
+                    .and_then(extract_trade_seq)
+                    .map(|seq| seq.iter().filter_map(|v| v.as_i64()).collect())
+                    .unwrap_or_default();
+                for &item_id in &ids {
+                    stage_trade_item_in_snap(
+                        snap,
+                        char_id,
+                        session.ship_id,
+                        is_a,
+                        &mut tr,
+                        item_id,
+                        None,
+                    )?;
+                    added_item_ids.push(item_id);
+                }
+                if !ids.is_empty() {
+                    tr.accept_a = false;
+                    tr.accept_b = false;
+                    save_json_note(snap, nid, -73, tr.trade_id, format!("trade:{}", tr.trade_id), &tr, now);
+                }
             }
             "OfferMoney" => {
-                let isk = args
-                    .get(1)
-                    .or_else(|| args.first())
-                    .and_then(|a| a.as_f64())
-                    .unwrap_or(0.0);
+                let isk = args.first().and_then(|a| a.as_f64()).unwrap_or(0.0);
                 if !isk.is_finite() || isk < 0.0 {
                     return Err(rpc_err("InvalidArgument", "Offered ISK must be non-negative"));
                 }
@@ -863,198 +1265,100 @@ fn handle_trade_action(
                 save_json_note(snap, nid, -73, tr.trade_id, format!("trade:{}", tr.trade_id), &tr, now);
             }
             "MakeOffer" => {
-                let accept = args
-                    .get(1)
-                    .or_else(|| args.first())
-                    .and_then(|a| a.as_bool())
-                    .unwrap_or(true);
-                if is_a {
-                    tr.accept_a = accept;
-                } else {
-                    tr.accept_b = accept;
-                }
-                if tr.accept_a && tr.accept_b {
-                    // Verify both wallets and items atomically
-                    let bal_a = snap.characters.get(&tr.char_a).map(|c| c.balance.0).unwrap_or(0);
-                    let bal_b = snap.characters.get(&tr.char_b).map(|c| c.balance.0).unwrap_or(0);
-                    if bal_a < tr.money_a_cents || bal_b < tr.money_b_cents {
-                        return Err(rpc_err("NotEnoughMoney", "Participant lacks ISK to complete trade"));
-                    }
-                    let active_ship_a = snap.characters.get(&tr.char_a).map(|c| c.active_ship_id);
-                    let active_ship_b = snap.characters.get(&tr.char_b).map(|c| c.active_ship_id);
-                    for &(iid, q) in &tr.items_a {
-                        let Some(it) = snap.items.get(&iid) else {
-                            return Err(rpc_err("ItemNotFound", "Offered item missing"));
-                        };
-                        let has_contents = snap
-                            .items
-                            .values()
-                            .any(|child| child.item_id != iid && child.location_id == iid && child.quantity > 0);
-                        if it.owner_id != tr.char_a
-                            || it.location_id != tr.station_id
-                            || it.flag != InventoryFlag::Hangar
-                            || it.quantity < q
-                            || Some(iid) == active_ship_a
-                            || snap.is_character_boarded_or_saved_ship(tr.char_a, None, iid)
-                            || snap.is_item_locked_excluding_trade(iid, Some(tr.trade_id))
-                            || has_contents
-                        {
-                            return Err(rpc_err("InvalidTradeItem", "Offered item no longer available"));
-                        }
-                        if it.singleton && q != it.quantity {
-                            return Err(rpc_err("CannotSplitSingleton", "Assembled items cannot be split"));
-                        }
-                    }
-                    for &(iid, q) in &tr.items_b {
-                        let Some(it) = snap.items.get(&iid) else {
-                            return Err(rpc_err("ItemNotFound", "Offered item missing"));
-                        };
-                        let has_contents = snap
-                            .items
-                            .values()
-                            .any(|child| child.item_id != iid && child.location_id == iid && child.quantity > 0);
-                        if it.owner_id != tr.char_b
-                            || it.location_id != tr.station_id
-                            || it.flag != InventoryFlag::Hangar
-                            || it.quantity < q
-                            || Some(iid) == active_ship_b
-                            || snap.is_character_boarded_or_saved_ship(tr.char_b, None, iid)
-                            || snap.is_item_locked_excluding_trade(iid, Some(tr.trade_id))
-                            || has_contents
-                        {
-                            return Err(rpc_err("InvalidTradeItem", "Offered item no longer available"));
-                        }
-                        if it.singleton && q != it.quantity {
-                            return Err(rpc_err("CannotSplitSingleton", "Assembled items cannot be split"));
-                        }
-                    }
-                    // Transfer items A -> B and B -> A
-                    for &(iid, q) in &tr.items_a {
-                        let (pre_item, new_item) = if let Some(it) = snap.items.get_mut(&iid) {
-                            if it.owner_id != tr.char_a || it.location_id != tr.station_id {
-                                return Err(rpc_err("InvalidTradeItem", "Offered item no longer available"));
-                            }
-                            if it.singleton && q != it.quantity {
-                                return Err(rpc_err("CannotSplitSingleton", "Assembled items cannot be split"));
-                            }
-                            let pre = it.clone();
-                            if q < it.quantity {
-                                it.quantity = it.quantity.checked_sub(q).ok_or_else(|| {
-                                    rpc_err("InvalidTradeItem", "Underflow calculating remaining quantity")
-                                })?;
-                                it.version += 1;
-                                let mut new_it = it.clone();
-                                new_it.owner_id = tr.char_b;
-                                new_it.location_id = tr.station_id;
-                                new_it.flag = InventoryFlag::Hangar;
-                                new_it.quantity = q;
-                                new_it.version = 1;
-                                (pre, Some(new_it))
-                            } else if q == it.quantity {
-                                it.owner_id = tr.char_b;
-                                it.flag = InventoryFlag::Hangar;
-                                it.version += 1;
-                                (pre, None)
-                            } else {
-                                return Err(rpc_err("InvalidTradeItem", "Offered item quantity exceeded"));
-                            }
+                let mut manifest_mismatch = false;
+                let accept = match args.first() {
+                    Some(rep)
+                        if matches!(
+                            rep,
+                            PyRep::KeyVal(_)
+                                | PyRep::Dict(_)
+                                | PyRep::ObjectEx { .. }
+                                | PyRep::Object { .. }
+                        ) =>
+                    {
+                        if validate_trade_manifest(rep, &tr) {
+                            true
                         } else {
-                            return Err(rpc_err("ItemNotFound", "Offered item missing"));
-                        };
-                        snap.sp6_lifecycle.self_destructs.remove(&iid);
-                        let post_src = snap.items.get(&iid).cloned();
-                        item_diffs.push((tr.char_a, Some(pre_item), post_src));
-                        if let Some(mut new_it) = new_item {
-                            snap.next_entity_id += 1;
-                            let new_iid = snap.next_entity_id.max(snap.items.keys().copied().max().unwrap_or(1_000_000) + 1);
-                            snap.next_entity_id = new_iid;
-                            new_it.item_id = new_iid;
-                            snap.items.insert(new_iid, new_it.clone());
-                            item_diffs.push((tr.char_b, None, Some(new_it)));
+                            manifest_mismatch = true;
+                            false
                         }
                     }
-                    for &(iid, q) in &tr.items_b {
-                        let (pre_item, new_item) = if let Some(it) = snap.items.get_mut(&iid) {
-                            if it.owner_id != tr.char_b || it.location_id != tr.station_id {
-                                return Err(rpc_err("InvalidTradeItem", "Offered item no longer available"));
-                            }
-                            if it.singleton && q != it.quantity {
-                                return Err(rpc_err("CannotSplitSingleton", "Assembled items cannot be split"));
-                            }
-                            let pre = it.clone();
-                            if q < it.quantity {
-                                it.quantity = it.quantity.checked_sub(q).ok_or_else(|| {
-                                    rpc_err("InvalidTradeItem", "Underflow calculating remaining quantity")
-                                })?;
-                                it.version += 1;
-                                let mut new_it = it.clone();
-                                new_it.owner_id = tr.char_a;
-                                new_it.location_id = tr.station_id;
-                                new_it.flag = InventoryFlag::Hangar;
-                                new_it.quantity = q;
-                                new_it.version = 1;
-                                (pre, Some(new_it))
-                            } else if q == it.quantity {
-                                it.owner_id = tr.char_a;
-                                it.flag = InventoryFlag::Hangar;
-                                it.version += 1;
-                                (pre, None)
-                            } else {
-                                return Err(rpc_err("InvalidTradeItem", "Offered item quantity exceeded"));
-                            }
-                        } else {
-                            return Err(rpc_err("ItemNotFound", "Offered item missing"));
-                        };
-                        snap.sp6_lifecycle.self_destructs.remove(&iid);
-                        let post_src = snap.items.get(&iid).cloned();
-                        item_diffs.push((tr.char_b, Some(pre_item), post_src));
-                        if let Some(mut new_it) = new_item {
-                            snap.next_entity_id += 1;
-                            let new_iid = snap.next_entity_id.max(snap.items.keys().copied().max().unwrap_or(1_000_000) + 1);
-                            snap.next_entity_id = new_iid;
-                            new_it.item_id = new_iid;
-                            snap.items.insert(new_iid, new_it.clone());
-                            item_diffs.push((tr.char_a, None, Some(new_it)));
-                        }
-                    }
-                    // Transfer ISK
-                    let net_to_b = tr.money_a_cents.checked_sub(tr.money_b_cents).ok_or_else(|| {
-                        rpc_err("Overflow", "Trade ISK delta overflow")
-                    })?;
-                    if net_to_b != 0 {
-                        if let Some(ca) = snap.characters.get_mut(&tr.char_a) {
-                            ca.balance = IskCents(ca.balance.0.checked_sub(net_to_b).ok_or_else(|| {
-                                rpc_err("Overflow", "Wallet balance overflow during trade")
-                            })?);
-                            let ba = ca.balance;
-                            bal_updates.push((tr.char_a, ba));
-                            snap.append_journal(
-                                tr.char_a,
-                                "PlayerTrading",
-                                IskCents(net_to_b.abs()),
-                                ba,
-                                format!("Direct station trade {} with {}", tr.trade_id, tr.char_b),
-                            );
-                        }
-                        if let Some(cb) = snap.characters.get_mut(&tr.char_b) {
-                            cb.balance = IskCents(cb.balance.0.checked_add(net_to_b).ok_or_else(|| {
-                                rpc_err("Overflow", "Wallet balance overflow during trade")
-                            })?);
-                            let bb = cb.balance;
-                            bal_updates.push((tr.char_b, bb));
-                            snap.append_journal(
-                                tr.char_b,
-                                "PlayerTrading",
-                                IskCents(net_to_b.abs()),
-                                bb,
-                                format!("Direct station trade {} with {}", tr.trade_id, tr.char_a),
-                            );
-                        }
-                    }
-                    tr.completed = true;
-                    snap.owner_notes.remove(&nid);
-                } else {
+                    Some(rep) => rep.as_bool().unwrap_or(true),
+                    None => true,
+                };
+                if manifest_mismatch {
+                    tr.accept_a = false;
+                    tr.accept_b = false;
+                    manifest_error = true;
                     save_json_note(snap, nid, -73, tr.trade_id, format!("trade:{}", tr.trade_id), &tr, now);
+                } else {
+                    if is_a {
+                        tr.accept_a = accept;
+                    } else {
+                        tr.accept_b = accept;
+                    }
+                    if tr.accept_a && tr.accept_b {
+                        let bal_a = snap.characters.get(&tr.char_a).map(|c| c.balance.0).unwrap_or(0);
+                        let bal_b = snap.characters.get(&tr.char_b).map(|c| c.balance.0).unwrap_or(0);
+                        if bal_a < tr.money_a_cents || bal_b < tr.money_b_cents {
+                            return Err(rpc_err("NotEnoughMoney", "Participant lacks ISK to complete trade"));
+                        }
+                        verify_party_items_for_completion(snap, tr.char_a, tr.station_id, tr.trade_id, &tr.items_a)?;
+                        verify_party_items_for_completion(snap, tr.char_b, tr.station_id, tr.trade_id, &tr.items_b)?;
+                        transfer_party_items_in_snap(
+                            snap,
+                            tr.char_a,
+                            tr.char_b,
+                            tr.station_id,
+                            &tr.items_a,
+                            &mut item_diffs,
+                        )?;
+                        transfer_party_items_in_snap(
+                            snap,
+                            tr.char_b,
+                            tr.char_a,
+                            tr.station_id,
+                            &tr.items_b,
+                            &mut item_diffs,
+                        )?;
+                        let net_to_b = tr.money_a_cents.checked_sub(tr.money_b_cents).ok_or_else(|| {
+                            rpc_err("Overflow", "Trade ISK delta overflow")
+                        })?;
+                        if net_to_b != 0 {
+                            if let Some(ca) = snap.characters.get_mut(&tr.char_a) {
+                                ca.balance = IskCents(ca.balance.0.checked_sub(net_to_b).ok_or_else(|| {
+                                    rpc_err("Overflow", "Wallet balance overflow during trade")
+                                })?);
+                                let ba = ca.balance;
+                                bal_updates.push((tr.char_a, ba));
+                                snap.append_journal(
+                                    tr.char_a,
+                                    "PlayerTrading",
+                                    IskCents(net_to_b.abs()),
+                                    ba,
+                                    format!("Direct station trade {} with {}", tr.trade_id, tr.char_b),
+                                );
+                            }
+                            if let Some(cb) = snap.characters.get_mut(&tr.char_b) {
+                                cb.balance = IskCents(cb.balance.0.checked_add(net_to_b).ok_or_else(|| {
+                                    rpc_err("Overflow", "Wallet balance overflow during trade")
+                                })?);
+                                let bb = cb.balance;
+                                bal_updates.push((tr.char_b, bb));
+                                snap.append_journal(
+                                    tr.char_b,
+                                    "PlayerTrading",
+                                    IskCents(net_to_b.abs()),
+                                    bb,
+                                    format!("Direct station trade {} with {}", tr.trade_id, tr.char_a),
+                                );
+                            }
+                        }
+                        tr.completed = true;
+                        snap.owner_notes.remove(&nid);
+                    } else {
+                        save_json_note(snap, nid, -73, tr.trade_id, format!("trade:{}", tr.trade_id), &tr, now);
+                    }
                 }
             }
             _ => {}
@@ -1063,9 +1367,13 @@ fn handle_trade_action(
     });
     match res {
         Ok(TradeActionOutcome::ClosedStale) => {
-            Some(Err(rpc_err("TradeClosed", "Trade session is already closed")))
+            if trade_id > 0 {
+                ctx.release_bound_objects_for_object("trademgr", trade_id);
+            }
+            Some(Err(rpc_err("CustomInfo", "Trade session is already closed")))
         }
         Ok(TradeActionOutcome::UndockedCancelled(tr)) => {
+            ctx.release_bound_objects_for_object("trademgr", tr.trade_id);
             for party in [tr.char_a, tr.char_b] {
                 ctx.emit_typed(
                     NotificationTarget::Character(party),
@@ -1129,7 +1437,7 @@ fn handle_trade_action(
                             },
                         );
                     }
-                    "AddItem" => {
+                    "AddItem" | "Add" | "MultiAdd" => {
                         ctx.emit_typed(
                             NotificationTarget::Character(party),
                             crate::router::notify_registry::OnTradeOfferReset {
@@ -1145,17 +1453,24 @@ fn handle_trade_action(
                                 arg2: Some(PyRep::Bool(tr.accept_b)),
                             },
                         );
-                        if party != char_id {
-                            if let Some(iid) = added_item_id {
-                                crate::services::notify_emitters_skills_trade_godma::emit_priming_needed_for_trade_items(
-                                    ctx,
-                                    party,
-                                    &[iid],
-                                );
-                            }
+                        if party != char_id && !added_item_ids.is_empty() {
+                            crate::services::notify_emitters_skills_trade_godma::emit_priming_needed_for_trade_items(
+                                ctx,
+                                party,
+                                &added_item_ids,
+                            );
                         }
                     }
                     "MakeOffer" => {
+                        if manifest_error {
+                            ctx.emit_typed(
+                                NotificationTarget::Character(party),
+                                crate::router::notify_registry::OnTradeOfferReset {
+                                    container_id: tr.trade_id,
+                                    manifest_error: true,
+                                },
+                            );
+                        }
                         ctx.emit_typed(
                             NotificationTarget::Character(party),
                             crate::router::notify_registry::OnTradeOffer {
@@ -1177,15 +1492,20 @@ fn handle_trade_action(
                     _ => {}
                 }
             }
-            Some(Ok(PyRep::keyval([
-                ("tradeContainerID", PyRep::Integer(tr.trade_id)),
-                ("myAccept", PyRep::Bool(tr.accept_a)),
-                ("herAccept", PyRep::Bool(tr.accept_b)),
-                ("myMoney", PyRep::Real(IskCents(tr.money_a_cents).to_wire_f64())),
-                ("herMoney", PyRep::Real(IskCents(tr.money_b_cents).to_wire_f64())),
-                ("completed", PyRep::Bool(tr.completed)),
-                ("cancelled", PyRep::Bool(tr.cancelled)),
-            ])))
+            if tr.completed || tr.cancelled {
+                ctx.release_bound_objects_for_object("trademgr", tr.trade_id);
+            }
+            Some(Ok(custom_reply.unwrap_or_else(|| {
+                PyRep::keyval([
+                    ("tradeContainerID", PyRep::Integer(tr.trade_id)),
+                    ("myAccept", PyRep::Bool(tr.accept_a)),
+                    ("herAccept", PyRep::Bool(tr.accept_b)),
+                    ("myMoney", PyRep::Real(IskCents(tr.money_a_cents).to_wire_f64())),
+                    ("herMoney", PyRep::Real(IskCents(tr.money_b_cents).to_wire_f64())),
+                    ("completed", PyRep::Bool(tr.completed)),
+                    ("cancelled", PyRep::Bool(tr.cancelled)),
+                ])
+            })))
         }
         Err(e) => Some(Err(e)),
     }

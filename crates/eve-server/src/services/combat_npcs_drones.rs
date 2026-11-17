@@ -1319,11 +1319,6 @@ pub async fn handle_npcs_drones(
                     drone_id: d.ball_id, owner_id: char_id, controller_id: ship_id,
                     activity_state: 0, type_id: d.type_id, controller_owner_id: char_id, target_id: None,
                 }).await;
-                let _ = sys_handle.emit_destiny_event(d.ball_id, eve_destiny::DestinyEvent::OnDroneActivityChange {
-                    drone_id: d.ball_id,
-                    activity_state: 0,
-                    activity: None,
-                }).await;
                 ctx.emit_typed(
                     NotificationTarget::Character(char_id),
                     OnDroneStateChange {
@@ -1508,11 +1503,6 @@ pub async fn handle_npcs_drones(
                 let _ = sys_handle.emit_destiny_event(d.ball_id, eve_destiny::DestinyEvent::OnDroneStateChange {
                     drone_id: d.ball_id, owner_id: char_id, controller_id: ship_id, activity_state: 1,
                     type_id: d.type_id, controller_owner_id: char_id, target_id: Some(target_id),
-                }).await;
-                let _ = sys_handle.emit_destiny_event(d.ball_id, eve_destiny::DestinyEvent::OnDroneActivityChange {
-                    drone_id: d.ball_id,
-                    activity_state: 1,
-                    activity: Some("attack".into()),
                 }).await;
                 ctx.emit_typed(
                     NotificationTarget::Character(char_id),
@@ -1730,11 +1720,13 @@ pub async fn handle_npcs_drones(
                         drone_id: bid, owner_id: char_id, controller_id: ship_id, activity_state: st,
                         type_id: tid, controller_owner_id: char_id, target_id: Some(target_char_id),
                     }).await;
-                    let _ = sys_handle.emit_destiny_event(bid, eve_destiny::DestinyEvent::OnDroneActivityChange {
-                        drone_id: bid,
-                        activity_state: st,
-                        activity: Some(if is_assist { "assist" } else { "guard" }.into()),
-                    }).await;
+                    crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(
+                        ctx,
+                        char_id,
+                        bid,
+                        st,
+                        Some(if is_assist { "assist" } else { "guard" }),
+                    );
                 }
             }
             Some(Ok(PyRep::keyval([

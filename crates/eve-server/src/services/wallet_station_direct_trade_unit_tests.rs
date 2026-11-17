@@ -19,6 +19,13 @@ fn station_direct_trade_edge_cases_abort_corrupt_singleton_and_reverse_isk() {
 
     let ship_a = ctx.db.with_snapshot(|s| s.characters[&char_a].active_ship_id);
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(mut acc) = snap.accounts.values().next().cloned() {
+            for (uid, uname) in [(502_u64, "td_502"), (503_u64, "td_503")] {
+                acc.user_id = uid;
+                acc.username = uname.into();
+                snap.accounts.insert(uname.into(), acc.clone());
+            }
+        }
         if let Some(ca) = snap.characters.get_mut(&char_a) {
             ca.station_id = Some(st_id);
             ca.balance = IskCents::from_f64_isk(10_000.0);
@@ -72,6 +79,12 @@ fn station_direct_trade_edge_cases_abort_corrupt_singleton_and_reverse_isk() {
         station_id: Some(60_000_001),
         ..Default::default()
     };
+    ctx.db
+        .acquire_online_lock(502, 502, Some(char_b), false, ctx.now_unix())
+        .unwrap();
+    ctx.db
+        .acquire_online_lock(503, 503, Some(char_c), false, ctx.now_unix())
+        .unwrap();
 
     // 1. InitiateTrade errors: missing arg, CharacterNotFound, PartnerNotInStation, trade_id 0 with no trade
     assert_eq!(
@@ -128,7 +141,21 @@ fn station_direct_trade_edge_cases_abort_corrupt_singleton_and_reverse_isk() {
     )
     .unwrap()
     .unwrap();
-    let tid1 = init1.dict_get("tradeContainerID").unwrap().as_i64().unwrap();
+    let tid1_bid = init1.as_i64().unwrap();
+    let tid1 = call_wallet_ext(
+        &ctx,
+        &mut sess_a,
+        "trademgr",
+        "List",
+        &[PyRep::Integer(tid1_bid)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap()
+    .dict_get("tradeContainerID")
+    .unwrap()
+    .as_i64()
+    .unwrap();
 
     // Lookup via trade_id = 0
     let list_zero = call_wallet_ext(&ctx, &mut sess_a, "trademgr", "List", &[PyRep::Integer(0)], &kw)
@@ -166,7 +193,21 @@ fn station_direct_trade_edge_cases_abort_corrupt_singleton_and_reverse_isk() {
     )
     .unwrap()
     .unwrap();
-    let tid2 = init2.dict_get("tradeContainerID").unwrap().as_i64().unwrap();
+    let tid2_bid = init2.as_i64().unwrap();
+    let tid2 = call_wallet_ext(
+        &ctx,
+        &mut sess_a,
+        "trademgr",
+        "List",
+        &[PyRep::Integer(tid2_bid)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap()
+    .dict_get("tradeContainerID")
+    .unwrap()
+    .as_i64()
+    .unwrap();
 
     assert_eq!(
         call_wallet_ext(

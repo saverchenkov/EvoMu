@@ -6,6 +6,7 @@ use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
 use eve_proto::{BridgeRpcError, PyRep};
+use eve_server::router::notify_registry::BeanPrimeItem;
 use eve_server::router::{NotificationTarget, ServerContext};
 use eve_server::services::notify_emitters_character_services::{
     emit_ccp_notification, emit_contextual_offer_purchased,
@@ -411,11 +412,21 @@ async fn test_cluster_account_notifications() {
     )
     .await
     .expect("SendClientStackTraceAlert");
-    assert!(matches!(trace_resp, PyRep::Tuple(_)));
+    let primed_eid = match &trace_resp {
+        PyRep::Tuple(t) => t.first().and_then(|v| v.as_i64()).expect("primed errorID"),
+        other => panic!("expected tuple from SendClientStackTraceAlert, got {other:?}"),
+    };
     let notifs_bean = drain_all(&ctx, &mut sess_a, PILOT_A);
     let bean_args = find_notif(&notifs_bean, "OnBeanPrime");
     assert_eq!(bean_args.len(), 1);
-    assert!(matches!(&bean_args[0], PyRep::Dict(entries) if entries.iter().any(|(k, _)| k.as_i64() == Some(stack_hash))));
+    let PyRep::List(beans_a) = &bean_args[0] else {
+        panic!("expected List for OnBeanPrime, got {:?}", bean_args[0]);
+    };
+    assert!(beans_a.iter().any(|b| {
+        b.dict_get("errorID") == Some(&PyRep::Integer(primed_eid))
+            && b.dict_get("errorKeyHash") == Some(&PyRep::Integer(stack_hash))
+            && b.dict_get("logMode") == Some(&PyRep::String("B".into()))
+    }));
 
     // Cluster broadcast also reached Pilot B:
     let notifs_bean_b_initial = drain_all(&ctx, &mut sess_b, PILOT_B);
@@ -425,12 +436,23 @@ async fn test_cluster_account_notifications() {
     emit_bean_prime(
         &ctx,
         NotificationTarget::Character(PILOT_A),
-        vec![(0x9988_7766, 44001, "B".into())],
+        vec![BeanPrimeItem {
+            error_id: 44001,
+            error_key_hash: 0x9988_7766,
+            log_mode: "B".into(),
+        }],
     );
     let notifs_bean_b = drain_all(&ctx, &mut sess_a, PILOT_A);
     let bean_b = find_notif(&notifs_bean_b, "OnBeanPrime");
     assert_eq!(bean_b.len(), 1);
-    assert!(matches!(&bean_b[0], PyRep::Dict(entries) if entries.iter().any(|(k, _)| k.as_i64() == Some(0x9988_7766))));
+    let PyRep::List(beans_targeted) = &bean_b[0] else {
+        panic!("expected List for targeted OnBeanPrime, got {:?}", bean_b[0]);
+    };
+    assert!(beans_targeted.iter().any(|b| {
+        b.dict_get("errorID") == Some(&PyRep::Integer(44001))
+            && b.dict_get("errorKeyHash") == Some(&PyRep::Integer(0x9988_7766))
+            && b.dict_get("logMode") == Some(&PyRep::String("B".into()))
+    }));
 
     // Negative: Pilot B did not receive the targeted notification
     assert!(!has_notif(&drain_all(&ctx, &mut sess_b, PILOT_B), "OnBeanPrime"));
@@ -613,4 +635,126 @@ async fn test_cluster_rpcs_and_market_event() {
 
     // Negative: Pilot B did not receive Pilot A's market event
     assert!(!has_notif(&drain_all(&ctx, &mut sess_gm, PILOT_B), "OnClientEvent_MarketItemReceived"));
+}
+
+#[tokio::test]
+async fn test_on_bean_prime_wire_delivery_strict() {
+    use eve_testkit::client_harness::{ClientWireFrameKind, ContractValidationMode};
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+
+    let mut h1 = crate::common::new_wire_harness(&ctx, 118_801);
+    h1.call_ok(
+        "authentication",
+        None,
+        "Login",
+        &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+        &kw,
+    )
+    .await;
+    h1.call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(PILOT_A)], &kw)
+        .await;
+
+    let mut h2 = crate::common::new_wire_harness(&ctx, 118_802);
+    h2.call_ok(
+        "authentication",
+        None,
+        "Login",
+        &[PyRep::String("other".into()), PyRep::String("other-secret".into())],
+        &kw,
+    )
+    .await;
+    h2.call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(PILOT_B)], &kw)
+        .await;
+
+    let _ = h1.drain_pending_frames();
+    let _ = h2.drain_pending_frames();
+    let mut h1 = h1.with_mode(ContractValidationMode::Strict);
+    let mut h2 = h2.with_mode(ContractValidationMode::Strict);
+
+    // 1. Unprimed stack hash returns (None, None) from alert.BeanCount.
+    let wire_hash = 0x5A7C_9911_i64;
+    let initial_bc = h1
+        .call_ok("alert", None, "BeanCount", &[PyRep::Integer(wire_hash)], &kw)
+        .await;
+    assert_eq!(initial_bc, PyRep::Tuple(vec![PyRep::None, PyRep::None]));
+    assert!(h1.drain_pending_frames().is_empty());
+
+    // 2. SendClientStackTraceAlert primes the bean and broadcasts OnBeanPrime on the wire.
+    let trace_out = h1
+        .call_exchange(
+            "alert",
+            None,
+            "SendClientStackTraceAlert",
+            &[
+                PyRep::Tuple(vec![PyRep::Integer(wire_hash), PyRep::ascii_bytes("wire_err_key")]),
+                PyRep::ascii_bytes("EXCEPTION in wire test\nline 2"),
+                PyRep::ascii_bytes("Error"),
+                PyRep::None,
+            ],
+            &kw,
+        )
+        .await;
+    let trace_res = trace_out
+        .result
+        .unwrap_or_else(|e| panic!("alert.SendClientStackTraceAlert failed: {e:?}"));
+    let PyRep::Tuple(trace_pair) = trace_res else {
+        panic!("expected tuple from SendClientStackTraceAlert, got {trace_res:?}");
+    };
+    let primed_eid = trace_pair[0].as_i64().expect("primed errorID");
+
+    let mut frames_1 = trace_out.frames;
+    frames_1.extend(h1.drain_pending_frames());
+    let frames_2 = h2.drain_pending_frames();
+    for (label, frames) in [("caller", &frames_1), ("peer", &frames_2)] {
+        let bean_args = frames
+            .iter()
+            .find_map(|f| match &f.kind {
+                ClientWireFrameKind::Notification { event, args } if event == "OnBeanPrime" => {
+                    Some(args)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label} session must receive wire OnBeanPrime frame"));
+        assert_eq!(bean_args.len(), 1);
+        let PyRep::List(beans) = &bean_args[0] else {
+            panic!("{label} OnBeanPrime arg0 must be List, got {:?}", bean_args[0]);
+        };
+        assert_eq!(beans.len(), 1);
+        assert_eq!(beans[0].dict_get("errorID"), Some(&PyRep::Integer(primed_eid)));
+        assert_eq!(beans[0].dict_get("errorKeyHash"), Some(&PyRep::Integer(wire_hash)));
+        assert_eq!(beans[0].dict_get("logMode"), Some(&PyRep::String("B".into())));
+    }
+
+    // 3. Subsequent BeanCount reports primed (errorID, "B") and BeanDelivery records counts.
+    let primed_bc = h1
+        .call_ok("alert", None, "BeanCount", &[PyRep::Integer(wire_hash)], &kw)
+        .await;
+    assert_eq!(
+        primed_bc,
+        PyRep::Tuple(vec![PyRep::Integer(primed_eid), PyRep::ascii_bytes("B")])
+    );
+
+    let delivery_res = h1
+        .call_ok(
+            "alert",
+            None,
+            "BeanDelivery",
+            &[PyRep::Dict(vec![(
+                PyRep::Integer(primed_eid),
+                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(1_775_400_000)]),
+            )])],
+            &kw,
+        )
+        .await;
+    assert_eq!(delivery_res, PyRep::None);
+    let recorded = ctx.db.with_snapshot(|snap| {
+        snap.cluster_and_runtime
+            .alert_bean_counts
+            .get(&primed_eid.to_string())
+            .copied()
+    });
+    assert_eq!(recorded, Some(3));
 }

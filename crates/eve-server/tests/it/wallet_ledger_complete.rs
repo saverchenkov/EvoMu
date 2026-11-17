@@ -762,8 +762,8 @@ async fn test_station_direct_trade_window() {
     let p1_bal_before = balance(&ctx, P1);
     let p2_bal_before = balance(&ctx, P2);
 
-    let init_rep = rpc(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)]).await.expect("InitiateTrade");
-    let trade_id = kv_i64(&init_rep, "tradeContainerID");
+    let init_bid = rpc(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)]).await.expect("InitiateTrade").as_i64().unwrap();
+    let trade_id = kv_i64(&rpc(&ctx, &mut s1, "trademgr", "List", &[PyRep::Integer(init_bid)]).await.expect("List trade"), "tradeContainerID");
 
     let overflow_qty = (1i64 << 32) - 1000;
     let err_overflow = rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(p1_item), PyRep::Integer(overflow_qty)]).await.unwrap_err();
@@ -824,8 +824,8 @@ async fn test_station_direct_trade_window() {
     let p2_bal_before_partial = balance(&ctx, P2);
     let total_isk_before = p1_bal_before_partial.0 + p2_bal_before_partial.0;
 
-    let init_rep2 = rpc(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)]).await.expect("InitiateTrade 2");
-    let trade_id2 = kv_i64(&init_rep2, "tradeContainerID");
+    let init_bid2 = rpc(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)]).await.expect("InitiateTrade 2").as_i64().unwrap();
+    let trade_id2 = kv_i64(&rpc(&ctx, &mut s1, "trademgr", "List", &[PyRep::Integer(init_bid2)]).await.expect("List trade 2"), "tradeContainerID");
 
     rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id2), PyRep::Integer(p1_partial_item), PyRep::Integer(30)]).await.expect("AddItem partial");
     rpc(&ctx, &mut s2, "trademgr", "OfferMoney", &[PyRep::Integer(trade_id2), PyRep::Real(15_000.0)]).await.expect("OfferMoney partial");

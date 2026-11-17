@@ -1257,22 +1257,9 @@ impl SystemRegistry {
                                 base_scramble_strengths.remove(&ball_id);
                                 base_core_strengths.remove(&ball_id);
                                 asteroids.remove(&ball_id);
-                                let docking_evs: Vec<DestinyEvent> = ballpark
-                                    .observer_events
-                                    .get(&ball_id)
-                                    .map(|evs| {
-                                        evs.iter()
-                                            .filter(|e| matches!(e, DestinyEvent::OnDockingAccepted { .. }))
-                                            .cloned()
-                                            .collect()
-                                    })
-                                    .unwrap_or_default();
                                 let removed = ballpark.remove_ball(ball_id);
                                 fit_projections.remove(&ball_id);
                                 removed_checkpoint_ball = Some(ball_id);
-                                if !docking_evs.is_empty() {
-                                    ballpark.observer_events.insert(ball_id, docking_evs);
-                                }
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(removed);
                             }
@@ -1379,21 +1366,7 @@ impl SystemRegistry {
                                         ballpark.accept_docking_at(ball_id, station_id, station_pos)
                                     }
                                 } else {
-                                    let docking_evs: Vec<DestinyEvent> = ballpark
-                                        .observer_events
-                                        .get(&ball_id)
-                                        .map(|evs| {
-                                            evs.iter()
-                                                .filter(|e| matches!(e, DestinyEvent::OnDockingAccepted { .. }))
-                                                .cloned()
-                                                .collect()
-                                        })
-                                        .unwrap_or_default();
-                                    let r = ballpark.remove_ball(ball_id);
-                                    if !docking_evs.is_empty() {
-                                        ballpark.observer_events.insert(ball_id, docking_evs);
-                                    }
-                                    r
+                                    ballpark.remove_ball(ball_id)
                                 };
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(removed.map(|ball| TakenBall {

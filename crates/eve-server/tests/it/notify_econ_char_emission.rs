@@ -3307,12 +3307,30 @@ async fn test_wallet_bills_lp_trade_market_and_industry_notifications() {
     // 4. Direct Player Trade: InitiateTrade, AddItem, OfferMoney, MakeOffer, Abort
     let trade_item_id = 930_001i64;
     seed_item(&ctx, trade_item_id, 34, P1, STATION_JITA, InventoryFlag::Hangar, 50, false);
-    let init_rep = call(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)]).await;
-    let trade_id = init_rep.dict_get("tradeContainerID").and_then(|v| v.as_i64()).expect("tradeContainerID");
+    let init_bid = call(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)])
+        .await
+        .as_i64()
+        .expect("bound trade id");
+    let trade_id = call(&ctx, &mut s1, "trademgr", "List", &[PyRep::Integer(init_bid)])
+        .await
+        .dict_get("tradeContainerID")
+        .and_then(|v| v.as_i64())
+        .expect("tradeContainerID");
     let n_ti1 = ctx.drain_notifications_for_char(P1);
     let n_ti2 = ctx.drain_notifications_for_char(P2);
-    assert_eq!(events_from(&n_ti1, "OnTradeInitiate"), vec![vec![PyRep::Integer(P1), PyRep::Integer(P2), PyRep::Integer(trade_id)]]);
-    assert_eq!(events_from(&n_ti2, "OnTradeInitiate"), vec![vec![PyRep::Integer(P1), PyRep::Integer(P2), PyRep::Integer(trade_id)]]);
+    let ti1 = events_from(&n_ti1, "OnTradeInitiate");
+    let ti2 = events_from(&n_ti2, "OnTradeInitiate");
+    assert!(
+        ti1.is_empty(),
+        "Initiator must not receive duplicate OnTradeInitiate; got {ti1:?}"
+    );
+    assert_eq!(ti2.len(), 1);
+    assert_eq!(ti2[0].len(), 3);
+    assert_eq!(ti2[0][0], PyRep::Integer(P1));
+    assert_eq!(ti2[0][2], PyRep::List(vec![]));
+    let oid2 = eve_testkit::client_harness::extract_bound_id_from_wire_rep(&ti2[0][1])
+        .expect("partner bound tradeSession rep");
+    assert_ne!(init_bid as u64, oid2);
 
     call(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(trade_item_id)]).await;
     let n_to2 = ctx.drain_notifications_for_char(P2);
@@ -3339,8 +3357,15 @@ async fn test_wallet_bills_lp_trade_market_and_industry_notifications() {
     assert!(matches!(&tc1[0][1], PyRep::List(items) if !items.is_empty()));
     assert_eq!(tc2, tc1);
 
-    let init2 = call(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)]).await;
-    let trade_id2 = init2.dict_get("tradeContainerID").and_then(|v| v.as_i64()).expect("tradeContainerID");
+    let init2_bid = call(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)])
+        .await
+        .as_i64()
+        .expect("bound trade id 2");
+    let trade_id2 = call(&ctx, &mut s1, "trademgr", "List", &[PyRep::Integer(init2_bid)])
+        .await
+        .dict_get("tradeContainerID")
+        .and_then(|v| v.as_i64())
+        .expect("tradeContainerID");
     ctx.drain_notifications_for_char(P1);
     ctx.drain_notifications_for_char(P2);
     call(&ctx, &mut s1, "trademgr", "Abort", &[PyRep::Integer(trade_id2)]).await;

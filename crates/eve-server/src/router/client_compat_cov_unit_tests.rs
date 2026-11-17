@@ -899,7 +899,7 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
     assert!(scan_bonuses.iter().any(|(k, _)| k.as_str() == Some("deviation")));
 
     // #977: entity.CmdEngage / CmdReturnHome / CmdReturnBay normalize non-Dict replies to {}
-    // and DoDestinyUpdate strips OnDroneActivityChange
+    // (#1188: DoDestinyUpdate filter for OnDroneActivityChange removed; server emits notify only).
     for cmd in ["CmdEngage", "CmdReturnHome", "CmdReturnAndOrbit", "CmdReturnBay"] {
         let cmd_rep = normalize_macho_rpc_reply(
             "entity",
@@ -938,7 +938,7 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
     let PyRep::List(ref d_items) = destiny_norm[0] else {
         panic!("expected List in DoDestinyUpdate");
     };
-    assert_eq!(d_items.len(), 1);
+    assert_eq!(d_items.len(), 2);
 
     // #978: industryManager.GetJob / GetJobsByOwner normalize V24.01 JobData fields and integer status
     let job_norm = normalize_macho_rpc_reply(

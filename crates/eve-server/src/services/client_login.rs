@@ -206,7 +206,11 @@ pub async fn handle(
                 crate::services::notify_emitters_missing::emit_bean_prime(
                     ctx,
                     crate::router::NotificationTarget::All,
-                    vec![(hash, eid, effective_mode.clone())],
+                    vec![crate::router::notify_registry::BeanPrimeItem {
+                        error_id: eid,
+                        error_key_hash: hash,
+                        log_mode: effective_mode.clone(),
+                    }],
                 );
             }
             // One line only: the client trace is diagnostic text, not a server fault.

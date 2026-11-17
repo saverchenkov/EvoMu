@@ -238,6 +238,11 @@ fn station_direct_trade_lifecycle_and_validation() {
     let station_id = 60_003_760;
 
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(mut acc) = snap.accounts.values().next().cloned() {
+            acc.user_id = 502;
+            acc.username = "user_502".into();
+            snap.accounts.insert("user_502".into(), acc);
+        }
         if let Some(ca) = snap.characters.get_mut(&char_a) {
             ca.station_id = Some(station_id);
             ca.balance = IskCents::from_f64_isk(50_000.0);
@@ -280,7 +285,11 @@ fn station_direct_trade_lifecycle_and_validation() {
     });
 
     let mut sess_a = char_session(char_a, 98_000_001);
+    sess_a.session_id = 101;
     sess_a.station_id = None;
+    ctx.db
+        .acquire_online_lock(502, 102, Some(char_b), false, ctx.now_unix())
+        .unwrap();
     assert_eq!(
         handle(
             &ctx,
@@ -322,7 +331,21 @@ fn station_direct_trade_lifecycle_and_validation() {
     )
     .unwrap()
     .unwrap();
-    let trade_id = init.dict_get("tradeContainerID").unwrap().as_i64().unwrap();
+    let trade_bid = init.as_i64().unwrap();
+    let trade_id = handle(
+        &ctx,
+        &mut sess_a,
+        "trademgr",
+        "List",
+        &[PyRep::Integer(trade_bid)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap()
+    .dict_get("tradeContainerID")
+    .unwrap()
+    .as_i64()
+    .unwrap();
 
     let mut sess_b = char_session(char_b, 98_000_001);
     sess_b.station_id = Some(station_id);
@@ -422,7 +445,7 @@ fn station_direct_trade_lifecycle_and_validation() {
         .unwrap()
         .unwrap_err()
         .code,
-        "TradeClosed"
+        "CustomInfo"
     );
 }
 
@@ -482,10 +505,28 @@ fn station_direct_trade_completes_when_current_trade_item_is_escrowed_and_emits_
         .acquire_online_lock(502, 102, Some(char_b), false, ctx.now_unix())
         .unwrap();
 
-    let init = handle(&ctx, &mut sess_a, "trademgr", "InitiateTrade", &[PyRep::Integer(char_b)], &HashMap::new())
+    let init_trade_container_id = |sess: &mut SessionState, target: i64| {
+        let init = handle(
+            &ctx,
+            sess,
+            "trademgr",
+            "InitiateTrade",
+            &[PyRep::Integer(target)],
+            &HashMap::new(),
+        )
         .unwrap()
         .unwrap();
-    let trade_id = init.dict_get("tradeContainerID").unwrap().as_i64().unwrap();
+        let bid = init.as_i64().unwrap();
+        handle(&ctx, sess, "trademgr", "List", &[PyRep::Integer(bid)], &HashMap::new())
+            .unwrap()
+            .unwrap()
+            .dict_get("tradeContainerID")
+            .unwrap()
+            .as_i64()
+            .unwrap()
+    };
+
+    let trade_id = init_trade_container_id(&mut sess_a, char_b);
     let _ = ctx.drain_notifications_for_char(char_a);
     let _ = ctx.drain_notifications_for_char(char_b);
 
@@ -516,10 +557,7 @@ fn station_direct_trade_completes_when_current_trade_item_is_escrowed_and_emits_
     assert!(ctx.drain_notifications_for_char(char_b).iter().any(|n| n.event == "OnItemChange"));
 
     // #848: Abort removes -73 trade note so List returns TradeNotFound
-    let init2 = handle(&ctx, &mut sess_a, "trademgr", "InitiateTrade", &[PyRep::Integer(char_b)], &HashMap::new())
-        .unwrap()
-        .unwrap();
-    let trade_id2 = init2.dict_get("tradeContainerID").unwrap().as_i64().unwrap();
+    let trade_id2 = init_trade_container_id(&mut sess_a, char_b);
     assert!(handle(&ctx, &mut sess_a, "trademgr", "List", &[PyRep::Integer(trade_id2)], &HashMap::new()).unwrap().is_ok());
     handle(&ctx, &mut sess_a, "trademgr", "Abort", &[PyRep::Integer(trade_id2)], &HashMap::new())
         .unwrap()
@@ -528,10 +566,7 @@ fn station_direct_trade_completes_when_current_trade_item_is_escrowed_and_emits_
     assert!(ctx.db.with_snapshot(|s| !s.owner_notes.contains_key(&super::trade_note_id(trade_id2))));
 
     // #848: Logout cancels open trade, unlocks items, and emits OnTradeCancel
-    let init3 = handle(&ctx, &mut sess_a, "trademgr", "InitiateTrade", &[PyRep::Integer(char_b)], &HashMap::new())
-        .unwrap()
-        .unwrap();
-    let trade_id3 = init3.dict_get("tradeContainerID").unwrap().as_i64().unwrap();
+    let trade_id3 = init_trade_container_id(&mut sess_a, char_b);
     handle(&ctx, &mut sess_b, "trademgr", "AddItem", &[PyRep::Integer(trade_id3), PyRep::Integer(item_id), PyRep::Integer(1)], &HashMap::new())
         .unwrap()
         .unwrap();
@@ -546,10 +581,7 @@ fn station_direct_trade_completes_when_current_trade_item_is_escrowed_and_emits_
     // #848: Undocking mid-trade still commits -73 note removal & emits OnTradeCancel while returning NotDockedAtStation
     let _ = ctx.drain_notifications_for_char(char_a);
     let _ = ctx.drain_notifications_for_char(char_b);
-    let init4 = handle(&ctx, &mut sess_a, "trademgr", "InitiateTrade", &[PyRep::Integer(char_b)], &HashMap::new())
-        .unwrap()
-        .unwrap();
-    let trade_id4 = init4.dict_get("tradeContainerID").unwrap().as_i64().unwrap();
+    let trade_id4 = init_trade_container_id(&mut sess_a, char_b);
     ctx.db.with_mut_snapshot(|s| {
         if let Some(cb) = s.characters.get_mut(&char_b) {
             cb.station_id = None;
@@ -561,4 +593,195 @@ fn station_direct_trade_completes_when_current_trade_item_is_escrowed_and_emits_
     assert_eq!(err.code, "NotDockedAtStation");
     assert!(ctx.db.with_snapshot(|s| !s.owner_notes.contains_key(&super::trade_note_id(trade_id4))));
     assert!(ctx.drain_notifications_for_char(char_b).iter().any(|n| n.event == "OnTradeCancel"));
+}
+
+#[test]
+fn station_direct_trade_rejects_offline_duplicate_and_blocked_and_cleans_bounds() {
+    let ctx = make_test_context();
+    let station_id: i64 = 60_003_760;
+    let char_a: i64 = 90_000_001;
+    let char_b: i64 = 90_000_002;
+    let char_c: i64 = 90_000_003;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(mut acc) = snap.accounts.values().next().cloned() {
+            for (uid, uname) in [(501_u64, "t_501"), (502_u64, "t_502"), (503_u64, "t_503")] {
+                acc.user_id = uid;
+                acc.username = uname.into();
+                snap.accounts.insert(uname.into(), acc.clone());
+            }
+        }
+        if let Some(ca) = snap.characters.get_mut(&char_a) {
+            ca.user_id = 501;
+            ca.station_id = Some(station_id);
+        }
+        let mut cb = snap.characters[&char_a].clone();
+        cb.character_id = char_b;
+        cb.user_id = 502;
+        cb.name = "TraderB".into();
+        cb.station_id = Some(station_id);
+        snap.characters.insert(char_b, cb);
+
+        let mut cc = snap.characters[&char_a].clone();
+        cc.character_id = char_c;
+        cc.user_id = 503;
+        cc.name = "TraderC".into();
+        cc.station_id = Some(station_id);
+        snap.characters.insert(char_c, cc);
+    });
+
+    let mut sess_a = SessionState {
+        session_id: 901,
+        user_id: Some(501),
+        character_id: Some(char_a),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(30_000_142),
+        station_id: Some(station_id),
+        ..Default::default()
+    };
+    let mut sess_c = SessionState {
+        session_id: 903,
+        user_id: Some(503),
+        character_id: Some(char_c),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(30_000_142),
+        station_id: Some(station_id),
+        ..Default::default()
+    };
+    ctx.db
+        .acquire_online_lock(501, 901, Some(char_a), false, ctx.now_unix())
+        .unwrap();
+    ctx.db
+        .acquire_online_lock(503, 903, Some(char_c), false, ctx.now_unix())
+        .unwrap();
+
+    // 1. Offline partner rejected without creating trade note or bound objects
+    let offline_err = handle(
+        &ctx,
+        &mut sess_a,
+        "trademgr",
+        "InitiateTrade",
+        &[PyRep::Integer(char_b)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(offline_err.code, "PartnerNotOnline");
+    assert!(ctx.bound_objects.read().unwrap().is_empty());
+    assert!(ctx
+        .db
+        .with_snapshot(|s| !s.owner_notes.values().any(|n| n.character_id == -73)));
+
+    // Bring char_b online
+    ctx.db
+        .acquire_online_lock(502, 902, Some(char_b), false, ctx.now_unix())
+        .unwrap();
+
+    // 2. Contact blocklist rejects InitiateTrade when partner blocked initiator
+    ctx.esi_state.char_contacts.write().unwrap().insert(
+        char_b,
+        vec![crate::esi::runtime_state::EsiContactEntry {
+            contact_id: char_a,
+            standing: -10.0,
+            contact_type: "character".into(),
+            is_watched: false,
+            is_blocked: true,
+            label_ids: vec![],
+        }],
+    );
+    let blocked_err = handle(
+        &ctx,
+        &mut sess_a,
+        "trademgr",
+        "InitiateTrade",
+        &[PyRep::Integer(char_b)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(blocked_err.code, "ContactBlocked");
+    ctx.esi_state.char_contacts.write().unwrap().clear();
+
+    // 3. Successful trade emits OnTradeInitiate ONLY to partner, and blocks duplicates for both parties
+    let _ = ctx.drain_notifications_for_char(char_a);
+    let _ = ctx.drain_notifications_for_char(char_b);
+    let bid_a = handle(
+        &ctx,
+        &mut sess_a,
+        "trademgr",
+        "InitiateTrade",
+        &[PyRep::Integer(char_b)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap()
+    .as_i64()
+    .unwrap();
+    assert!(
+        !ctx.drain_notifications_for_char(char_a)
+            .iter()
+            .any(|n| n.event == "OnTradeInitiate"),
+        "Initiator must receive tradeSession from CallRsp, not duplicate OnTradeInitiate"
+    );
+    assert_eq!(
+        ctx.drain_notifications_for_char(char_b)
+            .iter()
+            .filter(|n| n.event == "OnTradeInitiate")
+            .count(),
+        1
+    );
+
+    let dup_self_err = handle(
+        &ctx,
+        &mut sess_a,
+        "trademgr",
+        "InitiateTrade",
+        &[PyRep::Integer(char_c)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(dup_self_err.code, "TradeAlreadyActive");
+
+    let dup_partner_err = handle(
+        &ctx,
+        &mut sess_c,
+        "trademgr",
+        "InitiateTrade",
+        &[PyRep::Integer(char_b)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(dup_partner_err.code, "TradeAlreadyActive");
+
+    // 4. Abort cleans up both bound trademgr objects and allows new trades
+    handle(
+        &ctx,
+        &mut sess_a,
+        "trademgr",
+        "Abort",
+        &[PyRep::Integer(bid_a)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        ctx.bound_objects
+            .read()
+            .unwrap()
+            .values()
+            .filter(|e| e.service == "trademgr")
+            .count(),
+        0
+    );
+    let next_trade = handle(
+        &ctx,
+        &mut sess_c,
+        "trademgr",
+        "InitiateTrade",
+        &[PyRep::Integer(char_b)],
+        &HashMap::new(),
+    )
+    .unwrap();
+    assert!(next_trade.is_ok());
 }

@@ -1670,10 +1670,13 @@ async fn test_insurance_voiding_and_12_week_expiry() {
     assert!(contract_in_list(&list_contracts(&ctx, &mut s1).await, ship_c).is_some());
 
     let trade_rep = wire_ok(&ctx, &mut s1, "trademgr", None, "InitiateTrade", &[PyRep::Integer(PILOT_2)]).await;
-    let trade_id = trade_rep
+    let trade_oid = extract_bound_id_from_wire_rep(&trade_rep)
+        .expect("bound trade oid from InitiateTrade");
+    let trade_id = wire_ok(&ctx, &mut s1, "trademgr", Some(trade_oid), "List", &[])
+        .await
         .dict_get("tradeContainerID")
         .and_then(|v| v.as_i64())
-        .expect("tradeContainerID from InitiateTrade");
+        .expect("tradeContainerID from bound List");
     wire_ok(
         &ctx,
         &mut s1,

@@ -281,7 +281,8 @@ fn destiny_and_notification_normalizers_and_suppression_branches() {
             PyRep::Tuple(vec![PyRep::String(name.into()), PyRep::Tuple(vec![])]),
         ])
     };
-    // When SetState is present, OnSlimItemChange / SetBallInteractive / PackagedAction / OnDockingAccepted / OnClientControllerEvent are filtered out (#992).
+    // When SetState is present, OnSlimItemChange / SetBallInteractive / PackagedAction are filtered out (#992),
+    // while OnDockingAccepted, OnClientControllerEvent, and OnDroneActivityChange pass through (#1188).
     let norm_with_add = normalize_destiny_payload_arg(PyRep::List(vec![
         mk_ev("SetState"),
         mk_ev("OnSlimItemChange"),
@@ -289,9 +290,19 @@ fn destiny_and_notification_normalizers_and_suppression_branches() {
         mk_ev("PackagedAction"),
         mk_ev("OnDockingAccepted"),
         mk_ev("OnClientControllerEvent"),
+        mk_ev("OnDroneActivityChange"),
         mk_ev("Orbit"),
     ]));
-    assert_eq!(norm_with_add, PyRep::List(vec![mk_ev("SetState"), mk_ev("Orbit")]));
+    assert_eq!(
+        norm_with_add,
+        PyRep::List(vec![
+            mk_ev("SetState"),
+            mk_ev("OnDockingAccepted"),
+            mk_ev("OnClientControllerEvent"),
+            mk_ev("OnDroneActivityChange"),
+            mk_ev("Orbit"),
+        ])
+    );
 
     // Without SetState (including alongside AddBalls2), SetBallInteractive and PackagedAction are preserved,
     // while OnSlimItemChange is only filtered when AddBalls/AddBalls2/SetState is present.
@@ -310,7 +321,7 @@ fn destiny_and_notification_normalizers_and_suppression_branches() {
         ])
     );
 
-    // Without SetState/AddBalls/AddBalls2, OnSlimItemChange, SetBallInteractive, and PackagedAction are preserved.
+    // Without SetState/AddBalls/AddBalls2, OnSlimItemChange, SetBallInteractive, PackagedAction, and OnDockingAccepted are preserved.
     let norm_no_add = normalize_destiny_payload_arg(PyRep::Tuple(vec![PyRep::List(vec![
         mk_ev("OnSlimItemChange"),
         mk_ev("SetBallInteractive"),
@@ -323,13 +334,15 @@ fn destiny_and_notification_normalizers_and_suppression_branches() {
             mk_ev("OnSlimItemChange"),
             mk_ev("SetBallInteractive"),
             mk_ev("PackagedAction"),
+            mk_ev("OnDockingAccepted"),
         ])])
     );
 
     // should_suppress_macho_notification
     assert!(should_suppress_macho_notification("OnDamageStateChange", &[]));
     assert!(should_suppress_macho_notification("OnSessionChanged", &[]));
-    assert!(should_suppress_macho_notification(
+    // #1188: OnTradeInitiate suppress rule removed; never suppressed regardless of arg1 shape.
+    assert!(!should_suppress_macho_notification(
         "OnTradeInitiate",
         &[PyRep::Integer(1), PyRep::Integer(2)]
     ));
@@ -347,11 +360,11 @@ fn destiny_and_notification_normalizers_and_suppression_branches() {
     ));
     assert!(should_suppress_macho_notification(
         "DoDestinyUpdate",
-        &[PyRep::List(vec![mk_ev("OnDockingAccepted")])]
+        &[PyRep::List(vec![])]
     ));
     assert!(!should_suppress_macho_notification(
         "DoDestinyUpdate",
-        &[PyRep::List(vec![mk_ev("Orbit")])]
+        &[PyRep::List(vec![mk_ev("OnClientControllerEvent"), mk_ev("Orbit")])]
     ));
     assert!(!should_suppress_macho_notification("OnAccountChange", &[]));
 
@@ -794,8 +807,8 @@ fn wave2_wave4_normalizer_and_effect_id_helper_edges() {
         assert_eq!(padded[13], PyRep::None);
     }
 
-    // 5. normalize_destiny_update_arg: OnDockingAccepted 3-tuple -> 1-tuple (station_id,)
-    let dock_ev = normalize_destiny_update_arg(PyRep::List(vec![
+    // 5. normalize_destiny_update_arg: D01 removed (#1188); passes entries through unchanged.
+    let dock_ev_in = PyRep::List(vec![
         PyRep::Tuple(vec![
             PyRep::String("OnDockingAccepted".into()),
             PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(60_003_760)]),
@@ -804,20 +817,8 @@ fn wave2_wave4_normalizer_and_effect_id_helper_edges() {
             PyRep::String("OnDockingAccepted".into()),
             PyRep::Tuple(vec![PyRep::Integer(60_003_760)]),
         ]),
-    ]));
-    assert_eq!(
-        dock_ev,
-        PyRep::List(vec![
-            PyRep::Tuple(vec![
-                PyRep::String("OnDockingAccepted".into()),
-                PyRep::Tuple(vec![PyRep::Integer(60_003_760)]),
-            ]),
-            PyRep::Tuple(vec![
-                PyRep::String("OnDockingAccepted".into()),
-                PyRep::Tuple(vec![PyRep::Integer(60_003_760)]),
-            ]),
-        ])
-    );
+    ]);
+    assert_eq!(normalize_destiny_update_arg(dock_ev_in.clone()), dock_ev_in);
 
     // 6. normalize_agent_do_action_rep: passthroughs, state/missionState branches, integer dialogue entry
     let tuple2 = PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2)]);
@@ -1147,22 +1148,17 @@ fn w4_mutant_killers_all_remaining_notifications() {
     let PyRep::Tuple(bm1) = &bm_entries[1] else { panic!() };
     assert!(matches!(&bm1[2], PyRep::Tuple(t) if t.len() == 2));
 
-    let bean_list = normalize_macho_notification(
-        "OnBeanPrime",
-        vec![PyRep::List(vec![
-            PyRep::Integer(7),
-            PyRep::Dict(vec![(PyRep::String("errorID".into()), PyRep::Integer(99))]),
-            PyRep::keyval([("logMode", PyRep::Integer(3))]),
-            PyRep::String("skip".into()),
-        ])],
+    // #1188: OnBeanPrime rule removed; typed List[KeyVal] and arbitrary args pass through unchanged.
+    let bean_in = vec![PyRep::List(vec![PyRep::keyval([
+        ("errorID", PyRep::Integer(99)),
+        ("errorKeyHash", PyRep::Integer(0x1234)),
+        ("logMode", PyRep::String("B".into())),
+    ])])];
+    assert_eq!(normalize_macho_notification("OnBeanPrime", bean_in.clone()), bean_in);
+    assert_eq!(
+        normalize_macho_notification("OnBeanPrime", vec![PyRep::Integer(1), PyRep::Integer(2)]),
+        vec![PyRep::Integer(1), PyRep::Integer(2)]
     );
-    let PyRep::List(beans) = &bean_list[0] else { panic!() };
-    assert_eq!(beans.len(), 3);
-    assert_eq!(beans[0].dict_get("errorID"), Some(&PyRep::Integer(7)));
-    assert_eq!(beans[1].dict_get("errorID"), Some(&PyRep::Integer(99)));
-    assert_eq!(beans[2].dict_get("logMode"), Some(&PyRep::Integer(3)));
-    let bean_multi = normalize_macho_notification("OnBeanPrime", vec![PyRep::Integer(1), PyRep::Integer(2)]);
-    assert!(matches!(&bean_multi[0], PyRep::List(v) if v.len() == 2));
 
     assert!(normalize_macho_notification("OnCorporationRecruitmentAdChanged", vec![PyRep::Integer(1)]).is_empty());
     assert!(normalize_macho_notification("OnOrganizationContactsUpdated", Vec::new()).is_empty());
@@ -1296,19 +1292,13 @@ fn w4_mutant_killers_all_remaining_notifications() {
         vec![PyRep::Integer(60_003_760)]
     );
 
-    let ddu_dock = normalize_macho_notification(
-        "DoDestinyUpdate",
-        vec![PyRep::List(vec![PyRep::Tuple(vec![
-            PyRep::String("OnDockingAccepted".into()),
-            PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(60_003_760)]),
-        ])])],
-    );
+    let ddu_dock_in = vec![PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::String("OnDockingAccepted".into()),
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(60_003_760)]),
+    ])])];
     assert_eq!(
-        ddu_dock,
-        vec![PyRep::List(vec![PyRep::Tuple(vec![
-            PyRep::String("OnDockingAccepted".into()),
-            PyRep::Tuple(vec![PyRep::Integer(60_003_760)]),
-        ])])]
+        normalize_macho_notification("DoDestinyUpdate", ddu_dock_in.clone()),
+        ddu_dock_in
     );
 }
 

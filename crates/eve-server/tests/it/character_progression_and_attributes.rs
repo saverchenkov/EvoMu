@@ -138,9 +138,8 @@ fn extract_destiny_actions(updates: &PyRep) -> Vec<(String, Vec<PyRep>)> {
 }
 
 #[tokio::test]
-async fn test_parity_misc_destiny_on_drone_activity_change() {
-    // parity: destiny:OnDroneActivityChange
-    eve_testkit::attest(&["destiny:OnDroneActivityChange"]);
+async fn test_drone_activity_change_uses_macho_notification_channel() {
+    // #1188: OnDroneActivityChange is emitted solely via Macho notification (not DoDestinyUpdate).
     let ctx = new_ctx();
     let mut sess = authed_demo_session(&ctx, 8100).await;
     ctx.db.with_mut_snapshot(|snap| {
@@ -230,6 +229,7 @@ async fn test_parity_misc_destiny_on_drone_activity_change() {
     let drone_ball_id = launched_ids[0].as_i64().expect("launched drone ball_id");
     let _ = handle.add_target_lock(ship_id, eve_destiny::TargetLock { target_id, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
     let _ = handle.drain_observer_updates(ship_id).await;
+    let _ = ctx.drain_notifications_for_char(PILOT_A);
 
     let _ = ctx
         .dispatch_rpc(
@@ -252,16 +252,19 @@ async fn test_parity_misc_destiny_on_drone_activity_change() {
         .expect("drain observer updates after CmdEngage");
     let engage_actions = extract_destiny_actions(&engage_updates);
     assert!(
-        engage_actions
-            .iter()
-            .any(|(name, args)| name == "OnDroneActivityChange"
-                && args.as_slice()
-                    == [
-                        PyRep::Integer(drone_ball_id),
-                        PyRep::Integer(1),
-                        PyRep::String("attack".into()),
-                    ]),
-        "expected OnDroneActivityChange(drone_id={drone_ball_id}, activity_state=1, activity='attack') in DoDestinyUpdate, got {engage_actions:?}"
+        engage_actions.iter().all(|(name, _)| name != "OnDroneActivityChange"),
+        "OnDroneActivityChange must not be emitted in DoDestinyUpdate (#1188), got {engage_actions:?}"
+    );
+    let engage_notifs = ctx.drain_notifications_for_char(PILOT_A);
+    assert!(
+        engage_notifs.iter().any(|n| n.event == "OnDroneActivityChange"
+            && n.args.as_slice()
+                == [
+                    PyRep::Integer(drone_ball_id),
+                    PyRep::Integer(1),
+                    PyRep::String("attack".into()),
+                ]),
+        "expected notify OnDroneActivityChange(drone_id={drone_ball_id}, 1, 'attack'), got {engage_notifs:?}"
     );
 
     let _ = ctx
@@ -282,23 +285,27 @@ async fn test_parity_misc_destiny_on_drone_activity_change() {
         .expect("drain observer updates after CmdReturnHome");
     let return_actions = extract_destiny_actions(&return_updates);
     assert!(
-        return_actions
-            .iter()
-            .any(|(name, args)| name == "OnDroneActivityChange"
-                && args.as_slice()
-                    == [
-                        PyRep::Integer(drone_ball_id),
-                        PyRep::Integer(0),
-                        PyRep::None,
-                    ]),
-        "expected OnDroneActivityChange(drone_id={drone_ball_id}, activity_state=0, activity=None) in DoDestinyUpdate, got {return_actions:?}"
+        return_actions.iter().all(|(name, _)| name != "OnDroneActivityChange"),
+        "OnDroneActivityChange must not be emitted in DoDestinyUpdate (#1188), got {return_actions:?}"
+    );
+    let return_notifs = ctx.drain_notifications_for_char(PILOT_A);
+    assert!(
+        return_notifs.iter().any(|n| n.event == "OnDroneActivityChange"
+            && n.args.as_slice()
+                == [
+                    PyRep::Integer(drone_ball_id),
+                    PyRep::Integer(0),
+                    PyRep::None,
+                ]),
+        "expected notify OnDroneActivityChange(drone_id={drone_ball_id}, 0, None), got {return_notifs:?}"
     );
 
-    // Mid-range CmdReturnBay (> 2500m) must emit the 3-tuple ("OnDroneActivityChange", (droneID, 4, "returning"))
+    // Mid-range CmdReturnBay (> 2500m) emits Macho notification ("OnDroneActivityChange", [droneID, 4, "returning"]).
     let _ = handle
         .set_ball_position(drone_ball_id, ship_ball.position + DVec3::new(5_000.0, 0.0, 0.0))
         .await;
     let _ = handle.drain_observer_updates(ship_id).await;
+    let _ = ctx.drain_notifications_for_char(PILOT_A);
     let _ = ctx
         .dispatch_rpc(
             &mut sess,
@@ -317,16 +324,19 @@ async fn test_parity_misc_destiny_on_drone_activity_change() {
         .expect("drain observer updates after mid-range CmdReturnBay");
     let recall_actions = extract_destiny_actions(&recall_updates);
     assert!(
-        recall_actions
-            .iter()
-            .any(|(name, args)| name == "OnDroneActivityChange"
-                && args.as_slice()
-                    == [
-                        PyRep::Integer(drone_ball_id),
-                        PyRep::Integer(4),
-                        PyRep::String("returning".into()),
-                    ]),
-        "expected OnDroneActivityChange(drone_id={drone_ball_id}, activity_state=4, activity='returning') in DoDestinyUpdate, got {recall_actions:?}"
+        recall_actions.iter().all(|(name, _)| name != "OnDroneActivityChange"),
+        "OnDroneActivityChange must not be emitted in DoDestinyUpdate (#1188), got {recall_actions:?}"
+    );
+    let recall_notifs = ctx.drain_notifications_for_char(PILOT_A);
+    assert!(
+        recall_notifs.iter().any(|n| n.event == "OnDroneActivityChange"
+            && n.args.as_slice()
+                == [
+                    PyRep::Integer(drone_ball_id),
+                    PyRep::Integer(4),
+                    PyRep::String("returning".into()),
+                ]),
+        "expected notify OnDroneActivityChange(drone_id={drone_ball_id}, 4, 'returning'), got {recall_notifs:?}"
     );
 }
 

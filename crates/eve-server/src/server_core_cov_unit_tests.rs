@@ -379,33 +379,21 @@ fn normalize_notices_covers_bookmarks_bean_item_change_and_any_coercion() {
     let PyRep::List(folders) = &bm[0] else { panic!("expected list") };
     assert!(matches!(&folders[0], PyRep::Tuple(_)));
 
+    // #1188: OnBeanPrime client_compat rule removed; inputs pass through unchanged.
     assert_eq!(
         normalize_macho_notification("OnBeanPrime", Vec::new()),
-        vec![PyRep::List(Vec::new())]
+        Vec::<PyRep>::new()
     );
-    let bp_single_list = normalize_macho_notification(
-        "OnBeanPrime",
-        vec![PyRep::List(vec![PyRep::Integer(5)])],
+    let bp_kv_list = vec![PyRep::List(vec![PyRep::keyval([
+        ("errorID", PyRep::Integer(42)),
+        ("errorKeyHash", PyRep::Integer(99)),
+        ("logMode", PyRep::String("B".into())),
+    ])])];
+    assert_eq!(normalize_macho_notification("OnBeanPrime", bp_kv_list.clone()), bp_kv_list);
+    assert_eq!(
+        normalize_macho_notification("OnBeanPrime", vec![PyRep::String("raw".into()), PyRep::Integer(2)]),
+        vec![PyRep::String("raw".into()), PyRep::Integer(2)]
     );
-    assert_eq!(bp_single_list.len(), 1);
-    let bp_int = normalize_macho_notification("OnBeanPrime", vec![PyRep::Integer(42)]);
-    let PyRep::List(bp_items) = &bp_int[0] else { panic!("list") };
-    assert_eq!(bp_items[0].dict_get("errorID"), Some(&PyRep::Integer(42)));
-    let bp_dict = normalize_macho_notification(
-        "OnBeanPrime",
-        vec![PyRep::Dict(vec![(PyRep::String("k".into()), PyRep::Integer(1))])],
-    );
-    assert_eq!(bp_dict.len(), 1);
-    let bp_kv = normalize_macho_notification(
-        "OnBeanPrime",
-        vec![PyRep::keyval([("custom", PyRep::Integer(9))])],
-    );
-    assert_eq!(bp_kv.len(), 1);
-    let bp_str = normalize_macho_notification(
-        "OnBeanPrime",
-        vec![PyRep::String("raw".into()), PyRep::Integer(2)],
-    );
-    assert_eq!(bp_str.len(), 1);
 
     assert_eq!(normalize_macho_notification("OnOrganizationContactsUpdated", vec![PyRep::Integer(1)]).len(), 2);
     assert!(normalize_macho_notification("OnGodmaShipEffect", Vec::new()).is_empty());

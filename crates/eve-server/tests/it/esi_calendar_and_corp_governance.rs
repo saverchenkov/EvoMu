@@ -494,7 +494,8 @@ async fn test_esi_corp_structures_live_anchoring_services_fuel_and_profiles() {
         let rep = rpc(&ctx, &mut gm_sess, "slash", "SlashCmd", &[PyRep::String(format!("/giveitem {tid} {qty}"))]).await;
         gm_items.push(rep.dict_get("itemID").and_then(|v| v.as_i64()).expect("spawned itemID"));
     }
-    let trade_id = rpc(&ctx, &mut gm_sess, "trademgr", "InitiateTrade", &[PyRep::Integer(CEO_ID)]).await.dict_get("tradeContainerID").and_then(|v| v.as_i64()).expect("trade_id");
+    let trade_bid = rpc(&ctx, &mut gm_sess, "trademgr", "InitiateTrade", &[PyRep::Integer(CEO_ID)]).await.as_i64().expect("trade_bid");
+    let trade_id = rpc(&ctx, &mut gm_sess, "trademgr", "List", &[PyRep::Integer(trade_bid)]).await.dict_get("tradeContainerID").and_then(|v| v.as_i64()).expect("trade_id");
     for &item_id in &gm_items {
         rpc(&ctx, &mut gm_sess, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(item_id)]).await;
     }

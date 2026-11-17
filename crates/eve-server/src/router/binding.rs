@@ -10,7 +10,7 @@ use crate::router::{NotificationTarget, PendingMachoNotification};
 use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock, Weak};
 
@@ -28,6 +28,39 @@ pub(crate) const ERR_BOUND_OWNERSHIP: &str = "BoundObjectOwnershipViolation";
 
 /// Maximum concurrent bound objects retained per client session (`#882` / `C20`).
 pub const MAX_BOUND_OBJECTS_PER_SESSION: usize = 256;
+
+/// Separate per-`(session_id, service)` quota for notification-pushed sub-object bindings
+/// (e.g., incoming `trademgr` trade sessions) so cross-session notifications never evict
+/// unrelated bound services (`invbroker`, `dogmaIM`, `station`, etc.).
+pub const MAX_NOTIFICATION_SUB_OBJECTS_PER_TARGET_SERVICE: usize = 16;
+
+/// Maximum unattached (`session_id == 0`) bound objects retained across synthetic test sessions.
+const MAX_OFFLINE_BOUND_OBJECTS_TOTAL: usize = 256;
+
+static NOTIFICATION_BOUND_IDS: OnceLock<
+    RwLock<
+        HashMap<
+            u64,
+            (
+                Weak<RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>>,
+                HashSet<u64>,
+            ),
+        >,
+    >,
+> = OnceLock::new();
+
+fn notification_bound_ids(
+) -> &'static RwLock<
+    HashMap<
+        u64,
+        (
+            Weak<RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>>,
+            HashSet<u64>,
+        ),
+    >,
+> {
+    NOTIFICATION_BOUND_IDS.get_or_init(|| RwLock::new(HashMap::new()))
+}
 
 /// Retention window (`30s`, matching V24 `basesession.pyj::ObjectConnection.__del__ ->
 /// DisconnectObject(30)`) for in-flight read-only metadata calls (`invbroker`, owned
@@ -182,20 +215,28 @@ impl ServerContext {
 
     /// Releases all bound objects associated with `session_id` (called on disconnect or re-login).
     pub fn release_session_bindings(&self, session_id: u64) {
-        self.bound_objects
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, v| v.session_id != session_id);
+        {
+            let mut map = self
+                .bound_objects
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            map.retain(|_, v| v.session_id != session_id);
+            self.prune_notification_bound_ids_locked(&map);
+        }
         self.purge_transition_grace_for_session(session_id);
     }
 
     /// Releases all bound objects and Quasar notice subscriptions associated with `user_id`
     /// (called on ban, suspension, kick, or session displacement).
     pub fn release_user_bindings(&self, user_id: u64) {
-        self.bound_objects
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, v| v.user_id != user_id);
+        {
+            let mut map = self
+                .bound_objects
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            map.retain(|_, v| v.user_id != user_id);
+            self.prune_notification_bound_ids_locked(&map);
+        }
         self.purge_transition_grace_for_user(user_id);
         self.quasar_gateway.unsubscribe_user(user_id);
     }
@@ -253,10 +294,16 @@ impl ServerContext {
         let session_id = session.session_id;
         self.unregister_session_closer(session_id);
         if let Some(uid) = session.user_id {
-            self.bound_objects
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .retain(|_, v| !(v.session_id == session_id && (v.user_id == 0 || v.user_id == uid)));
+            {
+                let mut map = self
+                    .bound_objects
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                map.retain(|_, v| {
+                    !(v.session_id == session_id && (v.user_id == 0 || v.user_id == uid))
+                });
+                self.prune_notification_bound_ids_locked(&map);
+            }
             self.purge_transition_grace_for_session(session_id);
         } else {
             self.release_session_bindings(session_id);
@@ -372,6 +419,93 @@ impl ServerContext {
         }
     }
 
+    fn notification_bound_ids_snapshot(&self) -> HashSet<u64> {
+        let guard = notification_bound_ids()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        guard
+            .get(&self.instance_id)
+            .map(|(_, ids)| ids.clone())
+            .unwrap_or_default()
+    }
+
+    fn record_notification_bound_id_locked(
+        &self,
+        live_map: &HashMap<u64, BoundObjectEntry>,
+        bound_id: u64,
+    ) {
+        let owner = Arc::downgrade(&self.bound_objects);
+        let mut guard = notification_bound_ids()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.retain(|_, (w, _)| w.strong_count() > 0);
+        let (_, ids) = guard
+            .entry(self.instance_id)
+            .or_insert_with(|| (owner, HashSet::new()));
+        ids.retain(|id| live_map.contains_key(id));
+        ids.insert(bound_id);
+    }
+
+    fn prune_notification_bound_ids_locked(&self, live_map: &HashMap<u64, BoundObjectEntry>) {
+        let Some(lock) = NOTIFICATION_BOUND_IDS.get() else {
+            return;
+        };
+        let mut guard = lock.write().unwrap_or_else(|e| e.into_inner());
+        guard.retain(|_, (w, _)| w.strong_count() > 0);
+        if let Some((_, ids)) = guard.get_mut(&self.instance_id) {
+            ids.retain(|id| live_map.contains_key(id));
+            if ids.is_empty() {
+                guard.remove(&self.instance_id);
+            }
+        }
+    }
+
+    fn insert_bound_entry_record(&self, entry: BoundObjectEntry) {
+        let mut map = self
+            .bound_objects
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let notif_ids = self.notification_bound_ids_snapshot();
+        if entry.session_id != 0 {
+            let session_count = map
+                .values()
+                .filter(|e| e.session_id == entry.session_id && !notif_ids.contains(&e.bound_id))
+                .count();
+            if session_count >= MAX_BOUND_OBJECTS_PER_SESSION {
+                let excess = session_count - MAX_BOUND_OBJECTS_PER_SESSION + 1;
+                let mut session_bids: Vec<u64> = map
+                    .values()
+                    .filter(|e| {
+                        e.session_id == entry.session_id && !notif_ids.contains(&e.bound_id)
+                    })
+                    .map(|e| e.bound_id)
+                    .collect();
+                session_bids.sort_unstable();
+                for old_bid in session_bids.into_iter().take(excess) {
+                    map.remove(&old_bid);
+                }
+            }
+        } else {
+            let offline_count = map
+                .values()
+                .filter(|e| e.session_id == 0 && !notif_ids.contains(&e.bound_id))
+                .count();
+            if offline_count >= MAX_OFFLINE_BOUND_OBJECTS_TOTAL {
+                let excess = offline_count - MAX_OFFLINE_BOUND_OBJECTS_TOTAL + 1;
+                let mut offline_bids: Vec<u64> = map
+                    .values()
+                    .filter(|e| e.session_id == 0 && !notif_ids.contains(&e.bound_id))
+                    .map(|e| e.bound_id)
+                    .collect();
+                offline_bids.sort_unstable();
+                for old_bid in offline_bids.into_iter().take(excess) {
+                    map.remove(&old_bid);
+                }
+            }
+        }
+        map.insert(entry.bound_id, entry);
+    }
+
     fn insert_bound_entry(
         &self,
         session: &SessionState,
@@ -389,27 +523,104 @@ impl ServerContext {
             service,
             object_id,
         );
-        let mut map = self
-            .bound_objects
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let session_count = map
-            .values()
-            .filter(|e| e.session_id == session.session_id)
-            .count();
-        if session_count >= MAX_BOUND_OBJECTS_PER_SESSION {
-            let excess = session_count - MAX_BOUND_OBJECTS_PER_SESSION + 1;
-            let mut session_bids: Vec<u64> = map
-                .values()
-                .filter(|e| e.session_id == session.session_id)
-                .map(|e| e.bound_id)
-                .collect();
-            session_bids.sort_unstable();
-            for old_bid in session_bids.into_iter().take(excess) {
-                map.remove(&old_bid);
+        self.insert_bound_entry_record(entry);
+    }
+
+    /// Binds a notification-pushed sub-object for `char_id` on their active online session
+    /// (or explicit `fallback_session` in headless unit tests), returning `(bound_id, wire_rep)`.
+    /// Enforces a dedicated per-`(session_id, service)` quota and never evicts unrelated bound
+    /// services on the recipient's session (`RV-1188-P1-01`).
+    pub fn bind_sub_object_for_notification(
+        &self,
+        char_id: i64,
+        fallback_session: Option<&SessionState>,
+        service: &str,
+        object_id: i64,
+    ) -> Result<(u64, PyRep), BridgeRpcError> {
+        let fallback_pair = fallback_session
+            .filter(|s| s.character_id == Some(char_id))
+            .and_then(|s| s.user_id.map(|uid| (s.session_id, uid)));
+        let online_pair = fallback_pair.or_else(|| {
+            self.db.online_sessions_snapshot().into_iter().find_map(|(uid, sid)| {
+                self.db
+                    .get_online_session(uid)
+                    .filter(|rec| rec.character_id == Some(char_id))
+                    .map(|_| (sid, uid))
+            })
+        });
+        let (session_id, user_id) = match online_pair {
+            Some(pair) => pair,
+            None => {
+                if self.db.get_character(char_id).is_err() {
+                    return Err(BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: format!("character {char_id} not found for bound notification"),
+                        client_error: None,
+                    });
+                }
+                return Err(BridgeRpcError {
+                    code: "CharacterOffline".into(),
+                    message: format!("character {char_id} is offline for bound notification"),
+                    client_error: None,
+                });
             }
+        };
+        let bound_id = NEXT_BOUND_ID.fetch_add(1, Ordering::Relaxed);
+        let entry = self.make_bound_object_entry(
+            session_id,
+            bound_id,
+            user_id,
+            char_id,
+            service,
+            object_id,
+        );
+        let wire_rep = PyRep::SubStruct(Box::new(PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+            PyRep::ascii_bytes(entry.oid_str.clone()),
+            PyRep::Integer(entry.ref_id),
+        ])))));
+        {
+            let mut map = self
+                .bound_objects
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            if session_id != 0 {
+                let svc_count = map
+                    .values()
+                    .filter(|e| e.session_id == session_id && e.service == service)
+                    .count();
+                if svc_count >= MAX_NOTIFICATION_SUB_OBJECTS_PER_TARGET_SERVICE {
+                    return Err(BridgeRpcError {
+                        code: "TooManyBoundSubObjects".into(),
+                        message: format!(
+                            "Recipient session already holds the maximum {MAX_NOTIFICATION_SUB_OBJECTS_PER_TARGET_SERVICE} notification sub-objects for '{service}'"
+                        ),
+                        client_error: None,
+                    });
+                }
+            } else {
+                let char_svc_count = map
+                    .values()
+                    .filter(|e| {
+                        e.session_id == 0 && e.character_id == char_id && e.service == service
+                    })
+                    .count();
+                let offline_total = map.values().filter(|e| e.session_id == 0).count();
+                if char_svc_count >= MAX_NOTIFICATION_SUB_OBJECTS_PER_TARGET_SERVICE
+                    || offline_total >= MAX_OFFLINE_BOUND_OBJECTS_TOTAL
+                {
+                    return Err(BridgeRpcError {
+                        code: "TooManyBoundSubObjects".into(),
+                        message: format!(
+                            "Synthetic offline notification sub-object limit reached for '{service}'"
+                        ),
+                        client_error: None,
+                    });
+                }
+            }
+            map.insert(entry.bound_id, entry);
+            self.record_notification_bound_id_locked(&map, bound_id);
         }
-        map.insert(bound_id, entry);
+        Ok((bound_id, wire_rep))
     }
 
     /// Parses a bound object ID from either an `"N=<nodeID>:<boundID>"` string or an integer `bound_id`.
@@ -470,6 +681,9 @@ impl ServerContext {
                     map.remove(&bid);
                     count += 1;
                 }
+            }
+            if count > 0 {
+                self.prune_notification_bound_ids_locked(&map);
             }
             count
         };
@@ -555,28 +769,34 @@ impl ServerContext {
         None
     }
 
+    /// Wire form (`SubStruct(SubStream((b"N={nodeID}:{boundID}", refID)))`) of a bound-object
+    /// reference for Macho notifications delivered over `:26000`.
+    pub fn bound_object_wire_rep(&self, bound_id: u64) -> PyRep {
+        let (oid_str, ref_id) = self
+            .bound_objects
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&bound_id)
+            .map(|b| (b.oid_str.clone(), b.ref_id))
+            .unwrap_or_else(|| {
+                (
+                    format!("N={}:{bound_id}", eve_machonet::MACHO_PROXY_NODE_ID),
+                    (self.now_unix() as i64 + 11_644_473_600).saturating_mul(10_000_000),
+                )
+            });
+        PyRep::SubStruct(Box::new(PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+            PyRep::ascii_bytes(oid_str),
+            PyRep::Integer(ref_id),
+        ])))))
+    }
+
     /// Wire form of a bound-object reference. The native client (`caller_trace == "machoNet:26000"`)
     /// gets `SubStruct(SubStream((b"N={nodeID}:{boundID}", refID)))`, which `ObjectCall.GetObjectID`
     /// (`carbon/common/script/net/ObjectCallGPCS.pyj`) / `ParseObjectID` turn into a remote object;
     /// the JSON bridge gets the plain bound ID.
     pub fn bound_object_rep(&self, bound_id: u64, caller_trace: Option<&str>) -> PyRep {
         if caller_trace == Some("machoNet:26000") {
-            let (oid_str, ref_id) = self
-                .bound_objects
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&bound_id)
-                .map(|b| (b.oid_str.clone(), b.ref_id))
-                .unwrap_or_else(|| {
-                    (
-                        format!("N={}:{bound_id}", eve_machonet::MACHO_PROXY_NODE_ID),
-                        (self.now_unix() as i64 + 11_644_473_600).saturating_mul(10_000_000),
-                    )
-                });
-            PyRep::SubStruct(Box::new(PyRep::SubStream(Box::new(PyRep::Tuple(vec![
-                PyRep::ascii_bytes(oid_str),
-                PyRep::Integer(ref_id),
-            ])))))
+            self.bound_object_wire_rep(bound_id)
         } else {
             PyRep::Integer(bound_id as i64)
         }
@@ -1252,6 +1472,7 @@ impl ServerContext {
                     removed.push(entry);
                 }
             }
+            self.prune_notification_bound_ids_locked(&map);
         }
         if reason != "logout" {
             self.record_transition_grace_bindings(&removed);
@@ -1268,9 +1489,38 @@ impl ServerContext {
             .unwrap_or_else(|e| e.into_inner());
         if map.get(&bound_id).is_some_and(|e| e.session_id == session_id) {
             map.remove(&bound_id);
+            self.prune_notification_bound_ids_locked(&map);
         }
         drop(map);
         self.purge_transition_grace_entry(session_id, bound_id);
+    }
+
+    /// Releases all bound objects across sessions for `(service, object_id)`
+    /// (e.g., when a shared station direct trade window completes or cancels).
+    pub fn release_bound_objects_for_object(&self, service: &str, object_id: i64) -> usize {
+        let removed_count = {
+            let mut map = self
+                .bound_objects
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let target_bids: Vec<u64> = map
+                .iter()
+                .filter(|(_, e)| e.service == service && e.object_id == object_id)
+                .map(|(&bid, _)| bid)
+                .collect();
+            for &bid in &target_bids {
+                map.remove(&bid);
+            }
+            if !target_bids.is_empty() {
+                self.prune_notification_bound_ids_locked(&map);
+            }
+            target_bids.len()
+        };
+        self.purge_transition_grace_with(
+            |_, v| v.entry.service == service && v.entry.object_id == object_id,
+            |_, _| false,
+        );
+        removed_count
     }
 
     /// Releases a single bound object `bound_id` after verifying session ownership.
@@ -1280,11 +1530,17 @@ impl ServerContext {
         bound_id: u64,
     ) -> Result<(), BridgeRpcError> {
         let _ = self.verify_bound_object(session, bound_id)?;
-        let removed = self
-            .bound_objects
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&bound_id);
+        let removed = {
+            let mut map = self
+                .bound_objects
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let entry = map.remove(&bound_id);
+            if entry.is_some() {
+                self.prune_notification_bound_ids_locked(&map);
+            }
+            entry
+        };
         if let Some(entry) = removed {
             self.purge_transition_grace_with(|&bid, _| bid == bound_id, |_, _| false);
             self.emit_macho_object_disconnect(&entry);

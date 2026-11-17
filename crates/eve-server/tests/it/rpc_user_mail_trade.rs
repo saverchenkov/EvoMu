@@ -936,7 +936,7 @@ async fn test_trade_and_contact_blocklist() {
     });
 
     // 1. InitiateTrade
-    let init = rpc(
+    let init_bid = rpc(
         &ctx,
         &mut s1,
         "trademgr",
@@ -944,28 +944,57 @@ async fn test_trade_and_contact_blocklist() {
         &[PyRep::Integer(P2)],
     )
     .await
-    .expect("InitiateTrade");
-    let PyRep::KeyVal(init_kv) = init else {
-        panic!("expected KeyVal");
+    .expect("InitiateTrade")
+    .as_i64()
+    .expect("bound trade ID from InitiateTrade");
+    let list_rep = rpc(
+        &ctx,
+        &mut s1,
+        "trademgr",
+        "List",
+        &[PyRep::Integer(init_bid)],
+    )
+    .await
+    .expect("trademgr.List");
+    let PyRep::KeyVal(init_kv) = list_rep else {
+        panic!("expected KeyVal from List");
     };
     let trade_id = init_kv
         .get("tradeContainerID")
         .and_then(|v| v.as_i64())
         .expect("tradeContainerID");
     assert!(trade_id > 0);
-    assert_eq!(init_kv.get("myID"), Some(&PyRep::Integer(P1)));
-    assert_eq!(init_kv.get("herID"), Some(&PyRep::Integer(P2)));
+    assert_eq!(
+        init_kv.get("traders"),
+        Some(&PyRep::List(vec![PyRep::Integer(P1), PyRep::Integer(P2)]))
+    );
     assert_eq!(
         init_kv.get("stationID"),
         Some(&PyRep::Integer(JITA_STATION_ID))
     );
 
     let n1 = ctx.drain_notifications_for_char(P1);
-    assert!(n1.iter().any(|n| n.event == "OnTradeInitiate"));
+    assert!(
+        !n1.iter().any(|n| n.event == "OnTradeInitiate"),
+        "Initiator must receive tradeSession from CallRsp, not OnTradeInitiate: {n1:?}"
+    );
     let n2 = ctx.drain_notifications_for_char(P2);
-    assert!(n2.iter().any(|n| n.event == "OnTradeInitiate"));
+    assert!(n2.iter().any(|n| {
+        n.event == "OnTradeInitiate"
+            && n.args.first() == Some(&PyRep::Integer(P1))
+            && matches!(n.args.get(1), Some(PyRep::SubStruct(_)))
+    }));
 
-    // 2. BlockOwners
+    // Duplicate active InitiateTrade must fail until existing trade closes.
+    let dup_err = rpc(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)])
+        .await
+        .expect_err("duplicate active trade must fail");
+    assert_eq!(dup_err.code, "TradeAlreadyActive");
+    rpc(&ctx, &mut s1, "trademgr", "Abort", &[PyRep::Integer(trade_id)])
+        .await
+        .expect("Abort active trade");
+
+    // 2. BlockOwners (and verify ContactBlocked blocks P2 from initiating trade with P1)
     let bo = rpc(
         &ctx,
         &mut s1,
@@ -983,6 +1012,11 @@ async fn test_trade_and_contact_blocklist() {
         bo_kv.get("blockedIDs"),
         Some(&PyRep::List(vec![PyRep::Integer(P2)]))
     );
+    let blocked_trade_err =
+        rpc(&ctx, &mut s2, "trademgr", "InitiateTrade", &[PyRep::Integer(P1)])
+            .await
+            .expect_err("blocked contact must not initiate trade");
+    assert_eq!(blocked_trade_err.code, "ContactBlocked");
 
     let is_blocked = ctx
         .esi_state
@@ -1022,4 +1056,236 @@ async fn test_trade_and_contact_blocklist() {
         .and_then(|c| c.iter().find(|e| e.contact_id == P2).map(|e| e.is_blocked))
         .unwrap_or(true);
     assert!(!is_blocked_after);
+}
+
+#[tokio::test]
+async fn test_trade_initiate_bound_session_and_manifest_wire() {
+    // parity: notify:OnTradeInitiate
+    eve_testkit::attest(&["notify:OnTradeInitiate"]);
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    ctx.db.with_mut_snapshot(|snap| {
+        for pid in [P1, P2] {
+            if let Some(ch) = snap.characters.get_mut(&pid) {
+                ch.station_id = Some(JITA_STATION_ID);
+                ch.structure_id = None;
+                ch.solar_system_id = 30_000_142;
+                if pid == P2 && ch.balance.0 < 5_000_000 {
+                    ch.balance = eve_db::IskCents(5_000_000);
+                }
+            }
+        }
+    });
+    let trit_id = seed_item(&ctx, 34, P1, 100);
+    let p1_bal_before = ctx.db.with_snapshot(|s| s.characters[&P1].balance.0);
+
+    let kw = HashMap::new();
+    let mut h1 = common::new_wire_harness(&ctx, 118_901);
+    h1.call_ok(
+        "authentication",
+        None,
+        "Login",
+        &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+        &kw,
+    )
+    .await;
+    h1.call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(P1)], &kw)
+        .await;
+
+    let mut h2 = common::new_wire_harness(&ctx, 118_902);
+    h2.call_ok(
+        "authentication",
+        None,
+        "Login",
+        &[PyRep::String("other".into()), PyRep::String("other-secret".into())],
+        &kw,
+    )
+    .await;
+    h2.call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(P2)], &kw)
+        .await;
+    let _ = h1.drain_pending_frames();
+    let _ = h2.drain_pending_frames();
+    let mut h1 = h1.with_mode(eve_testkit::client_harness::ContractValidationMode::Strict);
+    let mut h2 = h2.with_mode(eve_testkit::client_harness::ContractValidationMode::Strict);
+
+    // 1. InitiateTrade returns bound tradeSession wire SubStruct and pushes bound rep ONLY to partner via OnTradeInitiate.
+    let existing_partner_inv = h2
+        .call_ok(
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Tuple(vec![PyRep::Integer(JITA_STATION_ID), PyRep::Integer(3)]), PyRep::None],
+            &kw,
+        )
+        .await;
+    let existing_partner_inv_oid =
+        eve_testkit::client_harness::extract_bound_id_from_wire_rep(&existing_partner_inv)
+            .expect("partner bound invbroker oid");
+
+    let init_rep = h1
+        .call_ok("trademgr", None, "InitiateTrade", &[PyRep::Integer(P2)], &kw)
+        .await;
+    assert!(
+        matches!(init_rep, PyRep::SubStruct(_)),
+        "trademgr.InitiateTrade on wire must return SubStruct bound object rep, got {init_rep:?}"
+    );
+    let oid_a = eve_testkit::client_harness::extract_bound_id_from_wire_rep(&init_rep)
+        .expect("initiator bound tradeSession id");
+
+    let frames_a = h1.drain_pending_frames();
+    assert!(
+        !frames_a.iter().any(|f| {
+            matches!(
+                &f.kind,
+                eve_testkit::client_harness::ClientWireFrameKind::Notification { event, .. }
+                    if event == "OnTradeInitiate"
+            )
+        }),
+        "initiator wire session must receive 0 OnTradeInitiate frames, got {frames_a:?}"
+    );
+    assert!(
+        ctx.bound_objects.read().unwrap().contains_key(&existing_partner_inv_oid),
+        "InitiateTrade must never evict partner's existing bound services"
+    );
+
+    let frames_b = h2.drain_pending_frames();
+    let notif_args = frames_b
+        .iter()
+        .find_map(|f| match &f.kind {
+            eve_testkit::client_harness::ClientWireFrameKind::Notification { event, args }
+                if event == "OnTradeInitiate" =>
+            {
+                Some(args)
+            }
+            _ => None,
+        })
+        .expect("partner must receive wire OnTradeInitiate frame");
+    assert_eq!(notif_args.len(), 3);
+    assert_eq!(notif_args[0], PyRep::Integer(P1));
+    assert!(
+        matches!(notif_args[1], PyRep::SubStruct(_)),
+        "OnTradeInitiate arg1 must be SubStruct bound tradeSession rep, got {:?}",
+        notif_args[1]
+    );
+    assert_eq!(notif_args[2], PyRep::List(vec![]));
+    let oid_b = eve_testkit::client_harness::extract_bound_id_from_wire_rep(&notif_args[1])
+        .expect("partner bound tradeSession id from OnTradeInitiate");
+    assert_ne!(oid_a, oid_b, "each party receives its own bound session handle");
+
+    // 2. Partner exercises bound tradeSession methods: List(), GetSelfInvItem(), GetCapacity().
+    let list_initial = h2.call_ok("trademgr", Some(oid_b), "List", &[], &kw).await;
+    let trade_id = list_initial
+        .dict_get("tradeContainerID")
+        .and_then(|v| v.as_i64())
+        .expect("List.tradeContainerID");
+    assert!(trade_id > 0);
+    assert_eq!(
+        list_initial.dict_get("traders"),
+        Some(&PyRep::List(vec![PyRep::Integer(P1), PyRep::Integer(P2)]))
+    );
+    let self_item = h2
+        .call_ok("trademgr", Some(oid_b), "GetSelfInvItem", &[], &kw)
+        .await;
+    assert_eq!(self_item.dict_get("itemID"), Some(&PyRep::Integer(trade_id)));
+    let cap_empty = h2
+        .call_ok("trademgr", Some(oid_b), "GetCapacity", &[], &kw)
+        .await;
+    assert!(cap_empty.dict_get("capacity").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
+    assert_eq!(cap_empty.dict_get("used").and_then(|v| v.as_f64()), Some(0.0));
+
+    // 3. Initiator stages partial stack via V24 `Add(itemID, sourceLoc, qty=...)`; partner lists & checks capacity.
+    let mut qty_kw = HashMap::new();
+    qty_kw.insert("qty".to_string(), PyRep::Integer(40));
+    h1.call_ok(
+        "trademgr",
+        Some(oid_a),
+        "Add",
+        &[PyRep::Integer(trit_id), PyRep::Integer(JITA_STATION_ID)],
+        &qty_kw,
+    )
+    .await;
+    let list_with_item = h2.call_ok("trademgr", Some(oid_b), "List", &[], &kw).await;
+    let PyRep::List(items) = list_with_item
+        .dict_get("items")
+        .expect("List.items after Add")
+    else {
+        panic!("expected List for List.items");
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].dict_get("itemID"), Some(&PyRep::Integer(trit_id)));
+    assert_eq!(items[0].dict_get("locationID"), Some(&PyRep::Integer(trade_id)));
+    assert_eq!(items[0].dict_get("ownerID"), Some(&PyRep::Integer(P1)));
+    assert_eq!(items[0].dict_get("quantity"), Some(&PyRep::Integer(40)));
+    let cap_used = h2
+        .call_ok("trademgr", Some(oid_b), "GetCapacity", &[], &kw)
+        .await;
+    assert!(cap_used.dict_get("used").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
+
+    h2.call_ok("trademgr", Some(oid_b), "OfferMoney", &[PyRep::Real(10_000.0)], &kw)
+        .await;
+    let _ = h1.drain_pending_frames();
+    let _ = h2.drain_pending_frames();
+
+    // 4. Stale manifest on MakeOffer emits OnTradeOfferReset(tradeContainerID, True) and does not complete.
+    let stale_manifest = PyRep::keyval([
+        ("tradeContainerID", PyRep::Integer(trade_id)),
+        ("money", PyRep::List(vec![PyRep::Real(0.0), PyRep::Real(5_000.0)])),
+        ("tradeItems", PyRep::PySet(vec![PyRep::Integer(trit_id)])),
+    ]);
+    let mismatch_rep = h1
+        .call_ok("trademgr", Some(oid_a), "MakeOffer", &[stale_manifest], &kw)
+        .await;
+    assert_eq!(mismatch_rep.dict_get("completed"), Some(&PyRep::Bool(false)));
+    let reset_frames = h2.drain_pending_frames();
+    assert!(reset_frames.iter().any(|f| {
+        matches!(
+            &f.kind,
+            eve_testkit::client_harness::ClientWireFrameKind::Notification { event, args }
+                if event == "OnTradeOfferReset"
+                    && args == &[PyRep::Integer(trade_id), PyRep::Bool(true)]
+        )
+    }));
+
+    // 5. Matching V24 manifest from both parties completes trade and emits OnTradeComplete on wire.
+    let valid_manifest = PyRep::keyval([
+        ("tradeContainerID", PyRep::Integer(trade_id)),
+        ("money", PyRep::List(vec![PyRep::Real(0.0), PyRep::Real(10_000.0)])),
+        ("tradeItems", PyRep::PySet(vec![PyRep::Integer(trit_id)])),
+    ]);
+    let acc_a = h1
+        .call_ok("trademgr", Some(oid_a), "MakeOffer", &[valid_manifest.clone()], &kw)
+        .await;
+    assert_eq!(acc_a.dict_get("completed"), Some(&PyRep::Bool(false)));
+    let acc_b = h2
+        .call_ok("trademgr", Some(oid_b), "MakeOffer", &[valid_manifest], &kw)
+        .await;
+    assert_eq!(acc_b.dict_get("completed"), Some(&PyRep::Bool(true)));
+    let complete_frames = h1.drain_pending_frames();
+    assert!(complete_frames.iter().any(|f| {
+        matches!(
+            &f.kind,
+            eve_testkit::client_harness::ClientWireFrameKind::Notification { event, args }
+                if event == "OnTradeComplete" && args.first() == Some(&PyRep::Integer(trade_id))
+        )
+    }));
+    let p1_bal_after = ctx.db.with_snapshot(|s| s.characters[&P1].balance.0);
+    assert_eq!(p1_bal_after - p1_bal_before, 1_000_000);
+    let p2_trit: i32 = ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .filter(|i| i.owner_id == P2 && i.type_id == 34 && i.location_id == JITA_STATION_ID)
+            .map(|i| i.quantity)
+            .sum()
+    });
+    assert_eq!(p2_trit, 40);
+    assert!(
+        !ctx.bound_objects.read().unwrap().contains_key(&oid_a)
+            && !ctx.bound_objects.read().unwrap().contains_key(&oid_b),
+        "completed trade must release bound tradeSession handles on both sessions"
+    );
+    assert!(
+        ctx.bound_objects.read().unwrap().contains_key(&existing_partner_inv_oid),
+        "partner's invbroker handle must remain bound after trade lifecycle"
+    );
 }

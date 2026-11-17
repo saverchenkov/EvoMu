@@ -243,22 +243,17 @@ fn combat_state_rng_damage_warp_bubbles_grid_bounds_docking_and_mushroom_edges()
     assert!(park.accept_docking_at(999, 60_000_001, DVec3::ZERO).is_none());
     let docked = park.accept_docking(10, 60_999_999).unwrap();
     assert_eq!(docked.id, 10);
-    assert!(park.drain_observer_events(10).iter().any(|e| matches!(
-        e,
-        DestinyEvent::OnDockingAccepted {
-            end_pos,
-            station_id: 60_999_999,
-            ..
-        } if *end_pos == [0.0, 0.0, 0.0]
-    )));
+    assert!(!park.balls.contains_key(&10));
 
     park.add_ball(make_ball(11, DVec3::ZERO, MovementMode::Stop));
     park.observer_events.clear();
+    assert!(park.emit_client_controller_event(11, None, "DockPrep", 1, None));
     assert!(park.accept_docking_at(11, 60_000_001, DVec3::X).is_some());
+    assert!(!park.balls.contains_key(&11));
     assert!(park
         .drain_observer_events(11)
         .iter()
-        .any(|e| matches!(e, DestinyEvent::OnDockingAccepted { .. })));
+        .any(|e| matches!(e, DestinyEvent::OnClientControllerEvent { .. })));
 }
 
 #[test]

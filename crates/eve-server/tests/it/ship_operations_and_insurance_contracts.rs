@@ -971,15 +971,18 @@ async fn test_r2_track5_economy_market_and_trading() {
 
     // 3. Issue #100: Direct trade rejects OfferMoney / MakeOffer if a participant undocks
     let char_b = 90_000_002i64;
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(cb) = s.characters.get_mut(&char_b) {
-            cb.station_id = Some(station_id);
-        }
+    let char_b_uid = ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&char_b).expect("char_b");
+        ch.station_id = Some(station_id);
+        ch.user_id
     });
+    ctx.db
+        .acquire_online_lock(char_b_uid, 8952, Some(char_b), false, ctx.now_unix())
+        .unwrap();
     let init_res = ctx.dispatch_rpc(&mut sess, "trademgr", None, "InitiateTrade", &[PyRep::Integer(char_b)], &kw, None).await.unwrap();
     let trade_id = match init_res {
         PyRep::KeyVal(kv) => kv.get("tradeContainerID").or_else(|| kv.get("tradeID")).and_then(|v| v.as_i64()).unwrap_or(0),
-        PyRep::Integer(id) => id,
+        PyRep::Integer(bid) => ctx.dispatch_rpc(&mut sess, "trademgr", None, "List", &[PyRep::Integer(bid)], &kw, None).await.unwrap().dict_get("tradeContainerID").and_then(|v| v.as_i64()).unwrap_or(0),
         _ => 0,
     };
     ctx.db.with_mut_snapshot(|s| {

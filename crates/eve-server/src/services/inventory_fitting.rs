@@ -94,6 +94,16 @@ pub async fn handle(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    if service == "trademgr" && method != "InitiateTrade" {
+        return super::wallet_services_ext::handle_trademgr_rpc(
+            ctx,
+            session,
+            bound_entry,
+            method,
+            args,
+            kwargs,
+        );
+    }
     if service == "dogmaIM"
         && matches!(method, "Activate" | "Overload")
         && session.ship_id.is_some_and(|sid| {

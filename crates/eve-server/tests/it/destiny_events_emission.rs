@@ -514,15 +514,13 @@ async fn test_slim_item_interactive_and_packaged_action_on_eject_and_board() {
 
 #[tokio::test]
 async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
-    // parity: destiny:SetBallFree, destiny:SetBallRadius, destiny:SetBallHarmonic, destiny:OnDockingAccepted
-    // parity: destiny:OnSovereigntyChanged, destiny:OnClientControllerEvent, rpc:posMgr.AnchorStructure, rpc:sovMgr.AcquireSkyhooks
+    // parity: destiny:SetBallFree, destiny:SetBallRadius, destiny:SetBallHarmonic
+    // parity: destiny:OnSovereigntyChanged, rpc:posMgr.AnchorStructure, rpc:sovMgr.AcquireSkyhooks
     eve_testkit::attest(&[
         "destiny:SetBallFree",
         "destiny:SetBallRadius",
         "destiny:SetBallHarmonic",
-        "destiny:OnDockingAccepted",
         "destiny:OnSovereigntyChanged",
-        "destiny:OnClientControllerEvent",
     ]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -685,14 +683,17 @@ async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
     assert_eq!(sov.len(), 1);
     assert_eq!(sov[0].as_slice(), &[PyRep::Integer(null_sys as i64), PyRep::Integer(99_000_123)]);
 
-    // Docking into Citadel 1_049_500_002 emits OnDockingAccepted([ship_x, ship_y, ship_z], [station_x, station_y, station_z], stationID).
+    // Docking into Citadel 1_049_500_002 emits Macho notification OnDockingAccepted(itemID) and no destiny OnDockingAccepted (#1188).
+    let _ = ctx.drain_notifications_for_char(PILOT);
     ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "structureDocking", None, "Dock", &[PyRep::Integer(1_049_500_002)], &kw, None).await.expect("Dock");
     let dock_acts = drain_actions(&null_handle, ship_id).await;
-    let ship_pos_list = PyRep::List(vec![PyRep::Real(ball.position.x), PyRep::Real(ball.position.y), PyRep::Real(ball.position.z)]);
-    let struct_pos_list = PyRep::List(vec![PyRep::Real(ball.position.x + 500.0), PyRep::Real(ball.position.y - 250.0), PyRep::Real(ball.position.z + 100.0)]);
-    assert_eq!(
-        find(&dock_acts, "OnDockingAccepted")[0].as_slice(),
-        &[ship_pos_list, struct_pos_list, PyRep::Integer(1_049_500_002)]
+    assert!(dock_acts.iter().all(|(name, _)| name != "OnDockingAccepted"));
+    let dock_notifs = ctx.drain_notifications_for_char(PILOT);
+    assert!(
+        dock_notifs
+            .iter()
+            .any(|n| n.event == "OnDockingAccepted" && n.args == vec![PyRep::Integer(1_049_500_002)]),
+        "expected notify OnDockingAccepted(1_049_500_002), got {dock_notifs:?}"
     );
 }

@@ -221,10 +221,17 @@ async fn test_journey_multiplayer_presence() {
     call_bound_rpc(&ctx, &mut sess2, "beyonce", bey2, "CmdDock", &[PyRep::Integer(60_003_760)]).await.expect("CmdDock 2");
 
     let trade_item_id = ctx.db.add_or_stack_item(90_000_001, 60_003_760, InventoryFlag::Hangar, 34, 100).unwrap().item_id;
-    let trade = call_rpc(&ctx, &mut sess1, "trademgr", "InitiateTrade", &[PyRep::Integer(90_000_002)])
+    let trade_bid = call_rpc(&ctx, &mut sess1, "trademgr", "InitiateTrade", &[PyRep::Integer(90_000_002)])
         .await
-        .expect("InitiateTrade");
-    let trade_id = trade.dict_get("tradeContainerID").and_then(|v| v.as_i64()).unwrap_or(1);
+        .expect("InitiateTrade")
+        .as_i64()
+        .expect("bound trade id");
+    let trade_id = call_rpc(&ctx, &mut sess1, "trademgr", "List", &[PyRep::Integer(trade_bid)])
+        .await
+        .expect("List trade")
+        .dict_get("tradeContainerID")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1);
     call_rpc(&ctx, &mut sess1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(trade_item_id), PyRep::Integer(100)])
         .await
         .expect("AddItem");
