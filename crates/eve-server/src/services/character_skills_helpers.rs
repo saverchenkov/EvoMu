@@ -3,8 +3,9 @@
 #![forbid(unsafe_code)]
 
 use super::{
-    alpha_skill_cap_for_character, catch_up_skill_queue, effective_character_attributes,
-    lookup_effective_attr_from_tuple, skill_queue_entry_duration_with_attrs,
+    alpha_skill_cap_for_character, catch_up_skill_queue, check_skill_type_prerequisites,
+    effective_character_attributes, is_trainable_injected_skill, lookup_effective_attr_from_tuple,
+    skill_queue_entry_duration_with_attrs, validate_published_skill_type,
 };
 use crate::formulas::{
     skill_injector_sp_yield, skill_training_time_seconds_with_multiplier, sp_for_skill_level,
@@ -145,45 +146,10 @@ fn check_skill_prerequisites(
     skills_map: &HashMap<TypeId, TrainedSkillRecord>,
     skill_type_id: TypeId,
 ) -> Result<(), BridgeRpcError> {
-    let Some(skill_type) = ctx.sde.types.get(&skill_type_id) else {
-        return Err(err(
-            "InvalidSkillType",
-            format!("Skill type {skill_type_id} not found in SDE"),
-        ));
-    };
-    if skill_type.category_id != 16 {
-        return Err(err(
-            "InvalidSkillType",
-            format!("Type {skill_type_id} is not a skill (category 16)"),
-        ));
-    }
-    for (skill_attr, level_attr) in eve_dogma::REQUIRED_SKILL_ATTR_IDS
-        .into_iter()
-        .zip(eve_dogma::REQUIRED_SKILL_LEVEL_ATTR_IDS)
-    {
-        if let Some(&req_skill_f) = skill_type.default_attributes.get(&skill_attr) {
-            let req_skill_id = req_skill_f as TypeId;
-            if req_skill_id > 0 {
-                let req_lvl = skill_type
-                    .default_attributes
-                    .get(&level_attr)
-                    .copied()
-                    .unwrap_or(1.0)
-                    .max(1.0) as u8;
-                let trained_lvl = skills_map.get(&req_skill_id).map(|s| s.level).unwrap_or(0);
-                if trained_lvl < req_lvl {
-                    return Err(err(
-                        "SkillPrerequisiteNotMet",
-                        format!(
-                            "Skill {} (type {skill_type_id}) requires prerequisite skill {req_skill_id} at level {req_lvl}",
-                            skill_type.name
-                        ),
-                    ));
-                }
-            }
-        }
-    }
-    Ok(())
+    let skill_type = validate_published_skill_type(&ctx.sde, skill_type_id)?;
+    check_skill_type_prerequisites(skill_type, |req_skill_id| {
+        skills_map.get(&req_skill_id).map(|s| s.level).unwrap_or(0)
+    })
 }
 
 fn parse_skills_and_levels_arg(arg: Option<&PyRep>) -> Result<Vec<(TypeId, u8)>, BridgeRpcError> {
@@ -258,10 +224,14 @@ fn handle_get_free_skill_points_applied_to_queue(
         let Some(queue) = snap.skill_queues.get(&char_id) else {
             return Vec::new();
         };
+        let skills_map = snap.skills.get(&char_id);
         let mut per_skill: BTreeMap<TypeId, f64> = BTreeMap::new();
         for q in queue {
             if budget <= 0.0 {
                 break;
+            }
+            if !skills_map.is_some_and(|m| is_trainable_injected_skill(&ctx.sde, m, q.type_id)) {
+                continue;
             }
             if ch.clone_grade <= 1
                 && q.target_level > alpha_skill_cap_for_character(&ctx.sde, ch.race_id, q.type_id)
@@ -331,6 +301,9 @@ fn handle_apply_free_skill_points_to_queue(
         let mut total_applied = 0.0;
 
         for mut q in queue {
+            if !is_trainable_injected_skill(&ctx.sde, skills_map, q.type_id) {
+                continue;
+            }
             if ch_snap.clone_grade <= 1
                 && q.target_level > alpha_skill_cap_for_character(&ctx.sde, ch_snap.race_id, q.type_id)
             {
@@ -481,9 +454,11 @@ fn handle_get_free_skill_points_applied_to_skills(
             if budget <= 0.0 {
                 break;
             }
-            let Some(existing) = skills_map.and_then(|m| m.get(&tid)) else {
+            let Some(m) = skills_map.filter(|m| is_trainable_injected_skill(&ctx.sde, m, tid))
+            else {
                 continue;
             };
+            let existing = &m[&tid];
             let max_lvl = if ch.clone_grade <= 1 {
                 alpha_skill_cap_for_character(&ctx.sde, ch.race_id, tid)
             } else {

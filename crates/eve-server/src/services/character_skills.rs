@@ -38,6 +38,78 @@ pub(crate) use super::jump_clone_names::{
     serialize_doll_pyrep, skill_queue_entry_duration_with_attrs, skill_queue_rowset,
 };
 
+/// Validates that `skill_type_id` exists in `sde` as a published skill (`category_id == 16`).
+pub(crate) fn validate_published_skill_type(
+    sde: &eve_sde::SdeRegistry,
+    skill_type_id: TypeId,
+) -> Result<&eve_sde::InvType, BridgeRpcError> {
+    let Some(skill_type) = sde.types.get(&skill_type_id) else {
+        return Err(BridgeRpcError {
+            code: "InvalidSkillType".into(),
+            message: format!("Skill type {skill_type_id} not found in SDE"),
+            client_error: None,
+        });
+    };
+    if skill_type.category_id != 16 || !skill_type.published {
+        return Err(BridgeRpcError {
+            code: "InvalidSkillType".into(),
+            message: format!("Type {skill_type_id} is not a published skill (category 16)"),
+            client_error: None,
+        });
+    }
+    Ok(skill_type)
+}
+
+/// Checks all 6 Dogma prerequisite skill slots of `skill_type` against `level_lookup`.
+pub(crate) fn check_skill_type_prerequisites<F>(
+    skill_type: &eve_sde::InvType,
+    level_lookup: F,
+) -> Result<(), BridgeRpcError>
+where
+    F: Fn(TypeId) -> u8,
+{
+    for (skill_attr, level_attr) in eve_dogma::REQUIRED_SKILL_ATTR_IDS
+        .into_iter()
+        .zip(eve_dogma::REQUIRED_SKILL_LEVEL_ATTR_IDS)
+    {
+        if let Some(&req_skill_f) = skill_type.default_attributes.get(&skill_attr) {
+            let req_skill_id = req_skill_f as TypeId;
+            if req_skill_id > 0 {
+                let req_lvl = skill_type
+                    .default_attributes
+                    .get(&level_attr)
+                    .copied()
+                    .unwrap_or(1.0)
+                    .max(1.0) as u8;
+                if level_lookup(req_skill_id) < req_lvl {
+                    return Err(BridgeRpcError {
+                        code: "SkillPrerequisiteNotMet".into(),
+                        message: format!(
+                            "Skill {} (type {}) requires prerequisite skill {req_skill_id} at level {req_lvl}",
+                            skill_type.name, skill_type.type_id
+                        ),
+                        client_error: None,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns `true` iff `type_id` is currently injected in `skills_map` and is a published skill.
+pub(crate) fn is_trainable_injected_skill(
+    sde: &eve_sde::SdeRegistry,
+    skills_map: &HashMap<TypeId, TrainedSkillRecord>,
+    type_id: TypeId,
+) -> bool {
+    skills_map.contains_key(&type_id)
+        && sde
+            .types
+            .get(&type_id)
+            .is_some_and(|t| t.category_id == 16 && t.published)
+}
+
 /// Offline / login skill queue catch-up (`feat:skills.skill-catch-up`):
 /// computes elapsed time since `started_at_unix` on the head of `char_id`'s queue,
 /// completes any finished skill levels in order, and advances partial SP on the current training skill.
@@ -121,6 +193,9 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
             let skills_map = snap.skills.entry(char_id).or_default();
 
             for mut q in queue {
+                if !is_trainable_injected_skill(&sde, skills_map, q.type_id) {
+                    continue;
+                }
                 if rem_secs <= 0.0 {
                     remaining_queue.push(q);
                     continue;
@@ -639,44 +714,32 @@ pub fn handle(
                     });
                 }
 
-                if !is_add_to_end {
-                    let now_ft = ctx.now_blueos_filetime_ticks();
-                    if let Some(old_q) = snap.skill_queues.insert(char_id, Vec::new()) {
-                        let hist = snap.skill_history.entry(char_id).or_default();
-                        for q in old_q {
-                            hist.push(SkillHistoryEntry {
-                                log_date_ft: now_ft,
-                                event_type_id: 38,
-                                skill_type_id: q.type_id,
-                                skill_level: q.target_level,
-                                absolute_points: q.start_sp,
-                            });
-                        }
-                    }
-                    if activate {
-                        snap.paused_skill_queues.remove(&char_id);
-                    } else {
-                        snap.paused_skill_queues.insert(char_id);
-                    }
-                }
-
+                let eff_attrs = effective_character_attributes(&ctx.sde, snap, char_id);
+                let train_mult = ctx.skill_training_multiplier();
+                let mut built_queue = if is_add_to_end {
+                    snap.skill_queues.get(&char_id).cloned().unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let mut new_history = Vec::new();
                 let mut last_ret = (0 as TypeId, 1 as u8, 0.0, 0.0);
 
                 for (skill_type_id, target_level) in skills_to_queue {
-                    let Some(skill_type) = ctx.sde.types.get(&skill_type_id) else {
+                    let skill_type = validate_published_skill_type(&ctx.sde, skill_type_id)?;
+                    let Some(existing_skill) = snap
+                        .skills
+                        .get(&char_id)
+                        .and_then(|m| m.get(&skill_type_id))
+                    else {
                         return Err(BridgeRpcError {
-                            code: "InvalidSkillType".into(),
-                            message: format!("Skill type {skill_type_id} not found in SDE"),
+                            code: "SkillNotInjected".into(),
+                            message: format!(
+                                "Skill {} (type {skill_type_id}) must be injected before training",
+                                skill_type.name
+                            ),
                             client_error: None,
                         });
                     };
-                    if skill_type.category_id != 16 {
-                        return Err(BridgeRpcError {
-                            code: "InvalidSkillType".into(),
-                            message: format!("Type {skill_type_id} is not a skill (category 16)"),
-                            client_error: None,
-                        });
-                    }
 
                     let rank = skill_type
                         .default_attributes
@@ -685,65 +748,29 @@ pub fn handle(
                         .unwrap_or(1.0);
                     let end_sp = sp_for_skill_level(rank, target_level);
 
-                    // Enforce skill prerequisites (all 6 dogma slots)
-                    for (skill_attr, level_attr) in eve_dogma::REQUIRED_SKILL_ATTR_IDS
-                        .into_iter()
-                        .zip(eve_dogma::REQUIRED_SKILL_LEVEL_ATTR_IDS)
-                    {
-                        if let Some(&req_skill_f) = skill_type.default_attributes.get(&skill_attr) {
-                            let req_skill_id = req_skill_f as TypeId;
-                            if req_skill_id > 0 {
-                                let req_lvl = skill_type
-                                    .default_attributes
-                                    .get(&level_attr)
-                                    .copied()
-                                    .unwrap_or(1.0)
-                                    .max(1.0) as u8;
-                                let trained_lvl = snap
-                                    .skills
-                                    .get(&char_id)
-                                    .and_then(|m| m.get(&req_skill_id))
-                                    .map(|s| s.level)
-                                    .unwrap_or(0);
-                                let queued_lvl = snap
-                                    .skill_queues
-                                    .get(&char_id)
-                                    .and_then(|q| {
-                                        q.iter()
-                                            .filter(|e| e.type_id == req_skill_id)
-                                            .map(|e| e.target_level)
-                                            .max()
-                                    })
-                                    .unwrap_or(0);
-                                if trained_lvl.max(queued_lvl) < req_lvl {
-                                    return Err(BridgeRpcError {
-                                        code: "SkillPrerequisiteNotMet".into(),
-                                        message: format!(
-                                            "Skill {} (type {skill_type_id}) requires prerequisite skill {req_skill_id} at level {req_lvl}",
-                                            skill_type.name
-                                        ),
-                                        client_error: None,
-                                    });
-                                }
-                            }
-                        }
-                    }
+                    // Enforce skill prerequisites (all 6 dogma slots) against trained + already-queued levels
+                    check_skill_type_prerequisites(skill_type, |req_skill_id| {
+                        let trained_lvl = snap
+                            .skills
+                            .get(&char_id)
+                            .and_then(|m| m.get(&req_skill_id))
+                            .map(|s| s.level)
+                            .unwrap_or(0);
+                        let queued_lvl = built_queue
+                            .iter()
+                            .filter(|e| e.type_id == req_skill_id)
+                            .map(|e| e.target_level)
+                            .max()
+                            .unwrap_or(0);
+                        trained_lvl.max(queued_lvl)
+                    })?;
 
-                    let current_lvl = snap
-                        .skills
-                        .get(&char_id)
-                        .and_then(|m| m.get(&skill_type_id))
-                        .map(|s| s.level)
-                        .unwrap_or(0);
-                    let (max_queued_lvl, max_queued_sp) = snap
-                        .skill_queues
-                        .get(&char_id)
-                        .and_then(|q| {
-                            q.iter()
-                                .filter(|e| e.type_id == skill_type_id)
-                                .max_by_key(|e| e.target_level)
-                                .map(|e| (e.target_level, Some(e.end_sp)))
-                        })
+                    let current_lvl = existing_skill.level;
+                    let (max_queued_lvl, max_queued_sp) = built_queue
+                        .iter()
+                        .filter(|e| e.type_id == skill_type_id)
+                        .max_by_key(|e| e.target_level)
+                        .map(|e| (e.target_level, Some(e.end_sp)))
                         .unwrap_or((0, None));
                     let effective_base_lvl = current_lvl.max(max_queued_lvl);
                     if target_level <= effective_base_lvl {
@@ -757,19 +784,12 @@ pub fn handle(
                         });
                     }
 
-                    let start_sp = max_queued_sp.unwrap_or_else(|| {
-                        snap.skills
-                            .get(&char_id)
-                            .and_then(|m| m.get(&skill_type_id))
-                            .map(|s| s.skill_points)
-                            .unwrap_or(0.0)
-                    });
+                    let start_sp = max_queued_sp.unwrap_or(existing_skill.skill_points);
                     let sp_delta = (end_sp - start_sp).max(0.0);
-                    let queued_sp: f64 = snap
-                        .skill_queues
-                        .get(&char_id)
-                        .map(|q| q.iter().map(|e| (e.end_sp - e.start_sp).max(0.0)).sum())
-                        .unwrap_or(0.0);
+                    let queued_sp: f64 = built_queue
+                        .iter()
+                        .map(|e| (e.end_sp - e.start_sp).max(0.0))
+                        .sum();
 
                     // Enforce per-skill Alpha Clone level cap from clonegrades.fsdbinary and 5,000,000 SP total cap (grade 1)
                     if ch.clone_grade <= 1 {
@@ -798,7 +818,6 @@ pub fn handle(
 
                     let primary_attr_id = skill_type.default_attributes.get(&eve_sde::attr_ids::PRIMARY_ATTRIBUTE).copied().map(|v| v as u32).unwrap_or(eve_sde::attr_ids::PERCEPTION as u32);
                     let secondary_attr_id = skill_type.default_attributes.get(&eve_sde::attr_ids::SECONDARY_ATTRIBUTE).copied().map(|v| v as u32).unwrap_or(eve_sde::attr_ids::WILLPOWER as u32);
-                    let eff_attrs = effective_character_attributes(&ctx.sde, snap, char_id);
                     let primary_attr = lookup_effective_attr_from_tuple(eff_attrs, primary_attr_id);
                     let secondary_attr = lookup_effective_attr_from_tuple(eff_attrs, secondary_attr_id);
                     let clone_mult = if ch.clone_grade == 2 { 1.0 } else { 0.5 };
@@ -808,18 +827,44 @@ pub fn handle(
                         primary_attr,
                         secondary_attr,
                         clone_mult,
-                        ctx.skill_training_multiplier(),
+                        train_mult,
                     );
-                    let is_first = snap.skill_queues.get(&char_id).map(|q| q.is_empty()).unwrap_or(true);
+                    let is_first = built_queue.is_empty();
                     let started_at = if activate && is_first { Some(now) } else { None };
-                    snap.skill_queues.entry(char_id).or_default().push(SkillQueueEntry {
+                    built_queue.push(SkillQueueEntry {
                         type_id: skill_type_id, target_level, start_sp, end_sp, duration_seconds: duration_sec, started_at_unix: started_at,
                     });
-                    let now_ft = ctx.now_blueos_filetime_ticks();
-                    snap.skill_history.entry(char_id).or_default().push(SkillHistoryEntry {
+                    new_history.push((skill_type_id, target_level, start_sp));
+                    last_ret = (skill_type_id, target_level, end_sp, duration_sec);
+                }
+
+                let now_ft = ctx.now_blueos_filetime_ticks();
+                if !is_add_to_end {
+                    if let Some(old_q) = snap.skill_queues.insert(char_id, built_queue) {
+                        let hist = snap.skill_history.entry(char_id).or_default();
+                        for q in old_q {
+                            hist.push(SkillHistoryEntry {
+                                log_date_ft: now_ft,
+                                event_type_id: 38,
+                                skill_type_id: q.type_id,
+                                skill_level: q.target_level,
+                                absolute_points: q.start_sp,
+                            });
+                        }
+                    }
+                    if activate {
+                        snap.paused_skill_queues.remove(&char_id);
+                    } else {
+                        snap.paused_skill_queues.insert(char_id);
+                    }
+                } else {
+                    snap.skill_queues.insert(char_id, built_queue);
+                }
+                let hist = snap.skill_history.entry(char_id).or_default();
+                for (skill_type_id, target_level, start_sp) in new_history {
+                    hist.push(SkillHistoryEntry {
                         log_date_ft: now_ft, event_type_id: 53, skill_type_id, skill_level: target_level, absolute_points: start_sp,
                     });
-                    last_ret = (skill_type_id, target_level, end_sp, duration_sec);
                 }
                 Ok(last_ret)
             });
@@ -896,20 +941,10 @@ pub fn handle(
                         client_error: None,
                     }));
                 };
-                let Some(skill_type) = ctx.sde.types.get(&skill_type_id) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSkillType".into(),
-                        message: format!("Skill type {skill_type_id} not found in SDE"),
-                        client_error: None,
-                    }));
+                let skill_type = match validate_published_skill_type(&ctx.sde, skill_type_id) {
+                    Ok(t) => t,
+                    Err(e) => return Some(Err(e)),
                 };
-                if skill_type.category_id != 16 {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSkillType".into(),
-                        message: format!("Type {skill_type_id} is not a skill (category 16)"),
-                        client_error: None,
-                    }));
-                }
                 let rank = skill_type
                     .default_attributes
                     .get(&attr_ids::SKILL_TIME_CONSTANT)
@@ -941,36 +976,12 @@ pub fn handle(
                             client_error: None,
                         });
                     };
-                    for (skill_attr, level_attr) in eve_dogma::REQUIRED_SKILL_ATTR_IDS
-                        .into_iter()
-                        .zip(eve_dogma::REQUIRED_SKILL_LEVEL_ATTR_IDS)
-                    {
-                        if let Some(&req_skill_f) = skill_type.default_attributes.get(&skill_attr) {
-                            let req_skill_id = req_skill_f as TypeId;
-                            if req_skill_id > 0 {
-                                let req_lvl = skill_type
-                                    .default_attributes
-                                    .get(&level_attr)
-                                    .copied()
-                                    .unwrap_or(1.0)
-                                    .max(1.0) as u8;
-                                let trained_lvl = skills_map
-                                    .get(&req_skill_id)
-                                    .map(|s| s.level)
-                                    .unwrap_or(0);
-                                if trained_lvl < req_lvl {
-                                    return Err(BridgeRpcError {
-                                        code: "SkillPrerequisiteNotMet".into(),
-                                        message: format!(
-                                            "Skill {} (type {skill_type_id}) requires prerequisite skill {req_skill_id} at level {req_lvl}",
-                                            skill_type.name
-                                        ),
-                                        client_error: None,
-                                    });
-                                }
-                            }
-                        }
-                    }
+                    check_skill_type_prerequisites(skill_type, |req_skill_id| {
+                        skills_map
+                            .get(&req_skill_id)
+                            .map(|s| s.level)
+                            .unwrap_or(0)
+                    })?;
                     let max_lvl = if ch_snap.clone_grade <= 1 {
                         alpha_skill_cap_for_character(&ctx.sde, ch_snap.race_id, skill_type_id)
                     } else {
@@ -1163,6 +1174,9 @@ pub fn handle(
                 let mut total_applied = 0.0;
 
                 for mut q in queue {
+                    if !is_trainable_injected_skill(&ctx.sde, skills_map, q.type_id) {
+                        continue;
+                    }
                     if ch_snap.clone_grade <= 1
                         && q.target_level > alpha_skill_cap_for_character(&ctx.sde, ch_snap.race_id, q.type_id)
                     {
@@ -1384,10 +1398,12 @@ pub fn handle(
                             client_error: None,
                         });
                     };
-                    if skill_type.category_id != 16 {
+                    if skill_type.category_id != 16 || !skill_type.published {
                         return Err(BridgeRpcError {
                             code: "InvalidSkillType".into(),
-                            message: format!("Type {skill_type_id} is not a skill (category 16)"),
+                            message: format!(
+                                "Type {skill_type_id} is not a published skill (category 16)"
+                            ),
                             client_error: None,
                         });
                     }

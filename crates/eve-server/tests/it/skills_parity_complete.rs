@@ -1205,12 +1205,19 @@ async fn queue_save_user_errors() {
         create_and_select_alpha_pilot(&ctx, 1_901, "qsave_err_u", "qsave-pass", "Queue Save Pilot").await;
     assert_eq!(ctx.db.get_character(char_id).unwrap().clone_grade, 1);
 
-    // Ensure Science (3402) is untrained and Mining (3386) is below IV for prereq check on Astrogeology (3410).
+    // Ensure Science (3402) and Astrogeology (3410) are injected at level 0 and Mining (3386) is below IV for prereq check on Astrogeology (3410).
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(sk) = snap.skills.get_mut(&char_id) {
-            sk.remove(&3402);
-            sk.remove(&3386);
-            sk.remove(&3410);
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.remove(&3386);
+        for tid in [3402_u32, 3410_u32] {
+            sk.insert(
+                tid,
+                eve_db::TrainedSkillRecord {
+                    type_id: tid,
+                    level: 0,
+                    skill_points: 0.0,
+                },
+            );
         }
         snap.skill_queues.remove(&char_id);
         snap.paused_skill_queues.remove(&char_id);
@@ -1378,4 +1385,140 @@ async fn queue_save_user_errors() {
     .await
     .expect_err("Alpha at 5M SP must fail with AlphaCloneSpCapExceeded");
     assert_eq!(alpha_sp_err.code, "AlphaCloneSpCapExceeded");
+}
+
+#[tokio::test]
+async fn test_skill_queue_requires_injected_and_published_skills_e2e() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    eve_server::world_seeder::seed_dual_anchor_markets(&ctx.db, &ctx.sde);
+
+    let mut donor = login_and_select(&ctx, 1178_01, "demo", "demo-secret", 90_000_001).await;
+    let (mut sess, char_id) =
+        create_and_select_alpha_pilot(&ctx, 1178_02, "hf1178_pilot", "hf1178-pass", "HF1178 Pilot").await;
+    rpc(
+        &ctx,
+        &mut donor,
+        "account",
+        "GiveCash",
+        &[PyRep::Integer(char_id), PyRep::Real(5_000_000.0), PyRep::String("stipend".into())],
+    )
+    .await
+    .expect("GiveCash");
+
+    // Verify 3348 (Leadership) is published & uninjected, while 3362 (DED Connections) is unpublished category 16
+    assert!(ctx.sde.types.get(&3348).is_some_and(|t| t.category_id == 16 && t.published));
+    assert!(ctx.sde.types.get(&3362).is_some_and(|t| t.category_id == 16 && !t.published));
+    assert!(ctx.db.with_snapshot(|s| !s.skills[&char_id].contains_key(&3348)));
+
+    // Seed an initial valid queue entry on starter skill 3327 (Spaceship Command) and verify preservation on errors
+    rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "SaveSkillQueue",
+        &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3327), PyRep::Integer(4)])])],
+    )
+    .await
+    .expect("initial queue on injected starter skill 3327");
+    let (initial_queue, initial_paused, initial_hist_len) = ctx.db.with_snapshot(|s| {
+        (
+            s.skill_queues.get(&char_id).cloned(),
+            s.paused_skill_queues.contains(&char_id),
+            s.skill_history.get(&char_id).map(|h| h.len()).unwrap_or(0),
+        )
+    });
+
+    // 1. SaveSkillQueue & SaveNewQueue must reject uninjected published skill 3348 without mutating state
+    let sq_err = rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "SaveSkillQueue",
+        &[PyRep::List(vec![
+            PyRep::Tuple(vec![PyRep::Integer(3327), PyRep::Integer(4)]),
+            PyRep::Tuple(vec![PyRep::Integer(3348), PyRep::Integer(1)]),
+        ])],
+    )
+    .await
+    .expect_err("SaveSkillQueue must reject uninjected skill 3348");
+    assert_eq!(sq_err.code, "SkillNotInjected");
+
+    let snq_err = rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "SaveNewQueue",
+        &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3348), PyRep::Integer(1)])])],
+    )
+    .await
+    .expect_err("SaveNewQueue must reject uninjected skill 3348");
+    assert_eq!(snq_err.code, "SkillNotInjected");
+
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.skill_queues.get(&char_id).cloned(), initial_queue);
+        assert_eq!(s.paused_skill_queues.contains(&char_id), initial_paused);
+        assert_eq!(s.skill_history.get(&char_id).map(|h| h.len()).unwrap_or(0), initial_hist_len);
+        assert!(!s.skills[&char_id].contains_key(&3348));
+    });
+
+    // Advancing clock & cluster skill queues after failed saves does not grant 3348
+    ctx.advance_secs(600);
+    ctx.advance_skill_queues(600.0);
+    let _ = rpc(&ctx, &mut sess, "skillMgr2", "GetSkills", &[]).await.expect("GetSkills");
+    assert!(ctx.db.with_snapshot(|s| !s.skills[&char_id].contains_key(&3348)));
+
+    // 2. Unpublished category-16 skill 3362 is rejected across SaveSkillQueue, SaveNewQueue, and InjectSkillIntoBrain
+    let unpub_queue = PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3362), PyRep::Integer(1)])]);
+    let sq_unpub_err = rpc(&ctx, &mut sess, "skillMgr2", "SaveSkillQueue", std::slice::from_ref(&unpub_queue))
+        .await
+        .expect_err("SaveSkillQueue must reject unpublished skill 3362");
+    assert_eq!(sq_unpub_err.code, "InvalidSkillType");
+    let snq_unpub_err = rpc(&ctx, &mut sess, "skillMgr2", "SaveNewQueue", &[unpub_queue])
+        .await
+        .expect_err("SaveNewQueue must reject unpublished skill 3362");
+    assert_eq!(snq_unpub_err.code, "InvalidSkillType");
+
+    let unpub_book_id = 991_178_362_i64;
+    place_hangar_item(&ctx, unpub_book_id, 3362, char_id, 1);
+    let inj_err = rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "InjectSkillIntoBrain",
+        &[PyRep::Integer(unpub_book_id)],
+    )
+    .await
+    .expect_err("InjectSkillIntoBrain must reject unpublished skillbook");
+    assert_eq!(inj_err.code, "InvalidSkillType");
+    assert_eq!(ctx.db.get_item(unpub_book_id).unwrap().quantity, 1);
+    assert!(ctx.db.with_snapshot(|s| !s.skills[&char_id].contains_key(&3362)));
+
+    // 3. Direct purchase (PurchaseSkills) -> SaveNewQueue -> time advance trains 3348 cleanly
+    ctx.advance_secs(30);
+    rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "PurchaseSkills",
+        &[PyRep::List(vec![PyRep::Integer(3348)])],
+    )
+    .await
+    .expect("PurchaseSkills 3348");
+    assert_eq!(ctx.character_skill_levels(char_id).get(&3348).copied(), Some(0));
+
+    rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "SaveNewQueue",
+        &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3348), PyRep::Integer(1)])])],
+    )
+    .await
+    .expect("SaveNewQueue succeeds after PurchaseSkills");
+    ctx.advance_secs(1_200);
+    rpc(&ctx, &mut sess, "skillMgr2", "CheckAndSendNotifications", &[])
+        .await
+        .expect("CheckAndSendNotifications completes 3348 lvl 1");
+    assert_eq!(ctx.character_skill_levels(char_id).get(&3348).copied(), Some(1));
 }

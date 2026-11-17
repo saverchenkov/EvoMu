@@ -816,6 +816,14 @@ fn gm_timer_acceleration_slash_commands_cover_all_aliases_branches_and_notificat
             ch.clone_grade = 2;
             ch.skill_points = 0.0;
         }
+        snap.skills.entry(char_id).or_default().insert(
+            skill_tid,
+            eve_db::TrainedSkillRecord {
+                type_id: skill_tid,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
         snap.paused_skill_queues.insert(char_id);
         snap.skill_queues.insert(
             char_id,
@@ -872,6 +880,14 @@ fn gm_timer_acceleration_slash_commands_cover_all_aliases_branches_and_notificat
 
     // Invalid arg fallback to "all" via /finishskills
     ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            3403_u32,
+            eve_db::TrainedSkillRecord {
+                type_id: 3403_u32,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
         snap.paused_skill_queues.insert(char_id);
         snap.skill_queues.insert(
             char_id,

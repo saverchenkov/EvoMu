@@ -2126,6 +2126,11 @@ impl ServerContext {
                 let skills_map = snap.skills.entry(char_id).or_default();
 
                 for mut q in queue {
+                    if !crate::services::character_skills::is_trainable_injected_skill(
+                        &sde, skills_map, q.type_id,
+                    ) {
+                        continue;
+                    }
                     if rem_secs <= 0.0 {
                         remaining_queue.push(q);
                         continue;

@@ -511,6 +511,14 @@ fn advance_skill_queues_emits_server_skills_changed_and_queue_saved_and_advance_
             ch.clone_grade = 2;
             ch.skill_points = 0.0;
         }
+        snap.skills.entry(char_id).or_default().insert(
+            skill_tid,
+            eve_db::TrainedSkillRecord {
+                type_id: skill_tid,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
         snap.skill_queues.insert(
             char_id,
             vec![eve_db::SkillQueueEntry {
@@ -692,7 +700,14 @@ fn synthetic_clock_jump_partial_skill_progress_pushes_aligned_notifications_with
     // covering both skills without duplicate notifications.
     let now2 = ctx.now_unix_secs();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.skills.entry(char_id).or_default().remove(&short_skill_tid);
+        snap.skills.entry(char_id).or_default().insert(
+            short_skill_tid,
+            eve_db::TrainedSkillRecord {
+                type_id: short_skill_tid,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
         let cur_long_sp = snap.skills[&char_id][&long_skill_tid].skill_points;
         snap.skill_queues.insert(
             char_id,

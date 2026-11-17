@@ -75,6 +75,16 @@ async fn test_t7_injectable_server_clock_time_acceleration_and_pause_on_tick() {
     // -------------------------------------------------------------------------
     // 1. Skill training under accelerated virtual clock time
     // -------------------------------------------------------------------------
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(90_000_001).or_default().insert(
+            3392,
+            eve_db::TrainedSkillRecord {
+                type_id: 3392,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
+    });
     let sp_before = ctx
         .db
         .with_snapshot(|snap| snap.characters[&90_000_001].skill_points);
@@ -721,9 +731,14 @@ async fn test_machonet_get_time_sqlite_restart_preserves_clock_offset_without_wa
                 ch.clone_grade = 2;
                 ch.skill_points = 0.0;
             }
-            if let Some(skills) = snap.skills.get_mut(&char_id) {
-                skills.remove(&3392);
-            }
+            snap.skills.entry(char_id).or_default().insert(
+                3392,
+                eve_db::TrainedSkillRecord {
+                    type_id: 3392,
+                    level: 0,
+                    skill_points: 0.0,
+                },
+            );
         });
 
         let mut harness1 = new_wire_harness(&ctx1, 99_101)

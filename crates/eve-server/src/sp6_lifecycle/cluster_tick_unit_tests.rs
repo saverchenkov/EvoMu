@@ -428,7 +428,7 @@ async fn idle_cluster_tick_avoids_per_tick_sqlite_wal_writes() {
     std::fs::create_dir_all(&dir).unwrap();
     let db_path = dir.join("world.sqlite");
     let db = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open_sqlite"));
-    let sde_path = std::env::var("EVOMU_SDE_PATH").unwrap_or_else(|_| "data/evomu_sde.sqlite".into());
+    let sde_path = eve_sde::SdeRegistry::default_db_path();
     let sde = Arc::new(eve_sde::SdeRegistry::open(&sde_path).unwrap_or_default());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_770_000_010)));
@@ -570,7 +570,7 @@ async fn sov_claimed_without_sov_hubs_entry_stays_idle_clean_and_advances_indice
     std::fs::create_dir_all(&dir).unwrap();
     let db_path = dir.join("world.sqlite");
     let db = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open_sqlite"));
-    let sde_path = std::env::var("EVOMU_SDE_PATH").unwrap_or_else(|_| "data/evomu_sde.sqlite".into());
+    let sde_path = eve_sde::SdeRegistry::default_db_path();
     let sde = Arc::new(eve_sde::SdeRegistry::open(&sde_path).unwrap_or_default());
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     // Freeze wall-clock drift and keep the 2 warmup + 5 measured 1 Hz ticks clear of a `% 60 == 0` periodic NPC-mining DB sync.
@@ -1903,7 +1903,7 @@ async fn tick_delta_restart_gm_advance_overrun_and_backward_clock_avoid_double_s
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let db_path = dir.join("world.sqlite");
-    let sde_path = std::env::var("EVOMU_SDE_PATH").unwrap_or_else(|_| "data/evomu_sde.sqlite".into());
+    let sde_path = eve_sde::SdeRegistry::default_db_path();
     let sde = Arc::new(eve_sde::SdeRegistry::open(&sde_path).unwrap_or_default());
 
     let base_now = 1_800_000_000_u64;
@@ -1920,6 +1920,14 @@ async fn tick_delta_restart_gm_advance_overrun_and_backward_clock_avoid_double_s
                 ch.clone_grade = 2;
                 ch.skill_points = 0.0;
             }
+            snap.skills.entry(char_id).or_default().insert(
+                skill_tid,
+                eve_db::TrainedSkillRecord {
+                    type_id: skill_tid,
+                    level: 0,
+                    skill_points: 0.0,
+                },
+            );
             snap.skill_queues.insert(
                 char_id,
                 vec![eve_db::SkillQueueEntry {
@@ -2024,7 +2032,7 @@ async fn clean_shutdown_final_checkpoint_persists_ship_condition_and_clock_offse
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let db_path = dir.join("world.sqlite");
-    let sde_path = std::env::var("EVOMU_SDE_PATH").unwrap_or_else(|_| "data/evomu_sde.sqlite".into());
+    let sde_path = eve_sde::SdeRegistry::default_db_path();
     let sde = Arc::new(eve_sde::SdeRegistry::open(&sde_path).unwrap_or_default());
 
     let sys_id = 30_000_142_u32;

@@ -434,14 +434,17 @@ fn free_sp_queue_get_and_apply_cover_alpha_skip_partial_and_errors() {
             ch.free_skill_points = 600.0;
             ch.skill_points = 0.0;
         }
-        snap.skills.entry(char_id).or_default().insert(
-            gunnery,
-            TrainedSkillRecord {
-                type_id: gunnery,
-                level: 0,
-                skill_points: 0.0,
-            },
-        );
+        let smap = snap.skills.entry(char_id).or_default();
+        for tid in [gunnery, omega_tid] {
+            smap.insert(
+                tid,
+                TrainedSkillRecord {
+                    type_id: tid,
+                    level: 0,
+                    skill_points: 0.0,
+                },
+            );
+        }
         snap.skill_queues.insert(
             char_id,
             vec![
@@ -623,6 +626,14 @@ fn char_start_training_skill_covers_item_lookup_caps_reordering_and_mct() {
                 type_id: gunnery,
                 level: 1,
                 skill_points: 250.0,
+            },
+        );
+        snap.skills.entry(char_id).or_default().insert(
+            3413,
+            TrainedSkillRecord {
+                type_id: 3413,
+                level: 0,
+                skill_points: 0.0,
             },
         );
         snap.paused_skill_queues.insert(char_id);

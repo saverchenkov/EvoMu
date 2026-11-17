@@ -35,6 +35,16 @@ async fn test_plan_ch2_skill_queue_and_brain_injection() {
     let skills_rep = ctx.dispatch_rpc(&mut sess, "skillMgr2", None, "GetSkills", &[], &kw, None).await.expect("GetSkills");
     assert!(matches!(skills_rep, PyRep::Rowset { .. }));
 
+    ctx.db.with_mut_snapshot(|snap| {
+        let smap = snap.skills.entry(char_id).or_default();
+        for tid in [3386_u32, 3392_u32] {
+            smap.entry(tid).or_insert(eve_db::TrainedSkillRecord {
+                type_id: tid,
+                level: 0,
+                skill_points: 0.0,
+            });
+        }
+    });
     let q_init = [PyRep::List(vec![PyRep::List(vec![PyRep::Integer(3386), PyRep::Integer(1)])])];
     ctx.dispatch_rpc(&mut sess, "skillMgr2", None, "SaveSkillQueue", &q_init, &kw, None).await.expect("SaveSkillQueue initial");
     assert_eq!(ctx.db.with_snapshot(|s| s.skill_queues[&char_id].len()), 1);

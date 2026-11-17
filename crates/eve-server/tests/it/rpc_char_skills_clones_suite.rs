@@ -58,6 +58,16 @@ async fn test_char_skill_queue_prerequisites_and_alpha_caps() {
 
     // 2. Enforce skill prerequisites from SDE dogma:
     // Torpedo Specialization (type 20213) requires Torpedoes (type 3325) at level 5
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            20213,
+            eve_db::TrainedSkillRecord {
+                type_id: 20213,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
+    });
     let prereq_err = rpc(
         &ctx,
         &mut sess,
@@ -109,6 +119,14 @@ async fn test_char_skill_queue_prerequisites_and_alpha_caps() {
             ch.skill_points = 1_000_000.0;
             ch.free_skill_points = 0.0;
         }
+        snap.skills.entry(char_id).or_default().insert(
+            3402,
+            eve_db::TrainedSkillRecord {
+                type_id: 3402,
+                level: 0,
+                skill_points: 0.0,
+            },
+        );
     });
 
     // Science (3402) has Alpha level cap of 4 in clonegrades
