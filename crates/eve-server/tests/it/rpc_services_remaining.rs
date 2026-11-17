@@ -1245,6 +1245,7 @@ async fn test_systematic_rpc_catalog_dispatch_and_wire_formatting() {
     // parity: rpc:charUnboundMgr.GetCharacterInfo, rpc:charUnboundMgr.SelectCharacterID, rpc:corpRegistry.AddCorporation, rpc:account.GetWalletDivisionsInfo, rpc:marketProxy.GetCharOrders, rpc:marketProxy.GetOrders, rpc:slash.SlashCmd, rpc:stationSvc.GetStation
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
+    ctx.disable_rpc_rate_budget_for_test();
     let empty_kw = HashMap::new();
 
     // 1. Load the authoritative RPC service catalog (216 machoNet services)

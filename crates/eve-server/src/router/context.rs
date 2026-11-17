@@ -126,6 +126,9 @@ pub struct ServerContext {
     pub brain_primed_sessions: Arc<RankedRwLock<HashSet<(u64, i64)>, RANK_LEAF>>,
     /// Per-session RPC token buckets checked before `sync_session` / DB snapshot locks (`#1186`).
     pub(crate) rpc_rate_buckets: Arc<RankedMutex<HashMap<u64, SessionRpcRateBucket>, RANK_LEAF>>,
+    /// Test-only fast-path bypass for per-session RPC rate budgeting (`#1264`).
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) rpc_rate_budget_disabled: Arc<AtomicBool>,
 }
 
 /// Burst token capacity for standard per-session RPC throttling.
@@ -276,6 +279,8 @@ pub(crate) struct ServerContextWeak {
     space_ballpark_bootstrapped: std::sync::Weak<RankedRwLock<HashMap<(u64, i64), u32>, RANK_LEAF>>,
     brain_primed_sessions: std::sync::Weak<RankedRwLock<HashSet<(u64, i64)>, RANK_LEAF>>,
     rpc_rate_buckets: std::sync::Weak<RankedMutex<HashMap<u64, SessionRpcRateBucket>, RANK_LEAF>>,
+    #[cfg(any(test, feature = "testkit"))]
+    rpc_rate_budget_disabled: std::sync::Weak<AtomicBool>,
 }
 
 impl ServerContextWeak {
@@ -352,6 +357,8 @@ impl ServerContextWeak {
             space_ballpark_bootstrapped: self.space_ballpark_bootstrapped.upgrade()?,
             brain_primed_sessions: self.brain_primed_sessions.upgrade()?,
             rpc_rate_buckets: self.rpc_rate_buckets.upgrade()?,
+            #[cfg(any(test, feature = "testkit"))]
+            rpc_rate_budget_disabled: self.rpc_rate_budget_disabled.upgrade()?,
         })
     }
 }
@@ -703,6 +710,8 @@ impl ServerContext {
             space_ballpark_bootstrapped: Arc::downgrade(&self.space_ballpark_bootstrapped),
             brain_primed_sessions: Arc::downgrade(&self.brain_primed_sessions),
             rpc_rate_buckets: Arc::downgrade(&self.rpc_rate_buckets),
+            #[cfg(any(test, feature = "testkit"))]
+            rpc_rate_budget_disabled: Arc::downgrade(&self.rpc_rate_budget_disabled),
         }
     }
 
@@ -872,6 +881,8 @@ impl ServerContext {
             space_ballpark_bootstrapped: Arc::new(RankedRwLock::new(HashMap::new())),
             brain_primed_sessions: Arc::new(RankedRwLock::new(HashSet::new())),
             rpc_rate_buckets: Arc::new(RankedMutex::new(HashMap::new())),
+            #[cfg(any(test, feature = "testkit"))]
+            rpc_rate_budget_disabled: Arc::new(AtomicBool::new(false)),
         };
         let npc_ctx_w = ctx.downgrade();
         ctx.systems.set_npc_death_hook(Arc::new(move |sys_id, npc_id, killer_opt| {
@@ -3295,6 +3306,10 @@ impl ServerContext {
         now: std::time::Instant,
         is_bootstrap: bool,
     ) -> bool {
+        #[cfg(any(test, feature = "testkit"))]
+        if self.rpc_rate_budget_disabled.load(Ordering::Acquire) {
+            return true;
+        }
         let mut guard = self
             .rpc_rate_buckets
             .lock()
@@ -3364,6 +3379,13 @@ impl ServerContext {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&session_id);
+    }
+
+    /// Disables per-session RPC rate-budget enforcement on this `ServerContext` instance
+    /// for high-iteration sweep and latency-benchmark tests (`#1264`).
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn disable_rpc_rate_budget_for_test(&self) {
+        self.rpc_rate_budget_disabled.store(true, Ordering::Release);
     }
 
     /// Returns the remaining lock acquisition milliseconds for `ship_id -> target_id`, if locking (`§C`).
