@@ -3130,6 +3130,36 @@ class TestPlaytester1200OriginMainCutover(unittest.TestCase):
             self.assertIn(("SlashCmd", "/createitem 90000001 34 100"), gm_events)
             self.assertIn(("close",), gm_events)
 
+    def test_planner_and_executor_prompts_omit_gm_actions_past_step_zero_for_non_gm(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            mem = playtester.PlaytesterMemory(root, git_head="deadbeef")
+            mem.data["active_persona"] = {"id": "open_explorer", "title": "Explorer", "rotate_after_steps": 25}
+            pp_player_s1 = playtester.build_planner_prompt(
+                1, root / "screen.png", [], {"active_view": "hangar"}, {}, mem, "deadbeef"
+            )
+            ep_player_s1 = playtester.build_executor_prompt(
+                1, 1, 1, {"plan_goal": "Test", "max_batch_steps": 1, "steps": [{}]},
+                root / "screen.png", [], {"active_view": "hangar"}, {}, mem, [],
+            )
+            self.assertNotIn("train_skill", pp_player_s1)
+            self.assertNotIn("open_structure_cosmetics", pp_player_s1)
+            self.assertNotIn("train_skill", ep_player_s1)
+            self.assertNotIn("open_structure_cosmetics", ep_player_s1)
+
+            pp_player_s0 = playtester.build_planner_prompt(
+                0, root / "screen.png", [], {"active_view": "hangar"}, {}, mem, "deadbeef"
+            )
+            self.assertIn("train_skill", pp_player_s0)
+            self.assertIn("open_structure_cosmetics", pp_player_s0)
+
+            mem.data["active_persona"] = dict(playtester.GM_TESTER_PERSONA)
+            pp_gm_s2 = playtester.build_planner_prompt(
+                2, root / "screen.png", [], {"active_view": "hangar"}, {}, mem, "deadbeef"
+            )
+            self.assertIn("train_skill", pp_gm_s2)
+            self.assertIn("open_structure_cosmetics", pp_gm_s2)
+
 
 if __name__ == "__main__":
     unittest.main()

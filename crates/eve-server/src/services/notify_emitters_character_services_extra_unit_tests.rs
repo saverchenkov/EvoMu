@@ -1594,4 +1594,25 @@ fn gm_bridge_batch3_slash_commands_target_explicit_player_char_id() {
     assert_eq!(adv_res.dict_get("characterID"), Some(&PyRep::Integer(player_cid)));
     assert!(crate::services::space_destiny::get_session_change_timer(&ctx, player_cid).is_none());
     assert!(crate::services::space_destiny::get_session_change_timer(&ctx, gm_cid).is_some());
+
+    // Fail closed with CharacterNotFound on explicit character-range IDs (>= 3_000_000) absent
+    // from snap.characters rather than falling back to caller_cid and parsing them as secs/dungeon_id.
+    let pre_unknown_now = ctx.now_unix();
+    let unknown_cid = 99_999_999_i64;
+    for bad_cmd in [
+        format!("/advancetime {unknown_cid} 60"),
+        format!("/advancetime 60 {unknown_cid}"),
+        format!("/completeskills {unknown_cid} 10"),
+        format!("/spawnanomaly {unknown_cid}"),
+        format!("/upwelltimer {unknown_cid}"),
+        format!("/completeindustry {unknown_cid}"),
+        format!("/cleartimers {unknown_cid}"),
+    ] {
+        let err = handle_batch3_gm_slash_cmd(&ctx, gm_cid, Some(gm_sys), &bad_cmd)
+            .expect("handled")
+            .expect_err("unknown explicit char_id must fail closed");
+        assert_eq!(err.code, "CharacterNotFound", "for command {bad_cmd}");
+    }
+    assert_eq!(ctx.now_unix(), pre_unknown_now);
+    assert!(crate::services::space_destiny::get_session_change_timer(&ctx, gm_cid).is_some());
 }

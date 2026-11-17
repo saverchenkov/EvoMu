@@ -2641,6 +2641,35 @@ def _format_compact_widgets(raw_widgets: List[Any], limit: int = 95) -> str:
     return "\n".join(lines)
 
 
+def _prompt_allows_gm_actions(step_num: int, persona_id: str) -> bool:
+    return int(step_num) <= 0 or str(persona_id or "").strip().lower() == GM_TESTER_PERSONA["id"]
+
+
+def _prompt_action_types_doc(allow_gm: bool, include_widget_actions: bool = False) -> str:
+    widget_head = ["click_widget"] if include_widget_actions else []
+    widget_tail = ["type_text", "click_xy", "drag_widget"] if include_widget_actions else []
+    base_actions = [
+        "open_neocom", "close_window", "undock", "dock", "jump_gate", "warp_to",
+        "approach", "orbit", "keep_at_range", "lock_target", "activate_module",
+    ]
+    gm_actions = (
+        [
+            "train_skill", "complete_skills", "advance_upwell_timer",
+            "complete_industry_jobs", "advance_server_time", "clear_timers", "slash_command",
+        ]
+        if allow_gm
+        else []
+    )
+    end_actions = (
+        ["open_plex_store"]
+        + (["open_structure_cosmetics"] if allow_gm else [])
+        + ["press_key"]
+        + widget_tail
+        + ["wait"]
+    )
+    return ", ".join(f"`{a}`" for a in (widget_head + base_actions + gm_actions + end_actions))
+
+
 def build_reasoning_prompt(
     step_num: int,
     screenshot_path: Optional[Path],
@@ -2654,6 +2683,7 @@ def build_reasoning_prompt(
     mem = memory.data
     persona = mem.get("active_persona") or {}
     persona_id = str(persona.get("id") or "")
+    allow_gm_prompt = _prompt_allows_gm_actions(step_num, persona_id)
     all_frontier = [x for x in (mem.get("coverage_frontier") or []) if isinstance(x, dict)]
     persona_pending = [
         x for x in all_frontier
@@ -2777,8 +2807,39 @@ def build_reasoning_prompt(
         if benign_macho:
             prompt_flight_recorder["benign_macho_exceptions"] = benign_macho
 
+    role_summary_line = (
+        "Your character has full **GM / QA / Admin role access** (`0x7FFFFFFFFFFFFFFF`) so you can both interact with the UI like a player AND invoke GM timer-acceleration commands to test multi-hour gameplay loops (skill training, Upwell structure timers, industry jobs, cooldowns) immediately without waiting real-time."
+        if allow_gm_prompt
+        else "You are controlling a **standard player character (`role = 0`)**. Interact through real game UI actions (Market, Inventory, Fitting, Industry, Skills window, Agency); setup/GM shortcuts and timer-acceleration actions are restricted to Step `0` or `--persona gm_tester`."
+    )
+    skill_section_doc = (
+        "1. **Skill Training & Skill Queue (`skills`, `skill_plans`, `train_skill`, `complete_skills`):**\n"
+        "   - Adding/starting a skill (`train_skill` or clicking Train in UI) MUST emit `OnNewSkillQueueSaved` / `OnSkillQueueChanged` and increase `skills_state.queue_len > 0` in the live snapshot and Skill Queue UI bar.\n"
+        "   - Running `complete_skills` (`/completeskills all`) MUST immediately finish queued skills without waiting real-time, emit `OnSkillTrained` + `OnServerSkillsChanged` + `OnNewSkillQueueSaved`, increase `skills_state.total_sp`, and update the trained skill level in the Character Sheet / Skills window live without requiring a relog.\n"
+        "   - If `queue_len` or `total_sp` or the Skills window UI fails to update after `train_skill` or `complete_skills`, set `previous_action_verification.expectation_met = false` and file a `ui_state_desync` bug!"
+        if allow_gm_prompt
+        else "1. **Skill Training & Skill Queue (`skills`, `skill_plans`):**\n"
+        "   - Adding/starting a skill by clicking Train in UI MUST emit `OnNewSkillQueueSaved` / `OnSkillQueueChanged` and increase `skills_state.queue_len > 0` in the live snapshot and Skill Queue UI bar.\n"
+        "   - If `queue_len` or the Skills window UI fails to update after queueing a skill in UI, set `previous_action_verification.expectation_met = false` and file a `ui_state_desync` bug!"
+    )
+    quasar_windows_doc = (
+        "7. **Quasar Windows (`open_plex_store`, `skill_plans`, `open_structure_cosmetics`, `agency`, `corporation`):**"
+        if allow_gm_prompt
+        else "7. **Quasar Windows (`open_plex_store`, `skill_plans`, `agency`, `corporation`):**"
+    )
+    catalog_skill_line = (
+        '7. `train_skill`: Inject and queue a skill (`target` = skill typeID, e.g. `"3386"`, `"3385"`, `"3300"`, `"3327"`).'
+        if allow_gm_prompt
+        else '7. **Skill Training (`open_neocom` `"skills"` / `click_widget`):** Open the Skills window and manage or queue skills via player UI controls.'
+    )
+    catalog_probe_line = (
+        "9. `open_plex_store` / `open_structure_cosmetics`: Direct probes for `#529` and `#527`."
+        if allow_gm_prompt
+        else "9. `open_plex_store`: Direct probe for `#529`."
+    )
+
     prompt = f"""You are the Autonomous EvoMu Live Client Playtester playing the real macOS EVE Online V24.01 client (`EVE.app`) connected to `eve-server` (commit `{git_head}`).
-Your character has full **GM / QA / Admin role access** (`0x7FFFFFFFFFFFFFFF`) so you can both interact with the UI like a player AND invoke GM timer-acceleration commands to test multi-hour gameplay loops (skill training, Upwell structure timers, industry jobs, cooldowns) immediately without waiting real-time.
+{role_summary_line}
 
 ### Step {step_num} Perception Bundle
 {screen_line}
@@ -2826,10 +2887,7 @@ Your character has full **GM / QA / Admin role access** (`0x7FFFFFFFFFFFFFFF`) s
 
 ### Expected EVE Online Mechanics & UI-State Reference Contract
 Use these ground-truth EVE Online V24.01 expectations to judge whether the game and UI updated properly after your previous action (even when no Python exception was raised!):
-1. **Skill Training & Skill Queue (`skills`, `skill_plans`, `train_skill`, `complete_skills`):**
-   - Adding/starting a skill (`train_skill` or clicking Train in UI) MUST emit `OnNewSkillQueueSaved` / `OnSkillQueueChanged` and increase `skills_state.queue_len > 0` in the live snapshot and Skill Queue UI bar.
-   - Running `complete_skills` (`/completeskills all`) MUST immediately finish queued skills without waiting real-time, emit `OnSkillTrained` + `OnServerSkillsChanged` + `OnNewSkillQueueSaved`, increase `skills_state.total_sp`, and update the trained skill level in the Character Sheet / Skills window live without requiring a relog.
-   - If `queue_len` or `total_sp` or the Skills window UI fails to update after `train_skill` or `complete_skills`, set `previous_action_verification.expectation_met = false` and file a `ui_state_desync` bug!
+{skill_section_doc}
 2. **Upwell Structures & Timers (`advance_upwell_timer` / `/upwelltimer`):**
    - **Key Upwell typeIDs:** Citadels: `Astrahus` (`35832`, Quantum Core `56201`), `Fortizar` (`35833`, Quantum Core `56202`), `Keepstar` (`35834`, Quantum Core `56203`); Engineering Complexes: `Raitaru` (`35825`, Quantum Core `56204`), `Azbel` (`35826`, Quantum Core `56205`), `Sotiyo` (`35827`, Quantum Core `56206`); Refineries: `Athanor` (`35835`, Quantum Core `56207`), `Tatara` (`35836`, Quantum Core `56208`); FLEX: `Ansiblex Jump Gate` (`35841`), `Pharolux Cyno Beacon` (`35840`), `Tenebrex Cyno Jammer` (`37534`); Standup Service Modules: `Standup Cloning Center I` (`35894`), `Standup Market Hub I` (`35892`), `Standup Manufacturing Plant I` (`35878`), `Standup Reprocessing Facility I` (`35899`); Fuel Blocks: `Helium Fuel Block` (`4051`), `Nitrogen Fuel Block` (`4247`); Skills: `Anchoring` (`3443`), `Corporation Management` (`3731`).
    - **Anchoring Prerequisites:** Pilot MUST belong to a player corporation (with Director/Station Manager/CEO role), be in space `> 1,000 km` from stations/stargates/structures and `> 5 km` from asteroids/NPCs (note: `/tr` only accepts `[me|<char_id>] <location_id>`, never `pos x y z`; to get clean deep space, warp toward a distant planet/stargate and press Stop Ship `CTRL+SPACE` mid-warp), and have the structure item in active ship cargo. Right-click structure in cargo -> `Launch for Corporation` (`structureDeployment.Anchor`).
@@ -2846,7 +2904,7 @@ Use these ground-truth EVE Online V24.01 expectations to judge whether the game 
    - `undock` MUST transition `active_view` from `hangar` to `inflight` (`space.in_space == true`) and populate `space.nearby_balls`.
    - `warp_to` MUST enter `ball.mode == 3` (`WARP`), activate `effects.Warping` tunnel FX (`warp_telemetry.saw_mode3 == true` and `saw_fx_warping == true`), and move the ship to the destination.
    - `approach` / `orbit` MUST transition `space.ego.mode` to `1` (`FOLLOW`) or `4` (`ORBIT`) and increase `speed_mps > 0`.
-7. **Quasar Windows (`open_plex_store`, `skill_plans`, `open_structure_cosmetics`, `agency`, `corporation`):**
+{quasar_windows_doc}
    - Opening these windows MUST populate their UI content without `TimeoutException`, `SkillPlanConnectionError`, or permanently blank/spinning panels.
 8. **Mining, Asteroid Harvesting, Mining Ledger & Ore Reprocessing (`mining`, `miningledger`, `reprocessing`, `mininghold`):**
    - Key mining typeIDs: Skills `Mining` (`3386`), `Astrogeology` (`3410`), `Mining Frigate` (`32918`), `Reprocessing` (`3385`); Modules `Miner I` (`483`), `Civilian Miner` (`3651`), `Miner II` (`482`); Ship `Venture` (`32880`); Asteroid ores `Veldspar` (`1230`), `Scordite` (`1228`), `Pyroxeres` (`1224`), `Plagioclase` (`18`); Reprocessed mineral `Tritanium` (`34`).
@@ -2866,11 +2924,11 @@ Choose your next action in the `action` object according to the required JSON sc
 4. `undock` / `dock`: Undock into space or dock at a station (`target` optional station item_id).
 5. `jump_gate`: Cross-system Stargate jump (`target` = gate `item_id` or gate/destination system substring such as `"Stargate (Perimeter)"` or `"Perimeter"` from `space.nearby_balls`). Automatically warps to the gate if >150 km, approaches <2.5 km, clears session timer, jumps, and awaits `state_diff.solar_system_changed`.
 6. `warp_to` / `approach` / `orbit` / `keep_at_range` / `lock_target` / `activate_module`: In-space navigation, combat, probe launcher/probes (`Core Probe Launcher I` `17938` + `Core Scanner Probe I` `30013`), and mining laser commands.
-7. `train_skill`: Inject and queue a skill (`target` = skill typeID, e.g. `"3386"`, `"3385"`, `"3300"`, `"3327"`).
+{catalog_skill_line}
 8. **GM Timer-Acceleration & Setup-Only Slash Policy (`role = 0` for player personas):**
    - Exploratory player personas run with **`role = 0` (non-GM)**. `slash_command` / `run_slash` (including `/createitem`, `/giveisk`, `/giveskill`, `/spawn`, `/moveme`) are **STRICTLY RESTRICTED** to Step `0` bootstrap or the explicit `--persona gm_tester` mode and are **REJECTED** by the host action validator at Step `> 0` for all normal player personas! Test game flows via real UI actions (Market, Inventory, Fitting, Industry, Quests/Agency) rather than GM slash shortcuts.
    - `complete_skills` / `advance_upwell_timer` / `complete_industry_jobs` / `advance_server_time` / `clear_timers` are ONLY valid in setup/time-control steps or `--persona gm_tester` mode.
-9. `open_plex_store` / `open_structure_cosmetics`: Direct probes for `#529` and `#527`.
+{catalog_probe_line}
 10. `type_text` / `press_key` / `click_xy` / `drag_widget` / `wait`: Direct UI manipulation.
    - `type_text`: Targets widgets marked `"editable": true` in `clickable_widgets` (or focused field). Append `\n` at the end of `command`/`text` (e.g. `"Tritanium\n"`) to trigger Return/search submission automatically!
    - `press_key`: Supports `RETURN`/`ENTER`, `TAB`, `SHIFT+TAB`, `ESCAPE`, `CTRL+SPACE` (Stop Ship), `F1`–`F10`, and shortcuts (`ALT+P` Probe Scanner, `ALT+D` D-Scan, `ALT+W` Wallet, `ALT+N` Notepad, `ALT+F` Fitting, `ALT+C` Cargo, `ALT+R` Market, `ALT+G` Corp, `ALT+T` Assets, `ALT+M` Journal, `ALT+X` Skills).
@@ -2960,6 +3018,14 @@ Exact top-level JSON structure:
 When reporting a real bug (`bug_report.should_file = true`), include `"category"`, `"title"`, `"severity"`, `"subsystem"`, `"expected_behavior"`, `"actual_behavior"`, `"reproduction_steps"` inside `"bug_report"`.
 """
 
+    planner_persona_id = str(((memory.data.get("active_persona") or {}).get("id")) or "")
+    allow_gm_prompt = _prompt_allows_gm_actions(step_num, planner_persona_id)
+    planner_direct_actions_doc = _prompt_action_types_doc(allow_gm_prompt, include_widget_actions=False)
+    planner_batch_example_doc = (
+        "`clear_timers` + slash setup -> `open_neocom` -> `click_widget` -> `type_text` -> `close_window`"
+        if allow_gm_prompt
+        else "`open_neocom` -> `click_widget` -> `type_text` -> `close_window`"
+    )
     planner_instructions = f"""{escalation_section}
 ### Hybrid Planner-Executor Architecture (YOUR ROLE: STRATEGIC PARENT PLANNER)
 You are the **Strategic Parent Planner**. You audit prior outcomes and formulate `delegated_plan` (`1..10` concrete steps) executed at high speed by the **Deterministic Python Batch Runner (`~0.2s`/step)** with warm Fast Executor (`{DEFAULT_EXECUTOR_MODEL_CHAIN[0]}`) fallback for dynamic UI:
@@ -2969,12 +3035,12 @@ You are the **Strategic Parent Planner**. You audit prior outcomes and formulate
 2. **Delegate an Executable Tactical Plan (`delegated_plan`):**
    - **Step 1 executes immediately from your `delegated_plan.steps[0]` WITHOUT another LLM call** when `exec_mode = "direct"`, and every subsequent `"direct"` step executes at `~0.2s` in Python unless a selector misses or an anomaly triggers escalation.
    - **Choose `exec_mode` per step:**
-     - `"direct"` (`~75-85%` of steps): Provide `action_type_hint` AND a concrete `"action"` object (`type`, `target`/`command`, optional `wait_ms` `250`-`500`) for `slash_command`, `open_neocom`, `close_window`, `undock`, `dock`, `warp_to`, `jump_gate`, `approach`, `orbit`, `keep_at_range`, `lock_target`, `activate_module`, `train_skill`, `complete_skills`, `advance_upwell_timer`, `complete_industry_jobs`, `advance_server_time`, `clear_timers`, `press_key`, `wait`, `open_plex_store`, `open_structure_cosmetics`, AND for `click_widget`/`type_text`/`drag_widget` when the widget name/path/label is known from `clickable_widgets` or predictable (`context_menu_*`, `yes_dialog_button`, `ok_dialog_button`, `cancelBtn`, `quickFilterInputBox`, `OverviewTab_*`).
+     - `"direct"` (`~75-85%` of steps): Provide `action_type_hint` AND a concrete `"action"` object (`type`, `target`/`command`, optional `wait_ms` `250`-`500`) for {planner_direct_actions_doc}, AND for `click_widget`/`type_text`/`drag_widget` when the widget name/path/label is known from `clickable_widgets` or predictable (`context_menu_*`, `yes_dialog_button`, `ok_dialog_button`, `cancelBtn`, `quickFilterInputBox`, `OverviewTab_*`).
      - `"llm"`: Provide `action_type_hint` (`"click_widget"`, etc.); use `"llm"` ONLY when a previous step in the same batch will open an unfamiliar window/dialog whose child widget names are not known yet (`action` may be omitted).
    - **Optional `"assertions"` (`expect_window_open`, `expect_window_closed`, `expect_modal_absent`, `expect_context_menu_item`, `expect_ball_present`, `expect_session_field`):** All keys are OPTIONAL — ONLY include `expect_modal_absent: true` when no confirmation popup (`Delete`, `Yes/No`) is expected! Keep `capture_screenshot: false` (default) on routine `"direct"` steps.
    - **Choose `max_batch_steps` (`6–10` steps strongly preferred for routine multi-step workflows!)** and explain briefly in `horizon_rationale`:
      - Use **`1–2` steps** only for high-risk/bug-prone probes or escalation diagnosis.
-     - Use **`6–10` steps** for normal setup -> UI -> gameplay sequences (e.g. `clear_timers` + slash setup -> `open_neocom` -> `click_widget` -> `type_text` -> `close_window`, or `undock` -> `warp_to` -> `wait` -> `lock_target` -> `activate_module` -> `dock`). Never emit `wait(10000)` for session-change timers (`clear_timers` takes `~0.2s`).
+     - Use **`6–10` steps** for normal gameplay sequences (e.g. {planner_batch_example_doc}, or `undock` -> `warp_to` -> `wait` -> `lock_target` -> `activate_module` -> `dock`). Never emit `wait(10000)` for session-change timers (`wait(10000)` if unavoidable).
      - Note: Only `{max(1, int((memory.data.get('active_persona') or {}).get('rotate_after_steps', 25)) - int(memory.data.get('active_persona_steps', 0)))}` steps remain before persona rotation.
    - **Keep `memory_update` coverage frontier clean & annotate Fix Verifications:**
      - Only reference canonical `feature_id`s from Coverage Frontier (or short snake_case slugs when genuinely new). Never emit long prose sentences as feature IDs.
@@ -3053,6 +3119,11 @@ Omit null/false action fields (`command`, `dest_x`, `dest_y`, `right_click`, `do
     _sep = (",", ":") if use_compact_json_contract else None
     _ind = None if use_compact_json_contract else 2
 
+    exec_persona_id = str(((memory.data.get("active_persona") or {}).get("id")) or "")
+    exec_actions_doc = _prompt_action_types_doc(
+        _prompt_allows_gm_actions(step_num, exec_persona_id),
+        include_widget_actions=True,
+    )
     if batch_step_idx <= 1:
         return f"""You are the **Fast Tactical Playtester Executor** (`{DEFAULT_EXECUTOR_MODEL_CHAIN[0]}`) operating the live macOS EVE Online V24.01 client (`EVE.app`).
 You are executing **Batch #{batch_id} (Step {batch_step_idx} of {max_steps})** delegated to you by the Strategic Parent Planner (`{DEFAULT_MODEL_CHAIN[0]}`).
@@ -3083,7 +3154,7 @@ You are executing **Batch #{batch_id} (Step {batch_step_idx} of {max_steps})** d
 1. **Batch Step 1 Verification:** Since the Parent Planner just audited the pre-batch state, set `previous_action_verification.expectation_met = true` and `discrepancy_summary = ""` on Batch Step 1 unless an unexpected error modal is already blocking the screen.
 2. **Map the Planned Step to a Concrete Action:**
    - Match `target_or_command_hint` (or `action.target`) from Batch Step {batch_step_idx} against live `clickable_widgets`, `open_windows`, `context_menu`, `modals`, or `space.nearby_balls`.
-   - Valid `action.type` values: `click_widget`, `open_neocom`, `close_window`, `undock`, `dock`, `jump_gate`, `warp_to`, `approach`, `orbit`, `keep_at_range`, `lock_target`, `activate_module`, `train_skill`, `complete_skills`, `advance_upwell_timer`, `complete_industry_jobs`, `advance_server_time`, `clear_timers`, `slash_command`, `open_plex_store`, `open_structure_cosmetics`, `press_key`, `type_text`, `click_xy`, `drag_widget`, `wait`.
+   - Valid `action.type` values: {exec_actions_doc}.
    - Note: `type_text` MUST set `target` to the editable widget path (or `""` if already focused) AND `command` to the non-empty text string to type (append `\n` to submit); `press_key` supports `RETURN`, `ENTER`, `TAB`, `SHIFT+TAB`, `ESCAPE`, `CTRL+SPACE`, `F1`–`F10`, and `ALT+P/D/W/N/F/C/R/G/T/M/X`; `click_widget` with `"double_click": true` works on both `eveui` cards and legacy rows.
 3. **Choosing `batch_status`:**
    - Set `batch_status = "completed"` if `max_batch_steps == 1` OR this action completes the final step of `delegated_plan`.
@@ -5899,8 +5970,7 @@ def validate_exploratory_action(
     """
     if not isinstance(action, dict):
         return False, "Action payload must be a JSON object"
-    pid = str(persona_id or "").strip().lower()
-    if int(step_num) <= 0 or pid == GM_TESTER_PERSONA["id"]:
+    if _prompt_allows_gm_actions(step_num, persona_id):
         return True, ""
 
     raw_type = str(action.get("type") or "").strip()

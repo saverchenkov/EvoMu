@@ -3449,6 +3449,7 @@ class TestScenarioHookExtensions(unittest.TestCase):
         fake_cmd = types.SimpleNamespace(
             CmdOpenNewEdenStore=lambda: None,
             CmdOpenSkillQueueWindow=lambda: None,
+            CmdToggleShipTree=lambda: None,
         )
         fake_uicore = types.SimpleNamespace(
             cmd=fake_cmd,
@@ -3456,11 +3457,16 @@ class TestScenarioHookExtensions(unittest.TestCase):
             layer=types.SimpleNamespace(modal=None, abovemain=None, main=None),
             desktop=types.SimpleNamespace(width=1280, height=800),
         )
+        cur_view_state = {
+            "secondary": types.SimpleNamespace(name="starmap_new"),
+            "current": types.SimpleNamespace(name="starmap_new"),
+        }
         fake_viewstate = types.SimpleNamespace(
-            secondaryInfo=types.SimpleNamespace(name="starmap"),
+            secondaryInfo=cur_view_state["secondary"],
             activeView=types.SimpleNamespace(
                 layer=types.SimpleNamespace(name="l_starmap", display=True, destroyed=False, children=[])
             ),
+            GetCurrentViewInfo=lambda: cur_view_state["current"],
             ToggleSecondaryView=lambda *_a, **_kw: None,
             CloseSecondaryView=lambda *_a, **_kw: None,
         )
@@ -3470,9 +3476,26 @@ class TestScenarioHookExtensions(unittest.TestCase):
             OpenDrawer=lambda: None,
             CloseDrawer=lambda: None,
         )
+        fake_skill_panel_cls = type(
+            "SkillPlanDockablePanel",
+            (),
+            {"Open": staticmethod(lambda: None), "GetIfOpen": staticmethod(lambda: None)},
+        )
+        fake_skill_panel_mod = types.ModuleType("eve.client.script.ui.skillPlan.skillPlanDockablePanel")
+        fake_skill_panel_mod.SkillPlanDockablePanel = fake_skill_panel_cls
+        fake_eve_pkg = types.ModuleType("eve")
+        fake_client_pkg = types.ModuleType("eve.client")
+        fake_script_pkg = types.ModuleType("eve.client.script")
+        fake_ui_pkg = types.ModuleType("eve.client.script.ui")
+        fake_sp_pkg = types.ModuleType("eve.client.script.ui.skillPlan")
         fake_svcs = {
             "viewState": fake_viewstate,
             "notificationUIService": types.SimpleNamespace(notificationCenter=fake_notif_center),
+            "notificationSvc": types.SimpleNamespace(
+                GetAllFormattedNotifications=lambda: [],
+                OpenNotificationReadingWnd=lambda: None,
+            ),
+            "skillPlanSvc": types.SimpleNamespace(GetAllPersonal=lambda: []),
             "aurumstore": types.SimpleNamespace(),
             "skills": types.SimpleNamespace(),
         }
@@ -3481,7 +3504,18 @@ class TestScenarioHookExtensions(unittest.TestCase):
             userid=1, charid=90000001, stationid=60003760, structureid=None,
             shipid=100000001, solarsystemid=None, solarsystemid2=30000142, mutating=0, changing=None,
         )
-        with mock.patch.dict(sys.modules, {"uthread": None}), \
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "uthread": None,
+                "eve": fake_eve_pkg,
+                "eve.client": fake_client_pkg,
+                "eve.client.script": fake_script_pkg,
+                "eve.client.script.ui": fake_ui_pkg,
+                "eve.client.script.ui.skillPlan": fake_sp_pkg,
+                "eve.client.script.ui.skillPlan.skillPlanDockablePanel": fake_skill_panel_mod,
+            },
+        ), \
              mock.patch.dict(builtins.__dict__, {"session": sess, "sm": fake_sm}), \
              mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
              mock.patch.object(hook, "_is_visible", side_effect=lambda obj: bool(getattr(obj, "display", True) and not getattr(obj, "destroyed", False))), \
@@ -3503,23 +3537,39 @@ class TestScenarioHookExtensions(unittest.TestCase):
             self.assertTrue(res_info.get("action_ok"), res_info)
             self.assertEqual(closed_wins, [])
 
-            # Secondary view without TabGroup ("map" -> currentSecondaryView="starmap") succeeds gracefully with tabs_clicked=0
+            # Secondary view without TabGroup ("map" -> currentSecondaryView="starmap_new") succeeds gracefully with tabs_clicked=0
             tab_map = hook._click_top_tabs_in_window("map", max_tabs=4, require_match=True)
             self.assertTrue(tab_map.get("ok"), tab_map)
             self.assertEqual(tab_map.get("tabs_clicked"), 0)
 
-            # Secondary view NOT open ("shiptree" while "starmap" is open) must fail when require_match=True
+            # Secondary view NOT open ("shiptree" while "starmap_new" is open) must fail when require_match=True
             tab_tree = hook._click_top_tabs_in_window("shiptree", max_tabs=4, require_match=True)
             self.assertFalse(tab_tree.get("ok"), tab_tree)
 
-            # skills / notifications / nes fallback must honor require_open=True and fail when nothing opened
-            res_skills = hook._open_client_window(fake_sm, "skills", require_open=True)
-            self.assertFalse(res_skills.get("ok"), res_skills)
-            res_notif = hook._open_client_window(fake_sm, "notifications", require_open=True)
-            self.assertFalse(res_notif.get("ok"), res_notif)
+            # With unrelated secondary view ("starmap_new") already open, no-op opens must still fail closed under require_open=True
+            res_skills_sec = hook._open_client_window(fake_sm, "skills", require_open=True)
+            self.assertFalse(res_skills_sec.get("ok"), res_skills_sec)
+            res_notif_sec = hook._open_client_window(fake_sm, "notifications", require_open=True)
+            self.assertFalse(res_notif_sec.get("ok"), res_notif_sec)
+            res_tree_sec = hook._open_client_window(fake_sm, "shiptree", require_open=True)
+            self.assertFalse(res_tree_sec.get("ok"), res_tree_sec)
             fake_uicore.cmd = types.SimpleNamespace()  # force aurumstore fallback
-            res_nes = hook._open_client_window(fake_sm, "nes", require_open=True)
-            self.assertFalse(res_nes.get("ok"), res_nes)
+            res_nes_sec = hook._open_client_window(fake_sm, "nes", require_open=True)
+            self.assertFalse(res_nes_sec.get("ok"), res_nes_sec)
+
+            # With only primary view ("hangar") and secondaryInfo=None, no-op opens must never report ok via GetCurrentViewInfo()=="hangar"
+            fake_uicore.cmd = fake_cmd
+            fake_viewstate.secondaryInfo = None
+            cur_view_state["current"] = types.SimpleNamespace(name="hangar")
+            res_skills_pri = hook._open_client_window(fake_sm, "skills", require_open=True)
+            self.assertFalse(res_skills_pri.get("ok"), res_skills_pri)
+            res_notif_pri = hook._open_client_window(fake_sm, "notifications", require_open=True)
+            self.assertFalse(res_notif_pri.get("ok"), res_notif_pri)
+            res_tree_pri = hook._open_client_window(fake_sm, "shiptree", require_open=True)
+            self.assertFalse(res_tree_pri.get("ok"), res_tree_pri)
+            fake_uicore.cmd = types.SimpleNamespace()
+            res_nes_pri = hook._open_client_window(fake_sm, "nes", require_open=True)
+            self.assertFalse(res_nes_pri.get("ok"), res_nes_pri)
 
 
 if __name__ == "__main__":

@@ -774,26 +774,49 @@ pub fn emit_milestone_timer_started(ctx: &ServerContext, char_id: i64, time_left
     );
 }
 
+const CHAR_ID_PREFIX_MIN: i64 = 3_000_000;
+const UPWELL_STRUCTURE_ID_MIN: i64 = 1_000_000_000_000;
+
 fn resolve_optional_target_char<'a, 'b>(
     ctx: &ServerContext,
     caller_cid: i64,
     args: &'a [&'b str],
-) -> (i64, &'a [&'b str]) {
+    cmd_head: &str,
+) -> Result<(i64, &'a [&'b str]), BridgeRpcError> {
     let Some(first) = args.first().copied() else {
-        return (caller_cid, args);
+        return Ok((caller_cid, args));
     };
     if first.eq_ignore_ascii_case("me") || first.eq_ignore_ascii_case("self") {
-        return (caller_cid, &args[1..]);
+        return Ok((caller_cid, &args[1..]));
     }
     if let Ok(parsed) = first.parse::<i64>() {
-        if parsed > 0
-            && (parsed == caller_cid
-                || ctx.db.with_snapshot(|s| s.characters.contains_key(&parsed)))
-        {
-            return (parsed, &args[1..]);
+        if parsed > 0 {
+            let (is_char, is_known_domain_id) = ctx.db.with_snapshot(|s| {
+                let is_char = parsed == caller_cid || s.characters.contains_key(&parsed);
+                let is_known_domain_id = match cmd_head {
+                    "/upwelltimer" | "/structuretimer" | "/finishstructure" => {
+                        parsed >= UPWELL_STRUCTURE_ID_MIN || s.structures.contains_key(&parsed)
+                    }
+                    "/completeindustry" | "/finishjobs" | "/industrytimer" => {
+                        s.industry_jobs.contains_key(&parsed)
+                    }
+                    _ => false,
+                };
+                (is_char, is_known_domain_id)
+            });
+            if is_char {
+                return Ok((parsed, &args[1..]));
+            }
+            if parsed >= CHAR_ID_PREFIX_MIN && !is_known_domain_id {
+                return Err(BridgeRpcError {
+                    code: "CharacterNotFound".into(),
+                    message: format!("Character {parsed} not found"),
+                    client_error: None,
+                });
+            }
         }
     }
-    (caller_cid, args)
+    Ok((caller_cid, args))
 }
 
 fn resolve_target_solar_system(
@@ -1123,7 +1146,11 @@ pub fn handle_batch3_gm_slash_cmd(
             Some(Ok(PyRep::Bool(enabled)))
         }
         "/spawnanomaly" => {
-            let (target_cid, rem) = resolve_optional_target_char(ctx, caller_cid, &parts[1..]);
+            let (target_cid, rem) =
+                match resolve_optional_target_char(ctx, caller_cid, &parts[1..], head.as_str()) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
             let sys_id = resolve_target_solar_system(ctx, caller_cid, caller_sys, target_cid);
             let dungeon_id = rem
                 .first()
@@ -1156,7 +1183,11 @@ pub fn handle_batch3_gm_slash_cmd(
         }
         "/advancetime" | "/fastforward" | "/ff" => {
             let (target_cid, secs) = {
-                let (mut cid_res, rem) = resolve_optional_target_char(ctx, caller_cid, &parts[1..]);
+                let (mut cid_res, rem) =
+                    match resolve_optional_target_char(ctx, caller_cid, &parts[1..], head.as_str()) {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
                 let mut parsed_secs: Option<u64> = None;
                 for tok in rem {
                     if tok.eq_ignore_ascii_case("me") || tok.eq_ignore_ascii_case("self") {
@@ -1170,6 +1201,13 @@ pub fn handle_batch3_gm_slash_cmd(
                             {
                                 cid_res = parsed;
                                 continue;
+                            }
+                            if parsed >= CHAR_ID_PREFIX_MIN {
+                                return Some(Err(BridgeRpcError {
+                                    code: "CharacterNotFound".into(),
+                                    message: format!("Character {parsed} not found"),
+                                    client_error: None,
+                                }));
                             }
                         }
                     }
@@ -1194,7 +1232,11 @@ pub fn handle_batch3_gm_slash_cmd(
             ])))
         }
         "/completeskills" | "/trainskills" | "/finishskills" => {
-            let (target_cid, rem) = resolve_optional_target_char(ctx, caller_cid, &parts[1..]);
+            let (target_cid, rem) =
+                match resolve_optional_target_char(ctx, caller_cid, &parts[1..], head.as_str()) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
             let arg = rem.first().copied().unwrap_or("all");
             let advance_s: f64 = if arg.eq_ignore_ascii_case("all") {
                 31_536_000.0 * 5.0
@@ -1282,7 +1324,11 @@ pub fn handle_batch3_gm_slash_cmd(
             ])))
         }
         "/upwelltimer" | "/structuretimer" | "/finishstructure" => {
-            let (target_cid, rem) = resolve_optional_target_char(ctx, caller_cid, &parts[1..]);
+            let (target_cid, rem) =
+                match resolve_optional_target_char(ctx, caller_cid, &parts[1..], head.as_str()) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
             let target_sid_opt = rem.first().and_then(|s| s.parse::<i64>().ok());
             let now = ctx.now_unix();
             let sys_id = resolve_target_solar_system(ctx, caller_cid, caller_sys, target_cid);
@@ -1381,7 +1427,11 @@ pub fn handle_batch3_gm_slash_cmd(
             }
         }
         "/completeindustry" | "/finishjobs" | "/industrytimer" => {
-            let (target_cid, rem) = resolve_optional_target_char(ctx, caller_cid, &parts[1..]);
+            let (target_cid, rem) =
+                match resolve_optional_target_char(ctx, caller_cid, &parts[1..], head.as_str()) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
             let target_job = rem.first().and_then(|s| s.parse::<i64>().ok());
             let now = ctx.now_unix();
             let corp_id = ctx
@@ -1450,7 +1500,11 @@ pub fn handle_batch3_gm_slash_cmd(
             ])))
         }
         "/cleartimers" => {
-            let (target_cid, rem) = resolve_optional_target_char(ctx, caller_cid, &parts[1..]);
+            let (target_cid, rem) =
+                match resolve_optional_target_char(ctx, caller_cid, &parts[1..], head.as_str()) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
             if let Some(bad_tok) = rem.first() {
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotFound".into(),

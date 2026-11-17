@@ -3903,6 +3903,34 @@ def _target_matches_view(t_norm, view_name):
     return any((tok in vn or vn in tok) for tok in _window_target_tokens(t_norm))
 
 
+_PRIMARY_VIEW_NAMES = ("", "hangar", "inflight", "charsel", "station", "login", "intro")
+
+
+def _current_secondary_view_name(sm):
+    if sm is None:
+        return ""
+    try:
+        svcs = getattr(sm, "services", None)
+        vs_cur = svcs.get("viewState") if isinstance(svcs, dict) else None
+        if vs_cur is None and hasattr(sm, "GetService"):
+            vs_cur = sm.GetService("viewState")
+        if vs_cur is None:
+            return ""
+        sec_cur = getattr(vs_cur, "secondaryInfo", None)
+        if sec_cur is not None and getattr(sec_cur, "name", None):
+            sec_name = _safe_str(getattr(sec_cur, "name", "") or "", 48)
+            if sec_name.strip().lower() not in _PRIMARY_VIEW_NAMES:
+                return sec_name
+        if hasattr(vs_cur, "GetCurrentViewInfo"):
+            vi_cur = vs_cur.GetCurrentViewInfo()
+            vi_name = _safe_str(getattr(vi_cur, "name", "") or "", 48)
+            if vi_name.strip().lower() not in _PRIMARY_VIEW_NAMES:
+                return vi_name
+    except Exception:
+        pass
+    return ""
+
+
 def _find_matching_secondary_or_drawer_container(sm, t_norm):
     if not t_norm:
         return None, None, None
@@ -3928,27 +3956,21 @@ def _find_matching_secondary_or_drawer_container(sm, t_norm):
                 return sp_wnd, "SkillPlanDockablePanel", "dockable_panel"
         except Exception:
             pass
-    vs = svcs.get("viewState") if isinstance(svcs, dict) else None
-    if vs is None and sm is not None and hasattr(sm, "GetService"):
-        try:
-            vs = sm.GetService("viewState")
-        except Exception:
-            vs = None
-    if vs is not None:
-        try:
-            sec_vi = getattr(vs, "secondaryInfo", None)
-            sec_name = _safe_str(getattr(sec_vi, "name", "") or "", 48)
-            if not sec_name and hasattr(vs, "GetCurrentViewInfo"):
-                cur_vi = vs.GetCurrentViewInfo()
-                cur_name = _safe_str(getattr(cur_vi, "name", "") or "", 48)
-                if cur_name not in ("", "hangar", "inflight", "charsel", "station", "login", "intro"):
-                    sec_name = cur_name
-            if sec_name and _target_matches_view(t_norm, sec_name):
+    sec_name = _current_secondary_view_name(sm)
+    if sec_name and _target_matches_view(t_norm, sec_name):
+        vs = svcs.get("viewState") if isinstance(svcs, dict) else None
+        if vs is None and sm is not None and hasattr(sm, "GetService"):
+            try:
+                vs = sm.GetService("viewState")
+            except Exception:
+                vs = None
+        if vs is not None:
+            try:
                 sec_view = getattr(vs, "activeView", None)
                 sec_layer = getattr(sec_view, "layer", None) if sec_view is not None else None
                 return (sec_layer or sec_view), sec_name, "secondary_view"
-        except Exception:
-            pass
+            except Exception:
+                pass
     return None, None, None
 
 
@@ -4104,23 +4126,15 @@ def _open_client_window(sm, target, require_open=False):
     reg = getattr(uicore, "registry", None) if uicore is not None else None
 
     def _current_sec_view():
-        try:
-            vs_cur = sm.GetService("viewState") if sm is not None else None
-            sec_cur = getattr(vs_cur, "secondaryInfo", None) if vs_cur is not None else None
-            if sec_cur is not None and getattr(sec_cur, "name", None):
-                return _safe_str(getattr(sec_cur, "name", "") or "", 48)
-            vi_cur = vs_cur.GetCurrentViewInfo() if (vs_cur is not None and hasattr(vs_cur, "GetCurrentViewInfo")) else None
-            return _safe_str(getattr(vi_cur, "name", "") or "", 48)
-        except Exception:
-            return ""
+        return _current_secondary_view_name(sm)
+
+    pre_sec_view = _current_sec_view()
 
     def _verify_matching_surface_open(pre_sec_view="", opened_vis_ids=None):
         post_sec_view = _current_sec_view()
         if post_sec_view and (
             (t and _target_matches_view(t, post_sec_view))
             or post_sec_view != pre_sec_view
-            or post_sec_view in _ASYNC_SECONDARY_VIEWS
-            or post_sec_view in ("skill_plan", "starmap_new", "systemmap_new", "planet", "shiptree", "paint_tool", "virtual_goods_store", "aurumstore", "career_portal")
         ):
             return True
         if opened_vis_ids:
@@ -4158,7 +4172,7 @@ def _open_client_window(sm, target, require_open=False):
             if wnd is None:
                 wnd = SkillPlanDockablePanel.GetIfOpen()
             sp_visible = bool(wnd is not None and not getattr(wnd, "destroyed", False) and _is_visible(wnd))
-            if require_open and not sp_visible and not _verify_matching_surface_open():
+            if require_open and not sp_visible and not _verify_matching_surface_open(pre_sec_view=pre_sec_view):
                 return {
                     "ok": False,
                     "error": "open_window %r produced no visible SkillPlanDockablePanel" % (raw_target,),
@@ -4210,7 +4224,7 @@ def _open_client_window(sm, target, require_open=False):
                 if hasattr(n_svc, "OpenNotificationReadingWnd"):
                     n_svc.OpenNotificationReadingWnd()
                     H._sleep_ms(500)
-                    if not require_open or _verify_matching_surface_open():
+                    if not require_open or _verify_matching_surface_open(pre_sec_view=pre_sec_view):
                         return {"ok": True, "opened_via": "notificationSvc.OpenNotificationReadingWnd"}
                     return {
                         "ok": False,
@@ -4256,7 +4270,6 @@ def _open_client_window(sm, target, require_open=False):
             return snap
 
         pre_snap = _reg_window_vis_map()
-        pre_sec_view = _current_sec_view()
         fn = getattr(cmd_svc, mname)
         cmd_args = ()
         if mname == "OpenAgencyContentGroup" and t == "agentfinder":
@@ -4308,15 +4321,14 @@ def _open_client_window(sm, target, require_open=False):
     if t in ("nes", "newedenstore", "plexstore", "aurumstore", "store"):
         try:
             vs = sm.GetService("viewState")
-            pre_sec = _current_sec_view()
             vs.ToggleSecondaryView("aurumstore")
             H._sleep_ms(600)
             post_sec = _current_sec_view()
-            if require_open and pre_sec and _target_matches_view(t, pre_sec) and not _target_matches_view(t, post_sec):
+            if require_open and pre_sec_view and _target_matches_view(t, pre_sec_view) and not _target_matches_view(t, post_sec):
                 vs.ToggleSecondaryView("aurumstore")
                 H._sleep_ms(600)
                 post_sec = _current_sec_view()
-            if require_open and not _verify_matching_surface_open(pre_sec_view=pre_sec):
+            if require_open and not _verify_matching_surface_open(pre_sec_view=pre_sec_view):
                 return {
                     "ok": False,
                     "error": "open_window %r did not open aurumstore secondary view (current=%r)" % (raw_target, post_sec),
