@@ -1697,3 +1697,371 @@ fn contract_fitted_ship_and_non_empty_container_lifecycle_and_validation() {
         assert!(snap.kv(eve_db::Ns::ContractBidDiv).get::<u8>(corp_auc_cid, &corp_bid_id.to_string()).is_none());
     });
 }
+
+#[test]
+fn remote_contract_creation_from_space_or_other_station_parity_1275() {
+    use eve_db::corp_roles;
+
+    let (mut ctx, issuer_sess, issuer_id, _acc_sess, acceptor_id, station_id, dest_id, corp_id) =
+        setup_extra_contracts_env();
+    let kw = HashMap::new();
+    let npc_station_id = 60_003_760i64;
+    let destroyed_struct_id = 1_000_000_000_103i64;
+    let limited_member_id = 90_000_077i64;
+    let active_ship = issuer_sess.ship_id.unwrap();
+
+    Arc::make_mut(&mut ctx.sde).stations.insert(
+        npc_station_id,
+        eve_sde::StationInfo {
+            station_id: npc_station_id,
+            solar_system_id: 30_000_142,
+            constellation_id: 20_000_020,
+            region_id: 10_000_002,
+            station_type_id: 57,
+            name: "Jita IV - Moon 4 - Caldari Navy Assembly Plant".into(),
+            position: glam::DVec3::ZERO,
+            owner_corporation_id: 1_000_035,
+            owner_faction_id: None,
+            operation_id: 0,
+            reprocessing_efficiency: 0.5,
+            reprocessing_stations_take: 0.05,
+            is_conquerable: false,
+            orbit_id: None,
+            has_clone_bay: true,
+        },
+    );
+
+    let npc_item = 830_001i64;
+    let struct_item = 830_002i64;
+    let auc_item = 830_003i64;
+    let courier_item = 830_004i64;
+    let corp_item = 830_005i64;
+    let other_station_item = 830_006i64;
+    let foreign_item = 830_007i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            destroyed_struct_id,
+            UpwellStructureRecord {
+                structure_id: destroyed_struct_id,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: "Destroyed Citadel".into(),
+                state: "Destroyed".into(),
+                position: [0.0; 3],
+                quantum_core_installed: false,
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&issuer_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.ensure_wallet_divisions();
+            corp.member_roles.insert(
+                limited_member_id,
+                corp_roles::ROLE_CONTRACT_MANAGER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0],
+            );
+        }
+        let mut limited = snap.characters[&acceptor_id].clone();
+        limited.character_id = limited_member_id;
+        limited.user_id = 44;
+        limited.corporation_id = corp_id;
+        limited.station_id = None;
+        limited.structure_id = None;
+        limited.balance = IskCents::from_isk(100_000_000);
+        snap.characters.insert(limited_member_id, limited);
+
+        snap.items.insert(npc_item, make_fighter_item(npc_item, 34, issuer_id, npc_station_id, InventoryFlag::Hangar, 5));
+        snap.items.insert(struct_item, make_fighter_item(struct_item, 34, issuer_id, station_id, InventoryFlag::Hangar, 10));
+        snap.items.insert(auc_item, make_fighter_item(auc_item, 34, issuer_id, station_id, InventoryFlag::Hangar, 1));
+        snap.items.insert(courier_item, make_fighter_item(courier_item, 34, issuer_id, station_id, InventoryFlag::Hangar, 3));
+        snap.items.insert(corp_item, make_fighter_item(corp_item, 34, corp_id, station_id, InventoryFlag::CorpSAG2, 4));
+        snap.items.insert(other_station_item, make_fighter_item(other_station_item, 34, issuer_id, dest_id, InventoryFlag::Hangar, 2));
+        snap.items.insert(foreign_item, make_fighter_item(foreign_item, 34, acceptor_id, station_id, InventoryFlag::Hangar, 2));
+    });
+
+    let mut space_sess = issuer_sess.clone();
+    space_sess.station_id = None;
+    space_sess.structure_id = None;
+
+    let mut limited_sess = space_sess.clone();
+    limited_sess.character_id = Some(limited_member_id);
+    limited_sess.ship_id = None;
+
+    // 1. Negative: undocked CreateContract omitting/zeroing startStationID -> InvalidContractStation.
+    for missing_start in [PyRep::None, PyRep::Integer(0)] {
+        let err = handle(
+            &ctx,
+            &mut space_sess,
+            "contractProxy",
+            "CreateContract",
+            &[PyRep::keyval([
+                ("contractType", PyRep::Integer(1)),
+                ("startStationID", missing_start),
+                ("endStationID", PyRep::Integer(station_id)),
+                ("itemList", PyRep::List(vec![PyRep::Integer(struct_item)])),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, "InvalidContractStation");
+    }
+
+    // 2. Negative: non-existent station and Destroyed structure -> InvalidContractStation.
+    for bad_loc in [99_999_999i64, destroyed_struct_id] {
+        let err = handle(
+            &ctx,
+            &mut space_sess,
+            "contractProxy",
+            "CreateContract",
+            &[PyRep::keyval([
+                ("contractType", PyRep::Integer(1)),
+                ("startStationID", PyRep::Integer(bad_loc)),
+                ("endStationID", PyRep::Integer(bad_loc)),
+                ("requestedItems", PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(34), PyRep::Integer(5)])])),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, "InvalidContractStation");
+    }
+
+    // 3. Negative: remote Want-to-Buy targeting an ACL-denied Upwell structure -> StructureAccessDenied (no side effects).
+    let pre_acl_bal = ctx.db.with_mut_snapshot(|snap| {
+        snap.structure_docking_acl_denied.entry(station_id).or_default().insert(issuer_id);
+        snap.characters[&issuer_id].balance
+    });
+    let err_wtb_acl = handle(
+        &ctx,
+        &mut space_sess,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::Integer(1)),
+            ("startStationID", PyRep::Integer(station_id)),
+            ("destinationID", PyRep::Integer(station_id)),
+            ("reward", PyRep::Real(100_000.0)),
+            ("requestItemTypeList", PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(34), PyRep::Integer(5)])])),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_wtb_acl.code, "StructureAccessDenied");
+    ctx.db.with_mut_snapshot(|snap| {
+        assert_eq!(snap.characters[&issuer_id].balance, pre_acl_bal);
+        assert!(snap.contracts.is_empty());
+        snap.structure_docking_acl_denied.remove(&station_id);
+    });
+
+    // 4. Negative: wrong-location item, foreign-owned item, and boarded active ship from space.
+    for (bad_item, expected_code) in [
+        (other_station_item, "ContractItemOwnershipOrLocationInvalid"),
+        (foreign_item, "ContractItemOwnershipOrLocationInvalid"),
+        (active_ship, "CannotContractActiveShip"),
+    ] {
+        let err = handle(
+            &ctx,
+            &mut space_sess,
+            "contractProxy",
+            "CreateContract",
+            &[PyRep::keyval([
+                ("contractType", PyRep::Integer(1)),
+                ("startStationID", PyRep::Integer(station_id)),
+                ("itemList", PyRep::List(vec![PyRep::Integer(bad_item)])),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, expected_code, "item {bad_item}");
+    }
+
+    // 5. Negative: non-CEO corp member lacking hangar take role for CorpSAG2 at remote station_id -> CrpAccessDenied.
+    let err_corp_hangar = handle(
+        &ctx,
+        &mut limited_sess,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::Integer(1)),
+            ("forCorp", PyRep::Bool(true)),
+            ("startStationID", PyRep::Integer(station_id)),
+            ("itemList", PyRep::List(vec![PyRep::Integer(corp_item)])),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_corp_hangar.code, "CrpAccessDenied");
+
+    // 6. Positive: undocked ItemExchange at remote NPC station via V24 [[itemID, qty]] + notifications + balance debit.
+    let _ = ctx.drain_notifications_for_char(issuer_id);
+    let bal_before_npc = ctx.db.with_snapshot(|snap| snap.characters[&issuer_id].balance);
+    let npc_created = handle(
+        &ctx,
+        &mut space_sess,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::Integer(1)),
+            ("availability", PyRep::Integer(0)),
+            ("assignedToID", PyRep::None),
+            ("minutesExpire", PyRep::Integer(1440)),
+            ("numDays", PyRep::Integer(1)),
+            ("startStationID", PyRep::Integer(npc_station_id)),
+            ("destinationID", PyRep::Integer(npc_station_id)),
+            ("price", PyRep::Real(1_000_000.0)), // public 1% broker (10k) + 1% deposit (100k) = 110k
+            ("itemList", PyRep::List(vec![PyRep::List(vec![PyRep::Integer(npc_item), PyRep::Integer(5)])])),
+            ("requestItemTypeList", PyRep::List(vec![])),
+            ("forCorp", PyRep::Integer(0)),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let npc_cid = created_cid(&npc_created).unwrap();
+    let npc_notifs = ctx.drain_notifications_for_char(issuer_id);
+    assert!(npc_notifs.iter().any(|n| n.event == "OnItemChange"));
+    assert!(npc_notifs.iter().any(|n| n.event == "OnAccountChange"));
+    assert!(npc_notifs.iter().any(|n| n.event == "OnContractCreated"));
+    ctx.db.with_snapshot(|snap| {
+        let c = &snap.contracts[&npc_cid];
+        assert_eq!(c.start_station_id, npc_station_id);
+        assert_eq!(c.end_station_id, npc_station_id);
+        assert_eq!(c.status, "Outstanding");
+        assert_eq!(c.item_ids, vec![npc_item]);
+        assert_eq!(snap.items[&npc_item].location_id, npc_cid);
+        assert_eq!(snap.items[&npc_item].flag, InventoryFlag::Locked);
+        assert_eq!(
+            snap.characters[&issuer_id].balance,
+            bal_before_npc.checked_sub(IskCents::from_isk(110_000)).unwrap()
+        );
+    });
+
+    // 7. Positive: undocked Want-to-Buy, Auction, Courier (Upwell -> NPC station), and forCorp ItemExchange.
+    let wtb_cid = created_cid(
+        &handle(
+            &ctx,
+            &mut space_sess,
+            "contractProxy",
+            "CreateContract",
+            &[PyRep::keyval([
+                ("contractType", PyRep::Integer(1)),
+                ("startStationID", PyRep::Integer(station_id)),
+                ("destinationID", PyRep::Integer(station_id)),
+                ("reward", PyRep::Real(250_000.0)),
+                ("requestItemTypeList", PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(35), PyRep::Integer(20)])])),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+    )
+    .unwrap();
+    let auc_cid = created_cid(
+        &handle(
+            &ctx,
+            &mut space_sess,
+            "contractProxy",
+            "CreateContract",
+            &[PyRep::keyval([
+                ("contractType", PyRep::Integer(2)),
+                ("startStationID", PyRep::Integer(station_id)),
+                ("price", PyRep::Real(500_000.0)),
+                ("collateral", PyRep::Real(2_000_000.0)),
+                ("itemList", PyRep::List(vec![PyRep::Integer(auc_item)])),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+    )
+    .unwrap();
+    let courier_cid = created_cid(
+        &handle(
+            &ctx,
+            &mut space_sess,
+            "contractProxy",
+            "CreateContract",
+            &[PyRep::keyval([
+                ("contractType", PyRep::Integer(3)),
+                ("startStationID", PyRep::Integer(station_id)),
+                ("endStationID", PyRep::Integer(npc_station_id)),
+                ("reward", PyRep::Real(250_000.0)),
+                ("collateral", PyRep::Real(1_000_000.0)),
+                ("itemList", PyRep::List(vec![PyRep::Integer(courier_item)])),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+    )
+    .unwrap();
+    let corp_cid = created_cid(
+        &handle(
+            &ctx,
+            &mut space_sess,
+            "contractProxy",
+            "CreateContract",
+            &[PyRep::keyval([
+                ("contractType", PyRep::Integer(1)),
+                ("forCorp", PyRep::Bool(true)),
+                ("startStationID", PyRep::Integer(station_id)),
+                ("price", PyRep::Real(1_000_000.0)),
+                ("itemList", PyRep::List(vec![PyRep::Integer(corp_item)])),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+    )
+    .unwrap();
+
+    // 8. Positive: caller docked at dest_id creates remote ItemExchange at station_id.
+    let mut other_docked_sess = issuer_sess.clone();
+    other_docked_sess.station_id = Some(dest_id);
+    other_docked_sess.structure_id = Some(dest_id);
+    let cross_cid = created_cid(
+        &handle(
+            &ctx,
+            &mut other_docked_sess,
+            "contractProxy",
+            "CreateContract",
+            &[PyRep::keyval([
+                ("contractType", PyRep::Integer(1)),
+                ("startStationID", PyRep::Integer(station_id)),
+                ("endStationID", PyRep::Integer(station_id)),
+                ("itemList", PyRep::List(vec![PyRep::Integer(struct_item)])),
+            ])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+    )
+    .unwrap();
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.contracts[&wtb_cid].requested_items, vec![(35, 20)]);
+        assert!(snap.contracts[&wtb_cid].item_ids.is_empty());
+        assert_eq!(snap.contracts[&auc_cid].contract_type, "Auction");
+        assert_eq!(snap.contracts[&auc_cid].buyout, IskCents::from_isk(2_000_000));
+        assert_eq!(snap.items[&auc_item].location_id, auc_cid);
+        assert_eq!(snap.contracts[&courier_cid].contract_type, "Courier");
+        assert_eq!(snap.contracts[&courier_cid].end_station_id, npc_station_id);
+        assert_eq!(snap.items[&courier_item].location_id, courier_cid);
+        assert!(snap.contracts[&corp_cid].for_corp);
+        assert_eq!(snap.items[&corp_item].location_id, corp_cid);
+        assert_eq!(
+            snap.kv(eve_db::Ns::ContractOrigFlag).get::<u16>(corp_cid, &corp_item.to_string()),
+            Some(InventoryFlag::CorpSAG2 as u16)
+        );
+        assert_eq!(snap.contracts[&cross_cid].start_station_id, station_id);
+        assert_eq!(snap.items[&struct_item].location_id, cross_cid);
+    });
+}
