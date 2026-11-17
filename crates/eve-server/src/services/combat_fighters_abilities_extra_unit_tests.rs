@@ -467,3 +467,158 @@ async fn untargeted_mwd_mjd_multi_fighter_batch_and_point_bomb_fallbacks() {
     let npc_cs = sys_handle.get_combat_state(npc_ball).await.unwrap().unwrap();
     assert!(npc_cs.shield_hp < 10_000.0);
 }
+
+#[tokio::test]
+async fn fighter_ability_uses_surface_distance_for_non_upwell_titan_hull_1247() {
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let mut sde = make_fighter_sde_registry();
+    if let Some(sys) = sde.solar_systems.get_mut(&sys_id) {
+        sys.security_status = -0.5;
+    }
+    for (aid, mode) in [
+        (11u32, "itemTargeted"),
+        (10u32, "itemTargeted"),
+        (38u32, "itemTargeted"),
+    ] {
+        insert_ability_def(&mut sde, aid, mode, false, false);
+    }
+    sde.types.insert(
+        999_500,
+        make_fighter_type(
+            999_500,
+            1652,
+            87,
+            1_000.0,
+            vec![
+                (2209, 5_000.0),
+                (2211, 100.0),
+                (2204, 8_000.0),
+                (2330, 1_000.0),
+                (2325, 400.0),
+            ],
+        ),
+    );
+    sde.fighter_abilities_by_type.insert(
+        999_500,
+        vec![
+            FighterAbilitySlot { slot_index: 0, ability_id: 11, cooldown_seconds: Some(0.0), charges: None },
+            FighterAbilitySlot { slot_index: 1, ability_id: 10, cooldown_seconds: Some(0.0), charges: None },
+            FighterAbilitySlot {
+                slot_index: 2,
+                ability_id: 38,
+                cooldown_seconds: Some(0.0),
+                charges: Some(FighterAbilityCharges { charge_count: 1, rearm_time_seconds: 10.0 }),
+            },
+        ],
+    );
+    ctx.sde = Arc::new(sde);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    // Non-Upwell Titan ball ID (`< 1_000_000_000_000`) with 6_800m Avatar radius at x = 10_820m.
+    let titan_ball = 800_501i64;
+    let f_mid = 500_501i64;
+    let f_close = 500_502i64;
+    sys_handle.spawn_ball(make_ball(ship_id, 23_911, DVec3::ZERO, 500.0)).await.unwrap();
+    sys_handle
+        .spawn_ball_with_combat(
+            make_ball(titan_ball, 11_567, DVec3::new(10_820.0, 0.0, 0.0), 6_800.0),
+            make_cs(50_000.0, 50_000.0, 50_000.0, 10_000.0),
+        )
+        .await
+        .unwrap();
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            TargetLock {
+                target_id: titan_ball,
+                locked: true,
+                remaining_lock_ms: 0.0,
+                lock_time_ms: 100.0,
+                max_range_m: Some(250_000.0),
+            },
+        )
+        .await
+        .unwrap();
+
+    // Fighter `f_mid` at origin: center distance = 10_820m (> 8_000m), surface distance = 4_000m.
+    // Fighter `f_close` at x = 3_500m: center distance = 7_320m (> 1_000m), surface distance = 500m (<= 1_000m).
+    for (idx, (fid, x)) in [(f_mid, 0.0), (f_close, 3_500.0)].into_iter().enumerate() {
+        sys_handle
+            .spawn_ball_with_combat(
+                make_ball(fid, 999_500, DVec3::new(x, 0.0, 0.0), 20.0),
+                make_cs(1_000.0, 1_000.0, 1_000.0, 100.0),
+            )
+            .await
+            .unwrap();
+        ctx.active_fighters.write().unwrap().insert(
+            fid,
+            ActiveFighterSquadron {
+                ball_id: fid,
+                item_id: fid + 100_000,
+                type_id: 999_500,
+                owner_char_id: char_id,
+                parent_ship_id: ship_id,
+                tube_index: idx,
+                squadron_size: 2,
+                target_id: None,
+                is_abandoned: false,
+                mwd_active: false,
+            },
+        );
+    }
+
+    // Short-range Cenobite neut (5_000m) and Siren tackle (8_000m) succeed at 4_000m surface distance (10_820m center).
+    assert!(
+        handle_activate_fighter_ability_slots(
+            &ctx,
+            &mut session,
+            &[PyRep::Integer(f_mid), PyRep::Integer(0), PyRep::Integer(titan_ball)],
+        )
+        .await
+        .unwrap()
+        .is_ok(),
+        "Cenobite neut (5_000m) must succeed at 4_000m surface distance on non-Upwell Titan"
+    );
+    assert!(
+        sys_handle.get_combat_state(titan_ball).await.unwrap().unwrap().capacitor < 10_000.0
+    );
+    assert!(
+        handle_activate_fighter_ability_slots(
+            &ctx,
+            &mut session,
+            &[PyRep::Integer(f_mid), PyRep::Integer(1), PyRep::Integer(titan_ball)],
+        )
+        .await
+        .unwrap()
+        .is_ok(),
+        "Siren tackle (8_000m) must succeed at 4_000m surface distance on non-Upwell Titan"
+    );
+
+    // Shadow sacrifice (1_000m) fails TargetOutOfRange at 4_000m surface distance, succeeds at 500m surface distance (7_320m center).
+    assert_eq!(
+        handle_activate_fighter_ability_slots(
+            &ctx,
+            &mut session,
+            &[PyRep::Integer(f_mid), PyRep::Integer(2), PyRep::Integer(titan_ball)],
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "TargetOutOfRange"
+    );
+    assert!(
+        handle_activate_fighter_ability_slots(
+            &ctx,
+            &mut session,
+            &[PyRep::Integer(f_close), PyRep::Integer(2), PyRep::Integer(titan_ball)],
+        )
+        .await
+        .unwrap()
+        .is_ok(),
+        "Shadow sacrifice (1_000m) must succeed at 500m surface distance (7_320m center) on non-Upwell Titan"
+    );
+    assert!(
+        sys_handle.get_combat_state(titan_ball).await.unwrap().unwrap().shield_hp < 50_000.0
+    );
+}

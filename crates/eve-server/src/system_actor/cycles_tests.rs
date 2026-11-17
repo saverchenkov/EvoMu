@@ -2176,9 +2176,145 @@ fn cycle_damage_skips_oor_turret_and_npc_corp_ids_do_not_queue_notifications_124
     let g = q_p.read().unwrap();
     assert!(!g.contains_key(&1_000_125), "NPC corp ID 1_000_125 must never receive notifications");
     assert!(!g.contains_key(&500_001), "NPC faction ID 500_001 must never receive notifications");
+    let vic_notifs = g.get(&player_char).expect("player victim must still receive notifications from NPC hit");
     assert!(
-        g.get(&player_char).is_some_and(|v| v.iter().any(|n| n.event == "OnDamageMessage")),
-        "player victim must still receive OnDamageMessage from NPC hit"
+        vic_notifs.iter().any(|n| {
+            n.event == "OnDamageMessage"
+                && n.args.first().is_some_and(|d| {
+                    d.dict_get("owner").is_none()
+                        && d.dict_get("source").and_then(|v| v.as_i64()) == Some(npc_attacker_id)
+                        && d.dict_get("attackerID").and_then(|v| v.as_i64()) == Some(npc_attacker_id)
+                })
+        }),
+        "player victim OnDamageMessage from NPC hit must omit invalid owner=(2, 0)"
+    );
+    assert!(
+        vic_notifs.iter().any(|n| {
+            n.event == "OnDamageMessages"
+                && matches!(n.args.first(), Some(eve_proto::PyRep::List(items)) if items.iter().any(|entry| matches!(
+                    entry,
+                    eve_proto::PyRep::Tuple(pair)
+                        if pair.get(1).is_some_and(|d| {
+                            d.dict_get("owner").is_none()
+                                && d.dict_get("source").and_then(|v| v.as_i64()) == Some(npc_attacker_id)
+                                && d.dict_get("attackerID").and_then(|v| v.as_i64()) == Some(npc_attacker_id)
+                        })
+                )))
+        }),
+        "player victim OnDamageMessages from NPC hit must omit invalid owner=(2, 0)"
+    );
+}
+
+#[test]
+fn vorton_surface_distance_and_oor_no_miss_1247() {
+    let mut bp = Ballpark::new(30_004_759);
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let sde_opt = Some(make_sde_for_cycles());
+    let db_opt = Some(Arc::clone(&db));
+    let rng = Some(Arc::new(crate::rng::MechanicRng::seeded(0x1247_4060)));
+    let tactical: Arc<RwLock<crate::services::tactical_modules::TacticalModulesState>> =
+        Arc::new(RwLock::new(Default::default()));
+
+    let atk_ship = 986_001_i64;
+    let atk_char = 986_101_i64;
+    let target_titan = 986_002_i64;
+    let mut atk = make_ship(atk_ship, 54731, DVec3::ZERO);
+    atk.radius = 50.0;
+    bp.add_ball(atk);
+    bp.combat_states.insert(
+        atk_ship,
+        CombatState {
+            capacitor: 5_000.0,
+            max_capacitor: 5_000.0,
+            ..CombatState::default()
+        },
+    );
+
+    // Target radius 6_800m at x = 30_000m -> center distance = 30_000m (> 25_000m), surface distance = 23_150m (<= 25_000m).
+    let mut tgt = make_ship(target_titan, 11_567, DVec3::new(30_000.0, 0.0, 0.0));
+    tgt.radius = 6_800.0;
+    bp.add_ball(tgt);
+    bp.combat_states.insert(
+        target_titan,
+        CombatState {
+            shield_hp: 10_000.0,
+            max_shield_hp: 10_000.0,
+            armor_hp: 10_000.0,
+            max_armor_hp: 10_000.0,
+            structure_hp: 10_000.0,
+            max_structure_hp: 10_000.0,
+            signature_radius: 16_000.0,
+            ..CombatState::default()
+        },
+    );
+
+    let vorton_cycle = ActiveModuleCycle {
+        ship_id: atk_ship,
+        owner_char_id: Some(atk_char),
+        module_id: 986_010,
+        module_type_id: 54752,
+        effect_name: "targetAttack".into(),
+        target_id: Some(target_titan),
+        repeat: 0,
+        duration_s: 1.0,
+        damage_vector: DamageVector::new(200.0, 200.0, 0.0, 0.0),
+        weapon_is_missile: true,
+        weapon_is_guided_missile: false,
+        weapon_optimal_m: 25_000.0,
+        missile_explosion_radius_m: 43.0,
+        missile_explosion_velocity_ms: 190.0,
+        missile_drf: 0.40,
+        max_effective_range_m: Some(25_000.0),
+        ..ActiveModuleCycle::default()
+    };
+
+    // 1. Within surface range (23_150m <= 25_000m despite 30_000m center distance): applies damage and logs CycleWeaponDamage.
+    let mut cycles = vec![vorton_cycle.clone()];
+    let mut actions = Vec::new();
+    step_cycles_and_capacitor(
+        &mut bp,
+        &mut cycles,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &sde_opt,
+        &db_opt,
+        &rng,
+        &*tactical,
+        &mut actions,
+        1.0,
+        None,
+    );
+    let shield_after_hit = bp.combat_states[&target_titan].shield_hp;
+    assert!(shield_after_hit < 10_000.0, "Vorton within surface range of Titan must deal damage");
+    assert!(
+        actions.iter().any(|a| matches!(a, PendingCycleAction::CycleWeaponDamage { .. })),
+        "in-range Vorton hit must queue CycleWeaponDamage"
+    );
+
+    // 2. Move target out of surface range (x = 32_000m -> surface = 25_150m > 25_000m): direct apply_weapon_cycle_damage & step skip without CycleWeaponMiss.
+    bp.balls.get_mut(&target_titan).unwrap().position = DVec3::new(32_000.0, 0.0, 0.0);
+    actions.clear();
+    let mut destroyed = Vec::new();
+    let mut rah = HashMap::new();
+    apply_weapon_cycle_damage(
+        &vorton_cycle,
+        &mut bp,
+        &mut rah,
+        &sde_opt,
+        &db_opt,
+        &mut actions,
+        &mut destroyed,
+        None,
+    );
+    assert_eq!(bp.combat_states[&target_titan].shield_hp, shield_after_hit);
+    assert!(
+        actions.is_empty(),
+        "out-of-range Vorton/missile cycle must return early without CycleWeaponMiss: {:?}",
+        actions.len()
     );
 }
 

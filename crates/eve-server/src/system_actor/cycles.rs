@@ -444,31 +444,28 @@ pub(crate) fn apply_weapon_cycle_damage(
         }
     } else if cycle.weapon_is_missile {
         if let Some(tb) = ballpark.balls.get(&target_id) {
-            let out_of_range = ballpark
-                .balls
-                .get(&cycle.ship_id)
-                .is_some_and(|sb| {
-                    cycle.weapon_optimal_m > 0.0
-                        && if cycle.weapon_is_guided_missile {
-                            sb.surface_distance(tb) > cycle.weapon_optimal_m
-                        } else {
-                            sb.position.distance(tb.position) > cycle.weapon_optimal_m
-                        }
-                });
+            let out_of_range = ballpark.balls.get(&cycle.ship_id).is_some_and(|sb| {
+                // Why: Both guided missiles and unguided `weapon_is_missile` (e.g. Vorton Projector, group 4060) measure surface distance (#1247).
+                let surface_dist = sb.surface_distance(tb);
+                (cycle.weapon_optimal_m > 0.0 && surface_dist > cycle.weapon_optimal_m)
+                    || cycle
+                        .max_effective_range_m
+                        .is_some_and(|max_r| surface_dist > max_r)
+            });
             if out_of_range {
-                eve_destiny::DamageVector::default()
-            } else {
-                compute_missile_effective_damage(
-                    cycle.damage_vector,
-                    cycle.missile_explosion_radius_m,
-                    cycle.missile_explosion_velocity_ms,
-                    cycle.missile_drf,
-                    target_id,
-                    ballpark,
-                )
+                // Why: Out-of-range missiles/Vortons must return early without emitting spurious `CycleWeaponMiss` notifications (#1247).
+                return;
             }
+            compute_missile_effective_damage(
+                cycle.damage_vector,
+                cycle.missile_explosion_radius_m,
+                cycle.missile_explosion_velocity_ms,
+                cycle.missile_drf,
+                target_id,
+                ballpark,
+            )
         } else {
-            eve_destiny::DamageVector::default()
+            return;
         }
     } else {
         cycle.damage_vector
@@ -3210,7 +3207,7 @@ pub(crate) fn build_cycle_damage_message_dict(
     hit_quality: i64,
     attack_type: &str,
 ) -> eve_proto::PyRep {
-    eve_proto::PyRep::Dict(vec![
+    let mut entries = vec![
         (
             eve_proto::PyRep::String("damage".into()),
             eve_proto::PyRep::Real(damage),
@@ -3232,13 +3229,6 @@ pub(crate) fn build_cycle_damage_message_dict(
             eve_proto::PyRep::Integer(target_id),
         ),
         (
-            eve_proto::PyRep::String("owner".into()),
-            eve_proto::PyRep::Tuple(vec![
-                eve_proto::PyRep::Integer(2),
-                eve_proto::PyRep::Integer(owner_cid),
-            ]),
-        ),
-        (
             eve_proto::PyRep::String("weapon".into()),
             eve_proto::PyRep::Integer(i64::from(module_type_id)),
         ),
@@ -3258,7 +3248,18 @@ pub(crate) fn build_cycle_damage_message_dict(
             eve_proto::PyRep::String("isBanked".into()),
             eve_proto::PyRep::Bool(false),
         ),
-    ])
+    ];
+    // Why: NPC entities have no character owner (`owner_cid == 0`); omit `"owner"` so the client resolves NPC names from `"source"`/`"attackerID"` (#1247).
+    if owner_cid > 0 {
+        entries.push((
+            eve_proto::PyRep::String("owner".into()),
+            eve_proto::PyRep::Tuple(vec![
+                eve_proto::PyRep::Integer(2),
+                eve_proto::PyRep::Integer(owner_cid),
+            ]),
+        ));
+    }
+    eve_proto::PyRep::Dict(entries)
 }
 
 fn enqueue_cycle_weapon_log_pair(

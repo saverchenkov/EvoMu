@@ -2426,4 +2426,264 @@ async fn cycle0_turret_oor_and_ewar_surface_distance_on_titan_1247() {
     );
 }
 
+#[tokio::test]
+async fn cycle0_unguided_missile_surface_distance_and_eff_range_1247() {
+    const SYN_AVATAR: u32 = 996_260;
+    const SYN_DEFENDER: u32 = 996_261;
+    const SYN_DEF_CHARGE: u32 = 996_262;
+    const SYN_TARGET_SHIP: u32 = 996_263;
+
+    let sys_id = 30_004_759_u32;
+    let ctx = seeded_cycles_ctx(|sde| {
+        if let Some(sys_rec) = sde.solar_systems.get_mut(&sys_id) {
+            sys_rec.security_status = 0.0;
+        }
+        let mut avatar = sde.types.get(&587).expect("rifter").clone();
+        avatar.type_id = SYN_AVATAR;
+        avatar.group_id = 30;
+        avatar.category_id = 6;
+        avatar.name = "Avatar".into();
+        avatar.radius = 6_800.0;
+        avatar.mass = 2_400_000_000.0;
+        avatar
+            .default_attributes
+            .retain(|k, _| !matches!(k, 182..=184 | 277..=279));
+        avatar.default_attributes.insert(attr_ids::HI_SLOTS, 8.0);
+        avatar.default_attributes.insert(attr_ids::CPU_OUTPUT, 1_000.0);
+        avatar.default_attributes.insert(attr_ids::POWER_OUTPUT, 1_000_000.0);
+        avatar.default_attributes.insert(attr_ids::CAPACITOR_CAPACITY, 10_000.0);
+        avatar.default_attributes.insert(attr_ids::MAX_LOCKED_TARGETS, 7.0);
+        avatar.default_attributes.insert(attr_ids::MAX_TARGET_RANGE, 200_000.0);
+        avatar.default_attributes.insert(attr_ids::SCAN_RESOLUTION, 100.0);
+        avatar.default_attributes.insert(attr_ids::SIGNATURE_RADIUS, 16_000.0);
+        sde.types.insert(SYN_AVATAR, avatar);
+
+        // Group 512 (`is_missile_group = true`, `is_guided_missile = false`).
+        // Give falloff=3_000 so unpatched `else if opt_range > 0` would compute 14_000m instead of weapon_optimal_m=5_000m.
+        let mut def_launcher = custom_inv_type(
+            sde,
+            SYN_DEFENDER,
+            512,
+            7,
+            5.0,
+            5.0,
+            "Test Defender Launcher I",
+            &[(6, 5.0), (51, 2_000.0), (54, 5_000.0), (158, 3_000.0), (128, 1.0), (604, 83.0)],
+        );
+        def_launcher.effect_ids = vec![101, 12, 16];
+        def_launcher.default_effect_id = Some(101);
+        sde.types.insert(SYN_DEFENDER, def_launcher);
+
+        let def_charge = custom_inv_type(
+            sde,
+            SYN_DEF_CHARGE,
+            83,
+            8,
+            0.01,
+            0.0,
+            "Test Defender Charge",
+            &[(37, 2_000.0), (281, 2_500.0), (114, 50.0)],
+        );
+        sde.types.insert(SYN_DEF_CHARGE, def_charge);
+
+        let mut tgt = sde.types.get(&587).expect("rifter").clone();
+        tgt.type_id = SYN_TARGET_SHIP;
+        tgt.radius = 50.0;
+        tgt.default_attributes.insert(attr_ids::SIGNATURE_RADIUS, 40.0);
+        sde.types.insert(SYN_TARGET_SHIP, tgt);
+    });
+
+    let char_id = 97_124_704_i64;
+    let vic_char_id = 97_124_705_i64;
+    let ship_id = 1_124_901_i64;
+    let def_id = 1_124_910_i64;
+    let charge_id = 1_124_911_i64;
+    let mid_id = 1_124_920_i64;
+    let far_id = 1_124_921_i64;
+
+    ensure_char(&ctx, char_id, 98_000_003, sys_id, ship_id);
+    ensure_char(&ctx, vic_char_id, 98_000_004, sys_id, far_id);
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let _ = ctx.db.acquire_online_lock(uid, 2, Some(char_id), false, ctx.now_unix());
+
+    insert_item(&ctx, ship_id, SYN_AVATAR, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, def_id, SYN_DEFENDER, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, charge_id, SYN_DEF_CHARGE, char_id, ship_id, InventoryFlag::HiSlot0, 10, false);
+
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels
+            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: SYN_AVATAR,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 60.0,
+            inertia: 1.0,
+            mass: 2_400_000_000.0,
+            radius: 6_800.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            shield_hp: 100_000.0,
+            max_shield_hp: 100_000.0,
+            armor_hp: 100_000.0,
+            max_armor_hp: 100_000.0,
+            structure_hp: 100_000.0,
+            max_structure_hp: 100_000.0,
+            capacitor: 10_000.0,
+            max_capacitor: 10_000.0,
+            signature_radius: 16_000.0,
+            ..CombatState::default()
+        },
+        SlimItemMeta {
+            group_id: 30,
+            category_id: 6,
+            owner_id: char_id,
+            char_id: Some(char_id),
+            corp_id: 98_000_003,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // `mid_id`: center = 10_850m (> 5_000m optimal), surface = 4_000m (<= 5_000m).
+    // `far_id`: center = 16_350m, surface = 9_500m (> 5_000m optimal, even though < 14_000m opt+3*falloff).
+    for (tid, x) in [(mid_id, 10_850.0), (far_id, 16_350.0)] {
+        sys.spawn_ball_with_meta(
+            Ball {
+                id: tid,
+                type_id: SYN_TARGET_SHIP,
+                position: DVec3::new(x, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 500.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 500.0,
+                max_shield_hp: 500.0,
+                armor_hp: 500.0,
+                max_armor_hp: 500.0,
+                structure_hp: 500.0,
+                max_structure_hp: 500.0,
+                signature_radius: 40.0,
+                ..CombatState::default()
+            },
+            SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: vic_char_id,
+                char_id: Some(vic_char_id),
+                corp_id: 98_000_004,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        sys.add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: tid,
+                lock_time_ms: 100.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(200_000.0),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let kw = HashMap::new();
+    let mut sess = SessionState {
+        user_id: Some(uid),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_003),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Cycle-0 activation against `far_id` (9_500m surface > 5_000m optimal) rejects TargetOutOfRange before cap/ammo/timer commit.
+    let far_err = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(def_id),
+            PyRep::String("useMissiles".into()),
+            PyRep::Integer(far_id),
+            PyRep::Integer(1000),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("Cycle-0 unguided missile past weapon_optimal_m must fail TargetOutOfRange");
+    assert_eq!(far_err.code, "TargetOutOfRange");
+    assert_eq!(sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor, 10_000.0);
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&charge_id].quantity), 10);
+    assert!(!sys.has_module_cycle(ship_id, def_id).await);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    // 2. Cycle-0 against `mid_id` (4_000m surface <= 5_000m despite 10_850m center) activates; stepping past 5_000m surface cancels via `max_effective_range_m == 5_000m`.
+    handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(def_id),
+            PyRep::String("useMissiles".into()),
+            PyRep::Integer(mid_id),
+            PyRep::Integer(1000),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("unguided missile within 5_000m surface range must activate on Titan");
+    assert!(sys.has_module_cycle(ship_id, def_id).await);
+    let shield_after_cycle0_hit = sys.get_combat_state(mid_id).await.unwrap().unwrap().shield_hp;
+    assert!(
+        shield_after_cycle0_hit < 500.0,
+        "Cycle-0 unguided missile at 4_000m surface distance (10_850m center) must hit Titan"
+    );
+
+    // Move `mid_id` to x = 12_850m (surface = 6_000m > 5_000m, still < 14_000m): cycle cancels before firing with 0 additional damage and 0 miss logs.
+    assert!(sys.set_ball_position(mid_id, DVec3::new(12_850.0, 0.0, 0.0)).await);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = sys.step_manual(2.1).await.unwrap();
+    crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;
+    assert!(
+        !sys.has_module_cycle(ship_id, def_id).await,
+        "cycle with max_effective_range_m=5_000m must cancel once target leaves 5_000m surface distance"
+    );
+    let shield_after_step = sys.get_combat_state(mid_id).await.unwrap().unwrap().shield_hp;
+    assert!(
+        shield_after_step >= shield_after_cycle0_hit,
+        "cancelled OOR missile cycle must not deal additional damage (before={shield_after_cycle0_hit}, after={shield_after_step})"
+    );
+    assert!(
+        !ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "OnDamageMessage" || n.event == "OnDamageMessages"),
+        "cancelled OOR missile cycle must not emit hit or miss logs"
+    );
+}
+
 

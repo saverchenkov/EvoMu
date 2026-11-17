@@ -479,11 +479,8 @@ async fn activate_single_fighter_ability(
                 }
             }
         };
-        let dist = if tid >= 1_000_000_000_000 {
-            (fighter_ball.position.distance(target_ball.position) - target_ball.radius - fighter_ball.radius).max(0.0)
-        } else {
-            fighter_ball.position.distance(target_ball.position)
-        };
+        // Why: Both short-range fighter abilities and Tackle/Siren compare hull-to-hull surface distance (#1247).
+        let dist = fighter_ball.surface_distance(&target_ball);
         if dist > max_range {
             return Some(Err(BridgeRpcError::target_out_of_range(
                 crate::services::inventory_fitting::resolve_target_display_name(ctx, tid),
