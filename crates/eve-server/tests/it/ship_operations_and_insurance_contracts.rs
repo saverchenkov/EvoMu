@@ -219,22 +219,22 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
 
     // Test persistence across SQLite restart
     let pid = std::process::id();
-    let json_path = std::env::temp_dir().join(format!("evomu_ins_{pid}.json"));
     let sqlite_path = std::env::temp_dir().join(format!("evomu_ins_{pid}.sqlite"));
-    let _ = std::fs::remove_file(&json_path);
+    let sqlite_wal = std::path::PathBuf::from(format!("{}-wal", sqlite_path.display()));
+    let sqlite_shm = std::path::PathBuf::from(format!("{}-shm", sqlite_path.display()));
     let _ = std::fs::remove_file(&sqlite_path);
-    ctx.db.save_snapshot_to_file(&json_path).expect("save snapshot");
-    {
-        let writer = eve_db::WorldRepository::open_sqlite(&sqlite_path).expect("open sqlite");
-        writer.load_snapshot_from_file(&json_path).expect("load snapshot");
-    }
+    let _ = std::fs::remove_file(&sqlite_wal);
+    let _ = std::fs::remove_file(&sqlite_shm);
+    ctx.db.save_to_sqlite(&sqlite_path).expect("save_to_sqlite");
     let reopened_repo = std::sync::Arc::new(eve_db::WorldRepository::open_sqlite(&sqlite_path).expect("reopen"));
-    let _ = std::fs::remove_file(&json_path);
-    let _ = std::fs::remove_file(&sqlite_path);
     let ctx2 = ServerContext::with_repository(reopened_repo);
     let restored_res = ctx2.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetContractForShip", &[PyRep::Integer(ship_id)], &kw, None).await.unwrap();
     let PyRep::KeyVal(res_kv) = restored_res else { panic!("expected KeyVal") };
     assert!((res_kv.get("fraction").and_then(|v| v.as_f64()).unwrap() - 1.0).abs() < 1e-6);
+    drop(ctx2);
+    let _ = std::fs::remove_file(&sqlite_path);
+    let _ = std::fs::remove_file(&sqlite_wal);
+    let _ = std::fs::remove_file(&sqlite_shm);
 
     let not_found_err = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetContractForShip", &[PyRep::Integer(999_999_999)], &kw, None).await.unwrap_err();
     assert_eq!(not_found_err.code, "ShipNotFound");

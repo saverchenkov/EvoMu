@@ -12,7 +12,7 @@ use std::hash::Hash;
 
 fn sync_cell_map<K, V>(
     tx: &Transaction<'_>,
-    before: Option<&CowCell<HashMap<K, V>>>,
+    before: &CowCell<HashMap<K, V>>,
     after: &CowCell<HashMap<K, V>>,
     mut delete_fn: impl FnMut(&Transaction<'_>, &K) -> Result<(), String>,
     mut upsert_fn: impl FnMut(&Transaction<'_>, &K, &V) -> Result<(), String>,
@@ -21,24 +21,18 @@ where
     K: Eq + Hash,
     V: PartialEq,
 {
-    if let Some(b) = before {
-        if b.ptr_eq(after) {
-            return Ok(());
-        }
-        for k in b.keys() {
-            if !after.contains_key(k) {
-                delete_fn(tx, k)?;
-            }
-        }
-        for (k, v) in after.iter() {
-            if b.get(k) != Some(v) {
-                upsert_fn(tx, k, v)?;
-            }
-        }
+    if before.ptr_eq(after) {
         return Ok(());
     }
+    for k in before.keys() {
+        if !after.contains_key(k) {
+            delete_fn(tx, k)?;
+        }
+    }
     for (k, v) in after.iter() {
-        upsert_fn(tx, k, v)?;
+        if before.get(k) != Some(v) {
+            upsert_fn(tx, k, v)?;
+        }
     }
     Ok(())
 }
@@ -52,24 +46,24 @@ pub(crate) fn sync_selected_cold_domains_to_sqlite(
     #[cfg(any(test, feature = "legacy-json-snapshot"))] mut delta: Option<&mut WorldStateWalDelta>,
 ) -> Result<(), String> {
     if cd.part1_cold {
-        sync_part1_cold_tables(tx, Some(before), snap)?;
+        sync_part1_cold_tables(tx, before, snap)?;
     }
     if cd.part2_activity {
         sync_part2_activity_tables(
             tx,
-            Some(before),
+            before,
             snap,
             #[cfg(any(test, feature = "legacy-json-snapshot"))]
             delta.as_deref_mut(),
         )?;
     }
     if cd.part3_social_corp {
-        sync_part3_social_corp_tables(tx, Some(before), snap)?;
+        sync_part3_social_corp_tables(tx, before, snap)?;
     }
     if cd.part4_world_tail {
         sync_part4_world_tail_tables(
             tx,
-            Some(before),
+            before,
             snap,
             #[cfg(any(test, feature = "legacy-json-snapshot"))]
             delta,
@@ -93,13 +87,13 @@ pub(crate) fn sync_selected_cold_domains_to_sqlite(
 #[inline(never)]
 fn sync_part1_cold_tables(
     tx: &Transaction<'_>,
-    before: Option<&WorldStateSnapshot>,
+    before: &WorldStateSnapshot,
     snap: &WorldStateSnapshot,
 ) -> Result<(), String> {
     // 1. accounts
     sync_cell_map(
         tx,
-        before.map(|b| &b.accounts),
+        &before.accounts,
         &snap.accounts,
         |tx, k| {
             tx.execute("DELETE FROM accounts WHERE username = ?1", params![k])
@@ -126,7 +120,7 @@ fn sync_part1_cold_tables(
     // 5. jump_clones
     sync_cell_map(
         tx,
-        before.map(|b| &b.jump_clones),
+        &before.jump_clones,
         &snap.jump_clones,
         |tx, &cid| {
             tx.execute(
@@ -150,7 +144,7 @@ fn sync_part1_cold_tables(
     // 6. active_implants
     sync_cell_map(
         tx,
-        before.map(|b| &b.active_implants),
+        &before.active_implants,
         &snap.active_implants,
         |tx, &cid| {
             tx.execute(
@@ -174,7 +168,7 @@ fn sync_part1_cold_tables(
     // 8. saved_fittings
     sync_cell_map(
         tx,
-        before.map(|b| &b.saved_fittings),
+        &before.saved_fittings,
         &snap.saved_fittings,
         |tx, &fid| {
             tx.execute(
@@ -209,14 +203,14 @@ fn sync_part1_cold_tables(
 #[inline(never)]
 fn sync_part2_activity_tables(
     tx: &Transaction<'_>,
-    before: Option<&WorldStateSnapshot>,
+    before: &WorldStateSnapshot,
     snap: &WorldStateSnapshot,
     #[cfg(any(test, feature = "legacy-json-snapshot"))] mut delta: Option<&mut WorldStateWalDelta>,
 ) -> Result<(), String> {
     // 11. contracts
     sync_cell_map(
         tx,
-        before.map(|b| &b.contracts),
+        &before.contracts,
         &snap.contracts,
         |tx, &cid| {
             tx.execute("DELETE FROM contracts WHERE contract_id = ?1", params![cid])
@@ -255,7 +249,7 @@ fn sync_part2_activity_tables(
     // 12. industry_jobs
     sync_cell_map(
         tx,
-        before.map(|b| &b.industry_jobs),
+        &before.industry_jobs,
         &snap.industry_jobs,
         |tx, &jid| {
             tx.execute("DELETE FROM industry_jobs WHERE job_id = ?1", params![jid])
@@ -300,7 +294,7 @@ fn sync_part2_activity_tables(
     // 13. planetary_colonies
     sync_cell_map(
         tx,
-        before.map(|b| &b.planetary_colonies),
+        &before.planetary_colonies,
         &snap.planetary_colonies,
         |tx, &(oid, pid)| {
             tx.execute(
@@ -331,20 +325,18 @@ fn sync_part2_activity_tables(
     )?;
 
     // 14. active_missions
-    if before.is_none_or(|b| b.active_missions != snap.active_missions) {
-        if let Some(b) = before {
-            for &(cid, mid) in b.active_missions.keys() {
-                if !snap.active_missions.contains_key(&(cid, mid)) {
-                    tx.execute(
-                        "DELETE FROM missions WHERE character_id = ?1 AND mission_id = ?2",
-                        params![cid, mid as i64],
-                    )
-                    .map_err(|e| e.to_string())?;
-                }
+    if before.active_missions != snap.active_missions {
+        for &(cid, mid) in before.active_missions.keys() {
+            if !snap.active_missions.contains_key(&(cid, mid)) {
+                tx.execute(
+                    "DELETE FROM missions WHERE character_id = ?1 AND mission_id = ?2",
+                    params![cid, mid as i64],
+                )
+                .map_err(|e| e.to_string())?;
             }
         }
         for (&(cid, mid), m) in &snap.active_missions {
-            if before.and_then(|b| b.active_missions.get(&(cid, mid))) != Some(m) {
+            if before.active_missions.get(&(cid, mid)) != Some(m) {
                 let js = to_checked_json_string(m)?;
                 tx.execute(
                     "INSERT OR REPLACE INTO missions (character_id, mission_id, agent_id, solar_system_id, state, current_room_id, npcs_remaining, record_json)
@@ -368,7 +360,7 @@ fn sync_part2_activity_tables(
     // 15. mission_tally
     sync_cell_map(
         tx,
-        before.map(|b| &b.mission_tally),
+        &before.mission_tally,
         &snap.mission_tally,
         |tx, &cid| {
             tx.execute(
@@ -391,7 +383,7 @@ fn sync_part2_activity_tables(
     // 16. standing_transactions
     sync_cell_map(
         tx,
-        before.map(|b| &b.standing_transactions),
+        &before.standing_transactions,
         &snap.standing_transactions,
         |tx, &cid| {
             tx.execute("DELETE FROM standings WHERE character_id = ?1", params![cid])
@@ -412,7 +404,7 @@ fn sync_part2_activity_tables(
     // 17. npe_progress
     sync_cell_map(
         tx,
-        before.map(|b| &b.npe_progress),
+        &before.npe_progress,
         &snap.npe_progress,
         |tx, &cid| {
             tx.execute(
@@ -443,7 +435,7 @@ fn sync_part2_activity_tables(
     // 18. bookmarks
     sync_cell_map(
         tx,
-        before.map(|b| &b.bookmarks),
+        &before.bookmarks,
         &snap.bookmarks,
         |tx, &bid| {
             tx.execute("DELETE FROM bookmarks WHERE bookmark_id = ?1", params![bid])
@@ -482,13 +474,13 @@ fn sync_part2_activity_tables(
 #[inline(never)]
 fn sync_part3_social_corp_tables(
     tx: &Transaction<'_>,
-    before: Option<&WorldStateSnapshot>,
+    before: &WorldStateSnapshot,
     snap: &WorldStateSnapshot,
 ) -> Result<(), String> {
     // 20. fleets
     sync_cell_map(
         tx,
-        before.map(|b| &b.fleets),
+        &before.fleets,
         &snap.fleets,
         |tx, &fid| {
             tx.execute("DELETE FROM fleets WHERE fleet_id = ?1", params![fid])
@@ -516,7 +508,7 @@ fn sync_part3_social_corp_tables(
     // 21. corporations
     sync_cell_map(
         tx,
-        before.map(|b| &b.corporations),
+        &before.corporations,
         &snap.corporations,
         |tx, &cid| {
             tx.execute("DELETE FROM corps WHERE corporation_id = ?1", params![cid])
@@ -547,7 +539,7 @@ fn sync_part3_social_corp_tables(
     // 22. alliances
     sync_cell_map(
         tx,
-        before.map(|b| &b.alliances),
+        &before.alliances,
         &snap.alliances,
         |tx, &aid| {
             tx.execute("DELETE FROM alliances WHERE alliance_id = ?1", params![aid])
@@ -569,7 +561,7 @@ fn sync_part3_social_corp_tables(
     // 23. wars
     sync_cell_map(
         tx,
-        before.map(|b| &b.wars),
+        &before.wars,
         &snap.wars,
         |tx, &wid| {
             tx.execute("DELETE FROM wars WHERE war_id = ?1", params![wid])
@@ -597,7 +589,7 @@ fn sync_part3_social_corp_tables(
     // 24. corp_projects
     sync_cell_map(
         tx,
-        before.map(|b| &b.corp_projects),
+        &before.corp_projects,
         &snap.corp_projects,
         |tx, &pid| {
             tx.execute(
@@ -629,7 +621,7 @@ fn sync_part3_social_corp_tables(
     // 25. killmails
     sync_cell_map(
         tx,
-        before.map(|b| &b.killmails),
+        &before.killmails,
         &snap.killmails,
         |tx, &kid| {
             tx.execute("DELETE FROM killmails WHERE kill_id = ?1", params![kid])
@@ -662,7 +654,7 @@ fn sync_part3_social_corp_tables(
     // 26. kill_rights
     sync_cell_map(
         tx,
-        before.map(|b| &b.kill_rights),
+        &before.kill_rights,
         &snap.kill_rights,
         |tx, &krid| {
             tx.execute(
@@ -695,14 +687,14 @@ fn sync_part3_social_corp_tables(
 #[inline(never)]
 fn sync_part4_world_tail_tables(
     tx: &Transaction<'_>,
-    before: Option<&WorldStateSnapshot>,
+    before: &WorldStateSnapshot,
     snap: &WorldStateSnapshot,
     #[cfg(any(test, feature = "legacy-json-snapshot"))] mut delta: Option<&mut WorldStateWalDelta>,
 ) -> Result<(), String> {
     // 28. system_states
     sync_cell_map::<SolarSystemId, _>(
         tx,
-        before.map(|b| &b.system_states),
+        &before.system_states,
         &snap.system_states,
         |tx, &sys_id| {
             tx.execute(
@@ -736,38 +728,24 @@ fn sync_part4_world_tail_tables(
     )?;
 
     // 29. idempotency_keys
-    if let Some(b) = before {
-        if !b
+    if !before
+        .committed_idempotency_keys
+        .ptr_eq(&snap.committed_idempotency_keys)
+    {
+        for (cid, key) in before
             .committed_idempotency_keys
-            .ptr_eq(&snap.committed_idempotency_keys)
+            .difference(&*snap.committed_idempotency_keys)
         {
-            for (cid, key) in b
-                .committed_idempotency_keys
-                .difference(&*snap.committed_idempotency_keys)
-            {
-                tx.execute(
-                    "DELETE FROM idempotency_keys WHERE character_id = ?1 AND idem_key = ?2",
-                    params![cid, key],
-                )
-                .map_err(|e| e.to_string())?;
-            }
-            for k in snap
-                .committed_idempotency_keys
-                .difference(&*b.committed_idempotency_keys)
-            {
-                tx.execute(
-                    "INSERT OR REPLACE INTO idempotency_keys (character_id, idem_key) VALUES (?1, ?2)",
-                    params![k.0, k.1],
-                )
-                .map_err(|e| e.to_string())?;
-                #[cfg(any(test, feature = "legacy-json-snapshot"))]
-                if let Some(d) = delta.as_deref_mut() {
-                    d.added_idempotency_keys.push(k.clone());
-                }
-            }
+            tx.execute(
+                "DELETE FROM idempotency_keys WHERE character_id = ?1 AND idem_key = ?2",
+                params![cid, key],
+            )
+            .map_err(|e| e.to_string())?;
         }
-    } else {
-        for k in &snap.committed_idempotency_keys {
+        for k in snap
+            .committed_idempotency_keys
+            .difference(&*before.committed_idempotency_keys)
+        {
             tx.execute(
                 "INSERT OR REPLACE INTO idempotency_keys (character_id, idem_key) VALUES (?1, ?2)",
                 params![k.0, k.1],
@@ -783,7 +761,7 @@ fn sync_part4_world_tail_tables(
     // 30. licensed_skins
     sync_cell_map(
         tx,
-        before.map(|b| &b.licensed_skins),
+        &before.licensed_skins,
         &snap.licensed_skins,
         |tx, &cid| {
             tx.execute(
@@ -807,7 +785,7 @@ fn sync_part4_world_tail_tables(
     // 31. applied_ship_skins
     sync_cell_map(
         tx,
-        before.map(|b| &b.applied_ship_skins),
+        &before.applied_ship_skins,
         &snap.applied_ship_skins,
         |tx, &sid| {
             tx.execute(
@@ -832,7 +810,7 @@ fn sync_part4_world_tail_tables(
     // 33. asteroids
     sync_cell_map(
         tx,
-        before.map(|b| &b.asteroids),
+        &before.asteroids,
         &snap.asteroids,
         |tx, &id| {
             tx.execute("DELETE FROM asteroids WHERE asteroid_id = ?1", params![id])
