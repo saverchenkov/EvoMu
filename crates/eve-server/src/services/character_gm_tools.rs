@@ -642,13 +642,21 @@ pub(crate) async fn execute_gm_heal(
     } else {
         None
     };
-    let (fit_max_hull, fit_max_armor, fit_max_shield, fit_max_cap) = if let Some(ref fit) = fit_opt
-    {
+    let (
+        fit_max_hull,
+        fit_max_armor,
+        fit_max_shield,
+        fit_max_cap,
+        fit_cap_recharge_ms,
+        fit_shield_recharge_ms,
+    ) = if let Some(ref fit) = fit_opt {
         let mut eff_attrs: std::collections::HashMap<u16, f64> = [
             eve_sde::attr_ids::HP_STRUCT,
             eve_sde::attr_ids::ARMOR_HP,
             eve_sde::attr_ids::SHIELD_CAPACITY,
             eve_sde::attr_ids::CAPACITOR_CAPACITY,
+            eve_sde::attr_ids::RECHARGE_RATE,
+            eve_sde::attr_ids::SHIELD_RECHARGE_RATE,
         ]
         .into_iter()
         .map(|aid| (aid, fit.ship.get_attribute(aid, &ctx.sde)))
@@ -675,6 +683,14 @@ pub(crate) async fn execute_gm_heal(
                 .get(&eve_sde::attr_ids::CAPACITOR_CAPACITY)
                 .copied()
                 .unwrap_or(0.0),
+            eff_attrs
+                .get(&eve_sde::attr_ids::RECHARGE_RATE)
+                .copied()
+                .unwrap_or(0.0),
+            eff_attrs
+                .get(&eve_sde::attr_ids::SHIELD_RECHARGE_RATE)
+                .copied()
+                .unwrap_or(0.0),
         )
     } else if let Some(t) = ctx.sde.types.get(&ship_type_id) {
         (
@@ -694,9 +710,17 @@ pub(crate) async fn execute_gm_heal(
                 .get(&eve_sde::attr_ids::CAPACITOR_CAPACITY)
                 .copied()
                 .unwrap_or(0.0),
+            t.default_attributes
+                .get(&eve_sde::attr_ids::RECHARGE_RATE)
+                .copied()
+                .unwrap_or(0.0),
+            t.default_attributes
+                .get(&eve_sde::attr_ids::SHIELD_RECHARGE_RATE)
+                .copied()
+                .unwrap_or(0.0),
         )
     } else {
-        (0.0, 0.0, 0.0, 0.0)
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     };
 
     let handle_opt = if target_ship_id > 0 {
@@ -784,6 +808,48 @@ pub(crate) async fn execute_gm_heal(
 
     let mut combat_healed = CombatState::default();
     if let Some(ref handle) = handle_opt {
+        if let Some(ref cs) = pre_cs {
+            let needs_cap_sync = fit_max_cap > 0.0 && cs.max_capacitor + 1e-6 < fit_max_cap;
+            let needs_recharge_sync = (fit_cap_recharge_ms > 0.0
+                && (cs.capacitor_recharge_time_ms <= 0.0
+                    || (needs_cap_sync
+                        && (cs.capacitor_recharge_time_ms - fit_cap_recharge_ms).abs() > 1e-3)))
+                || (fit_shield_recharge_ms > 0.0 && cs.shield_recharge_time_ms <= 0.0);
+            let needs_zero_hp_sync = (cs.max_shield_hp <= 0.0 && fit_max_shield > 0.0)
+                || (cs.max_armor_hp <= 0.0 && fit_max_armor > 0.0)
+                || (cs.max_structure_hp <= 0.0 && fit_max_hull > 0.0);
+            if needs_cap_sync || needs_recharge_sync || needs_zero_hp_sync {
+                let _ = handle
+                    .modify_combat_state(target_ship_id, move |st| {
+                        if needs_cap_sync {
+                            st.max_capacitor = fit_max_cap;
+                            st.base_max_capacitor = Some(fit_max_cap);
+                        }
+                        if fit_cap_recharge_ms > 0.0
+                            && (st.capacitor_recharge_time_ms <= 0.0 || needs_cap_sync)
+                        {
+                            st.capacitor_recharge_time_ms = fit_cap_recharge_ms;
+                            st.base_capacitor_recharge_time_ms = Some(fit_cap_recharge_ms);
+                        }
+                        if fit_shield_recharge_ms > 0.0 && st.shield_recharge_time_ms <= 0.0 {
+                            st.shield_recharge_time_ms = fit_shield_recharge_ms;
+                        }
+                        if st.max_shield_hp <= 0.0 && fit_max_shield > 0.0 {
+                            st.max_shield_hp = fit_max_shield;
+                            st.base_max_shield_hp = Some(fit_max_shield);
+                        }
+                        if st.max_armor_hp <= 0.0 && fit_max_armor > 0.0 {
+                            st.max_armor_hp = fit_max_armor;
+                            st.base_max_armor_hp = Some(fit_max_armor);
+                        }
+                        if st.max_structure_hp <= 0.0 && fit_max_hull > 0.0 {
+                            st.max_structure_hp = fit_max_hull;
+                            st.base_max_structure_hp = Some(fit_max_hull);
+                        }
+                    })
+                    .await;
+            }
+        }
         if let Ok(cs) = handle.heal_combat_state(target_ship_id).await {
             combat_healed = cs;
         }
@@ -920,7 +986,8 @@ pub(crate) async fn execute_gm_heal(
                 old_hull_dmg,
             );
         }
-        if final_cap > 0.0 || pre_dyn_cap.is_some() {
+        let emit_cap_sync = (final_cap > 0.0 || pre_dyn_cap.is_some()) && eff_max_cap > 0.0;
+        if !emit_cap_sync && (final_cap > 0.0 || pre_dyn_cap.is_some()) {
             push_change(
                 &mut attr_changes,
                 target_ship_id,
@@ -953,6 +1020,15 @@ pub(crate) async fn execute_gm_heal(
                 OnModuleAttributeChanges {
                     changes: PyRep::List(attr_changes),
                 },
+            );
+        }
+        if emit_cap_sync {
+            let _ = ctx.notify_ship_capacitor_change(
+                target_char_id,
+                target_ship_id,
+                final_cap,
+                eff_max_cap,
+                Some(old_cap),
             );
         }
         let _ = ctx.notify_damage_state_change(
@@ -1831,7 +1907,7 @@ pub async fn handle_gm_slash_ext(
 
         return match res {
             Ok((rec, chosen_flag)) => {
-                ctx.invalidate_and_push_fit(ship_id);
+                ctx.invalidate_ship_fitting(ship_id);
                 let flag_u16 = chosen_flag as u16;
                 let is_fitting_slot = matches!(flag_u16, 11..=34 | 92..=94 | 125..=132);
                 let mut is_online = false;
@@ -1860,18 +1936,27 @@ pub async fn handle_gm_slash_ext(
                         ctx.db.with_mut_snapshot(|snap| {
                             snap.module_online_states.insert(rec.item_id, true);
                         });
-                        ctx.invalidate_and_push_fit(ship_id);
                     }
                 }
-                let item_row = eve_proto::DBRowDescriptor::inv_item_header()
-                    .build_dbrow(crate::services::inventory_bound::item_to_packed_cells(ctx, &rec));
-                // ixLocationID (3) = 0, ixFlag (4) = 0 notifies `invCache`, `godma`, and `dogmaLocation`
-                // of the newly fitted module on `ship_id` at `chosen_flag`.
-                let _ = ctx.notify_item_change(
+                // ixLocationID (3) = 0, ixFlag (4) = 0 notifies `invCache`, `godma`, `dogmaLocation`,
+                // and `SlotsContainer.OnInvChange` BEFORE `invalidate_and_push_fit` / `OnModuleFitted`
+                // (#1252, parity with `inventory_fitting.rs`).
+                crate::services::inventory_bound::emit_inv_item_change(
+                    ctx,
                     rec.owner_id,
-                    item_row,
+                    &rec,
                     vec![(3, PyRep::Integer(0)), (4, PyRep::Integer(0))],
                 );
+                ctx.emit_typed(
+                    NotificationTarget::Character(rec.owner_id),
+                    crate::router::notify_registry::ProcessInventoryChange {
+                        arg0: PyRep::Integer(rec.item_id),
+                        arg1: PyRep::Integer(rec.location_id),
+                        arg2: PyRep::Integer(chosen_flag as i64),
+                        arg3: None,
+                    },
+                );
+                ctx.invalidate_and_push_fit(ship_id);
                 if is_fitting_slot {
                     let group_id = ctx
                         .sde
@@ -2575,6 +2660,45 @@ pub async fn handle_gm_slash_ext(
     }
 
     if let Some(res) = crate::services::notify_emitters_character_services::handle_batch3_gm_slash_cmd(ctx, cid, session.solar_system_id, cmd) {
+        if let Ok(ref rep) = res {
+            let head_lower = cmd
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if matches!(head_lower.as_str(), "/advancetime" | "/fastforward" | "/ff") {
+                let adv_cid = rep.dict_get("characterID").and_then(PyRep::as_i64).unwrap_or(cid);
+                let adv_secs = rep
+                    .dict_get("advancedSeconds")
+                    .and_then(PyRep::as_i64)
+                    .unwrap_or(0)
+                    .max(0) as u64;
+                if adv_secs > 0 {
+                    let explicit_space = if adv_cid == cid {
+                        match (session.solar_system_id, session.ship_id) {
+                            (Some(sys_id), Some(ship_id))
+                                if session.station_id.is_none()
+                                    && session.structure_id.is_none()
+                                    && sys_id > 0
+                                    && ship_id > 0 =>
+                            {
+                                Some((sys_id, ship_id))
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    crate::services::notify_emitters_character_services::fast_forward_and_sync_space_clock(
+                        ctx,
+                        adv_cid,
+                        explicit_space,
+                        adv_secs,
+                    )
+                    .await;
+                }
+            }
+        }
         return Some(res);
     }
 

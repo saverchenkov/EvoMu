@@ -780,8 +780,98 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             }
                         }
                     }
-                    ctx.invalidate_ship_fitting(sid);
+                    ctx.invalidate_ship_fitting_cache_only(sid);
                     let _ = ctx.fit(char_id, sid);
+                    if session.station_id.is_none() && session.structure_id.is_none() {
+                        if let Some(sys_id) = session.solar_system_id.filter(|&s| s > 0) {
+                            let sid_type_id = ctx
+                                .db
+                                .with_snapshot(|s| s.items.get(&sid).map(|i| i.type_id))
+                                .unwrap_or(0);
+                            if sid_type_id > 0 {
+                                let boarded_cs =
+                                    ctx.build_ship_combat_state(char_id, sid, sid_type_id);
+                                let sync_ref = boarded_cs.clone();
+                                let sys_h = ctx.systems.get_or_spawn(sys_id);
+                                if let Ok(Some(updated_cs)) = sys_h
+                                    .modify_combat_state(sid, move |cs| {
+                                        let scale_attr = |cur: f64,
+                                                          prev_max: f64,
+                                                          new_max: f64,
+                                                          persisted_val: f64| {
+                                            if new_max <= 0.0 {
+                                                0.0
+                                            } else if prev_max <= 0.0 {
+                                                persisted_val.clamp(0.0, new_max)
+                                            } else {
+                                                ((cur / prev_max).clamp(0.0, 1.0)) * new_max
+                                            }
+                                        };
+                                        cs.shield_hp = scale_attr(
+                                            cs.shield_hp,
+                                            cs.max_shield_hp,
+                                            boarded_cs.max_shield_hp,
+                                            boarded_cs.shield_hp,
+                                        );
+                                        cs.max_shield_hp = boarded_cs.max_shield_hp;
+                                        cs.base_max_shield_hp = boarded_cs.base_max_shield_hp;
+                                        cs.armor_hp = scale_attr(
+                                            cs.armor_hp,
+                                            cs.max_armor_hp,
+                                            boarded_cs.max_armor_hp,
+                                            boarded_cs.armor_hp,
+                                        );
+                                        cs.max_armor_hp = boarded_cs.max_armor_hp;
+                                        cs.base_max_armor_hp = boarded_cs.base_max_armor_hp;
+                                        cs.structure_hp = scale_attr(
+                                            cs.structure_hp,
+                                            cs.max_structure_hp,
+                                            boarded_cs.max_structure_hp,
+                                            boarded_cs.structure_hp,
+                                        );
+                                        cs.max_structure_hp = boarded_cs.max_structure_hp;
+                                        cs.base_max_structure_hp = boarded_cs.base_max_structure_hp;
+                                        cs.capacitor = scale_attr(
+                                            cs.capacitor,
+                                            cs.max_capacitor,
+                                            boarded_cs.max_capacitor,
+                                            boarded_cs.capacitor,
+                                        );
+                                        cs.max_capacitor = boarded_cs.max_capacitor;
+                                        cs.base_max_capacitor = boarded_cs.base_max_capacitor;
+                                        cs.shield_recharge_time_ms =
+                                            boarded_cs.shield_recharge_time_ms;
+                                        cs.capacitor_recharge_time_ms =
+                                            boarded_cs.capacitor_recharge_time_ms;
+                                        cs.base_capacitor_recharge_time_ms =
+                                            boarded_cs.base_capacitor_recharge_time_ms;
+                                        cs.signature_radius = boarded_cs.signature_radius;
+                                        cs.base_signature_radius = boarded_cs.base_signature_radius;
+                                        cs.tp_sig_multiplier = boarded_cs.tp_sig_multiplier;
+                                        cs.base_max_velocity = boarded_cs.base_max_velocity;
+                                        cs.base_mass = boarded_cs.base_mass;
+                                        cs.base_inertia = boarded_cs.base_inertia;
+                                        cs.shield_resonance = boarded_cs.shield_resonance;
+                                        cs.base_shield_resonance = boarded_cs.base_shield_resonance;
+                                        cs.armor_resonance = boarded_cs.armor_resonance;
+                                        cs.base_armor_resonance = boarded_cs.base_armor_resonance;
+                                        cs.structure_resonance = boarded_cs.structure_resonance;
+                                        cs.base_structure_resonance =
+                                            boarded_cs.base_structure_resonance;
+                                    })
+                                    .await
+                                {
+                                    let _ = sys_h.try_sync_ship_ballpark_stats(sid, &sync_ref);
+                                    crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
+                                        &ctx.db,
+                                        sys_id,
+                                        std::iter::once((sid, &updated_cs)),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    let _ = ctx.push_fit_projection(char_id, sid);
                     let _ = ctx.execute_session_transition_sync(
                         Some(session),
                         crate::router::SessionTransitionSpec::for_kind(
@@ -995,6 +1085,11 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     client_error: None,
                 }));
             }
+            let is_ship = ctx
+                .sde
+                .types
+                .get(&type_id)
+                .is_some_and(|t| t.category_id == 6);
             let launch_pos = DVec3::new(parent_pos.x + 300.0, parent_pos.y, parent_pos.z);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let parent_in_space = snap.items.get(&parent_id).is_some_and(|p| p.location_id == sys_id as i64)
@@ -1025,6 +1120,9 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 it.singleton = true;
                 it.version += 1;
                 snap.item_positions.insert(item_id, [launch_pos.x, launch_pos.y, launch_pos.z]);
+                if is_ship {
+                    crate::sp6_lifecycle::enter_space_in_snap(snap, item_id, sys_id);
+                }
                 Ok((old_loc, old_flag))
             });
             let (old_loc, old_flag) = match res {
@@ -1032,6 +1130,13 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 Err(e) => return Some(Err(e)),
             };
             let t_sde = ctx.sde.types.get(&type_id);
+            let launched_cs = if is_ship {
+                let mut cs = ctx.build_ship_combat_state(item_owner, item_id, type_id);
+                crate::sp6_lifecycle::apply_persisted_hp_to_combat_state(ctx, item_id, &mut cs);
+                cs
+            } else {
+                eve_destiny::CombatState::default()
+            };
             let _ = sys
                 .spawn_ball_with_meta(
                     eve_destiny::Ball {
@@ -1039,14 +1144,18 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         type_id,
                         position: launch_pos,
                         velocity: DVec3::ZERO,
-                        max_velocity: 200.0,
-                        inertia: 1.0,
-                        mass: t_sde.map(|t| t.mass.max(1_000.0)).unwrap_or(1_000_000.0),
+                        max_velocity: launched_cs
+                            .base_max_velocity
+                            .unwrap_or(200.0),
+                        inertia: launched_cs.base_inertia.unwrap_or(1.0),
+                        mass: launched_cs
+                            .base_mass
+                            .unwrap_or_else(|| t_sde.map(|t| t.mass.max(1_000.0)).unwrap_or(1_000_000.0)),
                         radius: t_sde.map(|t| t.radius.max(20.0)).unwrap_or(50.0),
                         speed_fraction: 0.0,
                         mode: eve_destiny::MovementMode::Stop,
                     },
-                    eve_destiny::CombatState::default(),
+                    launched_cs,
                     eve_destiny::SlimItemMeta {
                         group_id: t_sde.map(|t| t.group_id).unwrap_or(25),
                         category_id: t_sde.map(|t| t.category_id).unwrap_or(6),

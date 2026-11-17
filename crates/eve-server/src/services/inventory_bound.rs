@@ -44,7 +44,7 @@ fn err(code: &str, message: String) -> Option<Result<PyRep, BridgeRpcError>> {
 
 /// Extracts an inventory target `itemID` from a bare integer or an EVE item descriptor
 /// (`KeyVal`, `Dict`, `DBRow`, `Object`, or `ObjectEx` carrying an integer `"itemID"` field).
-fn extract_inventory_item_id(rep: &PyRep) -> Option<i64> {
+pub(crate) fn extract_inventory_item_id(rep: &PyRep) -> Option<i64> {
     match rep {
         PyRep::Integer(id) => Some(*id),
         PyRep::KeyVal(_)

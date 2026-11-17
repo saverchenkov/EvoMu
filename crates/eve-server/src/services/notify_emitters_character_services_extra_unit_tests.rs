@@ -1616,3 +1616,83 @@ fn gm_bridge_batch3_slash_commands_target_explicit_player_char_id() {
     assert_eq!(ctx.now_unix(), pre_unknown_now);
     assert!(crate::services::space_destiny::get_session_change_timer(&ctx, gm_cid).is_some());
 }
+
+#[tokio::test]
+async fn fast_forward_and_sync_space_clock_recharges_cap_and_emits_cap_sync_without_sim_clock_rebase() {
+    let (ctx, char_id) = make_ctx();
+    let sys_id = 30_000_142u32;
+    let ship_id = 99_100_001i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: std::collections::HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        crate::sp6_lifecycle::enter_space_in_snap(snap, ship_id, sys_id);
+    });
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let mut cs = eve_destiny::CombatState::default();
+    cs.max_capacitor = 168_750.0;
+    cs.capacitor = 200.0;
+    cs.capacitor_recharge_time_ms = 5_625_000.0;
+    cs.max_shield_hp = 1_000.0;
+    cs.shield_hp = 500.0;
+    cs.shield_recharge_time_ms = 600_000.0;
+    sys_h.try_spawn_ball_with_combat(
+        eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        },
+        cs,
+    );
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    fast_forward_and_sync_space_clock(&ctx, char_id, Some((sys_id, ship_id)), 6_000).await;
+
+    let post = sys_h
+        .get_combat_state(ship_id)
+        .await
+        .unwrap()
+        .expect("ship combat state remains present");
+    assert!(post.capacitor > 165_000.0, "expected recharged cap > 165000, got {}", post.capacitor);
+    let db_cap = ctx
+        .db
+        .with_snapshot(|s| s.items[&ship_id].dynamic_attributes.get(&18).copied())
+        .expect("dynamic attr 18 must be synced");
+    assert!((db_cap - post.capacitor).abs() < 1e-3);
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs.iter().any(|n| n.event == "OnCapacitorChange"));
+    assert!(notifs.iter().any(|n| n.event == "OnModuleAttributeChanges"));
+    assert!(
+        !notifs.iter().any(|n| n.event == "DoSimClockRebase"),
+        "#1015: must never emit DoSimClockRebase"
+    );
+}

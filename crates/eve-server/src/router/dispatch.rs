@@ -1140,10 +1140,14 @@ impl ServerContext {
             };
             self.advance_secs_without_sim_clock_rebase(secs);
             if secs > 0 {
-                if let Some((sys_id, ship_id)) = target_space {
-                    let sys_h = self.systems.get_or_spawn(sys_id);
-                    let _ = sys_h.fast_forward_clock(ship_id, secs).await;
-                }
+                let target_cid = explicit_target_cid.or(session.character_id).unwrap_or(0);
+                crate::services::notify_emitters_character_services::fast_forward_and_sync_space_clock(
+                    self,
+                    target_cid,
+                    target_space,
+                    secs,
+                )
+                .await;
             }
             return Ok(PyRep::Bool(true));
         }

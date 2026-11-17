@@ -884,6 +884,48 @@ pub(crate) fn update_system_hibernation_flag(
     }
 }
 
+/// Passively recharges stationary or unstepped ships during `fast_forward_clock` and persists updated HP/capacitor to DB.
+fn recharge_and_persist_ship_combat_state_on_fast_forward(
+    solar_system_id: SolarSystemId,
+    ballpark: &mut Ballpark,
+    ship_id: BallId,
+    unstepped_secs: u64,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+) {
+    if unstepped_secs == 0 {
+        return;
+    }
+    let dt_ms = (unstepped_secs as f64) * 1000.0;
+    let recharge_field = |cur: &mut f64, max_val: f64, tau_ms: f64| -> bool {
+        if max_val <= 0.0 || tau_ms <= 0.0 || *cur >= max_val {
+            return false;
+        }
+        let next = eve_destiny::combat::compute_passive_recharge(*cur, max_val, tau_ms, dt_ms);
+        if (next - *cur).abs() > 1e-9 {
+            *cur = next;
+            true
+        } else {
+            false
+        }
+    };
+    let updated = if let Some(cs) = ballpark.combat_states.get_mut(&ship_id) {
+        let cap_changed =
+            recharge_field(&mut cs.capacitor, cs.max_capacitor, cs.capacitor_recharge_time_ms);
+        let shield_changed =
+            recharge_field(&mut cs.shield_hp, cs.max_shield_hp, cs.shield_recharge_time_ms);
+        (cap_changed || shield_changed).then(|| cs.clone())
+    } else {
+        None
+    };
+    if let (Some(cs), Some(db)) = (updated, db_opt) {
+        crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
+            db,
+            solar_system_id,
+            std::iter::once((ship_id, &cs)),
+        );
+    }
+}
+
 /// Fast-forwards physics ticks inside the system actor for `timeControl.AdvanceClock`
 /// without per-tick DB snapshot cloning or flooding intermediate `DoDestinyUpdate` broadcasts.
 #[cfg(test)]
@@ -943,6 +985,13 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs(
         .get(&ship_id)
         .is_some_and(|cs| cs.is_invulnerable());
     if !is_moving && !was_invuln {
+        recharge_and_persist_ship_combat_state_on_fast_forward(
+            solar_system_id,
+            ballpark,
+            ship_id,
+            secs,
+            db_opt,
+        );
         return;
     }
     let max_sim = if is_moving {
@@ -952,8 +1001,10 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs(
     };
     let initial_tick = ballpark.current_tick;
     let mut all_events = Vec::new();
+    let mut sim_steps: u64 = 0;
     for _ in 0..max_sim {
         *sim_elapsed_secs += 1.0;
+        sim_steps += 1;
         let evs = ballpark.step(1.0);
         persist_landed_warps_in_db(ballpark, &evs, db_opt, ball_space_entry_epochs);
         clear_landed_warp_tracking_from_events(ballpark, &evs, warp_provenance, warp_tracking);
@@ -981,6 +1032,24 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs(
                 .is_none_or(|cs| !cs.is_invulnerable())
         {
             break;
+        }
+    }
+    let unstepped_secs = secs.saturating_sub(sim_steps);
+    if unstepped_secs > 0 {
+        recharge_and_persist_ship_combat_state_on_fast_forward(
+            solar_system_id,
+            ballpark,
+            ship_id,
+            unstepped_secs,
+            db_opt,
+        );
+    } else if sim_steps > 0 {
+        if let (Some(cs), Some(db)) = (ballpark.combat_states.get(&ship_id), db_opt) {
+            crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
+                db,
+                solar_system_id,
+                std::iter::once((ship_id, cs)),
+            );
         }
     }
     // Preserve `initial_tick` instead of bumping `ballpark.current_tick` ahead of live clients:

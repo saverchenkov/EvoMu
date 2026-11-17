@@ -1155,9 +1155,27 @@ async fn handle_validate_item_can_be_opened(
     args: &[PyRep], kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-    let item_id = match crate::router::RpcArgs::new(args, kwargs).opt_positive_i64(0, "itemID") {
-        Ok(v) => v.or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0),
-        Err(e) => return Some(Err(e)),
+    let parse_arg = |rep: &PyRep, label: &str| -> Result<i64, BridgeRpcError> {
+        crate::services::inventory_bound::extract_inventory_item_id(rep)
+            .filter(|&id| id > 0)
+            .ok_or_else(|| BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: format!("Expected positive integer or item descriptor for {label}"),
+                client_error: None,
+            })
+    };
+    let item_id = match args.first().filter(|a| !matches!(a, PyRep::None)) {
+        Some(rep) => match parse_arg(rep, "'itemID' (arg[0])") {
+            Ok(id) => id,
+            Err(e) => return Some(Err(e)),
+        },
+        None => match kwargs.get("itemID").filter(|a| !matches!(a, PyRep::None)) {
+            Some(rep) => match parse_arg(rep, "'itemID'") {
+                Ok(id) => id,
+                Err(e) => return Some(Err(e)),
+            },
+            None => bound_entry.map(|b| b.object_id).unwrap_or(0),
+        },
     };
     match validate_single_item_can_be_opened(ctx, char_id, item_id).await {
         Ok(()) => Some(Ok(PyRep::Bool(true))),
@@ -1181,9 +1199,10 @@ pub(crate) async fn handle_containers_ships_and_fitting(
 
         ("invbroker", "ValidateItemListCanBeOpened") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let extract = crate::services::inventory_bound::extract_inventory_item_id;
             let item_ids: Vec<i64> = match args.first().or_else(|| kwargs.get("itemIDs")) {
-                Some(PyRep::List(l) | PyRep::Tuple(l)) => l.iter().filter_map(|x| x.as_i64()).collect(),
-                Some(PyRep::Integer(id)) => vec![*id],
+                Some(PyRep::List(l) | PyRep::Tuple(l)) => l.iter().filter_map(extract).collect(),
+                Some(rep) => extract(rep).into_iter().collect(),
                 _ => Vec::new(),
             };
             if item_ids.is_empty() {

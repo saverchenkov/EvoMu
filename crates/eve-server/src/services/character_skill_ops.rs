@@ -902,11 +902,17 @@ pub async fn post_inventory_fitting_hook(
                 opened_ids.push(b.object_id);
             }
             if let Some(first) = args.first() {
-                if let Some(id) = first.as_i64() {
+                if let Some(id) =
+                    crate::services::inventory_bound::extract_inventory_item_id(first)
+                        .filter(|&id| id > 0)
+                {
                     opened_ids.push(id);
                 } else if let PyRep::List(l) | PyRep::Tuple(l) = first {
                     for el in l {
-                        if let Some(id) = el.as_i64() {
+                        if let Some(id) =
+                            crate::services::inventory_bound::extract_inventory_item_id(el)
+                                .filter(|&id| id > 0)
+                        {
                             opened_ids.push(id);
                         }
                     }

@@ -3385,3 +3385,334 @@ async fn test_batch_o_multi_merge_stack_all_auto_fit_and_bound_ship_add() {
         assert_eq!(s.items[&miner_stack_id].quantity, 3);
     });
 }
+
+#[tokio::test]
+async fn test_smb_launch_and_board_preserves_persisted_ship_damage_and_ball_stats() {
+    let ctx = new_sqlite_ctx();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(7199);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let char_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let orca_id = 829_020_i64;
+    let damaged_rifter_id = 829_001_i64;
+    let fallback_rifter_id = 829_002_i64;
+    seed_item(&ctx, orca_id, 28606, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    seed_item(&ctx, damaged_rifter_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    seed_item(&ctx, fallback_rifter_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.insert(29637, eve_db::TrainedSkillRecord { type_id: 29637, level: 5, skill_points: 256_000.0 });
+        sk.insert(3327, eve_db::TrainedSkillRecord { type_id: 3327, level: 5, skill_points: 256_000.0 });
+        sk.insert(3449, eve_db::TrainedSkillRecord { type_id: 3449, level: 5, skill_points: 256_000.0 });
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+        }
+    });
+
+    ctx.advance_secs(12);
+    ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(orca_id)], &kw, None)
+        .await
+        .expect("Board Orca");
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "ship",
+        None,
+        "StoreVessel",
+        &[PyRep::Integer(damaged_rifter_id), PyRep::Integer(orca_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("StoreVessel damaged Rifter into Orca SMA");
+
+    let mut damaged_cs = ctx.build_ship_combat_state(char_id, damaged_rifter_id, 587);
+    damaged_cs.shield_hp = (damaged_cs.max_shield_hp * 0.30).max(1.0);
+    damaged_cs.armor_hp = (damaged_cs.max_armor_hp * 0.45).max(1.0);
+    damaged_cs.structure_hp = (damaged_cs.max_structure_hp * 0.60).max(1.0);
+    damaged_cs.capacitor = (damaged_cs.max_capacitor * 0.40).max(1.0);
+    let expected_shield = damaged_cs.shield_hp;
+    let expected_armor = damaged_cs.armor_hp;
+    let expected_hull = damaged_cs.structure_hp;
+    let expected_cap = damaged_cs.capacitor;
+    let expected_armor_dmg = damaged_cs.max_armor_hp - expected_armor;
+    let expected_hull_dmg = damaged_cs.max_structure_hp - expected_hull;
+    eve_server::sp6_lifecycle::persist_ship_combat_hp_in_db(&ctx.db, damaged_rifter_id, &damaged_cs);
+
+    // Move Orca and character into space near Jita 4-4 so LaunchFromContainer -> Board -> Dock works cleanly.
+    let station_pos = ctx.sde.stations[&station_id].position;
+    let space_pos = station_pos + glam::DVec3::new(500.0, 0.0, 0.0);
+    sess.station_id = None;
+    sess.solar_system_id = Some(sys_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.solar_system_id = sys_id;
+        }
+        if let Some(sh) = snap.items.get_mut(&orca_id) {
+            sh.location_id = i64::from(sys_id);
+            sh.flag = InventoryFlag::None;
+        }
+    });
+    ctx.sync_session(&mut sess);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: orca_id,
+            type_id: 28606,
+            position: space_pos,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 100.0,
+            inertia: 1.0,
+            mass: 150_000_000.0,
+            radius: 500.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "ship",
+        None,
+        "LaunchFromContainer",
+        &[PyRep::Integer(damaged_rifter_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("LaunchFromContainer damaged Rifter from SMA");
+
+    let launched_cs = sys_handle
+        .get_combat_state(damaged_rifter_id)
+        .await
+        .expect("get launched combat state")
+        .expect("launched Rifter has CombatState");
+    assert!(
+        (launched_cs.armor_hp - expected_armor).abs() < 1e-4 && launched_cs.armor_hp < launched_cs.max_armor_hp,
+        "LaunchFromContainer must preserve armor damage: got {} expected {}",
+        launched_cs.armor_hp,
+        expected_armor
+    );
+    assert!(
+        (launched_cs.structure_hp - expected_hull).abs() < 1e-4 && launched_cs.structure_hp < launched_cs.max_structure_hp,
+        "LaunchFromContainer must preserve hull damage: got {} expected {}",
+        launched_cs.structure_hp,
+        expected_hull
+    );
+    assert!(
+        (launched_cs.shield_hp - expected_shield).abs() < 1e-4 && launched_cs.shield_hp < launched_cs.max_shield_hp,
+        "LaunchFromContainer must preserve shield damage"
+    );
+    assert!(
+        (launched_cs.capacitor - expected_cap).abs() < 1e-4 && launched_cs.capacitor < launched_cs.max_capacitor,
+        "LaunchFromContainer must preserve capacitor level"
+    );
+
+    // Boarding the launched ship in space must preserve HP damage and sync ballpark velocity/kinematics.
+    ctx.advance_secs(12);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "ship",
+        None,
+        "Board",
+        &[PyRep::Integer(damaged_rifter_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Board launched Rifter in space");
+
+    let boarded_cs = sys_handle
+        .get_combat_state(damaged_rifter_id)
+        .await
+        .expect("get boarded combat state")
+        .expect("boarded Rifter has CombatState");
+    assert!((boarded_cs.armor_hp - expected_armor).abs() < 1e-4 && boarded_cs.armor_hp < boarded_cs.max_armor_hp);
+    assert!((boarded_cs.structure_hp - expected_hull).abs() < 1e-4 && boarded_cs.structure_hp < boarded_cs.max_structure_hp);
+    assert!((boarded_cs.shield_hp - expected_shield).abs() < 1e-4 && boarded_cs.shield_hp < boarded_cs.max_shield_hp);
+    assert!((boarded_cs.capacitor - expected_cap).abs() < 1e-4 && boarded_cs.capacitor < boarded_cs.max_capacitor);
+
+    let (_, boarded_ball) = sys_handle
+        .get_ball_snapshot(damaged_rifter_id)
+        .await
+        .expect("get boarded ball snapshot")
+        .expect("boarded Rifter ball exists");
+    let ref_cs = ctx.build_ship_combat_state(char_id, damaged_rifter_id, 587);
+    let sde_base_vel = ctx.sde.types[&587].default_attributes[&eve_sde::attr_ids::MAX_VELOCITY];
+    let expected_vel = ref_cs.base_max_velocity.expect("base_max_velocity");
+    assert!(
+        (boarded_ball.max_velocity - expected_vel).abs() < 1e-4 && boarded_ball.max_velocity > sde_base_vel,
+        "Board must sync ballpark max_velocity ({}) to skilled CombatState ({})",
+        boarded_ball.max_velocity,
+        expected_vel
+    );
+
+    // Also verify the prev_max <= 0.0 fallback branch preserves persisted damage when boarding a second ship
+    // whose live CombatState has uninitialized max HP (all zeros).
+    let mut fb_cs = ctx.build_ship_combat_state(char_id, fallback_rifter_id, 587);
+    fb_cs.shield_hp = (fb_cs.max_shield_hp * 0.25).max(1.0);
+    fb_cs.armor_hp = (fb_cs.max_armor_hp * 0.50).max(1.0);
+    fb_cs.structure_hp = (fb_cs.max_structure_hp * 0.55).max(1.0);
+    fb_cs.capacitor = (fb_cs.max_capacitor * 0.35).max(1.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&fallback_rifter_id) {
+            sh.location_id = i64::from(sys_id);
+            sh.flag = InventoryFlag::None;
+        }
+        eve_server::sp6_lifecycle::enter_space_in_snap(snap, fallback_rifter_id, sys_id);
+    });
+    let _ = sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: fallback_rifter_id,
+            type_id: 587,
+            position: space_pos + glam::DVec3::new(100.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 100.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    sys_handle
+        .set_combat_state(
+            fallback_rifter_id,
+            eve_destiny::CombatState {
+                shield_hp: 0.0,
+                max_shield_hp: 0.0,
+                armor_hp: 0.0,
+                max_armor_hp: 0.0,
+                structure_hp: 0.0,
+                max_structure_hp: 0.0,
+                capacitor: 0.0,
+                max_capacitor: 0.0,
+                ..eve_destiny::CombatState::default()
+            },
+        )
+        .await
+        .expect("seed zeroed CombatState");
+    eve_server::sp6_lifecycle::persist_ship_combat_hp_in_db(&ctx.db, fallback_rifter_id, &fb_cs);
+    let pre_fb = sys_handle
+        .get_combat_state(fallback_rifter_id)
+        .await
+        .expect("get pre-board fallback combat state")
+        .expect("fallback Rifter has zeroed CombatState before Board");
+    assert_eq!(pre_fb.max_armor_hp, 0.0, "precondition: prev_max must be zero before fallback Board");
+
+    ctx.advance_secs(12);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "ship",
+        None,
+        "Board",
+        &[PyRep::Integer(fallback_rifter_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Board fallback Rifter");
+
+    let fb_live = sys_handle
+        .get_combat_state(fallback_rifter_id)
+        .await
+        .expect("get fallback combat state")
+        .expect("fallback Rifter has CombatState");
+    assert!(
+        (fb_live.armor_hp - fb_cs.armor_hp).abs() < 1e-4 && fb_live.armor_hp < fb_live.max_armor_hp,
+        "Board fallback must preserve armor damage: got {} expected {} (max={})",
+        fb_live.armor_hp,
+        fb_cs.armor_hp,
+        fb_live.max_armor_hp,
+    );
+    assert!(
+        (fb_live.structure_hp - fb_cs.structure_hp).abs() < 1e-4
+            && fb_live.structure_hp < fb_live.max_structure_hp,
+        "Board fallback must preserve structure damage: got {} expected {} (max={})",
+        fb_live.structure_hp,
+        fb_cs.structure_hp,
+        fb_live.max_structure_hp
+    );
+    assert!(
+        (fb_live.shield_hp - fb_cs.shield_hp).abs() < 1e-4 && fb_live.shield_hp < fb_live.max_shield_hp,
+        "Board fallback must preserve shield damage: got {} expected {} (max={})",
+        fb_live.shield_hp,
+        fb_cs.shield_hp,
+        fb_live.max_shield_hp
+    );
+
+    // Board back into damaged_rifter_id and Dock into Jita 4-4: persisted DB damage must remain intact (no 0-ISK repair).
+    ctx.advance_secs(12);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "ship",
+        None,
+        "Board",
+        &[PyRep::Integer(damaged_rifter_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Re-board damaged Rifter before Dock");
+    let reboarded_cs = sys_handle
+        .get_combat_state(damaged_rifter_id)
+        .await
+        .expect("get reboarded combat state")
+        .expect("reboarded Rifter has CombatState");
+    assert!(
+        (reboarded_cs.shield_hp - expected_shield).abs() < 1e-4 && reboarded_cs.shield_hp < reboarded_cs.max_shield_hp,
+        "Re-boarding damaged Rifter in space must keep damaged shield ({} vs {})",
+        reboarded_cs.shield_hp,
+        expected_shield
+    );
+    sys_handle.set_ball_position(damaged_rifter_id, space_pos).await;
+    ctx.advance_secs(12);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "stationSvc",
+        None,
+        "Dock",
+        &[PyRep::Integer(station_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Dock damaged Rifter at Jita 4-4");
+
+    assert_eq!(sess.station_id, Some(station_id));
+    ctx.db.with_snapshot(|snap| {
+        let hp = snap
+            .sp6_lifecycle
+            .ship_combat_hp
+            .get(&damaged_rifter_id)
+            .expect("ship_combat_hp persisted across Dock");
+        assert!((hp.armor_hp - expected_armor).abs() < 1e-4);
+        assert!((hp.hull_hp - expected_hull).abs() < 1e-4);
+        // Docking restores shield to 100% (#1082) while keeping armor and hull damage intact.
+        assert!((hp.shield_hp - ref_cs.max_shield_hp).abs() < 1e-4);
+        let item = &snap.items[&damaged_rifter_id];
+        assert_eq!(item.location_id, station_id);
+        let armor_dmg = item.dynamic_attributes.get(&eve_sde::attr_ids::ARMOR_DAMAGE).copied().unwrap_or(0.0);
+        let hull_dmg = item.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied().unwrap_or(0.0);
+        assert!((armor_dmg - expected_armor_dmg).abs() < 1e-4, "armor damage attr lost on dock: {armor_dmg} vs {expected_armor_dmg}");
+        assert!((hull_dmg - expected_hull_dmg).abs() < 1e-4, "hull damage attr lost on dock: {hull_dmg} vs {expected_hull_dmg}");
+    });
+}

@@ -713,3 +713,79 @@ fn fast_forward_clock_preserves_tick_stamp_across_repeated_calls() {
     assert!(bp.balls[&ship_id].position.x > 0.0);
 }
 
+#[test]
+fn fast_forward_clock_passively_recharges_stationary_ship_past_300s_cap_without_tick_broadcast() {
+    let sys_id = 30_004_759u32;
+    let ship_id = 99_003_901i64;
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: 90_000_001,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: std::collections::HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        crate::sp6_lifecycle::enter_space_in_snap(snap, ship_id, sys_id);
+    });
+    let pos_map = Arc::new(eve_db::lock_rank::RankedRwLock::new(
+        std::collections::HashMap::new(),
+    ));
+    let scram_cache = Arc::new(eve_db::lock_rank::RankedRwLock::new(HashSet::new()));
+    let (tx, mut rx) = tokio::sync::broadcast::channel::<crate::system_actor::TickBroadcast>(16);
+    let mut bp = Ballpark::new(sys_id);
+    bp.add_ball(make_ship_ball(ship_id, DVec3::ZERO, MovementMode::Stop));
+    let mut cs = CombatState::new();
+    cs.max_capacitor = 168_750.0;
+    cs.capacitor = 100.0;
+    cs.capacitor_recharge_time_ms = 5_625_000.0;
+    cs.max_shield_hp = 200_000.0;
+    cs.shield_hp = 10_000.0;
+    cs.shield_recharge_time_ms = 2_500_000.0;
+    bp.combat_states.insert(ship_id, cs);
+
+    let tick_before = bp.current_tick;
+    let mut sim_elapsed = 0.0;
+    fast_forward_clock_in_actor(
+        sys_id,
+        &mut bp,
+        ship_id,
+        6_000,
+        &mut sim_elapsed,
+        &Some(Arc::clone(&db)),
+        &pos_map,
+        &scram_cache,
+        &tx,
+    );
+
+    assert_eq!(sim_elapsed, 0.0, "stationary fast-forward must not advance sim_elapsed");
+    assert_eq!(bp.current_tick, tick_before, "#1159/#1165: current_tick must stay anchored");
+    assert!(rx.try_recv().is_err(), "stationary recharge must not flood TickBroadcast");
+    let post = &bp.combat_states[&ship_id];
+    assert!(
+        post.capacitor > 165_000.0,
+        "6000s passive recharge over 5625s recharge time must refill Titan cap, got {}",
+        post.capacitor
+    );
+    assert!(
+        post.shield_hp > 195_000.0,
+        "6000s passive shield recharge over 2500s recharge time must refill shield, got {}",
+        post.shield_hp
+    );
+    let persisted = db
+        .with_snapshot(|s| s.sp6_lifecycle.ship_combat_hp.get(&ship_id).copied())
+        .expect("SP6 persisted HP should be updated after passive fast-forward recharge");
+    assert!((persisted.shield_hp - post.shield_hp).abs() < 1e-3);
+}
+

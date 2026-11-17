@@ -1091,3 +1091,97 @@ async fn dispatch_box_fut_station_peer_notify_seq_filter_market_cache_and_wal_pr
     let _ = std::fs::remove_file(&wal_db_wal);
     let _ = std::fs::remove_file(&wal_db_shm);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn advance_clock_recharges_stationary_ship_capacitor_and_emits_cap_sync_without_sim_clock_rebase() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142u32;
+    let char_id = 90_000_001i64;
+    let ship_id = 99_200_001i64;
+    let kw = HashMap::new();
+    let mut sess = make_authed_session(88, 1, char_id, ROLE_GML);
+    sess.solar_system_id = Some(sys_id);
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(ship_id);
+    ctx.db
+        .acquire_online_lock(1, 88, Some(char_id), true, ctx.now_unix())
+        .expect("online lock");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        crate::sp6_lifecycle::enter_space_in_snap(snap, ship_id, sys_id);
+    });
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let mut cs = CombatState::default();
+    cs.max_capacitor = 168_750.0;
+    cs.capacitor = 10.0;
+    cs.capacitor_recharge_time_ms = 5_625_000.0;
+    sys_h.try_spawn_ball_with_combat(
+        Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        cs,
+    );
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "timeControl",
+        None,
+        "AdvanceClock",
+        &[PyRep::Integer(6_000)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("AdvanceClock(6000) succeeds");
+
+    let post = sys_h
+        .get_combat_state(ship_id)
+        .await
+        .unwrap()
+        .expect("ship combat state present");
+    assert!(post.capacitor > 165_000.0);
+    let db_cap = ctx
+        .db
+        .with_snapshot(|s| s.items[&ship_id].dynamic_attributes.get(&18).copied())
+        .expect("DB attr 18 synced");
+    assert!((db_cap - post.capacitor).abs() < 1e-3);
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs.iter().any(|n| n.event == "OnCapacitorChange"));
+    assert!(notifs.iter().any(|n| n.event == "OnModuleAttributeChanges"));
+    assert!(!notifs.iter().any(|n| n.event == "DoSimClockRebase"));
+}
