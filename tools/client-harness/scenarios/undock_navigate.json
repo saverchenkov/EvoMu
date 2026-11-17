@@ -72,6 +72,15 @@
       }
     },
     {
+      "id": "stop_ship",
+      "action": {"type": "stop", "wait_ms": 1500},
+      "checks": {
+        "ship_mode": 2,
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
       "id": "align_planet_1",
       "action": {"type": "align_to", "target": "40009077", "item_id": 40009077, "wait_ms": 1500},
       "checks": {

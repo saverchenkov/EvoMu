@@ -1632,7 +1632,8 @@ def _inspect_uicore_tree():
         nc = getattr(n_ui, "notificationCenter", None) if n_ui is not None else None
         if nc is not None and not any(o.get("window_id") == "notifications" for o in open_windows):
             nc_cont = getattr(nc, "notificationContainer", None) or getattr(nc, "drawer", None) or nc
-            if bool(getattr(nc, "isShowingDrawer", False)) or (nc_cont is not nc and _is_visible(nc_cont)):
+            is_showing = bool(getattr(nc, "isShowingDrawer", False))
+            if is_showing or (nc_cont is not nc and _is_visible(nc_cont)):
                 nc_c = _inspect_window_content(nc_cont)
                 open_windows.append({
                     "window_id": "notifications",
@@ -1644,11 +1645,12 @@ def _inspect_uicore_tree():
                     "w": 320,
                     "h": 480,
                     "minimized": False,
+                    "is_showing_drawer": is_showing,
                     "has_loading": nc_c["has_loading"],
                     "has_error": nc_c["has_error"],
                     "tab_count": nc_c["tab_count"],
                     "row_count": nc_c["row_count"],
-                    "populated_count": max(1, nc_c["populated_count"]) if bool(getattr(nc, "isShowingDrawer", False)) else nc_c["populated_count"],
+                    "populated_count": nc_c["populated_count"],
                     "sample_texts": nc_c["sample_texts"],
                 })
         vs = svcs.get("viewState")
@@ -3124,6 +3126,15 @@ def _get_state_snapshot(sm):
         invs = getattr(ic_svc, "inventories", None) if ic_svc is not None else None
         if isinstance(invs, dict):
             ship_id_i = sess_dict.get("shipid")
+            st_locs = {x for x in (sess_dict.get("stationid"), sess_dict.get("structureid")) if x}
+
+            def _item_category_id(rec):
+                val = rec.get("categoryID") if isinstance(rec, dict) else getattr(rec, "categoryID", None)
+                try:
+                    return int(val) if val is not None else None
+                except Exception:
+                    return None
+
             for ik, iv in invs.items():
                 items_attr = getattr(iv, "items", None)
                 cnt = len(items_attr) if isinstance(items_attr, (dict, list, tuple, set)) else None
@@ -3132,15 +3143,28 @@ def _get_state_snapshot(sm):
                 if isinstance(ik, tuple) and len(ik) >= 1:
                     loc_k = ik[0]
                     flag_k = ik[1] if len(ik) > 1 else None
-                    if loc_k == ship_id_i and flag_k in (5, None):
-                        inventory_state["cargo_item_count"] = cnt
-                    elif loc_k == sess_dict.get("stationid") or loc_k == sess_dict.get("structureid"):
-                        if flag_k == 4 and cnt is not None:
-                            inventory_state["hangar_item_count"] = cnt
+                    is_cargo = loc_k == ship_id_i and flag_k in (5, None)
+                    is_hangar = loc_k in st_locs and flag_k == 4
                 elif hasattr(iv, "itemID"):
                     loc_k = getattr(iv, "itemID", None)
-                    if loc_k == ship_id_i:
-                        inventory_state["cargo_item_count"] = cnt
+                    flag_k = getattr(iv, "flag", None)
+                    if flag_k is None:
+                        flag_k = getattr(iv, "locationFlag", None)
+                    is_cargo = loc_k == ship_id_i
+                    is_hangar = loc_k in st_locs and flag_k == 4
+                else:
+                    continue
+                if is_cargo:
+                    inventory_state["cargo_item_count"] = cnt
+                elif is_hangar and cnt is not None:
+                    inventory_state["hangar_item_count"] = cnt
+                    item_vals = list(items_attr.values()) if isinstance(items_attr, dict) else (
+                        list(items_attr) if isinstance(items_attr, (list, tuple, set)) else []
+                    )
+                    ship_cnt = sum(1 for it in item_vals if _item_category_id(it) == 6)
+                    if inventory_state["ship_hangar_count"] is None:
+                        inventory_state["ship_hangar_count"] = 0
+                    inventory_state["ship_hangar_count"] += ship_cnt
     except Exception:
         pass
 
@@ -5255,7 +5279,7 @@ def _execute_action(sm, action):
                     beyonce = H._get_beyonce(sm, sys_id)
                     michelle = sm.GetService("michelle")
                     bp = michelle.GetBallpark() if michelle is not None else None
-                    if not item_id and sub != "jump_gate" and bp is not None:
+                    if not item_id and sub not in ("jump_gate", "stop") and bp is not None:
                         sid = int(getattr(sess, "shipid", 0) or 0) if sess is not None else 0
                         item_id, resolve_err = _resolve_space_command_item_id(bp, sid, sub, raw_target)
                         if resolve_err:
@@ -5945,7 +5969,7 @@ def _execute_action(sm, action):
                         locs = getattr(c_cfg, "evelocations", None)
                         if locs is not None and hasattr(locs, "data"):
                             for lid, lrec in locs.data.items():
-                                if str(getattr(lrec, "locationName", "") or "").lower() == dest_raw.lower():
+                                if _to_utf8(getattr(lrec, "locationName", "") or "").lower() == dest_raw.lower():
                                     dest_id = int(lid)
                                     break
                     except Exception:
@@ -6056,7 +6080,16 @@ def _execute_action(sm, action):
         max_wait_s = (
             42.0
             if raw_atype == "jump_gate"
-            else (32.0 if raw_atype == "dock" else (25.0 if raw_atype in ("warp_to", "undock") else 12.0))
+            else (
+                32.0
+                if raw_atype == "dock"
+                else (
+                    25.0
+                    if raw_atype in ("warp_to", "warp_to_location", "warp_to_bookmark", "undock", "select_character")
+                    or atype in ("select_character", "warp_to_location", "warp_to_bookmark")
+                    else 12.0
+                )
+            )
         )
         t_start = time.time()
         while not done_flag[0] and (time.time() - t_start) < max_wait_s:

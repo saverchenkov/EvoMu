@@ -87,7 +87,8 @@ class TestScenarioValidation(unittest.TestCase):
             for s in scenarios["station_ui"]["steps"]
             if s["action"].get("type") == "open_window"
         ]
-        self.assertEqual(opened_targets, list(EXPECTED_16_STATION_WINDOWS))
+        self.assertIn("inventory", opened_targets)
+        self.assertEqual([t for t in opened_targets if t != "inventory"], list(EXPECTED_16_STATION_WINDOWS))
 
     def test_rejects_gm_and_time_control_commands_outside_declared_setup_steps(self):
         bad_cases = [
@@ -212,7 +213,7 @@ class TestScenarioChecks(unittest.TestCase):
             "session": {"solarsystemid2": 30000142, "stationid": None},
             "wallet_state": {"isk_balance": 100000.0},
             "inventory_state": {"hangar_item_count": 3},
-            "skills_state": {"queue_len": 1, "trained_count": 12},
+            "skills_state": {"queue_len": 1, "total_trained_skills": 12},
             "market_state": {"char_orders_count": 2},
             "warp_telemetry": {"started_count": 0, "finished_count": 0, "in_warp": False},
             "space": {
@@ -225,7 +226,7 @@ class TestScenarioChecks(unittest.TestCase):
             "active_view": "inflight",
             "wallet_state": {"isk_balance": 125000.0},
             "inventory_state": {"hangar_item_count": 2},
-            "skills_state": {"queue_len": 2, "trained_count": 12},
+            "skills_state": {"queue_len": 2, "total_trained_skills": 12},
             "market_state": {"char_orders_count": 3},
             "charsel_state": {"active": True, "count": 2, "names": ["Aura Capsuleer", "Aura Two"]},
             "bookmarks_state": {"count": 1, "names": ["Scenario Planet Spot"]},
@@ -563,6 +564,8 @@ class TestScenarioRunnerFakeHook(unittest.TestCase):
                 elif atype == "keep_at_range":
                     state["space"]["ego"] = {"mode": 1, "speed_mps": 220.0}
                     state["space"]["nearby_balls"][0]["distance_m"] = 9000.0
+                elif atype == "stop":
+                    state["space"]["ego"] = {"mode": 2, "speed_mps": 0.0}
                 elif atype == "align_to":
                     state["space"]["ego"] = {"mode": 1, "speed_mps": 95.0}
                 elif atype in ("warp_to", "warp_to_location"):
@@ -638,6 +641,365 @@ class TestScenarioRunnerFakeHook(unittest.TestCase):
             res = json.loads((out / "result.json").read_text(encoding="utf-8"))
             self.assertFalse(res["journeys"]["mini_desync"]["passed"])
             self.assertEqual(res["journeys"]["mini_desync"]["failure"]["failed_check"], "clean_logs")
+
+
+class TestScenarioReviewFixes(unittest.TestCase):
+    def _run_with_step_hook(
+        self,
+        tmp_root: Path,
+        scenario_files: list,
+        out_dir: Path,
+        step_handler,
+        init_client_logs=None,
+    ) -> int:
+        def _fake_start_server(self_runner, reset_db: bool = False):
+            _ = reset_db
+            self_runner.current_run_dir.mkdir(parents=True, exist_ok=True)
+            (self_runner.current_run_dir / "server.log").write_text(
+                "2026-11-16T00:00:00Z INFO Listening on Native machoNet / GPSTransport TCP\n",
+                encoding="utf-8",
+            )
+            return True
+
+        def _fake_start_client(self_runner):
+            clogs_dir = self_runner.current_run_dir / "client_logs"
+            clogs_dir.mkdir(parents=True, exist_ok=True)
+            (clogs_dir / "eve_client.log").write_text(
+                "2026-11-16 EVE Client version 24.01 started\n",
+                encoding="utf-8",
+            )
+            if callable(init_client_logs):
+                init_client_logs(self_runner.current_run_dir, clogs_dir)
+            self_runner._last_boot_result = {
+                "ok": True,
+                "state": {
+                    "client_version": "24.01",
+                    "client_build": "9990001",
+                    "session": {"charid": 90000001, "stationid": 60003760},
+                    "active_view": "hangar",
+                    "open_windows": [],
+                },
+                "flight_recorder": {"macho_calls": []},
+            }
+            return True
+
+        def _fake_capture(dest_path, **_kw):
+            Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(dest_path).write_bytes(b"\x89PNG\r\n\x1a\nFAKE")
+            return {"ok": True, "path": str(dest_path)}
+
+        args = _fake_scenario_args(tmp_root, scenario_files, out_dir)
+        with mock.patch.object(playtester.AgyStreamWorkerPool, "__init__", side_effect=AssertionError("LLM pool must never run")), \
+             mock.patch.object(playtester, "invoke_agy_planner", side_effect=AssertionError("LLM planner must never run")), \
+             mock.patch.object(playtester, "invoke_agy_executor", side_effect=AssertionError("LLM executor must never run")), \
+             mock.patch.object(playtester.ScenarioRunner, "start_server", _fake_start_server), \
+             mock.patch.object(playtester.ScenarioRunner, "stop_server", return_value=None), \
+             mock.patch.object(playtester.ScenarioRunner, "start_client", _fake_start_client), \
+             mock.patch.object(playtester.ScenarioRunner, "stop_client", return_value=None), \
+             mock.patch.object(playtester.ScenarioRunner, "_provision_extra_characters", return_value=[]), \
+             mock.patch.object(playtester, "capture_window_screenshot", side_effect=_fake_capture), \
+             mock.patch.object(playtester, "get_git_head", return_value="7e3600c29"):
+            runner = playtester.ScenarioRunner(args)
+            runner.rpc = mock.MagicMock()
+            runner.rpc.call.side_effect = lambda cmd, params=None, timeout=20.0: step_handler(runner, cmd, params or {})
+            return runner.run_scenarios()
+
+    def test_stored_scenarios_cover_inventory_window_closed_assertions_and_stop_step(self):
+        station = json.loads((HARNESS_DIR / "scenarios" / "station_ui.json").read_text(encoding="utf-8"))
+        close_steps = [s for s in station["steps"] if s["action"].get("type") == "close_window"]
+        self.assertGreaterEqual(len(close_steps), 17)
+        for cs in close_steps:
+            self.assertTrue(
+                cs.get("checks", {}).get("expect_window_closed"),
+                f"missing expect_window_closed on {cs['id']}",
+            )
+        notif_open = next(s for s in station["steps"] if s["id"] == "open_notifications")
+        self.assertEqual(notif_open["checks"].get("expect_window_open"), "notifications")
+        self.assertEqual(notif_open["checks"]["window_populated"].get("min_populated"), 0)
+        self.assertFalse(notif_open["checks"]["window_populated"].get("require_rpc_or_data", True))
+        notif_close = next(s for s in station["steps"] if s["id"] == "close_notifications")
+        self.assertEqual(notif_close["action"].get("target"), "notifications")
+        self.assertEqual(notif_close["checks"].get("expect_window_closed"), "notifications")
+
+        undock = json.loads((HARNESS_DIR / "scenarios" / "undock_navigate.json").read_text(encoding="utf-8"))
+        stop_steps = [s for s in undock["steps"] if s["action"].get("type") == "stop"]
+        self.assertEqual(len(stop_steps), 1)
+        self.assertEqual(stop_steps[0]["checks"].get("ship_mode"), 2)
+
+        login = json.loads((HARNESS_DIR / "scenarios" / "launch_login.json").read_text(encoding="utf-8"))
+        self.assertEqual([s["id"] for s in login["steps"]], ["wait_for_charsel", "select_test_character", "verify_hangar_and_ship"])
+
+    def test_rejects_extended_gm_slash_prefixes_in_type_text(self):
+        for slash_cmd in (
+            "/moveme 30000142",
+            "/translocate 60003760",
+            "/livingworld status",
+            "/unspawn 9001",
+            "/despawn 9001",
+            "/ban demo",
+            "/role gm",
+        ):
+            spec = {
+                "id": "gm_text_reject",
+                "steps": [{"id": "s1", "action": {"type": "type_text", "target": "chat", "command": slash_cmd}}],
+            }
+            with self.assertRaises(playtester.ScenarioValidationError, msg=slash_cmd):
+                playtester.validate_scenario(spec)
+
+    def test_oracle_noammoloaded_minimap_and_fitting_validation_filters(self):
+        self.assertTrue(
+            playtester.PlaytesterBugOracle.is_benign_client_traceback(
+                "AttributeError: 'MapSlider' object has no attribute 'minimumWidth'",
+                '  File "eve/client/script/ui/shared/maps/minimap.py", line 123, in _ResizeSlider\n'
+                "AttributeError: 'MapSlider' object has no attribute 'minimumWidth'\n",
+            )
+        )
+        ammo_hl = "Unhandled exception in <TaskletExt ctxt='ModuleButton.OnStateChange'>"
+        ammo_tb = (
+            '  File "eve/client/script/ui/inflight/shipModuleButton/shipModuleButton.py", line 420, in OnStateChange\n'
+            '  File "eve/client/script/ui/inflight/shipModuleButton/shipModuleButton.py", line 435, in activateeffect\n'
+            "UserError: ('NoAmmoLoaded', {})\n"
+        )
+        self.assertFalse(playtester.PlaytesterBugOracle._is_unhandled_tasklet_traceback(ammo_hl, ammo_tb))
+        self.assertTrue(playtester.PlaytesterBugOracle.is_ignorable_client_traceback(ammo_hl, ammo_tb))
+
+        fit_hl = "Unhandled exception in <TaskletExt ctxt='fittingSlotController.OnDropData'>"
+        fit_tb = (
+            '  File "eve/client/script/ui/shared/fitting/fittingSlotController.py", line 188, in OnDropData\n'
+            "UserError: ('CustomInfo', {'info': 'FittingValidationFailed: Invalid slot'})\n"
+        )
+        self.assertFalse(playtester.PlaytesterBugOracle._is_unhandled_tasklet_traceback(fit_hl, fit_tb))
+        self.assertTrue(playtester.PlaytesterBugOracle.is_ignorable_client_traceback(fit_hl, fit_tb))
+
+        generic_hl = "Unhandled exception in <TaskletExt ctxt='genericSvc.DoThing'>"
+        generic_tb = (
+            '  File "eve/client/script/ui/services/genericSvc.py", line 40, in DoThing\n'
+            "UserError: ('CustomInfo', {'info': 'UnexpectedServerFailure'})\n"
+        )
+        self.assertTrue(playtester.PlaytesterBugOracle._is_unhandled_tasklet_traceback(generic_hl, generic_tb))
+        self.assertFalse(playtester.PlaytesterBugOracle.is_ignorable_client_traceback(generic_hl, generic_tb))
+
+    def test_state_field_aliases_and_subset_prefix_rules(self):
+        st = {
+            "skills_state": {"total_trained_skills": 42},
+            "inventory_state": {"ship_hangar_count": 3},
+            "space": {"ego": {"signal_in_warp": True}},
+            "bookmarks_state": {"names": ["Home", "Gate Spot"]},
+            "autopilot_state": {"route": [30000142, 30001363, 30001407]},
+            "active_view": "inflight_space",
+        }
+        self.assertEqual(playtester._extract_state_value(st, "trained_skill_count"), 42)
+        self.assertEqual(playtester._extract_state_value(st, "ship_hangar_count"), 3)
+        self.assertIs(playtester._extract_state_value(st, "ship_warping"), True)
+
+        ok, fk, msg = playtester.evaluate_scenario_checks(
+            {
+                "state_checks": [
+                    {"field": "trained_skill_count", "equals": 42},
+                    {"field": "ship_hangar_count", "equals": 3},
+                    {"field": "ship_warping", "equals": True},
+                    {"field": "bookmarks_state.names", "subset": ["Home", "Gate Spot", "Extra"]},
+                    {"field": "autopilot_route", "prefix": [30000142, 30001363]},
+                    {"field": "active_view", "prefix": "inflight"},
+                ]
+            },
+            st,
+            st,
+            {"action_ok": True, "flight_recorder": {}},
+        )
+        self.assertTrue(ok, (fk, msg))
+
+        bad_sub, fk_sub, _ = playtester.evaluate_scenario_checks(
+            {"state_checks": [{"field": "bookmarks_state.names", "subset": ["Home"]}]},
+            st,
+            st,
+            {"action_ok": True, "flight_recorder": {}},
+        )
+        self.assertFalse(bad_sub)
+        self.assertEqual(fk_sub, "state_checks.bookmarks_state.names")
+
+        bad_pfx, fk_pfx, _ = playtester.evaluate_scenario_checks(
+            {"state_checks": [{"field": "autopilot_route", "prefix": [30000142, 30009999]}]},
+            st,
+            st,
+            {"action_ok": True, "flight_recorder": {}},
+        )
+        self.assertFalse(bad_pfx)
+        self.assertEqual(fk_pfx, "state_checks.autopilot_route")
+
+    def test_server_handshake_seen_and_select_character_step_timeout(self):
+        self.assertEqual(playtester.ScenarioRunner._step_rpc_timeout({"type": "select_character"}), 35.0)
+        self.assertEqual(playtester.ScenarioRunner._step_rpc_timeout({"type": "warp_to_location"}), 35.0)
+        self.assertEqual(playtester.ScenarioRunner._step_rpc_timeout({"type": "warp_to_bookmark"}), 35.0)
+        self.assertEqual(playtester.ScenarioRunner._step_rpc_timeout({"type": "open_window"}), 20.0)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen = root / "s.json"
+            scen.write_text(json.dumps({"id": "s", "steps": [{"id": "w", "action": {"type": "wait", "wait_ms": 10}}]}), encoding="utf-8")
+            args = _fake_scenario_args(root, [scen], root / "out")
+            runner = playtester.ScenarioRunner(args)
+            runner.current_run_dir = root / "run1"
+            runner.current_run_dir.mkdir(parents=True, exist_ok=True)
+            slog = runner.current_run_dir / "server.log"
+
+            pre_launch = (
+                "2026-11-16T00:00:00Z INFO Listening on Native machoNet / GPSTransport TCP\n"
+                "2026-11-16T00:00:01Z INFO Accepted Client Bridge connection\n"
+                "2026-11-16T00:00:01Z INFO Dispatching RPC call user_id=Some(1) service=charUnboundMgr method=GetCharactersToSelect\n"
+            )
+            slog.write_text(pre_launch, encoding="utf-8")
+            runner._client_launch_server_log_offset = slog.stat().st_size
+            self.assertFalse(runner._server_handshake_seen("demo"))
+
+            with slog.open("a", encoding="utf-8") as f:
+                f.write("2026-11-16T00:00:02Z INFO Accepted native machoNet connection peer=127.0.0.1:51234\n")
+            self.assertFalse(runner._server_handshake_seen("demo"))
+
+            with slog.open("a", encoding="utf-8") as f:
+                f.write("2026-11-16T00:00:03Z INFO Dispatching RPC call user_id=Some(1) service=charUnboundMgr method=GetCharacterSelectionData\n")
+            self.assertTrue(runner._server_handshake_seen("demo"))
+
+    def test_populated_client_tracebacks_log_unhandled_fails_and_benign_ignored(self):
+        benign_tb = (
+            "EXCEPTION #1 logged at 11/16/2026 00:00:01 : unhandled exception\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/shared/maps/minimap.py", line 123, in _ResizeSlider\n'
+            "AttributeError: 'MapSlider' object has no attribute 'minimumWidth'\n"
+            "EXCEPTION END\n"
+            "EXCEPTION #2 logged at 11/16/2026 00:00:02 : Unhandled exception in <TaskletExt ctxt='fittingSlotController.OnDropData'>\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/shared/fitting/fittingSlotController.py", line 188, in OnDropData\n'
+            "UserError: ('CustomInfo', {'info': 'FittingValidationFailed: No slots'})\n"
+            "EXCEPTION END\n"
+        )
+        unhandled_tb = (
+            "EXCEPTION #3 logged at 11/16/2026 00:00:03 : error\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/shared/broken.py", line 10, in Render\n'
+            "KeyError: 'broken_ui'\n"
+            "EXCEPTION END\n"
+        )
+        blocks = playtester.PlaytesterBugOracle.parse_tb_blocks(benign_tb + unhandled_tb)
+        self.assertEqual(len(blocks), 3)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen = root / "tb_check.json"
+            scen.write_text(
+                json.dumps({
+                    "id": "tb_check",
+                    "steps": [{"id": "step_one", "action": {"type": "wait", "wait_ms": 10}, "checks": {"no_client_exception": True}}],
+                }),
+                encoding="utf-8",
+            )
+
+            def _ok_step(_runner, _cmd, _params):
+                return {
+                    "action_ok": True,
+                    "post_state": {"client_build": "9990001", "session": {"charid": 90000001}},
+                    "flight_recorder": {"macho_calls": [], "scatters_observed": [], "log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+                }
+
+            out_benign = root / "out_benign"
+            rc_b = self._run_with_step_hook(
+                root,
+                [scen],
+                out_benign,
+                _ok_step,
+                init_client_logs=lambda _rd, cl: (cl / "client_tracebacks.log").write_text(benign_tb, encoding="utf-8"),
+            )
+            self.assertEqual(rc_b, 0)
+            res_b = json.loads((out_benign / "result.json").read_text(encoding="utf-8"))
+            self.assertTrue(res_b["journeys"]["tb_check"]["passed"])
+
+            out_bad = root / "out_bad"
+            rc_u = self._run_with_step_hook(
+                root,
+                [scen],
+                out_bad,
+                _ok_step,
+                init_client_logs=lambda _rd, cl: (cl / "client_tracebacks.log").write_text(benign_tb + unhandled_tb, encoding="utf-8"),
+            )
+            self.assertEqual(rc_u, 1)
+            res_u = json.loads((out_bad / "result.json").read_text(encoding="utf-8"))
+            self.assertFalse(res_u["journeys"]["tb_check"]["passed"])
+            self.assertEqual(res_u["journeys"]["tb_check"]["failure"]["step_id"], "step_one")
+            self.assertEqual(res_u["journeys"]["tb_check"]["failure"]["failed_check"], "no_client_exception")
+
+    def test_mid_run_per_step_log_offsets_fail_at_offending_step(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen = root / "three_steps.json"
+            scen.write_text(
+                json.dumps({
+                    "id": "three_steps",
+                    "steps": [
+                        {"id": "step_one", "action": {"type": "wait", "target": "10"}, "checks": {"no_client_exception": True}},
+                        {"id": "step_two", "action": {"type": "wait", "target": "20"}, "checks": {"no_client_exception": True}},
+                        {"id": "step_three", "action": {"type": "wait", "target": "30"}, "checks": {"no_client_exception": True}},
+                    ],
+                }),
+                encoding="utf-8",
+            )
+
+            seen_targets_tb = []
+
+            def _tb_on_step2(runner, cmd, params):
+                if cmd != "execute_action":
+                    return {"macho_calls": []}
+                tgt = str((params.get("action") or {}).get("target") or "")
+                seen_targets_tb.append(tgt)
+                if tgt == "20":
+                    tb_path = runner.current_run_dir / "client_logs" / "client_tracebacks.log"
+                    tb_path.write_text(
+                        "EXCEPTION #9 logged at 11/16/2026 00:00:05 : error\n"
+                        "Traceback (most recent call last):\n"
+                        '  File "eve/client/script/ui/shared/boom.py", line 55, in OnClick\n'
+                        "RuntimeError: mid_step_boom\n"
+                        "EXCEPTION END\n",
+                        encoding="utf-8",
+                    )
+                return {
+                    "action_ok": True,
+                    "post_state": {"client_build": "9990001", "session": {"charid": 90000001}},
+                    "flight_recorder": {"macho_calls": [], "scatters_observed": [], "log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+                }
+
+            out_tb = root / "out_step2_tb"
+            rc_tb = self._run_with_step_hook(root, [scen], out_tb, _tb_on_step2)
+            self.assertEqual(rc_tb, 1)
+            self.assertEqual(seen_targets_tb, ["10", "20"])
+            res_tb = json.loads((out_tb / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(res_tb["journeys"]["three_steps"]["failure"]["step_index"], 2)
+            self.assertEqual(res_tb["journeys"]["three_steps"]["failure"]["step_id"], "step_two")
+            self.assertEqual(res_tb["journeys"]["three_steps"]["failure"]["failed_check"], "no_client_exception")
+
+            seen_targets_ds = []
+
+            def _desync_on_step2(runner, cmd, params):
+                if cmd != "execute_action":
+                    return {"macho_calls": []}
+                tgt = str((params.get("action") or {}).get("target") or "")
+                seen_targets_ds.append(tgt)
+                if tgt == "20":
+                    clog = runner.current_run_dir / "client_logs" / "eve_client.log"
+                    with clog.open("a", encoding="utf-8") as f:
+                        f.write("Michelle discarded a state that was too old (tick=12345)\n")
+                return {
+                    "action_ok": True,
+                    "post_state": {"client_build": "9990001", "session": {"charid": 90000001}},
+                    "flight_recorder": {"macho_calls": [], "scatters_observed": [], "log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+                }
+
+            out_ds = root / "out_step2_ds"
+            rc_ds = self._run_with_step_hook(root, [scen], out_ds, _desync_on_step2)
+            self.assertEqual(rc_ds, 1)
+            self.assertEqual(seen_targets_ds, ["10", "20"])
+            res_ds = json.loads((out_ds / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(res_ds["journeys"]["three_steps"]["failure"]["step_index"], 2)
+            self.assertEqual(res_ds["journeys"]["three_steps"]["failure"]["step_id"], "step_two")
+            self.assertEqual(res_ds["journeys"]["three_steps"]["failure"]["failed_check"], "destiny_desync")
 
 
 if __name__ == "__main__":

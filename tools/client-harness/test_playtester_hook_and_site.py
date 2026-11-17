@@ -2966,6 +2966,121 @@ class TestScenarioHookExtensions(unittest.TestCase):
         self.assertEqual(cs["names"], ["Aura Capsuleer", "Aura Two"])
         self.assertEqual([c["character_id"] for c in cs["characters"]], [90000001, 90000002])
 
+    def test_notification_center_empty_drawer_reports_zero_populated_count(self):
+        hook = _load_hook_with_py2_stubs()
+        nc_container = types.SimpleNamespace(display=True, destroyed=False, children=[])
+        nc = type("NotificationCenter", (), {
+            "isShowingDrawer": True,
+            "notificationContainer": nc_container,
+        })()
+        fake_sm = types.SimpleNamespace(
+            services={"notificationUIService": types.SimpleNamespace(notificationCenter=nc)},
+        )
+        fake_desktop = types.SimpleNamespace(children=[], width=1280, height=720)
+        fake_uicore = types.SimpleNamespace(desktop=fake_desktop, layer=types.SimpleNamespace(l_main=types.SimpleNamespace(children=[])))
+        with mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.dict(builtins.__dict__, {"sm": fake_sm}):
+            ui_tree = hook._inspect_uicore_tree()
+        wins = [w for w in (ui_tree.get("open_windows") or []) if w.get("window_id") == "notifications"]
+        self.assertEqual(len(wins), 1, ui_tree)
+        self.assertTrue(wins[0]["is_showing_drawer"])
+        self.assertEqual(wins[0]["populated_count"], 0)
+
+        nc_container.children = [types.SimpleNamespace(display=True, destroyed=False, text="Skill completed", children=[])]
+        with mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.dict(builtins.__dict__, {"sm": fake_sm}):
+            ui_tree_pop = hook._inspect_uicore_tree()
+        wins_pop = [w for w in (ui_tree_pop.get("open_windows") or []) if w.get("window_id") == "notifications"]
+        self.assertEqual(len(wins_pop), 1)
+        self.assertGreaterEqual(wins_pop[0]["populated_count"], 1)
+
+    def test_inventory_state_populates_ship_hangar_count(self):
+        hook = _load_hook_with_py2_stubs()
+        fake_sess = types.SimpleNamespace(
+            userid=1, charid=90000001, stationid=60003760, structureid=None,
+            solarsystemid=None, solarsystemid2=30000142, shipid=1001,
+        )
+        fake_inv_cache = types.SimpleNamespace(inventories={
+            (60003760, 4): types.SimpleNamespace(items={
+                11: {"categoryID": 6},
+                12: types.SimpleNamespace(categoryID=6),
+                13: {"categoryID": 4},
+            }),
+        })
+        fake_sm = types.SimpleNamespace(
+            services={"invCache": fake_inv_cache},
+            GetService=lambda n: fake_sm.services.get(n),
+        )
+        with mock.patch.dict(builtins.__dict__, {"session": fake_sess, "sm": fake_sm}), \
+             mock.patch.object(hook, "_ensure_windowed_mode"), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_inspect_uicore_tree", return_value={"open_windows": [], "modals": []}):
+            snap = hook._get_state_snapshot(fake_sm)
+            self.assertEqual(snap["inventory_state"]["hangar_item_count"], 3)
+            self.assertEqual(snap["inventory_state"]["ship_hangar_count"], 2)
+
+            fake_inv_cache.inventories[(60003760, 4)] = types.SimpleNamespace(items={})
+            snap_empty = hook._get_state_snapshot(fake_sm)
+            self.assertEqual(snap_empty["inventory_state"]["hangar_item_count"], 0)
+            self.assertEqual(snap_empty["inventory_state"]["ship_hangar_count"], 0)
+
+    def test_space_command_stop_skips_ball_resolution_and_set_destination_handles_unicode(self):
+        hook = _load_hook_with_py2_stubs()
+        cmd_stop_calls = []
+        waypoint_calls = []
+        fake_beyonce = types.SimpleNamespace(CmdStop=lambda: cmd_stop_calls.append(True))
+        fake_michelle = types.SimpleNamespace(GetBallpark=lambda: types.SimpleNamespace(
+            GetBall=lambda bid: types.SimpleNamespace(mode=2),
+        ))
+        fake_starmap = types.SimpleNamespace(
+            SetWaypoint=lambda did, clearOtherWaypoints=True: waypoint_calls.append((did, clearOtherWaypoints)),
+            GetDestinationPath=lambda: [30000142],
+        )
+        fake_svcs = {"michelle": fake_michelle, "starmap": fake_starmap, "map": None}
+        fake_sm = types.SimpleNamespace(services=fake_svcs, GetService=lambda n: fake_svcs.get(n))
+        fake_sess = types.SimpleNamespace(userid=1, charid=90000001, solarsystemid=30000142, stationid=None, structureid=None, shipid=1001)
+        fake_cfg = types.SimpleNamespace(evelocations=types.SimpleNamespace(data={
+            30000142: types.SimpleNamespace(locationName="Jit\u00e4"),
+        }))
+        snap_base = {"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "inflight"}
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.dict(builtins.__dict__, {"session": fake_sess, "cfg": fake_cfg}), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value=snap_base), \
+             mock.patch.object(hook, "_settle_after_action", return_value=0), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook.H, "_get_beyonce", return_value=fake_beyonce, create=True), \
+             mock.patch.object(hook, "_resolve_space_command_item_id", side_effect=AssertionError("stop must skip ball resolution")):
+            res_stop = hook._execute_action(fake_sm, {"type": "stop", "wait_ms": 0, "reuse_pre_state": False})
+            res_dest = hook._execute_action(fake_sm, {"type": "set_destination", "target": "Jit\u00e4", "wait_ms": 0, "reuse_pre_state": False})
+        self.assertTrue(res_stop.get("ok"), res_stop)
+        self.assertEqual(cmd_stop_calls, [True])
+        self.assertTrue(res_dest.get("ok"), res_dest)
+        self.assertEqual(res_dest.get("destination_id"), 30000142)
+        self.assertEqual(waypoint_calls, [(30000142, True)])
+
+    def test_execute_action_uses_25s_max_wait_for_select_character_and_warp_variants(self):
+        hook = _load_hook_with_py2_stubs()
+        snap_base = {"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "hangar"}
+        fake_uicore = types.SimpleNamespace(cmd=None, registry=None, layer=None, desktop=None)
+        fake_sm = types.SimpleNamespace(services={}, GetService=lambda _n: None)
+        fake_uthread = types.SimpleNamespace(new=lambda _fn: None)
+        for atype in ("select_character", "warp_to_location", "warp_to_bookmark"):
+            time_seq = iter([0.0, 0.0, 0.1, 20.0, 20.1, 26.0, 26.0, 26.0])
+            with mock.patch.dict(sys.modules, {"uthread": fake_uthread}), \
+                 mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+                 mock.patch.object(hook, "_install_warp_telemetry"), \
+                 mock.patch.object(hook, "_get_state_snapshot", return_value=snap_base), \
+                 mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+                 mock.patch.object(hook, "_settle_after_action", return_value=0), \
+                 mock.patch.object(hook.H, "_sleep_ms", create=True), \
+                 mock.patch.object(hook.time, "time", side_effect=lambda s=time_seq: next(s, 26.0)):
+                res = hook._execute_action(fake_sm, {"type": atype, "target": "x", "wait_ms": 0, "reuse_pre_state": False})
+            self.assertFalse(res.get("ok"), f"{atype} unexpectedly succeeded: {res}")
+            self.assertIn("timed out after 26.0s", res.get("error", ""), f"{atype}: {res}")
+
 
 if __name__ == "__main__":
     unittest.main()

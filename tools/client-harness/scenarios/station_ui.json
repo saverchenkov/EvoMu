@@ -1,6 +1,6 @@
 {
   "id": "station_ui",
-  "title": "Open, Verify Populated Content, Record RPCs, and Close All 16 Station UI Windows",
+  "title": "Open, Verify Populated Content, Record RPCs, and Close Station UI Windows (16 Journey Panels + Inventory)",
   "starting_state": {
     "account": "demo",
     "password": "demo-secret",
@@ -25,7 +25,7 @@
     {
       "id": "close_shiphangar",
       "action": {"type": "close_window", "target": "hangar"},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"expect_window_closed": "hangar", "no_client_exception": true, "no_error_reply": true}
     },
     {
       "id": "open_itemhangar",
@@ -44,7 +44,26 @@
     {
       "id": "close_itemhangar",
       "action": {"type": "close_window", "target": "hangar"},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"expect_window_closed": "hangar", "no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_inventory",
+      "action": {"type": "open_window", "target": "inventory"},
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 500,
+        "checks": {"window_populated": {"window": "inventory", "min_populated": 1, "require_rpc_or_data": true}}
+      },
+      "checks": {
+        "window_populated": {"window": "inventory", "min_populated": 1, "require_rpc_or_data": true},
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_inventory",
+      "action": {"type": "close_window", "target": "inventory"},
+      "checks": {"expect_window_closed": "inventory", "no_client_exception": true, "no_error_reply": true}
     },
     {
       "id": "open_fitting",
@@ -63,7 +82,7 @@
     {
       "id": "close_fitting",
       "action": {"type": "close_window", "target": "fitting"},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"expect_window_closed": "fitting", "no_client_exception": true, "no_error_reply": true}
     },
     {
       "id": "open_market",
@@ -82,7 +101,7 @@
     {
       "id": "close_market",
       "action": {"type": "close_window", "target": "market"},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"expect_window_closed": "market", "no_client_exception": true, "no_error_reply": true}
     },
     {
       "id": "open_industry",
@@ -101,7 +120,7 @@
     {
       "id": "close_industry",
       "action": {"type": "close_window", "target": "industry"},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"expect_window_closed": "industry", "no_client_exception": true, "no_error_reply": true}
     },
     {
       "id": "open_agency",
@@ -120,7 +139,7 @@
     {
       "id": "close_agency",
       "action": {"type": "close_window", "target": "agency"},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"expect_window_closed": "agency", "no_client_exception": true, "no_error_reply": true}
     },
     {
       "id": "open_charactersheet",
@@ -139,7 +158,7 @@
     {
       "id": "close_charactersheet",
       "action": {"type": "close_window", "target": "character"},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"expect_window_closed": "character", "no_client_exception": true, "no_error_reply": true}
     },
     {
       "id": "open_skills",
@@ -158,7 +177,7 @@
     {
       "id": "close_skills",
       "action": {"type": "close_window", "target": "skill"},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"expect_window_closed": "skill", "no_client_exception": true, "no_error_reply": true}
     },
     {
       "id": "open_wallet",
@@ -177,7 +196,7 @@
     {
       "id": "close_wallet",
       "action": {"type": "close_window", "target": "wallet"},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"expect_window_closed": "wallet", "no_client_exception": true, "no_error_reply": true}
     },
     {
       "id": "open_journal",
@@ -196,7 +215,7 @@
     {
       "id": "close_journal",
       "action": {"type": "close_window", "target": "journal"},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"expect_window_closed": "journal", "no_client_exception": true, "no_error_reply": true}
     },
     {
       "id": "open_corp",
@@ -215,7 +234,7 @@
     {
       "id": "close_corp",
       "action": {"type": "close_window", "target": "corp"},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"expect_window_closed": "corp", "no_client_exception": true, "no_error_reply": true}
     },
     {
       "id": "open_peopleandplaces",
@@ -234,7 +253,7 @@
     {
       "id": "close_peopleandplaces",
       "action": {"type": "close_window", "target": "people"},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"expect_window_closed": "people", "no_client_exception": true, "no_error_reply": true}
     },
     {
       "id": "open_mail",
@@ -253,7 +272,7 @@
     {
       "id": "close_mail",
       "action": {"type": "close_window", "target": "mail"},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"expect_window_closed": "mail", "no_client_exception": true, "no_error_reply": true}
     },
     {
       "id": "open_notifications",
@@ -261,18 +280,22 @@
       "wait_until": {
         "timeout_ms": 8000,
         "poll_interval_ms": 500,
-        "checks": {"window_populated": {"window": "notif", "min_populated": 1, "require_rpc_or_data": true}}
+        "checks": {
+          "expect_window_open": "notifications",
+          "window_populated": {"window": "notifications", "min_populated": 0, "require_rpc_or_data": false}
+        }
       },
       "checks": {
-        "window_populated": {"window": "notif", "min_populated": 1, "require_rpc_or_data": true},
+        "expect_window_open": "notifications",
+        "window_populated": {"window": "notifications", "min_populated": 0, "require_rpc_or_data": false},
         "no_client_exception": true,
         "no_error_reply": true
       }
     },
     {
       "id": "close_notifications",
-      "action": {"type": "close_window", "target": "notif"},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "action": {"type": "close_window", "target": "notifications"},
+      "checks": {"expect_window_closed": "notifications", "no_client_exception": true, "no_error_reply": true}
     },
     {
       "id": "open_calendar",
@@ -291,7 +314,7 @@
     {
       "id": "close_calendar",
       "action": {"type": "close_window", "target": "calendar"},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"expect_window_closed": "calendar", "no_client_exception": true, "no_error_reply": true}
     },
     {
       "id": "open_nes",
@@ -310,7 +333,7 @@
     {
       "id": "close_nes",
       "action": {"type": "close_window", "target": "store"},
-      "checks": {"no_client_exception": true, "no_error_reply": true}
+      "checks": {"expect_window_closed": "store", "no_client_exception": true, "no_error_reply": true}
     }
   ]
 }

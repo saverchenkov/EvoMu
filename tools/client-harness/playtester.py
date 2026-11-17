@@ -4446,29 +4446,40 @@ def _evaluate_step_assertions(
     open_wins = list(ui_sub.get("open_windows") or state.get("open_windows") or [])
     sdiff = (exec_res.get("state_diff") or {}) if isinstance(exec_res, dict) else {}
 
-    def _win_names(wins: List[Any]) -> List[str]:
-        out = []
+    def _win_entries(wins: List[Any]) -> List[Tuple[str, str]]:
+        out: List[Tuple[str, str]] = []
         for w in wins:
             if isinstance(w, dict):
-                out.append(str(w.get("window_id") or w.get("name") or w.get("caption") or ""))
+                label = str(w.get("window_id") or w.get("name") or w.get("caption") or w.get("cls") or "")
+                hay = " ".join([
+                    str(w.get("window_id") or ""),
+                    str(w.get("name") or ""),
+                    str(w.get("caption") or ""),
+                    str(w.get("cls") or ""),
+                ]).lower()
+                if label or hay.strip():
+                    out.append((label or hay.strip(), hay))
             else:
-                out.append(str(w or ""))
-        return [x for x in out if x]
+                s = str(w or "")
+                if s:
+                    out.append((s, s.lower()))
+        return out
 
-    win_strs = _win_names(open_wins)
+    win_entries = _win_entries(open_wins)
+    win_strs = [lbl for lbl, _ in win_entries]
     opened_strs = [str(x or "") for x in (sdiff.get("windows_opened") or [])]
 
     want_open = assertions.get("expect_window_open")
     if want_open:
         wl = str(want_open).strip().lower()
-        found = any(wl in s.lower() for s in win_strs + opened_strs)
+        found = any(wl in hay for _, hay in win_entries) or any(wl in s.lower() for s in opened_strs)
         if not found:
             return False, f"assertion expect_window_open={want_open!r} failed (open_windows={win_strs})"
 
     want_closed = assertions.get("expect_window_closed")
     if want_closed:
         cl = str(want_closed).strip().lower()
-        still_open = [s for s in win_strs if cl in s.lower()]
+        still_open = [lbl for lbl, hay in win_entries if cl in hay]
         if still_open:
             return False, f"assertion expect_window_closed={want_closed!r} failed (still open: {still_open})"
 
@@ -4711,13 +4722,15 @@ class PlaytesterBugOracle:
         ]
         return lines[-1][:140] if lines else str(tb_txt or "").strip()[:140]
 
-    def _extract_unseen_tb_blocks(self, new_tb: str) -> List[Dict[str, str]]:
-        if not new_tb:
+    @classmethod
+    def parse_tb_blocks(cls, raw_tb: str) -> List[Dict[str, str]]:
+        """Parse traceback blocks cleanly into `{headline, trace, sig}` dicts without mutating instance state."""
+        if not raw_tb:
             return []
         blocks: List[List[str]] = []
         cur: List[str] = []
         ended_prev = False
-        for ln in new_tb.splitlines():
+        for ln in raw_tb.splitlines():
             s = ln.strip()
             is_header = (
                 ln.startswith("log.Log")
@@ -4739,30 +4752,38 @@ class PlaytesterBugOracle:
                 ended_prev = False
         if cur:
             blocks.append(cur)
-        unseen: List[Dict[str, str]] = []
-        suppressed: List[Dict[str, str]] = []
+        parsed: List[Dict[str, str]] = []
         for blk_lines in blocks:
             blk_txt = "\n".join(blk_lines).strip()
             if not blk_txt:
                 continue
             has_tb_marker = any(tok in blk_txt for tok in ("Traceback", 'File "', "Error:", "Exception:")) or any(
-                self._TB_EXC_LINE_RE.match(ln.strip()) for ln in blk_lines if not self._is_tb_noise_line(ln)
+                cls._TB_EXC_LINE_RE.match(ln.strip()) for ln in blk_lines if not cls._is_tb_noise_line(ln)
             )
             if not has_tb_marker:
                 continue
-            sig = self._tb_frame_sig(blk_txt)
-            headline = self._extract_tb_headline(blk_txt)
-            if sig and sig in self._seen_tb_sigs:
-                suppressed.append({"headline": headline[:160], "sig": sig[:160]})
-                continue
-            if sig:
-                self._seen_tb_sigs.add(sig)
+            sig = cls._tb_frame_sig(blk_txt)
+            headline = cls._extract_tb_headline(blk_txt)
             tb_excerpt = (
                 blk_txt[:1400] + "\n... [truncated] ...\n" + blk_txt[-2500:]
                 if len(blk_txt) > 4000
                 else blk_txt
             )
-            unseen.append({"headline": headline, "trace": tb_excerpt})
+            parsed.append({"headline": headline, "trace": tb_excerpt, "sig": sig})
+        return parsed
+
+    def _extract_unseen_tb_blocks(self, new_tb: str) -> List[Dict[str, str]]:
+        unseen: List[Dict[str, str]] = []
+        suppressed: List[Dict[str, str]] = []
+        for blk in self.parse_tb_blocks(new_tb):
+            sig = blk["sig"]
+            headline = blk["headline"]
+            if sig and sig in self._seen_tb_sigs:
+                suppressed.append({"headline": headline[:160], "sig": sig[:160]})
+                continue
+            if sig:
+                self._seen_tb_sigs.add(sig)
+            unseen.append({"headline": headline, "trace": blk["trace"]})
         self.last_suppressed_tracebacks = suppressed
         return unseen
 
@@ -4857,7 +4878,6 @@ class PlaytesterBugOracle:
         "commands: [",
         "unknownslashcommand",
         "invalidslashargument",
-        "noammoloaded",
         "cannotloadnotenoughcharges",
     )
 
@@ -6973,7 +6993,12 @@ _TIME_CONTROL_SLASH_PREFIXES = (
 _GM_SLASH_IN_TEXT_PREFIXES = (
     "/give",
     "/tr",
+    "/moveme",
+    "/translocate",
     "/spawn",
+    "/livingworld",
+    "/unspawn",
+    "/despawn",
     "/set",
     "/create",
     "/heal",
@@ -6983,9 +7008,15 @@ _GM_SLASH_IN_TEXT_PREFIXES = (
     "/advance",
     "/clear",
     "/upwell",
+    "/ban",
+    "/role",
 )
 _SCENARIO_ERROR_LINE_RE = re.compile(
     r"UnimplementedRPC|panicked at|Traceback \(most recent|\bEXCEPTION\b|_LogException\b|\bLogException\b|\bLogTraceback\b|SendClientStackTraceAlert|client exception report saved"
+)
+_SCENARIO_DESYNC_LINE_RE = re.compile(
+    r"Michelle\s+discarded\s+a\s+state\s+that\s+was\s+too\s+old|Failed\s+to\s+synchronize\s+to\s+\d+|stale-at-action|destiny[_\s-]*desync|sys_rx\s+lagged\s+by\s+\d+\s+ticks",
+    re.IGNORECASE,
 )
 
 
@@ -7186,7 +7217,7 @@ _STATE_FIELD_ALIASES = {
     "cargo_item_count": "inventory_state.cargo_item_count",
     "ship_hangar_count": "inventory_state.ship_hangar_count",
     "skill_queue_len": "skills_state.queue_len",
-    "trained_skill_count": "skills_state.trained_count",
+    "trained_skill_count": "skills_state.total_trained_skills",
     "order_count": "market_state.char_orders_count",
     "bookmark_count": "bookmarks_state.count",
     "bookmark_names": "bookmarks_state.names",
@@ -7194,7 +7225,7 @@ _STATE_FIELD_ALIASES = {
     "charsel_names": "charsel_state.names",
     "ship_mode": "space.ego.mode",
     "ship_speed": "space.ego.speed_mps",
-    "ship_warping": "space.ego.warping",
+    "ship_warping": "space.ego.signal_in_warp",
     "celestials_in_overview": "space.celestials_in_overview",
     "overview_count": "space.overview_count",
     "autopilot_active": "autopilot_state.active",
@@ -7279,6 +7310,34 @@ def _evaluate_value_rule(label: str, pre_val: Any, post_val: Any, rule: Dict[str
                 return f"{label} ({post_val!r}) does not contain key {needle!r}"
         elif post_val is None or needle_l not in str(post_val).lower():
             return f"{label} ({post_val!r}) does not contain {needle!r}"
+
+    if "subset" in rule:
+        allowed_spec = rule["subset"]
+        if not isinstance(allowed_spec, (list, tuple, set)):
+            return f"{label} subset rule expected list/set, got {allowed_spec!r}"
+        if post_val is None or isinstance(post_val, (str, bytes, int, float, bool)):
+            return f"{label} expected iterable collection for subset check, got {post_val!r}"
+        actual_items = list(post_val.keys()) if isinstance(post_val, dict) else list(post_val)
+        def _norm_elem(v: Any) -> Any:
+            if isinstance(v, bool):
+                return ("bool", v)
+            if isinstance(v, (int, float)):
+                return ("num", float(v))
+            return ("str", str(v).strip().lower())
+        allowed_norm = {_norm_elem(x) for x in allowed_spec}
+        extra = [x for x in actual_items if _norm_elem(x) not in allowed_norm]
+        if extra:
+            return f"{label} ({post_val!r}) is not a subset of {list(allowed_spec)!r} (unexpected={extra!r})"
+
+    if "prefix" in rule:
+        pfx = rule["prefix"]
+        if isinstance(pfx, (list, tuple)):
+            if not isinstance(post_val, (list, tuple)) or list(post_val[:len(pfx)]) != list(pfx):
+                return f"{label} ({post_val!r}) does not start with prefix {list(pfx)!r}"
+        else:
+            pfx_s = str(pfx).lower()
+            if post_val is None or not str(post_val).lower().startswith(pfx_s):
+                return f"{label} ({post_val!r}) does not start with prefix {pfx!r}"
 
     if "min" in rule:
         try:
@@ -7674,23 +7733,56 @@ def evaluate_scenario_checks(
     return True, "", ""
 
 
+def _read_log_chunk_from_offset(path: Optional[Path], log_offsets: Optional[Dict[str, int]]) -> Tuple[str, int]:
+    """Read bytes added to `path` since its tracked byte offset and update `log_offsets`."""
+    if not path or not path.exists():
+        return "", 0
+    key = str(path)
+    offset = int(log_offsets.get(key, 0) or 0) if log_offsets is not None else 0
+    size = path.stat().st_size
+    if size < offset:
+        offset = 0
+    if size == offset:
+        if log_offsets is not None:
+            log_offsets[key] = size
+        return "", offset
+    with path.open("rb") as f:
+        f.seek(offset)
+        chunk = f.read(size - offset)
+    if log_offsets is not None:
+        log_offsets[key] = size
+    return chunk.decode("utf-8", errors="replace"), offset
+
+
 def scan_scenario_logs_for_errors(
     server_log_path: Optional[Path],
     client_log_paths: List[Path],
     traceback_log_path: Optional[Path] = None,
+    log_offsets: Optional[Dict[str, int]] = None,
 ) -> List[str]:
-    """Scan server and client logs cleanly, honoring known benign V24 client tracebacks."""
+    """Scan server and client logs cleanly from optional byte offsets, honoring known benign V24 tracebacks."""
     errors: List[str] = []
-    if server_log_path and server_log_path.exists():
-        for ln in server_log_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            if _SCENARIO_ERROR_LINE_RE.search(ln) and " benign " not in ln.lower():
+    srv_txt, _ = _read_log_chunk_from_offset(server_log_path, log_offsets)
+    if srv_txt:
+        for ln in srv_txt.splitlines():
+            if " benign " in ln.lower():
+                continue
+            if _SCENARIO_DESYNC_LINE_RE.search(ln):
+                errors.append(f"[server.log] destiny desync: {ln.strip()[:240]}")
+            elif _SCENARIO_ERROR_LINE_RE.search(ln):
                 errors.append(f"[server.log] {ln.strip()[:280]}")
 
+    tb_resolved = traceback_log_path.resolve() if traceback_log_path else None
     for clp in client_log_paths:
         if not clp or not clp.exists():
             continue
-        lines = clp.read_text(encoding="utf-8", errors="replace").splitlines()
-        seen_started = False
+        if (tb_resolved is not None and clp.resolve() == tb_resolved) or clp.name == "client_tracebacks.log":
+            continue
+        c_txt, start_off = _read_log_chunk_from_offset(clp, log_offsets)
+        if not c_txt:
+            continue
+        lines = c_txt.splitlines()
+        seen_started = start_off > 0
         idx = 0
         while idx < len(lines):
             ln = lines[idx]
@@ -7699,25 +7791,31 @@ def scan_scenario_logs_for_errors(
             if "Traceback (most recent call last):" in ln:
                 block = [ln]
                 j = idx + 1
-                while j < len(lines) and (lines[j].startswith(" ") or lines[j].startswith("\t") or not block[-1].strip() or j == idx + 1):
+                while j < len(lines) and (lines[j].startswith((" ", "\t")) or not lines[j].strip()):
                     block.append(lines[j])
                     j += 1
                     if len(block) >= 40:
                         break
+                if j < len(lines) and lines[j].strip() and len(block) < 40:
+                    block.append(lines[j])
+                    j += 1
                 tb_txt = "\n".join(block)
-                hl = block[-1] if block else ln
+                non_empty = [b for b in block if b.strip()]
+                hl = non_empty[-1] if non_empty else ln
                 if not PlaytesterBugOracle.is_ignorable_client_traceback(hl, tb_txt):
                     errors.append(f"[{clp.name}] {tb_txt.splitlines()[0][:240]}")
                 idx = j
                 continue
-            if _SCENARIO_ERROR_LINE_RE.search(ln) or (seen_started and "#nolog: An exception has occurred" in ln):
+            if _SCENARIO_DESYNC_LINE_RE.search(ln):
+                errors.append(f"[{clp.name}] destiny desync: {ln.strip()[:240]}")
+            elif _SCENARIO_ERROR_LINE_RE.search(ln) or (seen_started and "#nolog: An exception has occurred" in ln):
                 if not PlaytesterBugOracle.is_ignorable_client_traceback(ln, ln):
                     errors.append(f"[{clp.name}] {ln.strip()[:280]}")
             idx += 1
 
-    if traceback_log_path and traceback_log_path.exists():
-        raw_tb = traceback_log_path.read_text(encoding="utf-8", errors="replace")
-        for u in PlaytesterBugOracle._extract_unseen_tb_blocks(raw_tb):
+    raw_tb, _ = _read_log_chunk_from_offset(traceback_log_path, log_offsets)
+    if raw_tb:
+        for u in PlaytesterBugOracle.parse_tb_blocks(raw_tb):
             if not PlaytesterBugOracle.is_ignorable_client_traceback(u.get("headline", ""), u.get("trace", "")):
                 errors.append(f"[client_tracebacks.log] {u.get('headline', '')[:240]}")
 
@@ -7743,6 +7841,7 @@ class ScenarioRunner(PlaytesterRunner):
         self._active_starting_state: Dict[str, Any] = {}
         self._active_expected_characters: List[str] = []
         self._last_boot_result: Dict[str, Any] = {}
+        self._client_launch_server_log_offset: int = 0
 
     def _scenario_auth_params(self) -> Tuple[str, str, int, bool]:
         st = self._active_starting_state
@@ -7920,23 +8019,42 @@ class ScenarioRunner(PlaytesterRunner):
         slog = self.current_run_dir / "server.log"
         if not slog.exists():
             return False
-        txt = slog.read_text(encoding="utf-8", errors="replace").lower()
+        offset = int(getattr(self, "_client_launch_server_log_offset", 0) or 0)
+        size = slog.stat().st_size
+        if size < offset:
+            offset = 0
+        with slog.open("rb") as f:
+            f.seek(offset)
+            post_txt = f.read(size - offset).decode("utf-8", errors="replace").lower()
+        marker = "accepted native machonet connection"
+        idx = post_txt.find(marker)
+        if idx < 0:
+            return False
+        after_accept = post_txt[idx + len(marker):]
         return (
-            account.lower() in txt
-            or "authentication" in txt
-            or "selectcharacterid" in txt
-            or "machonet" in txt
+            "dispatching rpc call" in after_accept
+            and (
+                "user_id=some(" in after_accept
+                or "charunboundmgr" in after_accept
+                or "getcharacterselectiondata" in after_accept
+                or "getcharacterstoselect" in after_accept
+                or "selectcharacterid" in after_accept
+                or "authentication" in after_accept
+            )
         )
 
     def _check_server_unimplemented_rpc(self) -> List[str]:
         slog = self.current_run_dir / "server.log"
         if not slog.exists():
             return []
-        return [
-            ln.strip()[:240]
-            for ln in slog.read_text(encoding="utf-8", errors="replace").splitlines()
-            if "UnimplementedRPC" in ln
-        ]
+        offset = int(getattr(self, "_client_launch_server_log_offset", 0) or 0)
+        size = slog.stat().st_size
+        if size < offset:
+            offset = 0
+        with slog.open("rb") as f:
+            f.seek(offset)
+            txt = f.read(size - offset).decode("utf-8", errors="replace")
+        return [ln.strip()[:240] for ln in txt.splitlines() if "UnimplementedRPC" in ln]
 
     @staticmethod
     def _step_rpc_timeout(action: Dict[str, Any]) -> float:
@@ -7945,7 +8063,7 @@ class ScenarioRunner(PlaytesterRunner):
             return 50.0
         if atype == "dock":
             return 38.0
-        if atype in ("warp_to", "warp_to_location", "warp_to_bookmark", "undock"):
+        if atype in ("warp_to", "warp_to_location", "warp_to_bookmark", "undock", "select_character"):
             return 35.0
         if atype == "wait":
             try:
@@ -8079,6 +8197,22 @@ class ScenarioRunner(PlaytesterRunner):
         client_logs: List[Path] = []
         passed = False
 
+        slog_path = scen_dir / "server.log"
+        step_log_offsets: Dict[str, int] = {}
+        self._client_launch_server_log_offset = 0
+
+        def _gather_client_logs() -> Tuple[List[Path], Path]:
+            logs: List[Path] = []
+            clog_m = scen_dir / "client.log"
+            if clog_m.exists():
+                logs.append(clog_m)
+            cdir = scen_dir / "client_logs"
+            if cdir.exists():
+                for p in sorted(cdir.glob("*.log")):
+                    if p.name != "client_tracebacks.log" and p not in logs:
+                        logs.append(p)
+            return logs, cdir / "client_tracebacks.log"
+
         try:
             if not self.start_server(reset_db=True):
                 failure_info = {
@@ -8094,6 +8228,9 @@ class ScenarioRunner(PlaytesterRunner):
                 extra_chars = list(self._active_starting_state.get("extra_characters") or [])
                 if extra_chars:
                     self._active_expected_characters = self._provision_extra_characters(extra_chars)
+
+                self._client_launch_server_log_offset = slog_path.stat().st_size if slog_path.exists() else 0
+                step_log_offsets[str(slog_path)] = self._client_launch_server_log_offset
 
                 if not self.start_client():
                     failure_info = {
@@ -8179,13 +8316,39 @@ class ScenarioRunner(PlaytesterRunner):
                         if isinstance(post_state, dict) and post_state.get("client_build"):
                             client_build = str(post_state["client_build"])
 
+                        step_chk_cfg = dict(step.get("checks") or {})
                         ok_step, fail_chk, fail_msg = evaluate_scenario_checks(
-                            step.get("checks"),
+                            step_chk_cfg,
                             pre_state,
                             post_state,
                             exec_res,
                             context=ctx,
                         )
+                        cur_logs, cur_tb_path = _gather_client_logs()
+                        step_log_errs = scan_scenario_logs_for_errors(
+                            slog_path,
+                            cur_logs,
+                            traceback_log_path=cur_tb_path,
+                            log_offsets=step_log_offsets,
+                        )
+                        if step_chk_cfg.get("no_client_exception") is False:
+                            step_log_errs = [
+                                e for e in step_log_errs
+                                if "destiny desync" in e.lower() or e.startswith("[server.log]")
+                            ]
+                        if ok_step and step_log_errs:
+                            ok_step = False
+                            first_err = step_log_errs[0]
+                            if "destiny desync" in first_err.lower():
+                                fail_chk = "destiny_desync"
+                            elif first_err.startswith("[client_tracebacks.log]") or not first_err.startswith("[server.log]"):
+                                fail_chk = "no_client_exception"
+                            else:
+                                fail_chk = "clean_logs"
+                            fail_msg = first_err
+                        if step_log_errs:
+                            log_errors.extend(step_log_errs)
+
                         step_records.append({
                             "step_index": step_num,
                             "step_id": step_id,
@@ -8216,22 +8379,20 @@ class ScenarioRunner(PlaytesterRunner):
             self.stop_client()
             self.stop_server()
 
-        clog_main = scen_dir / "client.log"
-        if clog_main.exists():
-            client_logs.append(clog_main)
-        clogs_dir = scen_dir / "client_logs"
-        if clogs_dir.exists():
-            for p in sorted(clogs_dir.glob("*.log")):
-                if p not in client_logs:
-                    client_logs.append(p)
-        slog_path = scen_dir / "server.log"
-        tb_log_path = clogs_dir / "client_tracebacks.log"
+        client_logs, tb_log_path = _gather_client_logs()
         destiny_cls = self._run_destiny_parity_check(client_logs)
         if destiny_cls and int(destiny_cls.get("stale_at_action", 0) or 0) > 0:
             log_errors.append(
                 f"[classify_client_log] destiny desync detected: stale_at_action={destiny_cls.get('stale_at_action')}"
             )
-        log_errors.extend(scan_scenario_logs_for_errors(slog_path, client_logs, traceback_log_path=tb_log_path))
+        log_errors.extend(
+            scan_scenario_logs_for_errors(
+                slog_path,
+                client_logs,
+                traceback_log_path=tb_log_path,
+                log_offsets=step_log_offsets,
+            )
+        )
 
         if failure_info is None and log_errors:
             failure_info = {
