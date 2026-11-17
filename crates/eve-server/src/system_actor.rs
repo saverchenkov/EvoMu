@@ -628,7 +628,10 @@ impl SystemRegistry {
             .map(|db| db.clock().now_unix_secs())
             .unwrap_or(1);
         let can_evict_handle = |h: &SystemHandle, max_strong: usize| -> bool {
-            if !h.is_hibernated() || Arc::strong_count(&h.ballpark) > max_strong {
+            if !h.is_hibernated()
+                || h.pending_destroyed_balls.is_non_empty()
+                || Arc::strong_count(&h.ballpark) > max_strong
+            {
                 return false;
             }
             if min_idle_ticks > 0
@@ -805,6 +808,8 @@ impl SystemRegistry {
         let hibernated_since_unix = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let idle_ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let dynamic_ball_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pending_destroyed_balls = PendingDestroyedOutbox::default();
+        let pending_destroyed_actor = pending_destroyed_balls.clone();
         let mut initial_actor_state = SystemActorState {
             asteroids: initial_asteroids,
             asteroid_templates: initial_asteroid_templates,
@@ -820,6 +825,7 @@ impl SystemRegistry {
             hibernated_since_unix: Arc::clone(&hibernated_since_unix),
             idle_ticks: Arc::clone(&idle_ticks),
             dynamic_ball_count: Arc::clone(&dynamic_ball_count),
+            pending_destroyed_balls: pending_destroyed_balls.clone(),
             ..Default::default()
         };
         if db_read_safe {
@@ -871,6 +877,16 @@ impl SystemRegistry {
         let panic_on_command_countdown_for_test = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         #[cfg(test)]
         let panic_on_command_countdown_actor = panic_on_command_countdown_for_test.clone();
+        #[cfg(test)]
+        let panic_after_destruction_for_test = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        #[cfg(test)]
+        let panic_after_destruction_actor = panic_after_destruction_for_test.clone();
+        #[cfg(test)]
+        let before_step_reply_hook_for_test: Arc<
+            RankedMutex<Option<Box<dyn FnOnce() + Send>>, RANK_LEAF>,
+        > = Arc::new(RankedMutex::new(None));
+        #[cfg(test)]
+        let before_step_reply_hook_actor = before_step_reply_hook_for_test.clone();
 
         tokio::spawn(async move {
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();
@@ -895,6 +911,18 @@ impl SystemRegistry {
                 if should_panic {
                     panic!("injected SystemActor command panic for #841 supervision test");
                 }
+                enum StepReply {
+                    Full(tokio::sync::oneshot::Sender<StepOutput>),
+                    TickOnly(tokio::sync::oneshot::Sender<StepOutput>),
+                }
+                enum PendingActorDelivery {
+                    Step(StepReply, StepOutput),
+                    Volley(
+                        tokio::sync::oneshot::Sender<WeaponVolleyOutput>,
+                        WeaponVolleyOutput,
+                    ),
+                }
+                let actor_delivery_out: Option<PendingActorDelivery> = {
                 let mut ballpark = ballpark_actor.write().unwrap_or_else(|e| e.into_inner());
                 let mut actor_st = actor_state_actor.write().unwrap_or_else(|e| e.into_inner());
                 let SystemActorState {
@@ -928,11 +956,11 @@ impl SystemRegistry {
                 } = &mut *actor_st;
                 {
                     {
-                        enum StepReply {
-                            Full(tokio::sync::oneshot::Sender<StepOutput>),
-                            TickOnly(tokio::sync::oneshot::Sender<StepOutput>),
-                        }
                         let mut pending_step: Option<(f64, StepReply)> = None;
+                        let mut pending_volley: Option<(
+                            tokio::sync::oneshot::Sender<WeaponVolleyOutput>,
+                            WeaponVolleyOutput,
+                        )> = None;
                         let mut spawned_checkpoint_ball: Option<BallId> = None;
                         let mut removed_checkpoint_ball: Option<BallId> = None;
                         let mut flush_checkpoint_reply: Option<
@@ -2091,6 +2119,7 @@ impl SystemRegistry {
                                             db_opt,
                                             &mut volley_actions,
                                             &mut volley_destroyed,
+                                            Some(&pending_destroyed_actor),
                                         );
                                     }
                                     cycles::flush_pending_cycle_damage_notifications_with_ballpark(
@@ -2151,7 +2180,16 @@ impl SystemRegistry {
                                     }
                                     sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 }
-                                let _ = reply.send((volley_destroyed, volley_actions));
+                                let (checked_out_destroyed, destroyed_lease) =
+                                    pending_destroyed_actor.checkout_entries(&volley_destroyed);
+                                pending_volley = Some((
+                                    reply,
+                                    WeaponVolleyOutput {
+                                        destroyed: checked_out_destroyed,
+                                        destroyed_lease,
+                                        actions: volley_actions,
+                                    },
+                                ));
                             }
                             SystemCommand::HasModuleCycle { ship_id, module_id, reply } => {
                                 let exists = active_module_cycles
@@ -2590,6 +2628,7 @@ impl SystemRegistry {
                                 db_opt,
                                 pending_cycle_actions,
                                 &mut missile_destroyed,
+                                Some(&pending_destroyed_actor),
                                 dt_sim,
                             );
                             let mut destroyed_balls = cycles::step_cycles_and_capacitor_with_missiles_and_tidi(
@@ -2601,6 +2640,7 @@ impl SystemRegistry {
                                 mechanic_rng_opt, tactical_state.as_ref(), pending_cycle_actions,
                                 *sim_elapsed_secs, dt_sim, tidi,
                                 Some(module_reload_sim_remaining), deact_guard.as_ref(),
+                                Some(&pending_destroyed_actor),
                             );
                             destroyed_balls.extend(missile_destroyed);
                             missiles::flush_pending_missile_launches(
@@ -2661,6 +2701,7 @@ impl SystemRegistry {
                                 solar_system_id,
                             ) {
                                 destroyed_balls.push((bid, None));
+                                pending_destroyed_actor.record_one(bid, None);
                             }
                             for bid in crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick(
                                 &mut ballpark,
@@ -2671,6 +2712,7 @@ impl SystemRegistry {
                                 notify_tx_opt.as_ref(),
                             ) {
                                 destroyed_balls.push((bid, None));
+                                pending_destroyed_actor.record_one(bid, None);
                             }
                             for bid in crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_in_ballpark(
                                 &mut ballpark,
@@ -2678,6 +2720,7 @@ impl SystemRegistry {
                                 solar_system_id,
                             ) {
                                 destroyed_balls.push((bid, None));
+                                pending_destroyed_actor.record_one(bid, None);
                             }
                             {
                                 let step_now_unix = db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or_else(|| {
@@ -2695,6 +2738,7 @@ impl SystemRegistry {
                                     dt_sim,
                                     step_now_unix,
                                 );
+                                let pre_bosonic_len = destroyed_balls.len();
                                 crate::services::doomsday_aoe_ops::step_bosonic_doomsday_in_ballpark(
                                     &mut ballpark,
                                     base_scramble_strengths,
@@ -2704,6 +2748,7 @@ impl SystemRegistry {
                                     step_now_unix,
                                     &mut destroyed_balls,
                                 );
+                                pending_destroyed_actor.record_batch(&destroyed_balls[pre_bosonic_len..]);
                                 if !destroyed_balls.is_empty() {
                                     let dead_ids: Vec<BallId> =
                                         destroyed_balls.iter().map(|&(bid, _)| bid).collect();
@@ -2771,23 +2816,22 @@ impl SystemRegistry {
                                 celestials::collect_immediate_armor_hull_checkpoint_entries(&mut actor_st, &ballpark)
                             };
                             celestials::update_system_hibernation_flag(&actor_st, &ballpark, has_subscribers as usize);
+                            let (step_destroyed_balls, destroyed_lease) =
+                                pending_destroyed_actor.checkout_for_step();
                             let step_out = StepOutput {
                                 solar_system_id,
                                 tick: current_tick,
                                 dt_sim,
                                 landed_warps,
-                                destroyed_balls,
+                                destroyed_balls: step_destroyed_balls,
+                                destroyed_lease,
                                 lock_completed_events,
                                 target_lost_events,
                                 cycle_actions,
                                 condition_checkpoint,
                                 broadcast: broadcast_opt,
                             };
-                            match step_reply {
-                                StepReply::Full(reply) | StepReply::TickOnly(reply) => {
-                                    let _ = reply.send(step_out);
-                                }
-                            }
+                            Some(PendingActorDelivery::Step(step_reply, step_out))
                         } else {
                             {
                                 let mut mod_guard = active_module_ships_actor.write().unwrap_or_else(|e| e.into_inner());
@@ -2811,6 +2855,60 @@ impl SystemRegistry {
                                 &ballpark,
                                 event_tx_actor.receiver_count(),
                             );
+                            pending_volley.map(|(reply, volley_out)| {
+                                PendingActorDelivery::Volley(reply, volley_out)
+                            })
+                        }
+                    }
+                }
+                };
+                if let Some(actor_delivery) = actor_delivery_out {
+                    #[cfg(test)]
+                    if panic_after_destruction_actor
+                        .swap(false, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        panic!("injected post-destruction SystemActor step panic for #1168 test");
+                    }
+                    #[cfg(test)]
+                    {
+                        let hook = before_step_reply_hook_actor
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .take();
+                        if let Some(hook) = hook {
+                            hook();
+                        }
+                    }
+                    match actor_delivery {
+                        PendingActorDelivery::Step(step_reply, step_out) => match step_reply {
+                            StepReply::Full(reply) | StepReply::TickOnly(reply) => {
+                                if let Err(unsent_step_out) = reply.send(step_out) {
+                                    let retained_count = unsent_step_out.destroyed_balls.len();
+                                    let step_tick = unsent_step_out.tick;
+                                    drop(unsent_step_out);
+                                    if retained_count > 0 {
+                                        tracing::warn!(
+                                            solar_system_id,
+                                            tick = step_tick,
+                                            retained_destroyed_balls = retained_count,
+                                            "SystemActor step reply receiver dropped; destroyed_balls lease rolled back to pending outbox"
+                                        );
+                                    }
+                                }
+                            }
+                        },
+                        PendingActorDelivery::Volley(reply, volley_out) => {
+                            if let Err(unsent_volley_out) = reply.send(volley_out) {
+                                let retained_count = unsent_volley_out.destroyed.len();
+                                drop(unsent_volley_out);
+                                if retained_count > 0 {
+                                    tracing::warn!(
+                                        solar_system_id,
+                                        retained_destroyed_balls = retained_count,
+                                        "SystemActor volley reply receiver dropped; destroyed_balls lease rolled back to pending outbox"
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -2851,6 +2949,7 @@ impl SystemRegistry {
             last_visible_stamp,
             last_fx_stamp,
             command_panics,
+            pending_destroyed_balls,
             hibernated,
             hibernated_since_unix,
             idle_ticks,
@@ -2859,6 +2958,10 @@ impl SystemRegistry {
             panic_next_command_for_test,
             #[cfg(test)]
             panic_on_command_countdown_for_test,
+            #[cfg(test)]
+            panic_after_destruction_for_test,
+            #[cfg(test)]
+            before_step_reply_hook_for_test,
             npc_death_hook: Arc::clone(&self.npc_death_hook),
             module_deactivation_hook: Arc::clone(&self.module_deactivation_hook),
             target_lock_completed_hook: Arc::clone(&self.target_lock_completed_hook),

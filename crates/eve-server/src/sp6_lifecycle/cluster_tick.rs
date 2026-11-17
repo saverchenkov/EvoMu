@@ -2175,10 +2175,10 @@ async fn step_single_system_physics_step_with_lateness(
 ) {
     let step_start = std::time::Instant::now();
     let step_res = catch_unwind_future(async {
-        let stepped_tick =
-            match tokio::time::timeout(SYSTEM_STEP_ASK_TIMEOUT, handle.step_manual_tick_only(1.0)).await
+        let step_output =
+            match tokio::time::timeout(SYSTEM_STEP_ASK_TIMEOUT, handle.ask_step_tick_only(1.0)).await
             {
-                Ok(Ok(tick)) => tick,
+                Ok(Ok(output)) => output,
                 Ok(Err(err)) => {
                     tracing::warn!(
                         solar_system_id = sys_id,
@@ -2196,6 +2196,11 @@ async fn step_single_system_physics_step_with_lateness(
                     return;
                 }
             };
+        // Commit `StepOutput` (including `on_ball_destroyed_sync` wrecks/killmails/capsules)
+        // outside `SYSTEM_STEP_ASK_TIMEOUT` so contested DB writes complete without discarding
+        // actor-produced ball deaths.
+        handle.apply_step_output(&step_output).await;
+        let stepped_tick = step_output.tick;
         // Run synchronous NPC AI / deployables off the Tokio async worker pool under timeout so
         // heavy systems neither starve async RPC/actor tasks nor defeat `SYSTEM_STEP_ASK_TIMEOUT` (`#1208`).
         let ctx_ai = ctx.clone();

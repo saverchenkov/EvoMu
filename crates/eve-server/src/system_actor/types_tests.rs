@@ -565,3 +565,35 @@ fn system_command_all_variants_construct_and_match() {
     assert_eq!(tags[69], "FlushConditionCheckpoint");
     assert_eq!(tags[70], "RepairCombatState");
 }
+
+#[test]
+fn pending_destroyed_outbox_checkout_entries_isolates_unrelated_pending_items_1168() {
+    let outbox = super::PendingDestroyedOutbox::default();
+    outbox.record_one(1001, Some(10));
+    outbox.record_one(1002, Some(20));
+    outbox.record_one(1003, Some(30));
+
+    // Checking out only ball 1002 must leave 1001 and 1003 undisturbed in `pending`.
+    let (batch, lease_opt) = outbox.checkout_entries(&[(1002, Some(20)), (1002, Some(20))]);
+    assert_eq!(batch, vec![(1002, Some(20))]);
+    assert_eq!(outbox.pending_and_in_flight_counts(), (2, 1));
+    assert!(outbox.is_non_empty());
+
+    // Dropping the lease without ack rolls 1002 back to pending cleanly.
+    drop(lease_opt);
+    assert_eq!(outbox.pending_and_in_flight_counts(), (3, 0));
+
+    // Re-checking out 1002 and acking commits only 1002 while keeping 1001 and 1003 pending.
+    let (batch2, lease2) = outbox.checkout_entries(&[(1002, Some(20))]);
+    assert_eq!(batch2, vec![(1002, Some(20))]);
+    lease2.unwrap().ack();
+    assert_eq!(outbox.pending_and_in_flight_counts(), (2, 0));
+    assert!(outbox.is_non_empty());
+
+    let (rest, rest_lease) = outbox.checkout_for_step();
+    assert_eq!(rest, vec![(1001, Some(10)), (1003, Some(30))]);
+    rest_lease.unwrap().ack();
+    assert_eq!(outbox.pending_and_in_flight_counts(), (0, 0));
+    assert!(!outbox.is_non_empty());
+    assert_eq!(outbox.totals(), (3, 3));
+}

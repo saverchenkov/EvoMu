@@ -752,6 +752,7 @@ pub(crate) fn update_system_hibernation_flag(
         || !state.active_module_cycles.is_empty()
         || !state.pending_anchoring_disruptors.is_empty()
         || !state.active_nanite_repairs.is_empty()
+        || state.pending_destroyed_balls.is_non_empty()
         || state
             .asteroids
             .values()

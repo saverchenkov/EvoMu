@@ -13,8 +13,8 @@ use eve_destiny::{
 use eve_sde::SdeRegistry;
 
 use super::{
-    ActiveGuidedMissile, ActiveModuleCycle, CharacterId, PendingCycleAction, PendingMissileDeployFx,
-    PendingMissileLaunch,
+    ActiveGuidedMissile, ActiveModuleCycle, CharacterId, PendingCycleAction,
+    PendingDestroyedOutbox, PendingMissileDeployFx, PendingMissileLaunch,
 };
 
 const MIN_MISSILE_BALL_ID: i64 = 9_950_000_000;
@@ -188,6 +188,7 @@ pub(crate) fn step_guided_missiles_in_actor(
     db_opt: &Option<Arc<WorldRepository>>,
     pending_cycle_actions: &mut Vec<PendingCycleAction>,
     destroyed_balls: &mut Vec<(BallId, Option<CharacterId>)>,
+    pending_destroyed_outbox: Option<&PendingDestroyedOutbox>,
     dt_sim: f64,
 ) {
     if active_missiles.is_empty() {
@@ -270,6 +271,7 @@ pub(crate) fn step_guided_missiles_in_actor(
                 db_opt,
                 pending_cycle_actions,
                 destroyed_balls,
+                pending_destroyed_outbox,
             );
         }
     }
