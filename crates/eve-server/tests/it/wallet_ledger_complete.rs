@@ -1208,3 +1208,209 @@ async fn test_wallet_transactions_crowset_and_entry_types_live_client_compat() {
 }
 
 }
+
+#[tokio::test]
+async fn test_give_cash_subcent_and_oversized_reason_rejected_with_sqlite_persistence() {
+    let db_path = std::env::temp_dir().join(format!(
+        "evomu_givecash_1179_{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&db_path);
+    eve_db::WorldRepository::with_demo_seed()
+        .save_to_sqlite(&db_path)
+        .expect("seed sqlite");
+
+    let memo_64 = "m".repeat(64);
+    let huge_reason = "X".repeat(10_000);
+    let corp_id = 98_123_779_i64;
+
+    {
+        let ctx = ServerContext::from_sqlite(&db_path).expect("open sqlite");
+        common::pin_clock(&ctx);
+
+        ctx.db.with_mut_snapshot(|snap| {
+            // Start P1 at 0.00 ISK so sub-cent exploit attempts are verified with zero funds.
+            snap.characters.get_mut(&P1).unwrap().balance = IskCents(0);
+            snap.characters.get_mut(&P2).unwrap().balance = IskCents::from_isk(100);
+            let mut corp = CorporationRecord::default();
+            corp.corporation_id = corp_id;
+            corp.name = "Hotfix 1179 Corp".into();
+            corp.ticker = "H179".into();
+            corp.ceo_id = P1;
+            corp.ensure_wallet_divisions();
+            corp.set_division_balance(1, IskCents::from_isk(1_000));
+            corp.set_division_balance(2, IskCents::from_isk(1_000));
+            corp.members.insert(P1);
+            corp.members.insert(P2);
+            snap.corporations.insert(corp_id, corp);
+            snap.characters.get_mut(&P1).unwrap().corporation_id = corp_id;
+            snap.characters.get_mut(&P2).unwrap().corporation_id = corp_id;
+        });
+
+        let kw_empty = HashMap::new();
+        let mut s1 = SessionState::new(9101);
+        common::login_pilot(&ctx, &mut s1, "demo", "demo-secret").await;
+        common::borrow_wire_harness(&ctx, &mut s1)
+            .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(P1)], &kw_empty)
+            .await;
+
+        let mut s2 = SessionState::new(9102);
+        common::login_pilot(&ctx, &mut s2, "other", "other-secret").await;
+        common::borrow_wire_harness(&ctx, &mut s2)
+            .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(P2)], &kw_empty)
+            .await;
+
+        let (wj_before, wjm_before, cwj1_before, cwj2_before) = ctx.db.with_snapshot(|s| {
+            (
+                s.wallet_journal.len(),
+                s.wallet_journal_meta.len(),
+                s.corp_wallet_journals.get(&(corp_id, 1)).map_or(0, Vec::len),
+                s.corp_wallet_journals.get(&(corp_id, 2)).map_or(0, Vec::len),
+            )
+        });
+
+        for bad_amt in [0.001, 0.004] {
+            let err = common::borrow_wire_harness(&ctx, &mut s1)
+                .call(
+                    "account",
+                    None,
+                    "GiveCash",
+                    &[PyRep::Integer(P2), PyRep::Real(bad_amt), PyRep::String("memo".into())],
+                    &kw_empty,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "InvalidArgument");
+        }
+        let err_huge_gc = common::borrow_wire_harness(&ctx, &mut s1)
+            .call(
+                "account",
+                None,
+                "GiveCash",
+                &[PyRep::Integer(P2), PyRep::Real(1.0), PyRep::String(huge_reason.clone())],
+                &kw_empty,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err_huge_gc.code, "InvalidArgument");
+
+        let err_corp_sub = common::borrow_wire_harness(&ctx, &mut s1)
+            .call(
+                "account",
+                None,
+                "GiveCashFromCorpAccount",
+                &[PyRep::Integer(P2), PyRep::Real(0.001), PyRep::Integer(1000)],
+                &HashMap::from([("reason".to_string(), PyRep::String("memo".into()))]),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err_corp_sub.code, "InvalidArgument");
+
+        let err_corp_huge = common::borrow_wire_harness(&ctx, &mut s1)
+            .call(
+                "account",
+                None,
+                "GiveCashFromCorpAccount",
+                &[
+                    PyRep::Integer(P2),
+                    PyRep::Real(1.0),
+                    PyRep::Integer(1000),
+                    PyRep::None,
+                    PyRep::String(huge_reason.clone()),
+                ],
+                &kw_empty,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err_corp_huge.code, "InvalidArgument");
+
+        let err_corp_legacy_sub = common::borrow_wire_harness(&ctx, &mut s1)
+            .call(
+                "account",
+                None,
+                "GiveCashFromCorpAccount",
+                &[PyRep::Integer(1), PyRep::Integer(2), PyRep::Real(0.001)],
+                &kw_empty,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err_corp_legacy_sub.code, "InvalidArgument");
+
+        ctx.db.with_snapshot(|s| {
+            assert_eq!(s.wallet_journal.len(), wj_before);
+            assert_eq!(s.wallet_journal_meta.len(), wjm_before);
+            assert_eq!(s.corp_wallet_journals.get(&(corp_id, 1)).map_or(0, Vec::len), cwj1_before);
+            assert_eq!(s.corp_wallet_journals.get(&(corp_id, 2)).map_or(0, Vec::len), cwj2_before);
+            assert_eq!(s.characters[&P1].balance, IskCents(0));
+            assert_eq!(s.characters[&P2].balance, IskCents::from_isk(100));
+            assert_eq!(s.corporations[&corp_id].division_balance(1), IskCents::from_isk(1_000));
+        });
+
+        ctx.db.with_mut_snapshot(|s| {
+            s.characters.get_mut(&P1).unwrap().balance = IskCents(5);
+        });
+        common::borrow_wire_harness(&ctx, &mut s1)
+            .call_ok(
+                "account",
+                None,
+                "GiveCash",
+                &[PyRep::Integer(P2), PyRep::Real(0.01), PyRep::String(memo_64.clone())],
+                &kw_empty,
+            )
+            .await;
+        common::borrow_wire_harness(&ctx, &mut s1)
+            .call_ok(
+                "account",
+                None,
+                "GiveCashFromCorpAccount",
+                &[PyRep::Integer(P2), PyRep::Real(0.01), PyRep::Integer(1000)],
+                &HashMap::from([("reason".to_string(), PyRep::String(memo_64.clone()))]),
+            )
+            .await;
+    }
+
+    {
+        let ctx2 = ServerContext::from_sqlite(&db_path).expect("reopen sqlite");
+        let kw_empty = HashMap::new();
+        let mut s2 = SessionState::new(9202);
+        common::login_pilot(&ctx2, &mut s2, "other", "other-secret").await;
+        common::borrow_wire_harness(&ctx2, &mut s2)
+            .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(P2)], &kw_empty)
+            .await;
+
+        let p2_journal_rep = common::borrow_wire_harness(&ctx2, &mut s2)
+            .call_ok(
+                "account",
+                None,
+                "GetTransactions",
+                &[PyRep::Integer(1000), PyRep::None, PyRep::None, PyRep::Bool(false)],
+                &kw_empty,
+            )
+            .await;
+        let p2_rows = rows(&p2_journal_rep);
+        assert!(p2_rows.iter().any(|r| {
+            r.get("description")
+                .and_then(|v| v.as_str())
+                .is_some_and(|d| d.contains(&memo_64))
+        }));
+        assert!(!p2_rows.iter().any(|r| {
+            r.get("description")
+                .and_then(|v| v.as_str())
+                .is_some_and(|d| d.contains(&huge_reason) || d == "memo")
+        }));
+
+        ctx2.db.with_snapshot(|s| {
+            assert_eq!(s.characters[&P1].balance, IskCents(4));
+            assert_eq!(s.characters[&P2].balance, IskCents(10_002));
+            assert_eq!(s.corporations[&corp_id].division_balance(1), IskCents(99_999));
+            assert!(s.corp_wallet_journals[&(corp_id, 1)]
+                .iter()
+                .any(|e| e.description == memo_64 && e.reason.as_deref() == Some(memo_64.as_str())));
+            assert!(!s.corp_wallet_journals[&(corp_id, 1)]
+                .iter()
+                .any(|e| e.description.contains(&huge_reason) || e.reason.as_deref().is_some_and(|r| r.contains(&huge_reason))));
+        });
+    }
+
+    let _ = std::fs::remove_file(&db_path);
+}

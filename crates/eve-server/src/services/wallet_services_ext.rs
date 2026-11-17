@@ -844,7 +844,11 @@ fn handle_trade_action(
                 if !isk.is_finite() || isk < 0.0 {
                     return Err(rpc_err("InvalidArgument", "Offered ISK must be non-negative"));
                 }
-                let cents = IskCents::from_f64_isk(isk);
+                let cents = if isk > 0.0 {
+                    super::wallet_ledger::parse_transfer_isk_cents(isk)?
+                } else {
+                    IskCents(0)
+                };
                 let bal = snap.characters.get(&char_id).map(|c| c.balance).unwrap_or(IskCents(0));
                 if bal.0 < cents.0 {
                     return Err(rpc_err("NotEnoughMoney", "Insufficient ISK for trade offer"));
