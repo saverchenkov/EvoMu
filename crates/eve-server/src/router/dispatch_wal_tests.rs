@@ -179,6 +179,7 @@ async fn test_issue_874_ignored_try_with_mut_snapshot_failure_poisons_rpc_withou
                         description: "trigger_poison".into(),
                         type_mask: 1,
                         recruiter_id: char_id,
+                        recruiters: vec![char_id],
                         created_unix: 0,
                         expiry_unix: 100,
                         days: 1,

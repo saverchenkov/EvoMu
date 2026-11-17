@@ -7,6 +7,13 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, DBRowDescriptor, DbColumnType, PyRep};
 use std::collections::{HashMap, HashSet};
 
+pub(super) fn corp_typeface_to_pyrep(tf: &eve_db::CorpTypeface) -> PyRep {
+    match tf {
+        eve_db::CorpTypeface::String(s) => PyRep::String(s.clone()),
+        eve_db::CorpTypeface::Integer(i) => PyRep::Integer(*i),
+    }
+}
+
 pub fn with_corp_gov<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&mut HashMap<i64, CorpGovState>) -> R,
@@ -786,25 +793,8 @@ pub(super) fn handle_corps(
                         c.corporation_id,
                         ceo_id.unwrap_or(c.ceo_id),
                     ) as i64;
-                    let lp_tax = snap
-                        .service_state_blobs
-                        .get(&format!("corp_lp_tax_rate:{corp_id}"))
-                        .and_then(|s| s.parse::<f64>().ok())
-                        .filter(|v| v.is_finite())
-                        .map(|v| v.clamp(0.0, 1.0))
-                        .unwrap_or(c.tax_rate);
-                    let typeface = snap
-                        .service_state_blobs
-                        .get(&format!("corp_typeface:{corp_id}"))
-                        .and_then(|enc| {
-                            if let Some(s) = enc.strip_prefix("s:") {
-                                Some(PyRep::String(s.to_string()))
-                            } else if let Some(i) = enc.strip_prefix("i:") {
-                                i.parse::<i64>().ok().map(PyRep::Integer)
-                            } else {
-                                None
-                            }
-                        });
+                    let lp_tax = c.effective_lp_tax_rate();
+                    let typeface = c.typeface.as_ref().map(corp_typeface_to_pyrep);
                     (c.corporation_id, c.name.clone(), ticker, ceo_id, m_count, m_limit, c.tax_rate, lp_tax, typeface, c.alliance_id.filter(|&id| id > 0), hq_station, desc, c.url.clone(), h_divs, w_divs, allow_war)
                 })
             }).or_else(|| {

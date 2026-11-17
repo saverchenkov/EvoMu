@@ -1635,3 +1635,372 @@ async fn title_parsers_delayed_grants_role_drop_and_kick_blocker_boundaries() {
         );
     });
 }
+
+#[tokio::test]
+async fn add_corp_and_recruitment_ads_store_typed_fields_with_recruiter_cap_and_zero_service_blobs() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let (mut ceo, _mem) = seed_player_corps(&ctx);
+    let corp_id = ceo.corporation_id.unwrap();
+    let ceo_id = ceo.character_id.unwrap();
+    let extra_members: Vec<i64> = (90_000_501..=90_000_507).collect();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.set_division_balance(1, IskCents::from_isk(10_000_000));
+            for &mid in &extra_members {
+                corp.members.insert(mid);
+            }
+        }
+    });
+
+    // 1. parse_recruiter_ids / CreateRecruitmentAd deduplicates with order preservation (7 items -> 6 unique)
+    // and enforces V24 corporationMaxCorpRecruiters = 6 on both CreateRecruitmentAd and UpdateRecruitmentAd.
+    let rec_input_6_dedup = vec![
+        ceo_id,
+        extra_members[0],
+        ceo_id,
+        extra_members[1],
+        extra_members[2],
+        extra_members[0],
+        extra_members[3],
+        extra_members[4],
+    ];
+    let expected_6 = vec![
+        ceo_id,
+        extra_members[0],
+        extra_members[1],
+        extra_members[2],
+        extra_members[3],
+        extra_members[4],
+    ];
+    let created = call_gov(
+        &ctx,
+        &mut ceo,
+        "corpRecProxy",
+        "CreateRecruitmentAd",
+        vec![
+            PyRep::Integer(14),
+            PyRep::Integer(7),
+            PyRep::Integer(1),
+            PyRep::String("Dedup 6".into()),
+            PyRep::List(rec_input_6_dedup.iter().copied().map(PyRep::Integer).collect()),
+            PyRep::String("Six Recruiters".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap();
+    let ad_id = kv(&created, "adID").as_i64().unwrap();
+    assert_eq!(
+        call_gov(
+            &ctx,
+            &mut ceo,
+            "corpRecProxy",
+            "GetRecruiters",
+            vec![PyRep::Integer(ad_id)],
+        )
+        .await
+        .unwrap(),
+        PyRep::List(expected_6.iter().copied().map(PyRep::Integer).collect())
+    );
+
+    // 7 distinct corp members must fail with InvalidArgument on both Create and Update without debiting ISK.
+    let bal_before_cap = ctx.db.with_snapshot(|s| s.corporations[&corp_id].division_balance(1));
+    let over_7: Vec<PyRep> = std::iter::once(ceo_id)
+        .chain(extra_members[..6].iter().copied())
+        .map(PyRep::Integer)
+        .collect();
+    let err_create_over = call_gov(
+        &ctx,
+        &mut ceo,
+        "corpRecProxy",
+        "CreateRecruitmentAd",
+        vec![
+            PyRep::Integer(14),
+            PyRep::Integer(7),
+            PyRep::Integer(1),
+            PyRep::String("Too many".into()),
+            PyRep::List(over_7.clone()),
+            PyRep::String("Over 6 Create".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_create_over.code, "InvalidArgument");
+
+    let err_update_over = call_gov(
+        &ctx,
+        &mut ceo,
+        "corpRecProxy",
+        "UpdateRecruitmentAd",
+        vec![
+            PyRep::Integer(ad_id),
+            PyRep::Integer(7),
+            PyRep::Integer(1),
+            PyRep::String("Too many update".into()),
+            PyRep::List(over_7),
+            PyRep::String("Over 6 Update".into()),
+            PyRep::Integer(7),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_update_over.code, "InvalidArgument");
+
+    let spam_65 = vec![PyRep::Integer(ceo_id); 65];
+    let err_spam = call_gov(
+        &ctx,
+        &mut ceo,
+        "corpRecProxy",
+        "UpdateRecruitmentAd",
+        vec![
+            PyRep::Integer(ad_id),
+            PyRep::Integer(7),
+            PyRep::Integer(1),
+            PyRep::String("Spam input".into()),
+            PyRep::List(spam_65),
+            PyRep::String("Spam Cap".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_spam.code, "InvalidArgument");
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.corporations[&corp_id].division_balance(1)),
+        bal_before_cap
+    );
+
+    // UpdateRecruitmentAd with reversed deduplicated 2 recruiters preserves new order on CorpRecruitmentAd.
+    call_gov(
+        &ctx,
+        &mut ceo,
+        "corpRecProxy",
+        "UpdateRecruitmentAd",
+        vec![
+            PyRep::Integer(ad_id),
+            PyRep::Integer(7),
+            PyRep::Integer(1),
+            PyRep::String("Updated list".into()),
+            PyRep::List(vec![
+                PyRep::Integer(extra_members[2]),
+                PyRep::Integer(extra_members[2]),
+                PyRep::Integer(ceo_id),
+            ]),
+            PyRep::String("Updated Two".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        call_gov(
+            &ctx,
+            &mut ceo,
+            "corpRecProxy",
+            "GetRecruiters",
+            vec![PyRep::Integer(ad_id)],
+        )
+        .await
+        .unwrap(),
+        PyRep::List(vec![PyRep::Integer(extra_members[2]), PyRep::Integer(ceo_id)])
+    );
+
+    // 2. Create >130 player corporations + recruitment ads (>256 keys under old blob scheme)
+    // with distinct explicit LP tax (including 0.0 when ISK tax != 0.0) and both string/int typefaces.
+    let mut created_corps = Vec::with_capacity(135);
+    let mut last_founder = None;
+    let mut last_ad_id = 0_i64;
+    for i in 0..135_i64 {
+        let cid_char = 90_700_000 + i;
+        let uid = cid_char as u64;
+        let mut sess = SessionState::new(700 + i as u64);
+        sess.user_id = Some(uid);
+        sess.character_id = Some(cid_char);
+        sess.corporation_id = Some(1_000_170);
+        sess.station_id = Some(60_003_760);
+
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut ch = clone_char_with(
+                snap,
+                cid_char,
+                &format!("Founder{i}"),
+                1_000_170,
+                30_000_142,
+                55_800_000 + i,
+            );
+            ch.user_id = uid;
+            ch.station_id = Some(60_003_760);
+            ch.balance = IskCents::from_isk(5_000_000);
+            snap.characters.insert(cid_char, ch);
+            snap.skills.entry(cid_char).or_default().insert(
+                3363,
+                TrainedSkillRecord {
+                    type_id: 3363,
+                    skill_points: 100_000.0,
+                    level: 2,
+                },
+            );
+            let uname = format!("scale_u{uid}");
+            snap.accounts.insert(
+                uname.clone(),
+                eve_db::AccountRecord {
+                    user_id: uid,
+                    username: uname,
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        });
+        ctx.db
+            .acquire_online_lock(uid, sess.session_id, Some(cid_char), true, 1_700_000_000)
+            .unwrap();
+
+        let tf_rep = if i % 2 == 0 {
+            PyRep::String(format!("Typeface{i}"))
+        } else {
+            PyRep::Integer(i + 10)
+        };
+        let lp_tax = if i == 134 { 0.0 } else { 0.18 };
+        let res = call_gov(
+            &ctx,
+            &mut sess,
+            "corpRegistry",
+            "AddCorporation",
+            vec![
+                PyRep::String(format!("Scale Corp {i}")),
+                PyRep::String(format!("S{i:03}")),
+                PyRep::String("Desc".into()),
+                PyRep::String("https://scale.example".into()),
+                PyRep::Real(0.15),
+                PyRep::Integer(415),
+                PyRep::Integer(416),
+                PyRep::Integer(417),
+                PyRep::Integer(671),
+                PyRep::Integer(672),
+                PyRep::Integer(673),
+                tf_rep,
+                PyRep::Bool(true),
+                PyRep::Bool(false),
+                PyRep::Real(lp_tax),
+            ],
+        )
+        .await
+        .unwrap();
+        let new_cid = kv(&res, "corporationID").as_i64().unwrap();
+        created_corps.push(new_cid);
+
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.corporations
+                .get_mut(&new_cid)
+                .unwrap()
+                .set_division_balance(1, IskCents::from_isk(1_000_000));
+        });
+        let ad = call_gov(
+            &ctx,
+            &mut sess,
+            "corpRecProxy",
+            "CreateRecruitmentAd",
+            vec![
+                PyRep::Integer(14),
+                PyRep::Integer(7),
+                PyRep::Integer(1),
+                PyRep::String(format!("Scale Ad {i}")),
+                PyRep::List(vec![PyRep::Integer(cid_char), PyRep::Integer(cid_char)]),
+                PyRep::String(format!("Title {i}")),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+            ],
+        )
+        .await
+        .unwrap();
+        last_ad_id = kv(&ad, "adID").as_i64().unwrap();
+        last_founder = Some(sess);
+    }
+
+    ctx.db.with_snapshot(|snap| {
+        let per_entity_keys: Vec<&String> = snap
+            .service_state_blobs
+            .keys()
+            .filter(|k| *k != "__server_now_unix")
+            .collect();
+        assert!(
+            per_entity_keys.is_empty(),
+            "AddCorporation and CreateRecruitmentAd/UpdateRecruitmentAd must not add per-entity keys to service_state_blobs (got {per_entity_keys:?})"
+        );
+    });
+
+    // Save to SQLite, reopen, and verify explicit LP tax 0.0, string typeface, integer typeface, and ad recruiters survive reload.
+    let db_path = std::env::temp_dir().join(format!(
+        "evomu_corp_scale_roundtrip_{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&db_path);
+    ctx.db.save_to_sqlite(&db_path).expect("save_to_sqlite");
+    let reopened_repo = std::sync::Arc::new(
+        eve_db::WorldRepository::open_sqlite(&db_path).expect("open_sqlite"),
+    );
+    let reopened_ctx = crate::router::ServerContext::with_sde_and_repository(
+        ctx.sde.clone(),
+        reopened_repo,
+    );
+    reopened_ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(
+        1_700_000_000,
+    )));
+
+    let mut sess_last = last_founder.unwrap();
+    let corp_last_info = call_gov(
+        &reopened_ctx,
+        &mut sess_last,
+        "corpRegistry",
+        "GetCorporation",
+        vec![],
+    )
+    .await
+    .unwrap();
+    assert_eq!(kv(&corp_last_info, "corporationID").as_i64(), Some(created_corps[134]));
+    assert_eq!(kv(&corp_last_info, "iskTaxRate").as_f64(), Some(0.15));
+    assert_eq!(kv(&corp_last_info, "loyaltyPointTaxRate").as_f64(), Some(0.0));
+    assert_eq!(kv(&corp_last_info, "typeface").as_str(), Some("Typeface134"));
+
+    let corp_int_tf = call_gov(
+        &reopened_ctx,
+        &mut sess_last,
+        "corpmgr",
+        "GetPublicInfo",
+        vec![PyRep::Integer(created_corps[133])],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        corp_int_tf.dict_get("typeface").and_then(|v| v.as_i64()),
+        Some(143)
+    );
+    assert_eq!(
+        call_gov(
+            &reopened_ctx,
+            &mut sess_last,
+            "corpRecProxy",
+            "GetRecruiters",
+            vec![PyRep::Integer(last_ad_id)],
+        )
+        .await
+        .unwrap(),
+        PyRep::List(vec![PyRep::Integer(sess_last.character_id.unwrap())])
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(db_path.with_extension("sqlite-shm"));
+}

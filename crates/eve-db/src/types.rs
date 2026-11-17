@@ -1122,6 +1122,13 @@ pub struct CorpWalletDivisionRecord {
     pub balance: IskCents,
 }
 
+/// Corporation banner/UI typeface configured at corporation creation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CorpTypeface {
+    String(String),
+    Integer(i64),
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CorporationRecord {
@@ -1131,6 +1138,10 @@ pub struct CorporationRecord {
     pub ceo_id: i64,
     pub alliance_id: Option<i64>,
     pub tax_rate: f64,
+    #[serde(default)]
+    pub loyalty_point_tax_rate: Option<f64>,
+    #[serde(default)]
+    pub typeface: Option<CorpTypeface>,
     #[serde(default)]
     pub(crate) master_wallet: IskCents,
     #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
@@ -1173,6 +1184,14 @@ impl CorporationRecord {
 
     pub fn master_wallet_balance(&self) -> IskCents {
         self.division_balance(1)
+    }
+
+    /// Returns the corporation's effective loyalty-point tax rate in `[0.0, 1.0]`, falling back to `tax_rate`.
+    pub fn effective_lp_tax_rate(&self) -> f64 {
+        self.loyalty_point_tax_rate
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(0.0, 1.0))
+            .unwrap_or(self.tax_rate)
     }
 
     pub fn default_wallet_divisions(master_wallet: IskCents) -> Vec<CorpWalletDivisionRecord> {

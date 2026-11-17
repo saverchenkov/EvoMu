@@ -364,6 +364,8 @@ pub struct CorpRecruitmentAd {
     pub description: String,
     pub type_mask: u64,
     pub recruiter_id: i64,
+    #[serde(default)]
+    pub recruiters: Vec<i64>,
     pub created_unix: u64,
     pub expiry_unix: u64,
     pub days: u32,
