@@ -3523,6 +3523,42 @@ def _compute_state_diff(pre, post, scatters, target_item_id=None):
     }
 
 
+_CORE_HUD_PRESERVE_TOKENS = (
+    "lobby",
+    "l_shipui",
+    "shipui",
+    "overview",
+    "selecteditem",
+    "droneview",
+    "target",
+    "neocom",
+    "sidepanel",
+    "infopanel",
+    "activeitem",
+    "stationservice",
+)
+_CHAT_WINDOW_TOKENS = ("chatchannel", "xmppchat", "lscchannel", "channelwindow")
+
+
+def _is_preserved_chrome_window(w, keep_chat=True):
+    if w is None:
+        return False
+    try:
+        wid = _safe_str(getattr(w, "windowID", None) or getattr(w, "name", ""), 64)
+        if isinstance(wid, tuple):
+            wid = _safe_str(wid[0], 64)
+        wname = _safe_str(getattr(w, "name", ""), 64)
+        wcls = w.__class__.__name__
+        combined = ("%s %s %s" % (wid, wname, wcls)).lower()
+        if any(tok in combined for tok in _CORE_HUD_PRESERVE_TOKENS):
+            return True
+        if keep_chat and any(tok in combined for tok in _CHAT_WINDOW_TOKENS):
+            return True
+    except Exception:
+        return False
+    return False
+
+
 def _cleanup_utility_windows(sm, keep_chat=True):
     """Deterministically close non-core utility windows and secondary views on persona rotation
     while preserving error modals (so BugOracle inspects them), station lobby, ship HUD, Overview,
@@ -3537,22 +3573,6 @@ def _cleanup_utility_windows(sm, keep_chat=True):
             for ch in list(getattr(lobj, "children", []) or []):
                 if ch not in wins and not getattr(ch, "destroyed", False) and _is_visible(ch):
                     wins.append(ch)
-
-    preserve_tokens = (
-        "lobby",
-        "l_shipui",
-        "shipui",
-        "overview",
-        "selecteditem",
-        "droneview",
-        "target",
-        "neocom",
-        "sidepanel",
-        "infopanel",
-        "activeitem",
-        "stationservice",
-    )
-    chat_tokens = ("chatchannel", "xmppchat", "lscchannel", "channelwindow")
 
     closed = []
     kept = []
@@ -3578,10 +3598,7 @@ def _cleanup_utility_windows(sm, keep_chat=True):
             if is_mod:
                 kept.append(wid or wcls)
                 continue
-            if any(tok in combined for tok in preserve_tokens):
-                kept.append(wid or wcls)
-                continue
-            if keep_chat and any(tok in combined for tok in chat_tokens):
+            if _is_preserved_chrome_window(w, keep_chat=keep_chat):
                 kept.append(wid or wcls)
                 continue
 
@@ -3762,36 +3779,224 @@ OPEN_WINDOW_GUARDS = {
 
 OPEN_WINDOW_CMD_MAP = cmd_map
 
+_WINDOW_TARGET_ALIASES = {
+    "inventory": ("inventory", "inventoryprimary", "inventorywnd"),
+    "cargohold": ("cargohold", "inventory", "activeshipcargo", "shipcargo"),
+    "shiphangar": ("shiphangar", "inventory", "stationships"),
+    "itemhangar": ("itemhangar", "inventory", "stationitems"),
+    "market": ("market", "regionalmarket"),
+    "marketorders": ("marketorders", "personalmarketorders"),
+    "multibuy": ("multibuy", "multibuywnd"),
+    "charsheet": ("charsheet", "charactersheet"),
+    "charactersheet": ("charsheet", "charactersheet"),
+    "character": ("charsheet", "charactersheet"),
+    "skills": ("skills", "skillplan", "skillplandockablepanel", "skill_plan"),
+    "skillqueue": ("skills", "skillqueue", "skillplan", "skillplandockablepanel", "skill_plan"),
+    "skillswindow": ("skills", "skillplan", "skillplandockablepanel", "skill_plan"),
+    "skillplan": ("skillplan", "skillplandockablepanel", "skills", "skill_plan"),
+    "skillplans": ("skillplan", "skillplandockablepanel", "skills", "skill_plan"),
+    "skillplanwindow": ("skillplan", "skillplandockablepanel", "skills", "skill_plan"),
+    "skilltree": ("skilltree", "skill_tree", "skillplan", "skills"),
+    "nes": ("aurumstore", "newedenstore", "virtualgoodsstore", "virtual_goods_store", "nes", "store"),
+    "newedenstore": ("aurumstore", "newedenstore", "virtualgoodsstore", "virtual_goods_store", "nes"),
+    "plexstore": ("aurumstore", "newedenstore", "virtualgoodsstore", "virtual_goods_store", "nes"),
+    "aurumstore": ("aurumstore", "newedenstore", "virtualgoodsstore", "virtual_goods_store", "nes"),
+    "store": ("aurumstore", "newedenstore", "virtualgoodsstore", "virtual_goods_store", "nes", "store"),
+    "plexvault": ("plexvault",),
+    "fitting": ("fitting", "fittingwindow"),
+    "fittingmgmt": ("fittingmgmt", "fittingmanagement"),
+    "contracts": ("contracts", "contractswindow"),
+    "industry": ("industry", "industrywnd"),
+    "planets": ("planets", "planet", "planetary"),
+    "pi": ("planets", "planet", "planetary"),
+    "corp": ("corp", "corporation"),
+    "corporation": ("corp", "corporation"),
+    "fleet": ("fleet", "fleetwindow"),
+    "agency": ("agency", "agencywnd"),
+    "jobboard": ("jobboard", "opportunities"),
+    "opportunities": ("jobboard", "opportunities"),
+    "assets": ("assets", "assetswindow"),
+    "wallet": ("wallet", "walletwindow"),
+    "mail": ("mail", "mailwindow"),
+    "notifications": ("notification", "notifications", "notificationcenter", "notificationreading"),
+    "notification": ("notification", "notifications", "notificationcenter", "notificationreading"),
+    "notificationpanel": ("notification", "notifications", "notificationcenter", "notificationreading"),
+    "notificationfeed": ("notification", "notifications", "notificationcenter", "notificationreading"),
+    "notificationcenter": ("notification", "notifications", "notificationcenter", "notificationreading"),
+    "notificationreading": ("notification", "notifications", "notificationcenter", "notificationreading"),
+    "map": ("map", "starmap", "starmap_new", "mapbrowser"),
+    "solarsystemmap": ("solarsystemmap", "systemmap", "systemmap_new"),
+    "dscan": ("dscan", "directionalscanner"),
+    "directionalscanner": ("dscan", "directionalscanner"),
+    "probe": ("probe", "probescanner", "scanner"),
+    "probescanner": ("probe", "probescanner", "scanner"),
+    "scanner": ("probe", "probescanner", "scanner"),
+    "notepad": ("notepad",),
+    "calculator": ("calculator",),
+    "calendar": ("calendar",),
+    "journal": ("journal",),
+    "agentfinder": ("agentfinder", "agency", "agencywnd"),
+    "lpstore": ("lpstore", "loyaltypointstore"),
+    "repair": ("repair", "repairshop"),
+    "repairshop": ("repair", "repairshop"),
+    "reprocessing": ("reprocessing", "reprocessingplant"),
+    "reprocessingplant": ("reprocessing", "reprocessingplant"),
+    "miningledger": ("miningledger", "ledger"),
+    "ledger": ("miningledger", "ledger"),
+    "mininghold": ("mininghold", "orehold", "inventory"),
+    "orehold": ("mininghold", "orehold", "inventory"),
+    "mineralhold": ("mineralhold", "inventory"),
+    "insurance": ("insurance", "insurancewindow"),
+    "bountyoffice": ("bountyoffice", "bounty"),
+    "securityoffice": ("securityoffice", "security"),
+    "militia": ("militia", "factionalwarfare", "fw"),
+    "factionalwarfare": ("factionalwarfare", "factionwarfare", "fw", "militia"),
+    "fw": ("factionalwarfare", "factionwarfare", "fw", "militia"),
+    "insurgency": ("insurgency", "pirateinsurgency"),
+    "skinr": ("skinr", "shipskinr", "ship_skinr", "paint_tool", "painttool"),
+    "shipskinr": ("skinr", "shipskinr", "ship_skinr", "paint_tool", "painttool"),
+    "structurebrowser": ("structurebrowser",),
+    "shiptree": ("shiptree", "isis"),
+    "isis": ("shiptree", "isis"),
+    "aircareerprogram": ("aircareerprogram", "career_portal", "careerportal", "achievements", "achievement"),
+    "acp": ("aircareerprogram", "career_portal", "careerportal", "achievements", "achievement"),
+    "peopleandplaces": ("peopleandplaces", "addressbook"),
+    "locations": ("locations", "bookmarks"),
+    "bookmarks": ("locations", "bookmarks"),
+    "compare": ("compare", "typecompare"),
+    "channels": ("channels", "channel"),
+    "chat": ("channels", "chat"),
+    "help": ("help", "helpwindow"),
+    "log": ("log", "logger", "logwindow"),
+    "info": ("info", "infowindow"),
+}
+
+
+def _normalize_window_tok(val):
+    return str(val or "").strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+
+
+def _window_target_tokens(t_norm):
+    base = _WINDOW_TARGET_ALIASES.get(t_norm, (t_norm,) if t_norm else ())
+    out = []
+    for tok in base:
+        nt = _normalize_window_tok(tok)
+        if nt and nt not in out:
+            out.append(nt)
+    return tuple(out)
+
+
+def _target_matches_window(t_norm, wid, wcap, wcls):
+    tokens = _window_target_tokens(t_norm)
+    if not tokens:
+        return True
+    wid_n = _normalize_window_tok(wid)
+    wcap_n = _normalize_window_tok(wcap)
+    wcls_n = _normalize_window_tok(wcls)
+    return any((tok in wid_n or tok in wcap_n or tok in wcls_n) for tok in tokens)
+
+
+def _target_matches_view(t_norm, view_name):
+    if not t_norm or not view_name:
+        return False
+    vn = _normalize_window_tok(view_name)
+    return any((tok in vn or vn in tok) for tok in _window_target_tokens(t_norm))
+
+
+def _find_matching_secondary_or_drawer_container(sm, t_norm):
+    if not t_norm:
+        return None, None, None
+    tokens = _window_target_tokens(t_norm)
+    svcs = getattr(sm, "services", {}) if sm is not None else {}
+    if any(tok in ("notification", "notifications", "notificationcenter", "notificationreading") for tok in tokens):
+        n_ui = svcs.get("notificationUIService") if isinstance(svcs, dict) else None
+        if n_ui is None and sm is not None and hasattr(sm, "GetService"):
+            try:
+                n_ui = sm.GetService("notificationUIService")
+            except Exception:
+                n_ui = None
+        nc = getattr(n_ui, "notificationCenter", None) if n_ui is not None else None
+        if nc is not None:
+            nc_cont = getattr(nc, "notificationContainer", None) or getattr(nc, "drawer", None) or nc
+            if getattr(nc, "isShowingDrawer", False) or (nc_cont is not nc and _is_visible(nc_cont)):
+                return nc_cont, "notifications", "drawer"
+    if any(tok in ("skills", "skillplan", "skillplandockablepanel", "skillqueue") for tok in tokens):
+        try:
+            from eve.client.script.ui.skillPlan.skillPlanDockablePanel import SkillPlanDockablePanel
+            sp_wnd = SkillPlanDockablePanel.GetIfOpen()
+            if sp_wnd is not None and not getattr(sp_wnd, "destroyed", False) and _is_visible(sp_wnd):
+                return sp_wnd, "SkillPlanDockablePanel", "dockable_panel"
+        except Exception:
+            pass
+    vs = svcs.get("viewState") if isinstance(svcs, dict) else None
+    if vs is None and sm is not None and hasattr(sm, "GetService"):
+        try:
+            vs = sm.GetService("viewState")
+        except Exception:
+            vs = None
+    if vs is not None:
+        try:
+            sec_vi = getattr(vs, "secondaryInfo", None)
+            sec_name = _safe_str(getattr(sec_vi, "name", "") or "", 48)
+            if not sec_name and hasattr(vs, "GetCurrentViewInfo"):
+                cur_vi = vs.GetCurrentViewInfo()
+                cur_name = _safe_str(getattr(cur_vi, "name", "") or "", 48)
+                if cur_name not in ("", "hangar", "inflight", "charsel", "station", "login", "intro"):
+                    sec_name = cur_name
+            if sec_name and _target_matches_view(t_norm, sec_name):
+                sec_view = getattr(vs, "activeView", None)
+                sec_layer = getattr(sec_view, "layer", None) if sec_view is not None else None
+                return (sec_layer or sec_view), sec_name, "secondary_view"
+        except Exception:
+            pass
+    return None, None, None
+
 
 def get_open_window_cmd_map():
     return dict(cmd_map)
 
 
 def _click_top_tabs_in_window(target="", max_tabs=6, require_match=False):
-    """Click through visible top-level tabs inside the matching (or topmost) open window."""
+    """Click through visible top-level tabs inside the matching (or topmost) open window/panel."""
     uicore = _get_uicore()
     reg = getattr(uicore, "registry", None) if uicore is not None else None
     wins = list(reg.GetWindows() or []) if (reg is not None and hasattr(reg, "GetWindows")) else []
-    t_low = str(target or "").strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+    t_norm = _normalize_window_tok(target)
+    is_explicit_chrome = bool(t_norm and any(tok == t_norm or (len(t_norm) >= 5 and tok in t_norm) for tok in (_CORE_HUD_PRESERVE_TOKENS + _CHAT_WINDOW_TOKENS)))
     chosen = None
+    surface_type = "window"
+    chosen_id = ""
     for w in reversed(wins):
         if w is None or getattr(w, "destroyed", False) or not _is_visible(w):
             continue
-        if not t_low:
-            chosen = w
-            break
-        wid = _safe_str(getattr(w, "windowID", None) or getattr(w, "name", ""), 64).lower()
-        wcap = _strip_tags(_safe_str(getattr(w, "caption", None) or "", 64)).lower()
-        wcls = w.__class__.__name__.lower()
-        if t_low in wid.replace("_", "") or t_low in wcap.replace(" ", "") or t_low in wcls:
-            chosen = w
-            break
-    if chosen is None and wins and not (require_match and t_low):
-        for w in reversed(wins):
-            if w is not None and not getattr(w, "destroyed", False) and _is_visible(w):
+        if not t_norm:
+            if not _is_preserved_chrome_window(w, keep_chat=True):
                 chosen = w
                 break
-    if chosen is None:
+            continue
+        if not is_explicit_chrome and _is_preserved_chrome_window(w, keep_chat=True):
+            continue
+        wid = _safe_str(getattr(w, "windowID", None) or getattr(w, "name", ""), 64)
+        wcap = _strip_tags(_safe_str(getattr(w, "caption", None) or "", 64))
+        wcls = w.__class__.__name__
+        if _target_matches_window(t_norm, wid, wcap, wcls):
+            chosen = w
+            break
+    if chosen is None and t_norm:
+        sm_obj = getattr(__builtin__, "sm", None)
+        sec_cont, sec_id, sec_stype = _find_matching_secondary_or_drawer_container(sm_obj, t_norm)
+        if sec_id:
+            chosen = sec_cont
+            chosen_id = sec_id
+            surface_type = sec_stype or "secondary_view"
+    if chosen is None and not chosen_id and wins and not (require_match and t_norm):
+        for w in reversed(wins):
+            if w is not None and not getattr(w, "destroyed", False) and _is_visible(w):
+                if not is_explicit_chrome and _is_preserved_chrome_window(w, keep_chat=True):
+                    continue
+                chosen = w
+                break
+    if chosen is None and not chosen_id:
         return {
             "ok": False,
             "error": "no visible open window found for click_top_tabs (target=%r)" % (target,),
@@ -3800,9 +4005,10 @@ def _click_top_tabs_in_window(target="", max_tabs=6, require_match=False):
             "window": None,
         }
 
-    chosen_id = _safe_str(getattr(chosen, "windowID", None) or getattr(chosen, "name", "") or chosen.__class__.__name__, 64)
+    if not chosen_id:
+        chosen_id = _safe_str(getattr(chosen, "windowID", None) or getattr(chosen, "name", "") or chosen.__class__.__name__, 64)
     seen = set()
-    queue = [(chosen, 0)]
+    queue = [(chosen, 0)] if chosen is not None else []
     tab_group = None
     while queue and len(seen) < 160:
         node, depth = queue.pop(0)
@@ -3821,7 +4027,7 @@ def _click_top_tabs_in_window(target="", max_tabs=6, require_match=False):
                     queue.append((ch, depth + 1))
 
     if tab_group is None:
-        return {"ok": True, "tabs_clicked": 0, "clicked_tabs": [], "window": chosen_id}
+        return {"ok": True, "tabs_clicked": 0, "clicked_tabs": [], "window": chosen_id, "surface_type": surface_type}
 
     tabs = list(getattr(tab_group, "tabs", None) or [])
     if not tabs:
@@ -3894,7 +4100,50 @@ def _open_client_window(sm, target, require_open=False):
             cmd_svc = None
 
     raw_target = str(target or "").strip()
-    t = raw_target.lower().replace("_", "").replace("-", "").replace(" ", "")
+    t = _normalize_window_tok(raw_target)
+    reg = getattr(uicore, "registry", None) if uicore is not None else None
+
+    def _current_sec_view():
+        try:
+            vs_cur = sm.GetService("viewState") if sm is not None else None
+            sec_cur = getattr(vs_cur, "secondaryInfo", None) if vs_cur is not None else None
+            if sec_cur is not None and getattr(sec_cur, "name", None):
+                return _safe_str(getattr(sec_cur, "name", "") or "", 48)
+            vi_cur = vs_cur.GetCurrentViewInfo() if (vs_cur is not None and hasattr(vs_cur, "GetCurrentViewInfo")) else None
+            return _safe_str(getattr(vi_cur, "name", "") or "", 48)
+        except Exception:
+            return ""
+
+    def _verify_matching_surface_open(pre_sec_view="", opened_vis_ids=None):
+        post_sec_view = _current_sec_view()
+        if post_sec_view and (
+            (t and _target_matches_view(t, post_sec_view))
+            or post_sec_view != pre_sec_view
+            or post_sec_view in _ASYNC_SECONDARY_VIEWS
+            or post_sec_view in ("skill_plan", "starmap_new", "systemmap_new", "planet", "shiptree", "paint_tool", "virtual_goods_store", "aurumstore", "career_portal")
+        ):
+            return True
+        if opened_vis_ids:
+            return True
+        sec_cont, sec_id, _ = _find_matching_secondary_or_drawer_container(sm, t)
+        if sec_id and (sec_cont is None or _is_visible(sec_cont) or sec_id == "notifications"):
+            return True
+        if reg is not None and hasattr(reg, "GetWindows"):
+            is_explicit_chrome = bool(t and any(tok == t or (len(t) >= 5 and tok in t) for tok in (_CORE_HUD_PRESERVE_TOKENS + _CHAT_WINDOW_TOKENS)))
+            try:
+                for rw in list(reg.GetWindows() or []):
+                    if rw is None or getattr(rw, "destroyed", False) or not _is_visible(rw):
+                        continue
+                    if not is_explicit_chrome and _is_preserved_chrome_window(rw, keep_chat=True):
+                        continue
+                    wid_s = _safe_str(getattr(rw, "windowID", None) or getattr(rw, "name", ""), 64)
+                    wcap_s = _strip_tags(_safe_str(getattr(rw, "caption", None) or "", 64))
+                    wcls_s = rw.__class__.__name__
+                    if t and _target_matches_window(t, wid_s, wcap_s, wcls_s):
+                        return True
+            except Exception:
+                pass
+        return False
 
     if t in ("skills", "skillqueue", "skillswindow", "skillplan", "skillplans", "skillplanwindow"):
         try:
@@ -3906,6 +4155,14 @@ def _open_client_window(sm, target, require_open=False):
             if wnd is not None and hasattr(wnd, "IsMinimized") and wnd.IsMinimized() and hasattr(wnd, "Maximize"):
                 wnd.Maximize()
             H._sleep_ms(500)
+            if wnd is None:
+                wnd = SkillPlanDockablePanel.GetIfOpen()
+            sp_visible = bool(wnd is not None and not getattr(wnd, "destroyed", False) and _is_visible(wnd))
+            if require_open and not sp_visible and not _verify_matching_surface_open():
+                return {
+                    "ok": False,
+                    "error": "open_window %r produced no visible SkillPlanDockablePanel" % (raw_target,),
+                }
             return {"ok": True, "opened_via": "SkillPlanDockablePanel.Open"}
         except Exception:
             pass
@@ -3925,12 +4182,19 @@ def _open_client_window(sm, target, require_open=False):
                     n_ui._ConstructNotificationCenter()
                     nc = getattr(n_ui, "notificationCenter", None)
                 if nc is not None:
-                    if not getattr(nc, "isShowingDrawer", False) and hasattr(nc, "OpenDrawer"):
+                    already_showing = bool(getattr(nc, "isShowingDrawer", False))
+                    if not already_showing and hasattr(nc, "OpenDrawer"):
                         nc.OpenDrawer()
                         H._sleep_ms(500)
-                        return {"ok": True, "opened_via": "notificationUIService.notificationCenter.OpenDrawer"}
-                    if getattr(nc, "isShowingDrawer", False):
-                        return {"ok": True, "opened_via": "notificationUIService.notificationCenter (already open)"}
+                    nc_cont = getattr(nc, "notificationContainer", None) or getattr(nc, "drawer", None)
+                    drawer_open = bool(getattr(nc, "isShowingDrawer", False) or (nc_cont is not None and _is_visible(nc_cont)))
+                    if drawer_open or not require_open:
+                        via_n = (
+                            "notificationUIService.notificationCenter (already open)"
+                            if already_showing
+                            else "notificationUIService.notificationCenter.OpenDrawer"
+                        )
+                        return {"ok": True, "opened_via": via_n}
             except Exception:
                 pass
         n_svc = svcs.get("notificationSvc")
@@ -3946,7 +4210,12 @@ def _open_client_window(sm, target, require_open=False):
                 if hasattr(n_svc, "OpenNotificationReadingWnd"):
                     n_svc.OpenNotificationReadingWnd()
                     H._sleep_ms(500)
-                    return {"ok": True, "opened_via": "notificationSvc.OpenNotificationReadingWnd"}
+                    if not require_open or _verify_matching_surface_open():
+                        return {"ok": True, "opened_via": "notificationSvc.OpenNotificationReadingWnd"}
+                    return {
+                        "ok": False,
+                        "error": "open_window %r produced no visible notification drawer or window" % (raw_target,),
+                    }
             except Exception:
                 pass
 
@@ -3969,8 +4238,6 @@ def _open_client_window(sm, target, require_open=False):
         if sess is None or (getattr(sess, "stationid", None) is None and getattr(sess, "structureid", None) is None):
             return {"ok": False, "error": "%s requires being docked at a station or structure; call dock first" % (mname,)}
     if cmd_svc is not None and hasattr(cmd_svc, mname):
-        reg = getattr(uicore, "registry", None) if uicore is not None else None
-
         def _reg_window_vis_map():
             snap = {}
             if reg is None or not hasattr(reg, "GetWindows"):
@@ -3987,14 +4254,6 @@ def _open_client_window(sm, target, require_open=False):
             except Exception:
                 pass
             return snap
-
-        def _current_sec_view():
-            try:
-                vs_cur = sm.GetService("viewState") if sm is not None else None
-                vi_cur = vs_cur.GetCurrentViewInfo() if (vs_cur is not None and hasattr(vs_cur, "GetCurrentViewInfo")) else None
-                return _safe_str(getattr(vi_cur, "name", "") or "", 48)
-            except Exception:
-                return ""
 
         pre_snap = _reg_window_vis_map()
         pre_sec_view = _current_sec_view()
@@ -4020,47 +4279,28 @@ def _open_client_window(sm, target, require_open=False):
         post_snap = _reg_window_vis_map()
         closed_ids = [wid for wid in pre_snap if wid not in post_snap]
         opened_vis_ids = [wid for wid, vis in post_snap.items() if wid not in pre_snap and vis]
+        post_sec_view = _current_sec_view()
+        sec_toggled_closed = bool(
+            pre_sec_view
+            and _target_matches_view(t, pre_sec_view)
+            and post_sec_view != pre_sec_view
+            and not _target_matches_view(t, post_sec_view)
+        )
         retried = False
-        if closed_ids and not opened_vis_ids:
+        if (closed_ids and not opened_vis_ids) or sec_toggled_closed:
             # ToggleOpenClose-style commands (e.g. OpenLedger / CmdToggleMap) close an already-open
-            # window or an invisible zombie left by an earlier ApplyAttributes exception; re-invoke
-            # once so open_neocom guarantees opening (or surfacing the real init exception).
+            # window, secondary view, or zombie; re-invoke once so open_window guarantees opening.
             fn(*cmd_args)
             H._sleep_ms(500)
             retried = True
             post_snap = _reg_window_vis_map()
             opened_vis_ids = [wid for wid, vis in post_snap.items() if wid not in pre_snap and vis]
 
-        if require_open and reg is not None and hasattr(reg, "GetWindows"):
-            post_sec_view = _current_sec_view()
-            sec_opened = bool(
-                post_sec_view
-                and (
-                    post_sec_view != pre_sec_view
-                    or post_sec_view in _ASYNC_SECONDARY_VIEWS
-                    or post_sec_view in ("skill_plan", "starmap_new", "systemmap_new", "planet", "shiptree", "paint_tool", "virtual_goods_store", "aurumstore", "career_portal")
-                )
-            )
-            matching_visible = False
-            try:
-                for rw in list(reg.GetWindows() or []):
-                    if rw is None or getattr(rw, "destroyed", False) or not _is_visible(rw):
-                        continue
-                    wid_s = _safe_str(getattr(rw, "windowID", None) or getattr(rw, "name", ""), 64).lower()
-                    wcap_s = _strip_tags(_safe_str(getattr(rw, "caption", None) or "", 64)).lower()
-                    wcls_s = rw.__class__.__name__.lower()
-                    if any(sys_tok in wid_s for sys_tok in ("neocom", "chatchannel", "l_main")):
-                        continue
-                    if t and (t in wid_s.replace("_", "") or t in wcap_s.replace(" ", "") or t in wcls_s):
-                        matching_visible = True
-                        break
-            except Exception:
-                pass
-            if not opened_vis_ids and not matching_visible and not sec_opened:
-                return {
-                    "ok": False,
-                    "error": "open_window %r produced no visible window or secondary view (cmd=%s)" % (raw_target, mname),
-                }
+        if require_open and not _verify_matching_surface_open(pre_sec_view=pre_sec_view, opened_vis_ids=opened_vis_ids):
+            return {
+                "ok": False,
+                "error": "open_window %r produced no visible window or secondary view (cmd=%s)" % (raw_target, mname),
+            }
 
         via_msg = "uicore.cmd.%s (retried after toggle-close)" % mname if retried else "uicore.cmd.%s" % mname
         return {"ok": True, "opened_via": via_msg, "opened_window_count": len(opened_vis_ids)}
@@ -4068,8 +4308,19 @@ def _open_client_window(sm, target, require_open=False):
     if t in ("nes", "newedenstore", "plexstore", "aurumstore", "store"):
         try:
             vs = sm.GetService("viewState")
+            pre_sec = _current_sec_view()
             vs.ToggleSecondaryView("aurumstore")
             H._sleep_ms(600)
+            post_sec = _current_sec_view()
+            if require_open and pre_sec and _target_matches_view(t, pre_sec) and not _target_matches_view(t, post_sec):
+                vs.ToggleSecondaryView("aurumstore")
+                H._sleep_ms(600)
+                post_sec = _current_sec_view()
+            if require_open and not _verify_matching_surface_open(pre_sec_view=pre_sec):
+                return {
+                    "ok": False,
+                    "error": "open_window %r did not open aurumstore secondary view (current=%r)" % (raw_target, post_sec),
+                }
             return {"ok": True, "opened_via": "viewState.ToggleSecondaryView(aurumstore)"}
         except Exception as exc:
             return {"ok": False, "error": "aurumstore open failed: %r" % (exc,)}
@@ -4473,7 +4724,11 @@ def _execute_action(sm, action):
                 open_res = _open_client_window(sm, target, require_open=req_open)
                 result.update(open_res)
                 if open_res.get("ok") and action.get("click_top_tabs"):
-                    tab_res = _click_top_tabs_in_window(target, max_tabs=int(action.get("max_tabs", 6) or 6))
+                    tab_res = _click_top_tabs_in_window(
+                        target,
+                        max_tabs=int(action.get("max_tabs", 6) or 6),
+                        require_match=True,
+                    )
                     result["tabs"] = tab_res
                     if not tab_res.get("ok"):
                         result["ok"] = False
@@ -4817,6 +5072,8 @@ def _execute_action(sm, action):
                             elif ch not in wins:
                                 wins.append(ch)
                 t_low = target.lower() if target else ""
+                t_norm = _normalize_window_tok(target)
+                is_explicit_chrome = bool(t_norm and any(tok == t_norm or (len(t_norm) >= 5 and tok in t_norm) for tok in (_CORE_HUD_PRESERVE_TOKENS + _CHAT_WINDOW_TOKENS)))
                 has_visible_modal = any(
                     not getattr(w, "destroyed", False)
                     and _is_visible(w)
@@ -4843,10 +5100,13 @@ def _execute_action(sm, action):
                         or "Popup" in wcls
                         or "Dialog" in wcls
                     )
+                    if not is_mod and not is_explicit_chrome and _is_preserved_chrome_window(w, keep_chat=True):
+                        continue
                     if not t_low and has_visible_modal and not is_mod:
                         continue
                     match = (
                         not t_low
+                        or _target_matches_window(t_norm, wid, wname + " " + wcap, wcls)
                         or t_low in wid.lower()
                         or t_low in wname.lower()
                         or t_low in wcap.lower()
@@ -4921,25 +5181,25 @@ def _execute_action(sm, action):
                         except Exception:
                             pass
                 if not (not t_low and has_visible_modal):
+                    if not t_norm or _target_matches_window(t_norm, "SkillPlanDockablePanel", "skills", "SkillPlanDockablePanel"):
+                        try:
+                            from eve.client.script.ui.skillPlan.skillPlanDockablePanel import SkillPlanDockablePanel
+                            sp_open = SkillPlanDockablePanel.GetIfOpen()
+                            if sp_open is not None and not getattr(sp_open, "destroyed", False) and _is_visible(sp_open):
+                                SkillPlanDockablePanel.CloseIfOpen()
+                                closed.append("SkillPlanDockablePanel")
+                        except Exception:
+                            pass
                     try:
                         vs = sm.GetService("viewState") if sm is not None else None
-                        cur_vi = vs.GetCurrentViewInfo() if (vs is not None and hasattr(vs, "GetCurrentViewInfo")) else None
+                        sec_vi = getattr(vs, "secondaryInfo", None) if vs is not None else None
+                        cur_vi = sec_vi or (vs.GetCurrentViewInfo() if (vs is not None and hasattr(vs, "GetCurrentViewInfo")) else None)
                         cur_vname = _safe_str(getattr(cur_vi, "name", ""), 48)
                         if cur_vname in ("paint_tool", "ship_skinr", "virtual_goods_store", "aurumstore", "starmap_new", "starmap", "systemmap", "systemmap_new", "planet", "shiptree", "career_portal", "skill_plan", "skill_tree", "omega_upsell", "achievements") and (
                             not t_low
-                            or "paint" in t_low
-                            or "skinr" in t_low
-                            or "store" in t_low
-                            or "nes" in t_low
-                            or "map" in t_low
-                            or "planet" in t_low
-                            or "tree" in t_low
-                            or "career" in t_low
-                            or "skill" in t_low
-                            or "omega" in t_low
-                            or "achiev" in t_low
+                            or _target_matches_view(t_norm, cur_vname)
                             or not closed
-                            or any(("paint" in c.lower() or "skinr" in c.lower() or "map" in c.lower() or "store" in c.lower() or "tree" in c.lower() or "career" in c.lower() or "skill" in c.lower() or "omega" in c.lower() or "achiev" in c.lower()) for c in closed)
+                            or any(_target_matches_view(_normalize_window_tok(c), cur_vname) for c in closed)
                         ):
                             if cur_vname == "skill_plan" or "skill" in t_low:
                                 try:
@@ -4962,7 +5222,7 @@ def _execute_action(sm, action):
                     except Exception:
                         pass
                 try:
-                    if not t_low or "notif" in t_low:
+                    if not t_low or "notif" in t_low or _target_matches_window(t_norm, "notifications", "NotificationCenter", "NotificationCenter"):
                         svcs_c = getattr(sm, "services", {}) if sm is not None else {}
                         n_ui_c = svcs_c.get("notificationUIService")
                         nc_c = getattr(n_ui_c, "notificationCenter", None) if n_ui_c is not None else None

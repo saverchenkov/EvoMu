@@ -1803,6 +1803,19 @@ class Test1202R4And1242Acceptance(unittest.TestCase):
         open_steps = [st for st in loaded["steps"] if st["action"].get("type") == "open_window"]
         self.assertEqual(len(open_steps), 56)
         self.assertTrue(all(st["action"].get("require_window_open") is True for st in open_steps))
+        for sec_target in ("nes", "notifications", "map", "solarsystemmap", "shiptree"):
+            matching = [
+                st for st in open_steps
+                if playtester._normalize_window_target_key(st["action"].get("target", "")) == sec_target
+            ]
+            self.assertTrue(matching, f"Missing open_window step for {sec_target}")
+            self.assertTrue(all(st["action"].get("click_top_tabs") is False for st in matching), matching)
+        close_steps = [st for st in loaded["steps"] if st["action"].get("type") == "close_modal_or_window"]
+        self.assertEqual(len(close_steps), 66)
+        self.assertTrue(
+            all(bool(str(st["action"].get("target") or "").strip()) for st in close_steps),
+            "BF-1242-R1-01: all close_modal_or_window steps in window_sweep.json must carry explicit non-empty targets",
+        )
         si_steps = [st for st in loaded["steps"] if st["action"].get("type") == "show_info"]
         self.assertEqual(len(si_steps), 10)
         self.assertTrue(all(st["checks"].get("expect_window_open") == "info" for st in si_steps))
@@ -1996,11 +2009,11 @@ class Test1202R4And1242Acceptance(unittest.TestCase):
                     def SlashCmd(self, cmd):
                         gm_events.append(("SlashCmd", cmd))
                         return {"ok": True}
-                    def AdvanceClock(self, secs):
-                        gm_events.append(("AdvanceClock", secs))
+                    def AdvanceClock(self, secs, *rest):
+                        gm_events.append(("AdvanceClock", secs, rest[0] if rest else None))
                         return True
-                    def ClearSessionTimer(self):
-                        gm_events.append(("ClearSessionTimer",))
+                    def ClearSessionTimer(self, *rest):
+                        gm_events.append(("ClearSessionTimer", rest[0] if rest else None))
                         return True
 
                 fake_bridge = types.ModuleType("evomu_bridge")
@@ -2056,12 +2069,106 @@ class Test1202R4And1242Acceptance(unittest.TestCase):
                 self.assertIn(("Login", exp_gm_user, "evomu-scenario-gm-secret"), gm_events)
                 self.assertIn(("SelectCharacterID", exp_gm_cid), gm_events)
                 self.assertIn(("SlashCmd", f"/giveisk {target_cid} 5000000"), gm_events)
-                self.assertIn(("AdvanceClock", 60), gm_events)
-                self.assertIn(("AdvanceClock", 12), gm_events)
+                self.assertIn(("AdvanceClock", 60, target_cid), gm_events)
+                self.assertIn(("AdvanceClock", 12, target_cid), gm_events)
                 self.assertIn(("close",), gm_events)
                 # Player session (role = 0) never receives slash_command / advance_server_time or time_control=True
                 self.assertTrue(all(a.get("time_control") is False for a in player_exec_actions), player_exec_actions)
                 self.assertFalse(any(a.get("type") in ("slash_command", "advance_server_time") for a in player_exec_actions))
+
+    def test_gm_bridge_rewrites_all_slash_and_time_control_commands_for_target_char(self):
+        import types
+
+        target_cid = 91000042
+        events = []
+
+        class _FakeGmConn:
+            connected = True
+            def close(self):
+                self.connected = False
+
+        class _FakeSvc:
+            def Login(self, u, pw):
+                return True
+            def GetCharactersToSelect(self):
+                return [{"characterID": 90000003}]
+            def SelectCharacterID(self, cid):
+                return True
+            def SlashCmd(self, cmd):
+                events.append(("SlashCmd", cmd))
+                return {"ok": True}
+            def AdvanceClock(self, secs, tgt=None):
+                events.append(("AdvanceClock", secs, tgt))
+                return True
+            def ClearSessionTimer(self, tgt=None):
+                events.append(("ClearSessionTimer", tgt))
+                return True
+
+        fake_bridge = types.ModuleType("evomu_bridge")
+        def _install(sm, host="127.0.0.1", port=26000):
+            sm.RemoteSvc = lambda _name: _FakeSvc()
+            return _FakeGmConn()
+        fake_bridge.install_service_manager_hook = _install
+
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(sys.modules, {"evomu_bridge": fake_bridge}):
+            runner = self._runner_in_dir(Path(td), [])
+            actions = [
+                ("clear_timers", {"type": "clear_timers"}),
+                ("complete_skills", {"type": "complete_skills"}),
+                ("complete_skills", {"type": "complete_skills", "target": "10"}),
+                ("complete_industry_jobs", {"type": "complete_industry_jobs"}),
+                ("complete_industry_jobs", {"type": "complete_industry_jobs", "target": "701"}),
+                ("advance_upwell_timer", {"type": "advance_upwell_timer"}),
+                ("advance_upwell_timer", {"type": "advance_upwell_timer", "target": "1000000000100"}),
+                ("advance_server_time", {"type": "advance_server_time", "seconds": 90}),
+                ("slash_command", {"type": "slash_command", "command": "/giveitem 587 2"}),
+                ("slash_command", {"type": "slash_command", "command": "/createitem 34 100"}),
+                ("slash_command", {"type": "slash_command", "command": "/spawnnpc 5000"}),
+                ("slash_command", {"type": "slash_command", "command": "/load 200 100"}),
+                ("slash_command", {"type": "slash_command", "command": "/fit 3100 11"}),
+                ("slash_command", {"type": "slash_command", "command": "/spawn 587 1"}),
+                ("slash_command", {"type": "slash_command", "command": "/spawnwreck 587 1"}),
+                ("slash_command", {"type": "slash_command", "command": "/spawnanomaly"}),
+                ("slash_command", {"type": "slash_command", "command": "/spawnanomaly 10001"}),
+                ("slash_command", {"type": "slash_command", "command": "/setattr 37 500"}),
+                ("slash_command", {"type": "slash_command", "command": "/setattr me 37 500"}),
+                ("slash_command", {"type": "slash_command", "command": "/energy 42"}),
+                ("slash_command", {"type": "slash_command", "command": "/secstatus -2.5"}),
+                ("slash_command", {"type": "slash_command", "command": "/tr 30000142 noblock"}),
+                ("slash_command", {"type": "slash_command", "command": "/advancetime 300"}),
+            ]
+            for atype, act in actions:
+                res = runner._execute_gm_or_time_control_via_bridge(act, atype, target_cid)
+                self.assertTrue(res.get("action_ok"), (act, res))
+            runner._close_gm_bridge()
+
+        expected = [
+            ("ClearSessionTimer", target_cid),
+            ("SlashCmd", f"/cleartimers {target_cid}"),
+            ("SlashCmd", f"/completeskills {target_cid} all"),
+            ("SlashCmd", f"/completeskills {target_cid} 10"),
+            ("SlashCmd", f"/completeindustry {target_cid}"),
+            ("SlashCmd", f"/completeindustry {target_cid} 701"),
+            ("SlashCmd", f"/upwelltimer {target_cid}"),
+            ("SlashCmd", f"/upwelltimer {target_cid} 1000000000100"),
+            ("AdvanceClock", 90, target_cid),
+            ("SlashCmd", f"/giveitem {target_cid} 587 2"),
+            ("SlashCmd", f"/createitem {target_cid} 34 100"),
+            ("SlashCmd", f"/spawnnpc {target_cid} 5000"),
+            ("SlashCmd", f"/load {target_cid} 200 100"),
+            ("SlashCmd", f"/fit {target_cid} 3100 11"),
+            ("SlashCmd", f"/spawn {target_cid} 587 1"),
+            ("SlashCmd", f"/spawnwreck {target_cid} 587 1"),
+            ("SlashCmd", f"/spawnanomaly {target_cid}"),
+            ("SlashCmd", f"/spawnanomaly {target_cid} 10001"),
+            ("SlashCmd", f"/setattr {target_cid} 37 500"),
+            ("SlashCmd", f"/setattr {target_cid} 37 500"),
+            ("SlashCmd", f"/energy {target_cid} 42"),
+            ("SlashCmd", f"/secstatus {target_cid} -2.5"),
+            ("SlashCmd", f"/tr {target_cid} 30000142 noblock"),
+            ("SlashCmd", f"/advancetime {target_cid} 300"),
+        ]
+        self.assertEqual(events, expected)
 
 
 if __name__ == "__main__":

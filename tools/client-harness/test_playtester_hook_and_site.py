@@ -3412,6 +3412,115 @@ class TestScenarioHookExtensions(unittest.TestCase):
             res_tabs = hook._click_top_tabs_in_window("info", max_tabs=3, require_match=True)
             self.assertFalse(res_tabs.get("ok"))
 
+    def test_window_sweep_chrome_protection_secondary_views_and_require_open(self):
+        hook = _load_hook_with_py2_stubs()
+        closed_wins = []
+
+        def _make_win(wid, name=None, caption=None):
+            w = types.SimpleNamespace(
+                windowID=wid,
+                name=name or wid,
+                caption=caption or wid,
+                destroyed=False,
+                display=True,
+                children=[],
+            )
+            def _close_win(win=w, win_id=wid):
+                win.destroyed = True
+                closed_wins.append(win_id)
+            w.Close = _close_win
+            return w
+
+        lobby = _make_win("lobbyWnd", "lobbyWnd", "Station")
+        neocom = _make_win("neocom", "neocom", "Neocom")
+        sidepanel = _make_win("sidepanel", "sidepanel", "InfoPanel")
+        chat = _make_win("chatchannel_local", "chatchannel_local", "Local")
+        overview = _make_win("OverviewWindow", "OverviewWindow", "Overview")
+        shipui = _make_win("ShipUI", "ShipUI", "ShipUI")
+        infopanel = _make_win("InfoPanelLocations", "InfoPanelLocations", "Route")
+        transient = _make_win("WalletWindow", "WalletWindow", "Wallet")
+        windows = [lobby, neocom, sidepanel, chat, overview, shipui, infopanel, transient]
+
+        fake_reg = types.SimpleNamespace(
+            GetWindows=lambda: list(windows),
+            GetModalWindow=lambda: None,
+            modals=[],
+        )
+        fake_cmd = types.SimpleNamespace(
+            CmdOpenNewEdenStore=lambda: None,
+            CmdOpenSkillQueueWindow=lambda: None,
+        )
+        fake_uicore = types.SimpleNamespace(
+            cmd=fake_cmd,
+            registry=fake_reg,
+            layer=types.SimpleNamespace(modal=None, abovemain=None, main=None),
+            desktop=types.SimpleNamespace(width=1280, height=800),
+        )
+        fake_viewstate = types.SimpleNamespace(
+            secondaryInfo=types.SimpleNamespace(name="starmap"),
+            activeView=types.SimpleNamespace(
+                layer=types.SimpleNamespace(name="l_starmap", display=True, destroyed=False, children=[])
+            ),
+            ToggleSecondaryView=lambda *_a, **_kw: None,
+            CloseSecondaryView=lambda *_a, **_kw: None,
+        )
+        fake_notif_center = types.SimpleNamespace(
+            isShowingDrawer=False,
+            drawer=types.SimpleNamespace(name="NotificationCenterDrawer", display=False, destroyed=True, children=[]),
+            OpenDrawer=lambda: None,
+            CloseDrawer=lambda: None,
+        )
+        fake_svcs = {
+            "viewState": fake_viewstate,
+            "notificationUIService": types.SimpleNamespace(notificationCenter=fake_notif_center),
+            "aurumstore": types.SimpleNamespace(),
+            "skills": types.SimpleNamespace(),
+        }
+        fake_sm = types.SimpleNamespace(services=fake_svcs, GetService=lambda n: fake_svcs.get(n))
+        sess = types.SimpleNamespace(
+            userid=1, charid=90000001, stationid=60003760, structureid=None,
+            shipid=100000001, solarsystemid=None, solarsystemid2=30000142, mutating=0, changing=None,
+        )
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.dict(builtins.__dict__, {"session": sess, "sm": fake_sm}), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_is_visible", side_effect=lambda obj: bool(getattr(obj, "display", True) and not getattr(obj, "destroyed", False))), \
+             mock.patch.object(hook, "_close_context_menus_if_outside"), \
+             mock.patch.object(hook, "_dismiss_pinned_tooltip_if_outside"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value={"session": {"charid": 90000001}, "open_windows": []}), \
+             mock.patch.object(hook, "_settle_after_action", return_value=0), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True):
+            # Generic close (target="") closes transient WalletWindow, preserving all HUD/lobby/chat/overview/infopanel
+            res_empty = hook._execute_action(fake_sm, {"type": "close_modal_or_window", "target": "", "wait_ms": 0})
+            self.assertTrue(res_empty.get("action_ok"), res_empty)
+            self.assertEqual(closed_wins, ["WalletWindow"])
+
+            # Target "info" must NOT close InfoPanelLocations when no InfoWnd is open
+            closed_wins[:] = []
+            res_info = hook._execute_action(fake_sm, {"type": "close_modal_or_window", "target": "info", "wait_ms": 0})
+            self.assertTrue(res_info.get("action_ok"), res_info)
+            self.assertEqual(closed_wins, [])
+
+            # Secondary view without TabGroup ("map" -> currentSecondaryView="starmap") succeeds gracefully with tabs_clicked=0
+            tab_map = hook._click_top_tabs_in_window("map", max_tabs=4, require_match=True)
+            self.assertTrue(tab_map.get("ok"), tab_map)
+            self.assertEqual(tab_map.get("tabs_clicked"), 0)
+
+            # Secondary view NOT open ("shiptree" while "starmap" is open) must fail when require_match=True
+            tab_tree = hook._click_top_tabs_in_window("shiptree", max_tabs=4, require_match=True)
+            self.assertFalse(tab_tree.get("ok"), tab_tree)
+
+            # skills / notifications / nes fallback must honor require_open=True and fail when nothing opened
+            res_skills = hook._open_client_window(fake_sm, "skills", require_open=True)
+            self.assertFalse(res_skills.get("ok"), res_skills)
+            res_notif = hook._open_client_window(fake_sm, "notifications", require_open=True)
+            self.assertFalse(res_notif.get("ok"), res_notif)
+            fake_uicore.cmd = types.SimpleNamespace()  # force aurumstore fallback
+            res_nes = hook._open_client_window(fake_sm, "nes", require_open=True)
+            self.assertFalse(res_nes.get("ok"), res_nes)
+
 
 if __name__ == "__main__":
     unittest.main()

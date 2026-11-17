@@ -2587,11 +2587,16 @@ class TestPlaytester1199AcceptanceCriteria(unittest.TestCase):
             runner_gm = playtester.PlaytesterRunner(args_gm)
             cfg_gm_text = runner_gm.write_server_config().read_text(encoding="utf-8")
             parsed_gm = tomllib.loads(cfg_gm_text) if tomllib is not None else _parse_simple_toml(cfg_gm_text)
+        # BF-1242-R1-03: --persona gm_tester must NOT emit [[admin_accounts]] (which would clobber seed_demo);
+        # instead it uses EVOMU_ADMIN_TOKEN (`admin` 90000003) via `_server_extra_env()`.
         admins_gm = parsed_gm.get("admin_accounts", [])
-        self.assertGreaterEqual(len(admins_gm), 1)
-        for a_acc in admins_gm:
-            unknown_a = set(a_acc.keys()) - struct_fields["AdminAccountConfig"]
-            self.assertEqual(unknown_a, set(), f"Unknown AdminAccountConfig keys: {unknown_a}")
+        self.assertEqual(len(admins_gm), 0, f"gm_tester must not emit admin_accounts, got {admins_gm}")
+        self.assertTrue(parsed_gm.get("feature_flags", {}).get("seed_demo"))
+        self.assertEqual(runner._server_extra_env(), {})
+        self.assertEqual(
+            runner_gm._server_extra_env(),
+            {"EVOMU_ADMIN_TOKEN": playtester.PLAYTESTER_GM_ADMIN_SECRET},
+        )
 
     def test_start_ini_build_detection_and_staging_without_hardcoded_build(self):
         src_text = (HARNESS_DIR / "playtester.py").read_text(encoding="utf-8")
@@ -3029,6 +3034,101 @@ class TestPlaytester1200OriginMainCutover(unittest.TestCase):
             self.assertNotIn(build_root, bundle_b["manual_report"]["title"])
             self.assertIn("scroll.py", bundle_a["manual_report"]["description"])
             self.assertIn("contentCards.py", bundle_b["manual_report"]["description"])
+
+    def test_gm_tester_preserves_demo_seed_and_routes_gm_ops_via_admin_bridge(self):
+        import types
+
+        with tempfile.TemporaryDirectory() as td:
+            wt = Path(td)
+            args = playtester.parse_args(["--worktree", str(wt), "--persona", "gm_tester"])
+            runner = playtester.PlaytesterRunner(args)
+            runner.oracle.async_write = False
+            runner.cached_git_head = "deadbeef"
+            cfg_text = runner.write_server_config().read_text(encoding="utf-8")
+            self.assertNotIn("[[admin_accounts]]", cfg_text)
+            self.assertIn("seed_demo = true", cfg_text)
+            self.assertEqual(
+                runner._server_extra_env(),
+                {"EVOMU_ADMIN_TOKEN": playtester.PLAYTESTER_GM_ADMIN_SECRET},
+            )
+
+            snap = {
+                "active_view": "hangar",
+                "session": {"charid": 90000001, "stationid": 60003760},
+                "ui": {"open_windows": [], "modals": [], "clickable_widgets": []},
+                "open_windows": [],
+                "modals": [],
+                "space": {},
+                "skills_state": {},
+                "wallet_state": {},
+            }
+            rpc_calls = []
+            gm_events = []
+
+            class _FakeGmConn:
+                def __init__(self):
+                    self.connected = True
+                def close(self):
+                    self.connected = False
+                    gm_events.append(("close",))
+
+            class _FakeSvc:
+                def Login(self, u, pw):
+                    gm_events.append(("Login", u, pw))
+                    return True
+                def GetCharactersToSelect(self):
+                    return [{"characterID": 90000003}]
+                def SelectCharacterID(self, cid):
+                    gm_events.append(("SelectCharacterID", cid))
+                    return True
+                def SlashCmd(self, cmd):
+                    gm_events.append(("SlashCmd", cmd))
+                    return {"ok": True}
+
+            fake_bridge = types.ModuleType("evomu_bridge")
+            def _install_hook(sm, host="127.0.0.1", port=26000):
+                sm.RemoteSvc = lambda _name: _FakeSvc()
+                return _FakeGmConn()
+            fake_bridge.install_service_manager_hook = _install_hook
+
+            def fake_rpc_call(method, params=None, timeout=15.0):
+                rpc_calls.append(method)
+                if method == "get_state":
+                    return dict(snap)
+                return {"ok": True}
+
+            runner.rpc = mock.Mock()
+            runner.rpc.call.side_effect = fake_rpc_call
+            plan_dec = {
+                "observation": "In hangar",
+                "previous_action_verification": {"expectation_met": True, "discrepancy_summary": ""},
+                "bug_report": {"should_file": False},
+                "current_goal": "Spawn item via /createitem in gm_tester",
+                "memory_update": {},
+                "delegated_plan": {
+                    "plan_goal": "GM bridge /createitem",
+                    "horizon_rationale": "Test gm_tester admin bridge",
+                    "max_batch_steps": 1,
+                    "steps": [
+                        {
+                            "step_number": 1,
+                            "exec_mode": "direct",
+                            "action": {"type": "slash_command", "command": "/createitem 34 100"},
+                        }
+                    ],
+                },
+            }
+            with mock.patch.dict(sys.modules, {"evomu_bridge": fake_bridge}), \
+                 mock.patch.object(playtester, "capture_window_screenshot", return_value={"ok": False}), \
+                 mock.patch.object(playtester, "invoke_agy_planner", return_value=(plan_dec, "hydrogen-l-tf-medium", 0.5)):
+                runner.execute_step(1, {}, [])
+            runner._close_gm_bridge()
+
+            self.assertNotIn("execute_action", rpc_calls)
+            self.assertIn(("Login", "admin", playtester.PLAYTESTER_GM_ADMIN_SECRET), gm_events)
+            self.assertIn(("SelectCharacterID", 90000003), gm_events)
+            self.assertIn(("SlashCmd", "/createitem 90000001 34 100"), gm_events)
+            self.assertIn(("close",), gm_events)
 
 
 if __name__ == "__main__":

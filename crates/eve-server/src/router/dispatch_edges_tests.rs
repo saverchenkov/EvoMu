@@ -1203,4 +1203,206 @@ fn session_rpc_rate_bucket_evicts_idle_bootstrap_entries_past_ttl() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn time_control_target_char_id_routing_fail_closed_and_role_gates() {
+    use crate::services::space_destiny::{get_session_change_timer, record_session_change_timer};
+    use eve_destiny::{Ball, MovementMode};
+    use glam::DVec3;
+
+    let ctx = edge_ctx();
+    let kw = HashMap::new();
+    let gm_cid = 90_000_001_i64;
+    let player_cid = 90_000_002_i64;
+    let gm_sys = 30_000_142_u32;
+    let player_sys = 30_002_187_u32;
+
+    let (gm_ship, player_ship) = ctx.db.with_mut_snapshot(|snap| {
+        let gm_ship = snap.characters[&gm_cid].active_ship_id;
+        let player_ch = snap.characters.get_mut(&player_cid).expect("player char");
+        player_ch.solar_system_id = player_sys;
+        player_ch.station_id = None;
+        player_ch.structure_id = None;
+        let p_ship = player_ch.active_ship_id;
+        (gm_ship, p_ship)
+    });
+
+    let _ = ctx
+        .systems
+        .get_or_spawn(gm_sys)
+        .spawn_ball(Ball {
+            id: gm_ship,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::new(200.0, 0.0, 0.0),
+            max_velocity: 200.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 1.0,
+            mode: MovementMode::GotoDirection { direction: DVec3::X },
+        })
+        .await;
+    let _ = ctx
+        .systems
+        .get_or_spawn(player_sys)
+        .spawn_ball(Ball {
+            id: player_ship,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::new(200.0, 0.0, 0.0),
+            max_velocity: 200.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 1.0,
+            mode: MovementMode::GotoDirection { direction: DVec3::X },
+        })
+        .await;
+
+    let mut gm = demo_session(&ctx, 701, service_roles::ROLE_ADMIN | service_roles::ROLE_GML);
+    gm.solar_system_id = Some(gm_sys);
+    gm.ship_id = Some(gm_ship);
+
+    let mut player = SessionState {
+        session_id: 702,
+        user_id: Some(2),
+        character_id: Some(player_cid),
+        solar_system_id: Some(player_sys),
+        ship_id: Some(player_ship),
+        role: service_roles::ROLE_PLAYER_DEFAULT,
+        ..Default::default()
+    };
+
+    // Non-GM caller must be rejected even with an explicit target_char_id.
+    for (method, args) in [
+        ("AdvanceClock", vec![PyRep::Integer(10), PyRep::Integer(player_cid)]),
+        ("ClearSessionTimer", vec![PyRep::Integer(player_cid)]),
+        ("FastForwardSessionTimer", vec![PyRep::Integer(player_cid)]),
+    ] {
+        let err = ctx
+            .dispatch_rpc(&mut player, "timeControl", None, method, &args, &kw, None)
+            .await
+            .expect_err("non-GM caller must be denied");
+        assert_eq!(err.code, "InsufficientRole", "{method}");
+    }
+
+    let t0 = ctx.clock().now_unix_secs();
+    record_session_change_timer(&ctx, gm_cid, t0, gm_sys, 1, "dock");
+    record_session_change_timer(&ctx, player_cid, t0, player_sys, 1, "stargate_jump");
+
+    // Unknown target_cid fails closed BEFORE mutating clock or timers; <=0 target is InvalidArgument.
+    let unknown_adv = ctx
+        .dispatch_rpc(
+            &mut gm,
+            "timeControl",
+            None,
+            "AdvanceClock",
+            &[PyRep::Integer(25), PyRep::Integer(999_888_777)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("unknown AdvanceClock target must fail closed");
+    assert_eq!(unknown_adv.code, "CharacterNotFound");
+    assert_eq!(ctx.clock().now_unix_secs(), t0, "failed AdvanceClock must not advance clock");
+
+    let unknown_clr = ctx
+        .dispatch_rpc(
+            &mut gm,
+            "timeControl",
+            None,
+            "ClearSessionTimer",
+            &[PyRep::Integer(999_888_777)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("unknown ClearSessionTimer target must fail closed");
+    assert_eq!(unknown_clr.code, "CharacterNotFound");
+    assert!(get_session_change_timer(&ctx, gm_cid).is_some());
+    assert!(get_session_change_timer(&ctx, player_cid).is_some());
+
+    let bad_arg = ctx
+        .dispatch_rpc(
+            &mut gm,
+            "timeControl",
+            None,
+            "ClearSessionTimer",
+            &[PyRep::Integer(0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("non-positive target_char_id must return InvalidArgument");
+    assert_eq!(bad_arg.code, "InvalidArgument");
+
+    // ClearSessionTimer(player_cid) and FastForwardSessionTimer(player_cid) mutate ONLY player_cid.
+    ctx.dispatch_rpc(
+        &mut gm,
+        "timeControl",
+        None,
+        "ClearSessionTimer",
+        &[PyRep::Integer(player_cid)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("ClearSessionTimer(player_cid) succeeds");
+    assert!(get_session_change_timer(&ctx, player_cid).is_none());
+    assert!(get_session_change_timer(&ctx, gm_cid).is_some(), "GM timer must remain intact");
+
+    record_session_change_timer(&ctx, player_cid, t0, player_sys, 2, "stargate_jump");
+    ctx.dispatch_rpc(
+        &mut gm,
+        "timeControl",
+        None,
+        "FastForwardSessionTimer",
+        &[PyRep::Integer(player_cid)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("FastForwardSessionTimer(player_cid) succeeds");
+    assert!(get_session_change_timer(&ctx, player_cid).is_none());
+    assert!(get_session_change_timer(&ctx, gm_cid).is_some(), "GM timer must remain intact");
+
+    // AdvanceClock(20, player_cid) advances wall clock and fast-forwards ONLY player_cid's ship.
+    ctx.dispatch_rpc(
+        &mut gm,
+        "timeControl",
+        None,
+        "AdvanceClock",
+        &[PyRep::Integer(20), PyRep::Integer(player_cid)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("AdvanceClock(20, player_cid) succeeds");
+    assert_eq!(ctx.clock().now_unix_secs(), t0 + 20);
+    let (_, player_ball) = ctx
+        .systems
+        .get_or_spawn(player_sys)
+        .get_ball_snapshot(player_ship)
+        .await
+        .expect("player sys ok")
+        .expect("player ship ball exists");
+    let (_, gm_ball) = ctx
+        .systems
+        .get_or_spawn(gm_sys)
+        .get_ball_snapshot(gm_ship)
+        .await
+        .expect("gm sys ok")
+        .expect("gm ship ball exists");
+    assert!(
+        player_ball.position.x > 1_000.0,
+        "expected player ship in system {player_sys} to advance, got {:?}",
+        player_ball.position
+    );
+    assert_eq!(
+        gm_ball.position,
+        DVec3::ZERO,
+        "GM ship in system {gm_sys} must not be fast-forwarded by targeted AdvanceClock"
+    );
+}
+
 

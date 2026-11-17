@@ -129,7 +129,7 @@ fn slash_command_usage(name: &str) -> Option<&'static str> {
         "help" => Some("/help [command] - List available slash commands or show usage for a command"),
         "giveisk" => Some("/giveisk [me|<characterID>] <amount> - Add positive integer ISK to wallet"),
         "load" => Some("/load [me|<targetID>] <typeID> [quantity] - Spawn item into active ship cargo or hangar"),
-        "giveitem" | "createitem" => Some("/giveitem <typeID> [quantity] | /createitem <typeID> [quantity] - Spawn item into docked hangar or active ship cargo"),
+        "giveitem" | "createitem" => Some("/giveitem [me|<characterID>] <typeID> [quantity] | /createitem [me|<characterID>] <typeID> [quantity] - Spawn item into docked hangar or active ship cargo"),
         "fit" => Some("/fit <typeID> [slot] - Fit a module or rig onto active ship"),
         "setskill" | "giveskill" => Some("/setskill [me|<characterID>] <typeID> <0-5> - Set character skill level"),
         "heal" => Some("/heal [targetID] - Restore shield, armor, hull, and capacitor"),
@@ -139,7 +139,7 @@ fn slash_command_usage(name: &str) -> Option<&'static str> {
         "whoami" => Some("/whoami - Show current session character, corp, location, ship, and role"),
         "location" => Some("/location [characterID] - Show character location and coordinates"),
         "online" => Some("/online [moduleID|all] - Online fitted modules"),
-        "spawn" | "spawnnpc" => Some("/spawn <typeID> [qty] | /spawnnpc <typeID> [qty] - Spawn NPC/entity in system"),
+        "spawn" | "spawnnpc" => Some("/spawn [me|<characterID>] <typeID> [qty] | /spawnnpc [me|<characterID>] <typeID> - Spawn NPC/entity in system"),
         "unspawn" | "despawn" => Some("/unspawn <entityID> - Remove spawned space entity"),
         "kill" => Some("/kill <entityID> - Destroy ship or space entity"),
         "ban" => Some("/ban <account_id> [duration_seconds] [reason] - Ban account"),
@@ -1297,131 +1297,14 @@ pub async fn handle(
                     ("reason", PyRep::String(reason.to_string())),
                 ])))
             } else if let Some(rest) = cmd.strip_prefix("/giveitem ").or_else(|| cmd.strip_prefix("/createitem ")) {
-                let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
-                let Some(type_id_str) = tokens.first().map(String::as_str) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /giveitem <type_id> [quantity] or /createitem <type_id> <quantity>".into(),
-                        client_error: None,
-                    }));
-                };
-                let Ok(type_id) = type_id_str.parse::<u32>() else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Invalid type_id for /giveitem".into(),
-                        client_error: None,
-                    }));
-                };
-                let qty: i32 = tokens.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
-                if qty <= 0 {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Quantity for /giveitem must be positive".into(),
-                        client_error: None,
-                    }));
-                }
-                let Some(inv_type) = ctx.sde.types.get(&type_id) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "TypeNotFound".into(),
-                        message: format!("Type ID {type_id} not found in SDE"),
-                        client_error: None,
-                    }));
-                };
-                let is_singleton = inv_type.category_id == 6
-                    || (qty == 1 && matches!(inv_type.category_id, 7 | 32));
-                let res = ctx.db.try_with_mut_snapshot(|snap| {
-                    let ch = snap.characters.get(&cid).ok_or_else(|| BridgeRpcError {
-                        code: "CharacterNotFound".into(),
-                        message: format!("Character {cid} not found"),
-                        client_error: None,
-                    })?;
-                    let (location_id, flag) = if let Some(st_id) = ch.station_id.or(ch.structure_id) {
-                        (st_id, InventoryFlag::Hangar)
-                    } else {
-                        (ch.active_ship_id, InventoryFlag::Cargo)
-                    };
-                    snap.next_entity_id += 1;
-                    let item_id = snap.next_entity_id;
-                    let item = InventoryItemRecord {
-                        item_id,
-                        type_id,
-                        owner_id: cid,
-                        location_id,
-                        flag,
-                        quantity: qty,
-                        singleton: is_singleton,
-                        version: 1,
-                        dynamic_attributes: HashMap::new(),
-                        source_mutaplasmid_id: None,
-                        insured_payout_isk: 0.0,
-                        is_blueprint_copy: false,
-                        blueprint_runs_remaining: None,
-                    };
-                    snap.items.insert(item_id, item.clone());
-                    Ok((item, location_id))
-                });
-                match res {
-                    Ok((item, loc_id)) => {
-                        let item_id = item.item_id;
-                        // Issue #988: route newly created items through `notify_item_mutation`
-                        // so `OnItemChange` and blueprint `OnBlueprintsUpdated(ownerID)` stay consistent.
-                        ctx.notify_item_mutation(cid, None, Some(&item));
-                        Some(Ok(PyRep::keyval([
-                            ("command", PyRep::String(cmd.to_string())),
-                            ("itemID", PyRep::Integer(item_id)),
-                            ("typeID", PyRep::Integer(type_id as i64)),
-                            ("quantity", PyRep::Integer(qty as i64)),
-                            ("locationID", PyRep::Integer(loc_id)),
-                        ])))
-                    }
-                    Err(e) => Some(Err(e)),
-                }
+                Some(handle_slash_give_item(ctx, cid, cmd, rest))
             } else if let Some(rest) = ["/setskill", "/giveskill"].iter().find_map(|prefix| {
                 cmd.strip_prefix(prefix)
                     .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
             }) {
                 Some(handle_slash_set_skill(ctx, cid, cmd, rest))
             } else if let Some(rest) = cmd.strip_prefix("/spawnnpc ") {
-                let type_id_str = rest.trim();
-                let Ok(type_id) = type_id_str.parse::<u32>() else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /spawnnpc <type_id>".into(),
-                        client_error: None,
-                    }));
-                };
-                if !ctx.sde.types.contains_key(&type_id) {
-                    return Some(Err(BridgeRpcError {
-                        code: "TypeNotFound".into(),
-                        message: format!("NPC type ID {type_id} not found in SDE"),
-                        client_error: None,
-                    }));
-                }
-                let (sys_id, ship_id) = ctx.db.with_snapshot(|snap| {
-                    snap.characters.get(&cid).map(|c| (c.solar_system_id, c.active_ship_id))
-                }).or_else(|| session.solar_system_id.map(|s| (s, 0))).unwrap_or((0, 0));
-
-                let handle = ctx.systems.get_or_spawn(sys_id);
-                let origin = if ship_id > 0 {
-                    handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO)
-                } else {
-                    DVec3::ZERO
-                };
-                let npc_id = crate::services::combat_crimewatch::combat_npc_ai::spawn_npc_entity_from_sde(
-                    ctx,
-                    sys_id,
-                    type_id,
-                    0,
-                    origin + DVec3::new(1_000.0, 0.0, 0.0),
-                )
-                .await;
-
-                Some(Ok(PyRep::keyval([
-                    ("command", PyRep::String(cmd.to_string())),
-                    ("npcID", PyRep::Integer(npc_id)),
-                    ("typeID", PyRep::Integer(type_id as i64)),
-                    ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                ])))
+                Some(handle_slash_spawn_npc(ctx, session, cid, cmd, rest).await)
             } else if let Some(rest) = ["/teleport", "/tr", "/translocate", "/moveme"]
                 .iter()
                 .find_map(|prefix| {
@@ -1603,6 +1486,265 @@ fn reconcile_skill_queue_after_set_skill(
         }
     }
     *queue != prev_queue
+}
+
+/// Parses an optional `[me|self|<characterID>]` prefix token, validating explicit numeric
+/// character IDs against `snap.characters` so unknown targets fail closed with `CharacterNotFound`.
+fn resolve_explicit_slash_target(
+    ctx: &ServerContext,
+    caller_cid: i64,
+    who: &str,
+    usage: &str,
+) -> Result<(i64, bool), BridgeRpcError> {
+    if who.eq_ignore_ascii_case("me") || who.eq_ignore_ascii_case("self") {
+        return Ok((caller_cid, false));
+    }
+    let Some(target_cid) = who.parse::<i64>().ok().filter(|&id| id > 0) else {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: usage.to_string(),
+            client_error: None,
+        });
+    };
+    if !ctx
+        .db
+        .with_snapshot(|snap| snap.characters.contains_key(&target_cid))
+    {
+        return Err(BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {target_cid} not found"),
+            client_error: None,
+        });
+    }
+    Ok((target_cid, true))
+}
+
+/// Handles `/giveitem` and `/createitem` GM slash commands (`[me|<characterID>] <typeID> [quantity]`).
+fn handle_slash_give_item(
+    ctx: &ServerContext,
+    cid: i64,
+    cmd: &str,
+    rest: &str,
+) -> Result<PyRep, BridgeRpcError> {
+    let usage =
+        "Usage: /giveitem [me|<characterID>] <type_id> [quantity] or /createitem [me|<characterID>] <type_id> [quantity]";
+    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let (target_cid, type_id_str, qty_str_opt) = match token_strs.as_slice() {
+        [type_str] => (cid, *type_str, None),
+        [who, type_str, qty_str] => {
+            let (target_cid, _) = resolve_explicit_slash_target(ctx, cid, who, usage)?;
+            (target_cid, *type_str, Some(*qty_str))
+        }
+        [tok0, tok1] => {
+            if tok0.eq_ignore_ascii_case("me") || tok0.eq_ignore_ascii_case("self") {
+                (cid, *tok1, None)
+            } else if let Ok(parsed0) = tok0.parse::<i64>() {
+                if parsed0 > 0
+                    && ctx
+                        .db
+                        .with_snapshot(|snap| snap.characters.contains_key(&parsed0))
+                {
+                    (parsed0, *tok1, None)
+                } else if parsed0 > 0
+                    && tok0
+                        .parse::<u32>()
+                        .ok()
+                        .is_none_or(|t| !ctx.sde.types.contains_key(&t))
+                    && tok1.parse::<u32>().ok().is_some_and(|t| {
+                        ctx.sde
+                            .types
+                            .get(&t)
+                            .is_some_and(|rec| rec.category_id != 0)
+                    })
+                {
+                    return Err(BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: format!("Character {parsed0} not found"),
+                        client_error: None,
+                    });
+                } else {
+                    (cid, *tok0, Some(*tok1))
+                }
+            } else {
+                return Err(BridgeRpcError {
+                    code: "InvalidSlashArgument".into(),
+                    message: usage.to_string(),
+                    client_error: None,
+                });
+            }
+        }
+        _ => {
+            return Err(BridgeRpcError {
+                code: "InvalidSlashArgument".into(),
+                message: usage.to_string(),
+                client_error: None,
+            });
+        }
+    };
+    let Ok(type_id) = type_id_str.parse::<u32>() else {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Invalid type_id for /giveitem".into(),
+            client_error: None,
+        });
+    };
+    let qty: i32 = match qty_str_opt {
+        Some(q_str) => q_str.parse::<i32>().map_err(|_| BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Quantity for /giveitem must be positive".into(),
+            client_error: None,
+        })?,
+        None => 1,
+    };
+    if qty <= 0 {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: "Quantity for /giveitem must be positive".into(),
+            client_error: None,
+        });
+    }
+    let Some(inv_type) = ctx.sde.types.get(&type_id) else {
+        return Err(BridgeRpcError {
+            code: "TypeNotFound".into(),
+            message: format!("Type ID {type_id} not found in SDE"),
+            client_error: None,
+        });
+    };
+    let is_singleton = inv_type.category_id == 6
+        || (qty == 1 && matches!(inv_type.category_id, 7 | 32));
+    let (item, loc_id) = ctx.db.try_with_mut_snapshot(|snap| {
+        let ch = snap.characters.get(&target_cid).ok_or_else(|| BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {target_cid} not found"),
+            client_error: None,
+        })?;
+        let (location_id, flag) = if let Some(st_id) = ch.station_id.or(ch.structure_id) {
+            (st_id, InventoryFlag::Hangar)
+        } else {
+            (ch.active_ship_id, InventoryFlag::Cargo)
+        };
+        snap.next_entity_id += 1;
+        let item_id = snap.next_entity_id;
+        let item = InventoryItemRecord {
+            item_id,
+            type_id,
+            owner_id: target_cid,
+            location_id,
+            flag,
+            quantity: qty,
+            singleton: is_singleton,
+            version: 1,
+            dynamic_attributes: HashMap::new(),
+            source_mutaplasmid_id: None,
+            insured_payout_isk: 0.0,
+            is_blueprint_copy: false,
+            blueprint_runs_remaining: None,
+        };
+        snap.items.insert(item_id, item.clone());
+        Ok((item, location_id))
+    })?;
+    let item_id = item.item_id;
+    // Issue #988: route newly created items through `notify_item_mutation`
+    // so `OnItemChange` and blueprint `OnBlueprintsUpdated(ownerID)` stay consistent.
+    ctx.notify_item_mutation(target_cid, None, Some(&item));
+    Ok(PyRep::keyval([
+        ("command", PyRep::String(cmd.to_string())),
+        ("itemID", PyRep::Integer(item_id)),
+        ("typeID", PyRep::Integer(type_id as i64)),
+        ("quantity", PyRep::Integer(qty as i64)),
+        ("locationID", PyRep::Integer(loc_id)),
+    ]))
+}
+
+/// Handles `/spawnnpc` GM slash commands (`[me|<characterID>] <typeID>`).
+async fn handle_slash_spawn_npc(
+    ctx: &ServerContext,
+    session: &SessionState,
+    cid: i64,
+    cmd: &str,
+    rest: &str,
+) -> Result<PyRep, BridgeRpcError> {
+    let usage = "Usage: /spawnnpc [me|<characterID>] <type_id>";
+    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let (target_cid, explicit_target, type_id_str) = match token_strs.as_slice() {
+        [type_str] => (cid, false, *type_str),
+        [who, type_str] => {
+            let (target_cid, explicit) = resolve_explicit_slash_target(ctx, cid, who, usage)?;
+            (target_cid, explicit, *type_str)
+        }
+        _ => {
+            return Err(BridgeRpcError {
+                code: "InvalidSlashArgument".into(),
+                message: usage.to_string(),
+                client_error: None,
+            });
+        }
+    };
+    let Ok(type_id) = type_id_str.parse::<u32>() else {
+        return Err(BridgeRpcError {
+            code: "InvalidSlashArgument".into(),
+            message: usage.to_string(),
+            client_error: None,
+        });
+    };
+    if !ctx.sde.types.contains_key(&type_id) {
+        return Err(BridgeRpcError {
+            code: "TypeNotFound".into(),
+            message: format!("NPC type ID {type_id} not found in SDE"),
+            client_error: None,
+        });
+    }
+    let resolved_loc = ctx.db.with_snapshot(|snap| {
+        snap.characters.get(&target_cid).map(|c| {
+            let ship_id = if c.station_id.is_none() && c.structure_id.is_none() {
+                c.active_ship_id
+            } else {
+                0
+            };
+            (c.solar_system_id, ship_id)
+        })
+    });
+    let (sys_id, ship_id) = if explicit_target {
+        resolved_loc.ok_or_else(|| BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {target_cid} not found"),
+            client_error: None,
+        })?
+    } else {
+        resolved_loc
+            .or_else(|| session.solar_system_id.map(|s| (s, 0)))
+            .unwrap_or((0, 0))
+    };
+
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let origin = if ship_id > 0 {
+        handle
+            .get_ball_snapshot(ship_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, b)| b.position)
+            .unwrap_or(DVec3::ZERO)
+    } else {
+        DVec3::ZERO
+    };
+    let npc_id = crate::services::combat_crimewatch::combat_npc_ai::spawn_npc_entity_from_sde(
+        ctx,
+        sys_id,
+        type_id,
+        0,
+        origin + DVec3::new(1_000.0, 0.0, 0.0),
+    )
+    .await;
+
+    Ok(PyRep::keyval([
+        ("command", PyRep::String(cmd.to_string())),
+        ("npcID", PyRep::Integer(npc_id)),
+        ("typeID", PyRep::Integer(type_id as i64)),
+        ("solarSystemID", PyRep::Integer(sys_id as i64)),
+    ]))
 }
 
 /// Handles `/setskill` and `/giveskill` GM slash commands (`[me|<characterID>] <typeID> <0-5>`).

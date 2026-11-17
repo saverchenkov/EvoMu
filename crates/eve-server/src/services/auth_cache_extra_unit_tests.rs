@@ -773,3 +773,220 @@ async fn structure_slash_command_role_and_listing() {
     .expect_err("non-ADMIN/GMH/GML role must be rejected");
     assert_eq!(err.code, "InsufficientRole");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_bridge_giveitem_createitem_spawnnpc_target_player_and_fail_closed() {
+    use eve_db::InventoryFlag;
+    use eve_destiny::{Ball, MovementMode};
+    use glam::DVec3;
+
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+    let gm_cid = 90_000_001_i64;
+    let player_cid = 90_000_002_i64;
+    let gm_sys = 30_000_142_u32;
+    let player_sys = 30_002_187_u32;
+    let player_station = 60_008_494_i64;
+
+    let (gm_uid, player_uid, player_ship) = ctx.db.with_mut_snapshot(|snap| {
+        let gm_uid = snap.characters[&gm_cid].user_id;
+        let p = snap.characters.get_mut(&player_cid).expect("player char");
+        p.solar_system_id = player_sys;
+        p.station_id = Some(player_station);
+        p.structure_id = None;
+        (gm_uid, p.user_id, p.active_ship_id)
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(gm_uid, 10, Some(gm_cid), false, ctx.now_unix());
+    let _ = ctx
+        .db
+        .acquire_online_lock(player_uid, 11, Some(player_cid), false, ctx.now_unix());
+
+    let mut gm_sess = auth_session(10, gm_cid, 98_000_001, gm_sys);
+    gm_sess.station_id = Some(60_003_760);
+    gm_sess.role = service_roles::ROLE_ADMIN | service_roles::ROLE_GML | service_roles::ROLE_SPAWN;
+
+    let mut player_sess = auth_session(11, player_cid, 98_000_002, player_sys);
+    player_sess.station_id = Some(player_station);
+    player_sess.role = service_roles::ROLE_PLAYER_DEFAULT;
+
+    let _ = ctx.drain_notifications_for_char(gm_cid);
+    let _ = ctx.drain_notifications_for_char(player_cid);
+    let item_count_before = ctx.db.with_snapshot(|snap| snap.items.len());
+
+    // Non-GM caller must be rejected cleanly with InsufficientRole.
+    for cmd in [
+        "/giveitem 90000002 34 10",
+        "/createitem 90000002 587 1",
+        "/spawnnpc 90000002 587",
+    ] {
+        let err = handle(
+            &ctx,
+            &mut player_sess,
+            "slash",
+            "SlashCmd",
+            &[PyRep::String(cmd.into())],
+            &kw,
+        )
+        .await
+        .expect("slash handled")
+        .expect_err("player must be denied GM slash commands");
+        assert_eq!(err.code, "InsufficientRole", "{cmd}");
+    }
+
+    // Unknown target_cid fails closed with CharacterNotFound without creating items or notifications.
+    for bad_cmd in [
+        "/giveitem 999888777 34",
+        "/giveitem 999888777 34 5",
+        "/createitem 999888777 587 1",
+        "/spawnnpc 999888777 587",
+    ] {
+        let err = handle(
+            &ctx,
+            &mut gm_sess,
+            "slash",
+            "SlashCmd",
+            &[PyRep::String(bad_cmd.into())],
+            &kw,
+        )
+        .await
+        .expect("slash handled")
+        .expect_err("unknown target_cid must fail closed");
+        assert_eq!(err.code, "CharacterNotFound", "{bad_cmd}");
+    }
+    assert_eq!(
+        ctx.db.with_snapshot(|snap| snap.items.len()),
+        item_count_before,
+        "failed targeted slash commands must not create items"
+    );
+    assert!(ctx.drain_notifications_for_char(gm_cid).is_empty());
+    assert!(ctx.drain_notifications_for_char(player_cid).is_empty());
+
+    // Docked /giveitem <player_cid> 34 50 spawns into player's station hangar and notifies ONLY player_cid.
+    let rep_hangar = handle(
+        &ctx,
+        &mut gm_sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/giveitem {player_cid} 34 50"))],
+        &kw,
+    )
+    .await
+    .expect("slash handled")
+    .expect("targeted docked /giveitem ok");
+    let hangar_item_id = rep_hangar.dict_get("itemID").and_then(|v| v.as_i64()).expect("itemID");
+    assert_eq!(
+        rep_hangar.dict_get("locationID").and_then(|v| v.as_i64()),
+        Some(player_station)
+    );
+    ctx.db.with_snapshot(|snap| {
+        let rec = snap.items.get(&hangar_item_id).expect("hangar item exists");
+        assert_eq!(rec.owner_id, player_cid);
+        assert_eq!(rec.location_id, player_station);
+        assert_eq!(rec.flag, InventoryFlag::Hangar);
+        assert_eq!(rec.quantity, 50);
+    });
+    assert!(
+        ctx.drain_notifications_for_char(player_cid)
+            .iter()
+            .any(|n| n.event == "OnItemChange"),
+        "target player must receive OnItemChange"
+    );
+    assert!(
+        ctx.drain_notifications_for_char(gm_cid).is_empty(),
+        "GM caller must not receive target player's item notifications"
+    );
+
+    // Undocked /createitem <player_cid> 34 7 spawns into player's active ship cargo.
+    ctx.db.with_mut_snapshot(|snap| {
+        let p = snap.characters.get_mut(&player_cid).expect("player char");
+        p.station_id = None;
+        p.structure_id = None;
+    });
+    let rep_cargo = handle(
+        &ctx,
+        &mut gm_sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/createitem {player_cid} 34 7"))],
+        &kw,
+    )
+    .await
+    .expect("slash handled")
+    .expect("targeted undocked /createitem ok");
+    let cargo_item_id = rep_cargo.dict_get("itemID").and_then(|v| v.as_i64()).expect("itemID");
+    assert_eq!(
+        rep_cargo.dict_get("locationID").and_then(|v| v.as_i64()),
+        Some(player_ship)
+    );
+    ctx.db.with_snapshot(|snap| {
+        let rec = snap.items.get(&cargo_item_id).expect("cargo item exists");
+        assert_eq!(rec.owner_id, player_cid);
+        assert_eq!(rec.location_id, player_ship);
+        assert_eq!(rec.flag, InventoryFlag::Cargo);
+        assert_eq!(rec.quantity, 7);
+    });
+    assert!(
+        ctx.drain_notifications_for_char(player_cid)
+            .iter()
+            .any(|n| n.event == "OnItemChange")
+    );
+    assert!(ctx.drain_notifications_for_char(gm_cid).is_empty());
+
+    // /spawnnpc <player_cid> 587 spawns in player_sys near player_ship rather than GM's system.
+    let _ = ctx
+        .systems
+        .get_or_spawn(player_sys)
+        .spawn_ball(Ball {
+            id: player_ship,
+            type_id: 587,
+            position: DVec3::new(5_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 200.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    let rep_npc = handle(
+        &ctx,
+        &mut gm_sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/spawnnpc {player_cid} 587"))],
+        &kw,
+    )
+    .await
+    .expect("slash handled")
+    .expect("targeted /spawnnpc ok");
+    let npc_id = rep_npc.dict_get("npcID").and_then(|v| v.as_i64()).expect("npcID");
+    assert_eq!(
+        rep_npc.dict_get("solarSystemID").and_then(|v| v.as_i64()),
+        Some(player_sys as i64)
+    );
+    let (_, npc_ball) = ctx
+        .systems
+        .get_or_spawn(player_sys)
+        .get_ball_snapshot(npc_id)
+        .await
+        .expect("player system ok")
+        .expect("NPC spawned in player system");
+    assert!(
+        (npc_ball.position - DVec3::new(6_000.0, 0.0, 0.0)).length() < 1.0,
+        "NPC should spawn 1km from player ship, got {:?}",
+        npc_ball.position
+    );
+    assert!(
+        ctx.systems
+            .get_or_spawn(gm_sys)
+            .get_ball_snapshot(npc_id)
+            .await
+            .expect("gm system ok")
+            .is_none(),
+        "NPC must not spawn in GM's solar system {gm_sys}"
+    );
+}
+

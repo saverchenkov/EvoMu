@@ -1742,6 +1742,8 @@ ui:
 # Persistent Memory, Persona & Coverage Frontier Manager
 # ---------------------------------------------------------------------------
 
+PLAYTESTER_GM_ADMIN_SECRET = "evomu-scenario-gm-secret"
+
 GM_TESTER_PERSONA: Dict[str, Any] = {
     "id": "gm_tester",
     "title": "GM Admin Tester (Opt-In)",
@@ -6010,6 +6012,8 @@ class PlaytesterRunner:
 
         self._session_flight_calls: List[Dict[str, Any]] = []
         self._session_flight_seqs: set = set()
+        self._gm_bridge_conn: Any = None
+        self._gm_bridge_sm: Any = None
 
         # Hybrid Planner + Executor + Direct Runner batch state
         self.batch_id: int = 0
@@ -6249,18 +6253,399 @@ class PlaytesterRunner:
             "initial_balance_isk = 125000000",
             "initial_balance_plex = 50000",
         ]
-        # Player personas run with role = 0 (non-GM). Only explicit `--persona gm_tester` gets admin role bits.
-        if is_gm_persona:
-            lines.extend([
-                "",
-                "[[admin_accounts]]",
-                'username = "demo"',
-                'password_token = "demo-secret"',
-                "character_id = 90000001",
-                'character_name = "Demo Pilot"',
-            ])
+        # Never emit `[[admin_accounts]]` in TOML: `provision_gm_account` inserts a character before
+        # `seed_demo` / `populate_demo_snapshot`, which would clobber `demo` (90000001) on fresh DBs.
+        # Keep `demo` at role = 0 with its seeded state intact; `--persona gm_tester` instead sets
+        # `EVOMU_ADMIN_TOKEN` via `_server_extra_env()` so `admin` (90000003) provisions post-seed
+        # and executes GM actions over the host-side GM bridge (`BF-1242-R1-03`).
+        _ = is_gm_persona
         cfg_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return cfg_path
+
+    def _server_extra_env(self) -> Dict[str, str]:
+        if self._active_persona_id() == GM_TESTER_PERSONA["id"]:
+            return {"EVOMU_ADMIN_TOKEN": PLAYTESTER_GM_ADMIN_SECRET}
+        return {}
+
+    def _default_target_char_id(self) -> int:
+        return 90000001
+
+    def _gm_bridge_credentials(self) -> Tuple[str, str, int]:
+        return "admin", PLAYTESTER_GM_ADMIN_SECRET, 90000003
+
+    def _connect_gm_bridge(self) -> Tuple[Any, Any]:
+        bridge_dir = str(CLIENT_BRIDGE_DIR)
+        if bridge_dir not in sys.path:
+            sys.path.insert(0, bridge_dir)
+        import evomu_bridge  # type: ignore
+
+        gm_user, gm_password, gm_char_id = self._gm_bridge_credentials()
+
+        class _GmBridgeLog:
+            def info(self, msg: str) -> None:
+                log_info(f"[gm-bridge] {msg}")
+
+            def warn(self, msg: str) -> None:
+                log_warn(f"[gm-bridge] {msg}")
+
+            def error(self, msg: str) -> None:
+                log_err(f"[gm-bridge] {msg}")
+
+        class _GmBridgeSM:
+            def __init__(self) -> None:
+                self.services: Dict[str, Any] = {}
+                self.logger = _GmBridgeLog()
+
+            def ScatterEvent(self, *_args: Any, **_kw: Any) -> None:
+                pass
+
+        gm_sm = _GmBridgeSM()
+        bridge_conn = evomu_bridge.install_service_manager_hook(
+            gm_sm,
+            host="127.0.0.1",
+            port=self.ports["bridge"],
+        )
+        try:
+            gm_sm.RemoteSvc("authentication").Login(gm_user, gm_password)
+            chars = gm_sm.RemoteSvc("charUnboundMgr").GetCharactersToSelect() or []
+            sel_cid = gm_char_id
+            avail_ids: List[int] = []
+            for ch in chars:
+                cid_raw = getattr(ch, "characterID", None) if not isinstance(ch, dict) else ch.get("characterID")
+                if cid_raw is not None:
+                    avail_ids.append(int(cid_raw))
+            if avail_ids and gm_char_id not in avail_ids:
+                sel_cid = avail_ids[0]
+            gm_sm.RemoteSvc("charUnboundMgr").SelectCharacterID(sel_cid)
+        except Exception:
+            try:
+                bridge_conn.close()
+            except Exception:
+                pass
+            raise
+        return bridge_conn, gm_sm
+
+    def _ensure_gm_bridge(self) -> Any:
+        if (
+            self._gm_bridge_sm is not None
+            and self._gm_bridge_conn is not None
+            and getattr(self._gm_bridge_conn, "connected", True)
+        ):
+            return self._gm_bridge_sm
+        self._close_gm_bridge()
+        conn, gm_sm = self._connect_gm_bridge()
+        self._gm_bridge_conn = conn
+        self._gm_bridge_sm = gm_sm
+        return gm_sm
+
+    def _close_gm_bridge(self) -> None:
+        conn = getattr(self, "_gm_bridge_conn", None)
+        self._gm_bridge_conn = None
+        self._gm_bridge_sm = None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _looks_like_char_id_token(tok: str, target_char_id: int) -> bool:
+        t = str(tok or "").strip()
+        if not t or not t.isdigit():
+            return False
+        n = int(t)
+        return n == int(target_char_id) or (90_000_000 <= n < 1_000_000_000)
+
+    @staticmethod
+    def _looks_like_entity_or_location_token(tok: str, target_char_id: int) -> bool:
+        t = str(tok or "").strip()
+        if not t or not t.isdigit():
+            return False
+        n = int(t)
+        return (
+            n == int(target_char_id)
+            or (60_000_000 <= n < 70_000_000)
+            or (90_000_000 <= n < 1_000_000_000)
+            or n >= 1_000_000_000
+        )
+
+    @classmethod
+    def _rewrite_gm_slash_for_target(cls, cmd: str, target_char_id: int) -> str:
+        raw = str(cmd or "").strip()
+        if not raw.startswith("/") or target_char_id <= 0:
+            return raw
+        parts = raw.split()
+        verb = parts[0].lower()
+        rest = parts[1:]
+        tgt_s = str(int(target_char_id))
+        me_tokens = ("me", "myship", "self")
+
+        if verb == "/giveisk":
+            if len(rest) == 1:
+                return f"/giveisk {tgt_s} {rest[0]}"
+            if len(rest) >= 2 and rest[0].lower() in ("me", "self"):
+                return " ".join(["/giveisk", tgt_s] + rest[1:])
+        elif verb in ("/giveskill", "/setskill"):
+            if len(rest) == 2:
+                return f"{parts[0]} {tgt_s} {rest[0]} {rest[1]}"
+            if len(rest) >= 3 and rest[0].lower() in ("me", "self"):
+                return " ".join([parts[0], tgt_s] + rest[1:])
+        elif verb == "/heal":
+            if not rest or rest[0].lower() in ("me", "self"):
+                return f"/heal {tgt_s}"
+        elif verb in ("/teleport", "/tr", "/translocate", "/moveme"):
+            noblock_tokens = [t for t in rest if t.lower() == "noblock"]
+            non_noblock = [t for t in rest if t.lower() != "noblock"]
+            if len(non_noblock) == 1:
+                return " ".join([parts[0], tgt_s, non_noblock[0]] + noblock_tokens)
+            if len(non_noblock) == 2:
+                if non_noblock[0].lower() in me_tokens:
+                    return " ".join([parts[0], tgt_s, non_noblock[1]] + noblock_tokens)
+                if non_noblock[1].lower() in me_tokens:
+                    return " ".join([parts[0], tgt_s, non_noblock[0]] + noblock_tokens)
+        elif verb in ("/giveitem", "/createitem", "/spawn", "/spawnnpc", "/spawnwreck", "/spawnanomaly"):
+            if not rest:
+                return f"{parts[0]} {tgt_s}"
+            if rest[0].lower() in me_tokens:
+                return " ".join([parts[0], tgt_s] + rest[1:])
+            if not cls._looks_like_char_id_token(rest[0], target_char_id):
+                return " ".join([parts[0], tgt_s] + rest)
+        elif verb in ("/load", "/fit"):
+            if len(rest) >= 2 and rest[0].lower() in me_tokens:
+                return " ".join([parts[0], tgt_s] + rest[1:])
+            if rest and not cls._looks_like_entity_or_location_token(rest[0], target_char_id):
+                return " ".join([parts[0], tgt_s] + rest)
+        elif verb == "/setattr":
+            if len(rest) >= 3 and rest[0].lower() in me_tokens:
+                return " ".join([parts[0], tgt_s] + rest[1:])
+            if len(rest) == 2 and not cls._looks_like_entity_or_location_token(rest[0], target_char_id):
+                return " ".join([parts[0], tgt_s] + rest)
+        elif verb == "/getattr":
+            if len(rest) >= 2 and rest[0].lower() in me_tokens:
+                return " ".join([parts[0], tgt_s] + rest[1:])
+            if len(rest) == 1 and not cls._looks_like_entity_or_location_token(rest[0], target_char_id):
+                return " ".join([parts[0], tgt_s] + rest)
+        elif verb in ("/energy", "/secstatus"):
+            if len(rest) == 1:
+                return f"{parts[0]} {tgt_s} {rest[0]}"
+            if len(rest) >= 2 and rest[0].lower() in ("me", "self"):
+                return " ".join([parts[0], tgt_s] + rest[1:])
+        elif verb == "/cleartimers":
+            if not rest or rest[0].lower() in ("me", "self"):
+                return f"{parts[0]} {tgt_s}"
+        elif verb in ("/completeskills", "/trainskills", "/finishskills"):
+            if not rest:
+                return f"{parts[0]} {tgt_s} all"
+            if rest[0].lower() in ("me", "self"):
+                return " ".join([parts[0], tgt_s] + (rest[1:] or ["all"]))
+            if not cls._looks_like_char_id_token(rest[0], target_char_id):
+                return " ".join([parts[0], tgt_s] + rest)
+        elif verb in (
+            "/completeindustry",
+            "/finishjobs",
+            "/industrytimer",
+            "/upwelltimer",
+            "/structuretimer",
+            "/finishstructure",
+        ):
+            if not rest:
+                return f"{parts[0]} {tgt_s}"
+            if rest[0].lower() in ("me", "self"):
+                return " ".join([parts[0], tgt_s] + rest[1:])
+            if not cls._looks_like_char_id_token(rest[0], target_char_id):
+                return " ".join([parts[0], tgt_s] + rest)
+        elif verb in ("/advancetime", "/fastforward", "/ff"):
+            if not rest:
+                return f"{parts[0]} {tgt_s}"
+            if rest[0].lower() in ("me", "self"):
+                return " ".join([parts[0], tgt_s] + rest[1:])
+            if len(rest) >= 2 and rest[-1].lower() in ("me", "self"):
+                return " ".join([parts[0], tgt_s] + rest[:-1])
+            if not any(cls._looks_like_char_id_token(t, target_char_id) for t in rest):
+                return " ".join([parts[0], tgt_s] + rest)
+        return raw
+
+    @staticmethod
+    def _should_dispatch_via_gm_bridge(act: Dict[str, Any], act_type: str) -> bool:
+        if act_type in _SCENARIO_TIME_CONTROL_ACTIONS:
+            return True
+        if act_type in ("slash_command", "run_slash", "train_skill"):
+            return True
+        if act_type == "station_command" and str(act.get("target") or "").strip().lower() == "inject_and_train_skill":
+            return True
+        if act_type == "type_text" and any(_is_gm_or_time_control_action(act)[:2]):
+            return True
+        return False
+
+    def _advance_clock_via_gm_bridge(self, secs: int = 12, target_char_id: int = 0) -> Optional[Dict[str, Any]]:
+        tgt = int(target_char_id or self._default_target_char_id() or 0)
+        try:
+            gm_sm = self._ensure_gm_bridge()
+            if tgt > 0:
+                gm_sm.RemoteSvc("timeControl").AdvanceClock(max(0, int(secs)), tgt)
+            else:
+                gm_sm.RemoteSvc("timeControl").AdvanceClock(max(0, int(secs)))
+            return {
+                "seq": 0,
+                "service": "timeControl",
+                "method": "AdvanceClock",
+                "ok": True,
+                "via": "gm_bridge",
+                "target_char_id": tgt,
+            }
+        except Exception as exc:
+            log_warn(f"GM bridge AdvanceClock({secs}) failed: {exc}")
+            return None
+
+    def _execute_gm_or_time_control_via_bridge(
+        self,
+        act: Dict[str, Any],
+        act_type: str,
+        target_char_id: int,
+    ) -> Dict[str, Any]:
+        tgt = int(target_char_id or self._default_target_char_id() or 0)
+        calls_recorded: List[Dict[str, Any]] = []
+        try:
+            gm_sm = self._ensure_gm_bridge()
+            gm_res: Any = None
+            if act_type == "advance_server_time":
+                raw_sec = act.get("seconds")
+                if raw_sec in (None, ""):
+                    raw_sec = act.get("target")
+                if raw_sec in (None, ""):
+                    raw_sec = act.get("amount")
+                if raw_sec in (None, ""):
+                    raw_sec = act.get("command")
+                try:
+                    secs = max(0, int(str(raw_sec).strip())) if raw_sec not in (None, "") else 12
+                except Exception:
+                    secs = 12
+                if tgt > 0:
+                    gm_res = gm_sm.RemoteSvc("timeControl").AdvanceClock(secs, tgt)
+                else:
+                    gm_res = gm_sm.RemoteSvc("timeControl").AdvanceClock(secs)
+                calls_recorded.append({
+                    "seq": 0,
+                    "service": "timeControl",
+                    "method": "AdvanceClock",
+                    "ok": True,
+                    "via": "gm_bridge",
+                    "target_char_id": tgt,
+                })
+            elif act_type == "clear_timers":
+                if tgt > 0:
+                    gm_sm.RemoteSvc("timeControl").ClearSessionTimer(tgt)
+                else:
+                    gm_sm.RemoteSvc("timeControl").ClearSessionTimer()
+                calls_recorded.append({
+                    "seq": 0,
+                    "service": "timeControl",
+                    "method": "ClearSessionTimer",
+                    "ok": True,
+                    "via": "gm_bridge",
+                    "target_char_id": tgt,
+                })
+                clear_cmd = f"/cleartimers {tgt}" if tgt > 0 else "/cleartimers"
+                gm_res = gm_sm.RemoteSvc("slash").SlashCmd(clear_cmd)
+                calls_recorded.append({
+                    "seq": 0,
+                    "service": "slash",
+                    "method": "SlashCmd",
+                    "command": clear_cmd,
+                    "ok": True,
+                    "via": "gm_bridge",
+                    "target_char_id": tgt,
+                })
+            elif act_type in ("complete_skills", "advance_upwell_timer", "complete_industry_jobs"):
+                slash_map = {
+                    "complete_skills": ("/completeskills", "all"),
+                    "advance_upwell_timer": ("/upwelltimer", ""),
+                    "complete_industry_jobs": ("/completeindustry", ""),
+                }
+                base_cmd, default_arg = slash_map[act_type]
+                arg = str(act.get("target") or act.get("command") or default_arg).strip()
+                raw_cmd = arg if arg.startswith("/") else f"{base_cmd} {arg}".strip()
+                cmd = self._rewrite_gm_slash_for_target(raw_cmd, tgt)
+                gm_res = gm_sm.RemoteSvc("slash").SlashCmd(cmd)
+                calls_recorded.append({
+                    "seq": 0,
+                    "service": "slash",
+                    "method": "SlashCmd",
+                    "command": cmd,
+                    "ok": True,
+                    "via": "gm_bridge",
+                    "target_char_id": tgt,
+                })
+            elif act_type == "train_skill" or (
+                act_type == "station_command"
+                and str(act.get("target") or "").strip().lower() == "inject_and_train_skill"
+            ):
+                tid_raw = act.get("type_id")
+                if tid_raw in (None, ""):
+                    cand_t = str(act.get("target") or "").strip()
+                    if cand_t.isdigit():
+                        tid_raw = int(cand_t)
+                if tid_raw in (None, ""):
+                    cand_c = str(act.get("command") or "").strip()
+                    if cand_c.isdigit():
+                        tid_raw = int(cand_c)
+                tid = int(tid_raw or 0)
+                if tid <= 0:
+                    raise ValueError(f"train_skill missing numeric type_id: {act!r}")
+                lvl = max(1, min(5, int(act.get("level", 1) or 1)))
+                cmd = f"/giveskill {tgt} {tid} {lvl}"
+                gm_res = gm_sm.RemoteSvc("slash").SlashCmd(cmd)
+                calls_recorded.append({
+                    "seq": 0,
+                    "service": "slash",
+                    "method": "SlashCmd",
+                    "command": cmd,
+                    "ok": True,
+                    "via": "gm_bridge",
+                    "target_char_id": tgt,
+                })
+            else:
+                raw_cmd = (
+                    _coerce_action_command(act)
+                    or str(act.get("slash_cmd") or act.get("target") or act.get("text") or act.get("input") or "").strip()
+                )
+                cmd = self._rewrite_gm_slash_for_target(raw_cmd, tgt)
+                gm_res = gm_sm.RemoteSvc("slash").SlashCmd(cmd)
+                calls_recorded.append({
+                    "seq": 0,
+                    "service": "slash",
+                    "method": "SlashCmd",
+                    "command": cmd,
+                    "ok": True,
+                    "via": "gm_bridge",
+                    "target_char_id": tgt,
+                })
+
+            return {
+                "action_ok": True,
+                "via": "gm_bridge",
+                "gm_result": gm_res,
+                "flight_recorder": {
+                    "macho_calls": calls_recorded,
+                    "scatters_observed": [],
+                    "log_exceptions": [],
+                    "quasar_errors": [],
+                    "macho_exceptions": [],
+                },
+            }
+        except Exception as exc:
+            return {
+                "action_ok": False,
+                "action_error": f"gm_bridge {type(exc).__name__}: {exc}",
+                "via": "gm_bridge",
+                "flight_recorder": {
+                    "macho_calls": calls_recorded,
+                    "scatters_observed": [],
+                    "log_exceptions": [],
+                    "quasar_errors": [],
+                    "macho_exceptions": [],
+                },
+            }
 
     def write_inclient_cfg(self) -> Path:
         self.current_run_dir.mkdir(parents=True, exist_ok=True)
@@ -6347,7 +6732,7 @@ class PlaytesterRunner:
         env["EVOMU_SDE_PATH"] = str(sde_path)
         env["EVOMU_QUASAR_DESCRIPTORS_PATH"] = str(qd_path)
         env.setdefault("RUST_LOG", "info")
-        extra_env_fn = getattr(self, "_scenario_server_extra_env", None)
+        extra_env_fn = getattr(self, "_server_extra_env", None)
         if callable(extra_env_fn):
             for k, v in (extra_env_fn() or {}).items():
                 env[str(k)] = str(v)
@@ -6396,6 +6781,7 @@ class PlaytesterRunner:
         return False
 
     def stop_server(self) -> None:
+        self._close_gm_bridge()
         if self.server_proc and self.server_proc.poll() is None:
             log_info(f"Stopping eve-server (PID {self.server_proc.pid})...")
             try:
@@ -7130,10 +7516,36 @@ class PlaytesterRunner:
                 "flight_recorder": {},
             }
         else:
-            try:
-                exec_res = self.rpc.call("execute_action", {"action": exec_action_payload}, timeout=rpc_timeout)
-            except Exception as exc:
-                exec_res = {"action_ok": False, "action_error": str(exc), "flight_recorder": {}}
+            canon_act_type = _canonicalize_action_type(
+                str(exec_action_payload.get("type") or ""),
+                bool(exec_action_payload.get("target")),
+            )
+            if self._should_dispatch_via_gm_bridge(exec_action_payload, canon_act_type):
+                try:
+                    target_cid = int(
+                        ((ui_snapshot or {}).get("session") or {}).get("charid")
+                        or self._default_target_char_id()
+                        or 90000001
+                    )
+                except Exception:
+                    target_cid = self._default_target_char_id() or 90000001
+                exec_res = self._execute_gm_or_time_control_via_bridge(
+                    exec_action_payload,
+                    canon_act_type,
+                    target_cid,
+                )
+                try:
+                    obs = self.rpc.call("get_state", timeout=15.0) or {}
+                    refreshed = _unwrap_state_payload(obs)
+                    if refreshed:
+                        exec_res["post_state"] = refreshed
+                except Exception:
+                    pass
+            else:
+                try:
+                    exec_res = self.rpc.call("execute_action", {"action": exec_action_payload}, timeout=rpc_timeout)
+                except Exception as exc:
+                    exec_res = {"action_ok": False, "action_error": str(exc), "flight_recorder": {}}
         if isinstance(exec_res, dict):
             self._record_session_flight_calls((exec_res.get("flight_recorder") or {}).get("macho_calls"))
 
@@ -7449,6 +7861,7 @@ class PlaytesterRunner:
                 self.oracle.flush(timeout=10.0)
             except Exception:
                 pass
+            self._close_gm_bridge()
             self.stop_client()
             self.stop_server()
             DEFAULT_PID_FILE.unlink(missing_ok=True)
@@ -9120,8 +9533,6 @@ class ScenarioRunner(PlaytesterRunner):
         self._active_expected_characters: List[str] = []
         self._last_boot_result: Dict[str, Any] = {}
         self._client_launch_server_log_offset: int = 0
-        self._gm_bridge_conn: Any = None
-        self._gm_bridge_sm: Any = None
 
     def _scenario_auth_params(self) -> Tuple[str, str, int, bool]:
         st = self._active_starting_state
@@ -9130,6 +9541,9 @@ class ScenarioRunner(PlaytesterRunner):
         char_id = int(st.get("char_id", 90000001) or 90000001)
         defer_cs = bool(st.get("defer_char_select", False))
         return user, password, char_id, defer_cs
+
+    def _default_target_char_id(self) -> int:
+        return int(self._scenario_auth_params()[2] or 90000001)
 
     def _scenario_requires_gm(self) -> bool:
         return any(
@@ -9140,283 +9554,17 @@ class ScenarioRunner(PlaytesterRunner):
     def _scenario_server_extra_env(self) -> Dict[str, str]:
         user, _, _, _ = self._scenario_auth_params()
         if self._scenario_requires_gm() and user == "demo":
-            return {"EVOMU_ADMIN_TOKEN": "evomu-scenario-gm-secret"}
+            return {"EVOMU_ADMIN_TOKEN": PLAYTESTER_GM_ADMIN_SECRET}
         return {}
+
+    def _server_extra_env(self) -> Dict[str, str]:
+        return self._scenario_server_extra_env()
 
     def _gm_bridge_credentials(self) -> Tuple[str, str, int]:
         user, _, _, _ = self._scenario_auth_params()
         if user == "demo":
-            return "admin", "evomu-scenario-gm-secret", 90000003
-        return "evomu_scenario_gm", "evomu-scenario-gm-secret", 90000099
-
-    def _connect_gm_bridge(self) -> Tuple[Any, Any]:
-        bridge_dir = str(CLIENT_BRIDGE_DIR)
-        if bridge_dir not in sys.path:
-            sys.path.insert(0, bridge_dir)
-        import evomu_bridge  # type: ignore
-
-        gm_user, gm_password, gm_char_id = self._gm_bridge_credentials()
-
-        class _GmBridgeLog:
-            def info(self, msg: str) -> None:
-                log_info(f"[scenario-gm-bridge] {msg}")
-
-            def warn(self, msg: str) -> None:
-                log_warn(f"[scenario-gm-bridge] {msg}")
-
-            def error(self, msg: str) -> None:
-                log_err(f"[scenario-gm-bridge] {msg}")
-
-        class _GmBridgeSM:
-            def __init__(self) -> None:
-                self.services: Dict[str, Any] = {}
-                self.logger = _GmBridgeLog()
-
-            def ScatterEvent(self, *_args: Any, **_kw: Any) -> None:
-                pass
-
-        gm_sm = _GmBridgeSM()
-        bridge_conn = evomu_bridge.install_service_manager_hook(
-            gm_sm,
-            host="127.0.0.1",
-            port=self.ports["bridge"],
-        )
-        try:
-            gm_sm.RemoteSvc("authentication").Login(gm_user, gm_password)
-            chars = gm_sm.RemoteSvc("charUnboundMgr").GetCharactersToSelect() or []
-            sel_cid = gm_char_id
-            avail_ids: List[int] = []
-            for ch in chars:
-                cid_raw = getattr(ch, "characterID", None) if not isinstance(ch, dict) else ch.get("characterID")
-                if cid_raw is not None:
-                    avail_ids.append(int(cid_raw))
-            if avail_ids and gm_char_id not in avail_ids:
-                sel_cid = avail_ids[0]
-            gm_sm.RemoteSvc("charUnboundMgr").SelectCharacterID(sel_cid)
-        except Exception:
-            try:
-                bridge_conn.close()
-            except Exception:
-                pass
-            raise
-        return bridge_conn, gm_sm
-
-    def _ensure_gm_bridge(self) -> Any:
-        if (
-            self._gm_bridge_sm is not None
-            and self._gm_bridge_conn is not None
-            and getattr(self._gm_bridge_conn, "connected", True)
-        ):
-            return self._gm_bridge_sm
-        self._close_gm_bridge()
-        conn, gm_sm = self._connect_gm_bridge()
-        self._gm_bridge_conn = conn
-        self._gm_bridge_sm = gm_sm
-        return gm_sm
-
-    def _close_gm_bridge(self) -> None:
-        conn = getattr(self, "_gm_bridge_conn", None)
-        self._gm_bridge_conn = None
-        self._gm_bridge_sm = None
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
-
-    @staticmethod
-    def _rewrite_gm_slash_for_target(cmd: str, target_char_id: int) -> str:
-        raw = str(cmd or "").strip()
-        if not raw.startswith("/") or target_char_id <= 0:
-            return raw
-        parts = raw.split()
-        verb = parts[0].lower()
-        rest = parts[1:]
-        tgt_s = str(int(target_char_id))
-
-        if verb == "/giveisk":
-            if len(rest) == 1:
-                return f"/giveisk {tgt_s} {rest[0]}"
-            if len(rest) >= 2 and rest[0].lower() in ("me", "self"):
-                return " ".join(["/giveisk", tgt_s] + rest[1:])
-        elif verb in ("/giveskill", "/setskill"):
-            if len(rest) == 2:
-                return f"{parts[0]} {tgt_s} {rest[0]} {rest[1]}"
-            if len(rest) >= 3 and rest[0].lower() in ("me", "self"):
-                return " ".join([parts[0], tgt_s] + rest[1:])
-        elif verb == "/heal":
-            if not rest or rest[0].lower() in ("me", "self"):
-                return f"/heal {tgt_s}"
-        elif verb in ("/teleport", "/tr", "/translocate", "/moveme"):
-            if len(rest) == 1:
-                return f"{parts[0]} {tgt_s} {rest[0]}"
-            if len(rest) >= 2 and rest[0].lower() in ("me", "myship", "self"):
-                return " ".join([parts[0], tgt_s] + rest[1:])
-        return raw
-
-    @staticmethod
-    def _should_dispatch_via_gm_bridge(act: Dict[str, Any], act_type: str) -> bool:
-        if act_type in _SCENARIO_TIME_CONTROL_ACTIONS:
-            return True
-        if act_type in ("slash_command", "run_slash", "train_skill"):
-            return True
-        if act_type == "station_command" and str(act.get("target") or "").strip().lower() == "inject_and_train_skill":
-            return True
-        if act_type == "type_text" and any(_is_gm_or_time_control_action(act)[:2]):
-            return True
-        return False
-
-    def _advance_clock_via_gm_bridge(self, secs: int = 12) -> Optional[Dict[str, Any]]:
-        try:
-            gm_sm = self._ensure_gm_bridge()
-            gm_sm.RemoteSvc("timeControl").AdvanceClock(max(0, int(secs)))
-            return {
-                "seq": 0,
-                "service": "timeControl",
-                "method": "AdvanceClock",
-                "ok": True,
-                "via": "gm_bridge",
-            }
-        except Exception as exc:
-            log_warn(f"GM bridge AdvanceClock({secs}) failed: {exc}")
-            return None
-
-    def _execute_gm_or_time_control_via_bridge(
-        self,
-        act: Dict[str, Any],
-        act_type: str,
-        target_char_id: int,
-    ) -> Dict[str, Any]:
-        calls_recorded: List[Dict[str, Any]] = []
-        try:
-            gm_sm = self._ensure_gm_bridge()
-            gm_res: Any = None
-            if act_type == "advance_server_time":
-                raw_sec = act.get("seconds")
-                if raw_sec in (None, ""):
-                    raw_sec = act.get("target")
-                if raw_sec in (None, ""):
-                    raw_sec = act.get("amount")
-                if raw_sec in (None, ""):
-                    raw_sec = act.get("command")
-                try:
-                    secs = max(0, int(str(raw_sec).strip())) if raw_sec not in (None, "") else 12
-                except Exception:
-                    secs = 12
-                gm_res = gm_sm.RemoteSvc("timeControl").AdvanceClock(secs)
-                calls_recorded.append({
-                    "seq": 0,
-                    "service": "timeControl",
-                    "method": "AdvanceClock",
-                    "ok": True,
-                    "via": "gm_bridge",
-                    "target_char_id": target_char_id,
-                })
-            elif act_type == "clear_timers":
-                gm_sm.RemoteSvc("timeControl").ClearSessionTimer()
-                calls_recorded.append({
-                    "seq": 0,
-                    "service": "timeControl",
-                    "method": "ClearSessionTimer",
-                    "ok": True,
-                    "via": "gm_bridge",
-                    "target_char_id": target_char_id,
-                })
-                gm_res = gm_sm.RemoteSvc("slash").SlashCmd("/cleartimers")
-                calls_recorded.append({
-                    "seq": 0,
-                    "service": "slash",
-                    "method": "SlashCmd",
-                    "ok": True,
-                    "via": "gm_bridge",
-                    "target_char_id": target_char_id,
-                })
-            elif act_type in ("complete_skills", "advance_upwell_timer", "complete_industry_jobs"):
-                slash_map = {
-                    "complete_skills": ("/completeskills", "all"),
-                    "advance_upwell_timer": ("/upwelltimer", ""),
-                    "complete_industry_jobs": ("/completeindustry", ""),
-                }
-                base_cmd, default_arg = slash_map[act_type]
-                arg = str(act.get("target") or act.get("command") or default_arg).strip()
-                cmd = arg if arg.startswith("/") else f"{base_cmd} {arg}".strip()
-                gm_res = gm_sm.RemoteSvc("slash").SlashCmd(cmd)
-                calls_recorded.append({
-                    "seq": 0,
-                    "service": "slash",
-                    "method": "SlashCmd",
-                    "ok": True,
-                    "via": "gm_bridge",
-                    "target_char_id": target_char_id,
-                })
-            elif act_type == "train_skill" or (
-                act_type == "station_command"
-                and str(act.get("target") or "").strip().lower() == "inject_and_train_skill"
-            ):
-                tid_raw = act.get("type_id")
-                if tid_raw in (None, ""):
-                    cand_t = str(act.get("target") or "").strip()
-                    if cand_t.isdigit():
-                        tid_raw = int(cand_t)
-                if tid_raw in (None, ""):
-                    cand_c = str(act.get("command") or "").strip()
-                    if cand_c.isdigit():
-                        tid_raw = int(cand_c)
-                tid = int(tid_raw or 0)
-                if tid <= 0:
-                    raise ValueError(f"train_skill missing numeric type_id: {act!r}")
-                lvl = max(1, min(5, int(act.get("level", 1) or 1)))
-                cmd = f"/giveskill {int(target_char_id)} {tid} {lvl}"
-                gm_res = gm_sm.RemoteSvc("slash").SlashCmd(cmd)
-                calls_recorded.append({
-                    "seq": 0,
-                    "service": "slash",
-                    "method": "SlashCmd",
-                    "ok": True,
-                    "via": "gm_bridge",
-                    "target_char_id": target_char_id,
-                })
-            else:
-                raw_cmd = (
-                    _coerce_action_command(act)
-                    or str(act.get("slash_cmd") or act.get("target") or act.get("text") or act.get("input") or "").strip()
-                )
-                cmd = self._rewrite_gm_slash_for_target(raw_cmd, int(target_char_id))
-                gm_res = gm_sm.RemoteSvc("slash").SlashCmd(cmd)
-                calls_recorded.append({
-                    "seq": 0,
-                    "service": "slash",
-                    "method": "SlashCmd",
-                    "ok": True,
-                    "via": "gm_bridge",
-                    "target_char_id": target_char_id,
-                })
-
-            return {
-                "action_ok": True,
-                "via": "gm_bridge",
-                "gm_result": gm_res,
-                "flight_recorder": {
-                    "macho_calls": calls_recorded,
-                    "scatters_observed": [],
-                    "log_exceptions": [],
-                    "quasar_errors": [],
-                    "macho_exceptions": [],
-                },
-            }
-        except Exception as exc:
-            return {
-                "action_ok": False,
-                "action_error": f"gm_bridge {type(exc).__name__}: {exc}",
-                "via": "gm_bridge",
-                "flight_recorder": {
-                    "macho_calls": calls_recorded,
-                    "scatters_observed": [],
-                    "log_exceptions": [],
-                    "quasar_errors": [],
-                    "macho_exceptions": [],
-                },
-            }
+            return "admin", PLAYTESTER_GM_ADMIN_SECRET, 90000003
+        return "evomu_scenario_gm", PLAYTESTER_GM_ADMIN_SECRET, 90000099
 
     def write_server_config(self) -> Path:
         self.world_dir.mkdir(parents=True, exist_ok=True)
@@ -9768,7 +9916,15 @@ class ScenarioRunner(PlaytesterRunner):
         use_tc_bridge = bool(step.get("time_control", False))
         while True:
             if use_tc_bridge and str((step.get("action") or {}).get("type") or "") != "advance_server_time":
-                gm_tick_call = self._advance_clock_via_gm_bridge(12)
+                try:
+                    wait_target_cid = int(
+                        (latest_state.get("session") or {}).get("charid")
+                        or (step_pre_state.get("session") or {}).get("charid")
+                        or self._default_target_char_id()
+                    )
+                except Exception:
+                    wait_target_cid = self._default_target_char_id()
+                gm_tick_call = self._advance_clock_via_gm_bridge(12, target_char_id=wait_target_cid)
                 if gm_tick_call is not None:
                     all_calls.append(gm_tick_call)
             tick_res = self.rpc.call(

@@ -29,7 +29,7 @@
       "description": "Close window/drawer after 'inventory'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "inventory",
         "wait_ms": 100
       },
       "checks": {
@@ -59,7 +59,7 @@
       "description": "Close window/drawer after 'cargohold'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "cargohold",
         "wait_ms": 100
       },
       "checks": {
@@ -89,7 +89,7 @@
       "description": "Close window/drawer after 'shiphangar'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "shiphangar",
         "wait_ms": 100
       },
       "checks": {
@@ -119,7 +119,7 @@
       "description": "Close window/drawer after 'itemhangar'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "itemhangar",
         "wait_ms": 100
       },
       "checks": {
@@ -149,7 +149,7 @@
       "description": "Close window/drawer after 'market'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "market",
         "wait_ms": 100
       },
       "checks": {
@@ -179,7 +179,7 @@
       "description": "Close window/drawer after 'marketorders'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "marketorders",
         "wait_ms": 100
       },
       "checks": {
@@ -209,7 +209,7 @@
       "description": "Close window/drawer after 'multibuy'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "multibuy",
         "wait_ms": 100
       },
       "checks": {
@@ -239,7 +239,7 @@
       "description": "Close window/drawer after 'charsheet'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "charsheet",
         "wait_ms": 100
       },
       "checks": {
@@ -269,7 +269,7 @@
       "description": "Close window/drawer after 'skills'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "skills",
         "wait_ms": 100
       },
       "checks": {
@@ -299,7 +299,7 @@
       "description": "Close window/drawer after 'skilltree'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "skilltree",
         "wait_ms": 100
       },
       "checks": {
@@ -309,11 +309,11 @@
     },
     {
       "id": "open_nes",
-      "description": "Open Neocom/utility window 'nes' (ToggleAurumStore) and click top-level tabs",
+      "description": "Open Neocom/utility surface 'nes' without clicking window TabGroup",
       "action": {
         "type": "open_window",
         "target": "nes",
-        "click_top_tabs": true,
+        "click_top_tabs": false,
         "wait_ms": 250,
         "expected_ui_and_state_change": "Window 'nes' opens without client exception or RPC error",
         "require_window_open": true
@@ -329,7 +329,7 @@
       "description": "Close window/drawer after 'nes'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "nes",
         "wait_ms": 100
       },
       "checks": {
@@ -359,7 +359,7 @@
       "description": "Close window/drawer after 'plexvault'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "plexvault",
         "wait_ms": 100
       },
       "checks": {
@@ -389,7 +389,7 @@
       "description": "Close window/drawer after 'fitting'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "fitting",
         "wait_ms": 100
       },
       "checks": {
@@ -419,7 +419,7 @@
       "description": "Close window/drawer after 'fittingmgmt'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "fittingmgmt",
         "wait_ms": 100
       },
       "checks": {
@@ -449,7 +449,7 @@
       "description": "Close window/drawer after 'contracts'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "contracts",
         "wait_ms": 100
       },
       "checks": {
@@ -479,7 +479,7 @@
       "description": "Close window/drawer after 'industry'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "industry",
         "wait_ms": 100
       },
       "checks": {
@@ -509,7 +509,7 @@
       "description": "Close window/drawer after 'planets'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "planets",
         "wait_ms": 100
       },
       "checks": {
@@ -539,7 +539,7 @@
       "description": "Close window/drawer after 'corp'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "corp",
         "wait_ms": 100
       },
       "checks": {
@@ -569,7 +569,7 @@
       "description": "Close window/drawer after 'fleet'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "fleet",
         "wait_ms": 100
       },
       "checks": {
@@ -599,7 +599,7 @@
       "description": "Close window/drawer after 'agency'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "agency",
         "wait_ms": 100
       },
       "checks": {
@@ -629,7 +629,7 @@
       "description": "Close window/drawer after 'jobboard'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "jobboard",
         "wait_ms": 100
       },
       "checks": {
@@ -659,7 +659,7 @@
       "description": "Close window/drawer after 'assets'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "assets",
         "wait_ms": 100
       },
       "checks": {
@@ -689,7 +689,7 @@
       "description": "Close window/drawer after 'wallet'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "wallet",
         "wait_ms": 100
       },
       "checks": {
@@ -719,7 +719,7 @@
       "description": "Close window/drawer after 'mail'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "mail",
         "wait_ms": 100
       },
       "checks": {
@@ -729,11 +729,11 @@
     },
     {
       "id": "open_notifications",
-      "description": "Open Neocom/utility window 'notifications' (OpenNotificationReadingWnd) and click top-level tabs",
+      "description": "Open Neocom/utility surface 'notifications' without clicking window TabGroup",
       "action": {
         "type": "open_window",
         "target": "notifications",
-        "click_top_tabs": true,
+        "click_top_tabs": false,
         "wait_ms": 250,
         "expected_ui_and_state_change": "Window 'notifications' opens without client exception or RPC error",
         "require_window_open": true
@@ -749,7 +749,7 @@
       "description": "Close window/drawer after 'notifications'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "notifications",
         "wait_ms": 100
       },
       "checks": {
@@ -759,11 +759,11 @@
     },
     {
       "id": "open_map",
-      "description": "Open Neocom/utility window 'map' (CmdToggleMap) and click top-level tabs",
+      "description": "Open Neocom/utility surface 'map' without clicking window TabGroup",
       "action": {
         "type": "open_window",
         "target": "map",
-        "click_top_tabs": true,
+        "click_top_tabs": false,
         "wait_ms": 250,
         "expected_ui_and_state_change": "Window 'map' opens without client exception or RPC error",
         "require_window_open": true
@@ -779,7 +779,7 @@
       "description": "Close window/drawer after 'map'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "map",
         "wait_ms": 100
       },
       "checks": {
@@ -789,11 +789,11 @@
     },
     {
       "id": "open_solarsystemmap",
-      "description": "Open Neocom/utility window 'solarsystemmap' (CmdToggleSolarSystemMap) and click top-level tabs",
+      "description": "Open Neocom/utility surface 'solarsystemmap' without clicking window TabGroup",
       "action": {
         "type": "open_window",
         "target": "solarsystemmap",
-        "click_top_tabs": true,
+        "click_top_tabs": false,
         "wait_ms": 250,
         "expected_ui_and_state_change": "Window 'solarsystemmap' opens without client exception or RPC error",
         "require_window_open": true
@@ -809,7 +809,7 @@
       "description": "Close window/drawer after 'solarsystemmap'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "solarsystemmap",
         "wait_ms": 100
       },
       "checks": {
@@ -839,7 +839,7 @@
       "description": "Close window/drawer after 'notepad'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "notepad",
         "wait_ms": 100
       },
       "checks": {
@@ -869,7 +869,7 @@
       "description": "Close window/drawer after 'calculator'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "calculator",
         "wait_ms": 100
       },
       "checks": {
@@ -899,7 +899,7 @@
       "description": "Close window/drawer after 'calendar'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "calendar",
         "wait_ms": 100
       },
       "checks": {
@@ -929,7 +929,7 @@
       "description": "Close window/drawer after 'journal'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "journal",
         "wait_ms": 100
       },
       "checks": {
@@ -959,7 +959,7 @@
       "description": "Close window/drawer after 'agentfinder'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "agentfinder",
         "wait_ms": 100
       },
       "checks": {
@@ -989,7 +989,7 @@
       "description": "Close window/drawer after 'lpstore'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "lpstore",
         "wait_ms": 100
       },
       "checks": {
@@ -1019,7 +1019,7 @@
       "description": "Close window/drawer after 'repair'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "repair",
         "wait_ms": 100
       },
       "checks": {
@@ -1049,7 +1049,7 @@
       "description": "Close window/drawer after 'reprocessing'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "reprocessing",
         "wait_ms": 100
       },
       "checks": {
@@ -1079,7 +1079,7 @@
       "description": "Close window/drawer after 'miningledger'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "miningledger",
         "wait_ms": 100
       },
       "checks": {
@@ -1109,7 +1109,7 @@
       "description": "Close window/drawer after 'mininghold'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "mininghold",
         "wait_ms": 100
       },
       "checks": {
@@ -1139,7 +1139,7 @@
       "description": "Close window/drawer after 'mineralhold'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "mineralhold",
         "wait_ms": 100
       },
       "checks": {
@@ -1169,7 +1169,7 @@
       "description": "Close window/drawer after 'insurance'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "insurance",
         "wait_ms": 100
       },
       "checks": {
@@ -1199,7 +1199,7 @@
       "description": "Close window/drawer after 'bountyoffice'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "bountyoffice",
         "wait_ms": 100
       },
       "checks": {
@@ -1229,7 +1229,7 @@
       "description": "Close window/drawer after 'securityoffice'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "securityoffice",
         "wait_ms": 100
       },
       "checks": {
@@ -1259,7 +1259,7 @@
       "description": "Close window/drawer after 'militia'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "militia",
         "wait_ms": 100
       },
       "checks": {
@@ -1289,7 +1289,7 @@
       "description": "Close window/drawer after 'factionalwarfare'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "factionalwarfare",
         "wait_ms": 100
       },
       "checks": {
@@ -1319,7 +1319,7 @@
       "description": "Close window/drawer after 'insurgency'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "insurgency",
         "wait_ms": 100
       },
       "checks": {
@@ -1349,7 +1349,7 @@
       "description": "Close window/drawer after 'skinr'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "skinr",
         "wait_ms": 100
       },
       "checks": {
@@ -1379,7 +1379,7 @@
       "description": "Close window/drawer after 'structurebrowser'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "structurebrowser",
         "wait_ms": 100
       },
       "checks": {
@@ -1389,11 +1389,11 @@
     },
     {
       "id": "open_shiptree",
-      "description": "Open Neocom/utility window 'shiptree' (CmdToggleShipTree) and click top-level tabs",
+      "description": "Open Neocom/utility surface 'shiptree' without clicking window TabGroup",
       "action": {
         "type": "open_window",
         "target": "shiptree",
-        "click_top_tabs": true,
+        "click_top_tabs": false,
         "wait_ms": 250,
         "expected_ui_and_state_change": "Window 'shiptree' opens without client exception or RPC error",
         "require_window_open": true
@@ -1409,7 +1409,7 @@
       "description": "Close window/drawer after 'shiptree'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "shiptree",
         "wait_ms": 100
       },
       "checks": {
@@ -1439,7 +1439,7 @@
       "description": "Close window/drawer after 'aircareerprogram'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "aircareerprogram",
         "wait_ms": 100
       },
       "checks": {
@@ -1469,7 +1469,7 @@
       "description": "Close window/drawer after 'peopleandplaces'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "peopleandplaces",
         "wait_ms": 100
       },
       "checks": {
@@ -1499,7 +1499,7 @@
       "description": "Close window/drawer after 'locations'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "locations",
         "wait_ms": 100
       },
       "checks": {
@@ -1529,7 +1529,7 @@
       "description": "Close window/drawer after 'compare'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "compare",
         "wait_ms": 100
       },
       "checks": {
@@ -1559,7 +1559,7 @@
       "description": "Close window/drawer after 'channels'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "channels",
         "wait_ms": 100
       },
       "checks": {
@@ -1589,7 +1589,7 @@
       "description": "Close window/drawer after 'help'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "help",
         "wait_ms": 100
       },
       "checks": {
@@ -1619,7 +1619,7 @@
       "description": "Close window/drawer after 'log'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "log",
         "wait_ms": 100
       },
       "checks": {
@@ -2010,7 +2010,7 @@
       "description": "Close space window 'dscan'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "dscan",
         "wait_ms": 100
       },
       "checks": {
@@ -2040,7 +2040,7 @@
       "description": "Close space window 'probe'",
       "action": {
         "type": "close_modal_or_window",
-        "target": "",
+        "target": "probe",
         "wait_ms": 100
       },
       "checks": {
