@@ -1655,3 +1655,1035 @@ async fn cloaking_device_activation_emits_zero_godma_duration_ms() {
     assert_eq!(eff.args.get(7), Some(&PyRep::Real(0.0)));
 }
 
+#[tokio::test]
+async fn titan_civilian_laser_vs_concord_surface_distance_and_miss_logs_1247() {
+    const SYN_AVATAR: u32 = 11_567;
+    const SYN_CIV_PULSE: u32 = 3_634;
+    const SYN_TIGHT_PULSE: u32 = 996_247;
+    const SYN_CONCORD_SWAT: u32 = 10_035;
+
+    let sys_id = 30_000_142_u32;
+    let ctx = seeded_cycles_ctx(|sde| {
+        if let Some(sys_rec) = sde.solar_systems.get_mut(&sys_id) {
+            sys_rec.security_status = -0.17;
+        }
+        let mut avatar = sde.types.get(&587).expect("rifter").clone();
+        avatar.type_id = SYN_AVATAR;
+        avatar.group_id = 30;
+        avatar.category_id = 6;
+        avatar.name = "Avatar".into();
+        avatar.radius = 6_800.0;
+        avatar.mass = 2_400_000_000.0;
+        avatar
+            .default_attributes
+            .retain(|k, _| !matches!(k, 182..=184 | 277..=279));
+        avatar.default_attributes.insert(attr_ids::HI_SLOTS, 8.0);
+        avatar.default_attributes.insert(attr_ids::MED_SLOTS, 6.0);
+        avatar.default_attributes.insert(attr_ids::LOW_SLOTS, 6.0);
+        avatar
+            .default_attributes
+            .insert(attr_ids::TURRET_SLOTS_LEFT, 8.0);
+        avatar.default_attributes.insert(attr_ids::CPU_OUTPUT, 1_000.0);
+        avatar
+            .default_attributes
+            .insert(attr_ids::POWER_OUTPUT, 1_000_000.0);
+        avatar
+            .default_attributes
+            .insert(attr_ids::CAPACITOR_CAPACITY, 10_000.0);
+        avatar
+            .default_attributes
+            .insert(attr_ids::MAX_LOCKED_TARGETS, 7.0);
+        avatar
+            .default_attributes
+            .insert(attr_ids::MAX_TARGET_RANGE, 200_000.0);
+        avatar
+            .default_attributes
+            .insert(attr_ids::SCAN_RESOLUTION, 100.0);
+        avatar
+            .default_attributes
+            .insert(attr_ids::SIGNATURE_RADIUS, 16_000.0);
+        sde.types.insert(SYN_AVATAR, avatar);
+
+        let civ_attrs = [
+            (6_u16, 1.0_f64),
+            (51, 2_000.0),
+            (54, 3_300.0),
+            (64, 1.3),
+            (114, 3.0),
+            (116, 0.0),
+            (117, 0.0),
+            (118, 2.0),
+            (158, 1_000.0),
+            (160, 625.0),
+            (620, 40_000.0),
+            (1795, 0.01),
+        ];
+        let mut civ = custom_inv_type(
+            sde,
+            SYN_CIV_PULSE,
+            53,
+            7,
+            5.0,
+            0.0,
+            "Civilian Gatling Pulse Laser",
+            &civ_attrs,
+        );
+        civ.effect_ids = vec![10, 12, 16, 42];
+        civ.default_effect_id = Some(10);
+        sde.types.insert(SYN_CIV_PULSE, civ);
+
+        let mut tight = custom_inv_type(
+            sde,
+            SYN_TIGHT_PULSE,
+            53,
+            7,
+            5.0,
+            0.0,
+            "Synthetic Zero-Tracking Laser",
+            &[
+                (6, 1.0),
+                (51, 2_000.0),
+                (54, 3_300.0),
+                (64, 1.3),
+                (114, 3.0),
+                (118, 2.0),
+                (158, 1_000.0),
+                (160, 0.0001),
+                (620, 40_000.0),
+                (1795, 0.01),
+            ],
+        );
+        tight.effect_ids = vec![10, 12, 16, 42];
+        tight.default_effect_id = Some(10);
+        sde.types.insert(SYN_TIGHT_PULSE, tight);
+
+        let mut concord_t = sde.types.get(&587).expect("rifter").clone();
+        concord_t.type_id = SYN_CONCORD_SWAT;
+        concord_t.group_id = 182;
+        concord_t.category_id = 11;
+        concord_t.name = "CONCORD SWAT Officer".into();
+        concord_t.radius = 38.0;
+        concord_t
+            .default_attributes
+            .insert(attr_ids::SIGNATURE_RADIUS, 25.0);
+        sde.types.insert(SYN_CONCORD_SWAT, concord_t);
+    });
+
+    let char_id = 97_124_701_i64;
+    let ship_id = 1_124_701_i64;
+    let laser_hit_id = 1_124_710_i64;
+    let laser_miss_id = 1_124_711_i64;
+    let laser_oob_id = 1_124_712_i64;
+    let concord_hit_id = 1_124_720_i64;
+    let concord_miss_id = 1_124_721_i64;
+    let concord_oob_id = 1_124_722_i64;
+
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id);
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, 1, Some(char_id), false, ctx.now_unix());
+    insert_item(
+        &ctx,
+        ship_id,
+        SYN_AVATAR,
+        char_id,
+        sys_id as i64,
+        InventoryFlag::None,
+        1,
+        true,
+    );
+    insert_item(
+        &ctx,
+        laser_hit_id,
+        SYN_CIV_PULSE,
+        char_id,
+        ship_id,
+        InventoryFlag::HiSlot0,
+        1,
+        true,
+    );
+    insert_item(
+        &ctx,
+        laser_miss_id,
+        SYN_TIGHT_PULSE,
+        char_id,
+        ship_id,
+        InventoryFlag::HiSlot1,
+        1,
+        true,
+    );
+    insert_item(
+        &ctx,
+        laser_oob_id,
+        SYN_CIV_PULSE,
+        char_id,
+        ship_id,
+        InventoryFlag::HiSlot2,
+        1,
+        true,
+    );
+
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels
+            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: SYN_AVATAR,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 60.0,
+            inertia: 1.0,
+            mass: 2_400_000_000.0,
+            radius: 6_800.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            shield_hp: 100_000.0,
+            max_shield_hp: 100_000.0,
+            armor_hp: 100_000.0,
+            max_armor_hp: 100_000.0,
+            structure_hp: 100_000.0,
+            max_structure_hp: 100_000.0,
+            capacitor: 10_000.0,
+            max_capacitor: 10_000.0,
+            signature_radius: 16_000.0,
+            ..CombatState::default()
+        },
+        SlimItemMeta {
+            group_id: 30,
+            category_id: 6,
+            owner_id: char_id,
+            char_id: Some(char_id),
+            corp_id: 98_000_001,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    for (tid, pos, vel, inertia) in [
+        (concord_hit_id, DVec3::new(6_855.5, 0.0, 0.0), DVec3::ZERO, 1.0),
+        (
+            concord_miss_id,
+            DVec3::new(6_855.5, 0.0, 0.0),
+            DVec3::new(0.0, 200.0, 0.0),
+            100.0,
+        ),
+        (concord_oob_id, DVec3::new(13_200.0, 0.0, 0.0), DVec3::ZERO, 1.0),
+    ] {
+        sys.spawn_ball_with_meta(
+            Ball {
+                id: tid,
+                type_id: SYN_CONCORD_SWAT,
+                position: pos,
+                velocity: vel,
+                max_velocity: 500.0,
+                inertia,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 500.0,
+                max_shield_hp: 500.0,
+                armor_hp: 550.0,
+                max_armor_hp: 550.0,
+                structure_hp: 500.0,
+                max_structure_hp: 500.0,
+                signature_radius: 25.0,
+                shield_recharge_time_ms: 0.0,
+                capacitor_recharge_time_ms: 0.0,
+                ..CombatState::default()
+            },
+            SlimItemMeta {
+                group_id: 182,
+                category_id: 11,
+                owner_id: 1_000_125,
+                char_id: None,
+                corp_id: 1_000_125,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        sys.add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: tid,
+                lock_time_ms: 100.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(100_000.0),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let kw = HashMap::new();
+    let mut sess = SessionState {
+        user_id: Some(uid),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Hit path: Avatar (r=6800) shooting CONCORD (r=50) at 5.5m surface distance.
+    handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(laser_hit_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(concord_hit_id),
+            PyRep::Integer(1000),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("civilian laser activation on CONCORD at 5.5m surface distance");
+
+    // 2. Miss path: extreme transversal target emits miss log rather than failing silently.
+    handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(laser_miss_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(concord_miss_id),
+            PyRep::Integer(1000),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("zero-tracking laser activation for deterministic miss log test");
+
+    // 3. Out-of-range path: surface distance 6350m (> 6300m optimal+3*falloff cutoff).
+    let cap_before_oob = sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor;
+    let oob_err = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(laser_oob_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(concord_oob_id),
+            PyRep::Integer(1000),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("Cycle-0 turret activation past optimal+3*falloff must return TargetOutOfRange");
+    assert_eq!(oob_err.code, "TargetOutOfRange");
+    assert_eq!(
+        sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor,
+        cap_before_oob,
+        "rejected Cycle-0 turret must not consume capacitor"
+    );
+    assert!(
+        !ctx.db.with_snapshot(|s| s.module_active_states.contains(&laser_oob_id)),
+        "rejected Cycle-0 turret must not be marked active in DB"
+    );
+
+    let _ = sys.step_manual(2.1).await.unwrap();
+    crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;
+
+    let hit_cs = sys.get_combat_state(concord_hit_id).await.unwrap().unwrap();
+    assert!(
+        hit_cs.shield_hp < 500.0,
+        "CONCORD at 5.5m surface distance must take damage from Titan Civilian Pulse Laser (shield={})",
+        hit_cs.shield_hp
+    );
+    assert!(
+        sys.has_module_cycle(ship_id, laser_hit_id).await,
+        "in-range repeating turret cycle must stay active"
+    );
+
+    let miss_cs = sys.get_combat_state(concord_miss_id).await.unwrap().unwrap();
+    assert_eq!(
+        miss_cs.shield_hp, 500.0,
+        "missed fast target must stay at full shield"
+    );
+
+    let oob_cs = sys.get_combat_state(concord_oob_id).await.unwrap().unwrap();
+    assert_eq!(
+        oob_cs.shield_hp, 500.0,
+        "out-of-range target past 6300m surface distance must stay at full shield"
+    );
+    assert!(
+        !sys.has_module_cycle(ship_id, laser_oob_id).await,
+        "out-of-range turret cycle must not remain active"
+    );
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnDamageMessage"
+                && n.args.first().and_then(|d| d.dict_get("target")).and_then(|v| v.as_i64())
+                    == Some(concord_hit_id)
+                && n.args.first().and_then(|d| d.dict_get("damage")).and_then(|v| v.as_f64())
+                    .is_some_and(|d| d > 0.0)
+        }),
+        "expected OnDamageMessage for CONCORD hit"
+    );
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnDamageMessages"
+                && matches!(n.args.first(), Some(PyRep::List(items)) if items.iter().any(|entry| matches!(
+                    entry,
+                    PyRep::Tuple(pair) if pair.first().and_then(|v| v.as_str()) == Some("AttackHit")
+                )))
+        }),
+        "expected AttackHit OnDamageMessages for CONCORD hit"
+    );
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnDamageMessage"
+                && n.args.first().and_then(|d| d.dict_get("target")).and_then(|v| v.as_i64())
+                    == Some(concord_miss_id)
+                && n.args.first().and_then(|d| d.dict_get("damage")).and_then(|v| v.as_f64())
+                    == Some(0.0)
+                && n.args.first().and_then(|d| d.dict_get("hitQuality")).and_then(|v| v.as_i64())
+                    == Some(0)
+        }),
+        "expected OnDamageMessage (damage=0.0, hitQuality=0) on turret miss"
+    );
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnDamageMessages"
+                && matches!(n.args.first(), Some(PyRep::List(items)) if items.iter().any(|entry| matches!(
+                    entry,
+                    PyRep::Tuple(pair) if pair.first().and_then(|v| v.as_str()) == Some("AttackMiss")
+                )))
+        }),
+        "expected AttackMiss OnDamageMessages on turret miss"
+    );
+    assert!(
+        !notifs.iter().any(|n| {
+            n.event == "OnDamageMessage"
+                && n.args.first().and_then(|d| d.dict_get("target")).and_then(|v| v.as_i64())
+                    == Some(concord_oob_id)
+        }),
+        "rejected Cycle-0 OOR turret must not emit OnDamageMessage or AttackMiss for target"
+    );
+}
+
+#[tokio::test]
+async fn cycle0_turret_oor_and_ewar_surface_distance_on_titan_1247() {
+    const SYN_AVATAR: u32 = 996_250;
+    const SYN_AUTOCANNON: u32 = 996_251;
+    const SYN_AMMO: u32 = 996_252;
+    const SYN_SCRAM: u32 = 996_253;
+    const SYN_TP: u32 = 996_254;
+    const SYN_TARGET_SHIP: u32 = 996_255;
+
+    let sys_id = 30_004_759_u32;
+    let ctx = seeded_cycles_ctx(|sde| {
+        if let Some(sys_rec) = sde.solar_systems.get_mut(&sys_id) {
+            sys_rec.security_status = 0.0;
+        }
+        let mut avatar = sde.types.get(&587).expect("rifter").clone();
+        avatar.type_id = SYN_AVATAR;
+        avatar.group_id = 30;
+        avatar.category_id = 6;
+        avatar.name = "Avatar".into();
+        avatar.radius = 6_800.0;
+        avatar.mass = 2_400_000_000.0;
+        avatar
+            .default_attributes
+            .retain(|k, _| !matches!(k, 182..=184 | 277..=279));
+        avatar.default_attributes.insert(attr_ids::HI_SLOTS, 8.0);
+        avatar.default_attributes.insert(attr_ids::MED_SLOTS, 6.0);
+        avatar.default_attributes.insert(attr_ids::LOW_SLOTS, 6.0);
+        avatar.default_attributes.insert(attr_ids::TURRET_SLOTS_LEFT, 8.0);
+        avatar.default_attributes.insert(attr_ids::CPU_OUTPUT, 1_000.0);
+        avatar.default_attributes.insert(attr_ids::POWER_OUTPUT, 1_000_000.0);
+        avatar.default_attributes.insert(attr_ids::CAPACITOR_CAPACITY, 10_000.0);
+        avatar.default_attributes.insert(attr_ids::MAX_LOCKED_TARGETS, 7.0);
+        avatar.default_attributes.insert(attr_ids::MAX_TARGET_RANGE, 200_000.0);
+        avatar.default_attributes.insert(attr_ids::SCAN_RESOLUTION, 100.0);
+        avatar.default_attributes.insert(attr_ids::SIGNATURE_RADIUS, 16_000.0);
+        sde.types.insert(SYN_AVATAR, avatar);
+
+        let mut ac = custom_inv_type(
+            sde,
+            SYN_AUTOCANNON,
+            55,
+            7,
+            5.0,
+            5.0,
+            "Test Autocannon I",
+            &[
+                (6, 5.0),
+                (51, 2_000.0),
+                (54, 2_000.0),
+                (56, 1.0),
+                (64, 1.5),
+                (128, 1.0),
+                (158, 1_000.0),
+                (160, 1.0),
+                (604, 83.0),
+                (620, 40.0),
+            ],
+        );
+        ac.effect_ids = vec![10, 12, 16, 42];
+        ac.default_effect_id = Some(10);
+        sde.types.insert(SYN_AUTOCANNON, ac);
+
+        let ammo = custom_inv_type(
+            sde,
+            SYN_AMMO,
+            83,
+            8,
+            0.01,
+            0.0,
+            "Test Projectile S",
+            &[(114, 10.0), (128, 1.0)],
+        );
+        sde.types.insert(SYN_AMMO, ammo);
+
+        let mut scram = custom_inv_type(
+            sde,
+            SYN_SCRAM,
+            52,
+            7,
+            5.0,
+            0.0,
+            "Test Warp Scrambler I",
+            &[(6, 5.0), (54, 9_000.0), (73, 5_000.0), (105, 2.0)],
+        );
+        scram.effect_ids = vec![12, 16, 39];
+        sde.types.insert(SYN_SCRAM, scram);
+
+        let mut tp = custom_inv_type(
+            sde,
+            SYN_TP,
+            379,
+            7,
+            5.0,
+            0.0,
+            "Test Target Painter I",
+            &[(6, 5.0), (54, 30_000.0), (73, 5_000.0), (554, 30.0), (2044, 10_000.0)],
+        );
+        tp.effect_ids = vec![12, 16];
+        sde.types.insert(SYN_TP, tp);
+
+        let mut tgt = sde.types.get(&587).expect("rifter").clone();
+        tgt.type_id = SYN_TARGET_SHIP;
+        tgt.radius = 50.0;
+        tgt.default_attributes.insert(attr_ids::SIGNATURE_RADIUS, 40.0);
+        sde.types.insert(SYN_TARGET_SHIP, tgt);
+    });
+
+    let char_id = 97_124_702_i64;
+    let vic_char_id = 97_124_703_i64;
+    let ship_id = 1_124_801_i64;
+    let ac_id = 1_124_810_i64;
+    let ammo_id = 1_124_811_i64;
+    let scram_id = 1_124_812_i64;
+    let tp_id = 1_124_813_i64;
+    let mid_id = 1_124_820_i64;
+    let far_id = 1_124_821_i64;
+
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id);
+    ensure_char(&ctx, vic_char_id, 98_000_002, sys_id, far_id);
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let _ = ctx.db.acquire_online_lock(uid, 2, Some(char_id), false, ctx.now_unix());
+
+    insert_item(&ctx, ship_id, SYN_AVATAR, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, ac_id, SYN_AUTOCANNON, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, ammo_id, SYN_AMMO, char_id, ship_id, InventoryFlag::HiSlot0, 10, false);
+    insert_item(&ctx, scram_id, SYN_SCRAM, char_id, ship_id, InventoryFlag::MedSlot0, 1, true);
+    insert_item(&ctx, tp_id, SYN_TP, char_id, ship_id, InventoryFlag::MedSlot1, 1, true);
+
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels
+            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: SYN_AVATAR,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 60.0,
+            inertia: 1.0,
+            mass: 2_400_000_000.0,
+            radius: 6_800.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            shield_hp: 100_000.0,
+            max_shield_hp: 100_000.0,
+            armor_hp: 100_000.0,
+            max_armor_hp: 100_000.0,
+            structure_hp: 100_000.0,
+            max_structure_hp: 100_000.0,
+            capacitor: 10_000.0,
+            max_capacitor: 10_000.0,
+            signature_radius: 16_000.0,
+            ..CombatState::default()
+        },
+        SlimItemMeta {
+            group_id: 30,
+            category_id: 6,
+            owner_id: char_id,
+            char_id: Some(char_id),
+            corp_id: 98_000_001,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // `mid_id`: center distance = 10_850m (> 9_000m scram range), surface distance = 4_000m (<= 9_000m).
+    // `far_id`: center distance = 16_350m, surface distance = 9_500m (> 5_000m turret & > 9_000m scram).
+    for (tid, x, owner) in [
+        (mid_id, 10_850.0, vic_char_id),
+        (far_id, 16_350.0, vic_char_id),
+    ] {
+        sys.spawn_ball_with_meta(
+            Ball {
+                id: tid,
+                type_id: SYN_TARGET_SHIP,
+                position: DVec3::new(x, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 500.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 500.0,
+                max_shield_hp: 500.0,
+                armor_hp: 500.0,
+                max_armor_hp: 500.0,
+                structure_hp: 500.0,
+                max_structure_hp: 500.0,
+                signature_radius: 40.0,
+                ..CombatState::default()
+            },
+            SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: owner,
+                char_id: Some(owner),
+                corp_id: 98_000_002,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        sys.add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: tid,
+                lock_time_ms: 100.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(200_000.0),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let kw = HashMap::new();
+    let mut sess = SessionState {
+        user_id: Some(uid),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Cycle-0 turret activation against `far_id` (9_500m surface > 5_000m cutoff) fails cleanly before cap/ammo/weapon timer.
+    let ac_oob = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(ac_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(far_id),
+            PyRep::Integer(1000),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("Cycle-0 turret past optimal+3*falloff must return TargetOutOfRange");
+    assert_eq!(ac_oob.code, "TargetOutOfRange");
+    assert_eq!(sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor, 10_000.0);
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&ammo_id].quantity), 10);
+    assert_eq!(
+        ctx.crimewatch
+            .state_of(char_id)
+            .map_or(0, |s| s.weapon_timer_until_unix),
+        0,
+        "rejected OOR Cycle-0 turret must not grant a weapon timer"
+    );
+    assert!(ctx.db.with_snapshot(|s| !s.sp6_lifecycle.weapon_timers_until.contains_key(&char_id)));
+    assert!(!sys.has_module_cycle(ship_id, ac_id).await);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    // 2. Tackle (`group 52`) & Target Painter (`group 379`) use surface distance (4_000m <= 9_000m despite 10_850m center distance).
+    let scram_oob = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(scram_id),
+            PyRep::String("warpScrambleForEntity".into()),
+            PyRep::Integer(far_id),
+            PyRep::Integer(1000),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("Warp Scrambler past 9_000m surface distance must fail TargetOutOfRange");
+    assert_eq!(scram_oob.code, "TargetOutOfRange");
+
+    handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(scram_id),
+            PyRep::String("warpScrambleForEntity".into()),
+            PyRep::Integer(mid_id),
+            PyRep::Integer(1000),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Warp Scrambler at 4_000m surface distance (10_850m center) must activate on Titan");
+    assert!(sys.has_module_cycle(ship_id, scram_id).await);
+
+    handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(tp_id),
+            PyRep::String("targetPassively".into()),
+            PyRep::Integer(mid_id),
+            PyRep::Integer(1000),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Target Painter at 4_000m surface distance must activate on Titan");
+    let tp_dist = ctx
+        .projected_ewar
+        .read()
+        .unwrap()
+        .get(&mid_id)
+        .and_then(|v| v.iter().find(|e| e.source_module_id == tp_id).map(|e| e.distance))
+        .expect("Target Painter projected EWAR recorded on target");
+    assert!(
+        (tp_dist - 4_000.0).abs() < 1e-6,
+        "Target Painter projected EWAR must store 4_000m surface distance, got {tp_dist}"
+    );
+}
+
+#[tokio::test]
+async fn cycle0_unguided_missile_surface_distance_and_eff_range_1247() {
+    const SYN_AVATAR: u32 = 996_260;
+    const SYN_DEFENDER: u32 = 996_261;
+    const SYN_DEF_CHARGE: u32 = 996_262;
+    const SYN_TARGET_SHIP: u32 = 996_263;
+
+    let sys_id = 30_004_759_u32;
+    let ctx = seeded_cycles_ctx(|sde| {
+        if let Some(sys_rec) = sde.solar_systems.get_mut(&sys_id) {
+            sys_rec.security_status = 0.0;
+        }
+        let mut avatar = sde.types.get(&587).expect("rifter").clone();
+        avatar.type_id = SYN_AVATAR;
+        avatar.group_id = 30;
+        avatar.category_id = 6;
+        avatar.name = "Avatar".into();
+        avatar.radius = 6_800.0;
+        avatar.mass = 2_400_000_000.0;
+        avatar
+            .default_attributes
+            .retain(|k, _| !matches!(k, 182..=184 | 277..=279));
+        avatar.default_attributes.insert(attr_ids::HI_SLOTS, 8.0);
+        avatar.default_attributes.insert(attr_ids::CPU_OUTPUT, 1_000.0);
+        avatar.default_attributes.insert(attr_ids::POWER_OUTPUT, 1_000_000.0);
+        avatar.default_attributes.insert(attr_ids::CAPACITOR_CAPACITY, 10_000.0);
+        avatar.default_attributes.insert(attr_ids::MAX_LOCKED_TARGETS, 7.0);
+        avatar.default_attributes.insert(attr_ids::MAX_TARGET_RANGE, 200_000.0);
+        avatar.default_attributes.insert(attr_ids::SCAN_RESOLUTION, 100.0);
+        avatar.default_attributes.insert(attr_ids::SIGNATURE_RADIUS, 16_000.0);
+        sde.types.insert(SYN_AVATAR, avatar);
+
+        // Group 512 (`is_missile_group = true`, `is_guided_missile = false`).
+        // Give falloff=3_000 so unpatched `else if opt_range > 0` would compute 14_000m instead of weapon_optimal_m=5_000m.
+        let mut def_launcher = custom_inv_type(
+            sde,
+            SYN_DEFENDER,
+            512,
+            7,
+            5.0,
+            5.0,
+            "Test Defender Launcher I",
+            &[(6, 5.0), (51, 2_000.0), (54, 5_000.0), (158, 3_000.0), (128, 1.0), (604, 83.0)],
+        );
+        def_launcher.effect_ids = vec![101, 12, 16];
+        def_launcher.default_effect_id = Some(101);
+        sde.types.insert(SYN_DEFENDER, def_launcher);
+
+        let def_charge = custom_inv_type(
+            sde,
+            SYN_DEF_CHARGE,
+            83,
+            8,
+            0.01,
+            0.0,
+            "Test Defender Charge",
+            &[(37, 2_000.0), (281, 2_500.0), (114, 50.0)],
+        );
+        sde.types.insert(SYN_DEF_CHARGE, def_charge);
+
+        let mut tgt = sde.types.get(&587).expect("rifter").clone();
+        tgt.type_id = SYN_TARGET_SHIP;
+        tgt.radius = 50.0;
+        tgt.default_attributes.insert(attr_ids::SIGNATURE_RADIUS, 40.0);
+        sde.types.insert(SYN_TARGET_SHIP, tgt);
+    });
+
+    let char_id = 97_124_704_i64;
+    let vic_char_id = 97_124_705_i64;
+    let ship_id = 1_124_901_i64;
+    let def_id = 1_124_910_i64;
+    let charge_id = 1_124_911_i64;
+    let mid_id = 1_124_920_i64;
+    let far_id = 1_124_921_i64;
+
+    ensure_char(&ctx, char_id, 98_000_003, sys_id, ship_id);
+    ensure_char(&ctx, vic_char_id, 98_000_004, sys_id, far_id);
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let _ = ctx.db.acquire_online_lock(uid, 2, Some(char_id), false, ctx.now_unix());
+
+    insert_item(&ctx, ship_id, SYN_AVATAR, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, def_id, SYN_DEFENDER, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, charge_id, SYN_DEF_CHARGE, char_id, ship_id, InventoryFlag::HiSlot0, 10, false);
+
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels
+            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: SYN_AVATAR,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 60.0,
+            inertia: 1.0,
+            mass: 2_400_000_000.0,
+            radius: 6_800.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            shield_hp: 100_000.0,
+            max_shield_hp: 100_000.0,
+            armor_hp: 100_000.0,
+            max_armor_hp: 100_000.0,
+            structure_hp: 100_000.0,
+            max_structure_hp: 100_000.0,
+            capacitor: 10_000.0,
+            max_capacitor: 10_000.0,
+            signature_radius: 16_000.0,
+            ..CombatState::default()
+        },
+        SlimItemMeta {
+            group_id: 30,
+            category_id: 6,
+            owner_id: char_id,
+            char_id: Some(char_id),
+            corp_id: 98_000_003,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // `mid_id`: center = 10_850m (> 5_000m optimal), surface = 4_000m (<= 5_000m).
+    // `far_id`: center = 16_350m, surface = 9_500m (> 5_000m optimal, even though < 14_000m opt+3*falloff).
+    for (tid, x) in [(mid_id, 10_850.0), (far_id, 16_350.0)] {
+        sys.spawn_ball_with_meta(
+            Ball {
+                id: tid,
+                type_id: SYN_TARGET_SHIP,
+                position: DVec3::new(x, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 500.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 500.0,
+                max_shield_hp: 500.0,
+                armor_hp: 500.0,
+                max_armor_hp: 500.0,
+                structure_hp: 500.0,
+                max_structure_hp: 500.0,
+                signature_radius: 40.0,
+                ..CombatState::default()
+            },
+            SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: vic_char_id,
+                char_id: Some(vic_char_id),
+                corp_id: 98_000_004,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        sys.add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: tid,
+                lock_time_ms: 100.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(200_000.0),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let kw = HashMap::new();
+    let mut sess = SessionState {
+        user_id: Some(uid),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_003),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Cycle-0 activation against `far_id` (9_500m surface > 5_000m optimal) rejects TargetOutOfRange before cap/ammo/timer commit.
+    let far_err = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(def_id),
+            PyRep::String("useMissiles".into()),
+            PyRep::Integer(far_id),
+            PyRep::Integer(1000),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("Cycle-0 unguided missile past weapon_optimal_m must fail TargetOutOfRange");
+    assert_eq!(far_err.code, "TargetOutOfRange");
+    assert_eq!(sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor, 10_000.0);
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&charge_id].quantity), 10);
+    assert!(!sys.has_module_cycle(ship_id, def_id).await);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    // 2. Cycle-0 against `mid_id` (4_000m surface <= 5_000m despite 10_850m center) activates; stepping past 5_000m surface cancels via `max_effective_range_m == 5_000m`.
+    handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(def_id),
+            PyRep::String("useMissiles".into()),
+            PyRep::Integer(mid_id),
+            PyRep::Integer(1000),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("unguided missile within 5_000m surface range must activate on Titan");
+    assert!(sys.has_module_cycle(ship_id, def_id).await);
+    let shield_after_cycle0_hit = sys.get_combat_state(mid_id).await.unwrap().unwrap().shield_hp;
+    assert!(
+        shield_after_cycle0_hit < 500.0,
+        "Cycle-0 unguided missile at 4_000m surface distance (10_850m center) must hit Titan"
+    );
+
+    // Move `mid_id` to x = 12_850m (surface = 6_000m > 5_000m, still < 14_000m): cycle cancels before firing with 0 additional damage and 0 miss logs.
+    assert!(sys.set_ball_position(mid_id, DVec3::new(12_850.0, 0.0, 0.0)).await);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = sys.step_manual(2.1).await.unwrap();
+    crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;
+    assert!(
+        !sys.has_module_cycle(ship_id, def_id).await,
+        "cycle with max_effective_range_m=5_000m must cancel once target leaves 5_000m surface distance"
+    );
+    let shield_after_step = sys.get_combat_state(mid_id).await.unwrap().unwrap().shield_hp;
+    assert!(
+        shield_after_step >= shield_after_cycle0_hit,
+        "cancelled OOR missile cycle must not deal additional damage (before={shield_after_cycle0_hit}, after={shield_after_step})"
+    );
+    assert!(
+        !ctx.drain_notifications_for_char(char_id)
+            .iter()
+            .any(|n| n.event == "OnDamageMessage" || n.event == "OnDamageMessages"),
+        "cancelled OOR missile cycle must not emit hit or miss logs"
+    );
+}
+
+

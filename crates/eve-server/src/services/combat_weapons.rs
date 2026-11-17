@@ -73,6 +73,44 @@ pub(crate) fn consume_one_weapon_round_and_emit(
     emit_weapon_charge_diff(ctx, char_id, ship_id, ammo_diff);
 }
 
+/// Computes the effective surface-to-surface maximum range (`optimal + 3 * falloff`) for an EWAR/tackle module,
+/// falling back to ship lock range only when the module defines neither optimal range nor falloff (#1247).
+fn compute_ewar_effective_range(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id: u32,
+    module_id: i64,
+    mod_type: &eve_sde::InvType,
+    mod_state: &eve_dogma::DogmaItemState,
+    fit: &eve_dogma::ShipFittingEngine,
+) -> f64 {
+    let mut opt_range = mod_state
+        .get_attribute(eve_sde::attr_ids::MAX_RANGE, &ctx.sde)
+        .max(0.0);
+    let disables_mwd = mod_type.group_id == 52
+        && eve_dogma::eval_warp_scrambler_effects(&[mod_state], &[0.0], &ctx.sde).blocks_mwd;
+    if mod_type.group_id == 65 || disables_mwd {
+        opt_range *= crate::services::security_mgr::insurgency_suppression_web_scram_range_multiplier(
+            ctx, char_id, sys_id,
+        );
+    }
+    let mut falloff = eve_dogma::get_module_falloff(mod_state, &ctx.sde).max(0.0);
+    let dark_mult = crate::services::pve_abyssal_hazards::dark_weather_midpocket_turret_mult(
+        ctx, char_id, sys_id, false, module_id, mod_type,
+    );
+    if (dark_mult - 1.0).abs() > 1e-9 {
+        opt_range *= dark_mult;
+        falloff *= dark_mult;
+    }
+    if opt_range > 0.0 || falloff > 0.0 {
+        opt_range + 3.0 * falloff
+    } else {
+        fit.ship
+            .get_attribute(eve_sde::attr_ids::MAX_TARGET_RANGE, &ctx.sde)
+            .max(0.0)
+    }
+}
+
 pub async fn handle_weapons(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -287,6 +325,18 @@ pub async fn handle_weapons(
                         ("damageDealt", PyRep::Real(0.0)),
                     ])));
                 }
+                let Some((_, target_ball)) = sys_handle
+                    .get_ball_snapshot(tid)
+                    .await
+                    .ok()
+                    .flatten()
+                else {
+                    return Some(Err(BridgeRpcError {
+                        code: "TargetNotInSpace".into(),
+                        message: format!("Target ball {tid} is not in space"),
+                        client_error: None,
+                    }));
+                };
                 let victim_char_opt = ctx.db.with_snapshot(|snap| {
                     if snap.characters.contains_key(&tid) {
                         Some(tid)
@@ -300,6 +350,7 @@ pub async fn handle_weapons(
                         None
                     }
                 });
+                let mut pvp_precheck: Option<(bool, bool, bool, bool)> = None;
                 if let Some(vc) = victim_char_opt {
                     if crate::services::space_destiny::is_location_change_invulnerable(ctx, vc, now_unix) {
                         return Some(Err(BridgeRpcError {
@@ -309,12 +360,7 @@ pub async fn handle_weapons(
                         }));
                     }
                     if vc != char_id {
-                        let is_pod_target = sys_handle
-                            .get_ball_snapshot(tid)
-                            .await
-                            .ok()
-                            .flatten()
-                            .is_some_and(|(_, b)| b.type_id == 670)
+                        let is_pod_target = target_ball.type_id == 670
                             || ctx.db.with_snapshot(|s| s.items.get(&tid).is_some_and(|i| i.type_id == 670));
                         let v_suspect_or_crim = {
                             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
@@ -344,31 +390,51 @@ pub async fn handle_weapons(
                                 return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                             }
                         }
-                        if v_suspect_or_crim || with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(char_id, vc, now_unix)) {
-                            with_mut_combat_runtime(ctx, |rt| {
-                                rt.add_limited_engagement(char_id, vc, now_unix);
-                                rt.add_limited_engagement(vc, char_id, now_unix);
-                            });
-                            emit_limited_engagement_created(ctx, char_id, vc);
+                        pvp_precheck = Some((is_pod_target, v_suspect_or_crim, is_legal, is_mobile_struct));
+                    }
+                }
+                // Why: Reject out-of-range EWAR (including special-target convoys/containers) before mutating CrimeWatch, assists, or projected EWAR (#1247).
+                let ewar_dist = attacker_ball.surface_distance(&target_ball);
+                let eff_max_range = compute_ewar_effective_range(
+                    ctx, char_id, sys_id, module_id, mod_type, &mod_state, &fit,
+                );
+                if eff_max_range > 0.0 && ewar_dist > eff_max_range {
+                    return Some(Err(BridgeRpcError::target_out_of_range(
+                        crate::services::inventory_fitting::resolve_target_display_name(ctx, tid),
+                        mod_type.type_id as i64,
+                        ewar_dist,
+                        format!(
+                            "Target {tid} is {ewar_dist:.1} m away (exceeds range {eff_max_range:.1} m)"
+                        ),
+                    )));
+                }
+                if let (Some(vc), Some((is_pod_target, v_suspect_or_crim, is_legal, is_mobile_struct))) =
+                    (victim_char_opt, pvp_precheck)
+                {
+                    if v_suspect_or_crim || with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(char_id, vc, now_unix)) {
+                        with_mut_combat_runtime(ctx, |rt| {
+                            rt.add_limited_engagement(char_id, vc, now_unix);
+                            rt.add_limited_engagement(vc, char_id, now_unix);
+                        });
+                        emit_limited_engagement_created(ctx, char_id, vc);
+                    }
+                    let is_new_agg = crate::services::combat_crimewatch::crimewatch_timers::is_new_pvp_aggression(ctx, char_id, vc, is_pod_target, now_unix);
+                    let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id);
+                    {
+                        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                        cw.system_corruption_stages.insert(sys_id, c_stage);
+                        let effective_sec = if is_mobile_struct { sys_sec.min(0.40) } else { sys_sec };
+                        let _ = cw.handle_combat_aggression_with_pod(char_id, vc, ship_id, sys_id, effective_sec, is_legal, is_pod_target, now_unix);
+                        if !is_legal && sys_sec > 0.0 && sys_sec < 0.45 && is_pod_target {
+                            let st = cw.get_or_create(char_id);
+                            st.criminal_flag_until_unix = now_unix.saturating_add(900);
+                            st.suspect_flag_until_unix = 0;
                         }
-                        let is_new_agg = crate::services::combat_crimewatch::crimewatch_timers::is_new_pvp_aggression(ctx, char_id, vc, is_pod_target, now_unix);
-                        let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id);
-                        {
-                            let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-                            cw.system_corruption_stages.insert(sys_id, c_stage);
-                            let effective_sec = if is_mobile_struct { sys_sec.min(0.40) } else { sys_sec };
-                            let _ = cw.handle_combat_aggression_with_pod(char_id, vc, ship_id, sys_id, effective_sec, is_legal, is_pod_target, now_unix);
-                            if !is_legal && sys_sec > 0.0 && sys_sec < 0.45 && is_pod_target {
-                                let st = cw.get_or_create(char_id);
-                                st.criminal_flag_until_unix = now_unix.saturating_add(900);
-                                st.suspect_flag_until_unix = 0;
-                            }
-                        }
-                        if !is_legal && !is_mobile_struct {
-                            crate::services::combat_crimewatch::crimewatch_timers::record_illegal_pvp_penalties_if_new(
-                                ctx, char_id, vc, sys_id, sys_sec, is_pod_target, is_new_agg, now_unix,
-                            );
-                        }
+                    }
+                    if !is_legal && !is_mobile_struct {
+                        crate::services::combat_crimewatch::crimewatch_timers::record_illegal_pvp_penalties_if_new(
+                            ctx, char_id, vc, sys_id, sys_sec, is_pod_target, is_new_agg, now_unix,
+                        );
                     }
                 }
                 crate::services::combat_crimewatch::crimewatch_timers::on_weapon_aggression_post_hook(ctx, char_id, victim_char_opt, sys_id, now_unix);
@@ -387,11 +453,6 @@ pub async fn handle_weapons(
                 }
                 // If Target Painter (379), also register projected EWAR on target ship so signature radius blooms
                 if mod_type.group_id == 379 {
-                    let dist = if let Ok(Some((_, tb))) = sys_handle.get_ball_snapshot(tid).await {
-                        attacker_ball.position.distance(tb.position)
-                    } else {
-                        5_000.0
-                    };
                     ctx.upsert_projected_ewar_on_ship(
                         ship_id,
                         tid,
@@ -399,7 +460,7 @@ pub async fn handle_weapons(
                             source_module_id: module_id,
                             source_module_type_id: m.type_id,
                             charge_type_id: m.charge_type_id,
-                            distance: dist,
+                            distance: ewar_dist,
                             overloaded: is_overloaded,
                             effective_module: mod_state.clone(),
                         },
@@ -582,7 +643,7 @@ pub async fn handle_weapons(
                     }
                 }
             };
-            let mod_state = if let Some(plan) = pending_weapon_autoload.as_ref() {
+            let (autoload_fit_opt, mod_state) = if let Some(plan) = pending_weapon_autoload.as_ref() {
                 let mut pre_fit = fit.clone();
                 if let Some(fm) = pre_fit.modules.get_mut(&module_id) {
                     fm.charge_type_id = Some(plan.ammo_type_id);
@@ -593,7 +654,8 @@ pub async fn handle_weapons(
                         .map_or(1, |&(_, _, q)| q.max(0) as u32);
                 }
                 pre_fit.recalculate_stats(&ctx.sde);
-                pre_fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde)
+                let ms = pre_fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
+                (Some(pre_fit), ms)
             } else {
                 if let Some(charge_type_id) = charge_type_id_opt {
                     if let Some(fm) = fit.modules.get_mut(&module_id) {
@@ -604,7 +666,7 @@ pub async fn handle_weapons(
                         }
                     }
                 }
-                fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde)
+                (None, fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde))
             };
             let charge_type_opt = charge_type_id_opt.and_then(|ctid| ctx.sde.types.get(&ctid));
             let is_fof_missile = charge_type_opt.is_some_and(|ct| matches!(ct.group_id, 394..=396));
@@ -644,9 +706,8 @@ pub async fn handle_weapons(
                     })
                     .min_by(|a, b| {
                         attacker_ball
-                            .position
-                            .distance(a.position)
-                            .partial_cmp(&attacker_ball.position.distance(b.position))
+                            .surface_distance(a)
+                            .partial_cmp(&attacker_ball.surface_distance(b))
                             .unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .map(|b| b.id);
@@ -791,17 +852,54 @@ pub async fn handle_weapons(
                 ctx, char_id, sys_id, is_missile_launcher, module_id, &mod_type,
             );
             let optimal_range = (if has_charge_mod(54, charge_item_id_opt) { base_opt } else { base_opt * range_mult }) * dark_mult;
-            let falloff_v = mod_state.get_attribute(158, &ctx.sde);
-            let falloff_range = (if falloff_v > 0.0 { falloff_v } else {
-                mod_type.default_attributes.get(&158).copied().unwrap_or(5_000.0)
-            }) * dark_mult;
-            let dist = if is_upwell_target {
-                (attacker_ball.position.distance(target_ball.position) - target_ball.radius - attacker_ball.radius).max(0.0)
+            // Why: Vorton Projectors (group 4060) have strict optimal range with zero falloff; defaulting missing attr 158 to 5_000m adds +15km phantom range (#1247).
+            let falloff_range = if is_vorton || is_missile_launcher {
+                0.0
             } else {
-                attacker_ball.position.distance(target_ball.position)
+                let falloff_v = mod_state.get_attribute(158, &ctx.sde);
+                (if falloff_v > 0.0 { falloff_v } else {
+                    mod_type.default_attributes.get(&158).copied().unwrap_or(5_000.0)
+                }) * dark_mult
             };
+            // Why: EVE weapon range and falloff are always measured surface-to-surface across all target types, not only Upwell structures (#1247).
+            let dist = attacker_ball.surface_distance(&target_ball);
 
-            if !is_missile_launcher && dist > optimal_range + 3.0 * falloff_range {
+            if is_missile_launcher {
+                if target_id_opt.is_some() {
+                    let (_, _, max_flight_range) =
+                        super::combat_missiles_aoe::compute_missile_flight_kinematics(
+                            autoload_fit_opt.as_ref().unwrap_or(&fit),
+                            module_id,
+                            charge_type_opt,
+                            &ctx.sde,
+                        );
+                    // Why: Enforce Cycle-0 missile/Breacher Pod surface flight range before autoload commit, capacitor, or ammo deduction (#1247).
+                    if max_flight_range > 0.0 && dist > max_flight_range + 1e-6 {
+                        let target_name =
+                            crate::services::inventory_fitting::resolve_target_display_name(
+                                ctx,
+                                target_ball_id,
+                            );
+                        if crate::system_actor::is_guided_missile_launcher_group(i64::from(
+                            mod_type.group_id,
+                        )) {
+                            return Some(Err(BridgeRpcError::target_too_far(
+                                target_name,
+                                mod_type.type_id as i64,
+                                dist,
+                            )));
+                        }
+                        return Some(Err(BridgeRpcError::target_out_of_range(
+                            target_name,
+                            mod_type.type_id as i64,
+                            dist,
+                            format!(
+                                "Target {target_ball_id} is {dist:.1} m away (exceeds range {max_flight_range:.1} m)"
+                            ),
+                        )));
+                    }
+                }
+            } else if dist > optimal_range + 3.0 * falloff_range {
                 return Some(Err(BridgeRpcError::target_out_of_range(
                     crate::services::inventory_fitting::resolve_target_display_name(
                         ctx,
@@ -1129,24 +1227,30 @@ pub async fn handle_weapons(
             };
             let turret_sig_res = mod_attr_pos(620, 40_000.0);
 
-            let angular_vel = eve_destiny::combat::compute_angular_velocity(
-                attacker_ball.position,
-                attacker_ball.velocity,
-                target_ball.position,
-                target_ball.velocity,
-            );
-            let p_hit = turret_chance_to_hit_with_res(
-                angular_vel,
-                tracking_speed,
-                turret_sig_res,
-                target_sig,
-                dist,
-                optimal_range,
-                falloff_range,
-            );
-            let hit_roll =
-                ctx.next_invention_roll(ship_id as u64, target_ball_id as u64, attacker_tick);
-            let (shot_dmg, mut is_wrecking) = turret_shot_damage(base_dmg, p_hit, hit_roll);
+            let (p_hit, shot_dmg, is_wrecking) = if is_vorton {
+                // Why: Vorton Projectors skip turret angular/wrecking rolls and apply via missile DRF within optimal (#1247).
+                (1.0, base_dmg, false)
+            } else {
+                let angular_vel = eve_destiny::combat::compute_angular_velocity(
+                    attacker_ball.position,
+                    attacker_ball.velocity,
+                    target_ball.position,
+                    target_ball.velocity,
+                );
+                let p_hit = turret_chance_to_hit_with_res(
+                    angular_vel,
+                    tracking_speed,
+                    turret_sig_res,
+                    target_sig,
+                    dist,
+                    optimal_range,
+                    falloff_range,
+                );
+                let hit_roll =
+                    ctx.next_invention_roll(ship_id as u64, target_ball_id as u64, attacker_tick);
+                let (shot_dmg, is_wrecking) = turret_shot_damage(base_dmg, p_hit, hit_roll);
+                (p_hit, shot_dmg, is_wrecking)
+            };
 
             // Entropic Disintegrator consecutive target-specific spooling (`feat:modules.turret-precursor`)
             let (spool_cycles, spool_multiplier) = if is_entropic {
@@ -1164,7 +1268,6 @@ pub async fn handle_weapons(
             // Vorton Projector arc chaining (`feat:modules.vorton-projector`)
             let mut vorton_secondary_targets = Vec::new();
             let final_dmg = if is_vorton {
-                is_wrecking = false;
                 let arc_range = mod_attr_pos(3036, 10_000.0);
                 let max_total_targets = {
                     let v3037 = mod_state.get_attribute(3037, &ctx.sde);
@@ -1187,19 +1290,18 @@ pub async fn handle_weapons(
                 let exp_rad = mod_attr_pos(654, 43.0);
                 let drf = mod_attr_pos(1353, 0.40);
                 let all_balls = sys_handle.list_balls().await.unwrap_or_default();
-                let candidates: Vec<(i64, DVec3)> = all_balls
+                let candidate_distances: Vec<(i64, f64)> = all_balls
                     .into_iter()
                     .filter(|b| {
                         b.id != ship_id
                             && b.id != target_ball_id
                             && super::combat_missiles_aoe::is_combatant_ship_or_entity_ball(ctx, b.id, b.type_id)
                     })
-                    .map(|b| (b.id, b.position))
+                    .map(|b| (b.id, target_ball.surface_distance(&b)))
                     .collect();
-                let hits = vorton_arc_targets_with_cap(
+                let hits = crate::formulas::vorton_arc_targets_from_distances(
                     target_ball_id,
-                    target_ball.position,
-                    &candidates,
+                    &candidate_distances,
                     arc_range,
                     max_secondary,
                 );

@@ -1657,8 +1657,8 @@ async fn w4_mutant_killers_cycles_cloak_turret_missile_rah_reload_cleanup_and_fl
     assert!(matches!(self_act, super::PendingCycleAction::CycleWeaponDamage { target_char_id: None, .. }));
     assert!(!pa.iter().any(|a| matches!(a, super::PendingCycleAction::CycleWeaponDamage { attacker_ship_id, .. } if *attacker_ship_id == npc_target)));
 
-    // 3. Missile exact boundary (dist == optimal hits, dist == optimal + 1 misses, optimal == 0 hits at long range) + stationary speed = max_velocity * speed_fraction
-    bp.balls.get_mut(&ship_vic).unwrap().position = DVec3::new(1_000.0, 0.0, 0.0);
+    // 3. Missile exact boundary (surface_dist == optimal hits, surface_dist == optimal + 1 misses, optimal == 0 hits at long range) + stationary speed = max_velocity * speed_fraction
+    bp.balls.get_mut(&ship_vic).unwrap().position = DVec3::new(1_100.0, 0.0, 0.0);
     bp.balls.get_mut(&ship_vic).unwrap().velocity = DVec3::ZERO;
     bp.balls.get_mut(&ship_vic).unwrap().max_velocity = 500.0;
     bp.balls.get_mut(&ship_vic).unwrap().speed_fraction = 0.0;

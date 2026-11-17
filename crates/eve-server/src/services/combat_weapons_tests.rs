@@ -1974,3 +1974,799 @@ async fn handle_weapons_and_fastpath_enforce_skill_prereqs_and_gated_autoload_gh
         "bomb 1 -> 0 depletion must emit OnItemChange tombstone"
     );
 }
+
+#[tokio::test]
+async fn handle_weapons_uses_surface_distance_for_non_upwell_titan_vs_concord_1247() {
+    use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
+    use eve_sde::attr_ids;
+
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    ctx = ctx.with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+    let kwargs = HashMap::new();
+
+    let mut sde = (*ctx.sde).clone();
+    if let Some(sys_rec) = sde.solar_systems.get_mut(&sys_id) {
+        sys_rec.security_status = -0.17;
+    }
+    let mut avatar = make_fighter_type(
+        11_567,
+        30,
+        6,
+        10_000_000.0,
+        vec![
+            (attr_ids::HI_SLOTS, 8.0),
+            (attr_ids::TURRET_SLOTS_LEFT, 8.0),
+            (attr_ids::CPU_OUTPUT, 10_000.0),
+            (attr_ids::POWER_OUTPUT, 1_000_000.0),
+            (attr_ids::CAPACITOR_CAPACITY, 10_000.0),
+            (attr_ids::MAX_LOCKED_TARGETS, 7.0),
+            (attr_ids::MAX_TARGET_RANGE, 200_000.0),
+            (attr_ids::SIGNATURE_RADIUS, 16_000.0),
+        ],
+    );
+    avatar.radius = 6_800.0;
+    avatar.mass = 2_400_000_000.0;
+    sde.types.insert(11_567, avatar);
+
+    let mut civ_laser = make_fighter_type(
+        3_634,
+        53,
+        7,
+        5.0,
+        vec![
+            (6, 1.0),
+            (51, 2_000.0),
+            (54, 3_300.0),
+            (64, 1.3),
+            (114, 3.0),
+            (116, 0.0),
+            (117, 0.0),
+            (118, 2.0),
+            (158, 1_000.0),
+            (160, 625.0),
+            (620, 40_000.0),
+            (1795, 0.01),
+        ],
+    );
+    civ_laser.capacity = 0.0;
+    civ_laser.effect_ids = vec![10, 12, 16, 42];
+    civ_laser.default_effect_id = Some(10);
+    sde.types.insert(3_634, civ_laser);
+
+    let mut concord_t = make_fighter_type(
+        10_035,
+        182,
+        11,
+        1_000.0,
+        vec![(attr_ids::SIGNATURE_RADIUS, 25.0)],
+    );
+    concord_t.radius = 38.0;
+    sde.types.insert(10_035, concord_t);
+    ctx.sde = std::sync::Arc::new(sde);
+
+    let civ_laser_id = 832_001_i64;
+    let concord_oob_id = 932_001_i64;
+    let concord_hit_id = 932_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items
+            .entry(ship_id)
+            .and_modify(|it| it.type_id = 11_567)
+            .or_insert_with(|| {
+                make_fighter_item(ship_id, 11_567, char_id, sys_id as i64, InventoryFlag::None, 1)
+            });
+        snap.items.insert(
+            civ_laser_id,
+            make_fighter_item(civ_laser_id, 3_634, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let now_unix = ctx.now_unix();
+    let _ = ctx.db.acquire_online_lock(
+        session.user_id.unwrap_or(1),
+        999_247,
+        Some(char_id),
+        true,
+        now_unix,
+    );
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Red);
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: 11_567,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 60.0,
+                inertia: 1.0,
+                mass: 2_400_000_000.0,
+                radius: 6_800.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 100_000.0,
+                max_shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                max_armor_hp: 100_000.0,
+                structure_hp: 100_000.0,
+                max_structure_hp: 100_000.0,
+                capacitor: 10_000.0,
+                max_capacitor: 10_000.0,
+                signature_radius: 16_000.0,
+                ..CombatState::default()
+            },
+            eve_destiny::SlimItemMeta {
+                group_id: 30,
+                category_id: 6,
+                owner_id: char_id,
+                char_id: Some(char_id),
+                corp_id: 98_000_001,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    for (tid, pos) in [
+        (concord_oob_id, DVec3::new(13_300.0, 0.0, 0.0)), // surface = 6,450m > 6,300m
+        (concord_hit_id, DVec3::new(6_855.5, 0.0, 0.0)),  // surface = 5.5m (center = 6,855.5m)
+    ] {
+        sys_handle
+            .spawn_ball_with_meta(
+                Ball {
+                    id: tid,
+                    type_id: 10_035,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 2_500.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    shield_hp: 500.0,
+                    max_shield_hp: 500.0,
+                    armor_hp: 550.0,
+                    max_armor_hp: 550.0,
+                    structure_hp: 500.0,
+                    max_structure_hp: 500.0,
+                    signature_radius: 25.0,
+                    shield_recharge_time_ms: 0.0,
+                    capacitor_recharge_time_ms: 0.0,
+                    ..CombatState::default()
+                },
+                eve_destiny::SlimItemMeta {
+                    group_id: 182,
+                    category_id: 11,
+                    owner_id: 1_000_125,
+                    char_id: None,
+                    corp_id: 1_000_125,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        sys_handle
+            .add_target_lock(
+                ship_id,
+                TargetLock {
+                    target_id: tid,
+                    lock_time_ms: 0.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: Some(100_000.0),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    // 1. Out-of-range beyond surface cutoff 6300m rejects with TargetOutOfRange.
+    let oob_err = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(civ_laser_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(concord_oob_id),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(oob_err.code, "TargetOutOfRange");
+
+    // 2. Non-Upwell CONCORD NPC at 5.5m surface distance on 6800m Titan must hit cleanly.
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let shot = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(civ_laser_id),
+            PyRep::String("targetAttack".into()),
+            PyRep::Integer(concord_hit_id),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("shot against CONCORD at 5.5m surface distance must succeed");
+
+    let hit_chance = shot.dict_get("hitChance").and_then(|v| v.as_f64()).unwrap();
+    let applied_dmg = shot.dict_get("appliedDamage").and_then(|v| v.as_f64()).unwrap();
+    assert!(hit_chance > 0.99, "surface distance 5.5m within 3300m optimal must have full hit chance (got {hit_chance})");
+    assert!(applied_dmg > 0.0, "expected positive damage against CONCORD (got {applied_dmg})");
+
+    let hit_cs = sys_handle.get_combat_state(concord_hit_id).await.unwrap().unwrap();
+    assert!(
+        hit_cs.shield_hp < 500.0,
+        "CONCORD target shield must drop after Civilian Pulse Laser hit (shield={})",
+        hit_cs.shield_hp
+    );
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnDamageMessage"),
+        "expected OnDamageMessage notification on handle_weapons hit"
+    );
+    assert!(
+        notifs.iter().any(|n| n.event == "OnDamageMessages"),
+        "expected OnDamageMessages notification on handle_weapons hit"
+    );
+}
+
+async fn setup_titan_sde_and_item_1247(
+    ctx: &mut ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    extra_types: Vec<eve_sde::InvType>,
+) {
+    use eve_sde::attr_ids;
+    let mut sde = (*ctx.sde).clone();
+    if let Some(sys_rec) = sde.solar_systems.get_mut(&sys_id) {
+        sys_rec.security_status = -0.17;
+    }
+    let mut avatar = make_fighter_type(
+        11_567,
+        30,
+        6,
+        10_000_000.0,
+        vec![
+            (attr_ids::MED_SLOTS, 8.0),
+            (attr_ids::HI_SLOTS, 8.0),
+            (attr_ids::TURRET_SLOTS_LEFT, 8.0),
+            (attr_ids::LAUNCHER_SLOTS_LEFT, 8.0),
+            (attr_ids::CPU_OUTPUT, 10_000.0),
+            (attr_ids::POWER_OUTPUT, 1_000_000.0),
+            (attr_ids::CAPACITOR_CAPACITY, 10_000.0),
+            (attr_ids::MAX_LOCKED_TARGETS, 7.0),
+            (attr_ids::MAX_TARGET_RANGE, 200_000.0),
+            (attr_ids::SIGNATURE_RADIUS, 16_000.0),
+        ],
+    );
+    avatar.radius = 6_800.0;
+    sde.types.insert(11_567, avatar);
+    for t in extra_types {
+        sde.types.insert(t.type_id, t);
+    }
+    ctx.sde = std::sync::Arc::new(sde);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items
+            .entry(ship_id)
+            .and_modify(|it| it.type_id = 11_567)
+            .or_insert_with(|| {
+                make_fighter_item(ship_id, 11_567, char_id, sys_id as i64, InventoryFlag::None, 1)
+            });
+    });
+    with_mut_combat_runtime(ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Red);
+    });
+}
+
+async fn spawn_titan_ball_1247(
+    sys_handle: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+) {
+    sys_handle
+        .spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: 11_567,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 60.0,
+                inertia: 1.0,
+                mass: 2_400_000_000.0,
+                radius: 6_800.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 100_000.0,
+                max_shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                max_armor_hp: 100_000.0,
+                structure_hp: 100_000.0,
+                max_structure_hp: 100_000.0,
+                capacitor: 1_000.0,
+                max_capacitor: 1_000.0,
+                signature_radius: 16_000.0,
+                ..CombatState::default()
+            },
+            eve_destiny::SlimItemMeta {
+                group_id: 30,
+                category_id: 6,
+                owner_id: char_id,
+                char_id: Some(char_id),
+                corp_id: 98_000_001,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+async fn lock_target_1247(
+    sys_handle: &crate::system_actor::SystemHandle,
+    ship_id: i64,
+    target_id: i64,
+) {
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            TargetLock {
+                target_id,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(100_000.0),
+            },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn handle_weapons_vorton_titan_strict_optimal_no_turret_roll_and_surface_arc_1247() {
+    use eve_sde::attr_ids;
+
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    ctx = ctx.with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+    let kwargs = HashMap::new();
+
+    // Vorton Projector (`4060`) intentionally omits `attr 158` (falloff) and sets near-zero turret tracking (`160 = 1e-6`).
+    setup_titan_sde_and_item_1247(
+        &mut ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        vec![
+            make_fighter_type(
+                40_601,
+                4060,
+                7,
+                5.0,
+                vec![
+                    (6, 20.0),
+                    (51, 3_000.0),
+                    (54, 10_000.0),
+                    (64, 1.0),
+                    (160, 1e-6),
+                    (604, 4061.0),
+                    (620, 40_000.0),
+                    (653, 1_000.0),
+                    (654, 40.0),
+                    (1353, 0.40),
+                    (3036, 5_000.0),
+                    (3037, 4.0),
+                ],
+            ),
+            make_fighter_type(40_611, 4061, 8, 0.01, vec![(114, 120.0), (117, 120.0)]),
+            make_fighter_type(10_050, 182, 11, 1_000.0, vec![(attr_ids::SIGNATURE_RADIUS, 16_000.0)]),
+        ],
+    )
+    .await;
+
+    let vorton_id = 833_001_i64;
+    let vorton_ammo_id = 833_002_i64;
+    let npc_oob = 933_101_i64;
+    let npc_primary = 933_102_i64;
+    let npc_arc_hit = 933_103_i64;
+    let npc_arc_oob = 933_104_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(vorton_id, make_fighter_item(vorton_id, 40_601, char_id, ship_id, InventoryFlag::HiSlot0, 1));
+        snap.items.insert(vorton_ammo_id, make_fighter_item(vorton_ammo_id, 40_611, char_id, ship_id, InventoryFlag::HiSlot0, 5));
+        snap.module_online_states.insert(vorton_id, true);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    spawn_titan_ball_1247(&sys_handle, char_id, ship_id).await;
+
+    for (tid, pos, vel, radius) in [
+        // 10_150m surface distance on opposite side from primary (> 10_000m strict optimal, < 25_000m phantom falloff, well clear of primary's 5_000m arc)
+        (npc_oob, DVec3::new(-17_000.0, 0.0, 0.0), DVec3::ZERO, 50.0),
+        // 8_400m surface distance (22_000m center) + transverse velocity so turret tracking 1e-6 would fail
+        (npc_primary, DVec3::new(22_000.0, 0.0, 0.0), DVec3::new(0.0, 150.0, 0.0), 6_800.0),
+        // 2_400m surface distance from primary (16_000m center > 5_000m arc_range)
+        (npc_arc_hit, DVec3::new(38_000.0, 0.0, 0.0), DVec3::ZERO, 6_800.0),
+        // 5_900m surface distance from primary (> 5_000m arc_range)
+        (npc_arc_oob, DVec3::new(41_500.0, 0.0, 0.0), DVec3::ZERO, 6_800.0),
+    ] {
+        sys_handle
+            .spawn_ball_with_meta(
+                Ball {
+                    id: tid,
+                    type_id: 10_050,
+                    position: pos,
+                    velocity: vel,
+                    max_velocity: vel.length(),
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius,
+                    speed_fraction: if vel.length() > 0.0 { 1.0 } else { 0.0 },
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    shield_hp: 5_000.0,
+                    max_shield_hp: 5_000.0,
+                    armor_hp: 5_000.0,
+                    max_armor_hp: 5_000.0,
+                    structure_hp: 5_000.0,
+                    max_structure_hp: 5_000.0,
+                    signature_radius: 16_000.0,
+                    base_signature_radius: Some(16_000.0),
+                    ..CombatState::default()
+                },
+                eve_destiny::SlimItemMeta {
+                    group_id: 182,
+                    category_id: 11,
+                    owner_id: 1_000_125,
+                    corp_id: 1_000_125,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    for tid in [npc_oob, npc_primary] {
+        lock_target_1247(&sys_handle, ship_id, tid).await;
+    }
+
+    // 1. Strict optimal cutoff: 10_150m surface fails without phantom 5_000m falloff, preserving cap & ammo
+    let oob_err = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(vorton_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_oob)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(oob_err.code, "TargetOutOfRange");
+    assert!((sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().capacitor - 1_000.0).abs() < 1e-6);
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&vorton_ammo_id).map(|i| i.quantity)), Some(5));
+
+    // 2. Primary at 8_400m surface skips turret tracking/wrecking roll and chains via surface distance
+    let shot = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(vorton_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_primary)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("Vorton within surface optimal must hit regardless of turret tracking");
+    assert_eq!(shot.dict_get("hitChance"), Some(&PyRep::Real(1.0)));
+    assert_eq!(shot.dict_get("isWreckingShot"), Some(&PyRep::Bool(false)));
+    assert_eq!(shot.dict_get("secondaryTargetsHit"), Some(&PyRep::Integer(1)));
+    assert!(shot.dict_get("appliedDamage").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
+    assert!((sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().capacitor - 980.0).abs() < 1e-6);
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&vorton_ammo_id).map(|i| i.quantity)), Some(4));
+    assert!(sys_handle.get_combat_state(npc_primary).await.unwrap().unwrap().shield_hp < 5_000.0);
+    assert!(sys_handle.get_combat_state(npc_arc_hit).await.unwrap().unwrap().shield_hp < 5_000.0);
+    assert!((sys_handle.get_combat_state(npc_arc_oob).await.unwrap().unwrap().shield_hp - 5_000.0).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn handle_weapons_missile_and_breacher_surface_spawn_and_oor_no_ammo_burn_1247() {
+    use eve_sde::attr_ids;
+
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let kwargs = HashMap::new();
+
+    setup_titan_sde_and_item_1247(
+        &mut ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        vec![
+            make_fighter_type(50_901, 509, 7, 5.0, vec![(51, 3_000.0), (604, 384.0)]),
+            make_fighter_type(38_401, 384, 8, 0.015, vec![(37, 4_000.0), (281, 2_000.0), (9, 75.0), (117, 150.0), (653, 170.0), (654, 40.0), (1353, 0.6)]),
+            make_fighter_type(45_001, 4500, 7, 5.0, vec![(51, 3_000.0), (604, 4070.0)]),
+            make_fighter_type(85_001, 4070, 8, 0.1, vec![(37, 4_000.0), (281, 2_000.0), (9, 75.0), (5735, 10_000.0), (5736, 250.0), (5737, 5.0)]),
+            make_fighter_type(10_050, 182, 11, 1_000.0, vec![(attr_ids::SIGNATURE_RADIUS, 16_000.0)]),
+        ],
+    )
+    .await;
+
+    let lml_id = 834_001_i64;
+    let lml_ammo_id = 834_002_i64;
+    let brl_id = 834_003_i64;
+    let brl_ammo_id = 834_004_i64;
+    let target_oob = 934_101_i64;
+    let target_hit = 934_102_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(lml_id, make_fighter_item(lml_id, 50_901, char_id, ship_id, InventoryFlag::HiSlot0, 1));
+        snap.items.insert(lml_ammo_id, make_fighter_item(lml_ammo_id, 38_401, char_id, ship_id, InventoryFlag::HiSlot0, 5));
+        snap.items.insert(brl_id, make_fighter_item(brl_id, 45_001, char_id, ship_id, InventoryFlag::HiSlot1, 1));
+        snap.items.insert(brl_ammo_id, make_fighter_item(brl_ammo_id, 85_001, char_id, ship_id, InventoryFlag::HiSlot1, 5));
+        snap.module_online_states.insert(lml_id, true);
+        snap.module_online_states.insert(brl_id, true);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    spawn_titan_ball_1247(&sys_handle, char_id, ship_id).await;
+
+    for (tid, pos) in [
+        // 8_400m surface distance (> 8_000m max_flight_range)
+        (target_oob, DVec3::new(22_000.0, 0.0, 0.0)),
+        // 6_000m surface distance (<= 8_000m max_flight_range, center 19_600m > 8_000m)
+        (target_hit, DVec3::new(19_600.0, 0.0, 0.0)),
+    ] {
+        sys_handle
+            .spawn_ball_with_meta(
+                Ball {
+                    id: tid,
+                    type_id: 10_050,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 2_400_000_000.0,
+                    radius: 6_800.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    shield_hp: 100_000.0,
+                    max_shield_hp: 100_000.0,
+                    armor_hp: 100_000.0,
+                    max_armor_hp: 100_000.0,
+                    structure_hp: 100_000.0,
+                    max_structure_hp: 100_000.0,
+                    signature_radius: 16_000.0,
+                    base_signature_radius: Some(16_000.0),
+                    ..CombatState::default()
+                },
+                eve_destiny::SlimItemMeta {
+                    group_id: 182,
+                    category_id: 11,
+                    owner_id: 1_000_125,
+                    corp_id: 1_000_125,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        lock_target_1247(&sys_handle, ship_id, tid).await;
+    }
+
+    // 1. OOR guided missile -> TargetTooFar without burning ammo
+    let lml_err = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(lml_id), PyRep::String("useMissiles".into()), PyRep::Integer(target_oob)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(lml_err.code, "TargetTooFar");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&lml_ammo_id).map(|i| i.quantity)), Some(5));
+
+    // 2. OOR Breacher Pod -> TargetOutOfRange without burning ammo
+    let brl_err = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(brl_id), PyRep::String("useMissiles".into()), PyRep::Integer(target_oob)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(brl_err.code, "TargetOutOfRange");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&brl_ammo_id).map(|i| i.quantity)), Some(5));
+
+    // 3. In-surface-range (6_000m surface, 19_600m center) launches from hull surface & impacts cleanly
+    let lml_ok = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(lml_id), PyRep::String("useMissiles".into()), PyRep::Integer(target_hit)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("guided missile at 6_000m surface distance must impact via hull-surface launch");
+    assert_eq!(lml_ok.dict_get("impacted"), Some(&PyRep::Bool(true)));
+    assert_eq!(lml_ok.dict_get("expired"), Some(&PyRep::Bool(false)));
+    assert!(lml_ok.dict_get("appliedDamage").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&lml_ammo_id).map(|i| i.quantity)), Some(4));
+
+    let brl_ok = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(brl_id), PyRep::String("useMissiles".into()), PyRep::Integer(target_hit)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("breacher pod at 6_000m surface distance must impact via hull-surface launch");
+    assert_eq!(brl_ok.dict_get("impacted"), Some(&PyRep::Bool(true)));
+    assert_eq!(brl_ok.dict_get("expired"), Some(&PyRep::Bool(false)));
+    assert_eq!(brl_ok.dict_get("isBreacherPod"), Some(&PyRep::Bool(true)));
+    assert!(brl_ok.dict_get("breacherTickDPS").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&brl_ammo_id).map(|i| i.quantity)), Some(4));
+    assert!(with_combat_runtime(&ctx, |rt| rt.active_breacher_dots.contains_key(&target_hit)));
+}
+
+#[tokio::test]
+async fn handle_weapons_special_target_ewar_surface_range_gate_1247() {
+    use eve_sde::attr_ids;
+
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let kwargs = HashMap::new();
+
+    // Target Painter (`379`, cutoff 20_000m + 3 * 5_000m = 35_000m) + Secure Container (`448`) routed via is_special_target
+    setup_titan_sde_and_item_1247(
+        &mut ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        vec![
+            make_fighter_type(37_902, 379, 7, 5.0, vec![(54, 20_000.0), (158, 5_000.0), (554, 30.0)]),
+            make_fighter_type(44_801, 448, 2, 100.0, vec![(9, 5_000.0), (attr_ids::SIGNATURE_RADIUS, 100.0)]),
+        ],
+    )
+    .await;
+
+    let tp_id = 835_001_i64;
+    let other_char_id = char_id + 500;
+    let cont_oob = 935_101_i64;
+    let cont_in = 935_102_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut other_ch = snap.characters[&char_id].clone();
+        other_ch.character_id = other_char_id;
+        other_ch.user_id = other_char_id as u64;
+        other_ch.corporation_id += 1;
+        other_ch.solar_system_id = sys_id;
+        other_ch.active_ship_id = 0;
+        other_ch.station_id = None;
+        snap.characters.insert(other_char_id, other_ch);
+
+        snap.items.insert(tp_id, make_fighter_item(tp_id, 37_902, char_id, ship_id, InventoryFlag::MedSlot0, 1));
+        snap.items.insert(cont_oob, make_fighter_item(cont_oob, 44_801, other_char_id, sys_id as i64, InventoryFlag::None, 1));
+        snap.items.insert(cont_in, make_fighter_item(cont_in, 44_801, other_char_id, sys_id as i64, InventoryFlag::None, 1));
+        snap.module_online_states.insert(tp_id, true);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    spawn_titan_ball_1247(&sys_handle, char_id, ship_id).await;
+
+    for (cid, pos) in [
+        // 35_650m surface distance (> 35_000m cutoff)
+        (cont_oob, DVec3::new(42_500.0, 0.0, 0.0)),
+        // 34_650m surface distance (<= 35_000m cutoff, despite 41_500m center distance)
+        (cont_in, DVec3::new(41_500.0, 0.0, 0.0)),
+    ] {
+        sys_handle
+            .spawn_ball_with_meta(
+                Ball {
+                    id: cid,
+                    type_id: 44_801,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 1_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    structure_hp: 5_000.0,
+                    max_structure_hp: 5_000.0,
+                    signature_radius: 100.0,
+                    base_signature_radius: Some(100.0),
+                    ..CombatState::default()
+                },
+                eve_destiny::SlimItemMeta {
+                    group_id: 448,
+                    category_id: 2,
+                    owner_id: other_char_id,
+                    char_id: Some(other_char_id),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        lock_target_1247(&sys_handle, ship_id, cid).await;
+    }
+
+    // 1. Out-of-range special target rejects before projected EWAR, weapon timer, aggression, or NPC timer
+    let oob_err = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(tp_id), PyRep::String("targetAttack".into()), PyRep::Integer(cont_oob)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(oob_err.code, "TargetOutOfRange");
+    assert!((ctx.effective_target_painter_multiplier(cont_oob) - 1.0).abs() < 1e-6);
+    assert_eq!(
+        ctx.crimewatch.read().unwrap().states.get(&char_id).map(|s| s.weapon_timer_until_unix).unwrap_or(0),
+        0
+    );
+    assert!(ctx.crimewatch.read().unwrap().get_aggression(char_id, other_char_id, ctx.now_unix()).is_none());
+    assert!(with_combat_runtime(&ctx, |rt| rt.npc_timers.get(&char_id).copied()).is_none());
+
+    // 2. Within surface range (34_650m <= 35_000m, center 41_500m) succeeds through is_special_target dispatch
+    let in_ok = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(tp_id), PyRep::String("targetAttack".into()), PyRep::Integer(cont_in)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("special-target EWAR within surface range must succeed");
+    assert_eq!(in_ok.dict_get("ewarAssistRecorded"), Some(&PyRep::Bool(true)));
+    assert!(ctx.effective_target_painter_multiplier(cont_in) > 1.0);
+    assert!(
+        ctx.projected_ewar
+            .read()
+            .unwrap()
+            .get(&cont_in)
+            .is_some_and(|list| list.len() == 1 && (list[0].distance - 34_650.0).abs() < 1e-3)
+    );
+}
+

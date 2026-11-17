@@ -441,7 +441,8 @@ pub(crate) fn reconcile_tackle_and_bubbles(
                 ballpark.balls.get(&active_module_cycles[idx].ship_id),
                 active_module_cycles[idx].max_effective_range_m,
             ),
-            (Some(tb), Some(sb), Some(max_r)) if (sb.position - tb.position).length() > max_r
+            // Why: EVE module ranges are surface-to-surface; using center-to-center distance breaks large hulls like Titans (#1247).
+            (Some(tb), Some(sb), Some(max_r)) if sb.surface_distance(tb) > max_r
         );
         if out_of_range {
             let shut_down = active_module_cycles.remove(idx);
@@ -887,7 +888,7 @@ pub(crate) fn handle_add_module_cycle(
             let mut att = 1.0;
             if cycle.remote_falloff > 0.0 || cycle.remote_optimal > 0.0 {
                 if let (Some(sb), Some(tb)) = (ballpark.balls.get(&cycle.ship_id), ballpark.balls.get(&target_id)) {
-                    let dist = (sb.position - tb.position).length();
+                    let dist = sb.surface_distance(tb);
                     att = eve_dogma::compute_falloff_with_cutoff(dist, cycle.remote_optimal, cycle.remote_falloff);
                 }
             }
@@ -1211,7 +1212,7 @@ pub(crate) fn apply_overload_transition_to_cycle(
                         Some(c.grappler_optimal_m + 3.0 * c.grappler_falloff_m.max(0.0));
                     if let Some(tid) = c.target_id {
                         if let (Some(sb), Some(tb)) = (ballpark.balls.get(&ship_id), ballpark.balls.get(&tid)) {
-                            let dist = (sb.position - tb.position).length();
+                            let dist = sb.surface_distance(tb);
                             let att = eve_dogma::compute_falloff_attenuation(
                                 dist,
                                 c.grappler_optimal_m,

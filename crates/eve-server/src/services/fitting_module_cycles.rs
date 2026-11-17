@@ -1475,31 +1475,17 @@ pub(crate) async fn handle_module_cycles(
                             .is_some_and(|eid| active_charge_sde.is_some_and(|ct| ct.effect_ids.contains(&eid)))
                 })
             };
-            let (missile_max_velocity_ms, missile_flight_time_s) = if is_missile_group {
-                let vel = {
-                    let v = fit.get_charge_effective_attribute(module_id, 37, &ctx.sde);
-                    if v > 0.0 {
-                        v
-                    } else {
-                        active_charge_sde
-                            .and_then(|ct| ct.default_attributes.get(&37).copied())
-                            .unwrap_or(3_750.0)
-                    }
+            let (missile_max_velocity_ms, missile_flight_time_s, missile_max_range_m) =
+                if is_missile_group {
+                    crate::services::combat_crimewatch::combat_missiles_aoe::compute_missile_flight_kinematics(
+                        &fit,
+                        module_id,
+                        active_charge_sde,
+                        &ctx.sde,
+                    )
+                } else {
+                    (0.0, 0.0, 0.0)
                 };
-                let delay_ms = {
-                    let v = fit.get_charge_effective_attribute(module_id, 281, &ctx.sde);
-                    if v > 0.0 {
-                        v
-                    } else {
-                        active_charge_sde
-                            .and_then(|ct| ct.default_attributes.get(&281).copied())
-                            .unwrap_or(5_000.0)
-                    }
-                };
-                (vel, delay_ms / 1_000.0)
-            } else {
-                (0.0, 0.0)
-            };
             let weapon_optimal_m = if is_turret_group {
                 let range_mult = active_charge_sde
                     .and_then(|ct| ct.default_attributes.get(&120).copied())
@@ -1518,7 +1504,7 @@ pub(crate) async fn handle_module_cycles(
                     base_opt * range_mult
                 }) * weapon_dark_mult
             } else if is_missile_group {
-                missile_max_velocity_ms * missile_flight_time_s
+                missile_max_range_m
             } else if is_vorton_group {
                 let v = mod_state.get_attribute(54, &ctx.sde);
                 if v > 0.0 {
@@ -1667,22 +1653,50 @@ pub(crate) async fn handle_module_cycles(
             } else {
                 0
             };
-            let mut missile_launch_range_comp_m = 0.0_f64;
-            if is_guided_missile {
+            if is_missile_group || is_turret_group || is_vorton_group {
                 if let Some(tid) = target_id_opt {
                     if let (Ok(Some((_, atk_ball))), Ok(Some((_, tgt_ball)))) = (
                         sys.get_ball_snapshot(ship_id).await,
                         sys.get_ball_snapshot(tid).await,
                     ) {
-                        missile_launch_range_comp_m =
-                            atk_ball.radius.max(0.0) + tgt_ball.radius.max(0.0);
-                        let center_dist = atk_ball.position.distance(tgt_ball.position);
-                        let max_launch_range = weapon_optimal_m + missile_launch_range_comp_m;
-                        if weapon_optimal_m > 0.0 && center_dist > max_launch_range + 1e-6 {
-                            return Some(Err(BridgeRpcError::target_too_far(
+                        // Why: Both launch-time validation and `cycles.rs` compare `Ball::surface_distance` (#1004, #1247).
+                        let surface_dist = atk_ball.surface_distance(&tgt_ball);
+                        if is_guided_missile {
+                            if weapon_optimal_m > 0.0 && surface_dist > weapon_optimal_m + 1e-6 {
+                                ctx.remove_projected_ewar_by_module(ship_id, module_id);
+                                return Some(Err(BridgeRpcError::target_too_far(
+                                    resolve_target_display_name(ctx, tid),
+                                    mod_type.type_id as i64,
+                                    surface_dist,
+                                )));
+                            }
+                        } else if is_turret_group {
+                            // Why: Reject out-of-range Cycle-0 turret activations before cap/ammo/timer commit (#1247).
+                            let turret_max_range_m = weapon_optimal_m + 3.0 * weapon_falloff_m;
+                            if turret_max_range_m > 0.0 && surface_dist > turret_max_range_m {
+                                ctx.remove_projected_ewar_by_module(ship_id, module_id);
+                                return Some(Err(BridgeRpcError::target_out_of_range(
+                                    resolve_target_display_name(ctx, tid),
+                                    mod_type.type_id as i64,
+                                    surface_dist,
+                                    format!(
+                                        "Target {tid} is {surface_dist:.1} m away (exceeds range {turret_max_range_m:.1} m)"
+                                    ),
+                                )));
+                            }
+                        } else if mod_type.group_id != 862
+                            && weapon_optimal_m > 0.0
+                            && surface_dist > weapon_optimal_m
+                        {
+                            // Why: Reject out-of-range Cycle-0 Vorton / targeted non-guided missile activations before cap/ammo/timer commit (#1247).
+                            ctx.remove_projected_ewar_by_module(ship_id, module_id);
+                            return Some(Err(BridgeRpcError::target_out_of_range(
                                 resolve_target_display_name(ctx, tid),
                                 mod_type.type_id as i64,
-                                center_dist,
+                                surface_dist,
+                                format!(
+                                    "Target {tid} is {surface_dist:.1} m away (exceeds range {weapon_optimal_m:.1} m)"
+                                ),
                             )));
                         }
                     }
@@ -1845,12 +1859,14 @@ pub(crate) async fn handle_module_cycles(
                         opt_range *= dark_mult;
                         falloff *= dark_mult;
                     }
-                    let eff = if is_guided_missile && weapon_optimal_m > 0.0 {
-                        weapon_optimal_m + missile_launch_range_comp_m
+                    let eff = if (is_guided_missile || is_vorton_group || is_missile_group)
+                        && weapon_optimal_m > 0.0
+                    {
+                        weapon_optimal_m
+                    } else if is_turret_group && (weapon_optimal_m > 0.0 || weapon_falloff_m > 0.0) {
+                        weapon_optimal_m + 3.0 * weapon_falloff_m.max(0.0)
                     } else if opt_range > 0.0 {
                         opt_range + 3.0 * falloff.max(0.0)
-                    } else if is_missile_group && weapon_optimal_m > 0.0 {
-                        weapon_optimal_m
                     } else {
                         fit.ship.get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde)
                     };
