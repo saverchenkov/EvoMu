@@ -1367,28 +1367,7 @@ where
         domain: &'static str,
         out: &mut Vec<DomainRowChange>,
     ) {
-        if self.ptr_eq(after) {
-            return;
-        }
-        for item in self.diff(after) {
-            match item {
-                CowDiffItem::Add(k, v) | CowDiffItem::Update { new: (k, v), .. } => {
-                    let key_str = k.encode_key();
-                    let value = to_checked_domain_json(domain, &key_str, &**v);
-                    out.push(DomainRowChange::Upsert {
-                        domain,
-                        key: key_str,
-                        value,
-                    });
-                }
-                CowDiffItem::Remove(k, _) => {
-                    out.push(DomainRowChange::Delete {
-                        domain,
-                        key: k.encode_key(),
-                    });
-                }
-            }
-        }
+        diff_cow_map_field(domain, "", "", self, after, out);
     }
 
     fn sync_full(&self, tx: &Transaction<'_>, domain: &'static str) -> Result<bool, String> {
@@ -1661,6 +1640,68 @@ pub(crate) fn diff_map_with<'a, K: KeyCodec + 'a, V: PartialEq + Serialize + 'a>
         |v| v,
         out,
     );
+}
+
+/// Emits `O(k log N)` `domain_rows` diffs for a [`CowMap`] via [`CowMap::diff`] without scanning
+/// all entries. Uses `{prefix}{field}/{encoded_key}` keys (or `{encoded_key}` when both `prefix`
+/// and `field` are empty), and preserves bit-exact unchanged `NaN` handling.
+pub(crate) fn diff_cow_map_field<K, V>(
+    domain: &'static str,
+    prefix: &str,
+    field: &str,
+    before: &CowMap<K, V>,
+    after: &CowMap<K, V>,
+    out: &mut Vec<DomainRowChange>,
+) where
+    K: Ord + Clone + KeyCodec,
+    V: Clone + PartialEq + Serialize,
+{
+    if before.ptr_eq(after) {
+        return;
+    }
+    let encode_row_key = |k: &K| {
+        if prefix.is_empty() && field.is_empty() {
+            k.encode_key()
+        } else {
+            format_domain_entry_key(prefix, field, k)
+        }
+    };
+    for item in before.diff(after) {
+        match item {
+            CowDiffItem::Add(k, v) => {
+                let key_str = encode_row_key(k);
+                let value = to_checked_domain_json(domain, &key_str, &**v);
+                out.push(DomainRowChange::Upsert {
+                    domain,
+                    key: key_str,
+                    value,
+                });
+            }
+            CowDiffItem::Update {
+                old: (_, prev),
+                new: (k, v),
+            } => {
+                let key_str = encode_row_key(k);
+                let value = to_checked_domain_json(domain, &key_str, &**v);
+                if matches!(value, Err(TxError::NonFinite { .. }))
+                    && serialized_bits_equal(&**prev, &**v)
+                {
+                    continue;
+                }
+                out.push(DomainRowChange::Upsert {
+                    domain,
+                    key: key_str,
+                    value,
+                });
+            }
+            CowDiffItem::Remove(k, _) => {
+                out.push(DomainRowChange::Delete {
+                    domain,
+                    key: encode_row_key(k),
+                });
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

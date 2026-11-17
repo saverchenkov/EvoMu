@@ -494,6 +494,79 @@ pub(crate) fn collect_industry_market_pve_domain_row_diffs(
     after: &WorldStateSnapshot,
     out: &mut Vec<DomainRowChange>,
 ) {
+    trait DomainMapDiff<K, V> {
+        fn collect_map_diffs(
+            &self,
+            after: &Self,
+            domain: &'static str,
+            field: &'static str,
+            out: &mut Vec<DomainRowChange>,
+        );
+    }
+
+    impl<K: Eq + Hash + crate::sqlite_store::domain_rows::KeyCodec, V: PartialEq + serde::Serialize>
+        DomainMapDiff<K, V> for HashMap<K, V>
+    {
+        #[inline]
+        fn collect_map_diffs(
+            &self,
+            after: &Self,
+            domain: &'static str,
+            field: &'static str,
+            out: &mut Vec<DomainRowChange>,
+        ) {
+            if !(self.is_empty() && after.is_empty()) {
+                diff_map_with(
+                    domain,
+                    field,
+                    self.len(),
+                    after.iter(),
+                    |k| self.get(k),
+                    self.keys(),
+                    |k| after.contains_key(k),
+                    out,
+                );
+            }
+        }
+    }
+
+    impl<K: Eq + Hash + crate::sqlite_store::domain_rows::KeyCodec, V: PartialEq + serde::Serialize>
+        DomainMapDiff<K, V> for crate::cow::CowCell<HashMap<K, V>>
+    {
+        #[inline]
+        fn collect_map_diffs(
+            &self,
+            after: &Self,
+            domain: &'static str,
+            field: &'static str,
+            out: &mut Vec<DomainRowChange>,
+        ) {
+            if !self.ptr_eq(after) {
+                self.as_inner()
+                    .collect_map_diffs(after.as_inner(), domain, field, out);
+            }
+        }
+    }
+
+    impl<
+            K: Ord + Clone + crate::sqlite_store::domain_rows::KeyCodec,
+            V: Clone + PartialEq + serde::Serialize,
+        > DomainMapDiff<K, V> for crate::cow::CowMap<K, V>
+    {
+        #[inline]
+        fn collect_map_diffs(
+            &self,
+            after: &Self,
+            domain: &'static str,
+            field: &'static str,
+            out: &mut Vec<DomainRowChange>,
+        ) {
+            crate::sqlite_store::domain_rows::diff_cow_map_field(
+                domain, "", field, self, after, out,
+            );
+        }
+    }
+
     trait MaybePtrEq {
         fn ptr_eq_fast(&self, other: &Self) -> bool;
     }
@@ -502,20 +575,6 @@ pub(crate) fn collect_industry_market_pve_domain_row_diffs(
         #[inline]
         fn ptr_eq_fast(&self, other: &Self) -> bool {
             self.ptr_eq(other)
-        }
-    }
-
-    impl<K: Ord + Clone, V: Clone> MaybePtrEq for crate::cow::CowMap<K, V> {
-        #[inline]
-        fn ptr_eq_fast(&self, other: &Self) -> bool {
-            self.ptr_eq(other)
-        }
-    }
-
-    impl<K, V> MaybePtrEq for HashMap<K, V> {
-        #[inline]
-        fn ptr_eq_fast(&self, _other: &Self) -> bool {
-            false
         }
     }
 
@@ -539,18 +598,12 @@ pub(crate) fn collect_industry_market_pve_domain_row_diffs(
         ) => {
             $(
                 $(
-                    if !before.$map_f.ptr_eq_fast(&after.$map_f) {
-                        diff_map_with(
-                            $domain_const,
-                            stringify!($map_f),
-                            before.$map_f.len(),
-                            after.$map_f.iter(),
-                            |k| before.$map_f.get(k),
-                            before.$map_f.keys(),
-                            |k| after.$map_f.contains_key(k),
-                            out,
-                        );
-                    }
+                    before.$map_f.collect_map_diffs(
+                        &after.$map_f,
+                        $domain_const,
+                        stringify!($map_f),
+                        out,
+                    );
                 )*
                 $(
                     if !before.$set_f.ptr_eq_fast(&after.$set_f) {

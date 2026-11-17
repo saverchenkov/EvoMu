@@ -1670,6 +1670,17 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
         .collect();
     snap.wallet_journal = CowIdVec::from(wj_vec);
     snap.mails = CowIdVec::from(mail_vec);
+    snap.wallet_journal_timestamps = (0..n_cold)
+        .map(|i| (500_000_000 + i as i64, 1_700_000_000_u64))
+        .collect();
+    snap.wallet_journal_meta = (0..n_cold)
+        .map(|i| {
+            (
+                500_000_000 + i as i64,
+                crate::ledger::JournalMeta::new(10, cid, cid, 1_700_000_000),
+            )
+        })
+        .collect();
 
     // Also populate CowMap, CowCell, CowLpLogs, CowActiveMissions, and cold stores.
     let item_id = 200_900_001_i64;
@@ -1799,6 +1810,12 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
     let before_snap = repo.with_snapshot(|s| s.clone());
     let cloned_snap = before_snap.clone();
     assert!(before_snap.wallet_journal.ptr_eq(&cloned_snap.wallet_journal));
+    assert!(before_snap
+        .wallet_journal_timestamps
+        .ptr_eq(&cloned_snap.wallet_journal_timestamps));
+    assert!(before_snap
+        .wallet_journal_meta
+        .ptr_eq(&cloned_snap.wallet_journal_meta));
     assert!(before_snap.mails.ptr_eq(&cloned_snap.mails));
     assert!(before_snap.char_lp_logs.ptr_eq(&cloned_snap.char_lp_logs));
     assert!(before_snap.active_missions.ptr_eq(&cloned_snap.active_missions));
@@ -1862,6 +1879,12 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
 
     let after_hot_snap = repo.with_snapshot(|s| s.clone());
     assert!(before_snap.wallet_journal.ptr_eq(&after_hot_snap.wallet_journal));
+    assert!(before_snap
+        .wallet_journal_timestamps
+        .ptr_eq(&after_hot_snap.wallet_journal_timestamps));
+    assert!(before_snap
+        .wallet_journal_meta
+        .ptr_eq(&after_hot_snap.wallet_journal_meta));
     assert!(before_snap.mails.ptr_eq(&after_hot_snap.mails));
     assert!(before_snap.char_lp_logs.ptr_eq(&after_hot_snap.char_lp_logs));
     assert!(before_snap.active_missions.ptr_eq(&after_hot_snap.active_missions));
@@ -1871,25 +1894,30 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
     assert!(before_snap.entity_kv.ptr_eq(&after_hot_snap.entity_kv));
     assert!(!before_snap.items.ptr_eq(&after_hot_snap.items));
 
-    // Appending 1 wallet_journal + 1 mail entry on 1M SQLite-backed sequences is O(log N),
-    // performs 0 cold FP clones, 0 full-table touches, and 0 fingerprint calls during commit/sync.
+    // Appending 1 journal entry via `WorldStateSnapshot::append_journal_entry` (updating
+    // `wallet_journal`, `wallet_journal_meta`, and `wallet_journal_timestamps`) + 1 mail entry on
+    // 1M SQLite-backed sequences/maps is O(log N), performs 0 cold FP clones, 0 full-table
+    // touches (`CowMap::diff` for `wallet_journal_timestamps` / `wallet_journal_meta`), and 0
+    // fingerprint calls during commit/sync.
     crate::cow::reset_thread_cow_full_touch_for_test();
     super::reset_thread_cold_fp_clones_for_test();
     sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
 
+    let mut appended_journal_id = 0_i64;
     let mut closure_fp_calls = usize::MAX;
     let t_append = std::time::Instant::now();
     repo.tx("append_1_journal_and_1_mail", |wtx| -> Result<(), TxError> {
-        let j_id = wtx.alloc_entity_id()?;
         let m_id = wtx.alloc_entity_id()?;
-        wtx.snap.wallet_journal.push(WalletJournalEntry {
-            entry_id: j_id,
-            character_id: cid,
-            entry_type: "Bounty".into(),
+        let j_id = wtx.snap.append_journal_entry(crate::ledger::JournalEntryInput {
+            owner_id: cid,
+            entry_type: "Bounty",
             amount: IskCents(500),
             balance_after: IskCents(600),
             reason: "append-fast".into(),
+            meta: crate::ledger::JournalMeta::new(10, cid, cid, 1_700_000_123),
         });
+        assert_ne!(j_id, m_id);
+        appended_journal_id = j_id;
         wtx.snap.mails.push(MailRecord {
             message_id: m_id,
             sender_id: cid,
@@ -1905,7 +1933,7 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
     let append_dur = t_append.elapsed();
     assert!(
         append_dur < std::time::Duration::from_millis(50),
-        "appending 1 wallet_journal + 1 mail to 1M vectors took {append_dur:?} (expected << 50ms)"
+        "appending 1 journal + 1 mail to 1M sequences/maps took {append_dur:?} (expected << 50ms)"
     );
     assert!(
         closure_fp_calls <= 2,
@@ -1921,10 +1949,21 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
         0,
         "append_1_journal_and_1_mail must perform 0 cold FP clones"
     );
-    assert_eq!(crate::cow::thread_cow_full_touch_for_test(), 0);
-    assert_eq!(repo.read_state().wallet_journal.len(), n_cold + 1);
-    assert_eq!(repo.read_state().mails.len(), n_cold + 1);
-    let (sql_wj_cnt, sql_mail_cnt): (i64, i64) = repo
+    assert_eq!(
+        crate::cow::thread_cow_full_touch_for_test(),
+        0,
+        "append_journal_entry must diff wallet_journal_timestamps/meta with 0 full-table touches"
+    );
+    let read_after = repo.read_state();
+    assert_eq!(read_after.wallet_journal.len(), n_cold + 1);
+    assert_eq!(read_after.wallet_journal_timestamps.len(), n_cold + 1);
+    assert_eq!(read_after.wallet_journal_meta.len(), n_cold + 1);
+    assert_eq!(
+        read_after.wallet_journal_timestamps.get(&appended_journal_id),
+        Some(&1_700_000_123)
+    );
+    assert_eq!(read_after.mails.len(), n_cold + 1);
+    let (sql_wj_cnt, sql_mail_cnt, ts_val, meta_exists): (i64, i64, String, bool) = repo
         .with_sqlite_conn(|c| {
             let wj: i64 = c
                 .query_row("SELECT COUNT(*) FROM wallet_journal", [], |r| r.get(0))
@@ -1932,11 +1971,97 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
             let m: i64 = c
                 .query_row("SELECT COUNT(*) FROM mail", [], |r| r.get(0))
                 .map_err(|e| e.to_string())?;
-            Ok::<(i64, i64), String>((wj, m))
+            let ts: String = c
+                .query_row(
+                    "SELECT value FROM domain_rows WHERE domain = ?1 AND key = ?2",
+                    rusqlite::params![
+                        crate::sqlite_store::domain_rows::DOMAIN_WALLET_AND_MARKET,
+                        format!("wallet_journal_timestamps/{appended_journal_id}"),
+                    ],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let meta_row: Option<String> = c
+                .query_row(
+                    "SELECT value FROM domain_rows WHERE domain = ?1 AND key = ?2",
+                    rusqlite::params![
+                        crate::sqlite_store::domain_rows::DOMAIN_WALLET_JOURNAL_META,
+                        appended_journal_id.to_string(),
+                    ],
+                    |r| r.get(0),
+                )
+                .ok();
+            Ok::<(i64, i64, String, bool), String>((wj, m, ts, meta_row.is_some()))
         })
         .expect("sqlite count");
     assert_eq!(sql_wj_cnt, (n_cold + 1) as i64);
     assert_eq!(sql_mail_cnt, (n_cold + 1) as i64);
+    assert_eq!(ts_val, "1700000123");
+    assert!(meta_exists);
+
+    // Updating + deleting an existing entry in 1M `wallet_journal_timestamps` also runs in
+    // O(k log N) with 0 full-table touches, 0 cold FP clones, and exact `domain_rows` SQLite sync.
+    crate::cow::reset_thread_cow_full_touch_for_test();
+    super::reset_thread_cold_fp_clones_for_test();
+    sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
+    repo.tx("update_1m_wallet_ts", |wtx| -> Result<(), TxError> {
+        wtx.snap
+            .wallet_journal_timestamps
+            .insert(appended_journal_id, 1_700_000_999);
+        Ok(())
+    })
+    .expect("update_1m_wallet_ts");
+    assert_eq!(crate::cow::thread_cow_full_touch_for_test(), 0);
+    assert_eq!(super::thread_cold_fp_clones_for_test(), 0);
+    assert_eq!(
+        sqlite_store::fingerprints::thread_fingerprint_calls_for_test(),
+        0
+    );
+    let updated_ts: String = repo
+        .with_sqlite_conn(|c| {
+            c.query_row(
+                "SELECT value FROM domain_rows WHERE domain = ?1 AND key = ?2",
+                rusqlite::params![
+                    crate::sqlite_store::domain_rows::DOMAIN_WALLET_AND_MARKET,
+                    format!("wallet_journal_timestamps/{appended_journal_id}"),
+                ],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .expect("sqlite verify ts update");
+    assert_eq!(updated_ts, "1700000999");
+
+    repo.tx("remove_1m_wallet_ts", |wtx| -> Result<(), TxError> {
+        wtx.snap
+            .wallet_journal_timestamps
+            .remove(&appended_journal_id);
+        Ok(())
+    })
+    .expect("remove_1m_wallet_ts");
+    assert_eq!(crate::cow::thread_cow_full_touch_for_test(), 0);
+    assert_eq!(super::thread_cold_fp_clones_for_test(), 0);
+    assert_eq!(
+        sqlite_store::fingerprints::thread_fingerprint_calls_for_test(),
+        0
+    );
+    let removed_exists: bool = repo
+        .with_sqlite_conn(|c| {
+            let row: Option<String> = c
+                .query_row(
+                    "SELECT value FROM domain_rows WHERE domain = ?1 AND key = ?2",
+                    rusqlite::params![
+                        crate::sqlite_store::domain_rows::DOMAIN_WALLET_AND_MARKET,
+                        format!("wallet_journal_timestamps/{appended_journal_id}"),
+                    ],
+                    |r| r.get(0),
+                )
+                .ok();
+            Ok::<bool, String>(row.is_some())
+        })
+        .expect("sqlite verify ts delete");
+    assert!(!removed_exists);
+
     let after_append_snap = repo.with_snapshot(|s| s.clone());
     assert!(after_hot_snap.contracts.ptr_eq(&after_append_snap.contracts));
     assert!(after_hot_snap.corp_governance.ptr_eq(&after_append_snap.corp_governance));
