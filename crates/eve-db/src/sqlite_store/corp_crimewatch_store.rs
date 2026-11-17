@@ -1164,35 +1164,6 @@ pub fn load_corp_crimewatch_domain_rows(
     Ok(had_legacy)
 }
 
-fn rollback_corp_crimewatch_inner(
-    conn: &Connection,
-    snap: &mut WorldStateSnapshot,
-) -> Result<(), String> {
-    let has_domain_rows = table_exists(conn, "domain_rows")?;
-    let has_legacy_table = table_exists(conn, "d6_corp_crimewatch_kv")?;
-    if !has_domain_rows && !has_legacy_table {
-        return Err("rollback corp_crimewatch missing domain_rows table".into());
-    }
-    let mut ctx = super::quarantine::LoadContext::new(false);
-    let (staged, _) = stage_corp_crimewatch_rows(conn, &mut ctx)?;
-    staged.apply_to(snap);
-    Ok(())
-}
-
-/// Restores all 3 Family 4 domains from SQLite into temporaries, mutating `snap` only
-/// after every query and checked JSON parse succeeds.
-pub fn rollback_corp_crimewatch(
-    conn: &Connection,
-    snap: &mut WorldStateSnapshot,
-) -> Result<(), String> {
-    if let Err(err) = rollback_corp_crimewatch_inner(conn, snap) {
-        crate::persistence::record_persist_failure();
-        tracing::error!("rollback_corp_crimewatch failed closed without mutating snapshot: {err}");
-        return Err(err);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 #[path = "corp_crimewatch_store_unit_tests.rs"]
 mod corp_crimewatch_store_unit_tests;

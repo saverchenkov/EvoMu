@@ -1,19 +1,14 @@
-//! Mutation-killing unit tests for `sqlite_store` edge cases across `fingerprints`,
-//! `industry_market_pve_store`, `corp_crimewatch_store`, `rollback`, `ledger_store`,
+//! Mutation-killing unit tests for `sqlite_store` edge cases across `checked_json`,
+//! `industry_market_pve_store`, `corp_crimewatch_store`, `ledger_store`,
 //! `notes_lp_sequence_store`, `load`, and `sync`.
 
 #![forbid(unsafe_code)]
 
 use super::evedb_sqlite_cov_tests::build_populated_snapshot;
 use super::evedb_sqlite_load_errors_and_schema_tests::open_migrated_conn;
-use crate::sqlite_store::fingerprints::{
-    compute_fingerprints, fp_asteroid, fp_character, fp_contract, fp_item, fp_market_order,
-    fp_market_orders_digest, fp_system_state,
-};
-use crate::sqlite_store::industry_market_pve_store::compute_d6_batch4_fingerprints;
+use crate::sqlite_store::checked_json::canonical_fp;
 use crate::sqlite_store::load::load_snapshot_from_sqlite;
-use crate::sqlite_store::notes_lp_sequence_store::rollback_d6;
-use crate::sqlite_store::sync::{replace_sqlite_from_snapshot, sync_dirty_to_sqlite};
+use crate::sqlite_store::sync::{replace_sqlite_from_snapshot, sync_snapshot_diff_for_test};
 use crate::types::{
     AccountRecord, AsteroidRecord, CharacterRecord, ContractRecord, CorporationRecord,
     InventoryItemRecord, MailRecord, MarketOrderRecord, MiningLedgerRecord, SkillQueueEntry,
@@ -27,36 +22,36 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
     let cid = 90_000_001i64;
     base.licensed_skins.insert(90_000_002, vec![1]);
 
-    // 1. Kill None vs Some(1) (`unwrap_or(-1) -> unwrap_or(1)`) in fingerprints
+    // 1. Kill None vs Some(1) (`unwrap_or(-1) -> unwrap_or(1)`) in canonical hashes
     let ch = base.characters[&cid].clone();
     assert_ne!(
-        fp_character(&CharacterRecord { alliance_id: None, ..ch.clone() }),
-        fp_character(&CharacterRecord { alliance_id: Some(1), ..ch.clone() }),
+        canonical_fp(&CharacterRecord { alliance_id: None, ..ch.clone() }),
+        canonical_fp(&CharacterRecord { alliance_id: Some(1), ..ch.clone() }),
     );
     assert_ne!(
-        fp_character(&CharacterRecord { war_faction_id: None, ..ch.clone() }),
-        fp_character(&CharacterRecord { war_faction_id: Some(1), ..ch.clone() }),
+        canonical_fp(&CharacterRecord { war_faction_id: None, ..ch.clone() }),
+        canonical_fp(&CharacterRecord { war_faction_id: Some(1), ..ch.clone() }),
     );
     assert_ne!(
-        fp_character(&CharacterRecord { station_id: None, ..ch.clone() }),
-        fp_character(&CharacterRecord { station_id: Some(1), ..ch.clone() }),
+        canonical_fp(&CharacterRecord { station_id: None, ..ch.clone() }),
+        canonical_fp(&CharacterRecord { station_id: Some(1), ..ch.clone() }),
     );
     assert_ne!(
-        fp_character(&CharacterRecord { structure_id: None, ..ch.clone() }),
-        fp_character(&CharacterRecord { structure_id: Some(1), ..ch.clone() }),
+        canonical_fp(&CharacterRecord { structure_id: None, ..ch.clone() }),
+        canonical_fp(&CharacterRecord { structure_id: Some(1), ..ch.clone() }),
     );
     assert_ne!(
-        fp_character(&CharacterRecord { fleet_id: None, ..ch.clone() }),
-        fp_character(&CharacterRecord { fleet_id: Some(1), ..ch.clone() }),
+        canonical_fp(&CharacterRecord { fleet_id: None, ..ch.clone() }),
+        canonical_fp(&CharacterRecord { fleet_id: Some(1), ..ch.clone() }),
     );
     let mut ch2 = ch.clone();
     ch2.loyalty_points.insert(1_000_125, 100);
     ch2.loyalty_points.insert(1_000_170, 200);
-    assert_ne!(fp_character(&ch2), fp_character(&ch));
+    assert_ne!(canonical_fp(&ch2), canonical_fp(&ch));
     let mut ch3 = ch;
     ch3.standings.insert(1_000_125, 0.5);
     ch3.standings.insert(1_000_170, 2.5);
-    assert_ne!(fp_character(&ch3), fp_character(&base.characters[&cid]));
+    assert_ne!(canonical_fp(&ch3), canonical_fp(&base.characters[&cid]));
 
     let mut item = InventoryItemRecord {
         item_id: 901,
@@ -68,14 +63,14 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
         blueprint_runs_remaining: None,
         ..Default::default()
     };
-    let item_none_fp = fp_item(&item);
+    let item_none_fp = canonical_fp(&item);
     item.blueprint_runs_remaining = Some(1);
-    assert_ne!(fp_item(&item), item_none_fp);
+    assert_ne!(canonical_fp(&item), item_none_fp);
     item.dynamic_attributes.insert(10, 1.5);
     item.dynamic_attributes.insert(20, 2.5);
-    let item_dyn_fp = fp_item(&item);
+    let item_dyn_fp = canonical_fp(&item);
     item.dynamic_attributes.insert(20, 3.5);
-    assert_ne!(fp_item(&item), item_dyn_fp);
+    assert_ne!(canonical_fp(&item), item_dyn_fp);
 
     let c_base = ContractRecord {
         contract_id: 1,
@@ -85,12 +80,12 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
         ..Default::default()
     };
     assert_ne!(
-        fp_contract(&ContractRecord { acceptor_id: Some(1), ..c_base.clone() }),
-        fp_contract(&c_base)
+        canonical_fp(&ContractRecord { acceptor_id: Some(1), ..c_base.clone() }),
+        canonical_fp(&c_base)
     );
     assert_ne!(
-        fp_contract(&ContractRecord { current_bidder_id: Some(1), ..c_base.clone() }),
-        fp_contract(&c_base)
+        canonical_fp(&ContractRecord { current_bidder_id: Some(1), ..c_base.clone() }),
+        canonical_fp(&c_base)
     );
 
     let s_base = SystemDynamicState {
@@ -100,15 +95,15 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
         ..Default::default()
     };
     assert_ne!(
-        fp_system_state(&SystemDynamicState { ess_linked_character_id: Some(1), ..s_base.clone() }),
-        fp_system_state(&s_base)
+        canonical_fp(&SystemDynamicState { ess_linked_character_id: Some(1), ..s_base.clone() }),
+        canonical_fp(&s_base)
     );
     assert_ne!(
-        fp_system_state(&SystemDynamicState { sov_alliance_id: Some(1), ..s_base.clone() }),
-        fp_system_state(&s_base)
+        canonical_fp(&SystemDynamicState { sov_alliance_id: Some(1), ..s_base.clone() }),
+        canonical_fp(&s_base)
     );
 
-    // 2. Kill high-bit XOR/OR/AND mutants in fp_market_order and 2-entry fp_market_orders_digest
+    // 2. Kill high-bit mutants in MarketOrderRecord and 2-entry CowMap canonical hashes
     let mo_base = MarketOrderRecord {
         order_id: -1,
         owner_id: -1,
@@ -123,27 +118,25 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
         is_npc: true,
         escrow: IskCents(-1),
     };
-    let mo_fp = fp_market_order(&mo_base);
-    assert_ne!(fp_market_order(&MarketOrderRecord { order_id: 1, ..mo_base.clone() }), mo_fp);
-    assert_ne!(fp_market_order(&MarketOrderRecord { owner_id: 1, ..mo_base.clone() }), mo_fp);
-    assert_ne!(fp_market_order(&MarketOrderRecord { station_id: 1, ..mo_base.clone() }), mo_fp);
-    assert_ne!(fp_market_order(&MarketOrderRecord { region_id: 1, ..mo_base.clone() }), mo_fp);
-    assert_ne!(fp_market_order(&MarketOrderRecord { price: IskCents(1), ..mo_base.clone() }), mo_fp);
-    assert_ne!(fp_market_order(&MarketOrderRecord { vol_entered: 1, ..mo_base.clone() }), mo_fp);
-    assert_ne!(fp_market_order(&MarketOrderRecord { escrow: IskCents(1), ..mo_base.clone() }), mo_fp);
+    let mo_fp = canonical_fp(&mo_base);
+    assert_ne!(canonical_fp(&MarketOrderRecord { order_id: 1, ..mo_base.clone() }), mo_fp);
+    assert_ne!(canonical_fp(&MarketOrderRecord { owner_id: 1, ..mo_base.clone() }), mo_fp);
+    assert_ne!(canonical_fp(&MarketOrderRecord { station_id: 1, ..mo_base.clone() }), mo_fp);
+    assert_ne!(canonical_fp(&MarketOrderRecord { region_id: 1, ..mo_base.clone() }), mo_fp);
+    assert_ne!(canonical_fp(&MarketOrderRecord { price: IskCents(1), ..mo_base.clone() }), mo_fp);
+    assert_ne!(canonical_fp(&MarketOrderRecord { vol_entered: 1, ..mo_base.clone() }), mo_fp);
+    assert_ne!(canonical_fp(&MarketOrderRecord { escrow: IskCents(1), ..mo_base.clone() }), mo_fp);
 
     let mut orders = crate::CowMap::new();
     orders.insert(1, mo_base.clone());
     orders.insert(2, MarketOrderRecord { order_id: 2, price: IskCents(500), ..mo_base });
-    let d1 = fp_market_orders_digest(&orders);
+    let d1 = canonical_fp(&orders);
     orders.get_mut(&2).unwrap().price = IskCents(600);
-    assert_ne!(fp_market_orders_digest(&orders), d1);
+    assert_ne!(canonical_fp(&orders), d1);
 
-    // 3. Kill 2-entry XOR mutants in hash_map_xor, batch4, and corp_crimewatch
+    // 3. Kill 2-entry XOR mutants in ChangeSet::diff domain_rows and cold_domains
     let mut base2 = base.clone();
     base2.licensed_skins.insert(90_000_002, vec![2, 3]);
-    assert_ne!(compute_fingerprints(&base2).licensed_skins, compute_fingerprints(&base).licensed_skins);
-
     base2.paused_skill_queues.insert(90_000_001);
     base2.paused_skill_queues.insert(90_000_002);
     base2.weapon_banks.entry(100).or_default().insert(1, vec![10]);
@@ -159,7 +152,6 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
     let mut base_acl_two = base2.clone();
     base2.structure_docking_acl_denied.entry(10).or_default().extend([1, 2]);
     base2.structure_docking_acl_denied.entry(20).or_default().extend([3, 4]);
-    let b4_a = compute_d6_batch4_fingerprints(&base2);
     let diff_init = crate::tx_engine::ChangeSet::diff(1, &base_acl_two, &base2);
     base_acl_two = base2.clone();
     base2.paused_skill_queues.remove(&90_000_002);
@@ -167,9 +159,8 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
     base2.weapon_banks.get_mut(&200).unwrap().insert(2, vec![21]);
     base2.mining_ledger[0].quantity = 101;
     base2.structure_docking_acl_denied.get_mut(&20).unwrap().insert(99);
-    let b4_b = compute_d6_batch4_fingerprints(&base2);
     let diff_acl_update = crate::tx_engine::ChangeSet::diff(2, &base_acl_two, &base2);
-    assert_ne!(b4_a.mining_ledger, b4_b.mining_ledger);
+    assert!(diff_acl_update.cold_domains.d6_batch4);
     assert!(!diff_init.domain_rows.is_empty());
     assert_eq!(diff_acl_update.domain_rows.len(), 4);
     assert!(diff_acl_update.domain_rows.iter().any(|op| matches!(
@@ -197,25 +188,7 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
                 && key == "weapon_banks/200"
     )));
 
-    // 4. Clean no-op rollback guards across rollback_d6
-    let empty_conn = open_migrated_conn();
-    let clean_fp = compute_fingerprints(&base);
-    let mut clean_snap = base.clone();
-    rollback_d6(&empty_conn, &mut clean_snap, &clean_fp).unwrap();
-    assert_eq!(clean_snap.accounts.len(), base.accounts.len());
-    assert_eq!(clean_snap.characters.len(), base.characters.len());
-    assert_eq!(clean_snap.skills.len(), base.skills.len());
-    assert_eq!(clean_snap.skill_queues.len(), base.skill_queues.len());
-    assert_eq!(clean_snap.items.len(), base.items.len());
-    assert_eq!(clean_snap.market_orders.len(), base.market_orders.len());
-    assert_eq!(clean_snap.wallet_journal.len(), base.wallet_journal.len());
-    assert_eq!(clean_snap.mails.len(), base.mails.len());
-    assert_eq!(clean_snap.structures.len(), base.structures.len());
-    assert_eq!(clean_snap.owner_notes.len(), base.owner_notes.len());
-    assert_eq!(clean_snap.corp_lp_balances.len(), base.corp_lp_balances.len());
-    assert_eq!(clean_snap.account_plex_vault.len(), base.account_plex_vault.len());
-
-    // 5. Kill world_meta single-field updates, next_entity_id load, same-length market_orders, append vs rewrite, and isolated cold_changed flags
+    // 4. Kill world_meta single-field updates, next_entity_id load, same-length market_orders, append vs rewrite, and isolated cold_changed flags
     let mut conn = open_migrated_conn();
     let mut sync_snap = base.clone();
     sync_snap.wallet_journal.push(WalletJournalEntry {
@@ -233,10 +206,11 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
         subject: "S2".into(),
         body: "B2".into(),
     });
-    let mut fp = replace_sqlite_from_snapshot(&mut conn, &sync_snap).expect("replace");
+    replace_sqlite_from_snapshot(&mut conn, &sync_snap).expect("replace");
+    let mut prev = sync_snap.clone();
     {
         let tx = conn.transaction().expect("warm tx");
-        sync_dirty_to_sqlite(&tx, &sync_snap, &mut fp, false).expect("warm sync");
+        sync_snapshot_diff_for_test(&tx, &mut prev, &sync_snap, false).expect("warm sync");
         tx.commit().expect("warm commit");
     }
 
@@ -247,17 +221,17 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
             _ => sync_snap.markets_seeded = false,
         }
         let tx = conn.transaction().expect("tx");
-        let delta = sync_dirty_to_sqlite(&tx, &sync_snap, &mut fp, true).expect("sync");
+        let delta = sync_snapshot_diff_for_test(&tx, &mut prev, &sync_snap, true).expect("sync");
         tx.commit().expect("commit");
         assert_eq!(delta.full_snapshot.is_some(), step == 2);
     }
     sync_snap.market_orders.get_mut(&700_100).unwrap().price = IskCents(777);
     {
         let tx = conn.transaction().expect("tx");
-        sync_dirty_to_sqlite(&tx, &sync_snap, &mut fp, false).expect("same-len order");
+        sync_snapshot_diff_for_test(&tx, &mut prev, &sync_snap, false).expect("same-len order");
         tx.commit().expect("commit");
     }
-    let (loaded, _) = load_snapshot_from_sqlite(&conn).expect("load");
+    let loaded = load_snapshot_from_sqlite(&conn).expect("load");
     assert_eq!(loaded.next_entity_id, 999_888_777);
     assert_eq!(loaded.wal_seq, sync_snap.wal_seq);
     assert!(!loaded.markets_seeded);
@@ -282,7 +256,7 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
     });
     {
         let tx = conn.transaction().expect("tx");
-        let d = sync_dirty_to_sqlite(&tx, &sync_snap, &mut fp, true).expect("append 2 journal");
+        let d = sync_snapshot_diff_for_test(&tx, &mut prev, &sync_snap, true).expect("append 2 journal");
         tx.commit().expect("commit");
         assert_eq!(d.appended_wallet_journal.len(), 2);
         assert!(d.full_snapshot.is_none());
@@ -303,22 +277,22 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
     });
     {
         let tx = conn.transaction().expect("tx");
-        let d = sync_dirty_to_sqlite(&tx, &sync_snap, &mut fp, true).expect("append 2 mails");
+        let d = sync_snapshot_diff_for_test(&tx, &mut prev, &sync_snap, true).expect("append 2 mails");
         tx.commit().expect("commit");
         assert!(d.full_snapshot.is_some());
     }
-    let (loaded4, _) = load_snapshot_from_sqlite(&conn).expect("load 4");
+    let loaded4 = load_snapshot_from_sqlite(&conn).expect("load 4");
     assert_eq!(loaded4.wallet_journal.len(), 4);
     assert_eq!(loaded4.wallet_journal[3].entry_id, 800_203);
     assert_eq!(loaded4.mails.len(), 4);
     assert_eq!(loaded4.mails[3].message_id, 630_203);
 
-    // Clear wallet_journal & mails to empty (`len=0 < fp_len` with `fp_len=4`)
+    // Clear wallet_journal & mails to empty (`len=0 < prev len=4`)
     sync_snap.wallet_journal.clear();
     sync_snap.mails.clear();
     {
         let tx = conn.transaction().expect("tx");
-        let d = sync_dirty_to_sqlite(&tx, &sync_snap, &mut fp, true).expect("clear");
+        let d = sync_snapshot_diff_for_test(&tx, &mut prev, &sync_snap, true).expect("clear");
         tx.commit().expect("commit");
         assert!(d.full_snapshot.is_some());
     }
@@ -338,7 +312,7 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
             }
         }
         let tx = conn.transaction().expect("tx");
-        let d = sync_dirty_to_sqlite(&tx, &sync_snap, &mut fp, true).expect("cold delta");
+        let d = sync_snapshot_diff_for_test(&tx, &mut prev, &sync_snap, true).expect("cold delta");
         tx.commit().expect("commit");
         assert!(d.full_snapshot.is_some(), "sub_idx {sub_idx} must set cold_changed");
     }
@@ -356,31 +330,21 @@ fn fp_asteroid_sensitive_to_all_ten_fields() {
         position: (1.5, -2.5, 3.5),
         radius: 125.0,
     };
-    let h0 = fp_asteroid(&base);
-    assert_ne!(fp_asteroid(&AsteroidRecord { asteroid_id: 70_000_002, ..base }), h0);
-    assert_ne!(fp_asteroid(&AsteroidRecord { solar_system_id: 30_000_143, ..base }), h0);
-    assert_ne!(fp_asteroid(&AsteroidRecord { belt_id: 40_009_083, ..base }), h0);
-    assert_ne!(fp_asteroid(&AsteroidRecord { type_id: 1228, ..base }), h0);
-    assert_ne!(fp_asteroid(&AsteroidRecord { quantity: 9_999, ..base }), h0);
-    assert_ne!(fp_asteroid(&AsteroidRecord { initial_quantity: 15_001, ..base }), h0);
-    assert_ne!(fp_asteroid(&AsteroidRecord { position: (1.6, -2.5, 3.5), ..base }), h0);
-    assert_ne!(fp_asteroid(&AsteroidRecord { position: (1.5, -2.6, 3.5), ..base }), h0);
-    assert_ne!(fp_asteroid(&AsteroidRecord { position: (1.5, -2.5, 3.6), ..base }), h0);
-    assert_ne!(fp_asteroid(&AsteroidRecord { radius: 125.5, ..base }), h0);
-
-    let mut snap = build_populated_snapshot();
-    let asteroid_id = base.asteroid_id;
-    snap.asteroids.insert(asteroid_id, base);
-    let fp = compute_fingerprints(&snap);
-    assert_eq!(fp.asteroids[&asteroid_id], h0);
+    let h0 = canonical_fp(&base);
+    assert_ne!(canonical_fp(&AsteroidRecord { asteroid_id: 70_000_002, ..base }), h0);
+    assert_ne!(canonical_fp(&AsteroidRecord { solar_system_id: 30_000_143, ..base }), h0);
+    assert_ne!(canonical_fp(&AsteroidRecord { belt_id: 40_009_083, ..base }), h0);
+    assert_ne!(canonical_fp(&AsteroidRecord { type_id: 1228, ..base }), h0);
+    assert_ne!(canonical_fp(&AsteroidRecord { quantity: 9_999, ..base }), h0);
+    assert_ne!(canonical_fp(&AsteroidRecord { initial_quantity: 15_001, ..base }), h0);
+    assert_ne!(canonical_fp(&AsteroidRecord { position: (1.6, -2.5, 3.5), ..base }), h0);
+    assert_ne!(canonical_fp(&AsteroidRecord { position: (1.5, -2.6, 3.5), ..base }), h0);
+    assert_ne!(canonical_fp(&AsteroidRecord { position: (1.5, -2.5, 3.6), ..base }), h0);
+    assert_ne!(canonical_fp(&AsteroidRecord { radius: 125.5, ..base }), h0);
 }
 
 #[test]
 fn canonical_fingerprints_distinguish_none_from_zero_sentinel_and_extra_fields() {
-    use super::fingerprints::{
-        fp_account, fp_json, fp_skill_queue, fp_structure,
-    };
-
     let acc_none = AccountRecord {
         user_id: 1,
         username: "u".into(),
@@ -393,7 +357,7 @@ fn canonical_fingerprints_distinguish_none_from_zero_sentinel_and_extra_fields()
         banned_until_unix: Some(0),
         ..acc_none.clone()
     };
-    assert_ne!(fp_account(&acc_none), fp_account(&acc_zero));
+    assert_ne!(canonical_fp(&acc_none), canonical_fp(&acc_zero));
 
     let snap = build_populated_snapshot();
     let item_base = snap.items.values().next().unwrap().clone();
@@ -401,7 +365,13 @@ fn canonical_fingerprints_distinguish_none_from_zero_sentinel_and_extra_fields()
         source_mutaplasmid_id: Some(0),
         ..item_base.clone()
     };
-    assert_ne!(fp_item(&InventoryItemRecord { source_mutaplasmid_id: None, ..item_base.clone() }), fp_item(&item_muta0));
+    assert_ne!(
+        canonical_fp(&InventoryItemRecord {
+            source_mutaplasmid_id: None,
+            ..item_base.clone()
+        }),
+        canonical_fp(&item_muta0)
+    );
 
     let item_bpc_none = InventoryItemRecord {
         blueprint_runs_remaining: None,
@@ -411,16 +381,16 @@ fn canonical_fingerprints_distinguish_none_from_zero_sentinel_and_extra_fields()
         blueprint_runs_remaining: Some(-1),
         ..item_base.clone()
     };
-    assert_ne!(fp_item(&item_bpc_none), fp_item(&item_bpc_neg1));
+    assert_ne!(canonical_fp(&item_bpc_none), canonical_fp(&item_bpc_neg1));
 
     let c_base = snap.contracts.values().next().unwrap().clone();
     assert_ne!(
-        fp_contract(&ContractRecord { acceptor_id: None, ..c_base.clone() }),
-        fp_contract(&ContractRecord { acceptor_id: Some(-1), ..c_base.clone() })
+        canonical_fp(&ContractRecord { acceptor_id: None, ..c_base.clone() }),
+        canonical_fp(&ContractRecord { acceptor_id: Some(-1), ..c_base.clone() })
     );
     assert_ne!(
-        fp_contract(&c_base),
-        fp_contract(&ContractRecord {
+        canonical_fp(&c_base),
+        canonical_fp(&ContractRecord {
             for_corp: !c_base.for_corp,
             ..c_base
         })
@@ -432,11 +402,11 @@ fn canonical_fingerprints_distinguish_none_from_zero_sentinel_and_extra_fields()
         ..st_base.clone()
     };
     assert_ne!(
-        fp_structure(&UpwellStructureRecord {
+        canonical_fp(&UpwellStructureRecord {
             self_destruct_at_unix: None,
             ..st_base
         }),
-        fp_structure(&st_zero)
+        canonical_fp(&st_zero)
     );
 
     let sq_none = vec![SkillQueueEntry {
@@ -451,7 +421,7 @@ fn canonical_fingerprints_distinguish_none_from_zero_sentinel_and_extra_fields()
         started_at_unix: Some(0),
         ..sq_none[0].clone()
     }];
-    assert_ne!(fp_skill_queue(&sq_none), fp_skill_queue(&sq_zero));
+    assert_ne!(canonical_fp(&sq_none), canonical_fp(&sq_zero));
 
     let mut c1 = CorporationRecord::new(98_001, "Alpha", "ALP", 90_001);
     let mut c2 = CorporationRecord::new(98_001, "Alpha", "ALP", 90_001);
@@ -461,5 +431,5 @@ fn canonical_fingerprints_distinguish_none_from_zero_sentinel_and_extra_fields()
     for id in [50, 30, 10, 40, 20] {
         c2.members.insert(id);
     }
-    assert_eq!(fp_json(&c1), fp_json(&c2));
+    assert_eq!(canonical_fp(&c1), canonical_fp(&c2));
 }

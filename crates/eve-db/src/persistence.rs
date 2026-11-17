@@ -1,10 +1,12 @@
-//! Durable transactional snapshot persistence, WAL journaling, and SQLite relational storage.
+//! Durable transactional snapshot persistence, SQLite relational storage, and legacy JSON test backend.
 
 use crate::cow::{CowCell, CowMap};
-use crate::cow_collections::{CowActiveMissions, CowIdVec};
 #[cfg(test)]
 use crate::cow_collections::CowVecDiff;
-use crate::lock_rank::{RankedMutex, RankedRwLock, RANK_CLOCK, RANK_LEAF, RANK_WAL_LOCK, RANK_WORLD_INNER};
+use crate::cow_collections::{CowActiveMissions, CowIdVec};
+#[cfg(any(test, feature = "legacy-json-snapshot"))]
+use crate::lock_rank::RANK_WAL_LOCK;
+use crate::lock_rank::{RankedMutex, RankedRwLock, RANK_CLOCK, RANK_LEAF, RANK_WORLD_INNER};
 use crate::sqlite_store;
 use crate::tx_engine::{
     apply_changeset_to_sqlite, validate_changeset, ChangeSet, Effects, EntityIdAllocator,
@@ -12,28 +14,31 @@ use crate::tx_engine::{
 };
 use crate::types::AuthRuntimeState;
 use crate::types::*;
+#[cfg(any(test, feature = "legacy-json-snapshot"))]
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+#[cfg(any(test, feature = "legacy-json-snapshot"))]
 pub(crate) const WAL_CHECKPOINT_INTERVAL: usize = 64;
 
 #[cfg(test)]
 thread_local! {
-    static THREAD_COLD_FP_CLONES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static THREAD_COLD_DOMAIN_SYNCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
-pub(crate) fn reset_thread_cold_fp_clones_for_test() {
-    THREAD_COLD_FP_CLONES.with(|c| c.set(0));
+pub(crate) fn reset_thread_cold_domain_syncs_for_test() {
+    THREAD_COLD_DOMAIN_SYNCS.with(|c| c.set(0));
 }
 
 #[cfg(test)]
-pub(crate) fn thread_cold_fp_clones_for_test() -> usize {
-    THREAD_COLD_FP_CLONES.with(|c| c.get())
+pub(crate) fn thread_cold_domain_syncs_for_test() -> usize {
+    THREAD_COLD_DOMAIN_SYNCS.with(|c| c.get())
 }
 
 /// Incremental Write-Ahead Log (WAL) delta record for hot-path mutations (`OF-06` / `OF-23` / `R21-P1-5`).
+#[cfg(any(test, feature = "legacy-json-snapshot"))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorldStateWalDelta {
     #[serde(skip)]
@@ -67,6 +72,7 @@ pub struct WorldStateWalDelta {
     pub(crate) full_snapshot: Option<Box<WorldStateSnapshot>>,
 }
 
+#[cfg(any(test, feature = "legacy-json-snapshot"))]
 impl WorldStateWalDelta {
     #[cfg(test)]
     pub(crate) fn from_diff(old: &WorldStateSnapshot, new: &WorldStateSnapshot) -> Self {
@@ -448,11 +454,6 @@ pub fn persist_failures_total() -> u64 {
     PERSIST_FAILURES_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-#[inline]
-pub(crate) fn record_persist_failure() {
-    PERSIST_FAILURES_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-}
-
 /// Returns the cumulative count of panics caught inside `run_mut_snapshot_tx` write closures (`#904` / `#833`).
 pub fn tx_panics_total() -> u64 {
     PERSIST_TX_PANICS_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
@@ -524,7 +525,6 @@ fn persist_tx_clock_offsets(
 pub(crate) struct WorldWriter {
     pub(crate) working: WorldStateSnapshot,
     pub(crate) conn: rusqlite::Connection,
-    pub(crate) fp: sqlite_store::TableFingerprints,
     pub(crate) seq: u64,
 }
 
@@ -537,8 +537,11 @@ pub struct WorldRepository {
     pub(crate) sqlite_path: Option<std::path::PathBuf>,
     pub(crate) auth_runtime: RankedRwLock<AuthRuntimeState, RANK_LEAF>,
     pub(crate) clock: RankedRwLock<std::sync::Arc<dyn crate::clock::ServerClock>, RANK_CLOCK>,
+    #[cfg(any(test, feature = "legacy-json-snapshot"))]
     pub(crate) wal_lock: RankedMutex<(), RANK_WAL_LOCK>,
+    #[cfg(any(test, feature = "legacy-json-snapshot"))]
     pub(crate) snapshot_path: Option<std::path::PathBuf>,
+    #[cfg(any(test, feature = "legacy-json-snapshot"))]
     pub(crate) pending_wal_records: std::sync::atomic::AtomicUsize,
     pub(crate) state_epoch: std::sync::atomic::AtomicU64,
     pub(crate) combat_state_epoch: std::sync::atomic::AtomicU64,
@@ -548,6 +551,7 @@ pub struct WorldRepository {
     pub(crate) fault_plan: std::sync::atomic::AtomicU64,
 }
 
+#[cfg(any(test, feature = "legacy-json-snapshot"))]
 impl Drop for WorldRepository {
     fn drop(&mut self) {
         if let Some(ref p) = self.snapshot_path {
@@ -575,7 +579,6 @@ impl WorldRepository {
     pub(crate) fn from_parts(
         working: WorldStateSnapshot,
         conn: rusqlite::Connection,
-        fp: sqlite_store::TableFingerprints,
         entity_block: i64,
         sqlite_path: Option<std::path::PathBuf>,
         auth_runtime: AuthRuntimeState,
@@ -591,7 +594,6 @@ impl WorldRepository {
             writer: RankedMutex::new(WorldWriter {
                 working,
                 conn,
-                fp,
                 seq: initial_seq,
             }),
             entity_ids,
@@ -600,8 +602,11 @@ impl WorldRepository {
             clock: RankedRwLock::new(std::sync::Arc::new(
                 crate::clock::VirtualServerClock::new(),
             )),
+            #[cfg(any(test, feature = "legacy-json-snapshot"))]
             wal_lock: RankedMutex::new(()),
+            #[cfg(any(test, feature = "legacy-json-snapshot"))]
             snapshot_path: None,
+            #[cfg(any(test, feature = "legacy-json-snapshot"))]
             pending_wal_records: std::sync::atomic::AtomicUsize::new(0),
             state_epoch: std::sync::atomic::AtomicU64::new(1),
             combat_state_epoch: std::sync::atomic::AtomicU64::new(1),
@@ -638,6 +643,7 @@ impl WorldRepository {
     }
 
     /// Returns the number of uncompacted WAL delta records pending snapshot checkpoint.
+    #[cfg(any(test, feature = "legacy-json-snapshot"))]
     pub fn pending_wal_records_count(&self) -> usize {
         self.pending_wal_records
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -702,7 +708,14 @@ impl WorldRepository {
 
     /// Returns `true` when this repository is an ephemeral `:memory:` instance with no backing SQLite or snapshot file.
     pub fn is_ephemeral_in_memory(&self) -> bool {
-        self.sqlite_path.is_none() && self.snapshot_path.is_none()
+        #[cfg(any(test, feature = "legacy-json-snapshot"))]
+        {
+            self.sqlite_path.is_none() && self.snapshot_path.is_none()
+        }
+        #[cfg(not(any(test, feature = "legacy-json-snapshot")))]
+        {
+            self.sqlite_path.is_none()
+        }
     }
 
     /// Returns the shared [`crate::clock::ServerClock`] for this repository (`T-7`).
@@ -723,10 +736,12 @@ impl WorldRepository {
         self.clock().now_unix_secs()
     }
 
+    #[cfg(any(test, feature = "legacy-json-snapshot"))]
     pub(crate) fn wal_path_for(path: &Path) -> std::path::PathBuf {
         path.with_extension("json.wal")
     }
 
+    #[cfg(any(test, feature = "legacy-json-snapshot"))]
     fn is_sqlite_extension(path: &Path) -> bool {
         matches!(
             path.extension().and_then(|e| e.to_str()),
@@ -759,7 +774,7 @@ impl WorldRepository {
         }
         let conn = rusqlite::Connection::open(target).map_err(|e| e.to_string())?;
         sqlite_store::apply_migrations(&conn)?;
-        let (snap, fp) =
+        let snap =
             sqlite_store::load_snapshot_from_sqlite_with_options(&conn, quarantine_unreadable)?;
         let entity_block = sqlite_store::load_entity_block_from_sqlite(&conn)?;
         let jwt_secret =
@@ -769,7 +784,6 @@ impl WorldRepository {
         let repo = Self::from_parts(
             snap,
             conn,
-            fp,
             entity_block,
             Some(target.to_path_buf()),
             auth_runtime,
@@ -831,39 +845,25 @@ impl WorldRepository {
     }
 
     /// Creates a production `WorldRepository` with an empty account, character, and player item table
-    /// prior to loading `EVOMU_DB_PATH` or `EVOMU_SNAPSHOT_PATH` (`R22-P1-5`, `R23-P0-1`, `R24-P1-1`, `D-3`).
+    /// prior to loading `EVOMU_DB_PATH` (`R22-P1-5`, `R23-P0-1`, `R24-P1-1`, `D-3`).
     pub fn new_empty() -> Self {
-        let db_or_snapshot_path = {
+        let db_path = {
             let _env_guard = crate::lock_test_env_read();
             std::env::var("EVOMU_DB_PATH")
                 .ok()
                 .filter(|s| !s.trim().is_empty())
-                .or_else(|| {
-                    std::env::var("EVOMU_SNAPSHOT_PATH")
-                        .ok()
-                        .filter(|s| !s.trim().is_empty())
-                })
                 .map(std::path::PathBuf::from)
         };
-        Self::new_empty_with_snapshot_path(db_or_snapshot_path)
-            .expect("Failed to load or initialize persisted WorldRepository database")
+        if let Some(p) = db_path {
+            return Self::open_sqlite(p)
+                .expect("Failed to load or initialize persisted WorldRepository SQLite database");
+        }
+        Self::new_in_memory()
+            .expect("Failed to initialize in-memory WorldRepository database")
     }
 
-    /// Creates a production `WorldRepository` with an empty player state, then loads `snapshot_path`
-    /// if it already exists on disk without clearing any loaded accounts, characters, skills, or items.
-    /// When `snapshot_path` has a `.sqlite`/`.sqlite3`/`.db` extension, opens the relational SQLite
-    /// store directly via [`Self::open_sqlite`] (`D-3`).
-    /// Returns `Err` if loading or initializing fails, refusing to start with an empty world over an
-    /// unreadable save (`R23-P0-1`, `R24-P1-1`, `S-5`, `D-3`).
-    pub fn new_empty_with_snapshot_path(
-        snapshot_path: Option<std::path::PathBuf>,
-    ) -> Result<Self, String> {
-        if let Some(ref p) = snapshot_path {
-            if Self::is_sqlite_extension(p) {
-                return Self::open_sqlite(p);
-            }
-        }
-
+    /// Creates an ephemeral in-memory `WorldRepository` backed by an empty `:memory:` SQLite store.
+    pub fn new_in_memory() -> Result<Self, String> {
         let market_orders = CowMap::new();
         let system_states = CowCell::new(HashMap::new());
         let mut initial_snap = WorldStateSnapshot {
@@ -939,20 +939,37 @@ impl WorldRepository {
         initial_snap.backfill_fw_system_occupations();
         let mut conn = rusqlite::Connection::open_in_memory().map_err(|e| e.to_string())?;
         sqlite_store::apply_migrations(&conn)?;
-        let fp = sqlite_store::replace_sqlite_from_snapshot(&mut conn, &initial_snap)?;
+        sqlite_store::replace_sqlite_from_snapshot(&mut conn, &initial_snap)?;
         let jwt_secret =
             sqlite_store::load_or_init_jwt_secret(&conn, Self::generate_random_secret_32)?;
         let entity_block = initial_snap.next_entity_id.max(200_000_000);
 
-        let mut repo = Self::from_parts(
+        Ok(Self::from_parts(
             initial_snap,
             conn,
-            fp,
             entity_block,
             None,
             AuthRuntimeState::new(jwt_secret),
-        );
+        ))
+    }
 
+    /// Creates a `WorldRepository` with an empty player state, then loads `snapshot_path`
+    /// if it already exists on disk without clearing any loaded accounts, characters, skills, or items.
+    /// When `snapshot_path` has a `.sqlite`/`.sqlite3`/`.db` extension, opens the relational SQLite
+    /// store directly via [`Self::open_sqlite`] (`D-3`).
+    /// Returns `Err` if loading or initializing fails, refusing to start with an empty world over an
+    /// unreadable save (`R23-P0-1`, `R24-P1-1`, `S-5`, `D-3`).
+    #[cfg(any(test, feature = "legacy-json-snapshot"))]
+    pub fn new_empty_with_snapshot_path(
+        snapshot_path: Option<std::path::PathBuf>,
+    ) -> Result<Self, String> {
+        if let Some(ref p) = snapshot_path {
+            if Self::is_sqlite_extension(p) {
+                return Self::open_sqlite(p);
+            }
+        }
+
+        let mut repo = Self::new_in_memory()?;
         if let Some(ref p) = snapshot_path {
             if p.exists() {
                 repo.load_snapshot_from_file(p)?;
@@ -964,6 +981,7 @@ impl WorldRepository {
         Ok(repo)
     }
     /// Serializes and atomically flushes the in-memory world snapshot to disk.
+    #[cfg(any(test, feature = "legacy-json-snapshot"))]
     fn save_snapshot_locked(&self, target: &Path, snap: &WorldStateSnapshot) -> Result<(), String> {
         use std::io::Write as _;
         let bytes = serde_json::to_vec(snap).map_err(|e| e.to_string())?;
@@ -991,6 +1009,7 @@ impl WorldRepository {
     /// Saves a compact checkpoint of the complete transactional world state to a JSON snapshot file
     /// (`M1` durable persistence) under `inner` + `wal_lock`, using an atomic temp-file write + `fsync` +
     /// rename and atomic `.json.wal` checkpoint rotation (`R21-P1-5`).
+    #[cfg(any(test, feature = "legacy-json-snapshot"))]
     pub fn save_snapshot_to_file(&self, path: impl AsRef<Path>) -> Result<(), String> {
         let writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let _wal_guard = self.wal_lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -1001,6 +1020,7 @@ impl WorldRepository {
     /// while holding `inner` and `wal_lock`, truncating any uncleaned partial tail before appending,
     /// performing best-effort `set_len(prev_len)` + `sync_all()` rollback on write/sync error, and
     /// treating periodic post-sync checkpoint compaction as retryable (`R21-P1-5`, `R25-P1-1`).
+    #[cfg(any(test, feature = "legacy-json-snapshot"))]
     pub(crate) fn append_wal_delta_locked(
         &self,
         path: &Path,
@@ -1070,6 +1090,7 @@ impl WorldRepository {
     /// uncompacted incremental `.json.wal` delta records in strict monotonic `seq` order,
     /// tolerating and healing a truncated/torn trailing WAL record from a prior crash and
     /// rejecting duplicate sequence numbers (`R21-P1-5`, `R24-P1-1`, `R25-P1-1`).
+    #[cfg(any(test, feature = "legacy-json-snapshot"))]
     pub fn load_snapshot_from_file(&self, path: impl AsRef<Path>) -> Result<(), String> {
         use std::io::Write as _;
         let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
@@ -1143,7 +1164,7 @@ impl WorldRepository {
         for (&sid, st) in &mut snap.system_states {
             st.solar_system_id = sid;
         }
-        writer.fp = sqlite_store::replace_sqlite_from_snapshot(&mut writer.conn, &snap)?;
+        sqlite_store::replace_sqlite_from_snapshot(&mut writer.conn, &snap)?;
         writer
             .conn
             .execute(
@@ -1312,7 +1333,7 @@ impl WorldRepository {
                 || before.transient_items != writer.working.transient_items;
 
         if did_mutate || has_clock_offset {
-            let mut staged_cold_fp = None;
+            #[cfg(any(test, feature = "legacy-json-snapshot"))]
             let mut need_wal_delta = false;
 
             if did_mutate {
@@ -1327,67 +1348,56 @@ impl WorldRepository {
                     return Err(E::from_tx_error(val_err));
                 }
 
-                let prev_wal_seq = writer.fp.wal_seq;
+                let prev_wal_seq = before.wal_seq;
                 if writer.working.wal_seq <= prev_wal_seq {
                     writer.working.wal_seq = prev_wal_seq.saturating_add(1);
                     changes.wal_seq = writer.working.wal_seq;
                     changes.meta_changed = true;
                 }
 
-                need_wal_delta = self.snapshot_path.is_some() && self.sqlite_path.is_none();
+                #[cfg(any(test, feature = "legacy-json-snapshot"))]
+                {
+                    need_wal_delta = self.snapshot_path.is_some() && self.sqlite_path.is_none();
+                }
 
-                // Only stage/clone cold TableFingerprints maps when at least one cold domain
-                // actually changed (#826); hot CowMap and domain_rows mutations update meta in O(1).
-                staged_cold_fp = if changes.cold_domains.any() {
-                    #[cfg(test)]
-                    THREAD_COLD_FP_CLONES.with(|c| c.set(c.get().saturating_add(1)));
-                    let hot_items = std::mem::take(&mut writer.fp.items);
-                    let hot_chars = std::mem::take(&mut writer.fp.characters);
-                    let hot_skills = std::mem::take(&mut writer.fp.skills);
-                    let hot_queues = std::mem::take(&mut writer.fp.skill_queues);
-                    let hot_orders = std::mem::take(&mut writer.fp.market_orders);
-                    let cloned = writer.fp.clone();
-                    writer.fp.items = hot_items;
-                    writer.fp.characters = hot_chars;
-                    writer.fp.skills = hot_skills;
-                    writer.fp.skill_queues = hot_queues;
-                    writer.fp.market_orders = hot_orders;
-                    Some(cloned)
-                } else {
-                    None
-                };
+                // Cold domains are synced directly via `ChangeSet::cold_domains` in `apply_changeset_to_sqlite`
+                // (#915 / #921); hot CowMap and domain_rows mutations skip cold domain syncs completely.
+                #[cfg(test)]
+                if changes.cold_domains.any() {
+                    THREAD_COLD_DOMAIN_SYNCS.with(|c| c.set(c.get().saturating_add(1)));
+                }
             }
             let fault_plan =
                 TxFaultPlan::decode(self.fault_plan.swap(0, std::sync::atomic::Ordering::SeqCst));
 
-            let persist_res = (|| -> Result<(Option<crate::tx_engine::HotFpDelta>, Option<WorldStateWalDelta>), TxError> {
+            let persist_res = (|| -> Result<(), TxError> {
                 let WorldWriter {
                     ref working,
                     ref mut conn,
-                    ref fp,
                     ..
                 } = *writer;
-                let mut dummy_cold_fp = sqlite_store::TableFingerprints::default();
-                let cold_fp_ref = staged_cold_fp.as_mut().unwrap_or(&mut dummy_cold_fp);
                 let sql_tx = conn
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(|e| TxError::Persist(e.to_string()))?;
                 let mut exec = TxSqlExecutor::new(&sql_tx, fault_plan);
-                let (hot_fp_opt, wal_delta_opt) = if did_mutate {
-                    let (mut delta, hot_fp) = apply_changeset_to_sqlite(
+                if did_mutate {
+                    #[cfg(any(test, feature = "legacy-json-snapshot"))]
+                    let mut delta = apply_changeset_to_sqlite(
                         &mut exec,
+                        &before,
                         working,
                         &changes,
-                        fp,
-                        cold_fp_ref,
                         need_wal_delta,
                     )?;
+                    #[cfg(not(any(test, feature = "legacy-json-snapshot")))]
+                    apply_changeset_to_sqlite(&mut exec, &before, working, &changes)?;
                     persist_tx_clock_offsets(
                         &sql_tx,
                         clock_offset_secs,
                         unrebased_clock_offset_secs,
                     )?;
                     exec.check_commit_fault()?;
+                    #[cfg(any(test, feature = "legacy-json-snapshot"))]
                     if need_wal_delta {
                         if let Some(ref p) = self.snapshot_path {
                             let _wal_guard = self.wal_lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -1396,7 +1406,6 @@ impl WorldRepository {
                                 .map_err(TxError::Persist)?;
                         }
                     }
-                    (Some(hot_fp), if need_wal_delta { Some(delta) } else { None })
                 } else {
                     persist_tx_clock_offsets(
                         &sql_tx,
@@ -1404,30 +1413,14 @@ impl WorldRepository {
                         unrebased_clock_offset_secs,
                     )?;
                     exec.check_commit_fault()?;
-                    (None, None)
-                };
+                }
                 sql_tx.commit().map_err(|e| TxError::Persist(e.to_string()))?;
-                Ok((hot_fp_opt, wal_delta_opt))
+                Ok(())
             })();
 
             match persist_res {
-                Ok((hot_fp_opt, _wal_delta)) => {
+                Ok(()) => {
                     if did_mutate {
-                        if let Some(mut next_fp) = staged_cold_fp {
-                            next_fp.items = std::mem::take(&mut writer.fp.items);
-                            next_fp.characters = std::mem::take(&mut writer.fp.characters);
-                            next_fp.skills = std::mem::take(&mut writer.fp.skills);
-                            next_fp.skill_queues = std::mem::take(&mut writer.fp.skill_queues);
-                            next_fp.market_orders = std::mem::take(&mut writer.fp.market_orders);
-                            next_fp.market_orders_digest = writer.fp.market_orders_digest;
-                            writer.fp = next_fp;
-                        }
-                        writer.fp.next_entity_id = writer.working.next_entity_id;
-                        writer.fp.wal_seq = writer.working.wal_seq;
-                        writer.fp.markets_seeded = writer.working.markets_seeded;
-                        if let Some(hot_fp) = hot_fp_opt {
-                            hot_fp.apply_to(&mut writer.fp);
-                        }
                         writer.seq = changes.seq;
                         *self.published.write().unwrap_or_else(|e| e.into_inner()) =
                             std::sync::Arc::new(writer.working.clone());
@@ -1538,7 +1531,6 @@ impl WorldRepository {
     {
         let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let out = f(&mut writer.working);
-        writer.fp = sqlite_store::compute_fingerprints(&writer.working);
         *self.published.write().unwrap_or_else(|e| e.into_inner()) =
             std::sync::Arc::new(writer.working.clone());
         out
@@ -1625,19 +1617,19 @@ impl WorldRepository {
         }
     }
 
-    /// Restores the repository's in-memory snapshot, `TableFingerprints`, and SQLite relational
+    /// Restores the repository's in-memory snapshot and SQLite relational
     /// tables back to a previously captured [`WorldTablesSnapshot`].
     #[cfg(any(test, feature = "testkit"))]
     pub fn restore(&self, saved: &WorldTablesSnapshot) -> Result<(), String> {
         let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-        let fp = sqlite_store::replace_sqlite_from_snapshot(&mut writer.conn, &saved.snapshot)?;
+        sqlite_store::replace_sqlite_from_snapshot(&mut writer.conn, &saved.snapshot)?;
         writer.working = saved.snapshot.clone();
-        writer.fp = fp;
         writer.seq = saved.snapshot.wal_seq;
         *self.published.write().unwrap_or_else(|e| e.into_inner()) =
             std::sync::Arc::new(saved.snapshot.clone());
         self.tx_commit_count
             .store(saved.tx_commit_count, std::sync::atomic::Ordering::SeqCst);
+        #[cfg(any(test, feature = "legacy-json-snapshot"))]
         self.pending_wal_records
             .store(0, std::sync::atomic::Ordering::SeqCst);
         self.bump_state_epoch();

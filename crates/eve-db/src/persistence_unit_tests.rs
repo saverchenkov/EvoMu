@@ -763,7 +763,7 @@ fn w5a_p2_0c_closure_panic_catch_unwind_rolls_back_snapshot_and_bumps_counter() 
 
 #[test]
 fn w5a_p2_0d_fnv_serializer_i128_u128_map_key_errors_and_json_fallback() {
-    use crate::sqlite_store::fingerprints::{canonical_fp, FnvHasher, FnvSerializer};
+    use crate::sqlite_store::checked_json::{canonical_fp, FnvHasher, FnvSerializer};
     use serde::ser::SerializeMap;
 
     #[derive(Serialize)]
@@ -1123,66 +1123,6 @@ fn issue_857_rollback_is_failsafe_across_all_abort_modes_and_partial_loads() {
         Some("CommittedAfterRollback")
     );
 
-    // 3. Partial baseline row deletion in `char_mining_ledger` and `entity_kv` must fail closed on rollback.
-    let mut mem_conn = rusqlite::Connection::open_in_memory().unwrap();
-    sqlite_store::apply_migrations(&mem_conn).unwrap();
-    let mut base_snap = WorldStateSnapshot::default();
-    base_snap.mining_ledger.push(MiningLedgerRecord {
-        character_id: cid,
-        solar_system_id: 30_000_142,
-        type_id: 1230,
-        quantity: 100,
-        date: "2026-01-01".into(),
-        timestamp_unix: 1_700_000_001,
-    });
-    base_snap.mining_ledger.push(MiningLedgerRecord {
-        character_id: cid,
-        solar_system_id: 30_000_142,
-        type_id: 1228,
-        quantity: 200,
-        date: "2026-01-02".into(),
-        timestamp_unix: 1_700_000_002,
-    });
-    base_snap
-        .kv_mut(crate::service_domains::Ns::XmppAuthToken)
-        .set_with_unix(cid, "k1", &"v1", 1_700_000_001)
-        .unwrap();
-    base_snap
-        .kv_mut(crate::service_domains::Ns::XmppAuthToken)
-        .set_with_unix(cid, "k2", &"v2", 1_700_000_002)
-        .unwrap();
-    let mem_fp = sqlite_store::replace_sqlite_from_snapshot(&mut mem_conn, &base_snap).unwrap();
-
-    // Delete 1 of 2 rows from `char_mining_ledger` and 1 of 2 rows from `entity_kv`:
-    // rollback must fail closed rather than replacing live state with a partial reload.
-    mem_conn
-        .execute("DELETE FROM char_mining_ledger WHERE type_id = 1228", [])
-        .unwrap();
-    mem_conn
-        .execute("DELETE FROM entity_kv WHERE sub_key = 'k2'", [])
-        .unwrap();
-    let mut dirty_snap = base_snap.clone();
-    dirty_snap.mining_ledger.clear();
-    dirty_snap.entity_kv.clear();
-    assert!(
-        sqlite_store::industry_market_pve_store::rollback_industry_market_pve(
-            &mem_conn,
-            &mut dirty_snap,
-            &mem_fp,
-        )
-        .is_err(),
-        "partial char_mining_ledger reload must fail closed (#857)"
-    );
-    assert!(
-        sqlite_store::service_domains_store::rollback_service_domains(
-            &mem_conn,
-            &mut dirty_snap,
-            &mem_fp,
-        )
-        .is_err(),
-        "partial entity_kv reload must fail closed (#857)"
-    );
-
     drop(repo);
     let _ = std::fs::remove_file(&db_path);
 }
@@ -1305,8 +1245,7 @@ fn issue_826_with_mut_snapshot_cowmap_and_domain_rows_zero_cold_clones_and_zero_
         snap.char_notes.insert((cid, 1), "SeededColdNote".into());
     });
 
-    super::reset_thread_cold_fp_clones_for_test();
-    sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
+    super::reset_thread_cold_domain_syncs_for_test();
 
     // Mutate all 5 hot CowMap domains and all 6 domain_rows CowMap domains via `with_mut_snapshot`.
     repo.with_mut_snapshot(|snap| {
@@ -1337,14 +1276,9 @@ fn issue_826_with_mut_snapshot_cowmap_and_domain_rows_zero_cold_clones_and_zero_
     });
 
     assert_eq!(
-        super::thread_cold_fp_clones_for_test(),
+        super::thread_cold_domain_syncs_for_test(),
         0,
-        "CowMap and domain_rows mutations must not clone cold TableFingerprints maps (#826)"
-    );
-    assert_eq!(
-        sqlite_store::fingerprints::thread_fingerprint_calls_for_test(),
-        0,
-        "CowMap and domain_rows mutations must perform zero FNV row re-fingerprinting (#826)"
+        "CowMap and domain_rows mutations must trigger zero cold domain syncs (#826)"
     );
 
     let reloaded = repo.reload_snapshot_from_sqlite().expect("reload_snapshot_from_sqlite");
@@ -1362,12 +1296,11 @@ fn issue_826_with_mut_snapshot_cowmap_and_domain_rows_zero_cold_clones_and_zero_
     assert_eq!(reloaded.char_lp_logs[&cid][0].amount, 500);
     assert_eq!(reloaded.char_notes.get(&(cid, 1)), Some(&"UpdatedSocialNote".into()));
 
-    // Mutating a cold domain stages cold fingerprints exactly once.
+    // Mutating a cold domain syncs cold domains exactly once.
     repo.with_mut_snapshot(|snap| {
         snap.character_last_jump_unix.insert(cid, 1_700_000_050);
     });
-    assert_eq!(super::thread_cold_fp_clones_for_test(), 1);
-    assert!(sqlite_store::fingerprints::thread_fingerprint_calls_for_test() > 0);
+    assert_eq!(super::thread_cold_domain_syncs_for_test(), 1);
 
     drop(repo);
     let _ = std::fs::remove_file(&db_path);
@@ -1732,7 +1665,6 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
         },
     );
 
-    let mut fp = crate::sqlite_store::compute_fingerprints(&snap);
     {
         let tx = conn.transaction().expect("seed item + 1M sql tx");
         let item = snap.items.get(&item_id).unwrap();
@@ -1770,10 +1702,6 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
         }
         tx.commit().expect("seed 1M commit");
     }
-    fp.items.insert(
-        item_id,
-        crate::sqlite_store::fingerprints::fp_item(snap.items.get(&item_id).unwrap()),
-    );
 
     // Indexed SQLite entity ID checks on 2M persisted rows must stay O(log N) (< 5ms).
     let t_sqlite_exists = std::time::Instant::now();
@@ -1801,7 +1729,6 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
     let repo = WorldRepository::from_parts(
         snap,
         conn,
-        fp,
         900_000_000,
         None,
         crate::types::AuthRuntimeState::new(jwt_secret),
@@ -1837,8 +1764,7 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
     assert!(before_snap.paused_skill_queues.ptr_eq(&cloned_snap.paused_skill_queues));
 
     crate::cow::reset_thread_cow_full_touch_for_test();
-    super::reset_thread_cold_fp_clones_for_test();
-    sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
+    super::reset_thread_cold_domain_syncs_for_test();
 
     // Commit 5 transactions: each mutates 1 item and allocates 100 entity IDs.
     let t0 = std::time::Instant::now();
@@ -1867,14 +1793,9 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
         "1M-cold tx commit must perform 0 full-table touches"
     );
     assert_eq!(
-        super::thread_cold_fp_clones_for_test(),
+        super::thread_cold_domain_syncs_for_test(),
         0,
-        "hot item tx with 1M wallet_journal/mails must perform 0 cold FP clones"
-    );
-    assert_eq!(
-        sqlite_store::fingerprints::thread_fingerprint_calls_for_test(),
-        0,
-        "hot item tx must trigger 0 full cold fingerprint scans"
+        "hot item tx with 1M wallet_journal/mails must perform 0 cold domain syncs"
     );
 
     let after_hot_snap = repo.with_snapshot(|s| s.clone());
@@ -1896,15 +1817,12 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
 
     // Appending 1 journal entry via `WorldStateSnapshot::append_journal_entry` (updating
     // `wallet_journal`, `wallet_journal_meta`, and `wallet_journal_timestamps`) + 1 mail entry on
-    // 1M SQLite-backed sequences/maps is O(log N), performs 0 cold FP clones, 0 full-table
-    // touches (`CowMap::diff` for `wallet_journal_timestamps` / `wallet_journal_meta`), and 0
-    // fingerprint calls during commit/sync.
+    // 1M SQLite-backed sequences/maps is O(log N), performs 0 cold domain syncs, and 0 full-table
+    // touches (`CowMap::diff` for `wallet_journal_timestamps` / `wallet_journal_meta`).
     crate::cow::reset_thread_cow_full_touch_for_test();
-    super::reset_thread_cold_fp_clones_for_test();
-    sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
+    super::reset_thread_cold_domain_syncs_for_test();
 
     let mut appended_journal_id = 0_i64;
-    let mut closure_fp_calls = usize::MAX;
     let t_append = std::time::Instant::now();
     repo.tx("append_1_journal_and_1_mail", |wtx| -> Result<(), TxError> {
         let m_id = wtx.alloc_entity_id()?;
@@ -1925,8 +1843,6 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
             subject: "Fast".into(),
             body: "Fast".into(),
         });
-        closure_fp_calls = sqlite_store::fingerprints::thread_fingerprint_calls_for_test();
-        sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
         Ok(())
     })
     .expect("append_1_journal_and_1_mail");
@@ -1935,19 +1851,10 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
         append_dur < std::time::Duration::from_millis(50),
         "appending 1 journal + 1 mail to 1M sequences/maps took {append_dur:?} (expected << 50ms)"
     );
-    assert!(
-        closure_fp_calls <= 2,
-        "pushing 1 journal + 1 mail must call canonical_fp <= 2 times, got {closure_fp_calls}"
-    );
     assert_eq!(
-        sqlite_store::fingerprints::thread_fingerprint_calls_for_test(),
+        super::thread_cold_domain_syncs_for_test(),
         0,
-        "append_1_journal_and_1_mail commit/sync must trigger 0 fingerprint calls"
-    );
-    assert_eq!(
-        super::thread_cold_fp_clones_for_test(),
-        0,
-        "append_1_journal_and_1_mail must perform 0 cold FP clones"
+        "append_1_journal_and_1_mail must perform 0 cold domain syncs"
     );
     assert_eq!(
         crate::cow::thread_cow_full_touch_for_test(),
@@ -2000,10 +1907,9 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
     assert!(meta_exists);
 
     // Updating + deleting an existing entry in 1M `wallet_journal_timestamps` also runs in
-    // O(k log N) with 0 full-table touches, 0 cold FP clones, and exact `domain_rows` SQLite sync.
+    // O(k log N) with 0 full-table touches, 0 cold domain syncs, and exact `domain_rows` SQLite sync.
     crate::cow::reset_thread_cow_full_touch_for_test();
-    super::reset_thread_cold_fp_clones_for_test();
-    sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
+    super::reset_thread_cold_domain_syncs_for_test();
     repo.tx("update_1m_wallet_ts", |wtx| -> Result<(), TxError> {
         wtx.snap
             .wallet_journal_timestamps
@@ -2012,11 +1918,7 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
     })
     .expect("update_1m_wallet_ts");
     assert_eq!(crate::cow::thread_cow_full_touch_for_test(), 0);
-    assert_eq!(super::thread_cold_fp_clones_for_test(), 0);
-    assert_eq!(
-        sqlite_store::fingerprints::thread_fingerprint_calls_for_test(),
-        0
-    );
+    assert_eq!(super::thread_cold_domain_syncs_for_test(), 0);
     let updated_ts: String = repo
         .with_sqlite_conn(|c| {
             c.query_row(
@@ -2040,11 +1942,7 @@ fn issue_1181_1m_wallet_journal_and_mails_tx_commit_and_alloc_entity_id_are_olog
     })
     .expect("remove_1m_wallet_ts");
     assert_eq!(crate::cow::thread_cow_full_touch_for_test(), 0);
-    assert_eq!(super::thread_cold_fp_clones_for_test(), 0);
-    assert_eq!(
-        sqlite_store::fingerprints::thread_fingerprint_calls_for_test(),
-        0
-    );
+    assert_eq!(super::thread_cold_domain_syncs_for_test(), 0);
     let removed_exists: bool = repo
         .with_sqlite_conn(|c| {
             let row: Option<String> = c
@@ -2105,19 +2003,8 @@ fn issue_1181_incremental_cold_tables_tx_zero_clone_and_zero_full_touch() {
         );
     }
 
-    let fp = {
-        let tx = conn.transaction().expect("seed tx");
-        let mut fake_fp = crate::sqlite_store::TableFingerprints::default();
-        crate::sqlite_store::sync::sync_dirty_to_sqlite(
-            &tx,
-            &snap,
-            &mut fake_fp,
-            false,
-        )
+    crate::sqlite_store::sync::replace_sqlite_from_snapshot(&mut conn, &snap)
         .expect("initial sync");
-        tx.commit().expect("seed commit");
-        fake_fp
-    };
 
     let jwt_secret =
         crate::sqlite_store::load_or_init_jwt_secret(&conn, WorldRepository::generate_random_secret_32)
@@ -2125,7 +2012,6 @@ fn issue_1181_incremental_cold_tables_tx_zero_clone_and_zero_full_touch() {
     let repo = WorldRepository::from_parts(
         snap,
         conn,
-        fp,
         900_000_000,
         None,
         crate::types::AuthRuntimeState::new(jwt_secret),
@@ -2133,8 +2019,7 @@ fn issue_1181_incremental_cold_tables_tx_zero_clone_and_zero_full_touch() {
 
     // 1. Mutate 1 structure
     crate::cow::reset_thread_cow_full_touch_for_test();
-    super::reset_thread_cold_fp_clones_for_test();
-    sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
+    super::reset_thread_cold_domain_syncs_for_test();
     repo.tx("single_structure", |wtx| -> Result<(), TxError> {
         wtx.snap
             .structures
@@ -2144,30 +2029,23 @@ fn issue_1181_incremental_cold_tables_tx_zero_clone_and_zero_full_touch() {
         Ok(())
     })
     .expect("single_structure");
-    assert_eq!(super::thread_cold_fp_clones_for_test(), 0);
+    assert_eq!(super::thread_cold_domain_syncs_for_test(), 0);
     assert_eq!(crate::cow::thread_cow_full_touch_for_test(), 0);
-    assert!(
-        sqlite_store::fingerprints::thread_fingerprint_calls_for_test() <= 2,
-        "expected O(k) structure fp calls"
-    );
 
-    // 2. Mutate 1 mail_timestamp (0 canonical_fp calls)
+    // 2. Mutate 1 mail_timestamp
     crate::cow::reset_thread_cow_full_touch_for_test();
-    super::reset_thread_cold_fp_clones_for_test();
-    sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
+    super::reset_thread_cold_domain_syncs_for_test();
     repo.tx("single_mail_timestamp", |wtx| -> Result<(), TxError> {
         wtx.snap.mail_timestamps.insert(600_000_999, 1_800_000_000);
         Ok(())
     })
     .expect("single_mail_timestamp");
-    assert_eq!(super::thread_cold_fp_clones_for_test(), 0);
+    assert_eq!(super::thread_cold_domain_syncs_for_test(), 0);
     assert_eq!(crate::cow::thread_cow_full_touch_for_test(), 0);
-    assert_eq!(sqlite_store::fingerprints::thread_fingerprint_calls_for_test(), 0);
 
     // 3. Mutate 1 item_custom_name
     crate::cow::reset_thread_cow_full_touch_for_test();
-    super::reset_thread_cold_fp_clones_for_test();
-    sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
+    super::reset_thread_cold_domain_syncs_for_test();
     repo.tx("single_item_custom_name", |wtx| -> Result<(), TxError> {
         wtx.snap
             .item_custom_names
@@ -2175,17 +2053,12 @@ fn issue_1181_incremental_cold_tables_tx_zero_clone_and_zero_full_touch() {
         Ok(())
     })
     .expect("single_item_custom_name");
-    assert_eq!(super::thread_cold_fp_clones_for_test(), 0);
+    assert_eq!(super::thread_cold_domain_syncs_for_test(), 0);
     assert_eq!(crate::cow::thread_cow_full_touch_for_test(), 0);
-    assert!(
-        sqlite_store::fingerprints::thread_fingerprint_calls_for_test() <= 2,
-        "expected O(k) item_custom_names fp calls"
-    );
 
-    // 4. Insert + remove 1 entity_kv row (and verify fp digest matches compute_fingerprints)
+    // 4. Insert + remove 1 entity_kv row
     crate::cow::reset_thread_cow_full_touch_for_test();
-    super::reset_thread_cold_fp_clones_for_test();
-    sqlite_store::fingerprints::reset_thread_fingerprint_calls_for_test();
+    super::reset_thread_cold_domain_syncs_for_test();
     repo.tx("single_entity_kv", |wtx| -> Result<(), TxError> {
         wtx.snap.entity_kv.insert(
             crate::service_domains::entity_kv::EntityKvKey::new(
@@ -2208,27 +2081,11 @@ fn issue_1181_incremental_cold_tables_tx_zero_clone_and_zero_full_touch() {
         Ok(())
     })
     .expect("single_entity_kv");
-    assert_eq!(super::thread_cold_fp_clones_for_test(), 0);
+    assert_eq!(super::thread_cold_domain_syncs_for_test(), 0);
     assert_eq!(crate::cow::thread_cow_full_touch_for_test(), 0);
-    assert!(
-        sqlite_store::fingerprints::thread_fingerprint_calls_for_test() <= 8,
-        "expected O(k) entity_kv fp calls"
-    );
 
     let expected_snap = repo.read_state();
-    let expected_fp = crate::sqlite_store::compute_fingerprints(&expected_snap);
-    let actual_writer_fp_digest = repo
-        .writer
-        .lock()
-        .unwrap()
-        .fp
-        .service_domains
-        .entity_kv_fp;
-    assert_eq!(
-        actual_writer_fp_digest,
-        expected_fp.service_domains.entity_kv_fp
-    );
-    let (loaded_snap, _) = repo
+    let loaded_snap = repo
         .with_sqlite_conn(|c| crate::sqlite_store::load_snapshot_from_sqlite_with_options(c, false))
         .expect("reload sqlite");
     assert_eq!(loaded_snap.structures, expected_snap.structures);
@@ -2291,11 +2148,9 @@ fn issue_1181_snapshot_alloc_entity_id_reconciles_dirty_lp_logs_and_active_missi
     let jwt_secret =
         crate::sqlite_store::load_or_init_jwt_secret(&conn, WorldRepository::generate_random_secret_32)
             .expect("jwt");
-    let fp = crate::sqlite_store::compute_fingerprints(&snap);
     let repo = WorldRepository::from_parts(
         snap,
         conn,
-        fp,
         200_000_003,
         None,
         crate::types::AuthRuntimeState::new(jwt_secret),

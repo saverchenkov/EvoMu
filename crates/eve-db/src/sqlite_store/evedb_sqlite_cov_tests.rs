@@ -4,10 +4,9 @@
 #![forbid(unsafe_code)]
 
 use crate::persistence::WorldRepository;
-use crate::sqlite_store::fingerprints::{compute_fingerprints, TableFingerprints};
 use crate::sqlite_store::load::load_snapshot_from_sqlite;
 use crate::sqlite_store::schema::apply_migrations;
-use crate::sqlite_store::sync::{replace_sqlite_from_snapshot, sync_dirty_to_sqlite};
+use crate::sqlite_store::sync::{replace_sqlite_from_snapshot, sync_snapshot_diff_for_test};
 use crate::types::{
     ActiveMissionRecord, AllianceRecord, AsteroidRecord, BookmarkRecord, CharacterLoginStats,
     ContractRecord, CorpProjectRecord, FleetRecord, IndustryJobRecord, JumpCloneRecord,
@@ -339,94 +338,55 @@ pub(super) fn build_populated_snapshot() -> WorldStateSnapshot {
 #[test]
 fn sqlite_store_kills_all_mutants_and_verifies_default_entity_id() {
     let empty_conn = open_migrated_conn();
-    let (empty_loaded, _) =
+    let empty_loaded =
         load_snapshot_from_sqlite(&empty_conn).expect("load empty migrated sqlite");
     assert_eq!(empty_loaded.next_entity_id, 200_000_000);
 
     let snap = build_populated_snapshot();
-    let fp = compute_fingerprints(&snap);
-    assert_eq!(fp.next_entity_id, 91_234_567);
-    assert_eq!(fp.wal_seq, 42);
-    assert!(fp.markets_seeded);
-    assert_eq!(fp.wallet_journal_len, snap.wallet_journal.len());
-    assert!(fp.wallet_journal_len > 0);
-    assert_ne!(fp.wallet_journal_hash, 0);
-    assert_eq!(fp.mails_len, snap.mails.len());
-    assert!(fp.mails_len > 0);
-    assert_ne!(fp.mails_hash, 0);
-    assert!(fp
-        .committed_idempotency_keys
-        .contains(&(90_000_001, "idem-cov-1".to_string())));
-    assert_eq!(fp.mission_tally.get(&90_000_001), Some(&7));
-    assert_eq!(fp.applied_ship_skins.get(&100_000_001), Some(&210_001));
-
     let mut conn = open_migrated_conn();
-    let mut sync_fp = TableFingerprints::default();
+    let mut prev = WorldStateSnapshot::default();
     let delta = {
         let tx = conn.transaction().expect("begin tx");
-        let d = sync_dirty_to_sqlite(&tx, &snap, &mut sync_fp, true).expect("sync populated");
+        let d = sync_snapshot_diff_for_test(&tx, &mut prev, &snap, true).expect("sync populated");
         tx.commit().expect("commit tx");
         d
     };
     assert_eq!(delta.seq, 42);
     assert_eq!(delta.next_entity_id, 91_234_567);
     assert!(delta.full_snapshot.is_some());
+
+    let stored_next_entity_id: i64 = conn
+        .query_row(
+            "SELECT meta_value FROM world_meta WHERE meta_key = 'next_entity_id'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("query stored next_entity_id");
+    assert_eq!(stored_next_entity_id, 91_234_567);
+
+    let loaded = load_snapshot_from_sqlite(&conn).expect("load populated sqlite");
+    // Reconciled cross-table high-water advances next_entity_id to max mail_timestamps key (800_000_001).
+    assert_eq!(loaded.next_entity_id, 800_000_001);
+    assert_eq!(loaded.wal_seq, 42);
+    assert!(loaded.markets_seeded);
+    assert_eq!(loaded.wallet_journal.len(), snap.wallet_journal.len());
+    assert!(!loaded.wallet_journal.is_empty());
+    assert_eq!(loaded.mails.len(), snap.mails.len());
+    assert!(!loaded.mails.is_empty());
+    assert!(loaded
+        .committed_idempotency_keys
+        .contains(&(90_000_001, "idem-cov-1".to_string())));
+    assert_eq!(loaded.mission_tally.get(&90_000_001), Some(&7));
+    assert_eq!(loaded.applied_ship_skins.get(&100_000_001), Some(&210_001));
 }
 
 #[test]
 fn sqlite_store_sync_deletions_and_full_rollback_roundtrip() {
     let mut conn = open_migrated_conn();
     let base = build_populated_snapshot();
-    let mut fp = replace_sqlite_from_snapshot(&mut conn, &base).expect("replace snapshot");
+    replace_sqlite_from_snapshot(&mut conn, &base).expect("replace snapshot");
 
-    let mut working = base.clone();
-    working.wal_seq = 999;
-    working.next_entity_id = 99_999_999;
-    working.markets_seeded = false;
-    working.accounts.clear();
-    working.characters.clear();
-    working.skills.clear();
-    working.skill_queues.clear();
-    working.jump_clones.clear();
-    working.active_implants.clear();
-    working.items.clear();
-    working.saved_fittings.clear();
-    working.market_orders.clear();
-    working.wallet_journal.clear();
-    working.contracts.clear();
-    working.industry_jobs.clear();
-    working.planetary_colonies.clear();
-    working.active_missions.clear();
-    working.mission_tally.clear();
-    working.standing_transactions.clear();
-    working.npe_progress.clear();
-    working.bookmarks.clear();
-    working.mails.clear();
-    working.fleets.clear();
-    working.corporations.clear();
-    working.alliances.clear();
-    working.wars.clear();
-    working.corp_projects.clear();
-    working.killmails.clear();
-    working.kill_rights.clear();
-    working.structures.clear();
-    working.system_states.clear();
-    working.committed_idempotency_keys.clear();
-    working.licensed_skins.clear();
-    working.applied_ship_skins.clear();
-    working.mining_ledger.clear();
-    working.asteroids.clear();
-    working.character_last_jump_unix.clear();
-    working.character_cspa_charges.clear();
-    working.mail_timestamps.clear();
-    working.character_login_stats.clear();
-    working.item_custom_names.clear();
-    working.item_positions.clear();
-    working.structure_vulnerability_windows.clear();
-    working.skill_history.clear();
-    working.character_doll_info.clear();
-
-    let (reloaded, _) = load_snapshot_from_sqlite(&conn).expect("reload full snapshot");
+    let reloaded = load_snapshot_from_sqlite(&conn).expect("reload full snapshot");
     let mut expected_reconciled = base.clone();
     expected_reconciled.reconcile_id_counters();
     assert_eq!(reloaded.next_entity_id, expected_reconciled.next_entity_id);
@@ -443,10 +403,11 @@ fn sqlite_store_sync_deletions_and_full_rollback_roundtrip() {
 
     // Sync deletion across all populated tables to exercise DELETE branches cleanly
     let empty = WorldStateSnapshot::default();
+    let mut prev = base.clone();
     let tx = conn.transaction().expect("begin tx");
-    sync_dirty_to_sqlite(&tx, &empty, &mut fp, false).expect("sync deletions");
+    sync_snapshot_diff_for_test(&tx, &mut prev, &empty, false).expect("sync deletions");
     tx.commit().expect("commit tx");
-    let (after_delete, _) = load_snapshot_from_sqlite(&conn).expect("load after delete");
+    let after_delete = load_snapshot_from_sqlite(&conn).expect("load after delete");
     assert!(after_delete.accounts.is_empty());
     assert!(after_delete.asteroids.is_empty());
     assert!(after_delete.mining_ledger.is_empty());
@@ -455,7 +416,6 @@ fn sqlite_store_sync_deletions_and_full_rollback_roundtrip() {
 #[test]
 fn sqlite_store_sync_insert_and_delete_error_paths_on_dropped_tables() {
     let snap = build_populated_snapshot();
-    let base_fp = compute_fingerprints(&snap);
 
     let tables = [
         "world_meta",
@@ -508,10 +468,10 @@ fn sqlite_store_sync_insert_and_delete_error_paths_on_dropped_tables() {
         insert_conn
             .execute(&format!("DROP TABLE {tbl}"), [])
             .unwrap_or_else(|e| panic!("drop {tbl}: {e}"));
-        let mut empty_fp = TableFingerprints::default();
+        let mut prev = WorldStateSnapshot::default();
         let tx = insert_conn.transaction().expect("begin tx");
         assert!(
-            sync_dirty_to_sqlite(&tx, &snap, &mut empty_fp, false).is_err(),
+            sync_snapshot_diff_for_test(&tx, &mut prev, &snap, false).is_err(),
             "expected insert sync error when table {tbl} is missing"
         );
     }
@@ -527,10 +487,10 @@ fn sqlite_store_sync_insert_and_delete_error_paths_on_dropped_tables() {
         del_conn
             .execute(&format!("DROP TABLE {tbl}"), [])
             .unwrap_or_else(|e| panic!("drop {tbl}: {e}"));
-        let mut fp = base_fp.clone();
+        let mut prev = snap.clone();
         let tx = del_conn.transaction().expect("begin tx");
         assert!(
-            sync_dirty_to_sqlite(&tx, &empty_snap, &mut fp, false).is_err(),
+            sync_snapshot_diff_for_test(&tx, &mut prev, &empty_snap, false).is_err(),
             "expected delete sync error when table {tbl} is missing"
         );
     }
@@ -700,8 +660,8 @@ fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
     };
     use crate::sqlite_store::domain_rows::{DOMAIN_CORP_GOVERNANCE, DOMAIN_QUASAR_STATE_BLOBS};
     use crate::sqlite_store::industry_market_pve_store::{
-        load_industry_market_pve_domain_rows, rollback_industry_market_pve,
-        sync_industry_market_pve_domain_rows, sync_mining_ledger, LEGACY_WORLD_KV_BLOBS_SQL,
+        load_industry_market_pve_domain_rows, sync_industry_market_pve_domain_rows,
+        sync_mining_ledger, LEGACY_WORLD_KV_BLOBS_SQL,
     };
     use crate::sqlite_store::notes_lp_sequence_store::{load_d6, sync_d6};
     use crate::sqlite_store::schema::{load_or_init_jwt_secret, save_jwt_secret};
@@ -824,11 +784,11 @@ fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
         c2.execute("DROP TABLE world_meta", []).unwrap();
         let mut s2 = WorldStateSnapshot::default();
         load_d6(&c2, &mut s2);
+        let before_n = WorldStateSnapshot::default();
         let mut pop_n = WorldStateSnapshot::default();
         pop_n.next_report_id += 1;
-        let mut fp_n = TableFingerprints::default();
         let tx = c2.transaction().unwrap();
-        assert!(sync_d6(&tx, &pop_n, &mut fp_n).is_err());
+        assert!(sync_d6(&tx, Some(&before_n), &pop_n).is_err());
     }
     {
         let mut c2 = open_migrated_conn();
@@ -843,7 +803,7 @@ fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
         assert!(crate::sqlite_store::domain_rows::sync_sp6_lifecycle_domain_rows(&tx, &pop_n).is_err());
     }
 
-    // industry_market_pve_store unknown key + dropped tables on load/sync/rollback
+    // industry_market_pve_store unknown key + dropped tables on load/sync
     let c_b4 = open_migrated_conn();
     c_b4.execute_batch(LEGACY_WORLD_KV_BLOBS_SQL).unwrap();
     c_b4.execute(
@@ -875,26 +835,17 @@ fn schema_and_cold_stores_dropped_table_and_corrupt_paths() {
         )
         .unwrap();
         assert!(!had_after_drop);
+        let before_b4 = WorldStateSnapshot::default();
         let mut pop_b4 = WorldStateSnapshot::default();
         pop_b4.mining_ledger.push(MiningLedgerRecord {
             character_id: 1, solar_system_id: 30_000_142, type_id: 1230, quantity: 10, date: "d".into(), timestamp_unix: 1,
         });
         pop_b4.quasar_state_blobs.insert("k".into(), "v".into());
-        let mut fp_b4 = TableFingerprints::default();
-        assert!(
-            rollback_industry_market_pve(&c2, &mut pop_b4, &fp_b4).is_err(),
-            "rollback_industry_market_pve must fail closed when {t} is missing"
-        );
-        assert_eq!(pop_b4.mining_ledger.len(), 1);
-        assert_eq!(
-            pop_b4.quasar_state_blobs.get("k").map(String::as_str),
-            Some("v")
-        );
         let tx = c2.transaction().unwrap();
         if t == "domain_rows" {
             assert!(sync_industry_market_pve_domain_rows(&tx, &pop_b4).is_err());
         } else {
-            assert!(sync_mining_ledger(&tx, &pop_b4, &mut fp_b4).is_err());
+            assert!(sync_mining_ledger(&tx, Some(&before_b4), &pop_b4).is_err());
         }
     }
 }

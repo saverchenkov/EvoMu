@@ -123,8 +123,7 @@ fn load_rejects_wrong_sqlite_column_types_across_relational_tables() {
         load_snapshot_from_sqlite(&conn).is_err(),
         "corrupt extension rows must fail closed by default (#906)"
     );
-    let (loaded, _) =
-        crate::sqlite_store::load_snapshot_from_sqlite_with_options(&conn, true).unwrap();
+    let loaded = crate::sqlite_store::load_snapshot_from_sqlite_with_options(&conn, true).unwrap();
     assert!(loaded.asteroids.is_empty());
     assert!(loaded.item_custom_names.is_empty());
 }

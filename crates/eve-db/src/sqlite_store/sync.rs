@@ -1,392 +1,112 @@
 //! Incremental snapshot synchronization to SQLite relational tables.
 
-use crate::sqlite_store::fingerprints::*;
-
+use crate::cow::CowCell;
+#[cfg(any(test, feature = "legacy-json-snapshot"))]
 use crate::persistence::WorldStateWalDelta;
-use crate::sqlite_store::fingerprints::TableFingerprints;
+use crate::sqlite_store::checked_json::to_checked_json_string;
 use crate::types::*;
-use eve_sde::{SolarSystemId, TypeId};
+use eve_sde::SolarSystemId;
 use rusqlite::{params, Connection, Transaction};
+use std::collections::HashMap;
+use std::hash::Hash;
 
-pub fn sync_dirty_to_sqlite(
+fn sync_cell_map<K, V>(
     tx: &Transaction<'_>,
-    snap: &WorldStateSnapshot,
-    fp: &mut TableFingerprints,
-    need_wal_delta: bool,
-) -> Result<WorldStateWalDelta, String> {
-    let mut delta = Box::new(WorldStateWalDelta {
-        seq: snap.wal_seq,
-        next_entity_id: snap.next_entity_id,
-        ..Default::default()
-    });
-    let mut meta_changed = false;
-    let mut cold_changed = false;
-
-    if fp.next_entity_id != snap.next_entity_id
-        || fp.wal_seq != snap.wal_seq
-        || fp.markets_seeded != snap.markets_seeded
-    {
-        meta_changed = true;
-        if fp.markets_seeded != snap.markets_seeded {
-            cold_changed = true;
+    before: Option<&CowCell<HashMap<K, V>>>,
+    after: &CowCell<HashMap<K, V>>,
+    mut delete_fn: impl FnMut(&Transaction<'_>, &K) -> Result<(), String>,
+    mut upsert_fn: impl FnMut(&Transaction<'_>, &K, &V) -> Result<(), String>,
+) -> Result<(), String>
+where
+    K: Eq + Hash,
+    V: PartialEq,
+{
+    if let Some(b) = before {
+        if b.ptr_eq(after) {
+            return Ok(());
         }
-        tx.execute(
-            "INSERT OR REPLACE INTO world_meta (meta_key, meta_value) VALUES ('next_entity_id', ?1), ('wal_seq', ?2), ('markets_seeded', ?3)",
-            params![
-                snap.next_entity_id,
-                snap.wal_seq as i64,
-                i64::from(snap.markets_seeded)
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-        fp.next_entity_id = snap.next_entity_id;
-        fp.wal_seq = snap.wal_seq;
-        fp.markets_seeded = snap.markets_seeded;
+        for k in b.keys() {
+            if !after.contains_key(k) {
+                delete_fn(tx, k)?;
+            }
+        }
+        for (k, v) in after.iter() {
+            if b.get(k) != Some(v) {
+                upsert_fn(tx, k, v)?;
+            }
+        }
+        return Ok(());
     }
-
-    cold_changed |= sync_part1_hot_tables(tx, snap, fp, &mut delta)?;
-    cold_changed |= sync_part1_cold_tables(tx, snap, fp, &mut delta)?;
-    cold_changed |= sync_part2_activity_tables(tx, snap, fp, &mut delta)?;
-    cold_changed |= sync_part3_social_corp_tables(tx, snap, fp)?;
-    cold_changed |= sync_part4_world_tail_tables(tx, snap, fp, &mut delta)?;
-
-    cold_changed |= super::sync_ext::sync_extension_tables(tx, snap, fp)?;
-    cold_changed |= super::domain_rows::sync_ledger_domain_rows(tx, snap)?;
-    cold_changed |= super::domain_rows::sync_notes_lp_domain_rows(tx, snap)?;
-    cold_changed |= super::domain_rows::sync_sp6_lifecycle_domain_rows(tx, snap)?;
-    cold_changed |= super::domain_rows::sync_service_domains_rows(tx, snap)?;
-    cold_changed |= super::notes_lp_sequence_store::sync_d6(tx, snap, fp)?;
-    cold_changed |= super::domain_rows::sync_social_domain_rows(tx, snap)?;
-    cold_changed |= super::domain_rows::sync_corp_crimewatch_domain_rows(tx, snap)?;
-    cold_changed |= super::domain_rows::sync_industry_market_pve_domain_rows(tx, snap)?;
-    cold_changed |= super::industry_market_pve_store::sync_mining_ledger(tx, snap, fp)?;
-    cold_changed |= super::service_domains_store::sync_service_domains(tx, snap, fp)?;
-
-    let hot_changed = !delta.upserted_characters.is_empty()
-        || !delta.upserted_skills.is_empty()
-        || !delta.upserted_skill_queues.is_empty()
-        || !delta.upserted_items.is_empty()
-        || !delta.removed_items.is_empty()
-        || !delta.upserted_market_orders.is_empty()
-        || !delta.removed_market_orders.is_empty()
-        || !delta.appended_wallet_journal.is_empty()
-        || !delta.upserted_contracts.is_empty()
-        || !delta.upserted_system_states.is_empty()
-        || !delta.added_idempotency_keys.is_empty();
-    delta.dirty = meta_changed || hot_changed || cold_changed;
-
-    if need_wal_delta && cold_changed {
-        delta.full_snapshot = Some(Box::new(snap.clone()));
+    for (k, v) in after.iter() {
+        upsert_fn(tx, k, v)?;
     }
-    Ok(*delta)
+    Ok(())
 }
 
-/// Syncs only the cold domains flagged in `cd` without scanning unchanged cold tables or the 5 hot `CowMap`s.
+/// Syncs only the cold domains flagged in `cd` without scanning unchanged cold tables or hot `CowMap`s.
 pub(crate) fn sync_selected_cold_domains_to_sqlite(
     tx: &Transaction<'_>,
+    before: &WorldStateSnapshot,
     snap: &WorldStateSnapshot,
-    fp: &mut TableFingerprints,
     cd: &crate::tx_engine::ColdDomainDiff,
-    delta: &mut WorldStateWalDelta,
+    #[cfg(any(test, feature = "legacy-json-snapshot"))] mut delta: Option<&mut WorldStateWalDelta>,
 ) -> Result<(), String> {
     if cd.part1_cold {
-        sync_part1_cold_tables(tx, snap, fp, delta)?;
+        sync_part1_cold_tables(tx, Some(before), snap)?;
     }
     if cd.part2_activity {
-        sync_part2_activity_tables(tx, snap, fp, delta)?;
+        sync_part2_activity_tables(
+            tx,
+            Some(before),
+            snap,
+            #[cfg(any(test, feature = "legacy-json-snapshot"))]
+            delta.as_deref_mut(),
+        )?;
     }
     if cd.part3_social_corp {
-        sync_part3_social_corp_tables(tx, snap, fp)?;
+        sync_part3_social_corp_tables(tx, Some(before), snap)?;
     }
     if cd.part4_world_tail {
-        sync_part4_world_tail_tables(tx, snap, fp, delta)?;
+        sync_part4_world_tail_tables(
+            tx,
+            Some(before),
+            snap,
+            #[cfg(any(test, feature = "legacy-json-snapshot"))]
+            delta,
+        )?;
     }
     if cd.extension_tables {
-        super::sync_ext::sync_extension_tables(tx, snap, fp)?;
+        super::sync_ext::sync_extension_tables_cold_only(tx, Some(before), snap)?;
     }
     if cd.d6_notes_lp_seq {
-        super::notes_lp_sequence_store::sync_d6(tx, snap, fp)?;
+        super::notes_lp_sequence_store::sync_d6(tx, Some(before), snap)?;
     }
     if cd.d6_batch4 {
-        super::industry_market_pve_store::sync_mining_ledger(tx, snap, fp)?;
+        super::industry_market_pve_store::sync_mining_ledger(tx, Some(before), snap)?;
     }
     if cd.service_domains {
-        super::service_domains_store::sync_service_domains(tx, snap, fp)?;
+        super::service_domains_store::sync_service_domains(tx, Some(before), snap)?;
     }
     Ok(())
 }
 
 #[inline(never)]
-fn sync_part1_hot_tables(
-    tx: &Transaction<'_>,
-    snap: &WorldStateSnapshot,
-    fp: &mut TableFingerprints,
-    delta: &mut WorldStateWalDelta,
-) -> Result<bool, String> {
-    let mut cold_changed = false;
-
-    // 2. characters
-    let removed_chars: Vec<i64> = fp
-        .characters
-        .keys()
-        .filter(|k| !snap.characters.contains_key(*k))
-        .copied()
-        .collect();
-    for k in removed_chars {
-        cold_changed = true;
-        tx.execute("DELETE FROM characters WHERE character_id = ?1", params![k])
-            .map_err(|e| e.to_string())?;
-        fp.characters.remove(&k);
-    }
-    for (&k, v) in &snap.characters {
-        let h = fp_character(v);
-        if fp.characters.get(&k) != Some(&h) {
-            let rec_json = to_checked_json_string(v)?;
-            tx.execute(
-                "INSERT INTO characters (character_id, user_id, name, corporation_id, alliance_id, station_id, structure_id, solar_system_id, active_ship_id, balance_cents, activity_status, version, record_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-                 ON CONFLICT(character_id) DO UPDATE SET
-                     user_id = excluded.user_id,
-                     name = excluded.name,
-                     corporation_id = excluded.corporation_id,
-                     alliance_id = excluded.alliance_id,
-                     station_id = excluded.station_id,
-                     structure_id = excluded.structure_id,
-                     solar_system_id = excluded.solar_system_id,
-                     active_ship_id = excluded.active_ship_id,
-                     balance_cents = excluded.balance_cents,
-                     activity_status = excluded.activity_status,
-                     version = excluded.version,
-                     record_json = excluded.record_json",
-                params![
-                    v.character_id,
-                    v.user_id as i64,
-                    v.name,
-                    v.corporation_id,
-                    v.alliance_id,
-                    v.station_id,
-                    v.structure_id,
-                    v.solar_system_id as i64,
-                    v.active_ship_id,
-                    v.balance.0,
-                    v.activity_status,
-                    v.version as i64,
-                    rec_json,
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-            fp.characters.insert(k, h);
-            delta.upserted_characters.push(v.clone());
-        }
-    }
-
-    // 3. skills
-    let removed_skill_chars: Vec<i64> = fp
-        .skills
-        .keys()
-        .filter(|k| !snap.skills.contains_key(*k))
-        .copied()
-        .collect();
-    for cid in removed_skill_chars {
-        cold_changed = true;
-        tx.execute("DELETE FROM skills WHERE character_id = ?1", params![cid])
-            .map_err(|e| e.to_string())?;
-        fp.skills.remove(&cid);
-    }
-    for (&cid, sk_map) in &snap.skills {
-        let fp_map = fp.skills.entry(cid).or_default();
-        let rem_tids: Vec<TypeId> = fp_map
-            .keys()
-            .filter(|tid| !sk_map.contains_key(*tid))
-            .copied()
-            .collect();
-        for tid in rem_tids {
-            cold_changed = true;
-            tx.execute(
-                "DELETE FROM skills WHERE character_id = ?1 AND type_id = ?2",
-                params![cid, tid as i64],
-            )
-            .map_err(|e| e.to_string())?;
-            fp_map.remove(&tid);
-        }
-        for (&tid, sk) in sk_map {
-            let digest = canonical_fp(sk);
-            if fp_map.get(&tid) != Some(&digest) {
-                tx.execute(
-                    "INSERT OR REPLACE INTO skills (character_id, type_id, level, skill_points) VALUES (?1, ?2, ?3, ?4)",
-                    params![cid, tid as i64, sk.level as i64, sk.skill_points],
-                )
-                .map_err(|e| e.to_string())?;
-                fp_map.insert(tid, digest);
-                delta.upserted_skills.push((cid, sk.clone()));
-            }
-        }
-    }
-
-    // 4. skill_queues
-    let rem_q_chars: Vec<i64> = fp
-        .skill_queues
-        .keys()
-        .filter(|k| !snap.skill_queues.contains_key(*k))
-        .copied()
-        .collect();
-    for cid in rem_q_chars {
-        cold_changed = true;
-        tx.execute(
-            "DELETE FROM skill_queues WHERE character_id = ?1",
-            params![cid],
-        )
-        .map_err(|e| e.to_string())?;
-        fp.skill_queues.remove(&cid);
-    }
-    for (&cid, q) in &snap.skill_queues {
-        let h = fp_skill_queue(q);
-        if fp.skill_queues.get(&cid) != Some(&h) {
-            tx.execute(
-                "DELETE FROM skill_queues WHERE character_id = ?1",
-                params![cid],
-            )
-            .map_err(|e| e.to_string())?;
-            for (idx, entry) in q.iter().enumerate() {
-                tx.execute(
-                    "INSERT INTO skill_queues (character_id, queue_index, type_id, target_level, start_sp, end_sp, duration_seconds, started_at_unix)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
-                        cid,
-                        idx as i64,
-                        entry.type_id as i64,
-                        entry.target_level as i64,
-                        entry.start_sp,
-                        entry.end_sp,
-                        entry.duration_seconds,
-                        entry.started_at_unix.map(|v| v as i64),
-                    ],
-                )
-                .map_err(|e| e.to_string())?;
-            }
-            fp.skill_queues.insert(cid, h);
-            delta.upserted_skill_queues.push((cid, q.clone()));
-        }
-    }
-
-    // 7. items
-    let removed_items: Vec<i64> = fp
-        .items
-        .keys()
-        .filter(|k| !snap.items.contains_key(*k))
-        .copied()
-        .collect();
-    for id in removed_items {
-        tx.execute("DELETE FROM items WHERE item_id = ?1", params![id])
-            .map_err(|e| e.to_string())?;
-        fp.items.remove(&id);
-        delta.removed_items.push(id);
-    }
-    for (&id, item) in &snap.items {
-        let h = fp_item(item);
-        if fp.items.get(&id) != Some(&h) {
-            let rec_json = to_checked_json_string(item)?;
-            tx.execute(
-                "INSERT OR REPLACE INTO items (item_id, type_id, owner_id, location_id, flag, quantity, singleton, version, record_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    item.item_id,
-                    item.type_id as i64,
-                    item.owner_id,
-                    item.location_id,
-                    item.flag as i64,
-                    item.quantity as i64,
-                    i64::from(item.singleton),
-                    item.version as i64,
-                    rec_json,
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-            fp.items.insert(id, h);
-            delta.upserted_items.push(item.clone());
-        }
-    }
-
-    // 9. market_orders
-    let mkt_digest = fp_market_orders_digest(&snap.market_orders);
-    if mkt_digest != fp.market_orders_digest
-        || snap.market_orders.len() != fp.market_orders.len()
-    {
-        let fp_orders = std::sync::Arc::make_mut(&mut fp.market_orders);
-        let removed_orders: Vec<i64> = fp_orders
-            .keys()
-            .filter(|k| !snap.market_orders.contains_key(*k))
-            .copied()
-            .collect();
-        for oid in removed_orders {
-            tx.execute(
-                "DELETE FROM market_orders WHERE order_id = ?1",
-                params![oid],
-            )
-            .map_err(|e| e.to_string())?;
-            fp_orders.remove(&oid);
-            delta.removed_market_orders.push(oid);
-        }
-        for (&oid, ord) in &snap.market_orders {
-            let h = fp_market_order(ord);
-            if fp_orders.get(&oid) != Some(&h) {
-                let mut stmt = tx
-                    .prepare_cached(
-                        "INSERT OR REPLACE INTO market_orders (order_id, owner_id, station_id, region_id, type_id, is_bid, price_cents, vol_entered, vol_remaining, min_volume, is_npc, escrow_cents)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                    )
-                    .map_err(|e| e.to_string())?;
-                stmt.execute(params![
-                    ord.order_id,
-                    ord.owner_id,
-                    ord.station_id,
-                    ord.region_id as i64,
-                    ord.type_id as i64,
-                    i64::from(ord.is_bid),
-                    ord.price.0,
-                    ord.vol_entered as i64,
-                    ord.vol_remaining as i64,
-                    ord.min_volume as i64,
-                    i64::from(ord.is_npc),
-                    ord.escrow.0,
-                ])
-                .map_err(|e| e.to_string())?;
-                fp_orders.insert(oid, h);
-                delta.upserted_market_orders.push(ord.clone());
-            }
-        }
-        fp.market_orders_digest = mkt_digest;
-    }
-
-    Ok(cold_changed)
-}
-
-#[inline(never)]
 fn sync_part1_cold_tables(
     tx: &Transaction<'_>,
+    before: Option<&WorldStateSnapshot>,
     snap: &WorldStateSnapshot,
-    fp: &mut TableFingerprints,
-    delta: &mut WorldStateWalDelta,
-) -> Result<bool, String> {
-    let mut cold_changed = false;
-
+) -> Result<(), String> {
     // 1. accounts
-    let removed_accounts: Vec<String> = fp
-        .accounts
-        .keys()
-        .filter(|k| !snap.accounts.contains_key(*k))
-        .cloned()
-        .collect();
-    for k in removed_accounts {
-        cold_changed = true;
-        tx.execute("DELETE FROM accounts WHERE username = ?1", params![k])
-            .map_err(|e| e.to_string())?;
-        fp.accounts.remove(&k);
-    }
-    for (k, v) in &snap.accounts {
-        let h = fp_account(v);
-        if fp.accounts.get(k) != Some(&h) {
-            cold_changed = true;
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.accounts),
+        &snap.accounts,
+        |tx, k| {
+            tx.execute("DELETE FROM accounts WHERE username = ?1", params![k])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+        |tx, _k, v| {
             tx.execute(
                 "INSERT OR REPLACE INTO accounts (username, user_id, password_token, role, banned_until_unix, ban_reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
@@ -398,162 +118,112 @@ fn sync_part1_cold_tables(
                     v.ban_reason,
                 ],
             )
-            .map_err(|e| e.to_string())?;
-            fp.accounts.insert(k.clone(), h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
-    // 5. jump_clones & 6. active_implants
-    let rem_jc: Vec<i64> = fp
-        .jump_clones
-        .keys()
-        .filter(|k| !snap.jump_clones.contains_key(*k))
-        .copied()
-        .collect();
-    for cid in rem_jc {
-        cold_changed = true;
-        tx.execute(
-            "DELETE FROM jump_clones WHERE character_id = ?1",
-            params![cid],
-        )
-        .map_err(|e| e.to_string())?;
-        fp.jump_clones.remove(&cid);
-    }
-    for (&cid, clones) in &snap.jump_clones {
-        let h = fp_json(clones);
-        if fp.jump_clones.get(&cid) != Some(&h) {
-            cold_changed = true;
+    // 5. jump_clones
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.jump_clones),
+        &snap.jump_clones,
+        |tx, &cid| {
+            tx.execute(
+                "DELETE FROM jump_clones WHERE character_id = ?1",
+                params![cid],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+        |tx, &cid, clones| {
             let js = to_checked_json_string(clones)?;
             tx.execute(
                 "INSERT OR REPLACE INTO jump_clones (character_id, clones_json) VALUES (?1, ?2)",
                 params![cid, js],
             )
-            .map_err(|e| e.to_string())?;
-            fp.jump_clones.insert(cid, h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
-    let rem_imp: Vec<i64> = fp
-        .active_implants
-        .keys()
-        .filter(|k| !snap.active_implants.contains_key(*k))
-        .copied()
-        .collect();
-    for cid in rem_imp {
-        cold_changed = true;
-        tx.execute(
-            "DELETE FROM active_implants WHERE character_id = ?1",
-            params![cid],
-        )
-        .map_err(|e| e.to_string())?;
-        fp.active_implants.remove(&cid);
-    }
-    for (&cid, imps) in &snap.active_implants {
-        let h = fp_json(imps);
-        if fp.active_implants.get(&cid) != Some(&h) {
-            cold_changed = true;
+    // 6. active_implants
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.active_implants),
+        &snap.active_implants,
+        |tx, &cid| {
+            tx.execute(
+                "DELETE FROM active_implants WHERE character_id = ?1",
+                params![cid],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+        |tx, &cid, imps| {
             let js = to_checked_json_string(imps)?;
             tx.execute(
                 "INSERT OR REPLACE INTO active_implants (character_id, implants_json) VALUES (?1, ?2)",
                 params![cid, js],
             )
-            .map_err(|e| e.to_string())?;
-            fp.active_implants.insert(cid, h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
     // 8. saved_fittings
-    let rem_fit: Vec<i64> = fp
-        .saved_fittings
-        .keys()
-        .filter(|k| !snap.saved_fittings.contains_key(*k))
-        .copied()
-        .collect();
-    for fid in rem_fit {
-        cold_changed = true;
-        tx.execute(
-            "DELETE FROM saved_fittings WHERE fitting_id = ?1",
-            params![fid],
-        )
-        .map_err(|e| e.to_string())?;
-        fp.saved_fittings.remove(&fid);
-    }
-    for (&fid, fit) in &snap.saved_fittings {
-        let h = fp_json(fit);
-        if fp.saved_fittings.get(&fid) != Some(&h) {
-            cold_changed = true;
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.saved_fittings),
+        &snap.saved_fittings,
+        |tx, &fid| {
+            tx.execute(
+                "DELETE FROM saved_fittings WHERE fitting_id = ?1",
+                params![fid],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+        |tx, &_fid, fit| {
             let js = to_checked_json_string(fit)?;
             tx.execute(
                 "INSERT OR REPLACE INTO saved_fittings (fitting_id, owner_id, name, ship_type_id, description, record_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![fit.fitting_id, fit.owner_id, fit.name, fit.ship_type_id as i64, fit.description, js],
-            )
-            .map_err(|e| e.to_string())?;
-            fp.saved_fittings.insert(fid, h);
-        }
-    }
-
-    // 10. wallet_journal
-    if snap.wallet_journal.len() < fp.wallet_journal_len
-        || (fp.wallet_journal_len > 0
-            && snap.wallet_journal.prefix_hash(fp.wallet_journal_len) != fp.wallet_journal_hash)
-    {
-        cold_changed = true;
-        tx.execute("DELETE FROM wallet_journal", [])
-            .map_err(|e| e.to_string())?;
-        fp.wallet_journal_len = 0;
-        fp.wallet_journal_hash = snap.wallet_journal.prefix_hash(0);
-    }
-    if snap.wallet_journal.len() > fp.wallet_journal_len {
-        let start = fp.wallet_journal_len;
-        for (seq_idx, entry) in snap.wallet_journal.iter_from(start) {
-            tx.execute(
-                "INSERT OR REPLACE INTO wallet_journal (seq_idx, entry_id, character_id, entry_type, amount_cents, balance_after_cents, reason)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
-                    seq_idx as i64,
-                    entry.entry_id,
-                    entry.character_id,
-                    entry.entry_type,
-                    entry.amount.0,
-                    entry.balance_after.0,
-                    entry.reason,
+                    fit.fitting_id,
+                    fit.owner_id,
+                    fit.name,
+                    fit.ship_type_id as i64,
+                    fit.description,
+                    js
                 ],
             )
-            .map_err(|e| e.to_string())?;
-            delta.appended_wallet_journal.push(entry.clone());
-        }
-        fp.wallet_journal_len = snap.wallet_journal.len();
-        fp.wallet_journal_hash = snap.wallet_journal.prefix_hash(fp.wallet_journal_len);
-    }
-    Ok(cold_changed)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
+
+    Ok(())
 }
 
 #[inline(never)]
 fn sync_part2_activity_tables(
     tx: &Transaction<'_>,
+    before: Option<&WorldStateSnapshot>,
     snap: &WorldStateSnapshot,
-    fp: &mut TableFingerprints,
-    delta: &mut WorldStateWalDelta,
-) -> Result<bool, String> {
-    let mut cold_changed = false;
-
+    #[cfg(any(test, feature = "legacy-json-snapshot"))] mut delta: Option<&mut WorldStateWalDelta>,
+) -> Result<(), String> {
     // 11. contracts
-    let rem_contracts: Vec<i64> = fp
-        .contracts
-        .keys()
-        .filter(|k| !snap.contracts.contains_key(*k))
-        .copied()
-        .collect();
-    for cid in rem_contracts {
-        cold_changed = true;
-        tx.execute("DELETE FROM contracts WHERE contract_id = ?1", params![cid])
-            .map_err(|e| e.to_string())?;
-        fp.contracts.remove(&cid);
-    }
-    for (&cid, c) in &snap.contracts {
-        let h = fp_contract(c);
-        if fp.contracts.get(&cid) != Some(&h) {
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.contracts),
+        &snap.contracts,
+        |tx, &cid| {
+            tx.execute("DELETE FROM contracts WHERE contract_id = ?1", params![cid])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+        |tx, &_cid, c| {
             let js = to_checked_json_string(c)?;
             tx.execute(
                 "INSERT OR REPLACE INTO contracts (contract_id, issuer_id, acceptor_id, contract_type, status, start_station_id, end_station_id, price_cents, reward_cents, collateral_cents, expiration_unix, record_json)
@@ -574,33 +244,30 @@ fn sync_part2_activity_tables(
                 ],
             )
             .map_err(|e| e.to_string())?;
-            fp.contracts.insert(cid, h);
-            delta.upserted_contracts.push(c.clone());
-        }
-    }
+            #[cfg(any(test, feature = "legacy-json-snapshot"))]
+            if let Some(d) = delta.as_deref_mut() {
+                d.upserted_contracts.push(c.clone());
+            }
+            Ok(())
+        },
+    )?;
 
     // 12. industry_jobs
-    let rem_jobs: Vec<i64> = fp
-        .industry_jobs
-        .keys()
-        .filter(|k| !snap.industry_jobs.contains_key(*k))
-        .copied()
-        .collect();
-    for jid in rem_jobs {
-        cold_changed = true;
-        tx.execute("DELETE FROM industry_jobs WHERE job_id = ?1", params![jid])
-            .map_err(|e| e.to_string())?;
-        fp.industry_jobs.remove(&jid);
-    }
-    for (&jid, j) in &snap.industry_jobs {
-        let h = fp_json(j);
-        if fp.industry_jobs.get(&jid) != Some(&h) {
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.industry_jobs),
+        &snap.industry_jobs,
+        |tx, &jid| {
+            tx.execute("DELETE FROM industry_jobs WHERE job_id = ?1", params![jid])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+        |tx, &jid, j| {
             if j.cost.is_some_and(|c| !c.is_finite())
                 || j.probability.is_some_and(|p| !p.is_finite())
             {
                 return Err(format!("non-finite float in industry_jobs[{jid}]"));
             }
-            cold_changed = true;
             tx.execute(
                 "INSERT OR REPLACE INTO industry_jobs (job_id, installer_id, facility_id, blueprint_item_id, blueprint_type_id, activity_id, runs, product_type_id, status, duration_seconds, start_unix, blueprint_location_id, output_location_id, cost, licensed_runs, probability, completed_unix, completed_character_id)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
@@ -625,31 +292,25 @@ fn sync_part2_activity_tables(
                     j.completed_character_id,
                 ],
             )
-            .map_err(|e| e.to_string())?;
-            fp.industry_jobs.insert(jid, h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
     // 13. planetary_colonies
-    let rem_col: Vec<(i64, i64)> = fp
-        .planetary_colonies
-        .keys()
-        .filter(|k| !snap.planetary_colonies.contains_key(*k))
-        .copied()
-        .collect();
-    for (oid, pid) in rem_col {
-        cold_changed = true;
-        tx.execute(
-            "DELETE FROM planetary_colonies WHERE owner_id = ?1 AND planet_id = ?2",
-            params![oid, pid],
-        )
-        .map_err(|e| e.to_string())?;
-        fp.planetary_colonies.remove(&(oid, pid));
-    }
-    for (&(oid, pid), col) in &snap.planetary_colonies {
-        let h = fp_json(col);
-        if fp.planetary_colonies.get(&(oid, pid)) != Some(&h) {
-            cold_changed = true;
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.planetary_colonies),
+        &snap.planetary_colonies,
+        |tx, &(oid, pid)| {
+            tx.execute(
+                "DELETE FROM planetary_colonies WHERE owner_id = ?1 AND planet_id = ?2",
+                params![oid, pid],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+        |tx, &(oid, pid), col| {
             let js = to_checked_json_string(col)?;
             tx.execute(
                 "INSERT OR REPLACE INTO planetary_colonies (owner_id, planet_id, solar_system_id, command_center_level, pins_count, last_extracted_unix, record_json)
@@ -664,129 +325,104 @@ fn sync_part2_activity_tables(
                     js,
                 ],
             )
-            .map_err(|e| e.to_string())?;
-            fp.planetary_colonies.insert((oid, pid), h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
     // 14. active_missions
-    let rem_mis: Vec<(i64, u32)> = fp
-        .active_missions
-        .keys()
-        .filter(|k| !snap.active_missions.contains_key(*k))
-        .copied()
-        .collect();
-    for (cid, mid) in rem_mis {
-        cold_changed = true;
-        tx.execute(
-            "DELETE FROM missions WHERE character_id = ?1 AND mission_id = ?2",
-            params![cid, mid as i64],
-        )
-        .map_err(|e| e.to_string())?;
-        fp.active_missions.remove(&(cid, mid));
-    }
-    for (&(cid, mid), m) in &snap.active_missions {
-        let h = fp_json(m);
-        if fp.active_missions.get(&(cid, mid)) != Some(&h) {
-            cold_changed = true;
-            let js = to_checked_json_string(m)?;
-            tx.execute(
-                "INSERT OR REPLACE INTO missions (character_id, mission_id, agent_id, solar_system_id, state, current_room_id, npcs_remaining, record_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    cid,
-                    mid as i64,
-                    m.agent_id,
-                    m.solar_system_id as i64,
-                    m.state,
-                    m.current_room_id as i64,
-                    m.npcs_remaining as i64,
-                    js,
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-            fp.active_missions.insert((cid, mid), h);
+    if before.is_none_or(|b| b.active_missions != snap.active_missions) {
+        if let Some(b) = before {
+            for &(cid, mid) in b.active_missions.keys() {
+                if !snap.active_missions.contains_key(&(cid, mid)) {
+                    tx.execute(
+                        "DELETE FROM missions WHERE character_id = ?1 AND mission_id = ?2",
+                        params![cid, mid as i64],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        for (&(cid, mid), m) in &snap.active_missions {
+            if before.and_then(|b| b.active_missions.get(&(cid, mid))) != Some(m) {
+                let js = to_checked_json_string(m)?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO missions (character_id, mission_id, agent_id, solar_system_id, state, current_room_id, npcs_remaining, record_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        cid,
+                        mid as i64,
+                        m.agent_id,
+                        m.solar_system_id as i64,
+                        m.state,
+                        m.current_room_id as i64,
+                        m.npcs_remaining as i64,
+                        js,
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+            }
         }
     }
 
     // 15. mission_tally
-    let rem_tally: Vec<i64> = fp
-        .mission_tally
-        .keys()
-        .filter(|k| !snap.mission_tally.contains_key(*k))
-        .copied()
-        .collect();
-    for cid in rem_tally {
-        cold_changed = true;
-        tx.execute(
-            "DELETE FROM mission_tally WHERE character_id = ?1",
-            params![cid],
-        )
-        .map_err(|e| e.to_string())?;
-        fp.mission_tally.remove(&cid);
-    }
-    for (&cid, &t) in &snap.mission_tally {
-        if fp.mission_tally.get(&cid) != Some(&t) {
-            cold_changed = true;
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.mission_tally),
+        &snap.mission_tally,
+        |tx, &cid| {
+            tx.execute(
+                "DELETE FROM mission_tally WHERE character_id = ?1",
+                params![cid],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+        |tx, &cid, &t| {
             tx.execute(
                 "INSERT OR REPLACE INTO mission_tally (character_id, tally) VALUES (?1, ?2)",
                 params![cid, t as i64],
             )
-            .map_err(|e| e.to_string())?;
-            fp.mission_tally.insert(cid, t);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
     // 16. standing_transactions
-    let rem_st_tx: Vec<i64> = fp
-        .standing_transactions
-        .keys()
-        .filter(|k| !snap.standing_transactions.contains_key(*k))
-        .copied()
-        .collect();
-    for cid in rem_st_tx {
-        cold_changed = true;
-        tx.execute(
-            "DELETE FROM standings WHERE character_id = ?1",
-            params![cid],
-        )
-        .map_err(|e| e.to_string())?;
-        fp.standing_transactions.remove(&cid);
-    }
-    for (&cid, list) in &snap.standing_transactions {
-        let h = fp_json(list);
-        if fp.standing_transactions.get(&cid) != Some(&h) {
-            cold_changed = true;
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.standing_transactions),
+        &snap.standing_transactions,
+        |tx, &cid| {
+            tx.execute("DELETE FROM standings WHERE character_id = ?1", params![cid])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+        |tx, &cid, list| {
             let js = to_checked_json_string(list)?;
             tx.execute(
                 "INSERT OR REPLACE INTO standings (character_id, tx_json) VALUES (?1, ?2)",
                 params![cid, js],
             )
-            .map_err(|e| e.to_string())?;
-            fp.standing_transactions.insert(cid, h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
     // 17. npe_progress
-    let rem_npe: Vec<i64> = fp
-        .npe_progress
-        .keys()
-        .filter(|k| !snap.npe_progress.contains_key(*k))
-        .copied()
-        .collect();
-    for cid in rem_npe {
-        cold_changed = true;
-        tx.execute(
-            "DELETE FROM npe_progress WHERE character_id = ?1",
-            params![cid],
-        )
-        .map_err(|e| e.to_string())?;
-        fp.npe_progress.remove(&cid);
-    }
-    for (&cid, npe) in &snap.npe_progress {
-        let h = fp_json(npe);
-        if fp.npe_progress.get(&cid) != Some(&h) {
-            cold_changed = true;
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.npe_progress),
+        &snap.npe_progress,
+        |tx, &cid| {
+            tx.execute(
+                "DELETE FROM npe_progress WHERE character_id = ?1",
+                params![cid],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+        |tx, &cid, npe| {
             let js = to_checked_json_string(npe)?;
             tx.execute(
                 "INSERT OR REPLACE INTO npe_progress (character_id, node_graph_id, current_node_id, completed, record_json)
@@ -799,31 +435,25 @@ fn sync_part2_activity_tables(
                     js,
                 ],
             )
-            .map_err(|e| e.to_string())?;
-            fp.npe_progress.insert(cid, h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
     // 18. bookmarks
-    let rem_bm: Vec<i64> = fp
-        .bookmarks
-        .keys()
-        .filter(|k| !snap.bookmarks.contains_key(*k))
-        .copied()
-        .collect();
-    for bid in rem_bm {
-        cold_changed = true;
-        tx.execute("DELETE FROM bookmarks WHERE bookmark_id = ?1", params![bid])
-            .map_err(|e| e.to_string())?;
-        fp.bookmarks.remove(&bid);
-    }
-    for (&bid, bm) in &snap.bookmarks {
-        let h = fp_json(bm);
-        if fp.bookmarks.get(&bid) != Some(&h) {
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.bookmarks),
+        &snap.bookmarks,
+        |tx, &bid| {
+            tx.execute("DELETE FROM bookmarks WHERE bookmark_id = ?1", params![bid])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+        |tx, &bid, bm| {
             if !bm.x.is_finite() || !bm.y.is_finite() || !bm.z.is_finite() {
                 return Err(format!("non-finite float in bookmarks[{bid}]"));
             }
-            cold_changed = true;
             tx.execute(
                 "INSERT OR REPLACE INTO bookmarks (bookmark_id, owner_id, label, solar_system_id, x, y, z, item_id, memo, folder_id, is_shared)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -841,92 +471,59 @@ fn sync_part2_activity_tables(
                     i64::from(bm.is_shared),
                 ],
             )
-            .map_err(|e| e.to_string())?;
-            fp.bookmarks.insert(bid, h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
-    // 19. mails
-    if snap.mails.len() < fp.mails_len
-        || (fp.mails_len > 0
-            && snap.mails.prefix_hash(fp.mails_len) != fp.mails_hash)
-    {
-        cold_changed = true;
-        tx.execute("DELETE FROM mail", [])
-            .map_err(|e| e.to_string())?;
-        fp.mails_len = 0;
-        fp.mails_hash = snap.mails.prefix_hash(0);
-    }
-    if snap.mails.len() > fp.mails_len {
-        cold_changed = true;
-        let start = fp.mails_len;
-        for (seq_idx, m) in snap.mails.iter_from(start) {
-            tx.execute(
-                "INSERT OR REPLACE INTO mail (seq_idx, message_id, sender_id, recipient_id, subject, body)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![seq_idx as i64, m.message_id, m.sender_id, m.recipient_id, m.subject, m.body],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-        fp.mails_len = snap.mails.len();
-        fp.mails_hash = snap.mails.prefix_hash(fp.mails_len);
-    }
-    Ok(cold_changed)
+    Ok(())
 }
 
 #[inline(never)]
 fn sync_part3_social_corp_tables(
     tx: &Transaction<'_>,
+    before: Option<&WorldStateSnapshot>,
     snap: &WorldStateSnapshot,
-    fp: &mut TableFingerprints,
-) -> Result<bool, String> {
-    let mut cold_changed = false;
-
+) -> Result<(), String> {
     // 20. fleets
-    let rem_fl: Vec<i64> = fp
-        .fleets
-        .keys()
-        .filter(|k| !snap.fleets.contains_key(*k))
-        .copied()
-        .collect();
-    for fid in rem_fl {
-        cold_changed = true;
-        tx.execute("DELETE FROM fleets WHERE fleet_id = ?1", params![fid])
-            .map_err(|e| e.to_string())?;
-        fp.fleets.remove(&fid);
-    }
-    for (&fid, fl) in &snap.fleets {
-        let h = fp_json(fl);
-        if fp.fleets.get(&fid) != Some(&h) {
-            cold_changed = true;
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.fleets),
+        &snap.fleets,
+        |tx, &fid| {
+            tx.execute("DELETE FROM fleets WHERE fleet_id = ?1", params![fid])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+        |tx, &_fid, fl| {
             let js = to_checked_json_string(fl)?;
             tx.execute(
                 "INSERT OR REPLACE INTO fleets (fleet_id, boss_id, free_move, is_registered, record_json)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![fl.fleet_id, fl.boss_id, i64::from(fl.free_move), i64::from(fl.is_registered), js],
+                params![
+                    fl.fleet_id,
+                    fl.boss_id,
+                    i64::from(fl.free_move),
+                    i64::from(fl.is_registered),
+                    js
+                ],
             )
-            .map_err(|e| e.to_string())?;
-            fp.fleets.insert(fid, h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
     // 21. corporations
-    let rem_corps: Vec<i64> = fp
-        .corporations
-        .keys()
-        .filter(|k| !snap.corporations.contains_key(*k))
-        .copied()
-        .collect();
-    for cid in rem_corps {
-        cold_changed = true;
-        tx.execute("DELETE FROM corps WHERE corporation_id = ?1", params![cid])
-            .map_err(|e| e.to_string())?;
-        fp.corporations.remove(&cid);
-    }
-    for (&cid, corp) in &snap.corporations {
-        let h = fp_json(corp);
-        if fp.corporations.get(&cid) != Some(&h) {
-            cold_changed = true;
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.corporations),
+        &snap.corporations,
+        |tx, &cid| {
+            tx.execute("DELETE FROM corps WHERE corporation_id = ?1", params![cid])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+        |tx, &_cid, corp| {
             let js = to_checked_json_string(corp)?;
             tx.execute(
                 "INSERT OR REPLACE INTO corps (corporation_id, name, ticker, ceo_id, alliance_id, tax_rate, master_wallet_cents, record_json)
@@ -942,56 +539,44 @@ fn sync_part3_social_corp_tables(
                     js,
                 ],
             )
-            .map_err(|e| e.to_string())?;
-            fp.corporations.insert(cid, h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
     // 22. alliances
-    let rem_all: Vec<i64> = fp
-        .alliances
-        .keys()
-        .filter(|k| !snap.alliances.contains_key(*k))
-        .copied()
-        .collect();
-    for aid in rem_all {
-        cold_changed = true;
-        tx.execute("DELETE FROM alliances WHERE alliance_id = ?1", params![aid])
-            .map_err(|e| e.to_string())?;
-        fp.alliances.remove(&aid);
-    }
-    for (&aid, al) in &snap.alliances {
-        let h = fp_json(al);
-        if fp.alliances.get(&aid) != Some(&h) {
-            cold_changed = true;
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.alliances),
+        &snap.alliances,
+        |tx, &aid| {
+            tx.execute("DELETE FROM alliances WHERE alliance_id = ?1", params![aid])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+        |tx, &_aid, al| {
             let js = to_checked_json_string(al)?;
             tx.execute(
                 "INSERT OR REPLACE INTO alliances (alliance_id, name, short_name, executor_corp_id, record_json)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![al.alliance_id, al.name, al.short_name, al.executor_corp_id, js],
             )
-            .map_err(|e| e.to_string())?;
-            fp.alliances.insert(aid, h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
     // 23. wars
-    let rem_wars: Vec<i64> = fp
-        .wars
-        .keys()
-        .filter(|k| !snap.wars.contains_key(*k))
-        .copied()
-        .collect();
-    for wid in rem_wars {
-        cold_changed = true;
-        tx.execute("DELETE FROM wars WHERE war_id = ?1", params![wid])
-            .map_err(|e| e.to_string())?;
-        fp.wars.remove(&wid);
-    }
-    for (&wid, w) in &snap.wars {
-        let h = fp_json(w);
-        if fp.wars.get(&wid) != Some(&h) {
-            cold_changed = true;
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.wars),
+        &snap.wars,
+        |tx, &wid| {
+            tx.execute("DELETE FROM wars WHERE war_id = ?1", params![wid])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+        |tx, &_wid, w| {
             tx.execute(
                 "INSERT OR REPLACE INTO wars (war_id, aggressor_corp_id, defender_corp_id, mutual, started_unix, active)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1004,31 +589,25 @@ fn sync_part3_social_corp_tables(
                     i64::from(w.active),
                 ],
             )
-            .map_err(|e| e.to_string())?;
-            fp.wars.insert(wid, h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
     // 24. corp_projects
-    let rem_proj: Vec<i64> = fp
-        .corp_projects
-        .keys()
-        .filter(|k| !snap.corp_projects.contains_key(*k))
-        .copied()
-        .collect();
-    for pid in rem_proj {
-        cold_changed = true;
-        tx.execute(
-            "DELETE FROM corp_projects WHERE project_id = ?1",
-            params![pid],
-        )
-        .map_err(|e| e.to_string())?;
-        fp.corp_projects.remove(&pid);
-    }
-    for (&pid, p) in &snap.corp_projects {
-        let h = fp_json(p);
-        if fp.corp_projects.get(&pid) != Some(&h) {
-            cold_changed = true;
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.corp_projects),
+        &snap.corp_projects,
+        |tx, &pid| {
+            tx.execute(
+                "DELETE FROM corp_projects WHERE project_id = ?1",
+                params![pid],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+        |tx, &_pid, p| {
             tx.execute(
                 "INSERT OR REPLACE INTO corp_projects (project_id, corporation_id, name, target_quantity, current_quantity, isk_per_unit_cents, escrow_remaining_cents)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -1042,28 +621,22 @@ fn sync_part3_social_corp_tables(
                     p.escrow_remaining.0,
                 ],
             )
-            .map_err(|e| e.to_string())?;
-            fp.corp_projects.insert(pid, h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
     // 25. killmails
-    let rem_km: Vec<i64> = fp
-        .killmails
-        .keys()
-        .filter(|k| !snap.killmails.contains_key(*k))
-        .copied()
-        .collect();
-    for kid in rem_km {
-        cold_changed = true;
-        tx.execute("DELETE FROM killmails WHERE kill_id = ?1", params![kid])
-            .map_err(|e| e.to_string())?;
-        fp.killmails.remove(&kid);
-    }
-    for (&kid, km) in &snap.killmails {
-        let h = fp_json(km);
-        if fp.killmails.get(&kid) != Some(&h) {
-            cold_changed = true;
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.killmails),
+        &snap.killmails,
+        |tx, &kid| {
+            tx.execute("DELETE FROM killmails WHERE kill_id = ?1", params![kid])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+        |tx, &_kid, km| {
             tx.execute(
                 "INSERT OR REPLACE INTO killmails (kill_id, victim_character_id, attacker_character_id, solar_system_id, ship_type_id, total_value_isk, killed_unix, victim_corp_id, victim_alliance_id, attacker_corp_id, attacker_alliance_id)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -1081,31 +654,25 @@ fn sync_part3_social_corp_tables(
                     km.attacker_alliance_id,
                 ],
             )
-            .map_err(|e| e.to_string())?;
-            fp.killmails.insert(kid, h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
     // 26. kill_rights
-    let rem_kr: Vec<i64> = fp
-        .kill_rights
-        .keys()
-        .filter(|k| !snap.kill_rights.contains_key(*k))
-        .copied()
-        .collect();
-    for krid in rem_kr {
-        cold_changed = true;
-        tx.execute(
-            "DELETE FROM kill_rights WHERE kill_right_id = ?1",
-            params![krid],
-        )
-        .map_err(|e| e.to_string())?;
-        fp.kill_rights.remove(&krid);
-    }
-    for (&krid, kr) in &snap.kill_rights {
-        let h = fp_json(kr);
-        if fp.kill_rights.get(&krid) != Some(&h) {
-            cold_changed = true;
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.kill_rights),
+        &snap.kill_rights,
+        |tx, &krid| {
+            tx.execute(
+                "DELETE FROM kill_rights WHERE kill_right_id = ?1",
+                params![krid],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+        |tx, &_krid, kr| {
             tx.execute(
                 "INSERT OR REPLACE INTO kill_rights (kill_right_id, owner_id, target_id, activation_fee_cents, is_active_suspect)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1117,85 +684,35 @@ fn sync_part3_social_corp_tables(
                     i64::from(kr.is_active_suspect),
                 ],
             )
-            .map_err(|e| e.to_string())?;
-            fp.kill_rights.insert(krid, h);
-        }
-    }
-    Ok(cold_changed)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
+
+    Ok(())
 }
 
 #[inline(never)]
 fn sync_part4_world_tail_tables(
     tx: &Transaction<'_>,
+    before: Option<&WorldStateSnapshot>,
     snap: &WorldStateSnapshot,
-    fp: &mut TableFingerprints,
-    delta: &mut WorldStateWalDelta,
-) -> Result<bool, String> {
-    let mut cold_changed = false;
-
-    // 27. structures
-    let rem_st: Vec<i64> = fp
-        .structures
-        .keys()
-        .filter(|k| !snap.structures.contains_key(*k))
-        .copied()
-        .collect();
-    for stid in rem_st {
-        cold_changed = true;
-        tx.execute(
-            "DELETE FROM structures WHERE structure_id = ?1",
-            params![stid],
-        )
-        .map_err(|e| e.to_string())?;
-        fp.structures.remove(&stid);
-    }
-    for (&stid, st) in &snap.structures {
-        let h = fp_structure(st);
-        if fp.structures.get(&stid) != Some(&h) {
-            cold_changed = true;
-            let js = to_checked_json_string(st)?;
-            tx.execute(
-                "INSERT OR REPLACE INTO structures (structure_id, type_id, owner_corp_id, solar_system_id, name, state, quantum_core_installed, fuel_blocks, shield_hp, armor_hp, hull_hp, record_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                params![
-                    st.structure_id,
-                    st.type_id as i64,
-                    st.owner_corp_id,
-                    st.solar_system_id as i64,
-                    st.name,
-                    st.state,
-                    i64::from(st.quantum_core_installed),
-                    st.fuel_blocks as i64,
-                    st.shield_hp,
-                    st.armor_hp,
-                    st.hull_hp,
-                    js,
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-            fp.structures.insert(stid, h);
-        }
-    }
-
+    #[cfg(any(test, feature = "legacy-json-snapshot"))] mut delta: Option<&mut WorldStateWalDelta>,
+) -> Result<(), String> {
     // 28. system_states
-    let rem_sys: Vec<SolarSystemId> = fp
-        .system_states
-        .keys()
-        .filter(|k| !snap.system_states.contains_key(*k))
-        .copied()
-        .collect();
-    for sys_id in rem_sys {
-        cold_changed = true;
-        tx.execute(
-            "DELETE FROM system_states WHERE solar_system_id = ?1",
-            params![sys_id as i64],
-        )
-        .map_err(|e| e.to_string())?;
-        fp.system_states.remove(&sys_id);
-    }
-    for (&sys_id, st) in &snap.system_states {
-        let h = fp_system_state(st);
-        if fp.system_states.get(&sys_id) != Some(&h) {
+    sync_cell_map::<SolarSystemId, _>(
+        tx,
+        before.map(|b| &b.system_states),
+        &snap.system_states,
+        |tx, &sys_id| {
+            tx.execute(
+                "DELETE FROM system_states WHERE solar_system_id = ?1",
+                params![sys_id as i64],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+        |tx, &sys_id, st| {
             let js = to_checked_json_string(st)?;
             tx.execute(
                 "INSERT OR REPLACE INTO system_states (solar_system_id, dbs_multiplier, ess_main_bank_cents, ess_reserve_bank_cents, sov_alliance_id, record_json)
@@ -1210,119 +727,119 @@ fn sync_part4_world_tail_tables(
                 ],
             )
             .map_err(|e| e.to_string())?;
-            fp.system_states.insert(sys_id, h);
-            delta.upserted_system_states.push(st.clone());
-        }
-    }
+            #[cfg(any(test, feature = "legacy-json-snapshot"))]
+            if let Some(d) = delta.as_deref_mut() {
+                d.upserted_system_states.push(st.clone());
+            }
+            Ok(())
+        },
+    )?;
 
     // 29. idempotency_keys
-    if !fp
-        .committed_idempotency_keys
-        .ptr_eq(&snap.committed_idempotency_keys)
-    {
-        let rem_idem: Vec<(i64, String)> = fp
+    if let Some(b) = before {
+        if !b
             .committed_idempotency_keys
-            .iter()
-            .filter(|k| !snap.committed_idempotency_keys.contains(*k))
-            .cloned()
-            .collect();
-        for (cid, key) in &rem_idem {
-            cold_changed = true;
-            tx.execute(
-                "DELETE FROM idempotency_keys WHERE character_id = ?1 AND idem_key = ?2",
-                params![cid, key],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-        for k in &snap.committed_idempotency_keys {
-            if !fp.committed_idempotency_keys.contains(k) {
+            .ptr_eq(&snap.committed_idempotency_keys)
+        {
+            for (cid, key) in b
+                .committed_idempotency_keys
+                .difference(&*snap.committed_idempotency_keys)
+            {
+                tx.execute(
+                    "DELETE FROM idempotency_keys WHERE character_id = ?1 AND idem_key = ?2",
+                    params![cid, key],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            for k in snap
+                .committed_idempotency_keys
+                .difference(&*b.committed_idempotency_keys)
+            {
                 tx.execute(
                     "INSERT OR REPLACE INTO idempotency_keys (character_id, idem_key) VALUES (?1, ?2)",
                     params![k.0, k.1],
                 )
                 .map_err(|e| e.to_string())?;
-                delta.added_idempotency_keys.push(k.clone());
+                #[cfg(any(test, feature = "legacy-json-snapshot"))]
+                if let Some(d) = delta.as_deref_mut() {
+                    d.added_idempotency_keys.push(k.clone());
+                }
             }
         }
-        fp.committed_idempotency_keys = snap.committed_idempotency_keys.clone();
+    } else {
+        for k in &snap.committed_idempotency_keys {
+            tx.execute(
+                "INSERT OR REPLACE INTO idempotency_keys (character_id, idem_key) VALUES (?1, ?2)",
+                params![k.0, k.1],
+            )
+            .map_err(|e| e.to_string())?;
+            #[cfg(any(test, feature = "legacy-json-snapshot"))]
+            if let Some(d) = delta.as_deref_mut() {
+                d.added_idempotency_keys.push(k.clone());
+            }
+        }
     }
 
     // 30. licensed_skins
-    let rem_lskins: Vec<i64> = fp
-        .licensed_skins
-        .keys()
-        .filter(|k| !snap.licensed_skins.contains_key(*k))
-        .copied()
-        .collect();
-    for cid in rem_lskins {
-        cold_changed = true;
-        tx.execute(
-            "DELETE FROM licensed_skins WHERE character_id = ?1",
-            params![cid],
-        )
-        .map_err(|e| e.to_string())?;
-        fp.licensed_skins.remove(&cid);
-    }
-    for (&cid, skins) in &snap.licensed_skins {
-        let h = fp_json(skins);
-        if fp.licensed_skins.get(&cid) != Some(&h) {
-            cold_changed = true;
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.licensed_skins),
+        &snap.licensed_skins,
+        |tx, &cid| {
+            tx.execute(
+                "DELETE FROM licensed_skins WHERE character_id = ?1",
+                params![cid],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+        |tx, &cid, skins| {
             let js = to_checked_json_string(skins)?;
             tx.execute(
                 "INSERT OR REPLACE INTO licensed_skins (character_id, skins_json) VALUES (?1, ?2)",
                 params![cid, js],
             )
-            .map_err(|e| e.to_string())?;
-            fp.licensed_skins.insert(cid, h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
     // 31. applied_ship_skins
-    let rem_askins: Vec<i64> = fp
-        .applied_ship_skins
-        .keys()
-        .filter(|k| !snap.applied_ship_skins.contains_key(*k))
-        .copied()
-        .collect();
-    for sid in rem_askins {
-        cold_changed = true;
-        tx.execute(
-            "DELETE FROM applied_ship_skins WHERE ship_id = ?1",
-            params![sid],
-        )
-        .map_err(|e| e.to_string())?;
-        fp.applied_ship_skins.remove(&sid);
-    }
-    for (&sid, &skin_id) in &snap.applied_ship_skins {
-        if fp.applied_ship_skins.get(&sid) != Some(&skin_id) {
-            cold_changed = true;
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.applied_ship_skins),
+        &snap.applied_ship_skins,
+        |tx, &sid| {
+            tx.execute(
+                "DELETE FROM applied_ship_skins WHERE ship_id = ?1",
+                params![sid],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+        |tx, &sid, &skin_id| {
             tx.execute(
                 "INSERT OR REPLACE INTO applied_ship_skins (ship_id, skin_id) VALUES (?1, ?2)",
                 params![sid, skin_id as i64],
             )
-            .map_err(|e| e.to_string())?;
-            fp.applied_ship_skins.insert(sid, skin_id);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
     // 32. char_mining_ledger (synced via industry_market_pve_store::sync_mining_ledger)
 
     // 33. asteroids
-    let rem_asteroids: Vec<i64> = fp
-        .asteroids
-        .keys()
-        .filter(|k| !snap.asteroids.contains_key(*k))
-        .copied()
-        .collect();
-    for id in rem_asteroids {
-        cold_changed = true;
-        tx.execute("DELETE FROM asteroids WHERE asteroid_id = ?1", params![id])
-            .map_err(|e| e.to_string())?;
-        fp.asteroids.remove(&id);
-    }
-    for (&id, ast) in &snap.asteroids {
-        let h = fp_asteroid(ast);
-        if fp.asteroids.get(&id) != Some(&h) {
+    sync_cell_map(
+        tx,
+        before.map(|b| &b.asteroids),
+        &snap.asteroids,
+        |tx, &id| {
+            tx.execute("DELETE FROM asteroids WHERE asteroid_id = ?1", params![id])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+        |tx, &id, ast| {
             if !ast.position.0.is_finite()
                 || !ast.position.1.is_finite()
                 || !ast.position.2.is_finite()
@@ -1330,7 +847,6 @@ fn sync_part4_world_tail_tables(
             {
                 return Err(format!("non-finite float in asteroids[{id}]"));
             }
-            cold_changed = true;
             tx.execute(
                 "INSERT OR REPLACE INTO asteroids (asteroid_id, solar_system_id, belt_id, type_id, quantity, initial_quantity, x, y, z, radius) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
@@ -1346,18 +862,18 @@ fn sync_part4_world_tail_tables(
                     ast.radius,
                 ],
             )
-            .map_err(|e| e.to_string())?;
-            fp.asteroids.insert(id, h);
-        }
-    }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        },
+    )?;
 
-    Ok(cold_changed)
+    Ok(())
 }
 
 pub fn replace_sqlite_from_snapshot(
     conn: &mut Connection,
     snap: &WorldStateSnapshot,
-) -> Result<TableFingerprints, String> {
+) -> Result<(), String> {
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
@@ -1409,13 +925,63 @@ pub fn replace_sqlite_from_snapshot(
          DELETE FROM entity_kv;",
     )
     .map_err(|e| e.to_string())?;
-    let mut fp = TableFingerprints::default();
-    let _ = sync_dirty_to_sqlite(&tx, snap, &mut fp, false)?;
+
+    tx.execute(
+        "INSERT OR REPLACE INTO world_meta (meta_key, meta_value) VALUES ('next_entity_id', ?1), ('wal_seq', ?2), ('markets_seeded', ?3)",
+        params![
+            snap.next_entity_id,
+            snap.wal_seq as i64,
+            i64::from(snap.markets_seeded)
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    super::notes_lp_sequence_store::sync_d6(&tx, None, snap)?;
+
+    let empty = WorldStateSnapshot::default();
+    let mut changes = crate::tx_engine::ChangeSet::diff(snap.wal_seq, &empty, snap);
+    changes.meta_changed = false;
+    changes.cold_domains.d6_notes_lp_seq = false;
+    let mut exec =
+        crate::tx_engine::TxSqlExecutor::new(&tx, crate::tx_engine::TxFaultPlan::None);
+    let _ = crate::tx_engine::apply_changeset_to_sqlite(
+        &mut exec,
+        &empty,
+        snap,
+        &changes,
+        #[cfg(any(test, feature = "legacy-json-snapshot"))]
+        false,
+    )
+    .map_err(|e| e.to_string())?;
+
     tx.commit().map_err(|e| e.to_string())?;
-    Ok(fp)
+    Ok(())
 }
-#[cfg(test)] #[path = "sync_unit_tests.rs"] mod sync_unit_tests;
+
+#[cfg(test)]
+pub(crate) fn sync_snapshot_diff_for_test(
+    tx: &Transaction<'_>,
+    before: &mut WorldStateSnapshot,
+    after: &WorldStateSnapshot,
+    need_wal_delta: bool,
+) -> Result<WorldStateWalDelta, String> {
+    let changes = crate::tx_engine::ChangeSet::diff(after.wal_seq, before, after);
+    let mut exec =
+        crate::tx_engine::TxSqlExecutor::new(tx, crate::tx_engine::TxFaultPlan::None);
+    let delta = crate::tx_engine::apply_changeset_to_sqlite(
+        &mut exec,
+        before,
+        after,
+        &changes,
+        need_wal_delta,
+    )
+    .map_err(|e| e.to_string())?;
+    *before = after.clone();
+    Ok(delta)
+}
+
+#[cfg(test)]
+#[path = "sync_unit_tests.rs"]
+mod sync_unit_tests;
 #[cfg(test)]
 #[path = "sync_edges_tests.rs"]
 mod sync_edges_tests;
-

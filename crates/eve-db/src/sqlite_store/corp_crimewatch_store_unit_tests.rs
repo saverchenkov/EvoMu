@@ -1,7 +1,7 @@
 //! Unit and mutation-killing tests for `sqlite_store::corp_crimewatch_store`.
 
 use super::*;
-use crate::sqlite_store::fingerprints::{canonical_fp, FnvHasher, FnvSerError, FnvSerializer};
+use crate::sqlite_store::checked_json::{canonical_fp, FnvHasher, FnvSerError, FnvSerializer};
 use crate::sqlite_store::schema::apply_migrations;
 use rusqlite::params;
 use serde::ser::{Error as _, Serializer as _};
@@ -484,7 +484,7 @@ fn corp_crimewatch_domain_rows_full_roundtrip_sync_load_and_rollback() {
     assert_eq!(scalar_diffs.len(), 2);
     assert!(scalar_diffs.iter().all(|d| matches!(d, DomainRowChange::Delete { .. })));
 
-    // Mutate all 3 domains in memory and verify `rollback_corp_crimewatch` restores all 36 fields.
+    // Mutate all 3 domains in memory and verify `load_corp_crimewatch_domain_rows` restores all 36 fields.
     loaded.corp_member_limits.insert(98_000_001, 999);
     loaded.wh_polarizations.clear();
     loaded.fw_wars.clear();
@@ -493,7 +493,12 @@ fn corp_crimewatch_domain_rows_full_roundtrip_sync_load_and_rollback() {
     loaded.sov_runtime.sov_upgrade_combat_npcs.clear();
     loaded.insurgency_runtime.active_state_notified.clear();
 
-    rollback_corp_crimewatch(&conn, &mut loaded).expect("rollback_corp_crimewatch");
+    load_corp_crimewatch_domain_rows(
+        &conn,
+        &mut loaded,
+        &mut crate::sqlite_store::quarantine::LoadContext::new(false),
+    )
+    .expect("load_corp_crimewatch_domain_rows");
     assert_family4_equal(&loaded, &snap);
 }
 
@@ -613,7 +618,7 @@ fn corp_crimewatch_legacy_kv_and_blob_migration_preserves_newer_domain_rows_and_
     )
     .expect("seed newer warfare scalar");
 
-    let (migrated, _fp) = load_snapshot_from_sqlite(&conn).expect("load + migrate");
+    let migrated = load_snapshot_from_sqlite(&conn).expect("load + migrate");
 
     // Retired legacy table and duplicate `world_kv_blobs` keys must be removed after commit.
     let legacy_exists: i64 = conn
@@ -660,7 +665,7 @@ fn corp_crimewatch_legacy_kv_and_blob_migration_preserves_newer_domain_rows_and_
         .expect("migrated domain_rows entry");
     assert_eq!(migrated_limit, "500");
 
-    let (reloaded, _) = load_snapshot_from_sqlite(&conn).expect("reload parity");
+    let reloaded = load_snapshot_from_sqlite(&conn).expect("reload parity");
     assert_family4_equal(&reloaded, &migrated);
 
     let _ = std::fs::remove_file(&path);
@@ -669,7 +674,7 @@ fn corp_crimewatch_legacy_kv_and_blob_migration_preserves_newer_domain_rows_and_
 #[test]
 fn corp_crimewatch_tx_writes_single_row_zero_cold_clones_and_rejects_non_finite() {
     use crate::persistence::{
-        reset_thread_cold_fp_clones_for_test, thread_cold_fp_clones_for_test, WorldRepository,
+        reset_thread_cold_domain_syncs_for_test, thread_cold_domain_syncs_for_test, WorldRepository,
     };
     use crate::sqlite_store::domain_rows::{
         apply_domain_row_changes, validate_domain_row_changes, DomainRowChange,
@@ -709,16 +714,16 @@ fn corp_crimewatch_tx_writes_single_row_zero_cold_clones_and_rejects_non_finite(
     })
     .expect("seed tx");
 
-    // Mutating 1 entry inside `repo.tx` triggers 0 cold fingerprint clones.
-    reset_thread_cold_fp_clones_for_test();
+    // Mutating 1 entry inside `repo.tx` triggers 0 cold domain syncs.
+    reset_thread_cold_domain_syncs_for_test();
     repo.tx("update_one_corp_limit", |wtx| -> Result<(), TxError> {
         wtx.snap.corp_member_limits.insert(98_000_001, 125);
         Ok(())
     })
     .expect("corp limit update tx");
-    assert_eq!(thread_cold_fp_clones_for_test(), 0);
+    assert_eq!(thread_cold_domain_syncs_for_test(), 0);
 
-    reset_thread_cold_fp_clones_for_test();
+    reset_thread_cold_domain_syncs_for_test();
     repo.tx("update_one_bounty_pool", |wtx| -> Result<(), TxError> {
         wtx.snap
             .combat_crimewatch_state
@@ -727,7 +732,7 @@ fn corp_crimewatch_tx_writes_single_row_zero_cold_clones_and_rejects_non_finite(
         Ok(())
     })
     .expect("crimewatch bounty update tx");
-    assert_eq!(thread_cold_fp_clones_for_test(), 0);
+    assert_eq!(thread_cold_domain_syncs_for_test(), 0);
 
     // Direct `ChangeSet::diff` + `apply_domain_row_changes` writes strictly 1 SQLite row.
     let before_snap = repo.with_snapshot(Clone::clone);
@@ -803,7 +808,7 @@ fn corp_crimewatch_tx_writes_single_row_zero_cold_clones_and_rejects_non_finite(
 }
 
 #[test]
-fn corp_crimewatch_fail_closed_load_and_rollback_preserve_snapshot_on_corrupt_row() {
+fn corp_crimewatch_fail_closed_load_preserves_snapshot_on_corrupt_row() {
     use crate::sqlite_store::quarantine::LoadContext;
 
     let conn = Connection::open_in_memory().unwrap();
@@ -827,19 +832,4 @@ fn corp_crimewatch_fail_closed_load_and_rollback_preserve_snapshot_on_corrupt_ro
     assert_eq!(snap.corp_member_limits.get(&98_000_001), Some(&10));
     assert_eq!(snap.wh_polarizations.get(&(90_000_001, 31_000_001)), Some(&4242));
     assert_eq!(snap.war_state.next_negotiation_id, 5);
-
-    let failures_before = crate::persist_failures_total();
-    let rb_err = rollback_corp_crimewatch(&conn, &mut snap).unwrap_err();
-    assert!(rb_err.contains(DOMAIN_CRIMEWATCH), "unexpected err: {rb_err}");
-    assert!(crate::persist_failures_total() >= failures_before + 1);
-    assert_eq!(snap.corp_member_limits.get(&98_000_001), Some(&10));
-    assert_eq!(snap.wh_polarizations.get(&(90_000_001, 31_000_001)), Some(&4242));
-    assert_eq!(snap.war_state.next_negotiation_id, 5);
-
-    // Clean existing `domain_rows` restores dirty snapshot back to committed rows / defaults.
-    conn.execute("DELETE FROM domain_rows", []).unwrap();
-    rollback_corp_crimewatch(&conn, &mut snap).expect("clean rollback to empty domain_rows");
-    assert!(snap.corp_member_limits.is_empty());
-    assert!(snap.wh_polarizations.is_empty());
-    assert_eq!(snap.war_state.next_negotiation_id, 0);
 }

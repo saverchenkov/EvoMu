@@ -1,5 +1,5 @@
 use super::*;
-use crate::sqlite_store::fingerprints::{FnvHasher, FnvSerializer};
+use crate::sqlite_store::checked_json::{FnvHasher, FnvSerializer};
 use rusqlite::Connection;
 use serde::Serialize;
 
@@ -200,7 +200,7 @@ fn corp_crimewatch_domain_rows_load_and_sync_edge_branches() {
 }
 
 #[test]
-fn corp_crimewatch_rollback_fails_closed_without_partial_overwrite() {
+fn corp_crimewatch_load_fails_closed_without_partial_overwrite() {
     use crate::sqlite_store::schema::apply_migrations;
 
     let mut conn = Connection::open_in_memory().unwrap();
@@ -231,21 +231,37 @@ fn corp_crimewatch_rollback_fails_closed_without_partial_overwrite() {
         [DOMAIN_CRIMEWATCH],
     )
     .unwrap();
-    let failures_before = crate::persist_failures_total();
-    let err = rollback_corp_crimewatch(&conn, &mut dirty).unwrap_err();
+    let err = load_corp_crimewatch_domain_rows(
+        &conn,
+        &mut dirty,
+        &mut crate::sqlite_store::quarantine::LoadContext::new(false),
+    )
+    .unwrap_err();
     assert!(err.contains(DOMAIN_CRIMEWATCH), "unexpected err: {err}");
-    assert!(crate::persist_failures_total() >= failures_before + 1);
     // Neither earlier `corp_governance` nor later `warfare` domain was mutated.
     assert!(dirty.corp_hangar_divisions.is_empty());
     assert!(dirty.zarzakh_gate_locks.contains_key(&2002));
     assert!(dirty.war_state.wars.contains_key(&2));
 
-    // Dropping `domain_rows` also fails rollback closed without mutating `dirty`.
+    // Dropping `domain_rows` and introducing a corrupt legacy `d6_corp_crimewatch_kv` row
+    // also fails load closed without mutating `dirty`.
     conn.execute("DROP TABLE domain_rows", []).unwrap();
-    let failures_before_drop = crate::persist_failures_total();
-    let drop_err = rollback_corp_crimewatch(&conn, &mut dirty).unwrap_err();
-    assert!(drop_err.contains("domain_rows"), "unexpected err: {drop_err}");
-    assert!(crate::persist_failures_total() >= failures_before_drop + 1);
+    conn.execute_batch(LEGACY_D6_CORP_CRIMEWATCH_SQL).unwrap();
+    conn.execute(
+        "INSERT INTO d6_corp_crimewatch_kv (store_key, payload_json) VALUES (?1, '{corrupt')",
+        [KEY_WARFARE],
+    )
+    .unwrap();
+    let legacy_err = load_corp_crimewatch_domain_rows(
+        &conn,
+        &mut dirty,
+        &mut crate::sqlite_store::quarantine::LoadContext::new(false),
+    )
+    .unwrap_err();
+    assert!(
+        legacy_err.contains("d6_corp_crimewatch_kv"),
+        "unexpected err: {legacy_err}"
+    );
     assert!(dirty.corp_hangar_divisions.is_empty());
     assert!(dirty.zarzakh_gate_locks.contains_key(&2002));
     assert!(dirty.war_state.wars.contains_key(&2));

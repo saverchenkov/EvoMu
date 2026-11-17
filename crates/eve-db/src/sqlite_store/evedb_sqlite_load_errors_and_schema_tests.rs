@@ -100,7 +100,7 @@ fn sqlite_store_load_error_and_optional_table_missing_branches() {
         conn.execute(&format!("DROP TABLE {tbl}"), [])
             .unwrap_or_else(|e| panic!("drop {tbl}: {e}"));
     }
-    let (loaded, _) = load_snapshot_from_sqlite(&conn)
+    let loaded = load_snapshot_from_sqlite(&conn)
         .expect("optional extension tables missing should still load base snapshot");
     assert!(loaded.asteroids.is_empty());
     assert!(loaded.character_doll_info.is_empty());
@@ -120,7 +120,7 @@ fn sqlite_store_malformed_json_and_unknown_kv_keys_coverage() {
         .expect("insert corrupt skill_history");
         let err = load_snapshot_from_sqlite(&conn).expect_err("corrupt skill_history fails closed");
         assert!(err.contains("skill_history") && err.contains("90000001"));
-        let (reloaded, _) =
+        let reloaded =
             crate::sqlite_store::load_snapshot_from_sqlite_with_options(&conn, true)
                 .expect("quarantine mode skips and moves corrupt skill_history");
         assert!(reloaded.skill_history.is_empty());
@@ -363,7 +363,7 @@ fn sqlite_store_schema_and_jwt_secret_error_and_edge_branches() {
     // Sync error branches on domain_rows, d6, and social stores when their tables are missing
     let mut snap = build_populated_snapshot();
     snap.read_mails.insert((90_000_001, 1));
-    let mut fp = crate::sqlite_store::fingerprints::TableFingerprints::default();
+    let before = snap.clone();
     let tx_err_conn = open_migrated_conn();
     tx_err_conn
         .execute("DROP TABLE domain_rows", [])
@@ -379,10 +379,10 @@ fn sqlite_store_schema_and_jwt_secret_error_and_edge_branches() {
     mut_conn
         .execute("DROP TABLE world_meta", [])
         .expect("drop world_meta");
-    snap.next_report_id = fp.d6.next_report_id + 1;
+    snap.next_report_id = before.next_report_id + 1;
     {
         let tx = mut_conn.transaction().expect("begin tx");
-        assert!(sync_d6(&tx, &snap, &mut fp).is_err());
+        assert!(sync_d6(&tx, Some(&before), &snap).is_err());
     }
 }
 

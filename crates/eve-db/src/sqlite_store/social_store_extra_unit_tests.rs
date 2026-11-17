@@ -14,7 +14,7 @@ use super::social_store::{
 use super::sync::replace_sqlite_from_snapshot;
 use crate::durable_domain_types::SocialContactNotificationRecord;
 use crate::persistence::{
-    reset_thread_cold_fp_clones_for_test, thread_cold_fp_clones_for_test, WorldRepository,
+    reset_thread_cold_domain_syncs_for_test, thread_cold_domain_syncs_for_test, WorldRepository,
 };
 use crate::tx_engine::{ChangeSet, TxError, TxSqlExecutor};
 use crate::types::{
@@ -260,22 +260,22 @@ fn social_tx_single_row_granularity_zero_cold_clones_and_rejects_non_finite() {
     })
     .expect("seed social domains");
 
-    // Mutating single social entries triggers 0 cold fingerprint clones.
-    reset_thread_cold_fp_clones_for_test();
+    // Mutating single social entries triggers 0 cold domain syncs.
+    reset_thread_cold_domain_syncs_for_test();
     repo.tx("update_one_note", |wtx| -> Result<(), TxError> {
         wtx.snap.char_notes.insert((cid, peer), "UpdatedScout".into());
         Ok(())
     })
     .expect("note update");
-    assert_eq!(thread_cold_fp_clones_for_test(), 0);
+    assert_eq!(thread_cold_domain_syncs_for_test(), 0);
 
-    reset_thread_cold_fp_clones_for_test();
+    reset_thread_cold_domain_syncs_for_test();
     repo.tx("insert_read_mail", |wtx| -> Result<(), TxError> {
         wtx.snap.read_mails.insert((cid, 2));
         Ok(())
     })
     .expect("read mail insert");
-    assert_eq!(thread_cold_fp_clones_for_test(), 0);
+    assert_eq!(thread_cold_domain_syncs_for_test(), 0);
 
     // Direct `ChangeSet::diff` + `apply_domain_row_changes` executes strictly 1 SQLite write.
     let before_snap = repo.with_snapshot(Clone::clone);
@@ -357,7 +357,7 @@ fn social_tx_single_row_granularity_zero_cold_clones_and_rejects_non_finite() {
 
     // Reopening from disk preserves cross-table social entity high-water marks (#1087).
     let reopened_conn = Connection::open(&path).unwrap();
-    let (loaded, _) = load_snapshot_from_sqlite(&reopened_conn).expect("load_snapshot_from_sqlite");
+    let loaded = load_snapshot_from_sqlite(&reopened_conn).expect("load_snapshot_from_sqlite");
     assert!(loaded.next_entity_id >= 200_000_130);
     assert!(
         super::load::query_cross_table_entity_high_water(&reopened_conn).unwrap() >= 200_000_130

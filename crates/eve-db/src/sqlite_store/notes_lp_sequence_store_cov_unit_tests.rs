@@ -1,5 +1,5 @@
 //! Comprehensive unit and mutation-killing tests for `sqlite_store::notes_lp_sequence_store`
-//! (`apply_d6_migration`, `compute_d6_fingerprints`, `load_d6`, `sync_d6`, and `rollback_d6`)
+//! (`apply_d6_migration`, `load_d6`, and `sync_d6`)
 //! and Family 2 (`owner_notes`, `corp_lp_balances`, `char_lp_logs`) `domain_rows` persistence.
 
 use super::domain_rows::{
@@ -7,10 +7,8 @@ use super::domain_rows::{
     sync_sp6_lifecycle_domain_rows, DOMAIN_CHAR_LP_LOGS, DOMAIN_CORP_LP_BALANCES,
     DOMAIN_OWNER_NOTES, LEGACY_SP6_LIFECYCLE_STATE_SQL,
 };
-use super::fingerprints::TableFingerprints;
 use super::notes_lp_sequence_store::{
-    apply_d6_migration, compute_d6_fingerprints, load_d6, rollback_d6, sync_d6,
-    D6Fingerprints, D6_SCHEMA_VERSION,
+    apply_d6_migration, load_d6, sync_d6, D6_SCHEMA_VERSION,
 };
 use super::quarantine::LoadContext;
 use super::schema::apply_migrations;
@@ -188,13 +186,12 @@ fn sync_d6_isolated_change_flags_noop_idempotency_and_sql_errors() {
 
     let mut snap = WorldStateSnapshot::default();
     load_d6(&conn, &mut snap);
-    let mut fp = TableFingerprints::default();
-    fp.d6 = compute_d6_fingerprints(&snap);
+    let before = snap.clone();
 
     // Unchanged snapshot must return `Ok(false)`.
     {
         let tx = conn.transaction().unwrap();
-        assert!(!sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(!sync_d6(&tx, Some(&before), &snap).unwrap());
         tx.commit().unwrap();
     }
 
@@ -287,24 +284,16 @@ fn sync_d6_isolated_change_flags_noop_idempotency_and_sql_errors() {
     }
 
     // 4. Isolated `sp6_lifecycle`: syncs via `domain_rows` (update -> true, noop -> false),
-    //    leaving `D6Fingerprints` scoped to the four `world_meta` sequence counters.
+    //    without touching the four `world_meta` sequence counters in `sync_d6`.
+    let before_sp6 = snap.clone();
     snap.sp6_lifecycle.pvp_timers_until.insert(90_000_001, 5_000);
     {
         let tx = conn.transaction().unwrap();
         assert!(sync_sp6_lifecycle_domain_rows(&tx, &snap).unwrap());
         assert!(!sync_sp6_lifecycle_domain_rows(&tx, &snap).unwrap());
-        assert!(!sync_d6(&tx, &snap, &mut fp).unwrap());
+        assert!(!sync_d6(&tx, Some(&before_sp6), &snap).unwrap());
         tx.commit().unwrap();
     }
-    assert_eq!(
-        fp.d6,
-        D6Fingerprints {
-            next_alliance_id: snap.next_alliance_id,
-            next_corporation_id: snap.next_corporation_id,
-            next_notification_id: snap.next_notification_id,
-            next_report_id: snap.next_report_id,
-        }
-    );
 
     // 5. SQL error propagation on missing tables for `sync_d6`, `sync_notes_lp_domain_rows`,
     //    and `sync_sp6_lifecycle_domain_rows`.
@@ -312,9 +301,8 @@ fn sync_d6_isolated_change_flags_noop_idempotency_and_sql_errors() {
     {
         let mut s = snap.clone();
         s.next_report_id += 1;
-        let mut f = fp.clone();
         let tx = bad_conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &s, &mut f).is_err());
+        assert!(sync_d6(&tx, Some(&snap), &s).is_err());
     }
     {
         let mut s = snap.clone();
@@ -350,41 +338,4 @@ fn sync_d6_isolated_change_flags_noop_idempotency_and_sql_errors() {
         let tx = bad_conn.transaction().unwrap();
         assert!(sync_sp6_lifecycle_domain_rows(&tx, &s).is_err());
     }
-}
-
-#[test]
-fn rollback_d6_restores_counters_without_touching_lifecycle_state() {
-    let mut conn = Connection::open_in_memory().unwrap();
-    apply_migrations(&conn).unwrap();
-    apply_d6_migration(&conn).unwrap();
-
-    let mut snap = WorldStateSnapshot::default();
-    load_d6(&conn, &mut snap);
-    snap.next_alliance_id = 99_100_001;
-    snap.next_corporation_id = 98_200_002;
-    snap.next_notification_id = 940_300_003;
-    snap.next_report_id = 400_004;
-    snap.sp6_lifecycle.last_downtime_day_idx = Some(42);
-
-    let mut fp = TableFingerprints::default();
-    {
-        let tx = conn.transaction().unwrap();
-        assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
-        assert!(sync_sp6_lifecycle_domain_rows(&tx, &snap).unwrap());
-        tx.commit().unwrap();
-    }
-
-    // Mutate all 4 counters and verify `rollback_d6` restores them cleanly without mutating
-    // `sp6_lifecycle` (which rolls back through `CowCell` / `domain_rows` transaction snapshots).
-    snap.next_alliance_id = 1;
-    snap.next_corporation_id = 2;
-    snap.next_notification_id = 3;
-    snap.next_report_id = 4;
-    snap.sp6_lifecycle.last_downtime_day_idx = Some(999);
-    rollback_d6(&conn, &mut snap, &fp).unwrap();
-    assert_eq!(snap.next_alliance_id, 99_100_001);
-    assert_eq!(snap.next_corporation_id, 98_200_002);
-    assert_eq!(snap.next_notification_id, 940_300_003);
-    assert_eq!(snap.next_report_id, 400_004);
-    assert_eq!(snap.sp6_lifecycle.last_downtime_day_idx, Some(999));
 }

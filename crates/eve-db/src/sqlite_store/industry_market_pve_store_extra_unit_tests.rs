@@ -2,14 +2,12 @@
 
 use super::domain_rows::{
     apply_domain_row_changes, table_exists, validate_domain_row_changes, DomainRowChange,
-    DOMAIN_CORP_STRUCTURE_AND_KILLMAILS, DOMAIN_INDUSTRY_PVE_PI, DOMAIN_PVE_AND_SPACE_EVENTS,
-    DOMAIN_SERVICE_STATE_BLOBS, DOMAIN_SHIP_FITTING_AND_SKILLS, DOMAIN_WALLET_AND_MARKET,
+    DOMAIN_CORP_STRUCTURE_AND_KILLMAILS, DOMAIN_PVE_AND_SPACE_EVENTS, DOMAIN_SERVICE_STATE_BLOBS,
+    DOMAIN_SHIP_FITTING_AND_SKILLS, DOMAIN_WALLET_AND_MARKET,
 };
-use super::fingerprints::TableFingerprints;
 use super::industry_market_pve_store::{
-    compute_d6_batch4_fingerprints, load_industry_market_pve, load_industry_market_pve_domain_rows,
-    rollback_industry_market_pve, sync_industry_market_pve_domain_rows, sync_mining_ledger,
-    LEGACY_WORLD_KV_BLOBS_SQL,
+    load_industry_market_pve, load_industry_market_pve_domain_rows,
+    sync_industry_market_pve_domain_rows, sync_mining_ledger, LEGACY_WORLD_KV_BLOBS_SQL,
 };
 use super::load::load_snapshot_from_sqlite;
 use super::quarantine::LoadContext;
@@ -371,125 +369,40 @@ fn assert_all_34_industry_market_pve_fields_eq(lhs: &WorldStateSnapshot, rhs: &W
 }
 
 #[test]
-fn all_34_industry_market_pve_collections_and_mining_ledger_roundtrip_and_rollback() {
+fn all_34_industry_market_pve_collections_and_mining_ledger_roundtrip_and_reload() {
     let mut conn = Connection::open_in_memory().unwrap();
     apply_migrations(&conn).unwrap();
 
     let empty = WorldStateSnapshot::default();
-    let empty_fp = compute_d6_batch4_fingerprints(&empty);
-
     let full = populate_all_27_batch4_blobs_and_mining_ledger();
-    let full_fp = compute_d6_batch4_fingerprints(&full);
-    assert_ne!(full_fp.mining_ledger, empty_fp.mining_ledger);
 
-    let mut fp = TableFingerprints::default();
     {
         let tx = conn.transaction().unwrap();
         assert!(sync_industry_market_pve_domain_rows(&tx, &full).unwrap());
-        assert!(sync_mining_ledger(&tx, &full, &mut fp).unwrap());
+        assert!(sync_mining_ledger(&tx, Some(&empty), &full).unwrap());
         tx.commit().unwrap();
     }
     // Second sync with identical snapshot is a no-op
     {
         let tx = conn.transaction().unwrap();
         assert!(!sync_industry_market_pve_domain_rows(&tx, &full).unwrap());
-        assert!(!sync_mining_ledger(&tx, &full, &mut fp).unwrap());
+        assert!(!sync_mining_ledger(&tx, Some(&full), &full).unwrap());
         tx.commit().unwrap();
     }
 
     let mut loaded = WorldStateSnapshot::default();
     load_industry_market_pve(&conn, &mut loaded);
     assert_all_34_industry_market_pve_fields_eq(&loaded, &full);
-
-    // Wipe a dirty snapshot and verify rollback_industry_market_pve restores all 34 fields + mining_ledger
-    let mut dirty = WorldStateSnapshot::default();
-    rollback_industry_market_pve(&conn, &mut dirty, &fp).unwrap();
-    assert_all_34_industry_market_pve_fields_eq(&dirty, &full);
-    assert_eq!(dirty.mining_ledger, full.mining_ledger);
+    let loaded_full = load_snapshot_from_sqlite(&conn).expect("load_snapshot_from_sqlite");
+    assert_all_34_industry_market_pve_fields_eq(&loaded_full, &full);
+    assert_eq!(loaded_full.mining_ledger, full.mining_ledger);
     let _ = (HashMap::<i64, i64>::new(), HashSet::<i64>::new());
-}
-
-#[test]
-fn rollback_industry_market_pve_fails_closed_without_wiping_or_partial_overwrite() {
-    let mut conn = Connection::open_in_memory().unwrap();
-    apply_migrations(&conn).unwrap();
-
-    let full = populate_all_27_batch4_blobs_and_mining_ledger();
-    let mut fp = TableFingerprints::default();
-    {
-        let tx = conn.transaction().unwrap();
-        assert!(sync_industry_market_pve_domain_rows(&tx, &full).unwrap());
-        assert!(sync_mining_ledger(&tx, &full, &mut fp).unwrap());
-        tx.commit().unwrap();
-    }
-
-    let mut dirty = full.clone();
-    dirty.moon_extractions.clear();
-    dirty.insurance_contracts.clear();
-    dirty.mining_ledger.clear();
-    dirty.mining_ledger.push(MiningLedgerRecord {
-        character_id: 90_000_999,
-        solar_system_id: 30_000_142,
-        type_id: 1230,
-        quantity: 9_999,
-        date: "2026-01-03".into(),
-        timestamp_unix: 1_700_009_000,
-    });
-
-    // 1. Corrupt `insurance_contracts` row in `domain_rows`: must fail closed and NOT overwrite
-    // earlier `moon_extractions` or replace `mining_ledger` with a partial reload.
-    conn.execute(
-        "UPDATE domain_rows SET value = '{corrupt' WHERE domain = ?1 AND key LIKE 'insurance_contracts/%'",
-        [DOMAIN_CORP_STRUCTURE_AND_KILLMAILS],
-    )
-    .unwrap();
-    let failures_before = crate::persist_failures_total();
-    let err = rollback_industry_market_pve(&conn, &mut dirty, &fp).unwrap_err();
-    assert!(err.contains(DOMAIN_CORP_STRUCTURE_AND_KILLMAILS), "unexpected err: {err}");
-    assert!(crate::persist_failures_total() >= failures_before + 1);
-    assert!(dirty.moon_extractions.is_empty());
-    assert!(dirty.insurance_contracts.is_empty());
-    assert_eq!(dirty.mining_ledger.len(), 1);
-    assert_eq!(dirty.mining_ledger[0].character_id, 90_000_999);
-
-    // 2. Restore valid rows, then seed an unknown key in `domain_rows`: strict rollback fails closed.
-    {
-        let tx = conn.transaction().unwrap();
-        assert!(sync_industry_market_pve_domain_rows(&tx, &full).unwrap());
-        tx.commit().unwrap();
-    }
-    conn.execute(
-        "INSERT INTO domain_rows (domain, key, value) VALUES (?1, 'unknown_future_field/1', '{}')",
-        [DOMAIN_INDUSTRY_PVE_PI],
-    )
-    .unwrap();
-    let err_unknown = rollback_industry_market_pve(&conn, &mut dirty, &fp).unwrap_err();
-    assert!(err_unknown.contains("unknown_future_field"), "unexpected err: {err_unknown}");
-    assert!(dirty.moon_extractions.is_empty());
-    assert!(dirty.insurance_contracts.is_empty());
-    assert_eq!(dirty.mining_ledger[0].character_id, 90_000_999);
-
-    // 3. Dropped `char_mining_ledger` fails closed when dirty, and dropped `domain_rows` fails closed.
-    conn.execute(
-        "DELETE FROM domain_rows WHERE domain = ?1 AND key = 'unknown_future_field/1'",
-        [DOMAIN_INDUSTRY_PVE_PI],
-    )
-    .unwrap();
-    conn.execute("DROP TABLE char_mining_ledger", []).unwrap();
-    let err_ledger = rollback_industry_market_pve(&conn, &mut dirty, &fp).unwrap_err();
-    assert!(err_ledger.contains("char_mining_ledger"), "unexpected err: {err_ledger}");
-    assert!(dirty.moon_extractions.is_empty());
-    assert_eq!(dirty.mining_ledger[0].character_id, 90_000_999);
-
-    conn.execute("DROP TABLE domain_rows", []).unwrap();
-    let err_domain_rows = rollback_industry_market_pve(&conn, &mut dirty, &fp).unwrap_err();
-    assert!(err_domain_rows.contains("domain_rows"), "unexpected err: {err_domain_rows}");
 }
 
 #[test]
 fn industry_market_pve_tx_single_row_granularity_zero_cold_clones_and_rejects_non_finite() {
     use crate::persistence::{
-        reset_thread_cold_fp_clones_for_test, thread_cold_fp_clones_for_test, WorldRepository,
+        reset_thread_cold_domain_syncs_for_test, thread_cold_domain_syncs_for_test, WorldRepository,
     };
     use crate::tx_engine::{ChangeSet, TxError, TxSqlExecutor};
 
@@ -511,8 +424,8 @@ fn industry_market_pve_tx_single_row_granularity_zero_cold_clones_and_rejects_no
     });
     seed_res.expect("seed tx");
 
-    // Mutating a single Family 5 map entry executes with 0 cold fingerprint clones.
-    reset_thread_cold_fp_clones_for_test();
+    // Mutating a single Family 5 map entry executes with 0 cold domain syncs.
+    reset_thread_cold_domain_syncs_for_test();
     let update_res: Result<(), TxError> = repo.tx("update_one_rental_cost", |wtx| {
         wtx.snap
             .station_office_rental_costs
@@ -521,9 +434,9 @@ fn industry_market_pve_tx_single_row_granularity_zero_cold_clones_and_rejects_no
     });
     update_res.expect("update tx");
     assert_eq!(
-        thread_cold_fp_clones_for_test(),
+        thread_cold_domain_syncs_for_test(),
         0,
-        "migrated industry_market_pve mutation must trigger 0 cold fingerprint clones"
+        "migrated industry_market_pve mutation must trigger 0 cold domain syncs"
     );
 
     // Direct `ChangeSet::diff` + `apply_domain_row_changes` writes strictly 1 SQLite row.
@@ -695,7 +608,7 @@ fn legacy_world_kv_blobs_migrates_preserving_newer_domain_rows_and_drops_table()
     )
     .expect("seed newer paused_skill_queues row");
 
-    let (migrated, _fp) = load_snapshot_from_sqlite(&conn).expect("load + migrate");
+    let migrated = load_snapshot_from_sqlite(&conn).expect("load + migrate");
     assert!(
         !table_exists(&conn, "world_kv_blobs").unwrap(),
         "retired world_kv_blobs table must be dropped after migration"
@@ -720,7 +633,7 @@ fn legacy_world_kv_blobs_migrates_preserving_newer_domain_rows_and_drops_table()
     assert_eq!(migrated.quasar_state_blobs, legacy.quasar_state_blobs);
 
     // Reloading post-migration reads cleanly straight from `domain_rows`.
-    let (reloaded, _) = load_snapshot_from_sqlite(&conn).expect("reload post-migration");
+    let reloaded = load_snapshot_from_sqlite(&conn).expect("reload post-migration");
     assert_all_34_industry_market_pve_fields_eq(&reloaded, &migrated);
 }
 

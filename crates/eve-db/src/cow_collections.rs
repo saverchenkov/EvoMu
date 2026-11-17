@@ -12,7 +12,7 @@
 
 use crate::cow::{CowMap, CowMapEntry};
 use crate::snapshot_ext::LpRewardLogEntry;
-use crate::sqlite_store::fingerprints::canonical_fp;
+use crate::sqlite_store::checked_json::canonical_fp;
 use crate::types::{ActiveMissionRecord, MailRecord, WalletJournalEntry};
 use imbl::OrdMap;
 use serde::de::{Deserialize, Deserializer};

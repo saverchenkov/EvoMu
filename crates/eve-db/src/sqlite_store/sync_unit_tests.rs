@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 
 #[test]
-fn sync_dirty_to_sqlite_hot_path_emits_incremental_wal_delta_without_full_snapshot() {
+fn sync_snapshot_diff_hot_path_emits_incremental_wal_delta_without_full_snapshot() {
     let mut conn = Connection::open_in_memory().unwrap();
     apply_migrations(&conn).unwrap();
 
@@ -31,23 +31,22 @@ fn sync_dirty_to_sqlite_hot_path_emits_incremental_wal_delta_without_full_snapsh
             escrow: IskCents(0),
         },
     );
-    let mut fp = replace_sqlite_from_snapshot(&mut conn, &snap).unwrap();
+    replace_sqlite_from_snapshot(&mut conn, &snap).unwrap();
+    let mut prev = snap.clone();
 
-    // Perform strictly hot-path mutations:
-    // -wal_seq, next_entity_id
-    // -character update
-    // -item upsert + item remove
-    // -market_order upsert + market_order remove
-    // -wallet_journal append
-    // -contract upsert
-    // -system_state upsert
-    // -idempotency_key add
+    // Phase 1: strictly non-cold hot-path upserts/appends -> no full_snapshot emitted:
+    // - wal_seq, next_entity_id
+    // - character update
+    // - item update + upsert
+    // - market_order upsert
+    // - wallet_journal append
     snap.wal_seq += 1;
     snap.next_entity_id += 5;
     snap.characters.get_mut(&cid).unwrap().balance.0 += 50_000;
-    snap.items.remove(&100_000_002);
     snap.items.get_mut(&100_000_001).unwrap().quantity += 10;
-    snap.market_orders.remove(&700_100);
+    let mut new_item = snap.items[&100_000_001].clone();
+    new_item.item_id = 100_000_099;
+    snap.items.insert(100_000_099, new_item);
     snap.market_orders.insert(
         700_101,
         MarketOrderRecord {
@@ -73,6 +72,32 @@ fn sync_dirty_to_sqlite_hot_path_emits_incremental_wal_delta_without_full_snapsh
         balance_after: IskCents(99_988_000),
         reason: "Order".into(),
     });
+
+    {
+        let tx = conn.transaction().unwrap();
+        let delta = sync_snapshot_diff_for_test(&tx, &mut prev, &snap, true).unwrap();
+        tx.commit().unwrap();
+
+        assert!(
+            delta.full_snapshot.is_none(),
+            "hot-only upserts/appends must not trigger full_snapshot"
+        );
+        assert_eq!(delta.seq, snap.wal_seq);
+        assert_eq!(delta.next_entity_id, snap.next_entity_id);
+        assert_eq!(delta.upserted_characters.len(), 1);
+        assert_eq!(delta.upserted_characters[0].character_id, cid);
+        assert!(delta.removed_items.is_empty());
+        assert_eq!(delta.upserted_items.len(), 2);
+        assert!(delta.removed_market_orders.is_empty());
+        assert_eq!(delta.upserted_market_orders.len(), 1);
+        assert_eq!(delta.upserted_market_orders[0].order_id, 700_101);
+        assert_eq!(delta.appended_wallet_journal.len(), 1);
+        assert_eq!(delta.appended_wallet_journal[0].entry_id, 800_100);
+    }
+
+    // Phase 2: hot deletions + cold/auxiliary mutations set full_snapshot = Some and track removals:
+    snap.items.remove(&100_000_002);
+    snap.market_orders.remove(&700_100);
     snap.contracts.insert(
         600_100,
         ContractRecord {
@@ -95,25 +120,12 @@ fn sync_dirty_to_sqlite_hot_path_emits_incremental_wal_delta_without_full_snapsh
         .insert((cid, "hot_idem_1".into()));
 
     let tx = conn.transaction().unwrap();
-    let delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp, true).unwrap();
+    let delta = sync_snapshot_diff_for_test(&tx, &mut prev, &snap, true).unwrap();
     tx.commit().unwrap();
 
-    assert!(
-        delta.full_snapshot.is_none(),
-        "hot-only changes must not trigger full_snapshot"
-    );
-    assert_eq!(delta.seq, snap.wal_seq);
-    assert_eq!(delta.next_entity_id, snap.next_entity_id);
-    assert_eq!(delta.upserted_characters.len(), 1);
-    assert_eq!(delta.upserted_characters[0].character_id, cid);
+    assert!(delta.full_snapshot.is_some());
     assert_eq!(delta.removed_items, vec![100_000_002]);
-    assert_eq!(delta.upserted_items.len(), 1);
-    assert_eq!(delta.upserted_items[0].item_id, 100_000_001);
     assert_eq!(delta.removed_market_orders, vec![700_100]);
-    assert_eq!(delta.upserted_market_orders.len(), 1);
-    assert_eq!(delta.upserted_market_orders[0].order_id, 700_101);
-    assert_eq!(delta.appended_wallet_journal.len(), 1);
-    assert_eq!(delta.appended_wallet_journal[0].entry_id, 800_100);
     assert_eq!(delta.upserted_contracts.len(), 1);
     assert_eq!(delta.upserted_contracts[0].contract_id, 600_100);
     assert_eq!(delta.upserted_system_states.len(), 1);
@@ -121,13 +133,14 @@ fn sync_dirty_to_sqlite_hot_path_emits_incremental_wal_delta_without_full_snapsh
 }
 
 #[test]
-fn sync_dirty_to_sqlite_cold_tables_upserts_rewrites_and_deletions() {
+fn sync_snapshot_diff_cold_tables_upserts_rewrites_and_deletions() {
     let mut conn = Connection::open_in_memory().unwrap();
     apply_migrations(&conn).unwrap();
 
     let mut snap = WorldRepository::create_demo_snapshot();
     let cid = 90_000_001;
-    let mut fp = replace_sqlite_from_snapshot(&mut conn, &snap).unwrap();
+    replace_sqlite_from_snapshot(&mut conn, &snap).unwrap();
+    let mut prev = snap.clone();
 
     // Populate all cold tables and sync with need_wal_delta = true
     snap.markets_seeded = true;
@@ -395,7 +408,7 @@ fn sync_dirty_to_sqlite_cold_tables_upserts_rewrites_and_deletions() {
 
     {
         let tx = conn.transaction().unwrap();
-        let delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp, true).unwrap();
+        let delta = sync_snapshot_diff_for_test(&tx, &mut prev, &snap, true).unwrap();
         assert!(delta.full_snapshot.is_some());
         tx.commit().unwrap();
     }
@@ -406,7 +419,7 @@ fn sync_dirty_to_sqlite_cold_tables_upserts_rewrites_and_deletions() {
     snap.mails[0].subject = "rewritten_subj".into();
     {
         let tx = conn.transaction().unwrap();
-        let delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp, false).unwrap();
+        let delta = sync_snapshot_diff_for_test(&tx, &mut prev, &snap, false).unwrap();
         assert!(delta.full_snapshot.is_none());
         tx.commit().unwrap();
     }
@@ -444,12 +457,12 @@ fn sync_dirty_to_sqlite_cold_tables_upserts_rewrites_and_deletions() {
 
     {
         let tx = conn.transaction().unwrap();
-        let delta = sync_dirty_to_sqlite(&tx, &snap, &mut fp, true).unwrap();
+        let delta = sync_snapshot_diff_for_test(&tx, &mut prev, &snap, true).unwrap();
         assert!(delta.full_snapshot.is_some());
         tx.commit().unwrap();
     }
 
-    let (loaded, _) = load_snapshot_from_sqlite(&conn).unwrap();
+    let loaded = load_snapshot_from_sqlite(&conn).unwrap();
     assert!(!loaded.accounts.contains_key("temp_acc"));
     assert!(!loaded.characters.contains_key(&90_000_002));
     assert!(loaded.skills.is_empty());

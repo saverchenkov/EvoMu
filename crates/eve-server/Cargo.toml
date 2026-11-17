@@ -37,7 +37,7 @@ lock-rank = ["eve-db/lock-rank"]
 testkit = ["eve-db/testkit", "eve-proto/testkit"]
 
 [dev-dependencies]
-eve-db = { path = "../eve-db", features = ["demo-seed", "testkit"] }
+eve-db = { path = "../eve-db", features = ["demo-seed", "testkit", "legacy-json-snapshot"] }
 eve-proto = { path = "../eve-proto", features = ["testkit"] }
 eve-server = { path = ".", features = ["demo-seed", "testkit"] }
 eve-testkit = { path = "../eve-testkit" }

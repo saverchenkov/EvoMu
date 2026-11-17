@@ -18,13 +18,12 @@ use crate::sqlite_store::domain_rows::{
     DOMAIN_PVE_AND_SPACE_EVENTS, DOMAIN_QUASAR_STATE_BLOBS, DOMAIN_SERVICE_STATE_BLOBS,
     DOMAIN_SHIP_FITTING_AND_SKILLS, DOMAIN_WALLET_AND_MARKET,
 };
-use crate::sqlite_store::fingerprints::{fp_json, TableFingerprints};
 use crate::sqlite_store::quarantine::LoadContext;
 use crate::types::{
     AutoMoonMinerRecord, CharacterResearchAgentRecord, CorpProjectContributorEntry,
     CorpWalletJournalRecord, CosmicAnomalyRecord, CosmicSignatureRecord, CustomsOfficeRecord,
     IncursionRecord, KillmailDetailRecord, LoyaltyStoreOfferRecord, MarketHistoryDayRecord,
-    MarketOrderMeta, MiningLedgerRecord, MoonExtractionRecord, ObserverMiningRecord,
+    MarketOrderMeta, MoonExtractionRecord, ObserverMiningRecord,
     PersistedInsuranceContractRecord, PlanetaryColonyLayoutRecord, ShipFitInputsRecord,
     StarbaseDetailSettings, StructureEsiTimerMeta, SystemJumpEvent, SystemKillEvent,
     WalletTransactionRecord, WorldStateSnapshot,
@@ -44,19 +43,6 @@ CREATE TABLE IF NOT EXISTS world_kv_blobs (
     blob_json TEXT NOT NULL
 );
 "#;
-
-/// Tracks the digest of the remaining Family 5 relational table (`char_mining_ledger`).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct D6Batch4Fingerprints {
-    pub mining_ledger: u64,
-}
-
-/// Computes fingerprints for the remaining relational Family 5 state (`char_mining_ledger`).
-pub fn compute_d6_batch4_fingerprints(snap: &WorldStateSnapshot) -> D6Batch4Fingerprints {
-    D6Batch4Fingerprints {
-        mining_ledger: fp_json(&snap.mining_ledger),
-    }
-}
 
 macro_rules! for_each_industry_market_pve_domain {
     ($cb:ident) => {
@@ -713,12 +699,13 @@ pub fn sync_industry_market_pve_domain_rows(
 /// Synchronizes the remaining relational Family 5 table (`char_mining_ledger`) when dirty.
 pub fn sync_mining_ledger(
     tx: &Transaction<'_>,
+    before: Option<&WorldStateSnapshot>,
     snap: &WorldStateSnapshot,
-    fp: &mut TableFingerprints,
 ) -> Result<bool, String> {
-    let ml_h = fp_json(&snap.mining_ledger);
-    if fp.d6_batch4.mining_ledger == ml_h {
-        return Ok(false);
+    if let Some(b) = before {
+        if b.mining_ledger.ptr_eq(&snap.mining_ledger) || *b.mining_ledger == *snap.mining_ledger {
+            return Ok(false);
+        }
     }
     tx.execute("DELETE FROM char_mining_ledger", [])
         .map_err(|e| e.to_string())?;
@@ -736,107 +723,5 @@ pub fn sync_mining_ledger(
         )
         .map_err(|e| e.to_string())?;
     }
-    fp.d6_batch4.mining_ledger = ml_h;
     Ok(true)
-}
-
-fn reload_mining_ledger_strict(
-    conn: &Connection,
-    expected_fp: u64,
-) -> Result<Vec<MiningLedgerRecord>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT character_id, solar_system_id, type_id, quantity, date, timestamp_unix FROM char_mining_ledger ORDER BY id ASC",
-        )
-        .map_err(|e| format!("rollback char_mining_ledger prepare failed: {e}"))?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0),
-                r.get::<_, i64>(1),
-                r.get::<_, i64>(2),
-                r.get::<_, i64>(3),
-                r.get::<_, String>(4),
-                r.get::<_, i64>(5),
-            ))
-        })
-        .map_err(|e| format!("rollback char_mining_ledger query failed: {e}"))?;
-    let mut out = Vec::new();
-    for row in rows {
-        let (character_id, solar_system_id, type_id, quantity, date, timestamp_unix) =
-            row.map_err(|e| format!("rollback char_mining_ledger row failed: {e}"))?;
-        out.push(MiningLedgerRecord {
-            character_id: character_id
-                .map_err(|e| format!("rollback char_mining_ledger character_id: {e}"))?,
-            solar_system_id: solar_system_id
-                .map_err(|e| format!("rollback char_mining_ledger solar_system_id: {e}"))?
-                as u32,
-            type_id: type_id.map_err(|e| format!("rollback char_mining_ledger type_id: {e}"))?
-                as u32,
-            quantity: quantity
-                .map_err(|e| format!("rollback char_mining_ledger quantity: {e}"))?,
-            date: date.map_err(|e| format!("rollback char_mining_ledger date: {e}"))?,
-            timestamp_unix: timestamp_unix
-                .map_err(|e| format!("rollback char_mining_ledger timestamp_unix: {e}"))?
-                as u64,
-        });
-    }
-    let empty_fp = fp_json(&Vec::<MiningLedgerRecord>::new());
-    if out.is_empty() && expected_fp != 0 && expected_fp != empty_fp {
-        return Err(
-            "rollback char_mining_ledger returned empty table for non-empty baseline".into(),
-        );
-    }
-    if expected_fp != 0 && fp_json(&out) != expected_fp {
-        return Err(
-            "rollback char_mining_ledger fingerprint mismatch against committed baseline".into(),
-        );
-    }
-    Ok(out)
-}
-
-fn rollback_industry_market_pve_inner(
-    conn: &Connection,
-    snap: &mut WorldStateSnapshot,
-    fp: &TableFingerprints,
-) -> Result<(), String> {
-    if !table_exists(conn, "domain_rows")? {
-        return Err(
-            "cannot rollback industry_market_pve: table 'domain_rows' does not exist".into(),
-        );
-    }
-    if !table_exists(conn, "char_mining_ledger")? {
-        return Err(
-            "cannot rollback industry_market_pve: table 'char_mining_ledger' does not exist".into(),
-        );
-    }
-
-    let mut ctx = LoadContext::new(false);
-    let (staged, _had_legacy) = load_staged_industry_market_pve(conn, &mut ctx)?;
-    let staged_ledger = if fp_json(&snap.mining_ledger) != fp.d6_batch4.mining_ledger {
-        Some(reload_mining_ledger_strict(conn, fp.d6_batch4.mining_ledger)?)
-    } else {
-        None
-    };
-
-    staged.apply_to(snap);
-    if let Some(ledger) = staged_ledger {
-        snap.mining_ledger = ledger.into();
-    }
-    Ok(())
-}
-
-/// Fail-closed reload of all 34 Family 5 collections (`domain_rows`) and `char_mining_ledger` from
-/// SQLite into `snap`, leaving `snap` untouched on any schema, decode, or digest error.
-pub fn rollback_industry_market_pve(
-    conn: &Connection,
-    snap: &mut WorldStateSnapshot,
-    fp: &TableFingerprints,
-) -> Result<(), String> {
-    if let Err(err) = rollback_industry_market_pve_inner(conn, snap, fp) {
-        crate::persistence::record_persist_failure();
-        tracing::error!("rollback_industry_market_pve failed closed without mutating snapshot: {err}");
-        return Err(err);
-    }
-    Ok(())
 }
