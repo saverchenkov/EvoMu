@@ -2570,5 +2570,400 @@ fn stack_all_enforces_secure_container_passwords_direct_and_ancestor() {
     assert_eq!(inner_repeat.dict_get("mergedCount"), Some(&PyRep::Integer(0)));
 }
 
+#[test]
+fn stack_ops_reject_auth_colocation_acl_before_password_oracle_and_run_atomically() {
+    let ctx = test_ctx();
+    let owner_id = 92_000_074;
+    let corp_owner = 98_000_074;
+    let attacker_id = 92_000_075;
+    let corp_attacker = 98_000_075;
+    let corp_mate_id = 92_000_076;
+    let station_a = 60_003_760;
+    let station_b = 60_003_761;
+    let sys_id = 30_000_142;
+    let ship_owner = 1_000_274_001;
+    let ship_attacker = 1_000_274_002;
+    let ship_mate = 1_000_274_003;
+    let cont_owner = 1_000_274_010;
+    let cont_remote = 1_000_274_011;
+    let corp_cont = 1_000_274_012;
+    let it_1 = 1_000_274_020;
+    let it_2 = 1_000_274_021;
+    let r_1 = 1_000_274_022;
+    let r_2 = 1_000_274_023;
+    let c_1 = 1_000_274_024;
+    let c_2 = 1_000_274_025;
+
+    ensure_char(&ctx, owner_id, corp_owner, Some(station_a), sys_id, ship_owner);
+    ensure_char(&ctx, attacker_id, corp_attacker, Some(station_a), sys_id, ship_attacker);
+    ensure_char(&ctx, corp_mate_id, corp_owner, Some(station_a), sys_id, ship_mate);
+    insert_item(&ctx, ship_owner, 587, owner_id, station_a, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, ship_attacker, 587, attacker_id, station_a, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, ship_mate, 587, corp_mate_id, station_a, InventoryFlag::Hangar, 1, true);
+
+    insert_item(&ctx, cont_owner, 17_366, owner_id, station_a, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, it_1, 34, owner_id, cont_owner, InventoryFlag::Cargo, 20, false);
+    insert_item(&ctx, it_2, 34, owner_id, cont_owner, InventoryFlag::Cargo, 30, false);
+
+    insert_item(&ctx, cont_remote, 17_366, attacker_id, station_b, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, r_1, 34, attacker_id, cont_remote, InventoryFlag::Cargo, 15, false);
+    insert_item(&ctx, r_2, 34, attacker_id, cont_remote, InventoryFlag::Cargo, 25, false);
+
+    insert_item(&ctx, corp_cont, 17_366, corp_owner, station_a, InventoryFlag::CorpSAG1, 1, true);
+    insert_item(&ctx, c_1, 34, corp_mate_id, corp_cont, InventoryFlag::Cargo, 10, false);
+    insert_item(&ctx, c_2, 34, corp_mate_id, corp_cont, InventoryFlag::Cargo, 12, false);
+
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.container_passwords.insert(cont_owner, "topsecret".into());
+        st.container_passwords.insert(cont_remote, "remotepw".into());
+        st.container_passwords.insert(corp_cont, "corppw".into());
+        save_container_ship_state(&ctx, &st);
+    }
+
+    let mut owner_sess = make_session(owner_id, corp_owner, Some(station_a), Some(sys_id), Some(ship_owner));
+    let mut attacker_sess =
+        make_session(attacker_id, corp_attacker, Some(station_a), Some(sys_id), Some(ship_attacker));
+    let mut mate_sess = make_session(corp_mate_id, corp_owner, Some(station_a), Some(sys_id), Some(ship_mate));
+    let kw_empty = HashMap::new();
+
+    // 1. Unbound StackAll password oracle against foreign container (wrong vs exact password)
+    for pw in ["wrong", "topsecret"] {
+        let mut kw = HashMap::new();
+        kw.insert("locationID".into(), PyRep::Integer(cont_owner));
+        kw.insert("password".into(), PyRep::String(pw.into()));
+        let err = handle_stack_ops(&ctx, &mut attacker_sess, None, "invbroker", "StackAll", &[], &kw)
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, "DestinationAccessDenied");
+    }
+
+    // 2. Remote owned container (co-location check precedes password check on StackAll/SplitStack/MultiMerge)
+    for pw in ["wrong", "remotepw"] {
+        let mut kw_stack = HashMap::new();
+        kw_stack.insert("locationID".into(), PyRep::Integer(cont_remote));
+        kw_stack.insert("password".into(), PyRep::String(pw.into()));
+        assert_eq!(
+            handle_stack_ops(&ctx, &mut attacker_sess, None, "invbroker", "StackAll", &[], &kw_stack)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "DestinationAccessDenied"
+        );
+
+        let mut kw_pw = HashMap::new();
+        kw_pw.insert("password".into(), PyRep::String(pw.into()));
+        assert_eq!(
+            handle_stack_ops(
+                &ctx,
+                &mut attacker_sess,
+                None,
+                "invbroker",
+                "SplitStack",
+                &[
+                    PyRep::Integer(station_b),
+                    PyRep::Integer(r_1),
+                    PyRep::Integer(5),
+                ],
+                &kw_pw,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "SplitFailed"
+        );
+
+        let merge_remote = PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(r_1),
+            PyRep::Integer(r_2),
+            PyRep::None,
+        ])]);
+        assert_eq!(
+            handle_stack_ops(
+                &ctx,
+                &mut attacker_sess,
+                None,
+                "invbroker",
+                "MultiMerge",
+                &[merge_remote],
+                &kw_pw,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "DestinationAccessDenied"
+        );
+    }
+
+    // 3. Foreign SplitStack rejects ownership before container password check
+    for pw in ["wrong", "topsecret"] {
+        let mut kw = HashMap::new();
+        kw.insert("password".into(), PyRep::String(pw.into()));
+        assert_eq!(
+            handle_stack_ops(
+                &ctx,
+                &mut attacker_sess,
+                None,
+                "invbroker",
+                "SplitStack",
+                &[
+                    PyRep::Integer(station_a),
+                    PyRep::Integer(it_1),
+                    PyRep::Integer(5),
+                ],
+                &kw,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "SplitFailed"
+        );
+    }
+
+    // 4. Corp container take role is validated before container password
+    for pw in ["wrong", "corppw"] {
+        let mut kw = HashMap::new();
+        kw.insert("locationID".into(), PyRep::Integer(corp_cont));
+        kw.insert("password".into(), PyRep::String(pw.into()));
+        assert_eq!(
+            handle_stack_ops(&ctx, &mut mate_sess, None, "invbroker", "StackAll", &[], &kw)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "CorpRoleDenied"
+        );
+    }
+
+    // 5. Failed SplitStack with matching password MUST NOT persist unlocked_containers
+    let commits_before_fail_split = ctx.db.tx_commit_count();
+    let mut owner_pw = HashMap::new();
+    owner_pw.insert("password".into(), PyRep::String("topsecret".into()));
+    assert_eq!(
+        handle_stack_ops(
+            &ctx,
+            &mut owner_sess,
+            Some(&make_bound(station_a, owner_id)),
+            "invbroker",
+            "SplitStack",
+            &[
+                PyRep::Integer(station_a),
+                PyRep::Integer(it_1),
+                PyRep::Integer(999),
+            ],
+            &owner_pw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "SplitFailed"
+    );
+    assert_eq!(ctx.db.tx_commit_count(), commits_before_fail_split);
+    let st_after_fail = read_container_ship_state(&ctx);
+    assert!(!st_after_fail.unlocked_containers.contains(&(cont_owner, owner_id)));
+
+    // 6. StackAll unlocking container + merging executes in exactly 1 commit, and no-op repeat does 0
+    assert_eq!(
+        handle_stack_ops(
+            &ctx,
+            &mut owner_sess,
+            Some(&make_bound(cont_owner, owner_id)),
+            "invbroker",
+            "StackAll",
+            &[PyRep::Integer(InventoryFlag::Cargo as i64)],
+            &kw_empty,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ALSCPasswordRequired"
+    );
+    let commits_before_stack = ctx.db.tx_commit_count();
+    let stack_res = handle_stack_ops(
+        &ctx,
+        &mut owner_sess,
+        Some(&make_bound(cont_owner, owner_id)),
+        "invbroker",
+        "StackAll",
+        &[PyRep::Integer(InventoryFlag::Cargo as i64)],
+        &owner_pw,
+    )
+    .unwrap()
+    .expect("owner StackAll with valid password must succeed");
+    assert_eq!(stack_res.dict_get("mergedCount"), Some(&PyRep::Integer(1)));
+    assert_eq!(ctx.db.tx_commit_count(), commits_before_stack + 1);
+
+    let st_after_ok = read_container_ship_state(&ctx);
+    assert!(st_after_ok.unlocked_containers.contains(&(cont_owner, owner_id)));
+
+    let commits_before_noop = ctx.db.tx_commit_count();
+    let noop_res = handle_stack_ops(
+        &ctx,
+        &mut owner_sess,
+        Some(&make_bound(cont_owner, owner_id)),
+        "invbroker",
+        "StackAll",
+        &[PyRep::Integer(InventoryFlag::Cargo as i64)],
+        &kw_empty,
+    )
+    .unwrap()
+    .expect("subsequent no-op StackAll must succeed without password");
+    assert_eq!(noop_res.dict_get("mergedCount"), Some(&PyRep::Integer(0)));
+    assert_eq!(ctx.db.tx_commit_count(), commits_before_noop);
+}
+
+#[test]
+fn get_inventory_mgr_bound_split_stack_works_when_docked_in_upwell_structure() {
+    let ctx = test_ctx();
+    let char_id = 92_000_077;
+    let corp_id = 98_000_077;
+    let sys_id = 30_000_142;
+    let struct_id = 1_000_275_900;
+    let ship_id = 1_000_275_001;
+    let cont_id = 1_000_275_002;
+    let hangar_stack = 1_000_275_010;
+    let cont_stack = 1_000_275_011;
+
+    ensure_char(&ctx, char_id, corp_id, None, sys_id, ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Test Fortizar".into(),
+                position: [25_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.station_id = None;
+        ch.structure_id = Some(struct_id);
+    });
+    insert_item(&ctx, ship_id, 587, char_id, struct_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, cont_id, 17_366, char_id, struct_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, hangar_stack, 34, char_id, struct_id, InventoryFlag::Hangar, 40, false);
+    insert_item(&ctx, cont_stack, 34, char_id, cont_id, InventoryFlag::Cargo, 60, false);
+
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.container_passwords.insert(cont_id, "structpw".into());
+        save_container_ship_state(&ctx, &st);
+    }
+
+    let mut sess = make_session(char_id, corp_id, None, Some(sys_id), Some(ship_id));
+    sess.structure_id = Some(struct_id);
+    let inv_mgr_bound = make_bound(i64::from(sys_id), char_id);
+    let kw_empty = HashMap::new();
+
+    // 1. V24 GetInventoryMgr() binds to solar_system_id; splitting in structure hangar succeeds
+    let split_hangar = handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&inv_mgr_bound),
+        "invbroker",
+        "SplitStack",
+        &[
+            PyRep::Integer(struct_id),
+            PyRep::Integer(hangar_stack),
+            PyRep::Integer(15),
+            PyRep::Integer(char_id),
+        ],
+        &kw_empty,
+    )
+    .unwrap()
+    .expect("GetInventoryMgr-bound SplitStack in docked Upwell hangar must succeed");
+    assert_eq!(split_hangar.dict_get("originalQuantity"), Some(&PyRep::Integer(25)));
+    assert_eq!(split_hangar.dict_get("newQuantity"), Some(&PyRep::Integer(15)));
+
+    // 2. GetInventoryMgr()-bound SplitStack inside a passworded container respects ACL before password
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.get_mut(&struct_id).unwrap().owner_corp_id = 98_000_999;
+        snap.structure_docking_acl_denied
+            .entry(struct_id)
+            .or_default()
+            .insert(char_id);
+    });
+    for pw in ["wrong", "structpw"] {
+        let mut kw = HashMap::new();
+        kw.insert("password".into(), PyRep::String(pw.into()));
+        assert_eq!(
+            handle_stack_ops(
+                &ctx,
+                &mut sess,
+                Some(&inv_mgr_bound),
+                "invbroker",
+                "SplitStack",
+                &[
+                    PyRep::Integer(struct_id),
+                    PyRep::Integer(cont_stack),
+                    PyRep::Integer(20),
+                    PyRep::Integer(char_id),
+                ],
+                &kw,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "SplitFailed"
+        );
+    }
+
+    // 3. Destroyed Upwell structure still yields StructureDestroyed even via GetInventoryMgr()
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structure_docking_acl_denied.remove(&struct_id);
+        snap.structures.get_mut(&struct_id).unwrap().state = "Destroyed".into();
+    });
+    assert_eq!(
+        handle_stack_ops(
+            &ctx,
+            &mut sess,
+            Some(&inv_mgr_bound),
+            "invbroker",
+            "SplitStack",
+            &[
+                PyRep::Integer(struct_id),
+                PyRep::Integer(cont_stack),
+                PyRep::Integer(20),
+                PyRep::Integer(char_id),
+            ],
+            &kw_empty,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "StructureDestroyed"
+    );
+
+    // 4. Restored ACL + valid password inside container succeeds via GetInventoryMgr()
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.structures.get_mut(&struct_id).unwrap();
+        st.state = "ShieldVulnerable".into();
+        st.owner_corp_id = corp_id;
+    });
+    let mut kw_ok = HashMap::new();
+    kw_ok.insert("password".into(), PyRep::String("structpw".into()));
+    let split_cont = handle_stack_ops(
+        &ctx,
+        &mut sess,
+        Some(&inv_mgr_bound),
+        "invbroker",
+        "SplitStack",
+        &[
+            PyRep::Integer(struct_id),
+            PyRep::Integer(cont_stack),
+            PyRep::Integer(20),
+            PyRep::Integer(char_id),
+        ],
+        &kw_ok,
+    )
+    .unwrap()
+    .expect("GetInventoryMgr-bound SplitStack inside Upwell container with ACL+pw must succeed");
+    assert_eq!(split_cont.dict_get("originalQuantity"), Some(&PyRep::Integer(40)));
+    assert_eq!(split_cont.dict_get("newQuantity"), Some(&PyRep::Integer(20)));
+}
+
 
 

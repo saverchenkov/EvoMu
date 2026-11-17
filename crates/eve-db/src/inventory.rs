@@ -484,89 +484,12 @@ impl WorldRepository {
             return Ok(StackAllOutcome::default());
         }
         self.try_with_mut_snapshot(|guard| {
-            let lock_index = guard.build_inventory_lock_index();
-            if guard.is_location_chain_locked_for_children(&lock_index, target_location_id) {
-                return Ok(StackAllOutcome::default());
-            }
-
-            let mut by_type: HashMap<TypeId, Vec<(i64, i32)>> = HashMap::new();
-            for item in guard.items.values() {
-                if item.owner_id == character_id
-                    && item.location_id == target_location_id
-                    && item.flag == target_flag
-                    && guard.is_item_stack_all_candidate(
-                        item,
-                        &lock_index,
-                        extra_excluded_item_ids,
-                    )
-                {
-                    by_type
-                        .entry(item.type_id)
-                        .or_default()
-                        .push((item.item_id, item.quantity));
-                }
-            }
-
-            let mut type_ids: Vec<TypeId> = by_type.keys().copied().collect();
-            type_ids.sort_unstable();
-
-            struct MergePlan {
-                dst_id: i64,
-                old_dst_qty: i32,
-                new_dst_qty: i32,
-                src_ids: Vec<i64>,
-            }
-            let mut plans = Vec::new();
-            for type_id in type_ids {
-                let Some(group) = by_type.get_mut(&type_id) else {
-                    continue;
-                };
-                if group.len() < 2 {
-                    continue;
-                }
-                group.sort_unstable_by_key(|&(item_id, _)| item_id);
-                let (dst_id, old_dst_qty) = group[0];
-                let mut cur_qty = old_dst_qty;
-                let mut src_ids = Vec::with_capacity(group.len() - 1);
-                for &(src_id, src_qty) in &group[1..] {
-                    let Some(sum) = cur_qty.checked_add(src_qty) else {
-                        continue;
-                    };
-                    cur_qty = sum;
-                    src_ids.push(src_id);
-                }
-                if !src_ids.is_empty() {
-                    plans.push(MergePlan {
-                        dst_id,
-                        old_dst_qty,
-                        new_dst_qty: cur_qty,
-                        src_ids,
-                    });
-                }
-            }
-
-            if plans.is_empty() {
-                return Ok(StackAllOutcome::default());
-            }
-
-            let mut outcome = StackAllOutcome::default();
-            for plan in plans {
-                for src_id in plan.src_ids {
-                    if let Some(old_src) = guard.items.remove(&src_id) {
-                        outcome.deleted_sources.push(old_src);
-                        outcome.merged_count += 1;
-                    }
-                }
-                if let Some(tgt) = guard.items.get_mut(&plan.dst_id) {
-                    tgt.quantity = plan.new_dst_qty;
-                    tgt.version += 1;
-                    outcome.survivors.push(StackAllSurvivor {
-                        old_quantity: plan.old_dst_qty,
-                        updated: tgt.clone(),
-                    });
-                }
-            }
-            Ok(outcome)
+            Ok(guard.stack_all_items_in_snap(
+                character_id,
+                target_location_id,
+                target_flag,
+                extra_excluded_item_ids,
+            ))
         })
     }
 
@@ -582,76 +505,7 @@ impl WorldRepository {
                 "Split quantity must be positive".into(),
             ));
         }
-        self.try_with_mut_snapshot(|guard| {
-            if guard.is_item_or_ancestor_locked_or_impounded(item_id) {
-                return Err(DbError::ItemLocked(item_id));
-            }
-            {
-                let item_ref = guard
-                    .items
-                    .get(&item_id)
-                    .ok_or(DbError::ItemNotFound(item_id))?;
-                if item_ref.owner_id != character_id {
-                    return Err(DbError::ItemOwnershipViolation {
-                        character_id,
-                        item_id,
-                    });
-                }
-                if WorldStateSnapshot::is_fitted_slot_flag(item_ref.flag) {
-                    return Err(DbError::ItemLocked(item_id));
-                }
-                if guard.is_container_non_empty(item_id) {
-                    return Err(DbError::ValidationError(
-                        "Cannot split a non-empty container".into(),
-                    ));
-                }
-                if item_ref.singleton
-                    || item_ref.is_blueprint_copy
-                    || item_ref.blueprint_runs_remaining.is_some()
-                    || !item_ref.dynamic_attributes.is_empty()
-                    || item_ref.source_mutaplasmid_id.is_some()
-                {
-                    return Err(DbError::ValidationError(
-                        "Cannot split a singleton, BPC, or mutated item".into(),
-                    ));
-                }
-                if split_quantity >= item_ref.quantity {
-                    return Err(DbError::ValidationError(format!(
-                        "Split quantity {} must be strictly less than item quantity {}",
-                        split_quantity, item_ref.quantity
-                    )));
-                }
-            }
-            let item = guard
-                .items
-                .get_mut(&item_id)
-                .ok_or(DbError::ItemNotFound(item_id))?;
-            item.quantity -= split_quantity;
-            item.version += 1;
-            let updated_orig = item.clone();
-
-            let new_id = guard.alloc_entity_id();
-            let new_item = InventoryItemRecord {
-                item_id: new_id,
-                type_id: updated_orig.type_id,
-                owner_id: character_id,
-                location_id: updated_orig.location_id,
-                flag: updated_orig.flag,
-                quantity: split_quantity,
-                singleton: false,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            };
-            guard.items.insert(new_id, new_item.clone());
-            if let Some(custom_name) = guard.item_custom_names.get(&item_id).cloned() {
-                guard.item_custom_names.insert(new_id, custom_name);
-            }
-            Ok((updated_orig, new_item))
-        })
+        self.try_with_mut_snapshot(|guard| guard.split_stack_in_snap(character_id, item_id, split_quantity))
     }
 
     /// Deletes (trashes) an item and all items contained inside it (`INV-2`).
@@ -1488,6 +1342,181 @@ impl WorldStateSnapshot {
     /// non-courier stack eligible for merging or commodity stacking.
     pub fn is_clean_stackable_item(&self, item: &InventoryItemRecord) -> bool {
         !Self::has_non_stackable_item_state(item) && !self.is_courier_cargo_item(item.item_id)
+    }
+
+    /// Merges all eligible stacks owned by `character_id` at `(target_location_id, target_flag)`
+    /// inside an open mutable snapshot transaction.
+    pub fn stack_all_items_in_snap(
+        &mut self,
+        character_id: i64,
+        target_location_id: i64,
+        target_flag: InventoryFlag,
+        extra_excluded_item_ids: &HashSet<i64>,
+    ) -> StackAllOutcome {
+        if Self::is_flag_stack_ineligible(target_flag) {
+            return StackAllOutcome::default();
+        }
+        let lock_index = self.build_inventory_lock_index();
+        if self.is_location_chain_locked_for_children(&lock_index, target_location_id) {
+            return StackAllOutcome::default();
+        }
+
+        let mut by_type: HashMap<TypeId, Vec<(i64, i32)>> = HashMap::new();
+        for item in self.items.values() {
+            if item.owner_id == character_id
+                && item.location_id == target_location_id
+                && item.flag == target_flag
+                && self.is_item_stack_all_candidate(item, &lock_index, extra_excluded_item_ids)
+            {
+                by_type
+                    .entry(item.type_id)
+                    .or_default()
+                    .push((item.item_id, item.quantity));
+            }
+        }
+
+        let mut type_ids: Vec<TypeId> = by_type.keys().copied().collect();
+        type_ids.sort_unstable();
+
+        struct MergePlan {
+            dst_id: i64,
+            old_dst_qty: i32,
+            new_dst_qty: i32,
+            src_ids: Vec<i64>,
+        }
+        let mut plans = Vec::new();
+        for type_id in type_ids {
+            let Some(group) = by_type.get_mut(&type_id) else {
+                continue;
+            };
+            if group.len() < 2 {
+                continue;
+            }
+            group.sort_unstable_by_key(|&(item_id, _)| item_id);
+            let (dst_id, old_dst_qty) = group[0];
+            let mut cur_qty = old_dst_qty;
+            let mut src_ids = Vec::with_capacity(group.len() - 1);
+            for &(src_id, src_qty) in &group[1..] {
+                let Some(sum) = cur_qty.checked_add(src_qty) else {
+                    continue;
+                };
+                cur_qty = sum;
+                src_ids.push(src_id);
+            }
+            if !src_ids.is_empty() {
+                plans.push(MergePlan {
+                    dst_id,
+                    old_dst_qty,
+                    new_dst_qty: cur_qty,
+                    src_ids,
+                });
+            }
+        }
+
+        if plans.is_empty() {
+            return StackAllOutcome::default();
+        }
+
+        let mut outcome = StackAllOutcome::default();
+        for plan in plans {
+            for src_id in plan.src_ids {
+                if let Some(old_src) = self.items.remove(&src_id) {
+                    outcome.deleted_sources.push(old_src);
+                    outcome.merged_count += 1;
+                }
+            }
+            if let Some(tgt) = self.items.get_mut(&plan.dst_id) {
+                tgt.quantity = plan.new_dst_qty;
+                tgt.version += 1;
+                outcome.survivors.push(StackAllSurvivor {
+                    old_quantity: plan.old_dst_qty,
+                    updated: tgt.clone(),
+                });
+            }
+        }
+        outcome
+    }
+
+    /// Splits `split_quantity` from `item_id` inside an open mutable snapshot transaction (`INV-2`).
+    pub fn split_stack_in_snap(
+        &mut self,
+        character_id: i64,
+        item_id: i64,
+        split_quantity: i32,
+    ) -> Result<(InventoryItemRecord, InventoryItemRecord), DbError> {
+        if split_quantity <= 0 {
+            return Err(DbError::ValidationError(
+                "Split quantity must be positive".into(),
+            ));
+        }
+        if self.is_item_or_ancestor_locked_or_impounded(item_id) {
+            return Err(DbError::ItemLocked(item_id));
+        }
+        {
+            let item_ref = self
+                .items
+                .get(&item_id)
+                .ok_or(DbError::ItemNotFound(item_id))?;
+            if item_ref.owner_id != character_id {
+                return Err(DbError::ItemOwnershipViolation {
+                    character_id,
+                    item_id,
+                });
+            }
+            if Self::is_fitted_slot_flag(item_ref.flag) {
+                return Err(DbError::ItemLocked(item_id));
+            }
+            if self.is_container_non_empty(item_id) {
+                return Err(DbError::ValidationError(
+                    "Cannot split a non-empty container".into(),
+                ));
+            }
+            if item_ref.singleton
+                || item_ref.is_blueprint_copy
+                || item_ref.blueprint_runs_remaining.is_some()
+                || !item_ref.dynamic_attributes.is_empty()
+                || item_ref.source_mutaplasmid_id.is_some()
+            {
+                return Err(DbError::ValidationError(
+                    "Cannot split a singleton, BPC, or mutated item".into(),
+                ));
+            }
+            if split_quantity >= item_ref.quantity {
+                return Err(DbError::ValidationError(format!(
+                    "Split quantity {} must be strictly less than item quantity {}",
+                    split_quantity, item_ref.quantity
+                )));
+            }
+        }
+        let item = self
+            .items
+            .get_mut(&item_id)
+            .ok_or(DbError::ItemNotFound(item_id))?;
+        item.quantity -= split_quantity;
+        item.version += 1;
+        let updated_orig = item.clone();
+
+        let new_id = self.alloc_entity_id();
+        let new_item = InventoryItemRecord {
+            item_id: new_id,
+            type_id: updated_orig.type_id,
+            owner_id: character_id,
+            location_id: updated_orig.location_id,
+            flag: updated_orig.flag,
+            quantity: split_quantity,
+            singleton: false,
+            version: 1,
+            dynamic_attributes: HashMap::new(),
+            source_mutaplasmid_id: None,
+            insured_payout_isk: 0.0,
+            is_blueprint_copy: false,
+            blueprint_runs_remaining: None,
+        };
+        self.items.insert(new_id, new_item.clone());
+        if let Some(custom_name) = self.item_custom_names.get(&item_id).cloned() {
+            self.item_custom_names.insert(new_id, custom_name);
+        }
+        Ok((updated_orig, new_item))
     }
 
     pub fn validate_item_for_consumption(
