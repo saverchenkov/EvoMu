@@ -1921,6 +1921,7 @@ async fn dispatch_rpc_tr_overlapping_transition_serves_crimewatch_get_client_sta
 #[test]
 fn notification_sub_object_binding_isolates_quota_and_caps_offline_without_evicting_services() {
     let ctx = test_ctx();
+    let trade_service = "trademgr";
     let partner_id = 90_000_002_i64;
     let partner_uid = 2_u64;
     let partner_sid = 88_100_u64;
@@ -1956,14 +1957,14 @@ fn notification_sub_object_binding_isolates_quota_and_caps_offline_without_evict
     let mut notif_bids = Vec::new();
     for idx in 0..super::MAX_NOTIFICATION_SUB_OBJECTS_PER_TARGET_SERVICE {
         let (bid, rep) = ctx
-            .bind_sub_object_for_notification(partner_id, None, "trademgr", 70_000 + idx as i64)
+            .bind_sub_object_for_notification(partner_id, None, trade_service, 70_000 + idx as i64)
             .expect("bind notification sub-object within dedicated quota");
         assert!(matches!(rep, PyRep::SubStruct(_)));
         notif_bids.push(bid);
     }
 
     let quota_err = ctx
-        .bind_sub_object_for_notification(partner_id, None, "trademgr", 79_999)
+        .bind_sub_object_for_notification(partner_id, None, trade_service, 79_999)
         .expect_err("exceeding per-(session, service) notification quota must fail");
     assert_eq!(quota_err.code, "TooManyBoundSubObjects");
 
@@ -1990,17 +1991,17 @@ fn notification_sub_object_binding_isolates_quota_and_caps_offline_without_evict
     }
 
     // release_bound_objects_for_object clears notification-pushed handles and restores quota.
-    let released = ctx.release_bound_objects_for_object("trademgr", 70_000);
+    let released = ctx.release_bound_objects_for_object(trade_service, 70_000);
     assert_eq!(released, 1);
     let (rebound, _) = ctx
-        .bind_sub_object_for_notification(partner_id, None, "trademgr", 70_000)
+        .bind_sub_object_for_notification(partner_id, None, trade_service, 70_000)
         .expect("rebind after release_bound_objects_for_object");
     assert!(ctx.bound_objects.read().unwrap().contains_key(&rebound));
 
     // Offline target with fallback=None must fail cleanly without creating session_id=0 entries.
     let offline_char = 90_000_001_i64;
     let offline_err = ctx
-        .bind_sub_object_for_notification(offline_char, None, "trademgr", 81_000)
+        .bind_sub_object_for_notification(offline_char, None, trade_service, 81_000)
         .expect_err("offline character without fallback must fail");
     assert_eq!(offline_err.code, "CharacterOffline");
     assert_eq!(
@@ -2025,13 +2026,13 @@ fn notification_sub_object_binding_isolates_quota_and_caps_offline_without_evict
         ctx.bind_sub_object_for_notification(
             offline_char,
             Some(&synth_sess),
-            "trademgr",
+            trade_service,
             82_000 + idx as i64,
         )
         .expect("synthetic session_id=0 binding within cap");
     }
     let synth_err = ctx
-        .bind_sub_object_for_notification(offline_char, Some(&synth_sess), "trademgr", 89_999)
+        .bind_sub_object_for_notification(offline_char, Some(&synth_sess), trade_service, 89_999)
         .expect_err("synthetic session_id=0 cap must fail cleanly");
     assert_eq!(synth_err.code, "TooManyBoundSubObjects");
 }
