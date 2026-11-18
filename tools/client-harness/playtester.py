@@ -5042,6 +5042,8 @@ class PlaytesterBugOracle:
         "invalidslashargument",
         "cannotloadnotenoughcharges",
         "invalidtarget",
+        "warpdestinationgone",
+        "windowblockedfromopening",
     )
 
     @classmethod

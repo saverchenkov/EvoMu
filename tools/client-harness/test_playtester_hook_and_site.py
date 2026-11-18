@@ -3880,6 +3880,179 @@ class TestComboDropdownAndFormWndLayout(unittest.TestCase):
             self.assertEqual((form_wnd.left, form_wnd.top), (700, 222))
             self.assertNotEqual((create_contract_wnd.left, create_contract_wnd.top), (700, 150))
 
+    def test_item_entry_double_click_docked_structure_falls_back_to_showinfo(self):
+        hook = _load_hook_with_py2_stubs()
+        shown_calls = []
+        windows = []
+
+        def _fake_show_info(tid, itemID=None):
+            shown_calls.append((tid, itemID))
+            windows.append(
+                types.SimpleNamespace(
+                    windowID="InfoWindow",
+                    name="InfoWindow",
+                    caption="Keepstar - Information",
+                    destroyed=False,
+                    display=True,
+                )
+            )
+
+        info_svc = types.SimpleNamespace(ShowInfo=_fake_show_info)
+        svcs = {"info": info_svc}
+        fake_sm = types.SimpleNamespace(services=svcs, GetService=lambda name: svcs.get(name))
+        docked_sess = types.SimpleNamespace(
+            stationid=60003760,
+            structureid=None,
+            solarsystemid=None,
+            shipid=100000001,
+        )
+        fake_reg = types.SimpleNamespace(GetWindows=lambda: list(windows))
+        fake_uicore = types.SimpleNamespace(
+            layer=types.SimpleNamespace(menu=None, main=None, abovemain=None, modal=None),
+            registry=fake_reg,
+            uilib=None,
+            cmd=None,
+            desktop=types.SimpleNamespace(width=1280, height=800),
+        )
+
+        class InvItem:
+            pass
+
+        entry = InvItem()
+        entry.name = "ItemEntry_35834"
+        entry.children = []
+        entry.destroyed = False
+        entry.display = True
+        entry.isContainer = False
+        rec = types.SimpleNamespace(typeID=35834, itemID=100001234, categoryID=65, groupID=1657)
+        scroll = mock.Mock()
+        sr_node = types.SimpleNamespace(scroll=scroll, selected=False, itemID=100001234, typeID=35834, rec=rec)
+        entry.sr = types.SimpleNamespace(node=sr_node)
+        entry.rec = rec
+        # Mimic EVE InvItem.OnDblClick -> structureDeployment.Deploy silent no-op while docked
+        entry.OnMouseDown = lambda: None
+        entry.OnDblClick = lambda: None
+
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.dict(builtins.__dict__, {"session": docked_sess, "sm": fake_sm}), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_is_visible", return_value=True), \
+             mock.patch.object(hook, "_close_neocom_panels_if_outside"), \
+             mock.patch.object(hook, "_close_utilmenu_if_outside"), \
+             mock.patch.object(hook, "_close_context_menus_if_outside"), \
+             mock.patch.object(hook, "_dismiss_pinned_tooltip_if_outside", return_value=False), \
+             mock.patch.object(hook, "_resolve_editable_widget", return_value=None), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_settle_after_action", return_value=0), \
+             mock.patch.object(hook, "_find_widget", return_value=entry), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True):
+            res = hook._execute_action(
+                fake_sm,
+                {"type": "click_widget", "target": "ItemEntry_35834", "double_click": True, "wait_ms": 0},
+            )
+
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res.get("clicked_widget"), "OnDblClick->ShowInfo")
+        self.assertEqual(shown_calls, [(35834, 100001234)])
+        self.assertTrue(
+            any("InfoWindow" in w for w in ((res.get("state_diff") or {}).get("windows_opened") or [])),
+            res,
+        )
+
+    def test_item_entry_double_click_preserves_ship_in_space_deploy_already_opened_and_user_error(self):
+        hook = _load_hook_with_py2_stubs()
+        shown_calls = []
+        windows = []
+
+        info_svc = types.SimpleNamespace(ShowInfo=lambda tid, itemID=None: shown_calls.append((tid, itemID)))
+        svcs = {"info": info_svc}
+        fake_sm = types.SimpleNamespace(services=svcs, GetService=lambda name: svcs.get(name))
+        fake_reg = types.SimpleNamespace(GetWindows=lambda: list(windows))
+        fake_uicore = types.SimpleNamespace(
+            layer=types.SimpleNamespace(menu=None, main=None, abovemain=None, modal=None),
+            registry=fake_reg,
+            uilib=None,
+            cmd=None,
+            desktop=types.SimpleNamespace(width=1280, height=800),
+        )
+
+        class InvItem:
+            pass
+
+        def _make_entry(name, tid, iid, cat_id, group_id, on_dbl, is_container=False):
+            e = InvItem()
+            e.name = name
+            e.children = []
+            e.destroyed = False
+            e.display = True
+            e.isContainer = is_container
+            rec = types.SimpleNamespace(typeID=tid, itemID=iid, categoryID=cat_id, groupID=group_id)
+            sr_node = types.SimpleNamespace(scroll=None, selected=False, itemID=iid, typeID=tid, rec=rec, isContainer=is_container)
+            e.sr = types.SimpleNamespace(node=sr_node)
+            e.rec = rec
+            e.OnMouseDown = lambda: None
+            e.OnDblClick = on_dbl
+            return e
+
+        class UserError(Exception):
+            def __init__(self, msg):
+                super().__init__(msg)
+                self.msg = msg
+
+        in_space_sess = types.SimpleNamespace(stationid=None, structureid=None, solarsystemid=30000142, shipid=100000001)
+        docked_sess = types.SimpleNamespace(stationid=60003760, structureid=None, solarsystemid=None, shipid=100000001)
+
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_is_visible", return_value=True), \
+             mock.patch.object(hook, "_close_neocom_panels_if_outside"), \
+             mock.patch.object(hook, "_close_utilmenu_if_outside"), \
+             mock.patch.object(hook, "_close_context_menus_if_outside"), \
+             mock.patch.object(hook, "_dismiss_pinned_tooltip_if_outside", return_value=False), \
+             mock.patch.object(hook, "_resolve_editable_widget", return_value=None), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True):
+            # 1) Structure in space: preserve OnDblClick (do not intercept StructureDeployment.Deploy)
+            in_space_struct = _make_entry("ItemEntry_35834", 35834, 2001, 65, 1657, lambda: None)
+            with mock.patch.dict(builtins.__dict__, {"session": in_space_sess, "sm": fake_sm}):
+                self.assertEqual(hook._invoke_widget_click(in_space_struct, double_click=True), "OnDblClick")
+
+            # 2) Docked ship & container: never fall back to ShowInfo
+            ship_entry = _make_entry("ItemEntry_34828", 34828, 2002, 6, 25, lambda: None)
+            cont_entry = _make_entry("ItemEntry_3293", 3293, 2003, 2, 12, lambda: None, is_container=True)
+            with mock.patch.dict(builtins.__dict__, {"session": docked_sess, "sm": fake_sm}):
+                self.assertEqual(hook._invoke_widget_click(ship_entry, double_click=True), "OnDblClick")
+                self.assertEqual(hook._invoke_widget_click(cont_entry, double_click=True), "OnDblClick")
+
+            # 3) Normal item whose OnDblClick opens InfoWindow itself: do not call ShowInfo a second time
+            def _open_info_directly():
+                windows.append(
+                    types.SimpleNamespace(
+                        windowID="InfoWindow",
+                        name="InfoWindow",
+                        caption="Tritanium - Information",
+                        destroyed=False,
+                        display=True,
+                    )
+                )
+
+            mineral_entry = _make_entry("ItemEntry_34", 34, 2004, 4, 18, _open_info_directly)
+            with mock.patch.dict(builtins.__dict__, {"session": docked_sess, "sm": fake_sm}):
+                self.assertEqual(hook._invoke_widget_click(mineral_entry, double_click=True), "OnDblClick")
+
+            # 4) UserError inside sr.node OnDblClick is caught cleanly and formatted
+            def _raise_user_err():
+                raise UserError("CantDeployBlocked")
+
+            err_entry = _make_entry("ItemEntry_35834", 35834, 2005, 65, 1657, _raise_user_err)
+            with mock.patch.dict(builtins.__dict__, {"session": in_space_sess, "sm": fake_sm}), \
+                 mock.patch.object(hook, "_notify_user_error") as notify_mock:
+                out_err = hook._invoke_widget_click(err_entry, double_click=True)
+                self.assertEqual(out_err, "UserError(CantDeployBlocked)")
+                notify_mock.assert_called_once()
+
+        self.assertEqual(shown_calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()
